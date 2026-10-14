@@ -177,7 +177,7 @@ fn bytes_is_never_trimmed_and_other_values_are() {
     assert_eq!(payload(&c)["bytes"], json!("  two spaces \n"));
 }
 
-/// No `</call>`, no call (owner, 2026-10-04): the model stopped generating
+/// No `</call>`, no call: the model stopped generating
 /// before it closed — nothing dispatches, nothing is "malformed"; the cut marker
 /// names it.
 #[test]
@@ -291,8 +291,8 @@ fn a_huge_numeric_target_is_refused() {
         r#"<call name="send"><target_id>123456789012345678901234567890</target_id><type>reflect</type></call>"#,
         &["a send names its target"],
     );
-    // A small numeric-shaped target_id is refused the same way — it was
-    // already a Number before C74, this just pins it stays that way.
+    // A small numeric-shaped target_id is refused the same way — it is a
+    // Number; this pins it stays that way.
     refused(
         r#"<call name="send"><target_id>42</target_id><type>reflect</type></call>"#,
         &["a send names its target"],
@@ -423,11 +423,10 @@ fn item_beside_other_tags_is_a_field() {
 
 #[test]
 fn a_call_written_inside_bytes_is_document_not_envelope() {
-    // MEASURED 2026-09-12 (peer_review:rust, 4 consecutive failures): the coder
-    // wrote a reviewer's error text VERBATIM into a file — and that text quoted
-    // `<call name="inquiry_answer">…</call>`. Python parses ONE `send` with a
-    // `bytes` payload; rust split it into five malformed blocks. `<bytes>` is
-    // verbatim to its FIRST closer: nothing inside it is an envelope.
+    // A model may write another agent's error text VERBATIM into a file — text
+    // that quotes `<call name="inquiry_answer">…</call>`. Python parses ONE `send`
+    // with a `bytes` payload, and so must this: `<bytes>` is verbatim to its FIRST
+    // closer, nothing inside it is an envelope.
     let t = "<call name=\"send\">\n<target_id>editor</target_id>\n<type>write</type>\n<path>review.md</path>\n<bytes><error>you were sent an inquiry and did not answer it: emit <call name=\n\"inquiry_answer\"><answer>what you concluded</answer></call></error>\n<reason>unhandled</reason>\n<request_id></request_id>\n</bytes>\n</call>";
     let calls = crate::tool_parse::extract_tool_calls(t);
     assert_eq!(
@@ -455,8 +454,8 @@ fn a_call_written_inside_bytes_is_document_not_envelope() {
 fn a_truthy_non_list_to_is_kept_raw() {
     // python keeps `to` verbatim unless it is a string or a list, and refuses at
     // PARSE only when there is no string target AND `to` is falsy. `<to>42</to>`
-    // therefore parses and routing answers with its own no-target reply; rust's
-    // `normalize_to` used to map it to none and answer the malformed-parse text.
+    // therefore parses and routing answers with its own no-target reply — never
+    // the malformed-parse text.
     let calls = extract_tool_calls("<call name=\"send\"><to>42</to><type>reflect</type></call>");
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].arguments.get("to"), Some(&json!(42)));

@@ -190,7 +190,7 @@ public func startKernel(workdir: String) async throws -> Kernel {
     // reseeded root keeps its children (see the hydration below).
     // CLAMPED, as python's `read_tree` reads it through `fs`: a root `agent.yaml`
     // linked outside `.fantastic` throws `fs: path 'agent.yaml' escapes root`
-    // HERE, before the seed below could write over the link (audit ARCH2-6).
+    // HERE, before the seed below could write over the link.
     let rootRecordFile = dotFantastic.appendingPathComponent(RECORD_FILE)
     var rootId = ROOT_ID
     var rootHandler: String? = ROOT_HANDLER_MODULE
@@ -203,11 +203,9 @@ public func startKernel(workdir: String) async throws -> Kernel {
         if let id = obj["id"]?.asString, !id.isEmpty { rootId = id }
         rootHandler = obj["handler_module"]?.asString
         // EVERYTHING ELSE the root record carries — `callable_by`, `can_call`,
-        // `guid`, and any operator-authored field. This used to read the file for
-        // its `guid` ALONE and drop the rest, so a root whose record granted
-        // `callable_by: {rest: "*"}` came up with only the `$self` baseline: the
-        // grant was on disk, ignored in memory, and every non-kernel
-        // verb from that agent was refused at ingress (measured 2026-08-29).
+        // `guid`, and any operator-authored field. Reading only its `guid`
+        // would leave a granted root with only the `$self` baseline: the grant on
+        // disk, ignored in memory.
         for (k, v) in obj where !["id", "handler_module", "parent_id"].contains(k) {
             rootMeta[k] = v
         }
@@ -229,7 +227,7 @@ public func startKernel(workdir: String) async throws -> Kernel {
     // after them. COLD primitive — it runs before any provider exists.
     if seeded && fm.fileExists(atPath: rootRecordFile.path) {
         // A root record that is THERE but did not parse is never written over —
-        // the seed lost its other keys (python `main._bootstrap`; audit 2026-10-14).
+        // the seed would lose its other keys (python `main._bootstrap`).
         throw KernelStartupError.internalError(
             "\(rootRecordFile.path) is unreadable — fix or remove it; the root is not "
                 + "re-seeded over it")
@@ -251,7 +249,7 @@ public func startKernel(workdir: String) async throws -> Kernel {
     // in a KernelState, and calls `kernel.load(_:)`, which already implements
     // weak-load — agents whose handler_module isn't in the current bundle
     // registry are skipped silently. A RESEEDED ROOT KEEPS ITS CHILDREN (python
-    // `read_tree`, 2026-09-20): the walk runs whether or not the root parsed.
+    // `read_tree`): the walk runs whether or not the root parsed.
     // THROWS where python's clamped walk raises: a `children_dir` or a record
     // that resolves outside `.fantastic` refuses the boot.
     var records =
@@ -261,7 +259,7 @@ public func startKernel(workdir: String) async throws -> Kernel {
         // `readTree` yields the root record first when `.fantastic/agent.yaml`
         // parsed; a reseeded root is not on disk as a record it yields, so the
         // one `parent_id == nil` entry `kernel.load` requires is prepended
-        // (python `main.py`, 2026-09-20).
+        // (python `main.py`).
         if !records.contains(where: { $0.parentId == nil }) {
             records.insert(
                 AgentRecord(id: rootId, handlerModule: rootHandler, parentId: nil, meta: [:]),

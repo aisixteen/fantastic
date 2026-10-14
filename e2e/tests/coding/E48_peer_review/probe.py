@@ -92,8 +92,7 @@ async def main():
         # THE REVIEWER, wired to RECEIVE INQUIRIES. It needs the spec and the diff to
         # answer, and the coder needs egress to it; the gate is two-sided and
         # these are siblings, so both halves are written here.
-        # THE ANSWER IS THE REVIEWER'S OWN SEND (owner, 2026-10-06: inquiries are
-        # fully async) — `ai_rev -> ai send`, both halves (the coder's below).
+        # THE ANSWER IS THE REVIEWER'S OWN SEND (inquiries are fully async) — `ai_rev -> ai send`, both halves (the coder's below).
         rv = await connect(root, core, BK, agent_id="ai_rev",
                            can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*",
                                      "ai": ["send"]},
@@ -126,8 +125,8 @@ async def main():
         # is how we know a second mind actually ran.
         # THE DEFAULT CLIENT: the coder's question carried no `client_id`, so the
         # reviewer's turns live under ai_core's default — reading them under the
-        # coder's own client name found an empty history and scored a second
-        # mind that had plainly worked as never having run (measured 2026-09-04).
+        # coder's own client name would find an empty history and score a second
+        # mind that plainly worked as never having run.
         rev_hist = {"messages": await store_rows(root, core, "ai_rev")}
         tr_rev = str(rev_hist.get("messages", rev_hist))
         await rv.close()
@@ -147,8 +146,7 @@ async def main():
         # the coder's `ai -> ai_rev` row is not its to see — so the same proof
         # is read off the coder's OWN rows: a `[reply to <pid> · ai_rev inquiry`
         # tag is written only for a call the kernel really dispatched, and
-        # names the row the ledger holds (measured 2026-09-11/12: four rust runs
-        # scored "never inquired" with the inquiry plainly in the transcript).
+        # names the row the ledger holds.
         if not inquired_peer and core is None:
             # The coder's ROWS, not its transcript: a delivered reply is a
             # user-role row, and the connector's transcript keeps assistant

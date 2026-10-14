@@ -1,9 +1,8 @@
 """coding/nested_folds — folds of folds, with a needle two levels down.
 
-PRESYNTHESIZED (owner, 2026-10-07): the 32 reads are PLANTED in each arm's memory store —
-the read calls and their replies, the filler text inline — instead of spending 32 live
-turns producing them (the live version ran 773–910 s, mostly the model re-reading
-padding). The subject is unchanged: the FOLD MECHANISM folds that long past — spans fold,
+PRESYNTHESIZED: the 32 reads are PLANTED in each arm's memory store — the read calls and
+their replies, the filler text inline — instead of spending 32 live turns producing
+them. The subject is unchanged: the FOLD MECHANISM folds that long past — spans fold,
 then folds fold — at a small window, and a marker sits in filler_2, under a level-1 fold
 that may itself sit under a level-2 fold. Scored: the past folded (levels reported), every fold
 has a summary, and the final names the marker — by grep through the nesting, or because

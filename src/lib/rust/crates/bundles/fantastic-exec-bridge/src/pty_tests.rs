@@ -359,11 +359,11 @@ fn exists(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// Measured (the CLI, 2026-09-28): a shell puts each job it starts in its OWN
-/// process group inside the PTY session, so killing the leader alone (and the
-/// tty's hangup, which reaches the foreground group only) left `sleep &` and a
-/// `nohup` running, reparented to init. `stop` and `delete_agent` (the kernel's
-/// shutdown runs the same teardown) now kill the whole session. Twin of python
+/// A shell puts each job it starts in its OWN process group inside the PTY
+/// session, so killing the leader alone (and the tty's hangup, which reaches the
+/// foreground group only) would leave `sleep &` and a `nohup` running,
+/// reparented to init. `stop` and `delete_agent` (the kernel's shutdown runs the
+/// same teardown) kill the whole session. Twin of python
 /// `test_every_teardown_kills_the_whole_session`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_teardown_kills_the_whole_session() {
@@ -426,7 +426,7 @@ async fn every_teardown_kills_the_whole_session() {
 }
 
 /// A plain (pipe) job leads its own session too, so `stop` and `delete_agent`
-/// take what it launched — a script's `sleep &` and a `nohup` used to outlive it.
+/// take what it launched — a script's `sleep &` and a `nohup` included.
 /// Twin of python `test_stop_and_delete_kill_everything_a_job_launched`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_and_delete_kill_everything_a_job_launched() {
@@ -482,7 +482,7 @@ async fn stop_and_delete_kill_everything_a_job_launched() {
 }
 
 /// A `<call>` strips a scalar like `data`, so a key ending in Enter rides
-/// `bytes`, written verbatim (owner 2026-10-04); exactly one of the two.
+/// `bytes`, written verbatim; exactly one of the two.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_bytes_is_verbatim_so_enter_reaches_the_program() {
     let Some(py) = python() else { return };

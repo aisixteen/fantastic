@@ -46,7 +46,7 @@ fn est_tokens(text: &str) -> usize {
 /// first prose line (skipping headings). Python `_read_desc` splits like
 /// `str.splitlines()` (the `\x1c`-`\x1e`/`\x85`/U+2028/U+2029 boundaries
 /// included, not just `\n`) and strips like `str.strip()` (python's wider
-/// whitespace set) — C59.
+/// whitespace set).
 fn read_desc(text: &str) -> String {
     let lines = fantastic_bundle::py_splitlines(text);
     for line in &lines {
@@ -64,8 +64,7 @@ fn read_desc(text: &str) -> String {
 }
 
 /// `\r\n` and a lone `\r` both become `\n` — python's universal-newlines text
-/// mode, applied to every doc/readme read (C59; rust/swift used to KEEP the
-/// CRs, so `tokens`/`desc` diverged from python's).
+/// mode, applied to every doc/readme read, so `tokens`/`desc` match python's.
 fn translate_newlines(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -86,7 +85,7 @@ fn translate_newlines(s: &str) -> String {
 /// under `prefix` (recursive; nesting preserved). Each entry `{key, desc,
 /// tokens, children?}` — NO body. A tier is ordered as python orders the files
 /// of a `docs/` dir: by `<stem>.md`. The docs ship IN the bundle and are never
-/// copied to disk (owner 2026-10-14).
+/// copied to disk.
 pub fn readme_index(docs: &[(&str, &str)], prefix: &str) -> Vec<Value> {
     let mut tier: Vec<(&str, &str)> = docs
         .iter()
@@ -282,7 +281,7 @@ fn roster(
 ///
 /// Key order is python's: identity, `description`, gate fields, the root
 /// frame, `tree`, `next`, `bundles`, `bundles_next`, `readme`. A reflect says
-/// what an agent IS, never how to call it (owner, 2026-10-05): verb docs are
+/// what an agent IS, never how to call it: verb docs are
 /// the `docs` kernel verb ([`crate::docs`]).
 ///
 /// `Err` = a roster node's reflect raised; the caller settles the whole
@@ -297,8 +296,8 @@ pub async fn apply_reflect_flags(
         return Ok(());
     };
     // A REFUSAL IS NOT A REFLECT. Decorating one with a tree
-    // produced a reply that reads like a healthy reflect with a stray error
-    // field, and a caller could not tell the two apart (2026-09-02).
+    // produces a reply that reads like a healthy reflect with a stray error
+    // field, and a caller could not tell the two apart.
     if obj.contains_key("error") {
         return Ok(());
     }
@@ -349,7 +348,7 @@ pub async fn apply_reflect_flags(
         // and the `self_extension` shape. No bundle import here: the registry
         // already holds it, and a root whose bundle is not installed in this
         // runtime simply contributes nothing. A hook that RAISES fails the
-        // reflect (audit 2026-10-03, ARCH2-9).
+        // reflect.
         if let Some(bundle) = target
             .handler_module
             .as_deref()
@@ -372,7 +371,7 @@ pub async fn apply_reflect_flags(
         _ => None,
     };
     if let Some(mode) = tree_mode {
-        // SUBTREE FILTERS (owner, 2026-10-05): `show_subtrees` answers with only
+        // SUBTREE FILTERS: `show_subtrees` answers with only
         // those branches, `ignore_subtrees` prunes each named branch to a stub
         // `{id, pruned: n}`; together, show first and ignore inside it.
         let (show, ignore) = match crate::docs::subtree_filter(kernel, payload, target) {
@@ -457,7 +456,7 @@ pub async fn apply_reflect_flags(
     // Polymorphic `readme`: `true` → the SHORT orientation readme.md (string or
     // null); `"index"` → the token-annotated topic tree; `"<key>"` → one topic's
     // body + sub-docs' index. Served from the agent's BUNDLE (compiled in), never
-    // from a copy on disk (owner 2026-10-14).
+    // from a copy on disk.
     let bundle = target
         .handler_module
         .as_deref()
@@ -522,7 +521,7 @@ fn tree_fields(target: &Agent, obj: &mut Map<String, Value>) {
             "egress_rule",
             "auth",
             "root",
-            // what a file_bridge exposes under its root (audit d7)
+            // what a file_bridge exposes under its root
             "allow",
             // THE CALL GATE, made readable. Without these an agent cannot read
             // its own authority — only discover it by trying, which cost whole
@@ -588,7 +587,7 @@ pub fn descendant_ids(target: &Agent) -> Vec<String> {
 ///
 /// With `schemas`, an entry also carries `schema` when its bundle publishes a
 /// [`crate::bundle::Bundle::record_schema`] — what that KIND's record takes,
-/// readable before any agent of it exists (lib request #3). Python
+/// readable before any agent of it exists. Python
 /// `_available_bundles(schemas=True)`; the cheap `bundles=ids` listing never asks.
 fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
     let mut out: Vec<Value> = kernel
@@ -608,7 +607,7 @@ fn available_bundles(kernel: &Arc<Kernel>, schemas: bool) -> Vec<Value> {
         })
         .collect();
     // FOLDER BUNDLES of this kernel's root, beside the installed ones — a refused
-    // folder too, with its `error` (owner, 2026-10-08).
+    // folder too, with its `error`.
     out.extend(kernel.bundles.folder_rows());
     out.sort_by(|a, b| {
         a.get("name")

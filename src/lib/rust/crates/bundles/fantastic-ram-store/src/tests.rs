@@ -320,8 +320,8 @@ fn readme_is_pythons_verbatim() {
 /// A row may carry the one number the kernel keeps whose text is not JSON — the
 /// `Infinity` a model's `3e500123` (a hex job id `float()` reads as infinity)
 /// coerces to. Reading it back must answer, not panic: a panic here fires under
-/// the store's lock and poisons it, so every later call on EVERY owner failed
-/// (E30 subai on rust, 2026-09-29).
+/// the store's lock and poisons it, so every later call on EVERY owner would
+/// fail.
 #[tokio::test]
 async fn a_row_holding_a_non_json_number_reads_back_and_the_store_survives() {
     let k = store();
@@ -454,7 +454,7 @@ async fn a_zero_limit_is_no_limit_like_python() {
     );
 }
 
-// ─── STEP-4 PINS (2026-10-01): refusal wire shapes + the id parser ──────────
+// ─── refusal wire shapes + the id parser ────────────────────────────────────
 //
 // `preserve_order` makes a refusal's KEY ORDER part of the wire, and `Value`
 // equality ignores it — so these compare the serialized text.

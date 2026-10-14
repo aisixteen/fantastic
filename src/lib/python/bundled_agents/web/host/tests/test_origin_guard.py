@@ -1,7 +1,7 @@
-"""The web host's closed defaults (2026-09-24): bind LOOPBACK unless the record
+"""The web host's closed defaults: bind LOOPBACK unless the record
 names a `host`; refuse a FOREIGN browser origin on websocket upgrades and on
 non-GET/HEAD/OPTIONS HTTP requests, unless the record's `allowed_origins` lists it;
-and (audit W-2) refuse EVERY request whose Host is not the host's own authority."""
+and refuse EVERY request whose Host is not the host's own authority."""
 
 import pytest
 from fastapi import FastAPI, WebSocket
@@ -90,7 +90,7 @@ def test_foreign_websocket_upgrade_is_refused_listed_origin_passes():
         assert ws.receive_text() == "hi"
 
 
-# ─── the Host guard (audit W-2) ────────────────────────────────────────────────
+# ─── the Host guard ────────────────────────────────────────────────────────────
 
 
 def test_own_authorities_are_the_bound_host_port_plus_loopback_spellings():
@@ -146,7 +146,7 @@ def test_loopback_spellings_pass_another_port_does_not():
 def test_a_published_bind_admits_only_its_own_host_port():
     """`0.0.0.0` publishes the port, but the only Host it answers is `0.0.0.0:<port>`
     — a port map, a LAN name, a tunnel name, even the loopback spellings are other
-    authorities (owner-accepted, audit W-2)."""
+    authorities."""
     c = TestClient(_app({"host": "0.0.0.0", "port": 8088}), base_url=OWN)
     assert c.get("/x", headers={"Host": "0.0.0.0:8088"}).status_code == 200
     for host in (

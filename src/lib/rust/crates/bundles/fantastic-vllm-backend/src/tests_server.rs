@@ -1,6 +1,6 @@
 //! What a record leaves out is READ FROM THE SERVER — python
-//! `tests/test_server_read.py`, case for case. The bodies are the shapes measured
-//! on a live vLLM (the local 3090, 2026-10-07).
+//! `tests/test_server_read.py`, case for case. The bodies are the shapes a live
+//! vLLM answers with.
 
 use super::server::{self, kv_slots, metrics_url, served_model};
 use super::*;

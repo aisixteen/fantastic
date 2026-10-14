@@ -6,8 +6,8 @@
 # double-click — using the execution id the model minted, and the ledger must
 # make that buy exactly once.
 #
-# The proposal used to be a JSON line the runner scraped out of the model's
-# prose. It is a real call now: the human has an id, a record, a gate and a
+# The proposal is a real call, not a JSON line scraped out of the model's
+# prose: the human has an id, a record, a gate and a
 # ledger row, so "I consulted the person" is a fact the kernel witnessed rather than
 # a sentence the model wrote.
 #

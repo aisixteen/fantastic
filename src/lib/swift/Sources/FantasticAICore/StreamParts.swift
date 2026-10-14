@@ -1,5 +1,4 @@
-// Streaming parts — a model's output split into PARTS as it is written (owner
-// design 2026-10-04, `tmp/streaming_parts.md`).
+// Streaming parts — a model's output split into PARTS as it is written.
 //
 // Ported from the canonical Python `ai_core/stream_parts.py` (`PartSplitter`,
 // `cut_marker`).
@@ -16,8 +15,7 @@
 //
 // Kinds: "text" (prose), "thinking" (inside `<think>`), "call" (a `<call
 // name="…">` envelope, its args streaming as they are written). A call written
-// inside a thought is thinking text, never a call part — only the answer acts
-// (owner, 2026-10-07).
+// inside a thought is thinking text, never a call part — only the answer acts.
 //
 // It is ANIMATION, never action: nothing here dispatches. The call parser in
 // `ToolParse` stays the one authority on what a call IS; this only tells a
@@ -143,7 +141,7 @@ final class PartSplitter {
     private(set) var parts: [StreamPart] = []
     /// Every CLOSED call part, in order: (stream_id, body) — what a dispatched
     /// call is matched to by its exact body, so the message it becomes carries the
-    /// stream it was previewed as (owner, 2026-10-04).
+    /// stream it was previewed as.
     private(set) var closedCalls: [(streamId: String, body: String)] = []
 
     init(source: String) {
@@ -235,7 +233,7 @@ final class PartSplitter {
         if call != nil { return stepCall(&out) }
         // Outside a call: look for the next markup that changes the part. INSIDE
         // thinking only `</think>` does — a `<call>` there is thinking text, never a
-        // call part (owner, 2026-10-07: only the answer acts).
+        // call part (only the answer acts).
         let opens = inThink ? [THINK_CLOSE_S] : [OPEN, THINK_OPEN_S]
         let hits = opens.compactMap { t in findScalars(buf, t, from: 0).map { ($0, t) } }
         guard let hit = hits.min(by: { $0.0 < $1.0 }) else {
@@ -384,7 +382,7 @@ final class PartSplitter {
     }
 }
 
-/// The assistant row a CUT pass leaves (owner, 2026-10-04) — a marker on top of
+/// The assistant row a CUT pass leaves — a marker on top of
 /// the context, never a half answer. `why` is "stopped by <receiver>" (a receiver
 /// stopped the stream) or "model stopped generating" (the pass ended with a block
 /// still open). Kept: the VISIBLE text streamed so far, thinking stripped; a cut

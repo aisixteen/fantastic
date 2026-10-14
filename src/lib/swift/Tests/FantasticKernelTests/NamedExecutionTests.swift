@@ -1,10 +1,9 @@
 // A NAMED execution's task-table handle IS the caller's id.
 //
-// Measured 2026-09-02: `send([Item(target, payload, id: "job-1")])` registered
-// the dispatch under a freshly minted `<agent>:<hex>` pid, so `ps` showed an id
-// the caller had never seen and `cancel task_id: "job-1"` answered
-// `{cancelled:false, killed:[]}` — the caller could neither find nor stop the
-// execution it had just named. Python registers named work under `exec_id`.
+// `send([Item(target, payload, id: "job-1")])` registers the dispatch under
+// `job-1`, so `ps` shows it and `cancel task_id: "job-1"` stops it — a freshly
+// minted pid would leave the caller unable to find or stop the execution it had
+// just named. Python registers named work under `exec_id`.
 
 import FantasticJSON
 import Foundation
@@ -86,7 +85,7 @@ struct NamedExecutionTests {
         #expect(pid > 0, "a minted pid is an int from the one counter, got \(pid)")
     }
 
-    /// C31: python `f"send: {d.target.id} {d.payload['type']!r} exceeded its
+    /// Python `f"send: {d.target.id} {d.payload['type']!r} exceeded its
     /// {d.timeout}s timeout; task cancelled"`, carrying `task_id`.
     @Test func ownTimeoutTextIsPythonExact() async {
         let kernel = freshKernel()
@@ -103,7 +102,7 @@ struct NamedExecutionTests {
         #expect(out.result["task_id"].asInt == out.pid?.value, "\(out.result.serialize())")
     }
 
-    /// C31: python `f"send: joined execution {d.pid!r} did not settle within
+    /// Python `f"send: joined execution {d.pid!r} did not settle within
     /// this caller's {d.timeout}s wait; the execution itself keeps running"`,
     /// carrying `task_id` — the JOINED execution's pid, always (not nil): the
     /// execution itself keeps running, unowned by the joiner.

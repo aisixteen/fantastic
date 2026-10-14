@@ -50,11 +50,10 @@ pub fn agent_meta(agent_id: &AgentId, kernel: &Kernel) -> serde_json::Map<String
 /// `_safe_client`, per CODE POINT.
 ///
 /// UNICODE ALPHANUMERICS SURVIVE (`str.isalnum` is Unicode-aware), and there is
-/// NO LENGTH CAP. Rust used to keep only ASCII alphanumerics and truncate at 64,
-/// so `éx` became `_x` and a long browser client id was silently a DIFFERENT id
-/// from python's — two runtimes writing two different chat sidecars for one
-/// caller. The strip is python's whitespace set (`\x1c`–`\x1f` included), which
-/// `str::trim` does not cover.
+/// NO LENGTH CAP — so `éx` stays `éx` and a long browser client id is the same id
+/// python derives: one caller, one chat sidecar across runtimes. The strip is
+/// python's whitespace set (`\x1c`–`\x1f` included), which `str::trim` does not
+/// cover.
 pub fn safe_client(client_id: &str) -> String {
     let stripped = py_strip(client_id);
     let raw = if stripped.is_empty() {
@@ -82,9 +81,8 @@ pub fn now_secs() -> f64 {
 }
 
 /// `n` bytes from the OS CSPRNG — the source class python's `secrets` module
-/// is (`os.urandom`). The clock/stack/counter mixer this replaced was not
-/// random at all: the capture read `AAAAAVnE3yQ`, a big-endian counter, where
-/// python had `cijoBiyMnnw`. A failure is FATAL — there is no second source.
+/// is (`os.urandom`) — never a clock/stack/counter mixer, which is not random
+/// at all. A failure is FATAL — there is no second source.
 pub(crate) fn os_random(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
     fantastic_kernel::lifecycle::fill_random(&mut buf);
@@ -117,10 +115,9 @@ pub fn mint_send_id() -> String {
 /// `secrets.token_hex(2)`.
 ///
 /// Per TURN and not derived from the batch's content: two turns that made the
-/// same calls used to collide (rust/swift hashed `(dest, count, body lengths)`),
-/// which is the exact confusion the token exists to prevent — a model that reads
-/// the same file twice in a row saw `1 of 2 in batch 7f3a` both times and could
-/// not tell the batches apart (measured 2026-08-24, the re-read loop).
+/// same calls would collide, which is the exact confusion the token exists to
+/// prevent — a model that reads the same file twice in a row would see the same
+/// batch token both times and could not tell the batches apart.
 pub fn mint_batch_token() -> String {
     os_random(2).iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -32,7 +32,7 @@ class _ChunkProvider:
 
 @pytest.fixture
 def wired(seeded_kernel, store_agent, fake_providers):
-    # `port`: the authority the web's Host guard admits (audit W-2).
+    # `port`: the authority the web's Host guard admits.
     seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     seeded_kernel.create(

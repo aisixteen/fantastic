@@ -6,7 +6,7 @@
 //
 // The ledger shapes and the recall-at-cap behaviour were measured on python
 // (`Kernel.ledger_entries` / `recall_executions`, kernel/_kernel.py) with the
-// same calls on 2026-10-01: identical, except that python names its exception
+// same calls: identical, except that python names its exception
 // class `RuntimeError` where this kernel's is `Error`.
 
 import { test } from "node:test";

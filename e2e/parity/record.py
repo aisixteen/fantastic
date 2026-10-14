@@ -1,13 +1,10 @@
 """Every byte a family writes goes through here.
 
-ONE WRITER. The round-1/2 scripts each had their own `save`: three of them
-passed `sort_keys=True` (`parity_capture.py:76`, `parity_web.py:10`,
-`parity_capture_cli_ctx.py:95`), which throws away key ORDER — and key order is
-an item on every runtime (python builds a reply dict in one order, a port in
-another, and a sorted dump makes the two look identical). Two of them cut error
-bodies. One substituted a guessed id list when a step failed
-(`parity_capture_store.py:485-487`), which is the worst of all: a capture that
-invents data measures the harness.
+ONE WRITER, so no family can sort keys (`sort_keys=True` throws away key ORDER,
+and key order is an item on every runtime — python builds a reply dict in one
+order, a port in another, and a sorted dump makes the two look identical), cut
+error bodies, or substitute guessed data when a step fails (a capture that
+invents data measures the harness).
 
 The rules here are the §5.3 rules, in one place so a new family cannot opt out:
 

@@ -121,7 +121,7 @@
         /// whatever file got it. Measured here by opening a file right after the
         /// close (the lowest free number — the master's own) and proving it stays
         /// empty. The race the lock closes is the same step taken mid-write: the
-        /// read loop now clears the fd under `fdLock` before closing, and a write
+        /// read loop clears the fd under `fdLock` before closing, and a write
         /// or resize holds `fdLock` for its whole use of the fd.
         @Test func aWriteOrResizeAfterTheJobEndsTouchesNoDescriptor() async throws {
             let k = await kernelWith("term_end")
@@ -202,12 +202,11 @@
             #expect(text.contains(path), "\(text)")
         }
 
-        /// Measured (the CLI, 2026-09-28): a shell puts each job it starts in its
-        /// OWN process group inside the PTY session, so killing the leader alone
-        /// (and the tty's hangup, which reaches the foreground group only) left
-        /// `sleep &` and a `nohup` running, reparented to launchd. `stop` and
-        /// `delete_agent` (the kernel's shutdown runs the same teardown) now kill
-        /// the whole session. Twin of python
+        /// A shell puts each job it starts in its OWN process group inside the PTY
+        /// session, so killing the leader alone (and the tty's hangup, which reaches
+        /// the foreground group only) would leave `sleep &` and a `nohup` running,
+        /// reparented to launchd. `stop` and `delete_agent` (the kernel's shutdown
+        /// runs the same teardown) kill the whole session. Twin of python
         /// `test_every_teardown_kills_the_whole_session`.
         @Test func everyTeardownKillsTheWholeSession() async {
             for (aid, end) in [("sh_stop", "stop"), ("sh_delete", "delete_agent")] {
@@ -261,7 +260,7 @@
 
         /// A plain (pipe) job leads its own session too, so `stop` and
         /// `delete_agent` take what it launched — a script's `sleep &` and a
-        /// `nohup` used to outlive it. Twin of python
+        /// `nohup` never outlive it. Twin of python
         /// `test_stop_and_delete_kill_everything_a_job_launched`.
         @Test func stopAndDeleteKillEverythingAJobLaunched() async {
             let line = "echo PID=$$; sleep 303 & nohup sleep 304 >/dev/null 2>&1 & sleep 305"

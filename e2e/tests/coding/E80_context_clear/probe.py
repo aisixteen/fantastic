@@ -41,8 +41,8 @@ _, STRATEGY, EXTRA = FOLD_ARMS[1]
 # 12 fillers at 4000 chars. The read reply must be INLINED for the view to grow: the
 # inline cap is budget/8 = 1872 tokens ≈ 7488 chars of the RENDERED reply, and a
 # 6800-char file renders (line-numbered items) past it — every runtime stored those
-# as digests and the fold count then depended on how many grep turns the MODEL chose
-# (python 45 turns → 4 folds, swift fewer → 0; measured 2026-09-23). At 4000 chars a
+# as digests and the fold count then depends on how many grep turns the MODEL chooses.
+# At 4000 chars a
 # read renders ≈ 6k chars, inlined; twelve of them ≈ 18k tokens against a 16k window,
 # so folds fire on every runtime whatever the model does between reads.
 N = 12

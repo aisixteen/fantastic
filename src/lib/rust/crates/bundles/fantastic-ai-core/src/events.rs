@@ -18,11 +18,6 @@ use std::time::{Duration, Instant};
 
 /// Route a streaming event to the originating caller's inbox — python
 /// `_to_caller`, the ONE rule.
-///
-/// This used to be selected per backend by a `CallerRoute` knob: ollama
-/// round-tripped `cli` and the other three always emitted on the agent's inbox.
-/// Python has no such knob, so a `cli` caller on three of the four backends
-/// never reached the `cli` handler and printed nothing.
 pub async fn to_caller(kernel: &Arc<Kernel>, self_id: &AgentId, client_id: &str, mut ev: Value) {
     if let Value::Object(ref mut obj) = ev {
         obj.insert("client_id".to_string(), json!(client_id));
@@ -39,9 +34,7 @@ pub async fn to_caller(kernel: &Arc<Kernel>, self_id: &AgentId, client_id: &str,
         // ON THE AGENT'S INBOX, tagged with `client_id` — not on an inbox named
         // after the client. A synthetic client id has no Agent, so it has no
         // watcher set, and a watcher that subscribed to the AGENT (which is what
-        // a `watch` frame names) never saw these events at all: measured
-        // 2026-09-10, `compaction:rust` fired its projection and pushed nothing
-        // the harness could observe.
+        // a `watch` frame names) would never see these events at all.
         kernel.emit(self_id, ev).await;
     }
 }
@@ -132,7 +125,7 @@ impl PartPublisher {
             (_, Some(t)) if !t.is_empty() => vec![t.clone()],
             _ => Vec::new(),
         };
-        // DELTAS ARE QUIET (owner, 2026-10-04): the addressee's inbox (and its
+        // DELTAS ARE QUIET: the addressee's inbox (and its
         // watchers) only, never the state stream — a token-rate stream would flood
         // every subscriber. `part_start`/`part_end`/`part_abort` stay on it.
         let quiet = ev.get("type").and_then(Value::as_str) == Some("part_delta");

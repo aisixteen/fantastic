@@ -12,12 +12,10 @@ They act on the TREE, or on the kernel-wide task table. **The agent you name is
 the OPERAND, not the actor** — `parent_id`, `id`, `task_id` say what is acted on.
 Sending one to that agent instead gets you a `not_here` refusal naming the fix.
 
-Until 2026-08-24 every agent answered them and the ADDRESSED agent became the
-parent of a `create_agent`. That made the target ambiguous — "send it to X" could
-mean X performs it, X is created under something, or X is the parent, and only
-the last was true — while `parent_id` in the payload was stripped and ignored. A
-model asked "But how do I invoke create_agent? Which target?", never resolved it,
-and finished sixteen messages having created nothing.
+Answered by every agent, with the ADDRESSED agent as the parent of a
+`create_agent`, the target would be ambiguous — "send it to X" could mean X
+performs it, X is created under something, or X is the parent. Answered by the
+root alone, with `parent_id` required, it means one thing.
 
 ## Composition
 

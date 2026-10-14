@@ -208,8 +208,8 @@ struct TaskEntry {
     /// a service loop a bundle runs for as long as its agent lives (a scheduler
     /// tick, an io_bridge read loop, `ws_drain`, an exec job pump, a
     /// `pty_reader`). The QUIET phase of `shutdown_agents` does not wait for it
-    /// — it never ends, so waiting spent one full `QUIET_TIMEOUT` every stop
-    /// (measured in python: 10.25 s → 0.29 s). It is still CANCELLED with every
+    /// — it never ends, so waiting would spend one full `QUIET_TIMEOUT` every
+    /// stop. It is still CANCELLED with every
     /// other non-keepalive root right after. Python's `_forked`.
     forked: bool,
 }
@@ -239,30 +239,21 @@ impl TaskTable {
         Self::default()
     }
 
-    // NO MINTER HERE ANY MORE. `TaskTable::mint` used to hand out
-    // `"<agent>:<8 hex>"` from a per-agent counter, hashed and salted so a
-    // visible sequence could not be read as an ordering (measured 2026-08-20 in
-    // python: a model inferred ordering from `<agent>:<n>`, decided "the reply
-    // queue is running ahead of me", and re-polled forever). Python reversed that
-    // trade: ONE int64 counter allocates every id in the kernel, so `ps`,
-    // `cancel`, the ledger, a reply tag and the message log all name the same
-    // number — and a number that names one thing everywhere is worth more than
-    // one that hides its order. The allocator is `kernel.mint_id()`; the
-    // caller mints, and this table only registers.
+    // NO MINTER HERE. ONE int64 counter allocates every id in the kernel
+    // (`kernel.mint_id()`), so `ps`, `cancel`, the ledger, a reply tag and the
+    // message log all name the same number — and a number that names one thing
+    // everywhere is worth more than one that hides its order. The caller mints,
+    // and this table only registers.
 
     /// Put one in-flight task in the table.
     ///
-    /// THE PARENT IS RECORDED AS GIVEN. There used to be a silent
-    /// `parent.filter(|p| inner.tasks.contains_key(p))` here, defended as
-    /// init-adoption; python REMOVED the same line for the same shape
-    /// (`_kernel.py:602-616`, "A PARENT IS ALWAYS ALIVE"), because converting a
-    /// dead parent to `None` puts the work OUTSIDE every subtree, where
-    /// `cancel` on its caller can never reach it. Re-parenting belongs to
-    /// [`Self::forget`], which walks the children when the parent actually
-    /// ends. Measured: `kernel ps` answered `parent: null` for the scheduler
-    /// tick loop, the pty readers and `ps` itself, where python names the
-    /// dispatch that spawned them (`e2e/parity` `wire/probes.json`,
-    /// `bundle_verbs/kernel_ps_after.json`, `kernel_verbs/bare/ps.json`).
+    /// THE PARENT IS RECORDED AS GIVEN — never filtered to live parents
+    /// (python: "A PARENT IS ALWAYS ALIVE", `_kernel.py:602-616`), because
+    /// converting a dead parent to `None` puts the work OUTSIDE every subtree,
+    /// where `cancel` on its caller can never reach it, and `ps` would answer
+    /// `parent: null` where python names the dispatch that spawned the work.
+    /// Re-parenting belongs to [`Self::forget`], which walks the children when
+    /// the parent actually ends.
     pub fn register(
         &self,
         id: &TaskId,
@@ -453,9 +444,9 @@ impl TaskTable {
 
     /// The verb of `id` when it is a KERNEL SERVICE TASK — a keepalive loop
     /// the ROOT owns (`root`): the execution flusher, the record persister.
-    /// `cancel` never kills one (audit KV-5, owner 2026-10-03): killing it
-    /// stopped ledger durability and record persistence until the process
-    /// restarted, and nothing restarted it. It stays listed in `ps`; the
+    /// `cancel` never kills one: killing it would stop ledger durability and
+    /// record persistence until the process restarted, and nothing would
+    /// restart it. It stays listed in `ps`; the
     /// kernel's own stop ends it. Python `Kernel.is_service_task`.
     fn service_verb(&self, id: &TaskId, root: &AgentId) -> Option<String> {
         let inner = self.inner.lock().expect("task table poisoned");
@@ -669,7 +660,7 @@ impl Kernel {
     /// fails honestly, it never pretends. A kernel service task
     /// ([`TaskTable::service_verb`]) is refused, and left alive.
     ///
-    /// Every hook runs AS ITS OWN AGENT (audit G-3) — see the loop below.
+    /// Every hook runs AS ITS OWN AGENT — see the loop below.
     pub async fn cancel_task(self: &Arc<Self>, task_id: &TaskId) -> Value {
         let root = self.root().map(|r| r.id.clone());
         if let Some(verb) = root
@@ -704,17 +695,16 @@ impl Kernel {
                 continue;
             };
             // A hook that fails is logged and the kill still happens: cancel is
-            // not refusable. C87: python's exact stdout line (`_agent.py:2858-
+            // not refusable. Python's exact stdout line (`_agent.py:2858-
             // 2859`, `print(f"  [cancel] {self.id} bundle on_cancel raised:
             // {e}")`).
             //
             // AS THE AGENT ITSELF, on every path that kills the task — the
             // `cancel` verb (inside the root's dispatch), an item's own deadline,
-            // `shutdown_agents` (audit G-3, owner 2026-10-03): an emit on its own
-            // inbox is ungated, every other send is gated as this agent. The verb
-            // path used to run it as the ROOT, so a non-top-level agent's
-            // own-inbox emit (ai_core's final `status done`) was gated root →
-            // agent and dropped; the deadline path ran it as the operator.
+            // `shutdown_agents`: an emit on its own inbox is ungated, every other
+            // send is gated as this agent. Run as the ROOT, a non-top-level
+            // agent's own-inbox emit (ai_core's final `status done`) would be
+            // gated root → agent and dropped.
             let hook = bundle.on_cancel(&agent.id, tid, self);
             if let Err(e) = crate::send::as_agent(&agent.id, hook).await {
                 println!("  [cancel] {} bundle on_cancel raised: {e}", agent.id.0);

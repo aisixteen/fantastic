@@ -183,7 +183,7 @@ async fn a_malformed_record_or_a_missing_field_is_named() {
     );
 }
 
-/// Audit S1: a key that is not a legal HTTP header value — a control character,
+/// A key that is not a legal HTTP header value — a control character,
 /// a non-ASCII one, whitespace at an edge — is refused by the reader, naming
 /// the ref and never the value (python's client quotes a refused header in its
 /// error). The store keeps whatever it was given; a key with inner spaces rides.

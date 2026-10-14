@@ -1,8 +1,8 @@
 //! `send` validates the ITEM before anything is resolved, gated or minted.
 //!
-//! Measured 2026-09-02 (python, ported): a payload without `type` reached the
-//! gate and the target instead of being a coded refusal; a non-string `type`
-//! raised out of `send`; rust/swift minted an id when the caller supplied `""`.
+//! Python-canonical, ported: a payload without `type` is a coded refusal before
+//! the gate and the target; a non-string `type` is refused, never raised out of
+//! `send`; nothing is minted for a caller-supplied `""` id.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply};
@@ -88,7 +88,7 @@ async fn non_string_type_is_bad_arg() {
     let (_t, kernel) = mk();
     create(&kernel, "a", json!({})).await;
     // A non-string is named by its TYPE, never echoed — python's
-    // `type(verb).__name__` (audit 2026-10-03, W-11).
+    // `type(verb).__name__`.
     for (bad, got) in [
         (json!(["x"]), "list"),
         (json!(7), "int"),
@@ -112,8 +112,8 @@ async fn non_string_type_is_bad_arg() {
 
 /// A RAW BODY sent AS `type` (the octet REST leg's `X-Fantastic-Bytes-Field:
 /// type`, a binary frame's `_binary_path: [payload, type]`) is python's `bytes`
-/// there: named by its type, never echoed — python's repr of it made a 1 MiB
-/// body a 5 MiB refusal (audit 2026-10-03, W-11).
+/// there: named by its type, never echoed — a repr would make a 1 MiB body a
+/// 5 MiB refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_body_sent_as_type_is_refused_by_its_type() {
     let (_t, kernel) = mk();
@@ -160,7 +160,7 @@ async fn empty_id_is_refused_bad_arg() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_target_is_missing_arg() {
-    // C30: an empty target is a coded `missing_arg`, checked FIRST — never an
+    // An empty target is a coded `missing_arg`, checked FIRST — never an
     // `unknown_agent` (the empty string is not a candidate id to suggest
     // corrections against). Also true for a binary item.
     let (_t, kernel) = mk();
@@ -186,9 +186,9 @@ async fn empty_target_is_missing_arg() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn draining_refuses_before_resolving_the_target() {
-    // C30 (rust): draining used to be checked AFTER the target was resolved,
-    // so a send to an id that does not even exist answered `unknown_agent`
-    // instead of `draining` while the kernel was stopping.
+    // Draining is checked BEFORE the target is resolved, so a send to an id
+    // that does not even exist answers `draining`, not `unknown_agent`, while
+    // the kernel is stopping.
     let (_t, kernel) = mk();
     let _ = kernel.shutdown_agents().await;
     assert!(kernel.draining());
@@ -204,7 +204,7 @@ async fn draining_refuses_before_resolving_the_target() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_from_a_killed_task_does_not_dispatch() {
-    // C30 (rust): a task already marked killed registers no new work — the
+    // A task already marked killed registers no new work — the
     // send settles `cancelled` synchronously, never reaching the task table.
     let (_t, kernel) = mk();
     create(&kernel, "a", json!({})).await;

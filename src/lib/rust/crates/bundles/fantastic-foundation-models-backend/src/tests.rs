@@ -623,10 +623,9 @@ async fn a_lean_system_prompt_turn_runs_in_the_real_on_device_window() {
 
 #[tokio::test]
 async fn the_default_system_block_fits_the_on_device_window() {
-    // Measured 2026-10-06: with the verb docs out of the reflects and the howto
-    // tightened, the kernel's default system block fits the 4096-token on-device
-    // window — the turn runs with no `system_prompt` (until then it failed fast,
-    // `context_insufficient`, and the model was never called).
+    // With the verb docs out of the reflects and the howto tight, the kernel's
+    // default system block fits the 4096-token on-device window — the turn runs
+    // with no `system_prompt`.
     let engine = Arc::new(FakeEngine::new().context_size(4096));
     let fx = kernel(&engine, json!({})).await;
     let r = fx.send("hi", json!({})).await;

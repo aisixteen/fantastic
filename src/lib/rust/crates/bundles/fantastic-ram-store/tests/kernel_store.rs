@@ -320,7 +320,7 @@ async fn a_settle_keeps_the_body_only_when_named_or_the_error_when_dead() {
 
 #[tokio::test]
 async fn repeated_ledger_calls_grow_the_store_linearly() {
-    // Measured before the fix: ~6x per `ledger` call (2 KB → 14.8 MB in five).
+    // Each `ledger` call must grow the store linearly, never geometrically.
     let (k, _) = seeded();
     mk(&k, "probe", json!({})).await;
     with_store(&k, true).await;

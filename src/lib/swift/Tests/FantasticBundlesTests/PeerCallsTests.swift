@@ -2,7 +2,7 @@
 // `hello {guid}`, the host kernel then reaches the page's agents as
 // `<guid>|<agent>`, each call rides this socket as an outbound `call` frame
 // answered by an inbound `reply`/`error` with the same id, and the page stops
-// being an address the moment its socket closes (owner, 2026-09-30).
+// being an address the moment its socket closes.
 //
 // The twin of python `web_ws/tests/test_peer_calls.py`, over a real socket: the
 // test is the page, and sends INTO it from the kernel it is connected to.
@@ -199,7 +199,7 @@ struct PeerCallsTests {
         await stop(k)
     }
 
-    /// Owner, 2026-10-03: every tab says hello with the identity's guid; the host
+    /// Every tab says hello with the identity's guid; the host
     /// calls ALL of them, the first reply settles, the other is dropped; a closed
     /// tab leaves the guid routable through the other.
     @Test(.timeLimit(.minutes(1)))

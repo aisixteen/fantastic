@@ -196,10 +196,9 @@ async def test_reflect_surfaces_posture(seeded_kernel):
 async def test_an_unimplementable_rule_is_refused_at_CREATE_not_just_update(
     seeded_kernel,
 ):
-    """`validate_meta` was wired into `update_agent` only, and the asymmetry was live:
-    `create_agent … ingress_rule=bogus` returned a record carrying `ingress_rule:
-    "bogus"` while the IDENTICAL `update_agent` was refused by the IDENTICAL function.
-    Measured 2026-08-07.
+    """`validate_meta` runs on `create_agent` as on `update_agent`: `create_agent …
+    ingress_rule=bogus` must not return a record carrying `ingress_rule: "bogus"`
+    while the IDENTICAL `update_agent` is refused by the IDENTICAL function.
 
     The argument the update path already makes applies verbatim at create — accepting a
     value you cannot honour and reporting success is the worst of both — and it is worse

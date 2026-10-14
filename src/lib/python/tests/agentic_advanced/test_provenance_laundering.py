@@ -25,7 +25,7 @@ from web_ws.tools import _make_endpoint
 
 
 def _wire(kernel, can_call):
-    # `port`: the authority the web's Host guard admits (audit W-2).
+    # `port`: the authority the web's Host guard admits.
     kernel.create(None, id="adv4_web", port=8088)
     app = make_app("adv4_web", kernel)
     # a leg under the root, its edge to the root granted on both ends
@@ -109,7 +109,7 @@ def test_update_and_delete_are_walled_the_same_way(wired):
 
 def test_a_wildcard_grant_is_the_legs_and_mints_anywhere(seeded_kernel):
     """`*` covers every verb — `create_agent` included — and grants are the only
-    rule (owner, 2026-10-06): a leg holding `*` on the root mints anywhere. The
+    rule: a leg holding `*` on the root mints anywhere. The
     frame still runs AS the leg: the authority used is the LEG's grant."""
     app = _wire(seeded_kernel, {"kernel_state": "*"})
     with TestClient(app, headers={"host": "127.0.0.1:8088"}) as client:

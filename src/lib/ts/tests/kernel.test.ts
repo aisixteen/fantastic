@@ -127,7 +127,7 @@ test("watching a REMOTE src asks the bridge once; unwatch releases", async () =>
   assert.deepEqual(unwatched, ["remote_pty"]);
 });
 
-// ── python parity (divergence fix 2026-10-01) ─────────────────────────────
+// ── python parity ─────────────────────────────────────────────────────────
 
 test("a SEND is mirrored to the target's own inbox and to its watchers", async () => {
   // python `_dispatch` → `_fanout(kind="send")`: a watcher sees the raw inbound

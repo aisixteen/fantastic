@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from web.app import make_app
 
 #: The web host's own authority (`127.0.0.1:<port>` on the loopback default) — any
-#: other Host is refused (audit W-2), TestClient's `testserver` included.
+#: other Host is refused, TestClient's `testserver` included.
 OWN = "http://127.0.0.1:8088"
 
 
@@ -34,7 +34,7 @@ async def web_agent(seeded_kernel):
             ]
         )
     )[0]["result"]
-    # The port the Host guard names (audit W-2) — set AFTER create, so the create's
+    # The port the Host guard names — set AFTER create, so the create's
     # boot binds nothing; the TestClient addresses `OWN`, this host's own authority.
     (
         await seeded_kernel.send(
@@ -251,16 +251,14 @@ async def test_file_proxy_sealed_agent_404(
 async def test_private_but_internally_readable_is_expressible(
     seeded_kernel, web_agent, tmp_path, monkeypatch
 ):
-    """THE QUADRANT THAT DID NOT EXIST. A file_bridge can now be readable by
-    in-kernel agents and NOT by the browser — "other agents read these; they are
-    the user's private chat history, not browser-facing content."
+    """A file_bridge can be readable by in-kernel agents and NOT by the browser —
+    "other agents read these; they are the user's private chat history, not
+    browser-facing content."
 
-    Before the `/file/` route carried the web host's identity it ran as OPERATOR,
-    so `ingress_rule` was a single switch over both origins and `callable_by`
-    could not reach the HTTP path: opening it for an in-kernel reader also served
-    it to every browser. Measured 2026-08-21 as a live exposure — a model opened
-    the leg, pinned `callable_by` to exclude web surfaces, and the browser was
-    served the transcripts anyway.
+    The `/file/` route carries the web host's identity, never the OPERATOR's, so
+    `ingress_rule` is not a single switch over both origins and `callable_by`
+    reaches the HTTP path: opening a leg for an in-kernel reader does not also
+    serve it to every browser.
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / "chat.txt").write_text("private chat history")
@@ -322,12 +320,9 @@ async def test_private_but_internally_readable_is_expressible(
 async def test_gate_denial_404_carries_the_hint_but_a_missing_file_does_not(
     seeded_kernel, web_agent, served_bridge, tmp_path, monkeypatch
 ):
-    """This kernel teaches through denials. `/file/` used to be the one surface that
-    discarded that: every cause returned a bare 404, so curling a misconfigured URL
-    taught nothing. Measured 2026-08-21 — five runs across two frontier models opened
-    a public directory's io leg, never granted `web` on its call gate, and reported
-    success; the kernel had said "does not accept 'read_stream' from web" the whole
-    time. A MISSING FILE stays bodyless: only the operator's own misconfiguration is
+    """This kernel teaches through denials, `/file/` included: a bare 404 for every
+    cause would make curling a misconfigured URL teach nothing (an io leg opened
+    without `web` granted on its call gate looks like success). A MISSING FILE stays bodyless: only the operator's own misconfiguration is
     useless kept secret, and existence is not."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "site.css").write_text("body{}")
@@ -365,10 +360,9 @@ async def test_browser_reachable_tracks_the_property_not_any_single_field(
     """`browser_reachable` must agree with what a GET actually returns, for every
     combination — that is the whole point of computing it instead of describing it.
 
-    Measured 2026-08-21, six runs across two frontier models: each one set
-    `ingress_rule=allow_all_ingress` on a public directory, never granted the web host on
-    its call gate, re-read the record, saw "allow_all", and reported the browser
-    could reach it. It could not. A single field cannot answer the question; three
+    A model that sets `ingress_rule=allow_all_ingress` on a public directory without
+    granting the web host on its call gate, re-reads the record and sees "allow_all"
+    will report the browser can reach it. It cannot. A single field cannot answer the question; three
     gates decide it, and this asserts the computed answer never diverges from the
     real one."""
     monkeypatch.chdir(tmp_path)

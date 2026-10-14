@@ -1,4 +1,4 @@
-//! mcp_client — ONE remote MCP server as an agent (owner, 2026-10-08). Python
+//! mcp_client — ONE remote MCP server as an agent. Python
 //! `mcp_client/tools.py`, text for text.
 //!
 //! `create_agent handler_module=mcp_client.tools url=<the server's MCP endpoint>

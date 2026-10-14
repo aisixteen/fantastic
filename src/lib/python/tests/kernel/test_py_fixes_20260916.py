@@ -1,5 +1,4 @@
-"""Twins for the 2026-09-16 python fixes (tmp/todo.md): each pins the behaviour
-that was measured wrong, in the smallest reachable form."""
+"""Each test pins one behaviour in the smallest reachable form."""
 
 from __future__ import annotations
 
@@ -59,7 +58,7 @@ async def test_kernel_ledger_is_json_after_a_binary_outcome(seeded_kernel, file_
     ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
         "result"
     ]
-    json.dumps(ledger)  # used to raise: bytes are not JSON
+    json.dumps(ledger)  # must not raise: bytes are not JSON
     assert "<bytes:2>" in json.dumps(ledger)
 
 
@@ -279,8 +278,8 @@ async def test_a_long_line_does_not_end_the_pipe(seeded_kernel):
 
 
 async def test_records_over_a_chunk_keep_every_key(tmp_path, monkeypatch):
-    """2026-09-16: the merge read took ONE 64 KiB chunk, so a larger agent.yaml
-    failed to parse and its unknown keys vanished on the next write."""
+    """A merge read of ONE 64 KiB chunk would make a larger agent.yaml fail to
+    parse and its unknown keys vanish on the next write."""
     from _testkit import boot_root
 
     monkeypatch.chdir(tmp_path)

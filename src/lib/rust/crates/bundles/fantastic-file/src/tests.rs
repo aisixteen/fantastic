@@ -16,7 +16,7 @@ fn at(root: &Path) -> Result<PathBuf, String> {
 
 #[test]
 fn readme_is_python_verbatim() {
-    // A2.8 — byte-for-byte the python bundle's readme.
+    // Byte-for-byte the python bundle's readme.
     let py = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(4)
@@ -86,7 +86,7 @@ fn an_atomic_write_with_a_mode_creates_exactly_those_bits() {
     );
 }
 
-/// F5 (audit 2026-10-03): `read_private` opens ONCE (`O_NOFOLLOW`) and judges
+/// `read_private` opens ONCE (`O_NOFOLLOW`) and judges
 /// the open descriptor — regular, this user's, no group/other bits — before
 /// reading it, so no swap can land between the check and the read. A symlink in
 /// the leaf's place, a widened mode and a FIFO are refused (`NotPrivate`,
@@ -226,7 +226,7 @@ fn write_stream_appends_when_offset_omitted() {
 
 #[test]
 fn write_stream_without_bytes_writes_an_empty_chunk() {
-    // A2.7 — python's `payload.get("bytes", b"")`: an ABSENT key is an empty
+    // Python's `payload.get("bytes", b"")`: an ABSENT key is an empty
     // chunk (a legal write); an explicit `null` is `missing_arg`.
     let tmp = tempfile::TempDir::new().unwrap();
     let served = served(&tmp);
@@ -249,7 +249,7 @@ fn write_stream_without_bytes_writes_an_empty_chunk() {
 
 #[test]
 fn root_escape_error_is_python_text() {
-    // A2.2 — the running-dir law, in python's words, quoting the CONFIGURED root.
+    // The running-dir law, in python's words, quoting the CONFIGURED root.
     let base = tempfile::TempDir::new().unwrap();
     let b = base.path();
     assert!(fs::resolve_root(".fantastic", b).is_ok());
@@ -267,7 +267,7 @@ fn root_escape_error_is_python_text() {
 
 #[test]
 fn root_symlink_pointing_outside_the_running_dir_refuses() {
-    // A2.19 — the clamp resolves symlinks on BOTH sides; a lexical compare used
+    // The clamp resolves symlinks on BOTH sides; a lexical compare used
     // to admit an outward symlinked root.
     let base = tempfile::TempDir::new().unwrap();
     let outside = tempfile::TempDir::new().unwrap();
@@ -280,7 +280,7 @@ fn root_symlink_pointing_outside_the_running_dir_refuses() {
 
 #[test]
 fn tilde_root_is_literal_not_home() {
-    // A2.17 — python's `fs` never expands `~`; the name is a directory.
+    // Python's `fs` never expands `~`; the name is a directory.
     let base = tempfile::TempDir::new().unwrap();
     let resolved = fs::resolve_root("~/projects", base.path()).unwrap();
     assert_eq!(
@@ -405,9 +405,9 @@ fn negative_offset_and_zero_length_are_refused_not_fatal() {
 
 #[test]
 fn read_stream_reply_key_order() {
-    // A2.6 — python's key order, measured: path, offset, bytes, next_offset,
+    // python's key order: path, offset, bytes, next_offset,
     // eof, size, origin (how to get these bytes again — what a caller's memory
-    // keeps instead of the body). A11.9 — `bytes` is nulled IN PLACE: python's
+    // keeps instead of the body). `bytes` is nulled IN PLACE: python's
     // codec lifts the value onto the wire and leaves a `null` behind, so every
     // reader gets the same dict shape; the chunk is the reply body beside it.
     let tmp = tempfile::TempDir::new().unwrap();
@@ -440,7 +440,7 @@ fn huge_length_reads_only_what_exists() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = at(&served(&tmp));
     std::fs::write(served(&tmp).join("a.txt"), b"abc").unwrap();
-    // 1 PB used to be `vec![0u8; length]` — an allocation abort of the kernel.
+    // 1 PB must never be `vec![0u8; length]` — an allocation abort of the kernel.
     let (m, b) = read_stream_reply(
         &fb(),
         &root,
@@ -481,7 +481,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
 
 #[test]
 fn dangling_symlink_pointing_outside_root_refuses() {
-    // A2.15 — `realpath(strict=False)` follows a dangling link to where it
+    // `realpath(strict=False)` follows a dangling link to where it
     // POINTS; outside the root, that is an escape, and nothing is created
     // through it.
     let tmp = tempfile::TempDir::new().unwrap();
@@ -542,7 +542,7 @@ fn bare_delete_refuses_a_populated_dir_recursive_removes_it() {
 
 #[test]
 fn os_error_text_is_python_oserror_str() {
-    // A2.12 — every OS failure renders as python's `OSError.__str__`.
+    // Every OS failure renders as python's `OSError.__str__`.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = served(&tmp);
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -679,7 +679,7 @@ fn absolute_path_is_refused_with_bad_arg() {
 
 #[test]
 fn refusal_texts_use_python_repr() {
-    // A2.3 — `{x!r}` on every refusal that names a path or a verb.
+    // `{x!r}` on every refusal that names a path or a verb.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = served(&tmp);
     std::fs::write(root.join("f.txt"), b"f").unwrap();
@@ -709,7 +709,7 @@ fn refusal_texts_use_python_repr() {
 
 #[test]
 fn list_paths_are_relative_to_resolved_root() {
-    // A2.11 — the entry path is relative to the RESOLVED root, and a stat that
+    // The entry path is relative to the RESOLVED root, and a stat that
     // fails reports -1.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = served(&tmp);
@@ -741,7 +741,7 @@ fn list_paths_are_relative_to_resolved_root() {
 
 #[test]
 fn truncate_and_recursive_use_python_truthiness() {
-    // A2.13 — `bool(payload.get(...))`, not a JSON bool test.
+    // `bool(payload.get(...))`, not a JSON bool test.
     let tmp = tempfile::TempDir::new().unwrap();
     let root = served(&tmp);
     let r = at(&root);
@@ -781,7 +781,7 @@ fn root_ok(p: &Path) -> Result<PathBuf, String> {
 
 #[test]
 fn auth_stem_is_not_judged_as_an_ingress_rule() {
-    // A2.18 — python judges only a PRESENT `ingress_rule`.
+    // Python judges only a PRESENT `ingress_rule`.
     let b = FileBundle::default();
     let mut auth_only = Map::new();
     auth_only.insert("auth".into(), json!("nonsense"));
@@ -857,7 +857,7 @@ fn password_ingress_is_refused_on_fs_and_process_legs() {
 
 #[tokio::test]
 async fn reflect_key_order_matches_python() {
-    // A2.1 + A2.16 + A2.17 — python's key order, docstring verbs and the
+    // Python's key order, docstring verbs and the
     // RESOLVED absolute root.
     let tmp = tempfile::TempDir::new().unwrap();
     let served = served(&tmp);
@@ -906,7 +906,7 @@ async fn reflect_key_order_matches_python() {
 
 #[test]
 fn verb_docs_are_python_docstring_first_lines() {
-    // A2.16 — the first line of each python docstring, in python's VERBS order.
+    // The first line of each python docstring, in python's VERBS order.
     let docs = FileBundle::default().verb_docs();
     let verbs = docs.as_object().unwrap();
     assert_eq!(
@@ -943,7 +943,7 @@ fn verb_docs_are_python_docstring_first_lines() {
 
 #[tokio::test]
 async fn reflect_root_is_resolved_absolute_path() {
-    // A2.17 — an escaping root is shown as CONFIGURED, with the violation.
+    // An escaping root is shown as CONFIGURED, with the violation.
     let tmp = tempfile::TempDir::new().unwrap();
     let mut meta = Map::new();
     meta.insert("root".into(), json!("../nope"));
@@ -1012,7 +1012,7 @@ fn reflect_posture_scopes_an_auth_stem_like_the_gate() {
 
 #[tokio::test]
 async fn unknown_verb_on_sealed_bridge_is_unhandled() {
-    // A2.4 — the verb lookup runs BEFORE the gate, so a sealed bridge still says
+    // The verb lookup runs BEFORE the gate, so a sealed bridge still says
     // "unknown type" instead of "unauthorized".
     let tmp = tempfile::TempDir::new().unwrap();
     served(&tmp);
@@ -1046,7 +1046,7 @@ async fn unknown_verb_on_sealed_bridge_is_unhandled() {
 
 #[tokio::test]
 async fn sealed_boot_is_denied_and_shutdown_is_unhandled() {
-    // A2.5 — the gate exemption covers `reflect` only.
+    // The gate exemption covers `reflect` only.
     let tmp = tempfile::TempDir::new().unwrap();
     served(&tmp);
     let kernel = mk_kernel_with(&tmp, json!({})).await;
@@ -1062,7 +1062,7 @@ async fn sealed_boot_is_denied_and_shutdown_is_unhandled() {
 
 #[tokio::test]
 async fn readonly_wins_over_root_escape() {
-    // A2.9 — the check order is readonly → arguments → root clamp → path clamp.
+    // The check order is readonly → arguments → root clamp → path clamp.
     let tmp = tempfile::TempDir::new().unwrap();
     served(&tmp);
     let kernel = mk_kernel_with(
@@ -1087,7 +1087,7 @@ async fn readonly_wins_over_root_escape() {
 
 #[tokio::test]
 async fn text_write_stream_with_string_bytes_is_missing_arg() {
-    // A13.19 — `bytes` IS RAW BYTES, and JSON has none. Python types the
+    // `bytes` IS RAW BYTES, and JSON has none. Python types the
     // argument (`isinstance(data, (bytes, bytearray))`), so a wire client's
     // JSON string or number is `missing_arg` and NOTHING IS WRITTEN; rust used
     // to accept both and write the text. A model's `<bytes>` document still
@@ -1122,7 +1122,7 @@ async fn text_write_stream_with_string_bytes_is_missing_arg() {
     assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"line one\n");
 
     // …and it comes back as a CHUNK, in the reply body, with the reply's own
-    // `bytes` key nulled in place (A11.9).
+    // `bytes` key nulled in place.
     let back = kernel
         .send(vec![Item::new(
             AgentId::from("fb"),
@@ -1142,7 +1142,7 @@ async fn text_write_stream_with_string_bytes_is_missing_arg() {
 
 #[tokio::test]
 async fn pump_falsy_args_fall_back_like_python() {
-    // A2.10 — `payload.get(k) or <fallback>` on every pump argument.
+    // `payload.get(k) or <fallback>` on every pump argument.
     let tmp = tempfile::TempDir::new().unwrap();
     let served = served(&tmp);
     let kernel = mk_kernel(&tmp).await;
@@ -1189,7 +1189,7 @@ async fn pump_falsy_args_fall_back_like_python() {
     );
 }
 
-/// Audit BV-7 — python `test_a_pump_onto_its_own_source_is_refused`. With only
+/// Python `test_a_pump_onto_its_own_source_is_refused`. With only
 /// `source_path`, sink and sink_path default to the source, and the first write's
 /// `truncate` cut the file the next read comes from — 200 KiB became 64 KiB under
 /// a success reply. Refused, the path judged normalised (`./x` is `x`); the file
@@ -1223,7 +1223,7 @@ async fn a_pump_onto_its_own_source_is_refused() {
     assert_eq!(std::fs::read(served.join("self.bin")).unwrap(), data);
 }
 
-/// ARCH2-8 — `path` is no alias for `source_path`: the verb doc lists only
+/// `path` is no alias for `source_path`: the verb doc lists only
 /// `source_path`, so a `path` names nothing and the read end refuses the empty
 /// source.
 #[tokio::test]
@@ -1384,10 +1384,10 @@ async fn writes_stay_inside_the_list_and_readonly_still_holds() {
     );
 }
 
-// ─── symlinks: BOTH ends must be exposed (audit 2026-09-28) ──────────────────
-// The list was checked on the path AS ASKED while the fs follows links, so a link
-// inside an exposed dir served whatever in-root file it pointed at. Python
-// `test_allow_list.py`'s symlink twins.
+// ─── symlinks: BOTH ends must be exposed ─────────────────────────────────────
+// The fs follows links, so checking the list on the path AS ASKED alone would
+// let a link inside an exposed dir serve whatever in-root file it points at.
+// Python `test_allow_list.py`'s symlink twins.
 
 async fn linked(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
     let k = bridge(tmp, Some(allow)).await;
@@ -1450,9 +1450,8 @@ async fn an_exposed_linked_dir_lists_what_it_serves() {
 #[tokio::test]
 async fn a_readonly_leg_refuses_a_binary_write_before_judging_the_chunk() {
     // PYTHON'S ORDER on the binary channel too: `readonly` first, whatever the
-    // header holds — a header carrying a JSON `bytes` answered `missing_arg`
-    // here while python said `agent is readonly` (parity bundle_verbs,
-    // readonly_write, 2026-09-30).
+    // header holds — a header carrying a JSON `bytes` answers `agent is readonly`
+    // as python does, never `missing_arg`.
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = served(&tmp);
     let kernel = mk_kernel_with(
@@ -1518,7 +1517,7 @@ async fn pump_ends_are_ordinary_executions_in_python_shape() {
     assert_eq!(write["bytes"], json!({"len": 5}));
 }
 
-/// STEP-4 PIN (2026-10-01): the file leg's unknown type, as TEXT — key order is
+/// The file leg's unknown type, as TEXT — key order is
 /// part of the wire (`preserve_order`) and `Value` equality ignores it.
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
@@ -1550,7 +1549,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     );
 }
 
-// ─── STEP-4 PINS (2026-10-01): one prologue, two channels ───────────────────
+// ─── one prologue, two channels ─────────────────────────────────────────────
 //
 // `handle` and `handle_binary` each run the agent lookup → meta snapshot → gate
 // → clamp → readonly/exposure prologue. These pin, per refusal, that the BINARY

@@ -1,5 +1,5 @@
 """credential_store: secrets by ref, bound to a host, read by whoever the call gate
-admits (owner, 2026-10-01). Tests never touch the real keychain or
+admits. Tests never touch the real keychain or
 home: the file backend writes under tmp_path, the keychain backend runs on an
 in-memory keyring."""
 
@@ -165,7 +165,7 @@ async def test_set_never_creates_a_ref_update_agent_declares_it(
 async def test_set_takes_no_host_the_declaration_is_the_binding(
     seeded_kernel, tmp_path
 ):
-    """AV-4 (audit 2026-10-03): a ref's host is its DECLARATION — written by
+    """A ref's host is its DECLARATION — written by
     `update_agent` on the store's `refs`, the one path. `set` stores the value of
     a declared ref and takes no host: a writer naming one is refused, loud, with
     nothing stored and the declared host untouched, so a writer can never rebind
@@ -251,7 +251,7 @@ async def test_a_ref_is_declared_with_its_host(seeded_kernel, tmp_path):
 async def test_forget_drops_the_value_and_keeps_the_declaration(
     seeded_kernel, tmp_path
 ):
-    """AV-5 (audit 2026-10-03): `forget` drops the VALUE — from the backend, with
+    """`forget` drops the VALUE — from the backend, with
     its field names — and nothing else. The declaration (host) is written and
     removed by `update_agent` alone, so a caller can never undeclare a ref nobody
     could then set again."""
@@ -287,7 +287,7 @@ async def test_forget_drops_the_value_and_keeps_the_declaration(
 async def test_the_file_is_judged_on_the_one_open_it_is_read_from(
     seeded_kernel, tmp_path, monkeypatch
 ):
-    """F5 (audit 2026-10-03): the credential file is opened ONCE (`O_NOFOLLOW`)
+    """The credential file is opened ONCE (`O_NOFOLLOW`)
     and the open descriptor is what is judged (`fstat`: regular, this user's,
     no group/other bits) and read. Checking the path and then reading the path
     again left a window: a leaf swapped for a symlink to another file between
@@ -399,7 +399,7 @@ async def test_the_keychain_backend_keeps_one_item_per_ref(
     k = _mk(seeded_kernel, tmp_path, backend="keychain", **meta)
     await _seed(k)
     assert list(mem_keyring.items) == [(namespace, "creds/openai/main")]
-    # the item holds the declared host WITH the value (audit S3)
+    # the item holds the declared host WITH the value
     assert json.loads(mem_keyring.items[(namespace, "creds/openai/main")]) == {
         "host": "api.openai.com",
         "fields": {"api_key": KEY},
@@ -544,8 +544,8 @@ async def test_the_file_is_an_absolute_path_a_relative_one_is_refused(
 
 async def test_the_file_is_the_kernel_emitters_bytes_sorted(seeded_kernel, tmp_path):
     """ONE format across runtimes: `kernel_state/yaml_io.dump` with every map's keys
-    sorted — each ref's entry is `{fields, host}` (the host stored WITH the value,
-    audit S3) — and a value a YAML 1.2 loader would read as a number quoted, so the
+    sorted — each ref's entry is `{fields, host}` (the host stored WITH the
+    value) — and a value a YAML 1.2 loader would read as a number quoted, so the
     rust and swift ports read back the same string."""
     k = _mk(seeded_kernel, tmp_path)
     await _declare(k, {"zeta": {"host": "h.example"}, "alpha": {"host": "h.example"}})
@@ -565,10 +565,10 @@ async def test_the_file_is_the_kernel_emitters_bytes_sorted(seeded_kernel, tmp_p
     )
 
 
-# ─── the host at rest (audit S3, 2026-10-03) ─────────────────────────────────
+# ─── the host at rest ────────────────────────────────────────────────────────
 
 
-# the `get {ref, host}` host-mismatch refusal's shape, reused (owner 2026-10-03)
+# the `get {ref, host}` host-mismatch refusal's shape, reused
 def _at_rest(ref: str, stored: str | None, declared: str) -> dict:
     return {
         "error": f"credential_store: ref {ref!r} is bound to host {declared!r}, not "

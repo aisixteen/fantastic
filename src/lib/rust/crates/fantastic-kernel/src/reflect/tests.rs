@@ -221,7 +221,7 @@ fn est_tokens_matches_ceil_div_and_desc_prefers_quote() {
 }
 
 /// A bundle that ships a readme and a keyed docs table — the only place a
-/// manual lives (owner 2026-10-14: never copied to disk).
+/// manual lives (never copied to disk).
 struct Docs {
     readme: Option<&'static str>,
     docs: &'static [(&'static str, &'static str)],
@@ -356,7 +356,7 @@ async fn readme_doctree_frame_index_view_and_errors() {
     assert_eq!(esc["readme"]["error"], "bad key '../readme'");
 }
 
-/// A12.2 — `minds` was a rust-only topic python never shipped. With it gone the
+/// `minds` was a rust-only topic python never shipped. With it gone the
 /// key is an ORDINARY unknown key: the reply stays well-formed and names the keys
 /// that do exist, rather than serving a doc no other runtime has.
 #[tokio::test]
@@ -385,7 +385,7 @@ async fn non_root_has_no_readmes_frame() {
     assert!(r.get("docs").is_none());
 }
 
-/// The R2-RFL-5 key matrix: a nested tier (`nested/child`), a topic with a
+/// The key matrix: a nested tier (`nested/child`), a topic with a
 /// tier (`frontend/…`) and a top-level topic.
 const CLAMP_DOCS: &[(&str, &str)] = &[
     ("frontend", "> f\n\nfrontend body"),
@@ -396,7 +396,7 @@ const CLAMP_DOCS: &[(&str, &str)] = &[
     ("topic", "> t\n\ntopic body"),
 ];
 
-/// C33 (python 2026-09-20): the key check is LEXICAL and then the INDEX — a
+/// The key check is LEXICAL and then the INDEX — a
 /// `.`, `..` or empty segment is a `bad key` whatever the filesystem holds, and
 /// a key is a doc only if the index lists it.
 #[tokio::test]
@@ -460,7 +460,7 @@ async fn readme_view_key_check_is_lexical_then_the_index() {
     assert_eq!(r["readme"]["error"], "bad key '/'");
 }
 
-/// C59: doc reads translate `\r\n` and a lone `\r` to `\n` (python text mode)
+/// Doc reads translate `\r\n` and a lone `\r` to `\n` (python text mode)
 /// BEFORE `tokens`/`desc` are computed from the body — a doc kept with its
 /// CRs counts one extra "character" per CRLF pair and desc-matching sees
 /// stray `\r`s python's reader never produces.
@@ -511,7 +511,7 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
         .remove(0)
         .result;
     assert_eq!(all["tree"].as_array().unwrap().len(), 6); // self + 5
-                                                          // C8: no further page ⇒ no cursor key at all (python inserts `next` only
+                                                          // No further page ⇒ no cursor key at all (python inserts `next` only
                                                           // when one exists; there is no `tree_next`).
     assert!(all.get("next").is_none(), "{all}");
     assert!(all.get("tree_next").is_none(), "{all}");
@@ -563,8 +563,8 @@ async fn tree_ids_is_paged_and_the_cursor_walks_the_whole_tree() {
 
 #[tokio::test]
 async fn an_agent_can_read_its_own_authority() {
-    // The gate used to be INVISIBLE: an agent could only discover its authority
-    // by trying, which cost whole passes of empirical probing every run. It also
+    // The gate is VISIBLE: otherwise an agent could only discover its authority
+    // by trying, which costs whole passes of empirical probing every run. It also
     // makes `update_agent`'s replace-not-merge warning actionable — you must
     // send the map whole, so you must be able to read it.
     let kernel = Arc::new(Kernel::new());
@@ -606,14 +606,12 @@ async fn an_agent_can_read_its_own_authority() {
     assert_eq!(node["callable_by"]["cli"], "*");
 }
 
-// ─── C5 — children walk CREATION order ─────────────────────────
+// ─── Children walk CREATION order ─────────────────────────
 
 #[tokio::test]
 async fn tree_children_keep_creation_order() {
     // Python's `_children` is a plain dict, so the tree frame, `tree=ids` and
-    // the descendant walk all read insertion order. Rust's `DashMap` had none,
-    // so every reader sorted by id and printed a tree python never prints —
-    // measured in `root_reflect_full.json` children and `prompt_req_01.json`.
+    // the descendant walk all read insertion order — never sorted by id.
     let kernel = Arc::new(Kernel::new());
     let root = mk_agent("kernel_state", None);
     kernel.register(Arc::clone(&root));
@@ -667,7 +665,7 @@ async fn tree_children_keep_creation_order() {
     );
 }
 
-// ─── C1 + C7 + C8 + C58 — the reflect flags are python's ─────────────
+// ─── The reflect flags are python's ─────────────
 
 /// A bundle whose reflect names a sentence and a `mode` (or raises, for the
 /// agent named `boom`).
@@ -746,7 +744,7 @@ async fn kernel_reflect(kernel: &Arc<Kernel>, payload: Value) -> crate::outcome:
 
 #[tokio::test]
 async fn reflect_carries_no_verb_docs() {
-    // Owner, 2026-10-05: a reflect says what an agent IS; verbs, emits, cancel,
+    // A reflect says what an agent IS; verbs, emits, cancel,
     // `more` and `kernel_verbs` are the `docs` kernel verb.
     let (kernel, root) = roster_kernel();
     let child = probe_child(&kernel, "kid", &root, json!({}));
@@ -970,7 +968,7 @@ async fn bundles_page_like_python() {
 
 #[tokio::test]
 async fn a_probe_registered_bundle_is_absent_from_the_catalog() {
-    // C10: python lists entry-point bundles only; a fixture imported without
+    // Python lists entry-point bundles only; a fixture imported without
     // one dispatches but is not installable.
     let (kernel, root) = roster_kernel();
     let ids = kernel_reflect(
@@ -1001,7 +999,7 @@ async fn a_probe_registered_bundle_is_absent_from_the_catalog() {
     assert_eq!(r, json!({"ok": true}));
 }
 
-// ─── C11 — an empty display_name is no name ─────────────────────────
+// ─── An empty display_name is no name ─────────────────────────
 
 #[tokio::test]
 async fn empty_display_name_falls_back_to_id() {
@@ -1018,7 +1016,7 @@ async fn empty_display_name_falls_back_to_id() {
     assert_eq!(tree_node(&b)["display_name"], "Named");
 }
 
-/// C12: the TREE ROOT answers `reflect` with the substrate identity even when
+/// The TREE ROOT answers `reflect` with the substrate identity even when
 /// it carries a handler_module (the root loader). Its persistence verbs still
 /// route to the bundle below; `reflect <root>` is the kernel's own identity.
 #[tokio::test]
@@ -1072,7 +1070,7 @@ async fn root_with_handler_reflects_identity() {
     );
 }
 
-/// A bundle that publishes its KIND's record schema (lib request #3).
+/// A bundle that publishes its KIND's record schema.
 struct Schemaed;
 
 #[async_trait::async_trait]

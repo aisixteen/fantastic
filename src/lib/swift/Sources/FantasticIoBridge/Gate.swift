@@ -21,14 +21,14 @@ public func gateInbound(rule: IngressRule, action: AuthAction) -> AuthDecision {
 /// `X-Fantastic-Auth` header). Returns `nil` to ADMIT, or a deny JSON.
 ///
 /// `kind` is the FRAME KIND — `call`, `emit`, `watch` or `state_subscribe`
-/// (python `gate_inbound(rule, kind, frame)`, C41). Only a `call` carries a verb
-/// of its own; for every other kind the verb IS the kind. This built `call`
-/// unconditionally, so a `watch`/`emit`/`state_subscribe` frame was authorized
-/// against a rule clause that names calls.
+/// (python `gate_inbound(rule, kind, frame)`). Only a `call` carries a verb
+/// of its own; for every other kind the verb IS the kind, so a
+/// `watch`/`emit`/`state_subscribe` frame is never authorized against a rule
+/// clause that names calls.
 ///
 /// A MISSING LEG RECORD IS SEALED, not admitted: `resolveIngress` on an absent
-/// rule denies, and a leg that is not in the registry has no rule at all. This
-/// returned `nil` (admit) for it, so deleting the leg record OPENED the socket.
+/// rule denies, and a leg that is not in the registry has no rule at all —
+/// admitting it would let deleting the leg record OPEN the socket.
 public func gateWebLeg(
     kernel: Kernel, legId: AgentId, kind: String, target: String, verb: String, token: String?
 ) -> JSON? {
@@ -38,9 +38,9 @@ public func gateWebLeg(
         auth: leg?.metaValue(forKey: "auth"))
     let action = AuthAction(
         kind: kind, target: target, verb: kind == "call" ? verb : kind, token: token)
-    // FORWARDED, not re-worded. The rule states the reason AND the repair; a web
-    // leg used to drop the repair entirely, so a browser/REST client hitting a
-    // sealed leg learned only that it was refused.
+    // FORWARDED, not re-worded. The rule states the reason AND the repair; dropping
+    // the repair would leave a browser/REST client hitting a sealed leg knowing
+    // only that it was refused.
     if case .deny(let d) = gateInbound(rule: rule, action: action) {
         return d.asRefusal
     }

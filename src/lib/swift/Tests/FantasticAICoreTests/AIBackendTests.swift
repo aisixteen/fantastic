@@ -28,7 +28,7 @@ private func readMark(_ backend: AIBackend, _ key: String) -> (Int, String)? {
 @Suite("AIBackend shared machinery")
 struct AIBackendTests {
 
-    // B1.23: PYTHON'S KEYS, IN PYTHON'S ORDER, then the backend's extras. No
+    // PYTHON'S KEYS, IN PYTHON'S ORDER, then the backend's extras. No
     // `kind`, no `provider` — python's reflect has neither, and this line is
     // rendered into every prompt.
     @Test func reflectBaseMatchesPythonKeysAndOrder() async throws {
@@ -50,7 +50,7 @@ struct AIBackendTests {
         #expect(r["model"].isNull && r["endpoint"].isNull, "\(r)")
         #expect(r["generating"] == .bool(false))
         #expect(r["extra"].asString == "yes")
-        // No verb docs on a reflect (owner, 2026-10-05) — they are `docs`.
+        // No verb docs on a reflect — they are `docs`.
         for key in ["verbs", "cancel", "emits", "concurrency"] {
             #expect(r.asObject?[key] == nil, "\(key)")
         }
@@ -69,7 +69,7 @@ struct AIBackendTests {
                 == true)
     }
 
-    // B1.23: THREE channels, python's wording. `done` is NOT one of them —
+    // THREE channels, python's wording. `done` is NOT one of them —
     // `status(phase='done')` IS the completion event.
     @Test func docsEmitsArePythonVerbatim() async throws {
         // Served by `docs` (tier detailed), never on a reflect.
@@ -83,7 +83,7 @@ struct AIBackendTests {
         #expect(emits["done"].isNull)
     }
 
-    // B1.2: the cancel doc is python's, TAG notation included — the model reads
+    // The cancel doc is python's, TAG notation included — the model reads
     // it and copies the shape.
     @Test func cancelDocIsPythonVerbatim() {
         #expect(
@@ -112,10 +112,8 @@ struct AIBackendTests {
         #expect(r["error"].asString == "mock_backend: unknown type 'nope'")
     }
 
-    /// `send` answers with the FINISHED text — python/rust parity. It used to
-    /// ack `{queued, stream_id, message_id}` and run the pass on its own task,
-    /// so a caller reading `response` got the text on two kernels and an empty
-    /// ack on the third.
+    /// `send` answers with the FINISHED text — python/rust parity, never an
+    /// `{queued, stream_id, message_id}` ack.
     @Test func sendReturnsTheCompletedText() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { MockProvider() })
@@ -229,12 +227,8 @@ struct AIBackendTests {
     }
 
     @Test func aCallerSystemPromptIsKeptForEveryHopOfTheChain() async throws {
-        // INVERTED by the dispatch phase, and kept for what survived. This test
-        // used to assert that an envelope streamed through UNDISPATCHED — "the
-        // tool loop is the caller's, this backend runs one pass and parses
-        // nothing". That is no longer true: the substrate reads every completion
-        // and dispatches the calls in it, so the envelope below really runs and
-        // its reply arrives as turn 2.
+        // The substrate reads every completion and dispatches the calls in it, so
+        // the envelope below really runs and its reply arrives as turn 2.
         //
         // What a caller-supplied `system_prompt` still does is REPLACE the default
         // block — and it has to keep doing so for every hop, or a chain the caller
@@ -304,7 +298,7 @@ struct AIBackendTests {
         let deltas = sink.snapshot().filter { $0["type"].asString == "token" }
             .compactMap { $0["text"].asString }.joined()
         #expect(deltas == raw)
-        // B2.15: `status(phase:'done')` IS the completion. There is no `done`
+        // `status(phase:'done')` IS the completion. There is no `done`
         // event at all — two events for one transition is two truths.
         #expect(sink.first(type: "done") == nil)
 
@@ -317,18 +311,14 @@ struct AIBackendTests {
     }
 
     @Test func aThinkingOnlyTurnStreamsItsThoughtAndIsDiscardedAsADeadTurn() async throws {
-        // The measured failure this mechanism exists for (gemma4:12b, 2026-08-02):
-        // the model spent its ENTIRE turn reasoning. Reading one channel made that
-        // an empty completion that silently ended the chain, indistinguishable
-        // from "the model said nothing" — so the reasoning text must still reach
-        // the caller (and a reader's parser) as tokens.
+        // The failure this mechanism exists for: a model spends its ENTIRE turn
+        // reasoning. Reading one channel makes that an empty completion that silently
+        // ends the chain, indistinguishable from "the model said nothing" — so the
+        // reasoning text must still reach the caller (and a reader's parser) as tokens.
         //
-        // What such a turn IS changed on 2026-09-30 (owner's decision, python
-        // `_run`): a turn with no answer once the thinking is stripped is a DEAD
-        // TURN — its empty answer discarded (the incoming row is kept), and
-        // rerolled by the no-call reminder. It used to complete with an empty assistant row, and the
-        // chain went on as if it had been answered (measured on vLLM: an 8-token
-        // thinking budget, then a clean `stop` with no answer).
+        // Such a turn (python `_run`): a turn with no answer once the thinking is
+        // stripped is a DEAD TURN — its empty answer discarded (the incoming row is
+        // kept), and rerolled by the no-call reminder.
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
                 MockProvider(tokens: ["<think>", "all of my turn", "</think>"])
@@ -374,11 +364,9 @@ struct AIBackendTests {
                 "type": .string("send"), "text": .string("hi"),
                 "client_id": .string("c"),
             ]))])[0].result
-        // A turn is persisted as a UNIT or not at all. This used to leave the
-        // user row behind, because the backend wrote it up-front and the error
-        // path returned before the assistant row — so a failed exchange read
-        // back as a question nobody answered. Python and rust never produced
-        // that: both have ONE save, after the stream, carrying both turns.
+        // A turn is persisted as a UNIT or not at all — ONE save, after the stream,
+        // carrying both turns (python and rust alike) — so a failed exchange never
+        // reads back as a question nobody answered.
         try await Task.sleep(nanoseconds: 60_000_000)
         let msgs = conversationRows(kernel: kernel, id: id)
         #expect(msgs.isEmpty, "a failed turn left a half-exchange behind: \(msgs)")
@@ -412,8 +400,7 @@ struct AIBackendTests {
         }
 
         // The `send` DISPATCH is the generation, so it stands in the table as
-        // its own row — that is what makes it killable at all. (It used to be a
-        // separate task that outlived an already-retired dispatch.)
+        // its own row — that is what makes it killable at all.
         let taskId = try await waitForTask(kernel: kernel, agent: id, verb: "send")
         #expect(taskId > 0)  // a pid: an int from the one counter
         // MID-STREAM, as python's test kills it (inside the provider stream): a
@@ -429,7 +416,7 @@ struct AIBackendTests {
 
         // The client's turn is CLOSED OUT — the terminal `status(done)` lands
         // even though the generation was killed mid-stream (aborting a task
-        // tells nobody). B2.3: its detail carries `started_at`, the only thing
+        // tells nobody). Its detail carries `started_at`, the only thing
         // that says how long the killed turn ran, and the keys are in python's
         // order.
         try await waitUntil("status(done)") { sink.statusDone() != nil }
@@ -450,7 +437,7 @@ struct AIBackendTests {
         let stillListed = await psRows(kernel).contains(where: { $0["id"].asInt == taskId })
         #expect(!stillListed)
 
-        // THE CUT (owner, 2026-10-04): the killed turn keeps the incoming message
+        // THE CUT: the killed turn keeps the incoming message
         // and a MARKER — never the half answer. A kernel `cancel` names no
         // stopper, so the marker says `cancel`.
         let msgs = conversationRows(kernel: kernel, id: id)
@@ -492,7 +479,7 @@ struct AIBackendTests {
         // Two sends on one agent: turn 2's persisted history must carry
         // turn 1 (the load→append round-trip through the kernel row store).
         let (kernel, id) = try await freshMockKernel(
-            // DONE-TERMINATED: a call-less turn is nudged now, and the nudge is
+            // DONE-TERMINATED: a call-less turn is nudged, and the nudge is
             // itself a turn — so a fixture that just streams prose grows the
             // history under the assertion.
             config: baseConfig { MockProvider(tokens: ["x ", doneEnvelope]) })
@@ -580,7 +567,7 @@ struct AIBackendTests {
                 
                     MockProvider(tokens: ["a", "b", "c"], chunkDelayNanos: 40_000_000)
             })
-        // CONCURRENT send: the pass now runs INLINE (py/rust parity), so the
+        // CONCURRENT send: the pass runs INLINE (py/rust parity), so the
         // dispatch does not return until the generation is done. Observing it
         // in flight means launching it on another task and polling from here.
         let running = Task {
@@ -612,7 +599,7 @@ struct AIBackendTests {
             config: baseConfig {
                 MockProvider(tokens: ["a", "b"], chunkDelayNanos: 40_000_000)
             })
-        // CONCURRENT send: the pass now runs INLINE (py/rust parity), so the
+        // CONCURRENT send: the pass runs INLINE (py/rust parity), so the
         // dispatch does not return until the generation is done. Observing it
         // in flight means launching it on another task and polling from here.
         let running = Task {
@@ -743,10 +730,8 @@ struct AIBackendTests {
 
     // ─── the queued event, the whole recall, the store cursor ───
 
-    /// ONE event on contention, and it is the `status` one. Rust/swift emitted a
-    /// bare `{type:'queued'}` ahead of it until 2026-09-02 — an undocumented type
-    /// python never sends, which broke any per-submission event count and every
-    /// cross-runtime event-stream diff.
+    /// ONE event on contention, and it is the `status` one — never a bare
+    /// `{type:'queued'}`, a type python never sends.
     @Test func contendedSendsEmitOneQueuedStatusAndNoBareQueuedEvent() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig {
@@ -785,7 +770,7 @@ struct AIBackendTests {
         }
         #expect(queued.count == 1, "one contended submission, one queued status")
         #expect(queued.first?["detail"]["ahead"].asInt != nil)
-        // B2.17: python's `**detail` order — the caller's `send_id, ahead`, then
+        // Python's `**detail` order — the caller's `send_id, ahead`, then
         // what `_emit_status` auto-fills. The in-flight entry is the FIRST turn,
         // so `started_at` is ITS start (python reads `_current` whoever holds it).
         #expect(
@@ -793,9 +778,8 @@ struct AIBackendTests {
                 == ["send_id", "ahead", "started_at", "queue_depth"])
     }
 
-    /// `recall` answers the turn WHOLE. Rust/swift capped each recalled turn at 2000
-    /// chars while python returned it verbatim — same verb, same store, two different
-    /// replies, and the cut half is exactly what a model pages back FOR.
+    /// `recall` answers the turn WHOLE, as python does — a per-turn cap would cut
+    /// exactly the half a model pages back FOR.
     @Test func recallReturnsTheTurnWhole() async throws {
         let (kernel, id) = try await freshMockKernel(
             config: baseConfig { MockProvider() })
@@ -865,9 +849,9 @@ struct AIBackendTests {
         #expect(mark?.1 == "probe")
     }
 
-    // ── the prompt the model reads (B1.1, B1.4, B1.9, B1.22) ─────
+    // ── the prompt the model reads ─────
 
-    // B1.1: NO JSON on the model path. A list of scalars is comma-joined, and
+    // NO JSON on the model path. A list of scalars is comma-joined, and
     // anything nested is the REPLY notation collapsed onto the line.
     @Test func renderReflectMatchesPythonOne() {
         let r: JSON = .object([
@@ -884,7 +868,7 @@ struct AIBackendTests {
                 == "S  t=True,1")
     }
 
-    // B1.4: the estimate counts `json.dumps(…)` in CODE POINTS — an em dash
+    // The estimate counts `json.dumps(…)` in CODE POINTS — an em dash
     // costs its six `\u2014` characters, not three.
     @Test func estimateOneCountsPythonJsonDumps() {
         #expect(
@@ -892,7 +876,7 @@ struct AIBackendTests {
                 == 11)
     }
 
-    // B5.6: the numeric context knobs parse EXACTLY as python's do.
+    // The numeric context knobs parse EXACTLY as python's do.
     @Test func budgetMetaParsesLikePython() async throws {
         func agent(_ meta: OrderedCollections.OrderedDictionary<String, JSON>) async throws
             -> Agent
@@ -924,7 +908,7 @@ struct AIBackendTests {
         #expect(AIContext.recentN(b) == 1)
     }
 
-    // B1.9 + B1.22: the opt-in blocks read python TRUTHINESS, and the primer
+    // The opt-in blocks read python TRUTHINESS, and the primer
     // reflect goes to the reserved `kernel` address (the root id differs per runtime).
     @Test func primerReflectTargetsKernelAliasAndFlagsArePythonTruthy() async throws {
         let cfg = baseConfig { MockProvider() }
@@ -942,9 +926,9 @@ struct AIBackendTests {
         #expect(prompt.contains("## Titling your calls"))
     }
 
-    // ── the turn text (B1.5, B1.6, B1.10, B1.20, B1.21, B5.7) ────
+    // ── the turn text ────
 
-    // B1.21: a numeric `text` runs as its digits.
+    // A numeric `text` runs as its digits.
     @Test func aNumericTextIsSentAsItsDigits() async throws {
         let script = ProviderScript([["ok " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
@@ -974,7 +958,7 @@ struct AIBackendTests {
         #expect(live == "", "a bool stays the empty turn")
     }
 
-    // B1.20: a message from ANOTHER agent opens with the header the KERNEL
+    // A message from ANOTHER agent opens with the header the KERNEL
     // vouches for — the sender is the dispatch's context, never its prose.
     @Test func aTurnFromAnotherAgentCarriesTheVouchedHeader() async throws {
         let a = ProviderScript([
@@ -1005,9 +989,9 @@ struct AIBackendTests {
         #expect(seen.contains("hello peer"))
     }
 
-    // The `messages` context-array parameter of `send` is REMOVED: the
+    // `send` takes no `messages` context array: the
     // conversation is ALWAYS the agent's own (its memory store). A supplied list
-    // is ignored — python's `_send` no longer reads it.
+    // is ignored — python's `_send` does not read it.
     @Test func aSuppliedMessagesListIsNotAConversation() async throws {
         let script = ProviderScript([["ok " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
@@ -1032,7 +1016,7 @@ struct AIBackendTests {
         #expect(conversationRows(kernel: kernel, id: id).map { $0["content"] }.first == .string("live"))
     }
 
-    // B1.6: `options` via python `str`, `action` via `json.dumps`.
+    // `options` via python `str`, `action` via `json.dumps`.
     @Test func inquiryTurnTextRendersOptionsAndActionLikePython() async throws {
         let script = ProviderScript([
             ["<call name=\"inquiry_answer\"><answer>b</answer></call>"]

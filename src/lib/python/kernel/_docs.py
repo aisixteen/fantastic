@@ -1,6 +1,6 @@
 """How to CALL an agent — the `docs` kernel verb, and the reflect subtree filters.
 
-A reflect says what an agent IS (owner, 2026-10-05): id, sentence, state, grants,
+A reflect says what an agent IS: id, sentence, state, grants,
 tree. How to call it — verb signatures, emits, cancel, notes — is `docs`, pulled
 per BUNDLE (two agents of one bundle share their docs), in two tiers:
 
@@ -11,9 +11,8 @@ per BUNDLE (two agents of one bundle share their docs), in two tiers:
     bundle's `EMITS`, `CANCEL` and `NOTES` (module attributes, duck-typed like
     `RECORD_SCHEMA`).
 
-Measured 2026-10-05 (rust e2e): docs were ~75% of a per-agent reflect and up to
-59k chars of a test's transcript — the same text every time an agent of that kind
-was reflected.
+Inlined, docs would be most of a per-agent reflect — the same text every time an
+agent of that kind is reflected.
 """
 
 from __future__ import annotations

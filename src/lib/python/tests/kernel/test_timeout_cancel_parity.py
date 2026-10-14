@@ -5,9 +5,9 @@ teardown — an OS child, a PTY, a socket), then the asyncio.Tasks are aborted.
 Phase ① AWAITS, so a handler inside the doomed subtree gets scheduling passes
 between the decision to kill it and its abort.
 
-Measured 2026-09-02: work it sent in that window started fresh dispatches — new
-`ps` rows, new OS children — that outlived the cancel that was supposed to take
-the whole group down. The subtree is now MARKED before phase ①, and a send from a
+Work it sends in that window must not start fresh dispatches — new `ps` rows, new
+OS children — that outlive the cancel that is supposed to take the whole group
+down. The subtree is MARKED before phase ①, and a send from a
 marked task settles `cancelled` without dispatching.
 """
 

@@ -1,4 +1,4 @@
-// Lib request #3 (2026-09-30) — a backend KIND's record schema, readable before any
+// A backend KIND's record schema, readable before any
 // agent of it exists, and the SAME schema enforced at the write. Twins of python's
 // `tests/kernel/test_kernel_reflect_extras.py`
 // (`test_the_catalog_carries_each_backend_kinds_record_schema`,
@@ -115,7 +115,7 @@ private struct Plain: AgentBundle {
         #expect(r["id"] == "a4", "\(r)")
     }
 
-    /// `system_prompt` (every AI agent's, owner 2026-10-03): an optional `str` in
+    /// `system_prompt` (every AI agent's): an optional `str` in
     /// the shared fields, refused AT THE WRITE unless a non-blank string; null
     /// clears it. Python's texts.
     @Test func aRecordSystemPromptIsAnOptionalStrRefusedAtTheWriteUnlessNonBlank() async {

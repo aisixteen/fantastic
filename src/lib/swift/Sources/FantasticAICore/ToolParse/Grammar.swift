@@ -15,10 +15,9 @@
 //     </bytes>
 //     </call>
 //
-// Why tags and not JSON (measured 2026-09-09, qwen3.8-27b, 4 trials × 3 shapes
-// that had failed in e2e): JSON with a verbatim `bytes` cut scored 3/12 —
-// escaped quotes, literal `\n`, a `\"}` inside content ending the value early;
-// bare child tags 12/12, zero escapes. A `"` boundary inside JSON fires the
+// Why tags and not JSON: JSON carrying a verbatim document fails on escaped
+// quotes, literal `\n`, a `\"}` inside content ending the value early; bare
+// child tags need zero escapes. A `"` boundary inside JSON fires the
 // model's escaping reflex; a tag boundary carries none.
 //
 // Nothing is repaired. A call that does not parse is reported with its fault
@@ -108,8 +107,7 @@ func envelopes(_ chars: [Unicode.Scalar]) -> [(start: Int, body: Int, end: Int?)
 ///
 /// A tag name is a KEY, not an XML name: grant maps are keyed by agent ids and
 /// the relative tokens (`$self`, `$parent`, `$subtree`), and the model writes
-/// those as tags (`<$self>*</$self>`, measured 2026-09-09 gated_write, 12
-/// refusals) — so `$`, `-` and `.` are letters here. Mirrors python's
+/// those as tags (`<$self>*</$self>`) — so `$`, `-` and `.` are letters here. Mirrors python's
 /// `<([A-Za-z_$][\w$.\-]*)>`.
 func nextTag(_ chars: [Unicode.Scalar], from: Int, hi: Int) -> (
     tag: Int, body: Int, name: [Unicode.Scalar]
@@ -302,16 +300,13 @@ func value(_ name: [Unicode.Scalar], _ chars: [Unicode.Scalar], lo: Int, hi: Int
     if kids.isEmpty { return coerceScalar(pyStrip(raw)) }
     // A LIST is a tag whose children are all `<item>` — one element each, any
     // count, one element included. The same tag the reply notation renders, so
-    // what the model reads is what it writes (2026-09-09 subai_graph: a reply
-    // showed `<allowed><item>…</item></allowed>`, the model wrote it back, and a
-    // plural/singular rule read the lone child as a one-field object — three
-    // refusals and a JSON-string fallback).
+    // what the model reads is what it writes: a lone `<item>` child is a
+    // one-element list, never a one-field object.
     if kids.allSatisfy({ $0.name == ITEM_NAME }) {
         return .array(try kids.map { try value($0.name, chars, lo: $0.lo, hi: $0.hi) })
     }
-    // `<item>` beside OTHER tags is an ordinary field named item (E14
-    // 2026-09-10: `<payload><type>buy</type><item>rocket</item></payload>` was
-    // refused as a list error and the purchase never left the model). Only a tag
+    // `<item>` beside OTHER tags is an ordinary field named item
+    // (`<payload><type>buy</type><item>rocket</item></payload>`). Only a tag
     // whose children are ALL `<item>` is a list; a one-field object named `item`
     // is the single shape the notation cannot say.
     var out: OrderedDictionary<String, JSON> = [:]
@@ -392,7 +387,7 @@ func parseCall(_ chars: [Unicode.Scalar], lo: Int, hi: Int) throws -> ToolCall? 
     // A NUMERIC-SHAPED target_id is not a string target — python's
     // `coerce_scalar` types it as an (unbounded) `int`, so `isinstance(target,
     // str)` fails even for a value too wide for this carrier's `Int64`, which
-    // `coerceScalar` otherwise has to keep as `.string` text (C74, D13). Check
+    // `coerceScalar` otherwise has to keep as `.string` text. Check
     // the raw text's shape, not just the JSON case, so a huge id still refuses
     // like python instead of dispatching to a literal numeral agent id.
     let target = rawTarget.flatMap(\.asString).map(pyStrip).flatMap {

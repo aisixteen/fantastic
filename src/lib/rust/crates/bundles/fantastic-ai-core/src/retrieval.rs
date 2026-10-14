@@ -125,10 +125,9 @@ pub async fn grep(
     let mut matches: Vec<Value> = Vec::new();
     let mut total = 0usize;
     let mut seen_lines: HashSet<String> = HashSet::new();
-    // IDENTICAL LINES ONCE. A task the human repeats per delivery matched 28
-    // times in one run and pushed the one body hit past the inline cap (measured
-    // 2026-09-06, python recall_after_fold). The first occurrence keeps its
-    // address.
+    // IDENTICAL LINES ONCE. A task the human repeats per delivery can match dozens
+    // of times in one run and push the one body hit past the inline cap. The first
+    // occurrence keeps its address.
     let mut take =
         |rid: Value, n: Value, line: &str, matches: &mut Vec<Value>, total: &mut usize| {
             let key = py_split_whitespace(line).join(" ");
@@ -149,9 +148,8 @@ pub async fn grep(
     let mut in_reach: Option<HashSet<i64>> = None;
     if let Some(ids) = &ids {
         // A fold id is a DESCENT: its members are reply rows, and their bodies
-        // hang off the pids on their tags (measured 2026-09-08: a descent that
-        // ignored them found nothing, 22 greps, 22 zeros). An id that is itself a
-        // pid counts.
+        // hang off the pids on their tags (a descent that ignores them finds
+        // nothing). An id that is itself a pid counts.
         let rows = load_history(agent_id, kernel, true).await?;
         let scope: HashSet<i64> = expand_ids(&rows, ids).into_iter().collect();
         let mut reach: HashSet<i64> = ids.iter().copied().collect();
@@ -392,13 +390,12 @@ pub async fn context_recall(
     // model call it had asked not to make.
     let dry = payload.get("dry").is_some_and(py_truthy);
     let provider = provider.filter(|_| !dry);
-    // A HEAD LONGER THAN THE BUDGET FOLDS FIRST (owner, 2026-10-07). A store
+    // A HEAD LONGER THAN THE BUDGET FOLDS FIRST. A store
     // written under a larger window — another model, a planted past — is folded
     // the way the turn's own `fold` projection folds it: oldest spans into fold
-    // rows, folds of folds as they pile up. Before this the fit below only
-    // stubbed every reply and dropped the oldest rows that still did not fit — no
-    // fold, no summary. Folding takes the model (a summary per span), so a `dry`
-    // recall does not fold.
+    // rows, folds of folds as they pile up; the fit below then only stubs replies
+    // and drops what still does not fit. Folding takes the model (a summary per
+    // span), so a `dry` recall does not fold.
     let mut folded = 0usize;
     if let Some(p) = provider {
         if meta.get("context_strategy").and_then(Value::as_str) == Some("fold") {
@@ -525,7 +522,7 @@ pub async fn context_recall(
         if let Some(ans) = answered {
             let head_ids: HashSet<i64> = head.iter().filter_map(|&i| row_id(&view[i])).collect();
             // python `_as_list(ans.get("expand"))`: a list as is, a scalar
-            // wrapped, falsy empty (2026-09-20; a truthy scalar used to raise).
+            // wrapped, falsy empty.
             let raw_expand = ans.get("expand").unwrap_or(&Value::Null);
             let items: Vec<Value> = if !py_truthy(raw_expand) {
                 Vec::new()
@@ -582,8 +579,8 @@ pub async fn context_recall(
     // the decision is a ROW — the next reload reads why the last recall chose as it did
     let rid = kernel.mint_id();
     // THE LIVE TASK IS NAMED. The view keeps the first root (the goal) at the top,
-    // and after a recall a model with several roots re-answered the FIRST one and
-    // called done (measured 2026-09-06, python fold_paging). The newest root is
+    // and after a recall a model with several roots can re-answer the FIRST one
+    // and call done. The newest root is
     // what is live; say so. Over the STORE, not the folded render: a root a fold
     // collapsed is still the live one if nothing newer came.
     let live = rows.iter().rev().find(|r| {

@@ -90,9 +90,8 @@ pub fn mint_guid() -> String {
 ///
 /// `{key: "*" | [verbs]}`, a key being one of [`crate::authz::legal_keys`] —
 /// anything else is refused here, so a record can never carry a grant the gate
-/// would have to guess on. Ported from python (measured 2026-09-01, E21_plan:
-/// `update_agent` accepted `can_call:"*"`, and the py gate crashed out of a web
-/// serve; a silently-dead grant is the wrong answer — refuse loud).
+/// would have to guess on. Ported from python: a silently-dead grant is the
+/// wrong answer — refuse loud.
 pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
     for field in ["can_call", "callable_by"] {
         let Some(g) = meta.get(field) else { continue };
@@ -145,11 +144,6 @@ pub(crate) async fn create_from_payload(
 
     // `parent_id` NAMES THE OWNER. It is a real, REQUIRED argument — resolved
     // like a send target (the reserved `kernel` address included), never defaulted.
-    //
-    // It used to be accepted and silently STRIPPED while the ADDRESSED agent
-    // became the parent: `parent_id:"specialist"` produced `parent_id="kernel_state"`
-    // with no error. The working mechanism was undiscoverable and the field
-    // that looked like it expressed placement did nothing.
     //
     // Same falsy-string rule as `handler_module` — an empty `parent_id` is
     // refused as absent, not resolved as an (unknown) empty-string agent id.
@@ -233,9 +227,8 @@ pub(crate) async fn create_from_payload(
     // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
     // payload rides in `meta` and merges over the baseline at construction.
 
-    // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical: create
-    // used to bypass it, so `create_agent ingress_rule=bogus` was ACCEPTED here
-    // and REFUSED one update later — two answers for one field). Record is empty
+    // WRITE-TIME VALIDATION, same gate as `update_agent` (py-canonical), so a
+    // field has one answer at create and at update. Record is empty
     // at create: the merged view IS the patch.
     if let Some(why) = bad_grant_shape(&meta) {
         return crate::refusal::refusal(crate::refusal::INVALID_META, &why);
@@ -327,8 +320,7 @@ pub(crate) async fn create_from_payload(
     // BRANCH ON THE OUTCOME STATUS, not on the reply shape. A handler that
     // RAISED settles `failed` and is the one case python prints — on stdout,
     // with the result's `str()`. A boot that merely answered `{error:…}`
-    // (`errored`) or completed prints nothing; rust used to log a WARN for
-    // every refusal, through a tracing subscriber python does not have.
+    // (`errored`) or completed prints nothing — no WARN for every refusal.
     if boot.status == crate::outcome::Status::Failed {
         println!(
             "  [create_agent] {} boot failed: {}",
@@ -339,7 +331,7 @@ pub(crate) async fn create_from_payload(
     // Lifecycle event on the PARENT's inbox, not the root's: whoever watches an
     // agent for new children still sees them arrive. Kernel bookkeeping too —
     // put on the parent's inbox and mirrored to its watchers directly (the
-    // fanout), never a gated emit (audit 2026-10-03, KV-4). Python
+    // fanout), never a gated emit. Python
     // `parent._fanout(..., kind="emit")`.
     kernel
         .fanout(
@@ -391,9 +383,8 @@ pub(crate) async fn delete_from_payload(
     let Some(target) = kernel.agents.get(&id).map(|e| Arc::clone(&e)) else {
         // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on, the LIVE id
         // index to self-correct from, and `deleted:false` so a caller reading
-        // that field is not told a typo succeeded. The bare `{error}` this used
-        // to answer is the measured 34-retry case — a fact with nothing to act
-        // on.
+        // that field is not told a typo succeeded. A bare `{error}` is a fact
+        // with nothing to act on.
         let mut r = crate::refusal::unknown_agent(
             id_str,
             kernel.agents.iter().map(|e| e.key().to_string()).collect(),
@@ -403,8 +394,8 @@ pub(crate) async fn delete_from_payload(
     };
     // THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers
     // every kernel verb, so cascading it empties the kernel and leaves a process
-    // with no control surface at all — `{"deleted": true}` and an empty tree
-    // (measured 2026-09-02). PYTHON'S PROSE, verbatim (`<id>` raw, no repr
+    // with no control surface at all — `{"deleted": true}` and an empty tree.
+    // PYTHON'S PROSE, verbatim (`<id>` raw, no repr
     // quoting) — key order `error, reason, arg, id, deleted` (`arg`/`id`/
     // `deleted` all ride python's `**extra`, in the order the call names them).
     if target.parent_id.is_none() {
@@ -427,12 +418,9 @@ pub(crate) async fn delete_from_payload(
     // them. Returns the first locked id so the caller can clear it
     // (`update_agent id=<blocker> delete_lock=null`) before retrying.
     if let Some(blocker) = find_locked_descendant(kernel, &target) {
-        // THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: true` flag
-        // and no `reason` until 2026-08-27, when the shared agentic corpus
-        // caught it — in python, rust and swift at once, because the flag #27
-        // declared dropped was never actually removed anywhere. PYTHON'S
-        // PROSE, verbatim (both ids `py_repr`-quoted); key order `error,
-        // reason, hint, blocked_by, id`.
+        // THE ONE REFUSAL SHAPE, never a bare `locked: true` flag without a
+        // `reason`. PYTHON'S PROSE, verbatim (both ids `py_repr`-quoted); key
+        // order `error, reason, hint, blocked_by, id`.
         let mut r = crate::refusal::refusal_hint(
             crate::refusal::LOCKED,
             format!(
@@ -471,7 +459,7 @@ fn subtree_ids(kernel: &Arc<Kernel>, agent: &Arc<Agent>, out: &mut Vec<AgentId>)
 
 /// A deleted id leaves every grant that named it — python `_prune_grants`. Grant
 /// keys are literal ids, so a stale one would hand its edge to whoever
-/// re-creates that id (audit 2026-10-14). Each changed record is re-persisted by
+/// re-creates that id. Each changed record is re-persisted by
 /// its `updated` event ([`Kernel::update`]).
 fn prune_grants(kernel: &Arc<Kernel>, gone: &[AgentId]) {
     let agents: Vec<Arc<Agent>> = kernel
@@ -512,12 +500,12 @@ pub async fn cascade_delete(kernel: &Arc<Kernel>, target: &Arc<Agent>) {
             Box::pin(cascade_delete(kernel, &child)).await;
         }
     }
-    // on_delete hook. C87: python's exact stdout line (`_agent.py:2835`,
+    // on_delete hook. Python's exact stdout line (`_agent.py:2835`,
     // `print(f"  [cascade] {self.id} bundle on_delete raised: {e}")`) — a
     // hook that raises is logged and the cascade still continues; delete is
     // not refusable. The hook is the agent's own code, so the kernel runs it AS
     // THE AGENT (its own id is the sender), whoever asked for the delete — like
-    // `on_cancel` (audit G-3).
+    // `on_cancel`.
     if let Some(hm) = target.handler_module.as_deref() {
         if let Some(bundle) = kernel.bundles.get(hm) {
             let hook = bundle.on_delete(&target.id, kernel);

@@ -22,7 +22,7 @@ def test_clamped_round_trip(tmp_path):
 
 def test_clamp_base_is_the_named_running_dir_not_the_cwd(tmp_path, monkeypatch):
     """The base is the Root's own running dir (`Kernel.workdir`); the process cwd
-    plays no part (audit 2026-09-28, c6)."""
+    plays no part."""
     (tmp_path / "work").mkdir()
     (tmp_path / "elsewhere").mkdir()
     monkeypatch.chdir(tmp_path / "elsewhere")
@@ -112,8 +112,8 @@ def test_external_remove_recursive(tmp_path):
 
 
 def test_remove_unlinks_a_symlink_not_its_target(tmp_path, monkeypatch):
-    """`remove` used to `resolve()` first — which FOLLOWS the link — and so
-    `delete link` (link -> data/) rmtree'd the real `data/` and left the link."""
+    """`remove` never `resolve()`s first — which FOLLOWS the link — so
+    `delete link` (link -> data/) never rmtree's the real `data/` and leaves the link."""
     import os
 
     R = fs.Root(tmp_path, "root")
@@ -149,7 +149,7 @@ def test_absolute_path_refuses_not_re_roots(tmp_path, monkeypatch):
 
 
 def test_read_private_judges_the_open_descriptor_it_reads(tmp_path):
-    """F5 (audit 2026-10-03): `read_private` opens ONCE (`O_NOFOLLOW`) and judges
+    """`read_private` opens ONCE (`O_NOFOLLOW`) and judges
     the open descriptor — regular, this user's, no group/other bits — before
     reading it, so no swap can land between the check and the read. A symlink in
     the leaf's place, a widened mode and a FIFO are refused (`NotPrivate`, a

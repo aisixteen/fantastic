@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-/// Register the ROOT LOADER. After C12 the root's `handler_module` is
+/// Register the ROOT LOADER. The root's `handler_module` is
 /// `kernel_state.tools`, and its `boot` is what mints the guid, rehydrates the
 /// ledger, starts the pump and subscribes the record writer — so a test that
 /// wants any of that boots the real bundle, not a second copy of it.
@@ -209,7 +209,7 @@ fn in_memory_boot_mints_an_ephemeral_guid() {
         .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
 }
 
-/// C12 + C56: a virgin dir seeds the ROOT the loader owns — id `kernel_state`,
+/// A virgin dir seeds the ROOT the loader owns — id `kernel_state`,
 /// handler_module `kernel_state.tools` — and the record written is the
 /// CONSTRUCTED root, so its meta is the structural grant baseline in order.
 #[test]
@@ -244,7 +244,7 @@ fn root_is_the_kernel_state_loader_and_the_seed_is_the_constructed_record() {
     shutdown(tmp.path()).unwrap();
 }
 
-/// C14: the root's meta order is `can_call, callable_by, guid` — the guid is
+/// The root's meta order is `can_call, callable_by, guid` — the guid is
 /// APPENDED by the loader's boot, after the stamped grants.
 #[test]
 fn root_meta_order_is_grants_then_guid() {
@@ -266,8 +266,8 @@ fn root_meta_order_is_grants_then_guid() {
     shutdown(tmp.path()).unwrap();
 }
 
-/// C56: a root record that is MISSING or not JSON reseeds like a virgin dir and
-/// STILL hydrates the children under `agents/` (python `read_tree`, 2026-09-20).
+/// A root record that is MISSING or not JSON reseeds like a virgin dir and
+/// STILL hydrates the children under `agents/` (python `read_tree`).
 #[test]
 fn a_missing_root_record_reseeds_and_keeps_children() {
     let tmp = TempDir::new().unwrap();
@@ -294,8 +294,7 @@ fn a_missing_root_record_reseeds_and_keeps_children() {
 }
 
 /// A root record that is THERE but does not parse is never written over: the
-/// boot refuses and the file stays as it was (python `main._bootstrap`; audit
-/// 2026-10-14).
+/// boot refuses and the file stays as it was (python `main._bootstrap`).
 #[test]
 fn an_unreadable_root_record_refuses_the_boot_and_is_left_alone() {
     let tmp = TempDir::new().unwrap();

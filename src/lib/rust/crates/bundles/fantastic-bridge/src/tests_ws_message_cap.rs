@@ -1,8 +1,8 @@
-//! A WS MESSAGE is bounded by io_bridge's one frame cap on every dialled socket
-//! (audit W-3): tungstenite's default message cap is 64 MiB, so a peer's message
-//! fragmented into frames under the 16 MiB frame cap reached the leg at four
-//! times python's `max_size`. Both dialled transports — ws_bridge's and
-//! relay_connector's — now end the socket on it; the same delivery under the cap,
+//! A WS MESSAGE is bounded by io_bridge's one frame cap on every dialled socket:
+//! tungstenite's default message cap is 64 MiB, so a peer's message fragmented
+//! into frames under the 16 MiB frame cap would reach the leg at four times
+//! python's `max_size`. Both dialled transports — ws_bridge's and
+//! relay_connector's — end the socket on it; the same delivery under the cap,
 //! fragmented, still arrives whole.
 
 use super::transport::relay::{PasswordReader, RelaySpawn, RelayTransport, SUBPROTOCOL};

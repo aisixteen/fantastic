@@ -1,11 +1,9 @@
 // The ONE shape every refused call answers with.
 //
-// Port of python `kernel/_refusal.py` (canonical). Before this there were ~18
-// shapes across the runtimes: `{error}`, `{error, reason, side, hint}`,
-// `{error, created:false}`, `{error, locked:true}`. A caller — human, LLM, or
-// another runtime — had to know which verb it had called to know which shape
-// came back, and a machine could not branch on the failure at all without
-// string-matching the prose.
+// Port of python `kernel/_refusal.py` (canonical). With many refusal shapes a caller —
+// human, LLM, or another runtime — would have to know which verb it had called
+// to know which shape came back, and a machine could not branch on the failure
+// without string-matching the prose.
 //
 // So: one object, one machine field, one human field.
 //
@@ -16,17 +14,15 @@
 //      ...extra}                            // facts specific to this refusal
 //
 // The machine field is `reason`, which ALREADY EXISTS — the call gate and every
-// io leg answer `reason:"unauthorized"`. Nothing is renamed. What was missing is
-// that most refusals carried NO machine field at all: `{"error": "create_agent:
-// handler_module required"}` could only be branched on by matching prose.
+// io leg answer `reason:"unauthorized"`. A refusal with NO machine field
+// (`{"error": "create_agent: handler_module required"}`) could only be branched
+// on by matching prose.
 //
 // The set is CLOSED — a new code is a deliberate addition here, not an ad-hoc
 // string at a call site.
 //
-// The `hint` is not decoration. Measured 2026-08-04: a model copied the literal
-// placeholder `<id>` out of a prompt example, received `{"error": "no agent
-// '<id>'"}` thirty-four times in one run, and never once corrected. The error
-// stated a fact and withheld every fact that would have repaired it.
+// The `hint` is not decoration: an error that states a fact and withholds every
+// fact that would repair it leaves a model repeating the same mistake.
 
 import FantasticJSON
 import OrderedCollections
@@ -117,12 +113,7 @@ public enum Refusal {
     /// An agent id is not just a name — it BECOMES A DIRECTORY. A loader builds
     /// a record's on-disk home by joining the id onto the store root, so an id
     /// carrying `..` or a separator walks out of the store and the write, or a
-    /// recursive delete, lands wherever it pointed.
-    ///
-    /// Measured in python 2026-08-28: an agent the call gate admitted to the
-    /// root loader sent `forget_record` with `id: "../../x"` and recursively
-    /// deleted a directory OUTSIDE the store. The gate was not bypassed;
-    /// nothing validated the id.
+    /// recursive delete, lands wherever it pointed — the call gate does not validate the id.
     ///
     /// `arg` names the field when the segment is not an id: a record's
     /// `children_dir` becomes a directory too (`<agent>/<children_dir>/<child>`),
@@ -159,7 +150,7 @@ public enum Refusal {
         }
         // `kernel` names the operator: sends to it reach the root, and a memory
         // store serves the operator under it. An agent holding that id would BE
-        // the operator to every store (measured in python 2026-09-28).
+        // the operator to every store.
         if agentId == reservedId {
             return bad(verb, arg, "a name other than the reserved \(pyRepr(reservedId))")
         }
@@ -184,7 +175,7 @@ public enum Refusal {
     }
 
     /// [`bad`], plus what was actually GIVEN — python's `f"{verb}: {arg} must
-    /// be {want}, got {value!r}"` tail (C30/C38's `timeout`/`id`/`retries`
+    /// be {want}, got {value!r}"` tail (the `timeout`/`id`/`retries`
     /// refusals all carry it; `bad` alone omits it; `payload.type` names only a
     /// non-string's TYPE — see `BatchSend.launch`).
     public static func badGot(_ verb: String, _ arg: String, _ want: String, got: JSON) -> JSON {

@@ -1,4 +1,4 @@
-// The record's own `system_prompt` (owner 2026-10-03, option b): set on an AI
+// The record's own `system_prompt`: set on an AI
 // agent's record it REPLACES the default system block on EVERY turn of that agent —
 // a main turn, a self-delivery, a turn woken by a reply. Precedence: the per-call
 // `send` argument (that delivery) > the record field > the default block; read LIVE

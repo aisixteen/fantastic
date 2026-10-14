@@ -407,11 +407,10 @@ final class WSClientHandler: ChannelInboundHandler, @unchecked Sendable {
             // completes: `websockets` decides between `ConnectionClosedOK` and
             // `ConnectionClosedError` on `close_rcvd is not None and
             // close_sent is not None and close_rcvd.code in OK_CLOSE_CODES`
-            // (`protocol.py`), so a peer that closed with 1001 read swift's
-            // silent TCP drop as an ERROR and logged one — python echoes (its
+            // (`protocol.py`), so a peer that closed with 1001 would read a
+            // silent TCP drop as an ERROR and log one — python echoes (its
             // `websockets` client does it for free) and the same close is
-            // clean. Measured on `bridges/peer_frames.json`: swift left an
-            // extra `read_end` frame python does not have.
+            // clean.
             inbox.fail(NIOWebSocketClient.Closed(reason: "websocket: peer closed"))
             if closeEchoed {
                 context.close(promise: nil)

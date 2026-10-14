@@ -1,5 +1,5 @@
-//! A record that leaves `model` out has it READ FROM THE SERVER (owner,
-//! 2026-10-07) — python `ollama_backend/server.py`, text for text.
+//! A record that leaves `model` out has it READ FROM THE SERVER — python
+//! `ollama_backend/server.py`, text for text.
 //!
 //! Before a verb that runs a turn ([`TURN_VERBS`]), an absent `model` is read from
 //! the server the record's `endpoint` names — the ONE model `GET {endpoint}/api/tags`
@@ -7,7 +7,7 @@
 //! again until the field is cleared (`null`). A server listing several names them and
 //! the record must pick one. A model set on the record is used as set.
 //!
-//! Only the model (owner, 2026-10-07): the window ollama loads a model with is the
+//! Only the model: the window ollama loads a model with is the
 //! request's `num_ctx`, else the Modelfile's, else the server's default — and that
 //! default is not in the API, so nothing about the window is read.
 

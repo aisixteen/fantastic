@@ -72,9 +72,8 @@ $PY $R/e2e/parity/diff.py check-proofs
 `--slow` adds A13.18 (45 s of socket idle) and the 2 MB body. `--families` takes
 a subset FOR ITERATION ONLY — an acceptance run is always `all`.
 
-Measured durations per runtime (2026-09-19, M1 Pro): tree 22 s, store 145 s,
-wire 115 s, cli 80 s, ctx 121 s, bundle_verbs 28 s, kernel_verbs 22 s, bridges
-34 s, ai_paths 137 s, providers 72 s — about 13 minutes for `--families all`.
+`--families all` takes roughly 13 minutes per runtime; `store`, `ai_paths`,
+`ctx` and `wire` are the long families.
 
 ## What makes a runtime CLEAN
 

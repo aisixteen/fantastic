@@ -1,4 +1,4 @@
-// A record that leaves `model` out has it READ FROM THE SERVER (owner, 2026-10-07)
+// A record that leaves `model` out has it READ FROM THE SERVER
 // — python `ollama_backend/server.py`, text for text.
 //
 // Before a verb that runs a turn (`TURN_VERBS`), an absent `model` is read from the

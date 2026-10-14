@@ -1,5 +1,5 @@
-//! A backend's KEY, read from a credential store at USE time (owner,
-//! 2026-10-01). Python `ai_core/credentials.py`, text for text.
+//! A backend's KEY, read from a credential store at USE time. Python
+//! `ai_core/credentials.py`, text for text.
 //!
 //! The record names WHERE the key lives — `credentials: {store, ref}` — never the
 //! value, and nothing reads the environment. Before EVERY request a provider

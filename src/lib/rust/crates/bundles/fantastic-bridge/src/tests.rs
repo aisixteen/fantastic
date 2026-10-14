@@ -115,7 +115,7 @@ pub(super) fn register_relay_store(reg: &mut fantastic_kernel::BundleRegistry) {
     );
 }
 
-/// THE RELAY PASSWORD a relay leg reads before every dial (audit IO-7/F4): a
+/// THE RELAY PASSWORD a relay leg reads before every dial: a
 /// credential_store `<leg>_pw` holding `password` at [`RELAY_REF`], bound to the
 /// relay URL's host and readable by `leg`, its `callable_by` opening `get` for
 /// the leg. Made BEFORE the leg (a started kernel boots a leg at create). Returns
@@ -180,12 +180,10 @@ async fn mk_kernel_guid(tmp: &TempDir, guid: &str) -> Arc<Kernel> {
     k
 }
 
-/// A7.1 — TWO readmes, each python's byte for byte.
+/// TWO readmes, each python's byte for byte.
 #[test]
 fn readme_present_and_titled() {
-    // `src/lib` above the crate (crates/bundles/fantastic-bridge). This used to
-    // climb one level too far and SKIP on the missing tree — the comparison
-    // never ran.
+    // `src/lib` above the crate (crates/bundles/fantastic-bridge).
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(4)
@@ -459,7 +457,7 @@ async fn pending_futures_rejected_on_close() {
     // Delete A — its read loop tears down in `on_delete` and every pending
     // forward fails with a close-flavoured reply. Through DELETE, not a
     // `shutdown` verb: as in python, `shutdown` is a lifecycle no-op a caller
-    // may send and nothing tears down behind it (2026-09-12).
+    // may send and nothing tears down behind it.
     let _ = kernel
         .send(vec![Item::new(
             AgentId::from("kernel_state"),
@@ -702,17 +700,15 @@ fn ingress_resolves_allow_and_deny() {
     let o = resolve(Some(&json!({"type": "deny_ingress"})));
     assert!(matches!(o.authorize(&call_action(None)), Decision::Deny(_)));
     // An object with no `type` is NOT a rule — and python resolves "no rule" to
-    // the plain SEAL, not to an error (A1.2). It used to be an `Err` each caller
-    // rendered its own way: `{error:"rule object missing 'type'"}` with no
-    // `reason` from the fs gate, a throw out of `handle` in swift.
+    // the plain SEAL, not to an error, so every caller renders it the same way.
     let typeless = resolve(Some(&json!({"policy": "deny_ingress"})));
     match typeless.authorize(&call_action(None)) {
         Decision::Deny(d) => assert_eq!(d.reason, "edge sealed by policy"),
         Decision::Allow => panic!("a type-less rule object must seal"),
     }
     // The SEAL refuses EVERY inbound kind — dispatch AND telemetry (py-canonical;
-    // this used to pin `watch` as allowed, which made the rust seal partial and
-    // let a "sealed" leg leak state to watchers).
+    // allowing `watch` would make the seal partial and let a "sealed" leg leak
+    // state to watchers).
     let watch = s.authorize(&Action {
         kind: "watch",
         target: "t",
@@ -722,11 +718,11 @@ fn ingress_resolves_allow_and_deny() {
     assert!(matches!(watch, Decision::Deny(_)));
     // UNKNOWN ⇒ SEALS and names the bad rule — it does NOT Err.
     //
-    // It used to be `Err`, on the theory of failing loudly. But resolution runs PER
-    // CALL, not at boot: in python that error surfaced as an unhandled exception out
-    // of the handler, which killed the caller's whole chain with no reply at all. An
-    // unresolvable rule is not an authorization, so deny — and say which name was
-    // wrong. Mirrors py `test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule`.
+    // Not `Err`: resolution runs PER CALL, not at boot, and in python such an
+    // error surfaces as an unhandled exception out of the handler, killing the
+    // caller's whole chain with no reply at all. An unresolvable rule is not an
+    // authorization, so deny — and say which name was wrong. Mirrors py
+    // `test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule`.
     let unknown = resolve(Some(&json!("password:kernel-internal-transcripts")));
     match unknown.authorize(&Action {
         kind: "call",
@@ -737,7 +733,7 @@ fn ingress_resolves_allow_and_deny() {
         Decision::Deny(denial) => {
             // The verdict splits: `reason` states WHAT happened (the name was not
             // resolvable), `hint` states the repair + the legal set. A caller that
-            // read only one half used to get half a refusal.
+            // read only one half would get half a refusal.
             let (reason, hint) = (denial.reason, denial.hint);
             assert!(
                 reason.contains("password:kernel-internal-transcripts"),
@@ -805,14 +801,13 @@ fn egress_resolves_and_presents() {
 #[test]
 fn a_name_from_the_other_manifold_is_loud_not_silent() {
     // Rule names are MANIFOLD-SCOPED so one name can never half-resolve across the two
-    // registries. Measured 2026-08-21, before scoping (python AND this runtime, which
-    // carried the identical aliases): `auth:"silent"` — a legitimate EGRESS policy —
-    // resolved ingress to `DenyInbound(unknown="silent")`, SEALING the leg while
-    // recording the unknown name and saying nothing; and `auth:"allow_all"` handed
-    // egress a `Silent` nobody asked for. One unscoped name against two registries with
-    // different membership is a fallback, and this kernel has none.
+    // registries. Unscoped, `auth:"silent"` — a legitimate EGRESS policy — would
+    // resolve ingress to `DenyInbound(unknown="silent")`, SEALING the leg while
+    // recording the unknown name and saying nothing; and `auth:"allow_all"` would
+    // hand egress a `Silent` nobody asked for. One unscoped name against two
+    // registries with different membership is a fallback, and this kernel has none.
     //
-    // It still DENIES — an unresolvable rule is not an authorization — but it now names
+    // It still DENIES — an unresolvable rule is not an authorization — but it names
     // the manifold mistake instead of looking like an ordinary seal.
     let sealed = authorizer::ingress::resolve(Some(&json!("silent_egress")));
     let Decision::Deny(denial) = sealed.authorize(&call_action(None)) else {
@@ -1566,7 +1561,7 @@ async fn mk_two_family_kernel(tmp: &TempDir) -> Arc<Kernel> {
     kernel
 }
 
-/// A7.2 / A7.5 — an unknown verb (and `shutdown`, and a ws leg's directory
+/// An unknown verb (and `shutdown`, and a ws leg's directory
 /// verbs) take python's `bridge: unknown type` reply, envelope hint and all.
 #[tokio::test]
 async fn unknown_type_is_pythons_reply_with_the_envelope_hint() {
@@ -1585,7 +1580,7 @@ async fn unknown_type_is_pythons_reply_with_the_envelope_hint() {
         ask(&kernel, &ws, json!({"type": "shutdown"})).await["error"],
         json!("bridge: unknown type 'shutdown'")
     );
-    // A7.5 — the directory verbs belong to relay_connector only.
+    // The directory verbs belong to relay_connector only.
     for verb in [
         "list_peers",
         "watch_directory",
@@ -1638,9 +1633,9 @@ async fn a_bridge_reflects_exactly_what_its_gate_enforces() {
         ),
         "{r}"
     );
-    // The rest of python's `describe` table, measured on python's ws_bridge
-    // reflect. A TYPE-LESS spec (`{type: ""}`) is no rule at all — the manifold
-    // defaults — where this reflect used to scope the empty stem to `_ingress`.
+    // The rest of python's `describe` table, as python's ws_bridge reflects it. A
+    // TYPE-LESS spec (`{type: ""}`) is no rule at all — the manifold defaults —
+    // never the empty stem scoped to `_ingress`.
     for (i, (auth, ingress, egress, sealed)) in [
         (json!({"type": ""}), "deny_ingress", "silent_egress", true),
         (
@@ -1678,7 +1673,7 @@ async fn a_bridge_reflects_exactly_what_its_gate_enforces() {
     }
 }
 
-/// A7.6 / A7.8 / A7.9 / A7.11 / A7.12 — reflect's key order, sentence, default
+/// Reflect's key order, sentence, default
 /// transport, family fields, verbs and emits are python's.
 #[tokio::test]
 async fn reflect_key_order_per_family() {
@@ -1780,7 +1775,7 @@ async fn reflect_key_order_per_family() {
     );
 }
 
-/// A7.13 / A7.14 — boot's error texts are python's, and a relay leg that is
+/// Boot's error texts are python's, and a relay leg that is
 /// missing `partner_guid` mints no guid.
 #[tokio::test]
 async fn boot_error_texts_match_python() {
@@ -1831,7 +1826,7 @@ async fn boot_error_texts_match_python() {
     );
 
     // an egress rule the registry does not know refuses the boot, before dialing
-    // (the leg's rules are read per frame now — boot caches none, audit ARCH-2).
+    // (the leg's rules are read per frame — boot caches none).
     let bad = id_for("a713_bad", &tmp);
     create_leg(
         &kernel,
@@ -1851,7 +1846,7 @@ async fn boot_error_texts_match_python() {
     );
 }
 
-/// A7.14 — a relay boot that fails validation mints NO guid.
+/// A relay boot that fails validation mints NO guid.
 #[tokio::test]
 async fn relay_boot_missing_partner_mints_no_guid() {
     let tmp = TempDir::new().unwrap();
@@ -1911,7 +1906,7 @@ async fn relay_boot_missing_partner_mints_no_guid() {
     );
 }
 
-/// A7.10 — `connected` follows the transport's closed state, and a closed
+/// `connected` follows the transport's closed state, and a closed
 /// memory leg is REBUILT by the next boot instead of answering `already`.
 #[tokio::test]
 async fn reflect_connected_false_after_peer_close_and_boot_rebuilds() {
@@ -1948,7 +1943,7 @@ async fn reflect_connected_false_after_peer_close_and_boot_rebuilds() {
     );
 }
 
-/// A7.15 — forward's refusals and error texts are python's.
+/// Forward's refusals and error texts are python's.
 #[tokio::test]
 async fn forward_error_texts_match_python() {
     let tmp = TempDir::new().unwrap();
@@ -2009,7 +2004,7 @@ async fn forward_error_texts_match_python() {
     assert_eq!(r, json!({"error": "remote error: boom"}));
 }
 
-/// A7.16 — the directory replies are python's shapes.
+/// The directory replies are python's shapes.
 #[tokio::test]
 async fn directory_replies_match_python() {
     let tmp = TempDir::new().unwrap();
@@ -2052,7 +2047,7 @@ async fn directory_replies_match_python() {
     assert_eq!(r["arg"], json!("role"));
 }
 
-/// A7.17 — a reconnect announces exactly one `bridge_down`, then `bridge_up`.
+/// A reconnect announces exactly one `bridge_down`, then `bridge_up`.
 #[tokio::test]
 async fn reconnect_emits_bridge_down_then_bridge_up() {
     let tmp = TempDir::new().unwrap();
@@ -2071,10 +2066,9 @@ async fn reconnect_emits_bridge_down_then_bridge_up() {
             kinds.push(t.to_string());
         }
     }
-    // C76: a reader on the bridge's OWN inbox now sees the REQUESTS too, each
-    // mirrored BEFORE its handler runs — python's measured `>reconnect reconnect
-    // bridge_down bridge_up`. Rust used to fan out after the reply, so the echo
-    // landed behind the events the handler had already emitted.
+    // A reader on the bridge's OWN inbox sees the REQUESTS too, each mirrored
+    // BEFORE its handler runs — python's `>reconnect reconnect bridge_down
+    // bridge_up` — so the echo never lands behind the events the handler emits.
     assert_eq!(
         kinds,
         vec!["boot", "bridge_up", "reconnect", "bridge_down", "bridge_up"],
@@ -2082,8 +2076,8 @@ async fn reconnect_emits_bridge_down_then_bridge_up() {
     );
 }
 
-/// A7.18 — a booted leg's work is registered as python names it: `read_loop`
-/// (both derivations), and since C36 each registration is a `task` ROW under the
+/// A booted leg's work is registered as python names it: `read_loop`
+/// (both derivations), and each registration is a `task` ROW under the
 /// id `ps` reports.
 #[tokio::test]
 async fn booted_bridge_ps_rows_match_python() {
@@ -2107,7 +2101,7 @@ async fn booted_bridge_ps_rows_match_python() {
         vec!["read_loop"],
         "python names the task `read_loop`"
     );
-    // C36 — the fork is a MESSAGE: one `task` row on the leg, and the pid in
+    // The fork is a MESSAGE: one `task` row on the leg, and the pid in
     // `ps` is that row's id.
     let store: Vec<_> =
         fantastic_kernel::test_support::rows_about(&kernel, &AgentId::from(bid.as_str()))
@@ -2136,7 +2130,7 @@ async fn booted_bridge_ps_rows_match_python() {
 /// A remote `{type:'event', src, payload}` is re-emitted (payload + `src`) ONLY for
 /// a `src` this leg subscribed to with `watch_remote`: nothing before the
 /// subscription, nothing without a `src` or a payload object, nothing after
-/// `unwatch_remote` (audit 2026-09-28).
+/// `unwatch_remote`.
 #[tokio::test]
 async fn a_remote_event_flows_only_for_a_subscribed_src() {
     let tmp = TempDir::new().unwrap();
@@ -2228,7 +2222,7 @@ async fn a_remote_event_flows_only_for_a_subscribed_src() {
     );
 }
 
-/// A15.1 — a frame that does not decode (or decodes to a non-object) is SKIPPED
+/// A frame that does not decode (or decodes to a non-object) is SKIPPED
 /// and the reader keeps going, exactly as python's `WSTransport.recv` loops
 /// (`ws_bridge/_ws.py:67-81`). Before the fix the first bad frame became a
 /// `TransportError::Other` that broke the engine read loop while the transport
@@ -2336,7 +2330,7 @@ async fn forward_timeout_is_python_float() {
     assert_eq!(r["reason"], "not_connected", "{r}");
 }
 
-/// STEP-4 PIN (2026-10-01): both families' unknown type, as TEXT — `error` then
+/// Both families' unknown type, as TEXT — `error` then
 /// `hint`, no code. Key order is part of the wire and `Value` equality ignores it.
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact_on_both_families() {
@@ -2379,7 +2373,7 @@ async fn unknown_type_wire_shape_is_byte_exact_on_both_families() {
     );
 }
 
-/// STEP-4 PIN (2026-10-01): a relay leg's minted `guid` is python's
+/// A relay leg's minted `guid` is python's
 /// `uuid.uuid4().hex` — 32 lowercase hex, version nibble 4, RFC-4122 variant.
 #[tokio::test]
 async fn a_minted_relay_guid_is_a_uuid4_hex() {
@@ -2416,7 +2410,7 @@ async fn a_minted_relay_guid_is_a_uuid4_hex() {
     assert_eq!(seen.len(), 4);
 }
 
-// ─── STEP-4 PINS (2026-10-01): the bridge's BINARY dispatch ─────────────────
+// ─── the bridge's BINARY dispatch ───────────────────────────────────────────
 
 /// A booted ws leg on an injected memory transport; returns the far end.
 async fn booted_leg(
@@ -2515,7 +2509,7 @@ async fn a_binary_forward_ships_raw_bytes_and_returns_the_reply_body() {
     assert_eq!(body.bytes, vec![0x00, 0xFF, 0x10], "the blob rides raw");
     assert_eq!(body.path, vec![Step::from("payload"), Step::from("bytes")]);
     let corr = header["id"].as_str().expect("a correlator").to_string();
-    // `<leg id>-<boot nonce>-<n>` (audit IO-5): dash, not colon — never a kernel pid
+    // `<leg id>-<boot nonce>-<n>`: dash, not colon — never a kernel pid
     let nonce = corr
         .strip_prefix(&format!("{bid}-"))
         .and_then(|rest| rest.strip_suffix("-1"))
@@ -2606,7 +2600,7 @@ async fn a_binary_forward_before_boot_is_not_connected() {
     assert_eq!(out.body, None);
 }
 
-/// STEP-4 PIN (2026-10-01): the two bundle shells differ ONLY in family, name
+/// The two bundle shells differ ONLY in family, name
 /// and readme — the same binary routing, the same delete teardown.
 #[tokio::test]
 async fn both_family_shells_share_one_behaviour() {
@@ -2671,16 +2665,16 @@ async fn both_family_shells_share_one_behaviour() {
 }
 
 /// A leg across its lifetime: a live record change, a sender restart (python
-/// `ws_bridge/tests/test_leg_lifetime.py`; audit ARCH-2 / IO-5).
+/// `ws_bridge/tests/test_leg_lifetime.py`).
 #[path = "tests_leg_lifetime.rs"]
 mod leg_lifetime;
 
 /// The relay password lives in a credential_store (python
-/// `relay_connector/tests/test_relay_credentials.py`; audit IO-7/F4).
+/// `relay_connector/tests/test_relay_credentials.py`).
 #[path = "tests_relay_credentials.rs"]
 mod relay_credentials;
 
-/// Audit W-8 — a bridge leg makes the one write-time check every leg makes
+/// A bridge leg makes the one write-time check every leg makes
 /// (python `io_bridge._engine.validate_meta` → `unknown_ingress_refusal`): an
 /// unknown name or a malformed spec is refused with the wire legal values; a rule
 /// it implements is not. Both bundles, the same text.
@@ -2719,10 +2713,9 @@ fn validate_meta_refuses_an_unknown_or_malformed_ingress_rule() {
     }
 }
 
-/// Audit W-8 — a record can still carry a malformed rule (written below the
+/// A record can still carry a malformed rule (written below the
 /// verbs, or by hand on disk): the inbound call is ANSWERED with the seal's
-/// denial, in python's words — it used to answer `bridge: bad auth rule:
-/// unsupported rule spec Number(7)`.
+/// denial, in python's words.
 #[tokio::test]
 async fn a_malformed_rule_on_the_record_denies_in_python_s_words() {
     let tmp = TempDir::new().unwrap();

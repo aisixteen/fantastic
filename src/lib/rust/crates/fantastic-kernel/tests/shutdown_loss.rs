@@ -1,10 +1,10 @@
-//! THE RECORD-WRITER SHUTDOWN LOSS (2026-09-24).
+//! THE RECORD-WRITER SHUTDOWN LOSS.
 //!
-//! The record writer's final flush ran inside `on_shutdown` — mid-teardown-walk,
-//! with the store already gone — so a `create_agent` + `update_agent` followed
-//! straight away by a shutdown never reached disk. It runs in `flush_pending`
-//! now, before the walk, while the provider lives. (There is no message tape to
-//! lose any more: the kernel flushes its execution rows into its memory store.)
+//! The record writer's final flush runs in `flush_pending`, before the
+//! teardown walk, while the provider lives — inside `on_shutdown` the store
+//! would already be gone, and a `create_agent` + `update_agent` followed
+//! straight away by a shutdown would never reach disk. (There is no message
+//! tape to lose: the kernel flushes its execution rows into its memory store.)
 
 use fantastic_kernel::test_support::{register_fake_store, register_root_loader, wire_fake_store};
 use fantastic_kernel::{Agent, AgentId, BundleRegistry, Item, Kernel, StorageMode};
@@ -40,10 +40,9 @@ async fn root_with_store(dir: &Path) -> Arc<Kernel> {
     kernel
 }
 
-/// The record writer's final flush used to run mid-teardown-walk, with the store
-/// already gone. It runs in `flush_pending` now — before the walk, while the
-/// provider is alive — so a create+update immediately followed by a shutdown is
-/// on disk.
+/// The record writer's final flush runs in `flush_pending` — before the walk,
+/// while the provider is alive — so a create+update immediately followed by a
+/// shutdown is on disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_record_updated_just_before_shutdown_always_lands() {
     let tmp = TempDir::new().unwrap();

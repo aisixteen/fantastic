@@ -60,7 +60,7 @@ pub fn py_type_name(v: &Value) -> &'static str {
 /// A bool is 0/1, a float truncates toward zero, a string parses as CPython's
 /// base-10 literal (python whitespace stripped, optional sign, Unicode `Nd`
 /// digits, single `_` between digits); `None`, a list and a dict raise
-/// `TypeError`. An integer wider than `i64` saturates (D13: `serde_json` holds
+/// `TypeError`. An integer wider than `i64` saturates (`serde_json` holds
 /// no wider integer).
 ///
 /// # Errors

@@ -79,7 +79,7 @@ struct REPLParseTests {
         #expect(cmd?.payload["s"].asString == "hello")
     }
 
-    /// A14.16: leading whitespace between `@` and the target must not
+    /// Leading whitespace between `@` and the target must not
     /// misalign the reconstructed chat text — python's `rest = line[1:]
     /// .strip()` drops it before `target` is even found, so the trailing
     /// slice (`rest[len(target):]`) starts right after `target`, not after
@@ -92,7 +92,7 @@ struct REPLParseTests {
     }
 }
 
-// A14.16: `_print_result` — python `kernel/modes/print.py`.
+// `_print_result` — python `kernel/modes/print.py`.
 @Suite("REPL _print_result")
 struct REPLPrintResultTests {
     @Test func printResultMatchesPython() {
@@ -138,7 +138,7 @@ struct REPLPrintResultTests {
             REPLMode.printResultLine(.array([.integer(1), .integer(2)])) == "  [\n  1,\n  2\n]")
     }
 
-    /// A14.16: python's `unknown command` line uses `{line!r}` — python
+    /// Python's `unknown command` line uses `{line!r}` — python
     /// `repr`, single-quoted, never Swift's own `debugDescription`
     /// (double-quoted, different escapes).
     @Test func unknownCommandUsesPythonRepr() {
@@ -160,7 +160,7 @@ private struct REPLTestNoop: AgentBundle {
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { .null }
 }
 
-/// A14.16: `list` / `add` / `delete` end to end — a real (in-memory) kernel,
+/// `list` / `add` / `delete` end to end — a real (in-memory) kernel,
 /// asserting on the STDOUT lines each command produces. `.serialized`:
 /// `RuntimeLog`'s capture sinks are a shared array every ACTIVE capture
 /// appends to (`RuntimeLog.swift`'s own doc: "two suites can be capturing at
@@ -233,19 +233,15 @@ struct REPLCommandTests {
     }
 }
 
-// A14.10 — ONE `k=v` rule for every CLI surface (one-shot, `reflect`, the
+// ONE `k=v` rule for every CLI surface (one-shot, `reflect`, the
 // REPL's `@id verb k=v` and `add k=v`): python `kernel/modes/parse.py:_coerce`.
 @Suite("REPL stdin cancellation")
 struct REPLCancelTests {
 
     /// The daemon races the REPL leg against the stop signal in a task group,
     /// and a task group AWAITS every child before it returns. `readLine()` is
-    /// an uninterruptible blocking read, so a SIGTERM under a PTY cancelled a
-    /// child that never came back: `kernel.shutdown()` never ran, the teardown
-    /// lines never printed, and the e2e driver had to SIGKILL the daemon
-    /// (measured 2026-09-21 — `cli/noargs_pty_fresh` and `cli/noargs_pty_web`
-    /// exit `-9` where python exits `0`; reproduced standalone at 15.6 s to
-    /// SIGKILL, 0.6 s after the fix).
+    /// an uninterruptible blocking read, so a SIGTERM under a PTY would cancel a
+    /// child that never comes back: `kernel.shutdown()` would never run.
     ///
     /// Python's `input()` blocks a thread the interpreter abandons at exit, so
     /// the leg has to be abandonable here too: the blocking read is parked on a
@@ -253,8 +249,8 @@ struct REPLCancelTests {
     @Test func cancelledReadReturnsWithoutWaitingForStdin() async {
         let t = Task { await REPLMode.readLineAsync() }
         t.cancel()
-        // The whole point: this `await` completes. Before the fix it waited on
-        // a `readLine()` no cancellation could reach.
+        // The whole point: this `await` completes, never waiting on
+        // a `readLine()` no cancellation can reach.
         let line = await t.value
         #expect(line == nil)
         #expect(t.isCancelled)
@@ -262,7 +258,7 @@ struct REPLCancelTests {
 
     /// The daemon's shape, reduced: a task group holding the REPL leg plus a
     /// stop leg that wins. `withTaskGroup` does not return until the REPL leg
-    /// does, so this test HANGS on the old code and passes on the new.
+    /// does, so this test HANGS unless the leg is abandonable.
     @Test func groupHoldingTheReplLegCompletesWhenTheStopLegWins() async {
         // A read that REALLY blocks, as a terminal's does. The runner's stdin is at
         // EOF, so `readLine()` returned at once and the REPL leg sometimes finished
@@ -313,7 +309,7 @@ struct ParseKVTests {
 
     @Test func duplicateKeyLastWins() {
         // python `{"type": verb, **_parse_kv(...)}`: a repeat keeps its FIRST
-        // position and takes the LAST value. `uniqueKeysWithValues` used to
+        // position and takes the LAST value. `uniqueKeysWithValues` would
         // trap here with `Fatal error: Duplicate key`.
         let p = cliPayload(verb: "list_agents", kvTokens: ["limit=1", "limit=2"])
         #expect(p["limit"].asInt == 2)

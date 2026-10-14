@@ -3,7 +3,7 @@ on `fs` (`write_record`, the cold bootstrap path) and once THROUGH a discovered
 file_bridge store (`_persist_via_store`, the auto-flush) — pinned on both sinks.
 
 Each sink writes the RECORD only — a bundle's readme and `docs/` are served from
-the bundle, never copied (owner 2026-10-14) — with the merge that keeps unknown
+the bundle, never copied — with the merge that keeps unknown
 on-disk keys (a record larger than one 64 KiB read_stream chunk included) and the
 commit that never leaves a torn record.
 """
@@ -191,9 +191,8 @@ async def test_a_flush_waits_for_the_drain_the_loop_already_took(
 ):
     """`aflush` returns once everything dirty has LANDED — also what the debounced
     loop took first. Past the 0.15 s debounce the loop's own drain holds the probe's
-    record; the flush found the queue empty and returned with that write still in
-    flight (measured: a 0.152–0.160 s gap between `create` and `aflush` left
-    `agent.yaml` unwritten in 13/15 runs). The loop's write
+    record; a flush that found the queue empty must not return with that write
+    still in flight. The loop's write
     is held here, so the overlap is certain, not a timing window."""
     root = wired
     real = kst._persist_via_store

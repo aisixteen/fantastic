@@ -1,7 +1,7 @@
 // Shared helpers for the web/HTTP/WS suites.
 //
 // `web` binds EXACTLY `rec.port` (python's `_spawn` requires it, with no
-// default and no "any free port" hint — A11.24), so a test that wants a live
+// default and no "any free port" hint), so a test that wants a live
 // listener has to name a port. Ask the OS for a free one first.
 
 import FantasticKernel
@@ -58,9 +58,8 @@ private func probeTCPPort() -> (port: UInt16, err: Int32) {
 
 /// A loopback port no other test in this process has been given.
 ///
-/// FAILS LOUD. This used to answer 0 on any syscall failure, and 0 is a legal
-/// `portHint`: the kernel then reported `httpPort() == 0` and a test built
-/// `http://127.0.0.1:0/...` — the measured flake. There is no sensible port to
+/// FAILS LOUD. 0 is a legal `portHint`, so answering 0 on a syscall failure
+/// would build `http://127.0.0.1:0/...`. There is no sensible port to
 /// fall back to, so an exhausted probe stops the run instead.
 func freeTCPPort() -> UInt16 {
     var lastErr: Int32 = 0

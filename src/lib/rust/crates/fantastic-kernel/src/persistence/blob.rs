@@ -134,7 +134,7 @@ fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), 
         .filter(|s| !s.is_empty())
         .ok_or_else(|| err(verb, "agent_id (str) required"))?;
     // The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
-    // `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
+    // `../bundles/x` would write a folder bundle's `bundle.yaml`.
     if let Some(r) = crate::refusal::guard_agent_id_as(verb, "agent_id", aid) {
         return Err(r);
     }

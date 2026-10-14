@@ -53,18 +53,17 @@ public func printFlushed(_ line: String) {
     RuntimeLog.out(line)
 }
 
-/// WHAT A SETTLE ROW KEEPS of an outcome — the one definition (decided
-/// 2026-09-26). Python `stored_outcome`.
+/// WHAT A SETTLE ROW KEEPS of an outcome — the one definition. Python `stored_outcome`.
 ///
 /// A NAMED call keeps its whole result: its name is a dedup contract, and a
-/// re-send returns the recorded outcome (C9). A DEAD LETTER keeps its error text:
+/// re-send returns the recorded outcome. A DEAD LETTER keeps its error text:
 /// someone has to read why it died. Every other settle keeps a digest —
 /// `{status, bytes}`.
 ///
 /// Why not the body everywhere: the kernel's own store reads are executions too
 /// (the `ledger` projection, every AI agent's head read), so a settle holding its
-/// body re-recorded the store inside the store — measured ~6x growth per `ledger`
-/// call (2 KB → 14.8 MB in five). And a reply body is not persisted anyway: its
+/// body would re-record the store inside the store, growing several-fold per
+/// `ledger` call. And a reply body is not persisted anyway: its
 /// receiver holds it in RAM with the one-line `origin` that gets it again.
 ///
 /// `result` is the reply AS THE STORE HOLDS IT — raw bytes already reduced to
@@ -187,7 +186,7 @@ extension Kernel {
     /// `settled` (the agent a settle closes).
     static let rowEventKeys = ["parent", "caller", "settled"]
 
-    /// The state event for an execution row just put (owner, 2026-10-08): a reader
+    /// The state event for an execution row just put: a reader
     /// learns "row <id> arrived for <agent>" and fetches rows only when told — no
     /// polling. Content-free. Published like every state event (gated by
     /// `state_subscribe` on the root) and, like them, never from inside the
@@ -454,7 +453,7 @@ extension Kernel {
         let ids = rows.ids()
         if ids.isEmpty { return (.object(["flushed": .integer(0)]), 0, 0) }
         // Nothing of this flush is published — its own id mint (and an id-block
-        // reservation it crosses) included (audit CLI-B).
+        // reservation it crosses) included.
         let (fid, kinds, result, status) = await KernelTaskLocals.$stateQuiet.withValue(true) {
             let fid = mintId()
             var kinds: [Int64: String] = [:]

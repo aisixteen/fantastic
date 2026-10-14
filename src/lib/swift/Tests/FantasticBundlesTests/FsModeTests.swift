@@ -1,5 +1,5 @@
-// `fs` — the atomic write's `mode` and `read_private` (python `file_bridge.fs`,
-// 2026-10-01 / audit F5 2026-10-03): a 0600 secret file is created with exactly
+// `fs` — the atomic write's `mode` and `read_private` (python `file_bridge.fs`):
+// a 0600 secret file is created with exactly
 // those bits, never readable by others in between; a private file is read
 // through ONE open whose descriptor is what is judged.
 
@@ -40,8 +40,7 @@ struct FsModeTests {
     }
 
     /// A symlink at `<name>.tmp` pointing outside the root is never written
-    /// through: each write stages in a fresh, exclusively created tmp (audit
-    /// 2026-10-14).
+    /// through: each write stages in a fresh, exclusively created tmp.
     @Test func anAtomicWriteNeverFollowsAPlantedTmpLink() throws {
         let d = tmp()
         defer { try? FileManager.default.removeItem(atPath: d) }
@@ -57,7 +56,7 @@ struct FsModeTests {
         }
     }
 
-    /// F5 (audit 2026-10-03): `fsReadPrivate` opens ONCE (`O_NOFOLLOW`) and
+    /// `fsReadPrivate` opens ONCE (`O_NOFOLLOW`) and
     /// judges the open descriptor — regular, this user's, no group/other bits —
     /// before reading it, so no swap can land between the check and the read. A
     /// symlink in the leaf's place, a widened mode and a FIFO are refused (the

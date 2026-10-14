@@ -118,7 +118,7 @@ async def test_a_missing_and_a_bad_verb(seeded_kernel):
         "arg": "payload.type",
     }
     # A non-string is named by its TYPE, never echoed — a body sent as `type`
-    # came back whole in the refusal, 5x its size (audit 2026-10-03, W-11).
+    # would come back whole in the refusal, several times its size.
     for verb, got in (
         ("", "''"),
         (None, "NoneType"),

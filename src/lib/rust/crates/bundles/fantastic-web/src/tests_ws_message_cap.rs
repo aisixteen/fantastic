@@ -1,8 +1,8 @@
-//! A ws MESSAGE is bounded by io_bridge's one frame cap, not only a frame (audit
-//! W-3): tungstenite's default message cap is 64 MiB, so a call fragmented into
-//! frames under the 16 MiB frame cap was buffered, parsed and dispatched at four
-//! times what python's server (uvicorn's `ws_max_size`) allows. A fragmented call
-//! under the cap is still answered.
+//! A ws MESSAGE is bounded by io_bridge's one frame cap, not only a frame:
+//! tungstenite's default message cap is 64 MiB, so a call fragmented into
+//! frames under the 16 MiB frame cap would be buffered, parsed and dispatched at
+//! four times what python's server (uvicorn's `ws_max_size`) allows. A
+//! fragmented call under the cap is still answered.
 
 use super::*;
 use fantastic_io_bridge::codec::MAX_FRAME;

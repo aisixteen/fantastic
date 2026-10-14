@@ -4,7 +4,7 @@ The relay is itself a kernel: each connection is a `peer_proxy` agent addressed
 by a GUID. We dial `ws://<host>/<guid>` with the group password in the
 `X-Fantastic-Auth` header (checked ONCE at the WS upgrade) and the
 `fantastic.relay.v1` subprotocol. The password is a SECRET and lives only in a
-credential_store (audit IO-7/F4, 2026-10-03): the record names it —
+credential_store: the record names it —
 `credentials: {store, ref}` — and before EVERY dial the connector reads the ref's
 `password` field as itself (the dial runs in its own dispatch, or a task it
 spawned), pinned to the relay URL's host, exactly as an AI backend reads its key

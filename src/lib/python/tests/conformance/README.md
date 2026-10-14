@@ -7,8 +7,7 @@ during the Aug 2026 session): **LangGraph** (checkpointing/time-travel/HITL),
 `tests/test_singleexec.py`), **a2a-tck** (the only conformance TCK for an
 agent task lifecycle), **openai-agents** (RunState + runtime symmetry),
 **langchain checkpoint-conformance** (storage contract), **MCP python-sdk**
-(elicitation). Their assertions were distilled into 26 canonical cases
-(`tmp/agentic_development.md` §10.5); this folder and `tests/kernel/` close
+(elicitation). Their assertions were distilled into 26 canonical cases; this folder and `tests/kernel/` close
 them. Score: **26/26 accounted — 19 closed with passing tests, 7 N/A by
 explicit design decision.**
 

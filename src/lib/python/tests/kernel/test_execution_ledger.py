@@ -942,18 +942,17 @@ async def test_a_joiner_during_the_retry_loop_sees_only_the_final_outcome(
 async def test_joining_is_authorized_against_the_verb_that_execution_ran(
     seeded_kernel,
 ):
-    """The gate was asked the WRONG QUESTION on a join.
+    """A join must ask the gate the RIGHT QUESTION.
 
-    It checked the joiner's own payload verb, then the JOIN handed back the
-    ORIGINAL call's outcome — a reply for a verb the joiner never had authorized.
-    Measured 2026-08-28: `agent_b`, granted only `safe_verb` on a target, reused
-    an id `agent_a` had used for `create_sensitive` and received agent_a's
-    secret verbatim. The handler ran once (dedup was correct); the RESULT crossed
-    an authorization boundary.
+    Checking the joiner's own payload verb, then handing back the ORIGINAL call's
+    outcome, would return a reply for a verb the joiner never had authorized: an
+    agent granted only `safe_verb` on a target could reuse an id another agent used
+    for `create_sensitive` and receive its secret verbatim. The handler runs once
+    (dedup is correct); the RESULT would cross an authorization boundary.
 
-    Same class as the read side-channel #36 closed by origin-scoping the `ledger`
-    verb — this was the same leak through `send` itself, and it is reachable from
-    the wire, where a frame id IS the execution id (#38).
+    Same class as the read side-channel closed by origin-scoping the `ledger` verb —
+    the same leak through `send` itself, reachable from the wire, where a frame id IS
+    the execution id.
 
     Joining is equivalent to having made that call, so that is what is asked.
     """

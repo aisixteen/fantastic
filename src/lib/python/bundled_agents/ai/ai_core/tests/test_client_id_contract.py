@@ -1,8 +1,7 @@
 """The `client_id` round-trip contract — pinned, character by character.
 
-Field-measured 2026-08-26 (a client's session hub): the hub encoded correlation
-into client_id ("cid#turn"), ai_core silently rewrote `#` to `_`, and the
-demux broke — an hour lost to an undocumented alphabet. This file IS the
+A client that encodes correlation into client_id ("cid#turn") breaks its demux
+when ai_core rewrites `#` to `_` under an undocumented alphabet. This file IS the
 documentation: exactly which characters survive `_safe_client` verbatim, what
 everything else becomes, and that the sanitized id is what every downstream
 surface (token events, status events, persisted history key) actually carries.
@@ -39,7 +38,7 @@ def test_the_safe_alphabet_survives_verbatim():
 
 def test_everything_else_becomes_underscore_silently():
     cases = {
-        "cid#turn": "cid_turn",  # the measured hour-loser
+        "cid#turn": "cid_turn",  # correlation encoded into the id
         "a b": "a_b",
         "a/b": "a_b",
         "a\\b": "a_b",
@@ -76,12 +75,12 @@ def test_two_distinct_raw_ids_can_collide_after_sanitization():
     assert _safe_client("a#b") == _safe_client("a/b") == "a_b"
 
 
-# ── the queue row a cancelled WAIT used to leave behind ──────────────────────
-# A send is enqueued BEFORE it waits on the per-backend FIFO lock, and was
-# dequeued only inside the lock body. An item `timeout` (or an operator
-# `cancel`) landing during that wait raised straight out of `acquire()`, so the
-# row was never popped: `status` reported a phantom pending caller forever and
-# every later caller was told `ahead: 1` for work that would never run.
+# ── the queue row a cancelled WAIT must not leave behind ─────────────────────
+# A send is enqueued BEFORE it waits on the per-backend FIFO lock. An item
+# `timeout` (or an operator `cancel`) landing during that wait raises straight out
+# of `acquire()`; dequeued only inside the lock body, the row would never be
+# popped: `status` would report a phantom pending caller forever and every later
+# caller would be told `ahead: 1` for work that would never run.
 
 
 class _Blocked:

@@ -1,10 +1,9 @@
-"""ONLY THE ANSWER ACTS (owner, 2026-10-07).
+"""ONLY THE ANSWER ACTS.
 
 A `<call>` written inside `<think>…</think>` is thinking — a draft, an illustration,
-a plan — never an action: not dispatched, not stored. Measured 2026-10-06/07 over
-2,821 e2e turns: of 106 calls written inside thinking, 39 were copies of an answer
-call (the action ran twice — `fanout` read its five files ten times) and 67 were
-drafts that ran although the model never wrote them in its answer.
+a plan — never an action: not dispatched, not stored. A call in thinking is often a
+copy of an answer call (dispatching both runs the action twice) or a draft the model
+never wrote in its answer.
 """
 
 from __future__ import annotations

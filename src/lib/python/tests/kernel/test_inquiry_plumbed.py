@@ -2,7 +2,7 @@
 
 An AI agent cannot proceed without a decision that is not its to make, so it
 `send`s an `inquiry` to the `user` agent — the human, first-class, with an id, a
-record, a gate and a ledger row like anyone else. FULLY ASYNC (owner, 2026-10-06):
+record, a gate and a ledger row like anyone else. FULLY ASYNC:
 the inquiry is ACCEPTED at once, the human READS it and replies LATER — its own
 send into the asker's conversation, tagged `[reply to <pid> · user inquiry]`.
 Nothing suspends and nothing is scraped.

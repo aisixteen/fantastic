@@ -274,9 +274,9 @@ async fn a_cap_that_is_the_whole_window_sends_no_max_tokens() {
 }
 
 /// python `test_a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens`: 64000 on
-/// a 65536 window — refused by vLLM with a 1537-token prompt (owner's 3090,
-/// 2026-10-12). The prompt's bound plus the cap past the window asks for the rest
-/// of it; a prompt that leaves the room keeps the cap.
+/// a 65536 window with a 1537-token prompt is refused by vLLM. The prompt's bound
+/// plus the cap past the window asks for the rest of it; a prompt that leaves the
+/// room keeps the cap.
 #[tokio::test]
 async fn a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens() {
     let (server, endpoint) = server_with(sse(&[delta(Some("stop"), json!({}))], true), 200).await;
@@ -752,7 +752,7 @@ fn the_schema_takes_optional_credentials() {
     assert_eq!(f["required"], json!(false));
 }
 
-// ─── STEP-4 PINS (2026-10-01) ────────────────────────────────────────────────
+// ─── PINS ───────────────────────────────────────────────────────────────────
 
 /// The unknown-type reply, as TEXT — a bare `{error}`; key order is wire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

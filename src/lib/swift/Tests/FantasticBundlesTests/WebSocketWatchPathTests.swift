@@ -1,9 +1,8 @@
 // The ONE watch path (connect-time auto-watch + explicit `watch` frame): the
 // name resolves the way `send` resolves a target (an id or `kernel`), the watch
 // runs under the leg's own identity, and a refusal is an `error` frame — never
-// silence, and never recorded as watched. Measured before (python, same shape
-// here): a socket whose connect-time watch did not resolve mirrored nothing and
-// said nothing, and the explicit watch that followed was skipped as a duplicate.
+// silence, and never recorded as watched — a watch that mirrors nothing and says nothing
+// would make the explicit watch that follows look like a duplicate.
 //
 // Twin of python `bundled_agents/io/web_ws/tests/test_watch_path.py`.
 

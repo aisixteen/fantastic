@@ -118,7 +118,7 @@ async def test_no_credentials_is_no_key_or_a_loud_refusal(seeded_kernel):
 async def test_a_key_that_is_not_a_legal_header_value_is_refused_by_its_ref(
     seeded_kernel, tmp_path, bad
 ):
-    """Audit S1: an HTTP client QUOTES a header it refuses (h11: `Illegal header
+    """An HTTP client QUOTES a header it refuses (h11: `Illegal header
     value b'Bearer <key>\\n'`), so a key pasted with a trailing newline would ride
     that text into the caller's reply and the logs. The reader refuses it first,
     naming the ref — never the value — and the store keeps whatever it was given

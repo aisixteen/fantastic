@@ -9,8 +9,7 @@ a `docs/` topic tree. `reflect` gains a polymorphic `readme` value:
 The ROOT reflect always carries `readmes` (the index) + `docs` (a one-liner) —
 the manual's map is in front of a caller from the first round-trip.
 
-The tree is served from the bundle package — nothing is copied to disk
-(owner 2026-10-14).
+The tree is served from the bundle package — nothing is copied to disk.
 """
 
 from __future__ import annotations
@@ -154,9 +153,8 @@ async def test_no_doc_desc_is_truncated_mid_sentence(kernel):
     """`_read_desc` takes the FIRST `> ` line and only that one — so a `> ` descriptor
     wrapped across two lines silently renders as half a sentence in `readme=index`.
 
-    Caught on 2026-08-06 by the rust port: a same-day edit here wrapped
-    self-extension's descriptor, and the index started advertising "…whose persisted
-    `code` is a". The reader is documented as one-line; the doc has to hold up its end,
+    A wrapped descriptor makes the index advertise e.g. "…whose persisted `code` is
+    a". The reader is documented as one-line; the doc has to hold up its end,
     and this test is cheaper than remembering that."""
     idx = (
         (
@@ -284,17 +282,15 @@ async def test_root_reflect_full_carries_readmes_and_docs(kernel):
 
 
 async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
-    """THE SAFETY PROPERTY OF THE DIET — strengthened by measurement.
+    """THE SAFETY PROPERTY OF THE DIET.
 
     The distilled default omits the inlined doc frame (`readmes` + `docs` + the long
     self_extension prose — ~1,267 tok of manual that `readme='index'` serves on
     demand). That is only sound while the reply leaves self-extension **actionable**.
 
-    This test used to assert `self_extension not in r`, on the theory that naming the
-    affordance in `more` was enough. It is not, and the failure is measured, not
-    theoretical: a model given only the distilled reflect, which understood it could
-    build a durable tool but was not told the SHAPE, invented a recipe that could not
-    run and built nothing (2026-08-05/06, opus-5 and gemma-4-12B in separate runs).
+    Naming the affordance in `more` is not enough: a model given only the distilled
+    reflect, which understands it could build a durable tool but is not told the
+    SHAPE, invents a recipe that cannot run and builds nothing.
 
     So the rule is sharper than "keep the pointer": a contract you do not know is not
     usable, and the weak models are exactly the ones that never follow the pointer to

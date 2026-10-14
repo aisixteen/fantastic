@@ -4,7 +4,7 @@
 //! The relay is itself a kernel: we dial `ws://<host>/<guid>` (subprotocol
 //! `fantastic.relay.v1`, header `X-Fantastic-Auth: <group password>` checked once
 //! at the WS upgrade) and reach a fixed `partner` GUID. The password is a SECRET
-//! and lives only in a credential_store (audit IO-7/F4, 2026-10-03): the
+//! and lives only in a credential_store: the
 //! transport is handed a [`PasswordReader`] and awaits it before EVERY dial —
 //! nothing cached, a rotated password is used by the next dial. The relay routes by
 //! `target` and delivers peer→peer ONE-WAY as `{type:"event", source, payload}`.
@@ -47,8 +47,8 @@ use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStre
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
 /// The one live writer, behind a lock. Generic in the sink so the bounded-write
-/// path can be driven by a test sink that never completes — the stalled-peer case
-/// that used to hold this lock forever.
+/// path can be driven by a test sink that never completes — the stalled-peer
+/// case, which must not hold this lock forever.
 type SharedSinkOf<S> = Arc<Mutex<Option<S>>>;
 type SharedSink = SharedSinkOf<WsSink>;
 /// The directory attributes we advertise to the relay (an opaque blob — the relay
@@ -379,7 +379,7 @@ async fn pump(
 ) {
     while let Some(msg) = source.next().await {
         let frame = match msg {
-            // STRICT (D13): python `decode_frame` → `io_bridge.loads`.
+            // STRICT: python `decode_frame` → `io_bridge.loads`.
             Ok(Message::Text(t)) => match fantastic_io_bridge::codec::loads(&t) {
                 Ok(env) => classify_text(env, partner, relay_pending),
                 Err(_) => None,
@@ -410,7 +410,7 @@ async fn send_to_partner(
     frame: Value,
 ) -> Result<(), TransportError> {
     let env = json!({"type":"send","target":partner,"payload":frame});
-    // python's `encode_frame` text half (A13.14).
+    // python's `encode_frame` text half.
     let text = fantastic_io_bridge::codec::encode_frame(&env);
     send_bounded(sink, connected, Message::Text(text))
         .await
@@ -555,8 +555,7 @@ async fn send_announce(sink: &SharedSink, connected: &AtomicBool, identity: &Sha
 /// python `_start_heartbeat`: cancel whatever beat is running, then spawn a new
 /// one — and `heartbeat <= 0` means OFF. Called from the socket-open path ONLY:
 /// python starts it in `_on_socket_open`, so a leg whose dial failed carries no
-/// heartbeat task and no `relay_heartbeat` row in `ps`. Rust used to spawn it at
-/// construction, so an unreachable relay showed a row python never has.
+/// heartbeat task and no `relay_heartbeat` row in `ps`.
 fn start_heartbeat(
     spawn: &RelaySpawn,
     sink: &SharedSink,
@@ -1002,10 +1001,10 @@ mod tests {
 
     #[tokio::test]
     async fn close_returns_and_aborts_the_owners_of_the_sink_lock() {
-        // `close()` used to take the sink lock BEFORE aborting the supervisor and
-        // the heartbeat — both of which take that same lock to write. With a write
-        // stalled, `close()` could never return, so the bridge agent could not be
-        // deleted. It now aborts first and settles the directory waiters.
+        // `close()` aborts the supervisor and the heartbeat BEFORE taking the sink
+        // lock — both take that same lock to write, so with a write stalled it
+        // could otherwise never return and the bridge agent could not be deleted.
+        // It then settles the directory waiters.
         let supervisor = tokio::spawn(async { std::future::pending::<()>().await });
         let stop = Arc::new(tokio::sync::Notify::new());
         let beat_stop = Arc::clone(&stop);

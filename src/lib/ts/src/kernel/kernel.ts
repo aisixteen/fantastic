@@ -281,8 +281,8 @@ export class Kernel {
    *
    *  THIS kernel's delete: tree CRUD verbs belong to the host root, so a page
    *  removes its own agents here — and `delete_lock` is enforced here, exactly
-   *  as the host kernels' `delete_agent` enforces it (owner, 2026-09-30: the
-   *  canvas background is a page agent with `delete_lock: true`). If the target
+   *  as the host kernels' `delete_agent` enforces it (e.g. a canvas background
+   *  is a page agent with `delete_lock: true`). If the target
    *  OR any descendant carries a truthy `delete_lock`, NOTHING is removed (no
    *  partial cascade) and the answer is the `locked` refusal naming the lock;
    *  clear it with `updateMeta(id, {delete_lock: false})`. An unknown id is the
@@ -751,8 +751,7 @@ export class Kernel {
   }
 
   /** Deliver an event to an agent's inbox and to everyone watching it.
-   *  GATED LIKE A SEND when an agent emits onto ANOTHER agent (audit
-   *  2026-09-28, a16): the emitter's `can_call` and the target's `callable_by`
+   *  GATED LIKE A SEND when an agent emits onto ANOTHER agent: the emitter's `can_call` and the target's `callable_by`
    *  must both allow verb `emit`. A denied emit is dropped; an emit has no
    *  reply. */
   emit(targetId: string, payload: Payload): void {
@@ -848,7 +847,7 @@ export class Kernel {
       .filter((hm) => !this.folderLoaded.has(hm))
       .map((hm) => ({ name: bundleName(hm), handler_module: hm }));
     // FOLDER BUNDLES beside the registered ones — a refused folder too, with its
-    // `error` (owner, 2026-10-08).
+    // `error`.
     for (const row of this.folderRowMap.values()) out.push({ ...row } as unknown as BundleInfo);
     return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }

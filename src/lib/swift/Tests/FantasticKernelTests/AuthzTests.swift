@@ -1,4 +1,4 @@
-// The MINIMAL call gate (owner decision 2026-10-03) — mirror of the python
+// The MINIMAL call gate — mirror of the python
 // `tests/kernel/test_minimal_gate.py`. Unit tests of the one matching engine, then
 // the kernel gate: two-sided allow/deny, `"*"` covers create_agent, the tree verbs
 // acting anywhere once granted, and the write-time grant-key check.
@@ -183,7 +183,7 @@ struct MinimalGateTests {
         #expect(k.agent(AgentId("made"))?.parentId == AgentId("a"))
     }
 
-    /// GRANTS ARE THE ONLY RULE (owner, 2026-10-06): holding the tree verbs on the
+    /// GRANTS ARE THE ONLY RULE: holding the tree verbs on the
     /// root, an agent creates, updates and deletes ANY agent it names — outside its
     /// own subtree and itself included.
     @Test func aTreeVerbGrantedOnTheRootActsAnywhere() async {

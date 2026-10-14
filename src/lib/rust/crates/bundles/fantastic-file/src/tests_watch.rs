@@ -170,7 +170,7 @@ async fn what_is_not_exposed_or_not_there_is_refused() {
 }
 
 /// `allow` is read live: narrowed after the watch was armed, the path's changes
-/// stop reaching watchers (audit 2026-10-14).
+/// stop reaching watchers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_path_the_bridge_stops_exposing_reports_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();

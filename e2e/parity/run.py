@@ -8,9 +8,8 @@
 
 THREE SUBCOMMANDS, ONE RULE EACH:
 
-  `preflight` FAILS LOUD AND NEVER REPAIRS. Every round-1/2 script either
-  rebuilt behind the operator's back (`ensure_runtime` → `artifacts.stage`) or
-  ran whatever happened to be on disk. Both make a capture a statement about an
+  `preflight` FAILS LOUD AND NEVER REPAIRS. Rebuilding behind the operator's
+  back, or running whatever happens to be on disk — both make a capture a statement about an
   unknown binary. This checks and names the command to run; it fixes nothing.
 
   `stage` is the only thing allowed to build, and it is explicit — an acceptance

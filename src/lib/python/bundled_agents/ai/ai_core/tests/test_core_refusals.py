@@ -159,7 +159,7 @@ async def test_an_unknown_verb_names_the_backend(seeded_kernel):
 
 
 async def test_inquiry_texts(seeded_kernel, fake_providers):
-    """`inquiry` on an AI is ACCEPTED at once (owner, 2026-10-06: fully async) and
+    """`inquiry` on an AI is ACCEPTED at once (fully async) and
     runs as its own turn, the question under a head naming who asked and the pid;
     the answer — given in any later turn — is covered in `test_inquiry_async.py`.
     An operator's inquiry has no conversation to land in: the answer is an event."""

@@ -204,7 +204,7 @@ public enum AIFoldStrategy {
     static func writeFold(_ ctx: ProjectionCtx, _ rows: [JSON], _ idxs: [Int]) async throws -> JSON {
         let ids = idxs.compactMap { rowId(rows[$0]) }
         let lvl = 1 + (idxs.filter { isFold(rows[$0]) }.map { AIFolds.level(rows, rows[$0]) }.max() ?? 0)
-        // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget (owner, 2026-10-11).
+        // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
         let index = mechanicalIndex(rows, idxs)
         let (title, summary, degraded) = try await summarize(ctx, rows, idxs)
         let text = index.isEmpty ? summary : "\(summary)\n\n\(index)"
@@ -227,9 +227,7 @@ public enum AIFoldStrategy {
     /// Never the goal turn, never the last `keepTail` rows, and never ending
     /// between a call and its answer. Folds are ordinary members, but NOT the
     /// first pick: a stretch that starts on the previous fold wraps it, and doing
-    /// that every time builds a linked list of summaries-of-summaries (measured
-    /// 2026-09-06, python: twelve levels deep in 26 cuts, the model lost in it
-    /// for 50 turns). So: skip the folds at the head and take the oldest
+    /// that every time builds a linked list of summaries-of-summaries. So: skip the folds at the head and take the oldest
     /// NON-fold rows; only when `AIConstants.FOLD_RUN` folds sit adjacent at the head do
     /// they become the span themselves. Depth then grows with the log of the
     /// history, not its length.
@@ -292,12 +290,11 @@ public enum AIFoldStrategy {
                 view = AIFolds.render(rows)
             }
         }
-        // TIDY THE HEAD, budget or no budget. Coalescing used to happen only while
-        // the view was OVER the watermark, so a projection that dropped under it
-        // left its adjacent folds standing — and they stayed standing, because the
-        // next projection folds ordinary rows first and only revisits the head
-        // when it is over budget with `AIConstants.FOLD_RUN` folds already there. A session
-        // therefore grew one fold per span at the head, forever.
+        // TIDY THE HEAD, budget or no budget. Coalescing only while the view is OVER
+        // the watermark would leave a projection's adjacent folds standing for good,
+        // because the next projection folds ordinary rows first and only revisits the
+        // head when it is over budget with `AIConstants.FOLD_RUN` folds already there —
+        // one fold per span at the head, forever.
         //
         // Terminates: each pass replaces `AIConstants.FOLD_RUN` adjacent folds with ONE, so
         // the run shrinks by `AIConstants.FOLD_RUN - 1` every time and `nextSpan` stops

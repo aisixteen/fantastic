@@ -1,13 +1,11 @@
-//! K-D — the REPLY SHAPES a kernel verb answers with, graded against python.
+//! The REPLY SHAPES a kernel verb answers with, graded against python.
 //!
-//! Python is the spec for every one of these. Each row here is a measured
-//! divergence from the 2026-09-02 sweep: rust answered the bare record where
-//! python answers `{updated, id, agent}`, a bare `{error}` where python answers
-//! a coded refusal, an eighth `verb` key on a ledger row python renders with
-//! seven, and its own prose on the `not_here` code. A caller that branches on
-//! `reason`, or reads `updated`, or diffs a row's key set, got a different
-//! answer per runtime for the same call — which is exactly the thing the one
-//! refusal shape exists to prevent.
+//! Python is the spec for every one of these: `{updated, id, agent}` from an
+//! update (not the bare record), a coded refusal (not a bare `{error}`), a
+//! ledger row with python's seven keys, and python's prose on the `not_here`
+//! code. A caller that branches on `reason`, or reads `updated`, or diffs a
+//! row's key set, must get the same answer from every runtime — which is what
+//! the one refusal shape exists for.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply};
@@ -101,8 +99,8 @@ async fn update_agent_answers_updated_id_and_the_record() {
 }
 
 /// An unknown id is `unknown_agent` + `deleted:false` — a code to branch on and
-/// the LIVE id index to correct from. The bare `{error: "no agent \"typo\""}`
-/// this used to answer is the measured 34-retry case.
+/// the LIVE id index to correct from — never a bare `{error: "no agent
+/// \"typo\""}` with nothing to act on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_agent_on_an_unknown_id_is_the_unknown_agent_refusal() {
     let (_t, kernel) = mk();
@@ -213,12 +211,10 @@ async fn ledger_rows_carry_no_verb_key() {
     }
 }
 
-/// `get` is NOT a kernel verb. Rust and swift answered it (returning the record,
-/// or `null` for an unknown id) and advertised it in `kernel_verbs`; python has
-/// no such verb and answers the root bundle's UNHANDLED refusal. A model reading
-/// a rust reflect therefore learned a verb the reference runtime does not have
-/// (e2e `agentic.build:rust`, 2026-09-03). A record is read with `list_agents`
-/// or a `reflect`.
+/// `get` is NOT a kernel verb: python has none and answers the root bundle's
+/// UNHANDLED refusal, and a reflect must not advertise one in `kernel_verbs` —
+/// a model reading it would learn a verb the reference runtime does not have.
+/// A record is read with `list_agents` or a `reflect`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_is_unhandled_not_a_kernel_verb() {
     let (_t, kernel) = mk();
@@ -229,7 +225,7 @@ async fn get_is_unhandled_not_a_kernel_verb() {
     assert!(r["id"].is_null(), "it must not answer with a record: {r}");
 }
 
-/// C6 — `list_agents` answers the registry in REGISTRATION ORDER.
+/// `list_agents` answers the registry in REGISTRATION ORDER.
 ///
 /// Python iterates `self.ctx.agents`, a plain dict, so the root leads and every
 /// agent follows in the order it was registered. Rust's registry is a `DashMap`
@@ -285,7 +281,7 @@ async fn list_agents_is_registry_order() {
     assert_eq!(ids, vec!["kernel_state", "zulu"], "{p}");
 }
 
-/// C15 — a record serializes `id, handler_module?, <meta in order>, parent_id`.
+/// A record serializes `id, handler_module?, <meta in order>, parent_id`.
 ///
 /// Python writes `parent_id` LAST because structure wins: a `parent_id` that
 /// leaked into meta must not shadow where the agent actually sits. Rust

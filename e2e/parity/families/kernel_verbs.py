@@ -1,12 +1,9 @@
 """kernel_verbs — the root's own verbs and their refusals (C13, C17–C34, C39).
 
-§9.1 marks this whole row `source` in both rounds: four refusal captures in
-round 1 and nothing after. Every id shape, every two-fault precedence pair,
-every grant map with a token key, the blob verbs with and without a grant — all
-of it was written into the ports from reading python, and none of it was driven.
+Every id shape, every two-fault precedence pair, every grant map with a token
+key, the blob verbs with and without a grant — all of it driven.
 
-The leg's grants are EXACT here (a seed override, as
-`SCR/parity_capture_wire.py:161-195` did), because half these cases are about
+The leg's grants are EXACT here (a seed override), because half these cases are about
 authority and a leg granted `"*"` on everything cannot show a refusal:
   * `limited` is granted `['reflect']` and nothing else — C21.
 """
@@ -84,8 +81,7 @@ def run(ctx) -> None:  # noqa: C901
         rec.json("C18/cancel_missing", call(k, "kernel", {"type": "cancel"}))
 
         # ── C19 — verbs on the root, and the ids they name ──
-        # The C19–C26 creates name `k.home` as parent (minimal model, owner
-        # 2026-10-04): the id / grant / field check each record is named for.
+        # The C19–C26 creates name `k.home` as parent (minimal model): the id / grant / field check each record is named for.
         rec.json("C19/create_id_dotdot",
                  call(k, k.root_id, {"type": "create_agent", "id": "../x",
                                      "handler_module": "cli.tools", "parent_id": k.home}))
@@ -153,8 +149,8 @@ def run(ctx) -> None:  # noqa: C901
         ]
         for case, payload in C27:
             rec.json(f"C27/{case}", call(k, k.root_id, payload))
-        # delete_lock with a locked child, created under the LEG (minimal model,
-        # owner 2026-10-04); `delete_parent_of_locked` is a plain delete of `files`.
+        # delete_lock with a locked child, created under the LEG (minimal model);
+        # `delete_parent_of_locked` is a plain delete of `files`.
         rec.json("C27/create_locked_child",
                  call(k, k.root_id, {"type": "create_agent", "id": "locked_child",
                                      "handler_module": "cli.tools", "parent_id": k.home,

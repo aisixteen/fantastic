@@ -1,7 +1,7 @@
 // Call security — the substrate authorization primitive.
 //
 // Mirror of the python canonical `kernel/_authz.py` (and rust `authz.rs`).
-// The model is MINIMAL (owner decision 2026-10-03):
+// The model is MINIMAL:
 //
 // - Every AGENT-originated send (`currentSender` is non-nil) is checked TWICE:
 //   egress — the SENDER's `can_call` must grant `(target, verb)` — AND ingress —

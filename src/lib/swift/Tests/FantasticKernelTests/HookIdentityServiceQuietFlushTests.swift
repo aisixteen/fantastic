@@ -1,14 +1,14 @@
-// Owner decisions 2026-10-03 (audit 2, set 2) on the task table and the flusher —
+// The task table and the flusher —
 // twin of python `tests/kernel/test_hook_identity_service_tasks_quiet_flush.py`
 // and rust `tasks/hook_identity_tests.rs` + `fantastic-ram-store/tests/quiet_flush.rs`.
 //
-// - G-3: every `onCancel` hook — the `cancel` verb's path and an item's own
+// - Every `onCancel` hook — the `cancel` verb's path and an item's own
 //   deadline alike — and every `onDelete` hook runs AS THE AGENT ITSELF (its own
 //   id is the sender), never as the operator or the root.
-// - KV-5: `cancel` refuses the kernel's own service tasks (the execution
+// - `cancel` refuses the kernel's own service tasks (the execution
 //   flusher, the record persister — keepalive loops the root owns); `ps` still
 //   lists them, and a group kill leaves them out.
-// - CLI-B: the kernel's own ledger-flush send publishes NOTHING on the state
+// - The kernel's own ledger-flush send publishes NOTHING on the state
 //   stream (its rows stay recorded by the flush row) — a long-poll waiter is not
 //   woken; an id block reserved inside the flush stays quiet too — the root
 //   record holds the bound, the next published update carries it.
@@ -179,7 +179,7 @@ struct HookIdentityServiceQuietFlushTests {
         #expect(out == .object(["cancelled": .bool(true), "killed": .array([.integer(pid)])]))
         #expect(await pending.value.status == .cancelled)
         #expect(log.entries == ["cancel gc as gc"])
-        // the own-inbox emit is delivered — it used to be gated root → gc and dropped
+        // the own-inbox emit is delivered — never gated root → gc and dropped
         #expect(drained(inbox).contains(doneStatus))
     }
 
@@ -206,7 +206,7 @@ struct HookIdentityServiceQuietFlushTests {
         #expect(log.entries == ["delete gc as gc", "delete mid as mid"])
     }
 
-    // ── KV-5 ──
+    // ── service tasks ──
 
     @Test func cancelRefusesTheFlusherAndItKeepsFlushing() async throws {
         let k = makeKernel(HookLog())
@@ -291,7 +291,7 @@ struct HookIdentityServiceQuietFlushTests {
     }
 }
 
-/// The ROW STATE EVENT (owner, 2026-10-08) — the twin of python
+/// The ROW STATE EVENT — the twin of python
 /// `tests/kernel/test_row_event.py`: every execution row the kernel puts is
 /// announced as `{agent_id, kind: "row", row: {id, kind, parent?, caller?,
 /// settled?}}`, content-free; nothing inside the kernel's own ledger flush is

@@ -1,11 +1,9 @@
 """The `user` role — THE HUMAN, as an ordinary agent.
 
-The premise is that AI and humans are first-class agents on one spine, and the
-human was the one party never modelled. An inquiry used to be a TEXT CONVENTION: the
-model printed `{"type":"inquiry"}` on a line and stopped, a harness regex found
-it (`e2e/helpers/proxy.py`), and the answer was posted back in from outside the
-kernel. The human had no id, no record, no reflect entry, no ledger row and no
-gate — a model could not even discover that a human existed.
+The premise is that AI and humans are first-class agents on one spine. An inquiry is
+not a TEXT CONVENTION scraped by a harness regex and answered from outside the
+kernel: the human has an id, a record, a reflect entry, ledger rows and a gate, so
+a model can discover that a human exists.
 
 Here it is an agent:
 
@@ -17,7 +15,7 @@ Here it is an agent:
                  names this agent: the wiring a test exercises is the wiring
                  production uses.
   * `inquiry`  — someone sends one; it is ACCEPTED at once, the human READS it
-                 and replies LATER (owner, 2026-10-06: fully async) — its own
+                 and replies LATER (fully async) — its own
                  send into the asker's conversation, tagged `[reply to <pid> ·
                  user inquiry]`, exactly as an AI that was asked answers. No
                  suspend, no resume, no scraping.
@@ -134,9 +132,8 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
                 # A HUMAN THAT COULD NOT OPEN THE DOOR MUST NOT SAY IT DID.
                 # Answering "granted" over a refused grant sends the model back
                 # to a wall that never moved, and it reads as the model failing
-                # to retry (measured 2026-09-04: `update_agent` is PRIVILEGED
-                # and a `"*"` grant does not cover it, so the human's own edit
-                # was refused while it cheerfully replied "access granted").
+                # to retry (e.g. `update_agent` is PRIVILEGED and a `"*"` grant
+                # does not cover it).
                 if err:
                     return {
                         "error": f"user_probe: grant refused, so the answer "

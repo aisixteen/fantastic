@@ -26,7 +26,7 @@ concurrent handlers don't trample each other. `_current_task` mirrors
 it exactly, carrying the CURRENT TASK ID — that is how a nested send
 learns which task is its parent.
 
-IDENTITY COMES ONLY FROM DISPATCH (owner 2026-10-04): the kernel sets
+IDENTITY COMES ONLY FROM DISPATCH: the kernel sets
 `_current_sender` when it runs an agent's code — its handler (`Agent._dispatch`)
 or one of its hooks (`on_cancel`, `on_delete`) — and nowhere else. The sends that
 code makes, and the tasks it spawns, are that agent's. A send made outside every
@@ -97,11 +97,11 @@ def shutdown_context():
         _in_shutdown.reset(tok)
 
 
-# THE LEDGER FLUSH IS SILENT on the state stream (owner 2026-10-03, audit CLI-B).
+# THE LEDGER FLUSH IS SILENT on the state stream.
 # The kernel's own flush `send` — and every send, emit and state event inside its
-# execution (the store's dispatch, its drain) — publishes nothing: a subscriber
-# woken by the flush (a long-poll `events` waiter) made a call, the call made
-# rows, the rows made the next flush, forever, filling the store. The rows stay
+# execution (the store's dispatch, its drain) — publishes nothing: otherwise a
+# subscriber woken by the flush (a long-poll `events` waiter) makes a call, the call
+# makes rows, the rows make the next flush, forever, filling the store. The rows stay
 # recorded by the flush row. Copied into every task the flush starts, like the
 # other contextvars here.
 _state_quiet: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -162,11 +162,10 @@ def current_task() -> int | None:
 def page(items: list, payload: dict, *, key=None) -> tuple[list, str | None]:
     """Apply `limit` + `after` to one list reply. Returns `(page, next_cursor)`.
 
-    UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box. Measured
-    2026-08-20: reflect bulk was ~42% of an AI agent's context, which is what
-    forced `dedupe_stale_reads`, the reflect stub and the point-of-use
-    distillation nudge in `ai_core` — every one of those shrinks what is
-    RETAINED because nothing could shrink what is SENT. Paging attacks the cause.
+    UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box. Reflect bulk
+    can be a large share of an AI agent's context; `dedupe_stale_reads`, the
+    reflect stub and the point-of-use distillation nudge in `ai_core` shrink what
+    is RETAINED, and paging shrinks what is SENT. Paging attacks the cause.
 
     The cursor is OPAQUE by construction: it is the last item's identity, not an
     offset, so a caller cannot compute the next one or skip ahead by arithmetic.
@@ -218,13 +217,10 @@ def page(items: list, payload: dict, *, key=None) -> tuple[list, str | None]:
 #               that did not match, a refusal the handler itself composed.
 #               `result` is that reply, verbatim.
 #
-#               Until 2026-09-11 this settled `completed`, on the rule that the
-#               kernel does not introspect domain replies. The rule did not
-#               survive contact with its own storage: `_stamp_call` already
-#               read `error`/`reason` off the result and wrote them onto the
-#               durable row BESIDE `status: completed`, so one row said both
-#               "fine" and "failed". Failure is a STATUS; nothing downstream
-#               should have to parse a result to learn it.
+#               Not `completed`: `_stamp_call` reads `error`/`reason` off
+#               the result onto the durable row, and one row must not say
+#               both "fine" and "failed". Failure is a STATUS; nothing
+#               downstream should have to parse a result to learn it.
 #   failed    — no handler answer exists: the kernel refused before dispatch
 #               (gate denial, unknown agent, malformed item) or the handler
 #               raised ({"error": f"{type}: {e}", "raised": True}).
@@ -260,16 +256,16 @@ def _store_safe(o: Any) -> Any:
 
 
 def stored_outcome(out: dict, named: bool) -> dict:
-    """WHAT A SETTLE ROW KEEPS of an outcome — the one definition (decided 2026-09-26).
+    """WHAT A SETTLE ROW KEEPS of an outcome — the one definition.
 
     A NAMED call keeps its whole result: its name is a dedup contract, and a re-send
-    returns the recorded outcome (C9). A DEAD LETTER keeps its error text: someone has
+    returns the recorded outcome. A DEAD LETTER keeps its error text: someone has
     to read why it died. Every other settle keeps a digest — `{status, bytes}`.
 
     Why not the body everywhere: the kernel's own store reads are executions too (the
     `ledger` projection, every AI agent's head read), so a settle holding its body
-    re-recorded the store inside the store — measured ~6x growth per `ledger` call
-    (2 KB → 14.8 MB in five). And a reply body is not persisted anyway (§3): its
+    would re-record the store inside the store, growing several-fold per `ledger`
+    call. And a reply body is not persisted anyway: its
     receiver holds it in RAM with the one-line `origin` that gets it again."""
     status = out.get("status")
     res = out.get("result")
@@ -297,7 +293,7 @@ _ROW_EVENT_KEYS = ("parent", "caller", "settled")
 
 
 def row_event(agent_id: str, row: dict) -> dict:
-    """The state event for an EXECUTION row just put (owner, 2026-10-08): a reader
+    """The state event for an EXECUTION row just put: a reader
     learns "row <id> arrived for <agent>" and fetches rows only when told — no
     polling. Content-free: id, kind and the few links above. Published like every
     state event (gated by `state_subscribe` on the root) and, like them, never from
@@ -321,8 +317,7 @@ def _summarize_payload(payload: Any) -> str:
     explode on binary protocol payloads (audio/image frames). Never
     raises; falls back to repr.
 
-    NOT TRUNCATED. This used to trim to 160 chars + an ellipsis. A summary
-    that silently drops the end of a payload is a telemetry view that lies
+    NOT TRUNCATED. A summary that silently drops the end of a payload is a telemetry view that lies
     about what was sent — and the reader cannot tell a short payload from a
     cut one. If a payload is long, the overlay's job is to show it long or
     to elide visibly at RENDER time, where the reader can see the choice.
@@ -447,7 +442,7 @@ class Kernel:
     # leaves the kernel — `ps` serves the five public fields only.
     tasks: dict[int, dict] = field(default_factory=dict)
 
-    # CONNECTED PEER KERNELS — guid → the LIVE routes to it (owner, 2026-09-30). An
+    # CONNECTED PEER KERNELS — guid → the LIVE routes to it. An
     # agent on another kernel is addressed `<guid>|<agent id>`; when that guid is
     # here, `send` hands the call to its routes and the reply is the call's
     # ordinary outcome. A TRANSPORT registers the peer it is connected to (the web
@@ -455,7 +450,7 @@ class Kernel:
     # the transport only carries frames; addressing is the kernel's. A guid that is
     # not here is an unknown target like any other.
     #
-    # A SET PER GUID (owner, 2026-10-03): the tabs of one identity are ONE
+    # A SET PER GUID: the tabs of one identity are ONE
     # principal — every tab says hello with the identity's guid, each is a live
     # route of it, a call to `<guid>|x` goes to all of them and settles with the
     # first reply (`RemoteTarget`). Kept in registration order.
@@ -818,7 +813,7 @@ class Kernel:
         never pruned. Returns how many executions went.
 
         A store READ that fails is said on stderr and prunes nothing — it never
-        raises: this runs inside the flush loop, and an exception here used to end
+        raises: this runs inside the flush loop, and an exception here would end
         that task silently, leaving every later execution row in RAM for the rest
         of the process."""
         try:
@@ -1089,20 +1084,13 @@ class Kernel:
         entry is forgotten when the task ends (done-callback), cancelled or
         not, so the table only ever holds LIVE work.
 
-        A PARENT IS ALWAYS ALIVE. There used to be a silent `parent = None`
-        here for the case where `_current_task` named a task that had already
-        ended, defended in a comment as init-adoption. It was the fingerprint
-        of a bug, not a rule: an UNREGISTERED fork (a bare `create_task` in a
-        bundle) kept using the scope of the dispatch that made it, so work
-        registered later claimed a dead parent — and converting that to None
-        put the work OUTSIDE every subtree, where `cancel` on its caller could
-        never reach it.
-
-        Measured over a full suite run: 97 hits before, 45 after `spawn_task`
-        began minting each registered fork its own id, 0 once the bare forks
-        (scheduler tick, bridge read loop, ws drain + call, exec drains, the
-        persistence writer) were registered too. Nothing absorbs it now — if a
-        dead parent ever reappears, `forget_task`'s re-parenting is what should
+        A PARENT IS ALWAYS ALIVE. A dead parent is the fingerprint of a bug,
+        not a rule: an UNREGISTERED fork (a bare `create_task` in a bundle)
+        keeps using the scope of the dispatch that made it, so work registered
+        later claims a dead parent — and converting that to None would put the
+        work OUTSIDE every subtree, where `cancel` on its caller could never
+        reach it. Every fork is registered through `spawn_task` with its own
+        id, so nothing absorbs it — if a dead parent ever appears, `forget_task`'s re-parenting is what should
         have handled it, and the row is wrong."""
         entry = {
             "id": task_id,
@@ -1143,14 +1131,11 @@ class Kernel:
 
         THE KERNEL CREATES THE TASK, because only the kernel can mint the id
         the task must run under. It takes a COROUTINE, not an
-        `asyncio.Task`: a caller that created the task itself had already
-        started it under the DISPATCH's scope, so `_current_task` inside the
-        fork named the forking dispatch — which settles moments later. Every
-        send the fork then made was rowed with a parent that was already gone
-        (measured 2026-09-11: a program's sends through the exec relay carried
-        the settled `start` pid), and `register_task` had to paper over the
-        same case by dropping a dead parent to None. The fork now runs under
-        its OWN id.
+        `asyncio.Task`: a caller that created the task itself would already
+        have started it under the DISPATCH's scope, so `_current_task` inside
+        the fork would name the forking dispatch — which settles moments
+        later — and every send the fork made would be rowed with a parent that
+        is already gone. The fork runs under its OWN id.
 
         Sender and origin ride the copied context untouched — a fork acts as
         whoever forked it, which is what the gate must see.
@@ -1220,9 +1205,9 @@ class Kernel:
 
     def is_service_task(self, entry: dict) -> bool:
         """A KERNEL SERVICE TASK — a keepalive loop the ROOT owns: the execution
-        flusher, the record persister. `cancel` never kills one (audit KV-5,
-        owner 2026-10-03): killing it stopped ledger durability and record
-        persistence until the process restarted, and nothing restarted it. It
+        flusher, the record persister. `cancel` never kills one: killing it would
+        stop ledger durability and record persistence until the process
+        restarted, and nothing restarts it. It
         stays listed in `ps`; the kernel's own stop ends it."""
         return (
             bool(entry.get("_keepalive"))
@@ -1282,9 +1267,8 @@ class Kernel:
         # MARK FIRST, kill second. `on_cancel` runs real teardown and can await,
         # so a handler in the doomed subtree gets scheduling passes between the
         # mark and the abort. Anything it sends in that window belongs to work
-        # that is already dead: without the mark it started fresh dispatches —
-        # new `ps` rows, new OS children — that outlived the cancel (measured
-        # 2026-09-02).
+        # that is already dead: without the mark it would start fresh dispatches —
+        # new `ps` rows, new OS children — that outlive the cancel.
         for tid in ids:
             entry = self.tasks.get(tid)
             if entry is not None:
@@ -1376,10 +1360,9 @@ class Kernel:
         this is a dict lookup, not a reflect. And a bare `no agent 'x'` teaches the
         caller nothing it can act on.
 
-        Measured 2026-08-04: a model copied the literal placeholder `<id>` out of the
-        prompt's own example, received `{"error": "no agent '<id>'"}` THIRTY-FOUR
-        times across one run, and never once corrected. The error stated a fact and
-        withheld every fact that would have repaired it. Same principle the ingress
+        A model that copies a literal placeholder `<id>` out of an example and gets
+        back only `{"error": "no agent '<id>'"}` has a fact and none of the facts
+        that would repair it. Same principle the ingress
         rules already follow — a denial names the legal values (`DenyInbound(unknown=…)`).
 
         This is NOT a repair and NOT a fallback: the call still fails, exactly once,
@@ -1468,11 +1451,10 @@ class Kernel:
             """The pending DISPATCHES — work that can finish on its own. A
             `spawn_task` FORK (scheduler tick, bridge read loop, ws drain, job
             pump, pty reader) is a service loop that never settles by
-            construction, so waiting on one burned the WHOLE `QUIET_TIMEOUT` on
-            every daemon that ran one: measured 2026-09-21, SIGTERM→exit was
-            10.25 s with a scheduler on the tree and 0.29 s without it, and the
-            e2e harness's 10 s stop window then SIGKILLed the kernel with its
-            PID lock (`.fantastic/lock.yaml`) still on disk. Forks are cancelled
+            construction, so waiting on one would burn the WHOLE `QUIET_TIMEOUT`
+            on every daemon that runs one, and a supervisor's stop window could
+            SIGKILL the kernel with its PID lock (`.fantastic/lock.yaml`) still
+            on disk. Forks are cancelled
             below — that is what a stop does to them — never awaited."""
             return [tid for tid in pending() if not self.tasks[tid].get("_forked")]
 

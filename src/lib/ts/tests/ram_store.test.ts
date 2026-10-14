@@ -179,8 +179,8 @@ test("an unknown verb is refused as python does", async () => {
   assert.deepEqual(unk, { error: "ram_store: unknown type 'nope'", reason: "unhandled", verb: "nope" });
 });
 
-// Measured from python's ram_store (a probe over the python kernel fixture,
-// 2026-10-01): each refusal quotes the caller's value as `repr` does.
+// Measured from python's ram_store (a probe over the python kernel fixture):
+// each refusal quotes the caller's value as `repr` does.
 test("refusals quote a caller's value as python repr does", async () => {
   const k = store();
   const rid = async (id: Json) => (await append(k, "alice", [{ id }]))["error"];
@@ -211,7 +211,7 @@ test("refusals quote a caller's value as python repr does", async () => {
 test("a ref of '0' is an id python reads (0), not a non-id — the refusal names it as python does", async () => {
   const k = store();
   const r = await append(k, "alice", [{ id: 30, kind: "fold", refs: ["0"] }]);
-  // measured on python's ram_store (2026-10-01)
+  // measured on python's ram_store
   assert.deepEqual(r, {
     error: "append: row 30 refs rows that do not exist for this owner: ['0']",
     reason: "not_found",

@@ -1,5 +1,5 @@
-"""ollama_backend — a `model` the record leaves out is READ FROM THE SERVER (owner,
-2026-10-07): the ONE model `GET /api/tags` lists, read before a verb that runs a
+"""ollama_backend — a `model` the record leaves out is READ FROM THE SERVER: the ONE
+model `GET /api/tags` lists, read before a verb that runs a
 turn and written back. Only the model: the window ollama loads with is not in the
 API. An optional key (`credentials`) rides every request, the model list included."""
 

@@ -18,11 +18,11 @@
 //! </call>
 //! ```
 //!
-//! Why tags and not JSON (measured 2026-09-09, qwen3.8-27b, 4 trials × 3 shapes
-//! that had failed in e2e): JSON with a verbatim `bytes` cut scored 3/12 —
-//! escaped quotes, literal `\n`, a `\"}` inside content ending the value early;
-//! bare child tags 12/12, zero escapes. A `"` boundary inside JSON fires the
-//! model's escaping reflex; a tag boundary carries none.
+//! Why tags and not JSON: on shapes that carry a document, JSON with a verbatim
+//! `bytes` cut fails often — escaped quotes, literal `\n`, a `\"}` inside content
+//! ending the value early — while bare child tags need zero escapes. A `"`
+//! boundary inside JSON fires the model's escaping reflex; a tag boundary carries
+//! none.
 //!
 //! Nothing is repaired. A call that does not parse is reported with its fault
 //! named and the minimal shape to send; the model fixes it.
@@ -131,8 +131,8 @@ pub fn envelopes(text: &str) -> Vec<(usize, usize, Option<usize>)> {
 ///
 /// A tag name is a KEY, not an XML name: grant maps are keyed by agent ids and
 /// the relative tokens (`$self`, `$parent`, `$subtree`), and the model writes
-/// those as tags (`<$self>*</$self>`, measured 2026-09-09 gated_write, 12
-/// refusals) — so `$`, `-` and `.` are letters here. Mirrors python's
+/// those as tags (`<$self>*</$self>`) — so `$`, `-` and `.` are letters here.
+/// Mirrors python's
 /// `<([A-Za-z_$][\w$.\-]*)>`.
 fn next_tag(body: &str, from: usize) -> Option<(usize, usize, String)> {
     let mut search = from;
@@ -273,10 +273,9 @@ pub fn value(name: &str, raw: &str) -> Result<Value, Malformed> {
     }
     // A LIST is a tag whose children are all `<item>` — one element each, any
     // count, one element included. The same tag the reply notation renders, so
-    // what the model reads is what it writes (2026-09-09 subai_graph: a reply
-    // showed `<allowed><item>…</item></allowed>`, the model wrote it back, and a
-    // plural/singular rule read the lone child as a one-field object — three
-    // refusals and a JSON-string fallback).
+    // what the model reads is what it writes: a reply shows
+    // `<allowed><item>…</item></allowed>`, the model writes it back, and a lone
+    // child must not be read as a one-field object.
     if kids.iter().all(|(k, _)| k == "item") {
         let mut items = Vec::with_capacity(kids.len());
         for (k, v) in &kids {
@@ -284,9 +283,9 @@ pub fn value(name: &str, raw: &str) -> Result<Value, Malformed> {
         }
         return Ok(Value::Array(items));
     }
-    // `<item>` beside OTHER tags is an ordinary field named item (E14
-    // 2026-09-10: `<payload><type>buy</type><item>rocket</item></payload>` was
-    // refused as a list error and the purchase never left the model). Only a tag
+    // `<item>` beside OTHER tags is an ordinary field named item
+    // (`<payload><type>buy</type><item>rocket</item></payload>` is not a list
+    // error). Only a tag
     // whose children are ALL `<item>` is a list; a one-field object named `item`
     // is the single shape the notation cannot say.
     let mut out = Map::new();

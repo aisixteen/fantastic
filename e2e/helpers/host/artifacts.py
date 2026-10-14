@@ -1,9 +1,9 @@
 """Build + PACKAGE each kernel exactly the way the release does, then run the
 packaged thing.
 
-e2e used to launch a kernel straight out of its build tree
+Launching a kernel straight out of its build tree
 (`src/lib/rust/target/debug/fantastic_kernel`,
-`src/lib/python/main.py` beside its own `.venv`). That tests a layout no user
+`src/lib/python/main.py` beside its own `.venv`) would test a layout no user
 ever has. Anything the release's packaging step drops — a bundle missing from
 the tarball, an entry point that only resolves because the source tree happens
 to be the cwd — is invisible until someone installs a release and it does not

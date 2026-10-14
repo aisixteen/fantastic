@@ -365,7 +365,7 @@ async def test_handler_raise_settles_as_failed_and_send_never_raises(seeded_kern
 
 async def test_a_handler_sys_exit_settles_failed_and_the_loop_runs_on(seeded_kernel):
     """A SystemExit out of an asyncio task stops the EVENT LOOP — the whole
-    kernel, for one handler that called sys.exit (audit 2026-10-03, ARCH2-1).
+    kernel, for one handler that called sys.exit.
     It is a raise like any other: that call settles failed, a sibling and the
     next call complete."""
     mod = types.ModuleType("exiter_agent.tools")
@@ -394,11 +394,10 @@ async def test_a_handler_sys_exit_settles_failed_and_the_loop_runs_on(seeded_ker
 async def test_a_module_whose_top_level_exits_is_never_imported(
     seeded_kernel, tmp_path, monkeypatch
 ):
-    """`create_agent` imported ANY handler_module on `sys.path` to validate its
-    meta, and any agent may create under ITSELF on its baseline — so one call
-    naming a module whose top level exits (stdlib `unittest.__main__` is one)
-    took the python kernel down (audit 2026-10-03, ARCH2-1). A name outside the
-    bundle catalog is never imported now: the create keeps the record as one this
+    """Importing ANY handler_module on `sys.path` to validate its meta would let
+    one call naming a module whose top level exits (stdlib `unittest.__main__` is
+    one) take the kernel down — any agent may create under ITSELF on its baseline.
+    A name outside the bundle catalog is never imported: the create keeps the record as one this
     runtime cannot answer (as rust and swift do), the call to it is refused, and
     the kernel answers the next call."""
     from _testkit import as_agent
@@ -479,7 +478,7 @@ async def test_kernel_facade_with_no_root_fails_per_item():
     assert all(o["pid"] is None and "no root" in o["result"]["error"] for o in outs)
 
 
-# ─── parallel EXECUTION holds; ARRIVAL is in input order (owner, 2026-10-01) ──
+# ─── parallel EXECUTION holds; ARRIVAL is in input order ─────────────────────
 
 _ov_started: dict[str, asyncio.Event] = {}
 _ov_arrivals: list[str] = []

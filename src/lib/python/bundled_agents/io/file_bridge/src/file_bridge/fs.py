@@ -188,8 +188,8 @@ def write_bytes(
     target.parent.mkdir(parents=True, exist_ok=True)
     if atomic:
         # A FRESH tmp per write, created exclusively and never through a link: a
-        # fixed `<name>.tmp` followed whatever symlink sat at that name (a write
-        # escaped the root) and was shared by concurrent writers (audit 2026-10-14).
+        # fixed `<name>.tmp` would follow whatever symlink sat at that name (a write
+        # escaping the root) and be shared by concurrent writers.
         tmp = target.with_name(f"{target.name}.tmp.{secrets.token_hex(4)}")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         fd = os.open(tmp, flags, 0o666 if mode is None else mode)
@@ -242,9 +242,8 @@ def read_private(root, path, *, external: bool = False) -> bytes:
     """Read a PRIVATE file — a regular file owned by this user with no group/other
     permission bits — through ONE open. `O_NOFOLLOW` refuses a symlink in the
     leaf's place, and the OPEN DESCRIPTOR is what is judged (`fstat`) and read,
-    so nothing can swap the file between the check and the read (audit F5,
-    2026-10-03: an `lstat` of the path and then a read of the path again was a
-    window). `O_NONBLOCK` so a FIFO planted there cannot hang the open — it is
+    so nothing can swap the file between the check and the read (an `lstat` of
+    the path and then a read of the path again would be a window). `O_NONBLOCK` so a FIFO planted there cannot hang the open — it is
     judged and refused like any other non-regular entry. Raises `NotPrivate`
     (nothing read) when the entry is not private; `FileNotFoundError` when absent."""
     leaf = _lexical_leaf(root, path, external=external)
@@ -334,10 +333,9 @@ def remove(root, path, *, recursive: bool = False, external: bool = False) -> No
     """Delete a file, an empty dir, or (recursive) a dir tree. Clamped to root.
 
     A symlink is UNLINKED, never followed: the leaf is probed before `resolve()`
-    follows it. Measured 2026-09-02: `delete link` (link -> data/) recursed into
-    the real `data/` and left the link dangling — the target died, the name
-    survived, and the dangling name could then never be deleted (`exists()`
-    follows). A dangling symlink is deletable for the same reason."""
+    follows it. Followed, `delete link` (link -> data/) would recurse into the
+    real `data/` and leave the link dangling — the target dead, the name
+    surviving, and the dangling name never deletable (`exists()` follows). A dangling symlink is deletable for the same reason."""
     leaf = _lexical_leaf(root, path, external=external)
     if leaf.is_symlink():
         leaf.unlink()

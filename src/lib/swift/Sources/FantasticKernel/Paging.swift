@@ -2,10 +2,9 @@
 //
 // Port of python `kernel/_kernel.py:page` (canonical).
 //
-// UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box. Measured
-// 2026-08-20: reflect bulk was ~42% of an AI agent's context, which is what
-// forced the dedupe/stub/distillation work — every one of those shrinks what is
-// RETAINED because nothing could shrink what is SENT. Paging attacks the cause.
+// UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box: list bulk
+// fills an AI agent's context. Dedupe/stub/distillation shrink what is
+// RETAINED; paging shrinks what is SENT — the cause.
 //
 // The cursor is OPAQUE by construction: it is the last item's IDENTITY, not an
 // offset, so a caller cannot compute the next one or skip ahead by arithmetic.
@@ -32,18 +31,14 @@ public func page<T>(
 ) -> (page: [T], next: String?) {
     var items = items
 
-    // C17 (R2-RFL-2): the cursor is python `str(after)` for ANY value that is
+    // The cursor is python `str(after)` for ANY value that is
     // not `None`, not a bool (either one — python's `isinstance(after, bool)`
     // check fires before the stringify, so `true`/`false` are NO cursor, the
     // same as absent) and not `""` — an int's digits, a float's python repr
     // (`2.0`, never truncated to `2`), a list/dict's python container repr.
-    // This used to read `.asString ?? .asInt.map(String.init)`, which left a
-    // float/array/object cursor silently absent (→ the WHOLE list) instead of
-    // python's `[]` (a cursor that stringifies to something no item's id
-    // matches — measured: `after=1.5` py `[]` / this used to be `full`;
-    // `after=["c1"]` py `[]` / this used to be `full`; `after=2.0` py `[]`
-    // via the literal string `"2.0"`, not by luckily truncating to an int
-    // that happened to match nothing).
+    // A float/array/object cursor is never silently absent (→ the WHOLE list):
+    // it stringifies to something no item's id matches — python's `[]` for
+    // `after=1.5`, `after=["c1"]`, and `after=2.0` via the literal string `"2.0"`.
     let cursor: String?
     switch payload["after"] {
     case .null, .bool: cursor = nil

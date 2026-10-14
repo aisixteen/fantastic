@@ -1,4 +1,4 @@
-// STREAMING PARTS (owner, 2026-10-04, `tmp/streaming_parts.md`): a model's
+// STREAMING PARTS: a model's
 // output streams to its addressees as parts — animation, never action; a
 // receiver can stop it; a cut pass leaves a marker on top of the context, never a
 // half answer.
@@ -148,7 +148,7 @@ struct StreamPartsTests {
         #expect(ev.map(shape).contains("abort call"))
     }
 
-    /// ONLY THE ANSWER ACTS (owner, 2026-10-07): a `<call>` inside `<think>` streams
+    /// ONLY THE ANSWER ACTS: a `<call>` inside `<think>` streams
     /// as thinking — no call part opens. Python `test_a_call_inside_a_thought_is_thinking_text`.
     @Test func aCallInsideAThoughtIsThinkingText() {
         let (ev, _) = run("<think>let me \(DONE) then</think>", 4)
@@ -262,7 +262,7 @@ struct StreamPartsTests {
         #expect(out.result == .object(["stopped": .bool(false)]))
     }
 
-    // ─── the match: draft ↔ final message (owner, 2026-10-04) ────────────────
+    // ─── the match: draft ↔ final message ────────────────
 
     /// AI → AI: the consumer watches `part_*` on its inbox, then receives the
     /// message; the message's header names the same stream id, `part_start` names
@@ -366,7 +366,7 @@ struct StreamPartsTests {
         #expect(out.result["reason"].asString == "unauthorized", "\(out)")
     }
 
-    /// Only a successful generation dispatches (owner, 2026-10-04): a pass that
+    /// Only a successful generation dispatches: a pass that
     /// wrote a complete call and then stopped with another block open sends
     /// NEITHER, and the marker names both as not sent.
     @Test func aCutPassSendsNothingNotEvenItsClosedCalls() async throws {
@@ -392,7 +392,7 @@ struct StreamPartsTests {
         #expect(!last.contains("[reply to"), "\(last)")
     }
 
-    /// Deltas go to the addressee's inbox only (owner, 2026-10-04): the state
+    /// Deltas go to the addressee's inbox only: the state
     /// stream carries a part's lifecycle — start / end / abort — never a delta.
     @Test func deltasNeverReachTheStateStream() async throws {
         let slow = Slow([CALL, DONE])

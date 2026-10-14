@@ -48,7 +48,7 @@ public struct InboxItem: Sendable {
 /// fanout queues a watcher's payload BEFORE the handler runs, and the single
 /// asyncio loop puts that payload on the wire before the handler's reply. A
 /// parallel drain task cannot promise that — the reply, written from the call
-/// task, overtook the event (the same race rust fixed in
+/// task, can overtake the event (rust handles the same race in
 /// `fantastic-kernel/src/inbox.rs`). The cure is a reader a CALL TASK can also
 /// hold for a moment: it takes the same lock the drain holds, forwards
 /// everything already queued, and only then writes its reply. `AsyncStream`

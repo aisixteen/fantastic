@@ -18,10 +18,7 @@
 //     PYTHON_KERNEL_BIN="$(realpath ~/Projects/fantastic_canvas/python/.venv/bin/fantastic)" \
 //         swift test --filter FantasticParityTests
 //
-// The previous Rust-targeted version of this harness lived at this
-// path; Rust workspace retired with PR #20. Python takes the role
-// because it's the canonical reference; the harness shape (subprocess
-// + JSON diff) is preserved.
+// Python takes the reference role because it is canonical.
 
 #if os(macOS)
 
@@ -73,7 +70,7 @@
 
     /// The reply is the FIRST JSON document on stdout. Python's one-shot prints
     /// the loader's `  [messages] no store wired — messages stay in RAM` line
-    /// AFTER the pretty-printed reply (measured 2026-09-12), so parsing the
+    /// AFTER the pretty-printed reply, so parsing the
     /// whole stream fails with "trailing content"; the reply ends at the
     /// brace that closes the document that opened at the first `{`.
     private func firstJSONDocument(_ data: Data) throws -> JSON {
@@ -105,8 +102,7 @@
         binary: URL, workdir: URL, agentId: String = "kernel_state",
         args: [String: String] = [:]
     ) throws -> JSON {
-        // Every runtime's root is `kernel_state` since C12 — the asymmetry is
-        // gone, so one default targets all of them.
+        // Every runtime's root is `kernel_state`, so one default targets all of them.
         let proc = Process()
         proc.executableURL = binary
         proc.currentDirectoryURL = workdir
@@ -182,9 +178,8 @@
             let kernel = try await startKernelInMemory(portHint: 0)
             let swReply = await kernel.send([Item(AgentId("kernel_state"), .object(["type": .string("reflect")]))])[0].result
 
-            // ONE ROOT ID ACROSS RUNTIMES (C12): the asymmetry that forced a
-            // per-runtime assertion is gone, so this is a cross-runtime equality
-            // check now — the same id AND the same handler_module.
+            // ONE ROOT ID ACROSS RUNTIMES: a cross-runtime equality check — the
+            // same id AND the same handler_module.
             #expect(pyReply["id"].asString == swReply["id"].asString, "root ids diverged")
             #expect(swReply["id"].asString == "kernel_state", "swift root id != kernel_state")
             #expect(
@@ -302,7 +297,7 @@
                     "\(label) root reflect guid not 32 lowercase-hex: \(g ?? "nil")")
             }
             // Stable across a reboot of the SAME workdir (never regenerated) — on
-            // swift. MEASURED 2026-09-13: python's one-shot does not persist the
+            // swift. Python's one-shot does not persist the
             // guid even with the provider wired above (`.fantastic/agent.yaml`
             // carries no `guid`; two reflects answer two guids). Python is the
             // immutable reference, so its stability is not asserted here; the
@@ -348,7 +343,7 @@
                         && arr?.first?["handler_module"].asString != nil,
                     "\(label) bundles=all entry missing name/handler_module")
             }
-            // A backend KIND's record schema (lib request #3) is python's, field for
+            // A backend KIND's record schema is python's, field for
             // field — names, order, types, enums, defaults, hints — for every
             // kind BOTH catalogs carry. A kind one runtime publishes a schema for and
             // the other does not is a difference too.

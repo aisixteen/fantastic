@@ -24,10 +24,9 @@ handler_module required"}` could only be branched on by matching prose.
 The set is CLOSED — a new code is a deliberate addition here, not an ad-hoc
 string at a call site.
 
-The `hint` is not decoration. Measured 2026-08-04: a model copied the literal
-placeholder `<id>` out of a prompt example, received `{"error": "no agent
-'<id>'"}` thirty-four times in one run, and never once corrected. The error
-stated a fact and withheld every fact that would have repaired it. A refusal
+The `hint` is not decoration. A model that copies a literal placeholder `<id>` out
+of a prompt example and gets back only `{"error": "no agent '<id>'"}` has a fact and
+none of the facts that would repair it. A refusal
 that cannot be acted on costs the same as no reply.
 """
 
@@ -117,13 +116,13 @@ def guard_agent_id(verb: str, agent_id: object, arg: str = "id") -> dict | None:
     (`_resolve_path`), so an id carrying `..` or a separator walks out of the
     store and the write, or the `rmtree`, lands wherever it pointed.
 
-    Measured 2026-08-28: an agent the call gate admitted to the root loader
-    sent `{"type": "forget_record", "id": "../../important_project_dir"}` and
-    recursively deleted a directory OUTSIDE the store entirely. The call gate
-    was not bypassed; nothing validated the id.
+    An agent the call gate admits to the root loader could send
+    `{"type": "forget_record", "id": "../../important_project_dir"}` and
+    recursively delete a directory OUTSIDE the store entirely — the call gate
+    not bypassed, the id simply unvalidated.
 
-    The same discipline already existed one screen away for blob filenames
-    (`_guard_blob_name`) and simply was never applied to ids. It is enforced HERE
+    The same discipline applies to blob filenames (`_guard_blob_name`). It is
+    enforced HERE
     — at the kernel, where ids are minted — so every consumer inherits it rather
     than each remembering.
 
@@ -158,7 +157,7 @@ def guard_agent_id(verb: str, agent_id: object, arg: str = "id") -> dict | None:
     if agent_id == RESERVED_ID:
         # `kernel` names the operator: sends to it reach the root, and a memory
         # store serves the operator under it. An agent holding that id would BE
-        # the operator to every store (measured 2026-09-28).
+        # the operator to every store.
         return bad(verb, arg, f"a name other than the reserved {RESERVED_ID!r}")
     return None
 

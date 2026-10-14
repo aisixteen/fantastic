@@ -37,7 +37,7 @@ def test_make_verbs_builds_the_six_verbs():
 def test_next_corr_namespaces_by_agent_id_and_boot():
     """`<bridge id>-<boot nonce>-<n>`: the id keeps bridges apart, the nonce keeps
     BOOTS apart — the counter restarts at every boot, and a frame id names the
-    execution on the receiver (audit IO-5)."""
+    execution on the receiver."""
     core._bridges.clear()
     sa = core._state("a")
     sb = core._state("b")

@@ -1,4 +1,4 @@
-// A docs body is HELD under its pid this run (owner, 2026-10-06): it opens with the
+// A docs body is HELD under its pid this run: it opens with the
 // line saying it is erased after the next message and how to keep what is needed,
 // the model's own `grep` on that pid returns the verb line, and once answered the
 // body is cut to a stub naming the same grep. Python `test_reply_manifest.py`.

@@ -1,9 +1,9 @@
 //! A binary item rides the ORDINARY batch.
 //!
-//! There is ONE send. A second, bypassing path for bytes once left a
+//! There is ONE send. A second, bypassing path for bytes would leave a
 //! `write_stream` with no task row (invisible to `ps`, unreachable by
-//! `cancel`), no ledger id (no dedup, no join) and no timeout (measured
-//! 2026-09-02); it is gone. An `Item` carries the blob (or asks for a raw reply
+//! `cancel`), no ledger id (no dedup, no join) and no timeout. An `Item`
+//! carries the blob (or asks for a raw reply
 //! chunk), and the kernel dispatches it through `handle_binary` under the same
 //! row, id and deadline as any other item — in python's payload shape.
 
@@ -146,13 +146,12 @@ async fn a_named_binary_item_dedups_like_any_other() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_timed_binary_item_still_reaches_the_binary_channel() {
-    // The item's own DEADLINE must not cost it its bytes. Swift had two
-    // dispatch branches and only the untimed one forwarded the blob, so every
-    // item carrying a timeout fell silently to the TEXT channel — and AI
-    // routing stamps the layer's deadline on EVERY item, making that the only
-    // shape a model could produce (e2e `E10_dialog:swift`, 2026-09-03). Rust
-    // chooses the channel once, inside the spawned task, before the deadline
-    // race; this pins that structure.
+    // The item's own DEADLINE must not cost it its bytes. A dispatch with two
+    // branches where only the untimed one forwards the blob drops every item
+    // carrying a timeout silently to the TEXT channel — and AI routing stamps
+    // the layer's deadline on EVERY item, making that the only shape a model
+    // could produce. Rust chooses the channel once, inside the spawned task,
+    // before the deadline race; this pins that structure.
     let (_t, kernel, seen) = mk().await;
     let payload = b"42\n".to_vec();
     let out = kernel

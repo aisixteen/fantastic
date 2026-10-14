@@ -293,9 +293,9 @@ async def test_pump_names_a_refused_write_and_the_sealed_read(
 async def test_a_pump_onto_its_own_source_is_refused(
     seeded_kernel, file_bridge, tmp_path
 ):
-    """Audit BV-7: with only `source_path` the sink and sink_path default to the
-    source, and the first write's `truncate` cut the file the next read comes
-    from — 200 KiB became 64 KiB under a success reply. Refused, the path judged
+    """With only `source_path` the sink and sink_path default to the source, and
+    the first write's `truncate` would cut the file the next read comes from —
+    shrinking it under a success reply. Refused, the path judged
     normalised (`./x` is `x`); the file is untouched."""
     k, fb = seeded_kernel, file_bridge
     data = bytes(range(256)) * 800

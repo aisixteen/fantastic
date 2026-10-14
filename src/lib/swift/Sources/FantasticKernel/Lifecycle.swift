@@ -91,11 +91,10 @@ extension Kernel {
     /// was. The daemon awaits this beside SIGINT/SIGTERM/SIGHUP; when it fires,
     /// the daemon runs `shutdown()`, releases the lock and exits 0.
     ///
-    /// CANCELLATION-AWARE. It parked on a bare `withCheckedContinuation`, so the
-    /// LOSER of that race — this leg, whenever a signal won — was never resumed
-    /// and `cancelAll()` waited on it forever: the daemon printed nothing on
-    /// SIGTERM/SIGINT, never tore down, and had to be SIGKILLed with `lock.yaml`
-    /// left behind. A cancelled wait now resolves exactly like a fired one; the
+    /// CANCELLATION-AWARE. Parked on a bare `withCheckedContinuation`, the
+    /// LOSER of that race — this leg, whenever a signal wins — would never be
+    /// resumed and `cancelAll()` would wait on it forever, with no teardown and
+    /// `lock.yaml` left behind. A cancelled wait resolves exactly like a fired one; the
     /// caller is already past the point where it cares which.
     public func shutdownRequested() async {
         let slot = ShutdownWaitSlot()
@@ -203,9 +202,8 @@ extension Kernel {
         let mine = tasks.carriers(KernelTaskLocals.currentTask)
         let deadline = Date().addingTimeInterval(quietTimeout)
         // SETTLING, not PENDING: a fork never settles by construction, so
-        // waiting on one burned the whole quiet timeout on every daemon with a
-        // scheduler / web / bridge loop on the tree (python, 2026-09-21:
-        // SIGTERM→exit 10.25 s with a scheduler, 0.29 s without). The cancel
+        // waiting on one would burn the whole quiet timeout on every daemon with a
+        // scheduler / web / bridge loop on the tree. The cancel
         // loop below still takes every non-keepalive root, forks included.
         while Date() < deadline && !tasks.settling(except: mine).isEmpty {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -264,7 +262,7 @@ extension Kernel {
                         try await b.flushPending(agentId: a.id, kernel: self)
                     }
                 } catch {
-                    // C87: python's line carries NO agent id
+                    // Python's line carries NO agent id
                     // (`print(f"  [shutdown] flush_pending raised: {e}",
                     // file=sys.stderr)`) — it is called on the root alone
                     // there; kept id-less here too even though this loop
@@ -300,11 +298,11 @@ extension Kernel {
     /// Python `Agent.shutdown`: depth-first like cascade-delete, but DOES NOT
     /// touch records, disk, or tree membership — only invokes each bundle's
     /// teardown hook. Children first, then this agent's `onShutdown` — ONLY
-    /// that hook, never `onDelete` in its place (audit c9). A hook that throws
+    /// that hook, never `onDelete` in its place. A hook that throws
     /// is printed and the walk continues: one bundle's teardown cannot take
     /// down the rest.
     ///
-    /// C87 residual (not reproduced, by construction): python additionally
+    /// Not reproduced, by construction: python additionally
     /// catches around the RECURSIVE `await child.shutdown()`
     /// (`  [shutdown] <cid> raised: <e>`). This function is non-throwing (its
     /// one fallible step, the hook call, has its own catch below), so nothing

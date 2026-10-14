@@ -18,7 +18,7 @@
 // file only while it still names OUR pid (python's `release_lock`).
 //
 // The one-shot CLI paths (`call`, `init`) take this same flock and refuse on
-// `.alreadyRunning` — they never judge a pid alive (owner, 2026-10-03).
+// `.alreadyRunning` — they never judge a pid alive.
 
 #if canImport(Darwin)
     import Darwin

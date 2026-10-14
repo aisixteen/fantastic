@@ -1,16 +1,14 @@
 //! web_rest judges a request BEFORE it reads the body, and bounds the body — the
 //! twin of python `web_rest/tests/test_web_rest_ingress_order.py`.
 //!
-//! Audit IO-4 (2026-10-03): the whole body was buffered (`to_bytes(body,
-//! usize::MAX)`) and parsed before the leg's ingress rule ran — a sealed or
-//! password-gated leg made the kernel hold and parse any amount of data from a
-//! client it was about to refuse. Now the rule judges the request on what it says
-//! up front (its target and its `X-Fantastic-Auth` credential), and only an
-//! admitted request's body is read — at most `MAX_BODY` bytes (16 MiB, io_bridge's
-//! `MAX_FRAME`: the one frame cap every wire leg holds); past it the request is
-//! refused, loud, 413.
+//! The rule judges the request on what it says up front (its target and its
+//! `X-Fantastic-Auth` credential), and only an admitted request's body is read —
+//! at most `MAX_BODY` bytes (16 MiB, io_bridge's `MAX_FRAME`: the one frame cap
+//! every wire leg holds); past it the request is refused, loud, 413. Buffering
+//! and parsing the body first would let a sealed or password-gated leg make the
+//! kernel hold any amount of data from a client it is about to refuse.
 //!
-//! Audit IO-6 (2026-10-03) at this leg: a non-ASCII credential is a plain 403.
+//! A non-ASCII credential is a plain 403 at this leg.
 //!
 //! Over a RAW socket: what is asserted is that the answer comes while the client
 //! still holds the rest of its body back — a leg that read first would wait for it.
@@ -65,7 +63,7 @@ async fn host(
 }
 
 /// The request head: `POST <path>` with `headers` (raw bytes — a header value may
-/// be latin-1). `host` names the server's own authority (audit W-2).
+/// be latin-1). `host` names the server's own authority.
 fn head(port: u16, path: &str, headers: &[(&str, &[u8])]) -> Vec<u8> {
     let mut out = format!("POST {path} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\n").into_bytes();
     for (k, v) in headers {

@@ -185,10 +185,8 @@ extension AIBackend {
                     "ts": .double(nowSecs()), "phase": .string("too_small"),
                     "detail": .object([
                         "context_window": .integer(window), "system_tokens": .integer(sysTokens),
-                        // NAME THE KILLER. Measured 2026-08-26 (python, `live_subai_graph`,
-                        // 131k window): this fired needing a single >126k-token turn and
-                        // recorded nothing about it — the run's tempdir was gone before
-                        // anyone could ask WHICH message was that big.
+                        // NAME THE KILLER: record WHICH message was that big, while
+                        // the run's state is still there to ask.
                         "last_message_tokens": .integer(lastCost),
                         "last_message_head": .string(
                             String(pyStr(body[body.count - 1]["content"]).unicodeScalars.prefix(200))),
@@ -246,10 +244,8 @@ extension AIBackend {
         // not a fallback.
         // Trim from the MIDDLE, not the front. `outBody[0]` is the goal turn every
         // strategy deliberately pins (`compact`/`truncate` both put it first); the
-        // last entry is the live turn. Taking from the front silently undid the pin
-        // — the exact regression the pin exists to prevent, re-introduced one layer
-        // up. Measured 2026-08-28 (python): with a snug window the goal sentence was
-        // absent from the projection entirely, in both strategies.
+        // last entry is the live turn. Taking from the front would silently undo the
+        // pin.
         var outBody = proj.body
         let stable = systemBlock + factBlock
         while outBody.count > 2 && AIContext.estimateTokens(stable + [notice] + outBody) > b {
@@ -301,8 +297,8 @@ extension AIBackend {
         if proj.folded > 0 {
             // "When it feels it folded, it runs context_recall" — at the start of
             // the next turn, over the new head. DEBOUNCED: a recall is a model
-            // call, and a recall after EVERY fold batch doubled the turn price
-            // (measured 2026-09-06, python: 11 folds, 5 recalls in 60 turns). Every
+            // call, and a recall after EVERY fold batch doubles the turn price.
+            // Every
             // RECALL_EVERY-th batch, or when a batch folded a lot at once.
             countFolds(agentKey, proj.folded)
         }
@@ -384,11 +380,9 @@ extension AIBackend {
         for m in store.dropFirst(idx) {
             guard m["role"].asString == "assistant" else { continue }
             // Tool calls live as envelope TEXT inside the assistant content —
-            // extract them with the shared parser. It now reads all three
-            // envelopes and accepts an unterminated-but-call-shaped block, so
-            // this read-model SEES reactions it previously scored as absent (a
-            // model that reacted in a shape the old scanner dropped was recorded
-            // as not having reacted at all). Pinned by
+            // extract them with the shared parser. It accepts an
+            // unterminated-but-call-shaped block, so this read-model sees every
+            // reaction shape the parser reads. Pinned by
             // `theReactionReaderSeesShapesItUsedToDrop`.
             for call in extractToolCalls(m["content"].asString ?? "") {
                 let args = call.arguments
@@ -449,10 +443,8 @@ extension AIBackend {
         }
         let truncated = indexed.count > limit
         var page = Array(indexed.suffix(limit))
-        // A PAGE MUST FIT THE WINDOW IT IS GOING INTO. Measured 2026-09-05
-        // (python): the default 20 turns of 6.8KB reads came back as one
-        // 14,786-token reply against a 12,000 window; `too_small` fired as a
-        // failfast and the chain died. The page is trimmed from the OLDEST end
+        // A PAGE MUST FIT THE WINDOW IT IS GOING INTO, or `too_small` fails
+        // the chain. The page is trimmed from the OLDEST end
         // (the newest of what was asked for is kept) and says so, with the index
         // to page further back from — the caller loses a page, never the run.
         let cap = AIContext.inlineCap(agent, modelWindow: config.modelWindow)
@@ -470,9 +462,8 @@ extension AIBackend {
         func serialized(_ pg: [(offset: Int, element: JSON)]) -> Int64 {
             // THE UNIT THE DELIVERY MEASURES: the whole reply, serialized, as one
             // user turn (`routeReply` dehydrates on exactly that). Sizing the inner
-            // messages alone let a 5,243-byte recall slip past the cap and come
-            // back as a stub (measured 2026-09-06, python recall_after_fold).
-            // Margin as in `fitReply`.
+            // messages alone would let a recall slip past the cap and come
+            // back as a stub. Margin as in `fitReply`.
             let body = renderReply(
                 .object([
                     "messages": messages(pg),
@@ -547,8 +538,7 @@ extension AIBackend {
         out["context_strategy"] = AIContext.strategy(agent)
         out["memory_store_id"] = agent.metaValue(forKey: "memory_store_id") ?? .null
         // WHERE its key is read — `{store, ref}`, a pointer, never the secret. An agent
-        // copying this one's record needs it (e2e subai, 2026-10-13: a keyed door, and
-        // the template it was told to read did not show it).
+        // copying this one's record needs it.
         out["credentials"] = agent.metaValue(forKey: "credentials") ?? .null
         return out
     }

@@ -2,7 +2,7 @@
 `hello {guid}`, the host kernel then reaches the page's agents as `<guid>|<agent>`,
 each call rides this socket as an outbound `call` frame answered by an inbound
 `reply`/`error` with the same id, and the page stops being an address the moment
-its socket closes (owner, 2026-09-30).
+its socket closes.
 
 Driven through the real proxy loop with a fake socket, so the host can send INTO
 the page from the test's own event loop.
@@ -171,7 +171,7 @@ async def test_one_guid_per_connection(seeded_kernel):
 
 
 async def test_two_tabs_of_one_identity_are_one_principal(seeded_kernel):
-    """Owner, 2026-10-03: every tab says hello with the identity's guid; the host
+    """Every tab says hello with the identity's guid; the host
     calls ALL of them, the first reply settles, the other is dropped; a closed tab
     leaves the guid routable through the other."""
     k = seeded_kernel
@@ -236,7 +236,7 @@ async def test_a_call_racing_the_disconnect_settles_instead_of_hanging(seeded_ke
 
 
 async def test_an_emit_to_a_peer_guid_reaches_every_tab(seeded_kernel):
-    """Owner, 2026-10-03: an emit on `<guid>|<agent>` goes to EVERY live tab of
+    """An emit on `<guid>|<agent>` goes to EVERY live tab of
     that guid as an `emit` frame."""
     k = seeded_kernel
     ws, task = await _open(k)
@@ -260,7 +260,7 @@ async def test_an_emit_to_a_peer_guid_reaches_every_tab(seeded_kernel):
 
 
 async def test_a_reply_to_one_tab_is_mirrored_to_the_others(seeded_kernel):
-    """Owner, 2026-10-03: tab A's call gets its `reply`; tab B (same hello guid)
+    """Tab A's call gets its `reply`; tab B (same hello guid)
     gets `reply_mirror` with the same id and data; a tab of another guid nothing."""
     k = seeded_kernel
     ws, task = await _open(k)

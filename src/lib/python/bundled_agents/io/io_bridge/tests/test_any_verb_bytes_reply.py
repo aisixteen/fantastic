@@ -109,7 +109,7 @@ def one(seeded_kernel):
         id="probe",
         callable_by={"t_ws": "*", "t_rest": "*"},
     )
-    # `port`: the authority the web's Host guard admits (audit W-2).
+    # `port`: the authority the web's Host guard admits.
     seeded_kernel.create(None, id="t_web", port=8088)
     app = make_app("t_web", seeded_kernel)
     app.add_api_websocket_route("/{host_id}/ws", _make_endpoint("t_ws", seeded_kernel))

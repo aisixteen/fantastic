@@ -4,21 +4,21 @@ This is the other half of what every probe duplicated. Creating a live AI agent
 is never one call: it is a record with a backend-shaped meta, a reciprocal
 ingress grant so its stream can reach `cli`, an api key for the backends that
 need one, a provider wrapped in the proxy reader, and a drive loop that knows
-when a chain has ended. Ten copies of that, each subtly behind the others.
+when a chain has ended — once, instead of a copy per probe.
 
-The failures this consolidates are all measured, not imagined:
+The failure modes it handles:
 
-  * `ps`/`cancel` are KERNEL verbs. Addressed to the AI agent they came back
-    `not_here`, and a harness that discards the reply cancelled NOTHING — capped
-    runs were not killed, they were abandoned, and their turns kept running.
+  * `ps`/`cancel` are KERNEL verbs. Addressed to the AI agent they come back
+    `not_here`, and a harness that discards the reply cancels NOTHING — capped
+    runs are abandoned, not killed, and their turns keep running.
   * A dead chain announces itself as `status(reason=error)` on the AI's own
-    inbox. With no subscriber it went nowhere and a chain that died mid-flight
-    read as a model that chose to stop.
+    inbox. With no subscriber it goes nowhere and a chain that died mid-flight
+    reads as a model that chose to stop.
   * `ai_core` RETURNS `{"error": …}` rather than raising, so a first send that
-    timed out scored as "the model produced nothing".
+    timed out would score as "the model produced nothing".
   * A fixed turn budget cannot tell "slower" from "worse" — under parallel load
-    probes hit a 40-turn cap mid-work that they had finished solo an hour before.
-    The cap counts turns since the last NEW call instead.
+    a probe can hit a turn cap mid-work it finishes solo. The cap counts turns
+    since the last NEW call instead.
 
 Deny-all is the substrate's posture, so `can_call` is a REQUIRED argument here:
 there is no "sensible default toolset" to fall back to, and a silent default is
@@ -92,7 +92,7 @@ async def connect(
 ) -> Connected:
     """Create the AI agent, wire both sides of the gate, install the reader."""
     L = limits or Limits.from_env(os.environ)
-    # `docs` IS A GRANT (owner, 2026-10-06): no verb is exempt by name, so every AI
+    # `docs` IS A GRANT: no verb is exempt by name, so every AI
     # the suite connects reads docs by a `docs` grant on the root — merged into
     # whatever the fixture already grants the root; the ingress half opens below
     # with the rest of the AI's `can_call`.
@@ -113,8 +113,8 @@ async def connect(
         # THE INGRESS HALF. A peer granted `can_call: {ai: [...]}` still cannot
         # reach the AI: the gate is two-sided and a sibling has no baseline edge.
         # A fixture that opens only the egress half builds a wire that carries
-        # nothing in the direction it was drawn — measured here as a probe whose
-        # push-back never arrived, scoring a model failure that never happened.
+        # nothing in the direction it was drawn — a probe whose push-back never
+        # arrives would score a model failure that never happened.
         # THE DRIVER'S OWN INGRESS, on the wire only. In process the probe is
         # the OPERATOR and its sends are ungated; across REST it arrives as the
         # `rest` leg — an agent, gated like any other — so the AI must accept it
@@ -128,9 +128,7 @@ async def connect(
                     # ...and the EVENT face, which dispatches a `watch`
                     # as itself. The gate is two-sided: without this the
                     # subscription is refused at ingress and the stream
-                    # reads as an agent that simply never emits (measured
-                    # 2026-09-12, compaction:swift — every `context:compacted`
-                    # event fired and none was counted).
+                    # reads as an agent that simply never emits.
                     **{i: "*" for i in getattr(root, "watch_ids", ())},
                 }
             }
@@ -246,20 +244,17 @@ async def connect(
 
         `detail.error` alone is not enough: the AI layer's own 180s per-send
         ceiling closes a turn with `done{reason:"timeout"}` and NO error key, and
-        a cancel closes it with `done{reason:"cancelled"}`. Both were invisible,
-        so a chain that died at the ceiling and a model that chose to stop wrote
-        the identical transcript — measured on `agentic.build:rust` and `:swift`,
-        2026-09-03, where the chain ended after 160s and 280s with no reason
-        recorded anywhere in the run.
+        a cancel closes it with `done{reason:"cancelled"}`. Without this, a chain
+        that died at the ceiling and a model that chose to stop write the
+        identical transcript.
         """
         return (
             ev.get("type") == "status"
             and ev.get("phase") == "done"
             # `awaiting` is the model's EXPLICIT wait (`<call name="await">`): a benign
-            # end of turn, not a failure — the next delivery wakes it (2026-09-10).
+            # end of turn, not a failure — the next delivery wakes it.
             # `dead_turn` is an empty answer the kernel REROLLS with the no-call
-            # nudge (owner, 2026-09-30) — the chain goes on; capping on it cancelled
-            # live chains (graph_shape:rust, 2026-10-05).
+            # nudge — the chain goes on; capping on it would cancel live chains.
             and det.get("reason") not in (None, "ok", "awaiting", "dead_turn")
         )
 
@@ -267,10 +262,8 @@ async def connect(
         return ev.get("type") == "status" and ev.get("phase") == "done"
 
     def _note_end(det: dict) -> None:
-        """EVERY TURN'S END, not only a failed one. A benign end (`ok`, `awaiting`,
-        `dead_turn`) used to leave no line at all, so a chain that stopped after a
-        clean turn could not say HOW that turn ended (subai_graph:rust,
-        2026-10-05)."""
+        """EVERY TURN'S END, not only a failed one, so a chain that stopped after a
+        clean turn (`ok`, `awaiting`, `dead_turn`) says HOW that turn ended."""
         print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
 
     if core is None:
@@ -359,17 +352,16 @@ async def human(
     person is sixteen copies to drift, and the wiring is the part that is easy to
     get wrong: the AI and the human are SIBLINGS, so there is no baseline edge
     between them and BOTH halves must be granted or the first task is refused at
-    ingress and the chain never starts (measured 2026-09-04 on the first
-    conversion: zero turns, a clean cap, nothing to read).
+    ingress and the chain never starts (zero turns, a clean cap, nothing to
+    read).
 
     The probe still grants its AI `can_call: {"user": "*"}` and passes
     `callable_by={"user": "*"}` to `connect` — that half belongs to the AI's own
     record, which this helper does not own.
     """
     # EVERY AI IT MAY TASK, not just one. A probe with a second session (a cold
-    # agent, a reviewer) names its own ids; granting only `ai` left the second
-    # one unreachable and its chain never started — zero turns, a clean cap,
-    # nothing to read (measured 2026-09-04 on memory_distill).
+    # agent, a reviewer) names its own ids; granting only `ai` would leave the
+    # second one unreachable and its chain would never start.
     ais = [ai] if isinstance(ai, str) else list(ai)
     payload = {
         "type": "create_agent",
@@ -400,15 +392,14 @@ _AWAIT_CALL = re.compile(r'<call\s+name="await"')
 #: Kernel service work and the driver's own calls — never a peer still working.
 _QUIET_VERBS = {"ps", "persist_writer", "flush_executions", "ws_drain", "inbound_call"}
 #: Messages a test has SCHEDULED for an agent (`facts_arm.send_later`) and not yet
-#: sent, by agent id. A chain with one pending is not over: measured 2026-10-06, the
-#: DONE_QUIET end cut flat_roots / fold_paging / facts_x_chains after their first
-#: task, before the later tasks the harness was about to send arrived.
+#: sent, by agent id. A chain with one pending is not over: ending it on quiet would
+#: cut a multi-task test after its first task, before the later tasks arrive.
 LATER: dict[str, set] = {}
 
 
 #: Nothing in flight anywhere for this long ends a wait on a swarm. The swarm tests
-#: run no clock, so a quiet kernel stays quiet (owner, 2026-10-07: multisubai_build's
-#: team was never started and the harness sat out its whole 600 s window).
+#: run no clock, so a quiet kernel stays quiet — without this a swarm that never
+#: started would sit out its whole window.
 IDLE_END = 30.0
 
 
@@ -446,9 +437,8 @@ class ChainEnd:
     and nothing in flight ANYWHERE (no sub-AI turn, job or tick of a peer), so a
     test whose peers still report back keeps the 30 s rule. A chain whose last turn
     called `await` stays open while any peer has work in flight (the 15-min hard
-    stop still bounds it). Measured
-    2026-10-06: the 30 s window was ~34 s of every test's wall (270 of 550 s
-    over eight coding tests) after the model had already called done.
+    stop still bounds it). Waiting the 30 s window after the model has already
+    called done would add that much to every test's wall.
 
     `check` is called only while no new turn has landed; it reads `ps` at most
     every PS_EVERY seconds. Returns (cap, busy): `cap` is the CHAIN ENDED
@@ -462,9 +452,7 @@ class ChainEnd:
     async def check(self, transcript: list[str], idle: float) -> tuple[str, bool]:
         said_done = bool(transcript) and bool(_DONE_CALL.search(transcript[-1] or ""))
         # AWAITING: the AI asked to be woken by what is in flight — an inquiry's
-        # later answer, a peer's report. While a peer works, its chain is not over
-        # (measured 2026-10-07, peer_review: the coder awaited the reviewer and the
-        # 30 s rule cut the chain while the reviewer was still working).
+        # later answer, a peer's report. While a peer works, its chain is not over.
         awaited = bool(transcript) and bool(_AWAIT_CALL.search(transcript[-1] or ""))
         if LATER.get(self.aid):
             said_done = False  # the test still has a message to send this agent
@@ -510,19 +498,16 @@ async def drive(
 
     Returns "" on a clean end, or the reason the run was cut.
 
-    THE HARNESS NO LONGER ANSWERS QUESTIONS. It used to scrape
-    `{"type":"inquiry"}` out of the model's prose and post a reply back in from
-    outside the kernel, which is why the human had no id, no record, no gate and
-    no ledger row. The human is an AGENT now (`e2e/probes/user_probe`) — the
+    THE HARNESS DOES NOT ANSWER QUESTIONS. The human is an AGENT
+    (`e2e/probes/user_probe`) with an id, a record, a gate and ledger rows — the
     model calls it, the answer comes back later under its pid, and a fixture chooses what the human
     says by writing that agent's `answer` field.
     """
     root, aid, L = conn.root, conn.id, conn.limits
     # THE TRANSCRIPT FOLLOWS THE DRIVEN CLIENT. The wire reader polls durable
     # history by client_id and was born defaulting to "probe" — a probe driving
-    # any other client got an empty transcript, a blind no-progress loop, and
-    # transcript checks that fail while the model quietly succeeds (measured:
-    # coding/file_edit:rust, n=0 with 6 rows under the real client).
+    # any other client would get an empty transcript, a blind no-progress loop,
+    # and transcript checks that fail while the model quietly succeeds.
     if getattr(conn.proxy, "client_id", None) is not None:
         conn.proxy.client_id = client_id
 
@@ -559,10 +544,7 @@ async def drive(
     while idle < L.idle:
         await asyncio.sleep(TICK)
         calls = distinct_calls(conn.proxy.transcript)
-        # NOTHING IS SCRAPED HERE ANY MORE. The harness used to read the model's
-        # own prose for `{"type":"inquiry"}` and post an answer back in from
-        # outside the kernel — the human had no id, no record, no gate and no
-        # ledger row. The human is an AGENT now (`e2e/probes/user_probe`): the
+        # NOTHING IS SCRAPED HERE. The human is an AGENT (`e2e/probes/user_probe`): the
         # model calls it and the answer arrives later under its pid, so a question needs the
         # driver no more than any other call does.
         if calls != seen_calls:
@@ -580,9 +562,8 @@ async def drive(
             elif busy and idle >= 30:
                 # A generation IS in flight — that is activity, not idleness.
                 # Without this hold, a single long turn (a big write after a big
-                # read) outlived L.idle and the while-condition exited SILENTLY
-                # mid-generation (measured 2026-09-01, gym bowling×3 + java: the
-                # chain died at turn 3-4, stub never written, no cap printed).
+                # read) could outlive L.idle and the while-condition would exit
+                # SILENTLY mid-generation.
                 # Held at 28 so the in-flight check re-runs; a truly hung task
                 # still ends via the provider/kernel timeout, after which the cap
                 # above fires normally.

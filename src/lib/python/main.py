@@ -43,7 +43,7 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     seeded = not any(r.get("parent_id") is None for r in records)
     if seeded and (root_dir / "agent.yaml").exists():
         # A root record that is THERE but did not parse is never written over —
-        # the seed merged onto nothing and lost its other keys (audit 2026-10-14).
+        # the seed would merge onto nothing and lose its other keys.
         raise SystemExit(
             f"[kernel] {root_dir / 'agent.yaml'} is unreadable — fix or remove it; "
             "the root is not re-seeded over it"
@@ -143,11 +143,10 @@ def main_dispatch() -> None:
     atexit.register(_atexit_shutdown)
 
     async def _run() -> None:
-        # SHUTDOWN ON THE LOOP THAT RAN THE CALL. A one-shot subcommand used to
-        # leave `asyncio.run` and let the atexit net start a FRESH loop — where
-        # the pump's tail task had died with the first one, so `catch_up` could
-        # never see the counter caught up and burned its full 1000 × 0.01 s
-        # bound: `kernel ps` took 11.5 s (measured 2026-09-21). Shutting down
+        # SHUTDOWN ON THE LOOP THAT RAN THE CALL. Leaving `asyncio.run` and letting
+        # the atexit net start a FRESH loop would strand `catch_up`: the pump's
+        # tail task dies with the first loop, so it could never see the counter
+        # caught up and would burn its full 1000 × 0.01 s bound. Shutting down
         # inside the same loop lands every row the one-shot minted and returns
         # as soon as the log is caught up; the atexit net below then no-ops on
         # `_shutdown_complete`, and the long-running mode's own `finally` does too.

@@ -18,7 +18,7 @@ from _testkit import wire
 @pytest.fixture
 def client(seeded_kernel):
     # The web host's record: its port is the authority the Host guard admits
-    # (audit W-2) — the client names it on every request, the upgrade included.
+    # — the client names it on every request, the upgrade included.
     seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so inbound frames dispatch (mirrors

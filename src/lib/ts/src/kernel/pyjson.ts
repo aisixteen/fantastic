@@ -7,7 +7,7 @@
 //                 `": "`) and, by default, ASCII escaping — a wire frame and a
 //                 settle digest are byte-identical across runtimes.
 //   pySplitlines — `str.splitlines()`: every line boundary python knows.
-//   strictLoads — the wire's STRICT JSON (owner D13, 2026-10-01): only values every
+//   strictLoads — the wire's STRICT JSON: only values every
 //                 runtime can hold. It keeps one fact JS drops: which integral
 //                 numbers python reads as a FLOAT (`wireFloat`).
 
@@ -52,7 +52,7 @@ function reprStr(s: string): string {
  *  switches only below -6 / at 21), with a sign and at least two exponent digits.
  *  An integral JS number reads as a python int (`String(n)`) unless `float` says
  *  python holds it as a float (`1.0`, `1e+20`, `-0.0` — `wireFloat`); what the
- *  wire does with integers beyond 2^53 is an open owner decision, left as it is. */
+ *  wire does with integers beyond 2^53 is left open. */
 function reprNum(n: number, float = false): string {
   if (Number.isNaN(n)) return "nan";
   if (n === Infinity) return "inf";

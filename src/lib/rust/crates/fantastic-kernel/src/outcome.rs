@@ -37,10 +37,8 @@ pub enum Status {
     /// A semantic failure — a missing path, a patch that did not match, a
     /// refusal the handler composed itself. `result` is that reply, verbatim.
     ///
-    /// This used to settle `Completed`, on the rule that the kernel does not
-    /// introspect domain replies. The rule did not survive contact with its own
-    /// storage: the durable row already carried `error`/`reason` copied off the
-    /// result BESIDE `status: completed`, so one row said both "fine" and
+    /// Not `Completed`: the durable row carries `error`/`reason` off the result,
+    /// and beside `status: completed` one row would say both "fine" and
     /// "failed". Failure is a STATUS; nothing downstream should have to parse a
     /// result to learn it.
     Errored,
@@ -225,22 +223,22 @@ pub struct Item {
     pub binary: Option<Blob>,
     /// The RAW (tag-typed) `exec_id`, when a caller is forwarding a value it
     /// did not itself parse — a model's `<exec_id>` argument, or a wire
-    /// frame's `id` field (C38). An untyped [`Value`] the KERNEL validates
+    /// frame's `id` field. An untyped [`Value`] the KERNEL validates
     /// and produces python's exact refusals for: `int(id)` NAMES an
     /// execution to JOIN (refused if none exists under it), a non-empty
     /// string NAMES one to open-or-join, anything else is `bad_arg`. Set,
-    /// this SUPERSEDES the typed `id` above — routing used to coerce with
-    /// `args.get("exec_id").and_then(Value::as_str)`, which silently
-    /// DROPPED an int `exec_id` (never attempting the join python performs)
-    /// instead of forwarding it.
+    /// this SUPERSEDES the typed `id` above — coercing with
+    /// `args.get("exec_id").and_then(Value::as_str)` would silently DROP an int
+    /// `exec_id` (never attempting the join python performs) instead of
+    /// forwarding it.
     pub raw_id: Option<Value>,
-    /// The RAW `timeout`, forwarded untouched (C38) instead of
+    /// The RAW `timeout`, forwarded untouched instead of
     /// `args.get("timeout").and_then(Value::as_f64)`, which silently
     /// DROPPED a malformed value (e.g. the string `"soon"`) — defaulting to
     /// "wait forever" — instead of the kernel's `bad_arg` refusal. Set, this
     /// SUPERSEDES the typed `timeout` above.
     pub raw_timeout: Option<Value>,
-    /// The RAW `retries`, forwarded untouched (C38) for the same reason.
+    /// The RAW `retries`, forwarded untouched for the same reason.
     /// Set, this SUPERSEDES the typed `retries` above.
     pub raw_retries: Option<Value>,
     /// SECRET MARKS (`crate::secret`): dotted paths into the payload whose values
@@ -327,7 +325,7 @@ impl Item {
         self
     }
 
-    /// Forward a RAW (tag-typed) `exec_id` for the KERNEL to validate (C38) —
+    /// Forward a RAW (tag-typed) `exec_id` for the KERNEL to validate —
     /// use this instead of `.with_id(...)` whenever the value came from a
     /// caller this code did not itself construct (model tag args, a wire
     /// frame), so an int join or a malformed value reaches python's exact
@@ -338,14 +336,14 @@ impl Item {
         self
     }
 
-    /// Forward a RAW `timeout` for the kernel to validate (C38).
+    /// Forward a RAW `timeout` for the kernel to validate.
     #[must_use]
     pub fn with_raw_timeout(mut self, v: Value) -> Self {
         self.raw_timeout = Some(v);
         self
     }
 
-    /// Forward RAW `retries` for the kernel to validate (C38).
+    /// Forward RAW `retries` for the kernel to validate.
     #[must_use]
     pub fn with_raw_retries(mut self, v: Value) -> Self {
         self.raw_retries = Some(v);
@@ -380,7 +378,7 @@ pub struct Outcome {
     /// How many dispatch attempts this execution spent (1 unless retried).
     pub attempts: u32,
     /// THE BINARY REPLY BODY — the carrier for the `bytes` value python's
-    /// reply dict holds natively (C37). `None` = the verb returned NO chunk;
+    /// reply dict holds natively. `None` = the verb returned NO chunk;
     /// `Some(b)` = it returned one, `b` possibly EMPTY (a 0-byte read of an
     /// empty file). Every wire leg picks its response shape from this
     /// distinction, exactly as python's `isinstance(reply["bytes"], bytes)`
@@ -408,7 +406,7 @@ impl Outcome {
     }
 
     /// …carrying the binary reply body the handler returned, at its slot of the
-    /// result (C37).
+    /// result.
     #[must_use]
     pub fn with_body(mut self, body: Option<Blob>) -> Self {
         self.body = body;

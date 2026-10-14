@@ -15,8 +15,8 @@ public enum AIContext {
     ///
     /// SERIALIZED THE WAY PYTHON SERIALIZES: `json.dumps(message, default=str)`
     /// — `', '`/`': '` separators and `ensure_ascii`, so `—` costs six chars, not
-    /// three — measured in CODE POINTS. A compact, raw-UTF-8 dump made every
-    /// estimate on this path smaller than python's, which is a different budget.
+    /// three — measured in CODE POINTS. A compact, raw-UTF-8 dump would make
+    /// every estimate on this path smaller than python's, a different budget.
     public static func estimateOne(_ message: JSON) -> Int64 {
         let n = pyJsonDumps(message).unicodeScalars.count
         return Int64((n + AIConstants.CHARS_PER_TOKEN - 1) / AIConstants.CHARS_PER_TOKEN)
@@ -106,8 +106,7 @@ public enum AIContext {
 
     /// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER
     /// the inline cap, or its answer is stored and digested and the model pulls
-    /// its own reply (measured 2026-09-06: a 4788-byte grep result came back as
-    /// a receipt; the run drowned in pulls). Keep items from the front while the
+    /// its own reply. Keep items from the front while the
     /// rendered reply fits. Returns (kept, truncated). Python `_fit_reply`.
     ///
     /// MEASURED ON THE SERIALIZED FORM, with headroom for the envelope the verb

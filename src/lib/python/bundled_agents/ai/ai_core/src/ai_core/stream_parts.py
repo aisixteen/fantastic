@@ -1,5 +1,4 @@
-"""Streaming parts — a model's output split into PARTS as it is written (owner design
-2026-10-04, `tmp/streaming_parts.md`).
+"""Streaming parts — a model's output split into PARTS as it is written.
 
 The provider streams raw text; this splitter reads it incrementally, with the SAME
 grammar `tool_parse` reads whole, and yields part lifecycle events:
@@ -13,7 +12,7 @@ grammar `tool_parse` reads whole, and yields part lifecycle events:
 
 Kinds: "text" (prose), "thinking" (inside `<think>`), "call" (a `<call name="…">`
 envelope, its args streaming as they are written). A call written inside a thought is
-thinking text, never a call part — only the answer acts (owner, 2026-10-07).
+thinking text, never a call part — only the answer acts.
 
 It is ANIMATION, never action: nothing here dispatches. The call parser in `tool_parse`
 stays the one authority on what a call IS; this only tells a watcher what is being
@@ -60,7 +59,7 @@ class PartSplitter:
         self.parts: list[dict] = []  # every part opened, in order
         # every CLOSED call part, in order: (stream_id, body) — what a dispatched
         # call is matched to by its exact body, so the message it becomes carries
-        # the stream it was previewed as (owner, 2026-10-04)
+        # the stream it was previewed as
         self.closed_calls: list[tuple[str, str]] = []
 
     # ── public ──
@@ -142,7 +141,7 @@ class PartSplitter:
             return self._step_call(out)
         # Outside a call: look for the next markup that changes the part. INSIDE
         # thinking only `</think>` does — a `<call>` there is thinking text, never a
-        # call part (owner, 2026-10-07: only the answer acts).
+        # call part (only the answer acts).
         opens = [THINK_CLOSE] if self._in_think else [OPEN, THINK_OPEN]
         hits = [(self._buf.find(t), t) for t in opens]
         hits = [(i, t) for i, t in hits if i != -1]
@@ -271,7 +270,7 @@ class PartSplitter:
 
 
 def cut_marker(text_so_far: str, why: str, unsent: list[dict]) -> str:
-    """The assistant row a CUT pass leaves (owner, 2026-10-04) — a marker on top of the
+    """The assistant row a CUT pass leaves — a marker on top of the
     context, never a half answer. `why` is "stopped by <receiver>" (a receiver stopped
     the stream) or "model stopped generating" (the pass ended with a block still open).
     Kept: the VISIBLE text streamed so far, thinking stripped; a cut inside an open

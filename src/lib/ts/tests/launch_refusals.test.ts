@@ -6,7 +6,7 @@
 // first one in python's order.
 //
 // Every expectation below was measured on python's `Agent._launch`
-// (kernel/_agent.py) with the same items on 2026-10-01 and is byte-identical.
+// (kernel/_agent.py) with the same items and is byte-identical.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

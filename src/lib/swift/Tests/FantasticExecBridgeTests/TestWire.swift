@@ -1,5 +1,5 @@
 // Open an edge on BOTH ends, as an operator would — python `_testkit.wire`.
-// The minimal gate (owner 2026-10-03) stamps only `{$self: "*"}`: every other
+// The minimal gate stamps only `{$self: "*"}`: every other
 // edge a test drives is an explicit grant.
 
 import FantasticJSON

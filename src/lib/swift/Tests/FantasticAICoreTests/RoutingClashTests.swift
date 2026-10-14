@@ -1,4 +1,4 @@
-// A ROUTING NAME A VERB ALSO TAKES (owner, 2026-10-11): `title` on a call is routing,
+// A ROUTING NAME A VERB ALSO TAKES: `title` on a call is routing,
 // never sent to the target. A verb whose docs name `title` could never receive it —
 // the call is refused, loud, and a verb without one is untouched. Twin of python's
 // `test_routing_clash.py`.

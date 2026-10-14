@@ -96,8 +96,7 @@ discovery-through-denial — the same way a sealed io leg's denial teaches
   that runner's `allowed`. Point the clock at the runner and give the runner the
   reach; do not build an inert parent to hold the job. A schedule fires AS THE
   SCHEDULER: the scheduler's `can_call` must reach the runner and the runner's
-  `callable_by` accept the scheduler. (A model spent 26,000
-  characters of one message deriving this from silence — measured 2026-09-04.)
+  `callable_by` accept the scheduler.
 
 - **A program's sends carry ITS RUNNER's identity** — the exec_bridge agent that
   started it. Its reach is that runner's `can_call`; a target must list the runner in

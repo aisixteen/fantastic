@@ -207,8 +207,7 @@ async fn a_never_written_sidecar_reads_empty_not_error() {
 async fn an_agent_cannot_write_another_agents_namespace() {
     // THE CONFUSED DEPUTY. `agent_id` arrives in the PAYLOAD, so without the
     // owner guard any agent granted `persist_blob` could forge another agent's
-    // memory — measured in python, where the victim read the forged content
-    // back as its own.
+    // memory, and the victim would read the forged content back as its own.
     const DESK: &str = "desk_blob_guard";
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().join(".fantastic");
@@ -239,7 +238,7 @@ async fn an_agent_cannot_write_another_agents_namespace() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_walk_that_escapes_the_root_raises_the_blob_verb() {
-    // ARCH2-6 outcome parity. A namespace that is not live is placed by walking
+    // Outcome parity. A namespace that is not live is placed by walking
     // the loader's persisted tree; python's walk (`_blob_reldir` → `_resolve_path`
     // → `_disk_parents` → `_walk`) has no `try`, so an entry linked outside the
     // root RAISES and the verb settles `failed` — not a `completed` reply.

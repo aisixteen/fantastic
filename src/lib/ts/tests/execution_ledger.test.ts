@@ -2,8 +2,8 @@
 //
 // The property under test is the one that makes a double-click safe: reusing an
 // id DECLARES "same intent", so the work runs ONCE and every later caller gets
-// the recorded outcome. Measured against the real python kernel 2026-08-27; the
-// ts kernel must agree, because the same ids cross the bridge between them.
+// the recorded outcome. The python kernel behaves this way; the ts kernel must
+// agree, because the same ids cross the bridge between them.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

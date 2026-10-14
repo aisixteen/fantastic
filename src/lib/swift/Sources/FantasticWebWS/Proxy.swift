@@ -29,7 +29,7 @@
 //   server → client : {"type":"reply_mirror", "id", "data"}  (the reply a SIBLING
 //                     connection of this hello guid got — never a call of this one)
 //
-// **THE PAGE AS A PEER KERNEL** (owner, 2026-09-30). A client that is itself a
+// **THE PAGE AS A PEER KERNEL.** A client that is itself a
 // kernel says `hello {guid}`; this leg then registers that guid with the host
 // kernel, which routes `send`s to `<guid>|<agent>` over this socket as outbound
 // `call` frames answered by inbound `reply`/`error` frames with the same id. One
@@ -43,21 +43,21 @@
 // (parity with python's `_proxy.run`). A single drain task pumps that inbox out
 // as `event` frames.
 //
-// **THE LEG GATE (C41).** Python resolves the leg's ingress rule PER FRAME and
+// **THE LEG GATE.** Python resolves the leg's ingress rule PER FRAME and
 // PER KIND (call/emit/watch/state_subscribe), so opening the edge
 // (`update_agent ingress_rule=allow_all_ingress`) takes effect without a
 // reconnect, and an ABSENT rule — or an absent leg RECORD — is SEALED. A denied
 // `call` is answered (`{error, reason:'unauthorized', hint?, see?}` inside the
 // reply's `data`) because discovery-through-denial is the point; every other
 // kind is dropped silently, the connect-time auto-watch included — a sealed leg
-// that auto-watched leaked the host's whole event stream to anyone who completed
-// the handshake (measured: `sealed sock event:output 5`).
+// that auto-watched would leak the host's whole event stream to anyone who
+// completed the handshake.
 //
-// **A FRAME IS AN INPUT, NOT A CONTRACT (A11.7).** An undecodable text or binary
+// **A FRAME IS AN INPUT, NOT A CONTRACT.** An undecodable text or binary
 // frame is answered with ONE error frame, BEFORE any gate, and the socket is
 // KEPT with every in-flight call on it.
 //
-// **IDENTITY: THIS HANDLER IS THE TRANSPORT** (owner 2026-10-04). Its frame lane
+// **IDENTITY: THIS HANDLER IS THE TRANSPORT.** Its frame lane
 // runs outside every dispatch, so what it sends is the operator's. It sends
 // nothing onward itself: every admitted frame is handed to the leg
 // (`Inbound.handIn` → the leg's `inbound_*` verbs), and the leg performs it as
@@ -87,9 +87,9 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// The web boot pid every task of this socket is registered under — python
     /// serves the ASGI app inside `CURRENT_TASK.scope(<boot pid>)`
     /// (`web/tools.py`), so `ws_drain` and each `ws_call` are CHILDREN of the
-    /// boot task, exactly as a REST request's dispatch is (A11.31). A NIO
+    /// boot task, exactly as a REST request's dispatch is. A NIO
     /// upgrade runs on the event loop with no task-local scope at all, so
-    /// without this both loops registered as roots and `ps` reported
+    /// without this both loops would register as roots and `ps` would report
     /// `parent: null` where python names the pid.
     private let bootParent: TaskId?
     /// One synthetic client id per connection (its inbox is the fanout point).
@@ -181,13 +181,11 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         // task-local), parented to the web boot pid like every task of this
         // socket.
         lane.start(parent: bootParent)
-        // THE CONNECT-TIME AUTO-WATCH IS GATED (C41). Only mirror the host's
+        // THE CONNECT-TIME AUTO-WATCH IS GATED. Only mirror the host's
         // inbox when THIS leg's rule admits an inbound `watch` with NO
         // credential (an open `allow_all` leg). On a sealed or credentialed leg
         // a client that merely completed the handshake would otherwise receive
-        // every event the host sees without ever passing the gate — measured,
-        // the sealed swift socket delivered term boot/output/write/stop events
-        // python never sent. It goes through THE ONE WATCH PATH, so the `kernel` address
+        // every event the host sees without ever passing the gate. It goes through THE ONE WATCH PATH, so the `kernel` address
         // resolves and a refusal is an `error` frame, never silence.
         if gateWebLeg(
             kernel: kernel, legId: legId, kind: "watch", target: hostId, verb: "watch",
@@ -217,8 +215,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         // SERVER keepalive — uvicorn pings every 20 s and closes 1011
         // `keepalive ping timeout` when the pong does not come back in time.
-        // Swift answered client pings and ignored pongs, but never pinged, so a
-        // half-open socket was never detected.
+        // Answering client pings without ever pinging would never detect a
+        // half-open socket.
         keepalive = context.eventLoop.scheduleRepeatedTask(
             initialDelay: .seconds(Self.pingIntervalSeconds),
             delay: .seconds(Self.pongTimeoutSeconds)
@@ -355,7 +353,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// python `decode_inbound` + `isinstance(frame, dict)`: parse a text frame
     /// as JSON or a binary frame as `[4B len | header | body]`, pop
     /// `_binary_path` and place the body there. `nil` is the ONE
-    /// malformed-frame answer (A11.7/A13.15).
+    /// malformed-frame answer.
     private static func decodeInbound(_ raw: InboundRaw) -> DecodedFrame? {
         let b: Data
         switch raw {
@@ -414,10 +412,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     /// THE ONE WATCH PATH — the connect-time auto-watch and an explicit `watch`
     /// frame both come here. FAIL LOUD: a name that resolves to no agent, or a
     /// gate refusal, is answered with an `error` frame and NOT recorded as
-    /// watched. (The connect-time watch used to discard the result and mark the
-    /// name watched anyway; a name the kernel's `watch` did not resolve mirrored
-    /// nothing, said nothing, and the explicit watch that followed was then
-    /// skipped as a duplicate.)
+    /// watched.
     ///
     /// The name resolves the way `send` resolves a target (`kernel` or a literal
     /// id). THE LEG WATCHES (`inbound_watch`), so the kernel's gate sees a real
@@ -522,7 +517,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     /// The ONE inbound path — text and binary frames decode the same way and
-    /// route by `type` the same way (A13.15). A binary `call` is handed to the
+    /// route by `type` the same way. A binary `call` is handed to the
     /// leg with the body at its slot of the item's payload — the one send, with
     /// its ledger, dedup and reflect flags. Runs on the lane.
     private func handleFrame(_ raw: InboundRaw, channel: Channel) async {
@@ -595,7 +590,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 // `payload[field] = body` runs where a body EXISTS; a TEXT
                 // frame's `bytes` reaches the target as the JSON value the
                 // client sent, and `write_stream` answers `missing_arg` for it
-                // (an ABSENT key stays an empty chunk) (A13.19). The decode left
+                // (an ABSENT key stays an empty chunk). The decode left
                 // `null` in the slot python's `set_path` fills — kept, so the
                 // call row and the watcher frame keep python's key order.
                 let out = await Inbound.handIn(
@@ -625,7 +620,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                 // REPLY MIRRORING: every OTHER live connection of this hello guid
                 // gets the reply too — the tabs of one identity are one principal.
                 // After this connection's lock is released: one lock at a time.
-                // TODO (owner, open): DESYNC between the tabs of one identity is
+                // TODO: DESYNC between the tabs of one identity is
                 // envisioned and unsolved — a mirror is not a merge; think later.
                 if let tabs {
                     for mirror in Tabs.shared.siblings(tabs, except: me) {
@@ -683,7 +678,7 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
             // it is gated on the ROOT — an ingress rule answers "may this client
             // reach this leg", never "what may it READ". THE LEG ASKS
             // (`inbound_state_subscribe`) — the lane's own context is the
-            // operator's, which the gate never judges (audit ARCH2-7).
+            // operator's, which the gate never judges.
             let asked = await Inbound.handIn(
                 kernel, legId: legId, .object(["type": .string("inbound_state_subscribe")]))
             if pyTruthy(asked.result["error"]) {
@@ -862,19 +857,19 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     /// `{type:"reply", id, data}` — the frame `id` is echoed RAW, whatever JSON
-    /// type it arrived as (A11.8); an absent one is `""`.
+    /// type it arrived as; an absent one is `""`.
     private static func writeReply(channel: Channel, id: JSON, data: JSON) {
         let frame: JSON = .object(["type": .string("reply"), "id": id, "data": data])
         writeText(channel: channel, text: Codec.encodeText(frame))
     }
 
     /// Send one server→client envelope, picking the frame kind from the
-    /// CARRIER (C37/A11.9): an envelope that HOLDS a chunk — a 0-byte one
+    /// CARRIER: an envelope that HOLDS a chunk — a 0-byte one
     /// included — is a binary frame whose head keeps `null` at the chunk's slot
     /// (`body.parts`, from the envelope root: `["data", "x.y"]` for a reply's
     /// chunk at the reply key `"x.y"`) in its python position — appended when the
     /// envelope did not name it — and names it in `_binary_path`. Testing the
-    /// body's LENGTH instead served an empty file as JSON.
+    /// body's LENGTH instead would serve an empty file as JSON.
     static func sendEnvelope(channel: Channel, envelope: JSON, body: Blob?) {
         guard let body else {
             writeText(channel: channel, text: Codec.encodeText(envelope))

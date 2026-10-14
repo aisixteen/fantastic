@@ -134,8 +134,7 @@ export async function answerKernelVerb(
     }
     // A BUNDLE by either name the kernel lists it under: `bundles='ids'` lists the
     // NAME (`file_bridge`), an agent record carries the handler_module
-    // (`file_bridge.tools`). Measured 2026-10-06 (rust, plan + build): models asked
-    // for the listed name and were refused.
+    // (`file_bridge.tools`); models ask for either.
     // a refused folder (its row carries `error`) is listed, never documented
     const listed = k.availableBundles().find(
       (b) => b.error === undefined && (b.handler_module === of || b.name === of),

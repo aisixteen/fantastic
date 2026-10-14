@@ -24,7 +24,7 @@ from responses_backend.provider import MAX_TOKENS
 
 NAME = "responses_backend"
 
-#: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+#: THE RECORD SCHEMA — what this kind's record takes, read with
 #: no agent existing (`reflect bundles=all`), from the constants the provider runs
 #: on. `validate_meta` enforces it at the write, so the page and the kernel cannot
 #: disagree about what a record needs.

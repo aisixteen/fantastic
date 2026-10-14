@@ -52,8 +52,7 @@ struct RefusalTests {
     }
 
     @Test func aPlaceholderIdIsNamedAsOne() {
-        // Measured 2026-08-04: a model copied `<id>` out of an example and got
-        // the same bare refusal 34 times without ever correcting.
+        // A bare refusal gives a model nothing to correct from.
         let v = Refusal.unknown("<id>", live: ["kernel_state"])
         let hint = v["hint"].asString ?? ""
         #expect(hint.contains("PLACEHOLDER"))
@@ -77,7 +76,7 @@ struct RefusalTests {
         #expect(v["reason"].asString == "unauthorized")
     }
 
-    // MARK: - python repr (C19)
+    // MARK: - python repr
 
     /// Python writes `f"no agent {agent_id!r}"` — SINGLE quotes, and the repr
     /// rules for a quote or a control character inside the id.
@@ -106,9 +105,8 @@ struct RefusalTests {
     }
 
     /// `guard_agent_id` spells the offending id with `{agent_id!r}`.
-    /// `kernel` names the operator; `|` marks a FOREIGN `guid|agent` (audit
-    /// 2026-09-28: `create_agent id=kernel` made an agent the operator to every
-    /// memory store).
+    /// `kernel` names the operator; `|` marks a FOREIGN `guid|agent` (an agent with id
+    /// `kernel` would be the operator to every memory store).
     @Test func theReservedIdAndAForeignIdAreRefused() {
         #expect(
             Refusal.guardAgentId("create_agent", "kernel")?["error"].asString

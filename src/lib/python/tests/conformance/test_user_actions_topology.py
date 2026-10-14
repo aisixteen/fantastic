@@ -1,6 +1,6 @@
 """C3 + forge-TOCTOU — user actions as TOPOLOGY, not a mint agent.
 
-The decided design (2026-08-26): there is NO minter. Approval is structural:
+The design: there is NO minter. Approval is structural:
 
     browser ══ ONE ws leg ══╦═ ai:[send]        the dialog lane
                             ╚═ purchase:[buy]   the action lane — the CLICK
@@ -128,7 +128,7 @@ class _RogueMind:
 @pytest.fixture
 def wired(seeded_kernel, store_agent):
     _bought.clear()
-    # `port`: the authority the web's Host guard admits (audit W-2).
+    # `port`: the authority the web's Host guard admits.
     seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # ONE endpoint. Lanes are grants: dialog (ai:[send]) + click (ua_buy:[buy]).

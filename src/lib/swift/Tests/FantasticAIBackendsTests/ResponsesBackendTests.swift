@@ -171,7 +171,7 @@ struct ResponsesBackendTests {
     }
 
     /// `store:false` keeps the conversation ours and `model` is the record's — a
-    /// `sampling` key naming either is refused, not merged over it (audit d8).
+    /// `sampling` key naming either is refused, not merged over it.
     @Test func samplingMayNotOverrideWhatTheProviderOwns() {
         for key in ["store", "model", "max_output_tokens"] {
             #expect(throws: PyError.self) {

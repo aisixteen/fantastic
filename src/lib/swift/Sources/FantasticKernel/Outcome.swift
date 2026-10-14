@@ -33,11 +33,8 @@ public enum Status: String, Sendable {
     /// `error`. A semantic failure — a missing path, a patch that did not match,
     /// a refusal the handler composed itself. `result` is that reply, verbatim.
     ///
-    /// This used to settle `completed`, on the rule that the kernel does not
-    /// introspect domain replies. The rule did not survive contact with its own
-    /// storage: the durable row already carried the error copied off the result
-    /// beside `status: completed`, so one row said both "fine" and "failed".
-    /// Failure is a STATUS; nothing downstream should have to parse a result to
+    /// Not `completed`: a durable row carrying the error beside `status: completed`
+    /// would say both "fine" and "failed". Failure is a STATUS; nothing downstream should have to parse a result to
     /// learn it.
     case errored
     /// No handler answer exists — refused before dispatch, or the handler threw.
@@ -156,20 +153,18 @@ public struct Item: Sendable {
 
     /// The RAW (tag-typed) `exec_id`, when a caller is FORWARDING a value it
     /// did not itself parse — a model's `<exec_id>` argument, or a wire
-    /// frame's `id` field (C38). An untyped `JSON` the KERNEL validates and
+    /// frame's `id` field. An untyped `JSON` the KERNEL validates and
     /// produces python's exact refusals for: an int NAMES an execution to
     /// JOIN (refused if none exists under it), a non-empty string NAMES one
     /// to open-or-join, anything else is `bad_arg`. Set, this SUPERSEDES the
-    /// typed `id` above — routing used to coerce with `args["exec_id"]?
-    /// .asString`, which silently DROPPED an int `exec_id` (never attempting
-    /// the join python performs) instead of forwarding it.
+    /// typed `id` above — coercing with `.asString` would silently DROP an int
+    /// `exec_id` instead of forwarding it.
     public var rawId: JSON?
-    /// The RAW `timeout`, forwarded untouched (C38) instead of `args["timeout"]?
-    /// .asDouble`, which silently DROPPED a malformed value (e.g. the string
-    /// `"soon"`) — defaulting to "wait forever" — instead of the kernel's
-    /// `bad_arg` refusal. Set, this SUPERSEDES the typed `timeout` above.
+    /// The RAW `timeout`, forwarded untouched — coercing with `.asDouble` would
+    /// silently DROP a malformed value (e.g. the string `"soon"`), defaulting to
+    /// "wait forever" instead of the kernel's `bad_arg` refusal. Set, this SUPERSEDES the typed `timeout` above.
     public var rawTimeout: JSON?
-    /// The RAW `retries`, forwarded untouched (C38) for the same reason. Set,
+    /// The RAW `retries`, forwarded untouched for the same reason. Set,
     /// this SUPERSEDES the typed `retries` above.
     public var rawRetries: JSON?
     /// SECRET MARKS (`Secret`): dotted paths into the payload whose values the
@@ -214,11 +209,11 @@ public struct Outcome: Sendable {
     /// How many dispatch attempts this execution spent (1 unless retried).
     public var attempts: UInt32
     /// THE BINARY REPLY BODY — the carrier for the bytes value python's reply
-    /// dict holds natively (C37), AND ITS SLOT in the reply. `nil` = the verb
+    /// dict holds natively, AND ITS SLOT in the reply. `nil` = the verb
     /// returned NO chunk; `.some(b)` = it returned one, `b.bytes` possibly EMPTY
     /// (a 0-byte read of an empty file). Every wire leg picks its response shape
     /// from THAT distinction, exactly as python's `isinstance(reply["bytes"],
-    /// bytes)` does; testing `isEmpty` instead served an empty file as JSON.
+    /// bytes)` does; testing `isEmpty` instead would serve an empty file as JSON.
     ///
     /// Only a binary item can set it (`Item.binary` / `Item.rawReply`): a
     /// bundle's `handleBinary` returns it at its slot of the reply (`["bytes"]`

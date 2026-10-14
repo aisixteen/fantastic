@@ -167,9 +167,9 @@ async def test_match_is_anchored_not_a_prefix(seeded_kernel):
 
 
 async def test_every_start_refusal_carries_a_code(seeded_kernel):
-    """Sibling argument errors used to split — `args`/`env` answered `bad_arg`
-    while `command`/`code`/the policy wall answered a bare `{error}`, so nothing
-    could branch on the failure without matching prose."""
+    """Sibling argument errors share one coded shape — `args`/`env`, `command`,
+    `code` and the policy wall alike — so a caller can branch on the failure
+    without matching prose."""
     await _mk(seeded_kernel, agent_id="codes", allowed=[r"echo( .*)?"])
 
     async def start(**payload):
@@ -274,9 +274,9 @@ async def test_the_records_env_reaches_the_child(seeded_kernel):
     assert row["last_line"] == "x42"
 
 
-# ─── the child's WHOLE environment is the record's (audit 2026-09-28) ───────
-# A per-call `env` (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted
-# line actually ran, and every child inherited the kernel's `.env` keys.
+# ─── the child's WHOLE environment is the record's ──────────────────────────
+# A per-call `env` (`LD_PRELOAD`, `PATH`, …) or `cwd` would change what an
+# allowlisted line actually runs, and no child inherits the kernel's `.env` keys.
 
 
 async def test_a_per_call_env_or_cwd_is_refused(seeded_kernel):
@@ -289,8 +289,8 @@ async def test_a_per_call_env_or_cwd_is_refused(seeded_kernel):
 
 
 async def test_a_wake_up_on_start_is_refused_naming_monitor(seeded_kernel):
-    # A `notify` on `start` was dropped silently: the caller waited for a message
-    # nothing would send (e2e monitor, 2026-10-13).
+    # A `notify` on `start` is refused, never dropped silently with the caller
+    # waiting for a message nothing would send.
     await _mk(seeded_kernel, allowed=[r"/bin/sh -c .*"])
     for arg, val in (("notify", "ai"), ("match", "WAKE"), ("every", 5)):
         r = await _start(
@@ -349,8 +349,8 @@ async def test_a_bare_command_is_found_on_the_childs_path_only(seeded_kernel, tm
 
 async def test_a_missing_cwd_is_named_not_the_command(seeded_kernel, tmp_path):
     """The OSError names the missing DIRECTORY (CPython's `noexec:chdir`), never
-    the command — rust named `python3` for a cwd that did not exist (measured
-    2026-10-06, subai) and the model hunted an interpreter for twenty turns."""
+    the command — naming the interpreter for a cwd that does not exist sends a
+    model hunting for the interpreter."""
     gone = tmp_path / "no_such_dir"
     await _mk(
         seeded_kernel, agent_id="nowhere", allowed=[r"/bin/echo( .*)?"], cwd=str(gone)
@@ -458,7 +458,7 @@ async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
 
 async def test_connector_verb_hands_over_the_reference_client(seeded_kernel):
     """A model pastes the client instead of re-deriving the socket framing
-    (measured 2026-09-01, E30: ten messages lost to int(fd)/buffering/not-seekable).
+    (int(fd), buffering, not-seekable pipes).
     Ungated like reflect — discovery works on a sealed leg."""
     await _mk(seeded_kernel, "runner_c", allowed=["x"])
     r = (
@@ -497,9 +497,7 @@ async def test_a_stream_chunk_crosses_the_wire_raw(
     seeded_kernel, tmp_path, monkeypatch
 ):
     """`write_stream`/`read_stream` from a program: the bytes ride the fd as the
-    io_bridge binary frame (kind B), never base64 — and never None. A `read_stream`
-    reply was unserializable on this wire and reached the program as None
-    (measured 2026-09-02, E30 subai:python: 50 messages lost to a correct worker)."""
+    io_bridge binary frame (kind B), never base64 — and never None."""
     from exec_bridge._connector import CONNECTOR_SRC
 
     monkeypatch.chdir(tmp_path)
@@ -580,9 +578,9 @@ def test_the_connector_raises_when_the_relay_cannot_deliver():
 
 
 async def test_a_denied_watch_reaches_the_program_and_registers_nothing(seeded_kernel):
-    """`kernel.watch` is gated like a send and can REFUSE. The refusal used to be
-    discarded: the sub was registered anyway and the program saw a subscription
-    that simply never fired — deaf, with nothing to diagnose."""
+    """`kernel.watch` is gated like a send and can REFUSE. The refusal reaches the
+    program and no sub is registered — never a subscription that simply never
+    fires, deaf, with nothing to diagnose."""
     await _mk(seeded_kernel, allowed=["x"])
     await _mk(seeded_kernel, agent_id="secret", allowed=["x"])  # no edge from runner
     child, task = await _wire(seeded_kernel)
@@ -742,7 +740,7 @@ async def test_password_ingress_is_refused_on_fs_and_process_legs(seeded_kernel)
 
 async def test_stop_and_delete_kill_everything_a_job_launched(seeded_kernel):
     """A plain job leads its own session, so `stop` and `delete_agent` take what it
-    launched too — a script's `sleep &` and a `nohup` used to outlive it. Twin of
+    launched too — a script's `sleep &` and a `nohup` never outlive it. Twin of
     the PTY case (`test_pty_jobs.py::test_every_teardown_kills_the_whole_session`)."""
     import os
 
@@ -915,10 +913,10 @@ async def test_a_second_onmessage_supersedes_without_being_evicted(seeded_kernel
 
 
 async def test_the_inbox_relays_a_drive_verb_only_for_its_own_job(seeded_kernel):
-    """Audit BV-9: the fanout mirrors every payload sent to the leg into the
-    owner inbox, so a program started by one caller saw another caller's `write`
-    keystrokes (unechoed input included), paste bytes and drive calls aimed at
-    that caller's job. A drive verb (`DRIVE_VERBS`) is dropped only when its
+    """The fanout mirrors every payload sent to the leg into the owner inbox, so
+    a program started by one caller would see another caller's `write` keystrokes
+    (unechoed input included), paste bytes and drive calls aimed at that caller's
+    job. A drive verb (`DRIVE_VERBS`) is dropped only when its
     `job_id` names ANOTHER job: no `job_id` (the bulk forms), this job's id, or a
     non-int id (no job's) is forwarded; other mail is unchanged."""
     k = seeded_kernel
@@ -956,13 +954,12 @@ async def test_the_inbox_relays_a_drive_verb_only_for_its_own_job(seeded_kernel)
     await asyncio.wait_for(task, 5)
 
 
-# ─── audit round 2: clear, the sealed inbox, malformed ctrl-fd frames ───────
+# ─── clear, the sealed inbox, malformed ctrl-fd frames ───────────────────────
 
 
 async def test_a_named_clear_refuses_a_running_job(seeded_kernel):
-    """Audit BV-5: `clear {job_id}` dropped a RUNNING row, and the row is the only
-    handle stop, cancel, delete and shutdown kill a process through — the process
-    outlived all four. A named job follows the bulk form's rule."""
+    """`clear {job_id}` never drops a RUNNING row: the row is the only handle stop,
+    cancel, delete and shutdown kill a process through. A named job follows the bulk form's rule."""
     import exec_bridge.tools as ebt
 
     await _mk(seeded_kernel, allowed=[r"sleep .*"])
@@ -992,7 +989,7 @@ async def test_a_named_clear_refuses_a_running_job(seeded_kernel):
 
 
 async def test_a_sealed_leg_refuses_mail_and_relays_nothing(seeded_kernel):
-    """Audit BV-8: the seal covers every verb but `reflect` — mail included. The
+    """The seal covers every verb but `reflect` — mail included. The
     substrate's fanout reaches the program's on_message proxy BEFORE the handler,
     so the relay's framer drops what the gate refuses: a sealed leg's program
     receives nothing, and receives again once the leg is reopened."""
@@ -1037,8 +1034,8 @@ async def test_a_sealed_leg_refuses_mail_and_relays_nothing(seeded_kernel):
 
 
 async def test_a_malformed_ctrl_frame_is_skipped_never_fatal(seeded_kernel):
-    """Audit W-9: JSON that is no envelope (`T[1]`), or a `src` that is no string,
-    ended the relay task (AttributeError / unhashable TypeError) and with it the
+    """JSON that is no envelope (`T[1]`), or a `src` that is no string, must not
+    end the relay task (AttributeError / unhashable TypeError) and with it the
     job's connector. Each is skipped; the next call is answered."""
     k = seeded_kernel
     await _mk(k, allowed=["x"])

@@ -482,8 +482,8 @@ async def test_per_edit_if_match_guards_the_whole_transaction(
 
 async def test_write_accepts_str_and_utf8_encodes(seeded_kernel, tmp_path, monkeypatch):
     """Text courtesy: ai_core encodes for the MODEL; a spawned program's ctrl-fd
-    wire is JSON (no bytes type) — a str document must land verbatim utf-8
-    (measured 2026-09-01, E20: the refusal drove a model to improvise base64)."""
+    wire is JSON (no bytes type) — a str document must land verbatim utf-8 (a
+    refusal drives a model to improvise base64)."""
     monkeypatch.chdir(tmp_path)
     fb, ed = await _mk(seeded_kernel)
     r = await _call(
@@ -574,7 +574,7 @@ async def test_read_with_max_limit_does_not_trap(seeded_kernel, tmp_path, monkey
 
 
 async def test_non_int_args_are_bad_arg_refusals(seeded_kernel, tmp_path, monkeypatch):
-    """#136 — `read {offset: "ten"}` used to raise ValueError out of the handler.
+    """`read {offset: "ten"}` must not raise ValueError out of the handler.
     A present-but-wrong number is a typo, and it is answered as one; an explicit
     null is ABSENT, as on every other verb of the bridge."""
     monkeypatch.chdir(tmp_path)

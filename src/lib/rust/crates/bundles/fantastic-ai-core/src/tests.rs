@@ -538,7 +538,7 @@ async fn send_streams_tokens_and_emits_done() {
 
 /// A reasoning turn: the RAW completion (thinking included) is what the caller gets
 /// and what streams; the ROUTER dispatches only the ANSWER's calls and the DURABLE
-/// turn is the answer (owner, 2026-10-07: only the answer acts). A call written
+/// turn is the answer (only the answer acts). A call written
 /// mid-thought is thinking — it never runs and is never stored. The answer ends with
 /// `done`, so no reminder starts a second turn.
 #[tokio::test]
@@ -624,11 +624,10 @@ async fn thinking_is_streamed_raw_but_neither_dispatched_nor_persisted() {
     );
 }
 
-/// A turn spent ENTIRELY reasoning is a DEAD TURN (owner, 2026-09-30): it is
+/// A turn spent ENTIRELY reasoning is a DEAD TURN: it is
 /// DISCARDED — durable history holds nothing of it, no empty assistant row a
 /// later turn would read as an answer — and REROLLED by the no-call reminder,
-/// which says why. (It used to settle as a completed, empty turn; then, briefly,
-/// it failed the turn and ended the chain.)
+/// which says why.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_thinking_only_turn_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
@@ -715,7 +714,7 @@ impl Provider for SummaryProvider {
     }
 }
 
-/// B3.3 — `status.current` has TWO python shapes, not one dict with a flag.
+/// `status.current` has TWO python shapes, not one dict with a flag.
 /// With a client: `{phase, send_id, started_at, elapsed, is_mine}` (+ this
 /// caller's own text). Without: the in-flight ENTRY minus its text-bearing keys,
 /// so `client_id` and `queued_at` are there and the order is the entry's. And an
@@ -822,7 +821,7 @@ async fn status_current_shape_matches_python() {
     let _ = join.await.unwrap();
 }
 
-/// B3.4 — the `send` reply names the row this turn produced. python `_send`
+/// The `send` reply names the row this turn produced. python `_send`
 /// returns `{response, final, client_id, message_id}` (the closed call parts
 /// feed routing only, never the reply); rust minted the id (routing
 /// needs it to parent the next turn) and then dropped it from the reply, so a
@@ -860,7 +859,7 @@ async fn send_reply_carries_message_id() {
 /// not overlap any other. It takes this lock and restores what it found.
 static SEND_TIMEOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// B2.8 — the ceiling is a python FLOAT: `FANTASTIC_AI_SEND_TIMEOUT=0.05` is a
+/// The ceiling is a python FLOAT: `FANTASTIC_AI_SEND_TIMEOUT=0.05` is a
 /// 50ms ceiling (rust parsed `u64`, failed, and silently used 180), the refusal
 /// spells the value with python's `repr`, and the `status(done)` detail carries
 /// `reason` plus the auto-fills and nothing else (rust added
@@ -928,7 +927,7 @@ fn the_default_send_ceiling_is_a_python_float() {
     );
 }
 
-/// B2.6 — python `secrets.token_urlsafe(8)`: 11 base64url characters, no
+/// Python `secrets.token_urlsafe(8)`: 11 base64url characters, no
 /// prefix. Rust minted `snd_<8 hex>`.
 #[test]
 fn send_id_is_pythons_token_urlsafe_shape() {
@@ -944,7 +943,7 @@ fn send_id_is_pythons_token_urlsafe_shape() {
     }
 }
 
-/// B2.10 — python `_safe_client`, per CODE POINT: `str.isalnum` is Unicode-aware
+/// Python `_safe_client`, per CODE POINT: `str.isalnum` is Unicode-aware
 /// and there is no length cap, and the strip is python's whitespace set.
 #[test]
 fn safe_client_strips_python_whitespace() {
@@ -1028,9 +1027,8 @@ fn context_notice_shapes() {
     let c = n["content"].as_str().unwrap();
     assert!(c.contains("[context-notice]") && c.contains("MY SUMMARY"));
     assert!(c.contains("memory agent"));
-    // THE RECALL AFFORDANCE IN THE ONE GRAMMAR. The notice taught
-    // `{type:'recall', query?, limit?}` — JSON the harness refuses — until
-    // 2026-09-12. Python's bytes, pinned.
+    // THE RECALL AFFORDANCE IN THE ONE GRAMMAR — never a JSON shape the
+    // harness refuses. Python's bytes, pinned.
     assert!(
         c.contains("send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`)"),
         "{c}"
@@ -1094,7 +1092,7 @@ async fn recall_pages_durable_store_and_context_status_shape() {
         "recall did not page the planted fact back: {r:#?}"
     );
     // python's recall reply is `{messages, total, truncated[, note]}` — no
-    // `client_id`, which rust used to add.
+    // `client_id`.
     assert!(r.get("client_id").is_none(), "{r:#?}");
 
     // context_status shape — default strategy, projection recorded.
@@ -1433,7 +1431,7 @@ async fn a_model_call_is_dispatched_and_the_result_returns() {
     // PID, then target AND verb — a bare `[reply to core]` is unmatchable with two in
     // flight, and target+verb alone is not unique either
     // ...then `↑<turn>`, the assistant row this reply answers — python's tag,
-    // the link the fold machinery derives chains from (ported 2026-09-12).
+    // the link the fold machinery derives chains from.
     assert!(
         turn2.contains(" \u{b7} kernel_state list_agents \u{b7} \u{2191}")
             && turn2.contains("[reply to "),
@@ -1557,10 +1555,10 @@ async fn an_inbound_cycle_is_refused_before_the_lock() {
 
 /// AN OMITTED `reply_to` MEANS SELF — the model gets its own answer back.
 ///
-/// The old default was fire-and-forget, and it produced the one failure a model
-/// cannot debug: gemma4:12b left the key out of an otherwise perfect call, the
-/// send ran, its result was dropped, and the chain died at pass 1 with no reply
-/// and no error. Indistinguishable, from inside the model, from being finished.
+/// A fire-and-forget default produces the one failure a model cannot debug: a
+/// key left out of an otherwise perfect call runs, its result is dropped, and
+/// the chain dies with no reply and no error. Indistinguishable, from inside the
+/// model, from being finished.
 /// Stopping is still free — it is emitting NO call.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reply_to_omitted_defaults_to_self() {
@@ -1683,8 +1681,8 @@ async fn a_failed_call_comes_back_to_the_model() {
 }
 
 /// A `<call>` with no target tells the model so, instead of vanishing — and
-/// it names the SHAPE, because a bare fault taught gemma-4-12B nothing about how
-/// to retry (2026-08-06).
+/// it names the SHAPE, because a bare fault teaches the model nothing about how
+/// to retry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_with_no_target_is_reported_not_swallowed() {
     let tmp = TempDir::new().unwrap();
@@ -1711,10 +1709,10 @@ async fn a_call_with_no_target_is_reported_not_swallowed() {
     );
 }
 
-/// Measured 2026-08-06: a payload-less send reached the handler as nothing and
-/// came back `'NoneType' object has no attribute 'get'` — an error about OUR
-/// internals, naming neither the omitted verb nor the agent. It must say what was
-/// missing instead, and must never dispatch.
+/// A payload-less send must not reach the handler as nothing and come back
+/// `'NoneType' object has no attribute 'get'` — an error about OUR internals,
+/// naming neither the omitted verb nor the agent. It must say what was missing
+/// instead, and must never dispatch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_with_no_payload_names_what_is_missing() {
     let tmp = TempDir::new().unwrap();
@@ -1741,10 +1739,9 @@ async fn a_send_with_no_payload_names_what_is_missing() {
     );
 }
 
-/// END TO END, which the parser-level tests do not cover — and the gap that let
-/// this ship broken in python: on 2026-08-06 `malformed_calls` returned the right
-/// report for gemma's truncated `create_agent` and the model still received
-/// nothing, so the run went on believing its agent existed.
+/// END TO END, which the parser-level tests do not cover: a correct
+/// `malformed_calls` report the model never receives leaves the run believing
+/// its agent exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unparseable_call_reaches_the_model_as_an_error() {
     let tmp = TempDir::new().unwrap();
@@ -1798,9 +1795,9 @@ async fn a_broken_call_beside_a_good_one_is_still_reported() {
     assert!(s.request(1).contains("NOT dispatched"), "{}", s.request(1));
 }
 
-/// A VERB IN THE TOOL SLOT IS REFUSED BY NAME. The JSON grammar used to guess —
-/// `{"name":"reflect",…}` was rewritten into a send of `{type:"reflect"}` — and
-/// the guess is gone: the tools are a closed set, and a verb goes in `<type>`.
+/// A VERB IN THE TOOL SLOT IS REFUSED BY NAME — `{"name":"reflect",…}` is never
+/// guessed into a send of `{type:"reflect"}`: the tools are a closed set, and a
+/// verb goes in `<type>`.
 /// The refusal says exactly that, so the model retries from it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_verb_in_the_tool_slot_is_refused_by_name() {
@@ -1913,12 +1910,12 @@ async fn an_error_reply_does_not_route() {
     assert_eq!(s.passes_served(), 1, "an errored pass must not route");
 }
 
-/// PROVIDER FAILURE, KIND 2 (B2.1): unmapped — python re-raises it out of the
+/// PROVIDER FAILURE, KIND 2: unmapped — python re-raises it out of the
 /// handler, and the kernel settles a raise as `{error:"<Type>: <msg>",
 /// raised:true}` on a FAILED execution. `status(done, reason='error')` still
 /// announces it first, carrying `str(e)` WITHOUT the exception-type prefix.
-/// Rust used to answer every provider failure with a COMPLETED
-/// `{error, client_id}`, so no AI failure was ever retryable or dead-letterable.
+/// A COMPLETED `{error, client_id}` would leave no AI failure retryable or
+/// dead-letterable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unmapped_provider_error_settles_raised() {
     let tmp = TempDir::new().unwrap();
@@ -1954,7 +1951,7 @@ async fn unmapped_provider_error_settles_raised() {
     assert_eq!(done[0]["detail"]["error"], json!("provider exploded"));
 }
 
-/// B2.2: a CONTEXT-PROJECTION refusal is not a provider failure. python returns
+/// A CONTEXT-PROJECTION refusal is not a provider failure. python returns
 /// the seam's dict out of `_run` VERBATIM — no `status(done)` closes a turn that
 /// never opened a provider pass, no `client_id` is stapled on, and the handler
 /// does not fail. The seam's own `context(too_small)` event is the only one.
@@ -2016,12 +2013,11 @@ async fn a_projection_refusal_is_returned_verbatim_and_does_not_raise() {
 ///
 /// Two shapes, one contract. A bundle returning `Err` is already mapped to an
 /// error reply by the kernel's dispatch, so it routes back on its own; a PANIC is
-/// re-raised into the caller, which is why the router catches it. python's
-/// equivalent ran bare until 2026-08-02: a `file_bridge` whose ingress rule could
-/// not be resolved raised out of its handler, asyncio logged "Task exception was
-/// never retrieved", and the model got no reply, no error and no further turn —
-/// the run stopped mid-verification and looked finished. An exception is a result;
-/// the model can act on one and cannot act on silence.
+/// re-raised into the caller, which is why the router catches it. Unguarded, a
+/// `file_bridge` whose ingress rule cannot be resolved raises out of its handler
+/// and the model gets no reply, no error and no further turn — the run stops and
+/// looks finished. An exception is a result; the model can act on one and cannot
+/// act on silence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
     struct Raiser;
@@ -2244,15 +2240,14 @@ async fn routing_is_its_own_ps_row() {
 }
 
 // ─── the end-of-chain contract: DONE is explicit; silence is nudged ─────
-// Reinstated 2026-09-01 (mirrors python `test_done_and_nudge.py`).
+// Mirrors python `test_done_and_nudge.py`.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
-    // The model is QUERIED UNTIL IT CALLS (python-canonical, 2026-09-01): a
-    // second silent turn used to end the chain silently.
+    // The model is QUERIED UNTIL IT CALLS (python-canonical): a second silent
+    // turn does not end the chain.
     //
-    // NO STREAK AND NO CAP. Rust bounded this at `NUDGE_LIMIT` (24, or the
-    // record's `nudge_limit`) and dropped the chain in SILENCE past it — the
+    // NO STREAK AND NO CAP here: a cap that drops the chain in SILENCE is the
     // exact failure the reminder exists to prevent, one layer up. python's two
     // honest ends (`done`, `await`) both return above this branch.
     let tmp = TempDir::new().unwrap();
@@ -2295,8 +2290,8 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
 
 /// A turn that is ONLY thinking did not answer: it is never stored and never
 /// counts as completed — it is rerolled by the no-call reminder, told why
-/// (measured on vLLM 2026-09-30: an 8-token thinking budget, then a clean `stop`
-/// with no answer; failing it outright ended a 30-pass chain). python
+/// (a tiny thinking budget, then a clean `stop` with no answer; failing it
+/// outright would end a long chain). python
 /// `test_a_dead_turn_is_discarded_and_rerolled`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_turn_is_discarded_and_rerolled() {
@@ -2431,8 +2426,8 @@ async fn a_done_call_ends_the_chain_without_a_nudge() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_first_turn_with_no_call_is_nudged_too() {
     // NOT an exemption for prose. A first turn from a person that decides on a
-    // call in thought and never emits it used to end the work silently; now it
-    // is reminded exactly once, and `done` closes it.
+    // call in thought and never emits it is reminded exactly once, and `done`
+    // closes it.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "ndg3").await;
     let s = script(
@@ -2462,9 +2457,9 @@ async fn a_first_turn_with_no_call_is_nudged_too() {
 // ── the batch: one deadline, one stamp, one token per turn ───────────
 
 /// EVERY dispatched model call carries the AI layer's per-call deadline. The
-/// KERNEL defaults nothing, so a call to a handler that never returns used to hang
-/// the whole batch forever: no reply, no timeout block, the chain dead with
-/// nothing to read. Python has always set it; rust/swift did not until 2026-09-02.
+/// KERNEL defaults nothing, so without it a call to a handler that never
+/// returns hangs the whole batch forever: no reply, no timeout block, the chain
+/// dead with nothing to read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_model_call_carries_the_layer_default_timeout() {
     let tmp = TempDir::new().unwrap();
@@ -2505,7 +2500,7 @@ async fn every_model_call_carries_the_layer_default_timeout() {
         "the timed-out call produced no block at all — the batch hung"
     );
     let turn = sa.request(0);
-    // C31: python's prose, verbatim — target id raw, verb `py_repr`-quoted,
+    // Python's prose, verbatim — target id raw, verb `py_repr`-quoted,
     // plus `task_id`.
     assert!(
         turn.contains("exceeded its 0.2s timeout; task cancelled"),
@@ -2518,11 +2513,10 @@ async fn every_model_call_carries_the_layer_default_timeout() {
     assert!(turn.contains("<task_id>"), "must carry task_id: {turn}");
 }
 
-/// C38: routing forwards `timeout` RAW (not `.and_then(Value::as_f64)`), so a
+/// Routing forwards `timeout` RAW (not `.and_then(Value::as_f64)`), so a
 /// non-numeric value reaches the kernel's own `bad_arg` refusal instead of
-/// being silently DROPPED at the route.rs coercion site — which used to
-/// default the call to the layer's `send_timeout` as if the model had never
-/// written the arg at all.
+/// being silently DROPPED at the route.rs coercion site and defaulting the call
+/// to the layer's `send_timeout` as if the model had never written the arg.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
     let tmp = TempDir::new().unwrap();
@@ -2571,9 +2565,8 @@ async fn a_malformed_timeout_arg_settles_the_kernels_refusal() {
     assert!(turn.contains("'soon'"), "must echo the raw value: {turn}");
 }
 
-/// A `reply_to` naming NO AGENT dispatches nothing and tells the model (python,
-/// measured 2026-10-11, e2e chat_users: `<reply_to>1001</reply_to>` meant a chat
-/// message id; typed as the number 1001 it used to DISCARD the reply). The grammar
+/// A `reply_to` naming NO AGENT dispatches nothing and tells the model (a chat
+/// message id typed as the number 1001 must never DISCARD the reply). The grammar
 /// types the bare number here too, so this pins the number-is-an-id half as well.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
@@ -2622,10 +2615,10 @@ async fn a_reply_to_naming_no_agent_dispatches_nothing_and_says_so() {
 }
 
 /// A turn whose calls all carried `reply_to:null` DISPATCHED REAL WORK. It is
-/// owed no reply, and it is not a silent turn: rust nudged it anyway until
-/// 2026-09-02 (gating on the blocks instead of python's `not calls and not
-/// units`), telling the model "your turn emitted no <call> element" about a
-/// turn that did — and, on a chat turn, handing that text to `send_to` on top.
+/// owed no reply, and it is not a silent turn: the gate is python's `not calls
+/// and not units`, never the blocks, so the model is never told "your turn
+/// emitted no <call> element" about a turn that did — nor, on a chat turn, is
+/// that text handed to `send_to` on top.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_fire_and_forget_calls_are_not_a_silent_turn() {
     let tmp = TempDir::new().unwrap();
@@ -2730,9 +2723,8 @@ async fn two_reads_turn(tag: &str, frac: f64) -> (String, i64) {
     (last["content"].as_str().unwrap_or("").to_string(), cap)
 }
 
-/// OWNER, 2026-10-07 (measured nested_folds:rust, 4.5k window): two greps, each
-/// under the 434-token cap, arrived as ONE 967-token message and the next turn
-/// could not fit it. The replies of a batch share the cap: the first fits and is
+/// Two greps, each under the cap, must not arrive as ONE message the next turn
+/// cannot fit. The replies of a batch share the cap: the first fits and is
 /// inline, the one that would push the message past it is held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_inline_cap_bounds_the_whole_batch_not_each_reply() {
@@ -2763,9 +2755,8 @@ async fn replies_that_fit_together_are_all_inline() {
 }
 
 /// The batch stamp lives INSIDE the `[reply to …]` tag, where the shared prompt
-/// says it does. It rode on its own trailing line in rust/swift until 2026-09-02,
-/// which python's history trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both anchored
-/// at the START of a block) cannot read at all.
+/// says it does — python's history trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both
+/// anchored at the START of a block) cannot read a trailing line at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_batch_stamp_lives_inside_the_reply_tag() {
     let tmp = TempDir::new().unwrap();
@@ -2814,11 +2805,10 @@ fn batch_token_of(turn: &str) -> String {
     turn[at..].chars().take(4).collect()
 }
 
-/// A FRESH token per turn. Rust/swift derived it from the batch's own content
-/// (destinations, counts, body lengths), so two turns that made the SAME calls
-/// collided — which is the exact confusion the token exists to end: a model that
-/// read one file twice saw `1 of 2 in batch 7f3a` both times (measured 2026-08-24,
-/// the re-read loop).
+/// A FRESH token per turn, never derived from the batch's own content
+/// (destinations, counts, body lengths): two turns that made the SAME calls would
+/// collide — the exact confusion the token exists to end: a model that read one
+/// file twice would see the same batch token both times.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_identical_turns_get_different_batch_tokens() {
     let tmp = TempDir::new().unwrap();
@@ -2855,9 +2845,9 @@ async fn two_identical_turns_get_different_batch_tokens() {
 }
 
 /// A `reflect` reply is LARGE and TRANSIENT, and the instruction for what to
-/// record before it goes rides ON THE REPLY — measured 2026-08-20 (`live_plan`):
-/// stated once as system-block policy, the model wrote a `SEEN` line for 0 of 10
-/// reflects. Only reflect bodies are dropped later, so only they carry it.
+/// record before it goes rides ON THE REPLY — stated once as system-block policy,
+/// it goes unheeded. Only reflect bodies are dropped later, so only they carry
+/// it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reflect_replies_carry_no_cut_notice() {
     let tmp = TempDir::new().unwrap();
@@ -2889,7 +2879,7 @@ async fn reflect_replies_carry_no_cut_notice() {
         .result;
     assert!(until_passes(&s, 2).await, "the reflect never came back");
     let turn2 = s.request(1);
-    // A reflect is MUTABLE state and stays whole (owner, 2026-10-06): it carries
+    // A reflect is MUTABLE state and stays whole: it carries
     // no cut notice — only a `docs` reply does.
     assert!(
         turn2.contains("mb_rt_nudge"),
@@ -2902,10 +2892,8 @@ async fn reflect_replies_carry_no_cut_notice() {
 }
 
 /// A FAILED HANDOFF is announced as an ordinary `status` event — `detail.reason`,
-/// the shape reflect's `emits` documents and a UI subscribes to. Rust/swift put
-/// `reason`/`error` at the TOP level until 2026-09-02, so every subscriber saw
-/// nothing: the silent-death regression the announcement exists to end, wearing
-/// the announcement's own clothes.
+/// the shape reflect's `emits` documents and a UI subscribes to — never
+/// `reason`/`error` at the TOP level, where no subscriber reads them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_handoff_is_a_status_event_with_detail() {
     let tmp = TempDir::new().unwrap();
@@ -2938,7 +2926,7 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
         .unwrap_or_else(|| panic!("the dead handoff was silent: {events:#?}"));
     assert_eq!(status["phase"], "done", "{status:#?}");
     assert_eq!(status["detail"]["reason"], "error", "{status:#?}");
-    // B2.4 — the error is the REPLY's own error, verbatim. python passes
+    // The error is the REPLY's own error, verbatim. python passes
     // `reply.get("error")` straight through; the raw status is the fallback and
     // carries NO `delivery ` prefix, which rust added to a string no python
     // subscriber matches.
@@ -2953,13 +2941,12 @@ async fn a_failed_handoff_is_a_status_event_with_detail() {
     assert_eq!(s.passes_served(), 1);
 }
 
-/// B2.5 — EACH DELIVERY IS ITS OWN `deliver_reply` KERNEL TASK, and the router
+/// EACH DELIVERY IS ITS OWN `deliver_reply` KERNEL TASK, and the router
 /// does not wait for it. A `send` to an AI agent holds that agent's FIFO lock
-/// for the whole turn, so awaiting deliveries inline made reply 2 of a 4-call
-/// turn wait for the conversation reply 1 started — measured on python
-/// 2026-08-24, 26 of 36 calls never answered.
+/// for the whole turn, so awaiting deliveries inline would make reply 2 of a
+/// 4-call turn wait for the conversation reply 1 started.
 ///
-/// Since C36 each of those tasks is also a `task` ROW on the target (python's
+/// Each of those tasks is also a `task` ROW on the target (python's
 /// `ai_rows_read.json` rows 427/435/445/462), under the very id `ps` reports.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delivery_is_a_deliver_reply_task_not_awaited() {
@@ -3013,7 +3000,7 @@ async fn delivery_is_a_deliver_reply_task_not_awaited() {
         json!(peer.as_str()),
         "the task belongs to the TARGET: {row:#?}"
     );
-    // C36 — A FORK IS A MESSAGE: the delivery's pid is the id of a `task`
+    // A FORK IS A MESSAGE: the delivery's pid is the id of a `task`
     // execution row about the target, so a finished delivery is still
     // explainable from the kernel's rows.
     let store: Vec<_> = fantastic_kernel::test_support::rows_about(&kernel, &peer)
@@ -3042,7 +3029,7 @@ async fn delivery_is_a_deliver_reply_task_not_awaited() {
     );
 }
 
-/// B2.4 — a CANCELLED handoff is not announced. python's `failed` is
+/// A CANCELLED handoff is not announced. python's `failed` is
 /// `status in ("failed", "timed_out")`; rust used `!is_completed()`, which also
 /// caught `cancelled` and turned every operator kill into a spurious error
 /// event on the target's inbox.
@@ -3065,10 +3052,10 @@ fn only_failed_and_timed_out_count_as_a_failed_handoff() {
     assert_eq!(Status::TimedOut.as_str(), "timed_out");
 }
 
-/// ONE event on contention, and it is the `status` one. Rust/swift emitted a bare
-/// `{type:'queued'}` ahead of it until 2026-09-02 — an undocumented type python
-/// never sends, which broke any per-submission event count and every
-/// cross-runtime event-stream diff.
+/// ONE event on contention, and it is the `status` one — never a bare
+/// `{type:'queued'}` ahead of it, an undocumented type python never sends,
+/// which would break any per-submission event count and every cross-runtime
+/// event-stream diff.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn contended_sends_emit_one_queued_status_and_no_bare_queued_event() {
     let tmp = TempDir::new().unwrap();
@@ -3245,14 +3232,10 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     );
 }
 
-/// SEVEN PARALLEL CALLS, NO `reply_to` — the shape that killed a live chain.
-///
-/// `subai_graph:rust` emitted one well-formed turn batching seven `reflect`
-/// sends with the key omitted, and NOTHING came back: no reply block, no error,
-/// no timeout, no cancel. The chain ended at pass 1 (measured 2026-09-03), and
-/// the same signature killed `agentic.build:rust` at pass 4 — also a turn whose
-/// calls carried no `reply_to`. An omitted key means the model gets its own
-/// answer back, so every one of these is owed a block.
+/// SEVEN PARALLEL CALLS, NO `reply_to` — a well-formed turn batching seven
+/// `reflect` sends with the key omitted must not end the chain with NOTHING
+/// back: no reply block, no error, no timeout, no cancel. An omitted key means
+/// the model gets its own answer back, so every one of these is owed a block.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_of_calls_without_reply_to_all_come_back() {
     let tmp = TempDir::new().unwrap();
@@ -3632,11 +3615,10 @@ async fn the_history_digest_pages_forward() {
 /// on an inbox named after the client.
 ///
 /// A synthetic client id has no `Agent`, so it has no watcher set, and a watcher
-/// that subscribed to the AGENT (which is what a `watch` frame names) saw
-/// nothing at all: measured 2026-09-10, `compaction:rust` fired its projection
-/// and pushed no event the harness could observe. Python has always emitted on
-/// the agent (`core.py::_to_caller`). Guarded here because the e2e that caught it
-/// is a paid live run, and this is a one-line regression to reintroduce.
+/// that subscribed to the AGENT (which is what a `watch` frame names) would see
+/// nothing at all. Python emits on the agent (`core.py::_to_caller`). Guarded
+/// here because otherwise only a live e2e run catches it, and this is a one-line
+/// regression to reintroduce.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
     let tmp = TempDir::new().unwrap();
@@ -3670,7 +3652,7 @@ async fn per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox() {
     );
 }
 
-/// B2.7 — ONE caller route, python's `_to_caller`: `client_id == 'cli'` is
+/// ONE caller route, python's `_to_caller`: `client_id == 'cli'` is
 /// DISPATCHED to the `cli` agent (so its handler prints to stdout), everyone
 /// else is emitted on the backend's own inbox. Rust selected between the two
 /// with a per-backend `CallerRoute` knob python does not have, so three of the
@@ -3785,9 +3767,9 @@ async fn put_row(kernel: &Arc<Kernel>, agent: &AgentId, row: Value) -> i64 {
 
 #[tokio::test]
 async fn grep_finds_the_line_inside_a_body_that_was_never_pulled() {
-    // THE OPERATION THE MODEL ACTUALLY WANTS. Measured 2026-09-06 (python): four
-    // ~10k-token thinking turns byte-scanning one 6.8KB body in 300-char windows
-    // hunting a single line. "Find the line that mentions X" is one call.
+    // THE OPERATION THE MODEL ACTUALLY WANTS. Without it a model spends long
+    // thinking turns byte-scanning one large body in small windows hunting a
+    // single line. "Find the line that mentions X" is one call.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "grep").await;
     let pid = kernel.mint_id();
@@ -3839,8 +3821,8 @@ async fn grep_finds_the_line_inside_a_body_that_was_never_pulled() {
 #[tokio::test]
 async fn grep_answers_under_the_inline_cap_even_when_everything_matches() {
     // THE CAP INVARIANT. A verb the agent calls ON ITSELF that answers over the
-    // cap is stored and digested — and then the model pulls its own grep
-    // (measured 2026-09-06, python: the run drowned in pulls).
+    // cap is stored and digested — and then the model pulls its own grep, and the
+    // run drowns in pulls.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "grepcap").await;
     for i in 0..400 {
@@ -4085,9 +4067,9 @@ async fn recall_long_head(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn context_recall_folds_a_head_longer_than_the_budget() {
-    // OWNER, 2026-10-07: a store written under a larger window (another model, a
-    // planted past) must FOLD at the rebuild — before, the fit stubbed every reply
-    // and dropped what still did not fit, and no fold was ever written.
+    // A store written under a larger window (another model, a planted past) must
+    // FOLD at the rebuild — not just stub every reply and drop what still does
+    // not fit.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "recallfold").await;
     let goal = long_head(&kernel, &backend, "fold").await;
@@ -4191,10 +4173,10 @@ async fn a_dry_recall_or_another_strategy_does_not_fold() {
 
 #[tokio::test]
 async fn a_fold_projection_over_budget_writes_folds() {
-    // MEASURED 2026-09-12 (fold_descent:rust): four compactions under
-    // `context_strategy: fold`, every one `folded=0 stripped=0` — the seam
-    // fired, the strategy did nothing, the cut did the work. A fold arm that
-    // never folds is the control arm with extra steps.
+    // Under `context_strategy: fold` a compaction must actually fold: a fold arm
+    // whose compactions all read `folded=0 stripped=0` — the seam fired, the
+    // strategy did nothing, the cut did the work — is the control arm with extra
+    // steps.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "foldproj").await;
     let _ = kernel
@@ -4274,12 +4256,11 @@ async fn a_fold_projection_over_budget_writes_folds() {
 
 #[tokio::test]
 async fn successive_fold_projections_do_not_nest_into_a_chain() {
-    // MEASURED 2026-09-12: rust reached fold levels 1..11 on `nested_folds` where
-    // python reached 1..2 on the same test. The strategy code was identical; the
-    // BODY was not — rust fed the whole store, python feeds the VIEW ARRAY, on
-    // which an old fold's members are absent and `render` does not re-place it
-    // at the head. Three adjacent folds then wrapped into a deeper one every
-    // other turn. This pins the python shape: depth stays flat.
+    // The strategy folds the VIEW ARRAY, as python does, never the whole store:
+    // on the view an old fold's members are absent and `render` does not
+    // re-place it at the head. Fed the whole store, three adjacent folds wrap
+    // into a deeper one every other turn and depth runs away. This pins the
+    // python shape: depth stays flat.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "folddepth").await;
     let _ = kernel.send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "update_agent", "id": backend.as_str(),
@@ -4512,7 +4493,7 @@ fn budget_meta_parses_like_python() {
     let meta = |v: Value| v.as_object().unwrap().clone();
     // `context_window` 0.5 is a POSITIVE float, so `_as_pos_int` truncates it to
     // 0 and that 0 is the window; `output_reserve` "-5" is not a digit string, so
-    // 1024; the budget then floors at 256. Measured python: {0, 1024, 256}.
+    // 1024; the budget then floors at 256. Python: {0, 1024, 256}.
     let m = meta(json!({"context_window": 0.5, "output_reserve": "-5", "recent_n": 1000.0}));
     assert_eq!(
         crate::context::resolve_context_window(&m, crate::constants::DEFAULT_CONTEXT_WINDOW),
@@ -4616,7 +4597,7 @@ fn inquiry_turn_text_uses_python_str_and_json_dumps() {
     );
 }
 
-/// INQUIRY, FULLY ASYNC (owner, 2026-10-06) — python `test_inquiry_async.py`. The
+/// INQUIRY, FULLY ASYNC — python `test_inquiry_async.py`. The
 /// primary asks its peer; the inquiry is ACCEPTED at once, the peer answers in a
 /// LATER turn of its own chain, and the answer reaches the primary as a message
 /// under the inquiry's pid. `steps` are the peer's passes after the question.
@@ -5015,9 +4996,9 @@ async fn context_titles_flag_is_python_truthy() {
 }
 #[tokio::test]
 async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
-    // Measured 2026-09-06 (python): the rebooted agent was woken by answers to
-    // calls its PREVIOUS incarnation made, and finished THAT work instead of the
-    // new instruction. The reply is kept as a row — real data — but runs no turn.
+    // A rebooted agent woken by answers to calls its PREVIOUS incarnation made
+    // would finish THAT work instead of the new instruction. The reply is kept as
+    // a row — real data — but runs no turn.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "late").await;
     let s = script(&backend, vec![pass("ack")], Duration::ZERO);
@@ -5259,7 +5240,7 @@ async fn a_numeric_why_is_its_python_str() {
 
 #[tokio::test]
 async fn a_scalar_expand_is_wrapped_like_python() {
-    // `_as_list` (python 2026-09-20): a truthy int/float/bool `expand` is ONE
+    // `_as_list` (python): a truthy int/float/bool `expand` is ONE
     // candidate — the recall completes and its row is written.
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "expscalar").await;
@@ -5348,12 +5329,11 @@ async fn a_non_string_type_tags_the_reply_with_python_str() {
 
 #[tokio::test]
 async fn the_seam_keeps_the_goal_the_strategies_pinned() {
-    // `project_context` appends the real notice and then trims to fit. It trimmed
-    // from the FRONT — exactly where `compact`/`truncate` had just pinned the goal
-    // turn — so a snug window silently dropped the one turn the whole run serves
-    // (python, measured 2026-08-28: absent across a wide band of windows, in BOTH
-    // strategies). python trims from the MIDDLE first and only takes the goal as
-    // a last resort, loudly.
+    // `project_context` appends the real notice and then trims to fit. Trimming
+    // from the FRONT — exactly where `compact`/`truncate` just pinned the goal
+    // turn — would silently drop the one turn the whole run serves in a snug
+    // window, in BOTH strategies. python trims from the MIDDLE first and only
+    // takes the goal as a last resort, loudly.
     let goal = "GOAL-SENTINEL: build the widget and report when done";
     for strategy in ["compact", "truncate"] {
         for window in [1200i64, 2000, 4000] {
@@ -5498,9 +5478,8 @@ async fn kernel_rows_and_role_less_notes_never_become_turns() {
     assert_eq!(g["total"], json!(1), "{g}");
 }
 
-/// B2.6 (r5) — the id must be RANDOM, not a counter. The capture read
-/// `AAAAAVnE3yQ` (base64 of a big-endian int64) where python had `cijoBiyMnnw`:
-/// the mint was `nanos ^ stack ^ pid ^ seq`, not `secrets`.
+/// The id must be RANDOM, not a counter: a mint like `nanos ^ stack ^ pid ^ seq`
+/// reads as a big-endian int64 (`AAAAAVnE3yQ`), never like python's `secrets`.
 #[test]
 fn two_send_ids_differ_and_do_not_ascend() {
     let ids: Vec<String> = (0..64).map(|_| crate::helpers::mint_send_id()).collect();
@@ -5533,8 +5512,8 @@ fn two_batch_tokens_differ_and_are_four_hex() {
 /// tags into `payload` with `fields.pop("target_id")`, which keeps the
 /// survivors in source order (`type`, `text`), then `setdefault("msg", …)`
 /// appends. `serde_json::Map::remove` is `swap_remove` under `preserve_order`
-/// — it dragged `text` into the hole and the r3 capture read
-/// `["text","type","msg"]` where python had `["type","text","msg"]`.
+/// — it would drag `text` into the hole and read `["text","type","msg"]` where
+/// python has `["type","text","msg"]`.
 #[test]
 fn a_peer_sends_payload_keeps_pythons_key_order() {
     let calls = crate::tool_parse::extract_tool_calls(
@@ -5747,7 +5726,7 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
 #[path = "tests_memory.rs"]
 mod memory_features;
 
-/// STEP-4 PIN (2026-10-01): per-agent backend state. Two agents never share a
+/// Per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the
 /// next touch builds a fresh one; the INCARNATION count is NOT freed by it —
 /// it is a process-lifetime counter, exactly as python's module-level
@@ -5785,7 +5764,7 @@ fn backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation() {
     crate::state::drop_state(&b);
 }
 
-/// ARCH2-2 delete-time teardown (python `test_delete_drops_every_row_but_the_incarnation`):
+/// Delete-time teardown (python `test_delete_drops_every_row_but_the_incarnation`):
 /// `delete_agent` runs the backend's `on_delete`, which drops every per-id table,
 /// so the id re-created later starts clean; the incarnation stays monotonic, so a
 /// reply to a call the deleted agent made never becomes a live turn of the new one.
@@ -5876,7 +5855,7 @@ async fn delete_drops_every_row_but_the_incarnation() {
     assert_eq!(crate::state::incarnation(&backend), incarnation + 1);
 }
 
-/// STEP-4 PIN (2026-10-01): `history fold=…` — the fold id parse (retrieval's
+/// `history fold=…` — the fold id parse (retrieval's
 /// `as_id`: an int, or a STRIPPED decimal string; never a float, a bool or a
 /// word), the head's key order, and the two refusals, byte for byte.
 #[tokio::test]
@@ -5965,8 +5944,8 @@ mod prompt_file_tests;
 mod stream_parts;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
-/// and once answered it is cut to a stub that names the same pid (owner,
-/// 2026-10-06) — python `test_a_docs_reply_is_cut_to_a_stub_once_answered`.
+/// and once answered it is cut to a stub that names the same pid — python
+/// `test_a_docs_reply_is_cut_to_a_stub_once_answered`.
 #[test]
 fn a_docs_reply_is_cut_to_a_stub_naming_its_held_pid() {
     let body = "[reply to 12 · kernel docs]\n<of>runner</of>\n<bundle>exec_bridge.tools</bundle>\
@@ -6015,7 +5994,7 @@ fn the_grep_example_is_a_real_verb_and_a_verbless_body_is_not_cut() {
     assert_eq!(drop_read_docs(&hist), hist);
 }
 
-// ─── ONLY THE ANSWER ACTS (owner, 2026-10-07) ───────────────────────────
+// ─── ONLY THE ANSWER ACTS ───────────────────────────────────────────────
 // A `<call>` written inside `<think>…</think>` is thinking — not dispatched, not
 // stored. Python `test_answer_only_calls.py`, same five cases.
 
@@ -6365,7 +6344,7 @@ async fn a_peer_cannot_mark_its_message_a_notice() {
     assert!(users[0].get("kind").is_none(), "{users:?}");
 }
 
-/// A ROUTING NAME A VERB ALSO TAKES (owner, 2026-10-11): `title` on a call is
+/// A ROUTING NAME A VERB ALSO TAKES: `title` on a call is
 /// routing, never sent to the target. A verb whose `docs` names `title` could never
 /// receive it — the call is refused, loud, and a verb without one is untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

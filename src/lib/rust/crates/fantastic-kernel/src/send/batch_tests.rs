@@ -109,7 +109,7 @@ async fn a_timeout_kills_through_the_front_door() {
     assert_eq!(out[0].status, Status::TimedOut);
     assert_eq!(out[0].result["reason"], "timeout");
     assert!(out[0].pid.is_some(), "it DID reach the task table");
-    // C31: python's prose, verbatim — target id RAW, verb `py_repr`-quoted,
+    // Python's prose, verbatim — target id RAW, verb `py_repr`-quoted,
     // plus `task_id`.
     let pid = out[0].pid.expect("checked above").0;
     assert_eq!(
@@ -167,10 +167,9 @@ async fn a_bad_timeout_is_refused_not_guessed() {
 
 #[tokio::test]
 async fn a_name_that_looks_like_an_old_pid_is_just_a_name() {
-    // THE NAMESPACE IS GONE. A caller used to be refused an id shaped
-    // `<agent>:<hex>` because that was the kernel's to mint. It mints numbers
-    // now and a caller supplies only NAMES, so there is nothing to collide with
-    // and nothing to refuse: this is an ordinary named execution.
+    // THERE IS NO PID NAMESPACE: the kernel mints numbers and a caller supplies
+    // only NAMES, so an id shaped `<agent>:<hex>` collides with nothing and is
+    // refused nothing: this is an ordinary named execution.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "b_ns").await;
@@ -288,7 +287,7 @@ async fn an_empty_batch_is_an_empty_answer() {
     assert!(kernel.send(vec![]).await.is_empty());
 }
 
-// ─── parallel EXECUTION, observed (owner, 2026-10-01) ───────────────────────
+// ─── parallel EXECUTION, observed ───────────────────────────────────────────
 //
 // The wall-clock twin above proves concurrency by timing; this pair proves it
 // by OBSERVATION, independent of load: item A's handler holds until item B's

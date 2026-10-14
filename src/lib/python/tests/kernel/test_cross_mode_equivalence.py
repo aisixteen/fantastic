@@ -114,7 +114,7 @@ async def _seed(kernel) -> None:
         "kernel_state", callable_by={"$self": "*", "rest_leg": "*", "ws_leg": "*"}
     )
     # The web host the ws leg is mounted on: its `port` is the authority the Host
-    # guard admits (audit W-2), named by the ws client on its upgrade.
+    # guard admits, named by the ws client on its upgrade.
     kernel.create(None, id="test_web", port=8088)
 
 

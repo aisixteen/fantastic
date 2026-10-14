@@ -1,4 +1,4 @@
-//! THE RECORD'S `system_prompt` (owner, 2026-10-03, option b): set on an ai_core
+//! THE RECORD'S `system_prompt`: set on an ai_core
 //! agent's record it REPLACES the default system block on EVERY turn — a main
 //! turn, a self-delivery, a turn woken by a reply. Precedence: the per-call
 //! argument (that delivery) > the record field > the default block; the record
@@ -164,7 +164,7 @@ async fn update(kernel: &Arc<Kernel>, backend: &AgentId, fields: Value) -> Value
         .result
 }
 
-/// `pre_system_prompt` / `post_system_prompt` (owner, 2026-10-11) WRAP the block in
+/// `pre_system_prompt` / `post_system_prompt` WRAP the block in
 /// force — the default, the record's, the per-call — verbatim, never replacing it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pre_and_post_wrap_whichever_block_is_in_force() {

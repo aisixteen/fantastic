@@ -558,7 +558,7 @@ struct FileTextVerbsTests {
         #expect(r["reason"] == "not_found", "\(r.serialize())")
     }
 
-    /// a17: the reflect carries the edit grammar and the compose rule verbatim.
+    /// The reflect carries the edit grammar and the compose rule verbatim.
     @Test func reflectCarriesTheEditGrammarAndCompose() async {
         let (k, _) = await bridge()
         let r = await call(k, ["type": "reflect"])

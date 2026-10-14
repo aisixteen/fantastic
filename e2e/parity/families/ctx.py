@@ -7,11 +7,10 @@ strategy DID to the same conversation rather than what four different
 conversations happened to look like. `ai_tiny` gets a window smaller than one
 turn, which trips the too_small failsafe on its first pass.
 
-Two changes from round 2, both because of what it could not measure:
-  * the data bridge is `bigfiles` rooted at `big` (it was `store`), so the name
-    `store` is free for a PERSISTENCE provider — round 2's reboot had none, so
-    the boot-time `context_recall` it was supposed to measure never ran
-    (`[messages] no store wired`, 0 rows, no boot request);
+Two choices, both so the family can measure what it is for:
+  * the data bridge is `bigfiles` rooted at `big`, so the name `store` is free
+    for a PERSISTENCE provider — without one, the boot-time `context_recall` the
+    reboot measures never runs (`[messages] no store wired`);
   * requests are saved as `req/<agent>_<kind>_t<turn>.json` with the ordinal kept
     in the index, so the diff aligns by (agent, kind, turn) instead of by a
     global counter that shifts the moment one runtime makes one extra call.

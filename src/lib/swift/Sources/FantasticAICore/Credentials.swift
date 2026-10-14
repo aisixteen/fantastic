@@ -1,4 +1,4 @@
-// A backend's KEY, read from a credential store at USE time (owner, 2026-10-01).
+// A backend's KEY, read from a credential store at USE time.
 // Python `ai_core/credentials.py`, its texts byte for byte.
 //
 // The record names WHERE the key lives — `credentials: {store, ref}` — never the

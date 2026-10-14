@@ -1,8 +1,7 @@
 """LIVE TEST — MULTISUBAI (solve): THREE sub-agents, each with its OWN oracle, must
 find a 3-digit safe code that exists only when every pair has talked.
 
-The team is built and kicked off BY THE HARNESS (user, 2026-09-10: "create all by
-yourself and program agent kickoff in test harness") — so what is measured is the
+The team is built and kicked off BY THE HARNESS — so what is measured is the
 SWARM, not a creator's wiring. A creator-built variant is a separate test.
 
 The puzzle (the ring safe): oracle 1 = who works where, oracle 2 = what each room
@@ -81,10 +80,9 @@ def make_puzzle(rng: random.Random) -> tuple[str, list[list[str]]]:
     room_count[who_where[p1]] = digits[0]
     owned[p2] = digits[1]
     desks[who_where[p3]] = digits[2]
-    # EVERY FACT ABOUT A ROOM LIVES IN THE ROOMS LEDGER. Desks used to sit in the
-    # PEOPLE ledger "for a one-hop clue"; measured 2026-09-10: solver_2 (rooms) asked
-    # its oracle 73 times for desks it never had while the others waited — the
-    # ledger NAME is what the solvers reason from, so the split must honour it.
+    # EVERY FACT ABOUT A ROOM LIVES IN THE ROOMS LEDGER. The ledger NAME is what the
+    # solvers reason from (a rooms solver asks its oracle for desks), so the split must
+    # honour it.
     ledger1 = [f"{p} works in {who_where[p]}." for p in people] + [
         f"{p} joined in {rng.randint(2010, 2024)}." for p in people
     ]

@@ -1,4 +1,4 @@
-"""INQUIRY, FULLY ASYNC (owner, 2026-10-06).
+"""INQUIRY, FULLY ASYNC.
 
 An `inquiry` sent to an AI is ACCEPTED at once (`{accepted, re, request_id}`) and
 runs as its own chain on the receiver. The answer the receiver gives with
@@ -6,10 +6,8 @@ runs as its own chain on the receiver. The answer the receiver gives with
 the asker LATER as a message under the inquiry's pid, `[reply to <pid> · <who>
 inquiry]`. A chain that ends without answering tells the asker so. Nothing waits:
 the asker keeps working or `await`s, and its open inquiry counts as work in flight.
-
-Until 2026-10-06 the answer was read off the receiver's FIRST turn only: a
-reviewer that read the spec and ran `git diff` before answering was told it had
-not answered (measured, peer_review:rust).
+The answer is never read off the receiver's FIRST turn only, so work before
+answering is allowed.
 """
 
 from __future__ import annotations
@@ -165,7 +163,7 @@ async def test_a_placeholder_is_refused_and_the_inquiry_stays_open(
 async def test_an_answer_the_asker_does_not_admit_is_told_to_the_receiver(
     seeded_kernel, fake_providers
 ):
-    """The answer is the receiver's own send (owner, 2026-10-06): without the
+    """The answer is the receiver's own send: without the
     reverse grant it is refused, and the RECEIVER is told — never dropped."""
     k = seeded_kernel
     a, r = _pair(

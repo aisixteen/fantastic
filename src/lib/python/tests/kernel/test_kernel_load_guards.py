@@ -4,9 +4,9 @@
 has to run first, or a hand-authored document leaves a kernel with an empty tree
 and no root — bricked by its own recovery path.
 
-Measured 2026-09-02: a parent CYCLE resolved on both ends (each `parent_id` named
-a record in the set) and passed validation, then hydrated nothing, silently
-dropping every record in the cycle.
+A parent CYCLE resolves on both ends (each `parent_id` names a record in the set),
+so it must be caught by validation — hydrated, it would silently drop every record
+in the cycle.
 """
 
 from __future__ import annotations

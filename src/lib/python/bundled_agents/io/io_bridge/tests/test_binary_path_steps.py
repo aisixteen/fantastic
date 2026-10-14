@@ -1,10 +1,10 @@
-"""`_binary_path` is a LIST OF STEPS (owner-approved, 2026-10-02).
+"""`_binary_path` is a LIST OF STEPS.
 
-A binary frame's header names where its raw body belongs. It used to spell that
-as a dotted string, so a payload whose bytes sat at the LITERAL key `"a.b"` (which
-web_rest's `X-Fantastic-Bytes-Field: a.b` binds) went out as `"payload.a.b"` and
-the receiver rebuilt a NESTED `a` → `b` slot — over every bridge, and over the
-exec_bridge guest wire. Now the path is a JSON array: a string step is an object
+A binary frame's header names where its raw body belongs. Spelled as a dotted
+string, a payload whose bytes sit at the LITERAL key `"a.b"` (which web_rest's
+`X-Fantastic-Bytes-Field: a.b` binds) would go out as `"payload.a.b"` and the
+receiver would rebuild a NESTED `a` → `b` slot — over every bridge, and over the
+exec_bridge guest wire. The path is a JSON array: a string step is an object
 key, taken literally; an integer step is a list index.
 
   (a) the codec: literal, nested and list paths round-trip; every malformed path

@@ -3,8 +3,8 @@
 
 THE STORE IS WIRED ONLY AROUND THE SCHEDULER STEP. A store under a live
 `state_subscribe` is a write loop that feeds itself: every ledger flush is an
-execution, every execution is a state event, and round 2 measured ~30
-write_stream/s and a 4 GB `frames.jsonl` in 25 seconds. The scheduler is the one
+execution, every execution is a state event, so the frame log grows without
+bound. The scheduler is the one
 step python refuses without a store, so the store is created for it and deleted
 after.
 
@@ -72,8 +72,7 @@ def roster(stub_url: str, cb: dict, interp: str) -> list:
 def seed_extra(k, w, port):
     """The extra authorities the wire family needs, written BEFORE the daemon.
 
-    `"*"` covers every verb, `state_subscribe` included (minimal model, owner
-    2026-10-04): the root accepts `ws`/`web`/`wsx`, and the legs reach the root.
+    `"*"` covers every verb, `state_subscribe` included (minimal model): the root accepts `ws`/`web`/`wsx`, and the legs reach the root.
     `outsider` is seeded under the ROOT, so no leg's grant names it — the leg
     reaches its own children (`$subtree`), and a REST-created agent would be one.
     """

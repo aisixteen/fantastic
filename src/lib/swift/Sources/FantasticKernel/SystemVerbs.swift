@@ -25,14 +25,12 @@ extension Kernel {
         // Refused HERE, in the handler — not at the call gate — so a send the
         // gate admitted answers `not_here`, never a gate denial.
         if target.parentId != nil {
-            // C32: EVERY system verb on a non-root — `shutdown_agents` and
+            // EVERY system verb on a non-root — `shutdown_agents` and
             // `kernel_stop` included — answers the SAME generic
             // `Refusal.notHere`. Python has no special case here: `if self.
             // parent is not None: return refusal(NOT_HERE, ...)` covers all
             // seven verbs uniformly ("kernel_stop already refused this
             // way; this generalises it to all seven" — `_agent.py:2036-2044`).
-            // The two-stop-verbs special case this used to carry answered a
-            // DIFFERENT, uncoded `{error}` with no `reason`/`hint`/`verb`.
             return Refusal.notHere(verb, target.id.value)
         }
         switch verb {
@@ -81,10 +79,8 @@ extension Kernel {
         // resources (OS subprocesses, PTYs, HTTP streams) die with it. An unknown
         // or already-finished id returns {cancelled:false} — it does not pretend.
         case "cancel":
-            // CODED. `{error: "cancel: task_id (str) required"}` could only be
-            // branched on by matching prose, so the shared corpus' `reason`
-            // matcher could never be satisfied here.
-            // C18: python `_verb_cancel` — missing iff `raw` is absent/null, a
+            // CODED: a bare `{error}` could only be branched on by matching prose.
+            // Python `_verb_cancel` — missing iff `raw` is absent/null, a
             // bool (either one), `""`, or anything but an int/str (a double,
             // list, object). Otherwise resolved through the SAME `_as_id` path
             // every other id argument uses (`asMessageId` — a positive int, or
@@ -160,10 +156,7 @@ extension Kernel {
     /// THE CONSEQUENCE MUST PRECEDE THE FIRST EM-DASH. A default reflect keeps
     /// only the text BEFORE it, so anything after the dash reaches
     /// `detail:"full"` callers only — and these are the facts a caller needs
-    /// BEFORE firing the verb, not after. Measured 2026-08-24: `create_agent`
-    /// read as `args: handler_module:str, id:str?, **meta` with "spawn a child
-    /// agent" cut, and a model spent 16 passes unable to work out what the target
-    /// meant, finishing with `agents_created: []`.
+    /// BEFORE firing the verb, not after.
     public static func kernelVerbDocs() -> JSON {
         .object([
             "create_agent": .string(
@@ -233,12 +226,12 @@ extension Kernel {
     /// kernel verbs), an agent id (the bundle it runs), or a bundle's handler
     /// module, readable before any agent of it exists. Python `_verb_docs` +
     /// `kernel/_docs.py`.
-    /// `docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>` (owner,
-    /// 2026-10-06) — python `Agent._remote_docs`. The question goes to THAT kernel's
+    /// `docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>` —
+    /// python `Agent._remote_docs`. The question goes to THAT kernel's
     /// own `docs`, and the reply names the qualified id. The asker's own `docs` grant
     /// on THIS root is what the gate checked; this kernel then asks as itself over the
-    /// peer's live routes, and the peer judges its leg. Measured 2026-10-06 (canvas E55/E58): with verbs out of
-    /// reflect a model could not learn a page agent's verbs at all.
+    /// peer's live routes, and the peer judges its leg. With verbs out of reflect,
+    /// this is how a model learns a page agent's verbs.
     func remoteDocsReply(_ of: String, _ payload: JSON) async -> JSON {
         var target: Agent? = nil
         if let bar = of.firstIndex(of: "|") {
@@ -302,13 +295,13 @@ extension Kernel {
             }
             module = hm
         } else if bundles.isFolder(of) {
-            // a FOLDER BUNDLE by its name — its handler_module (owner, 2026-10-08)
+            // a FOLDER BUNDLE by its name — its handler_module
             module = of
         } else if let hm = bundles.catalog().first(where: { $0.0 == of || $0.1.name == of })?.0 {
             // A BUNDLE by either name the kernel lists it under: `bundles='ids'`
             // lists the NAME (`file_bridge`), an agent record carries the
-            // handler_module (`file_bridge.tools`). Measured 2026-10-06 (rust,
-            // plan + build): models asked for the listed name and were refused.
+            // handler_module (`file_bridge.tools`). Models ask for
+            // the listed name.
             module = hm
         } else {
             return Refusal.make(
@@ -322,7 +315,7 @@ extension Kernel {
                 of: of, bundle: .string(module), tier: tier, verb: verb, table: .object([:]),
                 extras: [])
         }
-        // PER-INSTANCE VERBS (owner, 2026-10-08): an agent whose bundle names its
+        // PER-INSTANCE VERBS: an agent whose bundle names its
         // own table (an MCP server's tools) is documented by it; the bundle (no
         // agent) shows the bundle's.
         let table = named.flatMap { bundle.instanceVerbDocs($0) } ?? bundle.verbDocTable
@@ -404,10 +397,9 @@ extension Kernel {
         // `[a.record for a in self.ctx.agents.values()]` straight off the
         // registry dict, so the walk reads the order the agents were made in.
         let rows: [JSON] = allAgents().map { recordToJSON($0.record()) }
-        // `more` is not decoration (py-canonical, measured 2026-08-07): a model that
-        // opened with `list_agents` got bare records and never learned authoring was
-        // the mechanism; the arm that opened with `reflect` got `self_extension` and
-        // built. This verb rides every reflect's `system_verbs` — it needs a
+        // `more` is not decoration (py-canonical): a model that opens with
+        // `list_agents` gets bare records and may never learn authoring is the
+        // mechanism. This verb rides every reflect's `system_verbs` — it needs a
         // signpost back to the briefing.
         // PAGED. Absent `limit` ⇒ everything and `next: null`, so a caller that
         // never learned about paging is unaffected; the cursor is the last id
@@ -470,10 +462,8 @@ extension Kernel {
         // resolved like a send target (the reserved `kernel` address included), never
         // defaulted.
         //
-        // It used to be accepted and silently STRIPPED while the ADDRESSED agent
-        // became the parent: `parent_id:"specialist"` produced `parent_id="core"`
-        // with no error. The working mechanism was undiscoverable and the field
-        // that looked like it named where the agent sits did nothing.
+        // Never accepted and silently STRIPPED with the ADDRESSED agent as the
+        // parent: the field that looks like it names where the agent sits must do so.
         guard let pid = payload["parent_id"].asString, !pid.isEmpty else {
             return Refusal.make(
                 Refusal.missingArg, "create_agent: parent_id required",
@@ -525,16 +515,13 @@ extension Kernel {
         // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
         // payload rides in `meta` and merges over the baseline at construction.
 
-        // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: create
-        // used to bypass it, so a record could be born with meta its own bundle
-        // refuses). Record is empty at create: the merged view IS the patch.
+        // WRITE-TIME VALIDATION, same gate as update_agent (py-canonical: a record
+        // is never born with meta its own bundle refuses). Record is empty at create: the merged view IS the patch.
         if let why = badGrantShape(meta) {
             return Refusal.make(Refusal.invalidMeta, why)
         }
         if let bundle = bundles.get(hm), let why = bundle.validateMeta(meta, record: [:]) {
-            // THE ONE REFUSAL SHAPE (#27) — the create-side twin of the
-            // `updated: false` flag on update_agent. Both were ad-hoc booleans
-            // #27 declared dropped, and both carried no `reason` at all.
+            // THE ONE REFUSAL SHAPE — the create-side twin of update_agent's.
             return Refusal.make(Refusal.invalidMeta, why)
         }
 
@@ -608,7 +595,7 @@ extension Kernel {
 
         // agent_created lifecycle event on the PARENT's inbox — bookkeeping, a
         // plain fanout (no gate): whoever watches an agent for new children sees
-        // them arrive, at any depth (audit 2026-10-03, KV-4).
+        // them arrive, at any depth.
         fanout(
             parent, "emit",
             .text(
@@ -631,9 +618,8 @@ extension Kernel {
         guard let target = agent(id) else {
             // THE ONE REFUSAL SHAPE, py-canonical: a code to branch on, the LIVE
             // id index to self-correct from, and `deleted:false` so a caller
-            // reading that field is not told a typo succeeded. The bare `{error}`
-            // this used to answer is the measured 34-retry case — a fact with
-            // nothing to act on.
+            // reading that field is not told a typo succeeded. A bare `{error}` is
+            // a fact with nothing to act on.
             var r = Refusal.unknown(idStr, live: allAgents().map { $0.id.value })
             r["deleted"] = .bool(false)
             return r
@@ -641,7 +627,7 @@ extension Kernel {
         // THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers
         // every kernel verb, so cascading it empties the kernel and leaves a
         // process with no control surface at all — `{"deleted": true}` and an
-        // empty tree (measured 2026-09-02).
+        // empty tree.
         if target.parentId == nil {
             return Refusal.make(
                 Refusal.badArg,
@@ -653,10 +639,8 @@ extension Kernel {
                 ])
         }
         if let blocker = findLockedDescendant(of: target) {
-            // THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: true`
-            // flag and no `reason` until 2026-08-27, when the shared agentic
-            // corpus caught it — in python, rust and swift at once, because the
-            // flag #27 declared dropped was never actually removed anywhere.
+            // THE ONE REFUSAL SHAPE — never a bare `locked: true` flag without a
+            // `reason`.
             return Refusal.make(
                 Refusal.locked,
                 "delete_agent: \(pyRepr(id.value)) blocked by delete_lock on "
@@ -692,7 +676,7 @@ extension Kernel {
 
     /// A deleted id leaves every grant that named it — python `_prune_grants`.
     /// Grant keys are literal ids, so a stale one would hand its edge to whoever
-    /// re-creates that id (audit 2026-10-14). Each changed record is re-persisted
+    /// re-creates that id. Each changed record is re-persisted
     /// by its `updated` event (`update`).
     private func pruneGrants(_ gone: Set<String>) {
         for a in allAgents() {
@@ -775,9 +759,8 @@ extension Kernel {
         //
         // REFUSED, not silently skipped. `handler_module` is fixed at create —
         // swapping it would leave a live agent whose in-process state belongs
-        // to the OLD bundle. Reserved keys used to be dropped without a word,
-        // so the caller believed a change had landed that never did
-        // (2026-09-02). Checked BEFORE the target is even resolved, `handler_
+        // to the OLD bundle. Reserved keys dropped without a word
+        // would let the caller believe a change had landed that never did. Checked BEFORE the target is even resolved, `handler_
         // module` first then sorted reserved keys (python `("handler_module",
         // *sorted(RESERVED_RECORD_KEYS))`).
         if case .object(let dict) = payload {
@@ -809,8 +792,8 @@ extension Kernel {
             return Refusal.unknown(idStr, live: allAgents().map { $0.id.value })
         }
         // Grant-map SHAPE, judged here at write time — the gate only judges
-        // edges (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare
-        // string left a silently-dead grant; refuse loud at the mistake).
+        // edges (py-canonical: `can_call:"*"` accepted as a bare
+        // string would leave a silently-dead grant; refuse loud at the mistake).
         if let why = badGrantShape(patch) {
             return Refusal.make(Refusal.invalidMeta, why, extra: [("id", .string(idStr))])
         }
@@ -820,10 +803,8 @@ extension Kernel {
         if let hm = target.handlerModule, let bundle = bundles.get(hm),
             let why = bundle.validateMeta(patch, record: target.meta)
         {
-            // THE ONE REFUSAL SHAPE (#27). A bundle's own `validate_meta`
-            // rejection is `invalid_meta`; it carried the ad-hoc `updated:
-            // false` flag #27 declared dropped, and no `reason` at all, until
-            // the shared agentic corpus caught it 2026-08-27.
+            // THE ONE REFUSAL SHAPE. A bundle's own `validate_meta`
+            // rejection is `invalid_meta`.
             return Refusal.make(
                 Refusal.invalidMeta, why, extra: [("id", .string(idStr))])
         }
@@ -868,7 +849,7 @@ extension Kernel {
 // ── Helpers ───────────────────────────────────────────────────────
 
 /// A record as the wire sees it — `id, handler_module?, <meta>, parent_id`.
-/// Built as an OrderedDictionary, never through `JSONEncoder` (C15).
+/// Built as an OrderedDictionary, never through `JSONEncoder`.
 func recordToJSON(_ rec: AgentRecord) -> JSON { rec.json }
 
 /// Mint an id like `<bundle>_<6 hex>` — python `f"{bundle}_{secrets.token_hex(3)}"`
@@ -1063,8 +1044,8 @@ extension Kernel {
 /// A message id as an int: an int, or its digit string (a model may quote what
 /// it copied out of a tag). Anything else is not an id. Python `_as_id`.
 ///
-/// `isdecimal`, not `isdigit` (python, 2026-09-20): `'²'` is not an id, where
-/// the wider guard let it through to raise inside `int()`. `'٢'` is a decimal
+/// `isdecimal`, not `isdigit` (python): `'²'` is not an id — the wider guard
+/// would let it through to raise inside `int()`. `'٢'` is a decimal
 /// digit and reads as 2.
 public func asMessageId(_ v: JSON?) throws(PyError) -> Int64? {
     switch v {

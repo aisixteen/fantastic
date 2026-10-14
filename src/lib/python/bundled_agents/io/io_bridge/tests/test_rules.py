@@ -94,11 +94,9 @@ def test_auth_shorthand_is_enforced_not_only_reported():
 def test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule():
     """An unresolvable rule SEALS — it does not raise.
 
-    It used to raise `ValueError`, on the theory of failing the boot loudly. But
-    resolution runs PER CALL, not at boot: an agent set
-    `ingress_rule="password:kernel-internal-transcripts"`, `update_agent` accepted
-    it, and the next call raised out of the handler as an unhandled task exception
-    that killed the caller's chain with no reply. An unknown rule is not an
+    Raising would fail loudly only at boot, but resolution runs PER CALL: an
+    unknown `ingress_rule` raising out of the handler would kill the caller's chain
+    with no reply. An unknown rule is not an
     authorization, so deny — and say which name was wrong, in every denial, so the
     operator is not left guessing."""
     rule = resolve_ingress({"ingress_rule": "password:kernel-internal-transcripts"})
@@ -127,9 +125,9 @@ def test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule():
 def test_a_malformed_spec_seals_and_names_itself(spec, name):
     """A spec that is not a string or an object, or whose `type`/`env` is not a
     string, is named by its repr — a name no registry holds — so it SEALS like an
-    unknown name. It used to raise on every frame (`.get` on an int, a dict lookup
-    with a list, `os.environ.get(7)`), so a web_rest leg answered 500 and a bridge
-    call got no reply at all."""
+    unknown name — never a raise on every frame (`.get` on an int, a dict lookup
+    with a list, `os.environ.get(7)`) that leaves a web_rest leg answering 500 and
+    a bridge call with no reply at all."""
     rule = resolve_ingress({"ingress_rule": spec})
     assert isinstance(rule, DenyInbound) and rule.unknown == name
     d = gate_inbound(
@@ -171,10 +169,10 @@ def test_ingress_password_checks_envelope_token(monkeypatch):
 def test_ingress_password_compares_utf8_bytes_so_any_token_is_a_plain_answer(
     monkeypatch,
 ):
-    """IO-6 (audit 2026-10-03): the compare is over UTF-8 BYTES, as rust and swift
-    do. On `str` `hmac.compare_digest` raises TypeError for any non-ASCII text, so
-    a tokenless client sending `é` got a 500 / a dead dispatch instead of a denial,
-    and a non-ASCII group token refused its own holders."""
+    """The compare is over UTF-8 BYTES. On `str` `hmac.compare_digest` raises
+    TypeError for any non-ASCII text, so a tokenless client sending `é` would get a
+    500 / a dead dispatch instead of a denial, and a non-ASCII group token would
+    refuse its own holders."""
     monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "s3cret")
     for odd in ("é", "s3cr€t", "\ud800", "été"):
         d = IngressPassword().authorize(_call(odd))
@@ -210,9 +208,7 @@ def test_resolve_egress_threads_env_and_defaults_silent():
         == "MY_GROUP"
     )
     # An INGRESS-only name is not an egress instruction, and absent is not either: both
-    # present nothing. (The second assertion below was a byte-identical copy of the one
-    # above, under a comment claiming it covered a second spelling. It covered nothing —
-    # same rot as the duplicate `ingress_rule` key this file used to carry.)
+    # present nothing.
     assert isinstance(resolve_egress({"egress_rule": "silent_egress"}), Silent)
     assert isinstance(resolve_egress({}), Silent)
 
@@ -236,10 +232,10 @@ def test_a_name_from_the_other_manifold_is_loud_not_silent():
     """Rule names are MANIFOLD-SCOPED so one name can never half-resolve across the
     two registries.
 
-    Measured 2026-08-21, before scoping: `auth:"silent"` — a legitimate EGRESS
-    policy — resolved ingress to `DenyInbound(unknown='silent')`, SEALING the leg
-    while recording the unknown name and saying nothing; and `auth:"allow_all"`
-    handed egress a `Silent` nobody asked for. One unscoped name against two
+    Unscoped, `auth:"silent"` — a legitimate EGRESS policy — would resolve ingress
+    to `DenyInbound(unknown='silent')`, SEALING the leg while recording the unknown
+    name and saying nothing; and `auth:"allow_all"` would hand egress a `Silent`
+    nobody asked for. One unscoped name against two
     registries with different membership is a fallback, and this kernel has none.
 
     It still DENIES (an unresolvable rule is not an authorization), but it now names

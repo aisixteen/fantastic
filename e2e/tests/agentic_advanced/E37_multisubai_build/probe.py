@@ -11,10 +11,10 @@ turn wakes, reads `answer.txt` on `notes`, confirms the code the solvers report 
 the code on disk, tells the human, deletes its three solvers (its own children —
 baseline authority) and ends with `done`. That last leg — a sleeping mind woken by
 its own creation, validating, cleaning up and stopping — is the point of the test.
-Acceptance (user, 2026-09-10): the reported answer AND the deletion of the sub-agents.
+Acceptance: the reported answer AND the deletion of the sub-agents.
 
-The previous creator run (2026-09-10, killed at turn 13) was not stuck but SLOW:
-turns of reflecting, a probe program, one `update_agent` per grant. So the task
+A creator left to work it out is not stuck but SLOW: turns of reflecting, a probe
+program, one `update_agent` per grant. So the task
 here is as detailed as a spec — the record shape to copy, the exact grant maps
 (and that `update_agent` REPLACES a named field whole), the solver instructions
 verbatim, the batch kickoff with `<reply_to>null</reply_to>`, and `done`. What is
@@ -50,15 +50,15 @@ ORACLES, SOLVERS, LEDGER_NAMES, N = S.ORACLES, S.SOLVERS, S.LEDGER_NAMES, S.N
 # EVERY ID THE BUILDER'S RECORD NAMES is declared here, `cli` included: over the
 # wire the probe is the `rest` agent, and a creator may delegate only what it
 # holds — a `can_call` on an id the driver never reached is refused as
-# `cannot delegate '*' on cli` (measured 2026-09-12; python's rule is the same,
-# it just never fires in process where the probe is the operator).
+# `cannot delegate '*' on cli` (python's rule is the same; it never fires in
+# process, where the probe is the operator).
 # EVERYTHING E30'S SHARED BUILDER RECORD NAMES, plus this probe's own. Over the
 # wire the probe is the `rest` agent and a creator delegates only what it
 # holds, so every id `_ai_meta` puts on `can_call` (cli, clock, readings,
 # totals, runner, …) must be declared here or the create is refused
 # `cannot delegate '*' on <id>` — python's rule too; it never fires in process
-# where the probe is the operator (measured 2026-09-12, three refusals in a row
-# while the set was hand-listed). E30's own set is the authority.
+# where the probe is the operator. E30's own set is the authority, not a
+# hand-listed one.
 MINE = {*P.MINE, "kernel_store", "notes", "user", CREATOR, *ORACLES}
 UNATTENDED = S.UNATTENDED
 
@@ -79,7 +79,7 @@ def solver_instructions(k: int) -> str:
 #: PLUG put there (handler, model, endpoint, the backend's required fields, the
 #: key's `credentials` when the plug has one) plus the conversation store and the
 #: window. Read off the plug, never a hand-kept list: a list written for one
-#: backend left vllm solvers without `kv_slots`/`kv_overflow` (measured on E37).
+#: backend leaves another backend's required fields out.
 COPY = [*P.BK.record(), "memory_store_id", "context_window"]
 
 TASK = (
@@ -153,8 +153,7 @@ async def fixture(root, *, interpreter=None):
                         "handler_module": "file_bridge.tools", "allow": ["."],
                         "id": "kernel_store",
                         # `notes` is the one that actually reads/writes here (the solvers
-                        # and the creator go THROUGH it) — measured 2026-09-10: without
-                        # it, every write failed and the creator had to open the door.
+                        # and the creator go THROUGH it) — without it every write fails.
                         "callable_by": {CREATOR: "*", "brain": "*", "rest": "*", "web": "*"},
                         "ingress_rule": "allow_all_ingress",
                         "root": ".fantastic",
@@ -297,9 +296,9 @@ async def score(root, store_id, total, new_total, transcript):
     # ── 4. THE CREATOR IS WOKEN, VALIDATES, DELETES THE FLEET, STOPS ──
     woke = validated = stopped = deleted = False
     if c3:
-        # UP TO THE UNATTENDED LIMIT, ENDED BY THE IDLE STOP (owner, 2026-10-07): a fixed
-        # 240 s cut the creator mid-work on a one-request-at-a-time GPU (its last turn
-        # was awaiting its own calls' replies); a quiet kernel ends the wait instead.
+        # UP TO THE UNATTENDED LIMIT, ENDED BY THE IDLE STOP: a fixed cut can stop the
+        # creator mid-work on a one-request-at-a-time GPU (awaiting its own calls'
+        # replies); a quiet kernel ends the wait instead.
         end = time.monotonic() + UNATTENDED
         watch = QuietWatch(root)
         while time.monotonic() < end and not stopped:

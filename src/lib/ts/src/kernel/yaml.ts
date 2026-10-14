@@ -1,7 +1,7 @@
 // A STRICT YAML subset — the one YAML reader of the ts kernel (zero runtime deps).
 //
-// It reads a FOLDER BUNDLE's `bundle.yaml` (the page kernel loads its own folders,
-// owner 2026-10-08) and the `contract/` corpus in tests: block mappings and
+// It reads a FOLDER BUNDLE's `bundle.yaml` (the page kernel loads its own folders)
+// and the `contract/` corpus in tests: block mappings and
 // sequences by indentation, a sequence item that opens a mapping on its dash line,
 // flow `{…}` / `[…]` (nested, may span lines), plain / single-quoted /
 // double-quoted scalars (a plain scalar may continue on more-indented lines),

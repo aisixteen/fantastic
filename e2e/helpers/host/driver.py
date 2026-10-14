@@ -3,14 +3,12 @@
 The scenario is data (`e2e/tests/scenario/E*/scenario.yaml`); this is the e2e
 runner's transport for EVERY host runtime — python, rust and swift alike.
 
-ONE FACE FOR EVERY RUNTIME. There used to be an in-process python runner
-sitting beside this one, and it made python look better than the compiled
-kernels for a reason that had nothing to do with the kernels: it called
-`root.send(...)` directly, so it could name an execution, impersonate the
-operator, and register bespoke in-process fixtures. None of that is reachable
-over HTTP, so `user_actions` "passed" on python and "skipped" on rust while the
-two runs were not the same test. Python is spawned and driven over REST here
-like everything else, and a limit found here is a limit for all three.
+ONE FACE FOR EVERY RUNTIME. An in-process runner can call `root.send(...)`
+directly — name an execution, impersonate the operator, register bespoke
+in-process fixtures — none of which is reachable over HTTP, so the same test
+would not be the same test across runtimes. Python is spawned and driven over
+REST here like everything else, and a limit found here is a limit for all
+three.
 
 THE ONE REMAINING LIMIT, stated rather than worked around:
 
@@ -169,12 +167,8 @@ class HostKernel:
 
         Granted ON THE TREE, before the daemon starts, which is the only way an
         HTTP driver can hold authority: it arrives as the `rest` agent, and an
-        agent may not raise its own. This used to be done by POSTing
-        `update_agent` on `rest` after each create — a SELF-GRANT, which python
-        refuses outright and which rust and swift were letting through. Their
-        conferral check sat behind an early return for kernel verbs at the root,
-        so it never ran for `update_agent`; that is fixed in both, and the
-        driver no longer asks for something it should never have been given.
+        agent may not raise its own (POSTing `update_agent` on `rest` would be a
+        SELF-GRANT, which every runtime refuses).
 
         The ids are all known up front — the scenario names its roster — so
         declaring them costs nothing and keeps authority flowing downward.
@@ -191,18 +185,16 @@ class HostKernel:
         self.proc: subprocess.Popen | None = None
         #: The kernel's own stdout+stderr, on DISK — and NOT under `workdir`.
         #:
-        #: It used to go to `subprocess.PIPE` with nobody reading it. A pipe holds
-        #: ~64KB; past that the kernel BLOCKS on its next write, mid-request,
+        #: Not `subprocess.PIPE` with nobody reading it: a pipe holds ~64KB; past
+        #: that the kernel BLOCKS on its next write, mid-request,
         #: forever — no error, no exit, just a process that stops answering. That
         #: is indistinguishable from a model that chose to stop, and it is the one
         #: failure this harness must never confuse with a model's. A file cannot
         #: fill, and it is the only record of what the kernel had to say.
         #:
         #: OUTSIDE THE TREE UNDER TEST. Probes scan the workdir for what the model
-        #: wrote; a capture file living there is scanned too. Put in `workdir` on
-        #: 2026-09-03, it was immediately reported as the model's stored answer
-        #: (`stored='fantastic_kernel: headless host up…' key='kernel.out'`). A
-        #: diagnostic that becomes evidence about itself is worse than none.
+        #: wrote; a capture file living there would be scanned too, and reported as
+        #: the model's stored answer. A diagnostic that becomes evidence about itself is worse than none.
         self.klog_path = Path(
             tempfile.mkdtemp(prefix="fantastic-kernel-out-")) / "kernel.out"
         self.klog = None
@@ -232,7 +224,7 @@ class HostKernel:
         # ingress on `memory`), so only the FIRST seed writes them.
         if not (rest_dir / "agents" / memory.MEMORY / "agent.yaml").exists():
             root = yaml.safe_load((w / "agent.yaml").read_text())
-            # THE `rest` LEG IS THE TEST'S OPERATOR (owner, 2026-10-04, option a).
+            # THE `rest` LEG IS THE TEST'S OPERATOR.
             # Every REST call is the leg, and a mutation must come from the
             # operand's direct parent — so every agent a probe creates is the leg's
             # child, and the leg writes their records (grants included). The root
@@ -302,22 +294,19 @@ class HostKernel:
         self.klog = self.klog_path.open("wb")
         # ITS OWN PROCESS GROUP, KILLED AS A GROUP. A kernel is a daemon by design —
         # it keeps serving when its parent dies — so every probe that ended without
-        # reaching `close` (a lane timeout, a pkill, a harness crash) left one behind:
-        # 29 orphans, 835 MB, measured 2026-09-07. `close` and the exit hook now kill
-        # the group, which also takes any child the kernel spawned.
+        # reaching `close` (a lane timeout, a pkill, a harness crash) would leave one
+        # behind. `close` and the exit hook kill the group, which also takes any child the kernel spawned.
         self.proc = subprocess.Popen(
             self.cmd, cwd=self.workdir, env=self.env,
             stdout=self.klog, stderr=subprocess.STDOUT,
             start_new_session=True)
         # AT EXIT, NOT AT `close`. Probes bind `close_kernel` and never call it —
         # the kernel dies with the process — so a dump that lived only in `close`
-        # never ran and the capture was worth nothing (measured 2026-09-03).
+        # would never run.
         atexit.register(self.close)
         # WAIT ON THE PORT, never on a guessed sleep — and long enough for a
         # HYDRATED host: booting an agent with a store runs `context_recall`,
-        # a model call per AI agent, before the listener comes up (measured
-        # 2026-09-12, kernel_restart:rust: 324 rows hydrated, then `did not
-        # serve` at the old 15 s cap). 120 s, bounded.
+        # a model call per AI agent, before the listener comes up. 120 s, bounded.
         for _ in range(1200):
             with socket.socket() as s:
                 if s.connect_ex(("127.0.0.1", self.port)) == 0:

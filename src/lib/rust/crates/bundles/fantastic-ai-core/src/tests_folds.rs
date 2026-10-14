@@ -218,9 +218,8 @@ fn a_span_never_ends_between_a_call_and_its_answer() {
 #[test]
 fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
     // THE ANTI-LINKED-LIST RULE. A span that starts on the previous fold wraps
-    // it, and doing that every time builds summaries-of-summaries (measured
-    // 2026-09-06 in python: twelve levels in 26 cuts, the model lost in it for
-    // 50 turns). Below the threshold: take ordinary rows. At it: fold the folds.
+    // it, and doing that every time builds summaries-of-summaries the model gets
+    // lost in. Below the threshold: take ordinary rows. At it: fold the folds.
     let mut rows = vec![turn(1, "user", None, "goal")];
     // The rows each fold collapsed — present, so the fold has somewhere to sit.
     for k in 0..FOLD_RUN {
@@ -376,7 +375,7 @@ fn chain_text_elision_tail_is_python_slice() {
     );
 }
 
-/// A fold is sized by TOKENS, never a row count (owner, 2026-10-11): `next_span`
+/// A fold is sized by TOKENS, never a row count: `next_span`
 /// takes the oldest rows until their tokens reach `need`, and no further.
 #[test]
 fn a_span_is_sized_by_tokens_not_rows() {

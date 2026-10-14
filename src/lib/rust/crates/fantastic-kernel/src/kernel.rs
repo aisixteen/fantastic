@@ -55,7 +55,7 @@ pub(crate) fn publish_state_to(
     body: Option<&crate::outcome::Blob>,
 ) {
     let subs = subs.read().expect("state subs poisoned");
-    // Nothing inside the kernel's own ledger flush is published (audit CLI-B).
+    // Nothing inside the kernel's own ledger flush is published.
     if subs.is_empty() || crate::send::state_quiet() {
         return;
     }
@@ -78,7 +78,7 @@ pub(crate) fn publish_state_to(
     }
 }
 
-/// One subscriber call, ISOLATED (C87) — python: `try: cb(event) except
+/// One subscriber call, ISOLATED — python: `try: cb(event) except
 /// Exception as e: print(f"  [kernel] state subscriber raised: {e}",
 /// file=sys.stderr)`, and the loop moves on to the next subscriber. A
 /// rust callback has no `Result` to fail with — the equivalent of
@@ -178,8 +178,8 @@ pub struct Kernel {
     /// `ctx._ai_memory` attribute: two kernels in one process (tests, a
     /// multi-kernel host) never share it. See [`Self::extension`].
     extensions: DashMap<&'static str, Arc<dyn std::any::Any + Send + Sync>>,
-    /// CONNECTED PEER KERNELS — guid → the LIVE routes to it (owner, 2026-09-30;
-    /// a set per guid, 2026-10-03: the tabs of one identity are one principal).
+    /// CONNECTED PEER KERNELS — guid → the LIVE routes to it (a set per guid: the
+    /// tabs of one identity are one principal).
     /// An agent on another kernel is addressed `<guid>|<agent id>`; when that guid
     /// is here, `send` hands the call to its routes and the first reply is the
     /// call's ordinary outcome. A TRANSPORT registers the peer it is connected to
@@ -359,7 +359,7 @@ impl Kernel {
     }
 
     /// Queue a record for the root loader's writer with NO state event — the
-    /// id-block reservation inside the silent ledger flush (audit CLI-B). A no-op
+    /// id-block reservation inside the silent ledger flush. A no-op
     /// when no loader has booted.
     pub(crate) fn mark_record_dirty(&self, id: &AgentId) {
         let w = self.record_writer.lock().expect("writer poisoned").clone();
@@ -386,9 +386,7 @@ impl Kernel {
     /// (PTYs, subprocesses, sockets) without touching records or disk. The tree
     /// survives, so the next boot rehydrates cleanly.
     ///
-    /// IDEMPOTENT: a second call does nothing. Nothing used to call
-    /// `Bundle::on_shutdown` at all — the daemon sent `{type:shutdown}` LIFO to
-    /// every agent, which most bundles answer "unknown type".
+    /// IDEMPOTENT: a second call does nothing.
     pub async fn shutdown(self: &Arc<Self>) {
         if self
             .shutdown_complete
@@ -476,7 +474,7 @@ impl Kernel {
                 );
                 return;
             };
-            // C87: python's exact text is "hook raised", not "on_shutdown
+            // Python's exact text is "hook raised", not "on_shutdown
             // raised" (`print(f"  [shutdown] {self.id} hook raised: {e}",
             // file=sys.stderr)`).
             if let Err(e) = bundle.on_shutdown(&agent.id, self).await {
@@ -507,18 +505,16 @@ impl Kernel {
     /// handler is called DIRECTLY, with no message id, no call row, no task
     /// table entry, no ledger execution and no watcher fanout.
     ///
-    /// It used to go through `send`, and that wrote one `call`/`reflect` row per
-    /// agent per shutdown — plus, through `apply_reflect_flags`, an `internal`
-    /// roster row on every node of the tree — where python writes nothing at
-    /// all. Measured against the python baseline: 3 extra rows per agent on
-    /// every reboot (`e2e/parity` `ctx/reboot/*_rows_read.json`).
+    /// Going through `send` would write one `call`/`reflect` row per agent per
+    /// shutdown — plus, through `apply_reflect_flags`, an `internal` roster row
+    /// on every node of the tree — where python writes nothing at all.
     pub async fn shutdown_agents(self: &Arc<Self>) -> Value {
         self.draining
             .store(true, std::sync::atomic::Ordering::SeqCst);
         // Not every agent: a bundle that merely ACCEPTS the verb as a lifecycle
         // no-op is not asking to be told, and a face that treats it as a
         // teardown must never be told by the stop it is carrying (the web
-        // listener, 2026-09-12).
+        // listener).
         let all: Vec<AgentId> = self.agent_ids();
         let mut targets: Vec<AgentId> = Vec::new();
         for id in &all {
@@ -603,11 +599,9 @@ impl Kernel {
 
     /// Register an agent in the flat index. NO INBOX.
     ///
-    /// An agent does not get a queue merely by existing. `register` used to mint
-    /// one and hand back the receiver, which almost every caller dropped on the
-    /// same line — so the queue was live, nobody read it, and `watch` happily
-    /// mirrored into it forever. [`Self::ensure_inbox`] IS the reader
-    /// registration, and every caller of it drains what it gets.
+    /// An agent does not get a queue merely by existing: a minted queue nobody
+    /// reads would let `watch` mirror into it forever. [`Self::ensure_inbox`] IS
+    /// the reader registration, and every caller of it drains what it gets.
     pub fn register(&self, agent: Arc<Agent>) {
         // Re-registering an id keeps its place, as python's `dict[k] = v` does.
         {
@@ -934,7 +928,7 @@ impl Kernel {
                     if skip_ids.contains(pid) {
                         // Cascade skip — parent was dropped (weak-load).
                         // SILENT, as python is: `_kernel.py:1019-1031` returns
-                        // without a line for the skipped subtree (A15.3).
+                        // without a line for the skipped subtree.
                         skip_ids.insert(rec.id.clone());
                         made_progress = true;
                         continue;
@@ -1030,8 +1024,7 @@ impl Kernel {
     /// first event arrives. No queue puts, no fanout.
     ///
     /// Each entry: `{agent_id, name, backlog}`. REGISTRATION ORDER (python walks
-    /// `self.agents.values()`); it used to sort by id and report `backlog: 0` for
-    /// everyone, which answered a registry and a workload python never answers.
+    /// `self.agents.values()`), with each agent's real backlog.
     pub fn state_snapshot(&self) -> Vec<Value> {
         self.agent_ids()
             .into_iter()

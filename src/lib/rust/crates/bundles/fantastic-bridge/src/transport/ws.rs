@@ -164,7 +164,7 @@ async fn connect_offering_deflate(url: &str) -> Result<WsStream, String> {
 /// python `logger.warning("ws_bridge: skipping malformed frame: %s", e)`
 /// (`ws_bridge/_ws.py:78`). python configures no logging handler, so the record
 /// reaches `logging.lastResort` and the BARE message lands on stderr. The `<e>`
-/// tail is the codec's own text (residual R-D4-8 for the library half).
+/// tail is the codec's own text.
 fn skip_malformed(err: &str) {
     eprintln!("ws_bridge: skipping malformed frame: {err}");
 }
@@ -222,13 +222,13 @@ impl WsTransport {
                 let frame_result = match msg {
                     // Text WS message → a plain JSON envelope. A frame that does
                     // not decode, or decodes to a non-object, is SKIPPED with
-                    // python's line and the reader keeps going (A15.1) — the peer
+                    // python's line and the reader keeps going — the peer
                     // is remote, so bad bytes are an input, not a bug. Raising
                     // here killed the engine read loop while `closed` stayed
                     // false, leaving a bridge that reflects `connected:true` and
                     // answers every forward with a timeout that never names the
                     // dead reader.
-                    // STRICT (D13): python `decode_frame` → `io_bridge.loads`.
+                    // STRICT: python `decode_frame` → `io_bridge.loads`.
                     Ok(Message::Text(t)) => match fantastic_io_bridge::codec::loads(&t) {
                         Ok(v) if v.is_object() => Ok(Frame::Text(v)),
                         Ok(_) => {
@@ -323,7 +323,7 @@ impl WsTransport {
 #[async_trait]
 impl BridgeTransport for WsTransport {
     async fn send_frame(&self, frame: Value) -> Result<(), TransportError> {
-        // python's `encode_frame` text half (A13.14).
+        // python's `encode_frame` text half.
         let text = fantastic_io_bridge::codec::encode_frame(&frame);
         let mut sink = self.sink.lock().await;
         sink.send(Message::Text(text))

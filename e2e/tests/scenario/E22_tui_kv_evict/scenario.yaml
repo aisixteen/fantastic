@@ -1,5 +1,4 @@
-# THREE vLLM AGENTS ON TWO KV SLOTS — the terminal UI, live (owner, 2026-10-04:
-# "test tui (vllm, 2 kv caches, evict)"). A scripted keyboard in a PTY talks to
+# THREE vLLM AGENTS ON TWO KV SLOTS — the terminal UI, live. A scripted keyboard in a PTY talks to
 # ai_a, ai_b, ai_c in turn — one vLLM endpoint, `kv_slots: 2`, `kv_overflow:
 # evict` — so the third rotates the least-recently-used conversation out; ai_a,
 # asked again, still answers from its history (re-prefill). Then ai_b streams a
@@ -15,8 +14,7 @@
 # its own turn. Three agents on two slots: c's pick shows the table full; c's
 # turn evicts, seen from a's second pick on. The
 # exact count is not pinned — a turn makes more than one model pass, and a side
-# call (the view rebuild) is a conversation of its own (measured: 1 at c, 3 at
-# a's second pick, 4 at b's).
+# call (the view rebuild) is a conversation of its own.
 
 id: tui_kv_evict
 title: 'fantastic — three vLLM agents on two KV slots: streamed drafts, LRU eviction, stop'

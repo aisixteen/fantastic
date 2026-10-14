@@ -9,7 +9,7 @@
 //
 // A served request is NOT an agent send on the leg: the endpoint runs, calls
 // `kernel.send` as the leg, and the request holds exactly ONE task row — which
-// is why `handle_route` is not a verb (A11.28): it made every request a second,
+// is why `handle_route` is not a verb: as one, every request would be a second,
 // PARENT row on the leg.
 
 import FantasticJSON
@@ -41,7 +41,7 @@ public enum WebEndpoint: Sendable {
     /// content_type?, headers?, body?}, chunk?)` — a missing `content_type`
     /// means the response carries no body at all (204).
     ///
-    /// The second half is THE OCTET REPLY (C37/A13.1): `nil` = no chunk,
+    /// The second half is THE OCTET REPLY: `nil` = no chunk,
     /// `.some(o)` = a chunk, `o.bytes` possibly EMPTY (an empty file read), with
     /// the field it came out of and the reply without it (`RestOctet.split`). The
     /// host turns that — never the body's length — into

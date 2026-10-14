@@ -7,11 +7,11 @@ runner: probe.py
 runtimes: [python, rust, swift]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
-hard_stop_minutes: 25  # owner 2026-10-06: the one exception to run.py's 15-min stop
+hard_stop_minutes: 25  # an exception to run.py's 15-min stop
 limits:
   idle_seconds: 60
   max_turns: 140
   no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "32000"}  # 32k ONLY: a multi-root test needs room; at 12k the model lost every deliverable (2026-09-08)
+env: {E2E_WINDOW: "32000"}  # 32k ONLY: a multi-root test needs room; at 12k the model loses every deliverable

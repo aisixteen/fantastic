@@ -173,7 +173,7 @@ async fn a_server_that_declines_gets_plain_frames() {
 }
 
 /// A send after the PEER closed fails with python's `ConnectionClosed` text:
-/// what was received, then the echo this side sent (A7.17/A7.30).
+/// what was received, then the echo this side sent.
 #[tokio::test]
 async fn a_send_after_the_peer_closed_reports_the_closing_handshake() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -238,7 +238,7 @@ async fn a_send_after_closing_reports_what_was_sent_then_received() {
     }
 }
 
-/// `closed` FOLLOWS THE SOCKET (audit W-7): false while open, true once the peer's
+/// `closed` FOLLOWS THE SOCKET: false while open, true once the peer's
 /// close frame arrived — python's `state in (CLOSING, CLOSED)`.
 #[tokio::test]
 async fn closed_follows_the_peer_s_close() {
@@ -292,8 +292,7 @@ async fn closed_follows_an_abrupt_drop() {
 }
 
 /// A ws LEG whose remote dropped reflects `connected:false`, refuses a forward as
-/// not connected, and `boot` DIALS AGAIN instead of answering `{already:true}`
-/// (audit W-7 — only `reconnect` used to recover it).
+/// not connected, and `boot` DIALS AGAIN instead of answering `{already:true}`.
 #[tokio::test]
 async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
     use fantastic_kernel::{Agent, AgentId, Item, Kernel};

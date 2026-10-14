@@ -126,7 +126,7 @@ async def test_recv_reconnects_after_drop():
 async def test_recv_skips_non_object_frames_and_mistyped_reply_ids():
     """A frame that decodes to a non-object, or a relay reply whose id is not a
     string, is skipped like an undecodable one. `.get` on `[1]` and a
-    `_relay_pending.pop` of a list id used to raise out of `recv` and end the
+    `_relay_pending.pop` of a list id would raise out of `recv` and end the
     engine read loop with the leg still `connected`."""
     hub = FakeRelayHub()
     ws_a = hub.register("A")
@@ -191,9 +191,9 @@ async def test_directory_list_peers_and_watch():
 async def test_watch_directory_re_emits_directory_events_on_the_connector_inbox(
     seeded_kernel,
 ):
-    """THROUGH THE ENGINE (audit W-10, 2026-10-03): the directory event reached
-    the read loop with no `src`, and the engine re-emits only a subscribed `src` —
-    so `watch_directory` delivered nothing. Now the leg subscribes to the
+    """THROUGH THE ENGINE: the engine re-emits only a subscribed `src`, so a
+    directory event reaching the read loop with no `src` would deliver nothing. The
+    leg subscribes to the
     directory (`src:"relay"`): nothing flows before `watch_directory` or after
     `unwatch_directory`, and in between every `peer_*` event lands on the
     connector's inbox."""

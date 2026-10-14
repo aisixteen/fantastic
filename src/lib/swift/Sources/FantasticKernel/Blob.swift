@@ -1,7 +1,7 @@
 // THE BLOB CHANNEL — sidecars, persisted through the store.
 //
-// Port of python `kernel_state._persist_blob`/`_load_blob` (#10). There is no
-// `ledger.json` any more (deleted 2026-09-24): the execution ledger IS the
+// Port of python `kernel_state._persist_blob`/`_load_blob`. There is no
+// `ledger.json`: the execution ledger IS the
 // `call`+`settle` rows of `messages.yaml`, rebuilt by `hydrateExecutions`.
 //
 // The blob channel is a dumb BYTE authority: no data semantics — the caller owns
@@ -82,7 +82,7 @@ extension Kernel {
             return (nil, .object(["error": .string("\(verb): agent_id (str) required")]))
         }
         // The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
-        // `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
+        // `../bundles/x` writes a folder bundle's `bundle.yaml`.
         if let bad = Refusal.guardAgentId(verb, aid, arg: "agent_id") {
             return (nil, bad)
         }

@@ -183,7 +183,7 @@ struct ToolParseTests {
         #expect(p["bytes"].asString == "  two spaces \n")
     }
 
-    /// No `</call>`, no call (owner, 2026-10-04): the model stopped generating
+    /// No `</call>`, no call: the model stopped generating
     /// before it closed — nothing dispatches, nothing is "malformed"; the cut
     /// marker names it.
     @Test("an unterminated call is not a call")
@@ -283,7 +283,7 @@ struct ToolParseTests {
             ["a send names its target", "<target_id>", "<to><item>"])
     }
 
-    /// C74 (D13): python's `coerce_scalar` types a numeric-shaped target_id
+    /// Python's `coerce_scalar` types a numeric-shaped target_id
     /// as an (unbounded) `int`, so `isinstance(target, str)` fails and the
     /// send is refused even though the digits are too wide for this
     /// runtime's `Int64` carrier — it must not fall back to dispatching to a
@@ -391,8 +391,8 @@ struct ToolParseTests {
 
     @Test("<item> beside other tags is an ordinary field")
     func itemBesideOtherTagsIsAField() throws {
-        // E14, 2026-09-10: `<payload><type>buy</type><item>rocket</item></payload>`
-        // was refused as a list error and the purchase never left the model.
+        // `<payload><type>buy</type><item>rocket</item></payload>` is a field named
+        // item, never a list error.
         let c = try one(
             #"<call name="send"><target_id>user</target_id><type>inquiry</type>"#
                 + "<action><payload><type>buy</type><item>rocket</item></payload></action></call>")
@@ -401,7 +401,7 @@ struct ToolParseTests {
                 == .object(["type": .string("buy"), "item": .string("rocket")]))
     }
 
-    // ── code points, not graphemes (B5.14) ───────────────────────
+    // ── code points, not graphemes ───────────────────────
 
     // Python indexes a str by CODE POINT. Swift's `[Character]` scan was a
     // second index space: a CRLF is one Character, an NFD `é` is one Character,
@@ -448,7 +448,7 @@ struct ToolParseTests {
         #expect(extractToolCalls(sep).count == 1)
     }
 
-    // ── `to` (B5.12 / B5.13) ─────────────────────────────────────
+    // ── `to` ─────────────────────────────────────
 
     // Python keeps a truthy non-list `to` EXACTLY as written and dispatches the
     // call; routing answers the no-target reply. Only a FALSY `to` with no
@@ -478,7 +478,7 @@ struct ToolParseTests {
                 ]))
     }
 
-    // ── reply rendering (B5.16 / B5.17) ──────────────────────────
+    // ── reply rendering ──────────────────────────
 
     // `_reply_text` is `str(x)`: python float reprs, python container reprs, and
     // an EMPTY tag for null.

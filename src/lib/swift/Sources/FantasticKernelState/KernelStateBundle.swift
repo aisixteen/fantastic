@@ -83,7 +83,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         case "load_tree":
             let rootDir = try clampedRoot(agent, kernel)
             // A session loader's namespace keeps no copy of its record: the
-            // walk is rooted at the LIVE one (owner 2026-10-14).
+            // walk is rooted at the LIVE one.
             let live =
                 Kernel.canonPath(rootDir.path) == Kernel.canonPath(agent.rootPath.path)
                 ? nil : try? AgentRecord(json: .object(agent.record().ordered))
@@ -108,7 +108,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         default:
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `applyReflectFlags` into something
-            // that reads like a healthy reflect (python 2026-09-02). `shutdown`
+            // that reads like a healthy reflect (python). `shutdown`
             // lands here too: python's VERBS has none.
             let t = payload["type"]
             return Refusal.make(
@@ -227,8 +227,8 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         guard first else { return nil }
         // A SESSION loader (a `root` meta pointing at a sub-namespace) writes no
         // record of its own there: its one record lives in its parent's tree and
-        // `load_tree` walks the namespace from it (owner 2026-10-14 — a copy at
-        // `<root>/agent.yaml` froze and diverged).
+        // `load_tree` walks the namespace from it (a copy at
+        // `<root>/agent.yaml` would freeze and diverge).
         let installed = await kernel.bootRootLoader(agent)
         withLock {
             var e = state[agent.id.value] ?? LoaderState()
@@ -274,8 +274,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     }
 
     /// args: id:str (req), parent_id:str (opt). Remove the agent's dir. This
-    /// verb ends in a recursive delete: measured 2026-08-28, an agent with NO
-    /// explicit grant sent `id="../../important_project_dir"`.
+    /// verb ends in a recursive delete.
     private func forgetRecord(_ agent: Agent, _ payload: JSON, _ kernel: Kernel) throws(PyError)
         -> JSON
     {
@@ -330,7 +329,7 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
         -> OrderedDictionary<String, JSON>?
     {
         // `provider` only while writes land; a refused/failed write reports
-        // `error` and no provider until one lands again (d2).
+        // `error` and no provider until one lands again.
         var persistence: OrderedDictionary<String, JSON> = [:]
         if let err = kernel.persistError {
             persistence["provider"] = .null
@@ -358,9 +357,8 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// awaits this BEFORE the teardown walk (python `flush_pending`).
     ///
     /// THE RECORD FLUSH LIVES HERE, not in `onShutdown`. The record loop
-    /// debounces 0.15 s; a `create_agent` + `update_agent` followed straight away
-    /// by `shutdown()` used to reach its final flush mid-teardown-walk, with the
-    /// store already gone, and the update never landed.
+    /// debounces 0.15 s; a final flush in `onShutdown` would run mid-teardown-walk,
+    /// with the store already gone, and lose a just-made update.
     public func flushPending(agentId: AgentId, kernel: Kernel) async throws {
         await kernel.flushRecords()
     }
@@ -533,8 +531,8 @@ public final class KernelStateBundle: AgentBundle, @unchecked Sendable {
     /// The ROOT loader's tree is the one this kernel HYDRATES at boot, so only
     /// the operator (its own flush, the CLI, boot) writes it. An agent's record
     /// changes through `update_agent`, gated like any verb — a record
-    /// written here by an agent would be hydrated with whatever grants it named
-    /// (audit 2026-09-28, a15). A session loader (a remote's sub-namespace,
+    /// written here by an agent would be hydrated with whatever grants it named.
+    /// A session loader (a remote's sub-namespace,
     /// never hydrated here) keeps serving its remote. Python `_guard_own_tree`.
     private func guardOwnTree(_ verb: String, _ agent: Agent) -> JSON? {
         guard agent.parentId == nil, KernelTaskLocals.currentOrigin != nil else { return nil }

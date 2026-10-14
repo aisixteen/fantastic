@@ -273,7 +273,7 @@ async fn live_on_device_model() {
     drop(k);
 
     // 5. the default system block, against the real window: refused before the
-    // model is called (the open owner decision)
+    // model is called
     let (_k, reply) = live_default_block_turn().await;
     eprintln!("FM_LIVE default system block: {reply}");
     assert!(

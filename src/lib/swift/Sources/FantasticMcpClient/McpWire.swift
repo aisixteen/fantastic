@@ -1,4 +1,4 @@
-// The MCP wire — Streamable HTTP, DUAL-ERA (owner, 2026-10-12). Python
+// The MCP wire — Streamable HTTP, DUAL-ERA. Python
 // `mcp_client/wire.py`, text for text: the modern protocol 2026-07-28 first, the
 // `initialize`-era ones (`legacy`) when the server speaks only those — the spec's
 // "dual-era client" (2026-07-28 basic/versioning + transports/streamable-http).
@@ -59,13 +59,12 @@ public enum McpWire {
     /// A connect that does not happen fails (15 s, python `CONNECT_TIMEOUT`); a
     /// call itself is bounded by its caller's own item timeout, so there is no
     /// read clock. A REFUSED connect is reported at once, as python's httpx does
-    /// — the pool would otherwise retry it until the call's deadline (measured:
-    /// 90 s a request).
+    /// — the pool would otherwise retry it until the call's deadline.
     static let client: HTTPClient = {
         var cfg = HTTPClient.Configuration(timeout: .init(connect: .seconds(15)))
         cfg.connectionPool.retryConnectionEstablishment = false
         // Network.framework (macOS) otherwise WAITS for connectivity on a refused
-        // connect until the connect timeout (measured: 15 s a request)
+        // connect until the connect timeout
         cfg.networkFrameworkWaitForConnectivity = false
         return HTTPClient(eventLoopGroupProvider: .singleton, configuration: cfg)
     }()

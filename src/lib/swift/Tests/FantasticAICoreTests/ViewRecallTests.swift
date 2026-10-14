@@ -303,7 +303,7 @@ struct ViewRecallTests {
             + [f.row("user", "now?", nil)]
         // the conversation the projection folds is the agent's store
         f.seed(Array(body.dropFirst()))
-        // one overflow is ONE fold now (SPAN = 1024): the batch that crosses RECALL_EVERY
+        // one overflow is ONE fold (SPAN = 1024): the batch that crosses RECALL_EVERY
         backend.countFolds(agent.id.value, AIConstants.RECALL_EVERY - 1)
         let out = try await KernelTaskLocals.$sender.withValue(agent.id) { try await backend.projectContext(
             provider: MockProvider(), agent: agent, clientId: "cli", messages: body,
@@ -320,8 +320,7 @@ struct ViewRecallTests {
     /// the NEXT send runs `context_recall` before assembling — python
     /// `_recall_due` is consumed at the top of `_run` — so the decision lands as
     /// a `kind:recall` row. (A fold batch owes a recall the same way; the fold
-    /// half is pinned by `aFoldBatchMakesRecallDueOnTheNextTurn`.) Measured
-    /// 2026-09-13 (recall_after_fold:swift): 6 folds, 0 recalls.
+    /// half is pinned by `aFoldBatchMakesRecallDueOnTheNextTurn`.)
     @Test func anOwedRecallRunsAtTheStartOfTheNextLiveTurn() async throws {
         let (kernel, agent, f, _) = await boot(
             config: baseConfig { MockProvider(tokens: ["ok ", doneEnvelope]) },
@@ -340,9 +339,8 @@ struct ViewRecallTests {
         )
     }
 
-    /// Measured 2026-09-06 (python): the rebooted agent was woken by answers to
-    /// calls its previous incarnation made, and finished THAT work instead of the
-    /// new instruction.
+    /// A rebooted agent must not be woken by answers to calls its previous
+    /// incarnation made, or it finishes THAT work instead of the new instruction.
     @Test func aReplyInFlightAcrossARebootIsRecordedNotActedOn() async throws {
         // Its own agent id: the incarnation table is process-global and other
         // suites boot `mock` agents while this runs.
@@ -375,8 +373,8 @@ struct ViewRecallTests {
         #expect(script.calls == afterBoot + 2, "a reply from THIS incarnation runs a turn (recall + pass)")
     }
 
-    /// The array is the head as of its write; the log keeps growing. Measured
-    /// (python): served the array alone, the model restarted its survey every turn.
+    /// The array is the head as of its write; the log keeps growing: served the
+    /// array alone, a model restarts its survey every turn.
     @Test func rowsAppendedAfterTheArrayRideBehindIt() async throws {
         let (kernel, agent, f, backend) = await boot()
         let a = f.chain("a", 4, big: false)
@@ -440,9 +438,9 @@ struct ViewRecallTests {
         #expect(content.contains("live task: \(f.id("user:b"))"), Comment(rawValue: content))
     }
 
-    // ── round-2 self-verb edges (B3.5, B5.2 … B5.11) ─────────────────────
+    // ── self-verb edge cases ─────────────────────
 
-    // B3.5 r2: `limit or None` — only ZERO means "no limit"; a NEGATIVE limit
+    // `limit or None` — only ZERO means "no limit"; a NEGATIVE limit
     // returns an empty page.
     @Test func historyNegativeLimitIsAnEmptyPage() async throws {
         let (kernel, agent, f, _) = await boot()
@@ -459,7 +457,7 @@ struct ViewRecallTests {
         #expect((r["total"].asInt ?? 0) > 0)
     }
 
-    // B5.7: the digest of a CALLER-WRITTEN row — `kind or role` on python
+    // The digest of a CALLER-WRITTEN row — `kind or role` on python
     // truthiness, `head`/`bytes` from `str(content)`.
     @Test func historyDigestsACallerWrittenRowLikePython() async throws {
         let (kernel, agent, f, _) = await boot()
@@ -477,7 +475,7 @@ struct ViewRecallTests {
         #expect(row["bytes"].asInt == 8)
     }
 
-    // B5.2: `splitlines()` is python's boundary set — the INFORMATION
+    // `splitlines()` is python's boundary set — the INFORMATION
     // SEPARATORS split lines too, and swift's `isNewline` misses them.
     @Test func grepSplitsOnInformationSeparators() async throws {
         let (kernel, agent, f, _) = await boot()
@@ -505,7 +503,7 @@ struct ViewRecallTests {
         #expect(r2["matches"].asArray?.first?["line"].asInt == 2, "\(r2.serialize())")
     }
 
-    // B5.8: a non-string content RECALLS as `json.dumps(content, default=str)` —
+    // A non-string content RECALLS as `json.dumps(content, default=str)` —
     // every non-ASCII scalar ESCAPED. The rows are searched by the MEMORY STORE,
     // whose text index is `json.dumps(c, default=str, ensure_ascii=False)`
     // (python ram_store `_text_of`): the unescaped scalar is found, the escape
@@ -559,7 +557,7 @@ struct ViewRecallTests {
         #expect(budgets[1] > budgets[0], "\(budgets)")
     }
 
-    // B5.3: `dry` is python-truthy — `1` is dry and makes NO model call.
+    // `dry` is python-truthy — `1` is dry and makes NO model call.
     @Test func dryIsPythonTruthy() async throws {
         let (kernel, agent, f, backend) = await boot()
         f.seed([f.row("user", "GOAL", "user:goal")] + f.chain("a", 6, big: false))
@@ -575,7 +573,7 @@ struct ViewRecallTests {
         #expect(r["degraded"] == .bool(true) && r["why"].asString == "mechanical fit")
     }
 
-    // B5.4: the model's answer is read with python's rules.
+    // The model's answer is read with python's rules.
     @Test func recallModelAnswerFollowsPython() async throws {
         // An EMPTY answer is NO answer: degraded stays true.
         let (k1, a1, f1, b1) = await boot()
@@ -603,7 +601,7 @@ struct ViewRecallTests {
         #expect(listy["why"].asString == "['a']", "\(listy.serialize())")
     }
 
-    // B5.4: `expand` is `_as_list`-ed as python does (2026-09-20) — a scalar is
+    // `expand` is `_as_list`-ed as python does — a scalar is
     // ONE candidate, never iterated and never a raise.
     @Test func expandIsWrappedLikePython() async throws {
         let (k1, a1, f1, b1) = await boot()
@@ -628,7 +626,7 @@ struct ViewRecallTests {
         _ = b2
     }
 
-    // B5.5: `context_strategy` is read RAW — only an ABSENT key means compact.
+    // `context_strategy` is read RAW — only an ABSENT key means compact.
     @Test func aNullContextStrategyIsReportedRawAndRefused() async throws {
         let (kernel, agent, f, backend) = await boot(
             contextWindow: 12000, meta: ["output_reserve": .integer(0), "context_strategy": .null])

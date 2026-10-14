@@ -120,7 +120,7 @@ struct FileWatchTests {
     }
 
     /// `allow` is read live: narrowed after the watch was armed, the path's
-    /// changes stop reaching watchers (audit 2026-10-14).
+    /// changes stop reaching watchers.
     @Test func aPathTheBridgeStopsExposingReportsNothing() async throws {
         let (k, served, tmp) = await boot(allow: ["."])
         defer { try? FileManager.default.removeItem(at: tmp) }

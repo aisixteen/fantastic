@@ -2,9 +2,7 @@
 //
 // python `web/app.py:135` types the `/<id>/file/<path>` proxy with
 // `mimetypes.guess_type(path)` and falls back to `application/octet-stream`,
-// so the proxy's content-type IS this table. Swift used a hand-written
-// nine-case switch, which typed `.pdf`, `.csv`, `.wasm`, `.ico`, `.py` and
-// every other extension wrong.
+// so the proxy's content-type IS this table.
 //
 // Generated from `Lib/mimetypes.py` (`_suffix_map_default`,
 // `_encodings_map_default`, `_types_map_default`); the same tables the rust

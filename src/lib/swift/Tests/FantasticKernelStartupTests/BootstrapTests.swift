@@ -58,7 +58,7 @@ struct WorkdirLockTests {
         lock.release()
     }
 
-    /// C50: python's `yaml.dump({"pid": N})` bytes — `pid: N` + newline.
+    /// Python's `yaml.dump({"pid": N})` bytes — `pid: N` + newline.
     @Test func testLockBytesArePythonYamlDump() throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -117,8 +117,8 @@ struct WorkdirLockTests {
         second.release()
     }
 
-    /// ARCH2-3: python and rust read-then-wrote the lock, so two acquisitions
-    /// racing in one dir BOTH took it. Each racer here opens its own
+    /// A read-then-write lock would let two acquisitions racing in one dir
+    /// BOTH take it. Each racer here opens its own
     /// descriptor, and flock excludes descriptors of one process as it
     /// excludes processes — so every round, on a fresh dir and over a dead
     /// holder's lock alike, exactly one wins.
@@ -153,7 +153,7 @@ struct WorkdirLockTests {
         }
     }
 
-    /// C82: `release()` removes the FILE only when it still names OUR pid —
+    /// `release()` removes the FILE only when it still names OUR pid —
     /// a second kernel that reclaimed the (now-stale) lock in the meantime
     /// must not have its live lock deleted out from under it by the first
     /// kernel's own (delayed) release.
@@ -254,7 +254,7 @@ struct BootstrapTests {
     }
 }
 
-/// C52 + C53 + C61 — the hydration walk is python's `read_tree`: the root
+/// The hydration walk is python's `read_tree`: the root
 /// record names the children container, the DISK POSITION sets every
 /// `parent_id`, entries are visited sorted, a corrupt record takes its subtree
 /// with it silently, and the file's key order survives into the record.
@@ -310,7 +310,7 @@ struct HydrationWalkTests {
         #expect(recs.map(\.id) == ["kernel_state", "alpha", "mid", "zeta"])
     }
 
-    /// C52 — the container's NAME is declared config on the root record.
+    /// The container's NAME is declared config on the root record.
     @Test func testDeclaredChildrenDirRoundTrips() throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -335,7 +335,7 @@ struct HydrationWalkTests {
                 == store.appendingPathComponent("host_agents/a/host_agents/b").path)
     }
 
-    /// C61 — the record's meta (and every nested map) keeps the file's order.
+    /// The record's meta (and every nested map) keeps the file's order.
     @Test func hydratedChildRecordKeepsMetaAndNestedKeyOrder() throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -355,7 +355,7 @@ struct HydrationWalkTests {
             web.meta["can_call"]?.asObject?.keys.elements == ["$self", "$parent", "rest", "ws"])
     }
 
-    /// C53 — a record whose bundle is not installed HERE is skipped with
+    /// A record whose bundle is not installed HERE is skipped with
     /// python's exact stderr line, and it takes its subtree with it.
     @Test func weakLoadSkipsUnknownBundleWithPythonLine() async throws {
         let kernel = Kernel(storage: .inMemory, bundles: BundleRegistry())
@@ -377,9 +377,9 @@ struct HydrationWalkTests {
         #expect(kernel.agent(AgentId("under_it")) == nil, "the subtree goes with it")
     }
 
-    /// ARCH2-6: python's cold walk opens only through the `fs` clamp, so a
+    /// Python's cold walk opens only through the `fs` clamp, so a
     /// `children_dir` that resolves outside `.fantastic` raises — the boot
-    /// fails — where swift used to join it raw and hydrate another directory.
+    /// fails — never joined raw to hydrate another directory.
     @Test func coldWalkRefusesAnEscapingChildrenDir() throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -426,7 +426,7 @@ struct HydrationWalkTests {
     }
 }
 
-/// C56 + C14 + RP-11 — what a boot does, and what it does NOT.
+/// What a boot does, and what it does NOT.
 @Suite("root record: reseed, boot order, teardown")
 struct RootBootTests {
     private func seedChild(_ tmp: URL, _ id: String) throws {
@@ -438,8 +438,7 @@ struct RootBootTests {
     }
 
     /// A root record that is THERE but does not parse is never written over: the
-    /// start refuses and the file stays as it was (python `main._bootstrap`;
-    /// audit 2026-10-14).
+    /// start refuses and the file stays as it was (python `main._bootstrap`).
     @Test func anUnreadableRootRecordRefusesTheStartAndIsLeftAlone() async throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -464,7 +463,7 @@ struct RootBootTests {
         try seedChild(tmp, "orphan")
         let kernel = try await startKernel(workdir: tmp.path)
         #expect(kernel.root?.id.value == "kernel_state")
-        #expect(kernel.agent(AgentId("orphan")) != nil, "children survive a reseed (python 2026-09-20)")
+        #expect(kernel.agent(AgentId("orphan")) != nil, "children survive a reseed")
         #expect(!FileManager.default.fileExists(atPath: dot.appendingPathComponent("agent.yaml").path))
         try kernel.takeSeed()
         let parsed = try YamlIO.load(String(decoding: try Data(contentsOf: dot.appendingPathComponent("agent.yaml")), as: UTF8.self))
@@ -489,9 +488,9 @@ struct RootBootTests {
     }
 
     /// A `.fantastic` that cannot be made, or a root record that cannot be
-    /// written, FAILS the start (the seed under the lock), as python's seed raises. Both were `try?`: the
-    /// kernel booted "fine" with an unpersisted root and minted a new guid every
-    /// start, breaking peers pinned to it (audit 2026-10-03, ARCH2-9).
+    /// written, FAILS the start (the seed under the lock), as python's seed raises. Swallowed, the
+    /// kernel would boot "fine" with an unpersisted root and mint a new guid every
+    /// start, breaking peers pinned to it.
     @Test func aFailedColdSeedFailsTheStart() async throws {
         let fm = FileManager.default
         let blockedDir = makeTempDir()
@@ -512,11 +511,11 @@ struct RootBootTests {
         }
     }
 
-    /// ARCH2-6: the boot reads the root record through the `fs` clamp, as
+    /// The boot reads the root record through the `fs` clamp, as
     /// python's `read_tree` does, so a root `agent.yaml` linked outside
     /// `.fantastic` refuses the start with `fs`'s text — and NOTHING is reseeded
-    /// over the link. Swift read it raw: a dangling link read as "no record",
-    /// and the seed wrote a fresh root over it.
+    /// over the link (read raw, a dangling link would read as "no record" and the
+    /// seed would write a fresh root over it).
     @Test func anOutwardSymlinkedRootRecordRefusesTheStartAndIsNotReseeded() async throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -551,7 +550,7 @@ struct RootBootTests {
         #expect(Set(kernel.allAgents().map { $0.id.value }) == ["kernel_state", "orphan"])
     }
 
-    /// C12 — a PYTHON-SHAPED root record hydrates verbatim: its id and its
+    /// A PYTHON-SHAPED root record hydrates verbatim: its id and its
     /// handler_module are the tree's, not a default the port substitutes.
     @Test func testPythonShapedRootRecordHydrates() async throws {
         let tmp = makeTempDir()
@@ -577,7 +576,7 @@ struct RootBootTests {
                 == "0123456789abcdef0123456789abcdef")
     }
 
-    /// C14/RP-11 — the daemon's boot pass walks the REGISTRATION-ordered index,
+    /// The daemon's boot pass walks the REGISTRATION-ordered index,
     /// root FIRST, and mints nothing else: no `list_agents` send to the root and
     /// no post-boot `reflect` on web, both of which landed as ledger executions
     /// and call rows before the pump even existed.

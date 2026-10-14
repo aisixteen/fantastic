@@ -1,17 +1,15 @@
 """The runtime spec, the scrubbed environment, the fixed workdirs and the one
 kernel client every family sends through.
 
-ONE SPEC. The round-1/2 capture scripts each chose their own runtime the way
-that suited them — `ensure_runtime` (which REBUILDS when a source file is newer
-than the artifact), a hand-written `SPECS` table, a `e2e/dist` path with no
-staleness check — so a capture could silently measure a kernel built from a
-different tree than the one beside it. Here there is one table, `capture` never
-builds, and `run.py preflight` is the only thing allowed to say the artifact is
+ONE SPEC. A capture that picks its own runtime (rebuilding on a newer source
+file, a hand-written table, a `e2e/dist` path with no staleness check) can
+silently measure a kernel built from a different tree than the one beside it.
+Here there is one table, `capture` never builds, and `run.py preflight` is the only thing allowed to say the artifact is
 current.
 
 THE ROOT ID IS MEASURED, NEVER LOOKED UP. `HostKernel` reads it out of the
-driver's `RUNTIMES` row; a row is a claim about a binary, and it was wrong for
-two runtimes for as long as rust and swift called their root `core`. Here the
+driver's `RUNTIMES` row; a row is a claim about a binary, and a claim can go
+stale. Here the
 kernel seeds `.fantastic/agent.yaml` first and the id is READ OFF IT, with the
 branch that produced the seed recorded in `meta.json`. A capture can then never
 grant against an id the binary does not use.
@@ -104,29 +102,22 @@ def kernel_cmd(rt: str) -> list[str]:
 #: Context constants, recorded in meta rather than left to a default that could
 #: differ between runtimes. `ctx` uses them; nothing else may.
 #:
-#: 16000, MEASURED 2026-10-02 (python, vllm_backend on the chat stub): the
-#: system block is ~6.9k tokens, and the chain's largest live turn (the recall
-#: after the context notice) is ~3.2k. At 11000 that pair overran the 10000
-#: budget and every chain died `too_small` after its 4th turn. At 16000 (budget
-#: 15000, trigger 12000) all four chains run their 19 turns and compact 10–14
-#: times each, the fold chain folds 6 times, and `too_small` fires only where it
-#: is the case (the 60000-char send, and `ai_tiny`). It ran at 11000 for weeks
-#: because nothing compacted at all: the old stub reported `input_tokens: 1`,
-#: ai_core calibrated by it, and every capture recorded `calibration: 0.0`.
+#: 16000: the system block plus the chain's largest live turn (the recall after
+#: the context notice) must fit the budget, or every chain dies `too_small`. At
+#: 16000 (budget 15000, trigger 12000) all four chains run their turns and
+#: compact repeatedly, and `too_small` fires only where it is the case (the
+#: 60000-char send, and `ai_tiny`).
 CTX_WINDOW = 16000
 CTX_RESERVE = 1000
 CTX_WINDOW_TINY = 2048
 
-#: `ai_paths`' OWN window, deliberately NOT `CTX_WINDOW`. Owner ruling 2026-09-22.
+#: `ai_paths`' OWN window, deliberately NOT `CTX_WINDOW`.
 #:
-#: `ai_paths` runs 24 scripted cases through ONE ai agent, so its history grows
-#: for 74 model turns and it used to cross a 10000-token budget BY ACCIDENT.
-#: Measured on the 2026-09-21b captures: the crossing turn landed 1 CHARACTER
-#: over on python (`runtime=python` is one byte longer than `runtime=swift`), so
-#: python compacted at request 34 and the ports at 35 — and because the recorded
-#: event stream is compared positionally, that ONE turn of skew cascaded into
-#: ~1100 diff lines on both ports (`ai_paths/events.json $.ai[n]`, and every
-#: request body after it).
+#: `ai_paths` runs many scripted cases through ONE ai agent, so its history
+#: grows over many model turns. A budget the history crosses BY ACCIDENT can be
+#: crossed one character apart on two runtimes (`runtime=python` is one byte
+#: longer than `runtime=swift`), and because the recorded event stream is
+#: compared positionally, one turn of skew cascades into every later line.
 #:
 #: Compaction is NOT this family's subject: `ctx` drives all four strategies
 #: deliberately, at `CTX_WINDOW` and at `CTX_WINDOW_TINY`. Here the budget is
@@ -134,8 +125,8 @@ CTX_WINDOW_TINY = 2048
 #: does record is FORCED by `context_fill` (a scripted filler turn), landing
 #: thousands of tokens past the line instead of one character past it.
 #:
-#: THE NUMBERS, MEASURED on a python capture of this family with these values
-#: (2026-10-02, vllm_backend on the chat stub). The token series is
+#: THE NUMBERS, on a python capture of this family with these values. The token
+#: series is
 #: `ai_core.context.estimate_tokens` recomputed from each recorded request body
 #: — system block plus messages. The trigger is 0.8 of the budget
 #: (`ai_core.constants.TRIGGER`), and nothing reports a prompt size, so the
@@ -149,13 +140,12 @@ CTX_WINDOW_TINY = 2048
 #:     so the turn it lands on is ~32300 — PAST the trigger by ~2700 tokens.
 #:   * the filler turn is the NEWEST turn, so compaction keeps it and reclaims
 #:     the history behind it: the next three prompts are 27569, 27467 and 27466
-#:     tokens, 2031 UNDER the trigger. So the family compacts EXACTLY ONCE —
-#:     measured, one `context`/`compacted` event in `events.json`. At the old
-#:     30000 (trigger 23200) that post-fill prompt re-fired compaction on every
-#:     turn after the filler (three events).
+#:     tokens, 2031 UNDER the trigger. So the family compacts EXACTLY ONCE — one
+#:     `context`/`compacted` event in `events.json`. A smaller window would let
+#:     that post-fill prompt re-fire compaction on every turn after the filler.
 #: The smallest of those margins is ~2000 tokens, ~20x the ~100-token spread
 #: between the three runtimes' prompts for the same turn (the `runtime=` word
-#: plus the id digit width) — the spread that used to decide this.
+#: plus the id digit width).
 AI_WINDOW = 38000
 AI_RESERVE = 1000
 AI_FILL_CHARS = 80000
@@ -170,10 +160,8 @@ def kernel_env(rt: str, extra: dict | None = None, drop: tuple[str, ...] = ()) -
     """The kernel's environment, BUILT FROM NOTHING.
 
     Not `os.environ` plus a patch: an acceptance capture that inherits the
-    operator's shell measures the operator, and the round-2 captures did exactly
-    that (`{**os.environ, **CONN, **SPEC["env"]}`, with `CONN` parsed out of
-    `e2e/backends/connection.local.env` — a real key on the kernel's env for a
-    run that is supposed to spend nothing).
+    operator's shell measures the operator (and can put a real key on the
+    kernel's env for a run that is supposed to spend nothing).
 
     Every name here is one the runtime READS: `TMPDIR` is every mkdtemp,
     `HOME`/`LANG` are the runtime's own home and locale. A child gets none of
@@ -211,9 +199,9 @@ def family_workdir(family: str) -> Path:
     what it does with it.
 
     The real directory is the same string on every runtime, so path-embedding
-    counts (`bytes`, `size`) compare exactly. The round-1/2 scripts used
-    `mkdtemp(prefix=f"pc_{rt}_")`, whose length differs per runtime — every count
-    that embedded the path differed for that reason alone.
+    counts (`bytes`, `size`) compare exactly. A per-runtime temp dir name differs
+    in length, and every count that embedded the path would differ for that
+    reason alone.
     """
     real = WORK / family
     link = LINK / family
@@ -265,8 +253,7 @@ class Ports:
 class CaptureKernel(HostKernel):
     """A spawned kernel with the WHOLE transport recorded.
 
-    Moved from `SCR/parity_capture_store.py:246-279` and given the three things
-    every family needs and no round-1/2 script had all of:
+    It carries the three things every family needs:
 
       * the root id MEASURED off the seeded tree (see the module docstring);
       * a scrubbed env (`kernel_env`), never the operator's;
@@ -274,7 +261,7 @@ class CaptureKernel(HostKernel):
         refusal is data instead of `driver.py:376`'s 300-character head.
     """
 
-    #: WHERE A FAMILY CREATES ITS AGENTS (minimal model, owner 2026-10-04): every
+    #: WHERE A FAMILY CREATES ITS AGENTS (minimal model): every
     #: call is the `rest` leg, and a mutation must come from the operand's direct
     #: parent — so the leg's own subtree is the test's world.
     home = "rest"
@@ -350,7 +337,7 @@ class CaptureKernel(HostKernel):
             raise SystemExit(f"{self.rt}: seeded agent.yaml carries no id: {root!r}")
         self.root_id = measured
 
-        # THE `rest` LEG IS THE TEST'S OPERATOR (owner, 2026-10-04) — the same seed
+        # THE `rest` LEG IS THE TEST'S OPERATOR — the same seed
         # as `helpers/host/driver.py`. The root is nobody's child, so only this seed
         # opens it: the legs, the web host and every declared id.
         root["callable_by"] = {

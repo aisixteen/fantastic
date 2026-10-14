@@ -38,7 +38,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
                 kind: "ollama_backend",
                 sentence: "Ollama-backed LLM agent (raw prompt-and-parse tool-calling).",
                 // The SAMPLING KNOBS, in python's order — `model` and `endpoint`
-                // are base fields now. `temperature` falls back to the provider's
+                // are base fields. `temperature` falls back to the provider's
                 // 0.3; the rest are null unless the record sets them.
                 reflectExtra: { agent, _ in
                     [
@@ -76,7 +76,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
 
     public var recordSchema: JSON? { Self.RECORD_SCHEMA }
 
-    /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+    /// THE RECORD SCHEMA — what this kind's record takes, read with
     /// no agent existing (`reflect bundles=all`), from the constants the provider
     /// runs on. `validateMeta` enforces it at the write, so the page and the kernel
     /// cannot disagree about what a record needs. Python `RECORD_SCHEMA`.
@@ -209,7 +209,7 @@ public final class OllamaBackendBundle: AgentBundle, @unchecked Sendable {
     /// The kernel is killing a task of this agent. If it is the in-flight
     /// generation, close the turn out for the caller before the substrate
     /// cancels it (which drops the HTTP stream + releases the FIFO lock on its
-    /// own). There is no `interrupt` verb any more: cancellation is the kernel's.
+    /// own). There is no `interrupt` verb: cancellation is the kernel's.
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
         try await core.onCancel(agentId: agentId, taskId: taskId, kernel: kernel)
     }
@@ -315,11 +315,9 @@ struct OllamaProvider: AIProvider {
                     // an `HTTPStatusError` into `ResponseError(r.text, r.status_code)`,
                     // whose `__str__` is `<error> (status code: <n>)` and whose
                     // `error` is the body's JSON `error` field when the body parses,
-                    // else the raw text. Swift read no status at all: a 500 whose
-                    // body is `{"error": …}` decoded as an unparseable NDJSON line,
-                    // was SKIPPED, and the turn settled `completed` with an empty
-                    // response — the harness then saw a second, successful request
-                    // where python raised on the first.
+                    // else the raw text. Reading no status, a 500 whose
+                    // body is `{"error": …}` would decode as an unparseable NDJSON line,
+                    // be SKIPPED, and settle the turn `completed` with an empty response.
                     if response.status.code >= 400 {
                         let buf = try? await response.body.collect(upTo: 1 << 20)
                         let raw = buf.map { String(buffer: $0) } ?? ""

@@ -1,12 +1,10 @@
 """Scoring the Context Protocol from a probe: what the MODEL did, not what the task said.
 
-Every check here exists because the obvious one is a tautology. `E51_compaction` asserted
-`"recall" in str(history)` and `secret in str(history)` — and BOTH were already true before
-the model acted: the task text names `{type:'recall', query:'passphrase'}`, the task is a
-user turn in the durable store, and the secret arrives in the Step-1 read reply. Measured
-on `runs/20260904-044955/coding.compaction:swift.log`: recall returned `{"messages":[],
-"total":0}`, the chain died, `answer.md` was never written, `last_projection` was
-`{fired: False, too_small: True}` — and the test scored PASS.
+Every check here exists because the obvious one is a tautology. Asserting
+`"recall" in str(history)` and `secret in str(history)` is true before the model acts: the
+task text names `{type:'recall', query:'passphrase'}`, the task is a user turn in the
+durable store, and the secret arrives in the Step-1 read reply. Such a test passes even
+when recall returns an empty page and the chain dies.
 
 So the rules here are:
   * scan ASSISTANT turns for calls; a call the TASK described is not a call the model made;
@@ -77,7 +75,7 @@ def recalled(messages: list[dict], self_id: str, needle: str) -> tuple[bool, boo
     """(the model called `recall` on itself, that recall's REPLY carried `needle`).
 
     The second half is the load-bearing one: it is false when recall returned an empty
-    page, which is exactly the run that used to pass."""
+    page."""
     called = bool(calls_made(messages, target=self_id, verb="recall"))
     returned = any(
         needle in b for b in reply_blocks(messages, agent=self_id, verb="recall")

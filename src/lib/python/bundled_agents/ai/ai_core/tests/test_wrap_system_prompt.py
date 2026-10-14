@@ -1,4 +1,4 @@
-"""`pre_system_prompt` / `post_system_prompt` (owner, 2026-10-11): record text placed
+"""`pre_system_prompt` / `post_system_prompt`: record text placed
 BEFORE and AFTER the system block on every turn — whichever block is in force (the
 default, the record's `system_prompt`, a per-call one), never replacing it; verbatim,
 no placeholders. A value the record cannot use is refused AT THE WRITE; null clears."""

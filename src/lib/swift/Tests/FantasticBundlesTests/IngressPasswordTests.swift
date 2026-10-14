@@ -6,9 +6,9 @@ import Testing
 
 @Suite("io_bridge password ingress rule", .serialized)
 struct IngressPasswordTests {
-    /// It used to short-circuit `.allow` for any kind but `call`, so a
-    /// `password_ingress` exec leg admitted `start` (kind `spawn`) with no
-    /// credential and a web leg leaked `watch` telemetry to a tokenless client (#7).
+    /// Short-circuiting `.allow` for any kind but `call` would let a
+    /// `password_ingress` exec leg admit `start` (kind `spawn`) with no
+    /// credential and a web leg leak `watch` telemetry to a tokenless client.
     @Test func passwordRuleGatesEveryKind() {
         let env = "FANTASTIC_GROUP_TOKEN_PW_UNIT_EVERY_KIND"
         setenv(env, "s3cret", 1)
@@ -39,9 +39,7 @@ struct IngressPasswordTests {
         }
     }
 
-    /// IO-6 (audit 2026-10-03): the compare is over UTF-8 BYTES — python now does
-    /// what this rule always did (on `str` python raised TypeError for any
-    /// non-ASCII text). Any token is a plain answer, and a non-ASCII group token
+    /// The compare is over UTF-8 BYTES, as in python. Any token is a plain answer, and a non-ASCII group token
     /// admits its own holders. (A lone surrogate, python's fourth case, is not a
     /// Swift `String`.)
     @Test func passwordRuleComparesUTF8BytesSoAnyTokenIsAPlainAnswer() {

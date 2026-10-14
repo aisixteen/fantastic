@@ -64,9 +64,8 @@ extension Kernel {
         let state = snapshotState()
         // BUILT IN PYTHON'S ORDER — `{version, records}`, each record in its own
         // key order — never through JSONEncoder, whose key order is not stable
-        // from one process to the next (C15): re-parsing its output only froze
-        // whichever order that run happened to produce (measured: 2 of 6 runs
-        // wrote `{records, version}`).
+        // from one process to the next: re-parsing its output would only freeze
+        // whichever order that run happened to produce.
         let json: JSON = .object([
             "version": .integer(Int64(state.version)),
             "records": .array(state.records.map { $0.json }),

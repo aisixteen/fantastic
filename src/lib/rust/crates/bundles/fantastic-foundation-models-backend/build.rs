@@ -1,6 +1,6 @@
 //! Builds and links the swift `FantasticFMBridge` static library — the C ABI over
-//! `FantasticFMCore`, THE ONE implementation of the Apple Foundation Models calls
-//! (owner, 2026-10-02). The swift `foundation_models_backend` calls the same core
+//! `FantasticFMCore`, THE ONE implementation of the Apple Foundation Models
+//! calls. The swift `foundation_models_backend` calls the same core
 //! directly, so both kernels run one implementation.
 //!
 //! ON A macOS TARGET ONLY:

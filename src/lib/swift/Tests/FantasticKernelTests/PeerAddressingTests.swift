@@ -1,4 +1,4 @@
-// CROSS-KERNEL ADDRESSING (owner, 2026-09-30): an agent on a connected peer
+// CROSS-KERNEL ADDRESSING: an agent on a connected peer
 // kernel is addressed `<guid>|<agent id>`, called with an ordinary `send`, and
 // discovered through reflect. The KERNEL routes it — a transport only registers
 // the peer it is connected to (`registerPeer`) and carries the frames.
@@ -141,7 +141,7 @@ private func type(_ verb: String) -> JSON { .object(["type": .string(verb)]) }
 
 @Suite("cross-kernel addressing")
 struct PeerAddressingTests {
-    /// `docs of: <guid>|<agent>` (owner, 2026-10-06): the question goes to the
+    /// `docs of: <guid>|<agent>`: the question goes to the
     /// connected kernel's own `docs` and the reply names the qualified id. The
     /// asker's grant is `docs` on THIS root, like any `docs`; the peer judges its
     /// own leg. Python `test_docs_of_a_peer_agent_asks_that_kernel`.
@@ -267,7 +267,7 @@ struct PeerAddressingTests {
         #expect(after.result["peers"] == .array([]), "\(after.result.serialize())")
     }
 
-    /// The tabs of one identity are ONE principal (owner, 2026-10-03): a second
+    /// The tabs of one identity are ONE principal: a second
     /// route for a live guid is ADDED, and a disconnect removes only its own.
     @Test func oneGuidHoldsASetOfLiveRoutes() async {
         let k = mkKernel(guid: HOST)

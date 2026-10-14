@@ -244,10 +244,8 @@ struct RelayDirectoryPinTests {
         await #expect(throws: (any Error).self) { _ = try await t.recv() }
     }
 
-    /// THROUGH THE ENGINE (audit W-10, 2026-10-03): the directory event reached
-    /// the read loop with no `src`, and the engine re-emits only a subscribed
-    /// `src` — so `watch_directory` delivered nothing. Now the leg subscribes to
-    /// the directory (`src:"relay"`): nothing flows before `watch_directory` or
+    /// THROUGH THE ENGINE: the engine re-emits only a subscribed `src`, so the
+    /// leg subscribes to the directory (`src:"relay"`): nothing flows before `watch_directory` or
     /// after `unwatch_directory`, and in between every `peer_*` event lands on
     /// the connector's inbox. Python
     /// `test_watch_directory_re_emits_directory_events_on_the_connector_inbox`.

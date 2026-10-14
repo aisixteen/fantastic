@@ -21,11 +21,11 @@ Reply correlation: `corr_id = f"{bridge_id}-{boot nonce}-{counter}"` — the bri
 id keeps bridges apart, the nonce (minted at every boot) keeps BOOTS apart, and the
 frame `id` echoes it so logs correlate across hops. The frame id NAMES the execution
 on the receiver, so an id reused by a restarted sender would join a settled
-execution there and never run (audit IO-5, 2026-10-03).
+execution there and never run.
 
 A leg's rules (`ingress_rule`/`egress_rule`/`auth`) are read off the LIVE record per
 frame — never cached at boot — so what `reflect` reports is what the gate enforces
-the moment `update_agent` writes it (audit ARCH-2, 2026-10-03).
+the moment `update_agent` writes it.
 """
 
 from __future__ import annotations
@@ -140,8 +140,8 @@ def _state(id: str) -> _BridgeState:
 def _new_corr_prefix(id: str) -> str:
     """`<bridge id>-<12 hex>`: a fresh nonce per BOOT (ts's `mintPrefix` width).
     The counter under it restarts at every boot, so without the nonce a
-    restarted sender's `<leg>-1` named an execution the receiver had already
-    settled — the new call was joined to it and never ran (audit IO-5)."""
+    restarted sender's `<leg>-1` would name an execution the receiver had already
+    settled — the new call would be joined to it and never run."""
     return f"{id}-{secrets.token_hex(6)}"
 
 

@@ -184,9 +184,8 @@ async fn cascade_delete_fires_hooks_depth_first() {
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "counting.tools", "id": "p_1"}))])
         .await.remove(0).result;
     // PLACEMENT IS `parent_id`, not the target. The verb is kernel-owned, so
-    // these go to the root; the id names the OWNER of the new agent. Addressing
-    // `p_1` used to make it the parent implicitly — that is the ambiguity #23
-    // removed.
+    // these go to the root; the id names the OWNER of the new agent — never the
+    // addressed agent implicitly.
     for kid in ["c_1", "c_2"] {
         let _ = kernel
             .send(vec![Item::new(
@@ -323,11 +322,9 @@ async fn create_agent_demands_a_parent_and_resolves_it_like_a_target() {
     );
 }
 
-/// The `agent_created` event lands on the PARENT's inbox at every depth (audit
-/// 2026-10-03, KV-4). It was emitted as the root, so the gate judged
-/// root→parent, and the root's baseline grant then reached depth 1 only: a
-/// parent two levels down never got it — an operator create included, an
-/// agent creating under itself too — and nothing reported the drop.
+/// The `agent_created` event lands on the PARENT's inbox at every depth — put
+/// there as kernel bookkeeping, not emitted as the root (where the gate would
+/// judge root→parent and the root's baseline grant reaches depth 1 only).
 #[tokio::test]
 async fn agent_created_reaches_a_parent_at_any_depth() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -370,10 +367,10 @@ async fn agent_created_reaches_a_parent_at_any_depth() {
     );
 }
 
-/// C57: `create_agent` branches on the boot OUTCOME STATUS. A handler that
+/// `create_agent` branches on the boot OUTCOME STATUS. A handler that
 /// RAISED settles `failed` and is the one case python prints, on stdout, with
 /// the result's `str()`; a boot that merely answered `{error:…}` (`errored`) or
-/// completed prints nothing. Rust used to log a tracing WARN for every refusal.
+/// completed prints nothing.
 #[tokio::test]
 async fn a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent() {
     struct BootBundle;
@@ -846,7 +843,7 @@ async fn lifecycle_events_name_an_empty_display_name_by_id() {
 }
 
 /// A deleted id leaves every grant that named it (python `_prune_grants`): a
-/// re-created id inherits nothing (audit 2026-10-14).
+/// re-created id inherits nothing.
 #[tokio::test]
 async fn a_deleted_id_leaves_every_grant() {
     let tmp = tempfile::TempDir::new().unwrap();

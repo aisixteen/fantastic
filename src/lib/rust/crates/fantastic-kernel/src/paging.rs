@@ -2,9 +2,9 @@
 //!
 //! Port of python `kernel/_kernel.py:page` (canonical).
 //!
-//! UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box. Measured
-//! 2026-08-20: reflect bulk was ~42% of an AI agent's context, which is what
-//! forced `dedupe_stale_reads`, the reflect stub and the point-of-use
+//! UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box: reflect bulk
+//! can be a large share of an AI agent's context, which is what forced
+//! `dedupe_stale_reads`, the reflect stub and the point-of-use
 //! distillation nudge in `ai_core` — every one of those shrinks what is
 //! RETAINED because nothing could shrink what is SENT. Paging attacks the cause.
 //!
@@ -41,10 +41,9 @@ where
     // PYTHON: `after = payload.get("after")`; a bool is never a cursor
     // (`isinstance(after, bool): after = None`); absent, `None` or `""` means
     // "from the start"; any OTHER value compares as `str(after)` — an int id
-    // and its decimal string ARE the same cursor (C17). Rust used to accept
-    // only an already-string `after` (`.and_then(Value::as_str)`), so an
-    // int/float/array/object cursor was silently IGNORED and paged the WHOLE
-    // list instead of resuming past it.
+    // and its decimal string ARE the same cursor. A non-string `after` is never
+    // silently IGNORED (which would page the WHOLE list instead of resuming past
+    // it).
     let after = match payload.get("after") {
         None | Some(Value::Null) | Some(Value::Bool(_)) => None,
         Some(Value::String(s)) if s.is_empty() => None,

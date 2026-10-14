@@ -12,9 +12,8 @@ provider — and then the provider is measured as ai_core uses it.
 | `system_prompt_file` (E99) | none (free) | NO MODEL — a scripted Responses endpoint records each request's `instructions`; on python · rust · swift (packaged host, `web_rest`): an AI agent's `file_bridge_id` + `system_prompt_file` (a path on it), read THROUGH the `file_bridge` as the agent — placeholders filled (`{store}`, `{self}`, an unknown `{…}` kept), an editor's save and an atomic save live on a following turn (`watch_path`), record `system_prompt` > file > default, `{tree}\n\n{self}\n\n{howto}` == the default block byte for byte; nothing set (or `file_bridge_id` alone) → the default block; set and unusable — the file deleted, an ungranted bridge, a path with no `file_bridge_id` — → the turn FAILS loud (`reason: system_prompt_file`, the model never called, reflect `system_prompt_file_error`); a malformed value refused at the write |
 | `provider_mocks` (E101) | none (free) | NO MODEL — the reusable provider mocks (`e2e/mocks`: vllm, ollama, responses, anthropic — wire shapes from each provider's docs / server source) against the kernel's own backends, on python · rust · swift (packaged host, `web_rest`): a turn answers the mock's text; the fields a record leaves to the server are read from it (vllm `/v1/models` + `/metrics`, ollama `/api/tags`, anthropic `/v1/models/<id>`); the key on EVERY request in the provider's header; an HTTP 500 on every try and a refused key (401) fail the turn loud; the key never in the ledger |
 
-The Responses expectations follow the contract agreed with the proxy owner on
-2026-09-27 (raw text, `reasoning_text`, a cut ends `response.incomplete`, stateless,
-native tools refused).
+The Responses expectations follow the proxy's contract (raw text, `reasoning_text`, a
+cut ends `response.incomplete`, stateless, native tools refused).
 
 ## Running
 

@@ -16,37 +16,10 @@
 #     claim that the item landed. An ACCEPTED one stays accepted.
 
 version: 6
-#
-# v6 (2026-10-01) — the owner ACCEPTED the library-identity differences
-# (`tmp/todo.md`, parity leftovers b). R-D4-9, R-D4-12 and R-D4-10 move to the top
-# as `accepted`; R-L1-1…8 are new, each pinned to one slot. An ACCEPTED residual
-# now wins over landed.yaml (the owner decided the difference IS that runtime's
-# landed behaviour) and its lines no longer count against an item's pass.
-#   SUPERSEDED and deleted (each matched nothing once the entries above and the
-#   2026-10-01 rules existed): R-D3-1 → R-L1-8; R-D4-1 → R-L1-5; R-D4-2 → R-L1-6;
-#   R-D4-3 (its one line was the http `Connection` name slot, now R-D4-10);
-#   R-D4-4 → R-L1-2/R-L1-3/R-D4-9 (the ollama SDK's body, traceback, headers);
-#   R-D4-8 → R-L1-3/R-L1-4; R-D4-11 → R-L1-3 (no `Exception in ASGI application`
-#   remains in any capture — every traceback left is ai_core's turn-failure print);
-#   R-N2-1 → rules N2/N10 (runtime-name counts) and R-L1-7 (swift's big-int
-#   `stdout_bytes`). R-D4-6 is rust-only now: its swift matches were the stub
-#   requests N22 re-pairs. R-L1-8 is swift-only: rust's tail equals python's.
-#
-# v5 (2026-09-22) — R-D4-10 widened from `bundle_verbs/**` to every family and
-# from `[rust]` to `[rust, swift]`: the request header NAME slot is the HTTP
-# CLIENT's, wherever a case records one, and scoping it to one family left the
-# identical lines scoring REGRESSION in `kernel_verbs` and on swift. The ANCHOR
-# is what keeps it narrow, and it is unchanged. Three new entries, each pinned
-# to ONE slot: R-N2-1 (the `runtime=` word inside a `budget`/`stdout_bytes`
-# COUNT), R-D13-2 (the lone surrogate `"\udcff"` — one ledger census bucket) and
-# R-D16-3 (`bytes` present-and-null against absent in a read outcome).
-#
-# v4 — the state this file was in on 2026-09-21b.
 
 residuals:
-  # ══ v6 (2026-10-01) — OWNER-ACCEPTED LIBRARY IDENTITY ══════════════════════
-  # Decided by the owner on 2026-10-01 (`tmp/todo.md`, "parity leftovers (b)"):
-  # each difference below is the library a runtime uses — its HTTP/WS client and
+  # ══ ACCEPTED LIBRARY IDENTITY ═════════════════════════════════════════════
+  # Each difference below is the library a runtime uses — its HTTP/WS client and
   # server, its SDK, its traceback printer, its OS/regex/JSON error text — not a
   # behaviour of the kernel. They come FIRST so they win over the broader
   # pending entries further down; each is pinned to its slot and nothing else.
@@ -77,7 +50,7 @@ residuals:
   - id: R-D4-9
     decision: D4
     state: accepted
-    # ACCEPTED (owner, 2026-10-01): library identity — http/ws header case and count (tmp/todo.md, parity leftovers b).
+    # ACCEPTED: library identity — http/ws header case and count.
     runtimes: [rust, swift]
     # The stub writes one `requests.json` per provider family with the header
     # table of every request it was sent (`e2e/parity/stubs/__init__.py:55-66`).
@@ -88,9 +61,7 @@ residuals:
     #      length, and the NAME slot `headers[i][0]`. Because the tables are
     #      compared BY POSITION, one missing header slides every later name by
     #      one, so `Accept-Encoding` lands opposite a credential header and the
-    #      name slot of a credential header IS part of the census (94 such lines
-    #      on rust, measured 2026-09-21b) — the old lookahead dropped exactly
-    #      those and left them unmapped.
+    #      name slot of a credential header IS part of the census.
     #   2. The VALUE slot, as before, and only when the line names no credential
     #      header: a credential VALUE that differs is a kernel difference, not a
     #      client default.
@@ -113,13 +84,12 @@ residuals:
   - id: R-D4-12
     decision: D4
     state: accepted
-    # ACCEPTED (owner, 2026-10-01): library identity — http/ws header case and count (tmp/todo.md, parity leftovers b).
+    # ACCEPTED: library identity — http/ws header case and count.
     runtimes: [rust, swift]
     # The SAME census, in the stub's OTHER record. `stubs/__init__.py` writes the
     # header table twice: into `requests.json` (R-D4-9) and into the `index.json`
-    # summary beside it. Only `ai_paths/stub/` and `store/stub/` reach it — 400
-    # lines each on rust, 400 on swift, every one unmapped before this entry
-    # (measured 2026-09-21b) — and `index.json` exists nowhere else, so this is
+    # summary beside it. Only `ai_paths/stub/` and `store/stub/` reach it, and
+    # `index.json` exists nowhere else, so this is
     # R-D4-9's file_glob widened by the one file it could not name (fnmatch has
     # no alternation).
     file_glob: "**/stub/index.json"
@@ -134,21 +104,19 @@ residuals:
   - id: R-D4-10
     decision: D4
     state: accepted
-    # ACCEPTED (owner, 2026-10-01): library identity — http/ws header case and count (tmp/todo.md, parity leftovers b).
+    # ACCEPTED: library identity — http/ws header case and count.
     runtimes: [rust, swift]
     # EVERY family's `http` census, not just `bundle_verbs`: the census is
     # written by the same recorder wherever a case records its HTTP exchange,
-    # and the difference is the CLIENT's, so scoping it to one family left the
-    # identical lines unmapped elsewhere (measured 2026-09-22 on the swift
-    # capture: 134 in `bundle_verbs`, 2 in `kernel_verbs`, and both scored
-    # REGRESSION because the files carry landed items). The ANCHOR, not the
+    # and the difference is the CLIENT's, so scoping it to one family would leave
+    # the identical lines unmapped elsewhere. The ANCHOR, not the
     # glob, is what keeps this narrow: `$.http[i].headers[j][0]` is the NAME
     # slot of a recorded REQUEST header table and nothing else matches it.
     file_glob: "**/*"
     # The NAME slot of the recorded request header table (`headers[i][0]`) and
     # nothing else. The VALUE slot is NOT covered: `headers[2][1]` is
-    # `content-length`, and 124 vs 109 there is a real body-size difference
-    # (`file_bridge/readonly_write`, measured 2026-09-21) that must stay visible.
+    # `content-length`, where a difference is a real body-size difference that
+    # must stay visible.
     # Neither is the table's LENGTH (`$.http[i].headers · len`), so a request
     # header a port never sends at all is still a diff line.
     anchor: '\$\.http\[[0-9]+\]\.headers\[[0-9]+\]\[0\]'
@@ -343,7 +311,7 @@ residuals:
 
   - id: R-D16-1
     decision: D16
-    state: accepted   # owner 2026-10-04: transport-library defaults, accepted
+    state: accepted   # transport-library defaults
     runtimes: [rust, swift]
     file_glob: "wire/**"
     anchor: "server|permessage-deflate|Sec-WebSocket-Extensions"
@@ -352,13 +320,3 @@ residuals:
     note: >
       uvicorn/websockets defaults python gets for free: `server: uvicorn` on
       every response, permessage-deflate, 20s ping / 20s pong.
-
-  # ── already decided ──
-
-  # ── new in this harness ──
-
-  # ── new 2026-09-20: transport-library header sets, PTY chunk boundaries ──
-
-  # ── new 2026-09-22: three BY-DESIGN differences, each pinned to one slot ──
-
-  # ── new 2026-09-21: the `http` census carries the client's header NAMES ──

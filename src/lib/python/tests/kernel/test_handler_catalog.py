@@ -1,8 +1,9 @@
 """A record's `handler_module` resolves ONLY from the `fantastic.bundles` catalog
-plus `register_unlisted` — never from all of `sys.path` (audit 2026-10-03, ARCH2-1).
+plus `register_unlisted` — never from all of `sys.path`.
 
-Importing any name on `sys.path` ran that module's top-level code on a grant-less
-`create_agent` under the sender itself. A name outside the catalog is now, to this
+Importing any name on `sys.path` would run that module's top-level code on a
+grant-less `create_agent` under the sender itself. A name outside the catalog is, to
+this
 kernel, a module that does not exist — rust's and swift's answer for an
 unregistered name, in their text.
 """

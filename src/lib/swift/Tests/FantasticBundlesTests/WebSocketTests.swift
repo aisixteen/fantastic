@@ -77,11 +77,9 @@ struct WebSocketTests {
         return wsId
     }
 
-    // NOTE: the former frame-unit tests (computeWebSocketAccept / decodeFrame)
-    // are gone — swift-nio's WebSocket upgrader + frame codec own the handshake
-    // hash and framing now. The two end-to-end tests below exercise that real
-    // path through the NIO server (a stronger guarantee than the hand-rolled
-    // codec the unit tests used to pin).
+    // swift-nio's WebSocket upgrader + frame codec own the handshake hash and
+    // framing. The two end-to-end tests below exercise that real path through the
+    // NIO server.
 
     /// One frame, parsed. A binary frame is read as its `[4B len | head | body]`
     /// header so a caller can assert on the envelope either way.
@@ -99,8 +97,7 @@ struct WebSocketTests {
     /// kernel's fanout queues a watcher's payload BEFORE the target's handler
     /// runs. Swift writes the reply from the `ws_call` task and events from the
     /// `ws_drain` task, so the reply could overtake the event the kernel had
-    /// already queued — measured as an `event`/`reply` inversion this suite used
-    /// to work around by filtering frame types. 50 calls on ONE socket: each
+    /// already queued. 50 calls on ONE socket: each
     /// must read back `event` then `reply`, never the other way.
     @Test func watchEventAlwaysPrecedesTheReply() async throws {
         let kernel = try await startWebKernel()
@@ -170,7 +167,7 @@ struct WebSocketTests {
         // The connection auto-watches `kernel_state`, so this call's own
         // fanout queues an `event` for this client BEFORE the handler runs —
         // and python puts that event on the wire BEFORE the reply. Swift does
-        // too now (the flush-then-reply step in `WebSocketProxyHandler`), so
+        // too (the flush-then-reply step in `WebSocketProxyHandler`), so
         // the FIRST frame is the event and the SECOND is the reply.
         let first = try await Self.receiveJSON(task)
         #expect(first["type"].asString == "event")
@@ -297,7 +294,7 @@ struct WebSocketTests {
         // A `call` can run for minutes (an LLM stream). Untracked, a client that
         // closed its tab left it running to completion — billing tokens — with
         // nowhere to write the reply. Python cancels its pending set on
-        // disconnect and rust aborts its JoinHandles; `teardown()` now does too.
+        // disconnect and rust aborts its JoinHandles; `teardown()` does too.
         let kernel = try await startWebKernel()
         let flag = SlowFlag()
         kernel.bundles.register("ws_slow.tools", SlowProbe(flag: flag))
@@ -355,9 +352,9 @@ struct WebSocketTests {
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("stop")]))])[0].result
     }
 
-    // MARK: - A13.14 / A13.16 / A13.17 / A13.18
+    // MARK: - wire framing
 
-    /// A13.14 — every server→client text frame is python's `encode_frame`:
+    /// Every server→client text frame is python's `encode_frame`:
     /// `json.dumps(envelope, default=str)`, i.e. `', '`/`': '` separators and
     /// `ensure_ascii=True`. `serialize()` sent compact raw UTF-8, so `·` and
     /// `↑` crossed the wire unescaped.
@@ -391,10 +388,10 @@ struct WebSocketTests {
         #expect(!frame.contains("·"), "\(frame)")
     }
 
-    /// C86 + A13.14's binary half — a QUEUED PAYLOAD HOLDING BYTES leaves as a
+    /// A QUEUED PAYLOAD HOLDING BYTES leaves as a
     /// binary frame `[4B len | head with _binary_path | body]`, python's
-    /// `encode_outbound`. The fanout used to carry the header alone, so a
-    /// watcher on a `write_stream` received a hole where the body was.
+    /// `encode_outbound`. The fanout never carries the header alone, which
+    /// would hand a watcher on a `write_stream` a hole where the body was.
     @Test func watcherGetsBinaryFrameForBytesPayload() async throws {
         let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
@@ -428,7 +425,7 @@ struct WebSocketTests {
         #expect(decoded.body == blob)
     }
 
-    /// A13.16 — a client Close is echoed WITH ITS PAYLOAD; swift echoed an
+    /// A client Close is echoed WITH ITS PAYLOAD; swift echoed an
     /// empty buffer, which a client reads as 1005 (no status received).
     @Test func clientCloseIsEchoedWithItsCode() async throws {
         let kernel = try await startWebKernel()
@@ -451,7 +448,7 @@ struct WebSocketTests {
         #expect(code == .normalClosure, "\(String(describing: code))")
     }
 
-    // MARK: - C41 / A11.7 / A11.8 / A11.29 / A13.15 — the leg gate and the frame loop
+    // MARK: - the leg gate and the frame loop
 
     /// A `web_ws` leg with NO ingress rule (or a sealed one). The socket still
     /// upgrades; every frame on it is refused.
@@ -491,9 +488,9 @@ struct WebSocketTests {
         return nil
     }
 
-    /// C41 — the CONNECT-TIME AUTO-WATCH IS GATED. Measured: the sealed swift
-    /// socket delivered the host's boot/output/write/stop events to anyone who
-    /// completed the handshake; python sends none.
+    /// The CONNECT-TIME AUTO-WATCH IS GATED: a sealed socket
+    /// delivers none of the host's events to anyone who merely completed the
+    /// handshake; python sends none.
     @Test func sealedLegSkipsAutowatch() async throws {
         let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
@@ -517,7 +514,7 @@ struct WebSocketTests {
         #expect(!seen.got(), "a sealed leg auto-watched and leaked the host's events")
     }
 
-    /// C41 — an `emit` frame on a sealed leg is DROPPED (python answers nothing
+    /// An `emit` frame on a sealed leg is DROPPED (python answers nothing
     /// at all for a denied emit). The kernel must never see the payload.
     @Test func emitOnSealedLegDropped() async throws {
         let kernel = try await startWebKernel()
@@ -545,7 +542,7 @@ struct WebSocketTests {
         #expect(seen.get() == nil, "a denied emit reached the target: \(String(describing: seen.get()))")
     }
 
-    /// A11.7 (r2 WSF-1) — every undecodable frame answers the ONE frame error,
+    /// Every undecodable frame answers the ONE frame error,
     /// BEFORE any gate, and the socket survives to answer the next call.
     @Test func malformedFramesAnswerTheFrameErrorAndKeepTheSocket() async throws {
         let kernel = try await startWebKernel()
@@ -597,8 +594,8 @@ struct WebSocketTests {
         #expect(reply != nil, "the socket did not survive the malformed frames")
     }
 
-    /// IO-3 — ONE deeply nested frame used to overflow the NIO thread's stack in
-    /// the JSON scanner and kill the whole kernel, before any gate. Now it is
+    /// ONE deeply nested frame must not overflow the NIO thread's stack in
+    /// the JSON scanner and kill the whole kernel, before any gate: it is
     /// python's bad frame (`decode_frame` refuses it past the json recursion
     /// limit): the frame error, and the socket answers the next call. Text and
     /// binary-header frames, 100k nested arrays each.
@@ -641,7 +638,7 @@ struct WebSocketTests {
         #expect(reply != nil, "the socket did not survive the 100k-deep frames")
     }
 
-    /// A11.8 — a `call` frame with no `payload` dispatches `{}`, which the
+    /// A `call` frame with no `payload` dispatches `{}`, which the
     /// KERNEL refuses `send: payload.type required`; the frame `id` defaults to
     /// `""` and is always echoed.
     @Test func callFrameWithoutPayloadAnswersPayloadTypeRequired() async throws {
@@ -666,8 +663,7 @@ struct WebSocketTests {
         #expect(r["data"]["error"].asString == "send: payload.type required", "\(r)")
     }
 
-    /// A11.8 (r2 WSF-V4) — an `emit` frame with no payload emits `{}`, not
-    /// `null`: swift's watchers received `{"type":"event","payload":null}`.
+    /// An `emit` frame with no payload emits `{}`, not `null`.
     @Test func emitFrameWithoutPayloadEmitsEmptyObject() async throws {
         let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
@@ -720,7 +716,7 @@ struct WebSocketTests {
         #expect(seen == Array(1...30), "\(seen)")
     }
 
-    /// A13.15 — a BINARY frame routes by `type` exactly like a text one, and its
+    /// A BINARY frame routes by `type` exactly like a text one, and its
     /// body reaches the target as the item's blob, through the batch with its
     /// ledger, dedup and reflect flags.
     @Test func binaryFrameRoutesByTypeAndHonoursBinaryPath() async throws {
@@ -798,7 +794,7 @@ struct WebSocketTests {
         }
         let g = try #require(got, "read_stream did not answer a binary frame")
         #expect(g.header["_binary_path"] == ["data", "bytes"], "\(g.header)")
-        // R-D16-3 — python's `encode_frame` nulls the bytes value IN PLACE, so
+        // Python's `encode_frame` nulls the bytes value IN PLACE, so
         // the head keeps `bytes: null` where the chunk sat (after `offset`).
         #expect(
             g.header["data"].asObject.map { Array($0.keys) }
@@ -811,8 +807,8 @@ struct WebSocketTests {
         #expect(g.body == blob.prefix(g.body.count) && g.body.count > 0)
     }
 
-    /// A11.29 + C77's WS half — `state_subscribe` answers a snapshot of EVERY
-    /// agent, then streams `state_event` frames. Swift answered nothing at all.
+    /// `state_subscribe` answers a snapshot of EVERY agent, then streams
+    /// `state_event` frames.
     @Test func stateSubscribeSendsSnapshotThenEvents() async throws {
         let kernel = try await startWebKernel()
         _ = await kernel.send([Item(AgentId("web"), .object(["type": .string("boot")]))])[0].result
@@ -866,10 +862,10 @@ struct WebSocketTests {
         #expect(e["name"].asString != nil, "the lazy name fill is missing: \(e)")
     }
 
-    /// A11.29 (r2 WSF-5) — WITHOUT the root grant the leg gets python's
+    /// WITHOUT the root grant the leg gets python's
     /// FLATTENED denial frame, not a `data`-wrapped reply and not silence. The
     /// leg holds only the baseline: a NAMED `*` on the root would
-    /// cover `state_subscribe` (audit 2026-09-28).
+    /// cover `state_subscribe`.
     @Test(.timeLimit(.minutes(1)))
     func stateSubscribeWithoutRootGrantAnswersFlattenedError() async throws {
         let kernel = try await startWebKernel()
@@ -895,7 +891,7 @@ struct WebSocketTests {
         #expect(e["data"].isNull, "the denial is FLATTENED, not wrapped: \(e)")
     }
 
-    /// A11.7 — the drain is a REGISTERED kernel task on the HOST agent, so an
+    /// The drain is a REGISTERED kernel task on the HOST agent, so an
     /// open socket is a `ps` row (`ws_drain`) and its pump is cancellable.
     @Test func openWsShowsWsDrainInPs() async throws {
         let kernel = try await startWebKernel()
@@ -915,7 +911,7 @@ struct WebSocketTests {
         #expect(verbs.contains("ws_drain"), "\(ps)")
     }
 
-    /// A13.17 (D16) — uvicorn's 101 also carries `date` and `server: uvicorn`.
+    /// Uvicorn's 101 also carries `date` and `server: uvicorn`.
     /// permessage-deflate needs a compression implementation and is recorded,
     /// not ported.
     @Test func wsUpgradeCarriesDateAndServerHeaders() async throws {
@@ -937,7 +933,7 @@ struct WebSocketTests {
         #expect(raw.contains("server: uvicorn"), "\(raw)")
     }
 
-    /// A13.18 (D16) — the server PINGS (uvicorn's `ws_ping_interval`) and closes
+    /// The server PINGS (uvicorn's `ws_ping_interval`) and closes
     /// 1011 when no pong comes back inside `ws_ping_timeout`. Both are 20 s, so
     /// the behaviour is source-only; the wiring is pinned here.
     @Test func serverPingsAndCloses1011WithoutPong() {
@@ -992,11 +988,11 @@ struct WebSocketTests {
         }
     }
 
-    /// A13.19 ON THE WS LEG — a TEXT `call` carries no raw chunk, so python
+    /// ON THE WS LEG, a TEXT `call` carries no raw chunk, so python
     /// leaves the client's JSON `bytes` value in the payload and `file_bridge`
-    /// TYPES it: `missing_arg`, nothing written. Swift stripped the key before
-    /// dispatch (python overwrites it only when a BODY actually arrived), so the
-    /// refusal became a silent 0-byte write. An ABSENT `bytes` is python's
+    /// TYPES it: `missing_arg`, nothing written (python overwrites the key only
+    /// when a BODY actually arrived; stripping it would turn the refusal into a
+    /// silent 0-byte write). An ABSENT `bytes` is python's
     /// `payload.get("bytes", b"")` — a legal empty chunk.
     @Test func textCallWriteStreamTypesItsBytesArgument() async throws {
         let kernel = try await startWebKernel()

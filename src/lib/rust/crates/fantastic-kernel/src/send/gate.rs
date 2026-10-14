@@ -7,7 +7,7 @@
 //! made inside an agent's handler, or a task it spawned, is that agent's. Every AGENT send — ANY verb, `reflect` and the kernel verbs the
 //! root answers included, nothing exempt — needs BOTH the sender's `can_call`
 //! (egress) AND the target's `callable_by` (ingress). An edge exists only if both
-//! ends grant it. GRANTS ARE THE ONLY RULE (owner, 2026-10-06): the tree verbs
+//! ends grant it. GRANTS ARE THE ONLY RULE: the tree verbs
 //! take this check and nothing more.
 
 use super::*;

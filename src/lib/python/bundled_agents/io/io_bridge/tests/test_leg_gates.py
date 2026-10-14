@@ -113,7 +113,7 @@ def test_web_ws_sealed_reply_is_exact(seeded_kernel):
     from web_ws.tools import _make_endpoint
 
     seeded_kernel.create("web_ws.tools", id="ws_sealed")
-    # `port`: the authority the web's Host guard admits (audit W-2).
+    # `port`: the authority the web's Host guard admits.
     seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     app.add_api_websocket_route(
@@ -257,8 +257,8 @@ async def test_a_wire_leg_takes_every_rule_it_implements(seeded_kernel, module, 
 
 async def test_a_malformed_rule_on_a_bridge_record_denies_the_call(seeded_kernel):
     """A record can still carry one (written below the verbs, or by hand on
-    disk): the inbound call is ANSWERED with the seal's denial — it used to
-    raise in the call task and the peer waited out its timeout."""
+    disk): the inbound call is ANSWERED with the seal's denial — never a raise in
+    the call task that leaves the peer waiting out its timeout."""
     from io_bridge import MemoryTransport, _test_transport_inject
 
     k = seeded_kernel
@@ -361,7 +361,7 @@ async def test_a_bridge_leg_reflects_the_same_names(
 async def test_a_bridge_reflects_exactly_what_its_gate_enforces(seeded_kernel):
     """`auth` carries a bare STEM and the gate appends `_ingress` to it, so
     `auth: allow_all_ingress` resolves `allow_all_ingress_ingress` — unknown, and
-    it denies. The bridge reflect used to skip an already-suffixed stem and report
+    it denies. The bridge reflect must not skip an already-suffixed stem and report
     `allow_all_ingress` / sealed:false, an open door its gate never opened."""
     k = seeded_kernel
     k.create("ws_bridge.tools", id="br", transport="memory", auth="allow_all_ingress")

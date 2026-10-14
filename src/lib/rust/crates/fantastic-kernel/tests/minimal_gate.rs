@@ -1,11 +1,11 @@
-//! THE MINIMAL ACCESS MODEL (owner decision 2026-10-03), pinned.
+//! THE MINIMAL ACCESS MODEL, pinned.
 //!
 //! - Two-sided: an agent send passes iff the sender's `can_call` grants
 //!   (target, verb) AND the target's `callable_by` grants (sender, verb).
 //! - `"*"` covers EVERY verb — `create_agent` included.
 //! - The baseline is `{"$self": "*"}` on both fields, nothing else.
 //! - Kernel verbs answered by the root take the same check against the root.
-//! - The tree verbs take that check and nothing more (owner, 2026-10-06 — grants
+//! - The tree verbs take that check and nothing more (grants
 //!   are the only rule); a missing operand gets the verb's own refusal.
 //! - A grant key outside the legal set is refused `invalid_meta` at the write.
 
@@ -178,7 +178,7 @@ async fn star_covers_create_agent() {
 
 #[tokio::test]
 async fn a_tree_verb_granted_on_the_root_acts_anywhere() {
-    // GRANTS ARE THE ONLY RULE (owner, 2026-10-06): holding the tree verbs on the
+    // GRANTS ARE THE ONLY RULE: holding the tree verbs on the
     // root, an agent creates, updates and deletes ANY agent it names — outside its
     // own subtree and itself included. No ownership check after the gate.
     let (_t, k) = mk(json!({"a": "*"}));

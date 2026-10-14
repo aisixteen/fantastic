@@ -1,13 +1,8 @@
-// The websocket MESSAGE layer every upgraded route is served behind (audit W-4,
-// 2026-10-03).
+// The websocket MESSAGE layer every upgraded route is served behind.
 //
-// NIO's server upgrader hands a route's endpoint raw FRAMES. The web_ws proxy
-// read each `.text` frame as a whole message whatever its FIN bit said, ignored
-// `.continuation` frames and decoded text lossily: a fragmented call never
-// parsed, a complete call in a non-final frame was dispatched with what followed
-// it dropped, and invalid UTF-8 was dispatched as U+FFFD. Python's websockets
+// NIO's server upgrader hands a route's endpoint raw FRAMES. Python's websockets
 // server (and rust's tungstenite) reassemble a fragmented message, bound it, and
-// refuse text that is not UTF-8. The host now does the same in front of every
+// refuse text that is not UTF-8. The host does the same in front of every
 // endpoint: `NIOWebSocketFrameAggregator` reassembles fragments into ONE
 // message of at most io_bridge's `MAX_FRAME` bytes (the swift client's bound),
 // and this guard closes the socket with python's code and python's empty reason

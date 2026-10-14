@@ -74,7 +74,7 @@ async def test_reflect_tree_all_default(seeded_kernel):
 
 
 async def test_reflect_tree_node_carries_a_bridges_allow(seeded_kernel):
-    """`allow` is posture (audit 2026-09-28, d7): what a file_bridge exposes is
+    """`allow` is posture: what a file_bridge exposes is
     readable from the ONE root reflect (`detail:full`), like its root and its lock."""
     seeded_kernel.create("file_bridge.tools", allow=["src", "README.md"], id="fb_d7")
     r = (
@@ -130,7 +130,7 @@ async def test_reflect_bundles_all(seeded_kernel):
     assert "cli" in names and "file_bridge" in names
     assert names == sorted(names)
     for b in bundles:
-        # `schema` only where the bundle publishes a RECORD_SCHEMA (lib request #3)
+        # `schema` only where the bundle publishes a RECORD_SCHEMA
         assert set(b.keys()) <= {"name", "handler_module", "schema"}
         assert b["handler_module"].endswith(".tools")
 

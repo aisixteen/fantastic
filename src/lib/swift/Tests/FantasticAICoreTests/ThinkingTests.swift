@@ -21,7 +21,7 @@ struct ThinkingTests {
         #expect(withoutThinking("a<think>one</think>b<think>two</think>c") == "abc")
     }
 
-    /// ONLY THE ANSWER ACTS (owner, 2026-10-07): dispatch and history both read
+    /// ONLY THE ANSWER ACTS: dispatch and history both read
     /// the answer, so a call inside a thought does neither.
     @Test func aToolCallInsideASpanIsNeitherDispatchedNorStored() {
         let call =

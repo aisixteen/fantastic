@@ -9,16 +9,8 @@
 #
 # So an entry here is a CLAIM, and the harness will hold the runtime to it.
 #
-# FILLED IN 2026-09-20 from the owner's statement that every item in
-# `tmp/py_parity_plan.md` was implemented in both ports EXCEPT the four named
-# below. It is 459 items minus the 31 A6 terminal items (terminal_backend was deleted
-# 2026-09-28, merged into exec_bridge PTY jobs) minus the 15 A3 text_file items (text_file
-# was deleted 2026-09-29, its verbs moved to file_bridge) minus two per runtime (C35, the declared
-# `alias`, was deleted 2026-09-28) minus the 16 items about the AI backends deleted
-# 2026-10-01 (anthropic_backend, nvidia_nim_backend, llamacpp_backend — A15.4, B1.7,
-# B1.8, B1.13, B1.15, B1.16, B1.25, B2.9, B4.1, B4.2, B4.3, B4.4, B4.7, B4.8, B4.9,
-# B4.10; deleted from `tmp/py_parity_plan.md` and `proofs.yaml` on 2026-10-02, so
-# the plan's total no longer counts them), not a measurement — what the
+# It claims every item of the parity plan as implemented in both ports EXCEPT
+# the ones named below. That is a claim, not a measurement — what the
 # harness measures is whether each claim survives its selector, and that is the
 # `pass` half of the status line. An item claimed here that produces a diff line
 # reads as a REGRESSION, which is the point of writing the claim down.
@@ -42,8 +34,8 @@
 #     (C87 is in that set too, and is NOT claimed for swift)
 #
 # `run.py capture` reads the root id off `.fantastic/agent.yaml` after seeding
-# and records it in each family's `meta.json`. All three runtimes answered
-# `kernel_state` on 2026-09-19, which is what C12 is.
+# and records it in each family's `meta.json`. Every runtime answers
+# `kernel_state`, which is what C12 is.
 
 version: 4
 

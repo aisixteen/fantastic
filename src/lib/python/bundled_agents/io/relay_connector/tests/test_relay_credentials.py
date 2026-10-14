@@ -1,12 +1,11 @@
 """The relay password lives in a credential_store — never on the record.
 
-Audit IO-7 / F4 (2026-10-03): `relay_token` (the relay group password, sent as
-`X-Fantastic-Auth`) was a plain record field — in `list_agents`, and in cleartext
-in `.fantastic/agents/<id>/agent.yaml`. Owner rule: secrets live only in a
-credential_store. The connector's record names WHERE the password lives —
+A plain record field (the relay group password, sent as `X-Fantastic-Auth`) would
+show in `list_agents`, and in cleartext in `.fantastic/agents/<id>/agent.yaml`.
+Secrets live only in a credential_store. The connector's record names WHERE the password lives —
 `credentials: {store, ref}` — and before every dial it reads the ref's `password`
 field AS ITSELF, the answer marked `secret: ['result']`, pinned to the relay URL's
-host, exactly as an AI backend reads its key. `relay_token` is gone.
+host, exactly as an AI backend reads its key. There is no `relay_token` field.
 """
 
 from __future__ import annotations

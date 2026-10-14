@@ -296,8 +296,8 @@ private struct ItemFields {
 }
 
 /// Dispatch one corpus send under `sender` (nil = operator, ungated). A
-/// `write_stream`/`read_stream` rides the BINARY channel — file_bridge's string
-/// verbs are gone. Mirrors python `_engine.py`: for a write, `bytes_utf8` becomes
+/// `write_stream`/`read_stream` rides the BINARY channel — file_bridge has no string
+/// verbs. Mirrors python `_engine.py`: for a write, `bytes_utf8` becomes
 /// the raw blob; for a read, the returned blob folds back into the reply's
 /// `bytes` field (utf-8) so a `contains: {bytes: ...}` matcher can see it. The
 /// gate still applies — the batch send honours the two-sided call gate when a
@@ -495,8 +495,8 @@ private func pyEq(_ a: JSON, _ b: JSON) -> Bool {
 
 /// `grant`/`revoke` — sugar over an OPERATOR `update_agent`.
 ///
-/// Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging it
-/// (#6), so a spec that hand-wrote the payload would restate the whole map every
+/// Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging it,
+/// so a spec that hand-wrote the payload would restate the whole map every
 /// time and would silently drop every other grant off the live record.
 private func grantStep(_ h: Hydration, _ args: JSON, remove: Bool) async -> JSON {
     let agentId = args["agent"].asString ?? ""
@@ -987,10 +987,8 @@ struct AgenticCorpusTests {
             // Reap ONLY what a scenario plausibly wrote: `.fantastic`, its own
             // `.agentic_*` fixtures, and the roots its config declares. Sibling
             // suites share this process cwd and create fixtures of their own IN
-            // PARALLEL — a blanket "delete every new entry" reaped a concurrent
-            // HTTP test's live fixture mid-test (measured:
-            // webRestBinaryLegPatchAndReadStream, "file note.txt not found"
-            // after a successful patch).
+            // PARALLEL — a blanket "delete every new entry" would reap a
+            // concurrent HTTP test's live fixture mid-test.
             let owned = ownedRoots(of: sc.config).union(writtenPaths(of: sc.spec))
             defer {
                 let after = Set(
@@ -1013,7 +1011,7 @@ struct AgenticCorpusTests {
             // (python `test_agentic.py`). PC-4 asserts that rebooting the
             // DECLARED system rehydrates it identically, so it has to run
             // before any step has mutated the tree — a scenario that deletes
-            // an agent (lifecycle's C15) would otherwise fail it for the right
+            // an agent would otherwise fail it for the right
             // reason at the wrong target, since the manifest still declares
             // that agent and a reboot correctly builds it back. Running it
             // first also makes the steps STRONGER: they execute against a

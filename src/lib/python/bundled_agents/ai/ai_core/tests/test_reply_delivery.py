@@ -1,16 +1,15 @@
 """Every call in a turn gets its reply — delivered TOGETHER, as one message.
 
-Two defects pinned here, both measured live:
+Two defects pinned here:
 
-2026-08-24 (`live_build`, the model): replies were delivered SEQUENTIALLY and
-each delivery blocked on a whole model turn — 26 of 36 calls never answered.
+replies delivered SEQUENTIALLY, each delivery blocked on a whole model turn — so
+calls go unanswered when the chain ends first;
 
-2026-08-25 (`live_subai_langgraph`, the model): one reply per turn — a turn
-that made 7 calls spent the next 7 turns collecting its own answers (`1 of 7`
-… `7 of 7`), asked `list_agents` at t3, received the t1 reflect instead, and
-re-asked until the repeat tripwire killed the run with nothing built.
+one reply per turn — a turn that made 7 calls spends the next 7 turns collecting
+its own answers (`1 of 7` … `7 of 7`), and a question asked in between is answered
+by something older.
 
-The contract now: ALL of one turn's results arrive as ONE delivered message
+The contract: ALL of one turn's results arrive as ONE delivered message
 per `reply_to` destination — one `[reply to …]` block per call, in emission
 order. The model never sees a partial batch, so it never re-asks.
 """
@@ -294,9 +293,8 @@ class _SizedKernel(_Kernel):
 
 
 async def test_the_inline_cap_bounds_the_whole_batch_not_each_reply():
-    """Measured 2026-10-07 (nested_folds:rust, 4.5k window): two greps, each under the
-    434-token cap, arrived as ONE 967-token message and the next turn could not fit
-    it. The replies of a batch share the cap: the first fits and is inline, the one
+    """Two replies, each under the cap, arrive as ONE message the next turn may not
+    fit. The replies of a batch share the cap: the first fits and is inline, the one
     that would push the message past it is held, like an oversized reply."""
     from ai_core.context import estimate_one
     from ai_core.core import _inline_cap
@@ -337,9 +335,9 @@ class _KnownKernel(_Kernel):
 
 
 async def test_a_reply_to_naming_no_agent_dispatches_nothing_and_says_so():
-    """Measured 2026-10-11 (e2e chat_users): `<reply_to>1001</reply_to>` meant a
-    chat message id; the call ran, its reply went to agent "1001", which does not
-    exist, and the model never saw it. Now that call is NOT dispatched and the
+    """`<reply_to>1001</reply_to>` meaning a chat message id would send the call's
+    reply to agent "1001", which does not exist, and the model would never see it.
+    That call is NOT dispatched and the
     model is told why, in the same delivered message as the turn's other replies."""
     k = _KnownKernel({"ai", "chat", "kernel"})
     text = _call("chat", "post", reply_to="1001") + _call("kernel")
@@ -371,7 +369,7 @@ async def test_a_reply_to_naming_a_live_agent_or_a_peer_still_routes():
 
 async def test_a_numeric_reply_to_is_an_id_not_a_discard():
     """The grammar types `<reply_to>1001</reply_to>` as the NUMBER 1001, which
-    used to read as "discard the reply". A number is an id: here it names an
+    must not read as "discard the reply". A number is an id: here it names an
     agent that exists, so the reply goes there."""
     k = _KnownKernel({"ai", "chat", "1001"})
     text = render_call(

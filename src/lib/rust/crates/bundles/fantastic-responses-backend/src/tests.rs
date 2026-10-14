@@ -515,8 +515,7 @@ async fn send_streams_tokens_raw_on_both_channels() {
 }
 
 /// `endpoint` is REQUIRED on the record — refused AT THE WRITE (the kind's
-/// schema, lib request #3), naming the field and what it is; it used to surface
-/// only at the first turn (audit 2026-09-28, c9).
+/// schema), naming the field and what it is, never only at the first turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -540,7 +539,7 @@ async fn a_record_without_an_endpoint_is_refused_at_the_write_naming_it() {
 }
 
 /// `store:false` keeps the conversation ours and `model` is the record's — a
-/// `sampling` key naming either is refused, never merged over it (audit d8).
+/// `sampling` key naming either is refused, never merged over it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sampling_may_not_override_what_the_provider_owns() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -570,7 +569,7 @@ async fn sampling_may_not_override_what_the_provider_owns() {
     );
 }
 
-// ─── STEP-4 PINS (2026-10-01): a raw HTTP/1.1 stub ──────────────────────────
+// ─── a raw HTTP/1.1 stub ────────────────────────────────────────────────────
 //
 // The mock-server crates always answer with a COMPLETE body; the behaviours
 // pinned below need a body CUT mid-stream, the raw request head (headers as
@@ -727,8 +726,8 @@ async fn a_body_cut_mid_stream_raises_stream_and_the_cause_chain() {
 }
 
 /// The key rides VERBATIM as `Authorization: Bearer <key>` (never trimmed: a key
-/// with whitespace at an edge is refused by the reader, naming its ref — audit
-/// S1); a key ROTATED in the store rides the very next request (it is read per
+/// with whitespace at an edge is refused by the reader, naming its ref); a key
+/// ROTATED in the store rides the very next request (it is read per
 /// request, never cached), and nothing pools.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_key_rides_verbatim_a_rotated_key_rides_next_and_nothing_pools() {

@@ -277,9 +277,9 @@ async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
 
 
 async def test_tick_now_reports_a_refused_fire(seeded_kernel, store_agent):
-    """`tick_now` answers the fire's OUTCOME. Measured 2026-10-06 (rust
-    subai_graph): a schedule sent `{type:'tick'}` to an AI agent, which has no
-    such verb; `{fired:true}` alone hid sixteen refusals from the model."""
+    """`tick_now` answers the fire's OUTCOME: a schedule sending `{type:'tick'}` to
+    an AI agent, which has no such verb, is refused, and `{fired:true}` alone would
+    hide that from the model."""
     sid = await _make_scheduler(seeded_kernel)
     r = (
         await seeded_kernel.send(
@@ -369,10 +369,9 @@ async def test_fire_emits_to_target_inbox(seeded_kernel, store_agent):
             [{"target": sid, "payload": {"type": "tick_now", "schedule_id": sch_id}}]
         )
     )[0]["result"]
-    # ONE delivery per tick: the target gets the PAYLOAD and nothing else. The old
-    # contract also echoed `schedule_fired` at the target, so a live program's
-    # on_message saw every tick twice (measured 2026-08-07 — opus had to design a
-    # filter around it). Telemetry rides the scheduler's OWN inbox + history.
+    # ONE delivery per tick: the target gets the PAYLOAD and nothing else. Echoing
+    # `schedule_fired` at the target too would make a live program's on_message see
+    # every tick twice. Telemetry rides the scheduler's OWN inbox + history.
     msgs = []
     while not q.empty():
         msgs.append(q.get_nowait())
@@ -596,9 +595,9 @@ async def test_schedule_rejects_a_bad_timeout(seeded_kernel, store_agent):
 
 
 async def test_non_int_args_are_bad_arg_refusals(seeded_kernel, store_agent):
-    """#136 — a present-but-wrong number is a TYPO, not a new default. `int()`
-    used to raise out of the handler and `or 60` used to swallow it; either way
-    the caller's mistake became a silent behaviour change."""
+    """A present-but-wrong number is a TYPO, not a new default: neither raised out
+    of the handler by `int()` nor swallowed by `or 60` — either way the caller's
+    mistake would become a silent behaviour change."""
     sid = await _make_probed_scheduler(seeded_kernel, "sch_ints", ["p_x"])
     for bad_value in ("60", 1.5, True, None, 0, -1, [60]):
         r = await _schedule(seeded_kernel, sid, "p_x", interval=bad_value)
@@ -641,7 +640,7 @@ async def test_non_int_args_are_bad_arg_refusals(seeded_kernel, store_agent):
 
 
 async def test_schedule_refuses_a_non_object_payload(seeded_kernel, store_agent):
-    """#136 — `payload: [1]` used to raise `.get` out of the handler."""
+    """`payload: [1]` is refused, never raised `.get` out of the handler."""
     sid = await _make_probed_scheduler(seeded_kernel, "sch_payload", ["p_x"])
     for bad_value in ([1], "hit", 7):
         r = (
@@ -667,7 +666,7 @@ async def test_schedule_refuses_a_non_object_payload(seeded_kernel, store_agent)
 async def test_an_idle_scheduler_never_wakes_and_a_change_wakes_it(
     seeded_kernel, store_agent, monkeypatch
 ):
-    """No idle wakeups (owner, 2026-10-08): the loop sleeps until the earliest due
+    """No idle wakeups: the loop sleeps until the earliest due
     fire, and with nothing to wait for until a change — a schedule added, or the
     scheduler's own record updated (`paused`, even by update_agent)."""
     from scheduler import tools

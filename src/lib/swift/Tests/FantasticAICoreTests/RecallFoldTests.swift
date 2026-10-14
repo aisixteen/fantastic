@@ -1,4 +1,4 @@
-// A head longer than the budget FOLDS at `context_recall` (owner, 2026-10-07): a
+// A head longer than the budget FOLDS at `context_recall`: a
 // store written under a larger window (another model, a planted past) is folded
 // the way a turn's `fold` projection folds it, before the fit picks resolutions.
 // Twins of python `ai_core/tests/test_view_recall.py` (the recall-fold cases).

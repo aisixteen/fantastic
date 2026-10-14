@@ -18,7 +18,7 @@
 //!
 //! The one-shot CLI paths (`call`, `init`) take this same flock through the
 //! bootstrap and refuse on [`KernelError::LockHeld`] — they never judge a pid
-//! alive (owner, 2026-10-03). A caller that looks for a running daemon to
+//! alive. A caller that looks for a running daemon to
 //! ATTACH to asks [`held`] — the same flock, probed, never taken.
 
 use crate::errors::{KernelError, KernelResult};
@@ -47,7 +47,7 @@ static HELD: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
 pub fn pid_alive(pid: u32) -> bool {
     // python `_pid_alive`: `pid <= 0` is dead, no syscall. `kill(0, sig)`
     // targets the CALLER'S OWN process GROUP (not "pid 0" as a process), so
-    // without this a lock recorded `{"pid": 0}` read back as alive — C83.
+    // without this a lock recorded `{"pid": 0}` would read back as alive.
     if pid == 0 {
         return false;
     }
@@ -195,7 +195,7 @@ pub fn release(workdir: &Path) -> KernelResult<()> {
     };
     // python `release_lock`: `cur = _read_lock()` is `None` on ANY read/parse
     // failure, and `if cur and cur.get("pid") == os.getpid(): unlink()` — a
-    // malformed file is left ALONE, never removed (C83).
+    // malformed file is left ALONE, never removed.
     let owned = fs::read_to_string(&path)
         .ok()
         .and_then(|raw| parse_lock(&raw))
@@ -207,7 +207,7 @@ pub fn release(workdir: &Path) -> KernelResult<()> {
     Ok(())
 }
 
-/// Is the workdir lock HELD — the attach probe (owner, 2026-10-03)? `Some(pid)`
+/// Is the workdir lock HELD — the attach probe? `Some(pid)`
 /// while a live process holds the flock on `lock.yaml` (the pid read from the
 /// file, for the message); `None` when nobody holds it — no file, or a file a
 /// dead holder left, whatever pid it names (a reused pid is not a holder).

@@ -4,8 +4,8 @@
 # mcp` hosting the rust kernel in-process over stdio — not a model's judgement.
 #
 # Protocol: MCP 2025-11-25 over stdio, because that is what Claude Code 2.1.280's
-# stdio client sends (measured 2026-09-22: its first frame is `initialize` at
-# 2025-11-25). No Claude Code is run by this test, ever — owner rule, TOS.
+# stdio client sends (its first frame is `initialize` at 2025-11-25). No Claude
+# Code is run by this test, ever (TOS).
 #
 # Runs are sequential processes over ONE temp directory, so the second run
 # proves rehydration of what the first one left behind.
@@ -88,7 +88,7 @@ runs:
       lock_released: true
       files_exist: [.fantastic/agents/user/agents/mcp/agent.yaml, .fantastic/memory.db]
       # no tape, no ledger, no JSON/XML — and the kernel's execution rows stay
-      # in RAM (`kernel_memory`, owner 2026-10-09): memory.db holds AI rows only
+      # in RAM (`kernel_memory`): memory.db holds AI rows only
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/messages.xml, .fantastic/agent.json]
       no_kernel_rows: true
       record:

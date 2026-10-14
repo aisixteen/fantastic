@@ -1,4 +1,4 @@
-// py_agent — the BASE a folder bundle with a program extends (owner, 2026-10-08).
+// py_agent — the BASE a folder bundle with a program extends.
 // Python `py_agent.tools`, rust `fantastic-py-agent`, text for text. Lives in this
 // module because it is the process edge too: it spawns through `Spawn` (the one
 // spawner) and speaks the ONE relay (`Relay`, with two more ops).

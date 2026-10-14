@@ -166,18 +166,18 @@ fn register_default_bundles() -> BundleRegistry {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // NO tracing subscriber (A14.17). It wrote ANSI WARN lines to STDOUT ahead of
+    // NO tracing subscriber. It wrote ANSI WARN lines to STDOUT ahead of
     // a one-shot's reply, so stdout stopped parsing as JSON; python configures no
     // logger at all and prints its diagnostics as plain, explicit lines.
 
-    // A14.5 — `.env` autoload is the FIRST step of every mode (`P/main.py:89-91`).
+    // `.env` autoload is the FIRST step of every mode (`P/main.py:89-91`).
     let loaded = load_dotenv(Path::new(".env"));
     if loaded > 0 {
         eprintln!("[kernel] loaded {loaded} var(s) from .env");
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // A14.4 — `--ledger-cap` is stripped from argv wherever it sits, then the
+    // `--ledger-cap` is stripped from argv wherever it sits, then the
     // environment. A value python's `int()` rejects kills the process (python
     // raises the ValueError straight out of `main_dispatch`).
     let (args, cap) = match ledger_cap_from(args) {
@@ -191,7 +191,7 @@ async fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             // python `main_dispatch`: `except RuntimeError as e: print(f"[kernel]
-            // {e}", file=sys.stderr); sys.exit(1)` — a lock conflict (C81, its
+            // {e}", file=sys.stderr); sys.exit(1)` — a lock conflict (its
             // 3-line text on `KernelError::LockHeld`'s Display) and a failed
             // `kernel_start` alike.
             eprintln!("[kernel] {e}");
@@ -204,8 +204,8 @@ async fn main() -> ExitCode {
 /// — the daemon's own flock, taken by the bootstrap. A live holder is `Ok(None)`
 /// after `refusal(pid)` (the pid its file names) went to stderr, and the caller
 /// exits with status 1. There is no pid pre-check: a lock file naming a pid that
-/// is alive but holds no flock (a reused pid) is stale, and taken over (owner,
-/// 2026-10-03). Python `modes/dispatch.py:_lock_or_exit`.
+/// is alive but holds no flock (a reused pid) is stale, and taken over. Python
+/// `modes/dispatch.py:_lock_or_exit`.
 fn one_shot_bootstrap(
     workdir: &Path,
     refusal: impl FnOnce(u32) -> String,
@@ -387,7 +387,7 @@ async fn dispatch(
         apply_ledger_cap(&booted, cap);
         // python `print(src.read_text(...).rstrip())` — rstripped, one newline.
         println!("{}", py_rstrip(fantastic_cli_bundle::HELP));
-        // A14.18 — every non-daemon mode ends with an idempotent kernel
+        // Every non-daemon mode ends with an idempotent kernel
         // shutdown (python's atexit → `Kernel.shutdown`), even here where no
         // lock was ever taken.
         booted.kernel.shutdown().await;
@@ -423,15 +423,15 @@ async fn dispatch(
             .await
             .remove(0)
             .result;
-        // A14.9 — python `json.dumps(reply, indent=2, default=str)`: ensure_ascii
+        // Python `json.dumps(reply, indent=2, default=str)`: ensure_ascii
         // and python's float repr, not serde's pretty printer.
         println!("{}", py_json_dumps(&reply, true, Some(2)));
-        // A14.18 — every non-daemon mode ends with an idempotent kernel shutdown.
+        // Every non-daemon mode ends with an idempotent kernel shutdown.
         booted.kernel.shutdown().await;
         return Ok(ExitCode::SUCCESS);
     }
 
-    // Mode 2.5 (A14.3): `init <loader_bundle> <manifest>` — seed a
+    // Mode 2.5: `init <loader_bundle> <manifest>` — seed a
     // declarative loader. python `kernel/modes/dispatch.py:90-149`.
     if args.first().map(String::as_str) == Some("init") {
         let rest = &args[1..];
@@ -488,7 +488,7 @@ async fn dispatch(
             .result;
         println!("{}", py_json_dumps(&reply, true, Some(2)));
         booted.kernel.flush_records().await;
-        // A14.7's lock release, THEN A14.18's kernel shutdown — see the same
+        // The lock release, THEN the kernel shutdown — see the same
         // note on Mode 3 below.
         bootstrap::shutdown(&workdir)?;
         booted.kernel.shutdown().await;
@@ -496,7 +496,7 @@ async fn dispatch(
     }
 
     // Mode 3: `<id> <verb> [k=v ...]`. `boot` is an agent id like any other
-    // (A14.11) — python routes `boot x` here, it never means "daemon".
+    // — python routes `boot x` here, it never means "daemon".
     if args.len() >= 2 {
         let id = args[0].clone();
         let verb = args[1].clone();
@@ -507,7 +507,7 @@ async fn dispatch(
                 payload.insert(k.to_string(), parse_kv(v));
             }
         }
-        // A14.7 — THE DAEMON'S OWN LOCK, the flock the bootstrap takes; a live
+        // THE DAEMON'S OWN LOCK, the flock the bootstrap takes; a live
         // holder refuses with python's `[call]` line, not the kernel's LockHeld
         // text (see [`one_shot_bootstrap`]).
         let Some(booted) = one_shot_bootstrap(&workdir, |pid| {
@@ -542,7 +542,7 @@ async fn dispatch(
             .result;
         println!("{}", py_json_dumps(&reply, true, Some(2)));
         booted.kernel.flush_records().await;
-        // A14.7's lock release, THEN A14.18's kernel shutdown — python's own
+        // The lock release, THEN the kernel shutdown — python's own
         // order: the `with FantasticLock()` block's `__exit__` releases the
         // lock synchronously inside `call()`/`init()`, and `Kernel.shutdown()`
         // runs LAST, from the process's atexit handler.
@@ -559,7 +559,7 @@ async fn dispatch(
         let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
         apply_ledger_cap(&booted, cap);
         eprintln!("{USAGE}");
-        // A14.18 — python's `sys.exit(2)` still runs the atexit shutdown chain.
+        // Python's `sys.exit(2)` still runs the atexit shutdown chain.
         booted.kernel.shutdown().await;
         return Ok(ExitCode::from(2));
     }
@@ -568,7 +568,7 @@ async fn dispatch(
     //
     // NO LOCK YET — hydration only, so the "nothing to serve" decision below
     // can be made the way python makes it: BEFORE the lock and before any
-    // boot (A14.13). D17's tty REPL (A14.14) is NOT ported: this binary
+    // boot. Python's tty REPL is NOT ported: this binary
     // stays headless on a tty, exactly as its own doc comment declares —
     // the `has_repl` half of python's composition decision has no rust
     // counterpart here, only the web-daemon half.
@@ -589,7 +589,7 @@ async fn dispatch(
 
     // LOCK-FIRST, before booting — python: "so port binds don't happen on
     // conflict." `?` surfaces `KernelError::LockHeld` through main()'s
-    // `[kernel] {e}` printer (C81).
+    // `[kernel] {e}` printer.
     lock::acquire(&workdir)?;
     // A fresh root's record lands only now, under the lock.
     let mut booted = booted;
@@ -629,8 +629,8 @@ async fn dispatch(
         }
     };
 
-    // A14.13 — python `print("[kernel] up", flush=True)`. The tty half
-    // (`cli` intro/booted verbs) has no rust counterpart (A14.14, above).
+    // Python `print("[kernel] up", flush=True)`. The tty half
+    // (`cli` intro/booted verbs) has no rust counterpart (above).
     println!("[kernel] up");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
@@ -651,7 +651,7 @@ async fn dispatch(
             "kernel_stop"
         },
     };
-    // A14.13 — python's exact per-OS-signal line (`_request_stop`): a
+    // Python's exact per-OS-signal line (`_request_stop`): a
     // leading blank line, the signal's name, stderr, flushed.
     if sig != "kernel_stop" {
         eprintln!("\n[kernel] {sig} — shutting down...");
@@ -803,7 +803,7 @@ mod stop_signal_tests {
     }
 }
 
-/// C10 — the `bundles` catalog lists INSTALLABLE bundles only. python registers
+/// The `bundles` catalog lists INSTALLABLE bundles only. python registers
 /// the e2e probes from `e2e/probes` with `register_unlisted` (no
 /// `fantastic.bundles` entry point), so they dispatch but never reach
 /// `reflect bundles=ids`.

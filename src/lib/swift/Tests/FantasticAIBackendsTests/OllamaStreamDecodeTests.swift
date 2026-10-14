@@ -1,9 +1,7 @@
 // Ollama NDJSON wire-decode tests — the two-channel read.
 //
-// The defect these pin (measured live on gemma4:12b, 2026-08-02): the backend
-// asked ollama for thinking and then read `message.content` alone, so a turn
-// spent reasoning arrived as an EMPTY completion — no tokens, no tool call, no
-// error, and ollama's log showing the request answered normally.
+// The defect these pin: reading `message.content` alone makes a turn spent
+// reasoning arrive as an EMPTY completion — no tokens, no tool call, no error.
 
 import FantasticAICore
 import Foundation

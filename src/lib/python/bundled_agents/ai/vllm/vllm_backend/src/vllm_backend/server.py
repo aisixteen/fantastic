@@ -1,5 +1,5 @@
-"""What a record leaves out is READ FROM THE SERVER (owner, 2026-10-07: "defaults can
-be inferred from the endpoint").
+"""What a record leaves out is READ FROM THE SERVER (defaults can be inferred from the
+endpoint).
 
 `model`, `max_tokens`, `context_window` and `kv_slots` may be left off the record.
 Before a verb that runs a turn (`TURN_VERBS`), every one still absent is read from

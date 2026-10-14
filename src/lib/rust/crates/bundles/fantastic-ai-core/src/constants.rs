@@ -1,7 +1,7 @@
 //! THE TUNABLES of ai-core — every number the loop, the context machinery and the
-//! fold strategy run on, in ONE place (owner, 2026-09-30: "all constants to
-//! constant file"). Each keeps the note that says why it has the value it has; a
-//! change here is a change to measured behaviour, so re-measure before moving one.
+//! fold strategy run on, in ONE place. Each keeps the note that says why it has
+//! the value it has; a change here is a change to measured behaviour, so
+//! re-measure before moving one.
 //! Mirrors python `ai_core/constants.py`, section for section.
 //!
 //! The modules that use these re-export them by name
@@ -61,12 +61,11 @@ pub const SEND_TIMEOUT_SECS: f64 = 180.0;
 /// [`SEND_TIMEOUT_SECS`]. python `SEND_TIMEOUT = float(os.environ.get(
 /// "FANTASTIC_AI_SEND_TIMEOUT", "180"))`.
 ///
-/// A FLOAT, and PARSED LIKE PYTHON'S. `0.05` used to parse as `u64` and fail,
-/// silently falling back to 180 — so a test that set a sub-second ceiling waited
-/// three minutes, and the ceiling printed in the refusal (`180s`) was not the
-/// one python prints (`180.0s`). A value python's `float()` rejects is a
-/// MISCONFIGURATION and fails loud NAMING the variable, exactly as python's
-/// import-time `float()` raises; there is no fallback to the default.
+/// A FLOAT, and PARSED LIKE PYTHON'S: `0.05` is a sub-second ceiling, and the
+/// ceiling printed in a refusal reads like python's (`180.0s`). A value python's
+/// `float()` rejects is a MISCONFIGURATION and fails loud NAMING the variable,
+/// exactly as python's import-time `float()` raises; there is no fallback to the
+/// default.
 ///
 /// # Panics
 /// When `FANTASTIC_AI_SEND_TIMEOUT` is set to something python's `float()`
@@ -119,21 +118,20 @@ pub const LOW: f64 = 0.6;
 /// The longest a fold title may be, in chars.
 pub const MAX_TITLE: usize = 140;
 
-/// THE SUMMARY BUDGET (owner, 2026-10-11): a fold summary gets a FIXED 1024
+/// THE SUMMARY BUDGET: a fold summary gets a FIXED 1024
 /// tokens, and the model is told exactly that number; the fold's mechanical index
-/// rides beside it, outside the budget. The old formula — a fifth of the span,
-/// minus the index — put short, user-heavy chat spans on a 48-token floor: the
-/// model overshot, the one re-summarise was cut while it counted tokens, and
-/// nothing folded (measured, python E39).
+/// rides beside it, outside the budget. A budget derived from the span (a fifth of
+/// it, minus the index) puts short, user-heavy chat spans on a tiny floor the
+/// model overshoots, and nothing folds.
 pub const SUMMARY_BUDGET: i64 = 1024;
 /// Re-summarises after the first answer; past them the fold fails LOUD (the turn
-/// ends `reason: fold_summary`), never a silent unfolded span (owner, 2026-10-11).
+/// ends `reason: fold_summary`), never a silent unfolded span.
 pub const SUMMARY_RETRIES: usize = 3;
-/// THE THINKING ALLOWANCE on a summary call's `max_tokens` (decided 2026-09-26).
+/// THE THINKING ALLOWANCE on a summary call's `max_tokens`.
 /// The endpoint counts a reasoning model's thought against `max_tokens`; at a bare
 /// budget (as small as ~93 tokens for a short span) the thought alone hit the
 /// bound, every small summary was cut and refused, and the last-resort cut dropped
-/// the fold that held the run's decision (measured, python E81). The SUMMARY TEXT
+/// the fold that held the run's decision. The SUMMARY TEXT
 /// — thought stripped — must still fit the budget; the allowance is for the
 /// thinking only.
 pub const THINK_ALLOWANCE: i64 = 1024;
@@ -141,20 +139,19 @@ pub const THINK_ALLOWANCE: i64 = 1024;
 pub const INDEX_USER_CHARS: usize = 1200;
 /// Rows at the end of the view that never fold — the live tail.
 pub const KEEP_TAIL: usize = 6;
-/// WHEN AND HOW MUCH TO FOLD — shares of the body budget, never a row count
-/// (owner, 2026-10-11). A fold starts once the view passes `FOLD_AT` of the
+/// WHEN AND HOW MUCH TO FOLD — shares of the body budget, never a row count. A
+/// fold starts once the view passes `FOLD_AT` of the
 /// budget; ONE fold then takes the oldest foldable rows, by tokens, until the view
-/// lands at `LOW` or under. The old row count (SPAN = 8) folded a chat past 8 rows
-/// at a time into fold rows nearly as big as the rows: 47 folds, 4 levels, 391 s
-/// before the first answer (python E39).
+/// lands at `LOW` or under. A row count folds a chat a few rows at a time into
+/// fold rows nearly as big as the rows: many folds, several levels, and a long
+/// wait before the first answer.
 pub const FOLD_AT: f64 = 0.95;
 /// Adjacent folds at the head of the view before they fold as a group.
 ///
 /// THREE, not four. A real run folds at most once per turn — each projection
 /// drops the view under the watermark and stops — so the head accumulates folds
-/// one at a time and this threshold is the whole story. At four it never fired:
-/// measured 2026-09-11 (python), `nested_folds` and `flat_roots` both ended
-/// `levels [1]`, a head that grows one fold per span forever, which is the
+/// one at a time and this threshold is the whole story. At four it never fires:
+/// the head ends `levels [1]` and grows one fold per span forever, which is the
 /// growth this constant exists to stop.
 ///
 /// Three still skips-then-batches, so depth grows as log₃ of the history rather
@@ -166,7 +163,7 @@ pub const FOLD_RUN: usize = 3;
 /// A chain turn that dispatches no call is told to TRY AGAIN (emit a call, or end
 /// the chain with `done`/`await`). MAX_SILENT_TURNS in a row — prose-only turns
 /// and dead turns (only thinking) alike, reset by any call — and the chain GIVES
-/// UP: no more reminders, the caller is told the model could not answer (owner,
-/// 2026-09-30, after a single dead turn ended a 30-pass chain and an unbounded
-/// reminder loop was the only alternative).
+/// UP: no more reminders, the caller is told the model could not answer (failing
+/// on the first dead turn would end long chains early; an unbounded reminder loop
+/// would never end).
 pub const MAX_SILENT_TURNS: usize = 10;

@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// A11.6 — the readme is python's file, byte for byte
+/// The readme is python's file, byte for byte
 /// (`PB/io/web_rest/src/web_rest/readme.md`).
 #[test]
 fn readme_is_python_verbatim() {
@@ -12,7 +12,7 @@ fn readme_is_python_verbatim() {
     );
 }
 
-/// A11.5 — `get_routes` declares python's three specs: `{kind:"http", method,
+/// `get_routes` declares python's three specs: `{kind:"http", method,
 /// path}` (python also carries a live `endpoint` callable, which has no wire
 /// spelling).
 #[test]
@@ -28,7 +28,7 @@ fn get_routes_match_python() {
     );
 }
 
-/// A11.4 — an unknown verb is the shared `unhandled` refusal with python's
+/// An unknown verb is the shared `unhandled` refusal with python's
 /// `{t!r}` text and the verb echoed back; `shutdown` is no longer a verb.
 #[tokio::test]
 async fn unknown_verb_is_unhandled_refusal() {
@@ -52,7 +52,7 @@ async fn unknown_verb_is_unhandled_refusal() {
     );
 }
 
-/// A11.15 — the reflect frame is python's: no `mounted_on`, the curl examples,
+/// The reflect frame is python's: no `mounted_on`, the curl examples,
 /// the `auth_header`, the leg posture from `describe`, and python's verb docs.
 #[tokio::test]
 async fn reflect_keys_match_python() {
@@ -97,7 +97,7 @@ async fn reflect_keys_match_python() {
     assert_eq!(obj["sealed"], json!(true));
 }
 
-/// STEP-4 PIN (2026-10-01): the unknown-type refusal's KEY ORDER is part of the
+/// The unknown-type refusal's KEY ORDER is part of the
 /// wire (`preserve_order`); `Value` equality ignores it, so the text is compared.
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
@@ -125,7 +125,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     }
 }
 
-/// Audit W-8 — the one write-time check every leg makes (python
+/// The one write-time check every leg makes (python
 /// `validate_meta` → `io_bridge.unknown_ingress_refusal`): an unknown name or a
 /// malformed spec is refused with the wire legal values; a rule it implements is
 /// not.

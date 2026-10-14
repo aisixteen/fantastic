@@ -4,14 +4,14 @@
 //! through `serde_json::to_value(..).unwrap()`, and `to_value` re-PARSES an
 //! arbitrary-precision number from its stored text. This kernel stores exactly
 //! one number whose text is not JSON: the `Infinity` / `-Infinity` / `NaN`
-//! token python's `json.dumps(..., allow_nan=True)` writes (C74,
-//! [`crate::scalar`]). Feeding one back through `to_value` returns
+//! token python's `json.dumps(..., allow_nan=True)` writes
+//! ([`crate::scalar`]). Feeding one back through `to_value` returns
 //! `Error("invalid number")` — so `json!` PANICS on it and
 //! `to_value(..).unwrap_or(Value::Null)` silently answers `null`.
 //!
-//! Both were measured: `fantastic_kernel kernel create_agent … nan=nan`
-//! exited 101 with a panic in the traffic event, and with that fixed it
-//! printed `null` where python prints the record.
+//! Either way a caller's value is lost: `fantastic_kernel kernel create_agent …
+//! nan=nan` would panic in the traffic event, or print `null` where python
+//! prints the record.
 //!
 //! So nothing that carries a value a CALLER supplied — a payload, a reply, an
 //! agent record, an outcome — may be assembled with `json!`. Use [`obj`], which
@@ -57,7 +57,7 @@ pub(crate) fn record_value(rec: &AgentRecord) -> Value {
 }
 
 /// How a raw reply BODY is written where python's reply dict holds the bytes
-/// natively (its slot — the `bytes` key for a bundle's reply, C37).
+/// natively (its slot — the `bytes` key for a bundle's reply).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyAs {
     /// `{len: N}` — what a memory store holds (python `_store_safe`; base64 is

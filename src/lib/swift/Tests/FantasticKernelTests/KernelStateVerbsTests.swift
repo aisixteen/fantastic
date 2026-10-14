@@ -52,7 +52,7 @@ struct KernelStateVerbsTests {
         let ns = workdir.appendingPathComponent(sess)
         let fm = FileManager.default
         // The namespace keeps no copy of the session's record, readme or docs
-        // — its one record lives in the host tree (owner 2026-10-14).
+        // — its one record lives in the host tree.
         #expect(!fm.fileExists(atPath: ns.appendingPathComponent("agent.yaml").path))
         #expect(!fm.fileExists(atPath: ns.appendingPathComponent("readme.md").path))
         #expect(!fm.fileExists(atPath: ns.appendingPathComponent("docs").path))

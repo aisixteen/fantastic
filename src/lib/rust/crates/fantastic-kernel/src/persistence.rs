@@ -57,7 +57,7 @@ pub fn record_map(rec: &AgentRecord) -> Value {
     crate::jsonsafe::record_value(rec)
 }
 
-/// ONE STORE IO, THROUGH THE BATCH (C47).
+/// ONE STORE IO, THROUGH THE BATCH.
 ///
 /// Every persistence byte — the record merge read, the record write, the readme
 /// probe and seed, the blob verbs — crosses [`store_read`] or [`store_write`],
@@ -225,13 +225,11 @@ pub(crate) fn loader_reldir(kernel: &Kernel, loader: &Agent, abs: &Path) -> Stri
     }
 }
 
-// ─── loud persistence (audit 2026-09-28, d2) ─────────────────────
+// ─── loud persistence ────────────────────────────────────────────
 // A store that cannot hold the records, and every refused persist write, show
 // up on stderr AND as `persistence.error` on the root reflect — and
-// `persistence.provider` is reported only while writes land. Before this, a
-// store whose `allow` did not expose the records was still discovered, every
-// write was refused into the void, and the root reported it as the provider: a
-// silent RAM-only kernel. Python `kernel_state` `_persist_failed` /
+// `persistence.provider` is reported only while writes land, never a silent
+// RAM-only kernel. Python `kernel_state` `_persist_failed` /
 // `_persist_landed` / `_check_store_allow`.
 
 /// The last refused/failed persist write PER LOADER — absent while its writes
@@ -439,7 +437,7 @@ fn mint_tmp_suffix() -> String {
 /// - **Provider wired** → `read_stream` the existing YAML (to eof),
 ///   MERGE the agent's `record()` fields over it (overwriting only those keys,
 ///   leaving unknown keys + sidecars untouched), `write_stream` the merged
-///   YAML to a TMP sibling and `rename` it over `agent.yaml` (C43). If the
+///   YAML to a TMP sibling and `rename` it over `agent.yaml`. If the
 ///   provider refuses (sealed, unexposed) the write doesn't land — NO fallback
 ///   — and the refusal is LOUD (`persist_failed`). `yaml_io.dump(record)`
 ///   bytes, python-exact.
@@ -460,8 +458,8 @@ pub async fn persist(kernel: &Arc<Kernel>, loader: &Agent, agent: &Agent) -> Ker
     } else {
         format!("{reldir}/{RECORD_FILE}")
     };
-    // Merge: the WHOLE document through the provider (python pages to eof since
-    // 2026-09-20; one chunk lost every key of a record over 64 KiB), then overlay
+    // Merge: the WHOLE document through the provider (python pages to eof; one
+    // chunk would lose every key of a record over 64 KiB), then overlay
     // the kernel-managed keys.
     let existing = read_via_store(kernel, &store_id, &af).await;
     let mut on_disk: Map<String, Value> = std::str::from_utf8(&existing)
@@ -844,16 +842,14 @@ impl PersistWriter {
     /// (python `aflush`).
     ///
     /// When it returns, every write that was dirty when it was called has
-    /// LANDED — also the ones the debounced loop took first. It used to return
-    /// at once when the loop held them, with their writes still in flight: the
-    /// caller found neither the record nor its readme on disk (measured with a
-    /// store holding the loop's write: 5/5 runs returned early).
+    /// LANDED — also the ones the debounced loop took first, so the caller finds
+    /// the record and its readme on disk.
     pub async fn flush(&self, kernel: &Arc<Kernel>) {
         flush_records(kernel, &self.loader, &self.dirty, &self.drain).await;
     }
 
     /// Mark one record dirty with NO state event and wake the writer — the
-    /// root's id-block reservation inside the silent ledger flush (audit CLI-B).
+    /// root's id-block reservation inside the silent ledger flush.
     pub(crate) fn mark_dirty(&self, kernel: &Kernel, id: &AgentId) {
         if mark_persist(kernel, &self.dirty, id) {
             self.wake.notify_one();
@@ -900,8 +896,7 @@ fn mark_persist(kernel: &Kernel, dirty: &std::sync::Mutex<Dirty>, aid: &AgentId)
 }
 
 /// Subscribe the loader to the kernel state stream and start the debounced
-/// record writer. Replaces the inline persist that used to ride `create_agent` /
-/// `update_agent` / `delete_agent`.
+/// record writer.
 ///
 /// NO PROVIDER ⇒ THE DIRTY SET SURVIVES. Python returns BEFORE clearing the
 /// queues when no store is wired, so everything created before the store exists
@@ -1008,7 +1003,7 @@ async fn flush_records(
             continue;
         }
         // The record only — a bundle's readme and docs are served from the
-        // bundle, never copied (owner 2026-10-14).
+        // bundle, never copied.
         let _ = persist(kernel, &loader, &agent).await;
     }
     for (_, path) in forget {

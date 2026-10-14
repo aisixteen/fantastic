@@ -1,9 +1,8 @@
 // web_rest judges a request BEFORE it reads the body, and bounds the body.
 //
-// Audit IO-4 (2026-10-03): the host buffered, then the leg parsed, the WHOLE body
-// before the leg's ingress rule ran — a sealed or password-gated leg made the
-// kernel hold and parse any amount of data from a client it was about to refuse.
-// Now the rule judges the request on what it says up front (its target and its
+// Buffering and parsing the WHOLE body before the leg's ingress rule runs would
+// let a sealed or password-gated leg make the kernel hold and parse any amount
+// of data from a client it is about to refuse. The rule judges the request on what it says up front (its target and its
 // `X-Fantastic-Auth` credential), and only an admitted request's body is read —
 // at most 16 MiB (io_bridge's `MAX_FRAME`: the one frame cap every wire leg
 // holds); past it the request is refused, loud, 413.
@@ -13,7 +12,7 @@
 // refused or oversize request is answered while the client has NOT finished its
 // body (the read deadline is 3 s; a host that waits for the body never answers).
 //
-// Audit IO-6 at this leg: a non-ASCII credential is a plain 403.
+// At this leg, a non-ASCII credential is a plain 403.
 //
 // Twin of python `web_rest/tests/test_web_rest_ingress_order.py`.
 

@@ -1,5 +1,4 @@
-"""THE STREAM JUNCTION — the ONE place the e2e harness reads streaming parts
-(owner, 2026-10-04; design `tmp/streaming_parts.md`).
+"""THE STREAM JUNCTION — the ONE place the e2e harness reads streaming parts.
 
 A model's output streams to its addressees as `part_*` events: `part_start
 {stream_id, source, kind, name?, target?, to?, re?}` → `part_delta {text}` →
@@ -20,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 #: A call part that ENDED but whose final message has not arrived after this many
-#: seconds is FAILED (owner, 2026-10-04): only a successful generation dispatches,
+#: seconds is FAILED: only a successful generation dispatches,
 #: so a stream can end cleanly and still never become a message.
 SETTLE_SECONDS = 60.0
 

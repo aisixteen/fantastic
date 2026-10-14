@@ -13,4 +13,4 @@ limits:
   no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "32000"}  # 32k ONLY: a multi-root test needs room; at 12k the model lost every deliverable (2026-09-08)
+env: {E2E_WINDOW: "32000"}  # 32k ONLY: a multi-root test needs room; at 12k the model loses every deliverable

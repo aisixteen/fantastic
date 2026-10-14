@@ -28,8 +28,8 @@ BK = _resolve_backend()
 FB = "cmp_fb"
 DONE = 'end your run by calling done — emit <call name="done"></call>'
 # UNDER THE INLINE CAP, MANY OF THEM. A reply over the cap (~1.4k tokens at a 12k
-# window) is digested to its origin line in sync mode too (2026-09-26) — so a 2.4k
-# filler no longer grew the context and compaction never fired. ~1.1k-token fillers
+# window) is digested to its origin line in sync mode too — so a 2.4k filler would not
+# grow the context and compaction would never fire. ~1.1k-token fillers
 # stay inline, and ten of them overflow the window.
 LOREM = ("the quick brown fox jumps over the lazy dog " * 100)
 N = 10
@@ -83,10 +83,9 @@ async def main():
             root, core, BK, can_call={FB: "*", "notes": "*", "cli": "*", "user": "*"},
             callable_by={"user": "*"},
             limits=Limits.from_env(os.environ),
-            # SMALL ENOUGH TO COMPACT, BIG ENOUGH TO RUN. It was 8000, and at 8000 the
-            # system block alone measured 4176 tokens — so what fired was the `too_small`
-            # FAILFAST, not compaction, and the run died with `context_insufficient`
-            # while still scoring PASS (runs/20260904-043318, python). A window has to
+            # SMALL ENOUGH TO COMPACT, BIG ENOUGH TO RUN. Too small a window leaves the
+            # system block alone near the budget, so what fires is the `too_small`
+            # FAILFAST, not compaction. A window has to
             # leave room for one filler reply (~2400 tok) plus the notice envelope.
             record={"context_window": 12000, "num_ctx": 12000,
                     "context_strategy": "truncate"},
@@ -100,13 +99,10 @@ async def main():
         msgs = hist.get("messages") if isinstance(hist, dict) else None
         got = Path("answer.md").read_text() if Path("answer.md").exists() else ""
 
-        # WHAT THE MODEL DID, not what the task said. Both checks here used to be
-        # tautologies satisfied before the model acted: `"recall" in joined` matched the
-        # TASK TEXT (which quotes `{type:'recall', query:'passphrase'}`, and the task is
-        # a user turn in this very store), and `secret in joined` matched the Step-1 read
-        # reply. Measured on runs/20260904-044955 (swift): recall returned
-        # `{"messages":[],"total":0}`, the chain died, answer.md was never written — and
-        # the test scored PASS. `ctx_score` reads the ASSISTANT turns for the call and
+        # WHAT THE MODEL DID, not what the task said. `"recall" in joined` would match
+        # the TASK TEXT (which quotes `{type:'recall', query:'passphrase'}`, and the task
+        # is a user turn in this very store), and `secret in joined` the Step-1 read
+        # reply — both true before the model acts. `ctx_score` reads the ASSISTANT turns for the call and
         # attributes the secret to the REPLY BLOCK that carried it.
         called_recall, recall_returned = ctx_score.recalled(msgs or [], "ai", secret)
         # AND PROVE THERE WAS A COMPACTION AT ALL. `context_status.last_projection` is
@@ -118,8 +114,7 @@ async def main():
         # THE CLAIM: compaction dropped the early fact, and recall paged it back
         # from the whole durable store — checks 1+2. Whether the model then
         # transcribes it to answer.md is downstream behavior, not the compaction
-        # capability, so it is OBSERVED, not gated (measured: rust/swift models
-        # recall the secret then wander on the final write).
+        # capability, so it is OBSERVED, not gated.
         checks = [
             ("compaction actually fired (pushed context:compacted event)", compacted),
             ("the model called recall on itself after the notice", called_recall),

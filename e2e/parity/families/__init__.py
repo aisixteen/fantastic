@@ -19,8 +19,8 @@ from pathlib import Path
 BASE = {"$self": "*", "$parent": "*", "$subtree": "*"}
 #: THE ROOT'S ID — what every runtime seeds (`kernel_state`; `Ctx.boot` checks
 #: the measured one against it). A grant names it: `kernel` is the reserved
-#: ADDRESS of the root, never a grant key — under the minimal model (owner,
-#: 2026-10-04) `can_call` keys are literal ids, so `{"kernel": "*"}` matched nothing.
+#: ADDRESS of the root, never a grant key — under the minimal model `can_call`
+#: keys are literal ids, so `{"kernel": "*"}` matches nothing.
 ROOT_ID = "kernel_state"
 #: The ingress rule an agent needs before any leg may call it.
 OPEN = {"ingress_rule": "allow_all_ingress"}
@@ -37,7 +37,7 @@ VLLM = "vllm_backend.tools"
 #: endpoint's KV session table never decides a capture.
 VLLM_MAX_TOKENS = 4096
 VLLM_KV_SLOTS = 64
-#: The server window every vllm record names (REQUIRED, owner 2026-10-04); a
+#: The server window every vllm record names (REQUIRED); a
 #: family that measures context management names its own.
 VLLM_CONTEXT_WINDOW = 32768
 
@@ -106,8 +106,8 @@ def quiesce(stub, k, *, agent: str = "ai", max_s: float = 120, still: float = 4.
 
     Two conditions, not one. A stub that has gone quiet can simply be between
     turns, and a `ps` that is empty for an instant can be a turn that has not
-    been queued yet; waiting on both is what made the round-2 chains reproducible
-    instead of length-dependent.
+    been queued yet; waiting on both makes the chains reproducible instead of
+    length-dependent.
     """
     t0 = time.monotonic()
     last_n, last_change, polls = len(stub.requests), time.monotonic(), 0

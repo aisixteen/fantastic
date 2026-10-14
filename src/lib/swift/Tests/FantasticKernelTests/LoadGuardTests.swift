@@ -1,14 +1,14 @@
 // A bad snapshot is refused BEFORE the live tree is torn down, and a store file
 // is read WHOLE.
 //
-// Measured 2026-09-02 (python-canonical, ported):
+// Pinned (python-canonical, ported):
 //
-// - A parent CYCLE resolved on both ends (each `parent_id` named a record in the
-//   set) and passed validation, then hydrated nothing — silently dropping every
-//   record in the cycle after the old tree was already wiped.
-// - More than one root was never checked at all.
-// - `loadBlob` issued ONE `read_stream` and used the first chunk, so any sidecar
-//   past the 64 KiB default came back truncated.
+// - A parent CYCLE resolves on both ends (each `parent_id` names a record in the
+//   set) and would pass a naive validation, then hydrate nothing — silently
+//   dropping every record in the cycle after the old tree was wiped.
+// - More than one root is refused.
+// - `loadBlob` reads to the end, never only the first `read_stream` chunk (a
+//   sidecar past the 64 KiB default would come back truncated).
 
 import FantasticJSON
 import Foundation

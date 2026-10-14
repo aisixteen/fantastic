@@ -4,7 +4,7 @@ The very first instruction carries a code. Sixteen reads later, several folds in
 model is asked to quote it — recall pages the store where every row and every fold still
 lives — and to find a marker that sits inside a folded read, by grep.
 
-PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
 folding and the answer are the model's own, without spending a live turn per file.
 """
@@ -56,10 +56,8 @@ async def main():
         from helpers import ctx_score
         recalled = len(ctx_score.calls_made(fold["msgs"], target="ai_fold", verb="recall"))
         report((recency, fold), lambda a: f"code={code in a['body']}  marker={marker in a['body']}")
-            # NOT "both arms actually compacted": folding here was a side effect of a
-            # BLIND grep (2026-09-08: 12 greps, 12 zeros, then pulls filled the window).
-            # With grep reaching stored bodies (fixed 2026-09-09) the model never needs
-            # to hold them, so this test measures FACT SURVIVAL; folding is measured by
+            # NOT "both arms actually compacted": with grep reaching stored bodies the
+            # model never needs to hold them, so this test measures FACT SURVIVAL; folding is measured by
             # fold_paging / nested_folds / superlong_chain / user_fold.
         checks = [c for c in base_checks(recency, fold) if not c[0].startswith(("both arms produced", "both arms actually compacted"))] + [
             # the claim is REACH, not method: the store under the folds answered, by

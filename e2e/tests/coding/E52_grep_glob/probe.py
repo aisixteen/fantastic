@@ -1,6 +1,6 @@
 """coding/grep_glob — C3 as COMMANDS: glob + grep-with-matches, composed. LLM-driven.
 
-Search is a command, not a verb (settled 2026-09-01): the OS already ships
+Search is a command, not a verb: the OS already ships
 glob and grep, so the organ is an `exec_bridge` allowlist, exactly like E41 —
 this test adds what E41 does not drive: the GLOB is load-bearing. The marker
 appears in THREE files, but only the `*.cfg` hit counts (the others are named

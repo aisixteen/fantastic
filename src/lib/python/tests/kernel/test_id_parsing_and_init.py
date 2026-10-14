@@ -344,7 +344,7 @@ async def test_init_refuses_while_another_fantastic_owns_the_dir(
 
 
 async def test_one_shots_probe_the_flock_not_the_pid(kernel, tmp_path, capsys):
-    """Owner 2026-10-03: a one-shot takes the daemon's own flock. A lock file
+    """A one-shot takes the daemon's own flock. A lock file
     naming a live pid that holds no flock is stale — taken over, not refused."""
     path = _manifest(tmp_path)
     _stale_lock(tmp_path)

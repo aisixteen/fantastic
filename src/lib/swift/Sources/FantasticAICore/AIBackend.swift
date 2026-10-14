@@ -3,12 +3,10 @@
 // their `AIProvider` impl + an `AIBackendConfig`, and dispatch every
 // verb through the `handle` method here.
 //
-// Extracted from the three (formerly duplicated) Swift backends. The
-// shared layer owns: per-(agent, client_id) chat history, the
+// The shared layer owns: per-(agent, client_id) chat history, the
 // epoch-bump cancellation state, the verb bodies (reflect / boot /
 // send / history / status / recall / …), the spawned
-// streaming task, the token / status event emission, and — since the
-// dispatch phase — READING THE MODEL'S TOOL CALLS OUT OF ITS OWN TEXT
+// streaming task, the token / status event emission, and READING THE MODEL'S TOOL CALLS OUT OF ITS OWN TEXT
 // AND DISPATCHING THEM (`ToolParse` + `Routing`). The providers own
 // only the upstream wire (NDJSON, SSE+Bearer, on-device session).
 //
@@ -205,8 +203,8 @@ public final class AIBackend: @unchecked Sendable {
             // Python's `f"{name}: unknown type {t!r}"` — the bundle name and the
             // RAW payload value repr'd: `None` when the payload named no type,
             // `5` for a number, `'shutdown'` for a verb this bundle does not
-            // have (its verb map has no `shutdown` entry, so the lifecycle
-            // no-op swift answered was a reply python never sends).
+            // have (its verb map has no `shutdown` entry, so a lifecycle
+            // no-op answer would be a reply python never sends).
             return Refusal.make(
                 Refusal.unhandled, "\(config.kind): unknown type \(pyRepr(payload["type"]))",
                 extra: [("verb", payload["type"])])
@@ -230,7 +228,7 @@ public final class AIBackend: @unchecked Sendable {
     public func onCancel(agentId: AgentId, taskId: TaskId, kernel: Kernel) async throws {
         let st = runState(kernel, agentId.value)
         guard let entry = st.takeCurrentForCancel(taskId: String(taskId.value)) else { return }
-        // THE CUT (owner, 2026-10-04): every open part ABORTS for its watchers, and
+        // THE CUT: every open part ABORTS for its watchers, and
         // the turn leaves the incoming message + a marker row — never a half answer
         // — so the model's next turn knows what it was asked, what it had visibly
         // said, and who stopped it. Nothing of a stopped pass was dispatched.
@@ -297,7 +295,7 @@ public final class AIBackend: @unchecked Sendable {
 
     /// The `onDelete` bundle hook, shared by every backend (vllm drops its own
     /// table beside it). Drops every row this module keeps for the deleted id,
-    /// so an id re-created later starts clean and nothing leaks (audit ARCH2-2):
+    /// so an id re-created later starts clean and nothing leaks:
     /// the FIFO lock and queue, the in-flight entry, the projection and its
     /// marks, the fold and recall counters, the calibration, the silent streaks,
     /// the strip set, and this kernel's head, bodies and watchers.
@@ -418,7 +416,7 @@ public final class AIBackend: @unchecked Sendable {
         /// closed call part `(stream_id, body)` — what routing stamps each
         /// dispatched message with (python's `call_streams`).
         /// text, message id, the closed call parts, and `cut`: the model stopped
-        /// with a block open, so NOTHING of the pass dispatches (owner, 2026-10-04).
+        /// with a block open, so NOTHING of the pass dispatches.
         case ok(String, Int64, [(streamId: String, body: String)], Bool)
         /// A DEAD TURN: the RAW completion held nothing once the thinking was
         /// stripped. Nothing was stored; routing rerolls it with the no-call
@@ -435,17 +433,15 @@ public final class AIBackend: @unchecked Sendable {
 
     // MARK: - send
 
-    /// `inquiry` on an AI: accepted at once, answered LATER (owner, 2026-10-06).
+    /// `inquiry` on an AI: accepted at once, answered LATER.
     ///
     /// The human's bundle answers this verb from a record; an AI answers it by
     /// working and THINKING, in its own time. Either way the asker reads the answer
     /// as `[reply to <pid> · <who> inquiry]`, a later message under the same pid, so
     /// it never branches on who is at the other end. The inquiry runs as its own
     /// chain on this agent; the answer — given in ANY turn of that chain, after
-    /// whatever work it needs — reaches the asker through `closeInquiry`. It used to
-    /// be read off this agent's FIRST turn only, so a reviewer that read the spec
-    /// and ran `git diff` before answering was told it had not answered (measured
-    /// 2026-10-06, peer_review:rust). Python `_inquiry`.
+    /// whatever work it needs — reaches the asker through `closeInquiry`. Python
+    /// `_inquiry`.
     private func inquiryAccept(_ id: String, _ payload: JSON, _ kernel: Kernel) -> JSON {
         let q = payload["text"].asString ?? ""
         if q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -493,7 +489,7 @@ public final class AIBackend: @unchecked Sendable {
         // lock until the send ceiling expired). `_call_stack` is the caller's
         // reserved key; nothing on the reply-routing path carries one, so a
         // `reply_to:'self'` chain is not a cycle. Python `core.py:2197-2218`.
-        // `str(client_id)` for a truthy non-string (python `_safe_client`, 2026-09-20).
+        // `str(client_id)` for a truthy non-string (python `_safe_client`).
         let guardClientId = safeClient(pyTruthy(payload["client_id"]) ? pyStr(payload["client_id"]) : "")
         let callStack = payload["_call_stack"].asArray ?? []
         if callStack.contains(where: { $0.asString == agent.id.value }) {
@@ -579,8 +575,7 @@ public final class AIBackend: @unchecked Sendable {
         // WHO SAID IT, TO WHOM, UNDER WHICH NUMBER. A message from another AGENT
         // opens with a header the KERNEL vouches for — the sender is the
         // dispatch's own context, never the sender's prose. Without it a peer's
-        // message arrived anonymous (measured 2026-09-10, multisubai: solvers
-        // signed their prose by hand) and a group message was indistinguishable
+        // message arrives anonymous and a group message is indistinguishable
         // from a private one.
         if let sender = KernelTaskLocals.currentOrigin?.value, sender != agent.id.value {
             var parts = ["from \(sender)"]
@@ -590,7 +585,7 @@ public final class AIBackend: @unchecked Sendable {
             if payload["msg"] != .null { parts.append("msg \(pyStr(payload["msg"]))") }
             if payload["re"] != .null { parts.append("re \(pyStr(payload["re"]))") }
             // the stream this message was previewed as — what an AI consumer that
-            // watched it stream matches its draft to (owner, 2026-10-04)
+            // watched it stream matches its draft to
             if payload["stream_id"] != .null {
                 parts.append("stream \(pyStr(payload["stream_id"]))")
             }
@@ -617,9 +612,7 @@ public final class AIBackend: @unchecked Sendable {
 
         // Contention probe (best-effort, like Rust's try_lock): if a generation
         // already holds the lock, tell the caller it's queued. ONE event, and it is
-        // the `status` one — a bare `{type:'queued'}` rode ahead of it on rust/swift
-        // until 2026-09-02, an undocumented type python never sends, which broke any
-        // per-submission event count and every cross-runtime event-stream diff.
+        // the `status` one — never a bare `{type:'queued'}`, a type python never sends.
         if await st.fifo.busy() {
             let ahead = max(0, st.queueDepth() - 1)
             await emitStatus(
@@ -632,12 +625,8 @@ public final class AIBackend: @unchecked Sendable {
 
         // RUN THE GENERATION INLINE — python/rust parity.
         //
-        // This dispatch used to spawn the generation as its own task and ack
-        // `{queued:true, stream_id, message_id}` immediately, while python and
-        // rust both run the pass here and answer `{response, final, client_id}`.
-        // One verb, two contracts: a caller that reads `reply["response"]` got
-        // the text on two kernels and an empty ack on the third, so anything
-        // driving swift had to know it was driving swift.
+        // This dispatch runs the pass here and answers `{response, final,
+        // client_id}`, as python and rust do — one verb, one contract.
         //
         // Cancellation stays the KERNEL's, exactly as in rust: this dispatch IS
         // the task row, so `ps` sees it and `cancel <task_id>` drops this future,
@@ -700,7 +689,7 @@ public final class AIBackend: @unchecked Sendable {
                 "client_id": .string(clientId),
             ])
         } catch let e as FoldSummaryError {
-            // FAIL LOUD (owner, 2026-10-11): a fold's summary would not fit its
+            // FAIL LOUD: a fold's summary would not fit its
             // budget after every re-summarise — no turn on an unfolded view.
             await emitStatus(
                 kernel: kernel, agentId: agentId, clientId: clientId, phase: "done",
@@ -818,8 +807,7 @@ public final class AIBackend: @unchecked Sendable {
             // Python spawns the route task inside this handler and its event loop
             // runs that task up to its dispatch before the caller of this `send`
             // resumes — so a model's own call (`send ai …`) lands before the reply
-            // its caller then delivers. A detached swift task could lose that race
-            // (measured: parity `ai_paths` cycle, the two turns to `ai` swapped).
+            // its caller then delivers. A detached swift task could lose that race.
             // Released at launch, not at completion: the calls still SETTLE on
             // their own, and a self-addressed call fans out before it needs the
             // lock, so this never waits on this agent.
@@ -932,7 +920,7 @@ public final class AIBackend: @unchecked Sendable {
         var accumulated = ""
         var genStarted = Date()
         var firstToken = true
-        // STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as
+        // STREAMING PARTS: the same chunks, split into parts as
         // they are written — animation for the addressee, never action
         // (`StreamParts`).
         let parts = AIStreamParts(
@@ -969,10 +957,8 @@ public final class AIBackend: @unchecked Sendable {
                     accumulated += delta
                     st.updateCurrent { $0.textSoFar += delta }
                     // `{type:'token', text, source, client_id}` — python's four
-                    // keys. Swift carried `stream_id`/`message_id`/`delta`/
-                    // `accumulated` instead, so a client written against the
-                    // documented event read `text` as missing on this runtime
-                    // alone.
+                    // keys, so a client written against the documented event reads
+                    // the same keys on every runtime.
                     await toCaller(
                         kernel: kernel, agentId: agentId, clientId: clientId,
                         event: [
@@ -1004,7 +990,7 @@ public final class AIBackend: @unchecked Sendable {
         // cancelled — same contract: the turn is already closed out (`onCancel`
         // wrote its rows), persist nothing more.
         if Task.isCancelled { return .cancelled }
-        // ONLY A SUCCESSFUL GENERATION DISPATCHES (owner, 2026-10-04): a pass cut
+        // ONLY A SUCCESSFUL GENERATION DISPATCHES: a pass cut
         // with a block open sends nothing, its earlier closed calls included, and
         // the marker lists every call of the pass as not sent.
         let cutCalls = await parts.finish()
@@ -1036,20 +1022,16 @@ public final class AIBackend: @unchecked Sendable {
         }
 
         // A DEAD TURN — nothing left once the thinking is stripped — did not
-        // answer, whatever the provider's finish reason says. Measured 2026-09-30
-        // on vLLM: a thinking budget of 8 tokens ended the thought, the model
-        // stopped cleanly (`finish_reason: stop`) with an empty answer, and the
-        // turn was stored as a completed, empty assistant row. The ANSWER is
+        // answer, whatever the provider's finish reason says (a clean
+        // `finish_reason: stop` with an empty answer included). The ANSWER is
         // discarded here — never stored, never counted as an answer — and the
         // turn is routed like any that dispatched nothing: the no-call reminder
-        // rerolls it (owner, 2026-09-30). Failing the turn outright ended a
-        // 30-pass chain on its first dead turn (E31, measured). Python `_run`.
+        // rerolls it. Python `_run`.
         if pyStrip(withoutThinking(accumulated)).isEmpty {
             // The INCOMING row is kept — only the empty answer is dropped. The
             // turn this one answered may be a reply batch carrying the results of
             // the model's own calls; unstored, the reroll would arrive with those
-            // results gone and the model would re-ask for them (found in the swift
-            // port's review, 2026-09-30).
+            // results gone and the model would re-ask for them.
             let (inId, inParent) = rowIdsForIncoming(userText, kernel: kernel)
             try await saveHistory(
                 agentId.value, kernel,
@@ -1081,9 +1063,9 @@ public final class AIBackend: @unchecked Sendable {
         // MINTED HERE, AT THE APPEND — not at turn start. The store returns an
         // owner's rows in ID order and the head cache keeps APPEND order; the two
         // agree only while ids are minted as rows are appended. Minted at turn
-        // start, a fold or view row saved mid-turn (the projection) took a higher
-        // id yet landed first, and after a restart the conversation came back in a
-        // different order than the agent had lived it (python, E78).
+        // start, a fold or view row saved mid-turn (the projection) would take a
+        // higher id yet land first, and after a restart the conversation would come
+        // back in a different order than the agent had lived it (python).
         let (inId, inParent) = rowIdsForIncoming(userText, kernel: kernel)
         let messageId = kernel.mintId()
         // APPEND this send's user + assistant turns to the memory store. NOT the
@@ -1098,7 +1080,7 @@ public final class AIBackend: @unchecked Sendable {
                     userText, id: inId, parent: inParent,
                     notice: st.currentSnapshot()?.notice ?? false),
                 // A pass the model stopped with a block open leaves the CUT
-                // MARKER instead, on top of the context (owner, 2026-10-04).
+                // MARKER instead, on top of the context.
                 {
                     var row: OrderedDictionary<String, JSON> = [
                         "role": .string("assistant"),
@@ -1113,7 +1095,7 @@ public final class AIBackend: @unchecked Sendable {
             ])
 
         // The RAW completion — markers in — goes to routing, which reads only the
-        // ANSWER: a call written inside thinking never dispatches (owner, 2026-10-07).
+        // ANSWER: a call written inside thinking never dispatches.
         return .ok(accumulated, messageId, await parts.closedCalls(), cutCalls != nil)
     }
 
@@ -1221,7 +1203,7 @@ public final class AIBackend: @unchecked Sendable {
     /// Mirrors Rust `assemble_messages` / Python `_assemble`.
     /// THE system block a turn uses — the one choice `assemble` builds the turn on
     /// and `contextRecall` sizes the body budget against, so the two never drift.
-    /// PRECEDENCE (owner, 2026-10-03, 2026-10-08): the per-call argument (this
+    /// PRECEDENCE: the per-call argument (this
     /// delivery) > the record's own `system_prompt` (read LIVE, so an
     /// `update_agent` lands on the next turn — a main turn, a self-delivery, a turn
     /// woken by a reply) > the file the record's `system_prompt_file` names
@@ -1229,7 +1211,7 @@ public final class AIBackend: @unchecked Sendable {
     /// placeholders filled; none is ever appended to another. Python
     /// `_system_content`.
     func systemContent(agent: Agent, systemPrompt: String?, kernel: Kernel) async throws -> String {
-        // THE WRAP (owner, 2026-10-11): the record's `pre_system_prompt` goes BEFORE
+        // THE WRAP: the record's `pre_system_prompt` goes BEFORE
         // whichever prompt is in force and `post_system_prompt` AFTER it, each read
         // live and taken verbatim — no placeholders, and neither replaces anything.
         // Absent or null adds nothing (python `_system_content`).
@@ -1267,7 +1249,7 @@ public final class AIBackend: @unchecked Sendable {
     }
 
     /// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn
-    /// (owner, 2026-10-08) — so a prompt that REPLACES the default block keeps its
+    /// — so a prompt that REPLACES the default block keeps its
     /// live parts: `{tree}` the kernel primer (tree ids + bundle catalog), `{self}`
     /// this agent's identity and grants, `{store}` its memory store id, `{howto}`
     /// the fixed how-to blocks. `{tree}\n\n{self}\n\n{howto}` IS the default block,
@@ -1408,10 +1390,8 @@ public final class AIBackend: @unchecked Sendable {
             }
             // THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every
             // row appended since — the model's own turns, the replies that landed —
-            // rides behind it in full. Measured 2026-09-06 (python,
-            // recall_after_fold): served the array alone, the model never saw the
-            // read it had just made and restarted the survey from filler_0, sixty
-            // turns in a circle.
+            // rides behind it in full: served the array alone, the model would not see
+            // the read it had just made.
             let newest = entries.map { idx[$0["id"].asInt!]! }.max()!
             messages.append(
                 contentsOf: dropReadDocs(
@@ -1438,9 +1418,7 @@ public final class AIBackend: @unchecked Sendable {
 
     // NO `done` EVENT. `status(phase='done')` IS the completion — two events for
     // one transition is two truths, and a subscriber watching the wrong one
-    // drifts silently. python emits only the status; swift emitted both, so
-    // every swift turn carried one event python never sends (and `reflect.emits`
-    // documented three channels while the code produced four).
+    // drifts silently. python emits only the status, and so does this.
 
     // MARK: - history
 
@@ -1567,9 +1545,8 @@ public final class AIBackend: @unchecked Sendable {
 // CAUSALITY (the row this one responds to); a thread is the parent chain, derived
 // when needed. `reply_to` on a send is DELIVERY and is left alone. Python
 // `_TAG_LINKS`: `^\[reply to \S+ · [^\]]*?↑([^\s\]]+)[^\]]*\]`.
-// `↑<id>` stops at whitespace OR the tag's closing `]` — python's `_TAG_LINKS`
-// (2026-10-01): a tag ending on its `↑` segment with a later `]` in the body
-// captured `360]`, which is no id, so the reply row lost its parent.
+// `↑<id>` stops at whitespace OR the tag's closing `]` — python's `_TAG_LINKS` —
+// so a tag ending on its `↑` segment never takes a later `]` into the id.
 private let tagLinks = try! NSRegularExpression(
     pattern: "^\\[reply to \\S+ \u{b7} [^\\]]*?\u{2191}([^\\s\\]]+)[^\\]]*\\]")
 

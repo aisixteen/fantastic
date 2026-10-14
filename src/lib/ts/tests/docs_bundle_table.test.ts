@@ -1,4 +1,4 @@
-// `docs` serves a bundle's OWN verb table (owner, 2026-10-06), declared when the
+// `docs` serves a bundle's OWN verb table, declared when the
 // bundle registers — rust's `Bundle::verb_docs`, python's `VERBS`. So a bundle is
 // readable by its name before any agent of it exists, and an agent reads its
 // bundle's table.

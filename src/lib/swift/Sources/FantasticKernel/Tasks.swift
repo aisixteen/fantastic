@@ -57,9 +57,8 @@ import Foundation
 /// A task id — `"<agent_id>:<n>"`. A pid.
 /// A task id IS a message id: one int64 from the kernel's one counter, so
 /// `ps`, `cancel`, the ledger, a reply tag and the message log name the same
-/// number. It was `"<agent>:<8 hex>"` from a salted per-agent sequence until
-/// 2026-09-12 — python reversed that trade (a number that names one thing
-/// everywhere is worth more than one that hides its order), rust followed.
+/// number — a number that names one thing everywhere is worth more than one
+/// that hides its order.
 public struct TaskId: Sendable, Hashable, CustomStringConvertible {
     public let value: Int64
     public init(_ value: Int64) { self.value = value }
@@ -223,7 +222,7 @@ public final class TaskIdBox: @unchecked Sendable {
     public init() {}
 }
 
-/// What one dispatch's spawned task hands back beside its reply (C37): the
+/// What one dispatch's spawned task hands back beside its reply: the
 /// BINARY REPLY BODY, and whether the handler RAISED. Written inside the task
 /// before it resolves its `DispatchBox` and read only after that box has been
 /// awaited, so the box's own lock orders the two.
@@ -266,25 +265,20 @@ public final class TaskTable: @unchecked Sendable {
     /// Seconds since the epoch — the `started_at` clock (Python's `time.time()`).
     private func nowSecs() -> Double { Date().timeIntervalSince1970 }
 
-    // NO MINTER HERE. `mint` used to hand out `"<agent>:<8 hex>"` from a salted
-    // per-agent counter, hashed so a visible sequence could not be read as an
-    // ordering. Python reversed that trade: ONE int64 counter allocates every id
+    // NO MINTER HERE. ONE int64 counter allocates every id
     // in the kernel, so `ps`, `cancel`, the ledger, a reply tag and the message
     // store all name the same number. The allocator is `kernel.mintId()`;
     // the caller mints, and this table only registers.
 
     /// Put one in-flight task in the table.
     ///
-    /// THE PARENT IS STORED VERBATIM. There used to be a `parent` → `nil` drop
-    /// here for the case where `currentTask` named a task that had already
-    /// ended, defended as init-adoption. Python removed exactly that
-    /// (`_kernel.py::register_task`): it was the fingerprint of a bug, not a
-    /// rule — converting a dead parent to `nil` puts the work OUTSIDE every
-    /// subtree, where `cancel` on its caller can never reach it, and
-    /// `forget`'s re-parenting is what should have handled it. It also made
-    /// every REST-originated `ps` row claim `parent: null` where python names
-    /// the web boot pid (A11.31: the boot dispatch has already settled by the
-    /// time a request lands, so the pid it hands down is dangling by design).
+    /// THE PARENT IS STORED VERBATIM, even when `currentTask` names a task that has
+    /// already ended (python `_kernel.py::register_task`): converting a dead parent
+    /// to `nil` puts the work OUTSIDE every subtree, where `cancel` on its caller can
+    /// never reach it — `forget`'s re-parenting handles it. A REST-originated `ps`
+    /// row names the web boot pid, as python does (the boot dispatch has already
+    /// settled by the time a request lands, so the pid it hands down is dangling by
+    /// design).
     func register(
         id: TaskId, agent: AgentId, verb: String, parent: TaskId?, handle: TaskHandle,
         keepalive: Bool = false, forked: Bool = false
@@ -363,7 +357,7 @@ public final class TaskTable: @unchecked Sendable {
     /// Swift task) start? Yes inside a live DISPATCH and inside a keepalive fork
     /// (a persister that must outlive the quiet phase); no inside any other fork
     /// — a ws call, a scheduler tick, a bridge read loop starts new work (python
-    /// `Kernel.drain_admits`; audit 2026-10-14).
+    /// `Kernel.drain_admits`).
     public func drainAdmits(_ cur: TaskId?) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -400,9 +394,9 @@ public final class TaskTable: @unchecked Sendable {
 
     /// The verb of `id` when it is a KERNEL SERVICE TASK — a keepalive loop the
     /// ROOT owns (`root`): the execution flusher, the record persister. `cancel`
-    /// never kills one (audit KV-5, owner 2026-10-03): killing it stopped ledger
+    /// never kills one: killing it would stop ledger
     /// durability and record persistence until the process restarted, and
-    /// nothing restarted it. It stays listed in `ps`; the kernel's own stop ends
+    /// nothing restarts it. It stays listed in `ps`; the kernel's own stop ends
     /// it. Python `Kernel.is_service_task`.
     func serviceVerb(_ id: TaskId, root: AgentId) -> String? {
         lock.lock()
@@ -574,17 +568,16 @@ extension Kernel {
                 let bundle = bundles.get(hm)
             else { continue }
             // A hook that fails is ignored and the kill still happens: cancel is
-            // not refusable — but python still SAYS so (C87), stdout, no
+            // not refusable — but python still SAYS so, stdout, no
             // `flush=True` on its own print either:
             // `print(f"  [cancel] {self.id} bundle on_cancel raised: {e}")`.
             //
             // AS THE AGENT ITSELF, on every path that kills the task — the
             // `cancel` verb (inside the root's dispatch), an item's own deadline,
-            // `shutdownAgents` (audit G-3, owner 2026-10-03): an emit on its own
-            // inbox is ungated, every other send is gated as this agent. The verb
-            // path used to run it as the ROOT, so a non-top-level agent's
-            // own-inbox emit (ai_core's final `status done`) was gated root →
-            // agent and dropped; the deadline path ran it as the operator.
+            // `shutdownAgents`: an emit on its own
+            // inbox is ungated, every other send is gated as this agent. Run as the
+            // ROOT, a non-top-level agent's own-inbox emit (ai_core's final `status
+            // done`) would be gated root → agent and dropped.
             do {
                 try await asSelf(agentId) {
                     try await bundle.onCancel(agentId: agentId, taskId: tid, kernel: self)

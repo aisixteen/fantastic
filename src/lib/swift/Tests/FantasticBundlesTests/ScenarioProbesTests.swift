@@ -218,7 +218,7 @@ struct ScenarioProbesTests {
         let kernel = await probeKernel([
             ["id": "user", "handler_module": .string(USER_MODULE), "answer": "yes"]
         ])
-        // ACCEPTED at once (owner, 2026-10-06: fully async): the answer reaches the
+        // ACCEPTED at once (fully async): the answer reaches the
         // asker LATER, as this human's own send under the inquiry's pid.
         let none = await send(kernel, "user", ["type": "inquiry", "text": "go?"])
         #expect(none["accepted"] == .bool(true))
@@ -262,7 +262,7 @@ struct ScenarioProbesTests {
         #expect(tally["inquiries"].asInt == 0, "\(tally.serialize())")
     }
 
-    /// A PERSON READS, THEN REPLIES (owner, 2026-10-06: fully async): the inquiry
+    /// A PERSON READS, THEN REPLIES (fully async): the inquiry
     /// is accepted at once, and the answer reaches the asker LATER as this human's
     /// own gated send, under the inquiry's pid, on the asker's thread.
     @Test func theHumanRepliesLaterAsItsOwnSend() async throws {

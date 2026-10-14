@@ -97,9 +97,8 @@ def main(scenario_id: str) -> int:
     spec = ensure_runtime(REPO, rt)
 
     # THE ONE PLUG every probe uses (`e2e/backends`): `BACKEND` names it, the plug
-    # names what it needs. This runner used to build one hardcoded backend's agent
-    # whatever BACKEND said, so a `BACKEND=vllm` run of a scenario either failed
-    # here or ran on a different provider than its header claimed.
+    # names what it needs — never a hardcoded backend, which would run on a
+    # different provider than the header claims.
     bk = backend()
     model = bk.model
     if blockers := bk.blockers():
@@ -226,8 +225,7 @@ def main(scenario_id: str) -> int:
         # and the ledger must make the second press harmless.
         pressed = None
         if any("human_double_click" in c for c in (sc.get("expect") or [])):
-            # READ THE PROPOSAL OFF THE HUMAN. It used to be scraped out of the
-            # model's prose; it is a real call now, so the human HOLDS what it
+            # READ THE PROPOSAL OFF THE HUMAN. It is a real call, so the human HOLDS what it
             # was handed and the runner reads it. "The person was consulted" is
             # then a fact the kernel witnessed, not a sentence the model wrote.
             action, waited = None, time.monotonic() + 60
@@ -256,10 +254,7 @@ def main(scenario_id: str) -> int:
         deadline = time.monotonic() + float(
             os.environ.get("IDLE", limits.get("idle_seconds", 100))
         )
-        # NOTHING IS SCRAPED HERE ANY MORE. This loop used to read the model's
-        # own prose for `{"type":"inquiry"}` and post an answer back in from
-        # outside the kernel — which is why the human had no id, no record, no
-        # gate and no ledger row. The human is an AGENT now
+        # NOTHING IS SCRAPED HERE. The human is an AGENT
         # (`e2e/probes/user_probe`, role `user`): the model calls it and the
         # answer is the reply, so a question needs this runner no more than any
         # other call does.

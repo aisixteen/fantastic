@@ -106,9 +106,7 @@ struct KernelSendTests {
 
     @Test func sendToMissingAgentNamesTheLegalIds() async {
         // A bare `no agent 'x'` teaches the caller nothing it can act on.
-        // Measured 2026-08-04: a model copied the literal placeholder `<id>` out
-        // of a prompt example, got the same refusal 34 times in one run, and
-        // never corrected. The call still fails exactly once, by the one path —
+        // The call still fails exactly once, by the one path —
         // it just says what the legal ids are on the way out.
         let kernel = makeKernel()
         let out = await kernel.send([Item("ghost", ["type": "anything"])])[0]
@@ -131,11 +129,10 @@ struct KernelSendTests {
         #expect(reply["error"].asString?.contains("missing.tools") == true)
     }
 
-    /// C24: python's PREFIX pinned verbatim (`agent <id!r>: handler_module
-    /// <hm!r> cannot be imported in this runtime: `); the tail is a D3
-    /// residual (python's own import error text is not stable across runs —
-    /// "No module named 'yaml_state'" one round, "...'yaml_state.tools'" the
-    /// next — so it is not pinned here either).
+    /// Python's PREFIX pinned verbatim (`agent <id!r>: handler_module
+    /// <hm!r> cannot be imported in this runtime: `); the tail is not
+    /// pinned (python's own import error text is not stable across runs —
+    /// "No module named 'yaml_state'" or "...'yaml_state.tools'").
     @Test func handlerModuleNotInstalledPrefixIsPythonExact() async {
         let kernel = makeKernel(withEcho: false)
         _ = await kernel.send([Item("kernel_state", [
@@ -166,7 +163,7 @@ struct KernelEmitTests {
     @Test func emitDeliversToInbox() async {
         let kernel = makeKernel()
         kernel.register(Agent(id: "listener", handlerModule: nil, parentId: nil))
-        // THE READER REGISTERS ITS OWN INBOX (C29): `register` mints none.
+        // THE READER REGISTERS ITS OWN INBOX: `register` mints none.
         let stream = kernel.ensureInbox("listener")
         await kernel.emit("listener", ["type": "ping", "x": 1])
 
@@ -176,7 +173,7 @@ struct KernelEmitTests {
         #expect(first?.payload["x"].asInt == 1)
     }
 
-    /// a16 (audit 2026-09-28): an emit onto ANOTHER agent's inbox passes the
+    /// An emit onto ANOTHER agent's inbox passes the
     /// two-sided gate under verb `emit`; a denied emit is dropped. Emitting on
     /// your own inbox is how every bundle publishes, so it stays ungated.
     @Test func emitOnAnotherAgentNeedsBothHalves() async {
@@ -205,7 +202,7 @@ struct KernelEmitTests {
         #expect(inbox.tryTake()?.payload["n"] == 3)
     }
 
-    /// C29 — an agent gets no queue merely by existing.
+    /// An agent gets no queue merely by existing.
     @Test func registerMintsNoInbox() async {
         let kernel = makeKernel()
         kernel.register(Agent(id: "quiet", handlerModule: nil, parentId: nil))
@@ -214,7 +211,7 @@ struct KernelEmitTests {
         #expect(kernel.hasInbox("quiet") == true)
     }
 
-    /// C28 + C29 — a registered agent that never called `ensureInbox` cannot be
+    /// A registered agent that never called `ensureInbox` cannot be
     /// a watcher, and the refusal says so in python's words.
     @Test func watchByABareRegisteredAgentIsRefused() async {
         let kernel = makeKernel()
@@ -232,7 +229,7 @@ struct KernelEmitTests {
         #expect(denial?["src"].asString == "kernel_state")
     }
 
-    /// C78 — an emit to an id no agent holds does nothing at all: no inbox put,
+    /// An emit to an id no agent holds does nothing at all: no inbox put,
     /// no state event. Python `emit` resolves the target first.
     @Test func emitToNonAgentIdIsANoop() async {
         let kernel = makeKernel()
@@ -273,7 +270,7 @@ struct KernelSubscribeTests {
         #expect(!sendEvents.isEmpty)
         #expect(sendEvents.last?["payload"]["type"].asString == "list_agents")
         // Python pairs every `send` with a `drain` once the handler returns.
-        // BY KIND, not by position: the settle row's own `row` event (2026-09-23)
+        // BY KIND, not by position: the settle row's own `row` event
         // lands after the drain, exactly as python's `drains[-1]` reads it.
         let drain = evs.last { $0["kind"].asString == "drain" }
         #expect(drain != nil)
@@ -308,7 +305,7 @@ struct KernelSubscribeTests {
         #expect(sends.last?["sender"].asString == "ui")
     }
 
-    /// C77 — the whole traffic-event contract in one place: key order, `sender`
+    /// The whole traffic-event contract in one place: key order, `sender`
     /// JSON null for an operator send, `summary` through `py_json_dumps`, a
     /// `drain` after the handler, and `ts` stamped LAST.
     @Test func stateEventsArePythonShape() async {
@@ -332,7 +329,7 @@ struct KernelSubscribeTests {
         #expect(drain?["backlog"].asInt == 0)
     }
 
-    /// C77 — the snapshot is every agent in REGISTRATION order, reporting the
+    /// The snapshot is every agent in REGISTRATION order, reporting the
     /// in-flight handler count, not a queue length.
     @Test func stateSnapshotIsRegistrationOrderWithInFlight() async {
         let kernel = makeKernel()
@@ -352,7 +349,7 @@ struct KernelSubscribeTests {
         #expect(snap.first?.asObject?.keys.elements == ["agent_id", "name", "backlog"])
     }
 
-    /// C77 — lifecycle events carry python's `{agent_id, kind, …}` shape, not the
+    /// Lifecycle events carry python's `{agent_id, kind, …}` shape, not the
     /// port's `created`/`id`/`handler_module`.
     @Test func lifecycleEventsArePythonShape() async {
         let kernel = makeKernel()
@@ -378,7 +375,7 @@ struct KernelSubscribeTests {
 
 @Suite("Watcher fanout")
 struct WatcherFanoutTests {
-    /// C76 — the payload reaches the watcher BEFORE the handler runs, and it
+    /// The payload reaches the watcher BEFORE the handler runs, and it
     /// reaches the target's own registered inbox too.
     @Test func sendFansOutBeforeHandlerRuns() async {
         let registry = BundleRegistry()
@@ -408,7 +405,7 @@ struct WatcherFanoutTests {
         #expect(ownCopy?.payload["type"].asString == "work")
     }
 
-    /// C86 — a binary send fans the FULL payload out: the header with `bytes`
+    /// A binary send fans the FULL payload out: the header with `bytes`
     /// nulled, plus the raw body at that path. Without it a watcher could never
     /// receive the binary frame python sends.
     @Test func watchedBinarySendCarriesTheBody() async {
@@ -495,10 +492,8 @@ struct SystemVerbTests {
     }
 
     /// The `agent_created` event lands on the PARENT's inbox at every depth
-    /// (audit 2026-10-03, KV-4). It was emitted as the root, so the gate judged
-    /// root→parent, and the root's baseline grant then reached depth 1 only: a
-    /// parent two levels down never got it — an operator create included, an
-    /// agent creating under itself too — and nothing reported the drop.
+    /// — never emitted as the root, whose baseline grant would reach depth 1 only
+    /// and silently drop it for a parent two levels down.
     @Test func agentCreatedReachesAParentAtAnyDepth() async {
         let kernel = makeKernel()
         func create(_ parent: String, _ id: String) async -> JSON {
@@ -535,7 +530,7 @@ struct SystemVerbTests {
         #expect(reply["error"].asString?.contains("handler_module") == true)
     }
 
-    /// C26: an empty STRING is exactly as missing as an absent key — python
+    /// An empty STRING is exactly as missing as an absent key — python
     /// `if not isinstance(x, str) or not x`.
     @Test func emptyRequiredArgsAreMissing() async {
         let kernel = makeKernel()
@@ -551,7 +546,7 @@ struct SystemVerbTests {
         #expect(pid["arg"].asString == "parent_id")
     }
 
-    /// C26: the `hint` key precedes `arg` in the refusal object — python's
+    /// The `hint` key precedes `arg` in the refusal object — python's
     /// `refusal()` writes `error, reason, hint, ...extra` in that order, and
     /// `missing()` passes `arg` as part of `extra`.
     @Test func missingHintOrdersHintBeforeArg() async {
@@ -569,7 +564,7 @@ struct SystemVerbTests {
                     + "or the root ('kernel_state') for a top-level agent", "\(reply)")
     }
 
-    /// C26: check order is handler_module → parent_id → resolve parent →
+    /// Check order is handler_module → parent_id → resolve parent →
     /// reserved keys (sorted) → grant shape → validate_meta → guard id →
     /// exists. Each case below breaks TWO checks at once; the refusal must
     /// name the earlier one.
@@ -620,7 +615,7 @@ struct SystemVerbTests {
                 "id": "dup",
             ])])[0].result
         // Python: `f"agent {id!r} exists"` + a hint to pick another id or
-        // update the existing one (C26).
+        // update the existing one.
         #expect(second["error"].asString == "agent 'dup' exists", "\(second)")
         #expect(second["reason"].asString == "exists")
         #expect(second["hint"].asString == "pick another id, or update the existing agent")
@@ -652,7 +647,7 @@ struct SystemVerbTests {
                 "delete_lock": true,
             ])])[0].result
         let reply = await kernel.send([Item("kernel_state", ["type": "delete_agent", "id": "locked"])])[0].result
-        // #27: the machine field, not the ad-hoc flag it replaced.
+        // The machine field, not the ad-hoc flag it replaced.
         #expect(reply["reason"].asString == "locked")
         #expect(reply["blocked_by"].asString == "locked")
     }
@@ -698,7 +693,7 @@ struct SystemVerbTests {
         #expect(updated["agent"]["color"].asString == "#ff00ff")
     }
 
-    /// C27: `update_agent` checks `handler_module` + sorted reserved keys
+    /// `update_agent` checks `handler_module` + sorted reserved keys
     /// BEFORE resolving the target id — a reserved key on an id naming NO
     /// agent still answers `bad_arg`, not `unknown_agent`.
     @Test func updateAgentReservedKeyCheckedBeforeTargetResolution() async {
@@ -715,7 +710,7 @@ struct SystemVerbTests {
         #expect(hmReply["arg"].asString == "handler_module")
     }
 
-    /// C27: `update_agent id ""` is `missing_arg`, exactly like every other
+    /// `update_agent id ""` is `missing_arg`, exactly like every other
     /// empty required string arg.
     @Test func updateAgentEmptyIdIsMissingArg() async {
         let kernel = makeKernel()
@@ -724,7 +719,7 @@ struct SystemVerbTests {
         #expect(reply["arg"].asString == "id")
     }
 
-    /// C27: python's exact delete_lock text — `pyRepr` on both ids, `blocked_
+    /// Python's exact delete_lock text — `pyRepr` on both ids, `blocked_
     /// by` then `id` in the extras, PLUS the `hint`.
     @Test func deleteAgentLockedRefusalIsPythonText() async {
         let kernel = makeKernel()

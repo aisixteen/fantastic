@@ -1,13 +1,13 @@
 // The relay password lives in a credential_store — never on the record.
 //
-// Audit IO-7 / F4 (2026-10-03): `relay_token` (the relay group password, sent as
-// `X-Fantastic-Auth`) was a plain record field — in `list_agents`, and in
-// cleartext in `.fantastic/agents/<id>/agent.yaml`. Owner rule: secrets live only
-// in a credential_store. The connector's record names WHERE the password lives —
+// The relay group password (sent as `X-Fantastic-Auth`) is never a plain record
+// field — that would put it in `list_agents` and in cleartext in
+// `.fantastic/agents/<id>/agent.yaml`. Secrets live only in a credential_store.
+// The connector's record names WHERE the password lives —
 // `credentials: {store, ref}` — and before every dial it reads the ref's
 // `password` field AS ITSELF (the dial runs in its own dispatch, or a task it
 // spawned), pinned to the relay URL's host, exactly as an AI backend reads its
-// key. `relay_token` is gone.
+// key.
 //
 // Python stubs the network dial (`_open_ws`) and records its headers; here a
 // loopback listener records the upgrade request the real dial sends, then hangs

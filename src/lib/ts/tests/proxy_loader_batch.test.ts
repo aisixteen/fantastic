@@ -92,7 +92,7 @@ test("flush: the persists in dirty order, then the forgets; a second start is a 
 
 test("flush: parents before children — a child waits for its parent's wave; a refusal fails loud", async () => {
   // A host loader that refuses a record whose parent is not on disk YET — the
-  // record-owner guard walking the parent chain (measured on the canvas).
+  // record-owner guard walking the parent chain.
   const k = new Kernel();
   k.registerBundle("v.ts", () => null);
   const onDisk = new Set<string>(["sess1"]);

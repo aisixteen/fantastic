@@ -1,10 +1,10 @@
-//! Owner decisions 2026-10-03 (audit 2, set 2) on the task table — the twin of
+//! The task table's hook identity and service tasks — the twin of
 //! python `tests/kernel/test_hook_identity_service_tasks_quiet_flush.py`.
 //!
-//! - G-3: every `on_cancel` hook — the `cancel` verb's path and an item's own
+//! - Every `on_cancel` hook — the `cancel` verb's path and an item's own
 //!   deadline alike — and every `on_delete` hook runs AS THE AGENT ITSELF (its own
 //!   id is the sender), never as the operator or the root.
-//! - KV-5: `cancel` refuses the kernel's own service tasks (keepalive loops the
+//! - `cancel` refuses the kernel's own service tasks (keepalive loops the
 //!   root owns); `ps` still lists them, and a group kill leaves them out.
 use super::*;
 use crate::agent::Agent;
@@ -179,7 +179,7 @@ async fn on_cancel_runs_as_the_agent_on_the_cancel_verb_path() {
             Some("gc".to_string())
         )]
     );
-    // the own-inbox emit is delivered — it used to be gated root → gc and dropped
+    // the own-inbox emit is delivered — never gated root → gc and dropped
     assert!(drained(&mut inbox).contains(&done_status()));
 }
 

@@ -11,7 +11,7 @@ public final class BundleRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var map: [String: any AgentBundle] = [:]
     private var unlisted: Set<String> = []
-    /// FOLDER BUNDLES of this kernel's root (owner, 2026-10-08): name → the bundle
+    /// FOLDER BUNDLES of this kernel's root: name → the bundle
     /// its base built. Loaded at boot and re-loaded by `reload_bundle`.
     private var folders: [String: any AgentBundle] = [:]
     /// What `reflect bundles=all` lists for each folder — a refused one too, with
@@ -103,7 +103,7 @@ public final class BundleRegistry: @unchecked Sendable {
     /// Python's `import_handler(handlerModule)` against this registry: `nil`
     /// when a bundle is registered under `handlerModule`, else the
     /// `ModuleNotFoundError` text. Python resolves a handler_module ONLY from its
-    /// bundle catalog plus `register_unlisted` (audit 2026-10-03, ARCH2-1), and
+    /// bundle catalog plus `register_unlisted`, and
     /// names the TOP-LEVEL package of any other name — `absent_bundle.tools`,
     /// `file_bridge.nope` and the bare package `file_bridge` alike → `No module
     /// named '<top>'` (rust's `no_module_named`).

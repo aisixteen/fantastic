@@ -1,4 +1,4 @@
-//! exec_bridge MONITORS (owner, 2026-10-09) — python
+//! exec_bridge MONITORS — python
 //! `exec_bridge/tests/test_monitor.py`, case for case: a match is sent with its
 //! header and nothing else; `every` throttles and `tail` caps; the arguments are
 //! checked; `cancel` and `unmonitor` end a monitor while its job keeps running; a

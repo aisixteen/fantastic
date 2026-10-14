@@ -1,15 +1,14 @@
 // Guards on the ROOT and on the record fields that name substrate wiring.
 //
-// Measured 2026-09-02 (python-canonical, ported):
+// Pinned (python-canonical, ported):
 //
-// - `delete_agent id=<root>` cascaded the whole tree and answered
-//   `{"deleted": true}`, leaving a process with no control surface.
-// - `update_agent` silently DROPPED `handler_module` and the reserved keys and
-//   still answered success, so a caller believed a change had landed that never
-//   did.
-// - A verb an agent cannot answer came back as a reason-less `{error: …}` which
-//   `applyReflectFlags` then decorated with `kernel_verbs`/`tree`/`more` — a
-//   refusal wearing a reflect's clothes.
+// - `delete_agent id=<root>` is refused: cascading the whole tree would leave a
+//   process with no control surface.
+// - `update_agent` refuses `handler_module` and the reserved keys, never
+//   silently dropping them while answering success.
+// - A verb an agent cannot answer is a coded refusal, never a reason-less
+//   `{error: …}` that `applyReflectFlags` would decorate with
+//   `kernel_verbs`/`tree`/`more`.
 
 import FantasticJSON
 import Foundation
@@ -122,7 +121,7 @@ struct RootGuardTests {
         }
     }
 
-    /// C13 — the blob verbs are the LOADER's, not the substrate's, so they pass
+    /// The blob verbs are the LOADER's, not the substrate's, so they pass
     /// ROOT INGRESS like any bundle verb. A grandchild granted
     /// `$root:[persist_blob]` is still refused by the root's own `callable_by`
     /// (`reason: unauthorized, side: ingress`) — the shape

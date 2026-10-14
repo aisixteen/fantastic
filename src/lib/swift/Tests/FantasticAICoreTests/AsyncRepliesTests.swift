@@ -121,8 +121,8 @@ struct AsyncRepliesTests {
         #expect(r["reason"].asString == "bad_arg" && r["arg"].asString == "query")
     }
 
-    /// Measured 2026-09-06 (python): the task line repeated per delivery matched
-    /// 28 times and pushed the one body hit past the cap. Bodies come first;
+    /// A task line repeated per delivery can push the one body hit past the cap.
+    /// Bodies come first;
     /// identical lines once.
     @Test func grepPutsTheStoredBodyHitFirstAndCollapsesRepeatedLines() async throws {
         let (kernel, agent, f) = await boot()
@@ -185,7 +185,7 @@ struct AsyncRepliesTests {
         #expect(text.contains("cafebabe"))
     }
 
-    // ── code points, not graphemes (B5.1) ────────────────────────────────
+    // ── code points, not graphemes ────────────────────────────────
 
     // `line.strip()[:width]` counts code points: a CRLF is ONE Character and TWO
     // code points, so a grapheme-counted width returns more than python returns.

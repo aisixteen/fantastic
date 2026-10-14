@@ -5,10 +5,9 @@
 //
 // Exists because a call that cannot be read is the one failure a model cannot
 // debug: `extractToolCalls` returns `[]` for it, which is byte-identical to a
-// turn that emitted no call at all — and that means "done". Measured on
-// gemma-4-12B (2026-08-06): nothing parsed, nothing dispatched, no error came
-// back, and the run ended looking finished with the task untouched. Earlier
-// errors HAD taught it — it self-corrected out loud — so the fix is not a better
+// turn that emitted no call at all — and that means "done": nothing
+// parsed, nothing dispatched, no error, and the run ends looking finished.
+// Reported errors do teach a model, so the fix is not a better
 // parser, it is giving this failure the same voice the others already have.
 
 import FantasticJSON
@@ -61,8 +60,8 @@ func malformedCalls(_ text: String) -> [MalformedCall] {
 ///
 /// Anything echoed back becomes conversation the model reads, quotes and reasons
 /// about — and a quoted `<call` is indistinguishable from an emitted one.
-/// Measured 2026-08-06 (on the JSON envelope): echoing a block verbatim made the
-/// error self-amplifying, each report seeding the next. Breaking the opener is
+/// Echoing a block verbatim makes the error self-amplifying, each report seeding
+/// the next. Breaking the opener is
 /// enough.
 func defang(_ text: String) -> String {
     var out = Array(text.unicodeScalars)

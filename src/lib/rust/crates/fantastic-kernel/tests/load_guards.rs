@@ -4,10 +4,9 @@
 //! to run first — otherwise a hand-authored document leaves a kernel with an
 //! empty tree and no root, bricked by its own recovery path.
 //!
-//! Measured 2026-09-02 (python-canonical, ported): a parent CYCLE resolved on
-//! both ends (each `parent_id` named a record in the set) and passed validation,
-//! then failed mid-hydration with "could not resolve N agents" — after the old
-//! tree was already gone.
+//! A parent CYCLE resolves on both ends (each `parent_id` names a record in the
+//! set) and passes per-record validation, then fails mid-hydration with "could
+//! not resolve N agents" — so it must be refused before the old tree is gone.
 
 use fantastic_kernel::{Agent, AgentId, BundleRegistry, Kernel, KernelState};
 use serde_json::{json, Map};

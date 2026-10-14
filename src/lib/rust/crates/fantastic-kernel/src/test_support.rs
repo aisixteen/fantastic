@@ -48,7 +48,7 @@ impl Bundle for FakeStore {
                 };
                 Ok(Some(json!({"deleted": true})))
             }
-            // The C43 commit protocol's atomic op (`persistence::persist`
+            // The commit protocol's atomic op (`persistence::persist`
             // writes a tmp sibling then renames it over the target) — a
             // text-channel verb, no blob.
             "rename" => {
@@ -104,7 +104,7 @@ impl Bundle for FakeStore {
         let target = self.root.join(path);
         match verb {
             // A CHUNK-RETURNING verb answers `Some(bytes)` even when the chunk
-            // is empty; anything else answers `None` (C37).
+            // is empty; anything else answers `None`.
             "read_stream" => match std::fs::read(&target) {
                 Ok(bytes) => Ok((
                     Some(json!({"size": bytes.len()})),
@@ -117,7 +117,7 @@ impl Bundle for FakeStore {
                     std::fs::create_dir_all(parent).ok();
                 }
                 // APPEND unless told to truncate — the real provider's
-                // contract (a second pump flush used to wipe the log's header).
+                // contract (a second pump flush must not wipe the log's header).
                 let truncate = header.get("truncate").and_then(Value::as_bool) == Some(true);
                 let mut f = std::fs::OpenOptions::new()
                     .create(true)
@@ -136,7 +136,7 @@ impl Bundle for FakeStore {
     }
 }
 
-/// THE ROOT LOADER, stood in for. After C12 the root's `handler_module` is
+/// THE ROOT LOADER, stood in for. The root's `handler_module` is
 /// `kernel_state.tools` — a BUNDLE (`fantastic-core`), which this crate cannot
 /// depend on (that crate depends on this one). The verb surface it needs here
 /// is small and the MACHINERY is not duplicated: `boot` drives the kernel's own
@@ -277,7 +277,7 @@ pub fn rows_about(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<crate::rows::Row
         .collect()
 }
 
-/// THE ONE GRANT HELPER for tests (minimal access model, 2026-10-03): the
+/// THE ONE GRANT HELPER for tests (minimal access model): the
 /// operator merges `key: verbs` into `holder`'s `field` (`can_call` or
 /// `callable_by`) — every other key kept. Grants are explicit; a test wires the
 /// edges it exercises, both ends, through this.

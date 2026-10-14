@@ -20,7 +20,7 @@ from _testkit import wire
 
 def _client(kernel, leg_id):
     # The web host's record: its port is the authority the Host guard admits
-    # (audit W-2) — the client names it on every request, the upgrade included.
+    # — the client names it on every request, the upgrade included.
     kernel.get("test_web") or kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", kernel)
     app.add_api_websocket_route("/{host_id}/ws", _make_endpoint(leg_id, kernel))

@@ -1,4 +1,4 @@
-//! Watching paths (owner, 2026-10-08) — python `file_bridge._watch_path`, text for
+//! Watching paths — python `file_bridge._watch_path`, text for
 //! text.
 //!
 //! `watch_path {path}` puts an EXPOSED file or directory under a disk watcher
@@ -192,7 +192,7 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
                 }
             }
             // `allow` is read LIVE: a path the bridge stopped exposing after the
-            // watch was armed reports nothing more (audit 2026-10-14).
+            // watch was armed reports nothing more.
             let allow = k
                 .agents
                 .get(&me)

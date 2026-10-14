@@ -1,4 +1,4 @@
-"""credential_store — secrets an agent USES but never keeps (owner, 2026-10-01).
+"""credential_store — secrets an agent USES but never keeps.
 
 A credential is addressed by a REF (`openai/main`) and is bound to ONE HOST: a value
 plus the host it may be sent to. A bundle that needs one names it on its own record
@@ -20,7 +20,7 @@ WHERE THE VALUES LIVE — `backend` on the record, one of:
   * `env`: read-only; each ref maps its fields to environment variables
     (`refs: {ref: {host, env: {api_key: VAR}}}`), for a container or CI.
 
-THE HOST IS STORED WITH THE VALUE (audit S3, 2026-10-03): `set` writes the ref's
+THE HOST IS STORED WITH THE VALUE: `set` writes the ref's
 declared host beside its fields — the file entry and the keychain item are
 `{host, fields}` — and `get` refuses a value whose stored host is not the one its
 declaration names, or that carries none: a store elsewhere declaring the same id
@@ -29,7 +29,7 @@ and ref with another host reads nothing. The `env` backend keeps no value at res
 A REF IS DECLARED ONLY BY `update_agent` on the store's own record (the operator,
 or the store's parent): `refs: {<ref>: {host, fields?/env?}}` (it replaces the
 whole map; `host` is required — the binding). Only `update_agent` writes or
-removes a declaration (audit AV-4/AV-5, 2026-10-03): `set` stores the value of a
+removes a declaration: `set` stores the value of a
 DECLARED ref, never creates one and takes no `host` (an undeclared ref answers "no
 such ref"; a `host` on the call is refused); `forget` drops the value and keeps the
 declaration. `fields` on a ref are the stored value's NAMES: `set` writes them,
@@ -37,7 +37,7 @@ declaration. `fields` on a ref are the stored value's NAMES: `set` writes them,
 
 THE RECORD holds only metadata — the host and the field NAMES. The CALL carries
 the value: a `set` payload and a `get` reply are recorded like any call's (the
-ledger, the memory store, the state stream), in clear (owner, 2026-10-04).
+ledger, the memory store, the state stream), in clear.
 
 WHO MAY CALL is the kernel's call gate alone: any caller it admits may
 `set`/`get`/`forget` a declared ref — there are no per-ref access lists.
@@ -111,8 +111,8 @@ class _File:
         if not fs.exists(self.base, self.name, external=True):
             return {}
         # ONE open, judged on its own descriptor (`fs.read_private`): checking the
-        # path and then reading the path again was a window a swapped leaf slipped
-        # through (audit F5, 2026-10-03).
+        # path and then reading the path again would leave a window a swapped leaf
+        # slips through.
         try:
             raw = fs.read_private(self.base, self.name, external=True)
         except fs.NotPrivate as e:
@@ -219,7 +219,7 @@ def _sorted(v):
 def _host_mismatch(ref: str, bound, other) -> dict:
     """THE host-mismatch refusal: the ref is bound to `bound`, not `other`. One
     shape for a `get {ref, host}` naming another host and a value stored for
-    another host — or for none (audit S3)."""
+    another host — or for none."""
     return refusal(
         BAD_ARG,
         f"{NAME}: ref {ref!r} is bound to host {bound!r}, not {other!r} — refused, "
@@ -230,7 +230,7 @@ def _host_mismatch(ref: str, bound, other) -> dict:
 
 def _host_at_rest(ref: str, stored, declared: str | None) -> dict | None:
     """The refusal for a stored value whose host is not the declared one — or that
-    carries none (audit S3) — or None."""
+    carries none — or None."""
     at_rest = _host(stored)
     if at_rest is None or at_rest != declared:
         return _host_mismatch(ref, declared, at_rest)
@@ -264,7 +264,7 @@ async def _set(id, payload, agent):
     ref, fields = payload.get("ref"), payload.get("fields")
     if not isinstance(ref, str) or not ref.strip():
         return missing(f"{NAME} set", "ref")
-    if "host" in payload:  # the binding is the declaration's alone (audit AV-4)
+    if "host" in payload:  # the binding is the declaration's alone
         return refusal(
             BAD_ARG,
             f"{NAME} set: takes no host — a ref's host is its declaration, written "
@@ -295,7 +295,7 @@ async def _set(id, payload, agent):
     entry = refs.get(ref)
     if entry is None:  # declared by update_agent alone — set never makes one
         return _no_such_ref(ref)
-    # the declared host is stored WITH the value (audit S3)
+    # the declared host is stored WITH the value
     _backend(agent).put(ref, _host(entry.get("host")), dict(fields))
     refs[ref] = {**entry, "fields": sorted(fields)}  # the value's NAMES, never a value
     agent.ctx.update(id, refs=refs)
@@ -322,7 +322,7 @@ async def _get(id, payload, agent):
     backend = _backend(agent)
     fields = backend.get(ref)
     if fields and not isinstance(backend, _Env):
-        # THE HOST AT REST (audit S3): a value is read only for the host it was
+        # THE HOST AT REST: a value is read only for the host it was
         # stored with — the declaration of a store elsewhere sharing this id and
         # ref names its own host, and reads nothing.
         if bad := _host_at_rest(ref, fields.get("host"), _host(entry.get("host"))):
@@ -365,7 +365,7 @@ async def _forget(id, payload, agent):
     if entry is None:
         return _no_such_ref(ref)
     _backend(agent).drop(ref)
-    if "fields" in entry:  # the value's names go with the value (audit AV-5)
+    if "fields" in entry:  # the value's names go with the value
         refs[ref] = {k: v for k, v in entry.items() if k != "fields"}
         agent.ctx.update(id, refs=refs)
     return {"forgotten": True, "ref": ref}

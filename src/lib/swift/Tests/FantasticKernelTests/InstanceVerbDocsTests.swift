@@ -1,4 +1,4 @@
-// PER-INSTANCE VERBS (owner, 2026-10-08) — python
+// PER-INSTANCE VERBS — python
 // `test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one`: a bundle
 // whose agents serve different verbs names each one's table (`instanceVerbDocs`);
 // nil keeps the bundle's.

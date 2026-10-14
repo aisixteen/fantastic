@@ -2,9 +2,8 @@
 // canonical python suite `ai_core/tests/test_context.py:509-634` and rust's
 // `history_view.rs` unit tests.
 //
-// MEASURED (2026-08-20, `live_plan`): reflect replies were 42% of the whole
-// conversation — 73k of 174k chars — and 9 of 16 were a repeat of a target already
-// reflected. That bulk is what fills the window; a full window is what forces
+// Repeated whole-state replies (reflect above all) are a large share of a
+// conversation. That bulk is what fills the window; a full window is what forces
 // compaction; compaction is what put the goal at risk. So the reflect body is kept
 // for exactly one turn — the turn the model reads it — and after the model has
 // answered, only the distillation IT wrote survives.
@@ -43,7 +42,7 @@ struct HistoryViewTests {
         #expect(all.contains("reading_2 = 42"))
     }
 
-    /// A reflect is MUTABLE state (owner, 2026-10-06): its body stays whole after
+    /// A reflect is MUTABLE state: its body stays whole after
     /// the model answers it; only a newer reflect of the same agent supersedes it
     /// (`dedupeStaleReads`). Only `docs` replies are cut.
     @Test func aReflectReplyIsNeverCutFromTheView() {
@@ -58,9 +57,8 @@ struct HistoryViewTests {
 
     /// A batch arrives as ONE turn holding several `[reply to …]` blocks. The
     /// trimmer works per BLOCK: a superseded whole-state block dedupes alone, its
-    /// sibling replies stay. Treating the turn as one reply either deleted siblings
-    /// or trimmed nothing (a count guard skipped every multi-reply turn — tried
-    /// 2026-08-25, superseded same day).
+    /// sibling replies stay. Treating the turn as one reply either deletes siblings
+    /// or trims nothing (a count guard skips every multi-reply turn).
     @Test func aCombinedTurnTrimsPerBlockNeverWhole() {
         let combined =
             "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch ab12]\n"
@@ -94,14 +92,10 @@ struct HistoryViewTests {
         #expect(out.count == 3, "the emptied turn leaves no husk behind")
     }
 
-    /// MEASURED 2026-09-04, in all three runtimes at once. The verb group was `\S+`,
-    /// which does not exclude `]`, so on a reply whose BODY carries a bracket the run
-    /// kept `reflect]` and the regex closed on the body's bracket. The verb then read
-    /// `reflect]`, matched no vocabulary, and BOTH trimmers silently did nothing — on
-    /// every reflect, since reflect bodies are JSON and always contain one.
-    ///
-    /// It survived because every fixture here, in python and in rust, used a
-    /// bracket-free body. The three runtimes agreed with each other and with nothing.
+    /// A verb group of `\S+` does not exclude `]`, so on a reply whose BODY carries
+    /// a bracket the run would keep `reflect]` and the regex would close on the
+    /// body's bracket — the verb would match no vocabulary, and BOTH trimmers would
+    /// silently do nothing on every reflect, since reflect bodies are JSON.
     @Test func theVerbStopsAtTheTagsOwnBracketNotTheBodys() {
         let real = #"[reply to notes:aa · notes reflect]\nverbs=["read"]  root=."#
         #expect(parseReplyTag(real)?.verb == "reflect")

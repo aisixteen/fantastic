@@ -71,7 +71,7 @@ struct HTTPServerTests {
         return sock.readSome()
     }
 
-    // MARK: - A11.3 route table
+    // MARK: - route table
 
     /// The host renders nothing of its own: `/` is undeclared, so it is a 404 —
     /// no tree index, nothing about the kernel leaks to an anonymous client.
@@ -86,8 +86,7 @@ struct HTTPServerTests {
         #expect(!(String(data: data, encoding: .utf8) ?? "").contains("kernel_state"))
     }
 
-    /// A11.3 (D11) — the swift-only extras are gone; the favicon routes are
-    /// python's two.
+    /// No swift-only extras; the favicon routes are python's two.
     @Test func renderRouteAndAssetsAreAbsent() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -112,9 +111,9 @@ struct HTTPServerTests {
         }
     }
 
-    // MARK: - A11.10 file proxy
+    // MARK: - file proxy
 
-    /// A11.10 — the proxy types its body with CPython's `mimetypes` table
+    /// The proxy types its body with CPython's `mimetypes` table
     /// (`.pdf` → application/pdf, unknown → octet-stream, `text/*` + charset).
     @Test func fileProxyContentTypeIsPythonMimetypes() async throws {
         let kernel = try await startWebKernel()
@@ -134,11 +133,10 @@ struct HTTPServerTests {
                     "type": .string("create_agent"), "parent_id": .string("kernel_state"),
                     "handler_module": .string("file_bridge.tools"), "allow": ["."], "id": .string("files"),
                     "root": .string(rel), "ingress_rule": .string("allow_all_ingress"),
-                    // THE SERVING ALLOWANCE IS BOTH GATES (C41): the proxy
+                    // THE SERVING ALLOWANCE IS BOTH GATES: the proxy
                     // dispatches AS `web`, so the served agent's `callable_by`
-                    // decides whether the browser may reach it at all. Before
-                    // that the route ran as the OPERATOR and `callable_by` was
-                    // never consulted.
+                    // decides whether the browser may reach it at all — never
+                    // the OPERATOR, for whom `callable_by` is never consulted.
                     "callable_by": .object([
                         "$self": .string("*"), "$parent": .string("*"),
                         "$subtree": .string("*"), "web": .string("*"),
@@ -262,9 +260,9 @@ struct HTTPServerTests {
         }
     }
 
-    /// A11.31 — a REST-originated dispatch is a CHILD of the web boot task
-    /// (python serves under `CURRENT_TASK.scope`); swift rooted every request,
-    /// so the task row's `parent` was null.
+    /// A REST-originated dispatch is a CHILD of the web boot task
+    /// (python serves under `CURRENT_TASK.scope`), so the task row's `parent` is
+    /// never null.
     @Test func testIngressDispatchParent() async throws {
         let kernel = try await startWebKernel()
         kernel.bundles.register("parent_probe.tools", ParentProbe())
@@ -308,9 +306,9 @@ struct HTTPServerTests {
         #expect(direct["ps_parent"].isNull, "\(direct)")
     }
 
-    // MARK: - A13.6 / A13.9 matching
+    // MARK: - matching
 
-    /// A13.6 — an unmatched path is FastAPI's 404 JSON; a path that matches
+    /// An unmatched path is FastAPI's 404 JSON; a path that matches
     /// under another method is a 405 with `allow`.
     @Test func unmatchedPathsAndMethodsAnswerFastAPIJSON() async throws {
         let kernel = try await startWebKernel()
@@ -336,7 +334,7 @@ struct HTTPServerTests {
         #expect(head.contains("allow: GET"), "\(head)")
     }
 
-    /// A13.9 — `POST /<rest>/_reflect` is an ordinary `{target_id}` match, so it
+    /// `POST /<rest>/_reflect` is an ordinary `{target_id}` match, so it
     /// dispatches to an agent literally named `_reflect`.
     @Test func postToReflectLiteralDispatches() async throws {
         let kernel = try await startWebKernel()
@@ -355,7 +353,7 @@ struct HTTPServerTests {
         #expect(json["error"].asString?.contains("_reflect") == true, "\(json)")
     }
 
-    /// A13.9 — a path that only matches with the trailing slash toggled is a
+    /// A path that only matches with the trailing slash toggled is a
     /// 307 carrying the absolute location and no body.
     @Test func trailingSlashAnswers307() async throws {
         let kernel = try await startWebKernel()
@@ -376,9 +374,9 @@ struct HTTPServerTests {
         #expect(q.contains("location: http://127.0.0.1:\(port)/\(restId)/_reflect?tree=none"), "\(q)")
     }
 
-    // MARK: - A13.8 framing
+    // MARK: - framing
 
-    /// A13.8 — lowercase header names in python's order, `date` always, no
+    /// Lowercase header names in python's order, `date` always, no
     /// `Connection: close`, and the channel serves a second request.
     @Test func restResponseHeadersMatchPython() async throws {
         let kernel = try await startWebKernel()
@@ -418,7 +416,7 @@ struct HTTPServerTests {
         }
     }
 
-    /// A13.8 — the connection is KEPT: two requests on one socket.
+    /// The connection is KEPT: two requests on one socket.
     @Test func httpConnectionIsKeptAlive() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -433,9 +431,9 @@ struct HTTPServerTests {
         #expect(second.contains("404"), "second request on the same socket: \(second)")
     }
 
-    // MARK: - A11.27 / A13.2 / A13.4 / A13.5 the REST leg
+    // MARK: - the REST leg
 
-    /// A11.27 — python's REST body texts, and an empty body is `{}`.
+    /// Python's REST body texts, and an empty body is `{}`.
     @Test func webRestJSONBodyTexts() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -464,7 +462,7 @@ struct HTTPServerTests {
         #expect(empty["error"].asString?.contains("type") == true, "\(empty)")
     }
 
-    /// A11.27 — the GET `_reflect` shortcuts read python's query flags.
+    /// The GET `_reflect` shortcuts read python's query flags.
     @Test func webRestReflectQueryFlags() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -486,7 +484,7 @@ struct HTTPServerTests {
         #expect(!(try JSON.parse(bogus))["tree"].isNull)
     }
 
-    /// A11.27 / A13.4 — the octet leg's header texts, and an EMPTY
+    /// The octet leg's header texts, and an EMPTY
     /// `X-Fantastic-Payload` is an empty envelope, not a parse error.
     @Test func emptyPayloadHeaderIsAnEmptyEnvelope() async throws {
         let kernel = try await startWebKernel()
@@ -507,8 +505,7 @@ struct HTTPServerTests {
             let http = try #require(response as? HTTPURLResponse)
             return (try JSON.parse(data), http.statusCode)
         }
-        // An empty header value is `{}` — it REACHES dispatch instead of
-        // answering the 400 swift used to send.
+        // An empty header value is `{}` — it REACHES dispatch, never a 400.
         let (empty, emptyStatus) = try await octet("")
         #expect(emptyStatus == 200, "\(empty)")
         #expect(
@@ -524,7 +521,7 @@ struct HTTPServerTests {
             "\(arr)")
     }
 
-    /// A13.5 — a null reply is 204 with no body and no content-type (swift
+    /// A null reply is 204 with no body and no content-type (swift
     /// answered `jsonHTTP(200, null)`). Driven over the JSON leg; the octet
     /// branch takes the same decision.
     @Test func webRestOctetNullReplyIs204() async throws {
@@ -576,12 +573,11 @@ struct HTTPServerTests {
         return (restId, dir)
     }
 
-    /// A13.1 — A REPLY THAT HOLDS A CHUNK IS OCTET ON BOTH LEGS, a 0-byte one
+    /// A REPLY THAT HOLDS A CHUNK IS OCTET ON BOTH LEGS, a 0-byte one
     /// included. Python: JSON POST `{type:read_stream}` → 200
     /// `application/octet-stream`, body = the chunk, `X-Fantastic-Payload` = the
-    /// reply minus the field. Swift answered `application/json` with `bytes` as
-    /// a JSON string and gated octet on a NON-EMPTY body, so an empty file came
-    /// back as JSON.
+    /// reply minus the field — never JSON with `bytes` as a string, and never
+    /// gated on a NON-EMPTY body (an empty file is octet too).
     @Test func webRestJsonLegReadStreamAnswersOctet() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -622,9 +618,9 @@ struct HTTPServerTests {
         #expect(try JSON.parse(miss)["reason"].asString == "not_found")
     }
 
-    /// A13.1 — on the JSON leg a `write_stream` carrying a JSON-STRING `bytes`
+    /// On the JSON leg a `write_stream` carrying a JSON-STRING `bytes`
     /// is `missing_arg` and nothing is written: the request blob is empty and
-    /// the header's own `bytes` key is what file_bridge refuses (A13.19).
+    /// the header's own `bytes` key is what file_bridge refuses.
     @Test func jsonLegWriteStreamStringBytesIsMissingArg() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -646,7 +642,7 @@ struct HTTPServerTests {
             "the refused write still wrote")
     }
 
-    /// A13.3 — THE OCTET LEG DISPATCHES THROUGH THE BATCH, so it NAMES its
+    /// THE OCTET LEG DISPATCHES THROUGH THE BATCH, so it NAMES its
     /// execution: a repeated `X-Fantastic-Execution-Id` on the same target
     /// REPLAYS the recorded outcome instead of re-running the write, and a
     /// missing `payload.type` gets the KERNEL's refusal, not the bundle's.
@@ -670,7 +666,7 @@ struct HTTPServerTests {
             return (try? JSON.parse(d)) ?? .null
         }
         // No payload header at all: the KERNEL refuses `send: payload.type
-        // required`; swift used to reach the bundle with `unknown type ""`.
+        // required`, never the bundle's `unknown type ""`.
         let bare = try await post(nil, execId: nil, body: "x")
         #expect(bare["error"].asString == "send: payload.type required", "\(bare)")
         // A NAMED execution replays instead of re-running.
@@ -683,10 +679,9 @@ struct HTTPServerTests {
         #expect(String(decoding: onDisk, as: UTF8.self) == "one", "\(onDisk.count)")
     }
 
-    /// A13.10 — the path is percent-decoded ONCE and its query stripped before
-    /// matching AND before the file proxy. Swift matched the RAW target:
-    /// `POST /rest/fi%6Ces` answered `no agent "fi%6Ces"`, and
-    /// `/files/file/hello.txt?v=1` looked for a file named `hello.txt?v=1`.
+    /// The path is percent-decoded ONCE and its query stripped before
+    /// matching AND before the file proxy: `POST /rest/fi%6Ces` names `files`, and
+    /// `/files/file/hello.txt?v=1` reads `hello.txt`.
     @Test func percentEncodedPathAndQueryResolveLikePython() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -726,12 +721,11 @@ struct HTTPServerTests {
         #expect(String(decoding: hello, as: UTF8.self) == "hello")
     }
 
-    /// A13.11 (D13) — the JSON body decodes like CPython `json.loads(bytes)`:
+    /// The JSON body decodes like CPython `json.loads(bytes)`:
     /// the encoding comes from the BOM or from the null-byte pattern of the
     /// first four bytes, so a UTF-8-BOM / UTF-16 / UTF-32 body is ordinary JSON.
     /// Bytes that will not decode are web_rest's own 400 — python catches the
-    /// `UnicodeDecodeError` with the `JSONDecodeError` (it answered starlette's
-    /// 500 text/plain until the leg caught it; parity 2026-10-01).
+    /// `UnicodeDecodeError` with the `JSONDecodeError`.
     @Test func jsonBodyDecodesLikeCPythonJsonLoads() async throws {
         let kernel = try await startWebKernel()
         let port = await bootWeb(kernel)
@@ -775,7 +769,7 @@ struct HTTPServerTests {
         #expect(WebServer.decodeJSONBody(Data([0xFF, 0xFE, 0x7B])) == nil)
     }
 
-    /// A13.2 / A11.20 (leg half) — the octet reply header is python's
+    /// The octet reply header is python's
     /// `json.dumps` (ensure_ascii, `, ` separators), and naming a field other
     /// than `bytes` sends NO blob, so a `write_stream` writes nothing.
     @Test func octetReplyPayloadHeaderIsPythonJSONDumps() async throws {
@@ -785,7 +779,7 @@ struct HTTPServerTests {
             .appendingPathComponent(rel)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        // `naÃ¯ve.txt` is what the latin-1 header law (A13.12) makes of a raw
+        // `naÃ¯ve.txt` is what the latin-1 header law makes of a raw
         // UTF-8 `naïve.txt` — so the reply carries non-ASCII the header must
         // escape.
         try "hi".write(
@@ -834,7 +828,7 @@ struct HTTPServerTests {
         #expect(raw.hasSuffix("hi"), "\(raw)")
     }
 
-    /// A11.20 (leg half) — the body lands under the field
+    /// The body lands under the field
     /// `X-Fantastic-Bytes-Field` names. `bytes` (or absent) binds the blob;
     /// ANY other name leaves the header alone and sends no chunk at all.
     @Test func webRestOctetBytesFieldNamesThePayloadField() async throws {
@@ -891,7 +885,7 @@ struct HTTPServerTests {
         #expect((try? Data(contentsOf: dir.appendingPathComponent("custom.bin")))?.count == 0)
     }
 
-    /// A13.12 — request header values decode byte-for-byte as latin-1, so a raw
+    /// Request header values decode byte-for-byte as latin-1, so a raw
     /// UTF-8 path in `X-Fantastic-Payload` names a mojibake file.
     @Test func requestHeaderValuesDecodeAsLatin1() async throws {
         let kernel = try await startWebKernel()
@@ -964,7 +958,7 @@ struct HTTPServerTests {
         }
     }
 
-    /// D13 — python reads a REST body with `strict_loads` (`io_bridge.loads`):
+    /// Python reads a REST body with `strict_loads` (`io_bridge.loads`):
     /// `NaN`/`Infinity`, an integer outside int64, an overflowing number, a raw
     /// control character and a leading-zero number are NOT VALID JSON — the
     /// parse 400, never a dispatch and never `body must be a JSON object`. Twin
@@ -994,9 +988,9 @@ struct HTTPServerTests {
         }
     }
 
-    /// IO-3 — a REST body of 100k nested arrays used to overflow the NIO thread's
+    /// A REST body of 100k nested arrays must not overflow the NIO thread's
     /// stack in the JSON scanner (the body is parsed before the gate) and kill the
-    /// kernel. Now the parse refuses it past python's json recursion limit: the
+    /// kernel: the parse refuses it past python's json recursion limit: the
     /// body is not valid JSON (400), and the next request is served.
     @Test func webRestHundredThousandNestedArraysAreNotValidJSON() async throws {
         let kernel = try await startWebKernel()
@@ -1121,8 +1115,7 @@ final class RawHTTPClient {
 enum RawHTTPError: Error { case socket, connect, write }
 
 /// Answers with the parent of the task row its own dispatch runs under — the
-/// one fact A11.31 changes (python parents a request task on the web boot pid;
-/// swift rooted it).
+/// fact pinned here (python parents a request task on the web boot pid).
 struct ParentProbe: AgentBundle {
     let name = "parent_probe"
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {

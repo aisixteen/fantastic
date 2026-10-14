@@ -405,9 +405,9 @@ def test_a_late_reply_whose_parent_is_folded_stays_visible_and_attached():
 
 
 async def test_one_overflow_folds_the_whole_stretch_once():
-    """FOLD_AT + LOW by tokens (owner, 2026-10-11): one overflow folds the oldest stretch
-    into ONE fold — not 8 rows at a time (E39: 47 folds, 4 levels). Twelve levels in
-    26 cuts was the older failure; one fold per overflow cannot build that list."""
+    """FOLD_AT + LOW by tokens: one overflow folds the oldest stretch into ONE fold —
+    not a few rows at a time. One fold per overflow cannot build a deep linked list
+    of folds."""
     k = _K()
     a = _chain("a", 30)
     body = [_row("user", "GOAL", "user:goal")] + a + [_row("user", "now?", None)]
@@ -433,13 +433,12 @@ def test_three_adjacent_folds_at_the_head_fold_as_a_group():
 
     A real run folds ONCE per turn at most: each projection drops the view under
     the watermark and stops. So the head accumulates folds one at a time, and the
-    threshold is the whole story. At FOLD_RUN=4 a run that produced three folds
-    never nested at all — measured 2026-09-11, `nested_folds` and `flat_roots`
-    both ended `levels [1]`, a head that grows one fold per span forever. The
+    threshold is the whole story. At FOLD_RUN=4 a run that produces three folds
+    never nests at all — a head that grows one fold per span forever. The
     synthetic budget fixtures cannot show this: they fold many times inside ONE
     call and sail past four.
 
-    So the rule is exercised directly, at exactly the count that failed."""
+    So the rule is exercised directly, at exactly that count."""
     from ai_core.strategies.fold import KEEP_TAIL, next_span
 
     goal = _row("user", "GOAL", "user:goal")
@@ -458,13 +457,12 @@ def test_three_adjacent_folds_at_the_head_fold_as_a_group():
 
 
 async def test_the_head_is_coalesced_even_when_the_view_already_fits():
-    """Folds at the head used to coalesce ONLY while the view was over the
-    watermark. A projection that dropped under it left its adjacent folds
-    standing, and they stayed standing — the next projection folds ordinary rows
-    first and only revisits the head when it is over budget with FOLD_RUN folds
-    already there. So a session grew one fold per span at the head, forever,
-    which is the growth FOLD_RUN exists to stop. Measured 2026-09-11 on
-    `flat_roots`: three level-1 folds and no nesting across 51 turns.
+    """Folds at the head coalesce even when the view is under the watermark. If
+    they coalesced ONLY while over it, a projection that dropped under it would leave
+    its adjacent folds standing — the next projection folds ordinary rows first and
+    only revisits the head when it is over budget with FOLD_RUN folds already there.
+    So a session would grow one fold per span at the head, forever, which is the
+    growth FOLD_RUN exists to stop.
 
     Here the body ALREADY FITS the budget, so the fold loop never runs; only the
     tidy pass can produce the level-2 fold."""
@@ -490,7 +488,7 @@ async def test_the_head_is_coalesced_even_when_the_view_already_fits():
 
 
 async def test_a_fold_starts_at_fold_at_and_lands_at_low_by_tokens():
-    """Owner, 2026-10-11: the threshold is a share of the context, never a row count.
+    """The threshold is a share of the context, never a row count.
     Under FOLD_AT of the budget nothing folds; past it ONE fold takes the oldest rows,
     by tokens, and the view lands at LOW or under."""
     from ai_core.strategies.fold import FOLD_AT, LOW, fold_down

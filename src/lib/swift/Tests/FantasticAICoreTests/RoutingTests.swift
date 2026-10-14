@@ -139,11 +139,10 @@ struct RoutingTests {
     @Test func replyToOmittedDefaultsToSelf() async throws {
         // AN OMITTED `reply_to` MEANS SELF — the model gets its own answer back.
         //
-        // The old default was fire-and-forget, and it produced the one failure a
-        // model cannot debug: gemma4:12b left the key out of an otherwise perfect
-        // call, the send ran, its result was dropped, and the chain died at pass 1
-        // with no reply and no error. Indistinguishable, from inside the model,
-        // from being finished. Stopping is still free — it is emitting NO call.
+        // A fire-and-forget default would produce the one failure a model cannot
+        // debug: a call with the key left out runs, its result is dropped, and the
+        // chain dies with no reply and no error — indistinguishable, from inside the
+        // model, from being finished. Stopping is still free — it is emitting NO call.
         let mine = ProviderScript([
             [
                 callEnvelope(
@@ -197,7 +196,7 @@ struct RoutingTests {
         // returns `.null` for a MISSING key, so presence has to be read off the
         // dictionary. Read it with the subscript and every absent key becomes an
         // explicit discard — the default inverts, silently, and every chain dies at
-        // pass 1 exactly as it did before the default was fixed.
+        // pass 1.
         for word in ["none", "NULL", "nobody"] {
             let mine = ProviderScript([
                 [
@@ -218,8 +217,8 @@ struct RoutingTests {
     }
 
     @Test func aReplyToNamingNoAgentDispatchesNothingAndSaysSo() async throws {
-        // python, measured 2026-10-11 (e2e chat_users): `<reply_to>1001</reply_to>`
-        // meant a chat message id; typed as the number 1001 it DISCARDED the reply.
+        // `<reply_to>1001</reply_to>` may mean a chat message id; typed as the number
+        // 1001 it must never DISCARD the reply (python).
         // A number is an id, an id naming no agent dispatches nothing, and the model
         // is told why.
         let mine = ProviderScript([
@@ -269,16 +268,13 @@ struct RoutingTests {
     @Test func aRaisingHandlerComesBackAsAnErrorNotADeadChain() async throws {
         // A handler that RAISES must reach the model as `{"error": …}`.
         //
-        // Python's routing ran bare until 2026-08-02: a file_bridge whose ingress
-        // rule could not be resolved raised out of its handler, the exception
-        // escaped `_route_reply`, and asyncio logged "Task exception was never
-        // retrieved". The model got no reply, no error and no further turn — the
-        // run stopped mid-verification and looked finished. An exception is a
+        // An escaped exception leaves the model no reply, no error and no further
+        // turn, and the run looks finished. An exception is a
         // result; the model can act on one and cannot act on silence.
         //
         // In swift the catch is the SUBSTRATE's (`kernel.send` never throws), so
         // what is asserted here is that the caught body reaches the model whole.
-        // Routing adds NOTHING to it (B1.26): the tag line already names the
+        // Routing adds NOTHING to it: the tag line already names the
         // target, and python renders `render_reply(result)` unchanged.
         let script = ProviderScript([
             [callEnvelope(target: "raiser", payload: .object(["type": .string("reflect")]))],
@@ -313,15 +309,14 @@ struct RoutingTests {
                 "type": .string("send"), "text": .string("go"), "client_id": .string("c"),
             ]))])[0].result
         #expect(await script.waitForCalls(2), "malformed call was swallowed")
-        // The GRAMMAR refuses it — a targetless send never reaches routing now,
+        // The GRAMMAR refuses it — a targetless send never reaches routing,
         // so what comes back is the parser's fault line, not `NO_TARGET_ERROR`.
         #expect(script.requestText(1).contains("a send names its target"))
     }
 
     @Test func aSendWithNoPayloadNamesWhatIsMissing() async throws {
-        // Measured 2026-08-06: a payload-less send reached the handler as `None`
-        // and came back `'NoneType' object has no attribute 'get'` — a Python
-        // error about our internals, naming neither the omitted verb nor the
+        // A payload-less send must not reach the handler as `None` and come back
+        // as an error about our internals, naming neither the omitted verb nor the
         // agent. It must say what was missing instead, and must never dispatch.
         let bad = #"<call name="send"><target_id>probe</target_id></call>"#
         let script = ProviderScript([[bad], ["ok"]])
@@ -339,10 +334,8 @@ struct RoutingTests {
     }
 
     @Test func anUnparseableCallReachesTheModelAsAnError() async throws {
-        // END TO END, which the parser-level tests do not cover — and the gap that
-        // let this ship broken in python: on 2026-08-06 `malformed_calls` returned
-        // the right report for gemma's truncated `create_agent` and the model still
-        // received nothing, so the run went on believing its agent existed.
+        // END TO END, which the parser-level tests do not cover — the right report
+        // from `malformed_calls` must actually reach the model.
         // An element opened and never closed inside a terminated envelope (an
         // UNTERMINATED envelope is a cut, not a malformed call).
         let broken =
@@ -412,7 +405,7 @@ struct RoutingTests {
                 send to 'totals' carried no payload, so nothing was dispatched. A call \
                 names its verb in `<type>`, e.g. <type>reflect</type>.
                 """)
-        // B5.20: `{target!r}` is python's repr, not "wrap it in single quotes".
+        // `{target!r}` is python's repr, not "wrap it in single quotes".
         #expect(noPayloadError(target: "it's").hasPrefix("send to \"it's\" carried"))
         #expect(noPayloadError(target: #"C:\notes"#).hasPrefix(#"send to 'C:\\notes' carried"#))
         #expect(noPayloadError(target: "tab\there").hasPrefix(#"send to 'tab\there' carried"#))
@@ -447,8 +440,7 @@ struct RoutingTests {
 
     @Test func theAnswersCallDispatchesAndTheThoughtIsDropped() async throws {
         // A call written in the ANSWER (after `</think>`) runs; the deliberation is
-        // not stored. Reading only `content` would lose a turn spent reasoning — the
-        // gemma4:12b failure (2026-08-02).
+        // not stored. Reading only `content` would lose a turn spent reasoning.
         let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let raw =
             "\(THINK_OPEN)Let me work out which agent stores data.\(THINK_CLOSE)" + call + "on it"
@@ -645,11 +637,11 @@ struct RoutingTests {
     }
 
     // ─── the end-of-chain contract: DONE is explicit; silence is nudged ───
-    // Reinstated 2026-09-01 (mirrors python `test_done_and_nudge.py`).
+    // Mirrors python `test_done_and_nudge.py`.
 
     @Test func silentChainTurnsAreNudgedUntilACallOrDone() async throws {
-        // The model is QUERIED UNTIL IT CALLS (python-canonical, 2026-09-01): a
-        // second silent turn used to end the chain silently.
+        // The model is QUERIED UNTIL IT CALLS (python-canonical): a
+        // second silent turn never ends the chain silently.
         let script = ProviderScript([
             [callEnvelope(target: "kernel_state", payload: cheapReflect)],
             ["thinking out loud, no envelope"],
@@ -673,7 +665,7 @@ struct RoutingTests {
         #expect(script.calls == 5, "done ended it; nothing reminds after")
     }
 
-    // B1.3: THERE IS NO STREAK AND NO CAP. A `nudge_limit` on the record buys
+    // THERE IS NO STREAK AND NO CAP. A `nudge_limit` on the record buys
     // nothing — every call-less turn is nudged, and the chain ends where the
     // MODEL says it ends. Python `test_silent_chain_turns_are_nudged_until_a_call_or_done`.
     @Test func everySilentTurnIsNudgedWithNoCap() async throws {
@@ -687,7 +679,7 @@ struct RoutingTests {
         ])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["mock": script]), backendIds: ["mock"])
-        // A `nudge_limit` of 2 used to stop the chain at pass 4. It is not read.
+        // A `nudge_limit` of 2 is not read: the chain does not stop at pass 4.
         _ = await kernel.send([Item(AgentId("kernel_state"), .object([
                 "type": .string("update_agent"), "id": .string(ids["mock"]!.value),
                 "nudge_limit": .integer(2),
@@ -707,9 +699,7 @@ struct RoutingTests {
     }
 
     /// A turn that is ONLY thinking did not answer: it is never stored and never
-    /// counts as completed — it is rerolled by the no-call reminder, told why
-    /// (measured on vLLM 2026-09-30: an 8-token thinking budget, then a clean
-    /// `stop` with no answer; failing it outright ended a 30-pass chain). Python
+    /// counts as completed — it is rerolled by the no-call reminder, told why. Python
     /// `test_a_dead_turn_is_discarded_and_rerolled`.
     @Test func aDeadTurnIsDiscardedAndRerolled() async throws {
         let script = ProviderScript([["\(THINK_OPEN)hmm\(THINK_CLOSE)\n\n"], [doneEnvelope]])
@@ -795,11 +785,9 @@ struct RoutingTests {
         #expect(script.calls == 2, "done must end the chain silently")
     }
 
-    /// EVERY call-less turn is nudged, chain or not (python-canonical; user,
-    /// 2026-09-09: "all is tool calls"). The nudge used to fire only when the
-    /// incoming text was itself a reply or a nudge, so a FIRST turn of pure prose
-    /// from a person ended the work silently — the model had decided on a call,
-    /// written it in thought, and never emitted it.
+    /// EVERY call-less turn is nudged, chain or not (python-canonical): a FIRST
+    /// turn of pure prose from a person would otherwise end the work silently — a
+    /// model can decide on a call, write it in thought, and never emit it.
     @Test func aFirstTurnWithNoCallIsNudgedToo() async throws {
         let script = ProviderScript([["just an answer, no calls"], [doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
@@ -816,10 +804,9 @@ struct RoutingTests {
     // ─── the batch: one deadline, one stamp, one token per turn ─
 
     /// EVERY dispatched model call carries the AI layer's per-call deadline. The
-    /// KERNEL defaults nothing, so a call to a handler that never returns used to
-    /// hang the whole batch forever: no reply, no timeout block, the chain dead with
-    /// nothing to read. Python has always set it; rust/swift did not until
-    /// 2026-09-02.
+    /// KERNEL defaults nothing, so without it a call to a handler that never
+    /// returns would hang the whole batch forever: no reply, no timeout block, the
+    /// chain dead with nothing to read.
     @Test func everyModelCallCarriesTheLayerDefaultTimeout() async throws {
         // `slowpoke` takes 500ms. The layer's deadline is 100ms, and NO `timeout`
         // arg is written in the envelope — the default has to do the work.
@@ -870,9 +857,9 @@ struct RoutingTests {
     }
 
     /// The batch stamp lives INSIDE the `[reply to …]` tag, where the shared prompt
-    /// says it does. It rode on its own trailing line in rust/swift until 2026-09-02,
-    /// which python's history trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both anchored
-    /// at the START of a block) cannot read at all.
+    /// says it does — never on its own trailing line, which python's history
+    /// trimmers (`_REPLY_TAG` / `_BLOCK_SPLIT`, both anchored at the START of a
+    /// block) cannot read at all.
     @Test func theBatchStampLivesInsideTheReplyTag() async throws {
         let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let script = ProviderScript([[call + "\n" + call], ["both back " + doneEnvelope]])
@@ -920,7 +907,7 @@ struct RoutingTests {
         #expect(incomingParent("[reply to 40 \u{b7} notes read \u{b7} \"read the spec\" \u{b7} \u{2191}17]\nok") == 17)
         #expect(incomingParent("please survey the corpus") == nil)
         // A tag ENDING on its `↑` segment, with a later `]` in the body: the
-        // closing bracket is not part of the id (python `_TAG_LINKS`, 2026-10-01).
+        // closing bracket is not part of the id (python `_TAG_LINKS`).
         #expect(
             incomingParent(
                 "[reply to - \u{b7} 5 reflect \u{b7} \u{2191}360]\n<error>no agent '5'</error> [ids: 1]")
@@ -929,9 +916,7 @@ struct RoutingTests {
 
     /// THE MODEL'S `<title>` RIDES THE REPLY TAG — `[reply to <pid> · <target> <verb>
     /// · "<title>" …]` — so a reply names what it answered forever, in the store
-    /// and in every digest. Swift built the dispatched call's route unit without
-    /// it (measured 2026-09-13: every swift reply tag read `[reply to N · notes
-    /// read · ↑T]` while python/rust carried `· "read filler_1.txt (2 of 8)"`).
+    /// and in every digest.
     @Test func theCallTitleRidesTheReplyTag() async throws {
         let call = """
             <call name="send"><target_id>core</target_id><title>list the roster (1 of 1)</title>\
@@ -963,11 +948,9 @@ struct RoutingTests {
         return String(turn[r.upperBound...].prefix(4))
     }
 
-    /// A FRESH token per turn. Rust/swift derived it from the batch's own content
-    /// (destinations, counts, body lengths), so two turns that made the SAME calls
-    /// collided — which is the exact confusion the token exists to end: a model that
-    /// read one file twice saw `1 of 2 in batch 7f3a` both times (measured
-    /// 2026-08-24, the re-read loop).
+    /// A FRESH token per turn. Derived from the batch's own content (destinations,
+    /// counts, body lengths), two turns that made the SAME calls would collide —
+    /// the exact confusion the token exists to end.
     @Test func twoIdenticalTurnsGetDifferentBatchTokens() async throws {
         let call = callEnvelope(target: "kernel_state", payload: .object(["type": .string("list_agents")]))
         let twice = call + "\n" + call
@@ -984,10 +967,8 @@ struct RoutingTests {
     }
 
     /// A FAILED HANDOFF is announced as an ordinary `status` event — `detail.reason`,
-    /// the shape reflect's `emits` documents and a UI subscribes to. Rust/swift put
-    /// `reason`/`error` at the TOP level until 2026-09-02, so every subscriber saw
-    /// nothing: the silent-death regression the announcement exists to end, wearing
-    /// the announcement's own clothes.
+    /// the shape reflect's `emits` documents and a UI subscribes to — never
+    /// `reason`/`error` at the TOP level.
     @Test func aFailedHandoffIsAStatusEventWithDetail() async throws {
         // `raiser` throws on every real verb, so the delivered turn cannot land.
         let script = ProviderScript([
@@ -1016,7 +997,7 @@ struct RoutingTests {
         #expect(status["source"].asString == "raiser", "\(status.serialize())")
         #expect(status["ts"].asDouble != nil, "\(status.serialize())")
         #expect(status["client_id"].asString == "c", "\(status.serialize())")
-        // B2.4: the announcement goes through the SHARED emitter, so it carries
+        // The announcement goes through the SHARED emitter, so it carries
         // the target's `queue_depth` like every other status event, and its
         // `error` is the reply's own — never a `delivery <status>` sentence
         // python does not write.
@@ -1028,10 +1009,9 @@ struct RoutingTests {
             "\(status.serialize())")
     }
 
-    /// B2.4: a CANCELLED handoff is not announced. An operator kill is a
+    /// A CANCELLED handoff is not announced. An operator kill is a
     /// decision, not a silent death, and waking the target with an error for
-    /// work someone deliberately stopped is noise. Swift announced every
-    /// non-completed outcome, cancels included.
+    /// work someone deliberately stopped is noise.
     @Test func aCancelledHandoffIsNotAnnounced() async throws {
         // A slow destination, killed through the front door while the handoff is
         // in flight: the outcome is `cancelled` with `{cancelled:true}` and no
@@ -1056,10 +1036,9 @@ struct RoutingTests {
             "an operator kill is a decision, not a silent death to announce")
     }
 
-    /// B2.5: a delivery is a SPAWNED kernel task (`verb:"deliver_reply"`), not
-    /// an awaited call. Awaiting each one inside the router's loop made reply 2
-    /// of a 4-call turn wait for the whole conversation reply 1 started — 26 of
-    /// 36 calls never answered, measured 2026-08-24 (`live_build`).
+    /// A delivery is a SPAWNED kernel task (`verb:"deliver_reply"`), not
+    /// an awaited call. Awaiting each one inside the router's loop would make reply
+    /// 2 of a 4-call turn wait for the whole conversation reply 1 started.
     @Test func deliveriesRunAsDeliverReplyTasks() async throws {
         let (kernel, _, sent) = await bootStubKernel(deliveryPauseNanos: 300_000_000)
         await seedStub(kernel, "ai", "delivery.tools")
@@ -1076,7 +1055,7 @@ struct RoutingTests {
             rows.contains {
                 $0["agent"].asString == "ai" && $0["verb"].asString == "deliver_reply"
             }, "\(JSON.array(rows).serialize())")
-        // C36 — and it is a `task` ROW on the AI, under the same id, so the
+        // It is also a `task` ROW on the AI, under the same id, so the
         // handoff is in the message log and not only in the live table.
         let stored = kernel.rows.all().filter { $0["agent"]?.asString == "ai" }
         #expect(
@@ -1087,10 +1066,9 @@ struct RoutingTests {
     }
 
     /// A `reflect` reply is LARGE and TRANSIENT, and the instruction for what to
-    /// record before it goes rides ON THE REPLY — measured 2026-08-20 (`live_plan`):
-    /// stated once as system-block policy, the model wrote a `SEEN` line for 0 of 10
-    /// reflects. Only reflect bodies are dropped later, so only they carry it.
-    /// SYNC OR ASYNC ALIKE (decided 2026-09-26): a reply over the inline cap is
+    /// record before it goes rides ON THE REPLY : stated once as
+    /// system-block policy, it is not followed. Only reflect bodies are dropped later, so only they carry it.
+    /// SYNC OR ASYNC ALIKE: a reply over the inline cap is
     /// held in RAM under its pid (never persisted) and the model is handed
     /// python's stub — the exact bytes, its ORIGIN line, grep named — with the
     /// size counted AFTER the reflect nudge rode on. The body stays one `grep`
@@ -1098,7 +1076,7 @@ struct RoutingTests {
     @Test func anOverCapReplyIsStoredAndDeliveredAsTheStub() async throws {
         // A window whose inline cap (an eighth of the budget) is smaller than the
         // mock's own reflect + nudge, so that reply is the one that dehydrates. The
-        // reflect carries no verb docs any more, so a long `description` makes it big.
+        // reflect carries no verb docs, so a long `description` makes it big.
         let reflectSelf = callEnvelope(target: "mock", payload: .object(["type": .string("reflect")]))
         let script = ProviderScript([[reflectSelf], ["SEEN mock " + doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
@@ -1149,7 +1127,7 @@ struct RoutingTests {
             ]))])[0].result
         #expect(await script.waitForCalls(2), "the reflect never came back")
         let turn2 = script.requestText(1)
-        // A reflect is MUTABLE state and stays whole (owner, 2026-10-06): it carries
+        // A reflect is MUTABLE state and stays whole: it carries
         // no cut notice — only a `docs` reply does.
         #expect(turn2.contains("mock reflect"), Comment(rawValue: turn2))
         #expect(!turn2.contains("[transient"), Comment(rawValue: turn2))
@@ -1157,13 +1135,10 @@ struct RoutingTests {
 
 
     // ─── every call in a turn gets its reply — delivered TOGETHER ──
-    // Mirrors python `test_reply_delivery.py`. Two defects pinned there, both
-    // measured live: 2026-08-24 (`live_build`) replies were delivered
-    // SEQUENTIALLY and each delivery blocked on a whole model turn — 26 of 36
-    // calls never answered; 2026-08-25 (`live_subai_langgraph`) one reply per
-    // turn — a turn that made 7 calls spent the next 7 turns collecting its own
-    // answers, asked `list_agents` at t3, received the t1 reflect instead, and
-    // re-asked until the repeat tripwire killed the run with nothing built.
+    // Mirrors python `test_reply_delivery.py`. Two defects pinned there: replies
+    // delivered SEQUENTIALLY, each blocked on a whole model turn; and one reply
+    // per turn, so a turn that made 7 calls spends the next 7 collecting its own
+    // answers.
     //
     // Python drives `_route_reply` against an ARRAY-SHAPED KERNEL STUB (one
     // outcome per item, `sent` = the delivered `type:send` handoffs). Swift has
@@ -1181,7 +1156,7 @@ struct RoutingTests {
         // "ONE kernel batch" is python's `k.batches == [[…]]`. The kernel
         // launches every item of a batch before its first await
         // (BatchSend.swift), so the honest twin is: all four rows are in `ps` AT
-        // ONCE — which a serial dispatch (the 2026-08-24 shape) can never show.
+        // ONCE — which a serial dispatch can never show.
         // The echo agents pause so the window is wide enough to read.
         let (kernel, echo, sent) = await bootStubKernel(echoPauseNanos: 200_000_000)
         await seedStub(kernel, "ai", "delivery.tools")
@@ -1326,10 +1301,9 @@ struct RoutingTests {
         #expect(body.hasPrefix("[reply to \(jid) \u{b7} vault withdraw]"), Comment(rawValue: body))
     }
 
-    /// C38: `<timeout>soon</timeout>` used to coerce with `.asDouble`, which
-    /// silently DROPPED the malformed value — defaulting to "wait forever" —
-    /// instead of reaching the kernel's `bad_arg` refusal. Forwarded RAW
-    /// (tag-typed, untouched) now, so the model reads the kernel's exact text
+    /// `<timeout>soon</timeout>` is forwarded RAW (tag-typed, untouched), never
+    /// coerced with `.asDouble` (which would silently DROP it, defaulting to "wait
+    /// forever"), so the model reads the kernel's exact text
     /// and the call never reaches the target at all.
     @Test func aRawTimeoutThatIsNotANumberReachesTheKernelsRefusal() async throws {
         let (kernel, echo, sent) = await bootStubKernel()
@@ -1351,9 +1325,9 @@ struct RoutingTests {
             Comment(rawValue: body))
     }
 
-    /// C38: an int `<exec_id>` JOINS an existing execution instead of being
-    /// silently coerced with `.asString` (which dropped it — an int has no
-    /// string form there — and minted a fresh unnamed pid instead).
+    /// An int `<exec_id>` JOINS an existing execution instead of being
+    /// silently coerced with `.asString` (which would drop it and mint a fresh
+    /// unnamed pid).
     @Test func anIntExecIdJoinsAnOpenExecutionInsteadOfMintingAFreshOne() async throws {
         let (kernel, echo, sent) = await bootStubKernel()
         await seedStub(kernel, "ai", "delivery.tools")
@@ -1423,8 +1397,7 @@ struct RoutingTests {
         // ITS OWN AGENT ID (python's `nd_aw`), not the suite's `mock`: `inFlightTurns`
         // is keyed by the bare id across every kernel in the process, so a sibling
         // case's live batch for "mock" would count as THIS agent's in-flight work
-        // and turn the refusal into an honoured wait (measured 2026-09-13: passes
-        // alone, fails under parallel execution).
+        // and turn the refusal into an honoured wait under parallel execution.
         let script = ProviderScript([["waiting <call name=\"await\"></call>"], [doneEnvelope]])
         let (kernel, ids, _) = await bootMockKernel(
             config: scriptedConfig(["nd_aw": script]), backendIds: ["nd_aw"])
@@ -1479,7 +1452,7 @@ struct RoutingTests {
         }
         let last = script.request(1)?.last?["content"].asString ?? ""
         #expect(last.hasSuffix("two"), "the queued message must be the next turn: \(last.suffix(200))")
-        // B2.4: the honest wait is an ordinary status event from the SHARED
+        // The honest wait is an ordinary status event from the SHARED
         // emitter — `reason, pending`, then the auto-filled fields, `queue_depth`
         // last — not an envelope built by hand with none of them.
         let awaiting = try #require(
@@ -1602,9 +1575,9 @@ extension String {
             options: .regularExpression) != nil
     }
 
-    // ── round-2 edges (B1.11, B1.26, B5.18, B5.19) ───────────────
+    // ── edge cases ───────────────
 
-    // B1.11: kept RAW, refused only when it is not a string or is blank after a
+    // Kept RAW, refused only when it is not a string or is blank after a
     // FULL python strip.
     @Test func sendToIsKeptRawAndDroppedOnlyWhenBlank() async throws {
         // A `done` turn is the one that still takes the caller's hand-off.
@@ -1633,7 +1606,7 @@ extension String {
         #expect(await handOff(.integer(7)).isEmpty)
     }
 
-    // B1.26: the reply block renders `result` with NO injected `target`.
+    // The reply block renders `result` with NO injected `target`.
     @Test func aRaisedCallReplyBlockRendersTheResultUnchanged() async throws {
         let script = ProviderScript([
             [callEnvelope(target: "raiser", payload: .object(["type": .string("reflect")]))],
@@ -1655,7 +1628,7 @@ extension String {
         #expect(!turn2.contains("<target>"), "\(turn2.suffix(400))")
     }
 
-    // B5.18: `_clean_title` on CODE POINTS, with python's strip.
+    // `_clean_title` on CODE POINTS, with python's strip.
     @Test func cleanTitleMatchesPython() {
         // A CRLF is ONE Character and TWO code points: python turns the run into
         // a single space, swift's Character scan left it whole.
@@ -1672,7 +1645,7 @@ extension String {
         #expect(cleanTitle(.string(family))?.unicodeScalars.count == 140)
     }
 
-    // B5.19: a non-string `<type>` still names the reply — `?` means ABSENT.
+    // A non-string `<type>` still names the reply — `?` means ABSENT.
     @Test func aNonStringTypeTagsTheReplyWithPythonStr() async throws {
         let script = ProviderScript([
             [
@@ -1700,7 +1673,7 @@ extension String {
             "\(script.requestText(1).prefix(300))")
     }
 
-    // B5.12: `<to>42</to>` is a CALL python dispatches; the no-target reply comes
+    // `<to>42</to>` is a CALL python dispatches; the no-target reply comes
     // from routing, and the echo shows what the model wrote.
     @Test func aTruthyNonListToReachesTheNoTargetReply() async throws {
         let script = ProviderScript([

@@ -1,4 +1,4 @@
-"""A call a bridge leg serves is judged as THE LEG (owner 2026-10-04).
+"""A call a bridge leg serves is judged as THE LEG.
 
 Identity comes only from dispatch: the leg's read loop is a task its `boot`
 spawned, so every inbound call it serves is the leg's own send — the leg's

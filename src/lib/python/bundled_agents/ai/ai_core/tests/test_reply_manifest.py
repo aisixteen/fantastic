@@ -1,15 +1,11 @@
 """The `N of M from that turn` stamp on a reply envelope.
 
-The failure it exists to prevent, measured three times and fatal each time: a turn
-emits several calls, each reply comes back as its own turn, and the model cannot
-tell "the rest are still in flight" from "the kernel answered the wrong one".
-2026-08-07 opus re-issued both deletes and theorised duplicate delivery;
-2026-08-20 the model decided the reply queue was running ahead of it and re-polled
-forever; 2026-08-24 the model made two parallel reflects, got the first back, wrote
-"I sent a reflect to file_bridge but the reply came back from exec_bridge",
-re-sent it and gave up without doing the task.
+The failure it exists to prevent: a turn emits several calls, each reply comes back
+as its own turn, and the model cannot tell "the rest are still in flight" from "the
+kernel answered the wrong one" — it re-issues calls, theorises duplicate delivery,
+or re-polls forever.
 
-Since 2026-08-25 the whole batch arrives as ONE message per destination, so
+The whole batch arrives as ONE message per destination, so
 the stamp's remaining jobs are correlation (each block to its dispatch pid) and
 completeness (the model can count M blocks and reconcile). The tag format is
 unchanged.
@@ -28,8 +24,8 @@ from ai_core.core import _REPLY_TAG, _route_reply
 async def _settle(k, want: int, timeout: float = 2.0) -> None:
     """Wait for the spawned deliveries.
 
-    `_route_reply` no longer AWAITS the turns its replies start — that is the fix
-    for the 26-of-36 reply loss measured 2026-08-24. A caller that wants to observe
+    `_route_reply` does not AWAIT the turns its replies start, so replies are never
+    lost behind a long turn. A caller that wants to observe
     a delivery therefore yields to the loop first."""
     began = asyncio.get_event_loop().time()
     while len(k.delivered) < want:
@@ -135,7 +131,7 @@ async def test_the_tag_regex_still_parses_a_stamped_envelope():
 
 
 # ── a call written inside a thought ──────────────────────────────────────────
-# ONLY THE ANSWER ACTS (owner, 2026-10-07): a call written inside thinking is
+# ONLY THE ANSWER ACTS: a call written inside thinking is
 # thinking — not dispatched and not stored; dispatch and history both read the
 # answer, so they can never disagree.
 
@@ -211,7 +207,7 @@ async def test_a_docs_body_is_held_and_its_first_line_names_the_grep(
     seeded_kernel, fake_providers
 ):
     """A docs body opens with the line saying it is erased after the next message
-    and how to keep what is needed (owner, 2026-10-06); the body is HELD under its
+    and how to keep what is needed; the body is HELD under its
     pid, so the model's own `grep` on that pid returns the verb line."""
     from _testkit import memory_meta
 

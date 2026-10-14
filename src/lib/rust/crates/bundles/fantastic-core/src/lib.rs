@@ -314,8 +314,8 @@ impl KernelStateBundle {
     async fn boot(&self, agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
         // A SESSION loader (a `root` meta pointing at a sub-namespace) writes no
         // record of its own there: its one record lives in its parent's tree and
-        // `load_tree` walks the namespace from it (owner 2026-10-14 — a copy at
-        // `<root>/agent.yaml` froze and diverged).
+        // `load_tree` walks the namespace from it (a copy at `<root>/agent.yaml`
+        // would freeze and diverge).
         // IDEMPOTENT, as python's `_boot` is: a second boot installs nothing.
         {
             let mut st = self.state.lock().expect("kernel_state poisoned");
@@ -537,8 +537,8 @@ impl<'a> Places<'a> {
 /// The ROOT loader's tree is the one this kernel HYDRATES at boot, so only the
 /// operator (its own flush, the CLI, boot) writes it. An agent's record changes
 /// through `update_agent`, gated like any verb — a record written here
-/// by an agent would be hydrated with whatever grants it named (audit
-/// 2026-09-28, a15). A session loader (a remote's sub-namespace, never hydrated
+/// by an agent would be hydrated with whatever grants it named. A session
+/// loader (a remote's sub-namespace, never hydrated
 /// here) keeps serving its remote. Python `_guard_own_tree`.
 fn guard_own_tree(verb: &str, agent: &Arc<Agent>) -> Option<Value> {
     if agent.parent_id.is_some() || fantastic_kernel::current_origin().is_none() {
@@ -617,7 +617,7 @@ impl Bundle for KernelStateBundle {
             "read_bundles" => read_bundles(&agent, payload, kernel)?,
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `apply_reflect_flags` into
-            // something that reads like a healthy reflect (python 2026-09-02).
+            // something that reads like a healthy reflect (python).
             // `verb` echoes the RAW `type` (python `verb=t`): null when absent, `5`
             // for a number — never the empty string the dispatch matched on.
             _ => {
@@ -667,8 +667,8 @@ impl Bundle for KernelStateBundle {
         }
         // A DOC THAT WILL NOT DECODE FAILS THE REFLECT. python's `_readme_index`
         // lets the UnicodeDecodeError out of `reflect_root_extra`, and the
-        // substrate's merge site no longer swallows it (audit 2026-10-03,
-        // ARCH2-9) — the full root reflect settles `failed` with that raise.
+        // substrate's merge site does not swallow it — the full root reflect
+        // settles `failed` with that raise.
         let readmes = fantastic_kernel::reflect::readme_index(DOCS, "");
         out.insert("readmes".to_string(), Value::Array(readmes));
         out.insert("docs".to_string(), json!(DOCS_LINE));
@@ -681,8 +681,8 @@ impl Bundle for KernelStateBundle {
     ///
     /// THE RECORD FLUSH LIVES HERE, not in `on_shutdown`. The record loop
     /// debounces 150 ms; a `create_agent` + `update_agent` followed straight away
-    /// by a shutdown used to reach its final flush mid-teardown-walk, with the
-    /// store already gone, and the update never landed. The kernel already wraps
+    /// by a shutdown would otherwise reach its final flush mid-teardown-walk, with
+    /// the store already gone, and the update would never land. The kernel already wraps
     /// this hook in `shutdown_context` — a draining store would otherwise refuse
     /// the write.
     async fn flush_pending(

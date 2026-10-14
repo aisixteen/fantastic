@@ -23,9 +23,8 @@ async def _print_result(result: Any) -> None:
 
 async def _read_line(prompt: str) -> str:
     """`input()` on a DAEMON thread. The default executor's threads are joined
-    at interpreter exit, so a daemon blocked in `input()` never exited on
-    SIGTERM — it printed `[kernel] down` and hung until SIGKILL (measured
-    2026-09-16). A daemon thread is abandoned with the process instead."""
+    at interpreter exit, so a daemon blocked in `input()` would never exit on
+    SIGTERM — it would print `[kernel] down` and hang until SIGKILL. A daemon thread is abandoned with the process instead."""
     loop = asyncio.get_running_loop()
     fut: asyncio.Future[str] = loop.create_future()
 

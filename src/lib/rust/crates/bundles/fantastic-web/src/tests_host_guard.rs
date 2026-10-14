@@ -1,4 +1,4 @@
-//! The Host guard on a live server (audit W-2; python
+//! The Host guard on a live server (python
 //! `web/host/tests/test_origin_guard.py`, the Host half): a DNS-rebinding page's
 //! same-origin GET carries no Origin, only its own domain in `Host` — refused on
 //! every route, the file proxy and the websocket upgrade included.
@@ -6,7 +6,7 @@
 use super::*;
 
 /// python `test_rebound_host_is_refused_on_every_method_with_no_origin` — the
-/// file proxy the audit read through answers a rebound Host with the coded 403.
+/// file proxy answers a rebound Host with the coded 403.
 #[tokio::test]
 async fn a_rebound_host_cannot_read_the_file_proxy() {
     let tmp = TempDir::new().unwrap();

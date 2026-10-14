@@ -9,9 +9,9 @@ exists anywhere in this codebase — see "Why no graph library".)
 
 ## The question
 
-gemma-4-12B failed probe 05 six times (2026-08-06) and never on reasoning: right agents,
-right verbs, 4/4 planning language, every run. It lost on OUR contract. It has also seen
-thousands of state-graph examples in training and zero fantastic readmes.
+A small model can fail probe 05 without failing on reasoning: right agents, right verbs,
+planning language — and still lose on OUR contract. It has seen thousands of state-graph
+examples in training and zero fantastic readmes.
 
 So: is the blocker a SHAPE it has never seen, or capability?
 

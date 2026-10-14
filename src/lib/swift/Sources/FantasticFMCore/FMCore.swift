@@ -1,6 +1,6 @@
 // FantasticFMCore — THE ONE implementation of the Apple Foundation Models calls.
 //
-// Owner's decision (2026-10-02): an on-device Foundation Models backend in BOTH
+// An on-device Foundation Models backend in BOTH
 // swift and rust, with ONE implementation of the FoundationModels calls. This
 // target is it. The swift bundle (`FantasticFoundationModelsBackend`) uses it
 // directly; rust links it as a static library through the C ABI in
@@ -36,8 +36,7 @@ import Foundation
 /// window" ("the on-device model ... has a context window of 4096 tokens"), and
 /// the SDK itself — `SystemLanguageModel.contextSize` is `@backDeployed(before:
 /// macOS 26.4)` with the body `return 4096` for the releases that predate the
-/// real reading (FoundationModels.swiftinterface, MacOSX27.0.sdk). Measured on
-/// this machine (macOS 27.0, M1 Pro, 2026-10-02): the SDK reads 4096.
+/// real reading (FoundationModels.swiftinterface, MacOSX27.0.sdk).
 public let FM_DOCUMENTED_CONTEXT_SIZE = 4096
 
 /// Where a `contextSize` came from: the SDK, or Apple's documented figure.

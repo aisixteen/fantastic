@@ -192,7 +192,7 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             // python `json.loads(body) if body else {}`.
             payload = .object([:])
         } else {
-            // STRICT, as python's `strict_loads` (io_bridge.loads, owner D13):
+            // STRICT, as python's `strict_loads` (io_bridge.loads):
             // `NaN`/`Infinity`, an integer outside int64 and an overflowing
             // number are not valid JSON on the wire.
             guard let parsed = try? JSON.parseStrict(body) else {
@@ -214,7 +214,7 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             }
             payload = parsed
         }
-        // GATED BEFORE THE BODY WAS READ (audit IO-4): the host ran this leg's
+        // GATED BEFORE THE BODY WAS READ: the host ran this leg's
         // ingress rule on the request's head — its target and `X-Fantastic-Auth`
         // (`WebServer.preflight`) — and bounded the body; only an admitted
         // request reaches here. The host lowercases every header.
@@ -239,14 +239,14 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         // HANDED TO THIS LEG (`inbound_call`), which sends it as itself — an HTTP
         // caller has no agent identity of its own.
         //
-        // EVERY CALL MAY BE ANSWERED WITH RAW BYTES, whatever its verb (A13.1):
+        // EVERY CALL MAY BE ANSWERED WITH RAW BYTES, whatever its verb:
         // python's reply dict holds them and `_first_bytes_field` finds them,
         // with no list of verbs. The hand-in carries the reply's body back
         // (the binary channel with no request body), and this leg answers octet
         // exactly when the reply holds one. There is NO request body: a JSON
         // body cannot hold one, so `write_stream` with a JSON-string `bytes`
         // reaches file_bridge as a header `bytes` key and is refused
-        // `missing_arg` (A13.19), which is python's answer too.
+        // `missing_arg`, which is python's answer too.
         let out = await Inbound.handIn(
             kernel, legId: legId,
             .object(["type": .string("inbound_call"), "item": .object(item)]))

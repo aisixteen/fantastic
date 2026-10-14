@@ -61,8 +61,7 @@ async def main():
     )
     try:
         # The AI's chat leg — without one, history is RAM-empty (by design) and
-        # every reply turn arrives with total amnesia (measured on this test's
-        # first run: the model reflected, then no longer knew the task).
+        # every reply turn arrives with total amnesia.
         r = await _call(
             root,
             root.id,

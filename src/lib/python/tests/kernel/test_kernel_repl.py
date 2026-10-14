@@ -71,7 +71,7 @@ def test_help_prints_the_cheatsheet_and_an_unreadable_one_raises(
     capsys, monkeypatch, tmp_path
 ):
     """`help` prints `cli/help.md`. Unreadable, it RAISES — a substitute line
-    printed in its place hid a broken install (audit 2026-10-03, ARCH2-9)."""
+    printed in its place would hide a broken install."""
     import importlib.resources
 
     import pytest

@@ -10,7 +10,7 @@ import Foundation
 import OrderedCollections
 
 extension Kernel {
-    /// C34: the SAME refusal texts (+ `verb`) as the text channel — python has
+    /// The SAME refusal texts (+ `verb`) as the text channel — python has
     /// no separate binary dispatch at all, a binary frame runs through the
     /// same `_dispatch` resolution the text channel does.
     func dispatchBinary(target: Agent, header: JSON, body: Blob?) async -> (
@@ -21,8 +21,8 @@ extension Kernel {
         // `bytes` is an ordinary payload: `_dispatch` answers the kernel verbs,
         // the root's `reflect` (the substrate identity) and a bare agent exactly
         // as it does without them. Only a bundle's own verb reads the body.
-        // (Measured: an octet POST of `reflect` to the root answered the loader
-        // bundle's reflect — its sentence and `root` — instead of the kernel's.)
+        // (An octet POST of `reflect` to the root answers the kernel's reflect,
+        // never the loader bundle's.)
         if Kernel.isSystemVerb(verb) || target.handlerModule == nil
             || (verb == "reflect" && target.parentId == nil)
         {
@@ -47,7 +47,7 @@ extension Kernel {
     }
 
     /// `agent <id!r> has no handler_module; cannot answer verb <verb!r>` —
-    /// SHARED by text and binary dispatch (C34). Python `_agent.py:2069-2071`.
+    /// SHARED by text and binary dispatch. Python `_agent.py:2069-2071`.
     private func noHandlerModuleRefusal(_ id: String, _ verb: String) -> JSON {
         Refusal.make(
             Refusal.unhandled,
@@ -57,10 +57,9 @@ extension Kernel {
 
     /// `agent <id!r>: handler_module <hm!r> cannot be imported in this
     /// runtime: <ExceptionClass>: <message>` — SHARED by text and binary
-    /// dispatch (C24/C34). Python's PREFIX, verbatim; the TAIL is not stable
-    /// across python's own runs (D3 residual — measured "No module named
-    /// 'yaml_state'" one round, "No module named 'yaml_state.tools'" the
-    /// next), so this names the closest static equivalent of the dynamic
+    /// dispatch. Python's PREFIX, verbatim; the TAIL is not stable
+    /// across python's own runs ("No module named 'yaml_state'" or "No module
+    /// named 'yaml_state.tools'"), so this names the closest static equivalent of the dynamic
     /// import failure rather than pinning python's exact wording — the same
     /// residual rust picked, for cross-runtime consistency.
     private func notInstalledRefusal(_ id: String, _ hm: String, _ verb: String) -> JSON {
@@ -162,15 +161,15 @@ extension Kernel {
     /// dispatch runs, minus the in-flight bump.
     ///
     /// AN EMIT TO A NON-AGENT ID IS A NO-OP. The target agent is resolved FIRST:
-    /// no agent, no inbox put, no state event. Swift used to deliver into any
-    /// registered inbox and publish regardless, so a synthetic WS client id
-    /// (`_ws_<hex>`) produced telemetry for a sprite that does not exist —
+    /// no agent, no inbox put, no state event. Delivering into any
+    /// registered inbox and publishing regardless would let a synthetic WS client
+    /// id (`_ws_<hex>`) produce telemetry for a sprite that does not exist —
     /// python drops it silently (`_proxy.py:196-200`).
     public func emit(_ targetId: AgentId, _ payload: JSON) async {
         emitItem(targetId, .text(payload))
     }
 
-    /// QUIET `emit` (owner, 2026-10-04): the inbox and its watchers, NOTHING on
+    /// QUIET `emit`: the inbox and its watchers, NOTHING on
     /// the state stream — a streaming part's deltas, which would flood every
     /// subscriber at token rate. Gated and routed exactly as `emit`.
     public func emitQuiet(_ targetId: AgentId, _ payload: JSON) async {
@@ -181,8 +180,8 @@ extension Kernel {
     /// re-emits from a remote watch, which must reach a local watcher WHOLE.
     /// Same no-op rule for a non-agent id.
     ///
-    /// GATED LIKE A SEND when the emitter is another agent (audit 2026-09-28,
-    /// a16): the emitter's `can_call` and the target's `callable_by` must both
+    /// GATED LIKE A SEND when the emitter is another agent: the
+    /// emitter's `can_call` and the target's `callable_by` must both
     /// grant verb `emit`. The baseline keeps emits to self; any other edge is an
     /// explicit grant. A denied emit is dropped; an emit has no reply.
     ///
@@ -226,8 +225,8 @@ extension Kernel {
     func applyReflectFlags(_ target: Agent, _ payload: JSON, _ reply: inout JSON) async -> JSON? {
         guard case .object(var obj) = reply else { return nil }
         // A REFUSAL IS NOT A REFLECT. Decorating one with a tree
-        // produced a reply that reads like a healthy reflect with a stray error
-        // field, and a caller could not tell the two apart (2026-09-02).
+        // would produce a reply that reads like a healthy reflect with a stray error
+        // field, and a caller could not tell the two apart.
         if obj["error"] != nil { return nil }
         // `description` is a substrate meta field — surface it on every
         // reflect (bundle handlers don't know about it) unless already set.
@@ -277,10 +276,9 @@ extension Kernel {
                     }
                 } catch {
                     // A HOOK THAT RAISES FAILS THE REFLECT (python `_agent.py`
-                    // calls the duck-typed hook bare). Swallowed, it dropped
+                    // calls the duck-typed hook bare). Swallowed, it would drop
                     // `persistence` and `guid` — what an operator reads to learn
-                    // whether state persists — with nothing to say so (audit
-                    // 2026-10-03, ARCH2-9).
+                    // whether state persists — with nothing to say so.
                     reply = .object(obj)
                     return .object(["error": .string(error.description), "raised": .bool(true)])
                 }
@@ -297,7 +295,7 @@ extension Kernel {
         case .none, .some(.string("all")), .some(.string("ids")): walks = true
         default: walks = false
         }
-        // SUBTREE FILTERS (owner, 2026-10-05): `show_subtrees` answers with only
+        // SUBTREE FILTERS: `show_subtrees` answers with only
         // those branches, `ignore_subtrees` prunes each named branch to a stub
         // `{id, pruned: n}`; together, show first and ignore inside it. Python
         // `kernel/_docs.subtree_filter`.
@@ -362,7 +360,7 @@ extension Kernel {
                 return .object(entry)
             }
             // FOLDER BUNDLES of this kernel's root, beside the installed ones — a
-            // refused folder too, with its `error` (owner, 2026-10-08).
+            // refused folder too, with its `error`.
             entries += bundles.folderRows()
             entries.sort { ($0["name"].asString ?? "") < ($1["name"].asString ?? "") }
             let (cat, next) = page(entries, payload) { $0["name"].asString ?? "" }
@@ -381,7 +379,7 @@ extension Kernel {
         // topic tree; `"<key>"` → one topic's body. One agent at a time.
         //
         // A non-UTF-8 doc is NOT caught (python catches only `OSError`; a
-        // `UnicodeDecodeError` propagates and fails the WHOLE reflect — C60).
+        // `UnicodeDecodeError` propagates and fails the WHOLE reflect).
         if payload["readme"].asBool == true {
             do {
                 obj["readme"] = try readReadme(target)
@@ -454,8 +452,8 @@ extension Kernel {
     }
 
     /// The addressed agent's bundle readme (string) or null — served from the
-    /// bundle, never from a copy on disk (owner 2026-10-14). Python's text mode
-    /// (C59): `\r\n`/lone `\r` → `\n`.
+    /// bundle, never from a copy on disk. Python's text mode:
+    /// `\r\n`/lone `\r` → `\n`.
     private func readReadme(_ target: Agent) throws(PyError) -> JSON {
         guard let hm = target.handlerModule, let text = bundles.get(hm)?.readme else {
             return .null
@@ -467,7 +465,7 @@ extension Kernel {
     // The manual is a SHORT `readme.md` orientation + a `docs/` topic tree.
     // `reflect readme=index` lists it token-annotated; `reflect readme=<key>`
     // drills one topic. Served from the agent's bundle (`AgentBundle.docs`),
-    // never from a copy on disk (owner 2026-10-14).
+    // never from a copy on disk.
 
     /// ~tokens for a doc: ceil(chars/4), matching ai_core's estimate (Unicode
     /// scalars = code points, so the advertised cost is stable across runtimes).
@@ -477,7 +475,7 @@ extension Kernel {
 
     /// A topic's one-line descriptor: the leading `> ` line if present, else
     /// the first prose line (skipping headings). Python `str.splitlines()` /
-    /// `str.strip()` (C59) — NOT a bare `\n` split / ASCII-whitespace trim,
+    /// `str.strip()` — NOT a bare `\n` split / ASCII-whitespace trim,
     /// which miss python's wider boundary/strip sets.
     private func readDesc(_ text: String) -> String {
         let lines = pySplitlines(text)
@@ -616,11 +614,8 @@ extension Kernel {
             // the batch caller.
             _ = await self.cancelTask(taskId)
         }
-        // The BLOB rides the timed branch too. It did not until 2026-09-03:
-        // routing stamps the layer's deadline on EVERY item, so every model-issued
-        // `send_binary` took this branch, lost its bytes, and landed on the TEXT
-        // channel — `file_bridge` answered "bytes must be raw bytes on the binary
-        // channel" for a call that was correct (e2e `E10_dialog:swift`).
+        // The BLOB rides the timed branch too: routing stamps the layer's deadline
+        // on EVERY item, so every model-issued `send_binary` takes this branch.
         let end = await runDispatch(
             target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId,
             binary: binary, rawReply: rawReply, marks: marks)
@@ -690,20 +685,17 @@ extension Kernel {
     }
 
     /// Whether a handler's reply is a REFUSAL — an object carrying a truthy
-    /// `error`. The same test every consumer used to make for itself off the
-    /// result body.
+    /// `error`. One test, not one per consumer off the result body.
     ///
     /// PYTHON TRUTHINESS, not key presence: `ERRORED if reply.get("error") else
     /// COMPLETED`, so an `error` of `0`, `0.0`, `[]` or `{}` settles COMPLETED
-    /// exactly as `""` and `false` already did. Swift settled every one of them
-    /// `errored` because it read anything but a bool/string as truthy.
+    /// exactly as `""` and `false` do.
     private func errorShaped(_ r: JSON) -> Bool {
         pyTruthy(r["error"])
     }
 
-    /// `binary` has NO DEFAULT, deliberately: it defaulted to `nil` until
-    /// 2026-09-03 and the timed branch of `runDispatchOutcome` simply forgot to
-    /// pass it, which the compiler accepted. Every caller now states the channel:
+    /// `binary` has NO DEFAULT, deliberately: with a default, a caller could forget
+    /// to pass it and the compiler would accept it. Every caller states the channel:
     /// `binary` (a request body at its payload path) or `rawReply` (the binary
     /// channel with no request body — a raw read) or neither (the text channel).
     private func runDispatch(
@@ -836,7 +828,7 @@ extension Kernel {
 
     /// What a dispatch task runs, inside its scopes. A blob rides the BINARY
     /// channel under this same row/ledger/timeout, and THE REPLY BODY COMES BACK
-    /// WITH IT (C37): the batch is the carrier for the `bytes` value python's
+    /// WITH IT: the batch is the carrier for the `bytes` value python's
     /// reply dict holds natively.
     private func dispatchBody(
         target: Agent, payload: JSON, handlerPayload: JSON, binary: Blob?,
@@ -905,8 +897,7 @@ extension Kernel {
                 // CODED, not a bare error. A reason-less `{error}` is decorated
                 // by `applyReflectFlags` into something that reads like a
                 // healthy reflect (kernel_verbs, tree, more) with a stray error
-                // field — the caller cannot tell a refusal from an answer
-                // (measured 2026-09-02).
+                // field — the caller cannot tell a refusal from an answer.
                 return (noHandlerModuleRefusal(target.id.value, verb), false)
             }
         }
@@ -994,7 +985,7 @@ extension Kernel {
 /// payload (see `InboxItem`), so the marker is written back at the body's own
 /// path.
 ///
-/// NOT TRUNCATED. This used to cut at 160 chars + "...". A summary that silently
+/// NOT TRUNCATED. A summary that silently
 /// drops the end of a payload lies about what was sent — the reader cannot tell a
 /// short payload from a cut one, and the dropped part is exactly what you opened
 /// telemetry to find. Eliding is a RENDER decision, where it is visible.
@@ -1036,7 +1027,7 @@ extension Kernel {
     /// target's `callable_by` grants `(sender, verb)`) — every target, the root
     /// included: a kernel verb takes the same two-sided check against the root.
     /// The sender is always a LOCAL agent — a call a bridge leg serves is judged
-    /// as the leg. GRANTS ARE THE ONLY RULE (owner, 2026-10-06): the tree verbs take
+    /// as the leg. GRANTS ARE THE ONLY RULE: the tree verbs take
     /// this check and nothing more. A sender with no record → empty grant →
     /// deny-all.
     /// Every id ABOVE `agent` — what `$subtree` matches against: a grant holder

@@ -91,10 +91,9 @@ W = 78
 # total is unreachable except by actually reading the files.
 READINGS = {f"reading_{i}.txt": secrets.randbelow(9000) + 1000 for i in range(1, 4)}
 # NOT "reading_4.txt". The model's own plan writes a self-test reading, and the
-# natural next name IS reading_4 — measured 2026-08-25: the canary OVERWROTE the
-# model's 1000-value file with its own 4695/9786/1109, the artifact recomputed the
-# disk sum EXACTLY right (store == disk to the digit, three runs), and the harness
-# failed it against a total that double-counted the clobbered file. A canary must
+# natural next name IS reading_4; a canary there would overwrite the model's file and
+# the harness would fail a correct artifact against a total that double-counts the
+# clobbered file. A canary must
 # ADD a reading nobody could have written.
 CANARY_FILE = "canary_reading.txt"
 CANARY_VALUE = secrets.randbelow(9000) + 1000
@@ -110,9 +109,8 @@ TASK = (
     "of sensor readings and remembers the total. "
     # NAMED, not described. "a memory agent for durable state" meant `totals`, but the
     # kernel also holds the AI's own conversation store, a RAM store whose id is
-    # `memory`. Measured 2026-10-06 (rust, captured thinking): turns 2-8 each spent
-    # 3-7k tokens on how a spawned program could write into that RAM store, which
-    # neither `rest` nor the runner may call. Naming the two agents dictates no path,
+    # `memory`; a model left to guess spends turns on how a spawned program could write
+    # into that RAM store, which neither `rest` nor the runner may call. Naming the two agents dictates no path,
     # format or mechanism.
     "`readings` holds that directory — one number per file — and `totals` is the "
     "file store for durable results. "
@@ -129,8 +127,8 @@ TASK = (
     "When you say it is done I will check it myself, as `{operator}`: I will run what "
     "you built again and read the stored total, so everything you build must accept "
     "calls from `{operator}`. "
-    # COMPLETION PRESSURE — same clause 03 needed. Measured 2026-08-20/21: without an
-    # explicit "keep going until it works", models analyse, plan, report, and stop.
+    # COMPLETION PRESSURE: without an explicit "keep going until it works", models
+    # analyse, plan, report, and stop.
     # The "or certain it is impossible" half supplies the EXIT so this cannot become
     # a verify-forever loop.
     "Do not stop until it actually works — built and run, not merely planned — or "
@@ -241,10 +239,9 @@ async def wire_executor_leg(
 def _disk_total() -> int:
     """The CURRENT sum of the readings directory — truth recomputed at check time.
 
-    Grading against the seed-time snapshot scored a WORKING system FAIL on
-    2026-08-25 (the model): the model's own plan said "write a new reading
-    file to test requirement 3", it added one worth 500, and its stored total
-    honestly included it — 18268 vs the frozen 17768. The task's words are
+    Grading against the seed-time snapshot would score a WORKING system FAIL
+    when the model's own plan adds a test reading and its stored total honestly
+    includes it. The task's words are
     "keep the total up to date"; the correct total is whatever the directory
     holds when the check runs, so the scorer reads the same files the model's
     program does."""
@@ -275,11 +272,9 @@ async def discover_exec_agents(root) -> list[str]:
     """Every `exec_bridge.tools` agent in the tree — the operator's leg AND any the model built.
 
     The kernel's own root readme tells a model that a WORKER THAT COMPUTES is an
-    `exec_bridge.tools` agent owning a program file, and models follow it: measured
-    2026-09-21, 2 runs of 3 created their OWN exec agent (`totaller`), opened its
-    ingress, ran their program on it and stored the correct total — and scored
-    `jobs=0`, because the scorer only ever looked at the operator's pre-wired leg. A
-    model taking the route the kernel advertises has to be able to PASS, so the scorer
+    `exec_bridge.tools` agent owning a program file, and models follow it: they create
+    their OWN exec agent, open its ingress, run their program on it and store the
+    correct total. A model taking the route the kernel advertises has to be able to PASS, so the scorer
     looks for the program on whatever exec agent actually ran it.
 
     `handler_module` is the identity used here, NOT the `allowed` sniff
@@ -353,8 +348,7 @@ async def find_value(
       files: `*.py` (the model's program may embed constants), `*.jsonl`
       (transcripts), `*.tmp.*` (in-flight commit debris).
     `.json` is deliberately NOT skipped — models legitimately store results as
-    JSON documents (measured 2026-09-01: `sensor_total.json` held the right
-    total and a scorer draft that skipped .json scored it None).
+    JSON documents (e.g. `sensor_total.json`).
 
     Returns (path, snippet, matched); on no match, the first candidate seen so
     a wrong answer is still visible. `mem_id` is unused — kept for call-site
@@ -589,10 +583,8 @@ async def run(
 
     # SURFACE A FAILED SEND. `ai_core` returns {"error": ...} rather than raising —
     # a turn that timed out or errored otherwise reads as a model that produced
-    # nothing. Measured 2026-08-24: a cold GPU made test 5's first prompt exceed
-    # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
-    # the run scored as "0 chars, read the docs: False" — a harness failure wearing
-    # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
+    # nothing — a harness failure wearing a model failure's clothes (e.g. a cold GPU
+    # pushing the first prompt past `FANTASTIC_AI_SEND_TIMEOUT`). Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
     # THE TASK COMES FROM THE HUMAN, not from the harness: `user` dispatches it
     # as itself, so it is gated and the ledger names a real sender. The operator
     # still pokes the human once — that is the person pressing enter, and it is
@@ -623,10 +615,8 @@ async def run(
     spy = conn.proxy
     capped = ""
     # STOP ON NO PROGRESS, NOT ON TURN COUNT. A fixed turn budget cannot tell
-    # "slower" from "worse": measured 2026-08-24 under a 6-way parallel run, the two
-    # hard probes hit a 40-turn cap having done PARTIAL work that each had completed
-    # solo an hour earlier — the cap truncated real work and the run read as a model
-    # failure. What the cap is FOR is ending the re-verify-forever loop, and that
+    # "slower" from "worse": under parallel load a cap can truncate work the probe
+    # completes solo, and the run reads as a model failure. What the cap is FOR is ending the re-verify-forever loop, and that
     # loop has a signature: turns that mutate nothing. So count turns since the last
     # NEW CALL. Work that is still progressing is never cut; a model re-reading its own
     # result forever still stops. MAX_TURNS remains as a far backstop.
@@ -661,11 +651,10 @@ async def run(
             # Cancel the in-flight turn through the TASK TABLE — the same `ps` /
             # `cancel` an operator would use, not a private kill switch.
             # ps/cancel are KERNEL verbs — the ROOT answers them, and a task id
-            # already names its own agent. Addressed to `aid` (non-root) they came
-            # back `not_here` and the harness, which discards the reply, cancelled
-            # NOTHING: the cap only broke its own loop while the turns kept running.
-            # Measured 2026-08-25 — "capped" runs were not killed, they were
-            # abandoned, and their pending replies died with the process.
+            # already names its own agent. Addressed to `aid` (non-root) they come
+            # back `not_here`, and a harness that discards the reply cancels
+            # NOTHING: the cap would only break its own loop while the turns keep
+            # running.
             _t = (
                 (
                     (
@@ -695,8 +684,8 @@ async def run(
         else:
             idle += TICK
         if idle >= IDLE:
-            # AN IN-FLIGHT GENERATION IS NOT IDLE — see live_subai.py (measured
-            # 2026-08-25: the loop walked away mid-generation and scored FAIL).
+            # AN IN-FLIGHT GENERATION IS NOT IDLE — walking away mid-generation
+            # would score FAIL while the model is still working.
             _rows = (
                 (
                     (
@@ -725,9 +714,8 @@ async def run(
     # actually completed successfully, WHOSE COMMAND it records: that command IS the
     # artifact, and the canary re-issues it verbatim.
     # ON WHICHEVER EXEC AGENT RAN IT — the operator's leg when it was used, the agent
-    # the model built when it built one (see `pick_program_runner`). Before 2026-09-21
-    # this looked only at the operator's leg and failed runs that took the route the
-    # kernel's own readme advertises.
+    # the model built when it built one (see `pick_program_runner`), so a run that
+    # takes the route the kernel's own readme advertises can pass.
     runner_id, jobs = await pick_program_runner(root)
     job = _last_successful_job(jobs)
     has_artifact = job is not None
@@ -776,7 +764,7 @@ async def run(
                             "command": job["command"],
                             "args": job.get("args") or [],
                             # No `cwd`: WHERE a command runs is the runner's record,
-                            # and a per-call `cwd` is refused (audit 2026-09-28, a10).
+                            # and a per-call `cwd` is refused.
                             # Re-issued on the same runner, it runs where it ran.
                         },
                     }
@@ -789,9 +777,8 @@ async def run(
             waited += 3.0
             _k, _v, canary_ok = await find_value(root, mem["id"], new_total)
         if not canary_ok:
-            # SAY WHY. The re-run's reply and its job row were discarded before
-            # 2026-08-25, so a canary NO named nothing — the exact artifact later
-            # replayed CLEAN offline and the live cause was unrecoverable.
+            # SAY WHY. Without the re-run's reply and its job row, a canary NO names
+            # nothing and the live cause is unrecoverable.
             print(f"       canary start reply: {_cs!r}")
             if isinstance(_cs, dict) and _cs.get("job_id"):
                 _js = (

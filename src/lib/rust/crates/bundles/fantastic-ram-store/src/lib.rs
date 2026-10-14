@@ -60,8 +60,8 @@ pub const HANDLER_MODULE: &str = "ram_store.tools";
 /// (a model's `<limit>inf</limit>`, or a hex id like `3e500123` that `float()`
 /// reads as infinity). `json!` turns each operand into a `Value` through
 /// `to_value`, which re-parses that text and PANICS — and a panic here fires
-/// under the store's lock, so every later call answers "ram_store poisoned"
-/// (measured: E30 subai on rust, 2026-09-29). So a reply that carries a row is
+/// under the store's lock, so every later call would answer "ram_store
+/// poisoned". So a reply that carries a row is
 /// assembled with this, never with `json!` — the kernel's own
 /// `jsonsafe::obj` rule, which a bundle cannot import.
 fn obj<const N: usize>(pairs: [(&str, Value); N]) -> Value {

@@ -537,7 +537,7 @@ test("a `ledger` verb's store reads are bookkeeping — no call row; a stop ends
   assert.equal(k.tasks.has(fid), false);
 });
 
-// owner 2026-10-03 (audit KV-5): `cancel` refuses the kernel's own service tasks
+// `cancel` refuses the kernel's own service tasks
 test("cancel refuses the flusher; ps still lists it and it keeps flushing", async () => {
   const { k } = kernel();
   mk(k);
@@ -558,7 +558,7 @@ test("cancel refuses the flusher; ps still lists it and it keeps flushing", asyn
   assert.equal(k.store.rows.has(w.pid as number), false, "the flusher kept writing");
 });
 
-// owner 2026-10-03 (audit CLI-B): the kernel's own ledger flush publishes
+// the kernel's own ledger flush publishes
 // NOTHING on the state stream — a long-poll waiter is not woken; an id block
 // reserved inside the flush is quiet too
 test("the ledger flush publishes nothing on the state stream", async () => {

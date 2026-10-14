@@ -52,7 +52,7 @@ from relay_connector._relay import (
 
 def validate_meta(meta: dict, record: dict) -> str | None:
     """The record's own fields, refused at the write: `credentials` ({store, ref})
-    — the relay password lives in a credential_store (audit IO-7/F4, 2026-10-03)
+    — the relay password lives in a credential_store
     — then the bridge's `ingress_rule` check."""
     if meta.get("credentials") is not None and (
         bad := credentials_shape_error(meta["credentials"])

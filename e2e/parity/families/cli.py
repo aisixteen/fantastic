@@ -1,7 +1,5 @@
 """cli — the binary itself: one-shots, the daemon, the REPL on a tty, the lock,
-argument coercion, and the trees it hydrates from
-(`SCR/parity_capture_cli_ctx.py` cli part + `SCR/rpm_run.py` S1–S7 +
-`SCR/rpm_daemon.py` + `SCR/cli_verify*`).
+argument coercion, and the trees it hydrates from.
 
 This is the only family that does not go through REST: the subject IS the
 process — its argv parsing, its exit code, which stream it wrote to, what it
@@ -9,7 +7,7 @@ left on disk, and whether it came back from a SIGTERM. Every case gets its own
 workdir under `work/cli/<case>` with the SAME name on every runtime, so the diff
 lines up case for case.
 
-`sort_keys` is gone (round 2 sorted here and lost every key-order item), and the
+Nothing is key-sorted (that would lose every key-order item), and the
 signals and the 15-second grace are unchanged: python's PTY daemon survives its
 SIGTERM (A14.19) and swift needs the SIGKILL (C85), and both are measurements.
 """

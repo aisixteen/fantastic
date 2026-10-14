@@ -64,9 +64,8 @@ def limit_env(t: dict) -> dict:
     """A test's declared limits, rendered into the env its runner reads.
 
     ONE builder for the real run and the virtual one. `run.py` promises a dry run
-    never advertises something the run does not do, and the two used to render the
-    env separately — so `MAX_TOKENS`, added to the real path only, was invisible in
-    `--dry-run` (measured 2026-09-03).
+    never advertises something the run does not do; rendering the env separately
+    lets a variable added to one path go missing from the other.
     """
     out = {k: str(v) for k, v in (t.get("env") or {}).items()}
     lim = t.get("limits") or {}
@@ -96,14 +95,10 @@ LIMIT_ENV = (
 #: `runners/host.py`; the substrate is a plug (`KERNEL`), exactly as the model
 #: is a plug in `backends/`.
 #:
-#: python used to have its own in-process runner here, and it quietly made
-#: python the easier test: calling `root.send(...)` directly, it could name an
-#: execution, act as operator, and register bespoke in-process fixtures — none
-#: of which is reachable over HTTP. `user_actions` "passed" on python and
-#: "skipped" on rust while the two runs were not the same test at all. What that
-#: hid was a real gap in the product: no `web_rest`, in ANY runtime, could name
-#: an execution. Driving all three through one face surfaced it, and it was
-#: fixed in all three rather than worked around here.
+#: An in-process runner could call `root.send(...)` directly — name an
+#: execution, act as operator, register bespoke in-process fixtures — none of
+#: which is reachable over HTTP, so the same scenario would not be the same test
+#: on every runtime. Driving all three through one face keeps them comparable.
 #: The runtimes the host driver spawns — the ones with something to build.
 HOST_RUNTIMES = ("python", "rust", "swift")
 
@@ -163,9 +158,9 @@ def load_suite() -> list[dict]:
 
     out = []
     # SHARED SCENARIOS × RUNTIMES. One definition in `scenarios/`, executed by
-    # each runtime's runner. This is the cross-product that used to be four
-    # copied probe files per scenario — the copies drifted, and drifted results
-    # are not comparable, which is the only reason to run a scenario four times.
+    # each runtime's runner — not a copied probe file per runtime: copies drift,
+    # and drifted results are not comparable, which is the only reason to run a
+    # scenario on every runtime.
     runtimes = [
         r.strip()
         for r in os.environ.get("RUNTIMES", "python,rust,swift").split(",")
@@ -273,9 +268,8 @@ _GUESSED_ENDPOINT = re.compile(
 
 def check_no_guessed_endpoints() -> list[str]:
     """No `os.environ.get(VAR, "http://…")` anywhere in the harness. A loopback
-    model-server default survived in four files for weeks because it only fired in
-    a branch nobody ran — until a probe copied it and every runtime failed on a
-    server nobody wired (measured 2026-09-02). Loopback for the harness's OWN
+    model-server default hides in a branch nobody runs until a probe copies it and
+    every runtime fails on a server nobody wired. Loopback for the harness's OWN
     spawned kernel is fine; a guessed EXTERNAL endpoint is not."""
     out: list[str] = []
     for sub in ("tests", "backends", "helpers", "runners"):
@@ -354,21 +348,19 @@ def select(tests, groups, ids, backend_name, include_free, runtimes=()):
 
 
 # LONG TESTS SHARE THE MODEL. On one RTX6000, six long lanes push single turns past the
-# proxy's 180 s limit (measured 2026-09-06/08: 2–3 timeouts per long test at 6 lanes,
-# none at 1–2). A test marked `long: true` in its test.yaml takes one of these two
+# proxy's 180 s limit; at 1–2 lanes they do not. A test marked `long: true` in its test.yaml takes one of these two
 # slots FIRST, then a lane; short tests use the lanes freely.
 LONG_LANES = 2
 
-# LOAD TESTS RUN ALONE (owner, 2026-10-13: "its important to run isolated always
-# load tests"). A test marked `solo: true` in its test.yaml MEASURES the machine —
-# frame rate, GPU, a time bound — so another test beside it changes its numbers
-# (measured: 60 fps hovering alone, 41 beside five others). Solo tests run after
+# LOAD TESTS RUN ALONE. A test marked `solo: true` in its test.yaml MEASURES the
+# machine — frame rate, GPU, a time bound — so another test beside it changes its
+# numbers. Solo tests run after
 # the rest, one at a time, nothing else running.
 
-# THE HARD STOP. Owner, 2026-10-06: 15 minutes per test. A test still running then is
+# THE HARD STOP: 15 minutes per test. A test still running then is
 # stopped (its whole process group, kernel included) and scored FAIL with the reason
 # in its log — a run that needs longer is a finding, not a wait. A test that names its
-# own `hard_stop_minutes` in its test.yaml gets that instead (an owner's exception).
+# own `hard_stop_minutes` in its test.yaml gets that instead.
 HARD_STOP_S = 15 * 60
 
 
@@ -449,8 +441,8 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
                     )
                     fh.flush()
             except (asyncio.CancelledError, KeyboardInterrupt):
-                # THE LANE DIES WITH THE RUN. Ctrl-C or a cancelled batch used to leave
-                # the probe and its spawned kernel running (measured 2026-09-07).
+                # THE LANE DIES WITH THE RUN: Ctrl-C or a cancelled batch must not
+                # leave the probe and its spawned kernel running.
                 try:
                     os.killpg(proc.pid, signal.SIGTERM)
                 except ProcessLookupError:
@@ -698,14 +690,10 @@ async def main() -> int:
 
     # BUILD EACH KERNEL ONCE, HERE — not once per cell.
     #
-    # `ensure_runtime` used to run inside every cell, so a 5-cell swift run
-    # invoked `swift build` five times CONCURRENTLY and they serialised on the
-    # SwiftPM build lock: measured 4.2s / 4.7s / 5.3s / 5.8s / 6.3s for five
-    # no-op builds, and ~11s more whenever the tree had actually changed. That
-    # time was charged to the cells, which is why swift looked 2-4x slower than
-    # rust when its per-turn latency is in fact the same (1.15s vs 1.02s
-    # against the live endpoint) — and why the longest swift scenarios failed
-    # under 6 lanes but passed alone.
+    # `ensure_runtime` inside every cell would run concurrent builds that
+    # serialise on the build lock (SwiftPM's, for swift), and that time would be
+    # charged to the cells — making a runtime look slower than its per-turn
+    # latency, and failing long scenarios under many lanes.
     prebuilt = sorted(
         {t["runtime"] for t in picked if t.get("runtime") in HOST_RUNTIMES}
     )

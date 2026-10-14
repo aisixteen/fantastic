@@ -104,7 +104,7 @@ fn value_to_pattern(v: &Value) -> String {
     py_str(v)
 }
 
-/// Compile one `allowed` pattern in PYTHON's `re` dialect (A4.7 / D5).
+/// Compile one `allowed` pattern in PYTHON's `re` dialect.
 ///
 /// `fancy-regex`, not `regex`: python's engine is a backtracker, so an operator's
 /// allowlist may legitimately use `(?P<name>…)`, `(?P=name)`, a backreference or
@@ -137,7 +137,7 @@ pub fn command_permitted(meta: &Map<String, Value>, line: &str) -> Option<String
     for pat in &pats {
         // A broken pattern permits nothing; validate_meta refuses new ones. The
         // BARE pattern compiles first: wrapped, an unbalanced one (`x)|(?:.*`)
-        // closes the group early and matches every line (audit 2026-10-14).
+        // closes the group early and matches every line.
         if compile_pattern(pat).is_err() {
             continue;
         }
@@ -344,9 +344,9 @@ impl Bundle for ExecBridgeBundle {
         }
         // `password_ingress` is meaningless on an in-process leg: the token is
         // read off a WIRE ENVELOPE and the process edge has none — no frame ever
-        // presents one, so the rule could only refuse, or (until 2026-09-02) be
-        // satisfied by a secret persisted ON THE RECORD. Refused at the write
-        // (#116). Same rule as `fantastic_file::password_refusal`.
+        // presents one, so the rule could only refuse, or be satisfied by a
+        // secret persisted ON THE RECORD. Refused at the write. Same rule as
+        // `fantastic_file::password_refusal`.
         for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
             let Some(spec) = meta.get(field) else {
                 continue;
@@ -413,7 +413,7 @@ impl Bundle for ExecBridgeBundle {
                 );
             }
             // py reprs the RAW element and compiles `str(pat)`; the engine's own
-            // message after `': '` is the D4/D5 residual.
+            // message after `': '` is not matched.
             let raw_items: Vec<Value> = match raw {
                 Value::Array(a) => a.clone(),
                 other => vec![other.clone()],
@@ -440,12 +440,12 @@ impl Bundle for ExecBridgeBundle {
         let verb = raw_type.as_str().unwrap_or("");
         // AUTH GATE — the process edge, gated like any io_bridge leg (SEALED by
         // default). `reflect` and `connector` are UNGATED: discovery must work on a
-        // sealed bridge. Every other type is gated, MAIL INCLUDED (python `handler`,
-        // audit BV-8): a sealed leg delivers nothing to its program — the relay's
+        // sealed bridge. Every other type is gated, MAIL INCLUDED (python `handler`):
+        // a sealed leg delivers nothing to its program — the relay's
         // inbox drain refuses the same payloads, since the substrate's fanout
         // reaches it before this handler runs.
         //
-        // `shutdown` is NOT a verb (A4.3): python's VERBS has no such key, so it is
+        // `shutdown` is NOT a verb: python's VERBS has no such key, so it is
         // MAIL like any other unowned type.
         if !matches!(verb, "reflect" | "connector") {
             let meta = snapshot_meta(agent_id, kernel);
@@ -473,9 +473,8 @@ impl Bundle for ExecBridgeBundle {
             // `data` is bytes: on the text channel there is none to paste.
             "paste_image" => pty::paste_image_text(agent_id, payload),
             // The reference wire client SOURCE — a model pastes it at the top of
-            // its program instead of re-deriving the socket framing (measured
-            // 2026-09-01, E30 subai:rust: ten messages lost to int(fd)/buffering/
-            // not-seekable before the first working frame). Ungated like reflect.
+            // its program instead of re-deriving the socket framing (int(fd),
+            // buffering, not-seekable). Ungated like reflect.
             "connector" => json!({
                 "source": CONNECTOR_SRC,
                 "howto": "Write `source` verbatim as the first lines of your program file, then \
@@ -562,7 +561,7 @@ impl Bundle for ExecBridgeBundle {
         }
         Ok(())
     }
-    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    /// Shutdown frees what delete frees — declared, never a fallback.
     async fn on_shutdown(
         &self,
         agent_id: &AgentId,
@@ -578,7 +577,7 @@ impl Bundle for ExecBridgeBundle {
     ///
     /// TASK-SCOPED. `cancel <task_id>` must kill THAT job, not every child of the
     /// agent — a durable tool and a one-shot job can be in flight together, and
-    /// cancelling one used to take out the other.
+    /// cancelling one must not take out the other.
     ///
     /// The kernel runs every `on_cancel` in the subtree BEFORE aborting any future,
     /// so the OS process dies before its pump is dropped. Cancelling an
@@ -606,9 +605,9 @@ impl Bundle for ExecBridgeBundle {
 /// teaches the fix. `kind="spawn"` — that is what is being authorized; no rule
 /// inspects the kind, so a new one costs nothing and the audit trail is honest.
 ///
-/// The reply FORWARDS the rule's own `Denial` — reason, hint, see. Hand-rolling a
-/// hint here made one sealed leg teach a different repair per bundle and per
-/// runtime; the rule that refused is the thing that knows the repair.
+/// The reply FORWARDS the rule's own `Denial` — reason, hint, see. A hint
+/// hand-rolled here would teach a different repair per bundle and per runtime;
+/// the rule that refused is the thing that knows the repair.
 fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Value> {
     let spec = fantastic_io_bridge::authorizer::manifold_spec(
         meta.get("ingress_rule"),
@@ -620,7 +619,7 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
         kind: "spawn",
         target: agent_id.0.as_str(),
         verb,
-        // NO CREDENTIAL (A4.16). A token is a WIRE-ENVELOPE fact and the process
+        // NO CREDENTIAL. A token is a WIRE-ENVELOPE fact and the process
         // edge has no envelope; reading one off the RECORD would let a leg satisfy
         // its own password rule with a secret it stores itself. python's
         // `gate_inbound` here is handed an Action with `token=None`.
@@ -737,11 +736,10 @@ fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: nix::sys::signal:
 
 /// The `not_found` refusal for a named job this agent does not own, or `None`.
 ///
-/// A `job_id` naming nothing used to answer `{killed:0}`/`{interrupted:0}` — the
-/// same reply as "it had already exited", so a typo read as success. `status`
-/// answered a bare `{error}` with no code at all, and a caller branching on
-/// `reason == "not_found"` (what the corpus and the e2e scenarios pin) never
-/// matched on this runtime.
+/// A `job_id` naming nothing must not answer `{killed:0}`/`{interrupted:0}` —
+/// the same reply as "it had already exited", so a typo would read as success —
+/// nor a bare `{error}` with no code: a caller branches on
+/// `reason == "not_found"` (what the corpus and the e2e scenarios pin).
 fn no_job(agent_id: &AgentId, want: Option<&JobRef>) -> Option<Value> {
     let jid = want?;
     match jid.find(&jobs::jobs(), agent_id) {
@@ -864,8 +862,8 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     // EVERY refusal on this verb carries a CODE, so nothing has to tell a typo
     // from a policy refusal by matching prose.
     // WHERE and WITH WHAT a command runs are the OPERATOR's: a per-call `env`
-    // (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted line actually
-    // ran (audit 2026-09-28).
+    // (`LD_PRELOAD`, `PATH`, …) or `cwd` would change what an allowlisted line
+    // actually runs.
     for gone in ["env", "cwd"] {
         if payload.get(gone).is_some_and(|v| !v.is_null()) {
             return bad(
@@ -875,8 +873,8 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             );
         }
     }
-    // A WAKE-UP is a monitor's, never the start's: a `notify` here used to be
-    // dropped silently, and the caller waited for a message nothing would send.
+    // A WAKE-UP is a monitor's, never the start's: a `notify` here is refused,
+    // never dropped silently with the caller waiting for a message nothing sends.
     for gone in ["notify", "match", "every"] {
         if payload.get(gone).is_some_and(|v| !v.is_null()) {
             return bad("start", gone, START_WAKE_HINT);
@@ -1044,10 +1042,9 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             // py `f"exec_bridge: spawn failed: {e}"` over the OSError
             // `create_subprocess_exec` raises — `[Errno 2] No such file or
             // directory: 'nope'`, the COMMAND as the filename. A MISSING `cwd` is
-            // named instead, as CPython names it (its `noexec:chdir` path): measured
-            // 2026-10-06 (rust subai), a leg whose cwd did not exist answered
-            // `No such file or directory: 'python3'` and the model spent twenty
-            // turns hunting an interpreter that was there all along.
+            // named instead, as CPython names it (its `noexec:chdir` path): a leg
+            // whose cwd does not exist answering `No such file or directory:
+            // 'python3'` would send the model hunting an interpreter that is there.
             let culprit = if e.kind() == std::io::ErrorKind::NotFound
                 && !std::path::Path::new(&cwd).is_dir()
             {
@@ -1074,9 +1071,9 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     let (rd, wr) = ctrl.into_split();
     // THE PROGRAM'S SENDS ARE THIS AGENT'S SENDS — `spawn_task` carries the
     // dispatch identity into the relay. A `tokio::spawn` inherits no task-local,
-    // so the relay used to forward frames with NO sender, i.e. as the OPERATOR,
-    // ungated (measured live 2026-09-01, E30 subai:rust: a spawned program
-    // reached any agent). The runner's `can_call` bounds its programs.
+    // so the relay would forward frames with NO sender, i.e. as the OPERATOR,
+    // ungated, and a spawned program could reach any agent. The runner's
+    // `can_call` bounds its programs.
     // The relay's stop signal, held on the job row. `teardown` raises it instead of
     // aborting this task, so the relay leaves by its own read loop and the proxy
     // release after that loop actually runs.
@@ -1085,9 +1082,9 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     // THE PUMP IS THE JOB'S TASK, and the job's id IS that task's id — minted by
     // the kernel's one counter when the pump is forked (python `_start`). One number
     // names the job everywhere: `status`/`stop`/`write` take it as `job_id`, `ps`
-    // lists it, `cancel task_id=` kills it. (It used to be a random 8-hex string,
-    // which a model's `<job_id>04203581</job_id>` or `458e5912` coerced into an int
-    // or an infinite float — 3.7% of jobs could not be addressed again.)
+    // lists it, `cancel task_id=` kills it. (A random hex id would not survive a
+    // model's `<job_id>04203581</job_id>`: coerced into an int or an infinite
+    // float, it could not be addressed again.)
     //
     // The id exists only once the fork does, and a forked task may already be
     // running on another worker, so the pump learns its id through `ready` — sent
@@ -1245,10 +1242,10 @@ fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
 
 /// `clear` — forget this agent's FINISHED rows: one named job, or every one.
 ///
-/// A NAMED job follows the bare form's rule (python `_clear`, audit BV-5): a row
+/// A NAMED job follows the bare form's rule (python `_clear`): a row
 /// still `running` or `stopping` is refused. That row is the only handle `stop`,
 /// `cancel`, `delete` and shutdown kill its process through — dropped, the process
-/// outlived all four. `clear` is also the one caller that wants the label rather
+/// would outlive all four. `clear` is also the one caller that wants the label rather
 /// than process liveness — it is deciding what is finished enough to forget.
 fn clear_reply(agent_id: &AgentId, payload: &Value) -> Value {
     let want = match job_arg("clear", payload, false) {

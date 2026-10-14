@@ -80,6 +80,6 @@ async fn default_handle_binary_dispatches_header_and_drops_blob() {
     // The raw blob is NOT base64-encoded onto the payload — `data` stays absent.
     assert_eq!(reply["data"], Value::Null);
     // Default impl returns no reply body — `None`, which is what tells a leg
-    // "this verb answers no chunk" apart from a 0-byte one (C37).
+    // "this verb answers no chunk" apart from a 0-byte one.
     assert_eq!(body, None);
 }

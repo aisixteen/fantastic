@@ -17,10 +17,10 @@ extension IngressRules {
         }
 
         /// Gate EVERY inbound kind the choke point asks about — `call` AND the
-        /// data-bearing kinds (`spawn`, `watch`, `state_subscribe`, `emit`). It used
-        /// to short-circuit `.allow` for any kind but `call`, so a `password_ingress`
-        /// exec leg admitted `start` (kind `spawn`) with no credential and a web leg
-        /// leaked `watch` telemetry to a tokenless client (#7). Python checks the
+        /// data-bearing kinds (`spawn`, `watch`, `state_subscribe`, `emit`). Short-circuiting
+        /// `.allow` for any kind but `call` would let a `password_ingress` exec leg
+        /// admit `start` (kind `spawn`) with no credential and a web leg leak `watch`
+        /// telemetry to a tokenless client. Python checks the
         /// token unconditionally; so does this.
         public func authorize(_ action: AuthAction) -> AuthDecision {
             guard let expected = token() else {

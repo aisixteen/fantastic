@@ -78,7 +78,7 @@ public enum Codec {
     /// slot it names (swift's `JSON` holds no bytes; the body rides beside it).
     /// Returns the slot's steps, or `nil` when the header names none — absent or
     /// `null`, where python places no body. A path python's `set_path` cannot
-    /// place is the frame's error: `bad _binary_path <path>: <why>`, the old
+    /// place is the frame's error: `bad _binary_path <path>: <why>`, a
     /// dotted string included (`not a list of steps`).
     public static func placeBody(_ header: inout JSON) throws(FrameError) -> [PathStep]? {
         guard case .object(var members) = header,
@@ -156,9 +156,8 @@ public enum Codec {
     /// A frame arrives from a PEER, so every length in it is hostile until
     /// checked: a 4-byte prefix claiming 4 GiB of header on a 3-byte frame would
     /// slice garbage. The bounds are checked here, once, and every malformed
-    /// frame leaves as a `FrameError` CARRYING WHY — python's text. It used to
-    /// return `nil`, so the one caller that has to name the fault (the ws read
-    /// loop's skip line) had nothing to name it with. So is the header's
+    /// frame leaves as a `FrameError` CARRYING WHY — python's text, so the one caller that has to name the fault (the ws
+    /// read loop's skip line) can name it. So is the header's
     /// `_binary_path`: one python's `set_path` cannot place (`placeBody`) makes
     /// the frame malformed here, before any caller reads it.
     public static func decodeBinaryFrame(_ data: Data) throws(FrameError) -> (

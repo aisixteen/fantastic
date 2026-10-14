@@ -3,18 +3,17 @@
 //! A reasoning model streams two things. ollama labels them `message.thinking` /
 //! `message.content`; vLLM labels them `reasoning_content` / `content`. We must
 //! read BOTH — a turn spent entirely reasoning is otherwise an empty completion
-//! that silently ends the chain (measured on gemma4:12b, 2026-08-02). But we
+//! that silently ends the chain. But we
 //! must not KEEP both: feeding a reasoning model its own prior deliberation back
-//! is against every vendor's guidance, and it compounds — gemma's 3,800-char
-//! turn-1 deliberation is re-sent in every later prompt, crowding out the task.
+//! is against every vendor's guidance, and it compounds — a long early
+//! deliberation is re-sent in every later prompt, crowding out the task.
 //!
 //! Providers wrap reasoning in these markers, and everything downstream reads the
 //! ANSWER — the text with every span dropped whole: dispatch parses it and history
-//! persists it. A `<call>` written inside thinking is thinking (owner, 2026-10-07):
-//! measured over 2,821 e2e turns, of 106 calls inside thinking 39 were copies of an
-//! answer call (the action ran twice) and 67 were drafts that ran although the model
-//! never wrote them in its answer. One convention, no provider learns anything about
-//! the tool protocol.
+//! persists it. A `<call>` written inside thinking is thinking: a call drafted in
+//! thought either copies an answer call (the action would run twice) or is a
+//! draft the model never wrote in its answer. One convention, no provider learns
+//! anything about the tool protocol.
 //!
 //! This lives in its own module because the provider crates (ollama, vllm) import
 //! the markers — they are wire vocabulary, not loop internals.
@@ -30,8 +29,8 @@ pub const THINK_CLOSE: &str = "</think>";
 /// `THINKING_CAP`.
 pub const THINKING_CAP: usize = 32000;
 
-/// A generation's THINKING, for its assistant row (owner, 2026-10-12: a chat
-/// shows it collapsed under the answer, after a reload too): every
+/// A generation's THINKING, for its assistant row (a chat shows it collapsed
+/// under the answer, after a reload too): every
 /// `<think>…</think>` span of `text` (an unclosed one runs to the end), joined by
 /// a blank line — `{"thinking": …}`, the first [`THINKING_CAP`] characters, plus
 /// `{"thinking_cut": n}` when n more were dropped; empty when there was none.
@@ -147,11 +146,10 @@ impl ThinkWrap {
 /// property of the `/v1/chat/completions` streaming WIRE, not of a vendor.
 ///
 /// REASONING MODELS SPLIT THEIR OUTPUT. nemotron/deepseek-style models stream
-/// most tokens as `reasoning_content` and only the conclusion as `content`:
-/// measured 740 chars of reasoning to 129 of content on one turn, and 602 to
-/// 176 on gemma-4-12B. Reading `content` alone silently drops whole turns —
-/// observed live, a model spent an entire pass reasoning, an EMPTY completion
-/// came back, and the chain died with no error anywhere.
+/// most tokens as `reasoning_content` and only the conclusion as `content`.
+/// Reading `content` alone silently drops whole turns — a model that spends an
+/// entire pass reasoning returns an EMPTY completion, and the chain dies with no
+/// error anywhere.
 pub fn decode_openai_delta(delta: &serde_json::Value, wrap: &mut ThinkWrap) -> Vec<String> {
     let mut out = Vec::new();
     let think = delta
@@ -265,7 +263,7 @@ mod tests {
 
     #[test]
     fn a_call_written_inside_a_span_is_neither_dispatched_nor_stored() {
-        // ONLY THE ANSWER ACTS (owner, 2026-10-07): dispatch and history both read
+        // ONLY THE ANSWER ACTS: dispatch and history both read
         // the answer, so a call inside a thought does neither.
         let envelope = r#"<call name="send"><target_id>self</target_id><type>recall</type></call>"#;
         let kept = without_thinking(&format!("<think>I should {envelope}</think>done"));

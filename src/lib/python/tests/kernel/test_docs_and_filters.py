@@ -1,4 +1,4 @@
-"""`docs` and the reflect subtree filters (owner, 2026-10-05).
+"""`docs` and the reflect subtree filters.
 
 A reflect says what an agent IS; how to call it is the `docs` kernel verb,
 answered by the root, ungated, in two tiers. A reflect's tree can be cut to the
@@ -89,7 +89,7 @@ async def test_docs_of_a_bundle_and_of_the_kernel(seeded_kernel):
 async def test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one(
     seeded_kernel,
 ):
-    """PER-INSTANCE VERBS (owner, 2026-10-08): a bundle whose agents serve different
+    """PER-INSTANCE VERBS: a bundle whose agents serve different
     verbs names each one's table (`instance_verbs(agent)`); None keeps the bundle's."""
     import types
 
@@ -133,7 +133,7 @@ async def test_docs_refusals_are_coded(seeded_kernel):
 
 
 async def test_docs_is_gated_like_any_kernel_verb(seeded_kernel):
-    """No verb is exempt by name (owner, 2026-10-06): `docs` takes the two-sided
+    """No verb is exempt by name: `docs` takes the two-sided
     check against the root — an agent without the grant is refused at egress; one
     granted `docs` (both halves) reads them, and that grant covers nothing else."""
     k = seeded_kernel

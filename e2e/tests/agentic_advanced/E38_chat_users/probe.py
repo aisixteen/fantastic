@@ -327,8 +327,7 @@ async def main():
         checks.append(
             (
                 # ADDRESSED to the asking Sam — the first mention; crediting the
-                # announcer after it ("according to <@222>") is a correct reply
-                # (measured 2026-10-11).
+                # announcer after it ("according to <@222>") is a correct reply.
                 "e3 it is addressed to the asking Sam <@333> (first mention) and says 17:00",
                 any(p["mentions"][:1] == ["333"] and "17" in p["content"] for p in e3),
             )
@@ -401,8 +400,8 @@ async def main():
             (f"the code word reached nobody else ({len(leaks)} leaks)", not leaks)
         )
 
-        # A PING IS `<@digits>` (measured 2026-10-11: `<@user 555>` — plain text on a
-        # real platform, nobody pinged).
+        # A PING IS `<@digits>` (`<@user 555>` is plain text on a real platform —
+        # nobody is pinged).
         bad_mentions = [
             p["content"] for p in _posts() if re.search(r"<@(?!\d+>)", p["content"])
         ]

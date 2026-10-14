@@ -1,4 +1,4 @@
-// The PUMP runs both ends AS THE FILE_BRIDGE itself (owner 2026-10-04).
+// The PUMP runs both ends AS THE FILE_BRIDGE itself.
 //
 // Identity comes only from dispatch: `pump` sends its `read_stream` and
 // `write_stream` from inside its own dispatch, so both far ends judge THE BRIDGE —

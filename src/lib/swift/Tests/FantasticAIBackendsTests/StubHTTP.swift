@@ -94,12 +94,10 @@ final class StubHTTP: @unchecked Sendable {
 
         // THE ACCEPT THREAD OWNS `fd` (and the wake pipe's read end): it is the
         // only one that uses it and the only one that closes it, AFTER its last
-        // `accept`. `stop()` used to `close(listenFD)` from the test's thread while
-        // this loop was still accepting on that NUMBER: the OS handed the number
-        // to the next test's `socket()`, this stale loop accepted THAT stub's
-        // connection, saw itself stopped and closed it — the other test's
-        // provider read a closed connection as "refused" (measured: the vLLM
-        // suite failed 11 of 25 runs, a different test each time).
+        // `accept`. Closing it from the test's thread while
+        // this loop is still accepting on that NUMBER would let the OS hand the number
+        // to the next test's `socket()`, and this stale loop would accept and close
+        // THAT stub's connection.
         let wr = wakeRead
         Thread.detachNewThread { [weak self] in
             defer {

@@ -1,4 +1,4 @@
-// MONITORS (owner, 2026-10-09) — a filter on a running job's OUTPUT that tells an
+// MONITORS — a filter on a running job's OUTPUT that tells an
 // agent when something it watches for appears: how a long run is stopped EARLY.
 // Python `exec_bridge/_monitor.py`, rule for rule.
 //

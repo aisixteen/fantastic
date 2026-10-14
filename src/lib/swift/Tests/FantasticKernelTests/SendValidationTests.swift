@@ -1,8 +1,8 @@
 // `send` validates the ITEM before anything is resolved, gated or minted.
 //
-// Measured 2026-09-02 (python, ported): a payload without `type` reached the
-// gate and the target instead of being a coded refusal; a non-string `type`
-// raised out of `send`; rust/swift minted an id when the caller supplied `""`.
+// Python, ported: a payload without `type` is a coded refusal before the gate
+// and the target; a non-string `type` never raises out of `send`; a caller's
+// `""` mints no id.
 
 import FantasticJSON
 import Foundation
@@ -60,7 +60,7 @@ struct SendValidationTests {
         let kernel = freshKernel()
         await create(kernel, "a")
         // A non-string is named by its TYPE, never echoed — python's
-        // `type(verb).__name__` (audit 2026-10-03, W-11).
+        // `type(verb).__name__`.
         let cases: [(JSON, String)] = [
             (.array([.string("x")]), "list"), (.integer(7), "int"), (.double(1.5), "float"),
             (.object(["a": .integer(1)]), "dict"), (.string(""), "''"), (.null, "NoneType"),
@@ -77,8 +77,8 @@ struct SendValidationTests {
 
     /// A RAW BODY sent AS `type` (the octet REST leg's `X-Fantastic-Bytes-Field:
     /// type`, a binary frame's `_binary_path: [payload, type]`) is python's
-    /// `bytes` there: named by its type, never echoed — python's repr of it made
-    /// a 1 MiB body a 5 MiB refusal (audit 2026-10-03, W-11).
+    /// `bytes` there: named by its type, never echoed — python's repr of it would
+    /// make a 1 MiB body a 5 MiB refusal.
     @Test func aBodySentAsTypeIsRefusedByItsType() async {
         let kernel = freshKernel()
         await create(kernel, "a")
@@ -104,8 +104,8 @@ struct SendValidationTests {
         #expect(out.result["reason"].asString == "bad_arg", "\(out.result.serialize())")
         #expect(out.result["arg"].asString == "id")
         // NO MINTED NAMESPACE. A caller's id is a NAME, any non-empty string;
-        // ids are ints the kernel mints. The old `<agent>:<hex>` refusal was
-        // swift's own and is gone (python parity, 2026-09-12).
+        // ids are ints the kernel mints. There is no `<agent>:<hex>`
+        // refusal (python parity).
     }
 
     @Test func createAgentWithEmptyIdIsRefused() async {
@@ -117,7 +117,7 @@ struct SendValidationTests {
         #expect(kernel.allAgents().count == before, "no agent minted for \"\"")
     }
 
-    /// C30: an empty (or absent, by construction — `AgentId` is never
+    /// An empty (or absent, by construction — `AgentId` is never
     /// optional here, so an empty string is the only way to reach it) target
     /// is `missing_arg`, checked FIRST — before payload/timeout/verb.
     @Test func emptyTargetIsMissingArg() async {
@@ -128,7 +128,7 @@ struct SendValidationTests {
         #expect(out.result["arg"].asString == "target")
     }
 
-    /// C30/C38: `id` type-checks with python's exact "got <repr>" tail; a
+    /// `id` type-checks with python's exact "got <repr>" tail; a
     /// bool is refused the same as any other non-str/non-int (python: bool
     /// is an int SUBCLASS, but this kernel's `JSON` keeps the cases distinct,
     /// so a raw `true`/`false` id still lands here, matching python's
@@ -147,7 +147,7 @@ struct SendValidationTests {
             "\(out.result.serialize())")
     }
 
-    /// C38: an int `exec_id` that names no open execution is `bad_arg`, not a
+    /// An int `exec_id` that names no open execution is `bad_arg`, not a
     /// silent no-op — ids are minted by the kernel and only ever JOINED.
     @Test func intExecIdNamingNoExecutionIsBadArg() async {
         let kernel = freshKernel()
@@ -165,7 +165,7 @@ struct SendValidationTests {
             "\(out.result.serialize())")
     }
 
-    /// C38: an int `exec_id` that DOES name an open execution joins it — the
+    /// An int `exec_id` that DOES name an open execution joins it — the
     /// same execution, not a second one.
     @Test func intExecIdJoinsAnOpenExecution() async {
         let kernel = freshKernel()
@@ -179,7 +179,7 @@ struct SendValidationTests {
         #expect(second.pid == first.pid, "\(second.result.serialize())")
     }
 
-    /// C30/C38: `retries` must be a non-negative int; python's exact "got
+    /// `retries` must be a non-negative int; python's exact "got
     /// <repr>" tail.
     @Test func retriesMustBeANonNegativeInt() async {
         let kernel = freshKernel()
@@ -196,7 +196,7 @@ struct SendValidationTests {
         }
     }
 
-    /// C30/C38: a raw (tag-typed) `timeout` that is not a positive number
+    /// A raw (tag-typed) `timeout` that is not a positive number
     /// refuses with python's exact "got <repr>" tail — a caller relaying an
     /// untyped value (a malformed model arg) is REFUSED, not silently
     /// defaulted to "wait forever".

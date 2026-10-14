@@ -1,10 +1,9 @@
 //! A NAMED execution's task-table handle IS the caller's id.
 //!
-//! Measured 2026-09-02: `send([{target, payload, id: "job-1"}])` registered the
-//! dispatch under a freshly minted `<agent>:<hex>` pid, so `ps` showed an id the
-//! caller had never seen and `cancel task_id="job-1"` answered
-//! `{cancelled:false, killed:[]}` — the caller could neither find nor stop the
-//! execution it had just named. Python registers named work under `exec_id`.
+//! `send([{target, payload, id: "job-1"}])` registers the dispatch under
+//! `job-1`, never a freshly minted pid the caller has never seen — so `ps` shows
+//! the caller's id and `cancel task_id="job-1"` stops the execution it just
+//! named. Python registers named work under `exec_id`.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status};

@@ -28,7 +28,7 @@ fn context(payload: Value) -> Result<Option<String>, BundleError> {
 #[tokio::test]
 async fn reflect_advertises_exactly_what_it_accepts() {
     let reply = dispatch(json!({"type": "reflect"})).await.unwrap().unwrap();
-    // A9.3 — python's `_reflect` builds the dict in this order.
+    // Python's `_reflect` builds the dict in this order.
     let keys: Vec<&str> = reply
         .as_object()
         .unwrap()
@@ -53,7 +53,7 @@ async fn reflect_advertises_exactly_what_it_accepts() {
     }
 }
 
-/// A9.1 — the verb table is python's `VERBS`, in order, each doc the first line
+/// The verb table is python's `VERBS`, in order, each doc the first line
 /// of the python docstring. Two of them are cut mid-sentence on python; copying
 /// the whole sentence would be a divergence, not a courtesy.
 #[tokio::test]
@@ -104,7 +104,7 @@ async fn verb_docs_are_pythons_first_docstring_lines() {
     );
 }
 
-/// A9.4 — the vendored readme is python's, byte for byte.
+/// The vendored readme is python's, byte for byte.
 #[test]
 fn readme_is_pythons_verbatim() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -115,7 +115,7 @@ fn readme_is_pythons_verbatim() {
     assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
 }
 
-/// A14.1 — the vendored cheatsheet is python's `cli/help.md`, byte for byte.
+/// The vendored cheatsheet is python's `cli/help.md`, byte for byte.
 /// The binary prints THIS file, so a drift here is a drift in `fantastic --help`.
 #[test]
 fn help_md_is_pythons_verbatim() {
@@ -151,7 +151,7 @@ async fn every_accepted_verb_answers_null_rather_than_an_error() {
     }
 }
 
-/// A9.2 — the intro is the python map, and the identity names THIS runtime.
+/// The intro is the python map, and the identity names THIS runtime.
 #[tokio::test]
 async fn intro_booting_prints_the_control_plane_map() {
     let k = kernel();
@@ -188,7 +188,7 @@ async fn intro_booting_prints_the_control_plane_map() {
     );
 }
 
-/// A9.2 — `booted` is a DUMB SINK: one fixed line, no tree inspection. The
+/// `booted` is a DUMB SINK: one fixed line, no tree inspection. The
 /// bare kernel here has no agents at all, and the verb still answers.
 #[tokio::test]
 async fn booted_is_a_dumb_sink_no_tree_inspection() {
@@ -206,7 +206,7 @@ async fn booted_is_a_dumb_sink_no_tree_inspection() {
     assert_eq!(reply, Value::Null);
 }
 
-/// A9.5 — the tool-call entry line renders `json.dumps(args or {})`, not
+/// The tool-call entry line renders `json.dumps(args or {})`, not
 /// serde's compact spelling: python separates with `, ` and `: `, and escapes
 /// non-ASCII.
 #[test]
@@ -259,7 +259,7 @@ fn status_handler_renders_phase_markers() {
     assert!(status(json!({})).unwrap().is_none());
 }
 
-/// A9.6 — every value goes through python's `str()`, every default is keyed on
+/// Every value goes through python's `str()`, every default is keyed on
 /// PRESENCE, and the prefix is decided by python truthiness.
 #[test]
 fn status_values_render_like_python_str() {
@@ -328,7 +328,7 @@ fn status_values_render_like_python_str() {
     assert!(context(json!({"phase": "nonsense"})).unwrap().is_none());
 }
 
-/// A9.6 — the raise paths. Python does not render these; it dies, and the
+/// The raise paths. Python does not render these; it dies, and the
 /// kernel answers `{"error": …, "raised": true}`.
 #[tokio::test]
 async fn python_raise_paths_raise_here_too() {
@@ -409,7 +409,7 @@ async fn python_raise_paths_raise_here_too() {
     );
 }
 
-/// Audit BV-11 — every line this sink prints loses its C0/C1 control characters
+/// Every line this sink prints loses its C0/C1 control characters
 /// (and DEL), newline and tab kept: an escape sequence in agent or model text was
 /// INTERPRETED by the operator's terminal (a title, a clipboard write, a rewritten
 /// line). The same strings as python's `test_agent_text_reaches_the_terminal_…`.

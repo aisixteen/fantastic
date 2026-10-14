@@ -37,7 +37,7 @@ fn make_agent(id: &str) -> Arc<Agent> {
 
 #[test]
 fn summarize_never_truncates() {
-    // It used to cut at 160 chars + "...". A summary that silently drops the end of
+    // Never cut: a summary that silently drops the end of
     // a payload lies about what was sent, and the reader cannot tell a short payload
     // from a cut one — while the dropped part is exactly what you opened telemetry
     // to find. Eliding is a RENDER decision, where whoever is looking can see it
@@ -154,7 +154,7 @@ async fn unwatch_stops_fanout() {
     );
 }
 
-/// a16 (audit 2026-09-28): an emit onto ANOTHER agent's inbox passes the
+/// An emit onto ANOTHER agent's inbox passes the
 /// two-sided gate under verb `emit`; a denied emit is dropped. Emitting on your
 /// own inbox is how every bundle publishes, so it stays ungated.
 #[tokio::test]
@@ -282,7 +282,7 @@ async fn a_binary_item_routes_through_bundle_handle_binary() {
 
 #[tokio::test]
 async fn binary_dispatch_refusals_match_the_text_channel() {
-    // C34: python has ONE dispatch path for both channels, so a binary send to
+    // Python has ONE dispatch path for both channels, so a binary send to
     // a bare agent (no handler_module) or one whose bundle is not installed
     // answers the exact same UNHANDLED shape + `verb` the text channel does —
     // not a different, binary-only wording.
@@ -333,7 +333,7 @@ async fn binary_dispatch_refusals_match_the_text_channel() {
 
 #[tokio::test]
 async fn a_binary_bundle_error_settles_raised() {
-    // C34: a bundle error on the binary channel settles `raised:true`,
+    // A bundle error on the binary channel settles `raised:true`,
     // exactly like the text channel's bundle-error path.
     use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
     struct Boom;
@@ -412,7 +412,7 @@ async fn list_agents_returns_records_for_every_registered() {
 
 #[tokio::test]
 async fn list_agents_points_back_at_the_briefing() {
-    // C23: python's `_LIST_HINT` reads `<type>reflect</type>` — the TAG form,
+    // Python's `_LIST_HINT` reads `<type>reflect</type>` — the TAG form,
     // not `{type:'reflect'}` — since that is the wire grammar a caller
     // actually sends.
     let kernel = Arc::new(Kernel::new());
@@ -434,7 +434,7 @@ async fn list_agents_points_back_at_the_briefing() {
 
 #[tokio::test]
 async fn handler_module_not_installed_is_the_python_unhandled_shape() {
-    // C24: `agent <id!r>: handler_module <hm!r> cannot be imported in this
+    // `agent <id!r>: handler_module <hm!r> cannot be imported in this
     // runtime: <tail>` — the stable PREFIX is pinned; the exception tail is
     // not (python's own wording drifts between runs), so only the prefix and
     // the `reason`/`verb` machine fields are checked.
@@ -580,10 +580,6 @@ async fn an_ungranted_agent_cannot_watch_another() {
     // prompt, the document body, whatever was sent. So an ungated `watch` is a
     // read side-channel around `callable_by`: an agent that may not CALL an
     // agent could still read everything sent TO it.
-    //
-    // Found 2026-08-27 in a client audit: a browser leg granted exactly
-    // `assistant:[send]` could mirror ANY agent's inbox in its session and read
-    // the packed confidential context out of the model's prompt.
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
@@ -665,7 +661,7 @@ async fn the_state_stream_needs_the_roots_own_grant_too() {
         .is_none());
 }
 
-// ─── C20: the gate's denial shapes are python's ────────────────
+// ─── The gate's denial shapes are python's ────────────────
 
 /// An agent with an explicit grant, registered under `parent`.
 fn granted(id: &str, parent: Option<&str>, field: &str, grant: Value) -> Arc<Agent> {
@@ -689,8 +685,7 @@ fn keys(v: &Value) -> Vec<&str> {
 async fn gate_denial_keys_are_error_reason_hint_side() {
     // Python builds these through `refusal(code, error, hint=…, side=…)`:
     // `refusal` writes `error, reason`, then `hint` if truthy, then merges the
-    // extras — so `side` is LAST. The port wrote `side` before `hint`, and the
-    // measured `prompt_req_05.json` msg 8 disagreed key for key.
+    // extras — so `side` is LAST.
     let kernel = Arc::new(Kernel::new());
     let root = make_agent("kernel_state");
     kernel.register(Arc::clone(&root));
@@ -725,7 +720,7 @@ async fn gate_denial_keys_are_error_reason_hint_side() {
     assert_eq!(d["side"], "ingress");
 }
 
-// ── C36: the call row and its settle ───────────────────────────────────
+// ── the call row and its settle ────────────────────────────────────────
 
 /// A bundle that answers whatever the payload asks for: `{"type":"work"}` is a
 /// plain reply, `{"type":"nope"}` a domain refusal with a `reason`.
@@ -746,7 +741,7 @@ impl crate::bundle::Bundle for C36Bundle {
             "nope" => Ok(Some(
                 json!({"error": "х".repeat(300), "reason": "not_found", "extra": 1}),
             )),
-            // C89: echoes back WHATEVER `error` value the caller sent, so one
+            // Echoes back WHATEVER `error` value the caller sent, so one
             // handler can probe every falsy shape python's truthiness admits.
             "echo_error" => Ok(Some(
                 json!({"error": payload.get("error").cloned().unwrap_or(Value::Null)}),
@@ -829,7 +824,7 @@ async fn a_dispatch_writes_a_call_row_with_outcome() {
 
 #[tokio::test]
 async fn an_unnamed_kernel_reflect_writes_no_row() {
-    // C88: python's UNNAMED `kernel` reflect fast path (`_agent.py:846`) — a
+    // Python's UNNAMED `kernel` reflect fast path (`_agent.py:846`) — a
     // pure identity read with no ledger entry, no call row, no task-table
     // row, and the outcome's pid is None.
     let (kernel, _worker) = c36_kernel();
@@ -903,7 +898,7 @@ async fn an_errored_call_row_stamps_the_python_error_and_reason() {
 
 #[tokio::test]
 async fn a_falsy_non_string_error_settles_completed() {
-    // C89: python `ERRORED if isinstance(reply, dict) and reply.get("error")
+    // Python `ERRORED if isinstance(reply, dict) and reply.get("error")
     // else COMPLETED` (`_agent.py:1051-1052`) — FULL truthiness, not "the key
     // is present". `0`, `0.0`, `[]`, `{}` and `""` are all falsy.
     let (kernel, worker) = c36_kernel();
@@ -1018,7 +1013,7 @@ async fn a_nested_send_names_its_caller_as_parent() {
     assert_eq!(rows[0]["parent"], Value::Null);
 }
 
-// ─── C28 / C29 / C76 / C77 / C78 / C86 — the fanout contract ─────────
+// ─── The fanout contract ─────────
 
 #[tokio::test]
 async fn a_registered_agent_without_a_reader_cannot_be_a_watcher() {
@@ -1101,7 +1096,7 @@ fn peek_kernel() -> (Arc<Kernel>, Arc<Agent>) {
 
 #[tokio::test]
 async fn send_fans_out_before_the_handler_runs() {
-    // C76: the mirror happens at DISPATCH START, not after the reply — so a
+    // The mirror happens at DISPATCH START, not after the reply — so a
     // handler already sees the request that woke it, and a watcher's echo
     // precedes every event the handler goes on to emit.
     let (kernel, agent) = peek_kernel();
@@ -1122,7 +1117,7 @@ async fn send_fans_out_before_the_handler_runs() {
 
 #[tokio::test]
 async fn send_payload_reaches_the_targets_own_registered_inbox() {
-    // C76: the target's OWN inbox, not only its watchers'. A reader that
+    // The target's OWN inbox, not only its watchers'. A reader that
     // registered one is told what was sent TO it.
     let (kernel, agent) = peek_kernel();
     let mut rx = kernel.ensure_inbox(&agent.id);
@@ -1149,7 +1144,7 @@ async fn send_payload_reaches_the_targets_own_registered_inbox() {
 
 #[tokio::test]
 async fn emit_to_a_non_agent_id_is_a_noop() {
-    // C78: a synthetic id (a browser client `_ws_<hex>`) is not an agent. No
+    // A synthetic id (a browser client `_ws_<hex>`) is not an agent. No
     // inbox put, no state event — python resolves the agent first and returns.
     let kernel = Arc::new(Kernel::new());
     let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
@@ -1179,26 +1174,20 @@ async fn a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
     // - the forked BODY runs afterwards, on its own, and its rows follow the
     //   `task` row that names it.
     //
-    // WHAT IT DOES NOT GUARANTEE, and this test therefore no longer asserts:
-    // that the body's FIRST row lands before `settle`. This test used to (as
-    // `a_forked_body_mints_before_the_dispatch_settles`), on the grounds that
-    // python's FIFO ready queue runs the body before the settle resumes. Rust
-    // has no such ordering: the body is a `tokio::spawn` and the dispatch
-    // settles without waiting on it. On an idle runtime the body usually ran
-    // first — tokio parks a fresh spawn in the spawning worker's LIFO slot and
-    // runs it at that worker's next yield — which is why 50/50 passed alone.
-    // Under load it did not (measured 2026-09-30: 8 of 40 full-crate runs,
-    // mostly "the body had not run at all when `send` returned", once "body row
-    // 4 after settle row 3"). Making python's order a GUARANTEE is a kernel
-    // change (the owner's decision; see the `ai_paths` id-order note below),
-    // not something a test can assume.
+    // WHAT IT DOES NOT GUARANTEE, and this test therefore does not assert:
+    // that the body's FIRST row lands before `settle`. Python's FIFO ready queue
+    // runs the body before the settle resumes; rust has no such ordering: the
+    // body is a `tokio::spawn` and the dispatch settles without waiting on it.
+    // On an idle runtime the body usually runs first — tokio parks a fresh spawn
+    // in the spawning worker's LIFO slot and runs it at that worker's next
+    // yield — but under load it may not have run at all when `send` returns.
+    // Making python's order a GUARANTEE is a kernel change, not something a
+    // test can assume.
     //
-    // The ai_paths id-order divergence measured on 2026-09-21 (`deliver_reply`
-    // rows 2 ids late, `call send` rows 1 early) is a deeper chain (a spawned
-    // body that itself spawns) and is open on the owner — a single
-    // `yield_now()` at python's await point in `settle` fixed the
-    // `deliver_reply` class and made the `call send` class worse (ai_to_ai
-    // id/parent mismatches 71 -> 166), and one worker thread was worse still.
+    // A deeper chain (a spawned body that itself spawns) diverges from python's
+    // id order too; a single `yield_now()` at python's await point in `settle`
+    // fixes one class (`deliver_reply` rows) and worsens another (`call send`
+    // rows), and one worker thread is worse still.
     use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
     use tokio::sync::Notify;
     struct Forker {
@@ -1281,7 +1270,7 @@ async fn a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
 
 #[tokio::test]
 async fn a_watched_write_stream_reaches_the_watcher_with_its_body() {
-    // C86: the binary channel's payload rides the inbox WHOLE. The watcher gets
+    // The binary channel's payload rides the inbox WHOLE. The watcher gets
     // the head with `bytes` nulled AND the raw body — which is what the WS drain
     // re-encodes into the binary frame python sends.
     use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
@@ -1582,8 +1571,8 @@ async fn a_literal_key_body_is_one_top_level_key() {
 async fn binary_dispatch_runs_the_same_pre_bundle_path_as_text() {
     // python's `handle` is ONE path: the root answers `reflect` with the
     // substrate identity whether the payload carried bytes or not. The binary
-    // channel used to go straight to the bundle, so an octet `reflect` on the
-    // ROOT described the loader instead of the kernel.
+    // channel takes the same path, so an octet `reflect` on the ROOT describes
+    // the kernel, never the loader.
     use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
     struct Loader;
     #[async_trait::async_trait]
@@ -1630,7 +1619,7 @@ async fn binary_dispatch_runs_the_same_pre_bundle_path_as_text() {
 
 #[tokio::test]
 async fn state_summary_is_python_json_dumps() {
-    // C77: `json.dumps(shrunk, ensure_ascii=False)` — `, `/`: ` separators, raw
+    // `json.dumps(shrunk, ensure_ascii=False)` — `, `/`: ` separators, raw
     // non-ASCII, bytes as `<bytes:N>`, never truncated.
     let kernel = Arc::new(Kernel::new());
     kernel.register(make_agent("tgt"));
@@ -1693,7 +1682,7 @@ async fn a_literal_dotted_key_summarizes_at_that_key() {
     );
 }
 
-// ─── C2 + C4 — the kernel_verbs map is python's `_SYSTEM_VERB_DOCS` ─────────
+// ─── The kernel_verbs map is python's `_SYSTEM_VERB_DOCS` ─────────
 
 /// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
 /// (`P/kernel/_agent.py`).
@@ -1758,7 +1747,7 @@ fn docs_signatures_are_pythons() {
     assert_eq!(crate::docs::signature("No args."), "No args");
 }
 
-// ─── STEP-4 PINS (2026-10-01): one dispatch per channel ──────────────────────
+// ─── one dispatch per channel ───────────────────────────────────────────────
 //
 // The text and binary dispatch paths carry the same prologue (kernel-verb
 // root-only check, root reflect, bare-agent answers, not-installed refusal,
@@ -2001,7 +1990,7 @@ async fn binary_refusals_for_bare_and_uninstalled_agents_are_byte_identical_to_t
     }
 }
 
-// ─── STEP-4 PINS: the call context at every hop (CallCtx) ───────────────────
+// ─── PINS: the call context at every hop (CallCtx) ─────────────────────────
 
 /// Records, per handler run, what the call context says, and forwards along
 /// `next` — every forward the handler's own send, so gated as that agent.
@@ -2261,7 +2250,7 @@ async fn while_draining_shutdown_traffic_and_live_work_pass_and_new_roots_do_not
     assert!(!in_shutdown());
 }
 
-// ─── STEP-4 PINS: `ack_deadletter` (kernel_verbs' `as_id` / `raised` users) ──
+// ─── PINS: `ack_deadletter` (kernel_verbs' `as_id` / `raised` users) ───────
 
 #[tokio::test]
 async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
@@ -2421,7 +2410,7 @@ async fn a_marked_value_is_shown_never_kept() {
 }
 
 /// While draining, a FORK starting a send is new work: refused. A keepalive fork
-/// (a persister) still sends (python `drain_admits`; audit 2026-10-14).
+/// (a persister) still sends (python `drain_admits`).
 #[tokio::test]
 async fn while_draining_a_fork_is_refused_and_a_keepalive_fork_is_not() {
     let (kernel, _log) = hop_chain();

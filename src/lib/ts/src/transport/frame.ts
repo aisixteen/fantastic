@@ -82,7 +82,7 @@ function setPath(obj: unknown, path: unknown, value: unknown): void {
     const step: unknown = path[n];
     const last = n === path.length - 1;
     if (Array.isArray(cur)) {
-      // A FLOAT step (owner 2026-10-03, fixed): python reads `1.0`, `1e0`, `1e20`
+      // A FLOAT step: python reads `1.0`, `1e0`, `1e20`
       // as a float and refuses it here; JS holds it as the integer 1. The head is
       // parsed by `strictLoads`, which keeps each number's spelling from the
       // parse's source text, so `wireFloat` names the step python refuses.
@@ -147,7 +147,7 @@ export function binaryPaths(obj: unknown, prefix: BinaryPathStep[] = []): Binary
 }
 
 /** ONE binary body per frame: an envelope holding more is refused, naming each
- *  path — it used to go out with the second value written as `{}`. */
+ *  path. */
 function oneBody(envelope: Envelope): void {
   const paths = binaryPaths(envelope);
   if (paths.length > 1) {

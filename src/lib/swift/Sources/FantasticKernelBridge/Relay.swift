@@ -4,7 +4,7 @@
 // `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, header
 // `X-Fantastic-Auth: <group password>` checked once at the WS upgrade) and reach
 // a fixed `partner` GUID. The password is a SECRET and lives only in a
-// credential_store (audit IO-7/F4, 2026-10-03): the record names it —
+// credential_store: the record names it —
 // `credentials: {store, ref}` — and before EVERY dial the connector reads the
 // ref's `password` field as itself (the dial runs in its own dispatch, or a task
 // it spawned), pinned to the relay URL's host, exactly as an AI backend reads its
@@ -402,11 +402,9 @@ public actor RelayTransport: BridgeTransport {
     ///
     /// THE DIAL COMES FIRST AND THE SLEEP ONLY AFTER A FAILED ONE, exactly as
     /// python's loop is written (`try: dial ... except: await sleep; continue`).
-    /// Sleeping before the first attempt charged a full `reconnect` interval to
-    /// a socket that was already gone — and `recv`'s own catch has ALREADY slept
-    /// one, so a drop healed at 2x the backoff. Measured on the parity `bridges`
-    /// capture: `relay_connections` 1 where python opened 2, because python's
-    /// re-dial landed inside the window and this one did not.
+    /// Sleeping before the first attempt would charge a full `reconnect` interval
+    /// to a socket that is already gone — and `recv`'s own catch has ALREADY slept
+    /// one, so a drop would heal at 2x the backoff.
     private func reconnect() async -> (any RelayWire)? {
         guard reconnectSecs > 0, let dialer else { return nil }
         while !closedFlag {

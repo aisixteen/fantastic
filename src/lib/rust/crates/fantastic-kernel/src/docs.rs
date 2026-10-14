@@ -1,7 +1,7 @@
 //! HOW TO CALL an agent — the `docs` kernel verb, and the reflect subtree
 //! filters (python `kernel/_docs.py`).
 //!
-//! A reflect says what an agent IS (owner, 2026-10-05): id, sentence, state,
+//! A reflect says what an agent IS: id, sentence, state,
 //! grants, tree. How to call it — verb signatures, emits, cancel, notes — is
 //! `docs`, pulled per BUNDLE, in two tiers: `oneliners` (default) — each doc's
 //! first paragraph cut at its first top-level `. ` or ` — ` (never inside
@@ -105,12 +105,12 @@ pub fn render(
     Value::Object(out)
 }
 
-/// `docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>` (owner,
-/// 2026-10-06) — python `Agent._remote_docs`. The question goes to THAT kernel's own
+/// `docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>` — python
+/// `Agent._remote_docs`. The question goes to THAT kernel's own
 /// `docs`, and the reply names the qualified id. The asker's own `docs` grant on THIS
 /// root is what the gate checked; this kernel then asks as itself over the peer's
-/// live routes, and the peer judges its leg. Measured 2026-10-06 (canvas E55/E58): with verbs out of reflect a model
-/// could not learn a page agent's verbs at all and explored until its time ran out.
+/// live routes, and the peer judges its leg. With verbs out of reflect, this is
+/// how a model learns a page agent's verbs at all.
 pub async fn remote_docs_reply(kernel: &Arc<Kernel>, of: &str, payload: &Value) -> Value {
     let (guid, agent_id) = of.split_once('|').unwrap_or(("", ""));
     let target = if !guid.is_empty() && !agent_id.is_empty() && !agent_id.contains('|') {
@@ -195,15 +195,14 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
             None => return render(of, Value::Null, tier, verb, &json!({}), &[]),
         }
     } else if kernel.bundles.is_folder(of) {
-        // a FOLDER BUNDLE by its name — its handler_module (owner, 2026-10-08)
+        // a FOLDER BUNDLE by its name — its handler_module
         of.to_string()
     } else if let Some((hm, _)) = kernel
         .bundles
         .catalog()
         // A BUNDLE by either name the kernel lists it under: `bundles='ids'` lists
         // the NAME (`file_bridge`), an agent record carries the handler_module
-        // (`file_bridge.tools`). Measured 2026-10-06 (rust, plan + build): models
-        // asked for the listed name and were refused.
+        // (`file_bridge.tools`) — a model asks for the listed name.
         .find(|(hm, b)| *hm == of || b.name() == of)
     {
         hm.to_string()
@@ -223,7 +222,7 @@ pub fn docs_reply(kernel: &Arc<Kernel>, payload: &Value) -> Value {
     let Some(bundle) = kernel.bundles.get(&module) else {
         return render(of, json!(module), tier, verb, &json!({}), &[]);
     };
-    // PER-INSTANCE VERBS (owner, 2026-10-08): an agent whose bundle names its own
+    // PER-INSTANCE VERBS: an agent whose bundle names its own
     // table (an MCP server's tools) is documented by it; the bundle (no agent)
     // shows the bundle's.
     let table = agent

@@ -88,9 +88,9 @@ _jobs: dict[int, dict] = {}
 
 # The verbs that DRIVE one job. A running program's owner-inbox relay
 # (`on_message`) forwards one of these only when its `job_id` names THAT program's
-# own job (audit BV-9): the fanout mirrors every payload sent to the leg, so a
-# program started by one caller saw another caller's keystrokes, paste bytes and
-# drive calls aimed at that caller's job.
+# own job: the fanout mirrors every payload sent to the leg, so otherwise a
+# program started by one caller would see another caller's keystrokes, paste bytes
+# and drive calls aimed at that caller's job.
 DRIVE_VERBS = frozenset(
     {"write", "resize", "paste_image", "stop", "interrupt", "clear"}
 )
@@ -125,7 +125,7 @@ def _has_running_job(owner_id: str) -> bool:
 async def _read_stream(reader, job, stream, owner, job_id, kernel):
     """Stream one pipe line-by-line: a `progress` event per line, the line into the
     job's ring. Nothing else keeps it — the ring is the job's only copy, so a
-    chatty job never grows past it (audit 2026-10-14)."""
+    chatty job never grows past it."""
     async for raw in reader:
         text = raw.decode("utf-8", errors="replace")
         job["lines"] += 1
@@ -204,10 +204,10 @@ async def _pipe_body(job, job_id, owner, process, kernel):
 def _inbox_framer(owner_id, job_id, kernel):
     """on_message framer for job `job_id`: forward traffic on the owner agent, minus
     the job's own telemetry (its progress/job_started/job_done emits echo back via
-    the owner), minus a drive verb addressed to ANOTHER job (`DRIVE_VERBS`, audit
-    BV-9) — and nothing the leg's gate refuses. The substrate's fanout mirrors every
-    payload to the owner's watchers BEFORE any handler runs, so a sealed leg
-    whose handler refused the call still had it delivered here (audit BV-8)."""
+    the owner), minus a drive verb addressed to ANOTHER job (`DRIVE_VERBS`) — and
+    nothing the leg's gate refuses. The substrate's fanout mirrors every payload to
+    the owner's watchers BEFORE any handler runs, so without that check a sealed leg
+    whose handler refused the call would still have it delivered here."""
 
     def frame(payload):
         if isinstance(payload, dict) and payload.get("type") in (
@@ -246,8 +246,7 @@ def _unframe(body: bytes) -> dict:
 async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_push=None):
     """Relay a job's wire calls into the real kernel (child → spawner → kernel).
 
-    `ops` / `on_push` let another spawner reuse this ONE relay (py_agent, owner
-    2026-10-08): `ops` maps an extra child op to an awaitable handler of its frame,
+    `ops` / `on_push` let another spawner reuse this ONE relay (py_agent): `ops` maps an extra child op to an awaitable handler of its frame,
     and `on_push` receives the `push` function once the channel is open, so the
     spawner can write its own frames (a `call`) down the same fd.
 
@@ -257,8 +256,8 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
 
     Wire: `[4-byte BE length | kind | rest]`, both directions — kind T a JSON
     envelope, kind B the shared io_bridge binary frame for a payload or reply that
-    carries raw bytes (`read_stream`/`write_stream`). A bytes reply used to be
-    unserializable here and reached the program as None (measured 2026-09-02).
+    carries raw bytes (`read_stream`/`write_stream`), so a bytes reply reaches the
+    program intact.
 
     The proxy ids carry this bundle's prefix (`_xb…`): two spawner bundles in one kernel
     must not collide on a synthetic inbox id.
@@ -295,8 +294,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
     def release(src, proxy, task):
         """Give a proxy back: unwatch, DROP THE INBOX ROW, cancel the drain.
 
-        The `inboxes.pop` is the step that used to be missing: a leaked proxy
-        keeps every later payload on `src` being copied into a Queue nobody
+        Without the `inboxes.pop` a leaked proxy keeps every later payload on `src` being copied into a Queue nobody
         drains — one per (job, watched src), forever."""
         kernel.unwatch(src, proxy)
         kernel.ctx.inboxes.pop(proxy, None)
@@ -336,7 +334,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
             except (UnicodeDecodeError, ValueError, KeyError, IndexError, struct.error):
                 continue  # a malformed frame skips the frame, never the connection
             if not isinstance(m, dict):
-                continue  # so does valid JSON that is no envelope (`T[1]`, audit W-9)
+                continue  # so does valid JSON that is no envelope (`T[1]`)
             op = m.get("op")
             if op in ops:
                 await ops[op](m)
@@ -356,7 +354,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
             elif op == "watch":
                 src = m.get("src")
                 # An agent id is a string; any other `src` names nothing to watch
-                # (a list used to raise out of `in subs` and end the relay).
+                # (a list would raise out of `in subs` and end the relay).
                 if isinstance(src, str) and src and src not in subs:
                     proxy = f"_xbw_{job_id}_{src}"
                     # REGISTER THE READER FIRST. `watch` refuses a watcher
@@ -875,8 +873,8 @@ async def _start(id, payload, kernel):
     # Every refusal on this verb carries a CODE, so a model can tell a typo from a
     # policy refusal without reading the prose.
     # WHERE and WITH WHAT a command runs are the OPERATOR's: a per-call `env`
-    # (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted line actually
-    # ran (audit 2026-09-28).
+    # (`LD_PRELOAD`, `PATH`, …) or `cwd` would change what an allowlisted line
+    # actually runs.
     for gone in ("env", "cwd"):
         if payload.get(gone) is not None:
             return bad(
@@ -884,8 +882,8 @@ async def _start(id, payload, kernel):
                 gone,
                 f"absent — `{gone}` is the record's (update_agent {id} {gone}=…)",
             )
-    # A WAKE-UP is a monitor's, never the start's: a `notify` here used to be
-    # dropped silently, and the caller waited for a message nothing would send.
+    # A WAKE-UP is a monitor's, never the start's: a `notify` here is refused,
+    # never dropped silently with the caller waiting for a message nothing sends.
     for gone in ("notify", "match", "every"):
         if payload.get(gone) is not None:
             return bad(
@@ -1025,7 +1023,7 @@ async def _start(id, payload, kernel):
         "exit_code": None,
         "lines": 0,
         "last_line": "",
-        # THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
+        # THE LIVE LINE RING: every line a pipe job prints, as
         # (n, stream, line), the last LINE_RING bytes — what `tail`/`grep` read,
         # running or ended. The job's only copy of its output.
         "line_ring": collections.deque(),
@@ -1054,9 +1052,9 @@ async def _start(id, payload, kernel):
     # THE PUMP IS THE JOB'S TASK, and the job's id IS that task's id — minted
     # by the kernel's one counter when the pump is forked. One number names the
     # job everywhere: `status`/`stop`/`write` take it as `job_id`, `ps` lists it,
-    # `cancel task_id=` kills it. (It used to be a random 8-hex string, which a
-    # model's `<job_id>04203581</job_id>` or `458e5912` coerced into an int or
-    # an infinite float — 3.7% of jobs could not be addressed again.)
+    # `cancel task_id=` kills it. (A random hex string would be coerced by the
+    # tag grammar into an int or an infinite float, e.g. `04203581` or `458e5912`,
+    # and the job could not be addressed again.)
     #
     # The id exists only once the fork does, so the pump learns it through
     # `ready`, resolved the moment the job's row is in `_jobs` — never assuming
@@ -1240,8 +1238,9 @@ async def _unmonitor(id, payload, kernel):
 def _no_job(verb: str, id: str, jid) -> dict | None:
     """The `not_found` refusal for a named job this agent does not own, or None.
 
-    A job_id naming nothing used to answer `{killed:0}` / `{interrupted:0}` — the
-    same reply as "it had already exited", so a typo read as success."""
+    A job_id naming nothing is refused rather than answered `{killed:0}` /
+    `{interrupted:0}` — the same reply as "it had already exited", so a typo would
+    read as success."""
     if jid is None:
         return None
     if jid not in _jobs or _jobs[jid].get("owner") != id:
@@ -1297,9 +1296,9 @@ async def _clear(id, payload, kernel):
     if err:
         return err
     if jid is not None and jid in _jobs and _jobs[jid].get("owner") == id:
-        # A NAMED job follows the bulk form's rule (audit BV-5): a row still
-        # running or stopping is the only handle stop, cancel, delete and
-        # shutdown kill its process through — forgotten, it outlived them all.
+        # A NAMED job follows the bulk form's rule: a row still running or
+        # stopping is the only handle stop, cancel, delete and shutdown kill its
+        # process through — forgotten, it would outlive them all.
         if (status := _jobs[jid]["status"]) in ("running", "stopping"):
             return bad(
                 "clear",
@@ -1572,8 +1571,8 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         return bad
     # `password_ingress` is meaningless on an in-process leg: the token is read
     # off a WIRE ENVELOPE and the process edge has none — no frame ever presents
-    # one, so the rule could only refuse, or (the ports, until 2026-09-02) be
-    # satisfied by a secret persisted ON THE RECORD. Refused at the write.
+    # one, so the rule could only refuse, or be satisfied by a secret persisted
+    # ON THE RECORD. Refused at the write.
     # Same rule as file_bridge's `_password_refusal`.
     for field, stems in (
         ("ingress_rule", ("password_ingress",)),
@@ -1653,8 +1652,8 @@ def _gate(id: str, payload, kernel) -> dict | None:
 async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     # AUTH GATE — every verb but `reflect`/`connector`, MAIL INCLUDED: a sealed leg
-    # delivers nothing to its program (audit BV-8; the relay's framer refuses the
-    # same payloads, since the fanout reaches it before this handler runs).
+    # delivers nothing to its program (the relay's framer refuses the same
+    # payloads, since the fanout reaches it before this handler runs).
     if t not in UNGATED and (out := _gate(id, payload, kernel)):
         return out
     fn = VERBS.get(t)

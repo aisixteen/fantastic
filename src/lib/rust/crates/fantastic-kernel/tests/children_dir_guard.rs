@@ -1,4 +1,4 @@
-//! ARCH2-6 — `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`).
+//! `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`).
 //!
 //! Python (canonical) holds it to the agent-id rule at the write
 //! (`create_agent` / `update_agent`, `guard_agent_id(..., arg="children_dir")`),

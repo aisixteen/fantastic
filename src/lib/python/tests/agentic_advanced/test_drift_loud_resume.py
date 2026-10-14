@@ -6,7 +6,7 @@ documented "hidden replay risk"). Nothing revalidates the recording.
 
 Here a "recorded run" is just data — action ids + targets. Re-firing one is a
 LIVE send: the gate and the roster revalidate on every hop, so drift surfaces
-as a TYPED refusal naming what moved. Measured (2026-08-27) and pinned below:
+as a TYPED refusal naming what moved. Pinned below:
 the gate OUTRANKS the ledger — after revocation even the id of a COMPLETED
 execution refuses instead of joining. Live authority beats history.
 """
@@ -173,8 +173,8 @@ async def test_verb_drift_dies_at_the_verb_scoped_gate(kernel):
     """The tool's surface changed (verb renamed): because grants are
     VERB-scoped (`["buy"]`), the drifted call refuses at the caller's own
     egress — typed, before the handler is even reached. The recording cannot
-    quietly exercise a surface it was never granted (measured 2026-08-27:
-    egress refusal, not a handler error)."""
+    quietly exercise a surface it was never granted (an egress refusal, not a
+    handler error)."""
     await _wire(kernel)
     assert (await _fire(kernel, "job-1"))["status"] == "completed"
 

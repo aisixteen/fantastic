@@ -1,4 +1,4 @@
-//! The ROW STATE EVENT (owner, 2026-10-08) — the twin of python
+//! The ROW STATE EVENT — the twin of python
 //! `tests/kernel/test_row_event.py`: every EXECUTION row the kernel puts is
 //! announced on the state stream as `{agent_id, kind: "row", row: {id, kind,
 //! parent?, caller?, settled?}}`, content-free; nothing inside the kernel's own

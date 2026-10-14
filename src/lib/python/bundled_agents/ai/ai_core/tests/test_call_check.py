@@ -1,10 +1,9 @@
-"""The CALL CHECKER (owner, 2026-10-07): markup carrying our call vocabulary outside
+"""The CALL CHECKER: markup carrying our call vocabulary outside
 every `<call` envelope is a call written wrong, reported like a compiler error — the
 line, a caret, and the form to write instead, built from what the model wrote. The
 answer's well-formed calls still run, and the report says so.
 
-The first shape is the one measured on qwen3.8-27b (E59 `calc`, 2026-10-07: 18 of 25
-replies); the rest are the syntaxes other harnesses meet — a call name as a tag, a
+The first shape is one a real model wrote repeatedly; the rest are the syntaxes other harnesses meet — a call name as a tag, a
 JSON call, Qwen3-Coder's `<function=…><parameter=…>`."""
 
 from _testkit import memory_meta
@@ -111,9 +110,8 @@ def test_arguments_with_no_call_open():
 
 
 def test_the_verbs_own_arguments_carry_into_the_form_to_write():
-    """Measured 2026-10-07 (misleading_fold:rust): a grep scoped by `<ids>` lost its
-    leading `<` on the 3090 and the form to write kept only target/title/type — the
-    model rewrote it unscoped. Every argument the model wrote carries over, a nested
+    """A grep scoped by `<ids>` that lost its leading `<` must not be reported with
+    only target/title/type — the model would rewrite it unscoped. Every argument the model wrote carries over, a nested
     `<item>` as part of its list."""
     broken = """call name="send">
 <target_id>ai_fold</target_id>
@@ -132,10 +130,10 @@ def test_the_verbs_own_arguments_carry_into_the_form_to_write():
 
 
 def test_a_call_opener_that_lost_its_lt_is_named_as_that():
-    """Measured 2026-10-12 (the owner's canvas, qwen3.8-27b on the 3090): the answer
-    after `</think>` was exactly `call name="await"></call>` — the opening `<`
-    dropped. Only the `</call>` is a tag, so the report said "a close with no call
-    open — delete it"; it names the missing `<` and the call to write."""
+    """An answer after `</think>` of exactly `call name="await"></call>` — the
+    opening `<` dropped. Only the `</call>` is a tag, so the report would say "a
+    close with no call open — delete it"; it names the missing `<` and the call to
+    write."""
     (r,) = check('call name="await"></call>', ran=0)
     assert r == (
         "[malformed call — nothing ran] line 1, col 1:\n"
@@ -299,7 +297,7 @@ def test_a_multibyte_line_keeps_the_caret_under_the_token():
 
 
 def test_repair_gives_a_dropped_lt_back_and_nothing_else():
-    """The spell checker (owner, 2026-10-12): vLLM's streaming reasoning parser drops
+    """The spell checker: vLLM's streaming reasoning parser drops
     what shares a delta with `</think>` — the `<` of the call after it. A bare
     `call name="X">` closed by `</call>` gets its `<` back; prose, a well-formed call
     and an opener nothing closes stay as written."""
@@ -319,7 +317,7 @@ def test_repair_gives_a_dropped_lt_back_and_nothing_else():
 async def test_a_call_that_lost_its_lt_runs_and_is_stored_whole(
     seeded_kernel, fake_providers
 ):
-    """Measured shape (the owner's 3090): the answer after `</think>` is the call
+    """The answer after `</think>` is the call
     without its `<`. It RUNS — its reply is the next turn, no malformed report — and
     the stored answer is the repaired call."""
     from ai_core import core as _core

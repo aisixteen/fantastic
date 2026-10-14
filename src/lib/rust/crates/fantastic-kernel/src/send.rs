@@ -39,9 +39,9 @@ use std::sync::Arc;
 use tokio::task_local;
 
 /// Whether a handler's reply is a REFUSAL — a map carrying a truthy `error`.
-/// The same test every consumer used to make for itself off the result body.
+/// The one test, so no consumer makes its own off the result body.
 ///
-/// C89: python `ERRORED if isinstance(reply, dict) and reply.get("error")
+/// Python `ERRORED if isinstance(reply, dict) and reply.get("error")
 /// else COMPLETED` (`_agent.py:1051-1052`) — FULL python truthiness, not just
 /// bool/string. `error: 0`, `0.0`, `[]`, `{}` and `""` are all falsy and
 /// settle COMPLETED; only a truthy `error` value settles ERRORED.
@@ -125,13 +125,13 @@ where
 }
 
 tokio::task_local! {
-    /// THE LEDGER FLUSH IS SILENT on the state stream (owner 2026-10-03, audit
-    /// CLI-B). The kernel's own flush `send` — and every send, emit and state
-    /// event inside its execution (the store's dispatch, its drain) — publishes
-    /// nothing: a subscriber woken by the flush (a long-poll `events` waiter)
-    /// made a call, the call made rows, the rows made the next flush, forever,
-    /// filling the store. The rows stay recorded by the flush row. Carried into
-    /// the dispatch and the forks the flush starts. Python `_state_quiet`.
+    /// THE LEDGER FLUSH IS SILENT on the state stream. The kernel's own flush
+    /// `send` — and every send, emit and state event inside its execution (the
+    /// store's dispatch, its drain) — publishes nothing: a subscriber woken by
+    /// the flush (a long-poll `events` waiter) would make a call, the call rows,
+    /// the rows the next flush, forever, filling the store. The rows stay
+    /// recorded by the flush row. Carried into the dispatch and the forks the
+    /// flush starts. Python `_state_quiet`.
     pub(crate) static STATE_QUIET: bool;
 }
 
@@ -213,7 +213,7 @@ fn verb_of(payload: &Value) -> &str {
 }
 
 /// `agent <id!r> has no handler_module; cannot answer verb <verb!r>` — the
-/// one dispatch's refusal (C34), with or without a request body.
+/// one dispatch's refusal, with or without a request body.
 fn no_handler_module_refusal(id: &str, verb: &str) -> Value {
     let mut r = crate::refusal::refusal(
         crate::refusal::UNHANDLED,
@@ -230,8 +230,7 @@ fn no_handler_module_refusal(id: &str, verb: &str) -> Value {
 /// python's `ModuleNotFoundError` text for a handler module no bundle here
 /// answers: `No module named '<package>'`. Importing `a.tools` when no `a`
 /// package exists fails at `a` — the TOP-LEVEL name, which is what an absent
-/// bundle is (measured, parity 2026-09-30: `No module named 'absent_bundle'`
-/// for `absent_bundle.tools`, stable across python runs).
+/// bundle is (`No module named 'absent_bundle'` for `absent_bundle.tools`).
 pub(crate) fn no_module_named(hm: &str) -> String {
     let top = hm.split('.').next().unwrap_or(hm);
     format!("No module named {}", fantastic_bundle::py_repr(top))
@@ -380,7 +379,7 @@ enum Launched {
     Dispatched(Box<Dispatch>),
     /// Already in flight under this id: wait for ITS outcome, run nothing.
     Joining(Box<Joiner>),
-    /// C88: the UNNAMED `kernel` reflect fast path — python `_agent.py:846`.
+    /// The UNNAMED `kernel` reflect fast path — python `_agent.py:846`.
     /// A pure identity read: no ledger entry, no call row, no task-table
     /// row, no watcher fanout. Still async (reflect flags may nest
     /// dispatches), so it rides the settle phase like a real dispatch — just
@@ -434,7 +433,7 @@ struct Joiner {
     timeout: Option<Deadline>,
     /// The id of the execution being JOINED (python `d.pid`) — not this
     /// joiner's own dispatch, which never gets one. Needed only to render
-    /// the joiner-timeout refusal's `task_id` + pid-in-prose (C31).
+    /// the joiner-timeout refusal's `task_id` + pid-in-prose.
     exec_id: i64,
 }
 
@@ -477,11 +476,9 @@ impl Kernel {
     /// Nothing propagates out of `send`: a handler panic settles as `failed`
     /// with `raised: true`, a cancel settles as `cancelled`.
     ///
-    /// Why a batch at all: a model reply that fans out N calls used to get its
-    /// answers spread over the next N replies and re-asked in between (measured
-    /// 2026-08-25: 7 calls → replies `1 of 7`…`7 of 7`, `list_agents` re-asked
-    /// five times, nothing built). The industry shape is the same — all results
-    /// of one batch return together.
+    /// Why a batch at all: a model reply that fans out N calls would otherwise
+    /// get its answers spread over the next N replies and re-ask in between. The
+    /// industry shape is the same — all results of one batch return together.
     pub async fn send(self: &Arc<Self>, items: Vec<Item>) -> Vec<Outcome> {
         // THE CALLER: the agent whose dispatch makes this send, or `None` — the
         // operator (no dispatch running). Read once; every item is judged as it.
@@ -495,7 +492,7 @@ impl Kernel {
         // settles `failed` with that raise — the same record python's dispatch
         // makes of it.
         //
-        // TODO(parity, owner 2026-10-02 — left as is, rare failure): python's raise
+        // TODO(parity, rare failure): python's raise
         // also reaches the WIRE: `web_rest` answers HTTP 500 for the whole request,
         // where rust's legs answer 200 with every item failed. Mirroring it needs
         // `send` to be fallible — either `send` returns
@@ -583,7 +580,7 @@ impl Kernel {
     /// ledger already resolves); `name` is `Some` only for the string case
     /// (what a FRESH open binds); `caller_id` is the raw id `Value` itself
     /// (`Value::Null` when the item carried none), kept for the ledger's
-    /// rebind text (C31).
+    /// rebind text.
     ///
     /// Python: `_agent.py:614-681` (`_launch`'s `exec_id`/`join_id`/`name`
     /// block).
@@ -636,7 +633,7 @@ impl Kernel {
     }
 
     /// One item's SYNCHRONOUS half: validate, resolve, gate. Python
-    /// `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check order:
+    /// `Agent._launch` (`kernel/_agent.py:601-732`) — the check order:
     /// target → payload dict → timeout → payload.type → id → retries → killed
     /// → draining → resolve → gate. `caller` is who sends: the dispatching
     /// agent, or `None` (the operator — ungated).
@@ -676,7 +673,7 @@ impl Kernel {
         // 4. payload.type — `type` is the verb; there is no send without one.
         // Validated for EVERY send (operator included) BEFORE the gate, so a
         // typeless payload is a coded refusal, never an `unhandled` from the
-        // target (measured 2026-09-02).
+        // target.
         // A RAW BODY at `type` is python's `bytes` value there.
         let body_at_type = item.binary.as_ref().is_some_and(|b| b.at("type").is_some());
         let type_v = match item.payload.get("type") {
@@ -693,8 +690,8 @@ impl Kernel {
             Some(s) if !s.is_empty() && !body_at_type => s.to_string(),
             _ => {
                 // A non-string is named by its TYPE, never echoed: the octet REST
-                // leg and a binary WS frame can put a whole body here (audit
-                // 2026-10-03, W-11) — python's `type(verb).__name__`.
+                // leg and a binary WS frame can put a whole body here — python's
+                // `type(verb).__name__`.
                 let got = if body_at_type {
                     "bytes".to_string()
                 } else if type_v.is_string() {
@@ -729,8 +726,8 @@ impl Kernel {
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks
         // the whole subtree before it aborts anything, because `on_cancel`
         // hooks await — so a doomed handler gets scheduling passes on its way
-        // out, and what it sent there used to start fresh dispatches that
-        // outlived the cancel.
+        // out, and what it sends there must not start fresh dispatches that
+        // outlive the cancel.
         if current_killed() {
             return Launched::Settled(Outcome::new(
                 None,
@@ -739,7 +736,7 @@ impl Kernel {
             ));
         }
         // 8. draining — WHILE DRAINING, NO NEW ROOTS, checked BEFORE the
-        // target is even resolved (rust used to resolve first). A send from
+        // target is even resolved. A send from
         // inside live work (a parent task in the table — including an
         // agent's own `shutdown` dispatch using its tools) passes; everything
         // else is a new root and is refused BEFORE it costs an id. The
@@ -753,8 +750,7 @@ impl Kernel {
         if self.draining() && !in_shutdown() {
             let control = self.is_control(item.target.as_str(), &item.payload);
             // a live DISPATCH, or a keepalive fork; any other fork starts new
-            // work — a ws call used to pass where the same REST call was refused
-            // (audit 2026-10-14)
+            // work — a ws call is refused exactly where the same REST call is.
             let inside_live_work = current_task().is_some_and(|t| self.tasks.drain_admits(&t));
             if !control && !inside_live_work {
                 return Launched::Settled(Outcome::refused(crate::refusal::refusal(
@@ -790,7 +786,7 @@ impl Kernel {
             }
         }
 
-        // C88: the UNNAMED `kernel` reflect fast path. python checks the
+        // The UNNAMED `kernel` reflect fast path. python checks the
         // LITERAL reserved address the caller sent (`target_id == "kernel"`,
         // not the resolved root id — a call spelling the root's real id
         // directly does NOT take this
@@ -840,8 +836,8 @@ impl Kernel {
                 // outcome belongs to whoever ran it, so handing it back is
                 // equivalent to having made THAT call — the gate must be asked
                 // that question, not about the verb this caller happened to
-                // send. Measured in python 2026-08-28: a caller granted only a
-                // harmless verb reused another's id and got its secret verbatim.
+                // send — or a caller granted only a harmless verb could reuse
+                // another's id and get its secret verbatim.
                 if let Some(d) = self.join_denial(&caller, &orig_payload, &target) {
                     return Launched::Settled(Outcome::refused(d));
                 }
@@ -957,7 +953,7 @@ impl Kernel {
                     }
                 };
                 // pid stays None — no task table, no ledger, no fanout ever
-                // touched this item (C88). Still awaited under the item's own
+                // touched this item. Still awaited under the item's own
                 // deadline, as python awaits it: on expiry the read is dropped
                 // and the item settles `timed_out` with `task_id: "-"`.
                 let (reply, status) = match timeout {
@@ -1065,18 +1061,16 @@ impl Kernel {
                 break (this_pid, reply, status, body);
             }
             // A RETRY IS THE SAME EXECUTION, so it re-registers under the SAME
-            // id — named or not. It used to mint a fresh pid for an unnamed
-            // retry, so `cancel <pid>` on attempt two missed the work it was
-            // aimed at. Cancelling the id kills the current attempt AND this
-            // loop: a cancel is absorbing.
+            // id — named or not — so `cancel <pid>` on attempt two reaches the
+            // work it is aimed at. Cancelling the id kills the current attempt
+            // AND this loop: a cancel is absorbing.
             next_pid = TaskId(exec_id);
         };
 
         // NO FANOUT HERE. It ran in `run_dispatch`, BEFORE the handler — which is
         // where python puts it and what a watcher needs: mirroring after the
-        // reply meant a watcher saw the request only once the work was already
-        // done, so its echo landed after the handler's own progress events and
-        // the measured order inverted (`>start job_started start`).
+        // reply would show a watcher the request only once the work was done,
+        // its echo landing after the handler's own progress events.
         let out = self
             .ledger
             .settle(exec_id, Outcome::new(pid, status, reply).with_body(body));
@@ -1280,7 +1274,7 @@ impl Kernel {
                 match tokio::time::timeout(dur, wait).await {
                     Ok(o) => o,
                     Err(_) => {
-                        // PYTHON'S PROSE, verbatim (C31): the JOINED
+                        // PYTHON'S PROSE, verbatim: the JOINED
                         // execution's id (not this joiner's own dispatch,
                         // which never gets one) — bare digits, python's
                         // `{int!r}`. The execution itself keeps running; only
@@ -1451,7 +1445,7 @@ impl Kernel {
                                                 _ = cancel.notified() => None,
                                                 // A request body rides under this same
                                                 // row/ledger/timeout, and ANY REPLY BODY
-                                                // comes back with it (C37): the batch IS
+                                                // comes back with it: the batch IS
                                                 // the carrier for bytes, so any verb
                                                 // through `send` returns its chunk the
                                                 // way python's reply dict holds one.
@@ -1507,7 +1501,7 @@ impl Kernel {
                     Ok(j) => j,
                     Err(_) => {
                         self.cancel_task(&task_id).await;
-                        // PYTHON'S PROSE, verbatim (C31): target id RAW, verb
+                        // PYTHON'S PROSE, verbatim: target id RAW, verb
                         // `py_repr`-quoted, the timeout as given, plus `task_id`.
                         let r = own_deadline_refusal(&target.id, verb, &d, json!(task_id.0));
                         return (r, Status::TimedOut, None);
@@ -1562,10 +1556,9 @@ impl Kernel {
     /// watchers — the same fanout a dispatch runs, minus the in-flight bump.
     ///
     /// AN EMIT TO A NON-AGENT ID IS A NO-OP. The target agent is resolved FIRST:
-    /// no agent, no inbox put, no state event. Rust used to put into any
-    /// registered inbox and publish regardless, so a synthetic WS client id
-    /// (`_ws_<hex>`) produced telemetry for a sprite that does not exist — python
-    /// drops it silently (`_proxy.py:196-200`).
+    /// no agent, no inbox put, no state event — so a synthetic WS client id
+    /// (`_ws_<hex>`) produces no telemetry for a sprite that does not exist, as
+    /// python drops it silently (`_proxy.py:196-200`).
     pub async fn emit(self: &Arc<Self>, target_id: &AgentId, payload: Value) {
         self.emit_item(target_id, crate::inbox::InboxItem::text(payload))
             .await;
@@ -1575,8 +1568,8 @@ impl Kernel {
     /// bridge re-emits from a remote watch, which must reach a local watcher
     /// WHOLE. Same no-op rule for a non-agent id.
     ///
-    /// GATED LIKE A SEND when the emitter is another agent (audit 2026-09-28,
-    /// a16): the emitter's `can_call` and the target's `callable_by` must both
+    /// GATED LIKE A SEND when the emitter is another agent: the emitter's
+    /// `can_call` and the target's `callable_by` must both
     /// allow verb `emit`. An emit to self is the baseline. A denied emit is
     /// dropped; an emit has no reply.
     ///
@@ -1586,7 +1579,7 @@ impl Kernel {
         self.emit_item_with(target_id, item, true).await;
     }
 
-    /// [`Self::emit`], QUIET (owner, 2026-10-04): the payload reaches the target's
+    /// [`Self::emit`], QUIET: the payload reaches the target's
     /// inbox and its watchers and NOTHING is published on the state stream — a
     /// streaming `part_delta` arrives at token rate, and the state stream carries a
     /// part's lifecycle, never its every delta. Python `Agent.emit(..., quiet=True)`.
@@ -1632,10 +1625,9 @@ impl Kernel {
     /// around `callable_by`: an agent that may not CALL an agent could still
     /// read everything sent TO it.
     ///
-    /// Found 2026-08-27 in a client audit: a browser leg granted exactly
-    /// `assistant:[send]` could mirror ANY agent's inbox in its session and read
-    /// the packed confidential context out of the model's prompt. The `call`
-    /// path went through the two-sided gate; this one never did.
+    /// Ungated, a browser leg granted exactly `assistant:[send]` could mirror ANY
+    /// agent's inbox in its session and read the packed confidential context out
+    /// of the model's prompt.
     ///
     /// An OPERATOR watch (`current_sender()` is `None`) is the origin root of
     /// trust and stays ungated, as with send.
@@ -1648,10 +1640,10 @@ impl Kernel {
                 return Some(denial);
             }
         }
-        // A WATCHER MUST ALREADY BE A READER. This used to lazy-create the
-        // watcher's inbox — a sender whose receiver was dropped on the same
-        // line, so the mirror went nowhere and the caller had no way to know.
-        // Registering a consumer is what `watch` requires, not what it does.
+        // A WATCHER MUST ALREADY BE A READER: a lazily created inbox would be a
+        // sender with no receiver, so the mirror would go nowhere and the caller
+        // would have no way to know. Registering a consumer is what `watch`
+        // requires, not what it does.
         if !self.inboxes.contains_key(&watcher_id) {
             let who = fantastic_bundle::py_repr(&watcher_id.0);
             let mut r = crate::refusal::refusal_hint(
@@ -1731,7 +1723,7 @@ impl Kernel {
         if let Some(tx) = self.inboxes.get(&target.id) {
             // Never blocks the emitter, and at the bound the OLDEST payload is
             // evicted — python's `_put_drop_oldest` and swift's
-            // `.bufferingNewest` rule, which rust used to invert.
+            // `.bufferingNewest` rule.
             tx.send(item.clone());
         }
         if publish {
@@ -1762,16 +1754,16 @@ impl Kernel {
 /// One traffic state event, in python's key order:
 /// `{agent_id, kind, backlog, sender, summary, payload}` (`ts` is stamped by
 /// `publish_state`). `sender` is the originator or JSON null — never the target's
-/// own id, which is what rust used to substitute for an operator send.
+/// own id.
 ///
 /// BUILT BY HAND, not by `json!`. The macro routes a `Value` operand through
 /// `serde_json::to_value(..).unwrap()`, and that round-trip PANICS on the one
 /// number python writes and JSON has no grammar for: `Infinity`/`NaN`, which
-/// this kernel stores as an arbitrary-precision literal (C74) and serde's
+/// this kernel stores as an arbitrary-precision literal and serde's
 /// number emitter re-parses. A payload is a caller's, so `{"nan": nan}` on the
-/// CLI took the whole process down with `invalid number` (exit 101, measured
-/// against the python baseline, which prints the record). Nothing that carries
-/// a caller's value may go through `json!`.
+/// CLI would take the whole process down with `invalid number`, where python
+/// prints the record. Nothing that carries a caller's value may go through
+/// `json!`.
 fn traffic_event(
     agent_id: &AgentId,
     kind: &str,
@@ -1832,7 +1824,7 @@ impl Drop for InFlightGuard {
 /// Best-effort human text out of a panic payload — the two shapes
 /// `panic!` produces plus a fallback, so a handler that panicked with a
 /// non-string never reads as "panic: <nothing>". `pub(crate)`: also the
-/// state-subscriber isolation in [`crate::kernel`] (C87).
+/// state-subscriber isolation in [`crate::kernel`].
 pub(crate) fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
         (*s).to_string()
@@ -1923,7 +1915,7 @@ fn dispatch(
                     // decorated by `apply_reflect_flags` into something that
                     // reads like a healthy reflect (a tree around it)
                     // with a stray error field — the caller cannot tell a
-                    // refusal from an answer (measured 2026-09-02).
+                    // refusal from an answer.
                     _ => no_handler_module_refusal(&target.id.0, verb),
                 },
                 None,

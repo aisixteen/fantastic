@@ -240,9 +240,8 @@ async fn reflect_advertises_the_allowlist_not_interpreters() {
     }
 }
 
-/// EVERY refusal on `start` carries a CODE. Sibling argument errors used to split —
-/// `args`/`env` answered `bad_arg` while `command`/`code`/the policy wall answered a
-/// bare `{error}` — so nothing could tell a typo from a policy refusal without
+/// EVERY refusal on `start` carries a CODE — `args`/`env`, `command`/`code` and
+/// the policy wall alike — so a typo is told from a policy refusal without
 /// matching prose.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_start_refusal_carries_a_code() {
@@ -285,9 +284,9 @@ async fn every_start_refusal_carries_a_code() {
 }
 
 /// `status`/`stop`/`interrupt` on a job_id naming nothing answer `not_found` with the
-/// id. `stop`/`interrupt` used to answer `{killed:0}` — the same reply as "it had
-/// already exited", so a typo read as success; `status` answered a bare `{error}` and
-/// a caller branching on `reason == "not_found"` never matched on this runtime.
+/// id — never `{killed:0}` (the same reply as "it had already exited", so a typo
+/// would read as success) nor a bare `{error}` a caller branching on
+/// `reason == "not_found"` cannot match.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_job_id_is_not_found_on_every_verb() {
     let tmp = TempDir::new().unwrap();
@@ -913,9 +912,8 @@ async fn an_unknown_verb_without_a_job_errors_loudly() {
 
 /// PARITY WITH PYTHON: a program's sends carry the RUNNER's identity and are
 /// gated by its grants. A sibling the runner holds no `can_call` for must refuse
-/// (`unauthorized`). Before 2026-09-01 the relay forwarded with NO sender —
-/// operator, ungated — and a spawned program could reach any agent (measured
-/// live: E30 subai:rust).
+/// (`unauthorized`) — a relay forwarding with NO sender would be the operator,
+/// ungated, and a spawned program could reach any agent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     let Some(py) = find_real_python() else {
@@ -966,8 +964,7 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
 }
 
 /// `connector` hands over the reference wire client — a model pastes it instead of
-/// re-deriving the socket framing (measured 2026-09-01: ten messages lost). Ungated
-/// like reflect.
+/// re-deriving the socket framing. Ungated like reflect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_connector_verb_hands_over_the_reference_client() {
     let tmp = TempDir::new().unwrap();
@@ -1039,8 +1036,8 @@ impl fantastic_kernel::bundle::Bundle for BlobStore {
 /// `write_stream`/`read_stream` from a program: the bytes ride the fd as the
 /// io_bridge binary frame (kind B) both ways — the program's payload bytes reach the
 /// bundle's blob, the reply body comes back raw at `bytes`. Never base64, never
-/// None (measured 2026-09-02, E30 subai:python: a `read_stream` reply was
-/// unserializable on this wire and the worker got None).
+/// None: a `read_stream` reply must be serializable on this wire, or the worker
+/// gets None.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_chunk_crosses_the_wire_raw() {
     let Some(py) = find_real_python() else {
@@ -1337,9 +1334,9 @@ async fn wire_read(child: &mut tokio::net::UnixStream) -> Value {
     serde_json::from_slice(&body[1..]).expect("json")
 }
 
-/// `kernel.watch` is gated exactly like a send and can REFUSE. The refusal used to
-/// be discarded: the sub was registered anyway, so the program held a subscription
-/// that simply never fired — deaf, with nothing to diagnose.
+/// `kernel.watch` is gated exactly like a send and can REFUSE. A discarded
+/// refusal with the sub registered anyway would leave the program a subscription
+/// that never fires — deaf, with nothing to diagnose.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_denied_watch_reaches_the_program_and_registers_nothing() {
     let tmp = TempDir::new().unwrap();
@@ -1424,7 +1421,7 @@ async fn stopping_a_watching_program_leaves_no_proxy_or_watcher() {
     }
 }
 
-/// Audit BV-8 — the seal covers every verb but `reflect`/`connector`, MAIL
+/// The seal covers every verb but `reflect`/`connector`, MAIL
 /// INCLUDED. The substrate's fanout reaches the program's `_xbself_` proxy BEFORE
 /// the handler, so the relay's inbox drain drops what the gate refuses: a sealed
 /// leg's program receives nothing, and receives again once the leg is reopened.
@@ -1478,7 +1475,7 @@ async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
         .expect("relay");
 }
 
-/// Audit BV-9 — the fanout mirrors every payload sent to the leg into the owner
+/// The fanout mirrors every payload sent to the leg into the owner
 /// inbox, so a program started by one caller saw another caller's `write`
 /// keystrokes, paste bytes and drive calls aimed at that caller's job. A drive
 /// verb whose int `job_id` names ANOTHER job is dropped; one with no `job_id`
@@ -1537,7 +1534,7 @@ async fn the_inbox_drops_a_drive_verb_naming_another_job() {
         .expect("relay");
 }
 
-/// Audit W-9 (python `test_a_malformed_ctrl_frame_is_skipped_never_fatal`) — JSON
+/// Python `test_a_malformed_ctrl_frame_is_skipped_never_fatal` — JSON
 /// that is no envelope, or a `src` that is no string, is skipped; the relay keeps
 /// serving and the next call is answered. Python ended the relay task here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1673,8 +1670,8 @@ async fn the_connector_has_no_args() {
 }
 
 /// The other half of the same guarantee, through the REAL path: `stop` →
-/// `teardown` → the relay's own cleanup. Teardown used to `abort()` the relay
-/// task, which drops `serve` at its await point and skips the release entirely.
+/// `teardown` → the relay's own cleanup. Aborting the relay task would drop
+/// `serve` at its await point and skip the release entirely.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_releases_the_proxies_a_real_job_held() {
     let Some(py) = find_real_python() else {
@@ -1728,10 +1725,8 @@ async fn stop_releases_the_proxies_a_real_job_held() {
 
 #[test]
 fn a_typeless_rule_object_seals_like_python() {
-    // A1.2 — python's `parse_spec` reads `{env: 'X'}` as no rule at all, which
-    // is a plain SEAL. Rust used to answer `{error:"rule object missing 'type'"}`
-    // (no `reason`, so nothing could branch on it) and swift threw out of
-    // `handle`.
+    // python's `parse_spec` reads `{env: 'X'}` as no rule at all, which is a
+    // plain SEAL — never an `{error}` without a `reason` nothing could branch on.
     let mut meta = Map::new();
     meta.insert("ingress_rule".into(), json!({"env": "X"}));
     let denied = gate(&meta, &AgentId::from("px"), "start").expect("a type-less rule seals");
@@ -1743,7 +1738,7 @@ fn a_typeless_rule_object_seals_like_python() {
 
 #[test]
 fn reflect_reports_egress_posture() {
-    // A1.1 — every io leg's reflect answers python's `describe`: the two rule
+    // Every io leg's reflect answers python's `describe`: the two rule
     // names and `sealed`, in that order, at the end of the reply.
     let kernel = Kernel::new();
     let id = AgentId::from("px");
@@ -1768,13 +1763,13 @@ fn reflect_reports_egress_posture() {
     assert_eq!(r["sealed"], true);
 }
 
-// ─── python parity (plan §2 A4) ──────────────────────────────────
+// ─── python parity ───────────────────────────────────────────────
 //
 // Each test below pins a text, a coercion or an ordering to the canonical python
 // (`PB/io/exec_bridge/src/exec_bridge/tools.py`). Where python's own behaviour is a
-// quirk the plan marks (D5/D6), the quirk is what is pinned.
+// quirk, the quirk is what is pinned.
 
-/// A4.18 — the vendored readme is python's, byte for byte.
+/// The vendored readme is python's, byte for byte.
 ///
 /// Skips (loudly) when the python tree is absent, like
 /// `connector_matches_python_source`: the container's rust stage copies only
@@ -1793,7 +1788,7 @@ fn readme_matches_python_source() {
     assert_eq!(src, README, "readme has drifted from {}", py.display());
 }
 
-/// A4.2 — reflect's prose blocks are python's, verbatim.
+/// Reflect's prose blocks are python's, verbatim.
 #[tokio::test]
 async fn docs_texts_match_python_verbatim() {
     let notes = ExecBridgeBundle.notes_doc().unwrap();
@@ -1816,7 +1811,7 @@ async fn docs_texts_match_python_verbatim() {
     );
 }
 
-/// A4.17 — `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
+/// `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
 /// verb's docstring. Several are truncated mid-sentence; that is the python text.
 #[tokio::test]
 async fn verb_docs_are_python_first_docstring_lines() {
@@ -1863,7 +1858,7 @@ async fn verb_docs_are_python_first_docstring_lines() {
     );
 }
 
-/// A4.10 — reflect reports the record's `cwd` as written (null when unset — there
+/// Reflect reports the record's `cwd` as written (null when unset — there
 /// is no process default any more) and the `inherit_env` it runs with; `allowed`
 /// items go through `str()`.
 #[tokio::test]
@@ -1891,9 +1886,9 @@ async fn reflect_coerces_like_python() {
     assert_eq!(r2["inherit_env"], json!([]));
 }
 
-/// A4.3 — `shutdown` is not a verb here: python's `VERBS` has no such key, so it is
-/// MAIL like any other unowned type. It used to answer `null`, which read as a
-/// successful lifecycle call.
+/// `shutdown` is not a verb here: python's `VERBS` has no such key, so it is
+/// MAIL like any other unowned type — never a `null` that reads as a successful
+/// lifecycle call.
 #[tokio::test]
 async fn shutdown_is_mail_not_a_verb() {
     let tmp = TempDir::new().unwrap();
@@ -1909,7 +1904,7 @@ async fn shutdown_is_mail_not_a_verb() {
     );
 }
 
-/// A4.4 — every refusal quotes with python's `repr`, and an ABSENT `type` is `None`.
+/// Every refusal quotes with python's `repr`, and an ABSENT `type` is `None`.
 #[tokio::test]
 async fn refusal_texts_use_python_repr() {
     let tmp = TempDir::new().unwrap();
@@ -1946,8 +1941,8 @@ async fn refusal_texts_use_python_repr() {
     );
 }
 
-/// A4.5 — `validate_meta`'s texts are python's up to the engine tail after `': '`
-/// (that tail is the D4/D5 residual).
+/// `validate_meta`'s texts are python's up to the engine tail after `': '`
+/// (that tail is the regex engine's own).
 #[test]
 fn validate_meta_texts_match_python() {
     let b = ExecBridgeBundle;
@@ -1974,7 +1969,7 @@ fn validate_meta_texts_match_python() {
     );
 }
 
-/// A4.19 — only an UNKNOWN RULE NAME is refused. A falsy spec and a type-less rule
+/// Only an UNKNOWN RULE NAME is refused. A falsy spec and a type-less rule
 /// object are a plain seal (python resolves them to `DenyInbound()` with no
 /// `unknown`), and `password_ingress` resolves fine here — it is the stem check that
 /// refuses it on this edge.
@@ -1998,7 +1993,7 @@ fn validate_meta_refuses_only_unknown_ingress_rules() {
     );
 }
 
-/// A4.7 (D5) — `allowed` is compiled in PYTHON's `re` dialect: named groups,
+/// `allowed` is compiled in PYTHON's `re` dialect: named groups,
 /// backreferences and lookaround all work. `regex` rejects every one of them at
 /// compile time, which silently turned a working python policy into a leg that
 /// permitted nothing.
@@ -2031,7 +2026,7 @@ fn allowed_accepts_python_regex_syntax() {
 /// `job_id` is an INT or absent (python `_job_arg`): an absent key or `null` means
 /// ALL of this agent's jobs; any other non-int — `""`, `[]`, a string, a float — is
 /// a bad argument, never a silent "all"; an int that names nothing is not found,
-/// echoed raw. (It used to be read under python truthiness, when ids were strings.)
+/// echoed raw.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn job_id_is_an_int_or_absent() {
     let tmp = TempDir::new().unwrap();
@@ -2095,7 +2090,7 @@ async fn job_id_is_an_int_or_absent() {
     assert_eq!(r["job_id"], json!(7), "the raw value is echoed: {r}");
 }
 
-/// A4.9 — `start` coerces exactly as python does.
+/// `start` coerces exactly as python does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_coerces_args_env_and_cwd_like_python() {
     let tmp = TempDir::new().unwrap();
@@ -2131,7 +2126,7 @@ async fn start_coerces_args_env_and_cwd_like_python() {
         );
     }
     // A wake-up is a monitor's: `notify`/`match`/`every` on `start` refuse naming
-    // `monitor` (they were dropped silently — e2e monitor, 2026-10-13).
+    // `monitor`, never dropped silently.
     for (arg, val) in [
         ("notify", json!("ai")),
         ("match", json!("WAKE")),
@@ -2164,7 +2159,7 @@ async fn start_coerces_args_env_and_cwd_like_python() {
     );
 }
 
-/// A4.12 — `status` lists this agent's jobs in START order (python's dict is
+/// `status` lists this agent's jobs in START order (python's dict is
 /// insertion-ordered).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_lists_jobs_in_start_order() {
@@ -2204,7 +2199,7 @@ async fn status_lists_jobs_in_start_order() {
         .result;
 }
 
-/// A4.20 — the id in a `status` snapshot is an INT — the job's task id, the
+/// The id in a `status` snapshot is an INT — the job's task id, the
 /// number `cancel task_id=<id>` takes, not a quoted copy of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_job_id_is_the_integer_task_id() {
@@ -2237,11 +2232,10 @@ async fn status_job_id_is_the_integer_task_id() {
         .result;
 }
 
-/// Audit BV-5 — a NAMED `clear` follows the bare form's rule: a `running` (or
-/// `stopping`) row is refused. It used to drop the row whatever its status, and the
-/// row is the only handle `stop`, `cancel`, `delete` and shutdown kill a process
-/// through — the process outlived all four. Once the job is finished, the named
-/// clear drops it.
+/// A NAMED `clear` follows the bare form's rule: a `running` (or `stopping`) row
+/// is refused — the row is the only handle `stop`, `cancel`, `delete` and
+/// shutdown kill a process through, and without it the process would outlive all
+/// four. Once the job is finished, the named clear drops it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_named_clear_refuses_a_running_job() {
     let Some(py) = find_real_python() else {
@@ -2313,7 +2307,7 @@ async fn a_named_clear_refuses_a_running_job() {
     assert_eq!(st["jobs"], json!([]));
 }
 
-/// A4.21 — output is collected RAW: the newline stays on each line, a lone `\r` is
+/// Output is collected RAW: the newline stays on each line, a lone `\r` is
 /// data (`rstrip("\n")` only), a final line with no newline gets none added, and an
 /// invalid byte is REPLACED while the pipe keeps draining.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2347,9 +2341,9 @@ async fn output_is_collected_raw_like_python() {
     );
 }
 
-/// A line past the old 64 KiB bound is read whole: python raised asyncio's
-/// StreamReader limit to 16 MiB (2026-09-20), so a program's long line no longer
-/// ends the pipe with `[pump error]`.
+/// A line past asyncio's 64 KiB default is read whole: python raises the
+/// StreamReader limit to 16 MiB, so a program's long line does not end the pipe
+/// with `[pump error]`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_overlong_line_is_read_whole() {
     let Some(py) = find_real_python() else {
@@ -2380,7 +2374,7 @@ async fn an_overlong_line_is_read_whole() {
     assert!(done.get("error").is_none(), "{done}");
 }
 
-/// A4.6 — a signal death reports `exit_code = -signal`, `ok:false`. `ExitStatus::
+/// A signal death reports `exit_code = -signal`, `ok:false`. `ExitStatus::
 /// code()` answers `None` for a signal, which read as "still running" everywhere
 /// liveness is `exit_code.is_none()` and lost the cause of death from `job_done`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2412,7 +2406,7 @@ async fn a_killed_job_reports_negative_signal_exit_code() {
     assert_eq!(done["ok"], false, "{done}");
 }
 
-/// A4.25 — liveness is "the OS process has not exited", not "the pipes reached
+/// Liveness is "the OS process has not exited", not "the pipes reached
 /// EOF". A program that closes stdout/stderr and keeps running is still LIVE: its
 /// mail is queued and reflect counts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2460,7 +2454,7 @@ async fn liveness_is_process_exit_not_pipe_eof() {
         .result;
 }
 
-/// A4.24 — a spawn failure reads exactly as python's `OSError`.
+/// A spawn failure reads exactly as python's `OSError`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spawn_failure_text_matches_python() {
     let tmp = TempDir::new().unwrap();
@@ -2481,9 +2475,8 @@ async fn spawn_failure_text_matches_python() {
 }
 
 /// A MISSING `cwd` is named, not the command — CPython's `noexec:chdir` text.
-/// Measured 2026-10-06 (rust subai): `No such file or directory: 'python3'` for a
-/// leg whose cwd did not exist sent the model hunting an interpreter for twenty
-/// turns.
+/// `No such file or directory: 'python3'` for a leg whose cwd does not exist
+/// would send the model hunting an interpreter that is there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_cwd_is_named_not_the_command() {
     let tmp = TempDir::new().unwrap();
@@ -2512,7 +2505,7 @@ async fn a_missing_cwd_is_named_not_the_command() {
     assert_eq!(r["reason"], "transport_error");
 }
 
-/// A4.23 — the two control vars are written OVER the record's `env`, so a program
+/// The two control vars are written OVER the record's `env`, so a program
 /// cannot claim another agent's identity or point the control fd somewhere else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn caller_env_cannot_override_the_control_vars() {
@@ -2554,7 +2547,7 @@ async fn caller_env_cannot_override_the_control_vars() {
     );
 }
 
-/// A4.16 — the ingress gate never takes a credential from the RECORD. A token is a
+/// The ingress gate never takes a credential from the RECORD. A token is a
 /// wire-envelope fact and the process edge has no envelope; reading one off the
 /// record would let a leg satisfy its own password rule with a secret it stores.
 #[test]
@@ -2577,7 +2570,7 @@ fn the_record_auth_token_is_never_a_credential() {
     std::env::remove_var(env);
 }
 
-/// A4.11 — the relay coerces like python: a FALSY payload becomes `{}` and a FALSY
+/// The relay coerces like python: a FALSY payload becomes `{}` and a FALSY
 /// emit target becomes the OWNER (the one-arg `emit(payload)` form).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn relay_coerces_falsy_payload_and_target() {
@@ -2622,11 +2615,11 @@ async fn relay_coerces_falsy_payload_and_target() {
         .expect("relay");
 }
 
-/// A4.13 (D6) — a program's subscriptions hold KERNEL TASKS: `watch` forks a
+/// A program's subscriptions hold KERNEL TASKS: `watch` forks a
 /// `watch_drain`, `on_message` an `inbox_drain`, so `ps` lists them and `cancel`
-/// reaches them. They used to be detached `tokio::spawn`s, invisible and unkillable.
+/// reaches them — never detached `tokio::spawn`s, invisible and unkillable.
 ///
-/// Each fork is also a MESSAGE: since C36 its task id IS the id of a `task` row
+/// Each fork is also a MESSAGE: its task id IS the id of a `task` row
 /// on the runner, so `rows_read` explains a `ps` row that has already ended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watching_program_holds_drain_task_rows() {
@@ -2660,7 +2653,7 @@ async fn a_watching_program_holds_drain_task_rows() {
         }
     }
 
-    // C36 — and each one is a ROW, under the id `ps` reported.
+    // And each one is a ROW, under the id `ps` reported.
     let store: Vec<_> = fantastic_kernel::test_support::rows_about(&kernel, &a)
         .into_iter()
         .filter(|r| r.get("kind") == Some(&json!("task")))
@@ -2775,7 +2768,7 @@ async fn the_relay_forwards_a_send_untouched_and_a_binary_one_through_the_batch(
         .expect("relay");
 }
 
-/// STEP-4 PIN (2026-10-01): with no running job the unknown type is a BARE
+/// With no running job the unknown type is a BARE
 /// `{error}` carrying the "no running job" tail; with one it is mail, queued.
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
@@ -2800,7 +2793,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     );
 }
 
-/// STEP-4 PIN (2026-10-01): the three `arg` refusals carry `error, reason, hint,
+/// The three `arg` refusals carry `error, reason, hint,
 /// arg` IN THAT ORDER (key order is wire — `Value` equality ignores it).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arg_refusals_are_byte_exact_in_key_order() {
@@ -2872,7 +2865,7 @@ async fn arg_refusals_are_byte_exact_in_key_order() {
 #[path = "tests_binary_steps.rs"]
 mod tests_binary_steps;
 
-/// `tail` / `grep` read a RUNNING pipe job's output so far (owner, 2026-10-11):
+/// `tail` / `grep` read a RUNNING pipe job's output so far:
 /// `status` holds stdout/stderr only once the job ends. Order holds within a
 /// stream only (stdout and stderr are read concurrently).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2927,8 +2920,7 @@ async fn tail_and_grep_read_a_running_job() {
 }
 
 /// A broken `allowed` pattern permits nothing, even one the fullmatch wrapper
-/// would balance into match-everything (python `re.fullmatch` raises; audit
-/// 2026-10-14).
+/// would balance into match-everything (python `re.fullmatch` raises).
 #[test]
 fn an_unbalanced_allowed_pattern_permits_nothing() {
     let mut meta = Map::new();

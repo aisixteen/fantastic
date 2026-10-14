@@ -17,8 +17,8 @@ import OrderedCollections
 
 // ── Current sender task-local ─────────────────────────────────────
 
-/// The kernel's task-locals. IDENTITY COMES ONLY FROM DISPATCH (owner
-/// 2026-10-04): the kernel sets the sender when it runs an agent's handler, so
+/// The kernel's task-locals. IDENTITY COMES ONLY FROM DISPATCH:
+/// the kernel sets the sender when it runs an agent's handler, so
 /// the sends inside it — and every task it spawns, which inherits the
 /// task-locals — are that agent's. There is no way to send "as" someone else:
 /// the storage is internal to this module and only `runDispatch` /
@@ -68,11 +68,11 @@ public enum KernelTaskLocals {
     /// refuse as new work. Python `_in_shutdown` / `shutdown_context()`.
     @TaskLocal public static var inShutdown: Bool = false
 
-    /// THE LEDGER FLUSH IS SILENT on the state stream (owner 2026-10-03, audit
-    /// CLI-B). The kernel's own flush `send` — and every send, emit and state
+    /// THE LEDGER FLUSH IS SILENT on the state stream. The
+    /// kernel's own flush `send` — and every send, emit and state
     /// event inside its execution (the store's dispatch, its drain) — publishes
     /// nothing: a subscriber woken by the flush (a long-poll `events` waiter)
-    /// made a call, the call made rows, the rows made the next flush, forever,
+    /// would make a call, the call rows, the rows the next flush, forever,
     /// filling the store. The rows stay recorded by the flush row. Inherited by
     /// every `Task {}` the flush starts, like python's `_state_quiet` contextvar.
     @TaskLocal static var stateQuiet: Bool = false
@@ -94,8 +94,7 @@ public enum KernelTaskLocals {
     /// batch in INPUT ORDER. Python creates the dispatch tasks in order and each
     /// runs its prologue (in-flight count, fanout) before the next one starts;
     /// a task group starts its children in any order, so two items to one agent
-    /// reached its watchers swapped (measured: parity `ctx/ws_events.json`, a
-    /// `recall` + `context_status` batch, and `ai_paths` cycle). Cleared for the
+    /// could reach its watchers swapped. Cleared for the
     /// handler, so its own sends never touch the caller's turnstile.
     @TaskLocal static var onFanout: (@Sendable () -> Void)? = nil
 
@@ -164,7 +163,7 @@ public final class Kernel: @unchecked Sendable {
     private let rootLock = NSLock()
     private var _root: Agent?
     /// The last refused/failed persist write — `persistence.error` on the root
-    /// reflect until a write lands again (python `agent._persist_error`, d2).
+    /// reflect until a write lands again (python `agent._persist_error`).
     let persistErrorLock = NSLock()
     var _persistError: OrderedDictionary<String, JSON>?
 
@@ -271,8 +270,8 @@ public final class Kernel: @unchecked Sendable {
     /// `k.QUIET_TIMEOUT`; the constant is `Kernel.QUIET_TIMEOUT`.
     var quietTimeout: Double = Kernel.QUIET_TIMEOUT
 
-    /// CONNECTED PEER KERNELS — guid → the LIVE routes to it (owner, 2026-09-30;
-    /// a set per guid, 2026-10-03: the tabs of one identity are one principal).
+    /// CONNECTED PEER KERNELS — guid → the LIVE routes to it (a set per
+    /// guid: the tabs of one identity are one principal).
     /// An agent on another kernel is addressed `<guid>|<agent id>`; when that guid
     /// is here, `send` hands the call to its routes and the first reply is the
     /// call's ordinary outcome. A TRANSPORT registers the peer it is connected to
@@ -301,10 +300,8 @@ public final class Kernel: @unchecked Sendable {
 
     /// Register `agent` in the flat routing map. NO INBOX.
     ///
-    /// An agent does not get a queue merely by existing. `register` used to mint
-    /// one and hand back the stream, which almost every caller dropped on the
-    /// same line — so the queue was live, nobody read it, and `watch` happily
-    /// mirrored into it forever. `ensureInbox` IS the reader registration, and
+    /// An agent does not get a queue merely by existing: a queue nobody reads
+    /// would buffer `watch` mirrors forever. `ensureInbox` IS the reader registration, and
     /// every caller of it drains what it gets. Python `Kernel.register`.
     public func register(_ agent: Agent) {
         agentsLock.lock()
@@ -317,7 +314,7 @@ public final class Kernel: @unchecked Sendable {
     /// bypasses `create_agent` entirely. `ephemeral` is a CONSTRUCTION-time
     /// flag no verb payload can set (a bundle has no distinct Swift class the
     /// way python's `Cli` subclass carries its own `ephemeral = True`), and
-    /// the renderer is WIRED, never booted (A14.13/A14.15: the daemon fires
+    /// the renderer is WIRED, never booted (the daemon fires
     /// `intro_booting`/`booted` at it directly). Publishes the same `added`
     /// state event `create_agent` does, so a watcher sees it exactly as it
     /// would any other child — the record-writer ignores it all the same
@@ -391,7 +388,7 @@ public final class Kernel: @unchecked Sendable {
     /// The kernel's RUNNING DIR — the dir holding its root's address (its
     /// `.fantastic`). The ONE source of the disk clamp base (every file_bridge
     /// root resolves under it) and of store discovery; nothing reads the process
-    /// cwd in its place (audit 2026-09-28, c6; python `Kernel.workdir`). No root,
+    /// cwd in its place (python `Kernel.workdir`). No root,
     /// or a root that never named its address (`Agent`'s default
     /// `URL(fileURLWithPath: "")`) ⇒ nil, and the disk verbs refuse.
     public var workdir: URL? {
@@ -418,8 +415,7 @@ public final class Kernel: @unchecked Sendable {
     /// Drop a SYNTHETIC inbox its owner created with `ensureInbox` — a relay's
     /// watch proxy, a WS client's row. Whoever vivified it must release it, or
     /// the continuation lingers forever and `emit` keeps buffering into a stream
-    /// nobody drains (measured 2026-09-02: a spawned program that watched an
-    /// agent left a `_xbw_…` row behind on every stop). NOT for an agent's own
+    /// nobody drains. NOT for an agent's own
     /// inbox — that belongs to `unregister`, which also removes the agent.
     public func removeInbox(_ id: AgentId) {
         inboxLock.lock()
@@ -433,9 +429,9 @@ public final class Kernel: @unchecked Sendable {
         let inbox = _inboxes[id]
         inboxLock.unlock()
         // AN INBOX EXISTS IFF A READER REGISTERED IT. Delivery to an id nobody
-        // holds a stream for is a no-op. This used to auto-vivify, which minted
-        // a buffer for a consumer that never arrived: it filled to `inboxBound`
-        // and then evicted one payload per message, forever, with nothing to say
+        // holds a stream for is a no-op. Auto-vivifying would mint
+        // a buffer for a consumer that never arrives: it fills to `inboxBound`
+        // and then evicts one payload per message, forever, with nothing to say
         // so. `ensureInbox` IS the registration.
         if let inbox = inbox {
             inbox.put(item)
@@ -460,11 +456,6 @@ public final class Kernel: @unchecked Sendable {
     /// around `callable_by`: an agent that may not CALL an agent could still
     /// read everything sent TO it.
     ///
-    /// Found 2026-08-27 in a client audit: a browser leg granted exactly
-    /// `assistant:[send]` could mirror ANY agent's inbox in its session and read
-    /// the packed confidential context out of the model's prompt. The `call`
-    /// path went through the two-sided gate; this one never did.
-    ///
     /// An OPERATOR watch (`currentSender` is nil — made outside every
     /// dispatch) is the origin root of trust and stays ungated, as with send.
     @discardableResult
@@ -475,9 +466,9 @@ public final class Kernel: @unchecked Sendable {
                 return denial
             }
         }
-        // A WATCHER MUST ALREADY BE A READER. This used to lazy-create the
-        // watcher's inbox, so a caller could watch and never drain: the mirror
-        // went into a buffer nobody read. Registering a consumer is what `watch`
+        // A WATCHER MUST ALREADY BE A READER. Lazy-creating the watcher's
+        // inbox would let a caller watch and never drain: the mirror would go into
+        // a buffer nobody reads. Registering a consumer is what `watch`
         // requires, not what it does.
         guard hasInbox(watcher) else {
             return Refusal.make(
@@ -556,8 +547,7 @@ public final class Kernel: @unchecked Sendable {
     /// One traffic state event, in python's key order:
     /// `{agent_id, kind, backlog, sender, summary, payload}` (`ts` is stamped by
     /// `publishState`). `sender` is the originator or JSON null — never the
-    /// target's own id, which is what swift used to substitute for an operator
-    /// send.
+    /// target's own id substituted for an operator send.
     static func trafficEvent(
         _ agentId: AgentId, _ kind: String, _ backlog: Int, _ sender: AgentId?,
         _ summary: String, _ payload: JSON
@@ -622,7 +612,7 @@ public final class Kernel: @unchecked Sendable {
         subscriberLock.lock()
         let subs = _subscribers
         subscriberLock.unlock()
-        // Nothing inside the kernel's own ledger flush is published (audit CLI-B).
+        // Nothing inside the kernel's own ledger flush is published.
         if subs.isEmpty || KernelTaskLocals.stateQuiet { return }
         var stamped = event
         if case .object(var o) = event {

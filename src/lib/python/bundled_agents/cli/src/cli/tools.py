@@ -25,7 +25,7 @@ import sys
 # C0 and C1 control characters (with DEL), minus newline and tab: what a terminal
 # INTERPRETS instead of printing — an OSC title or clipboard write, a cursor move,
 # a line erase. Agent and model text reaches this sink from callers it does not
-# know, so it never reaches the terminal with them (audit BV-11).
+# know, so it never reaches the terminal with them.
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 

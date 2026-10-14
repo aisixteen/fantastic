@@ -1,4 +1,4 @@
-// OPEN INQUIRIES (owner, 2026-10-06: fully async). An `inquiry` an AI received is
+// OPEN INQUIRIES (fully async). An `inquiry` an AI received is
 // accepted at once and runs as its own chain `(receiver, client_id)`; the answer the
 // model gives in ANY turn of that chain — or the news that it ended without one —
 // is delivered to the asker as a later message under the inquiry's pid. Nothing
@@ -9,10 +9,9 @@ import FantasticKernel
 import Foundation
 import OrderedCollections
 
-/// What an inquiry carries ON ITSELF (owner, 2026-10-06): that it IS one and how it
-/// is answered. Delivered bare as `[from ai]` + the question, the reviewer in
-/// peer_review (rust, twice) did the work, wrote `REJECT — timeout = 300` as prose
-/// and ended with `done`; the one line in the system block was too far away.
+/// What an inquiry carries ON ITSELF: that it IS one and how it
+/// is answered. Delivered bare as `[from ai]` + the question, a model answers in
+/// prose and ends with `done`; the one line in the system block is too far away.
 /// Python `_INQUIRY_HEAD`.
 func inquiryHead(asker: String, pid: String) -> String {
     "[inquiry from \(asker) · re \(pid) — do any work it needs, then answer with "
@@ -103,7 +102,7 @@ private let answerTag = try! NSRegularExpression(pattern: "\\[reply to (\\S+) \u
 /// Close the inquiry this chain `(selfId, clientId)` is answering: hand `body`
 /// (`{answer}` or `{error}`) to its asker as a message under the inquiry's pid,
 /// `[reply to <pid> · <selfId> inquiry]`. The answer is THIS agent's own send to
-/// the asker (owner, 2026-10-06), gated like any: it needs `send` on the asker in
+/// the asker, gated like any: it needs `send` on the asker in
 /// this agent's `can_call` and the asker's `callable_by` admitting it — a refused
 /// delivery is told to this agent (`deliverAnswer`). An operator's inquiry has no
 /// conversation to land in: the answer is an event on this agent's inbox instead.
@@ -168,8 +167,7 @@ func answerInquiry(kernel: Kernel, selfId: String, clientId: String, _ call: Too
     let answer = call.arguments["answer"]
     // THE PLACEHOLDER IS NOT AN ANSWER. The shape shown to a model that did not
     // answer is `<answer>what you concluded</answer>`, and a model copies an example
-    // back verbatim — measured 2026-09-04 on peer_review, where "..." was written
-    // into review.md as the verdict. `answer.strip().strip(".")`: python whitespace
+    // back verbatim ("..." as the verdict). `answer.strip().strip(".")`: python whitespace
     // FIRST, then dots from both ends.
     guard case .string(let s) = answer, !pyStripDots(pyStrip(s)).isEmpty else {
         return "that is the PLACEHOLDER, not an answer — `answer` came back as "

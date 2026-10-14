@@ -1,4 +1,4 @@
-// What the record leaves out is READ FROM THE API (owner, 2026-10-07) — python
+// What the record leaves out is READ FROM THE API — python
 // `anthropic_backend/server.py`, text for text: `max_tokens` from the model entry's
 // `max_tokens`, `context_window` from its `max_input_tokens`
 // (`GET {endpoint with /messages replaced by /models}/{model}`), written back.

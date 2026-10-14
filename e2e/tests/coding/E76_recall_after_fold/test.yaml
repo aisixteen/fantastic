@@ -6,11 +6,11 @@ title: "every fold batch is followed by a recall; grep answers inline; the marke
 runner: probe.py
 runtimes: [python, rust, swift]
 costs: turns
-long: true  # hit the 180 s proxy limit at 6 lanes (2026-09-08); at most 2 long run at once
+long: true  # many lanes push turns past the 180 s proxy limit; at most 2 long run at once
 limits:
   idle_seconds: 60
   max_turns: 60
   no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "6000"}  # 6k (2026-10-06): the leaner system block left 12k peaks under the fold trigger
+env: {E2E_WINDOW: "6000"}  # 6k: the leaner system block leaves 12k peaks under the fold trigger

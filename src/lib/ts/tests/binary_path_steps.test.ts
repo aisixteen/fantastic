@@ -1,10 +1,9 @@
-// `_binary_path` is a LIST OF STEPS (owner-approved, 2026-10-02) — the ts mirror
+// `_binary_path` is a LIST OF STEPS — the ts mirror
 // of python's `io_bridge/tests/test_binary_path_steps.py`.
 //
-// A binary frame's header names where its raw body belongs. It used to spell that
-// as a dotted string, so a payload whose bytes sat at the LITERAL key `"a.b"` (which
-// web_rest's `X-Fantastic-Bytes-Field: a.b` binds) went out as `"payload.a.b"` and
-// the receiver rebuilt a NESTED `a` → `b` slot. Now the path is a JSON array: a
+// A binary frame's header names where its raw body belongs. The path is a JSON
+// array — not a dotted string, which cannot tell a LITERAL key `"a.b"` (which
+// web_rest's `X-Fantastic-Bytes-Field: a.b` binds) from a NESTED `a` → `b` slot: a
 // string step is an object key, taken literally; an integer step is a list index.
 //
 //   (a) the codec: literal, nested and list paths round-trip, each head as python
@@ -14,7 +13,7 @@
 //       call carrying one reaches the page's agent and the reply goes back the
 //       same way.
 //
-// Every head and message below was printed by python's codec (2026-10-02).
+// Every head and message below was printed by python's codec.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -266,9 +265,9 @@ test("a host call with bytes at a literal key reaches the page's agent there; th
   bridge.close();
 });
 
-// ─── ONE binary body per frame (owner, 2026-10-08) ─────────────────────────
+// ─── ONE binary body per frame ─────────────────────────────────────────────
 // Python `io_bridge` text for text: an envelope holding two binary values is
-// refused naming both paths (it went out with the second written as `{}`); a reply
+// refused naming both paths; a reply
 // or event a sender cannot carry goes as its routing keys and the refusal.
 
 test("an envelope with two binary bodies is refused naming both paths", async () => {

@@ -83,8 +83,8 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   }
   // `type` IS the verb; there is no send without one. Validated for EVERY sender
   // BEFORE the gate, so a typeless payload is a coded refusal rather than an
-  // `unhandled` from whatever the target happens to be (2026-09-02; the shared
-  // C21 corpus pins this on all four runtimes).
+  // `unhandled` from whatever the target happens to be (the shared C21 corpus
+  // pins this on all runtimes).
   if (!("type" in payload)) {
     return { index, settled: refused(missing("send", "payload.type")) };
   }
@@ -92,7 +92,7 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   if (typeof verb !== "string" || verb === "") {
     // A non-string is named by its TYPE, never echoed: a binary frame can put a
     // whole body here, and its repr made a 16 MiB body cost ~80 MiB of refusal
-    // text (audit 2026-10-03, W-11).
+    // text.
     const got = typeof verb === "string" ? pyRepr(verb) : pyTypeNameAt(payload, "type");
     return {
       index,
@@ -212,9 +212,8 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
       // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded outcome belongs
       // to whoever ran it, so handing it back is equivalent to having made THAT
       // call — the gate must be asked that question, not about the verb this
-      // caller happened to send. Measured in python 2026-08-28: a caller granted
-      // only a harmless verb reused another's id and received its result
-      // verbatim. An OPERATOR joiner is ungated, as everywhere.
+      // caller happened to send; otherwise a caller granted only a harmless verb
+      // could reuse another's id and receive its result verbatim. An OPERATOR joiner is ungated, as everywhere.
       if (origin !== null) {
         const d = k.gate(origin, existing.verb, resolvedId);
         if (d !== null) return { index, settled: refused(d) };

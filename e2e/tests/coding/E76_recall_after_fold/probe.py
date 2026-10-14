@@ -4,7 +4,7 @@
 Scored: a recall row follows each fold batch, every self-reply the agent got back was
 inline (the cap invariant — 0 dehydrated), and the marker is reported.
 
-PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
 folding and the answer are the model's own, without spending a live turn per file.
 """

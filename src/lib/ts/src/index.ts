@@ -106,7 +106,7 @@ export async function boot(opts: BootOptions): Promise<Booted> {
   // THE TREE IS KNOWN NOW — say who this kernel is. A HYDRATED root arrives with
   // its guid already set (no `updated` event carries it, and a root-only tree
   // publishes nothing at all), so without this a reopened page never said hello
-  // and the host could not address it after a restart (CLI E47, 2026-09-30). A
+  // and the host could not address it after a restart. A
   // guid the root mints LATER, at its first boot, is announced by the bridge's
   // own `updated` hook; with no guid yet this is a no-op.
   bridge.announce();

@@ -13,7 +13,7 @@
 //
 // Every refusal is the one kernel shape (`Refusal`): a caller branches on
 // `reason`, never on prose. A payload can never trap this bundle — a negative
-// `offset` used to hit `UInt64(Int64)` and abort the whole kernel (#34/#36).
+// `offset` never reaches `UInt64(Int64)`, which would abort the whole kernel.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -29,9 +29,8 @@ let IMAGE_EXTENSIONS: Set<String> = [
 
 /// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
 ///
-/// This answered a bare `{"error": "agent is readonly"}` until 2026-08-27, when
-/// the shared agentic corpus caught it: no `reason`, so a caller could only
-/// branch on the prose. `unauthorized` is the code the io SEAL answers with too
+/// A bare `{"error": "agent is readonly"}` carries no `reason`, so a caller could
+/// only branch on the prose. `unauthorized` is the code the io SEAL answers with too
 /// — both say "this edge is not open for that", and neither is about the
 /// caller, which is why neither carries a `side`.
 func readonlyRefusal() -> JSON {
@@ -42,9 +41,9 @@ func readonlyRefusal() -> JSON {
 
 /// `password_ingress` is meaningless on an in-process leg: the token is read
 /// off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
-/// presents one, so the rule could only ever refuse (python) or, worse, be
-/// satisfied by a secret persisted ON THE RECORD (the ports, until
-/// 2026-09-02). Refused at the write, next to the mistake (#116). Both
+/// presents one, so the rule could only ever refuse or, worse, be
+/// satisfied by a secret persisted ON THE RECORD. Refused at the write, next
+/// to the mistake. Both
 /// spellings: the scoped `ingress_rule` and the `auth` stem. Shared with
 /// `FantasticExecBridge`.
 public func passwordRefusal(_ meta: OrderedDictionary<String, JSON>, edge: String) -> String? {
@@ -65,8 +64,7 @@ struct Refused: Error {
 
 /// A string argument that is a ROOT-RELATIVE path: absent/null ⇒ `""`; a
 /// non-string or an absolute path is `bad_arg` (the absolute form is refused,
-/// never silently re-rooted — python used to `lstrip("/")` against its own
-/// docstring; #117). Mirrors py `_path_arg`.
+/// never silently re-rooted). Mirrors py `_path_arg`.
 func pathArg(_ verb: String, _ payload: JSON, _ name: String) throws(Refused) -> String {
     let p: String
     switch payload[name] {
@@ -156,7 +154,7 @@ public struct FileBundle: AgentBundle {
 
     public var readme: String? { Self.readmeText }
 
-    /// Refuse an `ingress_rule` no resolver implements. An unknown rule now SEALS
+    /// Refuse an `ingress_rule` no resolver implements. An unknown rule SEALS
     /// rather than throwing, so the edge is safe either way — but reporting
     /// `{"updated": true}` for a security control that does not exist is its own
     /// failure, and the complaint belongs at the write, next to the typo.
@@ -215,9 +213,9 @@ public struct FileBundle: AgentBundle {
         // except `reflect` is denied until opened (ingress_rule=allow_all_ingress);
         // python's UNGATED set is `{"reflect"}` alone, so a sealed `boot` denies.
         // NO token: the fs edge has no wire envelope, so nothing can present one.
-        // It used to pass the record's `auth_token` — a persisted secret in the
-        // portable workdir satisfied a `password_ingress` leg, the one thing the
-        // password rule exists to prevent (#116).
+        // The record's `auth_token` is never passed — a persisted secret in the
+        // portable workdir would satisfy a `password_ingress` leg, the one thing the
+        // password rule exists to prevent.
         if let denied = gateVerb(
             ingressRule: agent.metaValue(forKey: "ingress_rule"),
             auth: agent.metaValue(forKey: "auth"),
@@ -259,10 +257,7 @@ public struct FileBundle: AgentBundle {
         // THE STREAM VERBS ON THE TEXT CHANNEL, as python serves them: a model
         // writes a document VERBATIM between `<bytes>` and `</bytes>` and the
         // tag grammar delivers it as utf-8 bytes to the same handler; a chunk
-        // read back renders utf-8 in the reply. Swift refused both here with
-        // "raw bytes on the binary channel" — the `subai_graph` routine's
-        // program write failed on it every pass (measured 2026-09-13, the same
-        // refusal rust carried in 43 e2e logs). The binary channel stays for
+        // read back renders utf-8 in the reply. The binary channel stays for
         // real blobs.
         case "read_stream":
             let (reply, body) = readStream(agent: agent, payload: payload, base: base)
@@ -273,7 +268,7 @@ public struct FileBundle: AgentBundle {
             return .object(o)
         case "write_stream":
             if pyTruthy(agent.metaValue(forKey: "readonly") ?? .null) { return readonlyRefusal() }
-            // `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK (A13.19). Python
+            // `bytes` ON THE TEXT CHANNEL IS NEVER A CHUNK. Python
             // TYPES the argument — `isinstance(data, (bytes, bytearray))` — and
             // JSON has no bytes, so ANY present value here (a string, a number,
             // a null) is `missing_arg` and nothing is written. A raw chunk
@@ -351,7 +346,7 @@ public struct FileBundle: AgentBundle {
             let (reply, chunk) = readStream(agent: agent, payload: header, base: base)
             // A REFUSAL CARRIES NO CHUNK. A success does — a 0-byte one
             // included, which is how an empty file reads back as octet instead
-            // of JSON (C37/A13.1).
+            // of JSON.
             guard case .object(let o) = reply, !pyTruthy(o["error"] ?? .null) else {
                 return (reply, nil)
             }
@@ -364,7 +359,7 @@ public struct FileBundle: AgentBundle {
         // THE BODY AT `bytes` IS THE CHUNK, and a header `bytes` key of ANY JSON
         // value is a wire client trying to smuggle one through the envelope —
         // python OVERWRITES `payload[field]` with the body, so the key never
-        // reaches this handler holding a JSON value (A13.1). Refuse it rather
+        // reaches this handler holding a JSON value. Refuse it rather
         // than write whatever it spelled. Nothing at `bytes` (no body, or a body
         // under another key) is python's default `b""`: `written: 0`.
         if header.asObject?["bytes"] != nil {
@@ -522,7 +517,7 @@ public struct FileBundle: AgentBundle {
     }
 
     /// The clamp base has ONE source — `Kernel.workdir`, the dir holding the
-    /// root's `.fantastic` (audit 2026-09-28, c6). None ⇒ every disk verb refuses.
+    /// root's `.fantastic`. None ⇒ every disk verb refuses.
     static let noRunningDirText = "kernel has no root — no running dir to clamp disk to"
 
     static func noRunningDir() -> JSON {
@@ -558,7 +553,7 @@ public struct FileBundle: AgentBundle {
     /// python `_target_arg` — `pathArg` for a MUTATING verb: the path must name
     /// something INSIDE the root; empty/`.` is `missing_arg` and anything
     /// resolving to the root itself is `bad_arg`. `delete {path:"",
-    /// recursive:true}` used to remove the whole served store (#97): the root is
+    /// recursive:true}` would otherwise remove the whole served store: the root is
     /// the boundary, not an operand.
     func targetArg(_ verb: String, _ root: String, _ payload: JSON, _ name: String, base: String)
         throws(Refused) -> String
@@ -621,7 +616,7 @@ public struct FileBundle: AgentBundle {
                 "offset": .integer(offset),
                 // python's reply holds the chunk HERE. The chunk rides beside
                 // the reply (the outcome's body), so its slot holds `null` —
-                // the head python's `encode_frame` writes (R-D16-3).
+                // the head python's `encode_frame` writes.
                 "bytes": .null,
                 "next_offset": .integer(nextOffset),
                 "eof": .bool(nextOffset >= size),
@@ -637,7 +632,7 @@ public struct FileBundle: AgentBundle {
     /// SINK — write ONE raw chunk (`blob`) at `offset` (default: append at end).
     /// `truncate:true` on the first chunk starts fresh. Returns
     /// `{path, written, offset, size}` — `size` is the FILE's size after the
-    /// write (py `stat().st_size`), not the write cursor (#59).
+    /// write (py `stat().st_size`), not the write cursor.
     private func writeStream(agent: Agent, payload: JSON, blob: Data, base: String) -> JSON {
         let root = rootStr(agent)
         let path: String
@@ -690,9 +685,9 @@ public struct FileBundle: AgentBundle {
         }
         if src == sink && pumpOneFile(spath, dpath) {
             // The first write's `truncate` empties the file the next read comes
-            // from: everything past the first chunk was lost under a success reply
-            // — the bare `{source_path}` form did it, sink and sink_path defaulted
-            // (python `_pump`, audit BV-7).
+            // from: everything past the first chunk would be lost under a success
+            // reply — the bare `{source_path}` form, sink and sink_path defaulted
+            // (python `_pump`).
             return Refusal.bad(
                 "pump", "sink_path",
                 "another file than source_path when the sink is the source — a pump "
@@ -779,8 +774,7 @@ public struct FileBundle: AgentBundle {
     /// Where `path` actually LANDS (symlinks followed) must be under the RESOLVED
     /// form of an allow entry — entries resolved now, because the disk changes.
     /// With `allowExposed` (the path as asked) this is the both-ends rule: a link
-    /// inside an exposed area that points outside it serves nothing (audit
-    /// 2026-09-28). Python `_lands_exposed`.
+    /// inside an exposed area that points outside it serves nothing. Python `_lands_exposed`.
     func landsExposed(root: String, allow: [String], path: String, base: String) -> Bool {
         guard let target = try? fsResolve(root, path, base: base) else { return false }
         for s in allow {

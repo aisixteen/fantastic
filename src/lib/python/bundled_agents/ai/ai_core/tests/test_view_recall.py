@@ -293,8 +293,8 @@ async def test_a_fold_batch_makes_recall_due_on_the_next_turn(monkeypatch):
 
 
 async def test_a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on(monkeypatch):
-    """Measured 2026-09-06: the rebooted agent was woken by answers to calls its
-    previous incarnation made, and finished THAT work instead of the new instruction."""
+    """A rebooted agent must not be woken by answers to calls its previous
+    incarnation made, finishing THAT work instead of the new instruction."""
     from ai_core.core import _deliver, _incarnation, _make_boot
 
     async def fake_sys(self_id, kernel):
@@ -335,8 +335,8 @@ async def test_a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on(monkey
 
 
 async def test_rows_appended_after_the_array_ride_behind_it(monkeypatch):
-    """The array is the head as of its write; the log keeps growing. Measured: served the
-    array alone, the model restarted its survey every turn."""
+    """The array is the head as of its write; the log keeps growing. Served the array
+    alone, the model would restart its survey every turn."""
     k = _K()
     a = _chain("a", 4, big=False)
     await _seed(k, a)
@@ -424,7 +424,7 @@ async def test_the_live_root_is_found_even_when_a_fold_collapsed_it(monkeypatch)
     assert f"live task: {_id('user:b')}" in rec["content"], rec["content"]
 
 
-# ── a head longer than the budget folds at recall (owner, 2026-10-07) ─
+# ── a head longer than the budget folds at recall ─
 
 
 class _FoldingModel:
@@ -462,7 +462,7 @@ async def test_recall_folds_a_head_longer_than_the_budget(monkeypatch, fake_prov
     fake_providers["ai"] = model = _FoldingModel()
     r = await _context_recall("ai", {}, k, _cfg())
     folds = k.folds_of()
-    # ONE fold for the over-budget head (sized by tokens, owner 2026-10-11)
+    # ONE fold for the over-budget head (sized by tokens)
     assert r["folded"] == len(folds) == 1 and model.summaries == 1, r
     assert all(f["refs"] and f["title"] and f["body"] for f in folds)
     # NOTHING FELL OUT UNMARKED: every head row is in the view or under a fold

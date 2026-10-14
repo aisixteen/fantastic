@@ -7,8 +7,8 @@
 //! translation in between. NO native tool-calling: the provider streams raw
 //! text and ai-core parses the `<call name=…>` envelope out of it.
 //!
-//! What is vLLM-specific, and why each piece exists (measured by a production
-//! deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
+//! What is vLLM-specific, and why each piece exists (as measured on a production
+//! deployment of Qwen3.8-27B-FP8 on vLLM 0.27.1):
 //!
 //! - THE THOUGHT CHANNEL. With `--reasoning-parser qwen3` the thought streams
 //!   as `delta.reasoning_content` (some versions: `delta.reasoning`) and only
@@ -26,8 +26,8 @@
 //!   preempts and a preempted conversation re-prefills from scratch. The table
 //!   keeps the number of LIVE conversations under that ceiling and rotates the
 //!   least-recently-used one out.
-//! - THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front
-//!   of the shared GPU takes `Authorization: Bearer <key>`). Read before EACH
+//! - THE KEY, when the door needs one (an HTTPS door in front of a GPU server
+//!   takes `Authorization: Bearer <key>`). Read before EACH
 //!   request from the record's `credentials` ref in a credential store
 //!   (`fantastic_ai_core::credentials`), never the environment or the record; a
 //!   record with no `credentials` sends no header at all, so a local vLLM
@@ -77,8 +77,8 @@ const CFG: BackendConfig = BackendConfig {
 
 // ─── sampling ───────────────────────────────────────────────────────────────
 
-/// Applied ONLY where the record sets nothing (owner's decision: a production
-/// deployment's agentic defaults, copied), in python's key order — the order
+/// Applied ONLY where the record sets nothing (a production deployment's
+/// agentic defaults), in python's key order — the order
 /// reflect's `sampling` and the request body list them in.
 ///
 /// `reasoning_effort` is a CHAT-TEMPLATE input (a soft steer on how much the
@@ -98,8 +98,7 @@ fn sampling_defaults() -> [(&'static str, Value); 5] {
 pub const REASONING_EFFORTS: [&str; 3] = ["low", "medium", "xhigh"];
 
 /// Below this, NO thinking budget is sent: a handful of tokens of thinking is
-/// no thinking, and a model starved of it stops with an empty answer (measured:
-/// an 8-token budget on a 16-token turn, 2026-09-30).
+/// no thinking, and a model starved of it stops with an empty answer.
 pub const BUDGET_FLOOR: i64 = 256;
 
 /// Sent only when set on the record — never defaulted. Penalties especially:
@@ -133,7 +132,7 @@ pub const KV_OVERFLOWS: [&str; 2] = ["evict", "reject"];
 /// The LIVE conversations on ONE vLLM endpoint, least-recently used first.
 ///
 /// Shared by every vllm_backend agent in this kernel that names the same
-/// endpoint (owner's decision: one table per endpoint, the closest a kernel
+/// endpoint (one table per endpoint, the closest a kernel
 /// gets to "one count per GPU"). It is BOOKKEEPING, not memory management:
 /// vLLM owns its prefix cache and the table frees no GPU memory — a
 /// conversation rotated out here that comes back still hits whatever blocks
@@ -372,8 +371,8 @@ struct VllmProvider {
     /// one window, so a cap the prompt leaves no room for is refused (HTTP 400). A
     /// turn whose `max_tokens` could overrun it — [`prompt_bound`] plus `max_tokens`
     /// past the window — sends NO max_tokens: vLLM then gives it exactly what the
-    /// prompt leaves (owner, 2026-10-04: the e2e limit is the whole 260k;
-    /// 2026-10-12: 64000 on a 65536 window with a 1537-token prompt was refused).
+    /// prompt leaves (a cap of nearly the whole window would be refused once a
+    /// prompt is in it).
     /// python `VllmProvider._window`.
     window: Option<i64>,
     kv_slots: i64,
@@ -392,7 +391,7 @@ struct VllmProvider {
 
 impl VllmProvider {
     /// The `thinking_token_budget` to send on a call bounded by `call_max`
-    /// (owner's rule, 2026-09-30 — python `VllmProvider._budget_for`):
+    /// (python `VllmProvider._budget_for`):
     ///
     /// - a MAIN turn with an EXPLICIT budget sends it as set — the write keeps
     ///   it below the record's `max_tokens`, so it can fire;
@@ -402,8 +401,8 @@ impl VllmProvider {
     ///   of thumb, not tuned) — an explicit 8000 on a ~2000-token fold summary
     ///   becomes 1000 instead of refusing the fold;
     /// - below [`BUDGET_FLOOR`] NO budget is sent at all: a few tokens of
-    ///   thinking is no thinking — measured, an 8-token budget made the model
-    ///   stop with thinking only and no answer (a dead turn).
+    ///   thinking is no thinking — the model stops with thinking only and no
+    ///   answer (a dead turn).
     fn budget_for(&self, call_max: i64, side_call: bool) -> Result<Option<i64>, ProviderError> {
         let Some(v) = self
             .sampling
@@ -793,7 +792,7 @@ impl SseState {
         // `max_tokens`) that stopped at its bound got what it asked for — an
         // answer; its caller reads the stop reason. A MAIN turn that hit the
         // record's `max_tokens` did not finish, and returned as if it had, it
-        // parses as a truncated envelope (or, measured on vLLM, a turn of pure
+        // parses as a truncated envelope (or, on vLLM, a turn of pure
         // thinking) and the chain dies downstream with the cause hidden — so it
         // fails, naming the cut. Same contract as every other backend (python
         // `VllmProvider.chat`).
@@ -1061,12 +1060,11 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             }
         }
     }
-    // EVERY required field, checked at the WRITE (owner's decision, 2026-09-30):
-    // a model spawning a sub-AI copies the fields it can see, and a record the
-    // write accepted but no turn could use failed only later, on every turn,
-    // far from the create that caused it (measured: E37 multisubai_build — the
-    // solvers carried endpoint/model/max_tokens but no kv_slots/kv_overflow).
-    // Named ALL at once, from the schema, so one retry fixes the record.
+    // EVERY required field, checked at the WRITE: a model spawning a sub-AI
+    // copies the fields it can see, and a record the write accepted but no turn
+    // could use would fail only later, on every turn, far from the create that
+    // caused it. Named ALL at once, from the schema, so one retry fixes the
+    // record.
     schema::validate(record_schema(), NAME, meta, record)
 }
 
@@ -1078,7 +1076,7 @@ fn sampling_default(key: &str) -> Value {
         .map_or(Value::Null, |(_, v)| v)
 }
 
-/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+/// THE RECORD SCHEMA — what this kind's record takes, read with
 /// no agent existing (`reflect bundles=all`). Built from the constants the
 /// provider runs on, and enforced by [`validate`], so the page, the write check
 /// and the turn cannot disagree. `endpoint` and `kv_overflow` are required; the

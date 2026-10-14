@@ -235,7 +235,7 @@ fn spawn(
     // exactly like python's `{str(k): str(v) …}`. The kernel's own environment
     // does not leak in (`env_clear`).
     //
-    // The two control vars are written OVER it (A4.23), so a record `env` cannot
+    // The two control vars are written OVER it, so a record `env` cannot
     // make a job claim another agent's identity, nor point `FANTASTIC_CTRL_FD` at a
     // descriptor it chose.
     cmd.env_clear();

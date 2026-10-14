@@ -329,9 +329,8 @@ final class SlowBundle: AgentBundle, @unchecked Sendable {
     }
 }
 
-/// A handler that RAISES on every real verb — the failure python measured on
-/// 2026-08-02 (a `file_bridge` whose ingress rule could not be resolved threw out
-/// of its handler and killed the chain silently). `boot`/`shutdown` answer
+/// A handler that RAISES on every real verb — a handler that throws must not
+/// kill the chain silently. `boot`/`shutdown` answer
 /// normally so the agent can be created at all.
 final class RaisingBundle: AgentBundle, @unchecked Sendable {
     let name = "mock_raiser"
@@ -379,7 +378,7 @@ final class EventSink: @unchecked Sendable {
     }
 
     /// The terminal event of a turn: `status` with `phase:'done'`. There is no
-    /// `done` event on any runtime (B2.15) — this is what a client waits on.
+    /// `done` event on any runtime — this is what a client waits on.
     func statusDone() -> JSON? {
         snapshot().first { $0["type"].asString == "status" && $0["phase"].asString == "done" }
     }

@@ -4,7 +4,7 @@
 //
 // The expected replies were produced by python's ram_store
 // (bundled_agents/memory/ram_store/tools.py) from the same calls, in the same
-// order, on 2026-10-01; the grant tables were removed 2026-10-03.
+// order.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -225,8 +225,8 @@ _CLEAN = "a]0;TEST-VALUE-TITLEb[2Kc31mdefg\th\ni"
 async def test_agent_text_reaches_the_terminal_without_control_characters(
     seeded_kernel, capsys
 ):
-    """Audit BV-11: `token`/`say`/`error`/`status`/`context` wrote agent and model
-    text raw, so an escape sequence in it was INTERPRETED by the operator's
+    """`token`/`say`/`error`/`status`/`context` must not write agent and model
+    text raw, or an escape sequence in it is INTERPRETED by the operator's
     terminal (a title, a clipboard write, a rewritten line). C0/C1 controls are
     stripped, newline and tab kept — in every field the sink prints."""
     k = seeded_kernel

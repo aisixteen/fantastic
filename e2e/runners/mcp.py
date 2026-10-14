@@ -14,7 +14,7 @@ runs any build. Without one, the runner builds `src/tui` and uses
 `src/target/debug/fantastic` — the thing under test, not a guessed default.
 
 NEVER Claude Code. A human plugs the binary into their own client; a test never
-automates one (owner rule, TOS). The client below speaks MCP 2025-11-25 over
+automates one (TOS). The client below speaks MCP 2025-11-25 over
 stdio because that is what Claude Code's stdio client sends — measured, once, by
 a human-run capture — and that is the whole of Claude Code's part in this test.
 """
@@ -233,7 +233,7 @@ def check(step: dict, reply: dict, state: dict) -> list[str]:
 
 def kernel_rows_on_disk(store: Path) -> int:
     """The KERNEL'S execution rows (call / settle / task / flush) in `memory.db`.
-    Its store is RAM (`kernel_memory`, owner 2026-10-09): the file holds AI rows
+    Its store is RAM (`kernel_memory`): the file holds AI rows
     only, so this must be 0."""
     import sqlite3
 

@@ -37,9 +37,8 @@ error instead of a silent policy change.
 presents nothing outbound. Writing an egress name into `ingress_rule` (or any name
 no rule implements, or a spec that is not a string or `{type, env?}` of strings) is
 refused at the write, naming the legal values; an egress-only stem in `auth` seals
-the leg AND names the mistake, rather than looking like an ordinary seal. That
-failure was real: `auth: silent` used to seal every inbound call while reporting
-only a bare unknown name.
+the leg AND names the mistake, rather than looking like an ordinary seal (`auth:
+silent` seals every inbound call; reporting only a bare unknown name would hide why).
 
 ## Who is calling
 A call frame is `{type:"call", id, target, payload}`. The leg that serves it calls

@@ -1,4 +1,4 @@
-"""py_agent + folder bundles (owner, 2026-10-08): a `<root>/bundles/<name>/` folder
+"""py_agent + folder bundles: a `<root>/bundles/<name>/` folder
 extends py_agent; each instance's program is run by the kernel and answers the
 bundle's verbs over the connector channel. Real programs, real processes."""
 

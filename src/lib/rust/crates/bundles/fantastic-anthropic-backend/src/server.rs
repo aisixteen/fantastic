@@ -1,4 +1,4 @@
-//! What the record leaves out is READ FROM THE API (owner, 2026-10-07) — python
+//! What the record leaves out is READ FROM THE API — python
 //! `anthropic_backend/server.py`, text for text.
 //!
 //! `max_tokens` and `context_window` may be left off the record. Before a verb that

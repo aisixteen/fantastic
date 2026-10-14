@@ -1,9 +1,9 @@
 //! The ONE watch path (connect-time auto-watch + explicit `watch` frame): the
 //! name resolves the way `send` resolves a target (an id or `kernel`), the watch
 //! runs under the leg's own identity, and a refusal is an `error` frame — never
-//! silence, and never recorded as watched. Measured before: a socket whose
-//! connect-time watch did not resolve mirrored nothing and said nothing, and the
-//! explicit watch that followed was skipped as a duplicate. The twin of python
+//! silence, and never recorded as watched — a watch that did not resolve must
+//! not be recorded and then skip the explicit watch that follows as a duplicate.
+//! The twin of python
 //! `web_ws/tests/test_watch_path.py` (a `file_bridge` stands in for python's
 //! `exec_bridge`: any agent whose inbox has events will do).
 

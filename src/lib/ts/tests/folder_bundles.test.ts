@@ -1,4 +1,4 @@
-// FOLDER BUNDLES on the page kernel (owner, 2026-10-08): `<loader root>/bundles/*/
+// FOLDER BUNDLES on the page kernel: `<loader root>/bundles/*/
 // bundle.yaml`, read through the host loader's `read_bundles` (raw text) and parsed
 // HERE, extend a BASE the app registered (`registerBundle(…, {folderBundle})`).
 // They load before the tree; the root's `reload_bundle` re-reads one and restarts

@@ -143,7 +143,7 @@ fn scalar_styles_match_libyaml() {
         (json!({"k": "?x"}), "k: ?x\n"),
         (json!({"k": "a  \n b"}), "k: \"a  \\n b\"\n"),
     ];
-    // Every expected string is python's `yaml_io.dump` output (measured).
+    // Every expected string is python's `yaml_io.dump` output.
     // U+2028 (a YAML 1.1 break) is written raw by libyaml, as here; a 1.2 reader
     // does not treat it as a break, so that one is pinned write-side only.
     assert_eq!(dump(&json!({"a": "x\u{2028}y"})), "a: 'x\u{2028}  y'\n");

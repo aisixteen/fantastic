@@ -1,7 +1,7 @@
 // The RECORD writer + the ROOT LOADER's boot — python `kernel_state._FlushLoop`
 // and `_boot`.
 //
-// Records do not persist at the verb any more. `create_agent` / `update_agent` /
+// Records do not persist at the verb. `create_agent` / `update_agent` /
 // `delete_agent` publish a state event and return; the ROOT LOADER subscribes to
 // that stream and writes, debounced 150 ms, through the DISCOVERED provider. That
 // is what makes persistence a consumer of the kernel rather than a branch inside
@@ -136,11 +136,7 @@ public final class RecordWriter: @unchecked Sendable {
     ///
     /// ONE DRAIN AT A TIME. When it returns, every write that was dirty when it
     /// was called has LANDED — also the ones the debounced loop took first. It
-    /// used to return at once when the loop held them, with their writes still in
-    /// flight: `flushRecords` came back before the record and its readme were on
-    /// disk (measured: a 152–160 ms gap between `create_agent` and `flushRecords`,
-    /// just past the debounce, left `agent.yaml`, `readme.md` and `docs/`
-    /// unwritten when it returned).
+    /// never returns while the loop holds writes still in flight.
     public func flush() async {
         await acquireDrain()
         defer { releaseDrain() }
@@ -169,9 +165,8 @@ public final class RecordWriter: @unchecked Sendable {
     ///
     /// NO FINAL FLUSH HERE. `stop` runs mid-teardown, when the store may already
     /// be down; the last write happens in the loader's `flushPending`, before
-    /// the walk and while the provider is alive. A `create_agent` +
-    /// `update_agent` followed straight away by `shutdown()` used to reach this
-    /// flush mid-walk and the update never landed (measured 2026-09-24).
+    /// the walk and while the provider is alive. A final flush here
+    /// would run mid-walk and could lose a just-made update.
     func stop() async {
         if let token { kernel.unsubscribe(token) }
         token = nil
@@ -212,8 +207,8 @@ extension Kernel {
     }
 
     /// Subscribe the loader to the kernel state stream and start the debounced
-    /// record writer. Replaces the inline persist that used to ride
-    /// `create_agent` / `update_agent` / `delete_agent`.
+    /// record writer. Persistence never rides `create_agent` /
+    /// `update_agent` / `delete_agent` inline.
     @discardableResult
     public func installPersistWriter(loader: AgentId) -> RecordWriter {
         if let w = recordWriter { return w }

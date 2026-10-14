@@ -134,7 +134,7 @@ extension JSON {
     }
 
     /// Decode JSON that arrived OFF THE WIRE, strictly — python's
-    /// `io_bridge.loads` (owner D13): only values every runtime can hold. On
+    /// `io_bridge.loads`: only values every runtime can hold. On
     /// top of `parse`, an integer outside int64 and a number that overflows a
     /// double are refused, each as a parse failure, so every caller's "not
     /// valid JSON" path answers it.
@@ -189,7 +189,7 @@ extension JSON {
     }
 
     /// Pretty-print with `indent` spaces per level, matching Python's
-    /// `json.dumps(obj, indent=2)` BYTE FOR BYTE (C42): `": "` between key and
+    /// `json.dumps(obj, indent=2)` BYTE FOR BYTE: `": "` between key and
     /// value, `,\n<indent>` between items, empty `{}`/`[]` stay compact, no
     /// trailing newline on the outermost value, non-ASCII as lowercase
     /// `\uXXXX` (astral scalars as a surrogate PAIR — `ensure_ascii=True`,

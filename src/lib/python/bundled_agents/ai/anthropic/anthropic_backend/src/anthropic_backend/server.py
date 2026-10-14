@@ -1,4 +1,4 @@
-"""What the record leaves out is READ FROM THE API (owner, 2026-10-07) — the same
+"""What the record leaves out is READ FROM THE API — the same
 contract as vllm_backend's `server.py`.
 
 `max_tokens` and `context_window` may be left off the record. Before a verb that

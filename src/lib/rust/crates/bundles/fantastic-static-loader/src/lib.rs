@@ -9,7 +9,7 @@
 //!
 //! The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
 //! `create_agent` booting the loader it just made. An agent-sent `boot` is
-//! refused (audit G-2/BV-2): any agent granted `boot` on the loader could
+//! refused: any agent granted `boot` on the loader could
 //! otherwise re-run the manifest ungated — restore a revoked grant, re-create a
 //! deleted agent.
 //!
@@ -172,9 +172,9 @@ async fn boot(agent: &Arc<Agent>, kernel: &Arc<Kernel>) -> Value {
         if let Some(live) = kernel.agents.get(&AgentId::from(id)) {
             // THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
             // cloud, an API). So an id that already exists is RE-APPLIED
-            // from the manifest, never skipped: editing a grant in the yaml
-            // used to change nothing at all, because the hydrated record
-            // silently won and the operator got no word about it.
+            // from the manifest, never skipped: an edited grant in the yaml
+            // must take effect, never be silently overridden by the hydrated
+            // record.
             let declared_hm = obj.get("handler_module").unwrap_or(&Value::Null);
             if live.handler_module.as_deref() != declared_hm.as_str() {
                 // A bundle cannot be swapped under a live agent (its

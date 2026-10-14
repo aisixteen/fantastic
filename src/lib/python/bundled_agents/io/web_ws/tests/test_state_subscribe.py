@@ -22,7 +22,7 @@ from _testkit import wire
 @pytest.fixture
 def client(seeded_kernel):
     # The web host's record: its port is the authority the Host guard admits
-    # (audit W-2) — the client names it on every request, the upgrade included.
+    # — the client names it on every request, the upgrade included.
     seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so state_subscribe/call frames dispatch
@@ -203,7 +203,7 @@ def test_ws_close_unsubscribes_state_callback(seeded_kernel):
     """When the WS closes, the proxy's finally block unregisters every
     state subscriber tied to that connection."""
     # The web host's record: its port is the authority the Host guard admits
-    # (audit W-2) — the client names it on every request, the upgrade included.
+    # — the client names it on every request, the upgrade included.
     seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     # Sealed by default ⇒ open the leg so state_subscribe dispatches.
@@ -263,7 +263,7 @@ def test_state_subscribe_without_the_grant_is_refused(seeded_kernel):
     (The handler ran with no sender, so the kernel read an operator and served
     the snapshot; only the ambient context of a production serve gated it.)"""
     # The web host's record: its port is the authority the Host guard admits
-    # (audit W-2) — the client names it on every request, the upgrade included.
+    # — the client names it on every request, the upgrade included.
     seeded_kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", seeded_kernel)
     seeded_kernel.create(

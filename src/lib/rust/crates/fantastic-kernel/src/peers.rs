@@ -1,4 +1,4 @@
-//! CONNECTED PEER KERNELS — cross-kernel addressing (owner, 2026-09-30). Python
+//! CONNECTED PEER KERNELS — cross-kernel addressing. Python
 //! `PeerRoute` + `Kernel.peers` / `register_peer` / `unregister_peer` /
 //! `peer_rows` (`kernel/_kernel.py`).
 //!
@@ -10,7 +10,7 @@
 //! carries frames; addressing is the kernel's. A guid that is not here is an
 //! unknown target like any other.
 //!
-//! A SET PER GUID (owner, 2026-10-03): the tabs of one identity are ONE principal
+//! A SET PER GUID: the tabs of one identity are ONE principal
 //! — every tab says hello with the identity's guid, each is a live route of it, a
 //! call to `<guid>|x` goes to all of them and settles with the first reply.
 
@@ -209,7 +209,7 @@ pub(crate) async fn call_peer(remote: &RemoteRef, payload: Value, body: Option<B
         .iter()
         .map(|r| r.call(remote.agent_id.clone(), payload.clone(), body.clone()));
     // The losers are DROPPED with `select_all`'s rest — their routes forget them.
-    // TODO (owner, open): first-reply-wins hides tab DESYNC — if the tabs of one
+    // TODO: first-reply-wins hides tab DESYNC — if the tabs of one
     // identity diverge, the other replies are dropped unseen. Must be solved
     // (later).
     let (first, _, _rest) = futures_util::future::select_all(calls).await;
@@ -233,7 +233,7 @@ pub(crate) async fn emit_peer(
             return;
         }
     }
-    // TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+    // TODO: DESYNC between the tabs of one identity is envisioned
     // and unsolved — each tab gets this emit, nothing reconciles tabs that have
     // diverged. Think later.
     for r in &remote.routes {

@@ -1,19 +1,13 @@
 // A bridge leg across its LIFETIME: a live record change, a sender restart.
 //
-// Audit 2026-10-03:
-//
-//   - ARCH-2 — the leg's rules were resolved ONCE at boot and cached, so an
-//     operator's `update_agent ingress_rule=deny_ingress` on a LIVE leg changed
-//     what `reflect` reported (sealed) and nothing the gate did: inbound calls
-//     kept being dispatched until the transport was torn down. The opening
-//     direction (the readme's own `update_agent <id> ingress_rule=allow_all_ingress`)
-//     failed the same way. Now the leg reads its rules off the record per frame —
-//     the record is the truth the moment it is written.
-//   - IO-5 — a forward's frame id names the execution on the receiver, and it was
-//     `<leg>-<n>` with `n` counting from 1 in every process. A restarted sender's
-//     first forward reused `<leg>-1`, which the long-lived receiver had already
-//     settled: the new write was JOINED to the old one, answered with its
-//     recorded outcome, and never ran. Now every boot mints a nonce into the ids.
+//   - The leg reads its rules off the record per frame — the record is the
+//     truth the moment it is written, so an operator's `update_agent
+//     ingress_rule=…` on a LIVE leg changes what the gate does (both sealing and
+//     opening), not only what `reflect` reports.
+//   - A forward's frame id names the execution on the receiver, so every boot
+//     mints a nonce into the ids: a restarted sender's first forward never
+//     reuses an id the long-lived receiver already settled (it would be JOINED
+//     to the old execution and never run).
 //
 // Twin of python `ws_bridge/tests/test_leg_lifetime.py`.
 

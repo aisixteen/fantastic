@@ -6,8 +6,7 @@ two file agents (`fb` and the `notes` editor) with both arms' ids on their ingre
 completion, rename its artifact out of the way, read its history and fact log. This is
 that dance, once. A probe supplies the fixture, the task and the scorer.
 
-THE CONTROL CONDITION IS "NOT CARRIED", NOT "NOT STORED". Measured 2026-09-04: the model
-finds the `facts` verb without being taught it (the agent's own reflect lists its verbs)
+THE CONTROL CONDITION IS "NOT CARRIED", NOT "NOT STORED". The model can find the `facts` verb without being taught it (the agent's own reflect lists its verbs)
 and dumps anyway. That is a BETTER control, not contamination — both arms then behave the
 same and the only difference is whether the strategy carries the dumps.
 """
@@ -24,19 +23,16 @@ from helpers.ai import Connected  # noqa: F401  (re-exported for probes)
 from helpers.kernel import WRAPS, home
 
 # THE SQUEEZE. The model itself has 256k; this is the window the probes hand the agent so
-# folds, strips and recalls fire inside a run. 12k (2026-09-05) starved the multi-root
-# tests — 24 roots at 12k lost every deliverable, at 32k all three passed (2026-09-06).
-# Fillers scale with it (`plant_fillers`), so a read still dehydrates at any setting.
+# folds, strips and recalls fire inside a run. Too small a window starves the multi-root
+# tests of every deliverable. Fillers scale with it (`plant_fillers`), so a read still dehydrates at any setting.
 
 def _self_stub(content: str, aid: str) -> bool:
     """Did a reply FROM `aid` ITSELF arrive as a stub?
 
     One user row can carry a whole batch: `[reply to N · <agent> <verb> · …]` tag lines,
-    each followed by that reply's body. The old check looked for the stub prefix anywhere
-    in the row's first 400 chars, so a SHORT inlined self-reply followed by some OTHER
-    agent's dehydrated reply scored as a dehydrated self-reply (measured 2026-09-21,
-    `recall_after_fold:rust`: an inlined 1-match grep + a 6950-byte `notes read` stub).
-    Judge each reply by its own tag."""
+    each followed by that reply's body. Looking for the stub prefix anywhere in the row
+    would score a SHORT inlined self-reply followed by some OTHER agent's dehydrated
+    reply as a dehydrated self-reply. Judge each reply by its own tag."""
     for seg in content.split("[reply to ")[1:]:
         tag, _, body = seg.partition("]\n")
         if f"· {aid} " in tag and body.startswith("(settled, "):
@@ -70,10 +66,9 @@ async def call(root, target, payload):
 async def store_rows(root, core, aid: str) -> list[dict]:
     """The agent's conversation, for SCORING: its rows read from its MEMORY STORE (the
     store's dump — the one read every runtime answers), from the last `clear` on, turns
-    only — what the agent's own head holds. ONE PATH (2026-10-11): in process this used
-    to call `core._load_history` from outside the agent, so the store answered the read
-    under the CALLER's key — empty before the agent's first turn (E75 counted 0 planted
-    reads and told the model it had read nothing; E39 saw 0 folds)."""
+    only — what the agent's own head holds. ONE PATH: a read from outside the agent
+    (`core._load_history`) would be answered under the CALLER's key — empty before the
+    agent's first turn."""
     rows = await memory.rows_of(root, aid, conversation_only=True)
     last_clear = max(
         (i for i, r in enumerate(rows) if r.get("kind") == "clear"), default=None
@@ -110,7 +105,7 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
     c = out.get("content")
     # A FOLD ROW NAMES ITSELF in its head (`[fold <id> · …]`) — the id the model
     # descends by. Left as the placeholder, the model is pointed at a row that
-    # does not exist (measured 2026-10-07, misleading_fold:rust: `[fold 1000000001 …]`).
+    # does not exist.
     if isinstance(c, str) and c.startswith("[fold "):
         own = row.get("id")
         if isinstance(own, int) and own in seen:
@@ -133,7 +128,7 @@ def _remap_row(row: dict, seen: dict[int, int]) -> dict:
 
 
 #: Where a planted past must land, as a share of the FOLD TRIGGER (`FOLD_AT` of the
-#: agent's body budget — owner, 2026-10-11). Just over it, by default: exactly one fold
+#: agent's body budget). Just over it, by default: exactly one fold
 #: at boot. Well over it, for the tests whose subject is heavy compaction: several
 #: folds, folds of folds.
 FIT_ONE = (1.00, 1.10)
@@ -198,7 +193,7 @@ async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, ba
             {"role": "system", "content": await core._default_system_content(aid, root)}
         )
     else:
-        # OVER THE WIRE (owner, 2026-10-11): the runtime's default block mirrors
+        # OVER THE WIRE: the runtime's default block mirrors
         # python's (parity) — measured on a throwaway python kernel, once per run.
         from ai_core import core as pycore
 
@@ -213,7 +208,7 @@ async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, ba
 
     before = ratio()
     if before > hi:
-        # OVER: AUTOSIZE THE WINDOW (owner, 2026-10-11) — the planted content and its
+        # OVER: AUTOSIZE THE WINDOW — the planted content and its
         # needles stay whole; the window grows until the past sits mid-band.
         size = estimate_tokens(render(rows))
         want_body = int(size / (((lo + hi) / 2) * FOLD_AT))
@@ -281,7 +276,7 @@ async def plant_store(
     OVER THE WIRE the ids are PLACEHOLDERS (`WireCtx.mint_id`): `memory.plant` mints a
     real id for every row and remaps every reference (`_remap_row`) in ONE round.
 
-    FITTED first (`fit_planted`, owner 2026-10-11): `band` against the fold trigger at
+    FITTED first (`fit_planted`): `band` against the fold trigger at
     `window` (default the arms' WINDOW); `band=None` plants as written."""
     if band is not None:
         await fit_planted(core, root, aid, rows, window=window or WINDOW, band=band)
@@ -296,11 +291,10 @@ async def plant_store(
 
 async def read_view(core, root, aid: str) -> dict | None:
     """The agent's VIEW — the ordered ids it sees, each at a resolution: the newest
-    `view` row in its memory store, read from the store's dump. ONE PATH (2026-10-14):
-    in process this called `core._load_view` from outside the agent, so the store
-    answered under the CALLER's key and that read became the agent's head cache — a
-    rebooted agent then saw none of its own rows (E78 kernel_restart: b answered
-    "none")."""
+    `view` row in its memory store, read from the store's dump. ONE PATH: a read from
+    outside the agent (`core._load_view`) would be answered under the CALLER's key and
+    become the agent's head cache — a rebooted agent would then see none of its own
+    rows."""
     return await memory.latest_view(root, aid)
 
 
@@ -381,8 +375,7 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
     msgs = await store_rows(root, core, aid)
     # THE WRITE IS DETACHED. `done` closes the turn, and the calls that turn made run
     # in a spawned task after it — so the artifact can land a moment after `drive`
-    # returns. Measured 2026-09-06 (pull_by_choice): the transcript showed
-    # "report.md written with checksum: …" and the file read as empty. Wait for it.
+    # returns, while the file still reads as empty. Wait for it.
     p = Path(artifact)
     for _ in range(40):
         if p.exists() and p.read_text().strip():
@@ -417,7 +410,7 @@ async def run_arm(root, core, bk, fb: str, aid: str, strategy: str, extra: dict,
         "fold_ids": [m.get("id") for m in msgs if m.get("kind") == "fold"],
         "descents": _descents(msgs, aid),
         # a ROOT: a message from a person or a peer — it now OPENS with the kernel's
-        # `[from … ]` header (2026-09-10), so "starts with [" is no longer the test;
+        # `[from … ]` header, so "starts with [" is not the test;
         # the runtime's own lines (reply tags, nudges, notices, folds) are named.
         "roots": sum(
             1
@@ -521,11 +514,9 @@ def done_calls(rows: list[dict]) -> int:
 
 def after_replies(root, aid: str, n: int = 1):
     """Readiness for a SECOND ROOT: the agent has received at least `n` delivered
-    replies in its current run, i.e. it is mid-task. A fixed delay was tried
-    (`send_later(…, 45.0)`, 2026-09-08) and raced the model: under the tag grammar
-    the fold arm finished a four-read task in six turns, the chain ended before 45 s,
-    the later send was cancelled, and the second root never existed (two_roots_live,
-    2026-09-09)."""
+    replies in its current run, i.e. it is mid-task. A fixed delay races the model: a
+    fast chain ends before it, the later send is cancelled, and the second root never
+    exists."""
 
     async def ready() -> bool:
         rows = await memory.rows_of(root, aid)
@@ -546,8 +537,8 @@ def after_tasks(root, aid: str, laters: list):
     """Readiness for a FINAL: every earlier task was DELIVERED and the agent has gone
     quiet (no in-flight task of its own). Polled every few seconds, so it lands well
     inside the driver's 30 s idle cap and restarts the chain instead of missing it. A
-    done-count was tried first (2026-09-06) and never fired: a model that batches or
-    skips `done` per task keeps the count short and the FINAL arrived after the run."""
+    done-count does not work: a model that batches or skips `done` per task keeps the
+    count short and the FINAL would arrive after the run."""
     from helpers.ai import _live_tasks
 
     async def ready() -> bool:
@@ -559,9 +550,9 @@ def after_tasks(root, aid: str, laters: list):
 async def send_when(root, core, aid: str, text: str, ready, *, max_wait: float, poll: float = 5.0):
     """The HUMAN sends a message ONCE THE WORK IT REFERS TO EXISTS (`ready()` true), or
     at `max_wait` regardless (so a stalled agent still meets the message and the run
-    ends). A FINAL on a fixed timer measured 2026-09-06 as landing before the tasks it
-    summarized: the model then chose between an unfinished task and a FINAL that told
-    it to stop — folds_x_chains wrote 1 of 4 reports and called done. The tasks
+    ends). A FINAL on a fixed timer can land before the tasks it summarizes, leaving
+    the model to choose between an unfinished task and a FINAL that tells it to stop.
+    The tasks
     themselves stay on timers; interleaving is what those probes measure."""
     import asyncio
     import time
@@ -583,8 +574,7 @@ async def send_in_turn(root, aid: str, texts: list[str], *, quiet: float = 1.0,
     """The HUMAN sends each message as soon as the agent has FINISHED the one before —
     its own work was seen running, then stayed quiet for `quiet` s — so messages still
     arrive one after another, over time, without the idle a fixed timer leaves when a
-    task ends early (measured 2026-10-07: flat_roots idled 603 of 1067 s, fold_paging
-    525 of 782 s, on 20/22 s × i timers). The FIRST waits for the run's own first task to
+    task ends early. The FIRST waits for the run's own first task to
     start and end. `max_wait` per message bounds a stalled agent: the message goes
     regardless. One pending task for the whole sequence (the drive loop keeps the chain
     open while it is pending)."""
@@ -657,12 +647,10 @@ async def continue_arm(root, core, aid: str, task: str, artifact: str, *, timeou
             "greps": len(ctx_score.calls_made(msgs, target=aid, verb="grep"))}
 
 
-# ─── A PRE-SEEDED PAST (owner, 2026-10-07: "we are testing folding") ───────────
+# ─── A PRE-SEEDED PAST ───────────────────────────────────────────────────────────
 #
 # A fold test needs a past long enough to overflow the window. Producing it LIVE — the
-# model reading N files one per turn — was most of every fold test's wall (fold_descent:
-# 72 turns, 68 of them greps, because at a 6k window each filler is held and read
-# blind). The past is PLANTED instead: the original instruction, then per file the
+# model reading N files one per turn — would be most of every fold test's wall. The past is PLANTED instead: the original instruction, then per file the
 # model's `read` call and its reply with the text INLINE (bodies are never persisted;
 # a planted history carries them inline). The LAST reply is delivered LIVE, as the
 # reply a live run would have received, so the run continues that very chain: the
@@ -779,7 +767,7 @@ def base_checks(recency, other, *, planted: bool = False) -> list[tuple[str, boo
 
     `planted`: the past was PLANTED, so each arm compacts it at startup (its boot
     rebuild: the fold arm folds, the control stubs) — measured there, not by a second
-    compaction the short live tail may never reach (owner, 2026-10-07)."""
+    compaction the short live tail may never reach."""
     ran = (
         other["carried"] > 0 if other["strategy"] == "halve"
         else (other["digested"] > 0 or other["folded"] > 0 or other["stripped"] > 0)
@@ -802,8 +790,8 @@ def base_checks(recency, other, *, planted: bool = False) -> list[tuple[str, boo
 
 def conclude(recency, other, checks, ok_note: str, fail_note: str) -> tuple[bool, str]:
     """CONTROL DIED is not MECHANISM FAILED. The verdict is the mechanism arm's checks; the
-    control's fate is printed beside it. Three FAILs on 2026-09-06 were controls killed by
-    the unbounded ledger while the mechanism under test had passed every check.
+    control's fate is printed beside it: a control can die for its own reasons while the
+    mechanism under test passes every check.
     Returns (allok, note) — the probe calls `verdict` itself."""
     control_ok = bool(recency["body"].strip()) and not recency["failed"]
     for name, ok in checks:

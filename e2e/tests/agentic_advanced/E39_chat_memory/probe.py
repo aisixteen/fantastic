@@ -81,7 +81,7 @@ PEOPLE = [
 ]
 
 #: A real pet name, picked at random: a name with a hex tail reads as a typo and gets
-#: "cleaned" (measured 2026-10-11: recalled `pepperadd1` exactly, posted "Pepper").
+#: "cleaned".
 DOG = secrets.choice(
     ["Quincy", "Pistachio", "Bramble", "Marzipan", "Juniper", "Waffles"]
 )
@@ -135,8 +135,8 @@ FACTS = {
 }
 #: events per planted batch; each batch alone overflows the window, so each folds
 PAST_N = 120
-#: the past arrives in BATCHES, a live ask between them (owner, 2026-10-11: "add more,
-#: fold, add more, fold") — three folds side by side, then a fold of folds
+#: the past arrives in BATCHES, a live ask between them ("add more, fold, add more,
+#: fold") — three folds side by side, then a fold of folds
 BATCHES = 3
 
 LIVE = [
@@ -394,7 +394,7 @@ async def main():
         await conn.close()
 
         # THE STORE, not the agent's head cache: fold rows are counted where they are
-        # written (measured 2026-10-11: four fold summaries ran, the head read 0).
+        # written.
         msgs = await memory.rows_of(root, AI)
         folds = [m for m in msgs if m.get("kind") == "fold"]
         levels = sorted({int(m.get("level") or 1) for m in folds})
@@ -429,9 +429,8 @@ async def main():
 
         checks: list[tuple[str, bool]] = [
             (
-                # NESTING IS REPORTED, NOT REQUIRED (owner, 2026-10-11): folds merge
-                # only when FOLD_RUN of them sit adjacent, and the live asks between
-                # batches decide that (measured: levels [1] in 2 runs, [1,2,3] in others).
+                # NESTING IS REPORTED, NOT REQUIRED: folds merge only when FOLD_RUN of
+                # them sit adjacent, and the live asks between batches decide that.
                 f"every batch folded ({len(folds)} folds, levels {levels})",
                 len(folds) >= BATCHES,
             ),
@@ -467,8 +466,8 @@ async def main():
                 ),
             ),
         ]
-        # A PING IS `<@digits>` (measured 2026-10-11: `<@user 555>` — plain text on a
-        # real platform, nobody pinged).
+        # A PING IS `<@digits>` (`<@user 555>` is plain text on a real platform —
+        # nobody is pinged).
         bad_mentions = [
             p["content"] for p in _posts() if re.search(r"<@(?!\d+>)", p["content"])
         ]

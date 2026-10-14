@@ -234,7 +234,7 @@ public struct CliBundle: AgentBundle {
     /// `text` without its C0/C1 control characters (and DEL), newline and tab
     /// kept — python's `_CONTROL`: what a terminal INTERPRETS instead of printing
     /// (an OSC title or clipboard write, a cursor move, a line erase). Agent and
-    /// model text reaches this sink from callers it does not know (audit BV-11).
+    /// model text reaches this sink from callers it does not know.
     /// Judged per scalar, so a `\r\n` pair loses its `\r` and keeps its `\n`.
     static func terminalSafe(_ text: String) -> String {
         var out = String.UnicodeScalarView()

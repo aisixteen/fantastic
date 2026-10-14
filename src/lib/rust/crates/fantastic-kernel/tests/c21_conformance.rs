@@ -1,4 +1,4 @@
-//! C21 — one semantics, many transports, MANY RUNTIMES.
+//! One semantics, many transports, MANY RUNTIMES.
 //!
 //! This driver replays the SHARED corpus (`contract/conformance/cases.json` at the repo
 //! root) against the rust kernel. The python, swift and ts drivers replay the
@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 /// This runtime's root id. `$root` in the corpus means exactly this — parity
 /// asserts the per-runtime value, never equality (python's root is
-/// `kernel_state` — ours too, since C12).
+/// `kernel_state` — ours too).
 const ROOT_ID: &str = "kernel_state";
 
 /// The corpus path, resolved from this crate rather than the cwd so the test is

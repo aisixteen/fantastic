@@ -136,12 +136,11 @@ pub(super) async fn handle_kernel_verb(
                 r.get("id")
                     .map_or_else(String::new, fantastic_bundle::py_str)
             });
-            // `more` is not decoration (py-canonical, measured 2026-08-07): a model
-            // that opened with `list_agents` got bare records, never learned that
-            // authoring a script agent was the mechanism, and made 0 attempts; the
-            // arm that opened with `reflect` got `self_extension` and tried 10
-            // times. This verb rides every reflect's `system_verbs`, so it needs a
-            // signpost back to the briefing.
+            // `more` is not decoration (py-canonical): a model that opens with
+            // `list_agents` gets bare records and never learns that authoring a
+            // script agent is the mechanism, while one that opens with `reflect`
+            // gets `self_extension`. This verb rides every reflect's
+            // `system_verbs`, so it needs a signpost back to the briefing.
             json!({ "agents": out, "next": next, "more": LIST_HINT })
         }
         "create_agent" => crate::lifecycle::create_from_payload(kernel, target, payload).await,
@@ -199,7 +198,7 @@ pub(super) async fn handle_kernel_verb(
         // execution — the ledger resolves that last case. An id that resolves to
         // nothing is an honest `{cancelled:false}`, not a refusal: python does
         // not pretend to know whether a stranger's id ever existed.
-        // PYTHON, VERBATIM (C18): `raw = payload.get("task_id")`; None / "" /
+        // PYTHON, VERBATIM: `raw = payload.get("task_id")`; None / "" /
         // a bool / anything not (int, str) → `missing_arg`. Otherwise
         // `task_id = _as_id(raw)`; if that names nothing AND raw is a
         // string, the caller's NAME for its own execution is its handle too
@@ -286,9 +285,9 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
     // resolved to a live agent — python's `for k in ("handler_module",
     // *sorted(RESERVED_RECORD_KEYS)):`. `handler_module` is fixed at create —
     // swapping it would leave a live agent whose in-process state belongs to
-    // the OLD bundle. The reserved keys name substrate wiring; they used to
-    // be dropped without a word, so the caller believed a change had landed
-    // that never did (2026-09-02).
+    // the OLD bundle. The reserved keys name substrate wiring; dropping them
+    // without a word would let the caller believe a change had landed that
+    // never did.
     let mut checks: Vec<&str> = vec!["handler_module"];
     let mut reserved: Vec<&str> = RESERVED_RECORD_KEYS.to_vec();
     reserved.sort_unstable();
@@ -339,8 +338,8 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
         );
     };
     // Grant-map SHAPE, judged here at write time — the gate only judges edges
-    // (py-canonical, 2026-09-01: `can_call:"*"` accepted as a bare string left
-    // a silently-dead grant; refuse loud at the point of the mistake).
+    // (py-canonical: `can_call:"*"` accepted as a bare string would leave a
+    // silently-dead grant; refuse loud at the point of the mistake).
     if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
         let mut r = crate::refusal::refusal(crate::refusal::INVALID_META, &why);
         crate::refusal::with(&mut r, "id", json!(id));
@@ -400,7 +399,7 @@ async fn update_from_payload(kernel: &Arc<Kernel>, caller: &Arc<Agent>, payload:
 }
 
 /// A message id from whatever the caller wrote: a POSITIVE int, or the
-/// decimal string a URL or a form carries. A bool is not an id (C18).
+/// decimal string a URL or a form carries. A bool is not an id.
 ///
 /// PYTHON'S `_as_id`, verbatim:
 /// ```python
@@ -422,8 +421,8 @@ fn as_id(v: &Value) -> Result<Option<i64>, Value> {
     match v {
         Value::Bool(_) => Ok(None),
         Value::Number(n) => Ok(n.as_i64().filter(|i| *i > 0)),
-        // `isdecimal`, not `isdigit`: a superscript digit passed the guard and
-        // then raised inside `int()` (python fixed 2026-09-20).
+        // `isdecimal`, not `isdigit`: a superscript digit would pass the guard
+        // and then raise inside `int()`.
         Value::String(s) if fantastic_bundle::py_isdecimal(s) => {
             match fantastic_bundle::py_int(v) {
                 Ok(n) => Ok(Some(n)),

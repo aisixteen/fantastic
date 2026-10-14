@@ -262,7 +262,7 @@ async def test_a_settle_keeps_the_body_only_when_named_or_the_error_when_dead(
 
 
 async def test_repeated_ledger_calls_grow_the_store_linearly(seeded_kernel):
-    """Measured before the fix: ~6x per `ledger` call (2 KB → 14.8 MB in five)."""
+    """A settle holding its body would grow the store several-fold per `ledger` call."""
     import json as _json
 
     await _mk(seeded_kernel)
@@ -492,7 +492,7 @@ async def test_a_failed_store_read_in_the_prune_is_loud_and_the_flusher_lives(
 ):
     """A store READ that fails inside the window prune is said on stderr and prunes
     nothing; the flush LOOP survives it, so a later execution's rows still leave RAM.
-    It used to end the flusher task silently — every later row stayed in RAM."""
+    Ending the flusher task silently would leave every later row in RAM."""
     await _mk(seeded_kernel)
     await _with_store(seeded_kernel)
     k = seeded_kernel.ctx

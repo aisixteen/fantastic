@@ -5,8 +5,7 @@ this provider only streams the model's text. It talks to vLLM's own
 OpenAI-compatible surface — `POST {endpoint}/chat/completions` — with no proxy
 and no protocol translation in between.
 
-What is vLLM-specific here, and why each piece exists (measured by the
-production deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
+What is vLLM-specific here, and why each piece exists:
 
 - THE THOUGHT CHANNEL. With `--reasoning-parser qwen3` the thought streams as
   `delta.reasoning_content` (some versions: `delta.reasoning`) and only the
@@ -24,8 +23,8 @@ production deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
   ~16k prompt); past the server's KV capacity it preempts and a preempted
   conversation re-prefills from scratch. The table keeps the number of LIVE
   conversations under that ceiling and rotates the least-recently-used one out.
-- THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in front of
-  the shared GPU takes `Authorization: Bearer <key>`). Read before EACH request
+- THE KEY, when the door needs one (an HTTPS door in front of a shared GPU takes
+  `Authorization: Bearer <key>`). Read before EACH request
   through `key` — the record's `credentials` ref in a credential store
   (`ai_core/credentials.py`), never the environment or the record; a record with
   no `credentials` sends no header at all, so a local vLLM started without
@@ -48,24 +47,23 @@ log = logging.getLogger(__name__)
 
 # ─── sampling ────────────────────────────────────────────────────────────────
 #
-# Applied ONLY where the record sets nothing (owner's decision: a production
-# deployment's agentic defaults, copied). Each is a record field; a value set
+# Applied ONLY where the record sets nothing (a production deployment's agentic
+# defaults). Each is a record field; a value set
 # on the record is sent verbatim.
 SAMPLING_DEFAULTS: dict = {
     "temperature": 0.2,
     "top_p": 0.8,
     "top_k": 20,
     # `reasoning_effort` is a CHAT-TEMPLATE input (a soft steer on how much the
-    # model wants to think); measured at max_tokens 6000: xhigh 26,440 thinking
-    # chars / 0 answer, medium 5,607 / 18,935, low 4,313 / 20,199.
+    # model wants to think); xhigh can spend the whole bound thinking and leave no
+    # answer, medium and low leave room for one.
     "reasoning_effort": "medium",
     # the HARD limit (see the module docstring); medium thinks ~900 tokens on a
     # normal agent turn, so this only binds on a runaway.
     "thinking_token_budget": 16000,
 }
 # Below this, NO thinking budget is sent: a handful of tokens of thinking is no
-# thinking, and a model starved of it stops with an empty answer (measured: an
-# 8-token budget on a 16-token turn, 2026-09-30).
+# thinking, and a model starved of it stops with an empty answer.
 BUDGET_FLOOR = 256
 # vLLM accepts exactly these; "high" answers 400, so it is refused at write.
 REASONING_EFFORTS = ("low", "medium", "xhigh")
@@ -132,11 +130,11 @@ class SessionTable:
     """The LIVE conversations on ONE vLLM endpoint, least-recently-used first.
 
     Shared by every vllm_backend agent in this kernel that names the same
-    endpoint (owner's decision: one table per endpoint, the closest a kernel
+    endpoint (one table per endpoint, the closest a kernel
     gets to "one count per GPU"). It is BOOKKEEPING, not memory management:
     vLLM owns its prefix cache (content-addressed blocks, its own LRU) and the
     table frees no GPU memory — a conversation rotated out here that comes back
-    still hits whatever blocks vLLM kept (measured 0.69 s vs 6.70 s cold).
+    still hits whatever blocks vLLM kept.
     What the table does is keep the number of conversations this kernel
     drives at once under the server's KV ceiling, so vLLM never has to preempt
     one of ours. It sees only THIS kernel's traffic — anything else on the GPU
@@ -269,9 +267,8 @@ class VllmProvider:
         # against one window, so a cap the prompt leaves no room for is refused
         # (HTTP 400). A turn whose `max_tokens` could overrun it — the prompt's
         # token BOUND plus `max_tokens` past the window — sends NO max_tokens:
-        # vLLM then gives it exactly what the prompt leaves (owner, 2026-10-04:
-        # the e2e limit is the whole 260k; 2026-10-12: max_tokens 64000 on a
-        # 65536 window with a 1537-token prompt was refused).
+        # vLLM then gives it exactly what the prompt leaves (a max_tokens near the
+        # window size is refused once any prompt is added).
         self._window = int(window) if window else None
         self._kv = (int(kv_slots), kv_overflow, float(kv_ttl))
         # The effective sampling: the record's values over SAMPLING_DEFAULTS,
@@ -285,8 +282,7 @@ class VllmProvider:
         self._clock = clock
 
     def _budget_for(self, call_max: int, *, side_call: bool) -> int | None:
-        """The `thinking_token_budget` to send on a call bounded by `call_max`
-        (owner's rule, 2026-09-30):
+        """The `thinking_token_budget` to send on a call bounded by `call_max`:
 
         - a MAIN turn with an EXPLICIT budget sends it as set — the write keeps
           it below the record's `max_tokens`, so it can fire;
@@ -296,8 +292,8 @@ class VllmProvider:
           of thumb, not tuned) — an explicit 8000 on a ~2000-token fold summary
           becomes 1000 instead of refusing the fold;
         - below `BUDGET_FLOOR` NO budget is sent at all: a few tokens of
-          thinking is no thinking — measured, an 8-token budget made the model
-          stop with thinking only and no answer (a dead turn)."""
+          thinking is no thinking — a tiny budget makes the model stop with
+          thinking only and no answer (a dead turn)."""
         budget = self._sampling.get("thinking_token_budget")
         if budget is None:
             return None
@@ -468,8 +464,7 @@ class VllmProvider:
         # `max_tokens`) that stopped at its bound got what it asked for — an
         # answer; its caller reads `last_stop_reason`. A MAIN turn that hit the
         # record's `max_tokens` did not finish, and returned as if it had, it
-        # parses as a truncated envelope (or, as measured here, a turn of pure
-        # thinking) and the chain dies downstream with the cause hidden — so it
+        # parses as a truncated envelope (or a turn of pure thinking) and the chain dies downstream with the cause hidden — so it
         # fails, naming the cut. Same contract as every other backend.
         if max_tokens is None and self.last_stop_reason == "max_tokens":
             raise RuntimeError(

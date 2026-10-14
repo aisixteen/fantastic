@@ -5,7 +5,7 @@
 //
 //   1. Build the kernel (read the persisted tree; NO lock yet).
 //   2. Decide composition: a persisted `web.tools` agent, or `stdin.isatty()`
-//      → PTY. NEITHER → return silently, no lock ever taken (A14.13).
+//      → PTY. NEITHER → return silently, no lock ever taken.
 //   3. Only then acquire `.fantastic/lock.yaml` (fail if a live process owns
 //      it) and run THE START SEQUENCE (`kernel_start`): the root's memory store
 //      first, then everyone. A root with no `memory_store_id` does not start —
@@ -29,7 +29,7 @@ import Foundation
 #endif
 
 enum DaemonMode {
-    /// A0.15/A14.15: web composes by `handler_module`, never by the literal id
+    /// Web composes by `handler_module`, never by the literal id
     /// `"web"` — a renamed or aliased web agent still composes, and an
     /// unrelated agent someone happened to id `web` does not. Python:
     /// `_find_bundle_module("web", ctx=kernel)` then filters by that module;
@@ -85,7 +85,7 @@ enum DaemonMode {
             // restores the tree and the id counter; execution rows live in the
             // root's memory store, which `kernel_start` wires below.
             kernel = try await startKernel(workdir: cwd)
-            // C80: applied after every kernel construction (this mode builds
+            // Applied after every kernel construction (this mode builds
             // its own, separate from `FantasticCLI.bootDiskBacked`'s).
             if FantasticCLI.ledgerCap.wasSet { kernel.ledger.setCap(FantasticCLI.ledgerCap.cap) }
             FantasticCLI.composeCliIfTTY(kernel)
@@ -96,7 +96,7 @@ enum DaemonMode {
             exit(1)
         }
 
-        // Step 2 (A14.13/A14.15) — decide composition BEFORE the lock and
+        // Step 2 — decide composition BEFORE the lock and
         // any boot: a persisted agent whose `handler_module` is `web.tools`
         // (never `id == "web"` — a renamed/aliased web agent still
         // composes), OR a tty. Neither ⇒ return silently, no lock ever
@@ -224,7 +224,7 @@ enum DaemonMode {
     /// first. Equivalent to Python's `_block_forever()`.
     private static func blockForever() async {
         // A stream nothing yields to: its iteration ends only when this task is
-        // cancelled — no timer, no wakeups (owner, 2026-10-08).
+        // cancelled — no timer, no wakeups.
         let (stream, continuation) = AsyncStream<Void>.makeStream()
         for await _ in stream {}
         continuation.finish()

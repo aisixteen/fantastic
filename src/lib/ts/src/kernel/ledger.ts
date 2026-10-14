@@ -184,7 +184,7 @@ export function pyJsonLen(o: Json): number {
 }
 
 /**
- * WHAT A SETTLE ROW KEEPS of an outcome — the one definition (decided 2026-09-26).
+ * WHAT A SETTLE ROW KEEPS of an outcome — the one definition.
  *
  * A NAMED call keeps its whole result: its name is a dedup contract, and a re-send
  * returns the recorded outcome. A DEAD LETTER keeps its error text: someone has to
@@ -192,8 +192,7 @@ export function pyJsonLen(o: Json): number {
  *
  * Why not the body everywhere: the kernel's own store reads are executions too
  * (the `ledger` projection, an AI agent's head read), so a settle holding its body
- * re-recorded the store inside the store — measured in python ~6x growth per
- * `ledger` call (2 KB → 14.8 MB in five). And a reply body is not persisted
+ * re-recorded the store inside the store, growing it on every `ledger` call. And a reply body is not persisted
  * anyway: its receiver holds it in RAM with the one-line `origin` that gets it
  * again.
  */

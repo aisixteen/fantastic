@@ -17,9 +17,8 @@ from _engine import EXERCISED, Hydration, config_paths, hydrate
 from kernel import register_unlisted
 
 # THE ONE TEST BUNDLE the corpus names (`configs/lifecycle.yaml`). The kernel
-# resolves a handler_module only from the bundle catalog plus `register_unlisted`
-# (audit 2026-10-03, ARCH2-1), so it is registered HERE — every invocation of the
-# suite passes through this conftest, and `Agent._dispatch` and `Kernel.load` (the
+# resolves a handler_module only from the bundle catalog plus `register_unlisted`,
+# so it is registered HERE — every invocation of the suite passes through this conftest, and `Agent._dispatch` and `Kernel.load` (the
 # reboot) both resolve it. Unlisted: it never appears in the `bundles` catalog.
 register_unlisted("lifecycle_probe.tools", lifecycle_probe.tools)
 

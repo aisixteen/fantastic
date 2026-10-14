@@ -124,7 +124,7 @@ struct SpawnTests {
     @Test func theChildSelfReapsWhenTheControlSocketCloses() throws {
         guard let py = python3() else { print("skipping: no python3"); return }
         // The self-reap lives in the CONNECTOR (its reader thread sees EOF and
-        // `_o._exit(0)`s) — the shim is opt-in now, so this program takes it the
+        // `_o._exit(0)`s) — the shim is opt-in, so this program takes it the
         // way a parked durable tool would.
         let s = try Spawn.job(
             argv: [

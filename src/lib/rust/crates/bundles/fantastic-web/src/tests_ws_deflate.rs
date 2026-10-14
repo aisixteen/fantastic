@@ -1,7 +1,6 @@
 //! The ws leg's handshake negotiates permessage-deflate as uvicorn's websockets
 //! server does, and then speaks it. Every expected answer was measured against
-//! uvicorn 0.46 / websockets 16.0 (the repo venv, 2026-10-02) with the same raw
-//! upgrade request.
+//! uvicorn 0.46 / websockets 16.0 with the same raw upgrade request.
 
 use super::*;
 use fantastic_io_bridge::ws_deflate::{Params, PerMessageDeflate};

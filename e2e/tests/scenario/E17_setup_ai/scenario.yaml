@@ -1,12 +1,11 @@
 # THE SET-UP PAGE, END TO END, LIVE — a scripted keyboard writes an AI agent
-# through the terminal's set-up wizard for the CONFIGURED backend (owner,
-# 2026-10-04: the AI backend is configurable; vLLM, globally, until he
-# redecides), stores its key there, and the agent answers. Every value the
+# through the terminal's set-up wizard for the CONFIGURED backend (the AI
+# backend is configurable; vLLM here), stores its key there, and the agent answers. Every value the
 # record gets is the operator's, from the environment: the endpoint and model
 # (VLLM_ENDPOINT, FANTASTIC_AI_MODEL), the window and output (CTX, MAX_TOKENS —
 # 262144), the KV table (VLLM_KV_SLOTS, VLLM_KV_OVERFLOW), the key
 # (VLLM_API_KEY / VLLM_API_KEY_FILE — typed into the page, never printed).
-# Reasoning: xhigh with a 64k thinking budget (owner, 2026-10-04).
+# Reasoning: xhigh with a 64k thinking budget.
 
 id: setup_ai
 title: fantastic — the set-up page writes the configured AI agent, stores its key, it answers (live)
@@ -31,7 +30,7 @@ runs:
       exit_code: 0
       lock_released: true
 
-  # ── the wizard (owner 2026-10-12: the canvas's two pages, in the terminal):
+  # ── the wizard (the canvas's two pages, in the terminal):
   # page 1 → vllm (the 4th provider; nothing saved) → page 2, its lines: name
   # (`vllm-1`), URL, model, key (← → paste a new key: its value, then where keys
   # are kept — PLAIN in this throwaway home, never the real keychain), kv

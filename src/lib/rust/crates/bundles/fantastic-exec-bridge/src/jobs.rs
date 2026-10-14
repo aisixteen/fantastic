@@ -14,8 +14,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 /// asyncio's `StreamReader` default buffer bound. python reads every pipe through
 /// one, so a line longer than this is not truncated — `readline` RAISES, and the
-/// pump reports the raise as the job's stderr (A4.14).
-const LINE_LIMIT: usize = 16 * 1024 * 1024; // python raised asyncio's 64 KiB default (2026-09-20)
+/// pump reports the raise as the job's stderr.
+const LINE_LIMIT: usize = 16 * 1024 * 1024; // python raises asyncio's 64 KiB default to this
 
 /// The text `asyncio.StreamReader.readline` raises past [`LINE_LIMIT`], verbatim.
 const LINE_LIMIT_ERROR: &str = "Separator is not found, and chunk exceed the limit";
@@ -61,9 +61,9 @@ pub struct Job {
     pub lines: u64,
     /// The most recent output line.
     pub last_line: String,
-    /// THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
+    /// THE LIVE LINE RING: every line a pipe job prints, as
     /// `(n, stream, line)`, the last `LINE_RING` bytes — what `tail`/`grep` read,
-    /// running or ended. The job's only copy of its output (audit 2026-10-14).
+    /// running or ended. The job's only copy of its output.
     pub line_ring: std::collections::VecDeque<(u64, String, String)>,
     /// Bytes held in `line_ring` (each line + its newline).
     pub line_ring_bytes: usize,
@@ -89,7 +89,7 @@ static JOBS: OnceLock<Mutex<IndexMap<JobKey, Job>>> = OnceLock::new();
 /// process; every operation filters by `owner`.
 ///
 /// INSERTION-ORDERED, because python's is a `dict`: `status` with no `job_id`
-/// answers this agent's jobs in START order (A4.12), and `clear` removes with
+/// answers this agent's jobs in START order, and `clear` removes with
 /// `shift_remove` so the survivors keep it.
 pub fn jobs() -> MutexGuard<'static, IndexMap<JobKey, Job>> {
     JOBS.get_or_init(|| Mutex::new(IndexMap::new()))
@@ -156,13 +156,13 @@ async fn drain_to_eof<R: tokio::io::AsyncRead + Unpin>(rd: &mut BufReader<R>) {
 /// The pump's own line counter, shared by the job's two pipes.
 ///
 /// It lives HERE and not on the job row because python's counter lives on the dict
-/// the pump closed over (A4.15).
+/// the pump closed over.
 #[derive(Default)]
 struct Counter {
     n: u64,
 }
 
-/// One pipe read into lines, python's way (A4.14 / A4.21).
+/// One pipe read into lines, python's way.
 ///
 /// Chunk-by-chunk, not a line iterator: python's `raw` KEEPS its newline and is
 /// appended verbatim to the collected text, a lone `\r` is data (only `\n` is
@@ -367,7 +367,7 @@ pub async fn pump(
         }
     );
     // py `except Exception as e: fault = f"[pump error] {e}"`: a raise from EITHER
-    // pipe is the job's `error` (A4.14).
+    // pipe is the job's `error`.
     let fault = match (ro, re) {
         (Ok(()), Ok(())) => None,
         _ => Some(format!("[pump error] {LINE_LIMIT_ERROR}")),
@@ -404,7 +404,7 @@ pub async fn pump(
 ///
 /// `ExitStatus::code()` answers `None` for a signal death, which read as "still
 /// running" everywhere liveness is `exit_code.is_none()` and lost the cause of death
-/// from `job_done` (A4.6).
+/// from `job_done`.
 pub fn exit_code(s: std::process::ExitStatus) -> Option<i32> {
     use std::os::unix::process::ExitStatusExt;
     s.code().or_else(|| s.signal().map(|n| -n))

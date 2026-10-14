@@ -331,7 +331,7 @@ pub async fn write_fold(
         .map(|&i| level(rows, &rows[i]))
         .max()
         .unwrap_or(0);
-    // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget (owner, 2026-10-11).
+    // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
     let index = mechanical_index(rows, idxs);
     let (title, mut text, degraded) = summarize(ctx.provider, rows, idxs)
         .await
@@ -351,9 +351,8 @@ pub async fn write_fold(
 /// Never the goal turn, never the last `keep_tail` rows, and never ending
 /// between a call and its answer. Folds are ordinary members, but NOT the first
 /// pick: a stretch that starts on the previous fold wraps it, and doing that
-/// every time builds a linked list of summaries-of-summaries (measured
-/// 2026-09-06, python: twelve levels deep in 26 cuts, the model lost in it for
-/// 50 turns). So: skip the folds at the head and take the oldest NON-fold rows;
+/// every time builds a linked list of summaries-of-summaries the model gets lost
+/// in. So: skip the folds at the head and take the oldest NON-fold rows;
 /// only when `FOLD_RUN` folds sit adjacent at the head do they become the span
 /// themselves. Depth then grows with the log of the history, not its length.
 #[must_use]
@@ -436,10 +435,10 @@ pub async fn fold_down(
             view = render(&rows);
         }
     }
-    // TIDY THE HEAD, budget or no budget. Coalescing used to happen only while
-    // the view was OVER the watermark, so a projection that dropped under it left
-    // its adjacent folds standing — and they stayed standing. A session therefore
-    // grew one fold per span at the head, forever.
+    // TIDY THE HEAD, budget or no budget. Coalescing only while the view is OVER
+    // the watermark would leave the adjacent folds of a projection that dropped
+    // under it standing — and a session would grow one fold per span at the
+    // head, forever.
     //
     // Terminates: each pass replaces `FOLD_RUN` adjacent folds with ONE, so the
     // run shrinks by `FOLD_RUN - 1` every time and `next_span` stops selecting

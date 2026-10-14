@@ -64,11 +64,11 @@
         private static let maxFrame = 16 * 1024 * 1024
 
         /// The verbs that DRIVE one job — python `DRIVE_VERBS`. The owner-inbox
-        /// relay drops one of these whose `job_id` names ANOTHER job (audit BV-9);
+        /// relay drops one of these whose `job_id` names ANOTHER job;
         /// one with no `job_id` (bulk) or naming this job passes. The fanout mirrors
-        /// every payload sent to the leg,
-        /// so a program started by one caller saw another caller's keystrokes,
-        /// paste bytes and drive calls aimed at that caller's job.
+        /// every payload sent to the leg, so without this a program started by one
+        /// caller would see another caller's keystrokes, paste bytes and drive calls
+        /// aimed at that caller's job.
         static let driveVerbs: Set<String> = [
             "write", "resize", "paste_image", "stop", "interrupt", "clear",
         ]
@@ -78,10 +78,10 @@
         /// Guarded by its own lock, which is the "external synchronization mechanism"
         /// swift's concurrency checker asks about — every access below goes through it.
         ///
-        /// KEYED BY KERNEL, then owner (audit ARCH2-5): swift hosts several kernels
+        /// KEYED BY KERNEL, then owner: swift hosts several kernels
         /// in one process (every test does), and the entry's task and proxy ids are
-        /// that kernel's own. Keyed by the bare owner id, kernel B's `onmessage` took
-        /// kernel A's entry for the same id and cancelled B's task that happened to
+        /// that kernel's own. Keyed by the bare owner id, kernel B's `onmessage` would take
+        /// kernel A's entry for the same id and cancel B's task that happened to
         /// carry A's number, orphaning A's drain. `Kernel.serial`, as the AI side
         /// tables key theirs; a kernel's sub-table goes with its last entry.
         private final class OwnerInboxTable: @unchecked Sendable {
@@ -113,7 +113,7 @@
             "send", "emit", "watch", "unwatch", "onmessage", "offmessage",
         ]
 
-        /// What another spawner adds to this ONE relay (py_agent, owner 2026-10-08):
+        /// What another spawner adds to this ONE relay (py_agent):
         /// every child frame whose op the relay does not own goes here.
         private let extraOps: (@Sendable (JSON) async -> Void)?
 
@@ -368,7 +368,7 @@
                         "op": .string("reply"), "rid": rid, "data": out.result,
                     ])
                     // THE CARRIER decides the frame kind, never the body's
-                    // length: a 0-byte chunk is still a chunk (C37). The chunk
+                    // length: a 0-byte chunk is still a chunk. The chunk
                     // rides at `["data", …its slot]` — `null` there in python's
                     // position — so it lands in the program where the reply holds
                     // it (`r['bytes']` for a `read_stream`, `r['x.y']` for a
@@ -495,7 +495,7 @@
                             case "progress", "output", "job_started", "job_done": continue
                             default: break
                             }
-                            // …a drive verb addressed to ANOTHER job (audit BV-9) —
+                            // …a drive verb addressed to ANOTHER job —
                             // an int naming a job other than THIS one; one with no
                             // `job_id` (bulk) or naming this job is forwarded…
                             if let verb, Self.driveVerbs.contains(verb),
@@ -504,9 +504,9 @@
                                 continue
                             }
                             // …and whatever the leg's gate refuses (python
-                            // `_inbox_framer`, audit BV-8): the fanout mirrors every
-                            // payload here BEFORE any handler runs, so a sealed leg
-                            // whose handler refused the call still had it delivered.
+                            // `_inbox_framer`): the fanout mirrors every
+                            // payload here BEFORE any handler runs, so without this a sealed leg
+                            // whose handler refused the call would still have it delivered.
                             // An unknown or malformed rule resolves to
                             // `DenyInbound(unknown:)`, which refuses every payload.
                             guard let kernel else { return }

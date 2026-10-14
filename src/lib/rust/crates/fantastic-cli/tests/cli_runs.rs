@@ -175,7 +175,7 @@ fn one_shot_create_agent_persists_record() {
     assert!(content.contains("/tmp"));
 }
 
-/// A14.6, explicitly named per the plan: a one-shot `<id> <verb>` sends
+/// A one-shot `<id> <verb>` sends
 /// `{type:boot}` to the root BEFORE dispatching the call, so a mutation the
 /// call makes persists through the record writer that boot subscribes —
 /// `one_shot_create_agent_persists_record` is the same proof; this pins the
@@ -248,7 +248,7 @@ fn one_shot_dispatch_returns_json_reply() {
 /// crate source so a test can compare without shelling out twice.
 const HELP_MD: &str = include_str!("../../bundles/fantastic-cli-bundle/src/help.md");
 
-/// A14.1 — `help` / `-h` / `--help` as the FIRST word prints python's
+/// `help` / `-h` / `--help` as the FIRST word prints python's
 /// `cli/help.md` rstripped plus one `\n`, exits 0, and seeds the workdir like
 /// every other mode. Later words are ignored.
 #[test]
@@ -280,14 +280,14 @@ fn help_prints_cli_help_md_verbatim() {
         assert_eq!(out.stdout.len(), 1545, "python's help.md is 1545 bytes");
         assert!(
             !tmp.path().join(".fantastic").exists(),
-            "{spelling:?} takes no lock, so it writes nothing (audit 2026-10-14)"
+            "{spelling:?} takes no lock, so it writes nothing"
         );
     }
 }
 
 /// No readme or `docs/` is ever written into `.fantastic` — not with the cold
 /// root record, not through a wired store on a later root persist. The manual
-/// is served from the compiled bundle (owner 2026-10-14).
+/// is served from the compiled bundle.
 #[test]
 fn no_readme_or_docs_land_in_dot_fantastic() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -331,9 +331,9 @@ fn no_readme_or_docs_land_in_dot_fantastic() {
     );
 }
 
-/// A14.2 — exactly one remaining word that is not `help`/`reflect`/`init`
-/// prints python's four-line usage on stderr and exits 2 (rust used to fall
-/// through to daemon mode and exit 0 silently).
+/// Exactly one remaining word that is not `help`/`reflect`/`init`
+/// prints python's four-line usage on stderr and exits 2 (never daemon mode
+/// with a silent exit 0).
 #[test]
 fn single_positional_prints_usage_and_exits_2() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -357,7 +357,7 @@ fn single_positional_prints_usage_and_exits_2() {
     );
 }
 
-/// A14.11 — `boot <word>` is a one-shot to an agent called `boot`, not a mode.
+/// `boot <word>` is a one-shot to an agent called `boot`, not a mode.
 #[test]
 fn boot_word_is_an_agent_id() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -369,13 +369,13 @@ fn boot_word_is_an_agent_id() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        // C19: python's `!r` — single quotes, so no JSON escaping at all.
+        // Python's `!r` — single quotes, so no JSON escaping at all.
         stdout.contains("no agent 'boot'"),
         "`boot reflect` must dispatch to agent `boot`: {stdout}"
     );
 }
 
-/// A14.9 — stdout JSON is python's `json.dumps(reply, indent=2, default=str)`,
+/// Stdout JSON is python's `json.dumps(reply, indent=2, default=str)`,
 /// so it is ensure_ascii: a non-ASCII character leaves as a `\uXXXX` escape.
 #[test]
 fn one_shot_json_is_python_ensure_ascii() {
@@ -392,7 +392,7 @@ fn one_shot_json_is_python_ensure_ascii() {
         stdout.contains("caf\\u2014\\u00e9"),
         "ensure_ascii must escape both code points: {stdout}"
     );
-    // Only the JSON REPLY is ensure_ascii-checked — A14.18's trailing
+    // Only the JSON REPLY is ensure_ascii-checked — the trailing
     // kernel-shutdown status line ("no store wired…") is plain human text,
     // exactly as python's own bare `print()` leaves it, raw em dash included.
     let json_only: String = stdout
@@ -406,14 +406,14 @@ fn one_shot_json_is_python_ensure_ascii() {
     );
 }
 
-/// A14.17 — stdout carries the reply JSON and NOTHING else. The old
+/// Stdout carries the reply JSON and NOTHING else. The old
 /// `tracing_subscriber` wrote ANSI WARN lines there (a `boot ... errored`
 /// warning, a corrupt `agent.yaml` skip), so a caller piping into `jq` broke.
 #[test]
 fn one_shot_stdout_is_only_the_reply_json() {
     let tmp = tempfile::TempDir::new().unwrap();
     // A record the bundle registry cannot resolve AND a corrupt sibling: both
-    // used to print a WARN line through the subscriber.
+    // are warnings that must stay off stdout.
     std::fs::create_dir_all(tmp.path().join(".fantastic/agents/broken")).unwrap();
     std::fs::write(
         tmp.path().join(".fantastic/agents/broken/agent.yaml"),
@@ -432,7 +432,7 @@ fn one_shot_stdout_is_only_the_reply_json() {
         .output()
         .expect("run fantastic create_agent");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // The JSON reply OPENS stdout — A14.18's kernel-shutdown status line
+    // The JSON reply OPENS stdout — the kernel-shutdown status line
     // ("no store wired…", python's own bare `print()`) trails it when (as
     // here) no store was ever wired. Parse only the leading JSON value; the
     // stream deserializer stops there without touching what follows.
@@ -446,7 +446,7 @@ fn one_shot_stdout_is_only_the_reply_json() {
     );
 }
 
-/// A15.3 — no `tracing` formatting reaches stderr either: the subscriber is
+/// No `tracing` formatting reaches stderr either: the subscriber is
 /// gone, so nothing prints the `<timestamp>  WARN <target>:` shape python has
 /// no equivalent for.
 #[test]
@@ -474,7 +474,7 @@ fn daemon_stderr_has_no_tracing_prefix() {
     );
 }
 
-/// A14.13 — "nothing to serve" (no web agent, no tty) is decided BEFORE the
+/// "nothing to serve" (no web agent, no tty) is decided BEFORE the
 /// lock and before any boot — python `_default`'s early `return` never calls
 /// `FantasticLock()`. Proof: no `lock.yaml` is ever created, and stdout
 /// never gets a `[kernel] up` (nothing was ever booted to announce).
@@ -497,7 +497,7 @@ fn no_web_daemon_boots_nothing() {
     );
 }
 
-/// A14.13 — the daemon's lifecycle lines, byte for byte: `[kernel] up` on
+/// The daemon's lifecycle lines, byte for byte: `[kernel] up` on
 /// stdout once booted; a leading blank line + the signal's name + `—
 /// shutting down...` on stderr the moment SIGTERM lands; `tearing down
 /// agents...` / `down` bracketing the graceful `Kernel::shutdown()` walk.
@@ -586,7 +586,7 @@ fn daemon_output_lines_match_python() {
     assert!(shutting < tearing && tearing < down, "stderr={stderr}");
 }
 
-/// A14.5 — `.env` is autoloaded as the first step of every mode and the count
+/// `.env` is autoloaded as the first step of every mode and the count
 /// is announced on stderr. An entry already in the environment always wins.
 #[test]
 fn dotenv_is_loaded_and_announced() {
@@ -625,7 +625,7 @@ fn dotenv_is_loaded_and_announced() {
     );
 }
 
-/// A14.4 — `--ledger-cap <v>` is stripped from argv wherever it sits (and only
+/// `--ledger-cap <v>` is stripped from argv wherever it sits (and only
 /// when a value follows), falls back to `FANTASTIC_LEDGER_CAP`, and a value
 /// python's `int()` rejects kills the process with the ValueError text.
 #[test]
@@ -690,7 +690,7 @@ fn ledger_cap_flag_is_stripped_and_applied() {
     );
 }
 
-/// A14.7 — a one-shot refuses a LIVE lock with python's `[call] …` line on
+/// A one-shot refuses a LIVE lock with python's `[call] …` line on
 /// stderr, prints nothing on stdout and exits 1. `reflect` is unaffected: it
 /// never takes the lock. LIVE = the flock is held: this test process takes the
 /// daemon's own lock.
@@ -724,7 +724,7 @@ fn one_shot_refuses_a_live_lock_with_python_text() {
     fantastic_kernel::lock::release(tmp.path()).unwrap();
 }
 
-/// Owner 2026-10-03 — a one-shot probes the OS lock, not the pid: a lock file
+/// A one-shot probes the OS lock, not the pid: a lock file
 /// naming a LIVE pid that holds no flock (a dead holder's file, its pid reused)
 /// is stale and taken over — `call` and `init` both run, and release it.
 #[test]
@@ -781,7 +781,7 @@ fn one_shots_take_over_a_lock_whose_pid_holds_no_flock() {
     let _ = alive.wait();
 }
 
-/// C12 + C14: a virgin dir's root IS the `kernel_state` loader, and the daemon
+/// A virgin dir's root IS the `kernel_state` loader, and the daemon
 /// boots it FIRST — the boot that rehydrates the ledger, starts the pump and
 /// subscribes the record writer. The proof a one-shot can see is that a record
 /// created by the SAME invocation is on disk when the process exits: nothing
@@ -816,7 +816,7 @@ fn the_root_is_the_kernel_state_loader_and_boots_before_the_roster() {
         .exists());
 }
 
-/// A14.3 — `init <loader_bundle> <manifest>` creates a loader agent under the
+/// `init <loader_bundle> <manifest>` creates a loader agent under the
 /// root and boots it. python `kernel/modes/dispatch.py:90-149`.
 #[test]
 fn init_creates_the_loader_under_the_root() {
@@ -849,7 +849,7 @@ fn init_creates_the_loader_under_the_root() {
     );
 }
 
-/// A14.3 — fewer than 2 args after `init` is python's two-line usage, exit 2.
+/// Fewer than 2 args after `init` is python's two-line usage, exit 2.
 #[test]
 fn init_with_one_arg_prints_usage_exit_2() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -865,12 +865,12 @@ fn init_with_one_arg_prints_usage_exit_2() {
         "usage: fantastic init <loader_bundle> <manifest>\n   \
          e.g. fantastic init static_loader ./fantastic.yaml\n"
     );
-    // a lockless usage error writes nothing (audit 2026-10-14)
+    // a lockless usage error writes nothing
     assert!(!tmp.path().join(".fantastic").exists());
 }
 
 /// A root record that is there but does not parse is never written over: the
-/// boot refuses (python `main._bootstrap`; audit 2026-10-14).
+/// boot refuses (python `main._bootstrap`).
 #[test]
 fn an_unreadable_root_record_is_never_written_over() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -890,7 +890,7 @@ fn an_unreadable_root_record_is_never_written_over() {
     );
 }
 
-/// A14.3 — `init` against a LIVE lock prints python's `[init] …` line on
+/// `init` against a LIVE lock prints python's `[init] …` line on
 /// stderr, nothing on stdout, and exits 1.
 #[test]
 fn init_refuses_a_live_lock_with_python_text() {
@@ -911,13 +911,13 @@ fn init_refuses_a_live_lock_with_python_text() {
     fantastic_kernel::lock::release(tmp.path()).unwrap();
 }
 
-/// D7 — a CLI kv argument python coerces to a non-finite float or an int wider
+/// A CLI kv argument python coerces to a non-finite float or an int wider
 /// than 64 bits must round-trip to the reply, not take the process down.
 ///
 /// `fantastic_kernel kernel create_agent … inf=inf nan=nan big2=<30 digits>`
 /// exited 101 with `panicked … invalid number`, and printed nothing where
 /// python prints the record (`e2e/parity` `cli/cli/call_create_coerce_*`). Two
-/// causes, both from the arbitrary-precision number C74 introduced: `json!` and
+/// causes, both from the arbitrary-precision number: `json!` and
 /// `serde_json::to_value` re-parse the stored text (`crate::jsonsafe`), and
 /// `py_json_dumps` read it through `as_f64().unwrap_or(0.0)`.
 #[test]
@@ -1355,7 +1355,7 @@ fn the_catalog_carries_the_on_device_backend() {
     assert!(window >= 1, "{window}");
 }
 
-/// Lib request #3 — python `test_the_schema_is_what_the_write_enforces`: ONE
+/// Python `test_the_schema_is_what_the_write_enforces`: ONE
 /// TRUTH. A create missing the schema's required fields is refused at the write,
 /// every one named; an enum value outside its set is refused too.
 #[test]

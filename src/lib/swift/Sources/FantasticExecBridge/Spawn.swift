@@ -118,12 +118,10 @@
             // MOVE THE CHILD'S ENDS ABOVE THE TARGETS FIRST. A descriptor is just the
             // lowest free number, and under concurrency that can be 1, 2 or 3 itself
             // (another thread frees 3 between the kernel's two allocations of one
-            // socketpair/pipe). Planned in place, that broke two ways: a source that
-            // IS its target skipped its dup2 — and `POSIX_SPAWN_CLOEXEC_DEFAULT` then
-            // closed it as unnamed — and a later source equal to an earlier target
-            // was clobbered by that earlier dup2. Measured: the child's fd 3 was
-            // EBADF (`os.fstat(3)`), 1 run in ~45; the connector then never saw its
-            // socket and a parked child never self-reaped. Above 3, every source is
+            // socketpair/pipe). Planned in place, that breaks two ways: a source that
+            // IS its target skips its dup2 — and `POSIX_SPAWN_CLOEXEC_DEFAULT` then
+            // closes it as unnamed — and a later source equal to an earlier target
+            // is clobbered by that earlier dup2. Above 3, every source is
             // distinct from every target, so every dup2 lands.
             var ends: [(Int32, Int32)] = []
             var liftFailure: Int32 = 0
@@ -163,11 +161,11 @@
             posix_spawnattr_setsigdefault(&attrs, &allSignals)
             posix_spawnattr_setsigmask(&attrs, &noSignals)
             // `close_fds=True`, python's default with `pass_fds`: the child gets 0/1/2/3
-            // and NOTHING else. Without it a child inherited every descriptor of the
-            // kernel that was not yet FD_CLOEXEC — including ANOTHER job's parent socket
-            // in the window between its `socketpair()` and its `fcntl`, which kept that
-            // job's lifeline open after the kernel closed it: the child never saw EOF
-            // and never self-reaped (an orphan, measured 2026-09-22).
+            // and NOTHING else. Without it a child inherits every descriptor of the
+            // kernel that is not yet FD_CLOEXEC — including ANOTHER job's parent socket
+            // in the window between its `socketpair()` and its `fcntl`, which keeps that
+            // job's lifeline open after the kernel closed it: the child never sees EOF
+            // and never self-reaps.
             //
             // `POSIX_SPAWN_SETSID`: the job LEADS ITS OWN SESSION, so `killSession`
             // takes the command and everything it launched (`server &`, a `nohup`),

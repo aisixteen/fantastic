@@ -30,9 +30,9 @@ pub mod relay;
 pub mod ws;
 
 /// Every dialled socket (ws_bridge, relay_connector): a MESSAGE, like a frame,
-/// is at most io_bridge's one frame cap (audit W-3). tungstenite's default
+/// is at most io_bridge's one frame cap. tungstenite's default
 /// message cap is 64 MiB, so a peer's message fragmented into frames under the
-/// frame cap was buffered and parsed at four times what python's client
+/// frame cap would be buffered and parsed at four times what python's client
 /// (`websockets.connect(max_size=MAX_FRAME)`) allows.
 pub(crate) fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
     tokio_tungstenite::tungstenite::protocol::WebSocketConfig {

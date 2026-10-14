@@ -2,7 +2,7 @@
 
 No kernel and no provider: the endpoint our `responses_backend` talks to, asked
 directly with the record the plug builds. What the provider relies on, checked at
-the source — and the contract agreed with the proxy owner (2026-09-27): raw text
+the source — and the proxy's contract: raw text
 out, reasoning as `reasoning_text`, a cut ends `response.incomplete`, stateless,
 native tools refused.
 

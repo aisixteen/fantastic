@@ -90,7 +90,7 @@ def extra_origins(rec: dict) -> list[str]:
 
 class _OriginGuard:
     """ASGI guard in front of every route of this host, two checks:
-    - HOST (audit W-2): EVERY request — GET/HEAD/OPTIONS, unsafe methods and the
+    - HOST: EVERY request — GET/HEAD/OPTIONS, unsafe methods and the
       websocket upgrade alike — whose `Host` header is not one of `own_authorities`
       is refused. A DNS-rebinding page sends a same-origin GET with no `Origin`, so
       the Origin check never sees it; its `Host` still names the attacker's domain.
@@ -162,8 +162,7 @@ class _OriginGuard:
 def make_app(web_agent_id: str, kernel) -> FastAPI:
     # NO GENERATED SURFACES. FastAPI mounts `/docs`, `/redoc` and `/openapi.json`
     # by default — routes nobody declared, answering on every web agent and
-    # describing its whole route table to anyone who asks (parity 2026-09-30: the
-    # rust/swift web serve nothing they were not told to). A web agent serves only
+    # describing its whole route table to anyone who asks. A web agent serves only
     # what its legs declare.
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -208,14 +207,11 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
         agent's `ingress_rule` gates the io leg AND its `callable_by` decides whether
         `web` may call it at all.
 
-        Measured 2026-08-21 (`live_plan`): with this route running as operator, a
-        model set `transcripts` to `ingress_rule=allow_all_ingress` plus a `callable_by`
-        excluding every web surface, said "any future web/ws/rest agent are
-        deliberately excluded" — and the browser was served the private chat history
-        anyway. Its two-sided reasoning was right; the route's origin made it false.
-        Before this, "in-kernel readers yes, browser no" was INEXPRESSIBLE for a
-        file_bridge: `ingress_rule` is one switch over both origins and `callable_by`
-        could not reach the HTTP path. Now it is just `callable_by` without `web`.
+        Run as operator, this route would serve a browser a leg whose `callable_by`
+        excludes every web surface: "in-kernel readers yes, browser no" would be
+        INEXPRESSIBLE for a file_bridge, since `ingress_rule` is one switch over both
+        origins. With the route acting as the host it is just `callable_by` without
+        `web`.
 
         ONE contract (no fallback): the file is piped chunk-by-chunk over
         `read_stream` so a LARGE file never loads whole into memory. An agent that
@@ -254,12 +250,9 @@ def make_app(web_agent_id: str, kernel) -> FastAPI:
         #
         # A GATE denial carries its reason in the body. This kernel teaches through
         # denials — every refusal names the `side` and a `hint` with the recipe that
-        # fixes it — and this route used to be the one surface that threw that away,
-        # returning a bare 404 for every cause alike. Measured 2026-08-21: five runs
-        # across two frontier models set `ingress_rule=allow_all_ingress` on a public
-        # directory, never granted `web` on its call gate, and reported success;
-        # the kernel had said "assets does not accept 'read_stream' from web" and
-        # the route discarded it, so even curling the URL taught nothing.
+        # fixes it — and this route keeps it: a bare 404 for every cause alike would
+        # make even curling the URL teach nothing (a leg opened with
+        # `ingress_rule=allow_all_ingress` but no `web` grant looks like success).
         #
         # A MISSING FILE stays a bare 404 — no body, no existence leak, no path
         # probing. The two cases differ because only one of them is the operator's

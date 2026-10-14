@@ -18,7 +18,7 @@ fn pid_alive_clearly_dead_returns_false() {
 
 #[test]
 fn pid_zero_is_not_alive() {
-    // C83: python `_pid_alive`: `pid <= 0` is dead, no syscall at all — unlike
+    // Python `_pid_alive`: `pid <= 0` is dead, no syscall at all — unlike
     // unix `kill(0, 0)`, which signals the CALLER'S OWN process group and
     // would read back as "alive" without the explicit `pid == 0` guard.
     assert!(!pid_alive(0));
@@ -90,9 +90,9 @@ fn release_lets_the_next_acquire_in() {
 
 #[test]
 fn two_racing_acquisitions_exactly_one_wins() {
-    // ARCH2-3: the lock used to be read-then-write, so two acquisitions racing
-    // in one dir BOTH took it. Each racer opens its own descriptor, and flock
-    // excludes descriptors of one process as it excludes processes — so every
+    // Two acquisitions racing in one dir: each racer opens its own descriptor,
+    // and flock excludes descriptors of one process as it excludes processes —
+    // so every
     // round, on a fresh dir and over a dead holder's lock alike, exactly one
     // wins and the other is refused. On a fresh dir the refusal names the
     // winner's pid; over a dead lock it may name the dead pid (the winner
@@ -164,7 +164,7 @@ fn release_when_missing_is_noop() {
 
 #[test]
 fn release_keeps_a_malformed_lock() {
-    // C83: python `release_lock`'s `_read_lock()` returns `None` on ANY parse
+    // Python `release_lock`'s `_read_lock()` returns `None` on ANY parse
     // failure, so `cur and cur.get("pid") == os.getpid()` is false and the
     // file is left ALONE — release must never blindly `remove_file` a lock it
     // could not verify it owns.
@@ -178,7 +178,7 @@ fn release_keeps_a_malformed_lock() {
 
 #[test]
 fn lock_held_text_is_python_verbatim() {
-    // C81: python `_lock.py:52-64`'s exact 3 lines — `RCLI/src/main.rs`
+    // Python `_lock.py:52-64`'s exact 3 lines — `RCLI/src/main.rs`
     // prints this as `[kernel] {e}`, never the generic error wrapper.
     let err = KernelError::LockHeld { pid: 4242 };
     assert_eq!(

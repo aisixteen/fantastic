@@ -67,7 +67,7 @@ keeps that to one file, its `src/lib.ts`).
 the ROOT is never removed (`bad_arg`, `deleted: false`) — it answers the kernel
 verbs, and its removal would forget this kernel's whole namespace on the host.
 
-**Folder bundles** (owner, 2026-10-08). A folder `<loader root>/bundles/<name>/`
+**Folder bundles**. A folder `<loader root>/bundles/<name>/`
 with a `bundle.yaml` EXTENDS a base: `base` (a bundle the app registered with
 `registerBundle(hm, handler, verbs, {folderBundle})`), `sentence`, plus whatever
 that base reads (its builder gets the parsed spec and refuses a bad field by
@@ -167,7 +167,7 @@ reachable: any other target is `unknown_agent`, never forwarded back to the host
 A host `emit` frame is delivered the same way. Locally, `<this kernel's
 guid>|<agent id>` names the local agent too (`<guid>|kernel` the root).
 
-**The tabs of one identity are one principal** (owner, 2026-10-03). Every tab of
+**The tabs of one identity are one principal**. Every tab of
 every browser hydrates the same tree and so says hello with the SAME guid — there is
 no per-tab guid. The host holds each such connection as one more live route of that
 guid: a host call to `<guid>|<agent>` reaches every tab and settles with the first

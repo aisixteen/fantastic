@@ -1,8 +1,7 @@
 # THE CANVAS'S ONE USER, end to end. No model. One host (`fantastic
 # canvas`), a headless Chrome. Every host call a tab makes goes through `user`
-# (`user.forward`); who may call it is `user`'s grants, nothing else (owner,
-# 2026-10-13: the web token is gone). Single user (owner, 2026-10-03): no other
-# users, no per-user page grants, no tab sync.
+# (`user.forward`); who may call it is `user`'s grants, nothing else (there is
+# no web token). Single user: no other users, no per-user page grants, no tab sync.
 
 id: canvas_user
 title: the canvas's one user — a tab gets in through `user`, and `around` reads the page records

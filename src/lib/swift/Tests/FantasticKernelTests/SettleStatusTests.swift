@@ -3,11 +3,10 @@
 // Python `_settle_once`: FAILED only from the `except` branch (the handler
 // raised), CANCELLED only when the task itself was cancelled, TIMED_OUT only
 // when the deadline left the task pending and the kill ended it. A returned
-// dict is ERRORED or COMPLETED on its `error` alone. Swift used to read
-// `cancelled`/`raised` off the body, so the `cancel` verb's own answer settled
-// `cancelled` (and was dead-lettered), a relayed `{error, raised: true}`
-// settled `failed`, and under a deadline any `{cancelled: true}` reply came
-// back as the timeout refusal.
+// dict is ERRORED or COMPLETED on its `error` alone. Reading
+// `cancelled`/`raised` off the body would settle the `cancel` verb's own answer
+// `cancelled` (and dead-letter it), a relayed `{error, raised: true}` `failed`,
+// and under a deadline any `{cancelled: true}` reply as the timeout refusal.
 
 import FantasticJSON
 import Foundation

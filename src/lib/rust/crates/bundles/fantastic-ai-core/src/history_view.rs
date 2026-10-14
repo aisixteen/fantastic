@@ -6,11 +6,10 @@
 //! turns and return a VIEW. The durable JSONL sidecar keeps every turn verbatim,
 //! so the trace stays complete and `recall` can page anything back.
 //!
-//! Why trim at all. Measured 2026-08-20 (`live_plan`): reflect replies were 42% of
-//! the whole conversation — 73k of 174k chars — and 9 of 16 were a repeat of a
-//! target already reflected. That bulk is what fills the window; a full window is
-//! what forces compaction; compaction is what put the run's goal at risk.
-//! Trimming it attacks the cause, not the symptom.
+//! Why trim at all. Reflect replies — many of them repeats of a target already
+//! reflected — can be a large share of the whole conversation. That bulk is what
+//! fills the window; a full window is what forces compaction; compaction is what
+//! puts the run's goal at risk. Trimming it attacks the cause, not the symptom.
 //!
 //! The rule is narrow on purpose. A reply may be dropped only when a LATER reply
 //! makes it strictly redundant, which requires the verb to return WHOLE state
@@ -58,11 +57,11 @@ pub fn parse_reply_tag(s: &str) -> Option<(&str, &str)> {
     let rest = rest.strip_prefix(' ')?;
     let (verb_run, tail) = take_run(rest)?;
     // The verb group is `[^\]\s]+`, so a `]` ENDS it: the first bracket in the run is
-    // the tag's own closer, never one carried in from the body. It was `\S+` until
-    // 2026-09-04, which on `[reply to x · notes reflect]\n{"verbs":["read"]}` took
-    // `reflect]` and let `[^\]]*\]` close on a bracket inside the BODY — the verb then
-    // read `reflect]`, matched no vocabulary, and both trimmers silently did nothing for
-    // every reply containing a bracket (which is every reflect: bodies are JSON).
+    // the tag's own closer, never one carried in from the body. With `\S+`, on
+    // `[reply to x · notes reflect]\n{"verbs":["read"]}` the group takes
+    // `reflect]` and `[^\]]*\]` closes on a bracket inside the BODY — the verb then
+    // reads `reflect]`, matches no vocabulary, and both trimmers silently do nothing
+    // for every reply containing a bracket (which is every reflect: bodies are JSON).
     if let Some(i) = verb_run.find(']') {
         if i == 0 {
             return None; // `[^\]\s]+` must match at least one char
@@ -91,9 +90,9 @@ fn starts_a_block(s: &str) -> bool {
 ///
 /// A delivered turn carries ONE OR MORE blocks — a batch arrives whole, one block
 /// per call, joined by a blank line. The trimmers below work on the BLOCK, the
-/// unit they were written for; treating the whole turn as one reply either deleted
-/// siblings (the reflect cut) or trimmed nothing (a count guard that
-/// skipped every multi-reply turn — tried 2026-08-25, superseded same day).
+/// unit they were written for; treating the whole turn as one reply would either
+/// delete siblings (the reflect cut) or trim nothing (a count guard that skips
+/// every multi-reply turn).
 pub fn reply_blocks(content: &str) -> Vec<&str> {
     let mut out: Vec<&str> = Vec::new();
     let mut start = 0usize;
@@ -119,10 +118,9 @@ fn content_of(turn: &Value) -> &str {
     turn.get("content").and_then(Value::as_str).unwrap_or("")
 }
 
-/// A `docs` reply the model has ANSWERED is cut to this stub (owner,
-/// 2026-10-05). The body itself stays HELD this run under its pid (owner,
-/// 2026-10-06): the model keeps the lines it needs with its own `grep`, and those
-/// small replies stay in its view. Python `_DOCS_DROPPED`.
+/// A `docs` reply the model has ANSWERED is cut to this stub. The body itself
+/// stays HELD this run under its pid: the model keeps the lines it needs with its
+/// own `grep`, and those small replies stay in its view. Python `_DOCS_DROPPED`.
 fn docs_dropped(of: &str, tier: &str, pid: &str, verb: &str) -> String {
     format!(
         "[docs of={of} tier={tier} — dropped from your view; held this run: send yourself \
@@ -132,8 +130,8 @@ fn docs_dropped(of: &str, tier: &str, pid: &str, verb: &str) -> String {
 
 /// A REAL verb of this docs body for the grep example: the first that is not
 /// `reflect`/`boot`, else the first. A placeholder example is copied verbatim —
-/// measured 2026-10-06 (canvas E55/E58): `<query>verb</query>` was sent as written,
-/// matched only the `<verbs>` lines, and the model concluded the held body was gone.
+/// `<query>verb</query>` sent as written matches only the `<verbs>` lines, and the
+/// model concludes the held body is gone.
 /// `None` when the body lists no verbs (nothing to keep, so nothing is held).
 /// Python `example_verb`.
 #[must_use]
@@ -434,14 +432,11 @@ mod tests {
         t.get("content").and_then(Value::as_str).unwrap_or("")
     }
 
-    /// MEASURED 2026-09-04, in all three runtimes at once. The verb group was `\S+`,
-    /// which does not exclude `]`, so on a reply whose BODY carries a bracket the run
-    /// kept `reflect]` and the regex closed on the body's bracket. The verb then read
-    /// `reflect]`, matched no vocabulary, and BOTH trimmers silently did nothing —
-    /// on every reflect, since reflect bodies are JSON and always contain one.
-    ///
-    /// It survived because every fixture here, in python and in swift, used a
-    /// bracket-free body. The three runtimes agreed with each other and with nothing.
+    /// The verb group must exclude `]`: with `\S+`, on a reply whose BODY carries
+    /// a bracket the run keeps `reflect]` and the regex closes on the body's
+    /// bracket. The verb then reads `reflect]`, matches no vocabulary, and BOTH
+    /// trimmers silently do nothing — on every reflect, since reflect bodies are
+    /// JSON and always contain one. Only a fixture with a bracketed body catches it.
     #[test]
     fn the_verb_stops_at_the_tags_own_bracket_not_the_bodys() {
         let real = "[reply to notes:aa \u{b7} notes reflect]\nverbs=[\"read\"]  root=.";
@@ -487,9 +482,8 @@ mod tests {
 
     /// A batch arrives as ONE turn holding several `[reply to …]` blocks. The
     /// trimmer works per BLOCK: a superseded whole-state block dedupes alone, its
-    /// sibling replies stay. Treating the turn as one reply either deleted siblings
-    /// or trimmed nothing (a count guard skipped every multi-reply turn — tried
-    /// 2026-08-25, superseded same day).
+    /// sibling replies stay. Treating the turn as one reply would either delete
+    /// siblings or trim nothing (a count guard skips every multi-reply turn).
     #[test]
     fn a_combined_turn_trims_per_block_never_whole() {
         let combined = format!(

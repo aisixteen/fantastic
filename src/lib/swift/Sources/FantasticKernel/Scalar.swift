@@ -4,9 +4,7 @@
 // share it: the CLI's `k=v` and the model's `<k>v</k>`. It lives in the kernel
 // module here for the same reason rust put it in `fantastic-kernel` — the AI
 // core and the CLI executable both depend on this and neither depends on the
-// other, so this is the only place one rule can serve both. Until 2026-09-10 the
-// swift copy lived inside the CLI (`Fantastic/REPL.swift`), where the model path
-// could not reach it at all.
+// other, so this is the only place one rule can serve both.
 //
 // `true`/`false` → bool, an integer → integer, a decimal → double, anything else
 // → the string as written. No JSON, no quoting: a value that has to stay text is
@@ -75,7 +73,7 @@ public func coerceScalar(_ v: String) -> JSON {
 
 /// True when python's `coerce_scalar` would type `v` as an int — an ordinary
 /// `Int64`-shaped one AND one too wide for that carrier (`coerceScalar` keeps
-/// the latter as `.string`, the D13 residual). A caller that must refuse a
+/// the latter as `.string`). A caller that must refuse a
 /// numeric-shaped value the way python's `isinstance(x, str)` gate does —
 /// e.g. a `<target_id>` naming a send's recipient, which python types as an
 /// `int` and therefore never dispatches as a string id — checks this instead

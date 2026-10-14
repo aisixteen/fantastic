@@ -1,6 +1,6 @@
 // Interactive stdin REPL for an already-booted kernel.
 //
-// A14.16: a rule-for-rule port of python's `kernel/modes/longrun.py:_repl_loop`
+// A rule-for-rule port of python's `kernel/modes/longrun.py:_repl_loop`
 // + `kernel/modes/print.py:_print_result`/`_read_line` +
 // `kernel/modes/parse.py:_parse_at`, which are canonical. Composed by
 // `DaemonMode.run` when no-args invocation runs in a tty context.
@@ -8,7 +8,7 @@
 // Command grammar (python parity):
 //
 //   list                          every agent, registration order
-//   add <bundle> [k=v ...]        create_agent (boots internally, C79-style;
+//   add <bundle> [k=v ...]        create_agent (boots internally;
 //                                 python does the same net effect via a
 //                                 separate explicit boot send after a
 //                                 non-booting `kernel.create()`)
@@ -26,7 +26,7 @@
 // `{queued: true, stream_id: ...}`) and the prompt returns. Seeing streamed
 // tokens needs a `cli` bundle watching the LLM agent — same pattern python
 // uses with its `cli` renderer agent (composed by `FantasticCLI.
-// composeCliIfTTY`, A14.15), not this loop.
+// composeCliIfTTY`), not this loop.
 
 import FantasticJSON
 import FantasticKernel
@@ -68,9 +68,8 @@ enum REPLMode {
             // printing NOTHING. Python's `input()` sits on a thread the process
             // abandons at exit, so a signal-driven shutdown produces no REPL
             // output; swift's task group AWAITS this child, so a `readLine()`
-            // parked on the tty made `cancelAll()` a no-op — `kernel.shutdown()`
-            // never ran and the e2e driver SIGKILLed the daemon (measured:
-            // `noargs_pty_fresh`/`noargs_pty_web` exit -9 where python exits 0).
+            // parked on the tty would make `cancelAll()` a no-op — `kernel.shutdown()`
+            // would never run.
             if Task.isCancelled { return }
             guard let raw = read else {
                 // Ctrl-D: python's `except (EOFError, KeyboardInterrupt):
@@ -115,8 +114,7 @@ enum REPLMode {
     /// `read` is the blocking read itself — stdin's `readLine()` everywhere but a
     /// test, which needs a read that REALLY blocks: under `swift test` stdin is
     /// at EOF, so `readLine()` returns at once and a test of the abandonable leg
-    /// raced it instead of waiting on it (measured: 1 run in ~60 saw the REPL
-    /// leg finish first).
+    /// would race it instead of waiting on it.
     static func readLineAsync(
         _ read: @escaping @Sendable () -> String? = { readLine() }
     ) async -> String? {
@@ -192,8 +190,8 @@ enum REPLMode {
             payload[String(p[..<eq])] = cliCoerce(String(p[p.index(after: eq)...]))
         }
         // ONE call: this runtime's `create_agent` verb boots the child
-        // INTERNALLY and returns the PRE-BOOT record snapshot (C79-era
-        // design, `SystemVerbs.swift:429-459`) — the same net result and
+        // INTERNALLY and returns the PRE-BOOT record snapshot
+        // (`SystemVerbs.swift:429-459`) — the same net result and
         // the same printed shape as python's separate `kernel.create()` +
         // explicit boot send, whose boot reply is discarded anyway.
         let reply = await kernel.send([Item(AgentId("kernel"), .object(payload))])[0].result

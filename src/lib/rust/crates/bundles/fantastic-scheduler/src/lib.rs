@@ -22,7 +22,7 @@
 //! - `tick_now`     args `{schedule_id}`                       → fire immediately
 //! - `history`      args `{limit?, schedule_id?}`              → tail of schedule_events.yaml
 //!
-//! NO IDLE WAKEUPS (owner, 2026-10-08): the fire loop sleeps until the EARLIEST
+//! NO IDLE WAKEUPS: the fire loop sleeps until the EARLIEST
 //! due schedule, or — none due, or the scheduler paused — until something
 //! changes: a schedule added, removed, paused or resumed, or the scheduler's own
 //! record updated (`paused`). An idle scheduler wakes never. Python `_tick_loop`.
@@ -103,8 +103,8 @@ fn poke(agent_id: &AgentId) {
 static SCHEDULER_TASKS: OnceLockTaskMap = OnceLockTaskMap::new();
 
 /// In-process schedule cache, python's `_cache`. Every verb mutates it BEFORE it
-/// persists, so the cache is what a failed write leaves behind (A5.9), and nothing
-/// ever evicts it — not even `delete_agent` (A5.14).
+/// persists, so the cache is what a failed write leaves behind, and nothing
+/// ever evicts it — not even `delete_agent`.
 static SCHEDULE_CACHE: OnceLockScheduleCache = OnceLockScheduleCache::new();
 
 // ── once-lock map helpers ───────────────────────────────────────────
@@ -125,7 +125,7 @@ impl OnceLockTaskMap {
 /// python configures NO logging handler, so `logger.warning` / `logger.exception`
 /// reach `logging.lastResort` and print the BARE formatted message to stderr
 /// (`scheduler/tools.py:43`). This is that writer, with a sink tests can swap in
-/// to read the exact line back (A15.2).
+/// to read the exact line back.
 static LOG_SINK: OnceLockLogSink = OnceLockLogSink::new();
 
 /// Emit one python `logging.lastResort` line.
@@ -227,7 +227,7 @@ impl Bundle for SchedulerBundle {
             "resume" => resume_reply(agent_id, payload, kernel).await,
             "tick_now" => tick_now_reply(agent_id, payload, kernel).await,
             "history" => history_reply(agent_id, payload, kernel).await,
-            // `shutdown` is NOT a verb (A5.3): python's `VERBS` has no such key, so
+            // `shutdown` is NOT a verb: python's `VERBS` has no such key, so
             // it lands here like any other unknown type. The tick loop dies in
             // `on_delete`, never behind a verb.
             _ => {
@@ -243,12 +243,12 @@ impl Bundle for SchedulerBundle {
     }
 
     /// The tick loop and the SCHEDULE CACHE die with the agent.
-    /// (A5.14 / D6): python's `_cache` is a module global keyed by agent id and
-    /// nothing evicts it, so an agent recreated under the same id in the same
-    /// process sees its predecessor's schedules.
+    /// Python's `_cache` is a module global keyed by agent id; evicting it here
+    /// keeps an agent recreated under the same id in the same process from
+    /// seeing its predecessor's schedules.
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         // The cache goes with the agent: a re-created scheduler with the same id
-        // used to list and fire the old schedules (python fixed 2026-09-20).
+        // never lists or fires the old schedules.
         SCHEDULE_CACHE.lock().remove(agent_id);
         shutdown_tick(agent_id, kernel).await;
         if let Some((_, Some(token))) = wakes().remove(agent_id) {
@@ -256,7 +256,7 @@ impl Bundle for SchedulerBundle {
         }
         Ok(())
     }
-    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    /// Shutdown frees what delete frees — declared, never a fallback.
     async fn on_shutdown(
         &self,
         agent_id: &AgentId,
@@ -306,7 +306,7 @@ fn meta_value(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<Value> {
     meta.get(key).cloned()
 }
 
-/// A meta flag under PYTHON TRUTHINESS (A5.11) — `paused: "no"` is a paused
+/// A meta flag under PYTHON TRUTHINESS — `paused: "no"` is a paused
 /// scheduler there, because a non-empty string is true.
 fn meta_truthy(agent_id: &AgentId, kernel: &Kernel, key: &str) -> bool {
     meta_value(agent_id, kernel, key).is_some_and(|v| py_truthy(&v))
@@ -430,7 +430,7 @@ async fn load_schedules(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Vec<Value> 
         .clone()
 }
 
-/// Write the schedules out — RAM CACHE FIRST (A5.9).
+/// Write the schedules out — RAM CACHE FIRST.
 ///
 /// python's `_load` hands back the cached LIST ITSELF and every verb mutates it in
 /// place, so by the time `_save` runs the cache already holds the change: a failed
@@ -569,7 +569,7 @@ async fn tick_loop(agent_id: AgentId, kernel: Arc<Kernel>) {
 
 /// A schedule's `target`, python's way: whatever was stored, as text. `schedule`
 /// only checks the field for TRUTHINESS, so a non-string target is stored verbatim
-/// and fired verbatim (A5.5).
+/// and fired verbatim.
 fn sched_target(sch: &Value) -> String {
     match sch.get("target") {
         Some(Value::String(s)) => s.clone(),
@@ -600,7 +600,7 @@ fn fire_item(sch: &Value) -> Item {
     item
 }
 
-/// One fire's `(result, error)` pair for the `schedule_fired` event (A5.8).
+/// One fire's `(result, error)` pair for the `schedule_fired` event.
 ///
 /// `completed` ⇒ result is the reply and error stays NULL — even when that reply
 /// carries an `error` key, because the status is the verdict. Anything else ⇒
@@ -652,10 +652,10 @@ async fn fire_many(agent_id: &AgentId, kernel: &Arc<Kernel>, due: &[Value]) -> V
                 py_str(e.get("error").unwrap_or(&Value::Null))
             ));
         }
-        // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
-        // `schedule_fired` doubled every delivery to a live program's on_message —
-        // the payload send IS the tick; telemetry rides the scheduler's own inbox
-        // and schedule_events.yaml.
+        // ONE delivery per tick (py-canonical): the payload send IS the tick; a
+        // target-echo of `schedule_fired` would double every delivery to a live
+        // program's on_message. Telemetry rides the scheduler's own inbox and
+        // schedule_events.yaml.
         kernel.emit(agent_id, event.clone()).await;
         events.push(event);
     }
@@ -720,7 +720,7 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     if let Some(existing) = tasks.get(agent_id) {
         // LIVENESS COMES FROM THE TABLE, which holds only running work.
         if kernel.tasks.contains(existing) {
-            // py `return {"running": True}` on BOTH branches (A5.4): boot is
+            // py `return {"running": True}` on BOTH branches: boot is
             // idempotent and says nothing else, so a caller cannot branch on
             // whether it was first. A boot of a running loop makes it look again.
             drop(tasks);
@@ -739,7 +739,7 @@ async fn boot_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
         // "scheduler tick crashed for %s", sid)` (`scheduler/tools.py:243-244`)
         // — a crash names the scheduler on stderr instead of vanishing. Rust's
         // equivalent of an escaped exception is a panic, so the loop runs inside
-        // `catch_unwind`. The traceback body is residual R-D4-8.
+        // `catch_unwind`. The traceback body is not reproduced.
         let sid = id.clone();
         if AssertUnwindSafe(tick_loop(id, k))
             .catch_unwind()
@@ -762,7 +762,7 @@ async fn shutdown_tick(agent_id: &AgentId, kernel: &Arc<Kernel>) {
     }
 }
 
-/// `schedule` — VALIDATION ORDER IS PART OF THE CONTRACT (A5.5): the payload's
+/// `schedule` — VALIDATION ORDER IS PART OF THE CONTRACT: the payload's
 /// shape, then `interval_seconds`, then the target, then `payload.type`, then
 /// `timeout`. A call with two faults is told about the FIRST one python names.
 async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
@@ -785,7 +785,7 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         return json!({"error": "schedule: payload.type required"});
     }
     // Per-fire bound, seconds. Optional: absent = wait forever (never defaulted).
-    // It is STORED AS SENT (A5.6) — an int `5` stays `5`, it does not become `5.0`.
+    // It is STORED AS SENT — an int `5` stays `5`, it does not become `5.0`.
     let timeout = match payload.get("fire_timeout") {
         None | Some(Value::Null) => None,
         Some(Value::Number(n)) if n.as_f64().is_some_and(|t| t > 0.0) => {
@@ -830,7 +830,7 @@ async fn schedule_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
     json!({"schedule_id": sch["id"], "schedule": sch})
 }
 
-/// `payload["schedule_id"]` under PYTHON TRUTHINESS (A5.7) — every verb that takes
+/// `payload["schedule_id"]` under PYTHON TRUTHINESS — every verb that takes
 /// one writes `if not sid:`, and the raw value is echoed back in the reply.
 fn schedule_id(payload: &Value) -> Option<&Value> {
     payload.get("schedule_id").filter(|v| py_truthy(v))
@@ -929,10 +929,10 @@ async fn tick_now_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel
         return persist_err("tick_now", &e);
     }
     let due = vec![schedules[idx].clone()];
-    // THE OUTCOME, not just the fact. `{fired:true}` alone hid a target that
-    // refused every fire: measured 2026-10-06 (rust subai_graph), a schedule sent
-    // `{type:'tick'}` to an AI agent, which has no such verb; `tick_now` said fired
-    // 16 times and the model never learned the payload was wrong. Python canonical.
+    // THE OUTCOME, not just the fact. `{fired:true}` alone hides a target that
+    // refuses every fire (e.g. `{type:'tick'}` sent to an AI agent, which has no
+    // such verb), and the model never learns the payload is wrong. Python
+    // canonical.
     let ev = fire_many(agent_id, kernel, &due)
         .await
         .pop()

@@ -133,9 +133,9 @@ struct FileAllowListTests {
         #expect(await call(k, ["type": "mkdir", "path": "docs/sub"])["created"] == true)
     }
 
-    // ── symlinks: BOTH ends must be exposed (audit 2026-09-28) ──────────────
-    // The list was checked on the path AS ASKED while the fs follows links, so a
-    // link inside an exposed dir served whatever in-root file it pointed at.
+    // ── symlinks: BOTH ends must be exposed ──────────────
+    // Checking the list on the path AS ASKED while the fs follows links would let
+    // a link inside an exposed dir serve whatever in-root file it points at.
 
     private func linked(_ allow: JSON) async -> (Kernel, URL) {
         let (k, dir) = await site(allow: allow)
@@ -177,9 +177,9 @@ struct FileAllowListTests {
         #expect(await read(k, "docs/shared/c.txt")["size"] == 2)
     }
 
-    // ─── granted allow, web serving, posture, running dir (audit d6/d7/d10/c6) ──
+    // ─── granted allow, web serving, posture, running dir ──
 
-    /// d6 — the web serves only what the list exposes (the file proxy runs AS
+    /// The web serves only what the list exposes (the file proxy runs AS
     /// `web`, so the bridge's own `callable_by` and `allow` both decide).
     @Test func theWebServesOnlyWhatTheListExposes() async throws {
         let kernel = try await startWebKernel()
@@ -218,7 +218,7 @@ struct FileAllowListTests {
         }
     }
 
-    /// d7 — `allow` is posture: what a file_bridge exposes is readable from the
+    /// `allow` is posture: what a file_bridge exposes is readable from the
     /// ONE root reflect (`detail:full`), like its root and its lock.
     @Test func theRootReflectCarriesABridgesAllow() async {
         let (k, dir) = await site(allow: ["docs", "secret.txt"])
@@ -229,7 +229,7 @@ struct FileAllowListTests {
         #expect(node?["file_bridge_id"].isNull == true)
     }
 
-    /// d10 — the TEXT-channel `read_stream` reply carries `origin`, as py/rs do.
+    /// The TEXT-channel `read_stream` reply carries `origin`, as py/rs do.
     @Test func theTextChannelReadStreamCarriesOrigin() async {
         let (k, dir) = await site(allow: ["."])
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -240,7 +240,7 @@ struct FileAllowListTests {
         #expect(r["origin"].asString?.hasPrefix("fs docs/a.pdf bytes 0-6 of 6") == true)
     }
 
-    /// c6 — the clamp base is the kernel's NAMED running dir (the dir holding its
+    /// The clamp base is the kernel's NAMED running dir (the dir holding its
     /// root's `.fantastic`), never the process cwd; a root that named none refuses.
     @Test func theClampBaseIsTheNamedRunningDir() async {
         let fm = FileManager.default

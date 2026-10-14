@@ -2,7 +2,7 @@
 
 Every bundle ships a `readme.md` package resource. `reflect` with
 `readme: true` reads it FROM THE BUNDLE — nothing is copied into an
-agent's dir (owner 2026-10-14). Default reflect stays lean.
+agent's dir. Default reflect stays lean.
 """
 
 from __future__ import annotations

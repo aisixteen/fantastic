@@ -218,13 +218,9 @@ public let USER_MODULE = "user_probe.tools"
 
 /// `user` — THE HUMAN, as an ordinary agent.
 ///
-/// An inquiry used to be a TEXT CONVENTION: the model printed `{"type":"question"}`
-/// on a line and stopped, a harness regex found it, and the answer was posted
-/// back in from outside the kernel. The human had no id, no record, no reflect
-/// entry, no ledger row and no gate — a model could not discover that a human
-/// existed at all.
-///
-/// Here it is an agent. `task` hands work to another agent AS THIS AGENT, so the
+/// The human is an agent, never a text convention scraped by a harness — a
+/// model can discover it like any agent. `task` hands work to another agent AS
+/// THIS AGENT, so the
 /// send is gated and its ledger row names `user` as the sender: the wiring the
 /// test exercises is the wiring production uses. `question` returns the answer
 /// AS ITS REPLY — an ordinary call, nothing suspends, nothing is scraped.
@@ -347,7 +343,7 @@ public struct UserProbe: AgentBundle {
             }
             if case .object = payload["action"] { desk.hold(agentId.value, payload["action"]) }
             let received = desk.bump(agentId.value)
-            // A PERSON READS, THEN REPLIES (owner, 2026-10-06: fully async) — later,
+            // A PERSON READS, THEN REPLIES (fully async) — later,
             // as this agent's own send into the asker's conversation under the
             // inquiry's pid, gated like any send. Python `user_probe`, same text.
             let task = KernelTaskLocals.currentTask

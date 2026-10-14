@@ -25,7 +25,7 @@
 //!                                               tab of this connection's guid
 //! ```
 //!
-//! **CROSS-KERNEL ADDRESSING (owner, 2026-09-30).** After `hello`, the host
+//! **CROSS-KERNEL ADDRESSING.** After `hello`, the host
 //! kernel reaches the page's agents as `<guid>|<agent>` with an ordinary `send`;
 //! the call rides this socket as an outbound `call` frame and the page's answer
 //! is its outcome. This leg only carries the frames and registers the peer with
@@ -36,17 +36,14 @@
 //! [`fantastic_io_bridge::codec::encode_frame`] — python's
 //! `json.dumps(envelope, default=str)`, `, `/`: ` separators and
 //! `ensure_ascii` — so a `·` or a `↑` in a reply is `·` / `↑` on the
-//! wire exactly as python sends it (A13.14).
+//! wire exactly as python sends it.
 //!
-//! **IDENTITY (C40).** Every frame runs as the web_ws LEG (`leg_agent_id`), the
+//! **IDENTITY.** Every frame runs as the web_ws LEG (`leg_agent_id`), the
 //! child agent whose record carries the `ingress_rule` this face is gated by —
-//! never as the URL host and never as the operator. The rust loop used to
-//! dispatch `call` with no sender at all on the binary path and as the HOST on
-//! the text path, so a browser inherited the origin root of trust: measured
-//! 2026-09-16, a private agent, an outsider, and a SEALED leg all answered a
-//! `call` over the socket. The two tasks the loop registers still belong to the
-//! HOST (`ws_drain`, `ws_call`), which is what python's `spawn_task(host_id, …)`
-//! does.
+//! never as the URL host and never as the operator, or a browser would inherit
+//! the origin root of trust. The two tasks the loop registers still belong to
+//! the HOST (`ws_drain`, `ws_call`), which is what python's
+//! `spawn_task(host_id, …)` does.
 //!
 //! **THE LEG GATE.** Python resolves the leg's ingress rule PER FRAME, so
 //! opening the edge (`update_agent ingress_rule=allow_all_ingress`) takes effect
@@ -54,8 +51,8 @@
 //! answered (`{error, reason:'unauthorized', hint?, see?}` inside the reply's
 //! `data`) because discovery-through-denial is the point; every other kind is
 //! dropped silently, the connect-time auto-watch included — a sealed leg that
-//! auto-watched leaked the host's whole event stream to anyone who completed the
-//! handshake.
+//! auto-watched would leak the host's whole event stream to anyone who completed
+//! the handshake.
 
 use crate::AppState;
 use fantastic_io_bridge::authorizer::{ingress, manifold_spec, Action, Decision};
@@ -203,7 +200,7 @@ struct Inbound {
 /// place the body there. `Err` is the ONE malformed-frame answer.
 fn decode_inbound(msg: InboundRaw) -> Result<Inbound, ()> {
     let (envelope, path, bytes) = match msg {
-        // STRICT (D13): python `decode_frame` → `io_bridge.loads`.
+        // STRICT: python `decode_frame` → `io_bridge.loads`.
         InboundRaw::Text(t) => (
             fantastic_io_bridge::codec::loads(&t).map_err(|_| ())?,
             None,
@@ -346,10 +343,9 @@ pub(crate) async fn ws_loop(
     // exists the watch event is already queued — and python's cooperative loop
     // puts it on the wire FIRST (the drain task was made runnable at the fanout,
     // long before `_on_call` resumed). Rust's drain is a PARALLEL task, so the
-    // reply overtook the event it must follow (measured in the r3 capture at
-    // three AI replies). The lock below makes flush-then-reply ONE step: every
-    // payload queued when the handler settled reaches `out_tx` before the reply
-    // does, with no sleep and no yield.
+    // reply could overtake the event it must follow. The lock below makes
+    // flush-then-reply ONE step: every payload queued when the handler settled
+    // reaches `out_tx` before the reply does, with no sleep and no yield.
     let inbox_rx = Arc::new(tokio::sync::Mutex::new(
         state.kernel.ensure_inbox(&client_id),
     ));
@@ -828,10 +824,9 @@ pub(crate) async fn ws_loop(
 /// frame both come here. Python `web_ws._proxy._watch`.
 ///
 /// FAIL LOUD: a name that resolves to no agent, or a gate refusal, is answered
-/// with an `error` frame and NOT recorded as watched. (The connect-time watch
-/// used to discard the result and mark the name watched anyway; a name the
-/// kernel's `watch` did not resolve mirrored nothing, said nothing, and the
-/// explicit watch that followed was then skipped as a duplicate.)
+/// with an `error` frame and NOT recorded as watched — a name the kernel's
+/// `watch` did not resolve would otherwise mirror nothing, say nothing, and skip
+/// the explicit watch that follows as a duplicate.
 ///
 /// The name resolves the way `send` resolves a target (`kernel` or a literal
 /// id), and the watch is HANDED TO THE LEG (`inbound_watch`), whose handler

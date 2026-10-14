@@ -27,7 +27,7 @@ _UNLISTED: dict[str, ModuleType] = {}
 #: is looked up on every call and every reflect node, and a scan costs ~1.4 ms.
 _CATALOG: set[str] = set()
 _MISSING: set[str] = set()
-#: FOLDER BUNDLES (owner, 2026-10-08): `<root>/bundles/<name>/` — code that EXTENDS
+#: FOLDER BUNDLES: `<root>/bundles/<name>/` — code that EXTENDS
 #: a bundled agent (`base`), loaded by this kernel's loader from its own root. The
 #: handler_module of an instance is the folder name. One kernel per process, so
 #: process-wide like the catalog. `_FOLDER_ROWS` is what `reflect bundles=all`
@@ -87,9 +87,9 @@ def import_handler(handler_module: str) -> ModuleType:
     `fantastic.bundles` catalog plus `register_unlisted`, never from all of
     `sys.path`.
 
-    Importing any name on `sys.path` ran that module's top-level code on a
-    grant-less `create_agent` (audit 2026-10-03, ARCH2-1): an agent could name
-    `unittest.__main__` and exit the process, or a module it had written itself.
+    Importing any name on `sys.path` would run that module's top-level code on a
+    grant-less `create_agent`: an agent could name `unittest.__main__` and exit
+    the process, or a module it had written itself.
     A name outside the catalog is, to this kernel, a module that does not exist:
     `ModuleNotFoundError: No module named '<top-level package>'` — rust's and
     swift's text for an unregistered name, so every runtime says one thing."""
@@ -117,8 +117,7 @@ def bundle_package(handler_module: str) -> str | None:
     """The top-level package a bundle's shipped files (`readme.md`, `docs/`) are
     read from — for a CATALOG bundle, or a `register_unlisted` one whose package
     is already imported — else None: reading a package's resources imports its
-    `__init__`, so a name outside the catalog is never imported to read nothing
-    (audit 2026-10-03, ARCH2-1)."""
+    `__init__`, so a name outside the catalog is never imported to read nothing."""
     top = handler_module.split(".")[0]
     if handler_module in _FOLDER:
         return None  # a folder bundle ships no package resources

@@ -72,8 +72,8 @@ fn unknown_agent_carries_the_live_index() {
 
 #[test]
 fn a_placeholder_id_is_named_as_one() {
-    // Measured 2026-08-04: a model copied `<id>` out of an example and received
-    // the same bare refusal 34 times without correcting.
+    // A model that copies `<id>` out of an example and receives the same bare
+    // refusal repeats it without correcting.
     let v = unknown_agent("<id>", vec!["kernel_state".into()]);
     let hint = v["hint"].as_str().unwrap();
     assert!(hint.contains("PLACEHOLDER"));
@@ -117,8 +117,8 @@ fn py_repr_matches_python() {
 
 #[test]
 fn unknown_agent_error_is_python_repr() {
-    // Measured: `refusal_unknown_agent.json` / `prompt_req_02.json` carry
-    // `no agent 'ghost'` — rust's Debug quoting said `no agent "ghost"`.
+    // `no agent 'ghost'` (python's repr quoting) — never Debug's `no agent
+    // "ghost"`.
     let v = unknown_agent("ghost", vec!["kernel_state".into()]);
     assert_eq!(v["error"], "no agent 'ghost'");
     // Same helper behind the placeholder hint.
@@ -162,8 +162,8 @@ fn guard_refuses_all_digit_ids_and_accepts_colons() {
         guard_agent_id("create_agent", ".hidden").unwrap()["error"],
         "create_agent: id must be a name that is not hidden; got '.hidden'"
     );
-    // `kernel` names the operator; `|` marks a FOREIGN `guid|agent` (audit
-    // 2026-09-28: `create_agent id=kernel` made an agent the operator to every
+    // `kernel` names the operator; `|` marks a FOREIGN `guid|agent`
+    // (`create_agent id=kernel` would make an agent the operator to every
     // memory store).
     assert_eq!(
         guard_agent_id("create_agent", "kernel").unwrap()["error"],
@@ -176,7 +176,7 @@ fn guard_refuses_all_digit_ids_and_accepts_colons() {
     assert!(guard_agent_id("create_agent", "kernel_notes").is_none());
 }
 
-/// STEP-4 PIN (2026-10-01): every builder's KEY ORDER, as text —
+/// Every builder's KEY ORDER, as text —
 /// `preserve_order` makes it part of the wire, and `Value` equality ignores it.
 #[test]
 fn every_builder_serializes_in_pythons_key_order() {

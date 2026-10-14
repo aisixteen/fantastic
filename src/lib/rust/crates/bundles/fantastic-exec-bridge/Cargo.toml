@@ -18,11 +18,11 @@ tokio = { workspace = true }
 nix = { version = "0.29", features = ["signal"] }
 libc = { workspace = true }
 # The command gate is a REGEX allowlist over the shell-joined line, in PYTHON's
-# `re` dialect (D5): a backtracker, so `(?P<name>…)`, `(?P=name)`, backreferences
+# `re` dialect: a backtracker, so `(?P<name>…)`, `(?P=name)`, backreferences
 # and lookaround all compile. Anchored `\A(?s:…)\z` gives `re.fullmatch` + DOTALL.
 fancy-regex = "0.11"
 # The job table is python's insertion-ordered `dict`: `status` lists jobs in START
-# order (A4.12), so removal must be order-preserving (`shift_remove`).
+# order, so removal must be order-preserving (`shift_remove`).
 indexmap = "2"
 # A PTY job's incremental UTF-8 decode (a char split across reads is held, not shattered).
 encoding_rs = "0.8"

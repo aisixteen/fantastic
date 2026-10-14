@@ -1,12 +1,7 @@
-// The host serves websocket MESSAGES, not frames (audit W-4, 2026-10-03).
+// The host serves websocket MESSAGES, not frames.
 //
-// The server pipeline installed no `NIOWebSocketFrameAggregator`, so the web_ws
-// proxy read each `.text` frame as a whole message whatever its FIN bit said,
-// ignored `.continuation` frames and decoded text lossily: a call split into two
-// fragments answered the frame error, a complete call in a non-final frame was
-// dispatched with what followed it dropped, and `\xff\xfe` was dispatched as
-// U+FFFD. Python's websockets server and rust's tungstenite reassemble, bound
-// and validate. Now fragments are reassembled up to io_bridge's `MAX_FRAME`, and
+// Python's websockets server and rust's tungstenite reassemble, bound and
+// validate; so does the host: fragments are reassembled up to io_bridge's `MAX_FRAME`, and
 // the socket closes with python's code and empty reason: 1007 for a text message
 // that is not UTF-8, 1009 for a message over the bound, 1002 for a fragment out
 // of sequence.

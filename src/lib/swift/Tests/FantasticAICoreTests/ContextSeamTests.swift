@@ -108,7 +108,7 @@ struct ContextSeamTests {
     }
 
     @Test func registryNoMemgpt() {
-        // memgpt collapsed into the universal seam notice — it is no longer a strategy.
+        // memgpt is not a strategy: its nudge lives in the universal seam notice.
         #expect(Set(AIStrategies.strategyNames()) == ["compact", "truncate", "strip", "fold"])
         #expect(AIStrategies.defaultStrategy == "compact")
         #expect(AIStrategies.getStrategy("memgpt") == nil)
@@ -125,7 +125,7 @@ struct ContextSeamTests {
         // `everyStrategyKeepsTheGoalWhenTheBodyOverflows` for why). Everything after
         // it is the recent window, verbatim.
         #expect(proj.body == [b[0]] + b.suffix(4))
-        // the strategy never fabricates the old leading marker turn
+        // the strategy never fabricates a leading marker turn
         #expect(!proj.body.contains { ($0["content"].asString ?? "").contains("[Earlier conversation summary]") })
     }
 
@@ -272,17 +272,13 @@ struct ContextSeamTests {
 
     // ─── the GOAL must survive every strategy ───────────────────────
     //
-    // MEASURED FAILURE (2026-08-20, python, live the model on the `live_plan`
-    // probe, four runs). The task is stated ONCE, in the first user turn. On a
-    // long run the body overflows and `compact` — the DEFAULT — splits at
-    // `recent_n` and replaces the whole overflow with an LLM summary. The oldest
-    // turn IS the task framing, so the goal is the FIRST thing at risk. Observed
-    // end state: the model had already worked out the correct answer, then
-    // finished with "healthy budget, no tasks" and "Idle and ready. Give me a task
-    // whenever." — it did not refuse to act, it no longer knew what it was doing.
+    // The task is stated ONCE, in the first user turn. On a long run the body
+    // overflows and `compact` — the DEFAULT — splits at `recent_n` and replaces the
+    // whole overflow with an LLM summary. The oldest turn IS the task framing, so
+    // the goal is the FIRST thing at risk: a model that loses it no longer knows
+    // what it is doing.
     //
-    // `truncate` already gets this right, which is what made the diagnosis
-    // obvious. This test is deliberately GENERAL over the strategy registry: a new
+    // This test is deliberately GENERAL over the strategy registry: a new
     // strategy inherits the guarantee by being registered.
     @Test func everyStrategyKeepsTheGoalWhenTheBodyOverflows() async throws {
         let goal = "GOAL-SENTINEL: seal the secrets bridge and open the assets bridge."
@@ -305,17 +301,13 @@ struct ContextSeamTests {
     // ── the SEAM must not undo what the strategies pinned ────────────────
 
     /// `everyStrategyKeepsTheGoalWhenTheBodyOverflows` calls the strategies
-    /// DIRECTLY, so it never saw the layer that undid them.
+    /// DIRECTLY, so it never sees the layer after them.
     ///
-    /// `projectContext` appends the real notice and then trims to fit. It trimmed
-    /// from the FRONT — exactly where `compact`/`truncate` had just pinned the
-    /// goal turn — so a snug window silently dropped the one turn the whole run
-    /// serves. Measured 2026-08-28 (python): the goal sentence was absent from the
-    /// projection across a wide band of windows, in BOTH strategies. The cause was
-    /// a notice envelope reserved at 80 tokens against a real ~132, which put the
-    /// projection over budget and woke the backstop.
+    /// `projectContext` appends the real notice and then trims to fit. Trimming
+    /// from the FRONT — exactly where `compact`/`truncate` just pinned the goal
+    /// turn — would silently drop the one turn the whole run serves.
     ///
-    /// This asserts through the seam, which is the only place the bug was visible.
+    /// This asserts through the seam, the only place such a drop is visible.
     @Test func theSeamKeepsTheGoalTheStrategiesPinned() async throws {
         let goal = "GOAL-SENTINEL: build the widget and report when done"
         for strategy in AIStrategies.strategyNames().sorted() {

@@ -79,7 +79,7 @@ struct PagingTests {
         #expect(p == ["a", "b"])
     }
 
-    // ─── C17 (R2-RFL-2): after is python `str(after)` for ANY value ────
+    // ─── after is python `str(after)` for ANY value ────
 
     @Test func anIntAfterMatchesItsDecimalString() {
         let (p, _) = page(ids(["1", "2", "3"]), .object(["after": .integer(2)]), ident: me)

@@ -1,6 +1,6 @@
 """agentic/docs_mechanics — a reflect says what an agent IS; `docs` says how to call it.
 
-THE MECHANICS UNDER TEST (owner, 2026-10-05). A reflect carries no verbs; the
+THE MECHANICS UNDER TEST. A reflect carries no verbs; the
 kernel's `docs` verb serves them in two tiers (oneliners: one signature per verb;
 detailed: the whole text, for one verb); a reflect's tree can be cut with
 `show_subtrees` / `ignore_subtrees`. The system prompt teaches all three — the
@@ -20,7 +20,7 @@ SCORED ON THE MODEL'S OWN CALLS (parsed from its turns) and on the FILE:
   3. detailed only for a used verb — every detailed pull's verb is then called (a
                         pull naming no verb: one of that agent's verbs is);
 Reported, not scored: a filtered reflect after the first look (`show_subtrees` /
-`ignore_subtrees` — optional, owner 2026-10-13), docs pulls by tier, reflects plain vs filtered, and the
+`ignore_subtrees` — optional), docs pulls by tier, reflects plain vs filtered, and the
 share of reflect + docs replies in the conversation the agent holds.
 """
 
@@ -150,7 +150,7 @@ async def main():
         core,
         BK,
         agent_id=AID,
-        # THE VAULT'S ID IS NOWHERE IN THE MODEL'S VIEW (2026-10-13): it holds the
+        # THE VAULT'S ID IS NOWHERE IN THE MODEL'S VIEW: it holds the
         # estate as `$subtree`, not by name, and its system block leaves out `{tree}`
         # (the primer lists every id) — so finding the vault takes the tree itself.
         can_call={root.id: "*", "$subtree": "*", "desk": "*", "cli": "*", "user": "*"},
@@ -272,9 +272,9 @@ async def main():
     print(
         f"  4. a filtered reflect after the first look   : {'OK' if filtered_after else 'NO'} (reported)"
     )
-    # Check 4 is REPORTED, not scored (owner, 2026-10-13): cutting the tree is optional —
+    # Check 4 is REPORTED, not scored: cutting the tree is optional —
     # a tree small enough to read whole needs no filter.
-    # TODO(owner, 2026-10-13): figure out how to MEASURE tree cutting — this was the only
+    # TODO: figure out how to MEASURE tree cutting — this is the only
     # e2e of a model choosing `show_subtrees`/`ignore_subtrees`. One idea: an estate
     # whose full reflect passes the inline cap (~30k tokens at 262k, ~1.4k at 12k), so
     # the first look comes back digested and only a cut reaches the vault; then score

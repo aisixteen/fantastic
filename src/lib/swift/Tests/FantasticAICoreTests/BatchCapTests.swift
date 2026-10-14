@@ -1,5 +1,4 @@
-// The inline cap bounds a turn's WHOLE reply batch, not each reply (owner,
-// 2026-10-07). Twins of python `ai_core/tests/test_reply_delivery.py`
+// The inline cap bounds a turn's WHOLE reply batch, not each reply. Twins of python `ai_core/tests/test_reply_delivery.py`
 // (`test_the_inline_cap_bounds_the_whole_batch_not_each_reply`,
 // `test_replies_that_fit_together_are_all_inline`).
 
@@ -99,9 +98,8 @@ private func twoReplies(_ frac: Double) async throws -> (String, Int64) {
 
 @Suite("the inline cap bounds a whole reply batch")
 struct BatchCapTests {
-    /// Measured 2026-10-07 (nested_folds:rust, 4.5k window): two greps, each under
-    /// the 434-token cap, arrived as ONE 967-token message and the next turn could
-    /// not fit it. The replies of a batch share the cap: the first fits and is
+    /// Replies each under the cap can together exceed what the next turn fits.
+    /// The replies of a batch share the cap: the first fits and is
     /// inline, the one that would push the message past it is held.
     @Test func theInlineCapBoundsTheWholeBatchNotEachReply() async throws {
         let (text, cap) = try await twoReplies(0.6)

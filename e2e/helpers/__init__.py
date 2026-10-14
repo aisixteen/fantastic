@@ -4,10 +4,9 @@ Import this first, from any depth:
 
     from helpers import bootstrap; bootstrap()
 
-Why a marker file instead of `parents[N]`: every probe used to hard-code its own
-depth (`parents[1] / "src" / "lib" / "python"`), so moving one into a folder
-silently broke it — which is exactly what happened when this suite was grouped,
-and again when the contract engine was promoted here.
+Why a marker file instead of `parents[N]`: a probe that hard-codes its own
+depth (`parents[1] / "src" / "lib" / "python"`) silently breaks when it moves
+into another folder.
 """
 
 from __future__ import annotations

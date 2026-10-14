@@ -9,7 +9,7 @@
 // closed error, and every later `send`/`recv` fails the same way.
 //
 // It CARRIES frames and serves nothing: the far kernel answers a `call` through
-// its own leg (audit G-4, 2026-10-03) — `aServingLegGatesWhatCrossesTheMemoryPair`.
+// its own leg — `aServingLegGatesWhatCrossesTheMemoryPair`.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -126,7 +126,7 @@ struct MemoryTransportPinTests {
         await #expect(throws: (any Error).self) { _ = try await b.recv() }
     }
 
-    /// THE FAR LEG SERVES (audit G-4): the memory pair carries a forward to a
+    /// THE FAR LEG SERVES: the memory pair carries a forward to a
     /// SERVING leg on the far kernel, which gates it as python's
     /// `_serve_inbound_call` does — its ingress rule, then the leg's OWN send: a
     /// call a bridge leg serves is judged as THE LEG (its `can_call`, the target's

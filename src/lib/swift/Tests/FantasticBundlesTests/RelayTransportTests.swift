@@ -488,7 +488,7 @@ struct RelayTransportTests {
         }
     }
 
-    /// A7.20/A7.21 — an UNBOOTED relay leg seals by default and reflects python's
+    /// An UNBOOTED relay leg seals by default and reflects python's
     /// key order, family fields included.
     @Test func bridgeReflectKeyOrderMatchesPython() async throws {
         let (kernel, _) = await makeKernel(withEcho: false)
@@ -525,8 +525,7 @@ struct RelayTransportTests {
     /// `auth` carries a bare STEM and the gate appends `_ingress` to it, so
     /// `auth: allow_all_ingress` resolves `allow_all_ingress_ingress` — unknown,
     /// and it denies. The bridge reflects with the same `describe` every leg uses
-    /// (python `**describe(rec)`); it used to skip an already-suffixed stem and
-    /// report `allow_all_ingress` / sealed:false, an open door its gate never
+    /// (python `**describe(rec)`), never reporting an open door its gate never
     /// opened. Python `test_a_bridge_reflects_exactly_what_its_gate_enforces`.
     @Test func aBridgeReflectsExactlyWhatItsGateEnforces() async throws {
         let rule = resolveIngress(ingressRule: nil, auth: .string("allow_all_ingress"))
@@ -557,7 +556,7 @@ struct RelayTransportTests {
         }
     }
 
-    /// A7.20/A7.21 — the ws derivation's own field set and six verbs.
+    /// The ws derivation's own field set and six verbs.
     @Test func wsBridgeReflectFieldsMatchPython() async throws {
         let registry = BundleRegistry()
         registry.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))
@@ -581,7 +580,7 @@ struct RelayTransportTests {
                 "egress_rule", "sealed", "host", "peer_id", "port",
             ], "\(r.serialize())")
         #expect(r["transport"].asString == "ws")
-        // A7.24 — the dial to a dead port FAILED, so nothing attached: boot is
+        // The dial to a dead port FAILED, so nothing attached: boot is
         // not a half-success that reflects `connected:true` and times out later.
         #expect(r["connected"].asBool == false)
         #expect(r["host"].isNull && r["peer_id"].asString == "kernel_state")
@@ -595,7 +594,7 @@ struct RelayTransportTests {
         )
     }
 
-    /// A7.24 — a relay leg validates `relay_url` + `partner_guid` BEFORE minting
+    /// A relay leg validates `relay_url` + `partner_guid` BEFORE minting
     /// the guid, so a half-configured leg leaves no durable identity behind.
     @Test func relayBootMissingPartnerMintsNoGuid() async throws {
         let (kernel, _) = await makeKernel(withEcho: false)
@@ -621,7 +620,7 @@ struct RelayTransportTests {
         #expect(r["guid"].isNull, "a failed boot must mint no guid: \(r.serialize())")
     }
 
-    /// A7.1 — the two readmes are python's, byte for byte.
+    /// The two readmes are python's, byte for byte.
     @Test func bridgeReadmesMatchPythonVerbatim() throws {
         let ws = try String(
             contentsOf: pythonSource("io/ws_bridge/src/ws_bridge/readme.md"), encoding: .utf8)
@@ -632,7 +631,7 @@ struct RelayTransportTests {
         #expect(KernelBridgeBundle(family: .relay).readme == relay)
     }
 
-    /// A7.2/A7.5 — an unknown type (and a directory verb on a ws leg, and
+    /// An unknown type (and a directory verb on a ws leg, and
     /// `shutdown`) answers python's envelope-teaching miss.
     @Test func unknownTypeTeachesTheEnvelope() async throws {
         let registry = BundleRegistry()
@@ -656,7 +655,7 @@ struct RelayTransportTests {
         }
     }
 
-    /// A7.23/A7.24/A7.25 — boot texts, and every pre-boot verb's refusal.
+    /// Boot texts, and every pre-boot verb's refusal.
     @Test func bridgeBootAndForwardTextsMatchPython() async throws {
         let registry = BundleRegistry()
         registry.register("ws_bridge.tools", KernelBridgeBundle(family: .ws))
@@ -721,7 +720,7 @@ struct RelayTransportTests {
             "\(noTarget.serialize())")
     }
 
-    /// A7.29 — `unwatch_directory` before boot is simply OK; a bad `set_identity`
+    /// `unwatch_directory` before boot is simply OK; a bad `set_identity`
     /// role is python's `bad_arg`.
     @Test func directoryRepliesMatchPython() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
@@ -745,8 +744,8 @@ struct RelayTransportTests {
             .result
     }
 
-    /// A7.27 — the correlator is namespaced by agent id AND boot
-    /// (`<bridge_id>-<12 hex boot nonce>-<n>`, audit IO-5): never `:`, the
+    /// The correlator is namespaced by agent id AND boot
+    /// (`<bridge_id>-<12 hex boot nonce>-<n>`): never `:`, the
     /// kernel-minted namespace.
     @Test func corrIdsAreNamespacedByAgentId() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
@@ -771,7 +770,7 @@ struct RelayTransportTests {
             .result
     }
 
-    /// A7.30/A7.17 — `bridge_up` after boot, exactly one `bridge_down` when the
+    /// `bridge_up` after boot, exactly one `bridge_down` when the
     /// leg goes (the read loop's tail).
     @Test func bridgeEmitsBridgeUpAndDown() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
@@ -795,7 +794,7 @@ struct RelayTransportTests {
         #expect(seen == ["bridge_up", "bridge_down"], "\(seen)")
     }
 
-    /// A7.31 — the read loop is REGISTERED work: `ps` carries a `read_loop` row
+    /// The read loop is REGISTERED work: `ps` carries a `read_loop` row
     /// for the booted leg.
     @Test func bootedBridgePsRowsMatchPython() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
@@ -813,8 +812,8 @@ struct RelayTransportTests {
             .result
     }
 
-    /// A7.34 — an `error` frame with no `error` field is python's `str(None)`.
-    /// A7.3 — a SUBSCRIBED `event` frame with no payload is dropped (the payload
+    /// An `error` frame with no `error` field is python's `str(None)`.
+    /// A SUBSCRIBED `event` frame with no payload is dropped (the payload
     /// must be an object); the next one re-emits as its payload plus `src`.
     @Test(.timeLimit(.minutes(1)))
     func errorFrameWithoutErrorSaysNoneAndAnEmptyEventReEmits() async throws {
@@ -878,7 +877,7 @@ struct RelayTransportTests {
             .result
     }
 
-    /// A7.25/A7.26 — the `timeout` arg bounds the forward, rendered as python's
+    /// The `timeout` arg bounds the forward, rendered as python's
     /// float repr.
     @Test func bridgeForwardHonoursTimeoutArg() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
@@ -906,7 +905,7 @@ struct RelayTransportTests {
             .result
     }
 
-    /// A7.33 — teardown closes the transport and fails every pending forward
+    /// Teardown closes the transport and fails every pending forward
     /// with python's `ConnectionError` text.
     @Test func bridgeDetachClosesAndFailsPending() async throws {
         let (kernel, bundle) = await makeKernel(withEcho: false, leg: "brA")
@@ -926,7 +925,7 @@ struct RelayTransportTests {
             "\(r.serialize())")
     }
 
-    /// A7.4/A7.32 — an inbound call for an unknown target gets the KERNEL's own
+    /// An inbound call for an unknown target gets the KERNEL's own
     /// refusal, not a bridge-invented text, and the read loop keeps reading
     /// (each call is its own task).
     @Test func inboundCallToAnUnknownTargetRepliesTheKernelRefusal() async throws {
@@ -1017,14 +1016,12 @@ struct ManifoldScopedRuleNameTests {
     /// Rule names bind to exactly ONE direction, so a name can never half-resolve
     /// across the two registries.
     ///
-    /// Measured 2026-08-21, before scoping (python AND swift, which carried the
-    /// identical aliases): `auth:"silent"` — a legitimate EGRESS policy — resolved
-    /// ingress to `DenyInbound(unknown: "silent")`, SEALING the leg while recording the
-    /// unknown name and saying nothing; and `auth:"allow_all"` handed egress a `Silent`
-    /// nobody asked for. One unscoped name against two registries with different
+    /// Unscoped, `auth:"silent"` — a legitimate EGRESS policy — would resolve
+    /// ingress to `DenyInbound(unknown: "silent")`, SEALING the leg while saying
+    /// nothing; and `auth:"allow_all"` would hand egress a `Silent` nobody asked for. One unscoped name against two registries with different
     /// membership is a fallback, and this kernel has none.
     ///
-    /// It still DENIES — an unresolvable rule is not an authorization — but it now names
+    /// It still DENIES — an unresolvable rule is not an authorization — but it names
     /// the manifold mistake instead of looking like an ordinary seal.
     @Test func anEgressNameInIngressRuleIsLoudNotSilent() throws {
         let sealed = IngressRules.resolve(.string("silent_egress"))
@@ -1057,7 +1054,7 @@ struct ManifoldScopedRuleNameTests {
     }
 }
 
-// ── A15.1 — a malformed inbound frame is skipped, not fatal ─────
+// ── a malformed inbound frame is skipped, not fatal ─────
 
 /// A wire that hands back a scripted list of frames, python's `_FakeWS`.
 private actor ScriptedWire: RelayWire {
@@ -1080,7 +1077,7 @@ private func binaryFrame(headerLen: UInt32, _ tail: [UInt8]) -> [UInt8] {
     return out
 }
 
-// ── A7.22 — the self-healing re-dial starts at once, not after a backoff ──
+// ── the self-healing re-dial starts at once, not after a backoff ──
 
 /// Counts dial attempts and fails the first `failures` of them.
 private actor DialScript {
@@ -1103,11 +1100,9 @@ private actor DialScript {
 struct RelaySelfHealTests {
 
     /// Python `_reconnect_ws` DIALS FIRST and sleeps only after a dial FAILS, so
-    /// a leg that boots with no socket re-dials immediately. Swift slept one full
-    /// `reconnect` interval before every attempt; with a 30 s backoff that is the
+    /// a leg that boots with no socket re-dials immediately. Sleeping one full
+    /// `reconnect` interval before every attempt would, with a 30 s backoff, be the
     /// difference between healing now and never healing inside the window.
-    /// Measured on the parity `bridges` capture as `relay_connections` 1 vs
-    /// python's 2.
     @Test func reDialHappensBeforeTheBackoffSleep() async throws {
         let script = DialScript(failures: 1)
         let transport = try await RelayTransport.connect(
@@ -1168,9 +1163,8 @@ struct WSFrameResilienceTests {
         #expect(skips[4] == "ws_bridge: skipping non-object frame\n")
     }
 
-    /// IO-3 — a peer's 100k-deep frame (text, and a binary header) used to
-    /// overflow the reader's stack in the JSON scanner and kill the kernel. Now
-    /// each is python's malformed frame — refused past the json recursion limit,
+    /// A peer's 100k-deep frame (text, and a binary header) must not
+    /// overflow the reader's stack in the JSON scanner and kill the kernel: each is python's malformed frame — refused past the json recursion limit,
     /// skipped and named — and the next frame is read.
     @Test func hundredThousandNestedFrameIsSkippedAndReaderSurvives() async throws {
         let deep = String(repeating: "[", count: 100_000) + String(repeating: "]", count: 100_000)

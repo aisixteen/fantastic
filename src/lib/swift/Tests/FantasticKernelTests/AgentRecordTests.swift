@@ -94,7 +94,7 @@ struct AgentRecordCodableTests {
         #expect(parsed["handler_module"].asString == "real.tools")
     }
 
-    // MARK: - record key order (C15)
+    // MARK: - record key order
 
     /// Python's `record`: `id`, `handler_module` when set, the meta in ITS
     /// order, and `parent_id` LAST — written last so a `parent_id` that leaked
@@ -139,7 +139,7 @@ struct AgentRecordCodableTests {
             id: AgentId(ROOT_ID), handlerModule: nil, parentId: nil, rootPath: storeRoot)
         k.register(root)
         k.setRoot(root)
-        // RECORDS PERSIST THROUGH THE WRITER, not at the verb (C14): the root
+        // RECORDS PERSIST THROUGH THE WRITER, not at the verb: the root
         // loader subscribes to the state stream and drains, debounced. Here the
         // drain is driven directly — the test seam python's one-shot mode uses.
         k.installPersistWriter(loader: root.id)
@@ -196,7 +196,7 @@ private final class RecordFiles: @unchecked Sendable {
         defer { lock.unlock() }
         f[p] = c
     }
-    /// C43's tmp+rename commit protocol needs this to be REAL, not a no-op
+    /// The tmp+rename commit protocol needs this to be REAL, not a no-op
     /// `{"ok":true}` — else a persisted record would only ever exist under
     /// its `.tmp.<hex>` name.
     @discardableResult

@@ -127,8 +127,8 @@ async def test_a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all(
     seeded_kernel, host
 ):
     """`boot` on a running host re-mounts every surface. A re-mount REPLACES the
-    leg's routes: a second copy used to be appended, and `unmount` removed only
-    the newest one, so the first copy kept serving."""
+    leg's routes: an appended second copy would leave `unmount` removing only the
+    newest one while the first copy kept serving."""
     await _mk(seeded_kernel, "web_rest.tools", "mount_rest", parent_id=host)
     handle = await _spawn(host, seeded_kernel)
     await _mount_all_surfaces(handle, seeded_kernel, host)

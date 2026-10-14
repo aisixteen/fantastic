@@ -153,7 +153,7 @@ fn boot_disk(
 
     // THE TREE, python `_bootstrap`: `records = read_tree(.fantastic)`. A
     // missing or unparseable root `agent.yaml` does not hide the children under
-    // `agents/` (python `read_tree`, 2026-09-20) — they are parented to the root
+    // `agents/` (python `read_tree`) — they are parented to the root
     // id the seed below mints.
     let mut records = if fantastic_dir.is_dir() {
         read_tree(&fantastic_dir, &opts.root_id)?
@@ -166,7 +166,7 @@ fn boot_disk(
     let root_file = fantastic_dir.join(persistence::RECORD_FILE);
     if seeded && root_file.exists() {
         // A root record that is THERE but did not parse is never written over —
-        // the seed lost its other keys (python `main._bootstrap`; audit 2026-10-14).
+        // the seed would lose its other keys (python `main._bootstrap`).
         return Err(KernelError::InvalidSnapshot(format!(
             "{} is unreadable — fix or remove it; the root is not re-seeded over it",
             root_file.display()

@@ -113,7 +113,7 @@ async def test_shutdown_does_not_touch_records_or_tree(seeded_kernel, tmp_path):
 
 
 async def test_shutdown_never_falls_back_to_on_delete(seeded_kernel):
-    """Shutdown calls `on_shutdown` and only that (audit 2026-09-28, c9). A
+    """Shutdown calls `on_shutdown` and only that. A
     bundle whose shutdown is its delete teardown declares it
     (`on_shutdown = on_delete`); one with only `on_delete` has nothing to free
     at shutdown, and delete's teardown is not run in its place."""

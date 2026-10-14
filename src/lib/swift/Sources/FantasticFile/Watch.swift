@@ -1,4 +1,4 @@
-// Watching paths (owner, 2026-10-08) — python `file_bridge._watch_path`, text for
+// Watching paths — python `file_bridge._watch_path`, text for
 // text.
 //
 // `watch_path {path}` puts an EXPOSED file or directory under a disk watcher
@@ -140,7 +140,7 @@ final class Watches: @unchecked Sendable {
         kernel.spawnTask(agent: bridge, verb: "watch_path") {
             for await batch in stream {
                 // `allow` is read LIVE: a path the bridge stopped exposing after
-                // the watch was armed reports nothing more (audit 2026-10-14).
+                // the watch was armed reports nothing more.
                 let allow = (kernel.agent(bridge)?.metaValue(forKey: "allow")?.asArray ?? [])
                     .compactMap { $0.asString.flatMap(allowNorm) }
                 for (rel, kind) in batch where allowExposed(allow, rel) {

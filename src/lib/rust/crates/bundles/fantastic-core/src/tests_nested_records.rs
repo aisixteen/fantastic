@@ -3,8 +3,8 @@
 //! Those records are never live on the host, so the path resolution climbs THIS
 //! LOADER'S persisted records (disk position) past the live tree: nested 2+ levels
 //! lands under its real parents, and an existing record is placed where it is —
-//! never by the payload's parent. WHO may write is the grant alone (owner,
-//! 2026-10-06): any agent granted the record verbs on the loader writes any record.
+//! never by the payload's parent. WHO may write is the grant alone: any agent
+//! granted the record verbs on the loader writes any record.
 //! The twin of python `kernel_state/tests/test_nested_records.py`.
 
 use super::*;

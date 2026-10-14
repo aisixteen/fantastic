@@ -1,7 +1,7 @@
 // JOINING a caller-scoped kernel verb's execution. Twin of python
 // tests/kernel/test_caller_scoped_join.py.
 //
-// A join re-gates the ORIGINAL verb only (owner, 2026-10-03): a caller the gate
+// A join re-gates the ORIGINAL verb only: a caller the gate
 // admits for `ledger` / `ack_deadletter` joins another caller's execution of it
 // like any other verb and is handed the recorded outcome; a caller the gate
 // refuses for that verb is refused.

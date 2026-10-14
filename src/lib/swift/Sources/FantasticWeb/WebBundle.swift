@@ -253,11 +253,8 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
             "served_agent_count": .integer(Int64(kernel.allAgents().count)),
             "surfaces": .object(surfaces),
             // THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser
-            // hits, and it was described NOWHERE. Measured 2026-08-21: a model
-            // reflected this agent, found no route contract, and HALLUCINATED
-            // one — inventing a `routes` key and the rule "the agent must be in
-            // can_call AND expose read_stream", which omits the ingress half —
-            // then verified against its own fiction.
+            // hits, and a model that finds no route contract on reflect
+            // invents one.
             "routes": .object([
                 "GET /<agent_id>/file/<path>": .string(
                     "Streams a file by read_stream-ing through the named agent. The "
@@ -315,7 +312,7 @@ public final class WebBundle: AgentBundle, @unchecked Sendable {
         // the renderer never reaches in for it. No cli (non-tty) ⇒ nobody is
         // told; the bound port is on this agent's reflect. The URL names the
         // BOUND host — a host bound to a LAN address does not answer at
-        // 127.0.0.1 (audit ARCH2-10).
+        // 127.0.0.1.
         let line =
             "listening on http://\(handle.host):\(handle.port)/"
             + " · rest/ws are children (reflect kernel for ids)"

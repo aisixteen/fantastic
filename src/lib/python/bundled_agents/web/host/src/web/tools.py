@@ -125,9 +125,8 @@ def _order_routes(handle: _ServerHandle) -> None:
     (starlette), and legs append their routes in MOUNT order — which on a hydrated
     host is the children's folder order. A `web_ws` leg declares the catch-all
     `/{host_id}/ws`; mounted before a leg that declares the literal
-    `/web_ui/ws`, it swallowed it (measured: a CLI canvas leg sorted first and the
-    UI socket went dead on every rehydrate, while a first run's creation order
-    happened to be right). So the live table is ordered by how many PARAMETERS a
+    `/web_ui/ws`, it would swallow it (and a first run's creation order can hide
+    that until a rehydrate). So the live table is ordered by how many PARAMETERS a
     path has — fewer first; equal counts keep their mount order (a stable sort)."""
     handle.app.router.routes.sort(key=lambda r: str(getattr(r, "path", "")).count("{"))
 
@@ -187,8 +186,7 @@ async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
 
 
 class _Server(uvicorn.Server):
-    """uvicorn's server with its idle poll removed (owner, 2026-10-08: idle means
-    zero wakeups). `Server.main_loop` sleeps 0.1 s between `on_tick`s — ten
+    """uvicorn's server with its idle poll removed (idle means zero wakeups). `Server.main_loop` sleeps 0.1 s between `on_tick`s — ten
     wakeups a second while nothing happens — only to notice `should_exit` and
     refresh the Date header. Here `should_exit` sets an event and the loop waits
     on it; the Date header is off (see `date_header=False`)."""
@@ -242,8 +240,8 @@ def _start_serving(agent_id: str, handle: _ServerHandle) -> None:
 
     # THE SERVER IS A TRANSPORT, NOT A DISPATCH. Its task starts from an EMPTY
     # context, and every request task uvicorn creates inherits that: no task
-    # parent (it outlives the boot that started it — a request task naming the
-    # ended boot pid was measured 2026-09-16), and no identity. A request is the
+    # parent (it outlives the boot that started it, so it must not name the
+    # ended boot pid), and no identity. A request is the
     # outside world — the operator — handing a frame to a leg; the leg acts as
     # itself.
     handle.task = asyncio.create_task(_safe_serve(), context=contextvars.Context())
@@ -348,15 +346,9 @@ async def _reflect(id, payload, kernel):
         "running": id in _servers,
         "served_agent_count": len(kernel.list()),
         "surfaces": surfaces,
-        # THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser hits,
-        # and it was described NOWHERE — not here, not in the readme. Measured
-        # 2026-08-21: a model reflected this agent, found no route contract, and
-        # HALLUCINATED one — inventing a `routes` key and the rule "the agent must
-        # be in can_call AND expose read_stream", which omits the ingress half — then
-        # verified against its own fiction. Six runs across two models opened a
-        # public directory's io leg, never granted the web host on its call gate,
-        # and reported the browser could reach it. The field they invented is the
-        # field that was missing.
+        # THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser hits;
+        # undescribed, a model that reflects this agent invents a route contract
+        # (omitting the ingress half) and verifies against its own fiction.
         "routes": {
             "GET /<agent_id>/file/<path>": (
                 "Streams a file by read_stream-ing through the named agent. The "
@@ -393,7 +385,7 @@ async def _boot(id, payload, kernel):
     # host owns its port, so it tells the terminal where to attach — the renderer
     # never reaches in for it. No cli (non-tty) ⇒ nobody is told; the bound port
     # is on this agent's reflect. The URL names the BOUND host (uvicorn's config)
-    # — a host bound to a LAN address does not answer at 127.0.0.1 (audit ARCH2-10).
+    # — a host bound to a LAN address does not answer at 127.0.0.1.
     line = (
         f"listening on http://{handle.server.config.host}:{handle.port}/"
         " · rest/ws are children (reflect kernel for ids)"

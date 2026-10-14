@@ -1,4 +1,4 @@
-// ARCH2-6 — `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`),
+// `children_dir` BECOMES A DIRECTORY (`<agent>/<children_dir>/<child>`),
 // so python's `create_agent` / `update_agent` hold it to the agent-id rule
 // (`guard_agent_id(..., arg="children_dir")`). Only its string-ness was ever
 // checked: `../x` was accepted, and the next boot's clamped walk refused the tree.

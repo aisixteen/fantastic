@@ -269,7 +269,7 @@ struct ReflectUniformTests {
         #expect(!s.contains("code:'<your program"), "\(s)")
     }
 
-    /// C5 — the tree, `tree=ids` and every descendant walk read python's
+    /// The tree, `tree=ids` and every descendant walk read python's
     /// INSERTION order (`self._children.values()`), not an alphabetical sort.
     @Test func treeChildrenKeepCreationOrder() async {
         let kernel = makeKernel()
@@ -302,12 +302,12 @@ struct ReflectUniformTests {
                 == ["kernel_state", "zeta", "alpha", "mid"])
     }
 
-    // ─── C58: the `tree` flag is decided by KEY PRESENCE ───────
+    // ─── the `tree` flag is decided by KEY PRESENCE ───────
     //
     // Python reads `payload.get("tree", "all")`: ABSENT is `all`; a present
-    // `"all"`/`"ids"` acts; ANY other present value omits the tree. Swift read
-    // `asString ?? "all"`, so `tree:null` / `tree:true` / `tree:5` inserted the
-    // WHOLE tree — the one answer the caller did not ask for.
+    // `"all"`/`"ids"` acts; ANY other present value omits the tree — reading
+    // `asString ?? "all"` would insert the WHOLE tree for `tree:null` / `tree:true` /
+    // `tree:5`, the one answer the caller did not ask for.
     @Test func nonStringTreeFlagOmitsTheTree() async {
         let kernel = makeKernel()
         // Absent ⇒ all.
@@ -330,7 +330,7 @@ struct ReflectUniformTests {
         #expect(ids["tree"].asArray?.count == 1)
     }
 
-    // ─── C1: no verb docs on ANY reflect (they are `docs`) ───────
+    // ─── no verb docs on ANY reflect (they are `docs`) ───────
     @Test func reflectCarriesNoVerbDocs() async {
         let kernel = makeKernel()
         _ = await kernel.send([
@@ -351,7 +351,7 @@ struct ReflectUniformTests {
         for target in ["kernel_state", "kid"] {
             for flags in flagSets {
                 let r = await kernel.send([Item(AgentId(target), flags)])[0].result
-                // A reflect carries no verb docs (owner, 2026-10-05): no `more`,
+                // A reflect carries no verb docs: no `more`,
                 // `kernel_verbs`, `verbs`, `emits` or `cancel` — those are `docs`.
                 for key in ["more", "kernel_verbs", "verbs", "emits", "cancel"] {
                     #expect(r.asObject?[key] == nil, "\(target) \(flags.serialize()) \(key)")
@@ -364,7 +364,7 @@ struct ReflectUniformTests {
         }
     }
 
-    // ─── C8: reflect paging keys ───────────────────────────────
+    // ─── reflect paging keys ───────────────────────────────
     //
     // `tree=ids` names its cursor `next` (never `tree_next`) and only when a
     // further page follows; `bundles=all|ids` pages by the SAME `limit`/`after`
@@ -407,11 +407,11 @@ struct ReflectUniformTests {
         #expect(both["bundles_next"].asString == "b")
     }
 
-    // ─── C10: the catalog lists INSTALLABLE bundles only ───────
+    // ─── the catalog lists INSTALLABLE bundles only ───────
     //
     // Python's catalog is the `fantastic.bundles` ENTRY-POINT scan, so an
     // importable module without one (the e2e scenario probes) dispatches and is
-    // invisible here. Swift listed every registered bundle.
+    // invisible here.
     @Test func anUnlistedBundleIsNotInTheCatalog() async {
         let registry = BundleRegistry()
         registry.register("installed.tools", NamedProbe(name: "installed"))
@@ -437,7 +437,7 @@ struct ReflectUniformTests {
         #expect(fx["sentence"].asString == "fixture_probe speaking.")
     }
 
-    // ─── C11: an EMPTY `display_name` is no name ───────────────
+    // ─── an EMPTY `display_name` is no name ───────────────
     @Test func emptyDisplayNameFallsBackToId() async {
         let kernel = makeKernel()
         _ = await kernel.send([
@@ -476,7 +476,7 @@ struct NamedProbe: AgentBundle {
 
 @Suite("Root identity with a handler_module")
 struct RootWithHandlerTests {
-    /// C12 — the tree root answers `reflect` with the SUBSTRATE identity even
+    /// The tree root answers `reflect` with the SUBSTRATE identity even
     /// though it now carries `handler_module: kernel_state.tools`. Its other
     /// verbs still route to the bundle; `reflect <root>` is the kernel's own
     /// identity + tree, matching the reserved `kernel` address (python `_agent.py`:
@@ -541,7 +541,7 @@ struct RootWithHandlerTests {
 }
 
 /// A bundle that ships a readme and a flat keyed docs table — the only place a
-/// manual lives (owner 2026-10-14: never copied to disk, never read from it).
+/// manual lives (never copied to disk, never read from it).
 private struct DocsBundle: AgentBundle {
     let name = "docs_probe"
     let readme: String?
@@ -550,7 +550,7 @@ private struct DocsBundle: AgentBundle {
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? { nil }
 }
 
-/// Doc-tree reads served from the agent's BUNDLE (C33 R2-RFL-5, C59) — python's
+/// Doc-tree reads served from the agent's BUNDLE — python's
 /// `_readme_index`/`_readme_view` over the package `docs/`.
 @Suite("Readme doc tree — served from the bundle")
 struct ReadmeBundleDocsTests {
@@ -602,7 +602,7 @@ struct ReadmeBundleDocsTests {
         #expect(await reflect(kernel, "index")["index"].asArray == [])
     }
 
-    /// C59: `\r\n`/lone `\r` translate to `\n` before `body`/`desc`/`tokens`
+    /// `\r\n`/lone `\r` translate to `\n` before `body`/`desc`/`tokens`
     /// are computed from it — python text mode.
     @Test func docReadsTranslateNewlinesLikePythonTextMode() async throws {
         let (kernel, root) = makeDocsKernel([("topic", "> desc\r\nline2\rline3\n")])
@@ -632,7 +632,7 @@ struct ReadmeBundleDocsTests {
                 == ["frontend/html-agent", "frontend/routing"])
     }
 
-    /// python 2026-09-20: the key check is LEXICAL and then the INDEX — a `..`,
+    /// Python: the key check is LEXICAL and then the INDEX — a `..`,
     /// `.` or empty segment is a `bad key`, a listed key is served, an unlisted
     /// one is `no doc`.
     @Test func keyCheckIsLexicalThenTheIndex() async throws {

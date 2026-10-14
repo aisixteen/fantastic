@@ -100,11 +100,9 @@ expect:
       because: C20
 
     # Isolation asserted by WRITING through one leg and reading through the
-    # other, not by an absence in a listing. The previous form asserted
-    # `not_contains` on a reply that has no `files` key at all (the vault root
-    # does not exist until something writes there), so it passed without ever
-    # looking — caught 2026-08-28 when the matcher was taught to refuse a path
-    # that resolves to nothing.
+    # other, not by an absence in a listing: a `not_contains` on a reply with no
+    # `files` key at all (the vault root does not exist until something writes
+    # there) would pass without ever looking.
     - name: a file written through one leg is invisible to a leg rooted elsewhere
       operator: {to: vault, send: {type: write_stream, path: vault_only.txt, bytes_utf8: "v", truncate: true}}
       expect: {contains: {written: true}}

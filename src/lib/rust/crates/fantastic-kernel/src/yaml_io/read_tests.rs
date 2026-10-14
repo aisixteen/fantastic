@@ -1,6 +1,6 @@
 //! The reader against PYTHON's own answers. Every expected value below is
 //! python's `kernel_state.yaml_io.load` (`yaml.load(text, Loader=CSafeLoader)`)
-//! on the same text, measured with the repo venv on 2026-10-02 — a date or a
+//! on the same text — a date or a
 //! datetime as its `str()`, a non-finite float as its repr, every other value as
 //! the JSON python's own encoder writes.
 

@@ -103,9 +103,9 @@ def read_tree(root_dir: fs.Root, root_rec: dict | None = None) -> list[dict]:
     rd = root_dir
     if root_rec is None:
         root_rec = _read_record(rd, _RECORD_FILE)
-    # A MISSING OR CORRUPT ROOT RECORD DOES NOT HIDE THE TREE. It used to return
-    # `[]`, so the boot reseeded a fresh root and hydrated none of the children
-    # sitting under `agents/` (measured 2026-09-16). The children are walked under
+    # A MISSING OR CORRUPT ROOT RECORD DOES NOT HIDE THE TREE. Returning `[]` would
+    # make the boot reseed a fresh root and hydrate none of the children sitting
+    # under `agents/`. The children are walked under
     # the default layout and parented to the id the reseed will mint.
     if root_rec is None:
         records: list[dict] = []
@@ -120,7 +120,7 @@ def read_tree(root_dir: fs.Root, root_rec: dict | None = None) -> list[dict]:
     return records
 
 
-# ─── folder bundles (owner, 2026-10-08) ──────────────────────────────
+# ─── folder bundles ──────────────────────────────────────────────────
 # `<root>/bundles/<name>/bundle.yaml` — code that EXTENDS a bundled agent (`base`).
 # This loader owns the `.fantastic` layout, so it reads the folders: at boot beside
 # `read_tree` (before `kernel.load`, so an instance's handler resolves), and on the
@@ -448,8 +448,8 @@ async def _persist_via_store(
     af = f"{reldir}/{_RECORD_FILE}" if reldir else _RECORD_FILE
     existing: dict = {}
     # The WHOLE document: `read_stream` answers one chunk (64 KiB by default),
-    # so a record larger than that failed to parse and silently lost its
-    # unknown keys on the next write (measured 2026-09-16). Page to eof.
+    # so a record larger than that would fail to parse and silently lose its
+    # unknown keys on the next write. Page to eof.
     buf = bytearray()
     offset = 0
     while True:
@@ -599,11 +599,8 @@ class _FlushLoop:
         a one-shot awaits.
 
         ONE DRAIN AT A TIME. When it returns, every write that was dirty when it was
-        called has LANDED — also the ones the debounced loop took first. It used to
-        return at once when the loop held them, with their writes still in flight:
-        the flush came back before the record was on disk (measured: a 0.152–0.160 s
-        gap between `create` and `aflush`, just past the debounce, left `agent.yaml`
-        unwritten)."""
+        called has LANDED — also the ones the debounced loop took first, so the flush
+        never comes back before the record is on disk."""
         async with self._drain:
             store_id = _find_store(self.agent)
             if store_id is None:
@@ -770,7 +767,7 @@ async def _boot(id, payload, agent):
     A SESSION loader (a `root` meta pointing at a sub-namespace like
     `.fantastic/web/<session>/`) writes no record of its own there: its one
     record lives in its parent's tree, and `load_tree` walks the namespace from
-    it (owner 2026-10-14 — a copy at `<root>/agent.yaml` froze and diverged)."""
+    it (a copy at `<root>/agent.yaml` would freeze and diverge)."""
     rec = agent.record
     if rec.get("watch", True) is False:
         return
@@ -817,8 +814,7 @@ def _guard_own_tree(verb: str, agent) -> dict | None:
     """The ROOT loader's tree is the one this kernel HYDRATES at boot, so only the
     operator (its own flush, the CLI, boot) writes it. An agent's record changes
     through `update_agent`, gated like any verb — a record written here
-    by an agent would be hydrated with whatever grants it named (audit
-    2026-09-28). A session loader (a remote's sub-namespace, never hydrated here)
+    by an agent would be hydrated with whatever grants it named. A session loader (a remote's sub-namespace, never hydrated here)
     keeps serving its remote."""
     if agent.parent is None and current_origin() is not None:
         return refusal(
@@ -866,9 +862,8 @@ async def _forget_record(id, payload, agent):
     target = payload.get("id")
     if not target:
         return missing("forget_record", "id")
-    # This verb ends in `rmtree`. Measured 2026-08-28: an agent with NO explicit
-    # grant sent id="../../important_project_dir" and recursively deleted a
-    # directory outside the store entirely.
+    # This verb ends in `rmtree`: an id like "../../important_project_dir" would
+    # recursively delete a directory outside the store entirely.
     if (bad_id := guard_agent_id("forget_record", target)) is not None:
         return bad_id
     if (
@@ -987,10 +982,8 @@ async def load_blob(agent, aid: str, name: str) -> dict:
     reldir = _blob_reldir(agent, aid)
     path = f"{reldir}/{name}" if reldir else name
     # PUMP TO EOF. `read_stream` is a CHUNK verb — `file_bridge` caps a chunk at
-    # 65536 bytes — so a single call returns a PREFIX of any larger sidecar, and
-    # this used to return that prefix as if it were the file. Measured: a 100_000
-    # byte `state.yaml` round-tripped as 65_536 bytes, silently, with no error on
-    # any channel. A memory agent's whole point is that what it wrote is what it
+    # 65536 bytes — so a single call returns a PREFIX of any larger sidecar, never
+    # to be returned as if it were the file. A memory agent's whole point is that what it wrote is what it
     # reads back, so a truncating read is data loss dressed as a successful load.
     chunks: list[bytes] = []
     offset = 0
@@ -1041,7 +1034,7 @@ async def _persist_blob(id, payload, agent):
     name = payload.get("name")
     content = payload.get("content")
     # The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
-    # `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
+    # `../bundles/x` writes a folder bundle's `bundle.yaml`.
     if not isinstance(aid, str) or not aid:
         return {"error": "persist_blob: agent_id (str) required"}
     if (bad_id := guard_agent_id("persist_blob", aid, arg="agent_id")) is not None:
@@ -1061,7 +1054,7 @@ async def _load_blob(id, payload, agent):
     aid = payload.get("agent_id")
     name = payload.get("name")
     # The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
-    # `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
+    # `../bundles/x` writes a folder bundle's `bundle.yaml`.
     if not isinstance(aid, str) or not aid:
         return {"error": "load_blob: agent_id (str) required"}
     if (bad_id := guard_agent_id("load_blob", aid, arg="agent_id")) is not None:
@@ -1077,8 +1070,8 @@ async def flush_pending(agent):
 
     THE RECORD FLUSH LIVES HERE, not in `on_shutdown`. The record loop debounces
     0.15 s; a `create_agent` + `update_agent` followed straight away by
-    `shutdown()` used to reach its final flush mid-teardown-walk, with the store
-    already gone, and the update never landed."""
+    `shutdown()` would otherwise reach its final flush mid-teardown-walk, with the
+    store already gone, and the update would never land."""
     loop = getattr(agent, "_fs_flush_loop", None)
     if loop is not None:
         await loop.aflush()
@@ -1187,8 +1180,8 @@ async def handler(id: str, payload: dict, agent) -> dict | None:
     fn = VERBS.get(payload.get("type"))
     if fn is None:
         # CODED. A reason-less error on the ROOT — the most-addressed agent in
-        # the kernel — was decorated by `_apply_reflect_flags` into something
-        # that reads like a healthy reflect (2026-09-02).
+        # the kernel — would be decorated by `_apply_reflect_flags` into something
+        # that reads like a healthy reflect.
         t = payload.get("type")
         return refusal(UNHANDLED, f"kernel_state: unknown type {t!r}", verb=t)
     return await fn(id, payload, agent)

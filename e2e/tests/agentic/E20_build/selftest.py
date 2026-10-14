@@ -21,9 +21,7 @@ TWO SCENARIOS, because there are two shapes a passing run has:
 
   * `own`  — the model builds ITS OWN `exec_bridge.tools` worker and runs the
     program there, the route the kernel's root readme advertises ("A WORKER THAT
-    COMPUTES is an `exec_bridge.tools` agent … that owns a program file"). Measured
-    2026-09-21: 2 live runs of 3 did exactly this, stored the correct total, and
-    scored `jobs=0` — the scorer looked only at the operator's pre-wired leg.
+    COMPUTES is an `exec_bridge.tools` agent … that owns a program file").
   * `leg`  — the model reflects the operator's pre-wired `runner` and runs there.
 
 Both must score the same, and each must be scored on the RIGHT agent. Scoring goes
@@ -60,9 +58,8 @@ sys.argv = [sys.argv[0]]
 from tests.agentic.E20_build import probe as P  # noqa: E402
 from tests.agentic.E20_build.probe import CANARY_FILE, EXECUTOR_LEG  # noqa: E402
 
-# The id the model's own worker gets here. Named after the one a live run actually
-# chose (2026-09-21) rather than something like `my_exec`, so the scenario reads as
-# the run it is reproducing.
+# The id the model's own worker gets here — a name a live run chooses, rather than
+# something like `my_exec`, so the scenario reads like a real run.
 OWN_LEG = "totaller"
 
 # The reference solution: a PLAIN program that reads the readings OFF DISK (read_stream

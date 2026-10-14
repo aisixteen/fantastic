@@ -1,11 +1,9 @@
-// A ws leg reports its transport CLOSED once the remote drops (audit W-7,
-// 2026-10-03).
+// A ws leg reports its transport CLOSED once the remote drops.
 //
-// `WSTransport.isClosed()` answered `false` always (a copy of python's
-// `getattr(self._ws, "closed", False)`, which websockets 16 never sets). After
-// the remote closed, the read loop ended (`bridge_down`) while `reflect` kept
-// saying `connected:true` and `boot` answered `{already:true}` — only
-// `reconnect` recovered the leg. It now follows the socket.
+// `WSTransport.isClosed()` follows the socket — never a constant `false` (a copy
+// of python's `getattr(self._ws, "closed", False)`, which websockets 16 never
+// sets), which would leave `reflect` saying `connected:true` and `boot`
+// answering `{already:true}` after the remote closed.
 
 import FantasticIoBridge
 import FantasticJSON

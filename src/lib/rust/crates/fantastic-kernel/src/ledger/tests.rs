@@ -83,7 +83,7 @@ fn an_unknown_id_opens_fresh_and_a_settled_one_returns_its_outcome() {
     l.attempt(id_of(&l, "job-1"));
     l.settle(id_of(&l, "job-1"), done("first"));
 
-    // C11: the recorded outcome comes back and NOTHING runs again.
+    // The recorded outcome comes back and NOTHING runs again.
     match open(&l, "job-1", "desk", 0).1 {
         Opened::Settled(o, ..) => {
             assert_eq!(o.result["v"], "first");
@@ -95,7 +95,7 @@ fn an_unknown_id_opens_fresh_and_a_settled_one_returns_its_outcome() {
 
 #[tokio::test]
 async fn a_second_caller_joins_instead_of_running_twice() {
-    // C10: once-only under concurrency. The joiner waits on the OWNER's
+    // Once-only under concurrency. The joiner waits on the OWNER's
     // outcome; it never gets a dispatch of its own.
     let l = Arc::new(Ledger::default());
     assert!(matches!(open(&l, "job-2", "desk", 0).1, Opened::Fresh));
@@ -121,7 +121,7 @@ fn an_id_is_bound_to_its_first_target() {
     // The same id aimed elsewhere is a different intent wearing the same name.
     // Returning the other execution's outcome would be silently wrong.
     //
-    // PYTHON'S PROSE, verbatim (C31 r2 correction): the CALLER's raw id
+    // PYTHON'S PROSE, verbatim: the CALLER's raw id
     // (`py_repr`-quoted for a string name), never the minted exec_id; both
     // target names via `py_repr`; no `bound_to` key.
     let l = Ledger::default();
@@ -144,10 +144,10 @@ fn an_id_is_bound_to_its_first_target() {
 
 #[test]
 fn an_int_id_rebind_renders_bare_digits() {
-    // The r2 correction's other half: an INT caller id renders as bare
+    // The other half: an INT caller id renders as bare
     // digits (python `{exec_id!r}` on an int has no quotes), not as a
     // string. Exercises the `caller_id` parameter directly, since the int
-    // JOIN path itself is wired at `send::Kernel::resolve_exec_id` (C38).
+    // JOIN path itself is wired at `send::Kernel::resolve_exec_id`.
     let l = Ledger::default();
     let _ = l.open(
         301,
@@ -181,11 +181,9 @@ fn an_int_id_rebind_renders_bare_digits() {
 
 #[test]
 fn a_name_is_just_a_name_and_the_kernel_owns_every_id() {
-    // THE NAMESPACE IS GONE. There used to be a `<agent>:<hex>` id space a
-    // caller could trespass in, and a rule refusing an unknown colon id as a
-    // dangling reference. Neither is needed now: a caller supplies only a NAME,
-    // the kernel supplies every id, and a name that looks like an old pid is
-    // just an unusual name.
+    // THERE IS NO PID NAMESPACE: a caller supplies only a NAME, the kernel
+    // supplies every id, and a name that looks like a pid is just an unusual
+    // name.
     let l = Ledger::default();
     let (id, opened) = open(&l, "desk:0badf00d", "desk", 0);
     assert!(matches!(opened, Opened::Fresh));
@@ -464,7 +462,7 @@ fn stored_outcome_keeps_a_named_result_a_dead_error_else_a_digest() {
     );
 }
 
-/// D10 — a reply with a BINARY BODY is kept WHOLE in the ledger.
+/// A reply with a BINARY BODY is kept WHOLE in the ledger.
 ///
 /// The store records the body as its LENGTH, never the bytes; the live entry
 /// keeps the bytes, so a joiner in this process still gets them.

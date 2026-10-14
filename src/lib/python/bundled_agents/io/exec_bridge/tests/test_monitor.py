@@ -1,4 +1,4 @@
-"""exec_bridge MONITORS (owner, 2026-10-09) — a filter on a running job's output
+"""exec_bridge MONITORS — a filter on a running job's output
 that SENDS what matches to an agent as a turn; polls nothing; throttled by `every`;
 capped by `tail`; a kernel task that `cancel`/`unmonitor` ends and that ends with
 its job."""

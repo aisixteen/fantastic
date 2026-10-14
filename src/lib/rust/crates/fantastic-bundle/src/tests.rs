@@ -322,7 +322,7 @@ fn py_float_is_cpython_float() {
     }
 }
 
-/// C72: `int()`/`float()` transform every Unicode `Nd` digit to its ASCII
+/// `int()`/`float()` transform every Unicode `Nd` digit to its ASCII
 /// value BEFORE parsing — mixed scripts allowed in the one literal.
 #[test]
 fn unicode_decimal_digits_are_ascii_to_int_and_float() {
@@ -381,7 +381,7 @@ fn py_strip_and_split_use_pythons_whitespace() {
 
 #[test]
 fn py_set_order_matches_cpython() {
-    // The vector measured in the parity plan: `list(set([1116,1065,1066,1080]))`.
+    // A python vector: `list(set([1116,1065,1066,1080]))`.
     assert_eq!(
         py_set_order(&[1116, 1065, 1066, 1080]),
         vec![1080, 1065, 1066, 1116]
@@ -421,11 +421,11 @@ fn py_isdigit_matches_cpython() {
 
 #[test]
 fn a_non_finite_and_a_wide_int_keep_their_python_spelling() {
-    // D7 / C74. An arbitrary-precision number keeps the TEXT it was built from,
+    // An arbitrary-precision number keeps the TEXT it was built from,
     // and `as_f64()` answers `None` for exactly the two shapes an `f64` cannot
-    // hold. Routing them through `unwrap_or(0.0)` printed `0.0` for `Infinity`
-    // and `1.2345678901234568e+29` for a 30-digit int — measured against the
-    // python baseline's `kernel create_agent … big2=… inf=inf nan=nan`.
+    // hold. Routing them through `unwrap_or(0.0)` would print `0.0` for
+    // `Infinity` and `1.2345678901234568e+29` for a 30-digit int, where python's
+    // `kernel create_agent … big2=… inf=inf nan=nan` keeps the text.
     let raw = |s: &str| {
         serde_json::Value::Number(serde_json::Number::from_string_unchecked(s.to_string()))
     };

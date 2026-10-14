@@ -36,12 +36,10 @@ pub struct Action<'a> {
 /// Everything a refusal carries — the denial half of python's `Decision`,
 /// field for field.
 ///
-/// It used to be a bare `String`, so a rule could state a fact and nothing
-/// else: every gate that received one invented its own `hint` at the call site
-/// (the fs gate said "the fs edge is sealed" for whichever leg called it) and
-/// the three runtimes drifted into three vocabularies for the same `unauthorized`
-/// code. The rule KNOWS why it refused and how to open the edge; that knowledge
-/// travels with the verdict instead of being guessed downstream.
+/// Not a bare `String`: a rule states the fact AND the repair, so no gate
+/// invents its own `hint` at the call site and the runtimes share one vocabulary
+/// for `unauthorized`. The rule KNOWS why it refused and how to open the edge;
+/// that knowledge travels with the verdict instead of being guessed downstream.
 #[derive(Debug, Clone, Default)]
 pub struct Denial {
     /// One line a person reads — the `error` field on the wire.
@@ -78,9 +76,7 @@ impl Denial {
     }
 
     /// The wire shape every inbound gate answers a denial with. Built HERE so no
-    /// call site has to remember the key order or invent the teaching half — the
-    /// fs gate used to bolt on a hint claiming "the fs edge" for whichever leg
-    /// had called it.
+    /// call site has to remember the key order or invent the teaching half.
     #[must_use]
     pub fn to_refusal(&self) -> Value {
         let mut out = json!({ "error": self.reason, "reason": "unauthorized" });
@@ -132,18 +128,14 @@ pub(crate) const DEFAULT_TOKEN_ENV: &str = "FANTASTIC_GROUP_TOKEN";
 /// `type` and `env` are the only spellings.
 ///
 /// An object with no `type` is `(None, env)` — a plain SEAL, as python resolves
-/// it. It used to be an `Err` that every caller turned into its own shape: the
-/// file gate answered a bare `{error:"rule object missing 'type'"}` and refused
-/// the write, and exec_bridge threw the same string out of `handle`.
+/// it, rendered the same way by every caller.
 ///
 /// MALFORMED ⇒ `(python repr of the spec, None)`: a spec that is neither a
 /// string nor an object, or an object whose `type` or `env` is not a string, is
 /// named by its own repr — a name no registry holds, so ingress SEALS on it
-/// (`DenyInbound::unknown`) and egress refuses it like any unknown name. It was
-/// an `Err` each gate worded its own way (`bridge: bad auth rule: unsupported
-/// rule spec Number(7)`), a non-string `type` read as no rule at all, and a
-/// non-string `env` as the DEFAULT variable — a malformed password rule admitted
-/// the default group token (audit W-8, 2026-10-03).
+/// (`DenyInbound::unknown`) and egress refuses it like any unknown name. A
+/// non-string `env` is never read as the DEFAULT variable, which would let a
+/// malformed password rule admit the default group token.
 pub(crate) fn parse_spec(spec: Option<&Value>) -> (Option<String>, Option<String>) {
     let Some(spec) = spec else {
         return (None, None);
@@ -170,12 +162,11 @@ pub(crate) fn parse_spec(spec: Option<&Value>) -> (Option<String>, Option<String
 ///
 /// Rule names are manifold-scoped: a name binds to exactly one direction, so a name
 /// written into the wrong field is a loud error instead of a silent policy change.
-/// Measured 2026-08-21 (python, and this runtime had the identical defect): with bare
-/// names, `auth:"silent"` — a legitimate EGRESS policy — resolved ingress to
-/// `DenyInbound(unknown="silent")`, SEALING the leg while saying nothing; and
-/// `auth:"allow_all"` handed egress a `Silent` nobody asked for. One unscoped name
-/// against two registries with different membership is a fallback, and this kernel does
-/// not have fallbacks.
+/// With bare names, `auth:"silent"` — a legitimate EGRESS policy — would resolve
+/// ingress to `DenyInbound(unknown="silent")`, SEALING the leg while saying
+/// nothing; and `auth:"allow_all"` would hand egress a `Silent` nobody asked for.
+/// One unscoped name against two registries with different membership is a
+/// fallback, and this kernel does not have fallbacks.
 ///
 /// The per-direction field WINS and is taken as written (the author already scoped it).
 /// `auth` carries a bare STEM, and each manifold appends its own suffix — except that an
@@ -322,11 +313,10 @@ mod malformed_spec_tests {
     use super::*;
     use fantastic_bundle::py_repr;
 
-    /// python `parse_spec` (audit W-8): a spec that is not a string or an object,
+    /// python `parse_spec`: a spec that is not a string or an object,
     /// or whose `type`/`env` is not a string, is named by its python repr — a
     /// name no registry holds — so ingress SEALS on it, egress refuses it, and
-    /// reflect reports it, in python's words. It was an `Err` worded per gate, a
-    /// plain seal, or (a non-string `env`) the DEFAULT token variable.
+    /// reflect reports it, in python's words.
     #[test]
     fn a_malformed_spec_is_named_by_its_python_repr() {
         for (spec, name) in [

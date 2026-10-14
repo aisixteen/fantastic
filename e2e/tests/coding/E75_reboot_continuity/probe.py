@@ -7,7 +7,7 @@ the head and runs `context_recall`. Scored: the report lists all sixteen, reads 
 the reboot do not repeat the first eight, and the post-reboot view is a subset of the
 store.
 
-PRE-SEEDED (owner, 2026-10-07): the first eight reads are PLANTED — each read call and its
+PRE-SEEDED: the first eight reads are PLANTED — each read call and its
 reply inline, then the model's `done` — the agent boots over them, and the reboot and the
 second half run live.
 """
@@ -66,8 +66,7 @@ async def main():
         conn = await reboot_agent(root, core, BK, FB, AID, STRATEGY, EXTRA, watch_conn=conn)
         # WHAT WAS READ IS MEASURED, NOT ASSUMED. Phase one is bounded at 14 turns, so the
         # first instruction is usually unfinished; a second instruction that claims "you
-        # already have 0..7" is false and the model rightly re-read the gap (measured
-        # 2026-09-06). Name the files it has; ask for the rest.
+        # already have 0..7" is false and the model rightly re-reads the gap. Name the files it has; ask for the rest.
         have = sorted({i for i in range(N) for c in ctx_score.calls_made(before, target="notes", verb="read")
                        if f"filler_{i}.txt" in str(c["payload"])})
         have_txt = ", ".join(f"filler_{i}.txt" for i in have) or "none"

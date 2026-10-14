@@ -1,4 +1,4 @@
-"""The MCP wire — Streamable HTTP, DUAL-ERA (owner, 2026-10-12): the modern protocol
+"""The MCP wire — Streamable HTTP, DUAL-ERA: the modern protocol
 2026-07-28 first, the `initialize`-era ones (2025-11-25, 2025-06-18, 2025-03-26,
 2024-11-05) when the server speaks only those — the spec's "dual-era client"
 (2026-07-28 basic/versioning + transports/streamable-http, Backward Compatibility).

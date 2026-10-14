@@ -7,7 +7,7 @@ import Testing
 
 @Suite("Scalar")
 struct ScalarTests {
-    // MARK: - C71: pyStrip strips unicode scalars, not Characters
+    // MARK: - pyStrip strips unicode scalars, not Characters
 
     @Test func pyStripRemovesScalarsNotCharacters() {
         // U+0020 SPACE followed by U+0301 COMBINING ACUTE ACCENT then "x" is ONE
@@ -23,7 +23,7 @@ struct ScalarTests {
         #expect(pyStrip("\u{1c}\u{1d}\u{1e}\u{1f}") == "")
     }
 
-    // MARK: - C72: coerce_scalar accepts Unicode decimal digits
+    // MARK: - coerce_scalar accepts Unicode decimal digits
 
     @Test func unicodeDigitsFollowCPython() {
         // Mixed scripts within ONE literal: ASCII '1' + Arabic-Indic '١' (value
@@ -41,7 +41,7 @@ struct ScalarTests {
         #expect(coerceScalarIsIntegerShaped("1\u{0661}"))
     }
 
-    // MARK: - C73: coerceScalar rejects float spellings python's float() rejects
+    // MARK: - coerceScalar rejects float spellings python's float() rejects
 
     @Test func hexAndNanPayloadStayText() {
         // CPython's `float()` grammar has no hex form and no NaN payload —
@@ -54,14 +54,14 @@ struct ScalarTests {
         #expect(coerceScalar(".5") == .double(0.5))
     }
 
-    // MARK: - C74 (D13): a wide integer is int-shaped even though it can't fit
+    // MARK: - a wide integer is int-shaped even though it can't fit
     // this carrier's Int64 — `coerceScalar` keeps the text, but a caller that
     // needs python's `isinstance(x, str)` gate (a send's `target_id`) must
     // still see it as non-string.
 
     @Test func wideIntegerStaysAnInteger() {
         let huge = "123456789012345678901234567890"
-        // The JSON carrier has no bignum case (D13 residual): the too-wide
+        // The JSON carrier has no bignum case: the too-wide
         // value stays the string it was written as, never silently rounded
         // through a `Double`.
         #expect(coerceScalar(huge) == .string(huge))

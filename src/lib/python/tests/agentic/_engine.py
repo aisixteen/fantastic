@@ -21,7 +21,7 @@ Three general pieces, one discipline:
 property the moment a second gate exists: an agent can carry
 `ingress_rule=allow_all_ingress` and still be unreachable (no `callable_by`), and
 an agent whose `can_call` names a target is still refused when the target's
-`callable_by` does not name it back — measured, and the reply says
+`callable_by` does not name it back — and the reply says
 `side: "ingress"`. So every claim about wiring is made by ATTEMPTING the
 operation through `reach()` and asserting what the caller actually gets.
 
@@ -89,8 +89,8 @@ class Requirement:
 
 
 # The registry is DATA: `contract/requirements.yaml`, read by every runtime's
-# runner. It used to be a python tuple in this file, which made it unreadable to
-# the rust and swift runners that must pin the SAME ids.
+# runner — never a python tuple in this file, which the rust and swift runners that
+# must pin the SAME ids could not read.
 REQUIREMENTS_FILE = CONTRACT_DIR / "requirements.yaml"
 
 
@@ -1047,7 +1047,7 @@ async def _grant_step(h: "Hydration", step: Step, remove: bool) -> dict:
     """`grant`/`revoke` — sugar over an OPERATOR `update_agent`.
 
     Sugar, not a shortcut: `update_agent` REPLACES a field rather than merging
-    it (#6), so a spec that hand-wrote the payload would have to restate the
+    it, so a spec that hand-wrote the payload would have to restate the
     whole grant map every time and would silently drop every other grant.
     The runner reads the live map, edits one entry, and writes it back whole.
     """

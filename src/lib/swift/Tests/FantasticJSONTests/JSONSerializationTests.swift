@@ -137,7 +137,7 @@ import Foundation
 
 /// python `json.loads` (strict=True) refuses a raw control character in a
 /// string and any number off the RFC grammar; `parseStrict` — the wire decode,
-/// python's `io_bridge.loads` (owner D13) — also refuses what another runtime
+/// python's `io_bridge.loads` — also refuses what another runtime
 /// would hold differently. Twin of `io_bridge/tests/test_codec.py`.
 @Suite("JSON strictness (json.loads + io_bridge.loads)")
 struct JSONStrictnessTests {

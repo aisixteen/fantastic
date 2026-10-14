@@ -225,8 +225,8 @@ _SYSTEM_VERB_DOCS = {
 
 def _json_safe(o):
     """A reply body a JSON wire can carry: bytes become `<bytes:N>` (the telemetry
-    rule), everything else passes through. `kernel ledger` over REST answered HTTP
-    500 on the first `read_stream` outcome it held (measured 2026-09-16)."""
+    rule), everything else passes through, so a ledger holding a `read_stream`
+    outcome still serializes over REST."""
     if isinstance(o, (bytes, bytearray)):
         return f"<bytes:{len(o)}>"
     if isinstance(o, dict):
@@ -280,15 +280,14 @@ class _Dispatched:
 
 
 class RemoteTarget:
-    """An agent on a CONNECTED PEER KERNEL, as ONE send sees it (owner,
-    2026-09-30): addressed `<guid>|<agent id>`, never registered in this tree.
+    """An agent on a CONNECTED PEER KERNEL, as ONE send sees it: addressed `<guid>|<agent id>`, never registered in this tree.
     The send pipeline treats it like any target — a ledger row, a task-table
     row, a settled outcome — except that its dispatch hands the call to the
     peer's routes instead of a handler here. The transport a route rides only
     carries frames; the peer judges the call as the leg that serves it there.
 
     `routes` are the guid's live routes when the send resolved it — every tab of
-    one identity (owner, 2026-10-03): the call goes to ALL of them and settles
+    one identity: the call goes to ALL of them and settles
     with the FIRST reply.
     """
 
@@ -316,7 +315,7 @@ class RemoteTarget:
         finally:
             for c in calls:  # the losers — and every one when this call is stopped
                 c.cancel()
-        # TODO (owner, open): first-reply-wins hides tab DESYNC — if the tabs of
+        # TODO: first-reply-wins hides tab DESYNC — if the tabs of
         # one identity diverge, the other replies are dropped unseen. Must be
         # solved (later).
         return next(c for c in calls if c in done).result()
@@ -443,7 +442,7 @@ class Agent:
     def _bundle_files(self):
         """The agent's bundle package files (importlib Traversable), or None.
         A shipped bundle's readme and `docs/` live IN the bundle — never copied
-        into the agent's dir (owner 2026-10-14)."""
+        into the agent's dir."""
         pkg = bundle_package(self.handler_module) if self.handler_module else None
         if pkg is None:
             return None
@@ -553,9 +552,9 @@ class Agent:
         d = self._docs_dir
         safe = sel.strip("/").replace("\\", "/")
         # LEXICAL clamp, then EXACT key membership — never the filesystem's
-        # opinion: `a/../b` used to be `no doc` only because the OS could not
-        # traverse a missing `a`, and a case-insensitive disk served `TOPIC`
-        # for `topic` (measured 2026-09-16).
+        # opinion: `a/../b` is refused by the key, not by whether the OS can
+        # traverse a missing `a`, and a case-insensitive disk never serves
+        # `TOPIC` for `topic`.
         parts = safe.split("/")
         if not safe or any(p in ("", ".", "..") for p in parts):
             return {"error": f"bad key {sel!r}", "keys": self._readme_keys()}
@@ -594,12 +593,11 @@ class Agent:
             rec["handler_module"] = self.handler_module
         rec.update(self._meta)
         # STRUCTURE WINS. `parent_id` is not meta — it is where this agent
-        # actually sits, and the tree is the only thing that knows. It used to be
-        # written BEFORE the meta merge, so a `parent_id` that leaked into meta
-        # overwrote it and the record reported a parent the tree did not have:
-        # `$parent` then resolved differently on the two halves of the gate,
-        # `web/tools.py` read the lie, and a reboot silently corrected it from
-        # disk position. Written last, it cannot be shadowed.
+        # actually sits, and the tree is the only thing that knows. Written
+        # BEFORE the meta merge, a `parent_id` that leaked into meta would
+        # overwrite it and the record would report a parent the tree does not
+        # have (`$parent` resolving differently on the two halves of the gate).
+        # Written last, it cannot be shadowed.
         if self.parent is not None:
             rec["parent_id"] = self.parent.id
         else:
@@ -715,14 +713,14 @@ class Agent:
         # `type` is the verb; there is no send without one. Validated for EVERY
         # send (operator included) BEFORE the gate, so a typeless payload is a
         # coded refusal, never a TypeError out of `send` (HTTP 500 on web_rest)
-        # and never an `unhandled` from the target (measured 2026-09-02).
+        # and never an `unhandled` from the target.
         if "type" not in payload:
             return outcome(None, FAILED, missing("send", "payload.type"))
         verb = payload.get("type")
         if not isinstance(verb, str) or not verb:
             # A non-string is named by its TYPE, never echoed: the octet REST leg
-            # and a binary WS frame can put a whole body here, and its repr made
-            # a 16 MiB body cost ~80 MiB of refusal text (audit 2026-10-03, W-11).
+            # and a binary WS frame can put a whole body here, and its repr would
+            # make a large body cost several times its size in refusal text.
             got = repr(verb) if isinstance(verb, str) else type(verb).__name__
             return outcome(
                 None,
@@ -734,8 +732,8 @@ class Agent:
                 ),
             )
         # The item's OWN fields are validated before anything is resolved, gated
-        # or spawned: a bad `id`/`retries` used to be caught only after an unnamed
-        # dispatch had already started (orphaning a running task).
+        # or spawned: a bad `id`/`retries` caught only after an unnamed dispatch
+        # had started would orphan a running task.
         exec_id = item.get("id")
         join_id: int | None = None  # an int item id: JOIN by message id
         name: str | None = None  # a string item id: the caller's NAME
@@ -787,7 +785,7 @@ class Agent:
         # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
         # subtree before it aborts anything, because `on_cancel` hooks await —
         # so a doomed handler gets scheduling passes on its way out, and what it
-        # sent there used to start fresh dispatches that outlived the cancel.
+        # sent there would otherwise start fresh dispatches that outlive the cancel.
         cur = _current_task.get()
         if cur is not None and (self.ctx.tasks.get(cur) or {}).get("_killed"):
             return outcome(None, CANCELLED, {"cancelled": True})
@@ -797,8 +795,7 @@ class Agent:
         # keepalive persisters pass; everything else is a new root and is refused
         # before it costs an id. A FORK (a ws call, a scheduler tick, a bridge's
         # read loop, a job's relay) starts new work, so it is refused like any
-        # transport — a ws call used to pass where the same REST call was refused
-        # (audit 2026-10-14).
+        # transport — a ws call is treated exactly like the same REST call.
         # The root's own control surface stays open while draining: kernel verbs
         # (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`, `ledger`)
         # and `reflect` are how an operator watches and finishes the stop. Over a
@@ -861,7 +858,7 @@ class Agent:
                         ),
                     )
                 # JOIN — settled or in flight, the ledger future carries the one
-                # true outcome; no second execution ever starts (C9/C10/C11).
+                # true outcome; no second execution ever starts.
                 #
                 # AUTHORIZED AGAINST THE EXECUTION IT JOINS, not against the
                 # payload the joiner happened to send. Joining hands back
@@ -869,14 +866,13 @@ class Agent:
                 # having made that call — and the gate must be asked that
                 # question, not a different one.
                 #
-                # Measured 2026-08-28: `agent_b`, granted only `safe_verb` on a
-                # target, reused an id `agent_a` had used for
-                # a sensitive verb and received agent_a's result verbatim.
-                # Its own gate check passed — on `safe_verb`, a verb whose reply
-                # it never got. Same class as the read side-channel #36 closed
-                # by origin-scoping the `ledger` VERB; this is the same leak
-                # through `send` itself. Reachable from the wire, where a frame
-                # id IS the execution id (#38) and two legs can name one id.
+                # Otherwise an agent granted only `safe_verb` on a target could
+                # reuse an id another agent used for a sensitive verb and receive
+                # that result verbatim, its own gate check passing on a verb whose
+                # reply it never got. Same class as the read side-channel closed
+                # by origin-scoping the `ledger` VERB, through `send` itself.
+                # Reachable from the wire, where a frame id IS the execution id
+                # and two legs can name one id.
                 #
                 # An OPERATOR joiner (sender None) is ungated here as everywhere.
                 joiner = _current_sender.get()
@@ -1335,7 +1331,7 @@ class Agent:
         `authorize_call` engine. `"*"` covers every verb. A kernel verb answered by
         the root takes the same check against the root — the tree verbs
         (`create_agent`/`update_agent`/`delete_agent`) included: GRANTS ARE THE ONLY
-        RULE (owner, 2026-10-06), so whoever holds the verb on the root acts on any
+        RULE, so whoever holds the verb on the root acts on any
         agent it names. The sender is always a local agent — a call a bridge leg
         serves is that leg's."""
         sender = self.ctx.agents.get(sender_id)
@@ -1529,13 +1525,13 @@ class Agent:
           Atomic — one agent.
 
         A reflect says what an agent IS, never how to call it: no verbs, emits or
-        cancel (owner, 2026-10-05) — those are the `docs` kernel verb. Transport/
+        cancel — those are the `docs` kernel verb. Transport/
         wire docs live in the doc tree (`reflect readme=index`, then by key)."""
         if payload.get("type") != "reflect" or not isinstance(reply, dict):
             return reply
-        # A REFUSAL IS NOT A REFLECT. Decorating one with a tree
-        # produced a reply that reads like a healthy reflect with a stray error
-        # field, and a caller could not tell the two apart (measured 2026-09-02).
+        # A REFUSAL IS NOT A REFLECT. Decorating one with a tree would produce a
+        # reply that reads like a healthy reflect with a stray error field, and a
+        # caller could not tell the two apart.
         if "error" in reply:
             return reply
         full = payload.get("detail") == "full"
@@ -1572,9 +1568,9 @@ class Agent:
             # to bundle logic — e.g. `persistence: {provider}` (which file_bridge the
             # loader auto-persists THROUGH, or null = RAM). No bundle import: if the
             # module exposes `reflect_root_extra(agent) -> dict`, merge it.
-            # A hook that RAISES fails the reflect: swallowed, it dropped
+            # A hook that RAISES fails the reflect: swallowed, it would drop
             # `persistence` and `guid` — what an operator reads to learn whether
-            # state persists — with nothing to say so (audit 2026-10-03, ARCH2-9).
+            # state persists — with nothing to say so.
             if target.handler_module:
                 hook = getattr(
                     import_handler(target.handler_module),
@@ -1593,7 +1589,7 @@ class Agent:
         # `parent_id` is structure. Cheap fields with real consumers stay.
         tree = payload.get("tree", "all")
         if tree in ("all", "ids"):
-            # SUBTREE FILTERS (owner, 2026-10-05): `show_subtrees` answers with only
+            # SUBTREE FILTERS: `show_subtrees` answers with only
             # those branches, `ignore_subtrees` prunes each named branch to a stub
             # `{id, pruned: n}`; together, show first and ignore inside it.
             filt = _docs.subtree_filter(payload, target, self.ctx.agents)
@@ -1668,8 +1664,7 @@ class Agent:
 
         With `schemas`, an entry also carries `schema` when its handler module
         publishes `RECORD_SCHEMA` — what that KIND's record takes (`fields`),
-        readable before any agent of it exists (lib request #3,
-        2026-09-30). Duck-typed like `validate_meta`, which enforces the same
+        readable before any agent of it exists. Duck-typed like `validate_meta`, which enforces the same
         schema at the write. Importing the module is the cost of asking, so the
         cheap `bundles=ids` listing never does it."""
         out = []
@@ -1681,7 +1676,7 @@ class Agent:
                     entry["schema"] = sch
             out.append(entry)
         # FOLDER BUNDLES of this kernel's root, beside the installed ones — a
-        # refused folder too, with its `error` (owner, 2026-10-08).
+        # refused folder too, with its `error`.
         out += folder_rows()
         return sorted(out, key=lambda b: b["name"])
 
@@ -1690,19 +1685,19 @@ class Agent:
         Non-routing — does NOT invoke any handler. Telemetry sees an
         `emit` event.
 
-        QUIET (owner, 2026-10-04): the payload reaches the target's inbox and its
+        QUIET: the payload reaches the target's inbox and its
         watchers and NOTHING is published on the state stream — a streaming
         `part_delta` arrives at token rate, and the state stream carries a part's
         lifecycle, never its every delta.
 
-        GATED LIKE A SEND when an agent emits on ANOTHER agent (verb `emit`): an
-        open ws leg used to drop events on any inbox, an AI's input stream
-        included (audit 2026-09-28). Emitting on your OWN inbox — how every
+        GATED LIKE A SEND when an agent emits on ANOTHER agent (verb `emit`), so an
+        open ws leg cannot drop events on any inbox, an AI's input stream
+        included. Emitting on your OWN inbox — how every
         bundle publishes its events — and an operator emit are ungated. A
         refused emit is dropped: an emit has no reply channel.
 
         `<guid>|<agent>` naming a CONNECTED PEER reaches EVERY live route of that
-        guid (every tab of one identity, owner 2026-10-03), gated like a send to
+        guid (every tab of one identity), gated like a send to
         it (verb `emit`, egress only — the peer gates its own agents)."""
         if "|" in target_id:
             remote = self._qualified_target(target_id)
@@ -1725,7 +1720,7 @@ class Agent:
         if sender is not None:
             if self._gate(sender, "emit", remote) is not None:
                 return
-        # TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+        # TODO: DESYNC between the tabs of one identity is envisioned
         # and unsolved — each tab gets the event, nothing reconciles what they do
         # with it. Think later.
         for route in remote.routes:
@@ -1741,10 +1736,9 @@ class Agent:
         side-channel around `callable_by`: an agent that may not CALL an agent
         could still read everything sent TO it.
 
-        Found 2026-08-27 in a client audit: a browser leg granted exactly
-        `assistant:[send]` could mirror ANY agent's inbox in its session and
-        read the packed confidential context out of the model's prompt. The
-        `call` path went through the two-sided gate; this one never did.
+        Ungated, a browser leg granted exactly `assistant:[send]` could mirror
+        ANY agent's inbox in its session and read the packed confidential
+        context out of the model's prompt.
 
         The verb checked is `watch`, so an operator grants it exactly like any
         other edge (`callable_by: {viewer: ["watch"]}`). An OPERATOR watch
@@ -1758,12 +1752,11 @@ class Agent:
             denial = self._gate(sender_id, "watch", src)
             if denial is not None:
                 return denial
-        # A WATCHER MUST ALREADY BE A READER. This used to lazy-create the
-        # queue, which meant a caller could watch and never drain: the
-        # payloads piled up to `INBOX_BOUND` and were then evicted one per
-        # message, forever, with nothing to say so. `ensure_inbox` is the
-        # registration; making one here on the watcher's behalf invented a
-        # consumer that did not exist.
+        # A WATCHER MUST ALREADY BE A READER. Lazy-creating the queue here would
+        # let a caller watch and never drain: the payloads would pile up to
+        # `INBOX_BOUND` and then be evicted one per message, forever, with nothing
+        # to say so. `ensure_inbox` is the registration; making one here on the
+        # watcher's behalf would invent a consumer that does not exist.
         if tgt_id not in self.ctx.inboxes:
             return refusal(
                 NO_CONSUMER,
@@ -1902,8 +1895,7 @@ class Agent:
         # THE ROOT IS NOT DELETABLE. It owns the persistence surface and answers
         # every kernel verb, so cascading it empties the kernel and leaves a
         # process with no control surface at all — `{"deleted": true}` and an
-        # empty tree (measured 2026-09-02). The guard lived only on the unused
-        # `Kernel.delete`, which nothing calls.
+        # empty tree.
         if target.parent is None:
             return refusal(
                 BAD_ARG,
@@ -1915,11 +1907,8 @@ class Agent:
             )
         blocked_by = target._find_locked_descendant()
         if blocked_by is not None:
-            # THE ONE REFUSAL SHAPE (#27). This carried a bare `locked: True`
-            # flag and no `reason` until 2026-08-27, when the shared agentic
-            # corpus caught it — in all three runtimes at once, because the flag
-            # #27 declared dropped was never actually removed here. A caller had
-            # to know it had called `delete_agent` to know which field to read.
+            # THE ONE REFUSAL SHAPE: a coded `reason`, never a bare `locked: True`
+            # flag a caller would have to know `delete_agent` to read.
             return refusal(
                 LOCKED,
                 f"delete_agent: {agent_id!r} blocked by delete_lock on "
@@ -1941,7 +1930,7 @@ class Agent:
     def _prune_grants(self, gone: set) -> None:
         """A deleted id leaves every grant that named it. Grant keys are literal
         ids, so a stale one would hand its edge to whoever re-creates that id
-        (audit 2026-10-14). Each record changed is re-persisted by its `updated`."""
+        Each record changed is re-persisted by its `updated`."""
         for agent in tuple(self.ctx.agents.values()):
             changed = []
             for field in ("can_call", "callable_by"):
@@ -1989,7 +1978,7 @@ class Agent:
             # A SystemExit out of an asyncio task stops the EVENT LOOP — the whole
             # kernel, for one handler (or one handler module's import-time code,
             # reached by any `create_agent` under yourself) that called sys.exit
-            # (audit 2026-10-03, ARCH2-1). Here it is a raise like any other: THIS
+            # Here it is a raise like any other: THIS
             # call settles failed, the loop runs on.
             raise _Exited() from e
 
@@ -2031,19 +2020,14 @@ class Agent:
             if verb in _SYSTEM_VERBS:
                 # KERNEL-OWNED, answered by the ROOT ONLY. These act on the TREE
                 # (or on the kernel-wide task table); the agent they name is the
-                # OPERAND, never the actor. Answering them everywhere made the
-                # target ambiguous: `create_agent` appeared on all N agents with a
-                # doc naming only its arguments, so "send it to X" could mean X
-                # performs it, X is created under something, or X is the parent —
-                # and only the last was true. Measured 2026-08-24 (`live_subai`,
-                # the model): the model asked "But how do I invoke create_agent?
-                # Which target?", never resolved it, and finished 16 messages with
-                # `agents_created: []`.
+                # OPERAND, never the actor. Answering them everywhere would make
+                # the target ambiguous: with `create_agent` on all N agents and a
+                # doc naming only its arguments, "send it to X" could mean X
+                # performs it, X is created under something, or X is the parent.
                 #
                 # Refused HERE, in the handler, not in the call gate — the gate
                 # runs long before this and several probes assert a specific
-                # denial `side` for a kernel verb sent to a non-root agent. `shutdown_kernel`
-                # already refused this way; this generalises it to all seven.
+                # denial `side` for a kernel verb sent to a non-root agent.
                 if self.parent is not None:
                     return refusal(
                         NOT_HERE,
@@ -2072,8 +2056,7 @@ class Agent:
                 # CODED, not a bare error. A reason-less `{error}` is decorated
                 # by `_apply_reflect_flags` into something that reads like a
                 # healthy reflect (a tree around it) with a stray error
-                # field — the caller cannot tell a refusal from an answer
-                # (measured 2026-09-02).
+                # field — the caller cannot tell a refusal from an answer.
                 return refusal(
                     UNHANDLED,
                     f"agent {self.id!r} has no handler_module; cannot answer "
@@ -2204,14 +2187,12 @@ class Agent:
         return refusal(UNHANDLED, f"unhandled system verb {verb!r}", verb=verb)
 
     async def _remote_docs(self, of: str, payload: dict) -> dict:
-        """`docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>` (owner,
-        2026-10-06). The question goes to THAT kernel's own `docs` — which answers any
+        """`docs` of an agent on a CONNECTED KERNEL, `of: <guid>|<agent id>`. The
+        question goes to THAT kernel's own `docs` — which answers any
         caller its gate admits — and the reply names the qualified id. The asker's
         own `docs` grant on THIS root is what the gate checked; this kernel then asks
-        as itself over the peer's live routes, and the peer judges its leg. Measured
-        2026-10-06 (canvas E55/E58): with verbs out of reflect, a model could not learn
-        a page agent's verbs at all — local docs did not know the id and
-        `<guid>|kernel` docs was not granted — and explored until the time ran out."""
+        as itself over the peer's live routes, and the peer judges its leg. With verbs
+        out of reflect, this is how a model learns a peer agent's verbs at all."""
         guid, _, agent_id = of.partition("|")
         target = (
             self._qualified_target(f"{guid}|kernel")
@@ -2271,8 +2252,7 @@ class Agent:
         else:
             # A BUNDLE by either name the kernel lists it under: `bundles='ids'`
             # lists the NAME (`file_bridge`), an agent record carries the
-            # handler_module (`file_bridge.tools`). Measured 2026-10-06 (rust,
-            # plan + build): models asked for the listed name and were refused.
+            # handler_module (`file_bridge.tools`); models ask for the listed name.
             module = (
                 of
                 if is_folder(of) or _in_catalog(of)
@@ -2289,7 +2269,7 @@ class Agent:
         mod = import_handler(module)
         table, extras = _docs.module_docs(mod)
         if agent is not None:
-            # PER-INSTANCE VERBS (owner, 2026-10-08): a bundle whose agents serve
+            # PER-INSTANCE VERBS: a bundle whose agents serve
             # different verbs (an MCP server's tools) names each instance's own
             # table through the duck-typed `instance_verbs(agent)`; None keeps the
             # bundle's. A bundle named by `of` (no agent) shows its own table.
@@ -2441,16 +2421,11 @@ class Agent:
         # own-children only, callers use the `list_children` Python
         # method on the Agent instance, or walk a `reflect` tree.
         #
-        # `more` is not decoration. Measured 2026-08-07 (probe 06 A/B, gemma-4-12B):
-        # the arm that opened with `reflect` received `self_extension` and attempted
-        # `create_agent` 10 times; the arm that opened with `list_agents` got these
-        # bare records, never learned that authoring a script agent was the mechanism,
-        # spent 8 messages reasoning "it doesn't explicitly say how to call send from
-        # inside the script" — which `self_extension` states outright — and made 0
-        # authoring attempts. Same model, same task; the whole divergence was the
-        # FIRST call. This verb is advertised in every reflect's `system_verbs`, so
-        # "list the agents" is a natural opener, and it was a dead end with no
-        # signpost back.
+        # `more` is not decoration. A model that opens with `list_agents` gets bare
+        # records and never learns what `reflect` would have told it; the FIRST call
+        # can decide the whole run. This verb is advertised in every reflect's
+        # `system_verbs`, so "list the agents" is a natural opener, and without
+        # `more` it is a dead end with no signpost back.
         agents, nxt = page(
             [a.record for a in self.ctx.agents.values()],
             payload,
@@ -2473,11 +2448,8 @@ class Agent:
         payload. A false refusal is worse than no check: it makes the correct operation
         look impossible.
 
-        ONE implementation, used by BOTH `create_agent` and `update_agent`. It was only
-        wired into update, and the asymmetry was live: `create_agent
-        handler_module=file_bridge.tools ingress_rule=bogus` returned a record with
-        `ingress_rule: "bogus"` while the identical `update_agent` was refused by the
-        identical function. Measured 2026-08-07. The argument the update path already
+        ONE implementation, used by BOTH `create_agent` and `update_agent`, so a value
+        refused on update is refused on create too. The argument the update path
         makes applies verbatim at create — accepting a value you cannot honour and
         reporting success is the worst of both, and it is worse at create because there
         is no prior good state to fall back to.
@@ -2495,10 +2467,8 @@ class Agent:
         """A grant map's SHAPE, judged at WRITE time — the gate only judges edges.
 
         `{id|token: "*" | [verbs]}` — anything else is refused here, so a record
-        can never carry a grant the gate would have to crash or guess on.
-        Measured 2026-09-01 (E21_plan): `update_agent` accepted `can_call:"*"`
-        (a bare string), answered `{"updated": true}`, and the gate raised
-        `.items()` out of a web serve — a correctly-opened leg answered 500."""
+        can never carry a grant the gate would have to crash or guess on (a bare
+        string `can_call:"*"` would make the gate raise out of a web serve)."""
         for field in ("can_call", "callable_by"):
             if field not in meta:
                 continue
@@ -2526,16 +2496,8 @@ class Agent:
     async def _verb_create_agent(self, payload: dict) -> dict:
         """args: handler_module, parent_id (REQUIRED), id?, **meta.
 
-        `parent_id` NAMES THE OWNER. Until 2026-08-24 this verb was answered by
-        every agent and the ADDRESSED agent became the parent — the only way to
-        nest — while a `parent_id` in the payload was stripped and silently
-        ignored. Both halves were bad: the working mechanism was undiscoverable
-        (a default reflect truncates the doc before "spawn a child agent"), and
-        the field that looked like it expressed placement did nothing. Verified
-        before the change: asking for `parent_id:"specialist"` produced
-        `parent_id='kernel_state'` with no error.
-
-        Now the placement is always stated. There is no implicit parent — an
+        `parent_id` NAMES THE OWNER. The placement is always stated; the
+        addressed agent is never the implicit parent. There is no implicit parent — an
         agent building its own subtree names itself, which is one word and
         cannot be confused with "wherever this happened to be sent"."""
         handler_module = payload.get("handler_module")
@@ -2614,7 +2576,7 @@ class Agent:
         # Lifecycle event on the PARENT's inbox, not the root's: whoever watches an
         # agent for new children still sees them arrive. Kernel bookkeeping too —
         # put on the parent's inbox and mirrored to its watchers directly
-        # (`_fanout`), never a gated emit (audit 2026-10-03, KV-4).
+        # (`_fanout`), never a gated emit.
         parent._fanout(
             {"type": "agent_created", "id": rec["id"], "agent": rec}, kind="emit"
         )
@@ -2633,13 +2595,6 @@ class Agent:
         `Agent.__init__` included) is dropped, and the call still answers
         `{"updated": true}`. Send the map WHOLE.
 
-        Measured 2026-08-24 (`live_subai`, the model): the model reasoned the
-        danger out correctly — "if update_agent does a shallow merge ... I'd lose
-        the baseline grants" — could not settle it from `reflect`, chose to
-        establish it empirically, and lost the run to a repetition loop while
-        trying. The semantics were right; the fact that they were undiscoverable
-        is what cost the run.
-
         NOT refused when the baseline is absent: dropping a grant is a legitimate
         thing for an operator to express, and a wrong grant is recoverable with
         another `update_agent`. Documented, not gated.
@@ -2653,9 +2608,9 @@ class Agent:
         #
         # `handler_module` is fixed at create — swapping it would leave a live
         # agent whose in-process state belongs to the OLD bundle. Reserved keys
-        # name substrate wiring (`root_path`/`ctx`/`parent`); they used to be
-        # written into the record and then REFUSED by the loader on the next
-        # boot, so an accepted update made the workdir unbootable (2026-09-02).
+        # name substrate wiring (`root_path`/`ctx`/`parent`); written into the
+        # record they would be REFUSED by the loader on the next boot, so an
+        # accepted update would make the workdir unbootable.
         for k in ("handler_module", *sorted(RESERVED_RECORD_KEYS)):
             if k in payload:
                 return bad(
@@ -2684,10 +2639,9 @@ class Agent:
         # handler_module exposes `validate_meta(meta) -> str | None`, a returned
         # string REFUSES the patch and is reported at the point of the mistake.
         #
-        # Without this, `update_agent` accepted anything: on 2026-08-02 an agent set
-        # `ingress_rule="password_ingress:kernel-internal-transcripts"`, got `{"updated":
-        # true}` back, and only discovered it was meaningless when the next call to
-        # that agent failed. Accepting a value you cannot honour, and reporting
+        # Without this, `update_agent` would accept anything — an unknown
+        # `ingress_rule` answered `{"updated": true}` and found meaningless only when
+        # the next call to that agent fails. Accepting a value you cannot honour, and reporting
         # success, is the worst of both — the caller believes a security control is
         # in place that is not. Same discovery + optionality as `on_delete`.
         if why := self._bad_grant_shape(meta):
@@ -2777,7 +2731,7 @@ class Agent:
         it up and invokes it.
 
         The hook runs AS THIS AGENT (its own id is the sender), whoever asked
-        for the delete — like `on_cancel` (audit G-3)."""
+        for the delete — like `on_cancel`."""
         if self.handler_module:
             try:
                 mod = import_handler(self.handler_module)
@@ -2805,12 +2759,11 @@ class Agent:
 
         THE HOOK RUNS AS THIS AGENT — its own id is the sender — on every path
         that kills the task: the `cancel` verb, an item's own deadline,
-        `shutdown_agents` (audit G-3). An emit on its own inbox is then ungated
-        and every other send is gated as this agent. The verb path used to run
-        it as the ROOT (whose dispatch it sits in): a non-top-level agent's
-        own-inbox emit — ai_core's final `status done` to a browser client —
-        was gated root → agent and dropped; the deadline path ran it as the
-        operator."""
+        `shutdown_agents`. An emit on its own inbox is then ungated and every
+        other send is gated as this agent. Run as the ROOT (whose dispatch it
+        sits in), a non-top-level agent's own-inbox emit — ai_core's final
+        `status done` to a browser client — would be gated root → agent and
+        dropped."""
         if not self.handler_module:
             return
         try:
@@ -2895,17 +2848,12 @@ class Agent:
     # `password` (gated) and acts per the keystone readme (read-key == write-key);
     # ABSENT on an io leg ⇒ sealed-by-default. `root` shows a file_bridge's binding,
     # `allow` what it exposes under that root.
-    # The CALL gate belongs here too. It was left out, and the omission is not
-    # cosmetic: `can_call`/`callable_by` decide whether a send is even attempted,
-    # and with them absent an agent cannot read its OWN authority — it can only
-    # discover it by trying. Measured 2026-08-24 (`live_subai`, the model): the
-    # model wrote "the key question is: what are MY (ai's) can_call grants? The
-    # full reflect didn't include can_call/callable_by", and across the day it
-    # spent entire messages probing empirically — a throwaway `_probe_script` agent, a
-    # `selfchild` "test create_agent on self", a `_probe_ai` scratch write — to
-    # learn by experiment what one field states. This is not a secrecy boundary:
+    # The CALL gate belongs here too: `can_call`/`callable_by` decide whether a send
+    # is even attempted, and with them absent an agent cannot read its OWN
+    # authority — it can only discover it by trying, probing empirically to learn
+    # by experiment what one field states. This is not a secrecy boundary:
     # the gate ENFORCES, it does not hide, and everything surfaced here is already
-    # discoverable by attempting the call. Hiding it only made discovery expensive.
+    # discoverable by attempting the call. Hiding it only makes discovery expensive.
     _POSTURE_KEYS = (
         "ingress_rule",
         "egress_rule",

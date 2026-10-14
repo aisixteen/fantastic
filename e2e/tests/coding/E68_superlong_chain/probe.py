@@ -6,7 +6,7 @@ several folds written, and the final view holds no row that any fold covers — 
 cut the model sees folds and the tail, nothing else. The report must still name (almost)
 every file, which means the summaries carried them or the model went into a fold.
 
-PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
 folding and the answer are the model's own, without spending a live turn per file.
 The live reply CONTINUES the planted chain, so it is still ONE chain that never closed.

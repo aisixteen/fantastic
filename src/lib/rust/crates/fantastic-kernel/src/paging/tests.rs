@@ -93,7 +93,7 @@ fn an_empty_after_is_ignored() {
 
 #[test]
 fn int_ids_page_with_a_decimal_cursor() {
-    // C17: `ps`/`ledger` row identities are ints (`str(ident(item))` in
+    // `ps`/`ledger` row identities are ints (`str(ident(item))` in
     // python's `page`); a JSON-integer `after` must resume past the item
     // whose ident STRINGIFIES to the same decimal digits — not just an
     // already-string cursor.
@@ -121,13 +121,10 @@ fn int_ids_page_with_a_decimal_cursor() {
 
 #[test]
 fn a_non_string_cursor_compares_as_python_str() {
-    // C17 (r2 R2-RFL-2), measured against python: `after=True` is IGNORED
-    // (bools are never a cursor, matching); `after=1.5`/`after=["c1"]` compare
-    // as `str(1.5)`/`str(["c1"])` and, naming no item, page EMPTY rather than
-    // the whole list; `after=2.0` renders `"2.0"` — NOT the same string as an
-    // item literally named `"2"` (this is where rust used to page the WHOLE
-    // list — ignoring the non-string `after` outright — and swift wrongly
-    // matched `"2.0"` against `"2"`).
+    // Python's rules: `after=True` is IGNORED (bools are never a cursor);
+    // `after=1.5`/`after=["c1"]` compare as `str(1.5)`/`str(["c1"])` and, naming
+    // no item, page EMPTY rather than the whole list; `after=2.0` renders `"2.0"`
+    // — NOT the same string as an item literally named `"2"`.
     let items = ids(&["1", "2", "3"]);
 
     let (p, _) = page(items.clone(), &json!({"after": true}), id_of);

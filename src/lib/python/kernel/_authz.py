@@ -1,6 +1,6 @@
 """Call security — the substrate authorization primitive.
 
-The model is MINIMAL, two-sided, explicit-grants-only (owner decision 2026-10-03):
+The model is MINIMAL, two-sided, explicit-grants-only:
 
 - Every AGENT-originated send (`current_sender` is not None) passes iff
   **egress** — the SENDER's `can_call` grants `(target, verb)` — AND

@@ -84,10 +84,10 @@ def _root(kernel, rec: dict) -> fs.Root:
 
 # ─── argument validation ────────────────────────────────────────
 # Every refusal below is `bad`/`missing` — the one shape, branchable on `reason`.
-# These used to be `int(...)` coercions OUTSIDE the try (a non-numeric string raised
-# out of the handler; a negative `length` read 0 bytes and `pump` spun forever), and
-# an empty `path` on delete/rename/mkdir resolved to the ROOT itself — `delete
-# {path:"", recursive:true}` removed the whole served store.
+# Unvalidated, a non-numeric string would raise out of the handler, a negative
+# `length` would read 0 bytes and spin `pump` forever, and an empty `path` on
+# delete/rename/mkdir would resolve to the ROOT itself — `delete {path:"",
+# recursive:true}` would remove the whole served store.
 
 
 def _norm(path: str) -> str | None:
@@ -132,7 +132,7 @@ def _lands_exposed(root: fs.Root, allow: list[str], path: str) -> bool:
     """Where `path` actually LANDS (symlinks followed) must be under the RESOLVED
     form of an allow entry — entries resolved now, because the disk changes. With
     `_exposed` (the path as asked) this is the both-ends rule: a link inside an
-    exposed area that points outside it serves nothing (audit 2026-09-28)."""
+    exposed area that points outside it serves nothing."""
     try:
         target = fs.resolve(root, path)
     except ValueError:
@@ -186,8 +186,8 @@ def _int_arg(verb: str, payload: dict, name: str, default: int, minimum: int):
 
 def _path_arg(verb: str, payload: dict, name: str = "path"):
     """`(path, None)` or `(None, refusal)`: a string, root-relative (no leading
-    '/'). The absolute form used to be silently re-rooted (`lstrip("/")`), which
-    contradicted the clamp's own promise; the ports always refused it."""
+    '/'). The absolute form is refused, never silently re-rooted (`lstrip("/")`),
+    which would contradict the clamp's own promise."""
     p = payload.get(name, "")
     if p is None:
         p = ""
@@ -215,12 +215,10 @@ def _target_arg(verb: str, root: fs.Root, payload: dict, name: str = "path"):
     return p, None
 
 
-# One `read` used to return a whole file, however large. MEASURED 2026-08-07: an AI agent
-# read an 86 KB source file, its conversation went to 21k tokens, and the NEXT message was
-# cancelled mid-prefill because prefill at ~95 tok/s outran the backend's 180s send
-# timeout. Nothing caught it — the context window (32k) was never exceeded, so the
-# compaction handshake never fired and `context_insufficient` never appeared. The message
-# became un-completable on TIME while staying legal on SIZE, and no guard covers that.
+# One `read` returning a whole file, however large, can make an AI agent's NEXT message
+# un-completable on TIME while staying legal on SIZE: prefill of a large file can outrun
+# the backend's send timeout with the context window never exceeded, so the compaction
+# handshake never fires and no guard covers it.
 #
 # So a text read is WINDOWED. Not silently: an unread tail is reported with the totals and
 # the offset to continue from, because a caller that cannot tell a whole file from its
@@ -231,9 +229,8 @@ DEFAULT_MAX_READ_CHARS = 16384
 def _readonly_or_none(rec: dict) -> dict | None:
     """A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
 
-    This answered a bare `{"error": "agent is readonly"}` until 2026-08-27, when
-    the shared agentic corpus caught it: no `reason`, so a caller could only
-    branch on the prose. `unauthorized` is the same code the io SEAL answers with
+    Never a bare `{"error": "agent is readonly"}`: with no `reason` a caller could
+    only branch on the prose. `unauthorized` is the same code the io SEAL answers with
     — both say "this edge is not open for that", and neither is about the caller,
     which is why neither carries a `side`."""
     if rec.get("readonly"):
@@ -513,9 +510,8 @@ async def _pump(id, payload, kernel):
         return err
     if src == sink and _one_file(spath, dpath):
         # The first write's `truncate` empties the file the next read comes from:
-        # everything past the first chunk was lost under a success reply — the
-        # bare `{source_path}` form did it, sink and sink_path defaulted (audit
-        # BV-7).
+        # everything past the first chunk would be lost under a success reply —
+        # the bare `{source_path}` form does it, sink and sink_path defaulted.
         return bad(
             "pump",
             "sink_path",
@@ -991,7 +987,7 @@ async def on_delete(agent) -> None:
         st["task"].cancel()
 
 
-# ─── watching paths (owner, 2026-10-08) ─────────────────────────
+# ─── watching paths ─────────────────────────────────────────────
 #
 # `watch_path {path}` puts an EXPOSED file or directory under a disk watcher
 # (`watchfiles` — native events: FSEvents / inotify / kqueue): any change to it, by
@@ -1106,7 +1102,7 @@ async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, st
                 name = os.path.basename(p)
                 seen[name if d == "." else f"{d}/{name}"] = change.name
         # `allow` is read LIVE: a path the bridge stopped exposing after the watch
-        # was armed reports nothing more (audit 2026-10-14).
+        # was armed reports nothing more.
         allow = _allow(kernel.get(id) or {})
         for rel, kind in seen.items():
             if _exposed(allow, rel):
@@ -1175,8 +1171,8 @@ def validate_meta(meta: dict, record: dict) -> str | None:
 def _password_refusal(meta: dict, edge: str) -> str | None:
     """`password_ingress` is meaningless on an in-process leg: the token is read
     off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
-    presents one, so the rule could only ever refuse (python) or, worse, be
-    satisfied by a secret persisted ON THE RECORD (the ports, until 2026-09-02).
+    presents one, so the rule could only ever refuse or, worse, be satisfied by a
+    secret persisted ON THE RECORD.
     Refused at the write, next to the mistake. Shared with exec_bridge."""
     for field, stems in (
         ("ingress_rule", ("password_ingress",)),

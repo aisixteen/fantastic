@@ -1,14 +1,11 @@
-// K-D — the REPLY SHAPES a kernel verb answers with, graded against python.
+// The REPLY SHAPES a kernel verb answers with, graded against python.
 //
-// Python is the spec for every one of these. Each case here is a measured
-// divergence from the 2026-09-02 sweep: swift answered the bare record where
-// python answers `{updated, id, agent}`, a bare `{error}` where python answers a
-// coded refusal (`delete_agent` on an unknown/absent id, `cancel` with no
-// task_id, an unhandled system verb), an eighth `verb` key on a ledger row
-// python renders with seven, and its own prose on the `not_here` code. A caller
-// that branches on `reason`, or reads `updated`, or diffs a row's key set, got a
-// different answer per runtime for the same call — the exact thing the one
-// refusal shape exists to prevent.
+// Python is the spec for every one of these: `{updated, id, agent}` rather than
+// the bare record, a coded refusal rather than a bare `{error}` (`delete_agent`
+// on an unknown/absent id, `cancel` with no task_id, an unhandled system verb),
+// seven keys on a ledger row, and python's prose on the `not_here` code. A
+// caller that branches on `reason`, reads `updated`, or diffs a row's key set
+// gets the same answer on every runtime.
 
 import FantasticJSON
 import Foundation
@@ -84,8 +81,7 @@ struct ReplyShapeTests {
     }
 
     /// An unknown id is `unknown_agent` + `deleted:false` — a code to branch on
-    /// and the LIVE id index to correct from. The bare `{error: "no agent"}` this
-    /// used to answer is the measured 34-retry case.
+    /// and the LIVE id index to correct from.
     @Test func deleteAgentOnAnUnknownIdIsTheUnknownAgentRefusal() async {
         let k = makeKernel()
         await mkChild(k, "kid")
@@ -147,7 +143,7 @@ struct ReplyShapeTests {
                 + "you mean in `parent_id` / `id`", "\(r.serialize())")
     }
 
-    /// C6 — `list_agents` walks the registry in REGISTRATION order (python
+    /// `list_agents` walks the registry in REGISTRATION order (python
     /// pages `self.ctx.agents.values()` with no sort).
     @Test func testListAgentsIsRegistryOrder() async {
         let k = makeKernel()
@@ -157,7 +153,7 @@ struct ReplyShapeTests {
         #expect(ids == ["kernel_state", "zeta", "alpha", "mid"], "\(r.serialize())")
     }
 
-    /// C15 — the reply is a RECORD, built as an ordered map: `id`,
+    /// The reply is a RECORD, built as an ordered map: `id`,
     /// `handler_module`, the meta in the order it was given, then `parent_id`.
     /// Routed through `JSONEncoder` it came back in a different order every
     /// process, nested grant maps included.
@@ -207,7 +203,7 @@ struct ReplyShapeTests {
         }
     }
 
-    /// C89 — python settles `ERRORED if reply.get("error") else COMPLETED`, so a
+    /// Python settles `ERRORED if reply.get("error") else COMPLETED`, so a
     /// reply whose `error` is `0`, `0.0`, `[]` or `{}` settles COMPLETED. Swift
     /// read anything but a bool or a string as truthy and settled every one of
     /// them `errored`, so a handler answering `{"error": 0}` — a status code, a

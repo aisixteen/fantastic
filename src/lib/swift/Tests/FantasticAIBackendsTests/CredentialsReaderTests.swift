@@ -144,7 +144,7 @@ struct CredentialsReaderTests {
         }
     }
 
-    // ─── what one read COSTS in ids (parity, 2026-10-01) ───────────────────
+    // ─── what one read COSTS in ids (parity) ───────────────────
     //
     // A read is ONE send: a call row and a settle row — 2 ids, the same as any
     // other send — and, once the
@@ -227,7 +227,7 @@ struct CredentialsReaderTests {
         }
     }
 
-    /// Audit S1: a key that is not a legal HTTP header value — a control
+    /// A key that is not a legal HTTP header value — a control
     /// character, a non-ASCII one, whitespace at an edge — is refused by the
     /// reader, naming the ref and never the value (python's client quotes a
     /// refused header in its error). The store keeps whatever it was given; a key

@@ -5,7 +5,7 @@
 //! empty or look like a number); an INTEGER step is a list index.
 //! `["payload", "a.b"]` is the top-level payload key `"a.b"`, never `a` → `b`;
 //! `["data", "items", 0, "data"]` goes through a list. A dotted string could not
-//! tell those apart, so it is refused (owner, 2026-10-02).
+//! tell those apart, so it is refused.
 //!
 //! [`Step`] is that array's typed form — the kernel's `Blob` path, a watcher
 //! item's body, a reply's body. Every place a body is put or taken goes through

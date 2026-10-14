@@ -90,10 +90,8 @@ class WSWatcher:
             return None
         if opcode == 0x9:
             # A PING MUST BE ANSWERED (RFC 6455 §5.5.2). Every kernel's ws face
-            # pings each 20 s and closes 20 s later with no pong: this watcher
-            # used to ignore pings, so it went deaf 40 s into every run and the
-            # probes scored only the events of the first 40 s (measured
-            # 2026-09-20: rust emitted 7 `compacted`, the probe counted 1).
+            # pings each 20 s and closes 20 s later with no pong: a watcher that
+            # ignores pings goes deaf 40 s into every run.
             await self._send(body, opcode=0xA)
             return ""
         if opcode != 0x1:  # pong/binary — not what we watch for

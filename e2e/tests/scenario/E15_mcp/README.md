@@ -2,7 +2,7 @@
 
 The product binary's MCP face, driven by a **scripted MCP client**. No model,
 and no Claude Code: a human plugs the binary into their own client with
-`claude mcp add`, but a test never automates Claude Code (owner rule, TOS).
+`claude mcp add`, but a test never automates Claude Code (TOS).
 
 ```sh
 # free: no BACKEND needed

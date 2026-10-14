@@ -6,9 +6,8 @@
 // turns and return a VIEW. The durable JSONL sidecar keeps every turn verbatim,
 // so the trace stays complete and `recall` can page anything back.
 //
-// Why trim at all. Measured 2026-08-20 (`live_plan`): reflect replies were 42% of
-// the whole conversation — 73k of 174k chars — and 9 of 16 were a repeat of a
-// target already reflected. That bulk is what fills the window; a full window is
+// Why trim at all. Repeated whole-state replies (reflect above all) are a large
+// share of a conversation. That bulk is what fills the window; a full window is
 // what forces compaction; compaction is what put the run's goal at risk. Trimming
 // it attacks the cause, not the symptom.
 //
@@ -58,11 +57,11 @@ func parseReplyTag(_ s: String) -> (agent: String, verb: String)? {
     rest = rest.dropFirst()
     guard let (verbRun, tail) = takeRun(rest) else { return nil }
     // The verb group is `[^\]\s]+`, so a `]` ENDS it: the first bracket in the run is
-    // the tag's own closer, never one carried in from the body. It was `\S+` until
-    // 2026-09-04, which on `[reply to x · notes reflect]\n{"verbs":["read"]}` took
-    // `reflect]` and let `[^\]]*\]` close on a bracket inside the BODY — the verb then
-    // read `reflect]`, matched no vocabulary, and both trimmers silently did nothing for
-    // every reply containing a bracket (which is every reflect: bodies are JSON).
+    // the tag's own closer, never one carried in from the body. With `\S+`,
+    // `[reply to x · notes reflect]\n{"verbs":["read"]}` would take `reflect]` and let
+    // `[^\]]*\]` close on a bracket inside the BODY — the verb would match no
+    // vocabulary, and both trimmers would skip every reply containing a bracket
+    // (every reflect: bodies are JSON).
     if let i = verbRun.firstIndex(of: "]") {
         if i == verbRun.startIndex { return nil }
         return (String(agent), String(verbRun[verbRun.startIndex..<i]))
@@ -119,9 +118,9 @@ func stub(_ block: String) -> String {
 ///
 /// A delivered turn carries ONE OR MORE blocks — a batch arrives whole, one block
 /// per call, joined by a blank line. The trimmers below work on the BLOCK, the unit
-/// they were written for; treating the whole turn as one reply either deleted
-/// siblings (the reflect cut) or trimmed nothing (a count guard that skipped
-/// every multi-reply turn — tried 2026-08-25, superseded same day).
+/// they were written for; treating the whole turn as one reply either deletes
+/// siblings (the reflect cut) or trims nothing (a count guard skips
+/// every multi-reply turn).
 func replyBlocks(_ content: String) -> [String] {
     var out: [String] = []
     var start = content.startIndex
@@ -146,8 +145,8 @@ private func contentOf(_ turn: JSON) -> String {
     turn["content"].asString ?? ""
 }
 
-/// A `docs` reply the model has ANSWERED is cut to this stub (owner, 2026-10-05).
-/// The body itself stays HELD this run under its pid (owner, 2026-10-06): the model
+/// A `docs` reply the model has ANSWERED is cut to this stub.
+/// The body itself stays HELD this run under its pid: the model
 /// keeps the lines it needs with its own `grep`, and those small replies stay in its
 /// view. Python `_DOCS_DROPPED`.
 func docsDropped(of: String, tier: String, pid: String, verb: String) -> String {
@@ -156,9 +155,8 @@ func docsDropped(of: String, tier: String, pid: String, verb: String) -> String 
 }
 
 /// A REAL verb of this docs body for the grep example: the first that is not
-/// `reflect`/`boot`, else the first. A placeholder example is copied verbatim —
-/// measured 2026-10-06 (canvas E55/E58): `<query>verb</query>` was sent as written,
-/// matched only the `<verbs>` lines, and the model concluded the held body was gone.
+/// `reflect`/`boot`, else the first. A placeholder example is copied verbatim:
+/// `<query>verb</query>` sent as written matches only the `<verbs>` lines.
 /// `nil` when the body lists no verbs (nothing to keep, so nothing is held).
 /// Python `example_verb`.
 func exampleVerb(_ body: String) -> String? {

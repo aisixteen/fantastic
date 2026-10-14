@@ -121,11 +121,9 @@
                 // instantiates generic metadata (`IndexingIterator<Range<Int32>>`),
                 // which takes the runtime's metadata lock — and a fork of a threaded
                 // process copies that lock in whatever state ANOTHER thread held it,
-                // owned by a thread that does not exist in the child. Measured: the
-                // child aborted in `_os_unfair_lock_corruption_abort` under
-                // `IndexingIterator.next()` in this very function (EXC_BREAKPOINT,
-                // reported as SIGKILL), before `execve` — a terminal job that died
-                // with -9 having printed nothing (4 crash reports on 2026-09-30).
+                // owned by a thread that does not exist in the child. The
+                // child then aborts in `_os_unfair_lock_corruption_abort` before `execve`
+                // (reported as SIGKILL).
                 var sig: Int32 = 1
                 while sig < sigCount {
                     _ = signal(sig, sigDefault)

@@ -566,7 +566,7 @@ struct MemoryStoreTests {
         #expect(out == .object(["type": .string("kernel_stop"), "ok": .bool(true)]))
     }
 
-    /// C18: `cancel task_id:"+<pid>"` is NOT the pid — a leading `+` fails
+    /// `cancel task_id:"+<pid>"` is NOT the pid — a leading `+` fails
     /// `_as_id`'s digit-string test, and it names no execution either, so it is
     /// the same honest `{cancelled:false}` a stale id gets.
     @Test func cancelWithALeadingPlusIsNeverThePid() async {

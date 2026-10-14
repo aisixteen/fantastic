@@ -1,5 +1,5 @@
-// B4.5 + B4.9 — every provider backend's readme is python's `readme.md`, byte
-// for byte. It is served from the bundle by `reflect readme=true`, so a swift-written summary was a second, shorter truth
+// Every provider backend's readme is python's `readme.md`, byte
+// for byte. It is served from the bundle by `reflect readme=true`, so a swift-written summary would be a second, shorter truth
 // about the same bundle. (The ollama file's double-encoded lines are python's
 // bytes too, and they are copied as they stand.)
 

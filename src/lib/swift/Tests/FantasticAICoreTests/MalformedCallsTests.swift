@@ -4,9 +4,8 @@
 //
 // Why the module exists at all: a call that cannot be read returns `[]` from
 // `extractToolCalls`, which is byte-identical to a turn that emitted no call —
-// and that means "done". Measured on gemma-4-12B (2026-08-06): nothing parsed,
-// nothing dispatched, no error came back, and the run ended looking finished
-// with the task untouched.
+// and that means "done": nothing parsed,
+// nothing dispatched, no error, and the run ends looking finished.
 
 import FantasticJSON
 import Foundation
@@ -54,8 +53,7 @@ struct MalformedCallsTests {
     }
 
     /// PLAIN TEXT, not JSON — the model↔harness path carries none in either
-    /// direction, and a JSON-dumped refusal cost a run to doubled backslashes
-    /// (2026-09-09, program_tests).
+    /// direction, and a JSON-dumped refusal shows doubled backslashes.
     @Test func theBodyDeliveredToTheModelIsPlainText() {
         let bad = malformedCalls(#"<call name="send"><type>reflect</type></call>"#)
         let body = bad[0].body

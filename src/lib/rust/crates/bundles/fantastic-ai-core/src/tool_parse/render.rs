@@ -5,11 +5,9 @@
 //! they cannot drift from what the parser accepts.
 //!
 //! [`render_reply`] writes a REPLY to the model in that same tag notation — one
-//! notation on the whole model↔harness path, no JSON in either direction (user,
-//! 2026-09-09: "align answers in the same format"). Measured why: a JSON
-//! envelope escapes every newline and quote, so the model could not see a read's
-//! lines, and (2026-09-09 program_tests) a refusal carrying a JSON-dumped list
-//! showed doubled backslashes that cost a run.
+//! notation on the whole model↔harness path, no JSON in either direction. A JSON
+//! envelope escapes every newline and quote, so the model cannot see a read's
+//! lines, and a refusal carrying a JSON-dumped list shows doubled backslashes.
 //!
 //! They differ in whitespace and must not share a helper: `render_call` puts no
 //! newline after an open tag, `render_reply` does; `render_reply` renders a

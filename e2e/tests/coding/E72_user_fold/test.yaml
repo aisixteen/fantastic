@@ -12,4 +12,4 @@ limits:
   no_progress_turns: 32
   turn_chars: 60000
   turn_seconds: 300
-env: {E2E_WINDOW: "12000"}  # above the 9000 squeeze, so the fold is the squeeze's doing (planted past, 2026-10-07)
+env: {E2E_WINDOW: "12000"}  # above the 9000 squeeze, so the fold is the squeeze's doing (planted past)

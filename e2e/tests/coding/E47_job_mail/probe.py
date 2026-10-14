@@ -76,7 +76,7 @@ async def main():
     try:
         Path("worker.py").write_text(WORKER)
         # the ai's chat leg — without one, history is RAM-empty and each turn is
-        # amnesiac (measured on E46/E53).
+        # amnesiac.
         r = await _call(root, root.id, {
             "type": "create_agent", "parent_id": home(root), "id": FB,
             "handler_module": "file_bridge.tools", "allow": ["."], "root": ".",

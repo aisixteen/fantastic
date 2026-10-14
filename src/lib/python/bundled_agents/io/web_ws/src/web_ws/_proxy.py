@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 # hello guid → its live connections, per kernel: (id(kernel.ctx), guid) →
 # {client_id: that connection's `_send_envelope`}. Every reply a leg answers to
-# one tab of an identity is mirrored to the others (owner, 2026-10-03).
+# one tab of an identity is mirrored to the others.
 _TABS: dict[tuple[int, str], dict] = {}
 
 
@@ -74,9 +74,9 @@ def _make_client_id() -> str:
 def _name(frame: dict, key: str) -> str:
     """A frame field the proxy USES as a name (`type`, `target`, `src`, an answer's
     `id`): the field when it is a string, else `""` — as rust and swift read it. A
-    list or object here was hashed (`src in watching`, `out_calls.get(id)`, the
-    handler table, the kernel's agent table) and its TypeError ended the socket,
-    every in-flight call on it included (audit W-9, 2026-10-03)."""
+    list or object here would be hashed (`src in watching`, `out_calls.get(id)`, the
+    handler table, the kernel's agent table) and its TypeError would end the socket,
+    every in-flight call on it included."""
     v = frame.get(key)
     return v if isinstance(v, str) else ""
 
@@ -234,7 +234,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         await _send_envelope({"type": "reply", "id": fid, "data": data})
         if peer["guid"] is None:
             return
-        # TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+        # TODO: DESYNC between the tabs of one identity is envisioned
         # and unsolved — a mirror shows the reply, it does not reconcile state the
         # other tabs built differently. Think later.
         mirror = {"type": "reply_mirror", "id": fid, "data": data}
@@ -259,10 +259,8 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         """THE ONE WATCH PATH — the connect-time auto-watch and an explicit
         `watch` frame both come here. FAIL LOUD: a name that resolves to no agent,
         or a gate refusal, is answered with an `error` frame and NOT recorded as
-        watched. (The connect-time watch used to discard the result and mark the
-        name watched anyway; a name the kernel's `watch` did not resolve mirrored
-        nothing, said nothing, and the explicit watch that followed was then
-        skipped as a duplicate: measured, a page got zero events.)
+        watched. (Marking a name watched whatever the result would mirror nothing,
+        say nothing, and skip the explicit watch that follows as a duplicate.)
 
         The name resolves the way `send` resolves a target (`kernel` or a literal
         id). THE LEG WATCHES (`inbound_watch`), so the kernel's gate sees a real
@@ -339,7 +337,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         # rule answers "may this client reach this leg"; it says nothing about
         # what the client may then READ. THE LEG ASKS (`inbound_state_subscribe`),
         # like every other handler here — the transport's own context is the
-        # operator's, which the gate never judges (audit ARCH2-7).
+        # operator's, which the gate never judges.
         out = await hand_in(kernel, web_agent_id, {"type": "inbound_state_subscribe"})
         denial = out if isinstance(out, dict) and out.get("error") else None
         if denial is not None:
@@ -493,11 +491,11 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 raw = msg.get("bytes")
             if raw is None:
                 continue
-            # A FRAME IS AN INPUT, NOT A CONTRACT. Decoding used to run bare: a
-            # 3-byte binary frame raised `struct.error` out of the loop, a text
-            # frame that parsed to `[1]` raised `AttributeError` on `.get` — and
-            # either killed the whole connection through `finally`, cancelling
-            # every in-flight `call` on it (an LLM generation with it). Answer the
+            # A FRAME IS AN INPUT, NOT A CONTRACT. Decoded bare, a 3-byte binary
+            # frame would raise `struct.error` out of the loop, a text frame that
+            # parses to `[1]` would raise `AttributeError` on `.get` — and either
+            # would kill the whole connection through `finally`, cancelling every
+            # in-flight `call` on it (an LLM generation with it). Answer the
             # bad frame and KEEP THE SOCKET.
             try:
                 frame = decode_frame(raw)

@@ -40,9 +40,9 @@ const BYTES_FIELD_HEADER: &str = "x-fantastic-bytes-field";
 pub(crate) const MAX_BODY: usize = fantastic_io_bridge::codec::MAX_FRAME;
 
 /// The ws leg's socket: a MESSAGE, like a frame, is at most io_bridge's one frame
-/// cap (audit W-3). tungstenite's default message cap is 64 MiB, so a message
-/// fragmented into frames under the frame cap was buffered and parsed at four
-/// times what python's server (uvicorn's `ws_max_size`) allows.
+/// cap. tungstenite's default message cap is 64 MiB, so a message
+/// fragmented into frames under the frame cap would be buffered and parsed at
+/// four times what python's server (uvicorn's `ws_max_size`) allows.
 pub(crate) fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
     tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
         max_message_size: Some(fantastic_io_bridge::codec::MAX_FRAME),
@@ -176,10 +176,10 @@ async fn file_proxy(state: AppState, agent_id: String, path: String) -> Response
     // PYTHON'S TEST IS THE CHUNK, not the absence of an error:
     // `isinstance(first.get("bytes"), (bytes, bytearray))`. Anything that did
     // not answer with a chunk — a denial, a missing file, an agent that is not
-    // a SOURCE at all — is a 404 (C37 gives rust the same question to ask).
+    // a SOURCE at all — is a 404.
     let Some(first) = first else {
         // A GATE denial carries its reason in the body: this kernel teaches
-        // through denials, and the route used to throw that away. A MISSING
+        // through denials, and the route passes it on. A MISSING
         // FILE stays a bare 404 — no body, no existence leak.
         if meta.get("reason").and_then(Value::as_str) == Some("unauthorized") {
             // EXACTLY four keys, in THIS order, a missing one as `null` (a
@@ -292,14 +292,14 @@ fn too_large() -> Response {
     )
 }
 
-/// GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03). A POST is judged by the
+/// GATE FIRST, THEN THE BODY. A POST is judged by the
 /// leg's ingress rule on what the request says up front — its target and its
 /// `X-Fantastic-Auth` credential — and only an admitted request's body is read,
 /// at most [`MAX_BODY`] bytes (io_bridge's `MAX_FRAME`); a larger body is refused
 /// 413, loud, with nothing past the bound read (a declared `Content-Length` over
-/// it is refused unread). Reading and parsing the whole body before the gate let
-/// a client the leg was about to refuse make the kernel buffer any amount of
-/// data. Python `_rest_call`.
+/// it is refused unread). Reading and parsing the whole body before the gate
+/// would let a client the leg is about to refuse make the kernel buffer any
+/// amount of data. Python `_rest_call`.
 async fn rest_post(
     state: AppState,
     owner: AgentId,
@@ -335,7 +335,7 @@ async fn rest_post(
         // is an empty envelope, not a parse error.
         let raw = header_str(PAYLOAD_HEADER).filter(|v| !v.is_empty());
         let payload: Value = match raw {
-            // STRICT (D13): python `strict_loads` — what not every runtime can
+            // STRICT: python `strict_loads` — what not every runtime can
             // hold is "not valid JSON".
             Some(s) => match fantastic_io_bridge::codec::loads(&s) {
                 Ok(v) => v,
@@ -372,7 +372,7 @@ async fn rest_post(
         obj.insert(field.clone(), Value::Null);
         let payload = Value::Object(obj);
         // THROUGH THE BATCH, with the header's execution id NAMING the execution
-        // (A13.3): python builds `{target, payload+bytes}`, sets `item["id"]`
+        // — python builds `{target, payload+bytes}`, sets `item["id"]`
         // from `X-Fantastic-Execution-Id`, and HANDS it to this leg
         // (`inbound_call`), whose handler sends it onward as the leg — so a
         // repeated id on the same target REPLAYS instead of re-running.
@@ -398,19 +398,18 @@ async fn rest_post(
     let payload: Value = if body.is_empty() {
         json!({})
     } else {
-        // CPython `json.loads(bytes)` DETECTS THE ENCODING first (A13.11), so a
+        // CPython `json.loads(bytes)` DETECTS THE ENCODING first, so a
         // UTF-8 BOM, a UTF-16 or a UTF-32 body all parse; `serde_json` reads
-        // UTF-8 only and answered 400 for each. A body that will not decode at
+        // UTF-8 only. A body that will not decode at
         // all is a MALFORMED BODY — python catches its `UnicodeDecodeError`
-        // beside `JSONDecodeError` and answers the same 400 (it used to raise an
-        // uncaught 500, which this branch mirrored until parity 2026-09-30).
+        // beside `JSONDecodeError` and answers the same 400.
         let Some(text) = decode_json_bytes(&body) else {
             return json_error(
                 StatusCode::BAD_REQUEST,
                 "web_rest: request body is not valid JSON",
             );
         };
-        // STRICT (D13): python `strict_loads(body)`.
+        // STRICT: python `strict_loads(body)`.
         match fantastic_io_bridge::codec::loads(&text) {
             Ok(v) => v,
             // Don't echo the parser exception back — generic message only
@@ -463,9 +462,8 @@ fn inbound_call(
 /// `_first_bytes_field`: a reply whose chunk sits at a TOP-LEVEL key is octet (a
 /// 0-byte chunk included — an empty file is still a file), the header naming
 /// THAT key (`bytes` for a `read_stream`, `x.y` for a peer's reply that put it
-/// there); a reply with no chunk is JSON. Rust used to test
-/// `!out_body.is_empty()`, which served an empty file as JSON, and always named
-/// `bytes`.
+/// there); a reply with no chunk is JSON — decided by the chunk's presence,
+/// never by its length, and never assuming `bytes`.
 fn octet_or_json(reply: Value, body: Option<Blob>) -> Response {
     let Some(body) = body else {
         return json_reply(reply);
@@ -553,7 +551,7 @@ async fn rest_reflect(
 }
 
 /// CPython `json.detect_encoding` + `b.decode(<enc>, "surrogatepass")` — the
-/// first half of `json.loads(bytes)` (A13.11). `None` = the bytes do not decode,
+/// first half of `json.loads(bytes)`. `None` = the bytes do not decode,
 /// which in python is an uncaught `UnicodeDecodeError` (a 500).
 ///
 /// A HEADER goes through `json.loads(str)` instead, which does NOT detect an

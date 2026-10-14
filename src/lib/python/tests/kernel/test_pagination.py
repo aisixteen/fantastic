@@ -1,10 +1,9 @@
-"""C19 — every unbounded list reply can be asked for less.
+"""Every unbounded list reply can be asked for less.
 
-WHY THIS EXISTS. Unbounded replies are a measured cost, not a conformance box.
-2026-08-20: reflect bulk was ~42% of an AI agent's context, which is what forced
-`dedupe_stale_reads`, the reflect stub and the point-of-use distillation nudge in
-`ai_core`. Every one of those shrinks what is RETAINED, because nothing could
-shrink what is SENT. Paging attacks the cause.
+WHY THIS EXISTS. Unbounded replies are a real cost, not a conformance box. Reflect
+bulk can be a large share of an AI agent's context; `dedupe_stale_reads`, the
+reflect stub and the point-of-use distillation nudge in `ai_core` shrink what is
+RETAINED, and paging shrinks what is SENT. Paging attacks the cause.
 
 The canonical shape is `checkpoint-conformance/spec/test_list.py` (limit
 respected, opaque cursor, filters compose), sharpened by a2a-tck's `historyLength`

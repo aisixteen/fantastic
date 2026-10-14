@@ -1,4 +1,4 @@
-"""The MINIMAL call gate (owner decision 2026-10-03).
+"""The MINIMAL call gate.
 
 - An agent send passes iff the sender's `can_call` grants (target, verb) AND the
   target's `callable_by` grants (sender, verb); `"*"` covers EVERY verb.
@@ -6,7 +6,7 @@
 - Kernel verbs at the root take the same two-sided check against the root.
 - The tree verbs (`create_agent`, `update_agent`, `delete_agent`) take the gate
   like any verb and nothing more: whoever holds them on the root acts on any agent
-  (owner, 2026-10-06 — grants are the only rule).
+  (grants are the only rule).
 - A grant key is an agent id, `$self`, `$parent`, `$subtree`, `<guid>|<agent>`
   or `<guid>|*` — anything else is refused at the write.
 """
@@ -179,7 +179,7 @@ async def test_a_kernel_verb_takes_the_root_ingress_check(seeded_kernel):
 
 
 async def test_a_tree_verb_granted_on_the_root_acts_anywhere(seeded_kernel):
-    """GRANTS ARE THE ONLY RULE (owner, 2026-10-06): an agent granted the tree verbs
+    """GRANTS ARE THE ONLY RULE: an agent granted the tree verbs
     on the root creates, updates and deletes ANY agent it names — outside its own
     subtree and itself included. There is no ownership check after the gate."""
     k = seeded_kernel

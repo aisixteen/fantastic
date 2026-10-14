@@ -87,12 +87,10 @@ class OllamaProvider:
             kwargs["think"] = self._think
         # THINKING MODELS SPLIT THEIR OUTPUT — read every text field, not just one.
         # ollama streams a reasoning model's tokens as `message.thinking` and only
-        # its conclusion as `message.content`. Measured on gemma4:12b: 336 chars of
-        # thinking to 38 of content. Reading `content` alone silently drops whole
-        # turns — observed live on 2026-08-02, where gemma spent all 578 generated
-        # tokens reasoning, we saw an EMPTY completion, and the chain ended at pass
-        # one with no tool call and no error. ollama's own log showed the request
-        # answered normally, so it looked like the server had wedged.
+        # its conclusion as `message.content`, often far shorter. Reading `content`
+        # alone silently drops whole turns — a turn spent entirely reasoning reads as
+        # an EMPTY completion, and the chain ends with no tool call and no error while
+        # ollama's own log shows the request answered normally.
         #
         # Same defect and same fix as vllm's `reasoning_content`. A raw text
         # protocol reads the text the model produced; it does not let the provider

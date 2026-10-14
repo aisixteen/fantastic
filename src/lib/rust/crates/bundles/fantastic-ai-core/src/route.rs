@@ -80,11 +80,10 @@ or end the chain with <call name=\"done\"></call>.";
 /// verb and no agent, and that is a gap only the model can close — guessing a
 /// target would dispatch a write to whichever agent we picked.
 ///
-/// Measured 2026-08-06: gemma-4-12B emitted
-/// `{"name":"reflect","arguments":{"detail":"full"}}` and the bare fault told it
-/// nothing about how to retry, so it kept re-deriving the envelope from the
-/// system prompt instead. Every other error on this path states the fix; this one
-/// used not to.
+/// A bare fault (e.g. for `{"name":"reflect","arguments":{"detail":"full"}}`)
+/// tells the model nothing about how to retry, so it re-derives the envelope from
+/// the system prompt instead. Every other error on this path states the fix; so
+/// does this one.
 pub const NO_TARGET_ERROR: &str = "no target_id, so nothing was dispatched — a \
 send must name the AGENT it goes to. Shape: <call name=\"send\"><target_id>agent\
 </target_id><type>verb</type></call>. Send `kernel` <type>reflect</type> for the \
@@ -94,8 +93,8 @@ list of agent ids.";
 ///
 /// NO PAYLOAD, NO SEND. Dispatching nothing reaches the handler as nothing and
 /// raises about OUR internals, naming neither the verb the model omitted nor the
-/// agent it addressed (python: `'NoneType' object has no attribute 'get'`,
-/// measured three times in one run on 2026-08-06). [`crate::tool_parse`]
+/// agent it addressed (python: `'NoneType' object has no attribute 'get'`).
+/// [`crate::tool_parse`]
 /// translates every compressed shape it can recognise; what arrives here with no
 /// payload really has no verb in it, and saying so is the useful answer. Same
 /// shape as [`NO_TARGET_ERROR`], byte-identical across runtimes.
@@ -128,10 +127,10 @@ pub(crate) fn deliver_soon(
 
 /// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
 /// not return until the whole turn is done — model call, streaming, and that
-/// turn's own routing. Awaiting each delivery inline made reply 2 of a 4-call
-/// turn wait for the entire conversation reply 1 started, and if the chain ended
-/// first it was never delivered at all: measured on python 2026-08-24, 26 of 36
-/// calls never answered, misread three separate times as a model being stubborn.
+/// turn's own routing. Awaiting each delivery inline makes reply 2 of a 4-call
+/// turn wait for the entire conversation reply 1 started, and if the chain ends
+/// first it is never delivered at all — calls left unanswered, easily misread as
+/// a model being stubborn.
 ///
 /// A KERNEL TASK named `deliver_reply` on the TARGET (python
 /// `kernel.ctx.spawn_task(target, "deliver_reply", coro)`), not a bare spawn: it
@@ -175,8 +174,8 @@ fn deliver_soon_with_born(
 /// previous incarnation made: the agent that asked is gone and the one that
 /// replaced it is on other work. It is kept as a ROW — real data, written by the
 /// TARGET into its own store (the send is marked `late`) — but it wakes no turn.
-/// Measured 2026-09-06 (python): the rebooted agent was woken by answers to its
-/// predecessor's calls and finished THAT work instead of the new instruction.
+/// Woken, the rebooted agent would finish its predecessor's work instead of the
+/// new instruction.
 pub(crate) async fn deliver(
     kernel: &Arc<Kernel>,
     target: &str,
@@ -192,7 +191,7 @@ pub(crate) async fn deliver(
     payload.insert("type".to_string(), json!("send"));
     payload.insert("text".to_string(), json!(text));
     payload.insert("client_id".to_string(), json!(client_id));
-    // HARNESS TEXT, NOT A MESSAGE (owner, 2026-10-07): a turn this layer writes to
+    // HARNESS TEXT, NOT A MESSAGE: a turn this layer writes to
     // its own agent is stored as `kind: "notice"`, so a view can hide it; the model
     // still reads it as a user turn. Honoured only on a send to self. Python
     // `_deliver`.
@@ -221,23 +220,20 @@ pub(crate) async fn deliver(
     // it is gated, gone, or its own send answered `{"error": …}` — say so on its
     // inbox instead of dropping the reply.
     //
-    // Discarding it made a chain that DIED mid-flight identical to a model that
-    // chose to stop: no error anywhere, the last turn simply never happened.
-    // Only the first send's error was ever visible, i.e. never the ones that
+    // Discarding it makes a chain that DIED mid-flight identical to a model that
+    // chose to stop: no error anywhere, the last turn simply never happens.
+    // Only the first send's error would be visible, i.e. never the ones that
     // matter. This does NOT raise: the routing dispatch is detached, and
     // unwinding here would kill sibling branches that are still fine.
     //
     // THE ANNOUNCEMENT IS AN ORDINARY `status` EVENT — same shape a failed direct
     // send produces (`{type:'status', source, phase:'done', detail:{…}, ts,
     // client_id}`), because that is the shape reflect's `emits` documents and the
-    // shape a UI/harness subscribes to. It rode with `reason`/`error` at the TOP
-    // level here until 2026-09-02, so every subscriber reading `ev.detail.reason`
-    // saw nothing — the silent-death regression this announcement exists for,
-    // wearing the announcement's own clothes.
+    // shape a UI/harness subscribes to: `reason`/`error` ride in `detail`, where
+    // every subscriber reads `ev.detail.reason`.
     // FAILED IS `failed`/`timed_out` — python `out["status"] in ("failed",
     // "timed_out")` — plus any truthy `error` on the reply itself. `cancelled`
-    // is NOT announced: an operator kill already told whoever asked for it, and
-    // rust's `!is_completed()` turned every cancel into a spurious error event.
+    // is NOT announced: an operator kill already told whoever asked for it.
     let reply_error = out.result.get("error").filter(|v| py_truthy(v));
     let failed = matches!(out.status, Status::Failed | Status::TimedOut) || reply_error.is_some();
     if failed {
@@ -464,7 +460,7 @@ pub(crate) struct OpenInquiry {
     pub(crate) request_id: Value,
 }
 
-/// OPEN INQUIRIES (owner, 2026-10-06: fully async), by the receiver's chain
+/// OPEN INQUIRIES (fully async), by the receiver's chain
 /// `(receiver, client_id)`. The answer the model gives in ANY turn of that chain —
 /// or the news that it ended without one — goes to the asker as a later message
 /// under the inquiry's pid. Python `_open_inquiries`.
@@ -507,7 +503,7 @@ pub(crate) fn settle_owed(self_id: &str, text: &str) {
 
 /// Close the inquiry this chain `(self_id, client_id)` is answering: hand `body`
 /// (`{answer}` or `{error}`) to its asker as `[reply to <pid> · <self_id> inquiry]`.
-/// The answer is THIS agent's own send to the asker (owner, 2026-10-06), gated like
+/// The answer is THIS agent's own send to the asker, gated like
 /// any; a refused delivery is told to this agent. An operator's inquiry has no
 /// conversation to land in: the answer is an event on this agent's inbox. No-op
 /// when nothing is open. Python `_close_inquiry`.
@@ -607,7 +603,7 @@ pub(crate) async fn answer_inquiry(
     }
     let answer = call.arguments.get("answer").cloned().unwrap_or(Value::Null);
     // THE PLACEHOLDER IS NOT AN ANSWER — a model copies the shown example back
-    // verbatim (measured 2026-09-04, peer_review: "..." written as the verdict).
+    // verbatim (e.g. "..." written as the verdict).
     let real = answer
         .as_str()
         .filter(|s| !py_strip(s).trim_matches('.').is_empty());
@@ -663,8 +659,7 @@ pub const DEAD_TURN_LINE: &str =
 /// nothing: TRY AGAIN. DONE is EXPLICIT: the `{"name":"done"}` tool call ends a
 /// chain silently and is never nudged; `await` waits. The reminder repeats until
 /// the model acts or ends the chain, bounded by [`MAX_SILENT_TURNS`] in a row.
-/// Mirrors python `_NO_CALL_NUDGE` (canonical; reinstated 2026-09-01 after
-/// repo_map:swift twice stopped mid-task).
+/// Mirrors python `_NO_CALL_NUDGE` (canonical).
 const NO_CALL_NUDGE: &str = "[no call was dispatched] Your answer emitted no <call> element, so \
 NOTHING ran — a call written in your thinking does not run: write it in your answer, \
 after the thinking. If the task is unfinished, emit that call now. If it is finished, \
@@ -690,7 +685,7 @@ end the chain explicitly: <call name=\"done\"></call>";
 /// carries the `stream_id` of the part it was streamed as.
 ///
 /// `cut`: the model stopped with a block open — ONLY A SUCCESSFUL GENERATION
-/// DISPATCHES (owner, 2026-10-04), so the pass sends nothing, its closed calls and
+/// DISPATCHES, so the pass sends nothing, its closed calls and
 /// its malformed-call reports included; it routes as a turn that dispatched nothing.
 #[allow(clippy::too_many_arguments)]
 pub async fn route_reply(
@@ -711,9 +706,9 @@ pub async fn route_reply(
 ) {
     // THE MODEL'S CALLS ARE THE AGENT'S CALLS — gated. The routing task is
     // spawned by the agent's own dispatch through `Kernel::spawn_task`, which
-    // carries the dispatch identity into it (a bare tokio spawn would not —
-    // measured 2026-09-01, E53_grant): dispatches, the binary carrier, and reply
-    // deliveries all attribute to the AI agent.
+    // carries the dispatch identity into it (a bare tokio spawn would not):
+    // dispatches, the binary carrier, and reply deliveries all attribute to the
+    // AI agent.
     route_reply_gated(
         self_id,
         kernel,
@@ -794,12 +789,12 @@ async fn route_reply_gated(
     // However this route ends, the `send` waiting on its launch is released.
     let _release = FireOnDrop(launched.clone());
     let sp = system_prompt.as_deref();
-    // THE MATCH (owner, 2026-10-04): a dispatched message carries the `stream_id`
+    // THE MATCH: a dispatched message carries the `stream_id`
     // of the part it was streamed as, so a consumer settles its draft on it.
     // Matched by the call's exact body, in order — one reading of the text, not
     // two.
     let mut streams = call_streams;
-    // ONLY THE ANSWER ACTS (owner, 2026-10-07): calls written inside thinking are
+    // ONLY THE ANSWER ACTS: calls written inside thinking are
     // read as thinking — dispatch and the malformed-call report read the answer.
     let answer = crate::call_check::repair(&crate::think::without_thinking(&text));
     let parsed = if cut {
@@ -843,7 +838,7 @@ async fn route_reply_gated(
             title: None,
         });
     }
-    // CALLS WRITTEN WRONG (owner, 2026-10-07): markup carrying OUR call vocabulary
+    // CALLS WRITTEN WRONG: markup carrying OUR call vocabulary
     // outside every `<call` envelope — `<tool_call><function=call name="send">`,
     // `<send>`, a JSON call — is reported like a compiler error, with the form to
     // write instead (`call_check`). The answer's well-formed calls run as written,
@@ -876,12 +871,11 @@ async fn route_reply_gated(
     // calls undefined — and everything owed to one destination arrives as
     // ONE delivered turn.
     //
-    // Why whole, never split: replies used to land one per turn, so a turn
-    // that fanned out 7 calls spent the next 7 turns collecting its own
-    // answers, and every question asked in between was answered turns later
-    // by something older. Measured 2026-08-25 (`live_subai_langgraph`): the
-    // model re-asked `list_agents` five times and the run died with nothing
-    // built. Anthropic documents the split shape as the anti-pattern
+    // Why whole, never split: replies landing one per turn make a turn that
+    // fanned out 7 calls spend the next 7 turns collecting its own answers,
+    // and every question asked in between is answered turns later by
+    // something older — the model re-asks and the run builds nothing.
+    // Anthropic documents the split shape as the anti-pattern
     // ("separate user messages reduce parallel tool use"), OpenAI 400s on a
     // missing tool result, LangGraph's ToolNode collects every ToolMessage
     // before the agent runs again. The model never sees a PARTIAL batch, so
@@ -933,19 +927,19 @@ async fn route_reply_gated(
         // `reply_to` DEFAULTS TO SELF. An omitted key means the model gets its
         // own answer back, not that the answer is thrown away.
         //
-        // The old default was fire-and-forget, and it made the one failure a
-        // model can never debug: gemma4:12b once left the key out of an
-        // otherwise perfect call, the reflect ran, its result was dropped, and
-        // the chain died at pass 1 with no reply, no error, and nothing to see.
-        // From inside the model that is indistinguishable from being finished.
+        // A fire-and-forget default makes the one failure a model can never
+        // debug: a key left out of an otherwise perfect call runs, its result
+        // is dropped, and the chain dies with no reply, no error, and nothing
+        // to see. From inside the model that is indistinguishable from being
+        // finished.
         //
         // Stopping is still the default and still costs nothing — it is
-        // emitting NO call. A dropped key now costs a wasted turn instead of
-        // the whole task, and discarding a reply became something you must SAY
+        // emitting NO call. A dropped key costs a wasted turn instead of
+        // the whole task, and discarding a reply is something you must SAY
         // (`reply_to: null` / "none"), which is the right way round.
         // The tag grammar types a bare number (`<reply_to>1001</reply_to>` → 1001):
         // a number is an id the model wrote, never "discard" — it is checked like
-        // any id below (python, measured 2026-10-11, e2e chat_users).
+        // any id below.
         let reply_to: Option<String> = match args.get("reply_to") {
             Some(v) => match v {
                 Value::String(s) => Some(s.clone()),
@@ -982,11 +976,10 @@ async fn route_reply_gated(
             continue;
         };
         // A REPLY ADDRESSED TO NOBODY IS LOST. `reply_to` is where this call's
-        // answer goes, never an argument the target sees; one naming no agent made
-        // the delivery fail on that missing agent's inbox, so nobody saw it and the
-        // model never learned what its call did (python, measured 2026-10-11, e2e
-        // chat_users). Nothing is dispatched; the model is told. A peer address
-        // (`<guid>|<agent>`) is the peer's to resolve.
+        // answer goes, never an argument the target sees; one naming no agent would
+        // fail the delivery on that missing agent's inbox, so nobody sees it and the
+        // model never learns what its call did. Nothing is dispatched; the model is
+        // told. A peer address (`<guid>|<agent>`) is the peer's to resolve.
         if let Some(rt) = reply_to.as_deref() {
             if rt != self_id.as_str() && !rt.contains('|') && kernel.resolve_target(rt).is_none() {
                 let verb = match args.get("payload") {
@@ -1046,9 +1039,8 @@ async fn route_reply_gated(
         let mut payload = payload.clone();
         // A SELF-CALL INHERITS ITS CONVERSATION. `grep`, `pull` and `recall` are
         // per-client, and a call the MODEL makes belongs to the client whose
-        // turn it is — python 2026-09-06: without this, every model-issued
-        // `grep` in three e2e runs returned `total=0` against a store full of
-        // matches, because the call landed on the default client.
+        // turn it is — without this, a model-issued `grep` lands on the default
+        // client and returns `total=0` against a store full of matches.
         if target == self_id.as_str() && !payload.contains_key("client_id") {
             payload.insert("client_id".to_string(), json!(client_id));
         }
@@ -1060,13 +1052,12 @@ async fn route_reply_gated(
             Some(v) => py_str(v),
             None => "?".to_string(),
         };
-        // A ROUTING NAME THE VERB ALSO TAKES IS LOST (owner, 2026-10-11). `title`,
+        // A ROUTING NAME THE VERB ALSO TAKES IS LOST. `title`,
         // `timeout`, `reply_to`, … are this call's own fields — lifted out, never
         // sent to the target. A verb that documents an argument of the same name can
-        // never receive it from a model call (python, measured: a knowledge store's
-        // `create(title)` failed on every call, the model retried 8 times and blamed
-        // the store). The target's `docs` names the verb's arguments; a clash refuses
-        // the call, loud.
+        // never receive it from a model call (a store's `create(title)` would fail on
+        // every call, and the model would blame the store). The target's `docs` names
+        // the verb's arguments; a clash refuses the call, loud.
         if let Some(vt) = payload.get("type").and_then(Value::as_str) {
             let used: Vec<&str> = crate::tool_parse::grammar::ROUTING
                 .iter()
@@ -1101,7 +1092,7 @@ async fn route_reply_gated(
             }
         }
 
-        // THE `bytes` ARGUMENT IS RAW BYTES, NOT A JSON STRING (A13.19).
+        // THE `bytes` ARGUMENT IS RAW BYTES, NOT A JSON STRING.
         // Python's parser returns `raw.encode("utf-8")` for the one argument
         // named `bytes`, so the value that reaches a handler is TYPED — which
         // is why `file_bridge.write_stream` can refuse `bytes: "abc"` from a
@@ -1129,15 +1120,14 @@ async fn route_reply_gated(
             item = item.with_binary_key("bytes", doc);
         }
         // EVERY dispatched call carries the layer's deadline. The KERNEL
-        // defaults nothing, so a call to a handler that never returns used to
-        // hang the whole batch forever here — no reply, no timeout block, the
-        // chain simply stopped (python has always set it; rust/swift did not
-        // until 2026-09-02). Set BEFORE the model's own `timeout` arg, which
+        // defaults nothing, so without it a call to a handler that never returns
+        // hangs the whole batch forever here — no reply, no timeout block, the
+        // chain simply stops. Set BEFORE the model's own `timeout` arg, which
         // overrides it; the kernel validates that value, so a bad one settles
         // as a refusal the model can read.
         item = item.with_timeout(send_timeout);
         // The model may NAME the execution (dedup/join across retries) and may
-        // bound its own call. FORWARDED RAW (C38) — the kernel is what
+        // bound its own call. FORWARDED RAW — the kernel is what
         // validates all three and produces python's exact refusals; this used
         // to coerce with `.and_then(Value::as_str/as_f64/as_u64)`, which
         // silently DROPPED anything that did not already match the expected
@@ -1221,18 +1211,17 @@ async fn route_reply_gated(
     //
     // PID first, then target+verb. Target+verb alone is NOT unique: with two
     // calls in flight to one agent `[reply to kernel_state set]` is unmatchable
-    // — measured 2026-08-07 (opus re-issued both deletes, then theorised
-    // "duplicate delivery" about its own retries) and again 2026-08-20 (the
-    // model: "the reply queue is running ahead of me", then re-polled forever).
+    // — the model re-issues calls and blames "duplicate delivery" or a reply
+    // queue "running ahead", then re-polls forever.
     // The PID is the same id `ps`/`cancel` use, so a reply names a row the
     // model can act on.
     let meta = crate::helpers::agent_meta(&self_id, &kernel);
     let cap = crate::context::inline_cap(&meta, model_window);
-    // THE CAP IS PER MESSAGE, not per reply (owner, 2026-10-07): every reply of a
+    // THE CAP IS PER MESSAGE, not per reply: every reply of a
     // batch lands in ONE message to its addressee, so the replies share the cap.
-    // A reply that would push its batch past it is held like an oversized one.
-    // Measured: two greps, each under the 434-token cap, arrived as one 967-token
-    // message at a 4.5k window — the next turn could not fit it (`too_small`).
+    // A reply that would push its batch past it is held like an oversized one:
+    // two replies each under the cap can together overflow a small window
+    // (`too_small`).
     let mut used: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let blocks: Vec<Block> = units
         .into_iter()
@@ -1252,7 +1241,7 @@ async fn route_reply_gated(
                         crate::tool_parse::render_reply(pointed.as_ref().unwrap_or(&shown));
                     // Only docs bodies are cut later, so only they carry the notice, and
                     // are HELD under their pid for the model's own `grep`. A reflect is
-                    // MUTABLE state and stays whole (owner, 2026-10-06); a newer
+                    // MUTABLE state and stays whole; a newer
                     // reflect of the same agent supersedes it (dedupe).
                     let docs_body = u.verb == "docs" && shown.get("of").is_some();
                     if let (true, Some(p), Some(verb)) = (
@@ -1267,7 +1256,7 @@ async fn route_reply_gated(
                     // needs to be able to SEE it, not be forced to swallow it
                     // whole as its next turn. Anything over the inline cap is
                     // held in RAM under its pid and replaced by its digest + its
-                    // ORIGIN line. SYNC OR ASYNC ALIKE (decided 2026-09-26): a
+                    // ORIGIN line. SYNC OR ASYNC ALIKE: a
                     // body is never persisted; under the cap it is inline.
                     if let Some(p) = out.pid {
                         let over = so_far
@@ -1316,16 +1305,14 @@ async fn route_reply_gated(
     // EVERY CALL-LESS TURN IS REMINDED — no streak, no cap (python `_route_reply`:
     // "No streak, no cap: both exits are above this branch and both already
     // returned"). The two honest ends are ABOVE this branch and both return:
-    // `done` finishes and `await` waits. A bound here was rust-only, and what it
-    // bounded was the reminder rather than the work: on the 25th silent turn the
-    // chain was dropped in silence, which is the exact failure the reminder exists
-    // to prevent.
+    // `done` finishes and `await` waits. A bound here would bound the reminder
+    // rather than the work: past it the chain would be dropped in silence, which
+    // is the exact failure the reminder exists to prevent.
     //
     // THE GATE IS `not calls and not units`, not `no blocks`: a turn whose calls
-    // all carried `reply_to:null` dispatched real work and is owed no reply, and
-    // rust nudged it anyway until 2026-09-02 — telling the model "your turn emitted
-    // no <call> element" about a turn that did, and then handing that turn's
-    // text to `send_to` on top.
+    // all carried `reply_to:null` dispatched real work and is owed no reply;
+    // nudging it would tell the model "your turn emitted no <call> element" about
+    // a turn that did, and hand that turn's text to `send_to` on top.
     //
     // An inquiry turn was the OTHER legitimate silent end (emit + stop; the human's
     // answer resumes the chain) — nudging it would stomp the wait.
@@ -1338,17 +1325,13 @@ async fn route_reply_gated(
     if any_calls {
         silent().lock().expect("silent poisoned").remove(&chain);
     }
-    // EVERY CALL-LESS TURN IS NUDGED, chain or not (user, 2026-09-09: "all is
-    // tool calls"). This used to fire only when the incoming text was itself a
-    // reply or a nudge, so a FIRST turn of pure prose from a person ended the
-    // work silently — the model had decided on a call, written it in thought,
-    // and never emitted it.
+    // EVERY CALL-LESS TURN IS NUDGED, chain or not, a FIRST turn of pure prose
+    // from a person included — otherwise a model that decided on a call, wrote it
+    // in thought, and never emitted it ends the work silently.
     let _ = &incoming;
     let chained = true;
-    // AN INQUIRY IS A CALL NOW, so there is no silent-turn exemption: a turn that
-    // consults someone DISPATCHES and is never silent. This used to scan the
-    // model's own prose for the old `{"type":"question"}` line — a text convention
-    // had to recognise, with the human living outside it entirely.
+    // AN INQUIRY IS A CALL, so there is no silent-turn exemption: a turn that
+    // consults someone DISPATCHES and is never silent.
     let nudging = !any_calls && !any_blocks && chained;
     // Only broken calls: their reports are the next turn — unless this chain has
     // now been silent MAX_SILENT_TURNS in a row, and gives up.
@@ -1412,8 +1395,8 @@ async fn route_reply_gated(
             .get(self_id.as_str())
             .map_or(0, HashSet::len) as u64;
         let pending = inflight_count(self_id.as_str()) + queued + running + owed;
-        // TODO (owner, 2026-10-05) — STALL DETECTION. A chain can stop with no error: calls
-        // dispatched, then nothing (subai_graph:rust, 2026-09-03 and 2026-10-05). Three shapes:
+        // TODO — STALL DETECTION. A chain can stop with no error: calls
+        // dispatched, then nothing. Three shapes:
         // (1) a call never settles (no timeout by default, its task stays in `ps`); (2) every
         // call settled but the reply batch never reached this agent's conversation; (3) the
         // reply landed but no turn started. This agent KNOWS it is awaiting `pending` work:
@@ -1442,7 +1425,7 @@ async fn route_reply_gated(
         // TRY AGAIN — and a DEAD turn (only thinking, discarded unstored) is the
         // same silence, rerolled the same way.
         //
-        // BOUNDED (owner, 2026-09-30): MAX_SILENT_TURNS in a row and the chain
+        // BOUNDED: MAX_SILENT_TURNS in a row and the chain
         // GIVES UP instead of reminding again — the caller is told, loudly, that
         // the model could not answer. A person sees it in their view; a parent
         // that asked for the result by `send_to` gets it as a turn; a clock's tick
@@ -1515,17 +1498,14 @@ async fn silent_turn(
 /// tagged `[reply to <pid> · <target> <verb>]` — with ` · N of M in batch <token>`
 /// composed INSIDE that tag when the destination is owed more than one.
 ///
-/// INSIDE, not a trailing line. The stamp rode on its own `[N of M in batch tok]`
-/// line after the body until 2026-09-02, which is neither what the shared prompt
-/// teaches nor what python's history trimmers can read (`_REPLY_TAG` /
-/// `_BLOCK_SPLIT` match the tag at the START of a block) — so a rust transcript
-/// looked untrimmable to python and a cross-runtime byte-diff failed on every
-/// multi-call turn.
+/// INSIDE, not a trailing line: that is what the shared prompt teaches and what
+/// python's history trimmers can read (`_REPLY_TAG` / `_BLOCK_SPLIT` match the
+/// tag at the START of a block), so transcripts trim and byte-diff alike across
+/// runtimes.
 ///
 /// The stamp is for CORRELATION and COMPLETENESS, not "the rest are still in
 /// flight" — the batch arrives whole. A model that made 2 calls and got 1 back
-/// could not tell "still running" from "answered the wrong one"; that killed
-/// three runs (opus 08-07, the model 08-20, the model 08-24).
+/// cannot tell "still running" from "answered the wrong one".
 async fn deliver_grouped(
     kernel: &Arc<Kernel>,
     self_id: &str,

@@ -4,8 +4,8 @@ import { Kernel } from "../src/kernel/kernel.ts";
 import { Agent } from "../src/kernel/agent.ts";
 import type { Payload } from "../src/kernel/json.ts";
 
-// `delete_lock` on a PAGE agent (owner, 2026-09-30: the canvas background lives on
-// this kernel with `delete_lock: true`). This kernel has no `delete_agent` verb —
+// `delete_lock` on a PAGE agent (e.g. a canvas background lives on this kernel
+// with `delete_lock: true`). This kernel has no `delete_agent` verb —
 // tree CRUD is the host root's — so `remove` is where the page deletes, and where
 // the lock is enforced exactly as the host kernels' `delete_agent` enforces it.
 

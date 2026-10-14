@@ -10,7 +10,7 @@
 // visible divergence, not a cosmetic one.
 //
 // Lives beside `PyFormat.swift` — this module is where the shared
-// python-behaviour helpers live (D1(b)), and every bundle already depends on it.
+// python-behaviour helpers live, and every bundle already depends on it.
 //
 // `sink` is the test seam the twins use: with one installed the line goes there
 // instead of fd 2, so a suite can assert the text a failure printed.

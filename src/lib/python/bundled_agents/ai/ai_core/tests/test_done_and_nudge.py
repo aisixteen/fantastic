@@ -1,10 +1,8 @@
 """The end-of-chain contract: DONE is an explicit tool call; silence is nudged.
 
-Reinstated 2026-09-01 (the no-nudge experiment ended when `repo_map:swift`
-twice stopped mid-task with a partial artifact): a CHAIN turn that emits no
+A CHAIN turn that emits no
 call gets ONE runtime reminder; a `{"name":"done"}` call ends the chain
-silently. EVERY turn is held to it — a first turn from a person too (2026-09-09:
-"all is tool calls") — so prose with no call is nudged until `done`."""
+silently. EVERY turn is held to it — a first turn from a person too — so prose with no call is nudged until `done`."""
 
 from _testkit import memory_meta
 import asyncio
@@ -62,9 +60,9 @@ async def _settle(fp, want, timeout=5.0):
 async def test_silent_chain_turns_are_nudged_until_a_call_or_done(
     seeded_kernel, fake_providers
 ):
-    """The model is QUERIED UNTIL IT CALLS. A second silent turn used to end the
-    chain silently (measured 2026-09-01, E30 subai: two prose turns and the run
-    read as finished with the task untouched)."""
+    """The model is QUERIED UNTIL IT CALLS. A second silent turn never ends the
+    chain silently (two prose turns would read as finished with the task
+    untouched)."""
     fp = _Script(
         [
             _call({"type": "reflect"}),  # turn 1: a real call → chain
@@ -222,8 +220,8 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
 async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel, fake_providers):
     """A turn that is ONLY thinking did not answer: it is never stored and never
     counts as completed — it is rerolled by the no-call reminder, told why
-    (measured on vLLM 2026-09-30: an 8-token thinking budget, then a clean
-    `stop` with no answer; failing it outright ended a 30-pass chain)."""
+    (a tiny thinking budget, then a clean `stop` with no answer; failing it
+    outright would end a long chain)."""
     fp = _Script([f"{core.THINK_OPEN}hmm{core.THINK_CLOSE}\n\n", DONE])
     aid = "dead_think"
     seeded_kernel.create(
@@ -380,13 +378,13 @@ async def test_the_done_status_carries_the_token_usage(seeded_kernel, fake_provi
 
 
 @pytest.mark.skip(
-    reason="DEFERRED (owner, 2026-10-12: 'not yet'): resume-after-restart is parked "
+    reason="DEFERRED: resume-after-restart is parked "
     "unwired — during a drain the kernel refuses on_cancel's store writes"
 )
 async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
     seeded_kernel, fake_providers, monkeypatch
 ):
-    """RESUME AFTER RESTART (owner, 2026-10-12): the host stops (the kernel drains)
+    """RESUME AFTER RESTART: the host stops (the kernel drains)
     while a turn is generating — its cut row is marked `interrupted` with the
     client it streamed to; the next boot runs it again ONCE, as a
     `[resumed after restart]` turn to that client. A cancel by anyone else, or a
@@ -449,7 +447,7 @@ async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
 async def test_the_thinking_is_kept_on_its_row_and_never_shown_to_the_model(
     seeded_kernel, fake_providers
 ):
-    """THINKING ON THE ROW (owner, 2026-10-12): a chat shows a generation's thinking
+    """THINKING ON THE ROW: a chat shows a generation's thinking
     collapsed under its answer, after a reload too. The assistant row keeps it as
     `thinking` (a call written there stays undispatched); the model's next view
     carries only the answer; `history` flags the row `has_thinking`."""

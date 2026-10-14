@@ -19,126 +19,6 @@
 # send_id / serial / corr / ws-client ids.
 
 version: 10
-#
-# v10 (2026-10-02) — TWO NEW RULES, both owner-approved on the same day, and no
-# existing rule widened:
-#   N24 — the memory store's reflect `rows` counted WITHOUT the kernel's `flush`
-#         bookkeeping rows (their number is the flusher's debounce against the
-#         runtime's speed: python 334, rust/swift 333). It needs a family change:
-#         `store.py` takes a census of the store on each side of that reflect.
-#   N25 — `foundation_models_backend` dropped from the RUST/SWIFT side of a
-#         catalog (python has no FM, owner 2026-10-02), including the PAGED
-#         catalog walks, whose page boundaries the one extra name shifts.
-#
-# v9 (2026-10-02) — ONE NEW RULE, N23: the AI kind the families drive is now
-# `vllm_backend` (anthropic_backend, nvidia_nim_backend and llamacpp_backend were
-# deleted 2026-10-01), and its reflect carries the endpoint's KV session table,
-# whose conversation ids are digests over a prompt prefix that embeds a minted
-# guid and an OS-chosen port. Measured on the first two python captures
-# (`vllm_20261002`): every request body of every AI family differed in that one
-# token, because the agent's own reflect is rendered into its system prompt.
-# N4 REACHES FURTHER, for the same capture: with compaction now firing (the old
-# stub's `input_tokens: 1` had pinned the calibration at 0.0), the two python
-# runs' row ids came out 3 apart, and two places were sensitive to the absolute
-# value — the kernel's own documentation examples (`msg 412`,
-# `<ids><item>12</item><item>15</item></ids>`), renamed as if they were ids and so
-# colliding with a real row 412 on one run only, and a flush row's `covers`
-# quoted as embedded json, which N4 never renamed there.
-#
-# v8 (2026-10-01) — the parity leftovers the owner decided (`tmp/todo.md` (a)/(c)).
-# Three NEW rules, each an order that is not a contract: N20 (reply vs event on
-# one socket), N21 (a peer turn's self-reflect vs the reply delivered to the
-# same agent), N22 (stub requests paired per agent). Four rules REACH FURTHER
-# into what they own: N2 (the runtime as JSON inside text; a head-only stdout's
-# count off by exactly the name length), N4 (the escaped ↑ arrow), N10
-# (`<RUNTIME>` is of no fixed width; a token budget compared within ONE token),
-# N12 (a rewritten file's read `origin` repeats its size). Header order and
-# presence are STILL never normalised: the library header differences went to
-# residuals.yaml v6 as owner-accepted residuals, not rules.
-#
-# v7 (2026-09-22) — NO NEW RULE. Two existing rules reach further into things
-# they already own, one of them by being NARROWED the same way N12 was in v6,
-# and the biggest single source of diff lines was taken out of the SCENARIO
-# rather than out of the comparison.
-#
-#   NOT A RULE, and the most important change: `ai_paths` no longer compacts by
-#   accident. The family ran 74 model turns through one agent on `CTX_WINDOW`,
-#   and the turn that crossed the 10000-token budget crossed it by ONE BYTE on
-#   python (`runtime=python` against `runtime=swift`), so python compacted at
-#   request 34 and the ports at 35 — ~1100 diff lines, on both ports, from one
-#   character. `spec.AI_WINDOW` gives the family its own 30000-token window,
-#   which its own growth never reaches (measured peak 12548 tokens), and a
-#   scripted `context_fill` turn forces the ONE compaction it records, landing
-#   ~2800 tokens past the budget with ~17000 tokens of room before it. Same
-#   scenario on all three runtimes. Compaction itself is not this family's
-#   subject and is untouched where it IS the subject: `ctx` drives all four
-#   strategies deliberately, at `CTX_WINDOW` and at `CTX_WINDOW_TINY`.
-#
-#   N12's `__tag_shapes__` — the `messages.xml` half — was a SORTED LIST, and
-#   `flatten` indexes a list POSITIONALLY. Exactly the defect v6 fixed in
-#   `__distinct_shapes__`, in the other reduction, and with the same cost: one
-#   tag shape present on one side only shifted every index after it (measured
-#   2026-09-21b, swift `store/store_files_final/disk_raw/messages.xml`: 28 lines
-#   for 2 one-sided shapes). It is now a SET KEYED BY THE SHAPE — one line per
-#   one-sided shape, naming it, plus the key-set line. Nothing became invisible.
-#
-#   N10 reaches two more counts, both of them counts over a text that IS
-#   compared, in full, somewhere the diff does read:
-#     * the `ctx` request CENSUS (`bytes`, `system_chars`). The body they count
-#       is recorded whole as `ctx/stub/req_<n>.bin` and compared there. What
-#       makes the NUMBERS incomparable is already declared so: the `runtime=`
-#       word (N2) and the id DIGIT WIDTH (N4 — python executes ~379
-#       `ledger.json` writes against the ports' ~102, so its row ids reach four
-#       digits and a body quoting 18 of them is 18 bytes longer). A ZERO is kept
-#       as a zero, so "no system block at all" cannot hide in "a shorter one".
-#     * the `context_recall` header's two estimates — `the digests use <N>` (a
-#       token count over the digest block printed under it, whose ids N4 has
-#       just renamed and whose `<n>B` N10 has just dropped) and `your budget for
-#       the body is <N> tokens` (window − reserve − the system block's own size,
-#       and the system block carries `<RUNTIME>`). The INPUTS are compared
-#       exactly, and so is the same budget where it is recorded as a FIELD.
-#
-#   Also in this version, and outside `rules.yaml` because they are decisions and
-#   not normalisations: R-D4-10 widened from `bundle_verbs/**` to every family
-#   (the anchor, not the glob, is what keeps it to the request header NAME slot),
-#   and three new residuals — R-N2-1 (the `runtime=` word in a `budget` /
-#   `stdout_bytes` COUNT slot), R-D13-2 (the lone surrogate `"\udcff"`: one
-#   ledger census bucket, 37 vs 36 errored) and R-D16-3 (`bytes` present-and-null
-#   against absent in a read outcome; raw bytes ride out of band).
-#
-# v6 (2026-09-21) — N18 and N19, the owner's two rulings on the port captures of
-# the same day. One existing rule changed, and it was NARROWED, not widened:
-#   N12's `distinct_shapes` was a SORTED LIST, and `flatten` indexes a list
-#   POSITIONALLY, so one shape present on one side only shifted every index after
-#   it and the file hit the 200-line cap. It is now a SET KEYED BY THE SHAPE, so
-#   a one-sided shape is exactly one line and it NAMES the shape. Measured on
-#   `store/store_files_final/disk_raw/ledger.json`: 131 shapes (python) against
-#   132 (rust) and 133 (swift), of which only 2+3 and 1+3 were actually
-#   one-sided — 201 diff lines for 5 real ones. Nothing became invisible: a
-#   shape on one side only is still `<absent>` on the other.
-#
-# v5 (2026-09-21) — N17, the owner's ruling on PTY `output` chunking. It is the
-# ONLY change: no existing rule was widened.
-#
-# v4 (2026-09-20) — every change below was MEASURED on the python self-diff (two
-# captures of the same immutable tree), which went 1855 → 0:
-#   N8  NARROWED. The bare `:(\d{4,5})` form turned `"max_tokens":4096` into
-#       `<PORT:?>` in every prompt the capture recorded — a rule wide enough to
-#       eat an item. A port in text is now only recognised after a HOST or after
-#       the word `port`.
-#   N3/N4/N5/N6/N7 reach INTO TEXT and into an EMBEDDED json document, where the
-#       key-based pass cannot see: `guid=<hex32>` in a system prompt (664 of the
-#       1855 lines), `"send_id":"<b64url11>"` and `"ts":<float>` inside a ws frame's
-#       `text`, `<ids>`/`<view_ids>` blocks, `pid=<n>`, and the same documents
-#       quoted a second time inside a recorded request body.
-#   N10 says which counts are not comparable and why (a count over a text
-#       carrying a renamed id, a timestamp or an OS pid).
-#   N11 is IMPLEMENTED for the frame stream, as (mark, sock) — it was documented
-#       in v3 and the diff compared the interleaving anyway.
-#   N12 covers every field that is a number over, or a digest of, a rewritten
-#       file, and `__distinct_shapes__` is SORTED.
-#   N16 is new: the digest of a persisted file whose bytes embed a minted guid
-#       or an OS-chosen port.
 
 rules:
   - id: N1
@@ -169,18 +49,16 @@ rules:
       - $.runtime
       - cli intro_booting runtime token
       # …and `runtime=<name>` in TEXT. The root reflect is rendered into every
-      # system prompt, so the token sat in all 453 files of the ctx family and in
-      # every recorded request body (measured 2026-09-20).
+      # system prompt, so the token sits in every recorded request body.
       - 'runtime=(python|rust|swift) as a whole token'
-      # (2026-10-01) …and the same field as JSON INSIDE TEXT, quoted once or
+      # …and the same field as JSON INSIDE TEXT, quoted once or
       # more: `"runtime": "python"` in a cli stdout, `\"runtime\":\"python\"`
-      # in a recorded REST body (9 + 2 lines a port, measured 2026-10-01).
+      # in a recorded REST body.
       - '"runtime": "(python|rust|swift)" inside text, any quoting depth'
-    # (2026-10-01) A `stdout_bytes` whose stdout is recorded only as a HEAD (so
+    # A `stdout_bytes` whose stdout is recorded only as a HEAD (so
     # N10 cannot see the text it counts) is compared PAIRWISE and forgiven when it
     # differs by EXACTLY len(python name) − len(port name): the reflect it counts
-    # prints its runtime once. Measured: `setup.reflect.stdout_bytes` 3120 python
-    # vs 3118 rust (−2) and 3119 swift (−1). Any other difference is a line.
+    # prints its runtime once. Any other difference is a line.
     name_length_delta: stdout_bytes, exact
     replacement: <RUNTIME>
     must_not_hide:
@@ -196,8 +74,7 @@ rules:
     shape: '^[0-9a-f]{32}$'
     #: …and in TEXT, as `guid=<hex32>` / `"guid": "<hex32>"`. The root reflect is
     #: quoted verbatim into every system prompt, into cli stdout and into HTTP
-    #: bodies recorded as strings, where the key-based pass never sees it. 664 of
-    #: the 1855 lines of the v3 self-diff were this one token.
+    #: bodies recorded as strings, where the key-based pass never sees it.
     #: …and as the kernel half of a qualified caller, `<hex32>|<agent>` — every
     #: bridge call names its sender that way; the agent half stays compared.
     text_forms: ['guid[:=]\s*"?[0-9a-f]{32}', '[0-9a-f]{32}(?=\|)']
@@ -221,8 +98,7 @@ rules:
     only_when: int or digit-string; never an agent-id string
     text_anchors:
       - '\[reply to (\d+)'
-      # the ↑ arrow ESCAPED, as a frame's raw `text` carries it (`\u2191118`;
-      # 6 lines a port, 2026-10-01)
+      # the ↑ arrow ESCAPED, as a frame's raw `text` carries it (`\u2191118`)
       - '\\+u2191(\d+)'
       - '↑(\d+)'
       - 'in batch (\d+)'
@@ -233,7 +109,7 @@ rules:
       - '\[recall (\d+) ·'
       - 'msg (\d+) · re (\d+)'
       - 'joined execution (\d+)'
-      # the dedup note of a settled reply (measured 2026-09-30, python self-diff)
+      # the dedup note of a settled reply
       - 'reply in row (\d+)'
       - '^(\d+) · '
       # The same digest line reached as the RAW request body the stub recorded,
@@ -246,7 +122,7 @@ rules:
       # and `<options><item>true` carry values the HARNESS chose.
       - '<(ids|view_ids|refs|expand)>(<item>N</item>)+</\1>'
       # …and a ledger flush row's `covers`, quoted as embedded json by the memory
-      # store's state event; singly or doubly quoted (2026-10-02).
+      # store's state event; singly or doubly quoted.
       - '\\?"(expand|ids|refs|view_ids|covers)\\?": [N, …]'
       # A row quoted as json inside a prompt (the fold prompt does this), reached
       # both singly and doubly quoted.
@@ -392,7 +268,7 @@ rules:
       it is compared exactly.
     keys: [bytes, size, body_len, content-length, __bytes_len__]
     unverifiable: context_status estimates whose id-digit signatures differ → flagged count-unverifiable
-    #: THE THREE PLACES A COUNT IS DROPPED, each measured, each with the text it
+    #: THE PLACES A COUNT IS DROPPED, each with the text it
     #: counts compared in full somewhere the diff does read:
     #:   1. a count (`len`/`body_len`/`bytes_len`/`size`/`length`) beside the
     #:      text it measures, where that text carries `<ID#n>`, `<TS:float|int>`
@@ -408,52 +284,44 @@ rules:
     #:      (`<id> · <role> · "<title>" · <n>B · ↑<parent>`) — the count is over
     #:      the row's content, which is not in the line. Fires only on a line the
     #:      id renaming already touched.
-    #:   4. (v7) the `ctx` request CENSUS — `bytes` and `system_chars` of an
+    #:   4. the `ctx` request CENSUS — `bytes` and `system_chars` of an
     #:      entry carrying `{n, bytes, system_chars, messages, keys}`. Case 2's
     #:      argument, in the other recorder: the body is `ctx/stub/req_<n>.bin`
-    #:      beside it and is compared whole. Measured: `system_chars` 23214 vs
-    #:      23213 (the `runtime=` word, N2) and `bytes` 2196 vs 2178 (the id
-    #:      digit width, N4 — python runs ~379 `ledger.json` writes against the
-    #:      ports' ~102, so its ids are four digits where theirs are three).
+    #:      beside it and is compared whole. The numbers differ by the
+    #:      `runtime=` word (N2) and the id digit width (N4).
     #:      A ZERO IS KEPT AS ZERO: a request with NO system block at all is a
     #:      different thing from one with a shorter one, and stays a diff line.
-    #:   5. (v7) the `context_recall` header's two estimates, in TEXT:
+    #:   5. the `context_recall` header's two estimates, in TEXT:
     #:      `the digests use <N>` (a token count over the digest block printed
     #:      directly under it — the same `<n>B` lines case 3 has already
-    #:      dropped; measured 2141 vs 2137) and `your budget for the body is
+    #:      dropped) and `your budget for the body is
     #:      <N> tokens` (window − reserve − the system block's own token count,
-    #:      and the system block carries `<RUNTIME>`; measured 3869 vs 3870).
+    #:      and the system block carries `<RUNTIME>`).
     #:      The window and the reserve are compared exactly in `meta.json` and
     #:      in the agent record, and the SAME budget recorded as a FIELD
     #:      (`$.rows[n].budget`) is left alone — it is a diff line, owned by
     #:      residual R-N2-1.
-    #:   6. (2026-09-30) a ledger EXECUTION's outcome `bytes` — the size of the
+    #:   6. a ledger EXECUTION's outcome `bytes` — the size of the
     #:      reply that settled it, a reply the family that made the call records
     #:      WHOLE in its own file and compares there. Case 2's argument again.
-    #:      Measured on the python self-diff: 450 vs 452, 19970 vs 19972 in
-    #:      `tree/kernel_ledger_after.json`. A zero stays a zero; `status` and
+    #:      A zero stays a zero; `status` and
     #:      `attempts` beside it stay exact.
-    #:   7. (2026-09-30) a memory-store ROW's `bytes` where its `head` carries a
+    #:   7. a memory-store ROW's `bytes` where its `head` carries a
     #:      renamed id — the head is the content cut at a fixed width, so the
     #:      content carries the id too (case 1 with the text truncated). The
     #:      HEAD is then compared on the prefix both sides show, and only when
     #:      both raw heads have the same length (the kernel's cap): the cut
-    #:      lands where the raw digit widths put it. Measured on the python
-    #:      self-diff: `store/s4/history_final.json` 127 vs 126, `…</v` vs
-    #:      `…</ve`.
-    #:   8. (2026-10-01) `<RUNTIME>` joins the placeholders of no fixed width
+    #:      lands where the raw digit widths put it.
+    #:   8. `<RUNTIME>` joins the placeholders of no fixed width
     #:      (case 1): the name it stands for is 4, 5 or 6 characters. And
-    #:      `stdout` joins the texts, `stdout_bytes` the counts. Measured: a REST
-    #:      reflect body 4645 python vs 4643 rust / 4644 swift with its
-    #:      `content-length`, cli `stdout_bytes` 2996 vs 2994.
-    #:   9. (2026-10-01) A token BUDGET — `window − reserve − the system block's
+    #:      `stdout` joins the texts, `stdout_bytes` the counts.
+    #:   9. A token BUDGET — `window − reserve − the system block's
     #:      tokens`, and the system block names the runtime — is compared
     #:      PAIRWISE with a tolerance of ONE token, never blanked: as a field
     #:      (`budget` beside `why`, a recall reply or a view row) and as text
     #:      (`<budget>N</budget>`, `"budget": N`, in a prompt or a row's content;
-    #:      both texts must carry the same number of budgets). Measured: 3158 vs
-    #:      3159 (rust), 3160 vs 3161 (swift), 22301 vs 22302 in a view row. A
-    #:      port two tokens off is a line.
+    #:      both texts must carry the same number of budgets). A port two tokens
+    #:      off is a line.
     self_check: diff.py rulecheck — 6 cases (census both ways, recall header
       both ways), plus 7 for cases 6 and 7 (the size forgiven; status, a zero,
       a differing prefix, a different raw width and an id-free head still lines),
@@ -501,11 +369,11 @@ rules:
       because `ledger.json` is rewritten DURING the snapshot that reads it (C47)
       and a byte compare of a moving file measures the clock.
     exact: [agent.yaml, readme.md, 'docs/**']
-    # (2026-10-01) A rewritten file's read REPEATS its moving size in words: the
+    # A rewritten file's read REPEATS its moving size in words: the
     # `origin` line `bytes 0-193 of 193 — read_stream {…, offset: 0, length: 193}`.
     # Its numbers are blanked the way the record's own `size`/`length` are; the
-    # words, the path and the verb stay compared (measured: `schedules.yaml` 193
-    # vs 195 — a float `next_run` printed to a different digit count).
+    # words, the path and the verb stay compared (a float `next_run` can print to
+    # a different digit count).
     origin_numbers: blanked inside a REWRITTEN record only
     parsed_then_normalised: [schedules.yaml, lock.yaml, history lines]
     #: A record ABOUT one of the four keeps its path, its keys and its envelope,
@@ -519,16 +387,13 @@ rules:
     #: `ledger.json` is reduced to its SHAPE, and the distinct shapes are SORTED,
     #: not kept in first-appearance order: its rows are already declared
     #: unordered (N15), so an index into an arrival-ordered shape list is itself
-    #: a different document every run. Measured: 148 of the 1855 v3 self-diff
-    #: lines were that index shift, with the shape SETS identical.
+    #: a different document every run.
     distinct_shapes: sorted
     #: BOTH shape reductions are SETS KEYED BY THE SHAPE, never lists:
-    #: `__distinct_shapes__` for `ledger.json` (v6) and `__tag_shapes__` for
-    #: `messages.xml` (v7). `flatten` indexes a list POSITIONALLY, so one shape
-    #: present on one side only shifted every index after it — 201 lines for 5
-    #: real ones on the ledger, 28 lines for 2 real ones on the message log.
-    #: Keyed, a one-sided shape is exactly one line, it NAMES the shape, and the
-    #: key-set line beside it says the difference once more. Nothing is hidden:
+    #: `__distinct_shapes__` for `ledger.json` and `__tag_shapes__` for
+    #: `messages.xml`. `flatten` indexes a list POSITIONALLY, so in a list one
+    #: shape present on one side only would shift every index after it. Keyed, a
+    #: one-sided shape is exactly one line, it NAMES the shape, and the key-set line beside it says the difference once more. Nothing is hidden:
     #: a shape on one side only is still `<absent>` on the other.
     keyed_shape_sets: [__distinct_shapes__, __tag_shapes__]
     self_check: diff.py rulecheck — 2 cases (a reordered shape set, a one-sided
@@ -538,21 +403,7 @@ rules:
       - C45   # the readme bytes as written
       - C63   # a row shape only one runtime ever writes — named, not indexed
 
-  # N13 (swift_foundation_models) — DELETED 2026-09-21, and the id is not reused.
-  #
-  # It dropped `foundation_models_backend` from swift's bundle arrays and from
-  # the comma-joined catalog string the system prompt carries, because swift
-  # shipped a bundle with no python twin. The owner REMOVED the bundle from the
-  # swift kernel on 2026-09-21. Verified before deleting the rule: the swift tree
-  # carries 0 occurrences of `foundation_models`, and the 2026-09-21b acceptance
-  # capture of swift carries 0 occurrences of `foundation_models_backend` in any
-  # of its 2029 files — the catalogs are EQUAL, so there is nothing left to drop
-  # and a rule that fires on nothing is a rule that lies about what it hides.
-  # `residuals.yaml` R-C10-1, which recorded the same decision, went with it.
-  # C10 and C33 are now proved by the ordinary comparison: the bundle catalog and
-  # the paging envelope are compared whole, on both runtimes, with no exception.
-  # (2026-10-02: the bundle is back in rust AND swift and python has none, by the
-  # owner's decision — N25 below, a new id.)
+  # N13 — retired; the id is not reused.
 
   - id: N14
     name: harness_fields
@@ -815,7 +666,7 @@ rules:
       - C12   # a WRONG PARENT — `parent` renders the parent's CANONICAL ordinal,
               # derived from the parent's own content, so a re-parent is a line
 
-  # ── v8 (2026-10-01) — ORDER that is not a contract, decided by the owner ──
+  # ── ORDER that is not a contract ──
   # (`tmp/todo.md`, "parity leftovers (c)"): each rule names exactly the order it
   # frees and keeps every other order compared.
 
@@ -907,7 +758,7 @@ rules:
       - B1.12   # the reflect statics around the table
       - B1.23   # the reflect base and its ordered extras (`kv` is one) — key order and the list length stay compared
 
-  # ── v10 (2026-10-02) — owner-approved the same day ──
+  # ── store bookkeeping and catalog differences ──
 
   - id: N24
     name: memory_rows_without_flush
@@ -992,7 +843,7 @@ rules:
       - C8    # the paging keys (`bundles_next` only when non-null) — a port that pages wrongly is never re-paged
       - C17   # the cursor values, re-derived exactly as the port's own walk derived them
 
-  # ── v11 (2026-10-04) — owner decision A ──
+  # ── by-design catalog differences ──
 
   - id: N26
     name: apple_fm_catalog_entry

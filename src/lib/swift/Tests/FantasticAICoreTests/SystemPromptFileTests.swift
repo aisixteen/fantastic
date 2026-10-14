@@ -1,4 +1,4 @@
-// The system block's placeholders and its FILE (owner, 2026-10-08) — python
+// The system block's placeholders and its FILE — python
 // `ai_core/tests/test_system_prompt_file.py` and rust `tests_prompt_file.rs`, over
 // this harness.
 //

@@ -38,7 +38,7 @@ pub const HANDLER_MODULE: &str = "cli.tools";
 pub const README: &str = include_str!("readme.md");
 
 /// The CLI cheatsheet `fantastic --help` prints — python's `cli/help.md`, byte
-/// for byte (A14.1). It lives in THIS bundle because the CLI is what renders it:
+/// for byte. It lives in THIS bundle because the CLI is what renders it:
 /// file-backed, editable markdown, not a hardcoded string. The binary prints it
 /// `rstrip`ped plus one `\n`, exactly as python's `print(src.read_text().rstrip())`.
 pub const HELP: &str = include_str!("help.md");
@@ -156,7 +156,7 @@ fn write_type_error(v: &Value) -> BundleError {
 /// `text` without its C0/C1 control characters (and DEL), newline and tab kept —
 /// python's `_CONTROL`: what a terminal INTERPRETS instead of printing (an OSC
 /// title or clipboard write, a cursor move, a line erase). Agent and model text
-/// reaches this sink from callers it does not know (audit BV-11).
+/// reaches this sink from callers it does not know.
 fn terminal_safe(text: &str) -> String {
     text.chars()
         .filter(|&c| c == '\n' || c == '\t' || !c.is_control())

@@ -91,7 +91,7 @@ def _lock_or_exit(refusal: str) -> None:
     and is refused only when a live process holds it: `refusal` (formatted with
     the pid its file names) on stderr, exit 1. There is no pid pre-check: a lock
     file naming a pid that is alive but holds no flock (a reused pid) is stale,
-    and taken over (audit, owner 2026-10-03)."""
+    and taken over."""
     try:
         acquire_lock()
     except LockHeld as e:

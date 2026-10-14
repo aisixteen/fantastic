@@ -1,4 +1,4 @@
-// THE TABS OF ONE IDENTITY ARE ONE PRINCIPAL (owner, 2026-10-03): every tab of
+// THE TABS OF ONE IDENTITY ARE ONE PRINCIPAL: every tab of
 // every browser hydrates the one tree and says `hello` with ITS guid — there is
 // no per-tab guid. The host holds each tab's connection as one more live route
 // of that guid: its call to `<guid>|x` goes to every tab and settles with the

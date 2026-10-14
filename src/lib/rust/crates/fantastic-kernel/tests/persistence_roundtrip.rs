@@ -89,7 +89,7 @@ impl Bundle for FakeStore {
             return Ok(Some(json!({"deleted": true})));
         }
         if verb == "rename" {
-            // The C43 commit protocol's atomic op — a text-channel verb, no blob.
+            // The commit protocol's atomic op — a text-channel verb, no blob.
             let old_path = payload
                 .get("old_path")
                 .and_then(Value::as_str)
@@ -393,7 +393,7 @@ fn boot_tolerates_a_corrupt_child_record() {
     assert_eq!(kernel.agents.len(), 1, "only the root");
 }
 
-/// C14 (RP-09): the record writer's DIRTY SET SURVIVES a no-store flush. Python
+/// The record writer's DIRTY SET SURVIVES a no-store flush. Python
 /// returns BEFORE clearing the queues when nothing is wired, so everything
 /// created before a store exists lands the moment one does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -420,7 +420,7 @@ async fn records_created_before_the_store_persist_once_it_is_wired() {
     );
 }
 
-/// C42: `json.dumps(existing, indent=2)` bytes — 2-space indent, NO trailing
+/// `json.dumps(existing, indent=2)` bytes — 2-space indent, NO trailing
 /// newline, non-ASCII escaped as lowercase `\uXXXX` (surrogate pairs above the
 /// BMP), never raw UTF-8.
 #[tokio::test]
@@ -458,7 +458,7 @@ async fn persisted_record_bytes_are_python_yaml_dump() {
     );
 }
 
-/// C43: the merged bytes land at a `<af>.tmp.<8 hex>` sibling first, then a
+/// The merged bytes land at a `<af>.tmp.<8 hex>` sibling first, then a
 /// `rename` onto `agent.yaml` — never a direct truncating write onto the live
 /// name (a crash mid-write must never leave a torn or half-written record).
 #[tokio::test]
@@ -693,7 +693,7 @@ impl Bundle for ArcBundle {
 }
 
 /// A record write through the store copies NO readme beside it — a bundle's
-/// readme is served from the bundle (owner 2026-10-14), on create and on every
+/// readme is served from the bundle, on create and on every
 /// later write.
 #[tokio::test]
 async fn a_record_write_copies_no_readme() {
@@ -736,8 +736,8 @@ fn store_payloads(kernel: &Arc<Kernel>) -> Arc<std::sync::Mutex<Vec<Value>>> {
 /// python's `kernel_state` store calls are TEXT-channel dicts: a read is
 /// `{type: read_stream, path, offset}` with no `bytes` key, a write
 /// `{type: write_stream, path, bytes, truncate}` — the chunk at `bytes` IN PLACE.
-/// Rust used to send every store IO as a binary item: a read carried `bytes` and
-/// a write's `bytes` moved last.
+/// Never a binary item, which would give a read a `bytes` key and move a
+/// write's `bytes` last.
 #[tokio::test]
 async fn store_calls_have_python_shape() {
     let tmp = fresh_workdir();

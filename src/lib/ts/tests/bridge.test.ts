@@ -71,8 +71,8 @@ test("frame codec decodes STRICTLY and checks every length", () => {
   assert.throws(() => decodeFrame('{"a": "\\udcff"}'), /bad text frame: a lone surrogate/);
   assert.throws(() => decodeFrame('{"a": 1e400}'), /bad text frame: number 1e400 overflows a double/);
   // the int64 bounds are read off the token's DIGITS, so both ends are exact
-  // where a double cannot hold the value (what an int past 2^53 decodes TO is an
-  // open owner decision, so no decoded value is pinned here)
+  // where a double cannot hold the value (what an int past 2^53 decodes TO is
+  // left open, so no decoded value is pinned here)
   assert.doesNotThrow(() => decodeFrame('{"a": 9223372036854775807}'));
   assert.doesNotThrow(() => decodeFrame('{"a": -9223372036854775808}'));
   assert.throws(() => decodeFrame('{"a": 9223372036854775808}'), /^Error: bad text frame: integer 9223372036854775808 is outside int64/);
@@ -246,18 +246,13 @@ test("a pending call rejects when its socket drops", async () => {
   bridge.close();
 });
 
-// ─── #38: the wire id IS the execution id ───────────────────────────────────
+// ─── the wire id IS the execution id ────────────────────────────────────────
 
 test("two bridges mint DISJOINT correlator ids — a second tab must not collide", async () => {
-  // MEASURED 2026-08-27 against the real python kernel. The host puts a frame's
-  // `id` straight into the batch item, and an id is BOUND to its first target:
-  //
-  //   tab A  id "1" → alpha   completed
-  //   tab B  id "1" → beta    FAILED  bad_arg
-  //     "send: id '1' already names an execution on 'alpha', not 'beta'"
-  //
-  // Aimed at the same target it was worse than refused — it silently JOINED
-  // tab A's execution and returned tab A's result. A per-socket counter
+  // The host puts a frame's `id` straight into the batch item, and an id is
+  // BOUND to its first target: a second tab reusing id "1" on another target is
+  // refused (`id '1' already names an execution`), and on the same target it
+  // silently JOINS the first tab's execution. A per-socket counter
   // starting at 1 in every tab cannot be a global execution name.
   const idsFrom = async (): Promise<string> => {
     const fk = fakeFactory();
@@ -428,7 +423,7 @@ test("the operator forwards ungated; callHost and forwardBinary are host-bound s
 });
 
 // ─── the PEER role: the host calling THIS kernel's agents ───────────────────
-// (cross-kernel addressing, owner 2026-09-30: the host addresses a page agent as
+// (cross-kernel addressing: the host addresses a page agent as
 // `<page guid>|<agent>`; the page kernel answers `call` frames on the conn that
 // said `hello`). A call a bridge serves is judged as the LEG it arrived through:
 // this bridge is the kernel's own transport, not an agent, so it hands the call
@@ -500,7 +495,7 @@ test("a host call is answered by the page kernel as the operator; only its own a
   bridge.close();
 });
 
-// owner 2026-10-03: every emit and reply for an identity reaches all its tabs
+// every emit and reply for an identity reaches all its tabs
 test("a host emit frame is delivered to this kernel's agent; malformed or unknown-target ones are dropped", async () => {
   const fk = fakeFactory();
   const k = pageKernel("p1");

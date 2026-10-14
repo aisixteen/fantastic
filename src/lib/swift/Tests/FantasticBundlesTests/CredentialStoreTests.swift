@@ -1,5 +1,5 @@
 // credential_store: secrets by ref, bound to a host, read by whoever the call gate
-// admits (owner, 2026-10-01). Twin of python
+// admits. Twin of python
 // `security/credential_store/tests/test_credential_store.py`, plus the swift pins
 // (the file's bytes, the host normalization, the readme).
 //
@@ -239,7 +239,7 @@ struct CredentialStoreTests {
         #expect(nope.result["reason"] == "not_found", "\(nope.result.serialize())")
     }
 
-    /// AV-4 (audit 2026-10-03): a ref's host is its DECLARATION — written by
+    /// A ref's host is its DECLARATION — written by
     /// `update_agent` on the store's `refs`, the one path. `set` stores the value
     /// of a declared ref and takes no host: a writer naming one is refused, loud,
     /// with nothing stored and the declared host untouched, so a writer can never
@@ -310,7 +310,7 @@ struct CredentialStoreTests {
                 ]), "\(r.serialize())")
     }
 
-    /// AV-5 (audit 2026-10-03): `forget` drops the VALUE — from the backend, with
+    /// `forget` drops the VALUE — from the backend, with
     /// its field names — and nothing else. The declaration (host) is written and
     /// removed by `update_agent` alone, so a caller can never undeclare a ref
     /// nobody could then set again.
@@ -348,7 +348,7 @@ struct CredentialStoreTests {
         #expect(nope.result["reason"] == "not_found", "\(nope.result.serialize())")
     }
 
-    /// F5 (audit 2026-10-03): the credential file is opened ONCE (`O_NOFOLLOW`)
+    /// The credential file is opened ONCE (`O_NOFOLLOW`)
     /// and the open descriptor is what is judged and read. Python injects the
     /// swap between a path check and the read; swift has no hook for that race,
     /// so this pins the other half — a symlink in the leaf's place is refused
@@ -412,7 +412,7 @@ struct CredentialStoreTests {
 
     /// The file's bytes are python's — the kernel's YAML emitter with every map's
     /// keys sorted, each ref's entry `{fields, host}` (the host stored WITH the
-    /// value, audit S3) — either runtime reads the other's file.
+    /// value) — either runtime reads the other's file.
     @Test func theFileIsPythonsBytesKeysSorted() async throws {
         let f = await mk()
         defer { try? FileManager.default.removeItem(at: f.dir) }
@@ -512,7 +512,7 @@ struct CredentialStoreTests {
         let f = await mk(keychain: ring, ["backend": "keychain"])
         defer { try? FileManager.default.removeItem(at: f.dir) }
         await seed(f.k)
-        // the item holds the declared host WITH the value (audit S3)
+        // the item holds the declared host WITH the value
         #expect(
             ring.items == [
                 "fantastic\u{0}creds/openai/main":
@@ -680,7 +680,7 @@ struct CredentialStoreTests {
         #expect(ok.result["fields"] == ["api_key": .string(KEY)], "\(ok.result.serialize())")
     }
 
-    // ─── the host at rest (audit S3, 2026-10-03) ────────────────────────────
+    // ─── the host at rest ────────────────────────────
 
     /// Python `_at_rest`.
     private func atRest(_ ref: String, _ stored: String, _ declared: String) -> JSON {
@@ -694,7 +694,7 @@ struct CredentialStoreTests {
         ])
     }
 
-    /// S3: the value is stored WITH the host its declaration named at `set`. The
+    /// The value is stored WITH the host its declaration named at `set`. The
     /// operator re-declaring the ref with another host does not carry the value
     /// there: every `get` is refused, with or without a `host`, and nothing is read
     /// — until a writer sets the value again, which stores it under the new host.
@@ -752,7 +752,7 @@ struct CredentialStoreTests {
         #expect(!out.asJSON.serialize().contains(KEY))
     }
 
-    /// S3, no back-compat: a value at rest that carries no host — the old
+    /// No back-compat: a value at rest that carries no host — a bare
     /// `{field: value}` shape, or a hand-written entry — is refused, nothing read.
     @Test(arguments: ["file", "keychain"])
     func aStoredValueWithoutAHostIsRefused(backend: String) async throws {

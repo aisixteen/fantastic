@@ -4,7 +4,7 @@ Before the final question, a fold is planted from above whose BODY states the wr
 value; its members hold the right one. Scored: the answer is the members' value, and
 the model descended (grep/pull on that fold) to get it.
 
-PRE-SEEDED (owner, 2026-10-07): the first instruction and its reads are PLANTED — each read
+PRE-SEEDED: the first instruction and its reads are PLANTED — each read
 call and its reply inline, then the model's `done` — instead of eight live turns.
 """
 from __future__ import annotations
@@ -60,15 +60,15 @@ async def main():
                             f"filler_1.txt was read; its checksum line said >> checksum: {wrong}.", False,
                             id=root.ctx.mint_id())  # a planted fold is minted by the store like any row
         await inject_row(core, root, aid, planted)
-        # THE ROWS ARE THE ONLY TRUTH: with the file still on disk, re-reading it was an
-        # honest check that bypassed the fold (rust, 2026-10-13) — gone, only descent
+        # THE ROWS ARE THE ONLY TRUTH: with the file still on disk, re-reading it is an
+        # honest check that bypasses the fold — gone, only descent
         # into the fold's members can contradict its summary.
         Path("filler_1.txt").unlink()
         final = (f"FINAL: what is the checksum in `filler_1.txt`? Its read is folded — the fold summary may be stale; "
                  f"verify against the actual row before answering. Write `final.md` through `notes` with "
                  f"`checksum: <value>`. Then {DONE}.")
         a2 = await run_arm(root, core, BK, FB, aid, strategy, extra, final, "final.md")
-        # THE PLANTED FOLD OR A FOLD AROUND IT (owner, 2026-10-07): the startup rebuild
+        # THE PLANTED FOLD OR A FOLD AROUND IT: the startup rebuild
         # folds the planted past, so the planted fold may sit inside a fold of its own
         # making — descending into that one reaches the same rows.
         refs = {m["id"]: m.get("refs") or [] for m in a2["msgs"] if m.get("kind") == "fold"}
@@ -79,8 +79,7 @@ async def main():
 
         opened = [d for d in a2["descents"] if holds(d)]
         # AN UNSCOPED grep is a check of the source too when its query reaches a member
-        # of the planted fold (rust, 2026-10-13: `grep query=checksum` found the read
-        # row and the model named the fold stale). The store keeps a reply's origin
+        # of the planted fold (e.g. `grep query=checksum` finds the read row). The store keeps a reply's origin
         # line, not its hits, so the query is matched against the members here.
         members = [m for m in a2["msgs"] if m.get("id") in set(member_ids)]
         for c in ctx_score.calls_made(a2["msgs"], target=aid, verb="grep"):

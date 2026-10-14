@@ -1,4 +1,4 @@
-//! STREAMING PARTS (owner, 2026-10-04, `tmp/streaming_parts.md`): a model's
+//! STREAMING PARTS: a model's
 //! output streams to its addressees as parts — animation, never action; a
 //! receiver can stop it; a cut pass leaves a marker on top of the context, never a
 //! half answer. Case for case the twin of python
@@ -90,7 +90,7 @@ fn an_open_call_when_the_pass_ends_aborts() {
     assert!(shape(&ev).contains(&("abort", "call")), "{ev:?}");
 }
 
-/// ONLY THE ANSWER ACTS (owner, 2026-10-07): a `<call>` inside `<think>` streams as
+/// ONLY THE ANSWER ACTS: a `<call>` inside `<think>` streams as
 /// thinking — no call part opens. Python `test_a_call_inside_a_thought_is_thinking_text`.
 #[test]
 fn a_call_inside_a_thought_is_thinking_text() {
@@ -550,7 +550,7 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
     );
 }
 
-// ─── the match: draft ↔ final message (owner, 2026-10-04) ────────────────────
+// ─── the match: draft ↔ final message ────────────────────────────────────────
 
 /// AI → AI: the consumer watches `part_*` on its inbox, then receives the
 /// message; the message's header names the same stream id, `part_start` names
@@ -660,7 +660,7 @@ async fn status_during_a_stream_is_json() {
     turn.await.unwrap();
 }
 
-/// Only a successful generation dispatches (owner, 2026-10-04): a pass that wrote
+/// Only a successful generation dispatches: a pass that wrote
 /// a complete call and then stopped with another block open sends NEITHER, and the
 /// marker names both as not sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -693,7 +693,7 @@ async fn a_cut_pass_sends_nothing_not_even_its_closed_calls() {
     assert!(!last.contains("[reply to"), "{last}");
 }
 
-/// Deltas go to the addressee's inbox only (owner, 2026-10-04): the state stream
+/// Deltas go to the addressee's inbox only: the state stream
 /// carries a part's lifecycle — start / end / abort — never a delta.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deltas_never_reach_the_state_stream() {

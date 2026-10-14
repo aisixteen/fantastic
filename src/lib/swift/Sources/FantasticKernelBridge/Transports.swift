@@ -138,7 +138,7 @@ public actor WSTransport: BridgeTransport {
 /// one half sends, the other receives. It CARRIES frames and nothing else: each
 /// half is driven by a bridge leg's engine, so the far kernel serves an inbound
 /// `call` through its own leg — the ingress rule, then the leg's own send, gated
-/// as the leg — never as the operator (audit G-4, 2026-10-03).
+/// as the leg — never as the operator.
 public final class MemoryTransport: BridgeTransport, @unchecked Sendable {
     private let pipe: MemoryPipe
     /// This half receives on `pipe.queues[side]` and sends to the other.

@@ -22,7 +22,7 @@ only path for arbitrary verbs.
 The `self_id` is baked into the path literal so several `web_rest`
 agents under the same `web` parent don't collide.
 
-GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03). A POST is judged by the leg's
+GATE FIRST, THEN THE BODY. A POST is judged by the leg's
 ingress rule on what the request says up front — its target and its
 `X-Fantastic-Auth` credential — and only an admitted request's body is read, at
 most `MAX_BODY` bytes (16 MiB: io_bridge's `MAX_FRAME`, the one frame cap every
@@ -146,9 +146,8 @@ def _json_reply(reply) -> Response:
 
     A reply carrying something with no JSON form (an in-process object, an
     out-of-range float) makes `JSONResponse` raise while it renders, i.e. INSIDE
-    the ASGI app: uvicorn then answered a bare text/plain 500 and logged
-    `Exception in ASGI application` with a full traceback (measured, parity
-    capture 20260921b). Naming it here keeps that a stated transport refusal in
+    the ASGI app: uvicorn would then answer a bare text/plain 500 and log
+    `Exception in ASGI application` with a full traceback. Naming it here keeps that a stated transport refusal in
     the shape every other answer on this leg uses. (`get_routes` is pure data;
     the live endpoints reach `web` through the `route_endpoints(agent)` module
     hook.)
@@ -216,9 +215,8 @@ def _make_post_endpoint(self_id: str, kernel):
                 # are a MALFORMED BODY, the same client error as `{not json`:
                 # `json.loads` sniffs the encoding first, so it raises
                 # UnicodeDecodeError (not JSONDecodeError) before it ever parses.
-                # Uncaught, that raised inside the ASGI app and uvicorn answered a
-                # bare text/plain 500 with a traceback in the kernel log (measured,
-                # parity capture 20260921b, case `invalid_utf8_body`).
+                # Uncaught, that would raise inside the ASGI app and uvicorn would
+                # answer a bare text/plain 500 with a traceback in the kernel log.
                 # Don't echo the parser exception back — generic message
                 # only (CodeQL: information exposure through an exception).
                 return JSONResponse(

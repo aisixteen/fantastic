@@ -17,9 +17,9 @@ class Password(IngressRule):
     workdir. Fail-closed: an unset/empty env var refuses every inbound `call`.
     Constant-time compare over the UTF-8 BYTES of both sides (rust and swift compare
     bytes): on `str`, `hmac.compare_digest` raises TypeError for any non-ASCII text,
-    so a stray `é` from a tokenless client was an unhandled error instead of a
-    denial, and a non-ASCII group token refused its own holders (audit IO-6,
-    2026-10-03). The egress mirror (`egress_rules.password`) PRESENTS the
+    so a stray `é` from a tokenless client would be an unhandled error instead of
+    a denial, and a non-ASCII group token would refuse its own holders. The egress
+    mirror (`egress_rules.password`) PRESENTS the
     same token, so one group token in env makes a leg a full member."""
 
     env: str = "FANTASTIC_GROUP_TOKEN"

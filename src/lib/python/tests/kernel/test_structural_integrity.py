@@ -1,8 +1,5 @@
-"""Four defects found by auditing md claims against the code, 2026-08-23.
-
-Three were reproduced live before being fixed; the fourth is the security claim
-the doc rests on and had no test at all. Each test below fails on the code as it
-stood that morning.
+"""Doc claims pinned against the code: three structural defects and the security
+claim the doc rests on.
 """
 
 from __future__ import annotations
@@ -105,9 +102,9 @@ async def test_a_saved_document_never_names_a_parent_it_does_not_contain(kernel)
 
 
 async def test_a_record_cannot_claim_a_parent_it_does_not_have(kernel):
-    """`Agent.record` built `parent_id` from the tree and THEN merged meta, so a
-    `parent_id` that reached meta overwrote the truth. Measured: after
-    `update_agent id=b parent_id=a`, the record said `'a'` while the tree said
+    """If `Agent.record` built `parent_id` from the tree and THEN merged meta, a
+    `parent_id` that reached meta would overwrite the truth: after
+    `update_agent id=b parent_id=a`, the record would say `'a'` while the tree says
     `'kernel_state'`.
 
     Not cosmetic. `$parent` resolves against the TREE on one half of the gate
@@ -151,13 +148,9 @@ async def test_a_record_cannot_claim_a_parent_it_does_not_have(kernel):
 async def test_parent_id_places_the_agent_and_is_required(kernel):
     """`parent_id` NAMES THE OWNER — it is the only way to place an agent.
 
-    Until 2026-08-24 the opposite was true and this test asserted it: the
-    ADDRESSED agent became the parent, and a `parent_id` in the payload was
-    stripped and silently ignored. That combination cost a live run — the
-    working mechanism was undiscoverable (a default reflect truncates the doc
-    before "spawn a child agent") while the field that looked like it expressed
-    placement did nothing. Verified then: asking for `parent_id:"specialist"`
-    produced `parent_id='kernel_state'` and no error."""
+    The ADDRESSED agent never becomes the parent, and a `parent_id` in the payload
+    is never stripped or silently ignored: a field that looks like it expresses
+    placement must do so."""
     (
         await kernel.send(
             [
@@ -258,9 +251,9 @@ async def test_the_root_record_has_no_parent_whatever_meta_says(kernel):
 
 @pytest.mark.parametrize("size", [10, 65_536, 65_537, 200_000])
 async def test_a_sidecar_round_trips_whatever_its_size(kernel, size):
-    """`load_blob` issued ONE `read_stream`, and `file_bridge` caps a chunk at
-    65536 bytes — so anything larger came back as a PREFIX, presented as the
-    file. Measured: 100_000 bytes written, 65_536 read, no error anywhere.
+    """`file_bridge` caps a `read_stream` chunk at 65536 bytes — so a `load_blob`
+    that issued ONE `read_stream` would return anything larger as a PREFIX,
+    presented as the file, with no error anywhere.
 
     A memory agent's entire contract is that what it wrote is what it reads
     back, so a truncating read is data loss wearing a successful reply. The
@@ -468,7 +461,7 @@ async def test_an_agent_cannot_write_another_agents_namespace(kernel):
 def test_sidecar_persistence_is_a_direct_loader_call():
     """A bundle persisting its OWN sidecar through the loader is bookkeeping: a
     DIRECT call of the loader's `persist_blob`/`load_blob` functions, never a send
-    and never an identity switch (owner 2026-10-04). The namespace is the
+    and never an identity switch. The namespace is the
     scheduler's own id — never read from a caller's payload."""
     import inspect
 

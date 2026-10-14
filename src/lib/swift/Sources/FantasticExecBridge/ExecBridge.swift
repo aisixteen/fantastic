@@ -60,7 +60,7 @@
     }
 
     /// Python's `re` source in ICU's dialect: `(?P<n>…)` → `(?<n>…)` and
-    /// `(?P=n)` → `\k<n>`, the two spellings ICU does not share (D5). Escapes and
+    /// `(?P=n)` → `\k<n>`, the two spellings ICU does not share. Escapes and
     /// character classes are walked, so a literal `(?P<` inside `[...]` or after a
     /// `\` is left alone. Everything else — lookaround, backrefs, inline flags —
     /// is already common to both engines and passes through untouched.
@@ -114,7 +114,7 @@
     ///
     /// The BARE pattern compiles first: wrapped, an unbalanced one (`x)|(.*`)
     /// closes the group early and matches every line, where python's
-    /// `re.fullmatch` raises — a broken pattern permits nothing (audit 2026-10-14).
+    /// `re.fullmatch` raises — a broken pattern permits nothing.
     func pyFullmatch(_ pattern: String) -> NSRegularExpression? {
         guard (try? NSRegularExpression(pattern: pyRegexSource(pattern))) != nil else {
             return nil
@@ -310,8 +310,7 @@
         /// The kernel aborts the Swift `Task` only after the hook returns, and the
         /// pump runs on its own thread: between the SIGKILL and the abort it can see
         /// the pipes close and the child exit while `Task.isCancelled` is still
-        /// false — and announce a normal `job_done` for a job the kernel killed
-        /// (measured: 1 full run in 15). This mark is set before the kill, so any
+        /// false — and announce a normal `job_done` for a job the kernel killed. This mark is set before the kill, so any
         /// exit the kill caused finds it. Python cannot interleave there: its cancel
         /// lands in the same event-loop turn as the hook. Guarded by `lock`; a set of
         /// its own, not a row field, because `clear` may drop the row mid-pump.
@@ -343,8 +342,8 @@
             let verb = payload["type"].asString ?? ""
             // AUTH GATE — the process edge is an io_bridge leg: SEALED by default,
             // kind "spawn". `reflect` and `connector` are UNGATED (discovery works
-            // sealed); every other type is gated, MAIL INCLUDED (python `handler`,
-            // audit BV-8): a sealed leg delivers nothing to its program — the
+            // sealed); every other type is gated, MAIL INCLUDED (python `handler`):
+            // a sealed leg delivers nothing to its program — the
             // relay's inbox drain refuses the same payloads, since the fanout
             // reaches it before this handler runs.
             // `shutdown` is NOT a verb here: python's VERBS table has no such key, so
@@ -367,9 +366,8 @@
                 return clearReply(agentId, payload: payload)
             case "connector":
                 // The reference wire client SOURCE — a model pastes it at the top of
-                // its program instead of re-deriving the socket framing (measured
-                // 2026-09-01, E30 subai: ten passes lost before the first working
-                // frame). Ungated like reflect.
+                // its program instead of re-deriving the socket framing.
+                // Ungated like reflect.
                 return .object([
                     "source": .string(CONNECTOR_SRC),
                     "howto": .string(
@@ -444,9 +442,8 @@
                 auth: agent?.metaValue(forKey: "auth"))
             // NO CREDENTIAL FROM THE RECORD. Python builds the action from the
             // target and the payload alone (`gate_inbound(rule, "spawn",
-            // {"target", "payload"})`) — a leg that stored `auth_token` on its own
-            // record used to satisfy `password_ingress` with its own secret, which
-            // is the leg letting itself in.
+            // {"target", "payload"})`) — a leg's own stored `auth_token` never
+            // satisfies `password_ingress`, which would be the leg letting itself in.
             let action = AuthAction(kind: "spawn", target: agentId.value, verb: verb, token: nil)
             // FORWARDED, not re-worded — the rule states the reason and the
             // repair; this hint was a second, shorter wording of the same
@@ -492,15 +489,15 @@
             // EVERY refusal on this verb carries a CODE, so a model can tell a typo
             // from a policy refusal without reading the prose.
             // WHERE and WITH WHAT a command runs are the OPERATOR's: a per-call `env`
-            // (`LD_PRELOAD`, `PATH`, …) or `cwd` changed what an allowlisted line
-            // actually ran (audit 2026-09-28).
+            // (`LD_PRELOAD`, `PATH`, …) or `cwd` would change what an allowlisted
+            // line actually runs.
             for gone in ["env", "cwd"] where !payload[gone].isNull {
                 return Refusal.bad(
                     "start", gone,
                     "absent — `\(gone)` is the record's (update_agent \(agentId.value) \(gone)=…)")
             }
-            // A WAKE-UP is a monitor's, never the start's: a `notify` here used to be
-            // dropped silently, and the caller waited for a message nothing would send.
+            // A WAKE-UP is a monitor's, never the start's: a `notify` here is
+            // refused, never dropped with the caller waiting for a message nothing sends.
             for gone in ["notify", "match", "every"] where !payload[gone].isNull {
                 return Refusal.bad(
                     "start", gone,
@@ -627,9 +624,8 @@
             } catch {
                 // python's `str(OSError)`: `[Errno 2] No such file or directory: 'nope'`.
                 // A MISSING `cwd` is named instead, as CPython names it (its
-                // `noexec:chdir` path): measured 2026-10-06 (rust subai), a leg whose
-                // cwd did not exist answered `… 'python3'` and the model spent twenty
-                // turns hunting an interpreter that was there all along.
+                // `noexec:chdir` path): naming the interpreter instead sends a model
+                // hunting an interpreter that is there all along.
                 var isDir: ObjCBool = false
                 if let f = error as? Spawn.Failure, f.code == ENOENT,
                     !(FileManager.default.fileExists(atPath: cwdStr, isDirectory: &isDir)
@@ -649,10 +645,9 @@
             // THE PUMP IS THE JOB'S TASK, and the job's id IS that task's id —
             // minted by the kernel's one counter when the pump is forked. One
             // number names the job everywhere: `status`/`stop`/`write` take it as
-            // `job_id`, `ps` lists it, `cancel task_id=` kills it. (It used to be a
-            // random 8-hex string, which a model's `<job_id>04203581</job_id>` or
-            // `458e5912` coerced into an int or an infinite float — 3.7% of jobs
-            // could not be addressed again.)
+            // `job_id`, `ps` lists it, `cancel task_id=` kills it. (A random hex
+            // string would not survive the tag grammar: `04203581` or `458e5912`
+            // coerce into an int or an infinite float.)
             //
             // The id exists only once the fork does, and a swift `Task` may start
             // running on another thread before `spawnTask` even returns — so the
@@ -741,7 +736,7 @@
             let e = await errD
             // A PUMP FAULT is one fault for the whole pump, python's `gather` shape:
             // the job's `error` (`[pump error] …`). The output itself lives in the
-            // line ring only — the job's one copy (audit 2026-10-14).
+            // line ring only — the job's one copy.
             let fault = (o.fault ?? e.fault).map { "[pump error] \($0)" }
             let code = await spawned.child.wait()
             relayFor(jobId)?.stop()
@@ -992,7 +987,7 @@
             ])
         }
 
-        /// `tail` / `grep` — a job's output SO FAR (owner, 2026-10-11), running or
+        /// `tail` / `grep` — a job's output SO FAR, running or
         /// ended, pipe or PTY; each line `{n, stream, line}`. Python `_tail` / `_grep`.
         private func tailGrepReply(_ verb: String, _ agentId: AgentId, _ payload: JSON) -> JSON {
             let jid: TaskId
@@ -1247,10 +1242,10 @@
         /// finished enough to forget. No `not_found` guard (python has none): an
         /// unknown id simply clears nothing.
         ///
-        /// A NAMED job follows the bulk form's rule (python `_clear`, audit BV-5):
+        /// A NAMED job follows the bulk form's rule (python `_clear`):
         /// a row still `running` or `stopping` is refused. That row is the only
         /// handle `stop`, `cancel`, delete and shutdown kill its process through —
-        /// dropped, the process outlived all four.
+        /// dropped, the process would outlive all four.
         private func clearReply(_ agentId: AgentId, payload: JSON) -> JSON {
             let want: TaskId?
             switch jobArg("clear", payload, required: false) {
@@ -1283,9 +1278,9 @@
                 extra: [("job_id", .integer(jid.value))])
         }
 
-        /// …and the guard that decides. A `job_id` naming nothing used to answer
-        /// `{killed:0}` / `{interrupted:0}` — the same reply as "it had already
-        /// exited", so a typo read as success. `nil` = no job named ("every job").
+        /// …and the guard that decides. A `job_id` naming nothing is refused —
+        /// `{killed:0}` / `{interrupted:0}` is the reply for "it had already exited",
+        /// and would read a typo as success. `nil` = no job named ("every job").
         /// Python `_no_job`.
         private func noSuchJob(_ verb: String, _ agentId: AgentId, _ want: TaskId?) -> JSON? {
             guard let want else { return nil }
@@ -1294,8 +1289,8 @@
             // NOT a ternary: `JSON` is `ExpressibleByNilLiteral`, so
             // `known ? nil : noJob(want)` unifies BOTH branches at `JSON` and the
             // "known" branch hands back `.some(.null)` — the caller's
-            // `if let gone = noSuchJob(…)` then fired for every job that DOES exist
-            // and answered `null` instead of stopping it (measured on the wire).
+            // `if let gone = noSuchJob(…)` would then fire for every job that DOES exist
+            // and answer `null` instead of stopping it.
             if known { return nil }
             return noJob(want)
         }
@@ -1359,11 +1354,8 @@
         /// Read one pipe to EOF, emitting a `progress` PER LINE as it arrives, and
         /// return the whole text for the final `job_done`/`status` snapshot.
         ///
-        /// This used to buffer both pipes to EOF and emit every line in one burst at
-        /// exit, which made `progress` useless for exactly the jobs that need it: a
-        /// server-style program that prints a line per request and never exits
-        /// produced NO output events at all, and `status` reported `lines: 0` for its
-        /// whole life. `readabilityHandler` fires on Foundation's own queue (no thread
+        /// Never buffered to EOF: a server-style program that prints a line per
+        /// request and never exits still produces output events. `readabilityHandler` fires on Foundation's own queue (no thread
         /// pinned); it splits on '\n' and carries the partial line, and the carry is
         /// flushed at EOF so an unterminated last line is not lost.
         private func pumpStream(
@@ -1458,9 +1450,9 @@
             }
             // `password_ingress` is meaningless on an in-process leg: the token is
             // read off a WIRE ENVELOPE and the process edge has none — no frame ever
-            // presents one, so the rule could only refuse, or (until 2026-09-02) be
-            // satisfied by a secret persisted ON THE RECORD. Refused at the write
-            // (#116). Same rule as `FantasticFile.passwordRefusal`.
+            // presents one, so the rule could only refuse, or be
+            // satisfied by a secret persisted ON THE RECORD. Refused at the write.
+            // Same rule as `FantasticFile.passwordRefusal`.
             for (field, stem) in [("ingress_rule", "password_ingress"), ("auth", "password")] {
                 if let spec = meta[field], ruleName(spec, default: "") == stem {
                     return "\(field)=\(pyRepr(spec)) is not applicable to the process edge: "
@@ -1518,7 +1510,7 @@
                         _ = try NSRegularExpression(pattern: pyRegexSource(pat))
                     } catch {
                         // python appends `: <re.error>`; the engine's own wording past
-                        // `': '` is the residual ICU cannot reproduce (D4/D5).
+                        // `': '` is the residual ICU cannot reproduce.
                         return "allowed contains a broken regex \(pyRepr(pat)): "
                             + (error as NSError).localizedDescription
                     }
@@ -1798,7 +1790,7 @@
 
     /// The job's output-line counter, held by the PUMP rather than by the job row.
     ///
-    /// python's `_read_stream` closes over the job DICT (A4.15). Shared across
+    /// python's `_read_stream` closes over the job DICT. Shared across
     /// stdout and stderr, so `n` is one monotonic sequence.
     /// A pipe job's live line ring, in bytes — the same bound as the PTY ring.
     let LINE_RING = 256 * 1024
@@ -1810,7 +1802,7 @@
         private var count = 0
         private var last = ""
 
-        /// THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
+        /// THE LIVE LINE RING: every line a pipe job prints, as
         /// (n, stream, line), the last `LINE_RING` bytes — what `tail`/`grep` read,
         /// running or ended. The job's only copy of its output.
         private var ring: [(Int, String, String)] = []
@@ -1852,8 +1844,7 @@
     /// zero-based — a sliced `Data`'s are not, which is a quiet way to read the wrong
     /// bytes back out.
     private final class CarryBox: @unchecked Sendable {
-        /// python's `asyncio.StreamReader` limit — 16 MiB since 2026-09-20 (a
-        /// line over 64 KiB used to end the pipe with `[pump error]`); past it
+        /// python's `asyncio.StreamReader` limit — 16 MiB; past it
         /// with no separator in sight the read RAISES rather than buffering
         /// without bound.
         static let limit = 16 * 1024 * 1024

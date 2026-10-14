@@ -26,10 +26,10 @@ fn empty_kernel_has_no_root() {
 
 #[test]
 fn register_mints_no_inbox() {
-    // AN AGENT DOES NOT GET A QUEUE MERELY BY EXISTING. `register` used to
-    // auto-vivify one, so every agent looked like a reader to `watch` and a
-    // mirror piled up in a queue nobody drained. `ensure_inbox` IS the reader
-    // registration, and only then does an inbox exist.
+    // AN AGENT DOES NOT GET A QUEUE MERELY BY EXISTING: an auto-vivified queue
+    // makes every agent look like a reader to `watch`, and a mirror piles up in
+    // a queue nobody drains. `ensure_inbox` IS the reader registration, and only
+    // then does an inbox exist.
     let k = Kernel::new();
     let a = make_agent("agent_x");
     k.register(Arc::clone(&a));
@@ -120,7 +120,7 @@ fn publish_state_reaches_every_subscriber() {
 
 #[test]
 fn a_raising_state_subscriber_prints_and_others_still_receive() {
-    // C87: python `publish_state` wraps each subscriber call in its own
+    // Python `publish_state` wraps each subscriber call in its own
     // try/except and keeps going (`_kernel.py:1060-1068`); a rust subscriber
     // has no `Result` to fail with, so the equivalent of "raised" is a
     // panic — caught around EACH call so one broken tap never silences the
@@ -181,8 +181,7 @@ async fn an_inbox_at_its_bound_drops_the_oldest() {
     // never fails; at the bound the OLDEST payload is evicted, so a consumer
     // that fell behind catches up on the freshest events rather than freezing on
     // stale ones. Python's `_put_drop_oldest` and swift's `.bufferingNewest`
-    // rule; rust used to invert it (`try_send` discards what is being sent)
-    // under a comment claiming they matched.
+    // rule — never `try_send`, which discards what is being sent.
     let k = Kernel::new_with_inbox_bound(2);
     let a = make_agent("bp");
     k.register(Arc::clone(&a));
@@ -293,7 +292,7 @@ fn a_reserved_key_is_refused_before_anything_is_torn_down() {
     }
 }
 
-// ─── C77 — the state stream contract ────────────────────────────────
+// ─── The state stream contract ────────────────────────────────
 
 #[test]
 fn state_snapshot_is_registration_order_with_in_flight() {
@@ -362,7 +361,7 @@ async fn state_events_are_python_shape() {
         .iter()
         .map(|e| e["kind"].as_str().unwrap_or(""))
         .collect();
-    // THE CALL'S EXECUTION ROW first (owner, 2026-10-08: every `rows_put` is
+    // THE CALL'S EXECUTION ROW first (every `rows_put` is
     // announced, content-free), then the send and its drain.
     assert_eq!(kinds, vec!["row", "send", "drain"], "{events:?}");
     assert_eq!(
@@ -409,11 +408,9 @@ async fn state_events_are_python_shape() {
     assert_eq!(a.in_flight(), 0, "the counter came back down");
 }
 
-// ─── C84: `Kernel::shutdown()` ───────────────────────────────────────
+// ─── `Kernel::shutdown()` ────────────────────────────────────────────
 //
-// Nothing used to call `Bundle::on_shutdown` at all — the daemon sent
-// `{type:shutdown}` LIFO to every agent, which most bundles answer "unknown
-// type". This is python's `Kernel.shutdown`: `shutdown_agents` (drain, the verb,
+// Python's `Kernel.shutdown`: `shutdown_agents` (drain, the verb,
 // quiet), the ROOT bundle's `flush_pending`, then the DEPTH-FIRST walk.
 
 /// Records the order hooks fire in, so a test can read the walk.
@@ -537,7 +534,7 @@ impl crate::Bundle for OnlyDelete {
     }
 }
 
-/// Shutdown calls `on_shutdown` and only that (audit 2026-09-28, c9): a bundle
+/// Shutdown calls `on_shutdown` and only that: a bundle
 /// with only `on_delete` has nothing to free at shutdown, and delete's teardown
 /// is not run in its place.
 #[tokio::test]
@@ -618,15 +615,13 @@ async fn shutdown_continues_on_a_raising_hook() {
     }
 }
 
-// ─── D1(a): the shutdown sweep writes NOTHING ────────────────────────
+// ─── the shutdown sweep writes NOTHING ───────────────────────────────
 //
 // python `_kernel.py:870` asks `a.advertises("shutdown")`, which reads the
 // bundle module's `VERBS` table — no dispatch, so no message id, no call row,
-// no task, no ledger execution. Rust used to `send({type:reflect})` to every
-// agent for the same answer, which wrote one `call`/`reflect` row per agent
-// plus an `internal` roster row per node of the tree. Measured against the
-// python baseline at `e2e/parity` (`ctx/reboot/*_rows_read.json`): 3 rows per
-// agent on every reboot that python does not have.
+// no task, no ledger execution. A `send({type:reflect})` to every agent for the
+// same answer would write one `call`/`reflect` row per agent plus an `internal`
+// roster row per node of the tree, which python does not have.
 
 /// Declares a verb table (`verb_docs`) — with or without `shutdown` — and
 /// counts how often the handler is asked anything.

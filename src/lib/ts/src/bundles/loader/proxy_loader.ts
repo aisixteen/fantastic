@@ -145,8 +145,7 @@ export class ProxyLoader {
     // PARENTS BEFORE CHILDREN — one batch per DEPTH, each awaited before the next.
     // The host loader scopes a record verb to the caller's own subtree by walking
     // the record's parent chain on disk, so a child sent in the same batch as its
-    // new parent races it and is refused (measured on the canvas: `view_root` under
-    // a `canvas` still in flight). Within one depth the records are independent and
+    // new parent races it and is refused. Within one depth the records are independent and
     // go as ONE concurrent batch — a wave costs one round-trip, not one per record.
     const waves = new Map<number, Item[]>();
     for (const id of persist) {

@@ -1,14 +1,13 @@
 //! The relay password lives in a credential_store — never on the record. The
 //! twin of python `relay_connector/tests/test_relay_credentials.py`.
 //!
-//! Audit IO-7 / F4 (2026-10-03): `relay_token` (the relay group password, sent as
-//! `X-Fantastic-Auth`) was a plain record field — in `list_agents`, and in
-//! cleartext in `.fantastic/agents/<id>/agent.yaml`. Owner rule: secrets live only
-//! in a credential_store. The connector's record names WHERE the password lives —
-//! `credentials: {store, ref}` — and before every dial it reads the ref's
-//! `password` field AS ITSELF, the answer marked `secret: ['result']`, pinned to
-//! the relay URL's host, exactly as an AI backend reads its key. `relay_token` is
-//! gone.
+//! A secret lives only in a credential_store, never in a plain record field
+//! (visible in `list_agents`, and in cleartext in
+//! `.fantastic/agents/<id>/agent.yaml`). The connector's record names WHERE the
+//! password lives — `credentials: {store, ref}` — and before every dial it reads
+//! the ref's `password` field AS ITSELF, the answer marked `secret: ['result']`,
+//! pinned to the relay URL's host, exactly as an AI backend reads its key. There
+//! is no `relay_token` field.
 
 use super::*;
 use futures_util::StreamExt;

@@ -70,7 +70,7 @@ public final class ResponsesBundle: AgentBundle, @unchecked Sendable {
 
     public var recordSchema: JSON? { Self.RECORD_SCHEMA }
 
-    /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+    /// THE RECORD SCHEMA — what this kind's record takes, read with
     /// no agent existing (`reflect bundles=all`), from the constants the provider
     /// runs on. `validateMeta` enforces it at the write, so the page and the kernel
     /// cannot disagree about what a record needs. Python `RECORD_SCHEMA`.
@@ -216,7 +216,7 @@ struct ResponsesProvider: AIProvider {
     let sampling: OrderedDictionary<String, JSON>
 
     /// The keys this provider owns are refused, never silently overridden
-    /// (audit d8 — python raises the same `ValueError` in its constructor).
+    /// (python raises the same `ValueError` in its constructor).
     init(
         endpoint: String, model: String, key: @escaping KeyReader, maxTokens: Int64,
         sampling: OrderedDictionary<String, JSON>
@@ -323,7 +323,7 @@ struct ResponsesProvider: AIProvider {
                     do {
                         // NO READ CLOCK ON THE STREAM — the turn's one bound is ai_core's
                         // send timeout; a queued turn is not a dead one. Connect stays
-                        // finite (15 s, the client's configuration). Python d8.
+                        // finite (15 s, the client's configuration), as in python.
                         let response = try await Self.client.execute(req, deadline: .distantFuture)
                         let code = Int(response.status.code)
                         if code >= 400 {

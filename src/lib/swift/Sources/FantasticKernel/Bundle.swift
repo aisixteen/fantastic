@@ -42,14 +42,13 @@ public protocol AgentBundle: Sendable {
 
     /// HOW TO CALL this bundle's agents — `{verb: doc}`, python's module-level
     /// `VERBS` docstrings, served by the kernel's `docs` verb (oneliners: each
-    /// doc's signature; detailed: the whole doc). Never on a reflect (owner,
-    /// 2026-10-05). Default: no docs.
+    /// doc's signature; detailed: the whole doc). Never on a reflect. Default: no docs.
     var verbDocTable: JSON { get }
 
     /// THIS AGENT'S verb docs, when the bundle serves different verbs per agent
     /// (an MCP server's tools) — python's duck-typed `instance_verbs(agent)`.
     /// `docs of=<agent id>` reads it before `verbDocTable`; nil keeps the
-    /// bundle's (owner, 2026-10-08). Default: nil.
+    /// bundle's. Default: nil.
     func instanceVerbDocs(_ agent: Agent) -> JSON?
 
     /// The rest of the DETAILED docs — python's duck-typed module-level `EMITS`,
@@ -83,12 +82,12 @@ public protocol AgentBundle: Sendable {
     /// python's reply dict holds a bytes value at a key: a `read_stream` chunk is
     /// `Blob("bytes", …)`, a bridge relaying a peer's reply keeps the slot the
     /// peer's frame named (`["x.y"]` is the reply key `"x.y"`, never `x` → `y`).
-    /// It is OPTIONAL and the distinction is load-bearing (C37): `nil` = the verb
+    /// It is OPTIONAL and the distinction is load-bearing: `nil` = the verb
     /// returned NO chunk (a `write_stream` status, a refusal); `.some(b)` = it
     /// returned one, `b.bytes` possibly EMPTY (a 0-byte read of an empty file).
     /// Every wire leg picks its response shape from that, exactly as python's
     /// `isinstance(reply["bytes"], bytes)` does — testing `isEmpty` instead
-    /// served an empty file as JSON. Rust `Bundle::handle_binary`.
+    /// would serve an empty file as JSON. Rust `Bundle::handle_binary`.
     ///
     /// ANY VERB MAY ANSWER WITH A BODY. Every wire leg (web_ws, web_rest, a
     /// bridge serving an inbound call, the exec relay) dispatches its calls HERE —
@@ -96,7 +95,7 @@ public protocol AgentBundle: Sendable {
     /// exactly when the reply carries a body. There is no list of binary verbs
     /// and nothing to declare: a bundle that answers bytes returns them here.
     ///
-    /// Default: dispatch the HEADER through the text `handle` (C79) — python
+    /// Default: dispatch the HEADER through the text `handle` — python
     /// has no separate binary channel at all, so a bundle without a binary edge
     /// answers the header exactly as the text channel would. There is NO base64
     /// fallback: the body is simply not a chunk such a verb ever asked for.
@@ -114,10 +113,9 @@ public protocol AgentBundle: Sendable {
     /// judge it — but the bundle can. Default: accept everything. Mirrors py's
     /// duck-typed `validate_meta` / rust's `Bundle::validate_meta`.
     ///
-    /// Exists because `update_agent` used to accept anything: an agent set
-    /// `ingress_rule="password:kernel-internal-transcripts"`, got `{"updated": true}`
-    /// back, and believed a security control was in place that no resolver
-    /// implements. Accepting a value you cannot honour AND reporting success is the
+    /// Exists because accepting anything lets an agent set a value no resolver
+    /// implements, get `{"updated": true}` back, and believe a control is in place.
+    /// Accepting a value you cannot honour AND reporting success is the
     /// worst of both.
     /// `record` is the agent's CURRENT meta (empty at create) — a bundle
     /// validates the state the write WILL produce, not the patch alone
@@ -127,8 +125,7 @@ public protocol AgentBundle: Sendable {
     ) -> String?
 
     /// WHAT THIS KIND'S RECORD TAKES, readable before any agent of it exists —
-    /// python's duck-typed module-level `RECORD_SCHEMA` (lib request #3,
-    /// 2026-09-30). `{fields:[{name, type, required, enum?, default?, hint}]}`
+    /// python's duck-typed module-level `RECORD_SCHEMA`. `{fields:[{name, type, required, enum?, default?, hint}]}`
     /// (a key is a `credentials` field, `{store, ref}`), served on the kind's
     /// entry in `reflect bundles=all` (never
     /// `bundles=ids`). The same schema is what `validateMeta` enforces at the
@@ -145,7 +142,7 @@ public protocol AgentBundle: Sendable {
     /// nothing.
     ///
     /// THROWS like any other reflect step: the doc-tree frame walks the same
-    /// `docs/` a bad-UTF-8 file can fail on `detail:"full"` (C60) — python's
+    /// `docs/` a bad-UTF-8 file can fail on `detail:"full"` — python's
     /// exception is not scoped to the `readme` flag alone.
     func reflectRootExtra(agent: Agent, full: Bool, kernel: Kernel) throws(PyError)
         -> OrderedDictionary<String, JSON>?
@@ -162,7 +159,7 @@ public protocol AgentBundle: Sendable {
 
     /// Fired by `Kernel.shutdown`'s depth-first walk for every loaded agent
     /// that uses this bundle — the process is stopping, the record stays.
-    /// ONLY this hook runs at shutdown (audit 2026-09-28, c9): a bundle that
+    /// ONLY this hook runs at shutdown: a bundle that
     /// frees OS resources at shutdown declares it, usually by calling its own
     /// `onDelete`. Default: nothing.
     func onShutdown(agentId: AgentId, kernel: Kernel) async throws
@@ -175,7 +172,7 @@ public protocol AgentBundle: Sendable {
     ///
     /// Cancelling a Swift `Task` frees NO real resource — it flips a flag. An OS
     /// subprocess, a PTY, an HTTP stream held FOR THAT TASK must be released
-    /// here; this is where the orphaned-subprocess class of bug is fixed. Match
+    /// here, or the subprocess is orphaned. Match
     /// on `taskId` when the resource is task-scoped (an LLM pass): the cancelled
     /// task may be some OTHER dispatch on the same agent. Do NOT tear down
     /// AGENT-scoped resources here (a PTY outlives the `write` that fed it) —
@@ -188,7 +185,7 @@ public protocol AgentBundle: Sendable {
 
     /// Can a FOLDER BUNDLE (`<root>/bundles/<name>/bundle.yaml`, `base: <this
     /// bundle's name>`) extend this bundle? Python: the module exposes
-    /// `folder_bundle`. Default: no (owner, 2026-10-08).
+    /// `folder_bundle`. Default: no.
     var folderBase: Bool { get }
 
     /// Build the bundle a folder runs as — `name` its folder (its instances'
@@ -235,10 +232,9 @@ extension AgentBundle {
         body: Blob?,
         kernel: Kernel
     ) async throws -> (JSON?, Blob?) {
-        // C79: THE HEADER IS THE PAYLOAD. Python has one dispatch — a REST octet
+        // THE HEADER IS THE PAYLOAD. Python has one dispatch — a REST octet
         // POST of `{type:"say"}` to the cli agent reaches `handle` and answers
-        // 204; swift refused it with "no binary edge", which is a channel this
-        // substrate invented and python never had. A bundle with no chunk verb
+        // 204; there is no "no binary edge" refusal. A bundle with no chunk verb
         // simply never looks at the body.
         (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
     }

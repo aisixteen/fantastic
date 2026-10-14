@@ -132,8 +132,7 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// Not a bare `Task`: the loop outlives the `boot` dispatch and fires a send
     /// per due schedule for the life of the agent, so it belongs in `ps` and
     /// within reach of `cancel` — and its fires are then parented to work that
-    /// is still alive (measured 2026-09-11: `p_slow/hit`, `p_fast/hit`,
-    /// `p_cap/hit` all landed under a dispatch that had already ended).
+    /// is still alive, never to a dispatch that has already ended.
     private var tasks: [String: TaskId] = [:]
     /// python's module-global `_cache`: the RAM copy of each scheduler's
     /// schedules, keyed by agent id.
@@ -237,8 +236,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     }
 
     /// The tick loop AND the schedule cache die with the agent: a scheduler
-    /// recreated under the same id used to list and fire its predecessor's
-    /// schedules (python `on_delete`, 2026-09-20).
+    /// recreated under the same id never lists or fires its predecessor's
+    /// schedules (python `on_delete`).
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
         lock.withLock { cache[agentId.value] = nil }
         _ = await stopTick(agentId, kernel: kernel)
@@ -353,8 +352,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     // ── tick loop ───────────────────────────────────────────────
 
     /// Fire what is due, then sleep until the earliest next fire — or, with
-    /// nothing to wait for, until a change (`poke`). NO IDLE WAKEUPS (owner,
-    /// 2026-10-08): never on a fixed tick. Python `_tick_loop`.
+    /// nothing to wait for, until a change (`poke`). NO IDLE WAKEUPS:
+    /// never on a fixed tick. Python `_tick_loop`.
     private func tickLoop(_ agentId: AgentId, _ kernel: Kernel) async {
         let wake = wakeOf(agentId)
         while !Task.isCancelled {
@@ -455,8 +454,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
                 RuntimeLog.warn(
                     "scheduler \(agentId.value): history persist failed: \(pyStr(err["error"]))")
             }
-            // ONE delivery per tick (py-canonical, 2026-08-07). The target-echo of
-            // `schedule_fired` doubled every delivery to a live program's
+            // ONE delivery per tick (py-canonical): no target-echo of
+            // `schedule_fired`, which would double every delivery to a live program's
             // on_message — the payload send IS the tick; telemetry rides the
             // scheduler's own inbox and schedule_events.yaml.
             await kernel.emit(agentId, event)
@@ -707,10 +706,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
             setCache(agentId, schedules)
             return persistErr("tick_now", err)
         }
-        // THE OUTCOME, not just the fact. `{fired:true}` alone hid a target that
-        // refused every fire: measured 2026-10-06 (rust subai_graph), a schedule
-        // sent `{type:'tick'}` to an AI agent, which has no such verb; `tick_now`
-        // said fired 16 times and the model never learned the payload was wrong.
+        // THE OUTCOME, not just the fact. `{fired:true}` alone would hide a target that
+        // refuses every fire (a payload naming a verb the target lacks).
         let ev = await fireMany(agentId, [schedules[i]], kernel).first ?? .null
         return .object([
             "fired": .bool(true), "schedule_id": sid, "result": ev["result"], "error": ev["error"],

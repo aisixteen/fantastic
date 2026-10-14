@@ -108,8 +108,8 @@ public final class AIUsage: @unchecked Sendable {
     }
 }
 
-/// The token figures a finished generation's `status` `done` carries (owner,
-/// 2026-10-12: a chat shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
+/// The token figures a finished generation's `status` `done` carries (a chat
+/// shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
 /// `completion_tokens` as the provider REPORTED them — estimated (this layer's own
 /// count) when it reported none, and then `prompt_tokens_estimated` /
 /// `completion_tokens_estimated` says so — `gen_seconds` (the wall time from the

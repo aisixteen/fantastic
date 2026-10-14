@@ -1,12 +1,12 @@
-//! The CALL CHECKER — what a model wrote as a call that is not one (owner,
-//! 2026-10-07). Python `ai_core/call_check.py`, report for report.
+//! The CALL CHECKER — what a model wrote as a call that is not one. Python
+//! `ai_core/call_check.py`, report for report.
 //!
 //! A model may invent any call syntax — a `<tool_call>` wrapper, `<function=call
 //! name="send">`, `<send>` as a tag, a JSON object, `<parameter=x>` arguments — and
 //! none of it opens a `<call` envelope, so the scanner finds nothing and the turn
-//! reads as call-less (measured 2026-10-07, E59 `calc` on qwen3.8-27b: 18 of 25
-//! replies were `<tool_call><function=call name="send">…</call>`, each answered with
-//! the call-less reminder, the same shape repeated until the chain gave up).
+//! reads as call-less (a `<tool_call><function=call name="send">…</call>` reply
+//! answered only with the call-less reminder repeats the same shape until the
+//! chain gives up).
 //!
 //! The foreign syntaxes cannot be listed, so this checks the other way round: OUR
 //! grammar and OUR vocabulary are closed — `<call name="N">`, one child tag per
@@ -43,9 +43,9 @@ fn tag_re() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"<(/?)([^\s<>/=]*)([^<>\n]{0,300}?)(/?)>").expect("tag"))
 }
 
-/// A call opener whose leading `<` was dropped — `call name="await">` (measured
-/// 2026-10-12 on qwen3.8-27b, right after `</think>`). Not a tag to [`tag_re`], so
-/// without this only its `</call>` was seen and the report said to delete that.
+/// A call opener whose leading `<` was dropped — `call name="await">`, right
+/// after `</think>`. Not a tag to [`tag_re`], so without this only its `</call>`
+/// would be seen and the report would say to delete that.
 /// Only at the start of the text or after whitespace — where the dropped `<` was
 /// (`</think>\n\n<call`); python's `(?<!\S)` lookbehind is checked in [`bare`].
 fn bare_re() -> &'static Regex {
@@ -189,9 +189,9 @@ fn bare(masked: &str) -> Vec<regex::Captures<'_>> {
 
 /// The answer with every call opener that lost its leading `<` given it back —
 /// `call name="X">…</call>` → `<call name="X">…</call>` — when a `</call>` closes
-/// it. The owner's spell checker (2026-10-12): the `<` is not the model's — vLLM's
-/// streaming reasoning parser drops the content that shares a delta with
-/// `</think>` (measured on the 3090, 2 of 7 turns), so the call is restored and
+/// it. The `<` is not the model's — vLLM's
+/// streaming reasoning parser can drop the content that shares a delta with
+/// `</think>` — so the call is restored and
 /// runs, and the stored answer shows it whole. python `repair`.
 #[must_use]
 pub fn repair(answer: &str) -> String {
@@ -415,9 +415,9 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
         _ => "not a call tag",
     };
     // EVERY ARGUMENT THE MODEL WROTE carries into the form to write — the verb's
-    // own (`<query>`, `<ids>`) as much as ours by name. Measured 2026-10-07
-    // (misleading_fold:rust): a grep scoped by `<ids>` lost its `<` and was
-    // reported with only target/title/type; the model rewrote it unscoped. A tag
+    // own (`<query>`, `<ids>`) as much as ours by name: a grep scoped by `<ids>`
+    // that lost its `<` and is reported with only target/title/type gets
+    // rewritten unscoped. A tag
     // nested in an argument (an `<item>` of `<ids>`) is part of that value.
     let mut after = 0usize;
     for t in &call.toks {

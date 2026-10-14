@@ -125,8 +125,8 @@ pub fn inline_cap(meta: &Map<String, Value>, model_window: i64) -> i64 {
 
 /// THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER the
 /// inline cap, or its answer is stored and digested and the model pulls its own
-/// reply (measured 2026-09-06, python: a 4788-byte grep result came back as a
-/// receipt; the run drowned in pulls). Keep items from the front while the
+/// reply (a large grep result comes back as a receipt and the run drowns in
+/// pulls). Keep items from the front while the
 /// rendered reply fits. Returns `(kept, truncated)`.
 ///
 /// MEASURED ON THE SERIALIZED FORM, with headroom for the envelope the verb

@@ -196,8 +196,7 @@ async def core_the_running_tree_matches_the_declared_shape(h):
 async def core_every_declared_edge_is_reachable_and_every_refusal_names_its_side(h):
     """PC-2 is now a property of EXECUTING the spec, not a second walk.
 
-    The config used to carry an `edges:` list that this re-walked. With the steps
-    DSL the reach steps ARE the declared edges, so the executor asserts them in
+    With the steps DSL the reach steps ARE the declared edges, so the executor asserts them in
     order — and it adds the one thing a bare verdict cannot carry: every denial
     must teach how to open it (`hint`). A refusal that cannot be acted on costs
     the same as no reply.
@@ -229,7 +228,7 @@ async def core_the_roster_is_closed_after_boot(h):
     on the root is refused at egress — the baseline is `{$self: "*"}` alone, so
     nothing reaches the root ungranted. Indirectly: an agent editing its OWN
     `can_call` to grant itself the reach — refused at egress: it holds no
-    `update_agent` on the root (grants are the only rule, owner 2026-10-06).
+    `update_agent` on the root (grants are the only rule).
 
     The refusal is then re-probed for EFFECT, not inspected as a field: after the
     attempt to raise its own grant a previously-denied edge must still deny."""

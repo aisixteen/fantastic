@@ -1,8 +1,7 @@
 """vllm_backend — the wire it speaks, the turns it must not lose, and the
 KV-cache session table it keeps per endpoint.
 
-Every behaviour here traces to a measured failure on a live vLLM (a production
-deployment, Qwen3.8-27B-FP8, vLLM 0.27.1): a dropped thought channel, a turn
+Every behaviour here traces to a failure seen on a live vLLM: a dropped thought channel, a turn
 spent thinking with no answer, a stream that died without saying so, a system
 message the template refused, and a cache that only pays off while the live set
 stays under the server's KV ceiling.
@@ -183,9 +182,8 @@ async def test_a_cap_that_is_the_whole_window_sends_no_max_tokens():
 
 
 async def test_a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens():
-    """Measured 2026-10-12 (the owner's 3090): max_tokens 64000 on a 65536 window
-    with a 1537-token prompt — vLLM refused "a total of at least 65537 tokens"
-    (HTTP 400). When the prompt's token BOUND (`prompt_bound`: its bytes + a
+    """A max_tokens near the window size plus any prompt is refused by vLLM ("a total
+    of at least … tokens", HTTP 400). When the prompt's token BOUND (`prompt_bound`: its bytes + a
     per-message allowance) plus the cap overruns the window, the turn asks for the
     rest of it; a prompt that leaves the room keeps the cap."""
     sink: list = []
@@ -564,4 +562,4 @@ async def test_an_evicted_conversation_is_logged_by_its_key(caplog):
     )
 
 
-# ── the key never leaves in an error text (audit S1) ─────────────────────────
+# ── the key never leaves in an error text ────────────────────────────────────

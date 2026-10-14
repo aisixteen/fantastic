@@ -11,7 +11,7 @@ with the task in mind, and it is tiny.
     L0  full row     [reply to pid · notes read · "survey chunk 2"]\\n<6800 bytes>
     L1  stub         [reply to pid · notes read · "survey chunk 2"] (stripped: 6800 bytes)
 
-TWO RULES THAT KEEP THE KV CACHE WARM. Measured on this stack (vLLM /metrics): an append
+TWO RULES THAT KEEP THE KV CACHE WARM. On a prefix-caching server (vLLM /metrics): an append
 after the cached prefix reuses it in full; any edit inside it reuses NOTHING. So —
   * HYSTERESIS. Strip only past the HIGH watermark, and strip down to LOW in one batch:
     ten stubs in one event is one cache miss, not ten.

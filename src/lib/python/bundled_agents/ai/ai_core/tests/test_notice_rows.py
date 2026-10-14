@@ -1,4 +1,4 @@
-"""Harness text is a NOTICE, not a message (owner, 2026-10-07). A turn this layer
+"""Harness text is a NOTICE, not a message. A turn this layer
 writes to its own agent — the no-call reminder, a malformed-call report, an await
 refusal — is stored as `kind: "notice"`, so a view can hide it; the model still
 reads it as a user turn (Qwen's template takes no system message past the first).

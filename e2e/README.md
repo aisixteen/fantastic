@@ -37,10 +37,9 @@ This separation is the whole design, and it is worth being blunt about why.
 to measure and how long to allow. **`backends/` names nothing about a test.** It
 says which model, reached how, and what that plug needs before it can run.
 
-The suite used to carry an `if BACKEND == …: … elif …` inside each probe, at
-three sites each. Thirty branches that drifted independently — and did: one probe
-never read its endpoint variable, so it died on a 401 while five siblings ran fine
-against the same server. That class of bug is now unwritable.
+There is no `if BACKEND == …: … elif …` inside a probe: branches like that drift
+independently (a probe that never reads its endpoint variable dies on a 401 while
+its siblings run fine against the same server). That class of bug is unwritable.
 
 The same property makes results comparable. Run `agentic/plan` against a hosted
 frontier model and against a local 12B and the only thing that differed is the

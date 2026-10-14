@@ -183,7 +183,7 @@ async fn web_with_ws_child_serves_ws() {
                 "type": "create_agent", "parent_id": web_id,
                 "handler_module": "web_ws.tools", "callable_by": {"$parent": ["get_routes"]},
                 "id": "wws_child",
-                // C40 — a WS frame runs as the LEG, and a leg with no
+                // A WS frame runs as the LEG, and a leg with no
                 // `ingress_rule` is SEALED. An open face says so.
                 "ingress_rule": "allow_all_ingress",
                 // A grant map is keyed by a LITERAL id or a `$token` — `"*"` is
@@ -328,21 +328,21 @@ async fn web_with_rest_child_serves_rest() {
         .result;
 }
 
-// ── The WS frame loop (C40 + A11.7/8/9/19) ─────────────────────────
+// ── The WS frame loop ──────────────────────────────────────────────
 //
 // One wire shape for both directions:
 //
 //     text   : the JSON envelope
 //     binary : [4B BE hdr_len][header JSON + `_binary_path`][raw blob]
 //
-// There is NO chunked-upload protocol any more (A11.19): python has none, and
+// There is NO chunked-upload protocol any more: python has none, and
 // the `upload_id`/`chunk_index`/`total_chunks` frames rust invented were a
 // second, incompatible dialect nothing else on the wire spoke. A big upload is
 // a big binary frame, or a `write_stream` per offset.
 
 /// Stage a web + web_ws on `port`. `open_leg` writes
 /// `ingress_rule: allow_all_ingress` onto the web_ws child — WITHOUT it the leg
-/// is SEALED (C40) and every frame is denied or dropped, which is what a bare
+/// is SEALED and every frame is denied or dropped, which is what a bare
 /// leg means everywhere else in this kernel.
 async fn stage_web_with_ws_leg(
     tmp: &TempDir,
@@ -372,7 +372,7 @@ async fn stage_web_with_ws_leg(
     });
     if open_leg {
         ws_rec["ingress_rule"] = json!("allow_all_ingress");
-        // The leg is the SENDER of every frame now (C40), so it needs an egress
+        // The leg is the SENDER of every frame now, so it needs an egress
         // grant as well as an open ingress rule — the two gates are independent
         // and both have to be wired by an operator. A grant map is keyed by a
         // LITERAL id, never `"*"`.
@@ -457,7 +457,7 @@ async fn round_trip(
 
 /// Create a file_bridge child of the root, open for reads and writes, and wire
 /// BOTH gate ends between it and the WS leg — the leg is the sender of every
-/// frame now (C40), so `callable_by` on the bridge and `can_call` on the leg are
+/// frame now, so `callable_by` on the bridge and `can_call` on the leg are
 /// what make a browser fetch reach disk at all.
 async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path, leg: &str) {
     let r = kernel
@@ -488,7 +488,7 @@ async fn make_file_bridge(kernel: &Arc<Kernel>, id: &str, root: &std::path::Path
     assert!(g.get("error").is_none(), "grant the leg: {g}");
 }
 
-/// A11.19: a binary frame is an ordinary envelope plus a body at
+/// A binary frame is an ordinary envelope plus a body at
 /// A TEXT `call` carrying `write_stream` rides the binary channel for the reply
 /// shape, but its `bytes` key is the CLIENT'S JSON value — python only
 /// overwrites it with `payload[field] = body` on a binary frame. So a string
@@ -545,8 +545,8 @@ async fn a_text_write_stream_keeps_the_clients_bytes_value() {
 }
 
 /// `_binary_path` — routed by `type` exactly like a text frame, with the frame
-/// `id` naming the execution (A11.8) and the blob reaching the target's binary
-/// channel (C37).
+/// `id` naming the execution and the blob reaching the target's binary
+/// channel.
 #[tokio::test]
 async fn binary_ws_frame_routes_like_a_text_call() {
     use tokio_tungstenite::tungstenite::Message as TMessage;
@@ -585,7 +585,7 @@ async fn binary_ws_frame_routes_like_a_text_call() {
         blob
     );
 
-    // A11.9: a TEXT `read_stream` call answers a BINARY frame whose head keeps
+    // A TEXT `read_stream` call answers a BINARY frame whose head keeps
     // `bytes: null` in its python position and names it last.
     let frame = json!({
         "type": "call", "target": "fb_bin", "id": "r1",
@@ -625,7 +625,7 @@ async fn binary_ws_frame_routes_like_a_text_call() {
     stop(&kernel, web_id).await;
 }
 
-/// A11.7 (r2): every undecodable frame gets the ONE frame error and the socket
+/// Every undecodable frame gets the ONE frame error and the socket
 /// SURVIVES — a 3-byte binary frame, a header length past the end, JSON that is
 /// not an object, a `_binary_path` python's `set_path` cannot place, and the old
 /// dotted-string spelling of one (not a list of steps).
@@ -697,10 +697,10 @@ async fn malformed_frames_answer_the_frame_error_and_keep_the_socket() {
     stop(&kernel, web_id).await;
 }
 
-/// C40: a SEALED leg (no `ingress_rule`) denies a `call` AND TEACHES, skips the
+/// A SEALED leg (no `ingress_rule`) denies a `call` AND TEACHES, skips the
 /// connect-time auto-watch entirely, and drops `emit`/`watch`/`state_subscribe`
-/// in silence. Measured 2026-09-16: rust ran every frame as the operator and the
-/// sealed socket still received the host's term events.
+/// in silence — no frame runs as the operator, and the sealed socket receives
+/// none of the host's term events.
 #[tokio::test]
 async fn sealed_leg_denies_the_call_and_leaks_no_telemetry() {
     use tokio_tungstenite::tungstenite::Message as TMessage;
@@ -752,7 +752,7 @@ async fn sealed_leg_denies_the_call_and_leaks_no_telemetry() {
     stop(&kernel, web_id).await;
 }
 
-/// C40: an open leg DOES auto-watch the host, and every frame runs as the LEG,
+/// An open leg DOES auto-watch the host, and every frame runs as the LEG,
 /// not as the operator — so an agent that does not accept the leg is refused
 /// over the socket even though the leg's own ingress rule is open.
 #[tokio::test]
@@ -817,7 +817,7 @@ async fn open_leg_autowatches_and_calls_run_as_the_leg() {
     stop(&kernel, web_id).await;
 }
 
-/// A11.7/A11.8: `target` defaults to `""` (never the URL host), `payload` to
+/// `target` defaults to `""` (never the URL host), `payload` to
 /// `{}`, and the frame `id` is echoed RAW — an int id comes back an int.
 #[tokio::test]
 async fn call_frame_without_id_or_payload_replies_like_python() {
@@ -1049,11 +1049,10 @@ async fn web_rest_octet_leg_edit_and_read_stream() {
 /// A SEALED REST leg answers 403 with the repair — it does not serve, and it does
 /// not blame the wrong side.
 ///
-/// The rust POST/GET handlers dispatched straight into `as_agent(owner)` with
-/// no ingress check, so a leg carrying NO `ingress_rule` — sealed by default
-/// everywhere else in the io family — served unauthenticated requests. Where a
-/// call did fail it failed on EGRESS and named a false cause ("wr_sealed may not
-/// call \"reflect\" on …") while the true one, this leg is sealed, was never said.
+/// A leg carrying NO `ingress_rule` is sealed, as everywhere else in the io
+/// family: it serves no unauthenticated request, and its refusal names the true
+/// cause (this leg is sealed), never an EGRESS one ("wr_sealed may not call
+/// \"reflect\" on …").
 #[tokio::test]
 async fn sealed_rest_leg_answers_403_and_teaches_the_repair() {
     let tmp = TempDir::new().unwrap();
@@ -1345,7 +1344,7 @@ async fn stage_host(
     kernel
 }
 
-/// A11.2 — the readme is python's file, byte for byte.
+/// The readme is python's file, byte for byte.
 #[test]
 fn readme_is_python_verbatim() {
     assert_eq!(
@@ -1354,7 +1353,7 @@ fn readme_is_python_verbatim() {
     );
 }
 
-/// A11.10 — the file proxy types through CPython's `mimetypes` table, with
+/// The file proxy types through CPython's `mimetypes` table, with
 /// starlette's `; charset=utf-8` on `text/*` and octet-stream for a miss.
 #[test]
 fn file_proxy_content_type_matches_python_mimetypes() {
@@ -1389,7 +1388,7 @@ fn file_proxy_content_type_matches_python_mimetypes() {
     );
 }
 
-/// A13.14 — every server→client text frame is python's
+/// Every server→client text frame is python's
 /// `json.dumps(envelope, default=str)`: `, `/`: ` separators and ensure_ascii,
 /// so `·` and `↑` leave escaped, not as raw UTF-8.
 #[test]
@@ -1402,7 +1401,7 @@ fn event_frame_bytes_match_python_json_dumps() {
     );
 }
 
-/// A13.18 — uvicorn's keepalive contract, pinned at the source (a live twin
+/// Uvicorn's keepalive contract, pinned at the source (a live twin
 /// would have to idle 40 s). The loop pings every `PING_INTERVAL` and closes
 /// `1011 keepalive ping timeout` when no pong lands inside `PING_TIMEOUT`.
 #[test]
@@ -1416,7 +1415,7 @@ fn server_pings_and_closes_1011_without_pong() {
     );
 }
 
-/// A11.3 (D11) — the route table is python's baked routes (no `/`). The rust-only
+/// The route table is python's baked routes (no `/`). The rust-only
 /// extras are gone: no `/<id>/` server-side render, no `/transport.js`, no
 /// `/_assets/*` vendored JS, no `/favicon.ico`.
 #[tokio::test]
@@ -1466,7 +1465,7 @@ async fn render_route_is_absent() {
     stop(&kernel, "web_d11").await;
 }
 
-/// A13.6 + A13.9 — an unmatched path is FastAPI's `{"detail":"Not Found"}`, a
+/// An unmatched path is FastAPI's `{"detail":"Not Found"}`, a
 /// path that matches under another method is `405` with that route's `Allow`
 /// and FastAPI's `{"detail":"Method Not Allowed"}`, and a trailing slash that
 /// would match after toggling is a `307` carrying the `Host`.
@@ -1526,7 +1525,7 @@ async fn unmatched_paths_and_methods_answer_fastapi_json() {
     assert_eq!(resp.status().as_u16(), 405);
     assert_eq!(resp.headers()["allow"], "GET");
 
-    // `/rest/` toggles to `/rest`, which matches nothing → 404 (measured).
+    // `/rest/` toggles to `/rest`, which matches nothing → 404.
     let resp = client
         .get(format!("http://127.0.0.1:{port}/rest/"))
         .send()
@@ -1537,7 +1536,7 @@ async fn unmatched_paths_and_methods_answer_fastapi_json() {
     stop(&kernel, "web_404").await;
 }
 
-/// A13.9 — starlette's ordered walk: `POST /rest/_reflect` hits the POST
+/// Starlette's ordered walk: `POST /rest/_reflect` hits the POST
 /// route's `{target_id}` (the literal `_reflect` GET route is a different
 /// method, so it cannot shadow it), and a trailing slash redirects `307`.
 #[tokio::test]
@@ -1567,7 +1566,7 @@ async fn post_to_reflect_literal_dispatches_to_that_target() {
     stop(&kernel, "web_ord").await;
 }
 
-/// A13.9 — `GET /rest/_reflect/kernel_state/` toggles to a matching route, so python
+/// `GET /rest/_reflect/kernel_state/` toggles to a matching route, so python
 /// answers `307` with an absolute `location` built from the `Host` header and
 /// the query string carried through. `content-length: 0`.
 #[tokio::test]
@@ -1595,7 +1594,7 @@ async fn trailing_slash_answers_307_with_location() {
     stop(&kernel, "web_307").await;
 }
 
-/// A13.13 — no request-body limit: axum's 2 MiB `DefaultBodyLimit` refused a
+/// No request-body limit: axum's 2 MiB `DefaultBodyLimit` refused a
 /// 3 MB write where python answers `written: 3000000`.
 #[tokio::test]
 async fn rest_post_accepts_bodies_over_2mb() {
@@ -1632,7 +1631,7 @@ async fn stop(kernel: &Arc<Kernel>, web_id: &str) {
         .result;
 }
 
-/// A13.7 — the response header BLOCK, in python's order: uvicorn writes `date`
+/// The response header BLOCK, in python's order: uvicorn writes `date`
 /// then `server`, starlette then the handler's own headers, then
 /// `content-length`, then `content-type`; a `204` carries neither of the last
 /// two. Read off the raw socket, because that is where order lives.
@@ -1729,7 +1728,7 @@ async fn rest_response_header_order_matches_python() {
     stop(&kernel, "web_hdr").await;
 }
 
-/// A13.2 + A13.4 + A13.12 + A11.20 — the octet leg's header contract.
+/// The octet leg's header contract.
 #[tokio::test]
 async fn octet_leg_header_contract_matches_python() {
     let tmp = TempDir::new().unwrap();
@@ -1738,7 +1737,7 @@ async fn octet_leg_header_contract_matches_python() {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/rest/fb_oct");
 
-    // A13.2 — the reply header is `json.dumps(rest)`: `, `/`: ` separators and
+    // The reply header is `json.dumps(rest)`: `, `/`: ` separators and
     // ensure_ascii, so `naïve` leaves as `naïve`, never raw UTF-8.
     let resp = client
         .post(&url)
@@ -1758,7 +1757,7 @@ async fn octet_leg_header_contract_matches_python() {
     assert_eq!(resp.headers()["x-fantastic-bytes-field"], "bytes");
     assert_eq!(resp.bytes().await.unwrap().as_ref(), b"naive!\n");
 
-    // A13.4 — an EMPTY payload header parses as `{}` (`headers.get(...) or "{}"`),
+    // An EMPTY payload header parses as `{}` (`headers.get(...) or "{}"`),
     // so the dispatch is a typeless send, not a 400.
     let resp = client
         .post(&url)
@@ -1775,11 +1774,10 @@ async fn octet_leg_header_contract_matches_python() {
     let body: Value = resp.json().await.expect("json");
     // The envelope reached the target as `{}` — a 400 would mean the leg had
     // treated the empty value as a parse failure. (python's refusal TEXT here
-    // is `send: payload.type required`, which arrives with A13.3's move of the
-    // octet leg onto the batch.)
+    // is `send: payload.type required`.)
     assert!(body.get("error").is_some(), "body: {body}");
 
-    // A13.12 — request header values decode byte-for-byte as latin-1, so a raw
+    // Request header values decode byte-for-byte as latin-1, so a raw
     // UTF-8 path arrives mojibaked exactly as starlette hands it to python.
     let mut raw = reqwest::header::HeaderValue::from_bytes(
         "{\"type\":\"read_stream\",\"path\":\"na\u{ef}ve.txt\"}".as_bytes(),
@@ -1807,7 +1805,7 @@ async fn octet_leg_header_contract_matches_python() {
         "the path is the latin-1 reading of the raw bytes: {body}"
     );
 
-    // A11.20 — `x-fantastic-bytes-field` names the field the body lands under.
+    // `x-fantastic-bytes-field` names the field the body lands under.
     // The default name binds the body as the chunk...
     let resp = client
         .post(&url)
@@ -1868,7 +1866,7 @@ async fn octet_leg_header_contract_matches_python() {
     stop(&kernel, "web_oct").await;
 }
 
-/// A11.17 — the GET `_reflect` shortcuts read their flags exactly as python's
+/// The GET `_reflect` shortcuts read their flags exactly as python's
 /// `_reflect_payload` does (`readme=1|true|yes` ⇒ `True`, any other non-falsy
 /// value is a DOC KEY, `tree`/`bundles` only from the three tiers), and a null
 /// reply is a bare 404.
@@ -1912,8 +1910,8 @@ async fn get_reflect_query_flags_match_python() {
         json!({"type": "reflect"})
     );
 
-    // ...and over the wire: `?readme=true` is 200 (rust used to answer 400
-    // "invalid digit found in string"), and a null reply is a 404.
+    // ...and over the wire: `?readme=true` is 200 (never 400 "invalid digit
+    // found in string"), and a null reply is a 404.
     let tmp = TempDir::new().unwrap();
     let port = free_port();
     let kernel = stage_host(&tmp, port, "web_q", "rest", "fb_q").await;
@@ -1929,7 +1927,7 @@ async fn get_reflect_query_flags_match_python() {
     stop(&kernel, "web_q").await;
 }
 
-/// A11.11 + A11.12 — the reflect frame is python's, key for key.
+/// The reflect frame is python's, key for key.
 #[tokio::test]
 async fn reflect_sentence_and_verbs_match_python() {
     let tmp = TempDir::new().unwrap();
@@ -1996,7 +1994,7 @@ async fn reflect_sentence_and_verbs_match_python() {
     stop(&kernel, "web_r").await;
 }
 
-/// A11.14 — `boot` answers `{running, surfaces}`, a missing port RAISES, and
+/// `boot` answers `{running, surfaces}`, a missing port RAISES, and
 /// `stop` answers `{stopped:bool}`.
 #[tokio::test]
 async fn boot_and_stop_replies_match_python() {
@@ -2056,7 +2054,7 @@ async fn boot_and_stop_replies_match_python() {
     );
 }
 
-/// A11.13 — `mount` / `unmount` are verbs with python's replies, and an
+/// `mount` / `unmount` are verbs with python's replies, and an
 /// unknown type is `web: unknown type 'x'`.
 #[tokio::test]
 async fn mount_unmount_and_unknown_verb_match_python() {
@@ -2111,7 +2109,7 @@ async fn mount_unmount_and_unknown_verb_match_python() {
 /// The twin of python `test_mount.py::
 /// test_a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all`: `boot` on
 /// a running host re-mounts every surface, and a re-mount REPLACES the leg's
-/// routes (python used to append a second copy that outlived `unmount`).
+/// routes (never a second copy that outlives `unmount`).
 #[tokio::test]
 async fn a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all() {
     let tmp = TempDir::new().unwrap();
@@ -2157,7 +2155,7 @@ async fn a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all() {
     stop(&kernel, "web_rb").await;
 }
 
-/// A11.18 — routes change at boot and through `mount`/`unmount`, never through
+/// Routes change at boot and through `mount`/`unmount`, never through
 /// a state subscriber watching for `created`/`routes_changed`.
 #[tokio::test]
 async fn a_child_created_after_boot_mounts_only_through_mount() {
@@ -2264,7 +2262,7 @@ async fn a_child_created_after_boot_mounts_only_through_mount() {
     stop(&kernel, web_id).await;
 }
 
-/// A11.1 — boot ANNOUNCES the URL by sending `say` to `cli`, and falls back to
+/// Boot ANNOUNCES the URL by sending `say` to `cli`, and falls back to
 /// the stderr line only when that send answered something (no cli ⇒ refusal).
 #[tokio::test]
 async fn boot_announces_say_to_cli() {
@@ -2318,7 +2316,7 @@ async fn boot_announces_say_to_cli() {
     stop(&kernel, "web_say").await;
 }
 
-/// ARCH2-10 — the announcement names the host the listener BOUND, not a
+/// The announcement names the host the listener BOUND, not a
 /// hardcoded `127.0.0.1`: a host bound elsewhere does not answer there. The
 /// twin of python `test_boot_announces_the_bound_host`.
 #[tokio::test]
@@ -2404,9 +2402,8 @@ impl fantastic_kernel::bundle::Bundle for SayProbe {
     }
 }
 
-/// A13.16 — a client Close is ECHOED with its payload. Rust used to break the
-/// loop and abort the send task before the queued reply flushed, so the client
-/// saw `1006` (abnormal) instead of the code it sent.
+/// A client Close is ECHOED with its payload: the queued reply flushes before the
+/// loop ends, so the client sees the code it sent, never `1006` (abnormal).
 #[tokio::test]
 async fn client_close_is_echoed_with_its_code() {
     use futures_util::{SinkExt, StreamExt};
@@ -2444,7 +2441,7 @@ async fn client_close_is_echoed_with_its_code() {
         tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web_id}/ws"))
             .await
             .expect("ws connect");
-    // A13.17 (partial) — uvicorn's 101 block order, plus `server: uvicorn`.
+    // Uvicorn's 101 block order, plus `server: uvicorn`.
     // This client offers no extension, so none is answered (the negotiation is
     // pinned in `tests_ws_deflate.rs`). RESIDUAL: python sends capitalised
     // header names; hyper lowercases every name.
@@ -2490,7 +2487,7 @@ async fn client_close_is_echoed_with_its_code() {
     stop(&kernel, web_id).await;
 }
 
-// ─── C86 / A13.14 binary half — a watcher gets the BODY ──────────────
+// ─── binary half — a watcher gets the BODY ──────────────────────────
 
 #[tokio::test]
 async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
@@ -2547,9 +2544,9 @@ async fn ws_watcher_gets_a_binary_frame_for_a_bytes_payload() {
     stop(&kernel, web_id).await;
 }
 
-// ─── A13.1 / A13.3 — the REST legs ride the batch ───────────────────
+// ─── The REST legs ride the batch ───────────────────
 
-/// A13.1 — a reply that HOLDS a chunk is octet on the JSON leg too, a 0-byte
+/// A reply that HOLDS a chunk is octet on the JSON leg too, a 0-byte
 /// chunk included. Rust answered `application/json` with the bytes as a JSON
 /// string, and gated octet on `!body.is_empty()`, so an empty file came back as
 /// JSON and a caller could not tell it from a refusal.
@@ -2603,7 +2600,7 @@ async fn json_leg_read_stream_answers_octet_including_empty_chunk() {
     stop(&kernel, "web_jsonoct").await;
 }
 
-/// A13.1/A13.19 — a JSON `write_stream` naming `bytes` as a JSON string is
+/// A JSON `write_stream` naming `bytes` as a JSON string is
 /// `missing_arg`, and NOTHING is written: JSON has no bytes type, so the only
 /// raw chunk on this leg is the octet body.
 #[tokio::test]
@@ -2635,7 +2632,7 @@ async fn json_leg_write_stream_string_bytes_is_missing_arg() {
     stop(&kernel, "web_jsonwr").await;
 }
 
-/// A13.3 + A11.20 — the octet leg dispatches THROUGH THE BATCH, so
+/// The octet leg dispatches THROUGH THE BATCH, so
 /// `X-Fantastic-Execution-Id` NAMES the execution (a repeat REPLAYS instead of
 /// re-running, and rebinding the id to another target is refused) and the call
 /// leaves a row like any other send — an HTTP caller can express a safe repeat.
@@ -2708,9 +2705,9 @@ async fn octet_leg_names_executions_and_validates_type() {
     stop(&kernel, "web_octid").await;
 }
 
-// ─── C40 — the file proxy ───────────────────────────────────────────
+// ─── The file proxy ───────────────────────────────────────────
 
-/// C40 (r2 byte shapes) — a GATE denial is a 404 carrying EXACTLY
+/// A GATE denial is a 404 carrying EXACTLY
 /// `error, reason, side, hint` in that order (a missing key as `null`), while a
 /// missing file is a bare 404 with no body at all. Rust served the denied file
 /// 200 and answered a missing file with text/plain.
@@ -2838,7 +2835,7 @@ async fn the_web_serves_only_what_the_list_exposes() {
     stop(&kernel, "web_al").await;
 }
 
-/// C40 — an agent that is not there at all is a bare 404, before any dispatch.
+/// An agent that is not there at all is a bare 404, before any dispatch.
 #[tokio::test]
 async fn file_proxy_404_for_missing_agent() {
     let tmp = TempDir::new().unwrap();
@@ -2853,13 +2850,13 @@ async fn file_proxy_404_for_missing_agent() {
     stop(&kernel, "web_fpm").await;
 }
 
-/// A13.11 (partial) — the JSON BODY goes through CPython's
+/// The JSON BODY goes through CPython's
 /// `json.loads(bytes)`: the encoding is DETECTED from the BOM / null-byte
 /// pattern, so UTF-8-with-BOM, UTF-16 and UTF-32 bodies all parse. Rust read
 /// UTF-8 only and answered 400 for every one of them. A body that will not
 /// decode at all raises out of python's handler as a 500.
 ///
-/// STRICT (D13): what python's `io_bridge.loads` refuses — `NaN`/`Infinity`,
+/// STRICT: what python's `io_bridge.loads` refuses — `NaN`/`Infinity`,
 /// lone surrogates, ints outside int64, overflowing floats — is the same 400.
 #[tokio::test]
 async fn json_body_decodes_like_cpython_json_loads() {
@@ -2924,7 +2921,7 @@ async fn json_body_decodes_like_cpython_json_loads() {
         "web_rest: request body is not valid JSON"
     );
 
-    // STRICT (D13): `io_bridge.loads` refuses what not every runtime can hold
+    // STRICT: `io_bridge.loads` refuses what not every runtime can hold
     // — an int outside int64, a number that overflows a double — as the same
     // "not valid JSON" 400.
     for bad in [
@@ -2959,7 +2956,7 @@ async fn json_body_decodes_like_cpython_json_loads() {
     stop(&kernel, "web_jsonenc").await;
 }
 
-/// A11.7 — an open socket is WORK, and work is in `ps`: python spawns the
+/// An open socket is WORK, and work is in `ps`: python spawns the
 /// outbound pump as the kernel task `ws_drain` on the HOST, and each `call`
 /// frame as `ws_call`. Rust ran the drain as a bare `tokio::spawn`, so a live
 /// browser connection was invisible to `ps` and to `cancel`.
@@ -3000,13 +2997,12 @@ async fn open_ws_shows_ws_drain_in_ps() {
     stop(&kernel, web_id).await;
 }
 
-/// C40 (r5) — THE EVENT PRECEDES ITS REPLY. Python's kernel fans a payload into
+/// THE EVENT PRECEDES ITS REPLY. Python's kernel fans a payload into
 /// every watcher inbox BEFORE the handler runs, and python's cooperative loop
 /// puts that `event` frame on the wire before `_on_call` composes the `reply`.
-/// Rust drained the inbox on a PARALLEL task, so the reply overtook the event —
-/// three times in the r3 capture (`wire/frames.jsonl[141]`, `[185]`, `[186]`).
-/// A UI sits on this socket, so the order is the contract. 60 iterations, one
-/// socket, because it was a RACE.
+/// Draining the inbox on a PARALLEL task lets the reply overtake the event. A
+/// UI sits on this socket, so the order is the contract. 60 iterations, one
+/// socket, because it is a RACE.
 #[tokio::test]
 async fn the_watch_event_always_precedes_its_reply() {
     use futures_util::{SinkExt, StreamExt};
@@ -3174,7 +3170,7 @@ async fn foreign_websocket_upgrade_is_refused_listed_origin_passes() {
     stop(&kernel, "web_ow").await;
 }
 
-/// W-2 (audit 2026-10-03): every request whose Host is not the server's own
+/// Every request whose Host is not the server's own
 /// authority is refused, GET and the websocket upgrade included.
 #[path = "tests_host_guard.rs"]
 mod host_guard;
@@ -3201,7 +3197,7 @@ mod binary_path;
 #[path = "tests_ws_deflate.rs"]
 mod ws_deflate;
 
-/// W-3 (audit 2026-10-03): a ws message, fragmented or not, is bounded by the
+/// A ws message, fragmented or not, is bounded by the
 /// one frame cap.
 #[path = "tests_ws_message_cap.rs"]
 mod ws_message_cap;
@@ -3353,7 +3349,7 @@ fn reflect_query_is_parsed_like_starlette() {
     );
 }
 
-/// STEP-4 PIN (2026-10-01): `web`'s unknown type is a BARE `{error}` (no code,
+/// `web`'s unknown type is a BARE `{error}` (no code,
 /// no verb) — unlike its legs' coded refusal. Compared as text: key order is
 /// part of the wire and `Value` equality ignores it.
 #[tokio::test]
@@ -3382,7 +3378,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     }
 }
 
-/// STEP-4 PIN (2026-10-01): per-agent server state. Two `web` agents run two
+/// Per-agent server state. Two `web` agents run two
 /// listeners; deleting one releases ITS port (the `on_delete` teardown) while
 /// the other keeps serving, and its reflect says it is no longer running.
 #[tokio::test]
@@ -3447,7 +3443,7 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
     stop(&kernel, "web_s4a").await;
 }
 
-// IO-4 (audit 2026-10-03): the rest leg's gate runs before its body is read, and
+// The rest leg's gate runs before its body is read, and
 // the body is bounded by the one frame cap.
 #[path = "tests_rest_ingress_order.rs"]
 mod rest_ingress_order;

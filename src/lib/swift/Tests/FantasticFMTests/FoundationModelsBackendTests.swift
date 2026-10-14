@@ -321,8 +321,7 @@ struct FoundationModelsBackendTests {
     }
 
     @Test func theDefaultSystemBlockFitsTheOnDeviceWindow() async {
-        // Measured 2026-10-06: with the verb docs out of the reflects and the howto
-        // tightened, the kernel's default system block fits the 4096-token on-device
+        // With the verb docs out of the reflects, the kernel's default system block fits the 4096-token on-device
         // window — the turn runs with no `system_prompt`. Rust
         // `the_default_system_block_fits_the_on_device_window`.
         let engine = FakeEngine(contextSize: 4096)

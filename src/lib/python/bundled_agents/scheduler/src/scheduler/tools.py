@@ -27,7 +27,7 @@ scheduler's own id, so the gate judges the SCHEDULER's `can_call` and the
 target's `callable_by` for the scheduler. Every verb — list, history, tick_now,
 unschedule, pause, resume — sees every schedule.
 
-NO IDLE WAKEUPS (owner, 2026-10-08): the fire loop sleeps until the EARLIEST due
+NO IDLE WAKEUPS: the fire loop sleeps until the EARLIEST due
 schedule, or — none due, or the scheduler paused — until something changes: a
 schedule added, removed, paused or resumed, or the scheduler's own record updated
 (`paused`). An idle scheduler wakes never.
@@ -291,12 +291,10 @@ async def _fire_many(sid: str, due: list[dict], kernel) -> list[dict]:
             logger.warning(
                 "scheduler %s: history persist failed: %s", sid, err.get("error")
             )
-        # ONE delivery per tick. This used to also emit `schedule_fired` onto the
-        # TARGET's inbox, so a live program (exec_bridge mail → on_message)
-        # received every tick TWICE — the payload send and then this telemetry
-        # echo of the same tick, result included. Measured 2026-08-07 (combined
-        # probe, opus): the model discovered it live, named it "the double-fire
-        # hazard", and had to design its tool around filtering the duplicate.
+        # ONE delivery per tick. Emitting `schedule_fired` onto the TARGET's inbox
+        # too would make a live program (exec_bridge mail → on_message) receive
+        # every tick TWICE — the payload send and then this telemetry echo of the
+        # same tick, result included.
         # Telemetry about a fire is the SCHEDULER's story: its own inbox carries
         # the event for watchers and `history` already persists it; the target
         # got the actual payload, which IS the tick.
@@ -349,7 +347,7 @@ async def _schedule(id, payload, kernel):
     if sched_payload is None:
         sched_payload = {}
     if not isinstance(sched_payload, dict):
-        # A list/string here used to raise `.get` out of the handler.
+        # A list/string here would raise `.get` out of the handler.
         return bad("schedule", "payload", "an object with type")
     interval = _int_arg(payload, "interval_seconds", 60, "schedule", 1)
     if isinstance(interval, dict):
@@ -472,10 +470,8 @@ async def _tick_now(id, payload, kernel):
                     "error": f"scheduler.tick_now: {err['error']}",
                     **({"reason": err["reason"]} if err.get("reason") else {}),
                 }
-            # THE OUTCOME, not just the fact. `{fired:true}` alone hid a target that
-            # refused every fire: measured 2026-10-06 (rust subai_graph), a schedule
-            # sent `{type:'tick'}` to an AI agent, which has no such verb; `tick_now`
-            # said fired 16 times and the model never learned the payload was wrong.
+            # THE OUTCOME, not just the fact. `{fired:true}` alone hides a target that
+            # refuses every fire (a payload whose verb the target does not have).
             (ev,) = await _fire_many(id, [s], kernel)
             return {
                 "fired": True,
@@ -534,7 +530,7 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
 async def on_delete(agent):
     """Cascade hook: drop the in-process cache and stop the tick loop, so a
     re-created scheduler with the same id does not list and fire the old
-    schedules (measured 2026-09-16)."""
+    schedules."""
     _cache.pop(agent.id, None)
     t = _tick_tasks.pop(agent.id, None)
     if t is not None and not t.done():

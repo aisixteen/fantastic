@@ -45,7 +45,7 @@ async def test_summary_shrinks_bytes_but_never_truncates(seeded_kernel):
     """The `summary` field replaces bytes values with `<bytes:N>` so JSON-on-the-wire
     telemetry doesn't choke on binary protocol payloads — and it does NOT trim.
 
-    It used to cut at 160 chars + an ellipsis. That makes the telemetry view lie:
+    Cutting at a fixed length + an ellipsis would make the telemetry view lie:
     the reader cannot tell a short payload from a truncated one, and the part that
     got dropped is exactly the part you go looking at telemetry to find. Eliding is
     a RENDER decision, where whoever is looking can see that it happened."""

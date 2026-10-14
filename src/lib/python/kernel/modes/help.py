@@ -8,8 +8,7 @@ def _print_help() -> None:
     bundle because the CLI is what renders it: file-backed, editable
     markdown, not a hardcoded string. Points at `fantastic reflect
     readme=true` for the live-system bootstrap. An unreadable cheatsheet
-    raises: a substitute line hid a broken install (audit 2026-10-03,
-    ARCH2-9)."""
+    raises: a substitute line would hide a broken install."""
     import importlib.resources
 
     src = importlib.resources.files("cli") / "help.md"

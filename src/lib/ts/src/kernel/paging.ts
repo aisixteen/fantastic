@@ -1,11 +1,9 @@
 // `page(items, payload, ident)` — the paging primitive (#1). Port of python
 // `kernel/_kernel.py::page`, same semantics down to the cursor-miss case.
 //
-// UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box. Measured
-// 2026-08-20: reflect bulk was ~42% of an AI agent's context, which is what
-// forced `dedupe_stale_reads`, the reflect stub and the point-of-use
-// distillation nudge in `ai_core` — every one of those shrinks what is RETAINED
-// because nothing could shrink what is SENT. Paging attacks the cause.
+// UNBOUNDED LIST REPLIES ARE A REAL COST, not a conformance box: reflect bulk can
+// fill much of an AI agent's context. Retention-side measures shrink what is
+// RETAINED; paging shrinks what is SENT.
 //
 // The cursor is OPAQUE by construction: it is the last item's IDENTITY, not an
 // offset, so a caller cannot compute the next one or skip ahead by arithmetic.

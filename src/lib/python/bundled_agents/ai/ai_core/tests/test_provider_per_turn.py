@@ -1,10 +1,10 @@
 """The provider is built per turn from the LIVE record, and a deleted id leaves
-nothing behind (audit ARCH2-2).
+nothing behind.
 
-A cached provider captured endpoint, model and sampling when it was built: after
-`update_agent` moved an agent to another endpoint, every later turn still posted
+A cached provider captures endpoint, model and sampling when it is built: after
+`update_agent` moves an agent to another endpoint, every later turn would still post
 the conversation (and the key, when its ref still bound the old host) to the old
-one, and a deleted id re-created later inherited it. Rust and swift build per call.
+one, and a deleted id re-created later would inherit it.
 These drive the REAL turn path (`send` → `_run` → `_build_provider` →
 `make_provider`), with the provider CLASS recorded instead of dialled."""
 

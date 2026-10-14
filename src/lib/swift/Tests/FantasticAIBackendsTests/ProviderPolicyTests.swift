@@ -34,7 +34,7 @@ private let oneUser: [JSON] = [.object(["role": .string("user"), "content": .str
 @Suite("Provider policy")
 struct ProviderPolicyTests {
 
-    // ── B4.6: the ollama model and endpoint ──────────────────────────────
+    // ── the ollama model and endpoint ──────────────────────────────
 
     /// An unset model FAILS LOUD when the provider is built, naming the field —
     /// python's `required_meta`.
@@ -56,7 +56,6 @@ struct ProviderPolicyTests {
     }
 
     /// The record's `endpoint` is where ollama listens; `/api/chat` is appended.
-    /// Swift read a `host` meta and ignored `endpoint` entirely.
     @Test func ollamaRecordEndpointBuildsApiChatUrl() async {
         let stub = StubHTTP([.init(body: #"{"message":{"content":"ok"},"done":true}"#)])
         defer { stub.stop() }

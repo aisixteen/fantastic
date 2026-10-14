@@ -29,9 +29,9 @@ frame kind end-to-end, so a tunneled binary chunk stays a binary frame.
 
 ONE bytes value per frame (the stream protocol carries exactly one chunk per frame;
 rust and swift replies hold one body by type). An envelope holding MORE is refused
-by `encode_frame` (`FrameError`, naming each path) — it used to be written with the
-second value stringified (`json.dumps(default=str)` → `"b'…'"`), a corrupted value
-the receiver could not tell from data. A sender passes what it sends through
+by `encode_frame` (`FrameError`, naming each path) — never written with the second
+value stringified (`json.dumps(default=str)` → `"b'…'"`), a corrupted value the
+receiver could not tell from data. A sender passes what it sends through
 `sendable` first: a reply or an event that cannot be carried goes out as its routing
 keys and a refusal where its body was, so the receiver learns why; a frame the
 sender originates (a call) is refused at the sender.
@@ -239,8 +239,7 @@ def _no_lone_surrogate(x) -> None:
 
 
 def loads(text: str | bytes):
-    """JSON off the wire, STRICTLY — only values EVERY runtime can hold (owner
-    D13, 2026-10-01). Refused, each as a `JSONDecodeError` so every caller's
+    """JSON off the wire, STRICTLY — only values EVERY runtime can hold. Refused, each as a `JSONDecodeError` so every caller's
     existing "not valid JSON" path answers it:
       * `NaN`, `Infinity`, `-Infinity` — not JSON at all (RFC 8259), yet python's
         `json.loads` alone accepts them;
@@ -250,9 +249,7 @@ def loads(text: str | bytes):
       * a document nested deeper than the json scanner can enter — it charges
         every `[`/`{` against `sys.getrecursionlimit()` and raises
         `RecursionError`, which no "not valid JSON" path catches (web_rest
-        answered a bare 500). Swift's scanner refuses at the same depth.
-    (parity 2026-09-30: python took a `NaN` REST body, `12345678901234567890` and
-    `"\\udcff"` that rust and swift refuse or change.)"""
+        would answer a bare 500). Swift's scanner refuses at the same depth."""
     try:
         out = json.loads(
             text, parse_constant=_no_constant, parse_int=_int64, parse_float=_finite
@@ -271,7 +268,7 @@ def decode_frame(data: bytes | str) -> dict:
     ⇒ a binary frame with the raw body restored at `_binary_path`.
 
     A frame arrives from a PEER, so every length in it is hostile until checked: a
-    4-byte prefix claiming 4 GiB of header on a 3-byte frame used to slice garbage
+    4-byte prefix claiming 4 GiB of header on a 3-byte frame would slice garbage
     and raise `struct.error`/`JSONDecodeError` out of whichever read loop called us.
     The bounds are checked here, once, and every malformed frame leaves as the SAME
     `ValueError` — so a caller can catch one thing and keep its socket."""

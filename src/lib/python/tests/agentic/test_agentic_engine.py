@@ -111,7 +111,7 @@ def _pair(tmp_path, *, spec: str, config: str = "") -> Path:
 
 def test_an_unknown_config_key_is_refused_rather_than_dropped(tmp_path):
     """`static_loader` silently ignores every top-level key but `agents:` and
-    never objects to a misspelled meta — measured: `can_calls:` becomes inert
+    never objects to a misspelled meta — `can_calls:` becomes inert
     record meta with no complaint anywhere. A contract file that quietly drops
     half of what you wrote is the exact failure this suite exists to catch, so
     the wrapper refuses what the loader would swallow."""

@@ -1,9 +1,9 @@
 """Two ids no local agent may hold — refused at create AND at load.
 
 `kernel` names the operator: a send to it reaches the root, and a memory store
-serves the operator under it. Measured 2026-09-28: `create_agent id=kernel`
-succeeded, and that agent — unreachable, since sends to `kernel` land on the root
-— was the operator to every `ram_store` (its rows keyed `<guid>|kernel`).
+serves the operator under it. An agent created with `id=kernel` — unreachable, since
+sends to `kernel` land on the root — would be the operator to every `ram_store` (its
+rows keyed `<guid>|kernel`).
 
 `|` qualifies a FOREIGN agent (`<guid>|<agent>`). A local id never carries one,
 so a gate tells local from foreign by the id alone.

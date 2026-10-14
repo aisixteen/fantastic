@@ -1,4 +1,4 @@
-// Python-format helpers — every pin measured with CPython 3.11 (A0).
+// Python-format helpers — every pin measured with CPython 3.11.
 
 import Foundation
 import OrderedCollections

@@ -356,7 +356,7 @@ async def test_script_agent_cancels_another_agents_task(seeded_kernel):
 
 async def test_kernel_verbs_are_docs_not_reflect(seeded_kernel):
     """The kernel verbs are READ with `docs of=kernel` and ANSWERED only by the root
-    (owner, 2026-10-05: a reflect shows no verbs). They act on the TREE and on the
+    (a reflect shows no verbs). They act on the TREE and on the
     kernel-wide task table, so the agent they name is the OPERAND, not the actor —
     a non-root agent refuses them, naming where to go."""
     for target in ("kernel", "cli"):

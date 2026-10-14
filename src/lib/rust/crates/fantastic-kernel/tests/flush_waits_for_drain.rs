@@ -1,9 +1,9 @@
-//! ONE RECORD DRAIN AT A TIME (Q6, mirrored from swift's `RecordWriter`).
+//! ONE RECORD DRAIN AT A TIME (mirrored from swift's `RecordWriter`).
 //!
-//! `flush_records` used to take the dirty queues and return. When the debounced
-//! writer's own drain had already taken them, the flush found them empty and
-//! returned AT ONCE — with that drain's record write still in flight, so a
-//! caller did not see `agent.yaml` on disk.
+//! `flush_records` must not just take the dirty queues and return: when the
+//! debounced writer's own drain had already taken them, the flush would find
+//! them empty and return AT ONCE — with that drain's record write still in
+//! flight, so a caller would not see `agent.yaml` on disk.
 //!
 //! The race is pinned here without a timing window: the store HOLDS the probe's
 //! record write until the test opens its gate, so the writer's drain is provably

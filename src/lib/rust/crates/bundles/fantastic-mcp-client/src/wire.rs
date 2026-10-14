@@ -1,4 +1,4 @@
-//! The MCP wire — Streamable HTTP, DUAL-ERA (owner, 2026-10-12). Python
+//! The MCP wire — Streamable HTTP, DUAL-ERA. Python
 //! `mcp_client/wire.py`, text for text: the modern protocol 2026-07-28 first, the
 //! `initialize`-era ones ([`LEGACY`]) when the server speaks only those — the spec's
 //! "dual-era client" (2026-07-28 basic/versioning + transports/streamable-http).

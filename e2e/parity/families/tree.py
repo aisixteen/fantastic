@@ -1,5 +1,5 @@
 """tree — every bundle's create/reflect/readme surface, plus the web legs, in ONE
-boot (`SCR/parity_capture.py` + `SCR/parity_web.py`).
+boot.
 
 STORELESS ON PURPOSE. Nothing wires a persistence provider here, so an agent's
 `readme` comes from wherever the runtime keeps it with no disk behind it —
@@ -7,12 +7,13 @@ python answers a null non-root `readme=true` while swift seeds straight to disk,
 and that difference only exists when there is no store to hide it. `store`
 covers the wired case.
 
-Three changes from round 1, each for a measured reason:
-  * `grep {query:'reading'}` — round 1 sent `pattern` (`parity_capture.py:116`),
-    which is not the argument name, so the item under test never ran;
-  * `yaml_state.tools` → `absent_bundle.tools` — the yaml entry point is a STALE
-    record in the source venv (D12) and `yaml` measured the venv, not the kernel.
-    An id whose handler module does not exist anywhere is the real question;
+Three choices, each for a reason:
+  * `grep {query:'reading'}` — `query` is the argument name (`pattern` is not, so
+    the item under test would never run);
+  * `absent_bundle.tools`, not `yaml_state.tools` — the yaml entry point can be a
+    STALE record in the source venv (D12), which would measure the venv, not the
+    kernel. An id whose handler module does not exist anywhere is the real
+    question;
   * `totals2`/`sload2` — the same two bundles with EMPTY-STRING arguments,
     because a falsy argument takes a different branch than a missing one.
 """
@@ -153,8 +154,7 @@ def run(ctx) -> None:
         rec.json("ai_rows_read", call(k, MEMORY, {"type": "read", "owner": "ai"}))
         for verb, extra in (("history", {}), ("status", {"client_id": "probe"}),
                             ("context_status", {}), ("recall", {"query": "total"}),
-                            # `query`, not `pattern` — round 1 aimed this at a name
-                            # the verb does not take and measured the refusal.
+                            # `query`, not `pattern` — the name the verb takes.
                             ("grep", {"query": "reading"})):
             rec.json(f"ai_{verb}", call(k, "ai", {"type": verb, **extra}))
 

@@ -31,9 +31,9 @@ extension IngressRules {
         public let unknown: String?
         public init(unknown: String? = nil) { self.unknown = unknown }
         public func authorize(_ action: AuthAction) -> AuthDecision {
-            // EVERY inbound kind — py-canonical. Call-only sealing made the seal
-            // partial (watch/state_subscribe leaked, and a new kind like `spawn`
-            // sailed through); measured on rust 2026-08-07, fixed in all runtimes.
+            // EVERY inbound kind — py-canonical. Call-only sealing would make the seal
+            // partial (watch/state_subscribe leaking, a new kind like `spawn`
+            // sailing through).
             _ = action
             // PYTHON'S WORDS, both variants. The reason says WHAT happened, the
             // hint says how to open it, and the unknown-rule variant appends the

@@ -242,7 +242,7 @@ async fn wait_for(mut pred: impl FnMut() -> bool, secs: f64) -> bool {
 
 /// Stop a scheduler's tick loop the way an operator would.
 ///
-/// `shutdown` is NOT a verb (A5.3) — python has no such key and it answers
+/// `shutdown` is NOT a verb — python has no such key and it answers
 /// `scheduler: unknown type 'shutdown'`. The tick loop is a kernel TASK, so the way
 /// to stop one is to cancel that task (or delete the agent, which does the same
 /// through `on_delete`).
@@ -485,9 +485,8 @@ async fn pause_resume_flips_meta() {
     assert_eq!(flips, 2, "pause and resume each publish `updated`");
 }
 
-/// `tick_now` answers the fire's OUTCOME. Measured 2026-10-06 (rust subai_graph):
-/// a schedule sent `{type:'tick'}` to an AI agent, which has no such verb;
-/// `{fired:true}` alone hid sixteen refusals from the model. Python
+/// `tick_now` answers the fire's OUTCOME: `{type:'tick'}` sent to an AI agent,
+/// which has no such verb, is a refusal `{fired:true}` alone would hide. Python
 /// `test_tick_now_reports_a_refused_fire`.
 #[tokio::test]
 async fn tick_now_reports_a_refused_fire() {
@@ -729,9 +728,9 @@ async fn a_schedule_timeout_bounds_its_fire() {
 
 #[tokio::test]
 async fn non_int_args_are_bad_arg_refusals() {
-    // #136 — a present-but-wrong number is a TYPO, not a new default.
-    // `as_u64().unwrap_or(60)` used to swallow `interval_seconds: "60"` and
-    // schedule hourly what the caller wrote as per-minute.
+    // A present-but-wrong number is a TYPO, not a new default:
+    // `interval_seconds: "60"` must never schedule hourly what the caller wrote
+    // as per-minute.
     let tmp = TempDir::new().unwrap();
     let (kernel, sch, _hits) = mk_probed(&tmp, &["p_x"], None, true).await;
     for bad_value in [
@@ -820,7 +819,7 @@ async fn schedule_refuses_a_non_object_payload() {
 
 #[tokio::test]
 async fn an_idle_scheduler_never_wakes_and_a_change_wakes_it() {
-    // No idle wakeups (owner, 2026-10-08): with nothing to wait for the loop
+    // No idle wakeups: with nothing to wait for the loop
     // waits on a change; a schedule, or the record's own `paused` flipped by
     // update_agent, wakes it.
     let tmp = TempDir::new().unwrap();
@@ -866,7 +865,7 @@ async fn an_idle_scheduler_never_wakes_and_a_change_wakes_it() {
 
 // ─── python parity (plan §2 A5) ──────────────────────────────────
 
-/// A5.2 — the vendored readme is python's, byte for byte (two lines + `\n`).
+/// The vendored readme is python's, byte for byte (two lines + `\n`).
 #[test]
 fn scheduler_readme_is_python_verbatim() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -881,7 +880,7 @@ fn scheduler_readme_is_python_verbatim() {
     assert_eq!(src, README, "readme has drifted from {}", py.display());
 }
 
-/// A5.1 — the `schedule_fired` emit doc is python's, two em-dashes and all.
+/// The `schedule_fired` emit doc is python's, two em-dashes and all.
 #[tokio::test]
 async fn docs_emits_is_python_verbatim() {
     assert_eq!(
@@ -890,7 +889,7 @@ async fn docs_emits_is_python_verbatim() {
     );
 }
 
-/// A5.15 — `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
+/// `verbs` is python's `VERBS` order, each entry the FIRST LINE of that
 /// verb's docstring. `boot`'s is truncated mid-sentence; that is the python text.
 #[tokio::test]
 async fn verb_docs_are_python_verbatim() {
@@ -924,8 +923,8 @@ async fn verb_docs_are_python_verbatim() {
     );
 }
 
-/// A5.3 — `shutdown` is not a verb: python's `VERBS` has no such key, so it is an
-/// unknown type. It used to answer `null`, which read as a successful stop.
+/// `shutdown` is not a verb: python's `VERBS` has no such key, so it is an
+/// unknown type — never a `null` that reads as a successful stop.
 #[tokio::test]
 async fn shutdown_is_an_unknown_type() {
     let tmp = TempDir::new().unwrap();
@@ -938,7 +937,7 @@ async fn shutdown_is_an_unknown_type() {
     assert_eq!(r["error"], "scheduler: unknown type 'shutdown'");
 }
 
-/// A5.13 — refusals quote with python's `repr`.
+/// Refusals quote with python's `repr`.
 #[tokio::test]
 async fn refusal_text_uses_python_repr() {
     let tmp = TempDir::new().unwrap();
@@ -964,7 +963,7 @@ async fn refusal_text_uses_python_repr() {
     assert_eq!(r["error"], "schedule 7 not found");
 }
 
-/// A5.4 — `boot` is idempotent and says only `{running:true}`; a caller cannot
+/// `boot` is idempotent and says only `{running:true}`; a caller cannot
 /// branch on whether it was the first.
 #[tokio::test]
 async fn boot_twice_replies_running_only() {
@@ -981,7 +980,7 @@ async fn boot_twice_replies_running_only() {
     stop_tick(&kernel, &sch).await;
 }
 
-/// A5.5 — the validation ORDER is python's: payload shape → `interval_seconds` →
+/// The validation ORDER is python's: payload shape → `interval_seconds` →
 /// target → `payload.type` → `timeout`. A call with two faults is told about the
 /// first one python names.
 #[tokio::test]
@@ -1009,7 +1008,7 @@ async fn schedule_validation_order_is_pythons() {
     assert_eq!(r["schedule"]["target"], json!(7), "{r}");
 }
 
-/// A5.6 — `timeout` is stored AS SENT: an int `5` stays `5`, it does not become
+/// `timeout` is stored AS SENT: an int `5` stays `5`, it does not become
 /// `5.0` on its way through an `f64`.
 #[tokio::test]
 async fn an_int_timeout_stays_an_int() {
@@ -1028,7 +1027,7 @@ async fn an_int_timeout_stays_an_int() {
     assert!(r["schedule"]["fire_timeout"].is_i64(), "{r}");
 }
 
-/// A5.7 — `schedule_id` is read under python TRUTHINESS, and the raw value is
+/// `schedule_id` is read under python TRUTHINESS, and the raw value is
 /// echoed back.
 #[tokio::test]
 async fn empty_schedule_id_is_absent_like_python() {
@@ -1054,7 +1053,7 @@ async fn empty_schedule_id_is_absent_like_python() {
     assert_eq!(r["schedule_id"], json!(7), "{r}");
 }
 
-/// A5.11 — `paused` is python TRUTHINESS on both the agent meta and each schedule;
+/// `paused` is python TRUTHINESS on both the agent meta and each schedule;
 /// reflect still answers a bool.
 #[tokio::test]
 async fn paused_meta_uses_python_truthiness() {
@@ -1103,8 +1102,8 @@ async fn schedules_sidecar_uses_python_yaml_layout() {
     );
 }
 
-/// A5.14 — `delete_agent` evicts the process schedule cache (python's
-/// `on_delete`, 2026-09-20): an agent recreated under the same id in the same
+/// `delete_agent` evicts the process schedule cache (python's
+/// `on_delete`): an agent recreated under the same id in the same
 /// process starts empty instead of inheriting its predecessor's schedules.
 #[tokio::test]
 async fn recreated_scheduler_drops_the_process_cache() {
@@ -1135,7 +1134,7 @@ async fn recreated_scheduler_drops_the_process_cache() {
     );
 }
 
-/// A5.8 — a non-`completed` fire reads `'<status>: ' + str(detail)`, and a detail
+/// A non-`completed` fire reads `'<status>: ' + str(detail)`, and a detail
 /// python never had reads `None`. `completed` keeps `error` null even when the
 /// reply itself carries an `error` key: the STATUS is the verdict.
 #[test]
@@ -1164,13 +1163,12 @@ fn cancelled_fire_error_reads_none() {
     );
 }
 
-/// A5.9 — the RAM cache is updated BEFORE the persist, so a tick whose write failed
+/// The RAM cache is updated BEFORE the persist, so a tick whose write failed
 /// keeps its bumped `run_count`/`next_run` and does not re-fire on the next sweep.
 ///
-/// Warming the cache only on success made the opposite true: every sweep re-read the
-/// stale list, re-fired the same schedule and failed to persist again, forever.
-///
-/// The persist-failure TEXT this wraps is acceptance-deferred until C13.
+/// Warming the cache only on success would make the opposite true: every sweep
+/// would re-read the stale list, re-fire the same schedule and fail to persist
+/// again, forever.
 #[tokio::test]
 async fn failed_tick_persist_does_not_refire_next_tick() {
     let tmp = TempDir::new().unwrap();
@@ -1214,7 +1212,7 @@ async fn failed_tick_persist_does_not_refire_next_tick() {
     );
 }
 
-/// A5.9, the other half — `tick_now` ROLLS THE CACHE BACK when its persist fails
+/// The other half — `tick_now` ROLLS THE CACHE BACK when its persist fails
 /// (python decrements `run_count` by hand), while `pause` keeps its change.
 #[tokio::test]
 async fn a_failed_persist_rolls_back_tick_now_but_not_pause() {
@@ -1263,7 +1261,7 @@ async fn a_failed_persist_rolls_back_tick_now_but_not_pause() {
     );
 }
 
-/// A5.16's rust mirror — the per-schedule pause/resume reply leads with the FLAG,
+/// The per-schedule pause/resume reply leads with the FLAG,
 /// then the id (python's key order).
 #[tokio::test]
 async fn pause_reply_key_order_matches_python() {
@@ -1295,7 +1293,7 @@ async fn pause_reply_key_order_matches_python() {
     );
 }
 
-/// A15.2 — a failed tick persist and a failed history append each print python's
+/// A failed tick persist and a failed history append each print python's
 /// `logging.lastResort` line (`scheduler/tools.py:236-239,286-289`), not rust's
 /// old `tracing` text. Captured through the injected writer the fix introduces.
 #[tokio::test]
@@ -1359,7 +1357,7 @@ fn a_fire_carries_the_stored_timeout_raw() {
     assert!(item.raw_timeout.is_none());
 }
 
-/// STEP-4 PIN (2026-10-01): the scheduler's unknown type is a BARE `{error}`
+/// The scheduler's unknown type is a BARE `{error}`
 /// over python's repr of the RAW value. Compared as text (key order is wire).
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
@@ -1385,7 +1383,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     );
 }
 
-/// STEP-4 PIN (2026-10-01): a schedule id is python's
+/// A schedule id is python's
 /// `f"sch_{secrets.token_hex(3)}"` — 6 LOWERCASE hex, random per schedule.
 #[tokio::test]
 async fn schedule_ids_are_sch_and_token_hex_3() {
@@ -1418,7 +1416,7 @@ async fn schedule_ids_are_sch_and_token_hex_3() {
     assert_eq!(seen.len(), 8, "ids repeat: {seen:?}");
 }
 
-/// STEP-4 PIN (2026-10-01): per-agent state. Two schedulers of the same kind
+/// Per-agent state. Two schedulers of the same kind
 /// share nothing (schedules, tick loop); `delete_agent` stops the deleted one's
 /// tick loop and frees its slot, and the survivor keeps running.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

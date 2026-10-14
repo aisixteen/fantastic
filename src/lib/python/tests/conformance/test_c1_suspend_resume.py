@@ -2,8 +2,7 @@
 
 The exemplar (`openai-agents/tests/test_hitl_session_scenario.py`) interrupts a
 run for human input and asserts the answer resumes it at the exact point. In
-this paradigm there is NO SUSPENSION MACHINERY, and since 2026-09-11 there is
-no suspension either: ASKING IS A CALL. The chain `send`s an `inquiry` to the
+this paradigm there is NO SUSPENSION MACHINERY, and no suspension either: ASKING IS A CALL. The chain `send`s an `inquiry` to the
 `user` agent and the human's answer comes back as THAT CALL'S REPLY, in the
 next message, tagged and correlated like any other. Nothing is scraped out of
 prose and nothing waits on a convention.

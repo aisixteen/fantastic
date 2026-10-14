@@ -1,4 +1,4 @@
-// FOLDER BUNDLES — `<web root>/bundles/<name>/bundle.yaml` (owner, 2026-10-08):
+// FOLDER BUNDLES — `<web root>/bundles/<name>/bundle.yaml`:
 // code that EXTENDS a bundled agent (`base`) of THIS kernel. The kernel reads them
 // through its loader — the host loader's `read_bundles` hands each `bundle.yaml`
 // RAW and this kernel parses it with its own reader (`yaml.ts`) — at boot, before

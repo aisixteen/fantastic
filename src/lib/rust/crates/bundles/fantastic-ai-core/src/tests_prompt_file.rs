@@ -1,4 +1,4 @@
-//! The system block's placeholders and its FILE (owner, 2026-10-08) — python
+//! The system block's placeholders and its FILE — python
 //! `ai_core/tests/test_system_prompt_file.py`, over this harness.
 //!
 //! Placeholders `{tree}` `{self}` `{store}` `{howto}` are filled per agent and per

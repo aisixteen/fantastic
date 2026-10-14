@@ -29,11 +29,8 @@
     /// `environ` while suites running in parallel `setenv`/`unsetenv` their own
     /// keys (the password rules, dotenv, the shell tests): a walk racing a
     /// reallocation reads freed memory and the spawn fails `EFAULT` — "Bad
-    /// address" (measured standalone: 2 of 12,000 inherited-env spawns failed
-    /// with a mutating thread beside them, 0 of 12,000 with an explicit
-    /// environment). It was first read as "`Process.run()` is not thread-safe"
-    /// and papered over with a per-file lock, which could not reach the other
-    /// suites' `setenv`. The binary needs nothing from the environment; a fixed
+    /// address". A per-file lock cannot reach the other suites' `setenv`. The
+    /// binary needs nothing from the environment; a fixed
     /// one is also hermetic — no developer key or config leaks into the daemon.
     private let launchEnvironment: [String: String] = [
         "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",

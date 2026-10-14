@@ -22,8 +22,7 @@
 import Foundation
 
 /// Identity stub. Lets consumers verify they're linked against the
-/// native Swift kernel (pre-0.2.0 versions wrapped a Rust
-/// XCFramework that's no longer in the picture).
+/// native Swift kernel.
 public enum FantasticKernelEmbeddedInfo {
     public static let version = "0.2.0-swift"
     public static let isSwiftNative = true

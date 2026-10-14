@@ -27,8 +27,7 @@ from ai_core.core import THINK_CLOSE, THINK_OPEN
 # A 4xx, or any 5xx carrying a JSON body, is the endpoint DELIBERATELY answering:
 # that is the caller's bug and it stays loud. These codes with a NON-JSON body are
 # a CDN/proxy error page, meaning the request never reached anything that could
-# judge it. Measured 2026-08-24: a `521` from a 1-2s gap while the reverse proxy
-# restarted killed a 26-pass run at pass 5. Retrying the same single path on a
+# judge it (e.g. a `521` from a brief gap while a reverse proxy restarts). Retrying the same single path on a
 # transport failure is not a second mechanism — nothing was tried and nothing is
 # being routed around.
 TRANSPORT_CODES = frozenset({502, 503, 504, 520, 521, 522, 523, 524})

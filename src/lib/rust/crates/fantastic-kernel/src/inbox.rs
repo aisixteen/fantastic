@@ -165,7 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_queued_item_keeps_its_raw_body() {
-        // C86: a payload carrying bytes rides the inbox WHOLE — the head with
+        // A payload carrying bytes rides the inbox WHOLE — the head with
         // `null` at the bytes field, the raw body alongside — so a drainer can
         // rebuild the binary frame python sends.
         let (tx, mut rx) = inbox(4);

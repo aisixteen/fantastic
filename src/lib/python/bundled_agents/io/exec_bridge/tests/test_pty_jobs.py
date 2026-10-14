@@ -245,11 +245,11 @@ def _exists(pid: int) -> bool:
 
 
 async def test_every_teardown_kills_the_whole_session(term):
-    """Measured (the CLI, 2026-09-28): a shell puts each job it starts in its OWN
-    process group inside the PTY session, so killing the leader alone (and the tty's
-    hangup, which reaches the foreground group only) left `sleep &` and a `nohup`
-    running, reparented to init. `stop` and `delete_agent` (the kernel's shutdown
-    runs the same teardown) now kill the whole session."""
+    """A shell puts each job it starts in its OWN process group inside the PTY
+    session, so killing the leader alone (and the tty's hangup, which reaches the
+    foreground group only) would leave `sleep &` and a `nohup` running, reparented to
+    init. `stop` and `delete_agent` (the kernel's shutdown runs the same teardown)
+    kill the whole session."""
     for aid, end in (("sh_stop", "stop"), ("sh_delete", "delete_agent")):
         await _mk(
             term, agent_id=aid, allowed=[r"/bin/sh -i"], env={"PATH": "/usr/bin:/bin"}

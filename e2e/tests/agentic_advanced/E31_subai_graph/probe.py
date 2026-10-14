@@ -65,8 +65,8 @@ sys.argv = [sys.argv[0]]
 from tests.agentic_advanced.E30_subai import probe as P
 
 # `brain` rides the SAME backend as the builder — the one the run's connection env
-# wires (helpers read it; nothing here names a host). A hardcoded local default here
-# reached for a server nobody wired and failed every runtime (measured 2026-09-02).
+# wires (helpers read it; nothing here names a host) — never a hardcoded local default,
+# which would reach for a server nobody wired.
 BRAIN_BACKEND = P.BACKEND
 
 EXTRA = (
@@ -87,11 +87,10 @@ EXTRA = (
 )
 
 
-# NO GRAPH LIBRARY. This arm used to install `langgraph`, point the executor at that
-# venv's interpreter, and mount the package source as an `lgsrc` agent. That made the
-# probe depend on a package to test something that is not about the package — whether a
-# familiar DECOMPOSITION (nodes, an edge map, a runner) helps — and it changed the
-# interpreter as well as the ask, so a failure was attributable to either.
+# NO GRAPH LIBRARY. Installing one (e.g. `langgraph`) would make the probe depend on a
+# package to test something that is not about the package — whether a familiar
+# DECOMPOSITION (nodes, an edge map, a runner) helps — and would change the interpreter
+# as well as the ask, so a failure would be attributable to either.
 
 
 async def main() -> None:

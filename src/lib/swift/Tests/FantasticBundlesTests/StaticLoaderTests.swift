@@ -150,7 +150,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     #expect(rec["id"].asString == "sl_absent", "\(rec.serialize())")
 }
 
-/// A8.8 / A8.12 — the manifest read is `fs.resolve(Kernel.workdir, path)`: the
+/// The manifest read is `fs.resolve(Kernel.workdir, path)`: the
 /// BOOT reports an unreadable manifest with python's own exception text, and a
 /// path outside the running dir (or an ABSOLUTE one, even inside it) escapes.
 @Test func anUnreadableManifestIsReportedAtBoot() async throws {
@@ -174,7 +174,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         "\(miss.serialize())")
 }
 
-/// A8.12 — an ABSOLUTE manifest is refused even when it points INSIDE the
+/// An ABSOLUTE manifest is refused even when it points INSIDE the
 /// running dir: python's `fs.resolve` never re-roots a leading `/`.
 @Test func anAbsoluteManifestInsideCwdIsRefused() async {
     let kernel = mkKernel()
@@ -190,7 +190,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     #expect(kernel.agent("memory") == nil, "an escaping manifest hydrated its roster")
 }
 
-/// A8.12 — a symlink inside the running dir that points OUT of it is followed
+/// A symlink inside the running dir that points OUT of it is followed
 /// and refused (python resolves before it compares).
 @Test func aSymlinkedManifestEscapingCwdIsRefused() async throws {
     let kernel = mkKernel()
@@ -207,7 +207,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
             + "fs: path \(pyRepr(name)) escapes root", "\(b.serialize())")
 }
 
-/// A8.1 / A8.2 — an unknown verb (and `shutdown`, which is not a verb here) is
+/// An unknown verb (and `shutdown`, which is not a verb here) is
 /// the coded refusal python's `handler` builds.
 @Test func anUnknownVerbIsACodedRefusal() async {
     let (kernel, cleanup) = await bootLoader(MANIFEST)
@@ -222,7 +222,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     }
 }
 
-/// A8.4 — a record with no manifest boots with python's text (`{'manifest'!r}`).
+/// A record with no manifest boots with python's text (`{'manifest'!r}`).
 @Test func aRecordWithoutAManifestBootsWithPythonsText() async {
     let kernel = mkKernel()
     let rec = await kernel.send([
@@ -241,7 +241,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     #expect(b["booted"].asBool == false, "\(b.serialize())")
 }
 
-/// A8.9 — a python-FALSY YAML document is an empty mapping and boots empty; a
+/// A python-FALSY YAML document is an empty mapping and boots empty; a
 /// truthy non-mapping is refused.
 @Test func aFalsyYamlDocumentBootsEmpty() async {
     for text in ["", "~", "0", "false", "[]", "{}"] {
@@ -261,7 +261,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         "\(r.serialize())")
 }
 
-/// A8.21 — `agents:` present but not a list is refused (python `agents: null`
+/// `agents:` present but not a list is refused (python `agents: null`
 /// takes the same path: `None` is not a list).
 @Test func agentsPresentButNotAListIsRefused() async {
     for doc in ["agents: 5", "agents:"] {
@@ -276,7 +276,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     }
 }
 
-/// A8.10 — `handler_module` absent or FALSY is refused with the entry's python
+/// `handler_module` absent or FALSY is refused with the entry's python
 /// dict repr; a truthy non-string passes the check and fails at create.
 @Test func handlerModuleAbsentOrFalsyIsRefusedTruthyPasses() async {
     for (doc, repr) in [
@@ -301,9 +301,9 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         "\(r.serialize())")
 }
 
-/// A8.22 — a manifest mapping keeps its DOCUMENT order, so every `{spec!r}`
+/// A manifest mapping keeps its DOCUMENT order, so every `{spec!r}`
 /// text reads as python prints it. (The persisted record's meta order is
-/// asserted with C15.)
+/// asserted separately.)
 @Test func manifestMappingsKeepDocumentOrder() async {
     let (kernel, cleanup) = await bootLoader("agents:\n  - zeta: 1\n    alpha: 2\n    id: a\n")
     defer { cleanup() }
@@ -314,7 +314,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
             + "{'zeta': 1, 'alpha': 2, 'id': 'a'}", "\(r.serialize())")
 }
 
-/// A8.14 — a spec `type` key OVERRIDES the create verb (python's spread order),
+/// A spec `type` key OVERRIDES the create verb (python's spread order),
 /// so the roster entry is not created.
 @Test func aSpecTypeKeyOverridesTheCreateVerb() async {
     let (kernel, cleanup) = await bootLoader(
@@ -330,7 +330,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         (r["created"].asArray ?? []).compactMap { $0.asString } == ["kernel_state"], "\(r.serialize())")
 }
 
-/// A8.6 — the handler_module mismatch text is python's, with `{!r}` on all
+/// The handler_module mismatch text is python's, with `{!r}` on all
 /// three values and no `Some(...)`.
 @Test func aManifestThatReassignsAHandlerModuleFailsLoud() async {
     let (kernel, cleanup) = await bootLoader(MANIFEST)
@@ -354,7 +354,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     #expect(r["booted"].asBool == false, "\(r.serialize())")
 }
 
-/// A8.11 — reflect's `display_name` falls back to the id when the stored name
+/// Reflect's `display_name` falls back to the id when the stored name
 /// is empty (python `agent.display_name or id`).
 @Test func reflectDisplayNameEmptyFallsBackToId() async {
     let (kernel, cleanup) = await bootLoader(MANIFEST)
@@ -372,8 +372,8 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         r["loader"].asBool == true && r["sentence"].asString == "declarative YAML roster loader")
 }
 
-/// A8.13 — a YAML parse error is reported under python's prefix. (D4 residual:
-/// the tail is the YAML library's own message; PyYAML's `MarkedYAMLError`
+/// A YAML parse error is reported under python's prefix. (The
+/// tail is the YAML library's own message; PyYAML's `MarkedYAMLError`
 /// wording cannot be reproduced from libyaml.)
 @Test func yamlParseErrorIsPyYAMLText() async {
     let (kernel, cleanup) = await bootLoader("a: [1\n")
@@ -384,7 +384,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
         r["error"].asString?.contains("is not valid YAML: ") == true, "\(r.serialize())")
 }
 
-/// A8.23 — the bundle readme is python's `readme.md`, byte for byte.
+/// The bundle readme is python's `readme.md`, byte for byte.
 @Test func readmeIsPythonVerbatim() throws {
     let expected = try String(
         contentsOf: pythonSource("loader/static_loader/src/static_loader/readme.md"),
@@ -393,9 +393,8 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
 }
 
 @Test func aRosterEntryWithoutAnIdIsRefusedLoud() async {
-    // #105 — the roster is keyed by id, so an id-less entry can never match the
-    // agent the LAST boot minted: every reboot created ANOTHER one beside it and
-    // the flush persisted them all, with no word to the operator.
+    // The roster is keyed by id, so an id-less entry can never match the
+    // agent the LAST boot minted: every reboot would create ANOTHER one beside it.
     let (kernel, cleanup) = await bootLoader(
         """
         agents:
@@ -428,7 +427,7 @@ private func createLoader(_ kernel: Kernel, _ id: String, _ manifest: JSON) asyn
     #expect(kernel.agent(AgentId("memory")) == nil)
 }
 
-/// Audit G-2/BV-2 — the roster pass is the kernel's own bookkeeping (direct
+/// The roster pass is the kernel's own bookkeeping (direct
 /// kernel-verb calls), so only the kernel's own boot (origin none) may start it. A roster agent whose grant the operator
 /// revoked sent `boot` to its loader and got the grant back; a deleted roster
 /// agent came back. The edge is NAMED on both ends, so the refusal is the

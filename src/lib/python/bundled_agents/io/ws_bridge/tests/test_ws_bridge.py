@@ -350,8 +350,7 @@ async def _boot_solo_bridge(kernel, *, auth=None):
         "peer_id": "test_peer",
     }
     if auth is not None:
-        # `auth` used to be a shorthand for both legs. It is gone — say which leg.
-        # Rule names are MANIFOLD-SCOPED, so the same policy is a different name on
+        # Say which leg. Rule names are MANIFOLD-SCOPED, so the same policy is a different name on
         # each side; an inbound-only policy presents no outbound credential.
         def _scope(spec, suffix):
             if isinstance(spec, dict):
@@ -650,8 +649,8 @@ async def test_event_frame_re_emits_on_bridge_inbox_only_when_subscribed(two_ker
     """A remote `{type:'event', src, payload}` is re-emitted on the bridge agent's
     own inbox (payload + `src`) ONLY for a `src` this leg subscribed to with
     `watch_remote`. Nothing flows before the subscription, nothing without a
-    `src`, nothing after `unwatch_remote` (audit 2026-09-28: a peer could push
-    arbitrary payloads to the bridge's local watchers)."""
+    `src`, nothing after `unwatch_remote` (otherwise a peer could push arbitrary
+    payloads to the bridge's local watchers)."""
     ka, _ = two_kernels
     rec_a = (
         await ka.send(

@@ -47,13 +47,13 @@ struct NoDefaultModelTests {
         }
     }
 
-    // ── the reflect extras (B1.24) ───────────────────────────────
+    // ── the reflect extras ───────────────────────────────
 
     private func agent(_ meta: OrderedDictionary<String, JSON>) -> Agent {
         Agent(id: AgentId("a"), handlerModule: nil, parentId: nil, meta: meta)
     }
 
-    // B1.24: `model` and `endpoint` are BASE fields now; the extras are the
+    // `model` and `endpoint` are BASE fields; the extras are the
     // sampling knobs, in python's order, and `temperature` defaults to 0.3.
     @Test("ollama reflect extras match python")
     func reflectExtrasMatchPython() {

@@ -1,10 +1,9 @@
-//! Owner decisions 2026-10-03 (audit 2, set 2) on the kernel's own service loops,
-//! against the real `ram_store` — the twin of python
-//! `tests/kernel/test_hook_identity_service_tasks_quiet_flush.py`.
+//! The kernel's own service loops, against the real `ram_store` — the twin of
+//! python `tests/kernel/test_hook_identity_service_tasks_quiet_flush.py`.
 //!
-//! - KV-5: `cancel` refuses the execution flusher; `ps` still lists it and it
+//! - `cancel` refuses the execution flusher; `ps` still lists it and it
 //!   keeps flushing.
-//! - CLI-B: the kernel's own ledger-flush send publishes NOTHING on the state
+//! - The kernel's own ledger-flush send publishes NOTHING on the state
 //!   stream (its rows stay recorded by the flush row) — a long-poll waiter is not
 //!   woken; an id block reserved inside the flush is quiet too.
 

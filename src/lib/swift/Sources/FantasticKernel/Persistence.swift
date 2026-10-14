@@ -49,8 +49,7 @@ public enum Persistence {
     /// as python's `_walk` does, rather than orphaning children onto a parent
     /// that failed to load. Entries are visited in sorted order (`fs.list_dir`).
     /// A MISSING or unparseable root record yields the children alone, parented
-    /// to `fallbackRootId` (python `read_tree`, 2026-09-20 — it used to hide the
-    /// whole tree behind a reseed).
+    /// to `fallbackRootId` (python `read_tree`) — never hidden behind a reseed.
     ///
     /// Every path is clamped under `rootDir` as python's `fs` clamps it
     /// (`clamp`): a `children_dir` that resolves outside (`../x`), or a record

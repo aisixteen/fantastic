@@ -325,8 +325,7 @@ struct DrainTests {
     /// A `spawnTask` FORK is a SERVICE LOOP — scheduler tick, bridge read loop,
     /// ws drain, job pump, pty reader — and never settles by construction, so
     /// the quiet phase must not wait for one: python's `settling()` drops
-    /// `_forked` entries (2026-09-21; SIGTERM→exit was 10.25 s with a scheduler
-    /// on the tree, 0.29 s after). It is still CANCELLED, and a real in-flight
+    /// `_forked` entries. It is still CANCELLED, and a real in-flight
     /// DISPATCH still holds the quiet phase.
     @Test func aForkDoesNotHoldTheQuietPhaseButIsStillCancelled() async throws {
         let log = Log()
@@ -364,16 +363,14 @@ struct DrainTests {
         k2.setDraining(false)
     }
 
-    /// C32: EVERY system verb on a non-root answers the SAME generic
+    /// EVERY system verb on a non-root answers the SAME generic
     /// `not_here` — `shutdown_agents`/`kernel_stop` carry no special
     /// case (python `_agent.py:2036-2044` generalises the old kernel_stop-
     /// only refusal to all seven system verbs).
     /// `shutdown_agents` READS THE BUNDLE'S STATIC VERBS TABLE — python's
     /// `advertises("shutdown")` imports the module and looks at `VERBS`,
     /// sending nothing. A tree of N agents therefore costs NO reflect call row,
-    /// no task row and no watcher echo. Swift used to fan a `reflect` out to
-    /// every agent to learn the same thing, which is why its ledger carried
-    /// about twice python's rows for the same command.
+    /// no task row and no watcher echo.
     @Test func shutdownAgentsReadsTheStaticTableWithoutASingleSend() async throws {
         let quiet = Log()
         let kernel = makeKernel([
@@ -489,7 +486,7 @@ struct DrainTests {
         #expect(kernel.draining && kernel.shutdownComplete)
     }
 
-    /// C57 — the create_agent boot line branches on the OUTCOME STATUS: a boot
+    /// The create_agent boot line branches on the OUTCOME STATUS: a boot
     /// that RAISED (`failed`) prints python's stdout line; one that answered
     /// `{error}` (`errored`) or succeeded prints nothing. Swift discarded the
     /// boot reply entirely, so a raised child boot was invisible.
@@ -517,7 +514,7 @@ struct DrainTests {
     }
 
     @Test func theRootLoaderBootMintsTheGuidAfterItsGrants() async throws {
-        // C14: the guid is minted ONCE, by the root loader's `boot`, AFTER the
+        // The guid is minted ONCE, by the root loader's `boot`, AFTER the
         // record writer subscribes — so the `updated` event it publishes is what
         // carries the new record to disk. Meta order is grants, then guid.
         let kernel = makeKernel(
@@ -592,7 +589,7 @@ struct GracefulShutdownTests {
         #expect(kernel.agent(AgentId("K"))?.childIds().contains(AgentId("K_child")) == true)
     }
 
-    /// Shutdown calls `onShutdown` and only that (audit 2026-09-28, c9). A
+    /// Shutdown calls `onShutdown` and only that. A
     /// bundle with only `onDelete` has nothing to free at shutdown, and delete's
     /// teardown is not run in its place.
     @Test func shutdownNeverFallsBackToOnDelete() async throws {
@@ -673,12 +670,12 @@ struct GracefulShutdownTests {
             "\(fired)")
     }
 
-    /// C87: `flush_pending` raising prints python's stderr line — bare
+    /// `flush_pending` raising prints python's stderr line — bare
     /// `str(e)`, no agent id (python calls the hook on the root alone;
     /// swift's own broader "every agent is offered it" design keeps the
     /// text id-less all the same, matching python's literal spelling).
     ///
-    /// C87 residual (documented, not reproduced): python's recursive
+    /// Documented, not reproduced: python's recursive
     /// `await child.shutdown()` catch (`  [shutdown] <cid> raised: <e>`) has
     /// no swift counterpart — `shutdownWalk` is non-throwing, so nothing
     /// escapes the recursive call to catch further up.
@@ -758,7 +755,7 @@ struct HookFailureLineTests {
     }
 
     /// Python's `ModuleNotFoundError` text for a name outside its catalog
-    /// (`import_handler`, audit 2026-10-03 ARCH2-1): nothing is imported, the
+    /// (`import_handler`): nothing is imported, the
     /// TOP-LEVEL package is named — under an installed package too, and for
     /// the bare package; only a registered name resolves (`nil`).
     @Test func moduleNotFoundIsPythonsCatalogText() {

@@ -48,11 +48,8 @@ public struct AuthAction: Sendable {
 /// Everything a refusal carries — the denial half of python's `Decision`, field
 /// for field.
 ///
-/// It used to be a bare `String`, so a rule could state a fact and nothing else:
-/// every gate that received one invented its own `hint` at the call site (the fs
-/// gate said "the fs edge is sealed" for whichever leg called it, web legs said
-/// nothing at all) and the three runtimes drifted into three vocabularies for the
-/// same `unauthorized` code. The rule KNOWS why it refused and how to open the
+/// Not a bare `String`: a rule that could state only a fact would leave every
+/// gate to invent its own `hint` at the call site. The rule KNOWS why it refused and how to open the
 /// edge; that knowledge travels with the verdict instead of being guessed
 /// downstream.
 public struct Denial: Sendable {
@@ -117,17 +114,14 @@ public struct AuthPolicyError: Error, CustomStringConvertible {
 /// Python-falsy (absent, null, `""`, `false`, `0`, `[]`, `{}`) ⇒ `(nil, nil)`. A
 /// string ⇒ `(name, nil)`. An object ⇒ `(type, env)`; a null `type`/`env` is an
 /// absent one, and an object with no `type` has no name, which every resolver
-/// reads as a plain seal — python seals it (`edge sealed by policy`), where this
-/// used to throw out of `handle`.
+/// reads as a plain seal — python seals it (`edge sealed by policy`).
 ///
 /// MALFORMED ⇒ `(python repr of the spec, nil)`: a spec that is neither a string
 /// nor an object, or an object whose `type` or `env` is not a string, is named by
 /// its own repr — a name no registry holds, so ingress SEALS on it
-/// (`DenyInbound(unknown:)`) and egress refuses it like any unknown name. It
-/// threw `unsupported rule spec` (a web leg answered a bare `{error}`), read a
-/// non-string `type` as no rule at all, and a non-string `env` as the DEFAULT
-/// variable — a malformed password rule admitted the default group token
-/// (audit W-8, 2026-10-03).
+/// (`DenyInbound(unknown:)`) and egress refuses it like any unknown name —
+/// never read as no rule at all, nor a non-string `env` as the DEFAULT variable
+/// (a malformed password rule would admit the default group token).
 func parseSpec(_ spec: JSON?) -> (name: String?, tokenEnv: String?) {
     guard let spec, pyTruthy(spec) else { return (nil, nil) }
     switch spec {
@@ -152,10 +146,9 @@ func parseSpec(_ spec: JSON?) -> (name: String?, tokenEnv: String?) {
 ///
 /// Rule names are manifold-scoped: a name binds to exactly one direction, so a name
 /// written into the wrong field is a loud error instead of a silent policy change.
-/// Measured 2026-08-21 (python, and this runtime had the identical defect): with bare
-/// names, `auth:"silent"` — a legitimate EGRESS policy — resolved ingress to
-/// `DenyInbound(unknown: "silent")`, SEALING the leg while saying nothing; and
-/// `auth:"allow_all"` handed egress a `Silent` nobody asked for. One unscoped name
+/// With bare names, `auth:"silent"` — a legitimate EGRESS policy — would resolve
+/// ingress to `DenyInbound(unknown: "silent")`, SEALING the leg while saying nothing;
+/// and `auth:"allow_all"` would hand egress a `Silent` nobody asked for. One unscoped name
 /// against two registries with different membership is a fallback, and this kernel does
 /// not have fallbacks.
 ///
@@ -200,7 +193,7 @@ public func describe(_ meta: OrderedDictionary<String, JSON>) -> OrderedDictiona
     let hasIngress = meta.keys.contains("ingress_rule")
     let hasEgress = meta.keys.contains("egress_rule")
     // A present stem is scoped the way the gate scopes it; an ABSENT spec is the
-    // manifold's default, which already carries its suffix (python 2026-09-16).
+    // manifold's default, which already carries its suffix (python).
     let ingName = ruleName(hasIngress ? meta["ingress_rule"] : auth, default: "")
     let egrName = ruleName(hasEgress ? meta["egress_rule"] : auth, default: "")
     let ingress = ingName.isEmpty ? "deny_ingress" : scopedName(ingName, "_ingress", wasScoped: hasIngress)
@@ -236,11 +229,6 @@ func constantTimeEquals(_ a: String, _ b: String) -> Bool {
 /// Resolve the leg's INGRESS rule: `ingress_rule` if present, else the `auth`
 /// both-directions shorthand. Absent ⇒ **DenyInbound — IO legs seal by default**
 /// (`IngressRules.resolve` maps `nil` to it).
-///
-/// This doc used to read "Absent ⇒ AllowAll (back-compat)", which is the pre-seal-flip
-/// behaviour and the opposite of what the code does. The code was right; the comment
-/// was wrong in the dangerous direction — an operator reading it would believe a fresh
-/// leg admits traffic.
 public func resolveIngress(ingressRule: JSON?, auth: JSON?) -> IngressRule {
     IngressRules.resolve(manifoldSpec(ingressRule, auth, "_ingress"))
 }

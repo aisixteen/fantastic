@@ -189,9 +189,9 @@ async def test_dump_inject_roundtrip(kernel, store):
 
 
 async def test_a_superscript_digit_is_no_id_and_raises_nothing(kernel, store):
-    """`'²'.isdigit()` is True and `int('²')` raises: a `read` naming it used to
+    """`'²'.isdigit()` is True and `int('²')` raises: a `read` naming it must not
     fail the whole call as a raised handler. It names no row, like any non-id
-    (parity 2026-09-30 — rust/swift accept ASCII digits only)."""
+    (ASCII digits only)."""
     await _append(kernel, "alice", [{"id": 101, "role": "user", "content": "hi"}])
     out = await _call(kernel, "mem", {"type": "read", "ids": ["²", "101"]}, as_="alice")
     assert "error" not in out, out

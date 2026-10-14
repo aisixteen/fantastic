@@ -1,4 +1,4 @@
-// #1 / #7 / #22-#25 — the substrate contract, as a caller sees it.
+// The substrate contract, as a caller sees it.
 
 import FantasticJSON
 import Foundation
@@ -9,9 +9,8 @@ import Testing
 
 /// The roster here names `noop.tools`; it must be REGISTERED, or a `reflect`
 /// is a refusal ("handler_module is not installed in this runtime") rather than
-/// a reflect. It used to be unregistered and the assertions still passed, because
-/// a reason-less error was decorated with `can_call`/`callable_by` and read like
-/// a reflect — the exact confusion fixed 2026-09-02.
+/// a reflect. Unregistered, the assertions could still pass on a reason-less
+/// error decorated with `can_call`/`callable_by` that reads like a reflect.
 private struct Noop: AgentBundle {
     let name = "noop"
     func handle(agentId: AgentId, payload: JSON, kernel: Kernel) async throws -> JSON? {
@@ -86,8 +85,7 @@ struct ContractU1Tests {
     }
 
     @Test func anAgentCanReadItsOwnAuthority() async {
-        // The gate used to be INVISIBLE: an agent could only discover its
-        // authority by trying, which cost whole passes of empirical probing.
+        // The gate is VISIBLE: an agent need not discover its authority by trying.
         let k = makeKernel()
         _ = await mk(
             k, "worker",

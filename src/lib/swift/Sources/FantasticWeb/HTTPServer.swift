@@ -14,7 +14,7 @@
 // handles; else the first path-only match answers 405 with `allow`; else (path
 // ≠ `/`) the trailing slash is toggled and a match answers 307; else 404
 // `{"detail":"Not Found"}`. No transport.js, no vendored asset tree, no
-// server-side `/<id>/` render route — those were swift-only extras (D11).
+// server-side `/<id>/` render route.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -83,9 +83,8 @@ func rawSegments(_ path: String) -> [String] {
 /// uvicorn's ASGI `path` (`h11_impl.py:201`): the raw target MINUS its query,
 /// percent-decoded ONCE. Routing, the route params and the file proxy all read
 /// that decoded string, so `POST /rest/fi%6Ces` names the `files` agent and
-/// `GET /files/file/sp%20ace.txt?v=1` names `sp ace.txt` (A13.10). Swift matched
-/// the RAW target, so both answered 404 and a query string became part of the
-/// filename.
+/// `GET /files/file/sp%20ace.txt?v=1` names `sp ace.txt`; matching the RAW target would answer 404 for both and
+/// make a query string part of the filename.
 ///
 /// `removingPercentEncoding` is `nil` only for a byte sequence that is not
 /// UTF-8; python's `unquote` replaces those with U+FFFD rather than failing, and
@@ -127,7 +126,7 @@ func matchTemplate(_ template: [PathSegment], _ segments: [String]) -> [String: 
     return i == segments.count ? params : nil
 }
 
-// MARK: - host bind + Host/Origin guard (python `web/app.py` — 2026-09-24, W-2)
+// MARK: - host bind + Host/Origin guard (python `web/app.py`)
 
 /// The web host binds LOOPBACK unless its record names a `host` — a closed default,
 /// overridable by whoever creates the kernel (create_agent meta, a roster yaml,
@@ -208,9 +207,7 @@ struct Route: Sendable {
 /// and legs append their routes in MOUNT order — which on a hydrated host is the
 /// children's folder order. A `web_ws` leg declares the catch-all
 /// `/{host_id}/ws`; mounted before a leg that declares the literal `/web_ui/ws`,
-/// it swallowed it (measured on python: a CLI canvas leg sorted first and the UI
-/// socket went dead on every rehydrate, while a first run's creation order
-/// happened to be right). So the live table is ordered by how many PARAMETERS a
+/// it would swallow it. So the live table is ordered by how many PARAMETERS a
 /// path has — the `{` count, fewer first; equal counts keep their mount order (a
 /// STABLE sort, made explicit by the index tie-break). Python `_order_routes`.
 func orderRoutes(_ routes: [RouteSpec]) -> [RouteSpec] {
@@ -392,9 +389,9 @@ public final class WebServer: @unchecked Sendable {
         // DRAINS, like python's `_stop_uvicorn`: it sets `should_exit` and then
         // `await`s the serve task, so when the `stop` verb answers the port no
         // longer accepts. A fire-and-forget `close(promise: nil)` only QUEUES
-        // the close on an event loop, and the next `boot` then mounted its
-        // child surfaces against a socket that was still accepting — the
-        // listener the caller was told had stopped (A11.30, flaky).
+        // the close on an event loop, and the next `boot` would mount its
+        // child surfaces against a socket still accepting — the
+        // listener the caller was told had stopped.
         // `.wait()` blocks the calling thread, never an event-loop thread, for
         // the same reason `start()`'s bind may block it.
         try? ch?.close().wait()
@@ -412,7 +409,7 @@ public final class WebServer: @unchecked Sendable {
         ])
     }
 
-    /// python `_OriginGuard`, the HOST half (audit W-2): EVERY request — any
+    /// python `_OriginGuard`, the HOST half: EVERY request — any
     /// method, the websocket upgrade included — whose `Host` is not one of
     /// `webOwnAuthorities` is refused. A DNS-rebinding page sends a same-origin GET
     /// with no `Origin`; its `Host` still names the attacker's domain. `true` =
@@ -477,10 +474,9 @@ public final class WebServer: @unchecked Sendable {
                     WebSocketUpgrade(
                         params: params,
                         // The same boot pid an HTTP request task is parented
-                        // to: python serves BOTH under `CURRENT_TASK.scope`
-                        // (A11.31).
+                        // to: python serves BOTH under `CURRENT_TASK.scope`.
                         bootParent: self.requestParent))
-                // WHOLE, VALID MESSAGES ONLY (audit W-4): fragments reassembled
+                // WHOLE, VALID MESSAGES ONLY: fragments reassembled
                 // up to the one frame cap, then `WebSocketMessageGuard`; then
                 // THE ROUTE'S OWN ENDPOINT — whatever the leg handed over for
                 // this path (web_ws: its proxy, bound to the captured host_id).
@@ -515,7 +511,7 @@ public final class WebServer: @unchecked Sendable {
 
     // MARK: - Request handling (HTTP; WS is handled by the upgrader above)
 
-    /// NO parent: python clears `_current_task` for a REST task (2026-09-20) —
+    /// NO parent: python clears `_current_task` for a REST task —
     /// the web boot dispatch has ended, so a pid parented to it was dangling.
     var requestParent: TaskId? { nil }
 
@@ -529,7 +525,7 @@ public final class WebServer: @unchecked Sendable {
 
     func resolve(method: String, path: String, headers: [String: String]) -> Resolution {
         // THE QUERY IS STRIPPED AND THE PATH PERCENT-DECODED ONCE, BEFORE
-        // MATCHING (A13.10) — uvicorn hands the app a decoded, query-less path.
+        // MATCHING — uvicorn hands the app a decoded, query-less path.
         let (_, query) = splitQuery(path)
         let pathOnly = decodePath(path)
         // THE HOST + ORIGIN GUARD, in front of every route (python `_OriginGuard`).
@@ -648,22 +644,22 @@ public final class WebServer: @unchecked Sendable {
         case drain
     }
 
-    /// THE GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03; python
+    /// THE GATE FIRST, THEN THE BODY (python
     /// `web_rest._rest_call`). A web_rest POST is judged by the leg's ingress
     /// rule on what the request says up front — its target and its
     /// `X-Fantastic-Auth` credential (the rule sees `kind: call`, verb `""`) —
     /// and only an admitted request's body is read, at most `restBodyLimit`
     /// bytes (io_bridge's `MAX_FRAME`); a larger one is refused 413 (a declared
     /// `Content-Length` over it unread). Buffering and parsing the whole body
-    /// before the gate let a client the leg was about to refuse make the kernel
-    /// hold any amount of data. Everything the head alone answers (origin guard,
+    /// before the gate would let a client the leg was about to refuse make the
+    /// kernel hold any amount of data. Everything the head alone answers (origin guard,
     /// 404/405/307) is answered here too, with nothing read.
     ///
-    /// NO OTHER ROUTE READS A BODY (audit W-1, 2026-10-03): the favicon, the file
+    /// NO OTHER ROUTE READS A BODY: the favicon, the file
     /// proxy and web_rest's GET `_reflect` routes are served on the head, and
     /// whatever body a client sends them is drained unread — python and rust never
-    /// read it either. Buffering it unbounded let any client that reaches the
-    /// port grow the kernel until it was killed.
+    /// read it either. Buffering it unbounded would let any client that reaches
+    /// the port grow the kernel until it is killed.
     func preflight(_ head: HTTPRequestHead) -> Preflight {
         var headers: [String: String] = [:]
         for (name, value) in head.headers { headers[name] = value }
@@ -725,7 +721,7 @@ public final class WebServer: @unchecked Sendable {
 
     /// python `agent_file` — pipe the agent's `read_stream` SOURCE.
     ///
-    /// READ BY THE WEB HOST (C41/C37): the request is handed to it as
+    /// READ BY THE WEB HOST: the request is handed to it as
     /// `fetch_file` (this route is the transport — the operator), and its handler
     /// sends `read_stream` AS ITSELF, so the target's `callable_by` decides whether
     /// `web` may read it at all — never the operator, which would hand the browser
@@ -753,8 +749,7 @@ public final class WebServer: @unchecked Sendable {
         // still a chunk.
         //
         // A GATE denial carries its reason in the body — this kernel teaches
-        // through denials, and this route used to be the one surface that threw
-        // that away. A MISSING FILE stays a bare 404: no body, no existence
+        // through denials. A MISSING FILE stays a bare 404: no body, no existence
         // leak, no path probing.
         guard let first = body else {
             if meta["reason"].asString == "unauthorized" {
@@ -828,7 +823,7 @@ public final class WebServer: @unchecked Sendable {
                 owner: owner, params: params, request: request, headers: lowerHeaders)
         }
 
-        // THE BODY DECODES LIKE `json.loads(bytes)` (A13.11): CPython detects the
+        // THE BODY DECODES LIKE `json.loads(bytes)`: CPython detects the
         // encoding from the BOM / the null-byte pattern of the first four bytes,
         // so a UTF-8-BOM, UTF-16 or UTF-32 body is ordinary JSON to python.
         // Bytes that will not decode are the ENDPOINT's to answer — python's
@@ -858,7 +853,7 @@ public final class WebServer: @unchecked Sendable {
         let (reply, octet) = await endpoint(routeRequest)
         let status = Int(reply["status"].asInt ?? 200)
         // ONE DECISION, shared with the octet leg: a reply that HOLDS a chunk is
-        // octet, whatever its length (A13.1).
+        // octet, whatever its length.
         if let octet { return Self.octetReply(octet) }
         guard let contentType = reply["content_type"].asString else {
             return HTTPResponse(status: status, contentType: nil, body: Data())
@@ -917,19 +912,15 @@ public final class WebServer: @unchecked Sendable {
         let field = named.isEmpty ? "bytes" : named
         payload[field] = .null
 
-        // GATED BEFORE THE BODY WAS READ (audit IO-4): `preflight` ran the leg's
+        // GATED BEFORE THE BODY WAS READ: `preflight` ran the leg's
         // ingress rule on the head — target + X-Fantastic-Auth — exactly as for
         // the JSON leg; only an admitted request reaches here.
 
-        // THROUGH THE BATCH (A13.3/C37): ONE binary item, so the octet leg
+        // THROUGH THE BATCH: ONE binary item, so the octet leg
         // NAMES its execution like the JSON leg — a repeated
         // `X-Fantastic-Execution-Id` on the same target REPLAYS the recorded
         // outcome instead of re-running the write, and the kernel produces
         // python's own refusals for a missing `payload.type` or a rebinding id.
-        // `sendWithBinary` validated none of that: swift answered
-        // `file_bridge: unknown type ""` where python answers
-        // `send: payload.type required`, and stuffed the header's `id` into the
-        // verb payload the target reads.
         // HANDED TO THE LEG (`inbound_call`, the transport's operator hand-in),
         // which sends it AS ITSELF: the body rides the binary channel at its slot
         // of the item's payload.
@@ -962,11 +953,11 @@ public final class WebServer: @unchecked Sendable {
         return jsonHTTP(200, out.result)
     }
 
-    /// CPython `json.detect_encoding` + `bytes.decode(enc, "surrogatepass")`
-    /// (A13.11). `nil` = the bytes do not decode, which python raises on.
+    /// CPython `json.detect_encoding` + `bytes.decode(enc, "surrogatepass")`.
+    /// `nil` = the bytes do not decode, which python raises on.
     ///
     /// `surrogatepass` admits a lone surrogate here, and python's
-    /// `strict_loads` then refuses it (D13), as it refuses `NaN`/`Infinity` —
+    /// `strict_loads` then refuses it, as it refuses `NaN`/`Infinity` —
     /// so those bodies answer 400 on both. The ENCODING half below is exact.
     static func decodeJSONBody(_ b: Data) -> String? {
         if b.isEmpty { return "" }
@@ -976,7 +967,7 @@ public final class WebServer: @unchecked Sendable {
         // alone is UTF-16-LE.
         // Foundation's decoders are LENIENT — they drop a trailing odd byte
         // instead of failing, which is the difference between python's 500 and a
-        // silent 204 (measured `ff fe 7b`). The unit width is checked here.
+        // silent 204 (`ff fe 7b`). The unit width is checked here.
         func wide(_ body: Data, _ enc: String.Encoding, _ unit: Int) -> String? {
             guard body.count % unit == 0 else { return nil }
             return String(data: body, encoding: enc)
@@ -1036,7 +1027,7 @@ public final class WebServer: @unchecked Sendable {
 /// Collects one request (head + body + end), dispatches it to the
 /// `WebServer`'s async router, and writes the response. The connection is KEPT
 /// unless the peer asked otherwise (python never sends `Connection: close` on a
-/// keep-alive cycle — measured 46/46; h11 appends it, and closes, exactly when
+/// keep-alive cycle; h11 appends it, and closes, exactly when
 /// the request carried a `close` token or spoke HTTP/1.0). The async hop into `kernel.send` is the project's established
 /// bridge idiom; the context is carried into the completion via `NIOLoopBound`.
 final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable
@@ -1069,7 +1060,7 @@ final class HTTPDispatchHandler: ChannelInboundHandler, RemovableChannelHandler,
         return !closeToken && (h.version.major, h.version.minor) >= (1, 1)
     }
 
-    /// Answer the request NOW — before its body has arrived (audit IO-4). The
+    /// Answer the request NOW — before its body has arrived. The
     /// pipeline keeps reading the body to its end, which `channelRead` drains.
     private func answerEarly(
         context: ChannelHandlerContext, head h: HTTPRequestHead, _ response: HTTPResponse

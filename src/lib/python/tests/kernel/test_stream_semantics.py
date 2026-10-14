@@ -232,10 +232,9 @@ async def test_emit_never_invokes_a_handler(kernel, verb):
 
 
 async def test_an_agent_has_no_inbox_until_a_reader_registers_one(kernel):
-    """A QUEUE EXISTS IFF A READER REGISTERED IT. Until 2026-09-11 every agent
-    got one at construction and NOTHING in the tree read it: a 256-slot ring
-    that filled once and then evicted one payload per message, for the life of
-    the process. `ensure_inbox` IS the registration; an agent does not get a
+    """A QUEUE EXISTS IFF A READER REGISTERED IT. One per agent at construction
+    with NOTHING reading it would be a ring that fills once and then evicts one
+    payload per message, for the life of the process. `ensure_inbox` IS the registration; an agent does not get a
     queue merely by existing."""
     await _agent(kernel, "lonely")
     kernel.ctx.inboxes.pop("lonely", None)  # undo _agent's registration
@@ -251,9 +250,9 @@ async def test_an_agent_has_no_inbox_until_a_reader_registers_one(kernel):
 
 
 async def test_watch_without_a_registered_inbox_is_refused(kernel):
-    """`watch` used to lazy-create the watcher's queue, which meant a caller
-    could watch and never drain: payloads piled to INBOX_BOUND and were then
-    evicted one per message, with nothing to say so. Inventing a consumer on
+    """A `watch` that lazy-created the watcher's queue would let a caller watch
+    and never drain: payloads would pile to INBOX_BOUND and then be evicted one
+    per message, with nothing to say so. Inventing a consumer on
     the caller's behalf is the bug; refusing names it."""
     await _agent(kernel, "src_agent")
     denial = kernel.watch("src_agent", "ghost")

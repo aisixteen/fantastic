@@ -1,11 +1,11 @@
-//! STEP-4 PINS (2026-10-01) — the primitive python-format helpers that live in
+//! PINS — the primitive python-format helpers that live in
 //! more than one place today (the kernel's `scalar.rs` and `lifecycle.rs`, and
 //! `fantastic-bundle`'s `text.rs` / `int.rs`). A reduction that gives them ONE
 //! home must keep every vector here.
 //!
 //! Every expected value is CPython 3.11's (`str.strip`, `str.isspace`, `int()`,
-//! the kernel's `coerce_scalar` in `kernel/modes/parse.py`), measured with the
-//! repo venv on 2026-10-01. The two places the rust copies DIFFER from each
+//! the kernel's `coerce_scalar` in `kernel/modes/parse.py`). The two places the
+//! rust copies DIFFER from each
 //! other are pinned explicitly: `fantastic_kernel::coerce_scalar` keeps an int
 //! wider than i64 digit for digit, while `fantastic_bundle::py_int` saturates.
 

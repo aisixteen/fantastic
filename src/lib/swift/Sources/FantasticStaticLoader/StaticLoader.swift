@@ -10,7 +10,7 @@
 //
 // The pass runs ONLY on the kernel's own boot — origin none: the cold boot, or
 // `create_agent` booting the loader it just made. An agent-sent `boot` is
-// refused (audit G-2/BV-2): any agent granted a reach to the loader could
+// refused: any agent granted a reach to the loader could
 // otherwise re-run the manifest — restore a revoked grant, re-create a deleted
 // agent.
 //
@@ -81,7 +81,7 @@ public struct StaticLoaderBundle: AgentBundle {
 
     /// Read the manifest THROUGH the running-dir clamp — python
     /// `fs.read_text(fs.Root(workdir), path)`, `base` being the kernel's running
-    /// dir (`Kernel.workdir`, the one source — audit c6).
+    /// dir (`Kernel.workdir`, the one source).
     ///
     /// A cold bring-up read (before any `file_bridge` agent can exist) but NOT
     /// exempt from the running-dir law: `fs` is the one disk surface. The clamp
@@ -133,7 +133,7 @@ public struct StaticLoaderBundle: AgentBundle {
             // dicts are ordered; a Swift Dictionary is not).
             document = try Yams.compose(yaml: text).map(nodeToJSON) ?? .null
         } catch {
-            // D4 residual: the tail is the YAML library's own message; PyYAML's
+            // The tail is the YAML library's own message; PyYAML's
             // `MarkedYAMLError` wording is not reproducible from libyaml.
             return ([], "static_loader: manifest \(pyRepr(path)) is not valid YAML: \(error)")
         }
@@ -198,8 +198,7 @@ public struct StaticLoaderBundle: AgentBundle {
                 // THE MANIFEST IS TRUTH; a store is only a MEDIUM (disk, RAM,
                 // cloud, an API). So an id that already exists is RE-APPLIED
                 // from the manifest, never skipped: editing a grant in the yaml
-                // used to change nothing at all, because the hydrated record
-                // silently won and the operator got no word about it.
+                // takes effect, never silently losing to the hydrated record.
                 var declared = obj
                 declared["id"] = nil
                 declared["handler_module"] = nil

@@ -43,7 +43,7 @@ pub(crate) enum Handler {
     /// `GET /<rest_id>/_reflect/{target_id}`.
     RestReflectTarget(AgentId),
     /// `WS /{host_id}/ws`, carrying the web_ws LEG that declared it — the
-    /// record the frame gate reads and the identity every frame runs as (C40).
+    /// record the frame gate reads and the identity every frame runs as.
     Ws(AgentId),
 }
 

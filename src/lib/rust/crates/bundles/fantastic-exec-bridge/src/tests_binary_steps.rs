@@ -1,11 +1,10 @@
-//! `_binary_path` is a LIST OF STEPS on the GUEST WIRE (owner-approved,
-//! 2026-10-02) — the twins of python
+//! `_binary_path` is a LIST OF STEPS on the GUEST WIRE — the twins of python
 //! `io_bridge/tests/test_binary_path_steps.py` (e).
 //!
-//! A kind-B frame's header names where its raw body belongs. It used to spell
-//! that as a dotted string, so a payload whose bytes sat at the LITERAL key
-//! `"a.b"` went out as `"payload.a.b"` and came back as a NESTED `a` → `b` slot.
-//! Now the path is a JSON array: a string step is an object key, taken literally;
+//! A kind-B frame's header names where its raw body belongs, as a JSON array —
+//! never a dotted string, which would send bytes at the LITERAL key `"a.b"` out
+//! as `"payload.a.b"` and bring them back as a NESTED `a` → `b` slot. A string
+//! step is an object key, taken literally;
 //! an integer step is a list index. [`CONNECTOR_SRC`] (python's, byte for byte)
 //! writes and reads it; the relay decodes and encodes it with the io_bridge codec.
 //!

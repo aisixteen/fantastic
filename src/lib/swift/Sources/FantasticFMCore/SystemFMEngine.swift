@@ -13,9 +13,7 @@
 //   assistant turn→ `Transcript.Entry.response`
 // then `streamResponse(to: prompt)`. The session holds no state between
 // generations — the conversation lives in the caller's memory store, and the
-// caller hands it back every time. Measured 2026-10-02 (macOS 27.0): a two-turn
-// transcript ("My name is Zed." / "Noted.") then "What is my name?" answered
-// "Zed.".
+// caller hands it back every time.
 //
 // NO tools are passed and no schema is asked for: plain text in, plain text out.
 
@@ -150,9 +148,7 @@ public struct SystemFMEngine: FMEngine {
                     promptTokens = snapshot.usage.input.totalTokenCount
                 }
             }
-            // A CANCELLED session's stream ENDS rather than throws (measured
-            // 2026-10-02: cancelled 0.4 s in, the loop exited normally with 0
-            // snapshots). Reported as the cancellation it is, never as a short
+            // A CANCELLED session's stream ENDS rather than throws. Reported as the cancellation it is, never as a short
             // answer.
             if Task.isCancelled { throw CancellationError() }
             if let promptTokens { continuation.yield(.promptTokens(promptTokens)) }

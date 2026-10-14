@@ -148,7 +148,7 @@ async def main():
               err[:160])
         # The status event rides the agent's event stream, the reply rides the call:
         # over the wire they are two connections, so the event may land after the
-        # reply (measured 2026-10-07 at 6 lanes: the check read an empty list).
+        # reply.
         # Bounded wait for it — never a pass by timeout.
         for _ in range(50):
             if _done_reasons(events["ai_cut"]):

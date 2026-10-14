@@ -7,8 +7,8 @@ loop — one provider pass per send, and tool-calling is RAW: no `tools` array, 
 `<call>` elements are ai_core's to parse.
 
 What the record leaves out of `max_tokens` / `context_window` is read from the API
-before a turn and written back (`server.py`). The key is optional on the record
-(owner, 2026-10-07: "a space for a key, not sure on key yet"): `credentials`, a
+before a turn and written back (`server.py`). The key is optional on the record:
+`credentials`, a
 credential-store ref, sent as `x-api-key` when named.
 
 `on_cancel` / `on_delete` are re-exported from `ai_core` — the bundle's hooks.

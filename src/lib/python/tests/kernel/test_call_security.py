@@ -9,8 +9,7 @@ The model is **fully-gated, two-sided** — grants are the only rule:
 - An OPERATOR send (no `_current_sender` — the CLI / bootstrap / loader-at-boot /
   a test driver calling `kernel.send` directly) is the ORIGIN root of trust and
   passes ungated.
-- The tree verbs take the gate like any verb and nothing more (owner,
-  2026-10-06): an agent granted `update_agent` on the root may edit ANY record,
+- The tree verbs take the gate like any verb and nothing more: an agent granted `update_agent` on the root may edit ANY record,
   its own grants included — holding that grant IS the authority.
 
 Every agent carries the baseline `{$self:*}` on BOTH fields — nothing else. Any
@@ -319,9 +318,9 @@ async def test_operator_conferral_is_unbounded(seeded_kernel):
 
 
 async def test_update_agent_refuses_a_non_dict_grant(kernel):
-    """`can_call:"*"` (a bare string) used to be accepted — `{"updated": true}` —
-    and the gate then raised `.items()` out of a later dispatch (measured
-    2026-09-01, E21_plan: a correctly-opened web leg answered 500). The shape is
+    """`can_call:"*"` (a bare string) must not be accepted — `{"updated": true}` —
+    or the gate raises `.items()` out of a later dispatch (a correctly-opened web
+    leg answering 500). The shape is
     the WRITER's to refuse, at the point of the mistake."""
     aid = await _mk(kernel)
     r = (

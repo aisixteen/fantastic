@@ -8,8 +8,7 @@ makes afterwards is rowed with a parent that ended before the program did any
 work.
 
 Two things break when that happens. The trace lies — the row names a task that
-no longer exists, which `register_task` used to paper over by dropping a dead
-parent to None. And `cancel` misses it: cancel kills a task AND ITS SUBTREE, so
+no longer exists (and dropping a dead parent to None only papers over it). And `cancel` misses it: cancel kills a task AND ITS SUBTREE, so
 work that became a root is in nobody's subtree. The e2e harness reaps a capped
 agent exactly that way (`e2e/helpers/ai.py` cancels its live tasks by id), so a
 program that escaped the tree keeps running after the harness believes it
@@ -74,7 +73,7 @@ async def test_a_programs_send_is_parented_to_the_job_not_a_dead_dispatch(
             [{"target": "runner", "payload": _testkit.py_start_payload(PROGRAM)}]
         )
     )[0]
-    # The pid of the `start` DISPATCH itself — the parent the fork used to
+    # The pid of the `start` DISPATCH itself — the parent the fork must not
     # inherit, and which is over the moment this call returns.
     start_pid = start["pid"]
     assert start["result"].get("job_id"), start["result"]

@@ -1,13 +1,13 @@
-//! `_binary_path` is a LIST OF STEPS across a bridge (owner-approved,
-//! 2026-10-02) — the twins of python `io_bridge/tests/test_binary_path_steps.py`,
+//! `_binary_path` is a LIST OF STEPS across a bridge — the twins of python
+//! `io_bridge/tests/test_binary_path_steps.py`,
 //! bridge half: (c) a relay_connector forward through the relay, and a ws_bridge
 //! pair over the memory transport. The ws_bridge → web_ws forward and web_rest's
 //! literal binding are in `fantastic-web`'s `tests_binary_steps.rs`.
 //!
-//! A binary frame's header names where its raw body belongs. It used to spell
-//! that as a dotted string, so a payload whose bytes sat at the LITERAL key
-//! `"a.b"` went out as `"payload.a.b"` and the receiver rebuilt a NESTED `a` → `b`
-//! slot. Now the path is a JSON array: a string step is an object key, taken
+//! A binary frame's header names where its raw body belongs, as a JSON array —
+//! never a dotted string, which would send bytes at the LITERAL key `"a.b"` out
+//! as `"payload.a.b"` and have the receiver rebuild a NESTED `a` → `b` slot. A
+//! string step is an object key, taken
 //! literally; an integer step is a list index. The relay legs dial a fake relay
 //! hub over a REAL socket, so every frame crosses the io_bridge codec both ways.
 

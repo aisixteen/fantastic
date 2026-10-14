@@ -1,7 +1,6 @@
-"""vllm_backend — what a record leaves out is READ FROM THE SERVER (owner,
-2026-10-07): `model`, `max_tokens`, `context_window` and `kv_slots`, read before a
+"""vllm_backend — what a record leaves out is READ FROM THE SERVER: `model`, `max_tokens`, `context_window` and `kv_slots`, read before a
 verb that runs a turn and written back to the record. The bodies below are the
-shapes measured on a live vLLM (the local 3090, 2026-10-07): `/v1/models` names
+shapes a live vLLM serves: `/v1/models` names
 `max_model_len`, `/metrics` carries one `vllm:cache_config_info` line whose
 `kv_cache_max_concurrency` is vLLM's own count of full-length requests.
 """

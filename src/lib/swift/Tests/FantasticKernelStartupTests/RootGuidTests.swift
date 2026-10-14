@@ -1,6 +1,6 @@
 // Kernel instance `guid` contract (mirrors the py/rust contract):
 // the ROOT agent owns a stable 32-hex guid, minted ONCE by the ROOT LOADER'S
-// `boot` (python `kernel_state._boot`, C14) — not by the bootstrap — read back
+// `boot` (python `kernel_state._boot`) — not by the bootstrap — read back
 // verbatim on every later boot, and surfaced as a top-level `guid` on root
 // reflect. It is minted AFTER the record writer subscribes, so the `updated`
 // event it publishes is what carries the new record to a wired store.

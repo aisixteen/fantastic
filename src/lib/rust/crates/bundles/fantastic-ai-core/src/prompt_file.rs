@@ -1,4 +1,4 @@
-//! The system block from a FILE (owner, 2026-10-08): the record's `file_bridge_id`
+//! The system block from a FILE: the record's `file_bridge_id`
 //! names the file_bridge this agent reads files THROUGH, `system_prompt_file` a
 //! path on it. Not set → nothing is looked up (the default block). Set and unusable
 //! → [`PromptFileError`]: the turn fails loud, never another block. Python

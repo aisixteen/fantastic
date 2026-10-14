@@ -61,10 +61,9 @@ def parse_spec(spec) -> tuple[str | None, dict]:
     MALFORMED ⇒ `(repr(spec), {})`: a spec that is neither a string nor an
     object, or an object whose `type` or `env` is not a string, is named by its
     own repr — a name no registry holds, so ingress SEALS on it
-    (`DenyInbound(unknown=…)`) and egress refuses it like any unknown name. It
-    used to reach `.get` on an int, a dict lookup with a list, `os.environ.get`
-    with an int: every frame on the leg raised instead of being denied (audit
-    W-8, 2026-10-03; rust and swift denied)."""
+    (`DenyInbound(unknown=…)`) and egress refuses it like any unknown name —
+    never `.get` on an int, a dict lookup with a list, `os.environ.get` with an
+    int, which would make every frame on the leg raise instead of being denied."""
     if not spec:
         return None, {}
     if isinstance(spec, str):
@@ -125,7 +124,7 @@ def describe(record: dict) -> dict:
     egr_spec = record["egress_rule"] if egr_scoped else record.get("auth")
     # The name a caller READS is the name it must WRITE: a present stem is scoped
     # the way the gate scopes it; an ABSENT spec is the manifold's default, which
-    # already carries its suffix (it used to be suffixed twice, 2026-09-16).
+    # already carries its suffix (never suffixed twice).
     ing_name = rule_name(ing_spec, "")
     egr_name = rule_name(egr_spec, "")
     ingress = _scoped(ing_name, "_ingress", ing_scoped) if ing_name else "deny_ingress"

@@ -531,19 +531,14 @@ async def test_cli_context_renders_both_phases(capsys):
 
 # ─── the GOAL must survive every strategy ───────────────────────
 #
-# MEASURED FAILURE (2026-08-20, live the model on the `live_plan` probe, four runs).
 # The task is stated ONCE, in the first user turn. On a long run the body overflows and
 # `compact` — the DEFAULT — splits at `recent_n` and replaces the whole overflow with an
 # LLM summary. The oldest turn IS the task framing, so the goal is the FIRST thing at
-# risk. Observed end state: the model had already worked out the correct answer
-# ("assets should be served to any browser client but is currently sealed"), then
-# finished with "healthy budget, no tasks" and "Idle and ready. Give me a task
-# whenever." — it did not refuse to act, it no longer knew what it was doing. Zero
-# change-verbs issued across every run.
+# risk: a model that loses it does not refuse to act, it no longer knows what it is
+# doing.
 #
-# `truncate` already gets this right ("keep the first (task-framing) turn"), which is
-# what made the diagnosis obvious. This test is deliberately GENERAL over the strategy
-# registry rather than written against one probe: any long task whose goal is stated
+# `truncate` keeps the first (task-framing) turn. This test is deliberately GENERAL
+# over the strategy registry: any long task whose goal is stated
 # once, up front, is exposed — which is most agent work. A new strategy inherits the
 # guarantee by being registered.
 async def test_every_strategy_keeps_the_goal_when_the_body_overflows():
@@ -567,13 +562,11 @@ async def test_every_strategy_keeps_the_goal_when_the_body_overflows():
 
 # ─── reflect bulk: read once, then cut to its ids ───────────────
 #
-# MEASURED (2026-08-20, `live_plan`): reflect replies were 42% of the whole conversation.
-# The body is kept for exactly one turn — the turn the model reads it — and once the
-# model has answered, it is cut to a stub that KEEPS THE IDS it named (owner,
-# 2026-10-06; before, the cut waited for a `SEEN` distillation and an undistilled
-# reflect stayed whole: 13 full bodies, 36k chars, over ten e2e runs).
+# Reflect replies can be a large share of the whole conversation. The body is kept for
+# exactly one turn — the turn the model reads it — and once the model has answered, it
+# is cut to a stub that KEEPS THE IDS it named.
 def test_a_reflect_reply_is_never_cut_from_the_view():
-    """A reflect is MUTABLE state (owner, 2026-10-06): its body stays whole after
+    """A reflect is MUTABLE state: its body stays whole after
     the model answers it; only a newer reflect of the same agent supersedes it
     (`dedupe_stale_reads`). Only `docs` replies are cut."""
     tree = "<id>notes</id>\n<sentence>" + "x" * 4000 + "</sentence>"
@@ -611,9 +604,8 @@ def test_stale_whole_state_reads_dedupe_but_parameterised_reads_never_do():
 def test_a_combined_turn_trims_per_block_never_whole():
     """A batch arrives as ONE turn holding several `[reply to …]` blocks. The
     trimmer works per BLOCK: a superseded whole-state block dedupes alone, its
-    sibling replies stay. Treating the turn as one reply either deleted siblings
-    or trimmed nothing (a count guard skipped every multi-reply turn — tried
-    2026-08-25, superseded same day)."""
+    sibling replies stay. Treating the turn as one reply either deletes siblings
+    or trims nothing (a count guard skips every multi-reply turn)."""
     combined = (
         "[reply to ks:a1 · kernel_state reflect · 1 of 2 in batch ab12]\n"
         + "TREE" * 500
@@ -656,17 +648,15 @@ def test_a_turn_whose_every_block_is_superseded_drops_entirely():
 @pytest.mark.parametrize("window", [300, 400, 500, 700, 900, 1200])
 async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
     """`test_every_strategy_keeps_the_goal_when_the_body_overflows` calls the
-    strategies DIRECTLY, so it never saw the layer that undid them.
+    strategies DIRECTLY, so it never sees the layer that could undo them.
 
-    `_project_context` appends the real notice and then trims to fit. It trimmed
-    from the FRONT — exactly where `compact`/`truncate` had just pinned the goal
-    turn — so a snug window silently dropped the one turn the whole run serves.
-    Measured 2026-08-28: the goal sentence was absent from the projection across
-    a wide band of windows, in BOTH strategies. The cause was a notice envelope
-    reserved at 80 tokens against a real ~132, which put the projection over
-    budget and woke the backstop.
+    `_project_context` appends the real notice and then trims to fit. Trimming
+    from the FRONT — exactly where `compact`/`truncate` just pinned the goal
+    turn — would make a snug window silently drop the one turn the whole run
+    serves (as when an under-reserved notice envelope puts the projection over
+    budget and wakes the backstop).
 
-    This asserts through the seam, which is the only place the bug was visible.
+    This asserts through the seam, the only place such a bug is visible.
     """
     goal = "GOAL-SENTINEL: build the widget and report when done"
     msgs = [_turn("system", "sys"), _turn("user", goal)] + _body(40)
@@ -690,16 +680,13 @@ async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
 
 # ── the reply tag must not swallow a bracket from the BODY ───────────
 #
-# MEASURED 2026-09-04. `_REPLY_TAG`'s verb group was `\S+`, which does not exclude `]`,
-# so on a reply whose body contains a bracket the group took `reflect]` and `[^\]]*\]`
-# closed on the body's bracket instead of the tag's. The verb then read `reflect]` —
-# in no vocabulary — so BOTH trimmers silently did nothing. Reflect bodies are rendered
-# with `json.dumps`, so a list-valued field (`verbs=[…]`, always present) puts a bracket
-# in every one of them: the reflect dedup documented above as reclaiming 42% of the
-# window was inert on exactly the replies it exists for.
+# A verb group of `\S+` does not exclude `]`, so on a reply whose body contains a
+# bracket the group would take `reflect]` and `[^\]]*\]` would close on the body's
+# bracket instead of the tag's. The verb would then read `reflect]` — in no vocabulary
+# — so BOTH trimmers would silently do nothing. Reflect bodies are rendered with
+# `json.dumps`, so a list-valued field puts a bracket in nearly every one of them.
 #
-# It survived because every fixture in all three runtimes used a bracket-free body
-# ("\nbody"). The runtimes agreed with each other, and none of them with reality.
+# Fixtures must use a body WITH a bracket; a bracket-free body ("\nbody") hides it.
 def test_the_verb_group_stops_at_the_tags_own_bracket():
     from ai_core.core import _REPLY_TAG
 

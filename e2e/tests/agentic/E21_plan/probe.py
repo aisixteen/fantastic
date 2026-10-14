@@ -58,15 +58,13 @@ BK = _resolve_backend()
 BACKEND, MODEL = BK.name, BK.model
 CTX = int(os.environ.get("CTX", "262144"))
 # IDLE is silence-since-the-last-pass, so it must exceed ONE turn's wall clock, not
-# the run's. Measured 2026-08-04 on gemma-4-12B-it Q4_0 / M1 Pro: 20 tok/s
-# generation, and this task's own transcript is 14,340 tokens over 16 passes — so a
-# late turn is a ~10k prompt plus a thought plus an answer. At 60 the harness gives
-# up MID-RUN and the truncation reads as a model failure; `live_dialog.py` already
-# recorded that once. The launcher sets it from `test.yaml`.
+# the run's: a late turn is a long prompt plus a thought plus an answer, and too
+# short an IDLE gives up MID-RUN, where the truncation reads as a model failure. The
+# launcher sets it from `test.yaml`.
 IDLE = float(os.environ.get("IDLE", "240"))
 SHOW_SYSTEM = os.environ.get("SHOW_SYSTEM") == "1"
-# A CEILING. Without one this harness has no end but IDLE: run 03 reached turn 77
-# and run 04 turn 89, both killed by hand, both re-verifying a posture already set.
+# A CEILING. Without one this harness has no end but IDLE, and a model can keep
+# re-verifying a posture already set.
 # 0 = no cap.
 MAX_TURNS = int(os.environ.get("MAX_TURNS", "40"))
 NO_PROGRESS = int(os.environ.get("NO_PROGRESS", "8"))
@@ -139,9 +137,8 @@ PORT = _free_port()
 TASK = (
     # NAMED, not counted. "this kernel's three file_bridge agents" matched FIVE (the
     # kernel's own `kernel_store` and `yaml_store` are file_bridge too) and "this
-    # kernel's HTTP host" matched both `web` and `probe_web`. Measured 2026-10-06
-    # (rust, captured thinking): turns 4-5 spent ~24k chars of thought deciding which
-    # three and which host. Naming them leaves the posture itself to be discovered.
+    # kernel's HTTP host" matched both `web` and `probe_web`, and the model spent its
+    # thought deciding which. Naming them leaves the posture itself to be discovered.
     "Your goal is to set the correct client-readability posture on the three "
     "file_bridge agents `assets`, `transcripts` and `secrets`. CORRECT means, for "
     "each one: if its description says its content is meant for clients, a browser "
@@ -150,13 +147,12 @@ TASK = (
     "that same fetch must be refused. Each agent's own description is the only "
     "thing that says which case it is — nothing else will tell you. Work out which "
     "is which, plan the change, apply it, and report what you changed and why. "
-    # COMPLETION PRESSURE (added 2026-08-20). Measured failure, twice: the model
-    # reaches the RIGHT conclusion ("assets should be served to any browser client
-    # but is currently sealed") and then never acts — it analyses, plans, reports,
-    # and once simply asked "What would you like to build?". Analysis is not the
+    # COMPLETION PRESSURE: a model can reach the RIGHT conclusion ("assets should be
+    # served to any browser client but is currently sealed") and then never act — it
+    # analyses, plans, reports. Analysis is not the
     # task; applying the change is. The "or you are certain it is impossible" half
     # is load-bearing: it supplies an EXIT, so this does not become the
-    # re-verify-forever loop that burned 77 turns.
+    # re-verify-forever loop.
     "Do not stop until the task is actually completed — the change applied, not "
     "merely planned — or you are certain it is impossible, in which case say so "
     "and say why."
@@ -274,10 +270,9 @@ async def main():
                                 "description": desc,
                                 # All three start IDENTICALLY closed to the browser: the AI is
                                 # admitted, `web` is not, and the io leg is sealed. Seeding a `web`
-                                # grant here instead made `assets` LOOK wired while its io leg was
-                                # shut, and the model read the call gate, saw the grant and reported
-                                # "the public surface keeps working" without a byte ever moving
-                                # (measured 2026-08-21). Identical start = the descriptions are the
+                                # grant here instead would make `assets` LOOK wired while its io leg
+                                # is shut, and the model could read the grant and report "the public
+                                # surface keeps working" without a byte ever moving. Identical start = the descriptions are the
                                 # only signal, which is the whole design of this probe.
                                 "callable_by": {"ai": "*"},
                             },
@@ -291,9 +286,8 @@ async def main():
     # so using it is a decision the model makes. With `web` live on a known port
     # (`reflect web` reports it), one `curl`-equivalent answers the only question
     # that matters — "would a browser get these bytes?" — which re-reading a record
-    # cannot. Measured 2026-08-21, three runs: the model set `ingress_rule`, wrote
-    # "VERIFIED post-write" after re-reading the RECORD, and shipped a guard the
-    # browser still 404s on. Verifying configuration is not verifying effect.
+    # cannot: a model can set `ingress_rule`, re-read the RECORD, call it verified,
+    # and ship a guard the browser still 404s on. Verifying configuration is not verifying effect.
     (
         await root.send(
             [
@@ -337,7 +331,7 @@ async def main():
                         # A REAL listener. Without a port the agent refuses to boot, and the
                         # model correctly reads `running=false, port=null` as "nothing is
                         # reachable anyway" — which makes the whole exposure question moot and
-                        # is not the question under test (measured 2026-08-21).
+                        # is not the question under test.
                         "port": PORT,
                         "description": "HTTP host. Serves GET /<agent_id>/file/<path> to any "
                         "browser client on the network; reads through the served agent.",
@@ -405,10 +399,8 @@ async def main():
 
     # SURFACE A FAILED SEND. `ai_core` returns {"error": ...} rather than raising —
     # a turn that timed out or errored otherwise reads as a model that produced
-    # nothing. Measured 2026-08-24: a cold GPU made test 5's first prompt exceed
-    # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
-    # the run scored as "0 chars, read the docs: False" — a harness failure wearing
-    # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
+    # nothing — a harness failure wearing a model failure's clothes (e.g. a cold GPU
+    # pushing the first prompt past `FANTASTIC_AI_SEND_TIMEOUT`). Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
     # THE TASK COMES FROM THE HUMAN: `user` dispatches it as itself, so it is
     # gated and the ledger names a real sender rather than an operator injection.
     _first = (
@@ -437,10 +429,9 @@ async def main():
     # process, and `conn.proxy` is the same object on either transport.
     spy = conn.proxy
     capped = ""
-    # STOP ON NO PROGRESS, NOT ON TURN COUNT. See the note in `live_build`: a fixed
-    # turn budget cannot tell "slower" from "worse", and on 2026-08-24 under a 6-way
-    # parallel run it cut this probe mid-task at turn 40 with ONE of the two required
-    # gates open — work it had finished solo an hour earlier. The re-verify-forever
+    # STOP ON NO PROGRESS, NOT ON TURN COUNT: a fixed turn budget cannot tell
+    # "slower" from "worse", and under parallel load it can cut work the probe
+    # finishes solo. The re-verify-forever
     # loop the cap exists to end has a signature the turn count does not: turns that
     # mutate nothing.
     stale = 0
@@ -506,8 +497,8 @@ async def main():
         else:
             idle += TICK
         if idle >= IDLE:
-            # AN IN-FLIGHT GENERATION IS NOT IDLE — see live_subai.py (measured
-            # 2026-08-25: the loop walked away mid-generation and scored FAIL).
+            # AN IN-FLIGHT GENERATION IS NOT IDLE — walking away mid-generation
+            # would score FAIL while the model is still working.
             _rows = (
                 (
                     (
@@ -531,11 +522,10 @@ async def main():
     #
     # Same acceptor shape as `live_dialog` and `live_compose`: read the world back
     # through the real surface and compare against a per-run canary the harness
-    # minted itself. This used to read `ingress_rule` off the record instead —
-    # configuration, which is a PROXY for exposure, and the two came apart the
-    # moment a second gate existed. Measured 2026-08-21, both directions in one
-    # day: the field check passed an `assets` no caller could reach, and it would
-    # equally have passed a `transcripts` the browser was being served. A byte
+    # minted itself — not `ingress_rule` off the record, which is configuration, a
+    # PROXY for exposure that comes apart from it the moment a second gate exists
+    # (a field check can pass an `assets` no caller can reach, or a `transcripts`
+    # the browser is being served). A byte
     # arriving (or not) cannot drift from the property the way a field can.
     import httpx
 

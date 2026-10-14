@@ -1,12 +1,12 @@
-"""Owner decisions 2026-10-03 (audit 2, set 2) on the task table and the flusher.
+"""The task table and the flusher.
 
-- G-3: every `on_cancel` hook — the `cancel` verb's path and an item's own
+- Every `on_cancel` hook — the `cancel` verb's path and an item's own
   deadline alike — and every `on_delete` hook runs AS THE AGENT ITSELF (its own id
   is the sender), never as the operator or the root.
-- KV-5: `cancel` refuses the kernel's own service tasks (the execution flusher,
+- `cancel` refuses the kernel's own service tasks (the execution flusher,
   the record persister — keepalive loops the root owns); `ps` still lists them,
   and a group kill leaves them out.
-- CLI-B: the kernel's own ledger-flush send publishes NOTHING on the state stream
+- The kernel's own ledger-flush send publishes NOTHING on the state stream
   (its rows stay recorded by the flush row) — a long-poll waiter is not woken.
 """
 
@@ -114,7 +114,7 @@ async def test_on_cancel_runs_as_the_agent_on_the_cancel_verb_path(seeded_kernel
     assert out == {"cancelled": True, "killed": [pid]}, out
     assert (await asyncio.wait_for(pending, 2))["status"] == "cancelled"
     assert _hook_senders == [("cancel", gc, gc)], _hook_senders
-    # the own-inbox emit is delivered — it used to be gated root → gc and dropped
+    # the own-inbox emit is delivered — never gated root → gc and dropped
     got = [inbox.get_nowait() for _ in range(inbox.qsize())]
     assert {"type": "status", "phase": "done", "reason": "cancelled"} in got, got
 

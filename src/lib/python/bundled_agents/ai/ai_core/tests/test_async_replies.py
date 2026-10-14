@@ -107,8 +107,8 @@ async def test_grep_refuses_without_a_query():
 
 
 async def test_grep_puts_the_stored_body_hit_first_and_collapses_repeated_lines():
-    """Measured 2026-09-06: the task line repeated per delivery matched 28 times and
-    pushed the one body hit past the cap. Bodies come first; identical lines once."""
+    """A task line repeated per delivery can match many times and push the one body
+    hit past the cap. Bodies come first; identical lines once."""
     from ai_core.core import _grep, _store_reply
 
     k = _Leg()
@@ -183,7 +183,7 @@ async def test_grep_width_is_the_models_to_raise():
 
 
 async def test_grep_falls_back_per_knob():
-    """2026-09-16: a bad `limit` left `width` unbound (NameError on the first match)."""
+    """A bad `limit` must not leave `width` unbound (NameError on the first match)."""
     from ai_core.core import _grep, _store_reply
 
     k = _Leg()

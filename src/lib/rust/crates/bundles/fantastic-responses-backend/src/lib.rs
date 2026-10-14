@@ -134,7 +134,7 @@ fn build_client() -> Result<reqwest::Client, String> {
         .connect_timeout(Duration::from_secs(15))
         // A fresh connection per request and HTTP/1.1 only — python opens a new
         // `httpx.AsyncClient` per pass; a pooled or h2 connection through the
-        // CloudFront proxy was measured dying mid-request.
+        // CloudFront proxy can die mid-request.
         .pool_max_idle_per_host(0)
         .http1_only()
         .build()
@@ -623,7 +623,7 @@ fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> Pr
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
-/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+/// THE RECORD SCHEMA — what this kind's record takes, read
 /// with no agent existing (`reflect bundles=all`), from the constants the
 /// provider runs on. `validate_meta` enforces it at the write, so the page and
 /// the kernel cannot disagree about what a record needs. Python

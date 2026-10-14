@@ -78,16 +78,14 @@ async def main():
             for i, L in enumerate(LETTERS):
                 b = a["reports"][L]; lo = 4 * i
                 # `filler_{j}.txt`, not `filler_{j}`: the bare prefix made `filler_1` match
-            # `filler_10..15`, so reports c and d could never be clean (found 2026-09-06).
+            # `filler_10..15`, so reports c and d could never be clean.
             ok.append(all(f"filler_{j}.txt" in b for j in range(lo, lo + 4)) and not any(f"filler_{j}.txt" in b for j in range(16) if not lo <= j < lo + 4))
             return ok
 
         in_fold_text = any(token in str(m.get("title", "")) + str(m.get("body", "")) for m in fold["msgs"] if m.get("kind") == "fold")
         report((recency, fold), lambda a: f"reports clean={clean(a)}  FINAL={token in a['body']}  folded={a['folded']}  descents={len(a['descents'])}")
-            # NOT "both arms actually compacted": folding here was a side effect of a
-            # BLIND grep (2026-09-08: 12 greps, 12 zeros, then pulls filled the window).
-            # With grep reaching stored bodies (fixed 2026-09-09) the model never needs
-            # to hold them, so this test measures FACT SURVIVAL; folding is measured by
+            # NOT "both arms actually compacted": with grep reaching stored bodies the
+            # model never needs to hold them, so this test measures FACT SURVIVAL; folding is measured by
             # fold_paging / nested_folds / superlong_chain / user_fold.
         checks = [c for c in base_checks(recency, fold) if not c[0].startswith(("both arms produced", "both arms actually compacted"))] + [
             (f"four clean reports ({sum(clean(fold))}/4)", all(clean(fold))),

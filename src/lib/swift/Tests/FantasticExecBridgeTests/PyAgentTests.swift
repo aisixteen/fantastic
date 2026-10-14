@@ -227,7 +227,7 @@ import FantasticKernelState
         }
 
         /// A `bundles/<name>` that links OUTSIDE the running dir is refused by the
-        /// clamp, never loaded (python reads through `fs`; audit 2026-10-14).
+        /// clamp, never loaded (python reads through `fs`).
         @Test func aBundleFolderLinkingOutsideIsRefused() async throws {
             let b = Box()
             let real = try b.bundle("sw_escape_src")

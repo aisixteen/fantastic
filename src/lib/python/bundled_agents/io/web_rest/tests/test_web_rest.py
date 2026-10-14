@@ -79,8 +79,7 @@ def test_post_endpoint_mountable_on_fastapi(seeded_kernel):
 
 
 def test_post_endpoint_rejects_non_object_body(seeded_kernel):
-    # The body is read only once the leg admits the request (gate first, audit
-    # IO-4) — so the leg is OPEN here; a sealed one answers 403 unread.
+    # The body is read only once the leg admits the request (gate first) — so the leg is OPEN here; a sealed one answers 403 unread.
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )
@@ -98,8 +97,7 @@ def test_post_endpoint_rejects_non_object_body(seeded_kernel):
 
 
 def test_post_endpoint_rejects_bad_json(seeded_kernel):
-    # The body is read only once the leg admits the request (gate first, audit
-    # IO-4) — so the leg is OPEN here; a sealed one answers 403 unread.
+    # The body is read only once the leg admits the request (gate first) — so the leg is OPEN here; a sealed one answers 403 unread.
     seeded_kernel.create(
         "web_rest.tools", id="rest_xyz", ingress_rule="allow_all_ingress"
     )

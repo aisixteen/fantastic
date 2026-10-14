@@ -1,6 +1,6 @@
 // What a vllm record leaves out is READ FROM THE SERVER — python
-// `tests/test_server_read.py`, case for case. The bodies are the shapes measured on
-// a live vLLM (the local 3090, 2026-10-07).
+// `tests/test_server_read.py`, case for case. The bodies are the shapes a live vLLM
+// answers.
 
 import FantasticAICore
 import FantasticJSON

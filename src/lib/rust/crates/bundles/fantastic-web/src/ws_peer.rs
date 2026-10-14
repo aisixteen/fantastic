@@ -1,6 +1,6 @@
 //! THE PEER HALF of the WS leg: calls the host makes INTO the page — python
 //! `web_ws._proxy.run`'s `_call_page` / `_on_hello` / `_on_answer` and the
-//! disconnect settle in its `finally` (owner, 2026-09-30).
+//! disconnect settle in its `finally`.
 //!
 //! A page's kernel says who it is (`hello {guid}`); from then on the host kernel
 //! can address its agents as `<guid>|<agent>` (kernel `peers`), and every such
@@ -74,7 +74,7 @@ impl Mirror {
 /// denial — to each other tab of its identity on this kernel as `{type:"reply_mirror", id, data}` — the page emits it on its
 /// bridge's own inbox (it resolves no call there). The body rides at its reply
 /// slot, as on the reply.
-// TODO (owner, open): DESYNC between the tabs of one identity is envisioned and
+// TODO: DESYNC between the tabs of one identity is envisioned and
 // unsolved — a mirror informs the other tabs, nothing reconciles tabs that have
 // diverged. Think later.
 pub(super) async fn mirror_reply(

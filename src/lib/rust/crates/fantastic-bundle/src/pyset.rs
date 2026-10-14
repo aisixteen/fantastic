@@ -3,7 +3,7 @@
 //! `list(set(ids))` is not sorted and it is not insertion order — it is the hash
 //! table's SLOT order, and python hands that order straight to the model (grep's
 //! scope is scanned in it, so which row owns a line two rows share is decided by
-//! it). Rust's `sort_unstable()` gave a different owner for the same corpus.
+//! it). A sorted order would give a different owner for the same corpus.
 //!
 //! The table below is CPython 3.11's `setobject.c`, for the one key type that
 //! reaches here: a non-negative `int`, whose `hash` is itself.

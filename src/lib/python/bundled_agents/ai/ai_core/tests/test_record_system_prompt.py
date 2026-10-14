@@ -1,4 +1,4 @@
-"""The record's `system_prompt` field (owner, 2026-10-03, option b).
+"""The record's `system_prompt` field.
 
 Set on an ai_core agent's record, it REPLACES the default system block on EVERY turn
 of that agent — a main turn, a nudge, and a turn a reply wakes — read LIVE each

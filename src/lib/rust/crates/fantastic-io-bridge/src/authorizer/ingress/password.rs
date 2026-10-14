@@ -95,10 +95,9 @@ mod tests {
         ));
     }
 
-    /// IO-6 (audit 2026-10-03): the compare is over UTF-8 BYTES — any presented
+    /// The compare is over UTF-8 BYTES — any presented
     /// token is a plain allow/deny, and a non-ASCII group token admits its own
-    /// holders. Python raised TypeError on `str` here (`hmac.compare_digest`);
-    /// this runtime always compared bytes — the python twin is
+    /// holders. The python twin is
     /// `test_ingress_password_compares_utf8_bytes_so_any_token_is_a_plain_answer`.
     #[test]
     fn password_compares_utf8_bytes_so_any_token_is_a_plain_answer() {

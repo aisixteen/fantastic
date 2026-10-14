@@ -8,10 +8,9 @@
 //
 // So: one object, one machine field (`reason`), one human field (`error`).
 //
-// The `hint` is not decoration. Measured 2026-08-04: a model copied the literal
-// placeholder `<id>` out of a prompt example, received `{"error": "no agent
-// '<id>'"}` thirty-four times in one run, and never once corrected. The error
-// stated a fact and withheld every fact that would have repaired it.
+// The `hint` is not decoration: an error that states a fact but withholds every
+// fact that would repair it (e.g. `no agent '<id>'` after a model copied a
+// placeholder) leaves the model repeating the same mistake.
 
 import type { Json, Payload } from "./json.ts";
 import { pyRepr } from "./pyjson.ts";

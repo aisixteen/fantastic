@@ -2,7 +2,7 @@
 
     cd src/lib/python && .venv/bin/python -u ../../../e2e/runners/canvas_user.py
 
-One host, ONE user (owner, 2026-10-03: the multi-user paradigm is dropped): a tab
+One host, ONE user: a tab
 gets in through `user`, and `around` reads the page records.
 """
 
@@ -80,7 +80,7 @@ async def tab(b: Browser, url: str, *, stack) -> Page:
 
 
 async def ready(p: Page) -> bool:
-    # nothing floats (owner 2026-10-08): the canvas is drawn once its world is
+    # nothing floats: the canvas is drawn once its world is
     return await p.until("!!document.getElementById('canvas') && !!document.querySelector('.canvas-world')", 20)
 
 

@@ -27,7 +27,7 @@ runs:
       exit 8000
     frames:
       # no docked title: the live shell gives every row to the work
-      # the `mcp` leg is made at boot (owner 2026-10-08: it keeps the project's
+      # the `mcp` leg is made at boot (it keeps the project's
       # .fantastic/.mcp.json right before any client connects), with its bridge
       live: {contains: [exec, files, user, store, memory, mcp], contains_block_title: false}
     after_exit:
@@ -44,7 +44,7 @@ runs:
         - .fantastic/agents/user/agents/mcp_config/agent.yaml
         - .fantastic/prompt.md
         - .fantastic/.mcp.json
-      # nothing outside `.fantastic` (owner 2026-10-12: no pollution)
+      # nothing outside `.fantastic` (no pollution)
       # no roster file: every agent is a record under .fantastic/agents/
       files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/kernel.yaml, .mcp.json, .claude]
 
@@ -188,7 +188,7 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # the wizard's page 1 (owner 2026-10-12: the canvas's wizard): nothing
+      # the wizard's page 1 (the canvas's wizard): nothing
       # saved, the four providers — none linked into this build
       page:
         contains: ["+ add an ai agent", "NEW AI AGENT", "1 / 2", "Nothing saved yet — pick a provider below.",

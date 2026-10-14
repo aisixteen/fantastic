@@ -1,9 +1,9 @@
 """`send` validates the ITEM before anything is resolved, gated or spawned.
 
-Measured 2026-09-02: a bad `retries` on an unnamed item was caught only after the
-dispatch had started (an orphaned running task behind a `failed` outcome); a
-payload without `type` reached the gate and the target instead of being a coded
-refusal; a non-string `type` raised out of `send` (HTTP 500 on web_rest)."""
+A bad `retries` on an unnamed item must be caught before the dispatch starts (not an
+orphaned running task behind a `failed` outcome); a payload without `type` is a coded
+refusal, never reaching the gate and the target; a non-string `type` never raises out
+of `send` (HTTP 500 on web_rest)."""
 
 from __future__ import annotations
 

@@ -115,7 +115,7 @@ struct KernelStateTests {
         }
     }
 
-    /// RP-09 — the record writer's DIRTY SET SURVIVES a flush with no store
+    /// The record writer's DIRTY SET SURVIVES a flush with no store
     /// wired (python returns before clearing the queues), so everything created
     /// before the provider exists lands the moment one does. And every DRAINED
     /// write seeds that bundle's readme copy-if-missing, not only the create
@@ -163,7 +163,7 @@ struct KernelStateTests {
         #expect(!files.paths.contains("agents/early/readme.md"), "\(files.paths)")
     }
 
-    /// C42: persisted `agent.yaml` bytes are python's `messages_yaml.dump(record)`
+    /// Persisted `agent.yaml` bytes are python's `messages_yaml.dump(record)`
     /// — block style, BMP text verbatim (`allow_unicode`), a non-BMP scalar
     /// forces a double-quoted scalar with an uppercase `\UXXXXXXXX` escape, and
     /// the document ends in a newline.
@@ -187,7 +187,7 @@ struct KernelStateTests {
         #expect(bytes.hasSuffix("\n"), "\(bytes)")
     }
 
-    /// A14.15/A14.16: `composeEphemeralChild` wires a child exactly like
+    /// `composeEphemeralChild` wires a child exactly like
     /// `create_agent` (registered, findable via `allAgents()`, an `added`
     /// state event fires) but WITHOUT going through the gate/boot machinery
     /// — python's `Cli(kernel, parent=...)` bypasses `create_agent`
@@ -215,7 +215,7 @@ struct KernelStateTests {
             }, "\(events.map { $0.serialize() })")
     }
 
-    /// C43: a record commits through a `<af>.tmp.<8 hex>` write + `rename`,
+    /// A record commits through a `<af>.tmp.<8 hex>` write + `rename`,
     /// never a direct `write_stream` onto the live path — so a clean commit
     /// leaves no tmp debris beside the final `agent.yaml`.
     @Test func testRecordCommitsViaTmpAndRename() async throws {
@@ -295,7 +295,7 @@ private final class WriterFiles: @unchecked Sendable {
         defer { lock.unlock() }
         return f[p]
     }
-    /// The fake `rename` verb: move a key, C43's tmp+rename commit protocol
+    /// The fake `rename` verb: move a key; the tmp+rename commit protocol
     /// needs this to be REAL, not a no-op `{"ok":true}` — else a persisted
     /// record would only ever exist under its `.tmp.<hex>` name.
     @discardableResult

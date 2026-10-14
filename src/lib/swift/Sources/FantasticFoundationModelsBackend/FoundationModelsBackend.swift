@@ -1,6 +1,6 @@
 // Apple Foundation Models LLM backend — the on-device system model.
 //
-// Owner's decision (2026-10-02): `foundation_models_backend` in BOTH swift and
+// `foundation_models_backend` lives in BOTH swift and
 // rust, ONE implementation of the FoundationModels calls (`FantasticFMCore`):
 // this bundle calls it directly, rust links it through `FantasticFMBridge`'s C
 // ABI. Python has none (Apple-only native), so parity is swift <-> rust: the

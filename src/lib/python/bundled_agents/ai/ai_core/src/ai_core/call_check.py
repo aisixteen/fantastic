@@ -1,11 +1,10 @@
-"""The CALL CHECKER — what a model wrote as a call that is not one (owner, 2026-10-07).
+"""The CALL CHECKER — what a model wrote as a call that is not one.
 
 A model may invent any call syntax — a `<tool_call>` wrapper, `<function=call
 name="send">`, `<send>` as a tag, a JSON object, `<parameter=x>` arguments — and none
 of it opens a `<call` envelope, so the scanner finds nothing and the turn reads as
-call-less (measured 2026-10-07, E59 `calc` on qwen3.8-27b: 18 of 25 replies were
-`<tool_call><function=call name="send">…</call>`, each answered with the call-less
-reminder, the same shape repeated until the chain gave up).
+call-less (e.g. `<tool_call><function=call name="send">…</call>`, each answered with
+the call-less reminder, the same shape repeated until the chain gives up).
 
 The foreign syntaxes cannot be listed, so this checks the other way round: OUR
 grammar and OUR vocabulary are closed — `<call name="N">`, one child tag per
@@ -37,10 +36,10 @@ MAX_REPORTS = 3
 _SHOWN = 160  # chars of a quoted line
 
 _TAG = re.compile(r"<(/?)([^\s<>/=]*)([^<>\n]{0,300}?)(/?)>")
-#: A call opener whose leading `<` was dropped — `call name="await">` (measured
-#: 2026-10-12 on qwen3.8-27b, right after `</think>`; 2026-10-07 an `<ids>` lost its
-#: `<` the same way). Not a tag to `_TAG`, so without this only its `</call>` was
-#: seen and the report said to delete that.
+#: A call opener whose leading `<` was dropped — `call name="await">` (typically
+#: right after `</think>`; an `<ids>` can lose its `<` the same way). Not a tag to
+#: `_TAG`, so without this only its `</call>` is seen and the report says to delete
+#: that.
 #: Only at the start of the text or after whitespace — where the dropped `<` was
 #: (`</think>\n\n<call`); `<function=call name="send">` is another shape.
 _BARE = re.compile(r"""(?<!\S)call\s+name\s*=\s*["']?([A-Za-z_]\w*)["']?\s*>""")
@@ -227,9 +226,8 @@ def _report(text: str, masked: str, call: _Call) -> str:
     else:
         why = "not a call tag"
     # EVERY ARGUMENT THE MODEL WROTE carries into the form to write — the verb's own
-    # (`<query>`, `<ids>`) as much as ours by name. Measured 2026-10-07
-    # (misleading_fold:rust): a grep scoped by `<ids>` lost its `<` and was
-    # reported with only target/title/type; the model rewrote it unscoped. A tag
+    # (`<query>`, `<ids>`) as much as ours by name: reported with only
+    # target/title/type, a grep scoped by `<ids>` is rewritten unscoped. A tag
     # nested in an argument (an `<item>` of `<ids>`) is part of that value.
     after = -1
     for t in call.toks:
@@ -278,9 +276,8 @@ def _report(text: str, masked: str, call: _Call) -> str:
 def repair(answer: str) -> str:
     """The answer with every call opener that lost its leading `<` given it back —
     `call name="X">…</call>` → `<call name="X">…</call>` — when a `</call>` closes it.
-    The owner's spell checker (2026-10-12): the `<` is not the model's — vLLM's
-    streaming reasoning parser drops the content that shares a delta with
-    `</think>` (measured on the 3090, 2 of 7 turns), so the call is restored and
+    The spell checker: the `<` is not the model's — vLLM's streaming reasoning
+    parser drops the content that shares a delta with `</think>`, so the call is restored and
     runs, and the stored answer shows it whole. Outside every `<call` envelope
     only; anything else stays the checker's to report."""
     masked = _mask(answer)

@@ -152,7 +152,7 @@ try:
         # no kernel left to serve. Reap the whole process, not just this daemon
         # thread. This is what makes a kernel exit (parent dies → socket closes)
         # cascade-reap every durable job even when the parent dies too abruptly to
-        # run its own proc.kill() loop (the orphaned connectors the audit found).
+        # run its own proc.kill() loop (no orphaned connectors).
         # A short compute job exits via its main thread BEFORE any EOF, so this
         # only ever fires for a job still alive when its kernel left.
         _o._exit(0)
@@ -182,7 +182,6 @@ try:
             if "error" in m:
                 # The RELAY could not deliver the reply (as opposed to the target
                 # answering with its own {error} — that is data, returned as-is).
-                # A silent None here cost a builder 50 messages (measured 2026-09-02).
                 raise RuntimeError(
                     "fantastic: send(%r) failed in transit: %s" % (target, m["error"])
                 )

@@ -113,7 +113,7 @@ fn load_scenarios() -> Vec<Scenario> {
 /// The probe the cancel scenarios need: a verb that stays IN FLIGHT until it is
 /// cancelled. No shipped bundle offers one without a subprocess or a socket, and
 /// inventing a kernel mechanism to make a test expressible is not on — so each
-/// runtime ships this same small probe, exactly as each ships the C21 echo.
+/// runtime ships this same small probe, exactly as each ships the conformance echo.
 struct LifecycleProbe;
 
 #[async_trait::async_trait]

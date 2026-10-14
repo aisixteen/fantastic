@@ -174,9 +174,8 @@ time.sleep(0.5)
 
 @pytest.mark.parametrize("planted", [None, {"pid": 2**31 - 2}])
 def test_two_racing_acquisitions_exactly_one_wins(tmp_path, planted):
-    """ARCH2-3: the lock used to be read-then-write, so two processes starting
-    together in one dir BOTH acquired it (measured: 20 of 20 rounds). Now
-    exactly one wins every round — on a fresh dir and over a dead holder's
+    """A read-then-write lock would let two processes starting together in one dir
+    BOTH acquire it. Exactly one wins every round — on a fresh dir and over a dead holder's
     lock alike."""
     python_dir = str(Path(__file__).resolve().parents[2])
     env = {**os.environ, "PYTHONPATH": python_dir}

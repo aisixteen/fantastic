@@ -63,9 +63,7 @@ from ai_core.strategies.fold import FoldSummaryError
 # TWO live consumers. The agentic LOOP is still emergent — the backend does ONE
 # provider pass per send and never iterates — but `_route_reply` DOES parse this
 # pass's output and dispatch what it names, so the parser is load-bearing on the
-# routing path, not just a read-model. (This comment claimed otherwise until
-# 2026-08-06; `tool_parse`'s own docstring had already been corrected, and one of
-# two stale copies of a fact is worse than none.) `_derive_reaction` is the other
+# routing path, not just a read-model. `_derive_reaction` is the other
 # consumer, scanning the durable transcript for a recall/persist reaction.
 from ai_core.call_check import check as check_calls
 from ai_core.call_check import repair as repair_calls
@@ -129,9 +127,8 @@ _recall_due: set[str] = set()
 _folds_since: dict[str, int] = {}
 # INCARNATION per agent id, bumped on every boot. A reply dispatched under one
 # incarnation must not become a live turn of the next: after a reboot the rebuilt agent
-# would be woken by answers to calls it no longer remembers making. Measured
-# 2026-09-06 (reboot_continuity): the rebooted agent received phase-one read replies,
-# went back to "verifying" work already folded, and never did the new instruction.
+# would be woken by answers to calls it no longer remembers making, and go back to
+# work already done instead of the new instruction.
 _incarnation: dict[str, int] = {}
 # TOKEN CALIBRATION per agent: the prompt size the endpoint REPORTED for the last pass
 # divided by our own estimate of what we sent. The estimate is chars/4 over the
@@ -359,12 +356,10 @@ def _as_id(x) -> int | None:
 # EVERY ROW HAS AN ADDRESS. `id` is `<agent>:<hex>` — the same allocator the kernel uses
 # for pids, so calls and rows share one id space. `parent` is CAUSALITY (the row this one
 # responds to); a thread is the parent chain, derived when needed. `reply_to` on a send
-# is DELIVERY and is left alone. Measured 2026-09-06: the model attributed rows 5/5
-# through 64 interleaved chains from `parent` alone.
+# is DELIVERY and is left alone.
 # `↑<id>` stops at whitespace OR the tag's closing `]`: a tag that ENDS on its
-# `↑` segment (`[reply to - · 5 reflect · ↑360]`, no batch suffix) used to capture
-# `360]`, which is no id, so the reply row lost its parent (parity 2026-09-30:
-# ~100 `ai_paths` rows `parent: null` where rust/swift link the previous row).
+# `↑` segment (`[reply to - · 5 reflect · ↑360]`, no batch suffix) would otherwise
+# capture `360]`, which is no id, and the reply row would lose its parent.
 _TAG_LINKS = re.compile(r"^\[reply to \S+ · [^\]]*?↑([^\s\]]+)[^\]]*\]")
 
 
@@ -645,9 +640,8 @@ def _fit_reply(
     items: list, cap_tokens: int, limit: int | None = None
 ) -> tuple[list, bool]:
     """THE CAP INVARIANT. Every verb an agent calls on itself must answer UNDER the
-    inline cap, or its answer is stored and digested and the model pulls its own reply
-    (measured 2026-09-06: a 4788-byte grep result came back as a receipt; the run
-    drowned in pulls). Keep items from the front while the rendered reply fits.
+    inline cap, or its answer is stored and digested and the model pulls its own reply.
+    Keep items from the front while the rendered reply fits.
     Returns (kept, truncated)."""
     # MEASURED ON THE SERIALIZED FORM, with headroom for the envelope the verb wraps
     # around these items (`total`, `next`, …). JSON escaping inflates raw text by up to
@@ -724,11 +718,10 @@ def required_meta(rec: dict, key: str, backend: str) -> str:
 
 async def _build_provider(self_id: str, kernel, cfg: Backend):
     """The provider for ONE turn, built from the LIVE record by the backend's
-    `make_provider` (sync OR async). Never cached (audit ARCH2-2): a provider
-    captures endpoint, model and sampling when it is built, so a cached one kept
-    posting to an endpoint `update_agent` had moved the agent away from, and a
-    deleted id re-created later inherited it. Rust and swift build per call too. A
-    record missing what the provider needs raises, naming the field."""
+    `make_provider` (sync OR async). Never cached: a provider captures endpoint,
+    model and sampling when it is built, so a cached one would keep posting to an
+    endpoint `update_agent` had moved the agent away from, and a deleted id
+    re-created later would inherit it. A record missing what the provider needs raises, naming the field."""
     prov = cfg.make_provider(self_id, kernel)
     if inspect.isawaitable(prov):
         prov = await prov
@@ -937,29 +930,21 @@ def _deliver_soon(
 
     THIS IS WHY IT MUST NOT BE AWAITED INLINE. A send to an AI agent takes its
     FIFO lock and does not return until that whole turn is done — model call,
-    streaming, and the turn's own routing. `_route_reply` used to `await` each
-    delivery inside its per-call loop, so reply 2 of a 4-call turn waited for the
-    entire conversation reply 1 started, and if the chain ended first it was never
+    streaming, and the turn's own routing. Awaiting each delivery inside the
+    per-call loop would make reply 2 of a 4-call turn wait for the entire
+    conversation reply 1 started, and if the chain ended first it would never be
     delivered at all.
 
-    Measured 2026-08-24 (`live_build`, the model): 26 of 36 calls never answered
-    — `runner` 6 sent / 0 back (it was never first in its batch), `kernel` 10 / 1.
-    The model re-sent what never came back and was read as stubborn three separate
-    times (opus 08-07 "acks lag a turn behind"; the model 08-20 "the reply queue is
-    running ahead of me"; the model 08-24). Each was diagnosed as a labelling problem
-    and answered with a better reply tag. The cause was here.
-
-    Invisible to every unit test because a stub kernel's turn costs no time, and at
+    Invisible to a unit test with a stub kernel: its turn costs no time, and at
     zero latency serial and concurrent delivery are indistinguishable.
 
     Registered with `spawn_task` so the work is a `ps` row and `cancel` reaches it —
     the same contract `exec_bridge` uses for a forked job. Fire-and-forget without
     that is the orphan bug.
     """
-    # ONE PATH (owner, 2026-09-30): there used to be a `try … except: create_task`
-    # here "for a stub kernel in tests" — a fallback in product code, which would
-    # also have turned a REAL spawn failure into an unregistered orphan. A test
-    # fake that delivers now answers `spawn_task` like the kernel does.
+    # ONE PATH: no `create_task` fallback — it would turn a REAL spawn failure into
+    # an unregistered orphan. A test fake that delivers answers `spawn_task` like
+    # the kernel does.
     coro = _deliver(
         kernel, target, text, client_id, system_prompt, born=born, notice=notice
     )
@@ -981,14 +966,10 @@ async def _deliver(
 
     A FAILED HANDOFF IS ANNOUNCED, not dropped. `_send` answers a turn it could
     not run with `{"error": ...}` rather than raising — a timeout, a provider
-    transport failure, a refused gate. This function used to discard that reply,
-    so a chain that died mid-flight looked exactly like a model that chose to stop:
-    no error anywhere, the last turn simply never happened.
-
-    Measured 2026-08-24 (`live_subai`): the chain ended at pass 5 with the model
-    mid-task, and the run scored FAIL with no indication that anything had gone
-    wrong at all. The first send's error was surfaced by its caller; every
-    SUBSEQUENT turn's was invisible, which is every turn that matters.
+    transport failure, a refused gate. Discarding that reply would make a chain that
+    died mid-flight look exactly like a model that chose to stop: no error anywhere,
+    the last turn simply never happened. The first send's error is surfaced by its
+    caller; every SUBSEQUENT turn's would be invisible.
 
     So the error is emitted on the target's own inbox, the same `status(phase=done,
     reason=error)` shape a failed direct send produces. Whoever watches that agent —
@@ -996,7 +977,7 @@ async def _deliver(
     routed this reply is a detached task, and raising there kills a chain that may
     have other live branches."""
     payload = {"type": "send", "text": text, "client_id": client_id}
-    # HARNESS TEXT, NOT A MESSAGE (owner, 2026-10-07): a turn this layer writes to
+    # HARNESS TEXT, NOT A MESSAGE: a turn this layer writes to
     # its own agent — a reminder, a malformed-call report, an await refusal — is
     # stored as `kind: "notice"`, so a view can tell it from a person's message.
     # The model still reads it as a user turn: Qwen's template takes no system
@@ -1030,14 +1011,14 @@ async def _deliver(
 # A reasoning model streams two things. ollama labels them `message.thinking` /
 # `message.content`; vLLM labels them `reasoning_content` / `content`. We must read
 # BOTH — a turn spent entirely reasoning is otherwise an empty completion that
-# silently ends the chain (gemma4:12b, 2026-08-02). But we must not KEEP both:
+# silently ends the chain. But we must not KEEP both:
 # feeding a reasoning model its own prior deliberation back is against every
-# vendor's guidance, and it compounds — gemma's 3,800-char turn-1 deliberation is
+# vendor's guidance, and it compounds — an early turn's long deliberation is
 # re-sent in every later prompt, crowding out the task.
 #
 # Providers wrap reasoning in these markers; everything downstream reads the ANSWER
 # (`without_thinking`): dispatch parses it and history persists it — a call written
-# inside thinking is thinking (owner, 2026-10-07). One convention, no provider learns
+# inside thinking is thinking. One convention, no provider learns
 # anything about the tool protocol.
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -1045,11 +1026,10 @@ THINK_CLOSE = "</think>"
 
 # ─── stale whole-state reads: DEDUPED, not replayed ─────────────
 #
-# Measured (2026-08-20, the `live_plan` probe): reflect replies were 42% of the entire
-# conversation — 73k of 174k chars — and 9 of 16 were a REPEAT of a target already
-# reflected (`kernel_state` six times). That bulk is what fills the window, and a full
-# window is what triggers compaction, which is what put the goal at risk in the first
-# place. Trimming it attacks the cause, not the symptom.
+# Reflect replies can be a large share of a conversation, many of them a REPEAT of a
+# target already reflected. That bulk is what fills the window, and a full window is
+# what triggers compaction, which puts the goal at risk. Trimming it attacks the
+# cause, not the symptom.
 #
 # The rule is narrow on purpose. A reply may be dropped only when a LATER reply makes
 # it strictly redundant, which requires the verb to return WHOLE state rather than an
@@ -1072,18 +1052,15 @@ _WHOLE_STATE_READS = frozenset({"reflect", "list_agents", "ps", "keys"})
 # The verb group is `[^\]\s]+`, NOT `\S+`. With `\S+` the group is greedy and `]` is
 # not excluded from it, so on `[reply to x · notes reflect]\n{"verbs":["read"]}` it took
 # `reflect]` and let `[^\]]*\]` close on a bracket INSIDE THE BODY. The verb then read
-# `reflect]`, which is in no vocabulary — so `dedupe_stale_reads` matched nothing and
-# the reflect cut stubbed nothing for ANY reply whose body contains a `]`.
-# Reflect bodies are rendered with `json.dumps`, so every list-valued field puts one
-# there: the trimmer documented as reclaiming 42% of the window was inert in practice.
-# Measured 2026-09-04. Every fixture had used a body with no bracket (`"\nbody"`), in
-# all three runtimes, which is why parity tests agreed with each other and with nothing.
+# `reflect]`, which is in no vocabulary — so `dedupe_stale_reads` would match nothing
+# for ANY reply whose body contains a `]`. Reflect bodies are rendered with
+# `json.dumps`, so every list-valued field puts one there.
 _REPLY_TAG = re.compile(r"^\[reply to \S+ · (\S+) ([^\]\s]+)[^\]]*\]")
 # A delivered turn carries ONE OR MORE reply blocks — a batch arrives whole, one
 # block per call, joined by a blank line. The trimmers below work on the BLOCK,
 # the unit they were written for; treating the whole turn as one reply either
-# deleted siblings (the reflect cut) or trimmed nothing (a count guard
-# that skipped every multi-reply turn — tried 2026-08-25, superseded same day).
+# deletes siblings (the reflect cut) or trims nothing (a count guard
+# that skips every multi-reply turn).
 _BLOCK_SPLIT = re.compile(r"\n\n(?=\[reply to \S+ · )")
 # The pid off a block's first line — what `grep` and `strip` address a body by.
 _PID_TAG = re.compile(r"^\[reply to (\S+) · ")
@@ -1093,10 +1070,10 @@ def _reply_blocks(content: str) -> list[str]:
     return _BLOCK_SPLIT.split(content)
 
 
-# A `docs` reply the model has ANSWERED is cut to this stub (owner, 2026-10-05). A cut
+# A `docs` reply the model has ANSWERED is cut to this stub. A cut
 # one turn after the read sits next to the last assistant message, so a prefix cache
 # recomputes only what the thinking strip already recomputes. The body itself stays
-# HELD this run under its pid (owner, 2026-10-06): the model keeps the lines it needs
+# HELD this run under its pid: the model keeps the lines it needs
 # with its own `grep`, and those small replies stay in its view.
 _DOCS_DROPPED = (
     "[docs of={of} tier={tier} — dropped from your view; held this run: send yourself "
@@ -1115,9 +1092,9 @@ _DOCS_ENTRY = re.compile(r"^<([A-Za-z_]\w*)>.*?</\1>", re.S | re.M)
 
 def example_verb(body: str) -> str | None:
     """A REAL verb of this docs body for the grep example: the first that is not
-    `reflect`/`boot`, else the first. A placeholder example is copied verbatim —
-    measured 2026-10-06 (canvas E55/E58): `<query>verb</query>` was sent as written,
-    matched only the `<verbs>` lines, and the model concluded the held body was gone.
+    `reflect`/`boot`, else the first. A placeholder example is copied verbatim:
+    `<query>verb</query>` sent as written matches only the `<verbs>` lines, and the
+    model concludes the held body is gone.
     None when the body lists no verbs (nothing to keep, so nothing is held)."""
     m = _DOCS_VERBS.search(body)
     names = _DOCS_ENTRY.findall(m.group(1)) if m else []
@@ -1258,13 +1235,11 @@ def dedupe_repeat_bodies(history: list[dict]) -> list[dict]:
     return out
 
 
-# ONLY THE ANSWER ACTS (owner, 2026-10-07). A `<call>` written inside thinking is
-# thinking — a draft, an illustration, a plan — never an action: it is not streamed
-# as a call part, not dispatched, not stored. Measured 2026-10-06/07 over 2,821 e2e
-# turns: of 106 calls written inside thinking, 39 were exact copies of a call in the
-# answer (the action ran TWICE — `fanout` read its five files ten times) and 67 were
-# drafts the model never wrote in its answer, run anyway (create_agent, exec start).
-# This reverses 2026-08-24, when a call inside a thought was dispatched as an action.
+# ONLY THE ANSWER ACTS. A `<call>` written inside thinking is thinking — a draft, an
+# illustration, a plan — never an action: it is not streamed as a call part, not
+# dispatched, not stored. A call in thinking is often an exact copy of a call in the
+# answer (dispatching both runs the action TWICE) or a draft the model never wrote in
+# its answer.
 
 
 def without_thinking(text: str) -> str:
@@ -1291,8 +1266,8 @@ THINKING_CAP = 32000
 
 
 def thinking_fields(text: str) -> dict:
-    """A generation's THINKING, for its assistant row (owner, 2026-10-12: a chat
-    shows it collapsed under the answer, after a reload too): every
+    """A generation's THINKING, for its assistant row (a chat shows it collapsed
+    under the answer, after a reload too): every
     `<think>…</think>` span of `text` (an unclosed one runs to the end), joined by a
     blank line — `{"thinking": …}`, the first `THINKING_CAP` characters, plus
     `{"thinking_cut": n}` when n more were dropped; `{}` when there was none. NEVER
@@ -1317,19 +1292,12 @@ def thinking_fields(text: str) -> dict:
     return out
 
 
-# NO TRUNCATOR. `_real_output` used to cut every completion at the first
-# `[reply to ` — our own marker, so its presence proves the model started writing
-# replies it never received. The cut was right about that text and wrong about
-# everything after it: on 2026-08-02 opus-5 emitted a fabricated reply BETWEEN two
-# real calls, and the second (`update_agent assets readonly=true`) was silently
-# dropped — never dispatched, no error to the model, no record in the kernel. It
-# only surfaced because the model distrusted the ack and re-verified state itself.
-#
-# Measured against the transcript that motivated the truncator in the first place,
-# it also bought nothing: gpt-oss:120b marked its fabrications `[awaiting response]`
-# and `<awaiting reply>`, never `[reply to `, so all six of its calls — including
-# ones composed from an invented `kv_store` — dispatched with the truncator ON.
-# It caught the case it was built for zero times and cost a real call once.
+# NO TRUNCATOR. A completion is not cut at the first `[reply to ` — our own marker,
+# whose presence proves the model started writing replies it never received. Such a
+# cut is right about that text and wrong about everything after it: a fabricated
+# reply BETWEEN two real calls would silently drop the second — never dispatched, no
+# error to the model, no record in the kernel. Models also mark fabrications in other
+# ways (`[awaiting response]`, `<awaiting reply>`), so the cut catches little.
 #
 # Fabrication is a real failure; silently deleting a model's work is a worse one,
 # because the model can debug the first and cannot even see the second.
@@ -1337,8 +1305,7 @@ def thinking_fields(text: str) -> dict:
 
 # THE NO-CALL NUDGE — a turn that dispatched nothing is TRY AGAIN.
 #
-# Measured 2026-08-25 (`live_subai`, twice) and re-confirmed 2026-09-01
-# (`repo_map:swift`, twice): mid-task the model decides its next action INSIDE
+# Mid-task a model can decide its next action INSIDE
 # its thinking, closes the thought, and ends the completion without any
 # envelope — or stops early believing itself finished. Every agent harness
 # treats "no action emitted" as a control decision, not an ending;
@@ -1347,8 +1314,7 @@ def thinking_fields(text: str) -> dict:
 #
 # A call-less turn means "you emitted no call, try again", and it means that every
 # time. The chain ends where the model says it ends — `done` (finished) or
-# `await` (waiting on what is in flight) — with ONE bound on top (owner,
-# 2026-09-30; it replaces the earlier "no streak, no cap" rule): MAX_SILENT_TURNS
+# `await` (waiting on what is in flight) — with ONE bound on top: MAX_SILENT_TURNS
 # silent turns IN A ROW and the chain gives up, LOUDLY — `status done
 # reason=gave_up` to the caller, `_GAVE_UP` to a `send_to` — never silently. Any
 # call resets the count. A dead turn (only thinking, discarded) is a silent turn.
@@ -1366,7 +1332,7 @@ _AWAIT_REFUSED = (
 # The silent streak per chain `(agent id, client id)` — see `_route_reply`.
 _silent: dict[tuple[str, str], int] = {}
 
-# OPEN INQUIRIES (owner, 2026-10-06: fully async). An `inquiry` an AI received is
+# OPEN INQUIRIES (fully async). An `inquiry` an AI received is
 # accepted at once and runs as its own chain `(receiver, client_id)`; the answer the
 # model gives in ANY turn of that chain — or the news that it ended without one —
 # is delivered to the asker as a later message under the inquiry's pid. Nothing
@@ -1450,7 +1416,7 @@ async def _close_inquiry(kernel, self_id: str, client_id: str, body: dict) -> No
     """Close the inquiry this chain `(self_id, client_id)` is answering: hand `body`
     (`{answer}` or `{error}`) to its asker as a message under the inquiry's pid,
     `[reply to <pid> · <self_id> inquiry]`. The answer is THIS agent's own send to
-    the asker (owner, 2026-10-06), gated like any: it needs `send` on the asker in
+    the asker, gated like any: it needs `send` on the asker in
     this agent's `can_call` and the asker's `callable_by` admitting it — a refused
     delivery is told to this agent (`_deliver_answer`). An operator's inquiry has
     no conversation to land in: the answer is an event on this agent's inbox
@@ -1523,8 +1489,7 @@ async def _answer_inquiry(
     answer = (call.get("arguments") or {}).get("answer")
     # THE PLACEHOLDER IS NOT AN ANSWER. The shape shown to a model that did not
     # answer is `<answer>what you concluded</answer>`, and a model copies an example
-    # back verbatim — measured 2026-09-04 on peer_review, where "..." was written
-    # into review.md as the verdict.
+    # back verbatim.
     if not isinstance(answer, str) or answer.strip().strip(".") == "":
         return (
             "that is the PLACEHOLDER, not an answer — `answer` came back as %r. "
@@ -1581,11 +1546,9 @@ async def _route_reply(
     ONE delivered turn, each piece its own `[reply to …]` block, tagged
     `N of M in batch <token>` when M > 1.
 
-    Why whole, never split: replies used to land one per turn, so a turn that
-    fanned out 7 calls spent the next 7 turns collecting its own answers, and
-    every question asked in between was answered turns later by something
-    older. Measured 2026-08-25 (`live_subai_langgraph`): the model re-asked
-    `list_agents` five times and the run died with nothing built. Anthropic
+    Why whole, never split: replies landing one per turn make a turn that fanned
+    out 7 calls spend the next 7 turns collecting its own answers, and every
+    question asked in between is answered turns later by something older. Anthropic
     documents the split shape as the anti-pattern ("separate user messages
     reduce parallel tool use"), OpenAI 400s on it, LangGraph's ToolNode
     collects all ToolMessages before the agent runs again. The model never
@@ -1596,15 +1559,14 @@ async def _route_reply(
     with a `timeout` arg in the envelope (validated by the kernel; a bad value
     settles that call as a refusal it can read).
     """
-    # THE MATCH (owner, 2026-10-04): a dispatched message carries the `stream_id` of
+    # THE MATCH: a dispatched message carries the `stream_id` of
     # the part it was streamed as, so a consumer settles its draft on it. Matched by
     # the call's exact body, in order — one reading of the text, not two.
     streams = list(call_streams or [])
     calls = []
-    # ONLY A SUCCESSFUL GENERATION DISPATCHES (owner, 2026-10-04): a pass the model
-    # stopped with a block open sends NOTHING — its earlier closed calls included;
-    # the turn's marker names every one as not sent. ONLY THE ANSWER ACTS (owner,
-    # 2026-10-07): calls written inside thinking are read as thinking.
+    # ONLY A SUCCESSFUL GENERATION DISPATCHES: a pass the model stopped with a block
+    # open sends NOTHING — its earlier closed calls included; the turn's marker names
+    # every one as not sent. ONLY THE ANSWER ACTS: calls written inside thinking are read as thinking.
     answer = repair_calls(without_thinking(text or ""))
     for call, body in [] if cut else terminated_calls(answer):
         i = next((n for n, (_sid, b) in enumerate(streams) if b == body), None)
@@ -1632,7 +1594,7 @@ async def _route_reply(
                 f"{bad['error']}\n\nyour block:\n{bad['your_block']}",
             )
         )
-    # CALLS WRITTEN WRONG (owner, 2026-10-07): markup carrying OUR call vocabulary
+    # CALLS WRITTEN WRONG: markup carrying OUR call vocabulary
     # outside every `<call` envelope — `<tool_call><function=call name="send">`,
     # `<send>`, a JSON call — is reported like a compiler error, with the form to
     # write instead (`call_check`). The answer's well-formed calls run as written,
@@ -1729,14 +1691,12 @@ async def _route_reply(
         # `reply_to` DEFAULTS TO SELF. An omitted key means the model gets its
         # own answer back, not that the answer is thrown away. Discarding a
         # reply is something you must SAY (`reply_to: null` / "none") — a
-        # dropped key costs a wasted turn, not the whole task (measured:
-        # gemma4:12b left the key out of a perfect call and the chain died at
-        # pass 1 with nothing to see).
+        # dropped key costs a wasted turn, not the whole task.
         if "reply_to" in args:
             reply_to = args.get("reply_to")
             # The tag grammar types a bare number (`<reply_to>1001</reply_to>` →
             # 1001): a number is an id written by the model, never "discard" —
-            # it is checked like any id below (measured 2026-10-11, chat_users).
+            # it is checked like any id below.
             if isinstance(reply_to, (int, float)) and not isinstance(reply_to, bool):
                 reply_to = str(reply_to)
             reply_to = reply_to.strip() if isinstance(reply_to, str) else None
@@ -1748,9 +1708,9 @@ async def _route_reply(
             reply_to = self_id
         if not isinstance(target, str) or not target.strip():
             # NAME THE SHAPE, not just the fault — a send must name the AGENT
-            # it goes to, and only the model can close that gap (measured
-            # 2026-08-06: a bare fault sent gemma-4 re-deriving the envelope
-            # from the system prompt instead of retrying).
+            # it goes to, and only the model can close that gap; a bare fault sends
+            # a model re-deriving the envelope from the system prompt instead of
+            # retrying.
             if reply_to:
                 units.append(
                     (
@@ -1778,12 +1738,10 @@ async def _route_reply(
         target = target.strip()
         payload = args.get("payload")
         # A REPLY ADDRESSED TO NOBODY IS LOST. `reply_to` is where this call's
-        # answer goes, never an argument the target sees; one naming no agent made
-        # the delivery fail on that missing agent's inbox, so nobody saw it and the
-        # model never learned what its call did (measured 2026-10-11, e2e
-        # chat_users: a chat `post` with `<reply_to>1001</reply_to>` meant a chat
-        # message id; read as a number it DISCARDED the reply, and six refusals
-        # vanished). Nothing is dispatched; the model is told. A peer address
+        # answer goes, never an argument the target sees; one naming no agent would
+        # make the delivery fail on that missing agent's inbox, so nobody sees it and
+        # the model never learns what its call did. Nothing is dispatched; the model
+        # is told. A peer address
         # (`<guid>|<agent>`) is the peer's to resolve.
         if (
             reply_to
@@ -1840,12 +1798,11 @@ async def _route_reply(
                     )
                 )
             continue
-        # A ROUTING NAME THE VERB ALSO TAKES IS LOST (owner, 2026-10-11). `title`,
+        # A ROUTING NAME THE VERB ALSO TAKES IS LOST. `title`,
         # `timeout`, `reply_to`, … are this call's own fields — lifted out, never sent
         # to the target. A verb that documents an argument of the same name can never
-        # receive it from a model call (measured: a knowledge store's `create(title)`
-        # failed on every call, the model retried 8 times and blamed the store). The
-        # target's `docs` names the verb's arguments; a clash refuses the call, loud.
+        # receive it from a model call, and the model retries and blames the target.
+        # The target's `docs` names the verb's arguments; a clash refuses the call, loud.
         used = [k for k in _ROUTING if k != "target_id" and k in args]
         if used and isinstance(payload.get("type"), str):
             clash = _routing_clash(kernel, target, payload["type"], used, doc_args)
@@ -1880,9 +1837,7 @@ async def _route_reply(
         # A SELF-CALL INHERITS ITS CONVERSATION. The model's calls are dispatched here,
         # AFTER the turn closed and `_current` was cleared — so a verb that resolves
         # its conversation from the in-flight entry (`recall`, `grep`, `history`,
-        # `pull` of a fold) saw the DEFAULT client and searched an empty store.
-        # Measured 2026-09-06: every model-issued grep in three e2e runs returned
-        # total=0; the model fell back to paging (21 pulls where one grep would do).
+        # `pull` of a fold) would see the DEFAULT client and search an empty store.
         if (
             target == self_id
             and isinstance(payload, dict)
@@ -1939,8 +1894,7 @@ async def _route_reply(
             return
     if units:
         # A STABLE TOKEN PER TURN — two batches are distinguishable at a
-        # glance (measured 2026-08-24: bare "1 of 3" labels collided across
-        # turns and the model re-read one file forever). The PID still
+        # glance (bare "1 of 3" labels collide across turns). The PID still
         # identifies the individual call and is the `ps`/`cancel` handle.
         # The batch token IS the assistant row's hex, so `in batch <b>` and `↑<message>`
         # name the same thing and the model can see the row every reply points at.
@@ -1958,11 +1912,9 @@ async def _route_reply(
         _get = getattr(kernel, "get", None)  # a bare test kernel has no record
         rec_ = (_get(self_id) if _get else None) or {}
         cap = _inline_cap(rec_)
-        # THE CAP IS PER MESSAGE, not per reply (owner, 2026-10-07): every reply of a
-        # batch lands in ONE message to its addressee, so the replies share the cap.
-        # A reply that would push its batch past it is held like an oversized one.
-        # Measured: two greps, each under the 434-token cap, arrived as one 967-token
-        # message at a 4.5k window — the next turn could not fit it (`too_small`).
+        # THE CAP IS PER MESSAGE, not per reply: every reply of a batch lands in ONE
+        # message to its addressee, so the replies share the cap. A reply that would
+        # push its batch past it is held like an oversized one.
         used: dict[str, int] = {}
         for dest, target, verb, idx, body, *rest in units:
             title = rest[0] if rest else None
@@ -1973,7 +1925,7 @@ async def _route_reply(
                 body = render_reply(point_to_docs(target, verb, out["result"]))
                 # Only docs bodies are cut later, so only they carry the notice, and
                 # are HELD under their pid for the model's own `grep`. A reflect is
-                # MUTABLE state and stays whole (owner, 2026-10-06); a newer reflect
+                # MUTABLE state and stays whole; a newer reflect
                 # of the same agent supersedes it (dedupe).
                 if (
                     verb == "docs"
@@ -1990,7 +1942,7 @@ async def _route_reply(
                 # replaced by its digest; the model pulls pages when it wants them.
                 # This is what makes an unbounded reply (a 240KB ledger dump)
                 # non-fatal: it becomes a row to page, never a turn to fit.
-                # SYNC OR ASYNC ALIKE (decided 2026-09-26): a body is never persisted
+                # SYNC OR ASYNC ALIKE: a body is never persisted
                 # (§3). Over the inline cap it waits in RAM and the stored turn carries
                 # its origin line; under it, it is inline.
                 if (
@@ -2052,8 +2004,8 @@ async def _route_reply(
             + (1 if _lock_for(self_id).locked() else 0)
             + len(_awaiting.get(self_id, ()))  # answers to its inquiries, still to come
         )
-        # TODO (owner, 2026-10-05) — STALL DETECTION. A chain can stop with no error: calls
-        # dispatched, then nothing (subai_graph:rust, 2026-09-03 and 2026-10-05). Three shapes:
+        # TODO — STALL DETECTION. A chain can stop with no error: calls dispatched, then
+        # nothing. Three shapes:
         # (1) a call never settles (no timeout by default, its task stays in `ps`); (2) every
         # call settled but the reply batch never reached this agent's conversation; (3) the
         # reply landed but no turn started. This agent KNOWS it is awaiting `pending` work:
@@ -2084,8 +2036,7 @@ async def _route_reply(
             _deliver_soon(kernel, send_to, text, client_id, system_prompt)
         return
     if not calls and not units:
-        # TRY AGAIN. Every turn, chained or not (user, 2026-09-09: "all is tool
-        # calls"): a first turn from a person that answers in prose and emits
+        # TRY AGAIN. Every turn, chained or not: a first turn from a person that answers in prose and emits
         # nothing is the same silence as a mid-chain one — the model ends it
         # with `done`, waits with `await`, or acts. A DEAD turn (only thinking,
         # discarded unstored) is the same silence and is rerolled the same way.
@@ -2094,7 +2045,7 @@ async def _route_reply(
         # asks the human DISPATCHES (`send` to the human agent) and is therefore
         # never silent; the answer arrives as that call's reply.
         #
-        # BOUNDED (owner, 2026-09-30): MAX_SILENT_TURNS in a row and the chain
+        # BOUNDED: MAX_SILENT_TURNS in a row and the chain
         # GIVES UP instead of reminding again — the caller is told, loudly, that
         # the model could not answer. A person sees it in their view; a parent
         # that asked for the result by `send_to` gets it as a turn; a clock's
@@ -2115,8 +2066,8 @@ async def _route_reply(
 _SELF_KEYS = ("id", "description", "memory_store_id", "can_call", "callable_by")
 
 
-#: THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn (owner,
-#: 2026-10-08) — so a prompt that REPLACES the default block keeps its live parts:
+#: THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn — so a
+#: prompt that REPLACES the default block keeps its live parts:
 #: `{tree}` the kernel primer (tree ids + bundle catalog), `{self}` this agent's
 #: identity and grants, `{store}` its memory store id, `{howto}` the fixed how-to
 #: blocks. `{tree}\n\n{self}\n\n{howto}` IS the default block, byte for byte. Only
@@ -2193,8 +2144,8 @@ async def _system_content(
     self_id: str, kernel, system_prompt: str | None = None
 ) -> str:
     """THE system block a turn uses, WRAPPED: the record's `pre_system_prompt` goes
-    BEFORE whichever prompt is in force and `post_system_prompt` AFTER it (owner,
-    2026-10-11), each read live and taken verbatim — no placeholders, and neither
+    BEFORE whichever prompt is in force and `post_system_prompt` AFTER it, each read
+    live and taken verbatim — no placeholders, and neither
     replaces anything: the default block, a `system_prompt` or a prompt file stays
     whole between them. Absent or null adds nothing."""
     rec = kernel.get(self_id) or {}
@@ -2213,7 +2164,7 @@ async def _inner_system_content(
     """The prompt in force, before the pre/post wrap — the one choice `_assemble` builds the turn on
     and `_context_recall` sizes the body budget against, so the two never drift.
 
-    PRECEDENCE (owner, 2026-10-03, 2026-10-08): the per-call argument (that
+    PRECEDENCE: the per-call argument (that
     delivery) > the record's `system_prompt` field, read LIVE so an `update_agent`
     lands on the next turn — a main turn, a nudge and a reply-woken turn alike > the
     file the record's `system_prompt_file` names (read through its file_bridge,
@@ -2284,9 +2235,8 @@ async def _assemble(
         )
         # THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every row
         # appended since — the model's own turns, the replies that landed — rides
-        # behind it in full. Measured 2026-09-06 (recall_after_fold): served the
-        # array alone, the model never saw the read it had just made and restarted
-        # the survey from filler_0, sixty turns in a circle.
+        # behind it in full. Served the array alone, the model would never see the
+        # read it had just made and would restart its work in a circle.
         idx = {r.get("id"): i for i, r in enumerate(hist) if r.get("id")}
         newest = max(idx[e["id"]] for e in view["ids"])
         messages.extend(
@@ -2326,7 +2276,7 @@ class _PartPublisher:
 
     async def _send(self, part: dict, ev: dict) -> None:
         ev = {**ev, "stream_id": part["stream_id"], "source": self.self_id}
-        # DELTAS ARE QUIET (owner, 2026-10-04): inbox and watchers only, never the
+        # DELTAS ARE QUIET: inbox and watchers only, never the
         # state stream — it carries a part's lifecycle (start / end / abort).
         quiet = ev["type"] == "part_delta"
         addrs = part.get("to") or ([part["target"]] if part.get("target") else [])
@@ -2397,8 +2347,8 @@ async def _to_caller(kernel, self_id: str, client_id: str, ev: dict) -> None:
 def usage_detail(
     provider, model_messages: list, text: str, gen_seconds: float, window: int
 ) -> dict:
-    """The token figures a finished generation's `status` `done` carries (owner,
-    2026-10-12: a chat shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
+    """The token figures a finished generation's `status` `done` carries (a chat
+    shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
     `completion_tokens` as the provider REPORTED them — estimated (chars/4, this
     layer's own count) when it reported none, and then `prompt_tokens_estimated` /
     `completion_tokens_estimated` says so — `gen_seconds` (the wall time from the
@@ -2513,10 +2463,9 @@ def _make_summarizer(provider):
             if isinstance(chunk, str):
                 parts.append(chunk)
         cut = getattr(provider, "last_stop_reason", None) == "max_tokens"
-        # A REASONING MODEL THINKS OUT LOUD HERE TOO. Measured 2026-09-06 across two
-        # e2e runs: 172 of 172 model-written folds carried a title beginning
-        # `<think>The user wants me to summarize…` — the summary was buried under the
-        # reasoning and every fold read as noise. Side calls strip like the main turn.
+        # A REASONING MODEL THINKS OUT LOUD HERE TOO: unstripped, a fold's summary is
+        # buried under the reasoning and reads as noise. Side calls strip like the
+        # main turn.
         return without_thinking("".join(parts)), cut
 
     return _Summarizer(_summarize)
@@ -2629,10 +2578,8 @@ async def _project_context(
                 "detail": {
                     "context_window": resolve_context_window(rec),
                     "system_tokens": sys_tokens,
-                    # NAME THE KILLER. Measured 2026-08-26 (`live_subai_graph`,
-                    # 131k window): this fired needing a single >126k-token turn
-                    # and recorded nothing about it — the run's tempdir was gone
-                    # before anyone could ask WHICH message was that big.
+                    # NAME THE KILLER: which message was too big, recorded while
+                    # it can still be asked.
                     "last_message_tokens": estimate_one(body[-1]),
                     "last_message_head": str(body[-1].get("content"))[:200],
                     "hint": hint,
@@ -2690,10 +2637,8 @@ async def _project_context(
     # `len > 1` guard is a defensive backstop, not a fallback.
     # Trim from the MIDDLE, not the front. `out_body[0]` is the goal turn every
     # strategy deliberately pins (`compact`/`truncate` both put it first); the
-    # last entry is the live turn. Taking from the front silently undid the pin
-    # — the exact regression the pin exists to prevent, re-introduced one layer
-    # up. Measured 2026-08-28: with a snug window the goal sentence was absent
-    # from the projection entirely, in both strategies.
+    # last entry is the live turn. Taking from the front would silently undo the
+    # pin — the exact regression the pin exists to prevent, one layer up.
     out_body = proj.body
     stable = system_block + fact_block
     while len(out_body) > 2 and estimate_tokens(stable + [notice] + out_body) > b:
@@ -2734,8 +2679,8 @@ async def _project_context(
     if proj.folded:
         # "When it feels it folded, it runs context_recall" — at the start of the
         # next turn, over the new head. DEBOUNCED: a recall is a model call, and a
-        # recall after EVERY fold batch doubled the turn price (measured 2026-09-06:
-        # 11 folds, 5 recalls in 60 turns). Every RECALL_EVERY-th batch, or when a
+        # recall after EVERY fold batch would double the turn price. Every
+        # RECALL_EVERY-th batch, or when a
         # batch folded a lot at once.
         _folds_since[self_id] = _folds_since.get(self_id, 0) + proj.folded
         if _folds_since[self_id] >= RECALL_EVERY:
@@ -2819,7 +2764,7 @@ async def _run(
             setattr(provider, field_, None)
         except AttributeError:
             pass
-    # STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as they
+    # STREAMING PARTS: the same chunks, split into parts as they
     # are written — animation for the addressee, never action (`stream_parts`).
     splitter = PartSplitter(self_id)
     parts_out = _PartPublisher(kernel, self_id, client_id, re=current_task())
@@ -2861,20 +2806,16 @@ async def _run(
         _reported[self_id] = reported
 
     # A DEAD TURN — nothing left once the thinking is stripped — did not answer,
-    # whatever the provider's finish reason says. Measured 2026-09-30 on vLLM: a
-    # thinking budget of 8 tokens ended the thought, the model stopped cleanly
-    # (`finish_reason: stop`) with an empty answer, and the turn was stored as a
-    # completed, empty assistant row. The ANSWER is discarded here — never stored,
-    # never counted as an answer — and the turn is routed like any that dispatched
-    # nothing:
-    # the no-call reminder rerolls it (owner, 2026-09-30). Failing the turn
-    # outright ended a 30-pass chain on its first dead turn (E31, measured).
+    # whatever the provider's finish reason says (a tiny thinking budget can end the
+    # thought and stop cleanly with an empty answer). The ANSWER is discarded here —
+    # never stored, never counted as an answer — and the turn is routed like any that
+    # dispatched nothing: the no-call reminder rerolls it. Failing the turn outright
+    # would end a long chain on its first dead turn.
     if not without_thinking(last_text).strip():
         # The INCOMING row is kept — only the empty answer is dropped. The turn
         # this one answered may be a reply batch carrying the results of the
         # model's own calls; unstored, the reroll would arrive with those results
-        # gone and the model would re-ask for them (found in the swift port's
-        # review, 2026-09-30).
+        # gone and the model would re-ask for them.
         in_id, in_parent = _row_ids_for_incoming(self_id, user_text, kernel)
         await _save_history(
             self_id,
@@ -2941,7 +2882,7 @@ async def _run(
         # STRIPPED — the deliberation is not part of the conversation. The raw
         # text (with thinking) already went to `_route_reply` for parsing. A pass
         # the model stopped with a block open leaves the CUT MARKER instead, on top
-        # of the context (owner, 2026-10-04).
+        # of the context.
         {
             "role": "assistant",
             "content": (
@@ -2968,7 +2909,7 @@ async def _run(
         # dispatched message with the stream it was previewed as
         "call_streams": list(splitter.closed_calls),
         # the model stopped generating with a block open — NOTHING of this pass
-        # is sent (owner, 2026-10-04: only a successful generation dispatches)
+        # is sent (only a successful generation dispatches)
         "cut": cut_call is not None,
     }
 
@@ -2989,8 +2930,7 @@ def _make_reflect(cfg: Backend):
             "context_strategy": rec.get("context_strategy", DEFAULT_STRATEGY),
             "memory_store_id": rec.get("memory_store_id"),
             # WHERE its key is read — `{store, ref}`, a pointer, never the secret. An
-            # agent copying this one's record needs it (e2e subai, 2026-10-13: a keyed
-            # door, and the template it was told to read did not show it).
+            # agent copying this one's record needs it (a keyed endpoint).
             "credentials": rec.get("credentials"),
             # A generation IS its kernel dispatch task — the backend holds no
             # task handle of its own. `_current[id]` present ⇔ in flight.
@@ -3009,10 +2949,9 @@ def _make_reflect(cfg: Backend):
     return _reflect
 
 
-# What an inquiry carries ON ITSELF (owner, 2026-10-06): that it IS one and how it
-# is answered. Delivered bare as `[from ai]` + the question, the reviewer in
-# peer_review (rust, twice) did the work, wrote `REJECT — timeout = 300` as prose
-# and ended with `done`; the one line in the system block was too far away.
+# What an inquiry carries ON ITSELF: that it IS one and how it is answered. Delivered
+# bare as `[from ai]` + the question, a model does the work, writes its verdict as
+# prose and ends with `done`; one line in the system block is too far away.
 _INQUIRY_HEAD = (
     "[inquiry from {asker} · re {pid} — do any work it needs, then answer with "
     '<call name="inquiry_answer"><answer>…</answer></call> before done: nothing else '
@@ -3021,7 +2960,7 @@ _INQUIRY_HEAD = (
 
 
 def _make_inquiry(cfg: Backend):
-    """`inquiry` on an AI: accepted at once, answered LATER (owner, 2026-10-06).
+    """`inquiry` on an AI: accepted at once, answered LATER.
 
     The human's bundle answers this verb from a record, at once; an AI answers it
     by working and THINKING, in its own time. Either way the asker reads the
@@ -3039,13 +2978,11 @@ def _make_inquiry(cfg: Backend):
                 "reason": "missing_arg",
                 "arg": "text",
             }
-        # FULLY ASYNC (owner, 2026-10-06). The inquiry is ACCEPTED at once and runs
+        # FULLY ASYNC. The inquiry is ACCEPTED at once and runs
         # as its own chain on this agent; the answer — given in ANY turn of that
         # chain, after whatever work it needs — reaches the asker later as a
-        # message under this call's pid (`_route_reply`). It used to be read off
-        # this agent's FIRST turn only, so a reviewer that read the spec and ran
-        # `git diff` before answering was told it had not answered (measured
-        # 2026-10-06, peer_review:rust).
+        # message under this call's pid (`_route_reply`) — never read off this
+        # agent's FIRST turn only, so work before answering is allowed.
         asker = current_origin()
         pid = current_task()
         client = _safe_client(f"inquiry-{pid}")
@@ -3129,17 +3066,15 @@ def _make_send(cfg: Backend):
             for owed in _ANSWER_TAG.findall(text):
                 _awaiting[id].discard(owed)
         # A message is TEXT whatever the caller typed: the tag grammar types a bare
-        # number (`<text>586</text>` → 586, measured 2026-09-10 multisubai, a
-        # TypeError in the turn), and "586" is a perfectly good message.
+        # number (`<text>586</text>` → 586), and "586" is a perfectly good message.
         if isinstance(text, (int, float)) and not isinstance(text, bool):
             text = str(text)
         # WHO SAID IT, TO WHOM, UNDER WHICH NUMBER. A message from another AGENT
         # opens with a header the KERNEL vouches for (the sender is the dispatch's
         # own context, never the sender's prose): `[from solver_1 · to solver_2,
         # solver_3 · msg 412 · re 398]`; `current_origin` is the caller the gate saw.
-        # Without it a peer's message arrived
-        # anonymous (measured 2026-09-10 multisubai: solvers signed their prose
-        # by hand), and a group message was indistinguishable from a private one.
+        # Without it a peer's message arrives anonymous, and a group message is
+        # indistinguishable from a private one.
         sender = current_origin()
         if sender and sender != id:
             parts = [f"from {sender}"]
@@ -3151,7 +3086,7 @@ def _make_send(cfg: Backend):
             if payload.get("re") is not None:
                 parts.append(f"re {payload.get('re')}")
             # the stream this message was previewed as — what an AI consumer that
-            # watched it stream matches its draft to (owner, 2026-10-04)
+            # watched it stream matches its draft to
             if payload.get("stream_id") is not None:
                 parts.append(f"stream {payload.get('stream_id')}")
             text = f"[{' · '.join(parts)}]\n{text}"
@@ -3233,7 +3168,7 @@ def _make_send(cfg: Backend):
                     "client_id": client_id,
                 }
             except FoldSummaryError as e:
-                # FAIL LOUD (owner, 2026-10-11): a span's summary would not fit its
+                # FAIL LOUD: a span's summary would not fit its
                 # budget after every re-summarise — no turn on an unfolded view.
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
@@ -3257,8 +3192,7 @@ def _make_send(cfg: Backend):
             except Exception as e:
                 # THE TRACEBACK, on stderr, every time: a turn that ends in
                 # `reason='error'` with only `str(e)` is undiagnosable from a
-                # transcript (2026-09-09: "Object of type bytes is not JSON
-                # serializable" with no frame to name where).
+                # transcript with no frame to name where.
                 traceback.print_exc()
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
@@ -3452,7 +3386,7 @@ async def on_cancel(id, task_id, kernel):
     if entry is None:
         return
     client_id = entry.get("client_id", DEFAULT_CLIENT_ID)
-    # THE CUT (owner, 2026-10-04): every open part ABORTS for its watchers, and the
+    # THE CUT: every open part ABORTS for its watchers, and the
     # turn leaves the incoming message + a marker row — never a half answer — so the
     # model's next turn knows what it was asked, what it had visibly said, and who
     # stopped it. Nothing of a stopped pass was dispatched.
@@ -3462,7 +3396,7 @@ async def on_cancel(id, task_id, kernel):
         splitter, publisher = parts
         unsent = [p for p in splitter.parts if p["kind"] == "call"]
         await publisher.push(splitter.stop("stopped"), final=True)
-    # A HOST STOP (owner, 2026-10-12): the kernel is draining — this turn was cut by
+    # A HOST STOP: the kernel is draining — this turn was cut by
     # the stop, not by anyone's cancel. Its cut row is marked `interrupted` (with
     # the client it streamed to), and the next boot resumes it once.
     stopping = bool(getattr(_ctx(kernel), "draining", False))
@@ -3507,7 +3441,7 @@ async def on_delete(agent) -> None:
     """The `on_delete` bundle hook, SHARED by every backend (each re-exports it,
     like `on_cancel`; vllm wraps it to drop its own table too). Drops every row
     this module keeps for the deleted id, so an id re-created later starts clean
-    and nothing leaks (audit ARCH2-2): the FIFO lock and queue, the in-flight
+    and nothing leaks: the FIFO lock and queue, the in-flight
     entry, the projection and its marks, the fold and recall counters, the
     calibration, the silent streaks, the strip set, and this kernel's head,
     bodies and watchers.
@@ -3582,9 +3516,8 @@ async def _recall(id, payload, kernel):
         ]
     truncated = len(indexed) > limit
     page = indexed[-limit:]
-    # A PAGE MUST FIT THE WINDOW IT IS GOING INTO. Measured 2026-09-05: the default 20
-    # turns of 6.8KB reads came back as one 14,786-token reply against a 12,000 window;
-    # `too_small` fired as a failfast and the chain died. The page is trimmed from the
+    # A PAGE MUST FIT THE WINDOW IT IS GOING INTO, or `too_small` fires as a failfast
+    # and the chain dies. The page is trimmed from the
     # OLDEST end (the newest of what was asked for is kept) and says so, with the index
     # to page further back from — the caller loses a page, never the run.
     get = getattr(kernel, "get", None)
@@ -3594,8 +3527,8 @@ async def _recall(id, payload, kernel):
     def _serialized(pg) -> int:
         # THE UNIT THE DELIVERY MEASURES: the whole reply, serialized, as one user turn
         # (`_route_reply` dehydrates on exactly that). Sizing the inner messages alone
-        # let a 5,243-byte recall slip past the cap and come back as a stub (measured
-        # 2026-09-06, recall_after_fold). Margin as in `_fit_reply`.
+        # would let a recall slip past the cap and come back as a stub. Margin as in
+        # `_fit_reply`.
         body = render_reply(
             {
                 "messages": [
@@ -3691,8 +3624,8 @@ async def _grep(id, payload, kernel):
         limit = 100
     try:
         # The per-line cut. A bare default (200) that the model can raise: a rule
-        # written as one long line lost its tail at 200 and the model concluded grep
-        # could not reach it (measured 2026-09-08, fold_long).
+        # written as one long line loses its tail at 200 and the model concludes grep
+        # cannot reach it.
         width = max(20, min(int(payload.get("width") or 200), 20_000))
     except (TypeError, ValueError):
         width = 200
@@ -3709,9 +3642,8 @@ async def _grep(id, payload, kernel):
     seen_lines: set[str] = set()
 
     def take(rid, n: int, line: str) -> None:
-        # IDENTICAL LINES ONCE. A task the human repeats per delivery ("find the audit
-        # marker…") matched 28 times in one run and pushed the one body hit past the
-        # inline cap (measured 2026-09-06, recall_after_fold). The first occurrence
+        # IDENTICAL LINES ONCE. A task the human repeats per delivery can match many
+        # times and push the one body hit past the inline cap. The first occurrence
         # keeps its address.
         nonlocal total
         key = " ".join(line.split())
@@ -3729,8 +3661,7 @@ async def _grep(id, payload, kernel):
     in_reach = None
     if ids is not None:
         # A fold id is a DESCENT: its members are reply rows, and their bodies hang
-        # off the pids on their tags (measured 2026-09-08: a descent that ignored
-        # them found nothing, 22 greps, 22 zeros). An id that is itself a pid counts.
+        # off the pids on their tags. An id that is itself a pid counts.
         rows = await _load_history(id, kernel, behind=True)
         scope = set(expand_fold_ids(rows, ids))
         in_reach = set(ids) | scope
@@ -3842,7 +3773,7 @@ async def _context_recall(
             provider = await _build_provider(id, kernel, cfg)
         except Exception:
             provider = None
-    # A HEAD LONGER THAN THE BUDGET FOLDS FIRST (owner, 2026-10-07). A store written
+    # A HEAD LONGER THAN THE BUDGET FOLDS FIRST. A store written
     # under a larger window — another model, a planted past — is folded the way the
     # turn's own `fold` projection folds it: oldest spans into fold rows, folds of
     # folds as they pile up. Before this the fit below only stubbed every reply and
@@ -3972,12 +3903,10 @@ async def _context_recall(
     # the decision is a ROW — the next reload reads why the last recall chose as it did
     rid = _mint_row_id(id, kernel)
     # THE LIVE TASK IS NAMED. The view keeps the first root (the goal) at the top, and
-    # after a recall a model with several roots re-answered the FIRST one and called
-    # done (measured 2026-09-06, fold_paging: TASK 0 re-answered at turn 88 with
-    # TASK 15 and a FINAL pending). The newest root is what is live; say so.
+    # after a recall a model with several roots can re-answer the FIRST one and call
+    # done. The newest root is what is live; say so.
     # Over the STORE, not the folded render: a root that a fold collapsed is still the
-    # live one if nothing newer came (measured 2026-09-06, folds_x_chains: TASK C folded,
-    # the row named TASK A).
+    # live one if nothing newer came.
     live = next(
         (
             r
@@ -4131,7 +4060,7 @@ def _make_boot(cfg: Backend):
         # A new incarnation reads its store afresh; bodies are this run's only.
         _mem(kernel)["heads"].pop(id, None)
         _recall_due.add(id)
-        # RESUME AFTER RESTART is PARKED (owner, 2026-10-12: "not yet"): unwired —
+        # RESUME AFTER RESTART is PARKED: unwired —
         # `_resume_interrupted` is not spawned here until the kernel lets a drain's
         # `on_cancel` writes through (kernel gate; see that function).
         return None
@@ -4139,7 +4068,7 @@ def _make_boot(cfg: Backend):
     return _boot
 
 
-#: The turn that resumes a turn a host stop cut (owner, 2026-10-12).
+#: The turn that resumes a turn a host stop cut.
 RESUMED_NOTICE = (
     "[resumed after restart] The host stopped while you were answering the message "
     "above; your answer was cut there and nothing of it ran. Answer it now."
@@ -4149,12 +4078,12 @@ RESUME_WAIT = 60.0
 
 
 async def _resume_interrupted(id: str, kernel) -> None:
-    """DEFERRED — NOT WIRED (owner, 2026-10-12: "not yet"). Blocked on the kernel:
+    """DEFERRED — NOT WIRED. Blocked on the kernel:
     during a drain it refuses `on_cancel`'s store writes, so the cut turn this reads
     is never stored. To enable: let those writes through (kernel gate), then spawn
     this from `_boot`.
 
-    RESUME AFTER RESTART (owner, 2026-10-12). A turn in flight when the host
+    RESUME AFTER RESTART. A turn in flight when the host
     stopped left its incoming row and a cut row marked `interrupted` (`on_cancel`
     during the drain). If that cut row is still the newest of this agent's
     conversation, the turn is run again ONCE — a `[resumed after restart]` notice

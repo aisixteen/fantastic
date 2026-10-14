@@ -2,7 +2,7 @@
 
 The canonical suite (`tests/conformance/`, `tests/kernel/`) proves parity with
 the industry's own conformance assertions. THIS suite is the other half: tests
-built from the competition's **documented failures** (web sweep, Aug 2026) that
+built from the competition's **documented failures** that
 their architectures cannot pass and ours passes structurally — with zero kernel
 changes. Every claim here is a measured green test, not positioning prose.
 
@@ -24,7 +24,7 @@ changes. Every claim here is a measured green test, not positioning prose.
   fixture rides the kernel-switcher plane (contract 24/25/26) that is not
   landed py-side yet. Build it there, not as a one-off fixture here.
 - **Denials as an audit signal.** "Track permission denials as compromise
-  indicators" is a stated 2026 market want. Today a gate refusal settles
+  indicators" is a stated market want. Today a gate refusal settles
   `pid:null, status:failed` and is NOT ledgered — an agent probing walls
   leaves no queryable trace. Whether refusals belong in the ledger is a
   kernel decision (id space, ring pressure, origin scoping) — parked for the
@@ -33,7 +33,7 @@ changes. Every claim here is a measured green test, not positioning prose.
   human approves is what the client renders vs the proposal — client honesty.
   The execution id still binds the click to one target and one run.
 - **Payload injection / semantic correctness.** Nobody solves these; we don't
-  claim them. See `tmp/agentic_development.md` §8 escape-class table.
+  claim them.
 
 ## Relation to the canonical suite
 

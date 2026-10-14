@@ -1,10 +1,10 @@
-//! FOLDER BUNDLES — `<root>/bundles/<name>/bundle.yaml` (owner, 2026-10-08): code
+//! FOLDER BUNDLES — `<root>/bundles/<name>/bundle.yaml`: code
 //! that EXTENDS a bundled agent (`base`), loaded from this loader's own root at
 //! boot (before the tree loads, so an instance's handler resolves) and by the
 //! root's `reload_bundle`. The base builds the bundle (`Bundle::folder_bundle`).
 //! Python `kernel_state.load_bundle` / `load_bundles`, text for text — read
 //! through the clamped `fs`, so a `bundles/<name>` that links outside the
-//! running dir is refused like any escape (audit 2026-10-14).
+//! running dir is refused like any escape.
 
 use std::path::Path;
 

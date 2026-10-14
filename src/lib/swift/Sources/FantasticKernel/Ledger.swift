@@ -8,9 +8,9 @@
 // what a supplied `create_agent` id already means, applied to dispatch:
 //
 //   unknown id ⇒ dispatch and record (a name, not a new mechanism)
-//   in flight  ⇒ JOIN — no second run (C10: once-only under concurrency)
+//   in flight  ⇒ JOIN — no second run (once-only under concurrency)
 //   settled    ⇒ the recorded outcome returns, the handler never runs
-//                (C11 idempotency; C9 across the flush and a restart — a settled
+//                (idempotency, across the flush and a restart too — a settled
 //                 execution that left RAM lives on as its `call` + `settle` rows
 //                 in the kernel's memory store, and `Kernel.recallExecutions`
 //                 brings it back before `send` launches an item naming it)
@@ -66,8 +66,7 @@ public final class OutcomeBox: @unchecked Sendable {
     }
 
     /// The outcome, waited for — woken by `set`, or when `seconds` pass (nil: no
-    /// bound). nil only on expiry. NO POLL (owner, 2026-10-08): a joiner used to
-    /// look every 2 ms for the whole wait.
+    /// bound). nil only on expiry. NO POLL.
     func wait(upTo seconds: Double?) async -> Outcome? {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             let id: UInt64? = lock.withLock {
@@ -145,8 +144,8 @@ private struct LedgerRow {
     var name: String?
     var named: Bool { name != nil }
     /// WHO CALLED — `nil` for the operator. Scopes `ledger`, `ack_deadletter`
-    /// and the `on_deadletter` announcement. (Python renamed `origin` →
-    /// `caller`: replies own `origin` now.)
+    /// and the `on_deadletter` announcement. (Replies own
+    /// `origin`.)
     var caller: AgentId?
     /// The future: `nil` inside while in flight. Set ONCE, at the FINAL outcome —
     /// a retrying execution does not settle its intermediate attempts.
@@ -185,7 +184,7 @@ public final class ExecutionLedger: @unchecked Sendable {
     /// Claim `execId` for an execution, or discover it is already taken.
     ///
     /// `callerId` is the CALLER's raw id AS GIVEN — a string name or an int
-    /// (C38) — used ONLY to render the rebind refusal in python's exact words.
+    /// — used ONLY to render the rebind refusal in python's exact words.
     public func open(
         _ execId: Int64, target: AgentId, payload: JSON, retries: UInt32, name: String?,
         caller: AgentId?, callerId: JSON
@@ -350,7 +349,7 @@ public final class ExecutionLedger: @unchecked Sendable {
         return true
     }
 
-    /// Set the ring's cap and immediately re-run eviction against it (C80).
+    /// Set the ring's cap and immediately re-run eviction against it.
     /// `nil` = unbounded.
     public func setCap(_ newCap: Int?) {
         lock.lock()

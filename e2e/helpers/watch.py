@@ -44,10 +44,8 @@ RATIO = float(os.environ.get("WATCH_RATIO", "0.25"))
 
 # USE THE KERNEL'S OWN PARSER. A hand-rolled `<tool_call>(.*?)</tool_call>` regex
 # spans ADJACENT envelopes — the capture starts at one opener and ends at a later
-# closer, so the text begins with `<tool_call>` and `json.loads` rejects it. That
-# reported 60 valid calls as malformed on 2026-08-24 and the tripwire below KILLED a
-# healthy `live_build` run for "4 unparseable tool_call envelopes" that did not
-# exist. A watchdog measuring a different parser than the one that dispatches is
+# closer, so the text begins with `<tool_call>` and `json.loads` rejects it, and the
+# tripwire below would kill a healthy run for envelopes that do not exist. A watchdog measuring a different parser than the one that dispatches is
 # worse than no watchdog: it invents failures and ends runs that were fine.
 import os
 import sys
@@ -81,8 +79,7 @@ def _calls(text: str) -> tuple[list[str], int]:
     for c in extract_tool_calls(text or ""):
         a = c.get("arguments") or {}
         # The call's own text is its signature — the grammar has a renderer, and
-        # `json.dumps` cannot carry a verbatim `bytes` value (it killed agentic
-        # build on 2026-09-09 from INSIDE the provider stream).
+        # `json.dumps` cannot carry a verbatim `bytes` value.
         sigs.append(render_call(c.get("name") or "send", a))
     return sigs, len(malformed_calls(text or ""))
 
@@ -93,7 +90,7 @@ def _soup_ratio(text: str, window: int = 150) -> float | None:
     This is the signature of a degenerating turn — `skimskim -> sksksk -> kkkk`
     drives the ratio toward zero long before the turn ends.
 
-    CALIBRATED ON REAL TURNS, 2026-08-24, not guessed (every window >= 150 words):
+    CALIBRATED ON REAL TURNS, not guessed (every window >= 150 words):
 
         live_build, PASS      n=31   min 0.427   p5 0.473   median 0.600
         live_plan,  PASS      n=34   min 0.327   p5 0.440   median 0.603
@@ -122,13 +119,10 @@ class Watch:
         # TOTAL, for reporting. The TRIP reads the streak below.
         self.malformed = 0
         # CONSECUTIVE turns whose envelopes all failed to parse. Every other
-        # tripwire here is a streak that resets on progress; this one used to be
-        # cumulative, which is a different claim entirely — it said "you have
-        # written three bad envelopes ever" rather than "you are stuck". A model
-        # that writes a bad escape, is told so by `ai_core`, fixes it and carries
-        # on was still killed for it three occasions later. Measured on `subai`:
-        # 7 valid calls in turns 1-2, then two bad turns, and the run died at
-        # turn 4 of a permitted 50 with the model actively retrying.
+        # tripwire here is a streak that resets on progress, and so is this one: a
+        # cumulative count says "you have written three bad envelopes ever" rather
+        # than "you are stuck", and would kill a model that writes a bad escape, is
+        # told so by `ai_core`, fixes it and carries on.
         self.malformed_streak = 0
         self.silent_streak = 0
         self.repeat_streak = 0

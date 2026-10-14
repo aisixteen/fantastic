@@ -5,10 +5,9 @@ prompt, the document body, whatever was sent. So an ungated `watch` is a read
 side-channel around `callable_by`: an agent that may not CALL an agent could
 still read everything sent TO it.
 
-Found 2026-08-27 in a client audit: a browser leg granted exactly
-`assistant:[send]` could mirror ANY agent's inbox in its session and read the
-packed confidential context out of the model's prompt. The `call` path went
-through the two-sided gate; `watch` and `state_subscribe` never did.
+Ungated, a browser leg granted exactly `assistant:[send]` could mirror ANY agent's
+inbox in its session and read the packed confidential context out of the model's
+prompt. `watch` and `state_subscribe` go through the gate like the `call` path.
 
 Same class as the ledger's origin scoping — a verb that returns other agents'
 data has to be gated on the data, not merely on reachability.

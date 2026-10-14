@@ -1,4 +1,4 @@
-"""py_agent — the BASE a folder bundle with a program extends (owner, 2026-10-08).
+"""py_agent — the BASE a folder bundle with a program extends.
 
 A folder bundle `<root>/bundles/<name>/bundle.yaml` with `base: py_agent` names its
 program (`command`, run with cwd = the folder) and its verbs (`verbs`: verb → doc,

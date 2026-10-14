@@ -7,9 +7,9 @@ exists anywhere in this codebase — see "Why no graph library".)
 
 ## The question
 
-gemma-4-12B failed probe 05 six times (2026-08-06) and never on reasoning: right agents,
-right verbs, 4/4 planning language, every run. It lost on OUR contract. It has also seen
-thousands of state-graph examples in training and zero fantastic readmes.
+A small model can fail probe 05 without failing on reasoning: right agents, right verbs,
+planning language — and still lose on OUR contract. It has seen thousands of state-graph
+examples in training and zero fantastic readmes.
 
 So: is the blocker a SHAPE it has never seen, or capability?
 
@@ -35,11 +35,10 @@ ONE variable: the task carries one extra paragraph asking for the logic as a sta
 
 ## Why no graph library
 
-An earlier version installed `langgraph` into a side venv, pointed the executor at THAT
-interpreter, and mounted the package source as an agent so the API could be read. That
-made the probe depend on a package to answer a question that is not about the package,
-and it broke the single variable: the two arms then differed in the ask AND in the
-interpreter, so a FAIL was attributable to either. The thing being measured is whether a
+Installing a graph library (e.g. `langgraph`) into a side venv and pointing the executor
+at THAT interpreter would make the probe depend on a package to answer a question that is
+not about the package, and break the single variable: the two arms would differ in the ask
+AND in the interpreter, so a FAIL would be attributable to either. The thing being measured is whether a
 familiar DECOMPOSITION helps — nodes, edges, a runner — not whether the model can recall
 one library's API. So the model writes the runner, and both arms run identically.
 """
@@ -81,16 +80,14 @@ GRAPH_ASK = (
 )
 
 
-# NO LANGGRAPH DEPENDENCY. The arm used to install `langgraph` into a side venv,
-# point the executor at that interpreter, and mount the package source as an agent so
-# the model could read the real API. That made the probe need a package to answer a
-# question that is not about the package: the variable is whether a FAMILIAR SHAPE —
+# NO LANGGRAPH DEPENDENCY. Installing it into a side venv would make the probe need a
+# package to answer a question that is not about the package: the variable is whether a FAMILIAR SHAPE —
 # nodes, an edge map, a runner — helps a model that has seen thousands of such graphs
 # and zero of our readmes. The shape is what is being tested, so the model writes the
 # runner itself and the arm runs on the same interpreter as the control.
 #
-# That also restores the single variable. With a different interpreter the two arms
-# differed in TWO ways, and a FAIL could be attributed to either.
+# That also keeps the single variable. With a different interpreter the two arms would
+# differ in TWO ways, and a FAIL could be attributed to either.
 
 
 async def main() -> None:

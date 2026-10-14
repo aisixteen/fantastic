@@ -1,7 +1,7 @@
 // Persistence inversion — records persist THROUGH a discovered file_bridge.
 //
-// Mirrors py `kernel_state` + rust `persistence.rs`: the substrate no longer
-// owns an `fs` surface for records. It persists THROUGH a DISCOVERED
+// Mirrors py `kernel_state` + rust `persistence.rs`: the substrate does not
+// own an `fs` surface for records. It persists THROUGH a DISCOVERED
 // `file_bridge` provider's `read_stream`/`write_stream` verbs over the raw-bytes
 // binary channel. NO FALLBACKS: no provider ⇒
 // the live tree stays in RAM (lost on restart until a store is wired). Cold
@@ -74,7 +74,7 @@ extension Kernel {
         return a
     }
 
-    // ── loud persistence (audit 2026-09-28, d2) ────────────────────────
+    // ── loud persistence ────────────────────────
     // A refused/failed persist write is LOUD: stderr, and `persistence.error` on
     // the root reflect (which then reports no provider) until a write lands.
 
@@ -226,7 +226,7 @@ extension Kernel {
         // Assigning `nil` here DELETED such a key instead.
         for (k, v) in agent.record().ordered { existing[k] = v }
         let serialized = YamlIO.dump(.object(existing))
-        // ATOMIC COMMIT (C43): stream into a tmp beside the target, then
+        // ATOMIC COMMIT: stream into a tmp beside the target, then
         // RENAME — never `write_stream` the live path directly. A
         // `write_stream` that dies after truncating `af` itself would leave a
         // half-written or empty `agent.yaml`: the record gone, the next boot

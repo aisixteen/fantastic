@@ -10,7 +10,7 @@
 //     `a_sigterm_before_the_wait_is_held_not_lost`);
 //   - `kernel_stop` resolves the race with NO signal name (`nil`), so the daemon
 //     prints no `[kernel] <SIG> — shutting down...` line for it;
-//   - cancellation returns (C85).
+//   - cancellation returns.
 //
 // A wait runs DETACHED and is polled against a deadline, so a hang fails the
 // test instead of stalling the whole suite (a task group would wait forever on
@@ -88,7 +88,7 @@ struct AwaitStopPinTests {
             "kernel_stop is not a signal: \(String(describing: answer.result.value))")
     }
 
-    /// C85 — `shutdownRequested()` resolves on CANCELLATION as well as on the
+    /// `shutdownRequested()` resolves on CANCELLATION as well as on the
     /// stop signal. It parked on a bare continuation, so the loser of the
     /// daemon's race was never resumed, `cancelAll()` waited forever, and the
     /// process had to be SIGKILLed with `lock.yaml` left behind.

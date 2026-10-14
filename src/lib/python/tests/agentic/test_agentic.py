@@ -4,8 +4,7 @@ Every scenario is DATA: a deployable kernel `config` and a `spec` that declares
 what that config must prove. This file is the python RUNNER; rust and swift ship
 their own, reading the same files. A wire-visible property is decidable from
 outside, so asserting it once as data beats asserting it four times in four
-languages — measured on the C21 corpus, which found four real rust drifts on its
-first run.
+languages.
 
 A UNIT suite: free, no model, in process. It lives here rather than in `e2e/`
 because that is where the rust and swift copies live, and because it should run

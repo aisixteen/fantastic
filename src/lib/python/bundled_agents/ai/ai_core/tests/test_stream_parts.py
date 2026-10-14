@@ -1,4 +1,4 @@
-"""STREAMING PARTS (owner, 2026-10-04, `tmp/streaming_parts.md`): a model's output
+"""STREAMING PARTS: a model's output
 streams to its addressees as parts — animation, never action; a receiver can stop it;
 a cut pass leaves a marker on top of the context, never a half answer."""
 
@@ -59,7 +59,7 @@ def test_an_open_call_when_the_pass_ends_aborts():
 
 
 def test_a_call_inside_a_thought_is_thinking_text():
-    """ONLY THE ANSWER ACTS (owner, 2026-10-07): a `<call>` inside `<think>` streams
+    """ONLY THE ANSWER ACTS: a `<call>` inside `<think>` streams
     as thinking — no call part opens."""
     ev, _ = _run(f"<think>let me {DONE} then</think>", 4)
     assert [(e[0], e[1]["kind"]) for e in ev if e[0] != "delta"] == [
@@ -236,7 +236,7 @@ async def test_stop_with_nothing_in_flight_says_so(seeded_kernel, fake_providers
     assert out["result"] == {"stopped": False}
 
 
-# ─── the match: draft ↔ final message (owner, 2026-10-04) ────────────────────
+# ─── the match: draft ↔ final message ────────────────────────────────────────
 
 
 async def test_a_message_carries_the_stream_it_was_previewed_as(
@@ -345,7 +345,7 @@ async def test_rows_is_a_view_of_what_the_agent_holds(seeded_kernel, fake_provid
 async def test_a_cut_pass_sends_nothing_not_even_its_closed_calls(
     seeded_kernel, fake_providers
 ):
-    """Only a successful generation dispatches (owner, 2026-10-04): a pass that
+    """Only a successful generation dispatches: a pass that
     wrote a complete call and then stopped with another block open sends NEITHER,
     and the marker names both as not sent."""
     k = seeded_kernel
@@ -372,7 +372,7 @@ async def test_a_cut_pass_sends_nothing_not_even_its_closed_calls(
 
 
 async def test_deltas_never_reach_the_state_stream(seeded_kernel, fake_providers):
-    """Deltas go to the addressee's inbox only (owner, 2026-10-04): the state
+    """Deltas go to the addressee's inbox only: the state
     stream carries a part's lifecycle — start / end / abort — never a delta."""
     k = seeded_kernel
     _ai(k, "sp_q")

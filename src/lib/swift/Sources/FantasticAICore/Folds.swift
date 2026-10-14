@@ -7,8 +7,8 @@
 // history becomes a tree of marks the model walks down as far as it needs.
 //
 // CHAINS ARE DERIVED, NEVER STORED. A chain is a root row plus everything
-// reachable from it through `parent`. Measured 2026-09-06 (python): the model
-// attributed rows 5/5 through 16 interleaved chains from `parent` alone, so the
+// reachable from it through `parent`. A model attributes rows to
+// interleaved chains from `parent` alone, so the
 // agent carries no thread concept — this module walks the links when a projection
 // needs to know what is closed.
 //

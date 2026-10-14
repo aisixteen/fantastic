@@ -35,8 +35,8 @@ test("missing/bad name the ARG, and `bad` says what was wanted", () => {
 });
 
 test("unknown_agent NAMES the live ids — a bare refusal teaches nothing", () => {
-  // Measured 2026-08-04: a model copied the literal placeholder `<id>` from a
-  // prompt example, got `no agent '<id>'` 34 times in one run, never corrected.
+  // A model that copies a placeholder `<id>` from a prompt example needs the
+  // live ids to correct itself.
   const u = unknown("<id>", ["beta", "alpha"]);
   assert.equal(u["reason"], "unknown_agent");
   assert.deepEqual(u["agents"], ["alpha", "beta"]);

@@ -72,8 +72,7 @@ def test_non_object_text_frame_decodes_without_raising():
 
 def test_non_finite_numbers_are_not_json():
     """`NaN`/`Infinity`/`-Infinity` are not JSON; python's `json.loads` alone takes
-    them. Off the wire they are refused like any other malformed JSON (parity
-    2026-09-30: a `NaN` REST body python took and rust/swift refused)."""
+    them. Off the wire they are refused like any other malformed JSON."""
     from io_bridge import loads
 
     for bad in ('{"x": NaN}', '{"x": Infinity}', '{"x": -Infinity}'):
@@ -88,7 +87,7 @@ def test_non_finite_numbers_are_not_json():
 
 
 def test_only_values_every_runtime_can_hold():
-    """Owner D13 (2026-10-01): an integer outside int64, a number that overflows a
+    """An integer outside int64, a number that overflows a
     double and a lone surrogate are refused at the wire — rust and swift would
     hold a different value, or none."""
     from io_bridge import loads
@@ -132,7 +131,7 @@ def test_a_too_deep_document_is_a_json_decode_error():
             decode_frame(struct.pack(">I", len(head)) + head + b"body")
 
 
-# ─── ONE binary body per frame (owner, 2026-10-08) ─────────────────────────
+# ─── ONE binary body per frame ─────────────────────────────────────────────
 
 
 def test_an_envelope_with_two_bodies_is_refused_naming_both_paths():

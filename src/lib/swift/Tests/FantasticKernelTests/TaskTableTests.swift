@@ -253,8 +253,7 @@ struct TaskTablePsTests {
 
         // Task id IS a message id: one int from the kernel's one counter, so
         // `ps`, `cancel`, the ledger, a reply tag and the message log name the
-        // same number (python; rust; swift since 2026-09-12). It was
-        // "<agent_id>:<8 hex>" here — an opaque per-agent token — until then.
+        // same number (python; rust; swift).
         for (row, _) in [(parent, a), (child, b)] {
             let id = try #require(row["id"].asInt)
             #expect(id > 0)
@@ -412,7 +411,7 @@ struct TaskTableCancelTests {
         #expect(log.first?.2 == true, "the hook ran BEFORE the abort")
     }
 
-    /// C87: an `onCancel` hook that raises is ignored (the kill still
+    /// An `onCancel` hook that raises is ignored (the kill still
     /// happens — cancel is not refusable) but python still SAYS so, on
     /// STDOUT with no `flush=True`:
     /// `print(f"  [cancel] {self.id} bundle on_cancel raised: {e}")`.
@@ -493,7 +492,7 @@ struct TaskTableCancelTests {
     @Test func kernelVerbsAreDocsNotReflect() async throws {
         // `ps`/`cancel` and the tree verbs belong to no bundle — they are the
         // SUBSTRATE's own, answered by the root alone, and READ with `docs
-        // of=kernel` (owner, 2026-10-05: a reflect carries no verbs).
+        // of=kernel` (a reflect carries no verbs).
         let sh = Shared()
         let kernel = makeSlowKernel(sh)
         let a = await makeAgent(kernel, "slow_a", canCall: ["slow_b": "*"])
@@ -537,15 +536,12 @@ struct TaskTableCancelTests {
         ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?"),
     ]
 
-    // ─── C3 + C4: the kernel-verb map IS python's ──────────────
+    // ─── the kernel-verb map IS python's ──────────────
     //
     // Python's `_SYSTEM_VERB_DOCS`, key for key and byte for byte.
-    // `persist_blob` / `load_blob` are NOT in it — swift advertised two root
-    // verbs python never documents (their dispatch is untouched; it moves with
-    // C13).
+    // `persist_blob` / `load_blob` are NOT in it — they are the loader's.
     //
-    // VERBATIM, `create_agent`'s `'kernel_state'` top-level token included — the
-    // root-id rename landed with C12.
+    // VERBATIM, `create_agent`'s `'kernel_state'` top-level token included.
     static let pythonVerbDocs: [(String, String)] = [
         ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent."),
         ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included."),

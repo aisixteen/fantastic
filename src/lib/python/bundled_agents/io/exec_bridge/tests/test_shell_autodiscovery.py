@@ -199,7 +199,7 @@ async def test_reflect_advertises_the_shell_permission(k):
 
 async def test_write_bytes_is_verbatim_so_enter_reaches_the_shell(k, fake_shell):
     """A `<call>` strips a scalar like `data`, so a key ending in Enter rides
-    `bytes`, written verbatim (owner 2026-10-04): the line runs. Exactly one of
+    `bytes`, written verbatim: the line runs. Exactly one of
     `data`/`bytes` is accepted."""
     await _mk(k, "sh", env={"SHELL": fake_shell}, shell=True)
     k.watch("sh", "viewer")

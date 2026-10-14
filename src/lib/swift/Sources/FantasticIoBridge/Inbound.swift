@@ -1,7 +1,7 @@
 // The INBOUND verbs of a wire leg (`web_ws`, `web_rest`) — how an admitted frame
 // becomes the leg's own call. Mirror of python `io_bridge/_inbound.py`.
 //
-// IDENTITY COMES ONLY FROM DISPATCH (owner 2026-10-04). A transport's loop (the
+// IDENTITY COMES ONLY FROM DISPATCH. A transport's loop (the
 // HTTP server, a websocket's frame lane) runs outside every dispatch, so what it
 // sends is the operator's. It never sends a frame onward itself: it hands the
 // admitted frame to its LEG as one of these verbs (`handIn`), and the leg's

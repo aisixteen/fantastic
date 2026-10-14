@@ -187,8 +187,7 @@ impl Provider for OllamaProvider {
             // PYTHON'S TEXT: the ollama SDK raises `ResponseError(body,
             // status)`, which reads the body's `error` field (the raw body when
             // it is not JSON or has none) and renders `<error> (status code:
-            // <n>)` — measured, parity 2026-09-30: `ResponseError: stub blew up
-            // (status code: 500)` where this said `ollama: HTTP 500 …`.
+            // <n>)` — e.g. `ResponseError: stub blew up (status code: 500)`.
             let code = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
             let error = serde_json::from_str::<Value>(&text)
@@ -207,12 +206,11 @@ impl Provider for OllamaProvider {
 
 /// The NDJSON body as a LIVE stream of content tokens.
 ///
-/// PER LINE, NOT PER BODY. This used to drain the whole response into a `Vec`
-/// and hand it over only once the stream had ENDED — so nothing reached
-/// `text_so_far`, the `token` events or the `streaming` phase until the
-/// completion was already finished, and a long turn was indistinguishable from
-/// a stalled request. Python's provider is an async generator over the response
-/// lines; this yields on the same boundary.
+/// PER LINE, NOT PER BODY. Draining the whole response before handing it over
+/// would keep anything from reaching `text_so_far`, the `token` events or the
+/// `streaming` phase until the completion was already finished, and a long turn
+/// would be indistinguishable from a stalled request. Python's provider is an
+/// async generator over the response lines; this yields on the same boundary.
 fn consume_ndjson(resp: reqwest::Response, report: ReportCell) -> ProviderStream {
     let inner = resp.bytes_stream();
     // `pending` holds the events decoded from ONE chunk: a chunk can carry
@@ -330,12 +328,11 @@ fn note_usage(chunk: &Value, report: &ReportCell) {
 ///
 /// THINKING MODELS SPLIT THEIR OUTPUT — read every text field, not just one.
 /// ollama streams a reasoning model's tokens as `message.thinking` and only its
-/// conclusion as `message.content`. Measured on gemma4:12b: 336 chars of
-/// thinking to 38 of content. Reading `content` alone silently drops whole
-/// turns — observed live on 2026-08-02, where gemma spent all 578 generated
-/// tokens reasoning, we saw an EMPTY completion, and the chain ended at pass one
-/// with no tool call and no error. ollama's own log showed the request answered
-/// normally, so it looked like the server had wedged.
+/// conclusion as `message.content`. Reading `content` alone silently drops whole
+/// turns — a model that spends all its generated tokens reasoning yields an EMPTY
+/// completion, and the chain ends with no tool call and no error while ollama's
+/// own log shows the request answered normally, so it looks like the server
+/// wedged.
 ///
 /// Same defect and same fix as vllm's `reasoning_content`. A raw text protocol
 /// reads the text the model produced; it does not let the provider decide which
@@ -371,7 +368,7 @@ fn decode_chunk_into(
 
 // ── bundle impl ─────────────────────────────────────────────────────
 
-/// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+/// THE RECORD SCHEMA — what this kind's record takes, read
 /// with no agent existing (`reflect bundles=all`), from the constants the
 /// provider runs on. `validate_meta` enforces it at the write, so the page and
 /// the kernel cannot disagree about what a record needs. Python

@@ -47,12 +47,11 @@
 //! Reply correlation: a frame id is `<bridge id>-<boot nonce>-<counter>` — the
 //! bridge id keeps bridges apart, the nonce (minted at every boot) keeps BOOTS
 //! apart. The frame id NAMES the execution on the receiver, so an id reused by a
-//! restarted sender would join a settled execution there and never run (audit
-//! IO-5, 2026-10-03).
+//! restarted sender would join a settled execution there and never run.
 //!
 //! A leg's rules (`ingress_rule`/`egress_rule`/`auth`) are read off the LIVE
 //! record per frame — never cached at boot — so what `reflect` reports is what the
-//! gate enforces the moment `update_agent` writes it (audit ARCH-2, 2026-10-03).
+//! gate enforces the moment `update_agent` writes it.
 //!
 //! IDENTITY: an inbound `call` frame is served by the read loop — a task this
 //! leg's own `boot` spawned — so it is sent AS THE LEG and gated as the leg (its
@@ -488,7 +487,7 @@ impl Bundle for WsBridgeBundle {
         let _ = shutdown_reply(agent_id, kernel).await;
         Ok(())
     }
-    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    /// Shutdown frees what delete frees — declared, never a fallback.
     async fn on_shutdown(
         &self,
         agent_id: &AgentId,
@@ -547,7 +546,7 @@ impl Bundle for RelayConnectorBundle {
         let _ = shutdown_reply(agent_id, kernel).await;
         Ok(())
     }
-    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    /// Shutdown frees what delete frees — declared, never a fallback.
     async fn on_shutdown(
         &self,
         agent_id: &AgentId,
@@ -556,8 +555,8 @@ impl Bundle for RelayConnectorBundle {
         self.on_delete(agent_id, kernel).await
     }
     /// The record's own fields, refused at the write: `credentials` ({store,
-    /// ref}) — the relay password lives in a credential_store (audit IO-7/F4,
-    /// 2026-10-03) — then the leg's `ingress_rule`.
+    /// ref}) — the relay password lives in a credential_store — then the leg's
+    /// `ingress_rule`.
     /// Python `relay_connector.tools.validate_meta`.
     fn validate_meta(
         &self,
@@ -663,8 +662,8 @@ fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String>
 /// `<bridge id>-<12 hex>`: a fresh nonce per BOOT (python `_new_corr_prefix`,
 /// `secrets.token_hex(6)`; ts's `mintPrefix` width). The counter under it
 /// restarts at every boot, so without the nonce a restarted sender's `<leg>-1`
-/// named an execution the receiver had already settled — the new call was joined
-/// to it and never ran (audit IO-5). A failure is FATAL — no second source.
+/// would name an execution the receiver had already settled — the new call
+/// joined to it and never run. A failure is FATAL — no second source.
 pub(crate) fn new_corr_prefix(id: &AgentId) -> String {
     let mut b = [0u8; 6];
     fantastic_kernel::lifecycle::fill_random(&mut b);
@@ -890,9 +889,9 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     // REGISTERED, AND UNDER THE LEG'S OWN IDENTITY. The read loop outlives the
     // `boot` dispatch and issues a send per inbound frame, so it is real work:
     // `spawn_task` gives it a `ps` row and a `cancel` that reaches it, and
-    // carries this dispatch's sender into the fork — an inbound `call` used to
-    // reach `Kernel::launch` with `current_sender() == None`, the OPERATOR, and
-    // the two-sided gate was skipped for every frame a peer sent.
+    // carries this dispatch's sender into the fork — without it an inbound `call`
+    // would reach `Kernel::launch` with `current_sender() == None`, the OPERATOR,
+    // and the two-sided gate would be skipped for every frame a peer sends.
     let task_id = kernel.spawn_task(&agent_id.clone(), "read_loop", async move {
         read_loop(read_agent, read_state, read_kernel).await;
     });
@@ -958,9 +957,9 @@ async fn build_relay_transport(
     let (Some(relay_url), Some(partner)) = (relay_url, partner) else {
         return Err("relay_connector requires relay_url, partner_guid".to_string());
     };
-    // The relay password lives in a credential_store, named by `credentials`
-    // (audit IO-7/F4): no field ⇒ the boot fails loud, before any identity is
-    // minted or anything dialed.
+    // The relay password lives in a credential_store, named by `credentials`:
+    // no field ⇒ the boot fails loud, before any identity is minted or anything
+    // dialed.
     let Some(cred) = meta_value(agent_id, kernel, "credentials").filter(|v| !v.is_null()) else {
         return Err(format!(
             "relay_connector: no `credentials` on {agent_id} — name the relay password's \
@@ -1076,7 +1075,7 @@ async fn reconnect_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel
 /// web_ws and awaits the correlated reply. Returns `(reply, body)`; `body` is
 /// `None` when the remote answered a TEXT frame (no chunk at all) and
 /// `Some(chunk)` at its slot of the reply when it answered a binary one — empty
-/// chunk included (C37). Errors surface as `{error}` in the reply.
+/// chunk included. Errors surface as `{error}` in the reply.
 async fn forward_core(
     kernel: &Arc<Kernel>,
     agent_id: &AgentId,
@@ -1433,7 +1432,7 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                     // Carry the reply body alongside, at its slot of the reply
                     // (`["data", …p]` on the frame is `p` in `data`). A TEXT reply
                     // frame carried no chunk at all (`None`); a binary one carries
-                    // `Some`, even when the chunk is empty (C37). A body the frame
+                    // `Some`, even when the chunk is empty. A body the frame
                     // put outside `data` is not part of the reply.
                     let _ = tx.send(Ok((data, body.and_then(|b| b.under("data")))));
                 }
@@ -1527,7 +1526,7 @@ mod tests;
 #[path = "tests_ws_wire.rs"]
 mod tests_ws_wire;
 
-/// W-3 (audit 2026-10-03): a message on a dialled socket (ws_bridge,
+/// A message on a dialled socket (ws_bridge,
 /// relay_connector), fragmented or not, is bounded by the one frame cap.
 #[cfg(test)]
 #[path = "tests_ws_message_cap.rs"]

@@ -16,11 +16,11 @@
 // keeps bridges apart, the nonce (minted at every boot) keeps BOOTS apart, and
 // the frame `id` echoes it so logs correlate across hops. The frame id NAMES the
 // execution on the receiver, so an id reused by a restarted sender would join a
-// settled execution there and never run (audit IO-5, 2026-10-03).
+// settled execution there and never run.
 //
 // A leg's rules (`ingress_rule`/`egress_rule`/`auth`) are read off the LIVE
 // record per frame — never cached at boot — so what `reflect` reports is what the
-// gate enforces the moment `update_agent` writes it (audit ARCH-2, 2026-10-03).
+// gate enforces the moment `update_agent` writes it.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -57,7 +57,7 @@ public protocol BridgeTransport: Sendable {
 
 /// How a pending forward settled: the remote's `data` (with the reply's chunk at
 /// its slot of that `data` when it ARRIVED as a binary frame — a 0-byte chunk
-/// included, C37; `nil` for a text reply), or the engine's own `ConnectionError`
+/// included; `nil` for a text reply), or the engine's own `ConnectionError`
 /// text (python `bridge transport closed` / `bridge shut down`), which the verb
 /// renders as `bridge.forward: <text>`.
 enum PendingOutcome: Sendable {
@@ -107,9 +107,9 @@ final class BridgeState: @unchecked Sendable {
 
     /// Python `_new_corr_prefix`: `<bridge id>-<12 hex>`, a fresh nonce per
     /// BOOT (ts's `mintPrefix` width). The counter under it restarts at every
-    /// boot, so without the nonce a restarted sender's `<leg>-1` named an
-    /// execution the receiver had already settled — the new call was joined to
-    /// it and never ran (audit IO-5).
+    /// boot, so without the nonce a restarted sender's `<leg>-1` would name an
+    /// execution the receiver had already settled — the new call would be joined
+    /// to it and never run.
     static func newCorrPrefix(_ id: AgentId) -> String {
         var nonce = ""
         for _ in 0..<6 { nonce += String(format: "%02x", UInt8.random(in: 0...255)) }
@@ -423,7 +423,7 @@ extension KernelBridgeBundle {
             pyTruthy(target)
             ? pyStr(target) : (pyTruthy(frame["src"]) ? pyStr(frame["src"]) : "")
         // The leg's INGRESS rule — read off the LIVE record, per frame, as every
-        // web/file/exec leg does (audit ARCH-2). An unresolvable rule seals.
+        // web/file/exec leg does. An unresolvable rule seals.
         let meta = kernel.agent(agentId)?.meta ?? [:]
         let ingress = resolveIngress(ingressRule: meta["ingress_rule"], auth: meta["auth"])
         let decision = ingress.authorize(
@@ -466,7 +466,7 @@ extension KernelBridgeBundle {
             "type": .string("reply"), "id": frame["id"], "data": reply,
         ])
         // THE CARRIER picks the frame kind, never the body's length: a 0-byte
-        // chunk is still a chunk (C37). The chunk rides raw at `["data", …its
+        // chunk is still a chunk. The chunk rides raw at `["data", …its
         // slot]` (`["data", "bytes"]` for a `read_stream` chunk, `["data", "x.y"]`
         // for a reply key `"x.y"`). The peer went away mid-dispatch; the read
         // loop already knows.
@@ -505,7 +505,7 @@ extension KernelBridgeBundle {
         }
         // The leg's EGRESS rule, off the live record per forward (never a
         // boot-time copy): an operator's `update_agent egress_rule=…` stamps the
-        // next frame (audit ARCH-2).
+        // next frame.
         let egress: EgressRule
         do { egress = try liveEgress(agentId, kernel) } catch {
             return .object(["error": .string("bridge: bad auth rule: \(error)")])
@@ -543,7 +543,7 @@ extension KernelBridgeBundle {
     /// read). A body anywhere else is not part of the forwarded call, exactly as
     /// python's inner payload would not hold it. The reply's chunk comes back at
     /// its slot of the reply when the remote answered a binary frame — `nil` for a
-    /// text reply (C37).
+    /// text reply.
     func binaryForwardVerb(
         agentId: AgentId, header: JSON, body: Blob?, kernel: Kernel
     ) async throws -> (JSON, Blob?) {
@@ -613,9 +613,8 @@ extension KernelBridgeBundle {
     /// Register `corr`'s waiter BEFORE its frame is sent — python creates the
     /// future and files it in `pending` first. A reply can beat the send's return
     /// (a loopback `read_stream` answers in microseconds), and a reply that finds
-    /// no waiter is dropped: the caller then waited out the whole timeout and got
-    /// no body (measured: `wsBinaryForwardStreamsRawBytesOverWire`, 30 s and 0
-    /// bytes, 1 run in 80). The slot holds an outcome that lands before anyone
+    /// no waiter is dropped, leaving the caller to wait out the whole timeout with
+    /// no body. The slot holds an outcome that lands before anyone
     /// awaits it.
     private func expect(st: BridgeState, corr: String) -> PendingSlot {
         let slot = PendingSlot()

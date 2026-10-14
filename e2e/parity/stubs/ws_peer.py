@@ -1,10 +1,10 @@
-"""A LIVE peer kernel for `ws_bridge` — the thing round 1 and round 2 never had.
+"""A LIVE peer kernel for `ws_bridge`.
 
-Both rounds pointed every bridge at `ws://127.0.0.1:9/nowhere`, so every A7 item
-was measured on the SAME answer: connect refused. Everything past a successful
-boot — the correlation id shape, a malformed frame mid-stream, a reply that is
-an `error` with no error, an inbound call arriving FROM the peer, a socket the
-peer closes under a pending forward — was unmeasured.
+A bridge pointed at a dead address measures every A7 item on the SAME answer:
+connect refused. A live peer reaches everything past a successful boot — the
+correlation id shape, a malformed frame mid-stream, a reply that is an `error`
+with no error, an inbound call arriving FROM the peer, a socket the peer closes
+under a pending forward.
 
 This serves `ws://127.0.0.1:<port>/<peer_id>/ws`, the path
 `PB/io/ws_bridge/src/ws_bridge/_ws.py:172-178` builds, and answers a SCRIPT: one

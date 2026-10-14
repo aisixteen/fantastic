@@ -27,7 +27,7 @@ private func fnv1a64(_ s: String) -> UInt64 {
 @Suite("CLI argv modes")
 struct CLIModeTests {
 
-    // A14.1 — `help` / `-h` / `--help` as the FIRST word, later words ignored.
+    // `help` / `-h` / `--help` as the FIRST word, later words ignored.
     @Test func helpPrintsCliHelpMdVerbatim() {
         for spelling in ["help", "-h", "--help"] {
             #expect(FantasticCLI.mode(for: [spelling]) == .help)
@@ -43,7 +43,7 @@ struct CLIModeTests {
         #expect(!CliBundle.helpText.hasSuffix("\n"))
     }
 
-    // A14.2 — exactly one remaining word that is not a subcommand.
+    // Exactly one remaining word that is not a subcommand.
     @Test func singlePositionalPrintsUsageAndExits2() {
         #expect(FantasticCLI.mode(for: ["memo"]) == .usage)
         #expect(FantasticCLI.mode(for: ["boot"]) == .usage)
@@ -71,7 +71,7 @@ struct CLIModeTests {
                 == .reflect(["memo", "tree=ids"]))
     }
 
-    // A14.7 — a one-shot while a live pid owns the lock.
+    // A one-shot while a live pid owns the lock.
     @Test func oneShotRefusesALiveLockWithPythonText() {
         #expect(
             FantasticCLI.callLockRefusal(pid: 4321)
@@ -80,7 +80,7 @@ struct CLIModeTests {
                 + "(see ws_bridge bundle).")
     }
 
-    // A14.8 — the daemon's refusal (python raises out of `acquire_lock`, and
+    // The daemon's refusal (python raises out of `acquire_lock`, and
     // `main_dispatch` prints `[kernel] <e>`).
     @Test func daemonLockRefusalIsPythonText() {
         #expect(
@@ -91,7 +91,7 @@ struct CLIModeTests {
                 """)
     }
 
-    // A14.9 — stdout JSON is `json.dumps(reply, indent=2, default=str)`.
+    // Stdout JSON is `json.dumps(reply, indent=2, default=str)`.
     @Test func oneShotJsonIsPythonEnsureAscii() {
         let reply: JSON = .object([
             "more": .string("2 more — use after=2"),
@@ -120,7 +120,7 @@ struct CLIModeTests {
                 """)
     }
 
-    // C80: `--ledger-cap` is stripped from argv only when a value follows (a
+    // `--ledger-cap` is stripped from argv only when a value follows (a
     // trailing bare flag stays, python's `i + 1 < len(argv)` guard); absent
     // ⇒ `FANTASTIC_LEDGER_CAP`; `"inf"` ⇒ unbounded.
     @Test func ledgerCapFlagIsStripped() {
@@ -154,7 +154,7 @@ struct CLIModeTests {
         #expect(wasSet5)
     }
 
-    // A14.3 — `init` is matched by NAME, like `reflect`, before the generic
+    // `init` is matched by NAME, like `reflect`, before the generic
     // `len>=2` one-shot case; a single-word `init` still routes here.
     @Test func initRoutesLikeReflect() {
         #expect(
@@ -170,7 +170,7 @@ struct CLIModeTests {
                 == "[init] another fantastic owns this dir (pid=55). Stop it first.")
     }
 
-    // A14.13 — the daemon lifecycle banner texts, pinned as python spells
+    // The daemon lifecycle banner texts, pinned as python spells
     // them (`longrun.py`).
     @Test func daemonBannersArePythonText() {
         #expect(DaemonMode.upLine == "[kernel] up")
@@ -186,7 +186,7 @@ struct CLIModeTests {
                 == "[kernel] no store\n  hint: create one")
     }
 
-    // A14.15 — web composes by `handler_module == "web.tools"`, never by the
+    // Web composes by `handler_module == "web.tools"`, never by the
     // literal id `"web"`: a renamed web agent still composes, and an
     // unrelated agent id'd `web` does not.
     @Test func webDetectedByHandlerModule() {
@@ -223,7 +223,7 @@ private struct DaemonTestNoop: AgentBundle {
 @Suite("CLI .env autoload")
 struct DotEnvTests {
 
-    // A14.5 — python `kernel/_env.py:_load_dotenv`, the first step of every mode.
+    // Python `kernel/_env.py:_load_dotenv`, the first step of every mode.
     @Test func dotenvIsLoadedAndAnnounced() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("fantastic-dotenv-\(UUID().uuidString)")
@@ -292,7 +292,7 @@ struct DotEnvTests {
 @Suite("CLI disk-backed bootstrap")
 struct CLIBootstrapTests {
 
-    // A14.12 — `reflect` (and every other mode) boots disk-backed: the
+    // `reflect` (and every other mode) boots disk-backed: the
     // persisted tree, the persisted root guid, a seeded virgin dir.
     @Test func reflectReadsThePersistedTree() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -316,7 +316,7 @@ struct CLIBootstrapTests {
     }
 
     /// A lockless boot writes nothing; the seed lands once the lock is held
-    /// (`takeSeed`; audit 2026-10-14).
+    /// (`takeSeed`).
     @Test func aVirginDirIsSeededOnlyUnderTheLock() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("fantastic-virgin-\(UUID().uuidString)")
@@ -331,11 +331,11 @@ struct CLIBootstrapTests {
                 atPath: dir.appendingPathComponent(".fantastic/agent.yaml").path))
     }
 
-    // A14.6: a one-shot boots the ROOT LOADER before the call — the
+    // A one-shot boots the ROOT LOADER before the call — the
     // observable effect is the debounced record writer existing afterward
     // (installed only by the root's OWN `boot` verb, `kernel_state.tools`).
-    // Before this fix, rust/swift never sent that boot at all: no pump, no
-    // ledger, no record writer for a bare one-shot RPC.
+    // Without that boot a bare one-shot RPC has no pump, no ledger, no record
+    // writer.
     @Test func oneShotBootsTheRootBeforeTheCall() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("fantastic-oneshot-\(UUID().uuidString)")
@@ -350,7 +350,7 @@ struct CLIBootstrapTests {
         #expect(kernel.recordWriter != nil, "the root's boot verb installs it")
     }
 
-    /// A14.18: every non-daemon mode ends with an idempotent kernel shutdown
+    /// Every non-daemon mode ends with an idempotent kernel shutdown
     /// (python's `atexit` → `Kernel.shutdown`) — after `dispatchOneShot`'s
     /// own root boot, calling `shutdown()` (what `runOneShotRPC` does once
     /// the lock is released) must complete cleanly and mark it done, exactly
@@ -373,7 +373,7 @@ struct CLIBootstrapTests {
         #expect(kernel.shutdownComplete)
     }
 
-    // A14.3: `init <loader_bundle> <manifest>` creates the loader agent
+    // `init <loader_bundle> <manifest>` creates the loader agent
     // under the root and boots it (its own boot reads the manifest — the
     // kernel never parses YAML).
     //
@@ -408,9 +408,9 @@ struct CLIBootstrapTests {
         #expect(kernel.agent(AgentId("static_loader")) != nil)
     }
 
-    // A14.3, the USAGE half: `fantastic init` (no args) and `fantastic init
+    // The USAGE half: `fantastic init` (no args) and `fantastic init
     // static_loader` (one arg) print the usage and exit 2. The usage error takes
-    // no lock, so it writes nothing (audit 2026-10-14, all three runtimes).
+    // no lock, so it writes nothing.
     @Test func initUsageWritesNothing() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("fantastic-init-usage-\(UUID().uuidString)")
@@ -430,7 +430,7 @@ struct CLIBootstrapTests {
                 u.resolvingSymlinksInPath().path
                     .replacingOccurrences(of: root.path + "/", with: ""))
         }
-        // a lockless usage error writes nothing (audit 2026-10-14)
+        // a lockless usage error writes nothing
         #expect(seeded.isEmpty, "\(seeded.sorted())")
     }
 }

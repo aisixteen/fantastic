@@ -451,7 +451,7 @@ async fn a_chatty_program_does_not_block_on_its_own_output() {
 }
 
 /// A `bundles/<name>` that links OUTSIDE the running dir is refused by the clamp,
-/// never loaded (python reads through `fs`; audit 2026-10-14).
+/// never loaded (python reads through `fs`).
 #[tokio::test]
 async fn a_bundle_folder_linking_outside_is_refused() {
     let tmp = TempDir::new().unwrap();

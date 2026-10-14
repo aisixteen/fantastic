@@ -1,4 +1,4 @@
-// ONE-SHOTS PROBE THE OS LOCK, NOT THE PID (owner 2026-10-03) — subprocess
+// ONE-SHOTS PROBE THE OS LOCK, NOT THE PID — subprocess
 // level, the real binary. Twin of python `test_one_shots_probe_the_flock_not_the_pid`
 // and rust `one_shots_take_over_a_lock_whose_pid_holds_no_flock`.
 //

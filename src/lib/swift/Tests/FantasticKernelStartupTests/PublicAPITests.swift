@@ -87,7 +87,7 @@ struct StartKernelInMemoryTests {
                 "id": .string("ollama_nomodel"),
             ]))])[0].result
         let r = await kernel.send([Item(AgentId("ollama_nomodel"), .object(["type": .string("reflect")]))])[0].result
-        // B1.24: python answers `rec.get("model")` — no model on the record is
+        // Python answers `rec.get("model")` — no model on the record is
         // null, never a guessed one.
         #expect(r["model"].isNull, "ollama must not guess a model default: \(r)")
         #expect(r["endpoint"].isNull, "ollama must not guess an endpoint: \(r)")

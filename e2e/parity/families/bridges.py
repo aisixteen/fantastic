@@ -1,7 +1,6 @@
 """bridges — `ws_bridge` and `relay_connector` against a LIVE peer and a LIVE relay.
 
-Both rounds pointed every bridge at `ws://127.0.0.1:9/nowhere` and measured one
-thing: connect refused. Everything past a successful boot was source-only. Here
+A bridge pointed at a dead address measures one thing: connect refused. Here
 `stubs/ws_peer.py` and `stubs/relay.py` answer, so the capture reaches the parts
 that only exist once a socket is up — the correlation id shape (`<bridge_id>-<n>`),
 a reply that is an `error` with no error in it, a malformed frame followed by a

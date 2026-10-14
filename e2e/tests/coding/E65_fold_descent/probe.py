@@ -5,7 +5,7 @@ it. Scored on the exact answer and on whether the model DESCENDED (grep scoped t
 id, or a pull of one). If the fold's own summary already carries the value, descent was
 not needed — reported, not failed.
 
-PRE-SEEDED (owner, 2026-10-07): the reads are PLANTED — the instruction, each read call and
+PRE-SEEDED: the reads are PLANTED — the instruction, each read call and
 its reply inline — and the last reply arrives live, so the run continues that chain: the
 folding and the answer are the model's own, without spending a live turn per file.
 """

@@ -138,10 +138,9 @@ pub struct FileBundle {
 
 /// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
 ///
-/// This answered a bare `{"error": "agent is readonly"}` until 2026-08-27, when
-/// the shared agentic corpus caught it: no `reason`, so a caller could only
-/// branch on the prose. `unauthorized` is the code the io SEAL answers with too
-/// — both say "this edge is not open for that", and neither is about the
+/// No bare `{"error": "agent is readonly"}`: without a `reason` a caller could
+/// only branch on the prose. `unauthorized` is the code the io SEAL answers with
+/// too — both say "this edge is not open for that", and neither is about the
 /// caller, which is why neither carries a `side`.
 pub(crate) fn readonly_refusal() -> Value {
     rf::refusal_hint(
@@ -289,7 +288,7 @@ impl Bundle for FileBundle {
                     // `bytes` IN THE JSON IS NEVER A CHUNK. python types the
                     // argument (`isinstance(data, (bytes, bytearray))`), and
                     // JSON has no bytes, so ANY present value here — a string, a
-                    // number — is `missing_arg`, and nothing is written (A13.19).
+                    // number — is `missing_arg`, and nothing is written.
                     // A raw chunk reaches this bundle as a request body only;
                     // that is the carrier a model's `<bytes>` document rides too.
                     // Absent ⇒ python's `payload.get("bytes", b"")`: an empty
@@ -415,7 +414,7 @@ impl Bundle for FileBundle {
                     ));
                 }
                 // NO CHUNK COMES BACK from a write — `None`, not an empty body,
-                // so a leg can tell this reply from a 0-byte read (C37).
+                // so a leg can tell this reply from a 0-byte read.
                 Ok((
                     Some(write_stream_reply(
                         &root,
@@ -454,10 +453,10 @@ fn gate(meta: &Map<String, Value>, agent_id: &AgentId, verb: &str) -> Option<Val
     );
     let rule = fantastic_io_bridge::authorizer::ingress::resolve(spec.as_ref());
     // NO token: the fs edge has no wire envelope, so nothing can present one.
-    // It used to read `auth_token` off the RECORD — a persisted secret in the
-    // portable workdir satisfied a `password_ingress` leg, the one thing the
-    // password rule exists to prevent. `password_ingress` is now refused at
-    // `validate_meta` (#116); the gate never reads the record for a credential.
+    // The gate never reads the record for a credential: a persisted secret in
+    // the portable workdir satisfying a `password_ingress` leg is the one thing
+    // the password rule exists to prevent. `password_ingress` is refused at
+    // `validate_meta`.
     let action = fantastic_io_bridge::authorizer::Action {
         kind: "call",
         target: agent_id.0.as_str(),
@@ -512,7 +511,7 @@ fn clamp_root(
 /// THE `bytes` KEY STILL EXISTS, holding `null`, IN ITS PYTHON POSITION between
 /// `offset` and `next_offset` — python's reply dict always has it and the codec
 /// nulls it in place when it lifts the value onto the wire, so a binary frame's
-/// head keeps python's dict shape (A11.9).
+/// head keeps python's dict shape.
 fn read_stream_reply(
     agent_id: &AgentId,
     root: &Result<PathBuf, String>,
@@ -579,8 +578,7 @@ fn missing_bytes() -> Value {
 
 /// A string argument that is a ROOT-RELATIVE path: absent/null ⇒ `""`; a
 /// non-string or an absolute path is `bad_arg` (the absolute form is refused,
-/// never silently re-rooted — python used to `lstrip("/")` against its own
-/// docstring).
+/// never silently re-rooted).
 pub(crate) fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result<&'a str, Value> {
     let p = match payload.get(name) {
         None | Some(Value::Null) => "",
@@ -616,8 +614,8 @@ pub(crate) fn int_arg(
 
 /// `path_arg` for a MUTATING verb: the path must name something INSIDE the
 /// root — empty/`.` is `missing_arg`, anything resolving to the root itself is
-/// `bad_arg`. `delete {path:"", recursive:true}` used to remove the whole
-/// served store (#97): the root is the boundary, not an operand.
+/// `bad_arg`, so `delete {path:"", recursive:true}` can never remove the whole
+/// served store: the root is the boundary, not an operand.
 fn target_arg<'a>(
     verb: &str,
     root: &Result<PathBuf, String>,
@@ -713,9 +711,9 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
     };
     if src == sink && one_file(&spath, &dpath) {
         // The first write's `truncate` empties the file the next read comes from:
-        // everything past the first chunk was lost under a success reply — the
-        // bare `{source_path}` form did it, sink and sink_path defaulted (python
-        // `_pump`, audit BV-7).
+        // everything past the first chunk would be lost under a success reply —
+        // the bare `{source_path}` form, sink and sink_path defaulted (python
+        // `_pump`).
         return rf::bad(
             "pump",
             "sink_path",
@@ -742,7 +740,7 @@ async fn pump_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -
         // python tests the reply for a `bytes` chunk (`isinstance(r["bytes"],
         // bytes)`); on this channel the chunk rides the body, so the carrier
         // answers the same question — `None`, or a chunk at another slot, is
-        // "no chunk came back" (C37).
+        // "no chunk came back".
         let Some(body) = body
             .filter(|_| rmeta.is_object())
             .and_then(|b| b.into_at("bytes"))
@@ -821,9 +819,9 @@ fn target_id(v: &Value) -> String {
 
 /// `password_ingress` is meaningless on an in-process leg: the token is read
 /// off a WIRE ENVELOPE, and the fs/process edges have none — no frame ever
-/// presents one, so the rule could only ever refuse (python) or, worse, be
-/// satisfied by a secret persisted ON THE RECORD (the ports, until
-/// 2026-09-02). Refused at the write, next to the mistake (#116). Both
+/// presents one, so the rule could only ever refuse or, worse, be
+/// satisfied by a secret persisted ON THE RECORD. Refused at the write, next
+/// to the mistake. Both
 /// spellings: the scoped `ingress_rule` and the `auth` stem. Shared with
 /// `fantastic-exec-bridge`.
 pub fn password_refusal(meta: &Map<String, Value>, edge: &str) -> Option<String> {
@@ -899,7 +897,7 @@ fn leads_to(allow: &[String], path: &str) -> bool {
 /// Where `path` actually LANDS (symlinks followed) must be under the RESOLVED
 /// form of an allow entry — entries resolved now, because the disk changes. With
 /// [`exposed`] (the path as asked) this is the both-ends rule: a link inside an
-/// exposed area that points outside it serves nothing (audit 2026-09-28).
+/// exposed area that points outside it serves nothing.
 fn lands_exposed(root: &Path, allow: &[String], path: &str) -> bool {
     let Ok(target) = fs::resolve(root, path) else {
         return false;
@@ -1145,7 +1143,7 @@ fn list_entries(root: &Path, path: &str) -> Result<Listing, String> {
 /// `delete path recursive?` — a file, an EMPTY dir, or (`recursive:true`) a
 /// dir tree. A symlink is UNLINKED, never followed (so a dangling one is still
 /// a deletable name). A bare delete on a populated dir refuses like python's
-/// `rmdir` (it used to `remove_dir_all` regardless, #57).
+/// `rmdir`.
 fn delete_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) -> Value {
     if readonly {
         return readonly_refusal();

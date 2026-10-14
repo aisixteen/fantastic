@@ -1,7 +1,7 @@
 //! Call security — the substrate authorization primitive (mirror of the python
 //! canonical `kernel/_authz.py`).
 //!
-//! The model is MINIMAL (owner decision 2026-10-03): **two-sided, deny-all,
+//! The model is MINIMAL: **two-sided, deny-all,
 //! explicit grants only.**
 //!
 //! - Every AGENT-originated send (`current_sender()` is `Some`) is checked TWICE:

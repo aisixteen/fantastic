@@ -76,7 +76,7 @@ async fn write_frame(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, kind: u8, res
 /// Frame one JSON value onto the socket (kind `T`).
 async fn push(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, v: &Value) {
     // python's `encode_frame` text half — `json.dumps(v, default=str)`, so the
-    // separators and the `\uXXXX` escapes match byte for byte (A13.14).
+    // separators and the `\uXXXX` escapes match byte for byte.
     let body = fantastic_io_bridge::codec::encode_frame(v).into_bytes();
     write_frame(wr, b'T', &body).await;
 }
@@ -108,7 +108,7 @@ async fn push_binary(
 /// skipped), a non-object envelope or an unknown kind.
 fn unframe(body: &[u8]) -> Option<(Value, Option<Blob>)> {
     match body.first()? {
-        // STRICT (D13): python `_unframe` → `strict_loads`.
+        // STRICT: python `_unframe` → `strict_loads`.
         b'T' => fantastic_io_bridge::codec::loads_slice(&body[1..])
             .ok()
             .map(|v| (v, None)),
@@ -150,9 +150,8 @@ async fn push_item(
 }
 
 /// Tear a proxy down: unwatch, DROP THE INBOX ROW, cancel the drain — python's
-/// `release`. The `inboxes` removal is the step that used to be missing: a leaked row
-/// means `emit`'s auto-vivify path keeps `try_send`ing into a channel nobody drains,
-/// forever.
+/// `release`. The `inboxes` removal matters: a leaked row means `emit`'s
+/// auto-vivify path keeps `try_send`ing into a channel nobody drains, forever.
 async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
     kernel.unwatch(src, &sub.proxy).await;
     kernel.remove_inbox(&sub.proxy);
@@ -160,9 +159,9 @@ async fn drop_proxy(kernel: &Arc<Kernel>, src: &AgentId, sub: Sub) {
 }
 
 /// The verbs that DRIVE one job — python `DRIVE_VERBS`. A running program's
-/// owner-inbox relay drops one of these whose `job_id` names ANOTHER job (audit
-/// BV-9): the fanout mirrors every payload sent to the leg, so a program started
-/// by one caller saw another caller's keystrokes, paste bytes and drive calls
+/// owner-inbox relay drops one of these whose `job_id` names ANOTHER job: the
+/// fanout mirrors every payload sent to the leg, so a program started by one
+/// caller would see another caller's keystrokes, paste bytes and drive calls
 /// aimed at that caller's job. One with no `job_id` (bulk) or naming this job is
 /// forwarded.
 const DRIVE_VERBS: [&str; 6] = [
@@ -176,11 +175,11 @@ const DRIVE_VERBS: [&str; 6] = [
 
 /// The job's own telemetry echoes back through the owner's watcher fanout; drop it so a
 /// tool does not receive its own `progress`/`job_started`/`job_done` as inbox mail —
-/// drop a drive verb addressed to ANOTHER job ([`DRIVE_VERBS`], audit BV-9) — and
-/// drop whatever the leg's gate refuses (python `_inbox_framer`, audit BV-8). The
+/// drop a drive verb addressed to ANOTHER job ([`DRIVE_VERBS`]) — and
+/// drop whatever the leg's gate refuses (python `_inbox_framer`). The
 /// substrate's fanout mirrors every payload to the owner's watchers BEFORE any
-/// handler runs, so a sealed leg whose handler refused the call still had it
-/// delivered here.
+/// handler runs, so a sealed leg whose handler refused the call would still have
+/// it delivered here.
 fn inbox_framer(p: &Value, owner: &AgentId, job_id: TaskId, kernel: &Kernel) -> Option<Value> {
     let verb = match p.get("type").and_then(Value::as_str) {
         Some("progress") | Some("output") | Some("job_started") | Some("job_done") => return None,
@@ -295,7 +294,7 @@ pub async fn serve(
                 match body {
                     // The verb returned NO chunk — a plain text frame. `Some(b)`
                     // with `b` EMPTY is still a chunk (an empty file), so the
-                    // test is the carrier, never the length (C37).
+                    // test is the carrier, never the length.
                     None => push(&wr, &env).await,
                     Some(body) => {
                         // A chunk rides raw at `["data", …its slot]` — `["data",
@@ -332,10 +331,10 @@ pub async fn serve(
                 // inbox, and the drain task below is what reads this one.
                 let mut rx = kernel.ensure_inbox(&proxy);
                 // THE KERNEL DECIDES. `watch` is gated exactly like a send (it IS a
-                // read of the source) and can refuse. The refusal used to be
-                // discarded and the sub registered anyway, so the program held a
-                // subscription that simply never fired — deaf, with nothing to
-                // diagnose. Tell it, and register NOTHING.
+                // read of the source) and can refuse. Discarding the refusal and
+                // registering anyway would leave the program a subscription that
+                // never fires — deaf, with nothing to diagnose. Tell it, and
+                // register NOTHING.
                 if let Some(denial) = kernel.watch(&src, proxy.clone()).await {
                     kernel.remove_inbox(&proxy);
                     push(
@@ -347,7 +346,7 @@ pub async fn serve(
                 }
                 let w = Arc::clone(&wr);
                 let s = src.clone();
-                // REGISTERED as a kernel task `watch_drain` (A4.13): a drain lives
+                // REGISTERED as a kernel task `watch_drain`: a drain lives
                 // as long as the subscription, so it is real work — visible to `ps`
                 // and reachable by `cancel` — not a detached `tokio::spawn`.
                 let drain = kernel.spawn_task(&owner, "watch_drain", async move {
@@ -396,7 +395,7 @@ pub async fn serve(
                 // kernel alive.
                 let weak = Arc::downgrade(&kernel);
                 let o = owner.clone();
-                // REGISTERED as a kernel task `inbox_drain` (A4.13) — see the
+                // REGISTERED as a kernel task `inbox_drain` — see the
                 // `watch_drain` above.
                 let drain = kernel.spawn_task(&owner, "inbox_drain", async move {
                     while let Some(p) = rx.recv().await {
@@ -442,7 +441,7 @@ pub async fn serve(
     }
 }
 
-/// What another spawner adds to this ONE relay (py_agent, owner 2026-10-08):
+/// What another spawner adds to this ONE relay (py_agent):
 /// every child frame whose op the relay does not own goes to `inbound`, and every
 /// value sent on `outbound` is pushed down the control fd as a text frame.
 pub struct Extra {

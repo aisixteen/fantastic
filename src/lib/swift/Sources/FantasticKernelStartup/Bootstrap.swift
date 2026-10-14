@@ -76,11 +76,9 @@ public enum Bootstrap {
     /// `add_signal_handler`; `kernel_stop` sets the same event directly,
     /// with no such print).
     ///
-    /// BOTH LEGS ARE CANCELLATION-AWARE. `shutdownRequested()` parked on a
-    /// `withCheckedContinuation` with no cancellation handler, so `cancelAll`
-    /// never returned: a SIGTERM printed nothing, the teardown lines never ran,
-    /// `kernel.shutdown()` never ran, and the process was still alive 15 s later
-    /// with `lock.yaml` left behind (measured; the e2e driver SIGKILLed swift).
+    /// BOTH LEGS ARE CANCELLATION-AWARE. A `withCheckedContinuation` with no
+    /// cancellation handler would make `cancelAll` never return: no teardown, no
+    /// `kernel.shutdown()`, and `lock.yaml` left behind.
     public static func awaitStop(kernel: Kernel, signals: StopSignals) async -> String? {
         await withTaskGroup(of: String?.self) { group -> String? in
             group.addTask { await signals.recv() }

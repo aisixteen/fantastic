@@ -1,4 +1,4 @@
-// #10 / #37 — the blob channel and the durable ledger.
+// The blob channel and the durable ledger.
 //
 // The owner guard is the point: `agent_id` is the namespace and it arrives in
 // the PAYLOAD, so without it any agent granted `persist_blob` could write any
@@ -34,8 +34,8 @@ private final class Files: @unchecked Sendable {
     }
 }
 
-/// A mock file_bridge that speaks the STREAM verbs on the BINARY channel — the
-/// string `read`/`write` verbs are gone, so the kernel's blob + record I/O rides
+/// A mock file_bridge that speaks the STREAM verbs on the BINARY channel — there
+/// are no string `read`/`write` verbs, so the kernel's blob + record I/O rides
 /// `write_stream`/`read_stream` with raw bytes.
 private struct Store: AgentBundle {
     let name = "file_bridge"
@@ -85,7 +85,7 @@ struct BlobChannelTests {
     private func makeKernel(_ files: Files) async -> Kernel {
         let reg = BundleRegistry()
         reg.register("file_bridge.tools", Store(files: files))
-        // THE BLOB VERBS ARE THE LOADER'S, not the substrate's (C13) — the root
+        // THE BLOB VERBS ARE THE LOADER'S, not the substrate's — the root
         // answers them through its `kernel_state.tools` bundle.
         reg.register(ROOT_HANDLER_MODULE, KernelStateBundle())
         let storeRoot = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -148,11 +148,10 @@ struct BlobChannelTests {
     }
 
     @Test func aCancelNeverDestroysAWriteTheKernelAlreadyCommitted() async {
-        // MEASURED 2026-08-27. The AI backend commits the user message, then
-        // streams; cancelling mid-stream marked the whole subtree killed, and
-        // dispatch is INERT to a killed task — so the persist that had already
-        // been decided was swallowed and the chat read back EMPTY. The user's
-        // own message disappeared because the reply was cancelled.
+        // The AI backend commits the user message, then streams; cancelling
+        // mid-stream marks the whole subtree killed, and dispatch is INERT to a killed
+        // task — so a persist that had already been decided must not be swallowed, or
+        // the user's own message disappears because the reply was cancelled.
         //
         // Bookkeeping is the kernel acting, not the caller: it survives the
         // caller's death. Deterministic here — the flag is set by hand, so this
@@ -207,7 +206,7 @@ struct BlobChannelTests {
     }
 
     @Test func aGrantedAgentWritesAnyNamespace() async {
-        // GRANTS ARE THE ONLY RULE (owner, 2026-10-06): an agent that reaches
+        // GRANTS ARE THE ONLY RULE: an agent that reaches
         // `persist_blob` names any namespace; the grant is the authority.
         let files = Files()
         let k = await makeKernel(files)
@@ -223,7 +222,7 @@ struct BlobChannelTests {
     }
 
     /// `agent_id` becomes a directory (`agents/<agent_id>/`): `../bundles/x`
-    /// would reach a folder bundle's `bundle.yaml` (audit 2026-10-14).
+    /// would reach a folder bundle's `bundle.yaml`.
     @Test func anAgentIdThatWalksOutIsRefused() async {
         let files = Files()
         let k = await makeKernel(files)
@@ -289,7 +288,7 @@ struct BlobChannelTests {
     }
 
     @Test func blobRefusalsArePythonsBareError() async {
-        // C13: every one of these is the LOADER's reply — a bare `{error}`,
+        // Every one of these is the LOADER's reply — a bare `{error}`,
         // with `reason: unauthorized` on the owner denial alone and no `side`.
         let files = Files()
         let k = await makeKernel(files)
@@ -310,7 +309,7 @@ struct BlobChannelTests {
         #expect(noContent == .object(["error": .string("persist_blob: content (str) required")]))
     }
 
-    /// PERSISTENCE IO IS THE KERNEL'S OWN BOOKKEEPING (owner 2026-10-04): every
+    /// PERSISTENCE IO IS THE KERNEL'S OWN BOOKKEEPING: every
     /// store byte (a blob write, a blob read, the record write) is a PLAIN CALL
     /// into the store's handler (`storeCall`) — not a gated send, so it leaves no
     /// call row on the store and no settle row. The `persist_blob` call that
@@ -342,11 +341,11 @@ struct BlobChannelTests {
         #expect(storeRows.isEmpty, "\(storeRows)")
     }
 
-    /// C79 — the AgentBundle DEFAULT `handleBinary` dispatches the HEADER
+    /// The AgentBundle DEFAULT `handleBinary` dispatches the HEADER
     /// through the text `handle`. Python has no separate binary channel at all,
     /// so an octet POST of `{type:"say"}` to a bundle with no chunk verb reaches
-    /// its handler; swift answered `no binary edge — verb "say" does not accept
-    /// binary frames`, a refusal python never produces.
+    /// its handler — never a `no binary edge` refusal, which python never
+    /// produces.
     @Test func defaultHandleBinaryDispatchesTheHeader() async {
         let files = Files()
         let k = await makeKernel(files)

@@ -24,7 +24,7 @@ import OrderedCollections
 ///     filters to its own id.
 ///
 /// No fan-out: the cli never sees a browser's tokens, and a browser never sees
-/// the cli's. Swift emitted EVERYTHING on the inbox, so a cli-driven turn printed
+/// the cli's. Emitting EVERYTHING on the inbox would leave a cli-driven turn printing
 /// nothing unless something happened to be watching the agent. The event is
 /// stamped with `client_id` LAST (python's `{**ev, "client_id": …}`).
 func toCaller(

@@ -325,7 +325,7 @@ fn meta_of(pairs: &[(&str, Value)]) -> Map<String, Value> {
 
 #[tokio::test]
 async fn an_unknown_verb_is_a_coded_refusal() {
-    // A8.1 + A8.2 — `shutdown` is not a verb of this bundle either.
+    // `shutdown` is not a verb of this bundle either.
     let (kernel, _fixture) = boot_with_manifest(MANIFEST).await;
     for verb in ["frobnicate", "shutdown"] {
         let r = kernel
@@ -350,7 +350,7 @@ async fn an_unknown_verb_is_a_coded_refusal() {
 
 #[tokio::test]
 async fn a_record_without_a_manifest_boots_with_pythons_text() {
-    // A8.4 — a loader may exist before its roster does; `boot` says so in
+    // A loader may exist before its roster does; `boot` says so in
     // python's words rather than the record being unwritable.
     let kernel = mk_kernel();
     let rec = kernel
@@ -384,7 +384,7 @@ async fn a_record_without_a_manifest_boots_with_pythons_text() {
 
 #[test]
 fn an_empty_manifest_string_is_no_manifest() {
-    // A8.20 — python tests `isinstance(path, str) and path`.
+    // Python tests `isinstance(path, str) and path`.
     let agent = loader_with_meta(meta_of(&[("manifest", json!(""))]));
     assert_eq!(
         load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
@@ -394,7 +394,7 @@ fn an_empty_manifest_string_is_no_manifest() {
 
 #[tokio::test]
 async fn a_manifest_outside_the_running_dir_is_refused_at_boot() {
-    // A8.8 — the cold bring-up read is not exempt from the running-dir law, and
+    // The cold bring-up read is not exempt from the running-dir law, and
     // the tail is python's own `fs` ValueError.
     let kernel = mk_kernel();
     let rec = create_loader(&kernel, "sl3", json!("/etc/hosts")).await;
@@ -407,7 +407,7 @@ async fn a_manifest_outside_the_running_dir_is_refused_at_boot() {
 
 #[test]
 fn an_absolute_manifest_inside_cwd_is_refused() {
-    // A8.12 — `fs.resolve` refuses ANY leading '/', re-rooting nothing.
+    // `fs.resolve` refuses ANY leading '/', re-rooting nothing.
     let (fixture, rel) = write_manifest(MANIFEST);
     let abs = std::env::current_dir().unwrap().join(&rel);
     let agent = loader_with_meta(meta_of(&[("manifest", json!(abs.display().to_string()))]));
@@ -424,7 +424,7 @@ fn an_absolute_manifest_inside_cwd_is_refused() {
 
 #[test]
 fn a_symlinked_manifest_escaping_cwd_is_refused() {
-    // A8.12 + A8.16 — the clamp resolves symlinks, and the escape is reported
+    // The clamp resolves symlinks, and the escape is reported
     // under the `cannot read manifest` prefix.
     let (fixture, rel) = write_manifest(MANIFEST);
     let link = std::path::Path::new(&rel).with_file_name("link.yaml");
@@ -442,7 +442,7 @@ fn a_symlinked_manifest_escaping_cwd_is_refused() {
 
 #[test]
 fn a_falsy_yaml_document_boots_empty() {
-    // A8.9 — `yaml.safe_load(text) or {}`.
+    // `yaml.safe_load(text) or {}`.
     for doc in ["", "~", "0", "false", "[]", "{}"] {
         let (fixture, rel) = write_manifest(doc);
         let agent = loader_with_meta(meta_of(&[("manifest", json!(rel))]));
@@ -464,7 +464,7 @@ fn a_falsy_yaml_document_boots_empty() {
 
 #[tokio::test]
 async fn handler_module_absent_or_falsy_is_refused_truthy_passes() {
-    // A8.10 — python tests `not spec.get("handler_module")`.
+    // Python tests `not spec.get("handler_module")`.
     for entry in [
         "  - id: a\n",
         "  - id: a\n    handler_module: ''\n",
@@ -518,7 +518,7 @@ async fn handler_module_absent_or_falsy_is_refused_truthy_passes() {
 
 #[tokio::test]
 async fn a_spec_type_key_overrides_the_create_verb() {
-    // A8.14 — python spreads the spec OVER the verb, so an entry naming `type`
+    // Python spreads the spec OVER the verb, so an entry naming `type`
     // decides what is sent. Here the manifest sends `reflect` to the kernel: no
     // agent is created, and the loader reports the reflect's own `id` as
     // "created" — python's behaviour, root id apart.
@@ -541,7 +541,7 @@ async fn a_spec_type_key_overrides_the_create_verb() {
 
 #[test]
 fn reflect_display_name_empty_falls_back_to_id() {
-    // A8.11 — python `agent.display_name or id`.
+    // Python `agent.display_name or id`.
     let agent = loader_with_meta(meta_of(&[("display_name", json!(""))]));
     assert_eq!(reflect_reply(&agent)["display_name"], json!("sl"));
     let agent = loader_with_meta(meta_of(&[("display_name", json!("Roster"))]));
@@ -550,7 +550,7 @@ fn reflect_display_name_empty_falls_back_to_id() {
 
 #[test]
 fn reflect_manifest_is_the_raw_meta_value() {
-    // A8.18 — python reports `agent.record.get("manifest")` as written.
+    // Python reports `agent.record.get("manifest")` as written.
     let agent = loader_with_meta(meta_of(&[("manifest", json!(7))]));
     assert_eq!(reflect_reply(&agent)["manifest"], json!(7));
     let agent = loader_with_meta(Map::new());
@@ -559,7 +559,7 @@ fn reflect_manifest_is_the_raw_meta_value() {
 
 #[test]
 fn verb_docs_are_python_docstrings() {
-    // A8.15 — the first line of each python docstring, in VERBS order.
+    // The first line of each python docstring, in VERBS order.
     assert_eq!(
         StaticLoaderBundle.verb_docs(),
         json!({
@@ -571,7 +571,7 @@ fn verb_docs_are_python_docstrings() {
 
 #[test]
 fn readme_is_python_verbatim() {
-    // A8.19 — byte-for-byte the python bundle's readme.
+    // Byte-for-byte the python bundle's readme.
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(4)
@@ -582,7 +582,7 @@ fn readme_is_python_verbatim() {
 
 #[tokio::test]
 async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
-    // A8.6 — python's text, with `{!r}` on all three names (no `Some(...)`).
+    // Python's text, with `{!r}` on all three names (no `Some(...)`).
     let (kernel, fixture) = boot_with_manifest(MANIFEST).await;
     drop(fixture);
     let (fixture, path) =
@@ -618,7 +618,7 @@ async fn a_manifest_that_reassigns_a_handler_module_fails_loud() {
 
 #[tokio::test]
 async fn a_refused_re_apply_names_the_agent_and_forwards_the_error() {
-    // A8.7 — only a TRUTHY error is a failure, and the tail is `str(error)`.
+    // Only a TRUTHY error is a failure, and the tail is `str(error)`.
     // (The kernel's own refusal text is pinned by C19/C26/C27, not here.)
     let (kernel, fixture) = boot_with_manifest(MANIFEST).await;
     drop(fixture);
@@ -675,7 +675,7 @@ fn an_unhashable_mapping_key_is_invalid_yaml() {
     }
 }
 
-/// STEP-4 PIN (2026-10-01): the unknown type, as TEXT — key order is part of
+/// The unknown type, as TEXT — key order is part of
 /// the wire (`preserve_order`) and `Value` equality ignores it.
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
@@ -703,7 +703,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
     );
 }
 
-/// Audit G-2/BV-2 — the roster pass is kernel bookkeeping (ungated), so only the kernel's own
+/// The roster pass is kernel bookkeeping (ungated), so only the kernel's own
 /// boot (origin none) may start it. A roster agent whose grant the operator
 /// revoked sent `boot` to its loader and got the grant back; a deleted roster
 /// agent came back. The edge is NAMED on both ends, so the refusal is the

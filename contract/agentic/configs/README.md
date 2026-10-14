@@ -98,7 +98,7 @@ scenario's own ids: the ones its validator beside the runner tags with
 ## `edges:` are probes, not grant maps
 
 **Assert reachability, never a config field.** A field check stops tracking the
-property the moment a second gate exists. Measured on `static_loader`'s own
+property the moment a second gate exists. On `static_loader`'s own
 fixture: the manifest granted `worker.can_call = {memory: [set, read]}`, the
 field was set, and the send came back `{"reason": "unauthorized", "side":
 "ingress"}` — the callee never named the caller back. The reverse case is just

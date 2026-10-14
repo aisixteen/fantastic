@@ -41,7 +41,7 @@ pub enum KernelError {
 
     /// Another daemon holds the lock file in this workdir.
     ///
-    /// C81: python's exact three lines (`P/kernel/_lock.py:52-64`) — name the
+    /// Python's exact three lines (`P/kernel/_lock.py:52-64`) — name the
     /// pid and tell the operator how to recover (kill it, or remove a stale
     /// lock). `RCLI/src/main.rs` prints this as `[kernel] {e}` and exits 1,
     /// NOT through the generic `fantastic_kernel: {e}` wrapper every other

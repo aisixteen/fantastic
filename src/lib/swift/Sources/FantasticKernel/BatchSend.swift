@@ -1,15 +1,12 @@
 // ARRAY-ONLY batch send: `[Item] -> [Outcome]`.
 //
-// Port of python `kernel/_agent.py:Agent.send` (canonical), `tmp/pychanges.md`
-// #29 + #34–#37.
+// Port of python `kernel/_agent.py:Agent.send` (canonical).
 //
 // There is deliberately NO single-call form — one shape prevents single/batch
 // drift. A single call is `(await kernel.send([Item(t, p)]))[0].result`.
 //
-// Why a batch at all: a model batch that fans out N calls used to get its answers
-// spread over the next N messages and re-asked in between (measured 2026-08-25:
-// 7 calls → replies `1 of 7`…`7 of 7`, `list_agents` re-asked five times,
-// nothing built). The industry shape is the same — all results of one batch
+// Why a batch at all: a model batch that fans out N calls would otherwise get its
+// answers spread over the next N messages and re-ask in between. The industry shape is the same — all results of one batch
 // return together.
 
 import FantasticJSON
@@ -41,7 +38,7 @@ extension Kernel {
         // settles `failed` with that raise as its body — the caller learns the
         // same thing, and nothing is dispatched on a lookup that did not happen.
         //
-        // TODO(parity, owner 2026-10-02 — left as is, rare failure): python's raise
+        // TODO(parity — rare failure): python's raise
         // also reaches the WIRE: `web_rest` answers HTTP 500 for the whole request,
         // where swift's legs answer 200 with every item failed. Mirroring it needs
         // `send` to throw — either `send` itself becomes `throws` (changes every
@@ -106,7 +103,7 @@ extension Kernel {
     }
 
     /// One item's SYNCHRONOUS half: validate, resolve, gate, claim the row.
-    /// Python `Agent._launch` (`kernel/_agent.py:601-732`) — C30's check
+    /// Python `Agent._launch` (`kernel/_agent.py:601-732`) — check
     /// order: target → payload dict → timeout → payload.type → id → retries
     /// → killed → draining → resolve → gate.
     /// Is this send the root's CONTROL SURFACE — a kernel verb or `reflect`
@@ -153,7 +150,7 @@ extension Kernel {
                             got: .array(blob.parts.map(\.json)))))
             }
         }
-        // 3. timeout — `item.rawTimeout` (C38) supersedes the typed `item.
+        // 3. timeout — `item.rawTimeout` supersedes the typed `item.
         // timeout` when a caller is forwarding a value it did not itself
         // parse.
         let timeout: Deadline?
@@ -164,7 +161,7 @@ extension Kernel {
         // 4. payload.type — `type` is the verb; there is no send without one.
         // Validated for EVERY sender (operator included) BEFORE the gate, so
         // a typeless payload is a coded refusal, never an `unhandled` from
-        // the target (measured 2026-09-02).
+        // the target.
         // A RAW BODY at `type` is python's `bytes` value there.
         let bodyAtType = item.binary?.at("type") != nil
         let typeV: JSON
@@ -177,8 +174,7 @@ extension Kernel {
         }
         guard let verb = typeV.asString, !verb.isEmpty, !bodyAtType else {
             // A non-string is named by its TYPE, never echoed: the octet REST leg
-            // and a binary WS frame can put a whole body here (audit 2026-10-03,
-            // W-11) — python's `type(verb).__name__`.
+            // and a binary WS frame can put a whole body here — python's `type(verb).__name__`.
             let got: String
             if bodyAtType {
                 got = "bytes"
@@ -218,8 +214,8 @@ extension Kernel {
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks
         // the whole subtree before it aborts anything, because `onCancel`
         // hooks await — so a doomed handler gets scheduling passes on its way
-        // out, and what it sent there used to start fresh dispatches that
-        // outlived the cancel. Settled here, before an id is minted: a
+        // out, and what it sent there would otherwise start fresh
+        // dispatches that outlive the cancel. Settled here, before an id is minted: a
         // refused send costs nothing.
         if KernelTaskLocals.currentKilled?.isKilled == true {
             return .settled(
@@ -239,8 +235,7 @@ extension Kernel {
         if draining && !KernelTaskLocals.inShutdown {
             let control = isControl(target: item.target.value, payload: item.payload)
             // a live DISPATCH, or a keepalive fork; any other fork starts new
-            // work — a ws call used to pass where the same REST call was refused
-            // (audit 2026-10-14)
+            // work
             let insideLiveWork = tasks.drainAdmits(KernelTaskLocals.currentTask)
             if !control && !insideLiveWork {
                 return .settled(
@@ -280,9 +275,8 @@ extension Kernel {
         // ONE ID SPACE, ONE HANDLE. A NAMED execution registers in the task
         // table under the caller's own id, so `ps` shows that id and `cancel
         // task_id=<id>` kills it — the id the caller already holds IS the
-        // handle. Minting a second, private pid for a named item meant the
-        // caller could not cancel or find its own execution (measured
-        // 2026-09-02). An unnamed item still mints, synchronously.
+        // handle. A second, private pid for a named item would leave the
+        // caller unable to cancel or find its own execution. An unnamed item still mints, synchronously.
         // ONE ID SPACE. A caller-named/joined execution reuses the id it
         // already opened; an unnamed one takes the next int — the same
         // allocator that mints every row, so a pid, a reply tag and a
@@ -293,9 +287,9 @@ extension Kernel {
         // READ. Python answers it without a task-table row, and for an UNNAMED
         // item without a ledger row and WITHOUT MINTING AN ID at all
         // (`Agent._launch`: the check sits before the mint, `_Dispatched(pid=
-        // None)`). Swift dispatched it like any other verb, so every AI pass's
-        // primer reflect minted a `call · reflect · <root> ← ai` row plus a
-        // settle python never writes — 55 extra rows, measured 2026-09-21.
+        // None)`). Dispatched like any other verb, every AI pass's
+        // primer reflect would mint a `call · reflect · <root> ← ai` row plus a
+        // settle python never writes.
         let kernelReflect = item.target.value == "kernel" && verb == "reflect"
         if kernelReflect, joinId == nil, name == nil {
             return .reflectFast(
@@ -317,9 +311,9 @@ extension Kernel {
             // AUTHORIZED AGAINST THE EXECUTION IT JOINS. The recorded outcome
             // belongs to whoever ran it, so handing it back is equivalent to
             // having made THAT call — the gate must be asked that question, not
-            // about the verb this caller happened to send. Measured in python
-            // 2026-08-28: a caller granted only a harmless verb reused another's
-            // id and received another caller's result verbatim.
+            // about the verb this caller happened to send — otherwise a caller
+            // granted only a harmless verb could reuse another's id and receive that
+            // caller's result verbatim.
             if let d = joinDenial(origin: caller, payload: origPayload, target: target) {
                 return .settled(Outcome.refused(d))
             }
@@ -339,8 +333,8 @@ extension Kernel {
             // dispatch, the deadline — and is what the kernel flushes into its
             // memory store and reads back for `ledger` and named-call dedup.
             // KEY ORDER IS PYTHON'S: id, kind, verb, parent, caller, payload,
-            // named, retries, attempts, timeout[, name]. (`origin` → `caller`:
-            // replies own `origin` now.)
+            // named, retries, attempts, timeout[, name]. (Replies own
+            // `origin`.)
             var callRow: Row = [
                 "id": .integer(execId), "kind": .string("call"), "verb": .string(verb),
             ]
@@ -378,7 +372,7 @@ extension Kernel {
                 binary: item.binary, rawReply: item.rawReply, marks: marks))
     }
 
-    /// `timeout` validation (C30/C38): `item.rawTimeout`, when forwarded by a
+    /// `timeout` validation: `item.rawTimeout`, when forwarded by a
     /// caller relaying an untyped value, SUPERSEDES the typed `item.timeout`.
     /// Python: `if timeout is not None and (isinstance(timeout, bool) or not
     /// isinstance(timeout, (int, float)) or timeout <= 0): refuse`.
@@ -417,7 +411,7 @@ extension Kernel {
         return .ok(nil)
     }
 
-    /// `retries` validation (C30/C38): `item.rawRetries` SUPERSEDES the typed
+    /// `retries` validation: `item.rawRetries` SUPERSEDES the typed
     /// `item.retries` (which is always valid by construction — a `UInt32`
     /// cannot be negative or a bool). Python: `retries = item.get("retries",
     /// 0); if isinstance(retries, bool) or not isinstance(retries, int) or
@@ -432,7 +426,7 @@ extension Kernel {
         return .ok(UInt32(truncatingIfNeeded: n))
     }
 
-    /// `id` validation (C30/C38): `item.rawId`, when forwarded by a caller
+    /// `id` validation: `item.rawId`, when forwarded by a caller
     /// relaying an untyped value (a model's `<exec_id>` argument, a wire
     /// frame's `id`), SUPERSEDES the typed `item.id`. An int NAMES an
     /// execution to JOIN — refused if none exists under it; a non-empty
@@ -443,7 +437,7 @@ extension Kernel {
     /// Returns `(joinId, name, callerId)`: `joinId` is set when the caller
     /// named an EXISTING execution; `name` is set only for the string case
     /// (the dedup handle); `callerId` is the raw value AS GIVEN, carried
-    /// through for [`ExecutionLedger/open`]'s C31 rebind text.
+    /// through for [`ExecutionLedger/open`]'s rebind text.
     private func resolveExecId(_ item: Item) -> LaunchField<(Int64?, String?, JSON)> {
         let raw: JSON? = item.rawId ?? item.id.map { JSON.string($0) }
         guard let raw, raw != .null else { return .ok((nil, nil, .null)) }
@@ -486,7 +480,7 @@ extension Kernel {
             var pid: TaskId? = nil
             var reply: JSON = .null
             var status: Status = .completed
-            // THE BINARY REPLY BODY, carried out of the batch (C37). It is the
+            // THE BINARY REPLY BODY, carried out of the batch. It is the
             // carrier for the `bytes` value python's reply dict holds natively,
             // so a leg read/write is an ordinary execution — call row, ledger
             // id, `ps` row, timeout, settle row — instead of a `sendWithBinary`
@@ -532,9 +526,9 @@ extension Kernel {
             // NO FANOUT HERE. Python fans out at DISPATCH START, before the verb
             // is resolved (`_dispatch`), so a watcher sees the traffic while the
             // handler is still running and a retry fans out once per attempt.
-            // Publishing after the settle reversed the measured order — rust and
-            // swift echoed `job_started` before `start`, and `status(done)` before
-            // the send that caused it. `runDispatch` now owns it.
+            // Publishing after the settle would reverse the order —
+            // `job_started` before `start`, `status(done)` before the send that
+            // caused it. `runDispatch` owns it.
             return recordSettle(
                 execId: d.execId, target: d.target.id, pid: pid, status: status,
                 reply: reply, body: body)

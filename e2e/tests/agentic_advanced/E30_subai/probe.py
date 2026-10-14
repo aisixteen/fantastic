@@ -3,7 +3,7 @@
     cd src/lib/python && uv run python -u ../../../e2e/run.py --group agentic_advanced --id subai --lanes 1
 
 The probes so far all end when the model's turn ends. This one asks for something
-that OUTLIVES the conversation AND has a mind inside it (user, 2026-09-10): the
+that OUTLIVES the conversation AND has a mind inside it: the
 creator must CREATE a new AI agent and a new code agent, aim the clock at the AI,
 and put the knowledge (the multiplier) in the code. Every tick: clock → sub-AI →
 program on the code agent → `current hour × 4` → stored durably. The creator
@@ -89,10 +89,9 @@ BACKEND, MODEL = BK.name, BK.model
 CTX = int(os.environ.get("CTX", "262144"))
 # The BUILDER's window, separately. `CTX` is sized for `brain`, whose window is the
 # server's, and claiming more than the server has is a lie the Context Protocol would
-# then plan against. A builder on another plug has its own window — measured
-# 2026-08-07: the combined arm ran its builder inside 31744 usable tokens and spent
-# calls on `context_status`/`recall` managing a ceiling that was the harness's, not
-# the model's. Defaults to CTX, so unset behaves as before.
+# then plan against. A builder on another plug has its own window; given the wrong
+# one, it spends calls on `context_status`/`recall` managing a ceiling that is the
+# harness's, not the model's. Defaults to CTX.
 BUILDER_CTX = int(os.environ.get("BUILDER_CTX", str(CTX)))
 IDLE = float(os.environ.get("IDLE", "240"))
 # A CEILING. Without one these harnesses end only on IDLE: runs have reached turn
@@ -112,16 +111,15 @@ READINGS = {f"reading_{i}.txt": secrets.randbelow(9000) + 1000 for i in range(1,
 CANARY_FILE = "reading_4.txt"
 CANARY_VALUE = secrets.randbelow(9000) + 1000
 
-# The shape is STATED, because it is graded. An earlier version asked only for
-# "something that keeps the total up to date"; opus built a single flat tool, which is
-# a correct reading of that sentence, and then failed a check that silently demanded
-# nesting. Grade what you asked for.
+# The shape is STATED, because it is graded: a task that asks only for "something that
+# keeps the total up to date" is correctly read as a single flat tool, so a check that
+# demands nesting must ask for it. Grade what you asked for.
 MULTIPLIER = 4
-# How many clock cycles the sub-AI must have reacted to (user, 2026-09-10): one
+# How many clock cycles the sub-AI must have reacted to: one
 # lucky turn is not a routine.
 CYCLES = int(os.environ.get("CYCLES", "3"))
 
-# THE TWO IDS THE CREATOR BUILDS (owner 2026-10-04). Under the minimal access model
+# THE TWO IDS THE CREATOR BUILDS. Under the minimal access model
 # an agent writes grants only on its own children, and `clock`, `totals`, the memory
 # store and the key store are the harness's — so the creator can never open them to an
 # agent it makes. The operator opens them IN ADVANCE to these named ids; every edge
@@ -190,11 +188,8 @@ MINE = {
     "user",
     EXECUTOR_LEG,
     # The REST driver's own legs, written by `HostKernel.seed` so an HTTP client
-    # can reach in at all. They exist ONLY on a spawned kernel, which is why
-    # every rust and swift run reported `agents_made=3 ['web','rest','ws']` for a
-    # model that had created nothing (measured 2026-09-03) — the same
-    # harness-counts-its-own-furniture bug the `_fixture` docstring below
-    # describes, in a second place.
+    # can reach in at all. They exist ONLY on a spawned kernel; counted, they would
+    # report agents for a model that created nothing.
     "web",
     "rest",
     "ws",
@@ -230,10 +225,9 @@ def _ai_meta(
         "type": "create_agent",
         "parent_id": home(root),
         "id": agent_id,
-        # Two-sided deny-all: the operator grants the BUILDER its toolset. Written
-        # before the call gate existed, this probe gave the builder only the
-        # structural baseline — it could not reach one peer it is asked to wire, so
-        # it measured the gate rather than the model. The task still names nothing:
+        # Two-sided deny-all: the operator grants the BUILDER its toolset. With only
+        # the structural baseline it could not reach a peer it is asked to wire, and
+        # the probe would measure the gate rather than the model. The task still names nothing:
         # WHICH agent does what, and how to compose them, stays the model's problem.
         "can_call": {
             "$self": "*",
@@ -262,8 +256,7 @@ def _ai_meta(
         # `watch` frame is the `ws` LEG's own call — all AGENTS, gated like any
         # other, so an agent that does not accept them refuses the very first
         # send and emits to a watcher that was never allowed to subscribe
-        # (`ws` was missing: the status watcher below saw NOTHING over the wire,
-        # "ai does not accept 'watch' from ws", measured 2026-10-05). In process
+        # (without `ws`, the status watcher below sees NOTHING over the wire). In process
         # these ids do not exist and the grant is inert.
         "callable_by": {
             "$self": "*",
@@ -306,8 +299,7 @@ def true_total() -> int:
     """The total of what is ACTUALLY in the readings dir right now.
 
     Not the minted sum: a model that writes its own test reading to verify its work is
-    doing the right thing — opus did exactly that on 2026-08-05 and its total was
-    correct for the disk while failing a check pinned to my original numbers. Grading a
+    doing the right thing, and its total is correct for the disk. Grading a
     pristine fixture measures tidiness, not whether the agent works.
     """
     total = 0
@@ -321,9 +313,7 @@ def true_total() -> int:
 
 #: Files the KERNEL writes, never the model. They are skipped outright: the scan
 #: reports the first non-empty file it saw when the value is absent, and reporting
-#: one of these made a run read as though the model had stored junk —
-#: `stored='{"pid":9626}' key='.fantastic/lock.json' (now lock.yaml)` on every spawned runtime,
-#: `.fantastic/readme.md` in process (measured 2026-09-03).
+#: one of these would make a run read as though the model had stored junk.
 _KERNEL_OWNED = {"agent.yaml", "lock.yaml", "readme.md"}
 
 
@@ -580,7 +570,7 @@ async def build_fixture(root, *, interpreter: str | None = None):
 def _stored_value(want: set[int]):
     """A STORED value, not a number that happens to occur in prose: a line of a
     non-program file that is the number alone or `<name>[:=] <number>`. `hour × 4`
-    is small (0–92) and word-bounded search matched a readme (measured 2026-09-10)."""
+    is small (0–92) and a word-bounded search can match a readme."""
     pat = re.compile(r"^\s*(?:[\w .-]{0,40}[:=]\s*)?(\d{1,3})\s*$")
     skip_dirs = {"readings", "agents", "__pycache__"}
     for dirpath, dirnames, filenames in os.walk("."):
@@ -628,7 +618,7 @@ async def score(root, store_id, total, new_total, transcript):
     )
 
     # ── 2. THE CLOCK AIMS AT THE ROUTINE ──
-    # (owner, 2026-10-04, option b) The fixture's `clock` and `totals` are NOT the
+    # The fixture's `clock` and `totals` are NOT the
     # model's: it cannot rewrite their grants, so `clock` reaches only `ai`. A
     # routine that works within the grants routes THROUGH the builder — the clock
     # at `ai`, `ai` relaying to its sub-AI and code. Both shapes are the routine.
@@ -698,8 +688,7 @@ async def score(root, store_id, total, new_total, transcript):
     starts = 0
     for aid in ai_ids:
         # The kernel's rows, whole — the `history` verb is a DIGEST (120-char heads),
-        # which hid every `start` (measured 2026-09-10: ticks_received=0 with the
-        # routine demonstrably running).
+        # which hides every `start`.
         msgs = await rows_for(root, aid, conversation_only=True)
         # A TICK is a turn the clock opened — its delivered header names the sender
         # (`[from clock · …]`); the builder's own task and replies are not ticks.
@@ -836,8 +825,7 @@ async def run(
     await memory.open_ingress(root, memory.MEMORY, SUB_AI)
     if BK.key_ref:
         await creds.open_store(root, SUB_AI)
-    # FORENSICS: pin the moment any grant on the store changes (rust E30,
-    # 2026-09-30 — `rest` vanished from memory's callable_by mid-run).
+    # FORENSICS: pin the moment any grant on the store changes.
     _grants_watch = asyncio.create_task(memory.watch_store_grants(root))
     # …and WHO wrote it: every `update_agent` naming the store, with its sender,
     # off the state stream (a spawned kernel only — in process there is no ws face).
@@ -855,8 +843,7 @@ async def run(
     # SEE A DEAD CHAIN. `_deliver` now announces a failed handoff as a
     # status(reason=error) on the AI's own inbox; without a subscriber that event
     # goes nowhere and a chain that died mid-flight still looks like a model that
-    # chose to stop (measured 2026-08-24: test 5 ended at pass 5, scored FAIL, no
-    # indication anything had failed).
+    # chose to stop.
     # IN-PROCESS ONLY: the inbox tap needs a handle on the live kernel. Across
     # a wire a dead chain is caught by the drive loop's `ps` check instead.
     _errtask = None
@@ -916,20 +903,17 @@ async def run(
                 # again here would double it. Skipping it is what makes the index
                 # honest: `seen[0]` can be exactly `len(messages)`, with no `+1`
                 # guess about how many messages the next turn will add. That guess
-                # was wrong whenever a turn made PARALLEL tool calls — ai_core
-                # appends one user message per reply, so the index ran past the
-                # history and silently dropped a message per turn (measured
-                # 2026-08-24, and every log read that day was missing messages).
+                # is wrong whenever a turn makes PARALLEL tool calls — ai_core
+                # appends one user message per reply, so the index would run past
+                # the history and silently drop a message per turn.
                 if m["role"] in ("system", "assistant"):
                     continue
                 box(f"-- turn {self.n} - {m['role'].upper()} ->", m["content"])
             seen[0] = len(messages)
             out = []
             # PER-TURN BOUND. The no-progress cap counts TURNS that emit no new
-            # call, so it is structurally blind to a model stuck INSIDE one turn:
-            # measured 2026-08-24, `live_subai` died emitting 31,627 characters of
-            # the same paragraph in a single pass, making zero calls, and the
-            # counter never advanced. Only a bound on the turn itself can see that.
+            # call, so it is structurally blind to a model stuck INSIDE one turn
+            # (the same paragraph emitted over and over, zero calls). Only a bound on the turn itself can see that.
             # Generous on purpose — the largest legitimate turn observed is ~34k
             # chars, so this catches a runaway without truncating real work.
             grew, began = 0, time.monotonic()
@@ -981,10 +965,9 @@ async def run(
                         print(f"\n  ** TURN FAILED: {det['error']} **\n", flush=True)
                         runaway.append(f"turn failed: {det['error']}")
                     elif ev.get("type") == "status" and ev.get("phase") == "done":
-                        # EVERY TURN'S END, not only a failed one: a benign end
-                        # (`ok`, `awaiting`, `dead_turn`) left no line, so a chain
-                        # that stopped after a clean turn could not say HOW that
-                        # turn ended (subai_graph:rust, 2026-10-05).
+                        # EVERY TURN'S END, not only a failed one, so a chain that
+                        # stopped after a clean turn (`ok`, `awaiting`, `dead_turn`)
+                        # says HOW that turn ended.
                         print(f"  · turn ended: {det.get('reason') or 'ok'}", flush=True)
                     if ev.get("type") == "context" and ev.get("phase") == "too_small":
                         print(f"\n  ** TOO_SMALL: {det} **\n", flush=True)
@@ -1011,10 +994,8 @@ async def run(
 
     # SURFACE A FAILED SEND. `ai_core` returns {"error": ...} rather than raising —
     # a turn that timed out or errored otherwise reads as a model that produced
-    # nothing. Measured 2026-08-24: a cold GPU made test 5's first prompt exceed
-    # `FANTASTIC_AI_SEND_TIMEOUT` (180s default), the reply was discarded here, and
-    # the run scored as "0 chars, read the docs: False" — a harness failure wearing
-    # a model failure's clothes. Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
+    # nothing — a harness failure wearing a model failure's clothes (e.g. a cold GPU
+    # pushing the first prompt past `FANTASTIC_AI_SEND_TIMEOUT`). Raise `FANTASTIC_AI_SEND_TIMEOUT` for a cold cache.
     _first = (
         await root.send(
             [
@@ -1032,10 +1013,8 @@ async def run(
     spy = spy_obj
     capped = ""
     # STOP ON NO PROGRESS, NOT ON TURN COUNT. A fixed turn budget cannot tell
-    # "slower" from "worse": measured 2026-08-24 under a 6-way parallel run, the two
-    # hard probes hit a 40-turn cap having done PARTIAL work that each had completed
-    # solo an hour earlier — the cap truncated real work and the run read as a model
-    # failure. What the cap is FOR is ending the re-verify-forever loop, and that
+    # "slower" from "worse": under parallel load a cap can truncate work the probe
+    # completes solo, and the run reads as a model failure. What the cap is FOR is ending the re-verify-forever loop, and that
     # loop has a signature: turns that mutate nothing. So count turns since the last
     # NEW CALL. Work that is still progressing is never cut; a model re-reading its own
     # result forever still stops. MAX_TURNS remains as a far backstop.
@@ -1060,10 +1039,8 @@ async def run(
                 capped = _cap
             elif _busy and idle >= 30:
                 # A generation IS in flight — activity, not idleness. Without this
-                # hold the `while idle < IDLE` exited SILENTLY mid-generation (same
-                # defect `helpers/ai.py` fixed 2026-09-01; measured here 2026-09-02:
-                # a 33k-char turn regenerating after a fence refusal died at 60s
-                # with no cap line). Held at 28 so the check re-runs.
+                # hold the `while idle < IDLE` would exit SILENTLY mid-generation (as
+                # in `helpers/ai.py`). Held at 28 so the check re-runs.
                 idle = 28.0
         if runaway:
             # A turn blew the per-turn bound: the model is looping INSIDE one pass
@@ -1077,11 +1054,10 @@ async def run(
             # Cancel the in-flight turn through the TASK TABLE — the same `ps` /
             # `cancel` an operator would use, not a private kill switch.
             # ps/cancel are KERNEL verbs — the ROOT answers them, and a task id
-            # already names its own agent. Addressed to `aid` (non-root) they came
-            # back `not_here` and the harness, which discards the reply, cancelled
-            # NOTHING: the cap only broke its own loop while the turns kept running.
-            # Measured 2026-08-25 — "capped" runs were not killed, they were
-            # abandoned, and their pending replies died with the process.
+            # already names its own agent. Addressed to `aid` (non-root) they come
+            # back `not_here`, and a harness that discards the reply cancels
+            # NOTHING: the cap would only break its own loop while the turns keep
+            # running.
             _t = (
                 (
                     (
@@ -1111,10 +1087,9 @@ async def run(
         else:
             idle += POLL
         if idle >= IDLE:
-            # AN IN-FLIGHT GENERATION IS NOT IDLE. Measured 2026-08-25: pass 2 ran
-            # past the 300s window (56k-char turns under GPU contention), the loop
-            # exited without a cap and the harness walked away MID-GENERATION —
-            # the run scored FAIL while the model was still working. The `_live`
+            # AN IN-FLIGHT GENERATION IS NOT IDLE: a long turn under GPU contention
+            # can run past the window, and walking away MID-GENERATION would score
+            # FAIL while the model is still working. The `_live`
             # check above only suppresses the CAPPED label; this one extends the
             # wait. A wedged turn is still bounded by FANTASTIC_AI_SEND_TIMEOUT.
             _rows = (
@@ -1139,8 +1114,7 @@ async def run(
         # is unreadable from the transcript alone: it cannot distinguish "the
         # calls never dispatched" from "they ran and the replies were dropped".
         # The LEDGER holds every execution and what it became, so it answers
-        # exactly that (subai_graph:rust died at pass 1 after seven well-formed
-        # reflects, 2026-09-03, and nothing on record said which).
+        # exactly that.
         _led = (
             await root.send([{"target": "kernel", "payload": {"type": "ledger"}}])
         )[0]["result"]
@@ -1155,8 +1129,7 @@ async def run(
         # leg and lists only what IT originated, so it cannot say whether `aid`'s
         # calls were sent. Those live in the memory store: the call/settle rows
         # naming `aid` and its conversation (did a reply ever land?). Read while
-        # the kernel is still alive — the store is RAM and dies with it
-        # (subai_graph:rust, 2026-10-05: five closed calls, no reply, no record).
+        # the kernel is still alive — the store is RAM and dies with it.
         # A SETTLE row names neither: it points at its call through `parent` (the
         # call's id) and at who answered through `settled` — so it is matched to
         # `aid`'s call rows by id, in a second pass.
@@ -1210,10 +1183,7 @@ async def run(
     # `transcript` is this probe's own list, appended by the in-process provider
     # wrapper above. On a SPAWNED kernel there is no provider to wrap: the reader
     # is a `WireTranscript` holding its OWN list, and the local one stays empty —
-    # so every rust and swift run scored `read the docs: False`, `planning
-    # language: 0/4`, `final turn length: 0 chars` and `writes=0` no matter what
-    # the model did. Measured 2026-09-03: the rust lane's own turns mention the
-    # readme twice and the log holds nine of them, all of it scored as silence.
+    # scoring the local one would score every spawned run as silence.
     return await (scorer or score)(
         root, store["id"], total, total + CANARY_VALUE, spy.transcript
     )

@@ -89,7 +89,7 @@ pub(crate) fn reflect_origins(rec: &Map<String, Value>) -> Vec<String> {
 }
 
 /// python `_OriginGuard` — two checks, `rec` read per request by the caller:
-/// - HOST (audit W-2): EVERY request — GET/HEAD/OPTIONS, unsafe methods and the
+/// - HOST: EVERY request — GET/HEAD/OPTIONS, unsafe methods and the
 ///   websocket upgrade alike — whose `Host` header is not one of
 ///   `own_authorities` is refused. A DNS-rebinding page sends a same-origin GET
 ///   with no `Origin`, so the Origin check never sees it; its `Host` still names
@@ -237,7 +237,7 @@ mod tests {
         guard("web", r, &b.body(Body::empty()).unwrap()).map(|resp| resp.status().as_u16())
     }
 
-    /// THE REBINDING READ (audit W-2): a same-origin GET carries no Origin, so only
+    /// THE REBINDING READ: a same-origin GET carries no Origin, so only
     /// the Host names the attacker's domain — every method is judged on it.
     #[test]
     fn a_foreign_host_is_refused_on_every_method_with_no_origin() {
@@ -260,7 +260,7 @@ mod tests {
 
     /// `0.0.0.0` publishes the port, but the only Host it answers is
     /// `0.0.0.0:<port>` — a port map, a LAN name, a tunnel name, even the loopback
-    /// spellings are other authorities (owner-accepted, audit W-2).
+    /// spellings are other authorities.
     #[test]
     fn a_published_bind_admits_only_its_own_host_port() {
         let r = rec(json!({"host": "0.0.0.0", "port": 8088}));

@@ -14,7 +14,7 @@ fn readme_present_and_titled() {
 fn docs_tree_present_keyed_and_descriptored() {
     assert!(!DOCS.is_empty());
     assert!(DOCS.iter().any(|(k, _)| *k == "self-extension"));
-    // A12.2 — `minds` is not a topic on python, so it is not one here.
+    // `minds` is not a topic on python, so it is not one here.
     assert!(!DOCS.iter().any(|(k, _)| *k == "minds"), "minds is gone");
     let mut keys: Vec<_> = DOCS.iter().map(|(k, _)| *k).collect();
     let n = keys.len();
@@ -30,7 +30,7 @@ fn docs_tree_present_keyed_and_descriptored() {
     }
 }
 
-/// A12.1 + A12.2 + A12.3 — the keyed doc tree IS python's: the same keys (no
+/// The keyed doc tree IS python's: the same keys (no
 /// more `minds`, and the six topics rust never had), and every body byte for
 /// byte. The rust index was 9 top-level entries against python's 12.
 #[test]
@@ -77,7 +77,7 @@ fn docs_equal_python_verbatim() {
     }
 }
 
-/// A12.4 — the root orientation readme is python's, byte for byte (rust was
+/// The root orientation readme is python's, byte for byte (rust was
 /// missing the whole `kernel_verbs` paragraph).
 #[test]
 fn root_readme_is_pythons_verbatim() {
@@ -90,7 +90,7 @@ fn root_readme_is_pythons_verbatim() {
     assert!(README.contains("type: docs"));
 }
 
-/// A12.1 — the nested tiers are served from the compiled table: the index
+/// The nested tiers are served from the compiled table: the index
 /// nests them under their parent topic, and nothing is written to disk.
 #[test]
 fn nested_tiers_index_from_the_table() {
@@ -111,9 +111,9 @@ fn nested_tiers_index_from_the_table() {
 
 // ─── the kernel_state LOADER: the root's own bundle ──────────────────
 //
-// C12 moved the root frame (`persistence`, `guid`, `readmes`, `docs`,
-// `self_extension`) out of the kernel and into this bundle's
-// `reflect_root_extra`, so the texts and their tests live together here.
+// The root frame (`persistence`, `guid`, `readmes`, `docs`,
+// `self_extension`) lives in this bundle's `reflect_root_extra`, not the
+// kernel, so the texts and their tests live together here.
 
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::{BundleRegistry, Item, Kernel};
@@ -138,7 +138,7 @@ async fn root_reflect(kernel: &Arc<Kernel>, payload: serde_json::Value) -> serde
         .result
 }
 
-/// C12: the ROOT answers `reflect` with the substrate identity even though it
+/// The ROOT answers `reflect` with the substrate identity even though it
 /// carries a handler_module, and the loader's frame is MERGED onto it.
 #[tokio::test]
 async fn root_with_handler_reflects_identity() {
@@ -159,7 +159,7 @@ async fn root_with_handler_reflects_identity() {
     assert!(v.get("docs").is_none());
 }
 
-/// C9 (merged into C12): the FULL frame is python's key order —
+/// The FULL frame is python's key order —
 /// persistence, guid, readmes, docs, self_extension — appended after
 /// runtime/env/version.
 #[tokio::test]
@@ -212,7 +212,7 @@ async fn full_root_frame_key_order_is_pythons() {
     assert!(v["docs"].as_str().unwrap().contains("keyed doc tree"));
 }
 
-/// C9: the FULL `self_extension` is python's text VERBATIM — and it ends at
+/// The FULL `self_extension` is python's text VERBATIM — and it ends at
 /// `work as before.`, with no rust-only fd-wire tail sentence.
 #[tokio::test]
 async fn full_self_extension_is_python_verbatim() {
@@ -250,7 +250,7 @@ async fn distilled_self_extension_states_the_file_and_command_model() {
     assert!(se.contains("can_call") && se.contains("callable_by"));
 }
 
-/// C12: an unknown verb on the loader is python's CODED refusal, verbatim.
+/// An unknown verb on the loader is python's CODED refusal, verbatim.
 #[tokio::test]
 async fn unknown_type_refusal_is_verbatim() {
     let tmp = TempDir::new().unwrap();
@@ -261,7 +261,7 @@ async fn unknown_type_refusal_is_verbatim() {
     assert_eq!(v["verb"], json!("wat"));
 }
 
-/// C12: `load_tree` reads the subtree back and `persist_record` writes one
+/// `load_tree` reads the subtree back and `persist_record` writes one
 /// agent.yaml — the explicit verb contract a session/remote loader uses.
 #[tokio::test]
 async fn load_tree_persist_record_round_trip() {
@@ -308,7 +308,7 @@ async fn load_tree_persist_record_round_trip() {
     assert!(!tmp.path().join(".fantastic/agents/noted").exists());
 }
 
-/// a15 (audit 2026-09-28): the ROOT loader's tree is hydrated at boot, so no
+/// The ROOT loader's tree is hydrated at boot, so no
 /// AGENT writes it — not a sibling's record, not its own. The operator still does.
 #[tokio::test]
 async fn the_root_loader_refuses_record_verbs_from_an_agent() {
@@ -362,7 +362,7 @@ async fn the_root_loader_refuses_record_verbs_from_an_agent() {
     assert!(!tmp.path().join(".fantastic/agents/noted").exists());
 }
 
-/// C13: the blob verbs are the LOADER's now — a bare kernel verb set no longer
+/// The blob verbs are the LOADER's now — a bare kernel verb set no longer
 /// answers them, and the loader's refusals are python's bare `{error}` shape.
 #[tokio::test]
 async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
@@ -409,7 +409,7 @@ async fn blob_verbs_are_the_loaders_and_refuse_like_python() {
 
 /// The catalog NAME is python's entry-point name (`kernel_state`), not the
 /// module path: `reflect bundles=all|ids`, its `bundles_next` cursor and the AI
-/// prompt all carry it. It used to read `kernel_state.tools`.
+/// prompt all carry it.
 #[test]
 fn the_catalog_name_is_pythons_entry_point_name() {
     use fantastic_kernel::Bundle;
@@ -513,7 +513,7 @@ async fn a_session_loader_persists_a_canvas_that_survives_a_restart() {
 #[path = "tests_nested_records.rs"]
 mod nested_records;
 
-// ─── loud persistence (audit 2026-09-28, d2) ───────────────────────────
+// ─── loud persistence ──────────────────────────────────────────────────
 
 /// A kernel with the root loader AND the real file_bridge, NOT yet booted.
 fn with_file(tmp: &TempDir) -> Arc<Kernel> {
@@ -983,7 +983,7 @@ async fn a_loader_without_a_root_in_a_kernel_with_no_running_dir_raises() {
     assert_eq!(reflect["root"], "/srv/state");
 }
 
-/// STEP-4 PIN (2026-10-01): the loader's unknown type, as TEXT — key order is
+/// The loader's unknown type, as TEXT — key order is
 /// part of the wire (`preserve_order`) and `Value` equality ignores it.
 #[tokio::test]
 async fn unknown_type_wire_shape_is_byte_exact() {
@@ -1010,7 +1010,7 @@ async fn unknown_type_wire_shape_is_byte_exact() {
 
 /// The handler's `verb` echoes the RAW `type` — python `verb=t`: null when it is
 /// absent, the number for `5` — never the empty string the dispatch matched on.
-/// `send` refuses those payloads before any handler runs (python measured: `send:
+/// `send` refuses those payloads before any handler runs (python: `send:
 /// payload.type required` / `must be a non-empty string`), so the handler is
 /// called directly, as a bundle that forwards a payload would.
 #[tokio::test]

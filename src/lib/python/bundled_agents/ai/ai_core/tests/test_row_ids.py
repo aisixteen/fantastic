@@ -1,6 +1,6 @@
 """Every row has an address — an int from the kernel's one counter; parent is
-causality, reply_to is delivery. A thread is the parent chain — derived, never stored
-(measured unnecessary through 16 threads)."""
+causality, reply_to is delivery. A thread is the parent chain — derived, never
+stored."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def test_a_delivered_reply_turn_names_its_parent_from_the_tag():
 
 def test_a_tag_that_ends_on_its_parent_segment_still_names_the_parent():
     """`[reply to - · 5 reflect · ↑360]` — no batch suffix, so `↑360` is followed by
-    the closing `]`, which must not become part of the id (parity 2026-09-30)."""
+    the closing `]`, which must not become part of the id."""
     for text, want in (
         # a LATER `]` in the body is what let the greedy capture keep `360]`
         ("[reply to - · 5 reflect · ↑360]\n<error>no agent '5'</error> [ids: 1]", 360),

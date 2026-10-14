@@ -1,5 +1,4 @@
-// A batch EXECUTES in parallel (owner, 2026-10-01: "the idea was parallel
-// executing — it needs to hold"). Since 342b372f a batch STARTS its items in input
+// A batch EXECUTES in parallel. A batch STARTS its items in input
 // order — item N+1 is handed to its target only once item N has fanned out — so
 // this pins the other half: the items still RUN at the same time. Observed, not
 // timed: item A waits until item B has STARTED; a batch that serialized execution

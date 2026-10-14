@@ -1,19 +1,14 @@
 //! A bridge leg across its LIFETIME: a live record change, a sender restart — the
 //! twin of python `ws_bridge/tests/test_leg_lifetime.py`.
 //!
-//! Audit 2026-10-03:
-//!
-//!   - ARCH-2 — the leg's rules were resolved ONCE at boot and cached, so an
-//!     operator's `update_agent ingress_rule=deny_ingress` on a LIVE leg changed
-//!     what `reflect` reported (sealed) and nothing the gate did: inbound calls
-//!     kept being dispatched until the transport was torn down. The opening
-//!     direction failed the same way. Now the leg reads its rules off the record
-//!     per frame — the record is the truth the moment it is written.
-//!   - IO-5 — a forward's frame id names the execution on the receiver, and it was
-//!     `<leg>-<n>` with `n` counting from 1 at every boot. A restarted sender's
-//!     first forward reused `<leg>-1`, which the long-lived receiver had already
-//!     settled: the new write was JOINED to the old one, answered with its
-//!     recorded outcome, and never ran. Now every boot mints a nonce into the ids.
+//!   - The leg reads its rules off the record per frame — never resolved once at
+//!     boot and cached — so an operator's `update_agent
+//!     ingress_rule=deny_ingress` on a LIVE leg changes what the gate does the
+//!     moment it is written, in both directions.
+//!   - A forward's frame id names the execution on the receiver, so every boot
+//!     mints a nonce into the ids: a restarted sender's first forward must never
+//!     reuse an id the long-lived receiver already settled (it would be JOINED to
+//!     the old one, answered with its recorded outcome, and never run).
 
 use super::*;
 
@@ -173,7 +168,7 @@ async fn an_unknown_egress_rule_written_live_refuses_the_forward() {
 
 /// `<bridge id>-<boot nonce>-<n>`: the id keeps bridges apart, the nonce keeps
 /// BOOTS apart — the counter restarts at every boot, and a frame id names the
-/// execution on the receiver (audit IO-5).
+/// execution on the receiver.
 #[test]
 fn the_corr_prefix_is_the_leg_id_and_a_per_boot_nonce() {
     let a = new_corr_prefix(&AgentId::from("a"));
@@ -190,7 +185,7 @@ fn the_corr_prefix_is_the_leg_id_and_a_per_boot_nonce() {
     );
 }
 
-// ─── IO-5: a restarted sender never joins a stale execution ─────────────────
+// ─── A restarted sender never joins a stale execution ─────────────────
 
 async fn write_doc(ka: &Arc<Kernel>, a_id: &str, doc: &str, text: &str) -> Value {
     ask(

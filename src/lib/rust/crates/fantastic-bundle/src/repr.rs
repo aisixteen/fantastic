@@ -133,7 +133,7 @@ fn number_text(n: &serde_json::Number, non_finite: [&str; 3]) -> String {
     if let Some(u) = n.as_u64() {
         return u.to_string();
     }
-    // ARBITRARY PRECISION (C74): the number is kept as the text it was built
+    // ARBITRARY PRECISION: the number is kept as the text it was built
     // from, and `as_f64` answers `None` for the two shapes that text can hold
     // and an `f64` cannot — a non-finite float, and an integer wider than 64
     // bits. Routing either through `unwrap_or(0.0)` printed `0.0` for

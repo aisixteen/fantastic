@@ -173,8 +173,7 @@ async fn set_stores_the_value_0600_and_the_record_keeps_only_metadata() {
 
 /// THE FILE IS PYTHON'S, BYTE FOR BYTE — the kernel's YAML emitter over every
 /// map's keys sorted, each ref's entry `{fields, host}` (the host stored WITH the
-/// value, audit S3; measured with the python kernel, 2026-10-03), so either
-/// runtime reads the other's.
+/// value), so either runtime reads the other's.
 #[tokio::test]
 async fn the_file_is_pythons_bytes() {
     let f = mk(json!({})).await;
@@ -253,9 +252,9 @@ async fn set_never_creates_a_ref_update_agent_declares_it() {
     assert_eq!(nope.result["reason"], json!("not_found"), "{}", nope.result);
 }
 
-/// AV-5 (audit 2026-10-03): `forget` drops the VALUE — from the backend, with
+/// `forget` drops the VALUE — from the backend, with
 /// its field names — and nothing else. The declaration (its host) is the operator's, written and removed by `update_agent` alone, so a writer can
-/// no longer undeclare a ref nobody could then set again.
+/// never undeclare a ref nobody could then set again.
 #[tokio::test]
 async fn forget_drops_the_value_and_keeps_the_declaration() {
     let f = mk(json!({})).await;
@@ -323,7 +322,7 @@ async fn forget_drops_the_value_and_keeps_the_declaration() {
     );
 }
 
-/// AV-4 (audit 2026-10-03): a ref's host is its DECLARATION — written by
+/// A ref's host is its DECLARATION — written by
 /// `update_agent` on the store's `refs`, the one path. `set` stores the value of
 /// a declared ref and takes no host: a writer naming one is refused, loud, with
 /// nothing stored and the declared host untouched, so a writer can never rebind a
@@ -572,7 +571,7 @@ async fn the_keychain_backend_keeps_one_item_per_ref() {
             f.keychain
                 .get_password(namespace, "creds/openai/main")
                 .unwrap(),
-            // the item holds the declared host WITH the value (audit S3)
+            // the item holds the declared host WITH the value
             Some(format!(
                 "{{\"host\": \"api.openai.com\", \"fields\": {{\"api_key\": \"{KEY}\"}}}}"
             ))
@@ -684,7 +683,7 @@ async fn a_read_pinned_to_another_host_is_refused() {
         .ends_with("not None — refused, nothing read"));
 }
 
-// ─── the host at rest (audit S3, 2026-10-03) ─────────────────────────────────
+// ─── the host at rest ────────────────────────────────────────────────────────
 
 /// python `_at_rest` — the `get {ref, host}` host-mismatch shape: bound to the
 /// declared host, not the stored one.
@@ -699,7 +698,7 @@ fn at_rest(r: &str, stored: &str, declared: &str) -> Value {
     })
 }
 
-/// S3: the value is stored WITH the host its declaration named at `set`. The
+/// The value is stored WITH the host its declaration named at `set`. The
 /// operator re-declaring the ref with another host does not carry the value
 /// there: every `get` is refused, with or without a `host`, and nothing is read —
 /// until a writer sets the value again, which stores it under the new host.
@@ -745,7 +744,7 @@ async fn a_redeclared_host_reads_nothing_until_the_value_is_set_again() {
     );
 }
 
-/// S3, the shared-default case: a second store naming the same `file` declares
+/// The shared-default case: a second store naming the same `file` declares
 /// the SAME ref with another host. The value was stored for the first store's
 /// host, so the second store's `get` is refused — the operator's included.
 #[tokio::test]
@@ -776,7 +775,7 @@ async fn another_store_sharing_the_file_reads_nothing_for_its_host() {
     assert!(!out.result.to_string().contains(KEY));
 }
 
-/// S3, no back-compat: a value at rest that carries no host — the old
+/// No back-compat: a value at rest that carries no host — the old
 /// `{field: value}` shape, or a hand-written entry — is refused, nothing read.
 #[tokio::test]
 async fn a_stored_value_without_a_host_is_refused() {

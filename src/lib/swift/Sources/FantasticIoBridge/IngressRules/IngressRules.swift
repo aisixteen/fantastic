@@ -13,12 +13,12 @@ public enum IngressRules {
     /// Resolve an ingress rule spec (string | `{type, env}` | null) BY NAME.
     /// **SEALED BY DEFAULT** — absent ⇒ `DenyInbound` (an io leg with no rule
     /// refuses every inbound call until opened with `ingress_rule=allow_all`).
-    /// Mirrors py/rust's seal-default flip.
+    /// Mirrors py/rust.
     ///
     /// UNKNOWN TYPE ⇒ `DenyInbound(unknown:)` — seal, and name the bad rule in every
-    /// denial. It used to throw; but resolution runs PER CALL, not at boot, and in
-    /// python that raise surfaced as an unhandled exception out of the handler which
-    /// killed the caller's whole chain with no reply. An unresolvable rule is not an
+    /// denial. Never a throw: resolution runs PER CALL, not at boot, and a raise there
+    /// surfaces as an unhandled exception out of the handler, killing the caller's
+    /// whole chain with no reply. An unresolvable rule is not an
     /// authorization, so deny. A MALFORMED spec is named by its repr (`parseSpec`)
     /// and seals the same way, so resolution cannot fail.
     public static func resolve(_ spec: JSON?) -> IngressRule {

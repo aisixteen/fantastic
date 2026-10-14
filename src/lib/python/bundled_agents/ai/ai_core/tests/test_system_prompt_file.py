@@ -1,4 +1,4 @@
-"""The system block's placeholders and its FILE (owner, 2026-10-08).
+"""The system block's placeholders and its FILE.
 
 Placeholders `{tree}` `{self}` `{store}` `{howto}` are filled per agent and per turn
 in whichever prompt is in force; `{tree}\\n\\n{self}\\n\\n{howto}` IS the default block,

@@ -197,7 +197,7 @@ impl Bundle for WebBundle {
         stop_reply(agent_id).await;
         Ok(())
     }
-    /// Shutdown frees what delete frees — declared, never a fallback (audit c9).
+    /// Shutdown frees what delete frees — declared, never a fallback.
     async fn on_shutdown(
         &self,
         agent_id: &AgentId,
@@ -245,9 +245,8 @@ async fn reflect_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     out.insert("served_agent_count".into(), json!(kernel.agents.len()));
     out.insert("surfaces".into(), Value::Object(surface_map));
     // THE BROWSER-FACING CONTRACT. `/file/` is the only route a browser hits,
-    // and it was described NOWHERE — so a model reflected this agent, found no
-    // route contract, and HALLUCINATED one (measured 2026-08-21). The field
-    // they invented is the field that was missing.
+    // and without a description a model that reflects this agent finds no
+    // route contract and HALLUCINATES one. This field is that contract.
     out.insert(
         "routes".into(),
         json!({
@@ -402,7 +401,7 @@ Set port on create_agent or via update_agent."
     // web host owns its port, so it tells the terminal where to attach — the
     // renderer never reaches in for it. No cli (non-tty) ⇒ nobody is told; the
     // bound port is on this agent's reflect. The URL names the BOUND host — a
-    // host bound to a LAN address does not answer at 127.0.0.1 (audit ARCH2-10).
+    // host bound to a LAN address does not answer at 127.0.0.1.
     let line = format!(
         "listening on http://{host}:{port}/ · rest/ws are children (reflect kernel for ids)"
     );
@@ -441,7 +440,7 @@ async fn start_serving(
             // (`web/tools.py:158`), through `logging.lastResort` → bare stderr.
             // python's OTHER spelling here (uvicorn raising SystemExit on a bind
             // clash → `serve exited (code=…) — port likely in use`) is a uvicorn
-            // artefact, residual per D16.
+            // artefact, not reproduced.
             eprintln!("webapp {agent_id} :{port} serve failed: {e}");
             SERVERS.lock().remove(agent_id);
             return;

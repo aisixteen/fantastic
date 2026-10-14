@@ -2,7 +2,7 @@
 //
 // A reply too large to inline is held in RAM under its pid for this run only and
 // the model is handed its digest + origin line; it greps for the line it wants.
-// `pull` is gone (python deleted it): after a restart there are no bodies — the
+// There is no `pull` (python has none): after a restart there are no bodies — the
 // model re-reads from the origin line. The rows themselves are searched by the
 // memory store.
 //
@@ -74,8 +74,7 @@ extension AIBackend {
         // A value that is not a number is the default.
         let limit = max(1, min((try? pyIntOr(payload["limit"], 100)) ?? 100, 100))
         // The per-line cut. A bare default (200) that the model can raise: a rule
-        // written as one long line lost its tail at 200 and the model concluded
-        // grep could not reach it (measured 2026-09-08, python fold_long).
+        // written as one long line loses its tail at 200.
         let width = max(20, min((try? pyIntOr(payload["width"], 200)) ?? 200, 20_000))
         var ids: [Int64]? = nil
         switch payload["ids"] {
@@ -94,9 +93,8 @@ extension AIBackend {
         var matches: [JSON] = []
         var total = 0
         var seenLines: Set<String> = []
-        // IDENTICAL LINES ONCE. A task the human repeats per delivery ("find the
-        // audit marker…") matched 28 times in one run and pushed the one body hit
-        // past the inline cap (measured 2026-09-06, python recall_after_fold). The
+        // IDENTICAL LINES ONCE. A task the human repeats per delivery can match
+        // dozens of times and push the one body hit past the inline cap. The
         // first occurrence keeps its address.
         func take(_ rid: JSON, _ n: JSON, _ line: String) {
             let key = pySplitWhitespace(line).joined(separator: " ")
@@ -118,8 +116,7 @@ extension AIBackend {
         var inReach: Set<Int64>? = nil
         if let ids {
             // A fold id is a DESCENT: its members are reply rows, and their bodies
-            // hang off the pids on their tags (measured 2026-09-08: a descent that
-            // ignored them found nothing, 22 greps, 22 zeros). An id that is itself
+            // hang off the pids on their tags. An id that is itself
             // a pid counts.
             let rows = try await loadHistory(id, kernel, behind: true)
             let scope = Set(AIFolds.expandIds(rows, ids))

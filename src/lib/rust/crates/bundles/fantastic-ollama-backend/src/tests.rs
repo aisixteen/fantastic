@@ -135,7 +135,7 @@ async fn drain(rx: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
 
 #[test]
 fn readme_is_python_verbatim() {
-    // B4.5 — the readme a model reads about this backend is the PYTHON bundle's,
+    // The readme a model reads about this backend is the PYTHON bundle's,
     // byte for byte. Each runtime had written its own, so the same agent
     // described itself differently depending on where it ran.
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -198,11 +198,8 @@ async fn send_streams_tokens_and_emits_done() {
 
 /// An envelope in the completion DISPATCHES, over the real NDJSON transport.
 ///
-/// This test used to assert the opposite (`envelope_text_streams_verbatim_no_dispatch`
-/// — "just TEXT, nothing parsed, nothing dispatched"). That was never a principle,
-/// it was a gap: python's ai_core has parsed and dispatched this envelope since
-/// 2026-08-02, and this crate's own module header already said ai-core owns the
-/// parse. What the transport still owes is the OTHER half — the text reaches the
+/// Python's ai_core parses and dispatches this envelope, and ai-core owns the
+/// parse. What the transport owes is the OTHER half — the text reaches the
 /// caller verbatim, markers and all, so a mid-thought call survives the trip.
 ///
 /// `reply_to:null` keeps it to exactly ONE HTTP pass: the wiremock stub answers
@@ -290,9 +287,9 @@ fn reasoning_channel_is_wrapped_once_per_turn() {
 
 #[test]
 fn a_thinking_only_chunk_is_not_an_empty_completion() {
-    // Measured live on 2026-08-02: gemma spent all 578 generated tokens on
-    // `thinking`, we read only `content`, and the turn looked like the server had
-    // wedged. The span closes at end-of-stream even though content never started.
+    // A model can spend every generated token on `thinking`; reading only
+    // `content`, the turn would look like the server wedged. The span closes at
+    // end-of-stream even though content never started.
     let text = decoded_text(&[json!({"message": {"thinking": "all of it"}, "done": true})]);
     assert_eq!(text, format!("{THINK_OPEN}all of it{THINK_CLOSE}"));
     // An explicit `null` on either channel is shape, not content.
@@ -407,7 +404,7 @@ async fn sends_temperature_default_and_override() {
 
 #[tokio::test]
 async fn list_models_is_unknown_type() {
-    // D7: `list_models` was a rust-only verb. Python's ollama backend never had
+    // `list_models` was a rust-only verb. Python's ollama backend never had
     // one, so a model that read it off `reflect` was taught a probe that does not
     // exist on the canonical runtime — it is now an unknown type like any other.
     let tmp = TempDir::new().unwrap();
@@ -598,7 +595,7 @@ async fn reflect_extras_match_python() {
     assert_eq!(r["think"], false, "present-and-not-null → bool(x)");
 }
 
-/// B3.1 — python `handler`'s `{name}: unknown type {t!r}`: python's repr (single
+/// Python `handler`'s `{name}: unknown type {t!r}`: python's repr (single
 /// quotes), and `shutdown` is NOT in the VERBS map, so it is unknown like
 /// anything else. The prefix is the BACKEND's name — rust answered `ollama:`
 /// where python answers `ollama_backend:`.
@@ -641,7 +638,7 @@ fn ndjson_usage_reports_prompt_tokens_and_a_cut_as_max_tokens() {
     assert_eq!(report.lock().unwrap().stop_reason.as_deref(), Some("stop"));
 }
 
-// ─── STEP-4 PINS (2026-10-01): a raw HTTP/1.1 stub ──────────────────────────
+// ─── a raw HTTP/1.1 stub ────────────────────────────────────────────────────
 //
 // The mock-server crates always answer with a COMPLETE body; the behaviours
 // pinned below need a body CUT mid-stream, the raw request head (headers as

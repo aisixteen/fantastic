@@ -89,9 +89,8 @@ pub fn context_notice(
              this run — after a restart, re-read it from its origin."
         ));
     }
-    // PYTHON'S BYTES. This line teaches the model how to page turns back, and
-    // it taught the OLD JSON shape (`{type:'recall', query?, limit?}`) until
-    // 2026-09-12 — a call the harness refuses. Python `_context_notice`.
+    // PYTHON'S BYTES. This line teaches the model how to page turns back, in the
+    // shape the harness accepts. Python `_context_notice`.
     lines.push(
         "The full transcript is intact in your memory store. To page dropped turns back, \
          send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`). If the dropped span holds \
@@ -235,10 +234,9 @@ pub async fn project_context(
     // last (live) turn: the failsafe above guarantees room for [notice + live turn].
     // TRIM FROM THE MIDDLE, NOT THE FRONT. `out_body[0]` is the goal turn every
     // strategy deliberately pins (`compact`/`truncate` both put it first) and the
-    // last entry is the live turn. Taking from the front silently undid the pin —
-    // the exact regression the pin exists to prevent, re-introduced one layer up
-    // (python, measured 2026-08-28: with a snug window the goal sentence was
-    // absent from the projection entirely, in both strategies).
+    // last entry is the live turn. Taking from the front silently undoes the pin —
+    // with a snug window the goal sentence would be absent from the projection
+    // entirely, in both strategies.
     let mut out_body = proj.body;
     let over = |body: &[Value]| -> bool {
         let mut probe = system_block.clone();
@@ -329,8 +327,8 @@ pub async fn project_context(
                 "strategy": strat_name, "dropped_messages": dropped_n,
                 "kept_messages": out_body.len(), "summarized": summarized,
                 // WHAT THE STRATEGY DID, on the event a probe scores from —
-                // python's detail. Without these the fold arm read `folded=0`
-                // with four fold levels in its store (2026-09-12).
+                // python's detail. Without these the fold arm reads `folded=0`
+                // with fold levels in its store.
                 "pinned_facts": 0,
                 "stripped": proj.stripped,
                 "stripped_bytes": proj.stripped_bytes,
@@ -381,7 +379,7 @@ pub async fn derive_reaction(
 /// `append`) — a model persists what it must keep as plain files.
 ///
 /// Pure, so the SHAPES it recognizes can be pinned. It reads exactly what
-/// dispatch reads: an UNTERMINATED envelope is no call (owner, 2026-10-04), so it
+/// dispatch reads: an UNTERMINATED envelope is no call, so it
 /// is no reaction either.
 pub fn reaction_from(self_id: &str, turns: &[Value]) -> Value {
     let mut recalled = false;
@@ -427,7 +425,7 @@ mod tests {
 
     #[test]
     fn the_reaction_reader_sees_what_dispatch_saw() {
-        // AN UNTERMINATED ENVELOPE IS NOT A CALL (owner, 2026-10-04): dispatch
+        // AN UNTERMINATED ENVELOPE IS NOT A CALL: dispatch
         // skips it, and the reaction reader must see the same thing dispatch saw.
         let turns = [
             turn(r#"<call name="send"><target_id>me</target_id><type>recall</type>"#),

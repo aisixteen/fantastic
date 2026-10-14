@@ -201,10 +201,9 @@ async def _boot(id, payload, agent):
                 "type": "create_agent",
                 **spec,
                 # AFTER the spread, not before. A manifest entry carrying its
-                # own `parent_id` used to win and place the agent somewhere
-                # else entirely — measured 2026-08-28: an entry naming the
-                # root landed as the ROOT's child, not the loader's, silently
-                # breaking the "roster is the loader's subtree" guarantee this
+                # own `parent_id` must not win and place the agent somewhere
+                # else entirely — an entry naming the root would land as the
+                # ROOT's child, not the loader's, silently breaking the "roster is the loader's subtree" guarantee this
                 # docstring states and that owned-subtree delete depends on.
                 "parent_id": agent.id,
             }

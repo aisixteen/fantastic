@@ -123,7 +123,7 @@ async def _until_calls(fp, n: int, timeout: float = 5.0) -> bool:
 async def test_done_means_one_pass(seeded_kernel, store_agent, fake_providers):
     """THE point of model-owned routing: a one-pass task costs ONE pass. A turn
     that answers and calls `done` is finished — nothing schedules another turn.
-    (A turn with NO call is nudged: all is tool calls, 2026-09-09.)"""
+    (A turn with NO call is nudged: all is tool calls.)"""
     oid = await _make_ollama(seeded_kernel)
     fp = _FakeProvider([['the answer <call name="done"></call>'], ["must never run"]])
     fake_providers[oid] = fp
@@ -307,9 +307,9 @@ async def test_malformed_call_is_reported_not_swallowed(
 async def test_a_send_with_no_payload_names_what_is_missing(
     seeded_kernel, store_agent, fake_providers
 ):
-    """Measured 2026-08-06: a payload-less send reached the handler as `None` and
-    came back `'NoneType' object has no attribute 'get'` — a Python error about our
-    internals, naming neither the omitted verb nor the agent. It must say what was
+    """A payload-less send must not reach the handler as `None` and come back
+    `'NoneType' object has no attribute 'get'` — a Python error about our internals,
+    naming neither the omitted verb nor the agent. It must say what was
     missing instead, and must never dispatch."""
     oid = await _make_ollama(seeded_kernel)
     bad = '<call name="send"><target_id>totals</target_id></call>'
@@ -332,10 +332,9 @@ async def test_a_send_with_no_payload_names_what_is_missing(
 async def test_an_unparseable_call_reaches_the_model_as_an_error(
     seeded_kernel, store_agent, fake_providers
 ):
-    """END TO END, which the parser-level tests do not cover — and the gap that let
-    this ship broken: on 2026-08-06 `malformed_calls` returned the right report for
-    gemma's truncated `create_agent` and the model still received nothing, so the
-    run went on believing its agent existed."""
+    """END TO END, which the parser-level tests do not cover: a right report from
+    `malformed_calls` for a truncated `create_agent` is worthless unless the model
+    receives it — otherwise the run goes on believing its agent exists."""
     oid = await _make_ollama(seeded_kernel)
     broken = (
         '<call name="send"><target_id>kernel</target_id><type>create_agent'
@@ -507,11 +506,9 @@ async def test_a_raising_handler_comes_back_as_an_error_not_a_dead_chain(
 ):
     """A handler that RAISES must reach the model as `{"error": ...}`.
 
-    This ran bare until 2026-08-02: a file_bridge whose ingress rule could not be
-    resolved raised out of its handler, the exception escaped `_route_reply`, and
-    asyncio logged "Task exception was never retrieved". The model got no reply, no
-    error and no further turn — the run stopped mid-verification and looked
-    finished. An exception is a result; the model can act on one and cannot act on
+    Run bare, an exception raised out of a handler escapes `_route_reply` and
+    asyncio logs "Task exception was never retrieved". The model gets no reply, no
+    error and no further turn — the run stops and looks finished. An exception is a result; the model can act on one and cannot act on
     silence."""
     import types
     from kernel import register_unlisted
@@ -567,9 +564,9 @@ async def test_thinking_is_parsed_but_not_persisted(
     """A tool call written in the ANSWER dispatches; the deliberation is NOT kept.
 
     Both halves matter and they pull opposite ways. Read only `content` and a turn
-    spent reasoning is an empty completion that silently ends the chain (gemma4:12b,
-    2026-08-02). Keep the reasoning and it is re-sent in every later prompt —
-    gemma's 3,800-char turn-1 deliberation crowding out the task — which is also
+    spent reasoning is an empty completion that silently ends the chain. Keep the
+    reasoning and it is re-sent in every later prompt — an early long deliberation
+    crowding out the task — which is also
     against every vendor's guidance for reasoning models. So: parse the full text,
     persist the stripped text."""
     from ai_core.core import THINK_CLOSE, THINK_OPEN, without_thinking

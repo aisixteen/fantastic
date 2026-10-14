@@ -1,13 +1,13 @@
-// IO-3 — JSON nesting depth is bounded where python's wire loads refuses.
+// JSON nesting depth is bounded where python's wire loads refuses.
 //
-// The scanner used to recurse once per `[`/`{` with no bound: one 100k-deep
-// frame overflowed the parsing thread's stack (an NIO event-loop thread, 512 KiB)
-// and killed the whole kernel BEFORE any gate. Python never crashes there:
+// A scanner that recursed once per `[`/`{` with no bound would let one 100k-deep
+// frame overflow the parsing thread's stack (an NIO event-loop thread, 512 KiB)
+// and kill the whole kernel BEFORE any gate. Python never crashes there:
 // CPython's json scanner charges every container it enters against
 // `sys.getrecursionlimit()` (1000), and `io_bridge.loads` refuses with
 // RecursionError "maximum recursion depth exceeded while decoding a JSON array
-// from a unicode string" (`decode_frame` → "bad text frame: …"). Measured
-// 2026-10-03, CPython 3.11, `loads` called with no caller frames above it: 994
+// from a unicode string" (`decode_frame` → "bad text frame: …"). With
+// CPython 3.11, `loads` called with no caller frames above it: 994
 // nested containers parse, the 995th is refused — the deepest python ever takes.
 
 import Foundation

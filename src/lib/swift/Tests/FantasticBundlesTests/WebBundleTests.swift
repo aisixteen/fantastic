@@ -1,4 +1,4 @@
-// A11 — the `web` host bundle and its two leg bundles, against python's
+// The `web` host bundle and its two leg bundles, against python's
 // `web/tools.py`, `web_rest/tools.py`, `web_ws/tools.py`.
 
 import FantasticIoBridge
@@ -96,7 +96,7 @@ struct WebBundleTests {
         await kernel.send([Item(AgentId(id), payload)])[0].result
     }
 
-    // MARK: - readmes (A11.2, A11.6)
+    // MARK: - readmes
 
     @Test func webReadmeIsPythonVerbatim() throws {
         let expected = try String(
@@ -116,9 +116,9 @@ struct WebBundleTests {
         #expect(WebWSBundle().readme == expected)
     }
 
-    // MARK: - reflect keys (A11.22, A11.25, A11.26)
+    // MARK: - reflect keys
 
-    /// A11.22 — python's `_reflect` keys, in order. No `kind`, no `emits`;
+    /// Python's `_reflect` keys, in order. No `kind`, no `emits`;
     /// `routes` is the browser-facing contract dict, not an asset table.
     @Test func webReflectKeysMatchPython() async throws {
         let kernel = try await startWebKernel()
@@ -143,7 +143,7 @@ struct WebBundleTests {
                 == ["reflect", "boot", "stop", "mount", "unmount", "fetch_file"])
     }
 
-    /// A11.26 — the ws leg's reflect: `[id, sentence, path_pattern, <describe>,
+    /// The ws leg's reflect: `[id, sentence, path_pattern, <describe>,
     /// verbs]`, no `kind`.
     @Test func webWsReflectKeysMatchPython() async {
         let kernel = makeKernelWithAll()
@@ -166,7 +166,7 @@ struct WebBundleTests {
         #expect(r["sealed"].asBool == true, "\(r)")
     }
 
-    /// A11.25 — the REST leg's reflect: URL patterns, curl examples and this
+    /// The REST leg's reflect: URL patterns, curl examples and this
     /// leg's auth posture; no `kind`.
     @Test func webRestReflectKeysMatchPython() async {
         let kernel = makeKernelWithAll()
@@ -196,9 +196,9 @@ struct WebBundleTests {
                 == "curl http://<host>/rest/_reflect           # root reflect (tree)")
     }
 
-    // MARK: - unknown verbs (A11.4)
+    // MARK: - unknown verbs
 
-    /// A11.4 — the legs answer python's coded `unhandled` refusal (carrying the
+    /// The legs answer python's coded `unhandled` refusal (carrying the
     /// verb); the host answers its own plain `{error}` dict. `shutdown` is not a
     /// verb on any of the three, and `boot` answers None on both legs.
     @Test func unknownVerbIsUnhandledRefusal() async throws {
@@ -234,10 +234,10 @@ struct WebBundleTests {
         #expect(none?["error"].asString == "web: unknown type None", "\(String(describing: none))")
     }
 
-    // MARK: - lifecycle (A11.23, A11.24, A11.30, A11.1)
+    // MARK: - lifecycle
 
-    /// A11.23 — boot/stop/mount/unmount answer python's bodies; the swift-only
-    /// `asset`/`render`/`shutdown` cases are gone.
+    /// Boot/stop/mount/unmount answer python's bodies; there are no
+    /// `asset`/`render`/`shutdown` cases.
     @Test func webLifecycleRepliesMatchPython() async throws {
         let kernel = try await startWebKernel()
         defer { Task { _ = await call(kernel, "web", .object(["type": .string("stop")])) } }
@@ -279,7 +279,7 @@ struct WebBundleTests {
         #expect(cold["error"].asString == "web.unmount: not running", "\(cold)")
     }
 
-    /// A11.24 — `rec.port` is REQUIRED with no default: a missing or zero port
+    /// `rec.port` is REQUIRED with no default: a missing or zero port
     /// fails the verb RAISED, and the record never gains `running`.
     @Test func webBootWithoutPortRefuses() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
@@ -308,7 +308,7 @@ struct WebBundleTests {
         #expect(refl["port"].asInt == 70000, "\(refl)")
     }
 
-    /// A11.24 — the listener never writes `port`/`running` back into the
+    /// The listener never writes `port`/`running` back into the
     /// record (swift's `list_agents` showed `running:true`).
     @Test func webBootDoesNotWriteRunningIntoRecord() async throws {
         let kernel = try await startWebKernel()
@@ -322,7 +322,7 @@ struct WebBundleTests {
         #expect(web["port"].asInt == Int64(kernel.httpPort()), "\(web)")
     }
 
-    /// A11.30 — every child surface is mounted BEFORE the listener accepts, so
+    /// Every child surface is mounted BEFORE the listener accepts, so
     /// no request can arrive at a half-built route table.
     @Test func webBootMountsBeforeListening() async throws {
         let kernel = try await startWebKernel()
@@ -345,7 +345,7 @@ struct WebBundleTests {
         #expect(probe.sawListener() == false, "get_routes ran after the port was accepting")
     }
 
-    /// A11.1 — boot ANNOUNCES the bind by sending `say` to `cli`; the stderr
+    /// Boot ANNOUNCES the bind by sending `say` to `cli`; the stderr
     /// line is the fallback for when no renderer answers.
     @Test func webBootAnnouncesSayToCli() async throws {
         let kernel = try await startWebKernel()
@@ -380,7 +380,7 @@ struct WebBundleTests {
                 + " · rest/ws are children (reflect kernel for ids)", "\(said)")
     }
 
-    /// ARCH2-10 — the announcement names the host the listener BOUND (`host` on
+    /// The announcement names the host the listener BOUND (`host` on
     /// the record), not a hardcoded `127.0.0.1`: a host bound elsewhere does not
     /// answer there. Twin of python `test_boot_announces_the_bound_host`.
     @Test func webBootAnnouncesTheBoundHost() async throws {
@@ -414,7 +414,7 @@ struct WebBundleTests {
                 + " · rest/ws are children (reflect kernel for ids)", "\(said)")
     }
 
-    // MARK: - browser_reachable (A11.22)
+    // MARK: - browser_reachable
 
     /// python's `_browser_reachable` asks the REAL gates: both halves of the
     /// call gate AND the served agent's own io leg.

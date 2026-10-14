@@ -1,12 +1,8 @@
-// One precondition, one code (#109).
+// One precondition, one code.
 //
-// Five verbs share ONE precondition — the leg has a live transport — and used to
-// answer it in three shapes: `list_peers` with `reason:"not_connected"`,
-// `forward`/`watch_remote`/`unwatch_remote` with `reason:"not_attached"` and the
-// text "no bridge attached", `set_identity`/`watch_directory` with
-// `not_attached` and the repair buried in prose. `not_attached` is not in the
-// closed vocabulary at all, so a caller branching on `NOT_CONNECTED` handled one
-// of them and silently mishandled the rest.
+// Five verbs share ONE precondition — the leg has a live transport — and answer
+// it with ONE code from the closed vocabulary, `not_connected`, so a caller
+// branching on `NOT_CONNECTED` handles all five.
 
 import FantasticJSON
 import FantasticKernel
@@ -38,7 +34,7 @@ struct KernelBridgeRefusalTests {
         ["type": "list_peers"] as JSON,
         ["type": "watch_directory"] as JSON,
         // `unwatch_directory` is NOT here: python answers `{ok:true}` pre-boot
-        // (stopping something never started is a no-op), and swift now matches —
+        // (stopping something never started is a no-op), and swift matches —
         // `RelayTransportTests.directoryRepliesMatchPython` pins that half.
         ["type": "set_identity", "role": "manager"] as JSON,
     ])

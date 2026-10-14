@@ -8,8 +8,8 @@
 // every turn). Mirrors Python `ai_core/strategies` / Rust `strategies/`.
 //
 // Selection is STATIC per agent (`context_strategy`, default `compact`); no
-// runtime try-X-else-Y (NO-FALLBACKS). `memgpt` was removed — its persist
-// nudge is now universal in the seam notice.
+// runtime try-X-else-Y (NO-FALLBACKS). The persist
+// nudge is universal in the seam notice.
 
 import FantasticJSON
 import FantasticKernel
@@ -132,11 +132,8 @@ public enum AIStrategies {
     /// Python `_make_summarizer`.
     ///
     /// The input is NOT char-capped: python hands the span over whole. A
-    /// REASONING MODEL THINKS OUT LOUD HERE TOO. Measured 2026-09-06 (python)
-    /// across two e2e runs: 172 of 172 model-written folds carried a title
-    /// beginning `<think>The user wants me to summarize…` — the summary was
-    /// buried under the reasoning and every fold read as noise. Side calls strip
-    /// like the main turn.
+    /// REASONING MODEL THINKS OUT LOUD HERE TOO, burying the summary under the
+    /// reasoning. Side calls strip like the main turn.
     public static func makeSummarizer(_ provider: any AIProvider) -> AISummarizer {
         { msgs, maxTokens in
             let rendered = msgs.map { m -> String in
@@ -198,10 +195,8 @@ public enum AIStrategies {
         // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it
         // is the first thing the overflow split takes. A summary is a lossy retelling;
         // the one turn that must survive verbatim is the instruction the whole run
-        // serves. Measured 2026-08-20 (python, four live runs): the agent reached the
-        // correct conclusion, then ended "healthy budget, no tasks" — it had not refused
-        // to act, it no longer knew what it was doing. `truncate` already pins this
-        // turn; `compact` did not. Cost is one turn of budget, charged before the tail.
+        // serves: without it the agent no longer knows what it is doing. `truncate`
+        // pins this turn too. Cost is one turn of budget, charged before the tail.
         let first = body[0]
         let headCost = AIContext.estimateOne(first)
         let kept = fitTail(recent, max(0, avail - headCost))

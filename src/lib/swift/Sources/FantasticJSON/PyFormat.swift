@@ -4,7 +4,7 @@
 // `{x!r}`, `str(x)`, `json.dumps(x)`, `str(OSError)` and `int(x)`. A port that
 // approximates any of them diverges byte-for-byte on every text that embeds one.
 // These live here, in FantasticJSON, because every target already depends on it:
-// one copy serves the bundles, the AI core and the CLI (owner decision D1(b)).
+// one copy serves the bundles, the AI core and the CLI.
 //
 // Each helper names the CPython routine it mirrors; the pins in
 // `Tests/FantasticJSONTests/PyFormatTests.swift` were measured with CPython 3.11.
@@ -393,7 +393,7 @@ public func pyErrorText(_ error: Error) -> String {
 /// strip, optional sign, Unicode decimal digits, single `_` between digits);
 /// None, a list or a dict is python's `TypeError`, an unparseable str its
 /// `ValueError`. A value wider than `Int` is `OverflowError` — python holds it,
-/// this cannot (D13).
+/// this cannot.
 public func pyInt(_ v: JSON) throws(PyError) -> Int {
     switch v {
     case .bool(let b): return b ? 1 : 0

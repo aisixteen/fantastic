@@ -1,17 +1,13 @@
 """Guards on the ROOT and on the record fields that name substrate wiring.
 
-Measured 2026-09-02:
-
-- `delete_agent id=<root>` cascaded the whole tree and answered `{"deleted": true}`,
-  leaving a process with no control surface. The guard existed only on
-  `Kernel.delete`, which nothing calls.
-- `update_agent` silently DROPPED `handler_module` and the reserved keys
-  (`root_path`/`ctx`/`parent`) and still answered success, so a caller believed a
-  change had landed that never did — and in python the reserved keys were written
-  into the record, which the loader then refused on the next boot.
-- A verb a bare agent cannot answer came back as a reason-less `{error: …}` which
-  `_apply_reflect_flags` then decorated with `kernel_verbs`/`tree`/`more` — a
-  refusal wearing a reflect's clothes.
+- `delete_agent id=<root>` must not cascade the whole tree and answer
+  `{"deleted": true}`, leaving a process with no control surface.
+- `update_agent` must not silently DROP `handler_module` and the reserved keys
+  (`root_path`/`ctx`/`parent`) and still answer success, nor write the reserved
+  keys into the record, which the loader would refuse on the next boot.
+- A verb a bare agent cannot answer must not come back as a reason-less
+  `{error: …}` that `_apply_reflect_flags` decorates with `kernel_verbs`/`tree`/
+  `more` — a refusal wearing a reflect's clothes.
 """
 
 from __future__ import annotations
@@ -115,13 +111,9 @@ async def test_a_refusal_is_not_decorated_into_a_reflect(seeded_kernel):
 
 
 async def test_get_is_not_a_kernel_verb(seeded_kernel):
-    """`get` is NOT one of the kernel verbs — here, or in rust/swift.
-
-    Both ported runtimes answered it (returning the record, or `null` for an
-    unknown id) and advertised it in `kernel_verbs`, so a model reading one of
-    their reflects learned a verb this reference runtime does not have (seen in
-    the reflect body of e2e `agentic.build:rust`, 2026-09-03). A record is read
-    with `list_agents` or a `reflect`.
+    """`get` is NOT one of the kernel verbs — in any runtime, so a model never
+    learns from one runtime's reflect a verb another does not have. A record is
+    read with `list_agents` or a `reflect`.
     """
     r = (
         await seeded_kernel.send(

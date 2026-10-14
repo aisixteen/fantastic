@@ -1,4 +1,4 @@
-//! `tail` / `grep` — a job's output SO FAR (owner, 2026-10-11). A pipe job's
+//! `tail` / `grep` — a job's output SO FAR. A pipe job's
 //! stdout and stderr land in `status` only when it ends; while it runs, a caller
 //! reads the live line ring: the last lines, or the lines matching a regex, each
 //! `{n, stream, line}`. A PTY job's one stream is its ring, split into lines.

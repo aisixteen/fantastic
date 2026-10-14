@@ -155,12 +155,11 @@ test("an untrusted iframe's reach is its AGENT's, not the operator's", async () 
 });
 
 test("joining an execution is gated on the verb THAT execution ran", async () => {
-  // Measured in python 2026-08-28: the gate was checked against the JOINER's own
-  // verb, then the JOIN handed back the ORIGINAL call's outcome — so a caller
-  // granted only a harmless verb reused another's id and received its result
-  // verbatim. Joining is equivalent to having made that call, so that is the
+  // Gating the JOINER's own verb while the JOIN hands back the ORIGINAL call's
+  // outcome would let a caller granted only a harmless verb reuse another's id
+  // and receive its result verbatim. Joining is equivalent to having made that call, so that is the
   // question the gate must be asked. Reachable from the wire, where a frame id
-  // IS the execution id (#38) and two legs can name one id.
+  // IS the execution id and two legs can name one id.
   const k = tree();
   k.registerBundle("vault.tools", (_id, payload) =>
     payload["type"] === "steal" ? { gold: "ALL OF IT" } : { ok: true },

@@ -16,7 +16,7 @@
 //! - `GET  /<self_id>/_reflect` → kernel.reflect (root tree)
 //! - `GET  /<self_id>/_reflect/{target_id}` → reflect on a specific agent
 //!
-//! GATE FIRST, THEN THE BODY (audit IO-4, 2026-10-03). A POST is judged by the
+//! GATE FIRST, THEN THE BODY. A POST is judged by the
 //! leg's ingress rule on what the request says up front — its target and its
 //! `X-Fantastic-Auth` credential — and only an admitted request's body is read,
 //! at most 16 MiB (io_bridge's `MAX_FRAME`, the one frame cap every wire leg

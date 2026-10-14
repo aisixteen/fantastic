@@ -63,7 +63,7 @@ async fn a_named_id_runs_the_handler_exactly_once() {
 
 #[tokio::test]
 async fn concurrent_sends_of_one_id_join_and_run_the_body_once() {
-    // C10: once-only under concurrency. Both callers get the SAME outcome and
+    // Once-only under concurrency. Both callers get the SAME outcome and
     // exactly one dispatch happens — this is what makes a double-click safe.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
@@ -113,10 +113,9 @@ async fn an_unnamed_execution_is_ledgered_under_its_pid() {
 
 #[tokio::test]
 async fn ledger_row_key_order_matches_python() {
-    // C16: python's row is exactly `{id, target, attempts, retries, named,
+    // Python's row is exactly `{id, target, attempts, retries, named,
     // name?, status, outcome?}` — `name` OMITTED (not `null`) when the
-    // execution is unnamed. Measured: rust used to carry `name:null` on
-    // every row.
+    // execution is unnamed.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "l_key_order").await;
@@ -188,7 +187,7 @@ async fn a_retry_budget_re_dispatches_under_the_same_id() {
 
 #[tokio::test]
 async fn a_spent_budget_parks_a_dead_letter_that_never_re_arms() {
-    // C12: failed work must neither vanish nor loop. It parks WITH its outcome,
+    // Failed work must neither vanish nor loop. It parks WITH its outcome,
     // queryable; a retry is an explicit NEW id, never a silent re-run.
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
@@ -256,7 +255,7 @@ async fn a_joiner_timeout_bounds_only_its_own_wait() {
         .await
         .remove(0);
     assert_eq!(joined.status, Status::TimedOut);
-    // C31: python's prose, verbatim — the JOINED execution's id (bare
+    // Python's prose, verbatim — the JOINED execution's id (bare
     // digits, not this joiner's own pid-less dispatch), plus `task_id`.
     let exec_id = joined.result["task_id"]
         .as_i64()
@@ -408,14 +407,11 @@ async fn a_cancelled_execution_stays_cancelled() {
     assert_eq!(out.attempts, 1, "cancel must not spend the budget");
 }
 
-/// Joining is authorized against the verb THAT EXECUTION RAN.
-///
-/// The gate used to be asked the wrong question on a join — the joiner's own
-/// payload verb — and the JOIN then handed back the ORIGINAL call's outcome, a
-/// reply for a verb the joiner never had authorized. Measured in python
-/// 2026-08-28: a caller granted only a harmless verb reused another's id and
-/// received its secret verbatim. Dedup was correct; the RESULT crossed an
-/// authorization boundary.
+/// Joining is authorized against the verb THAT EXECUTION RAN — never the
+/// joiner's own payload verb, since the JOIN hands back the ORIGINAL call's
+/// outcome: otherwise a caller granted only a harmless verb could reuse
+/// another's id and receive its secret verbatim. Dedup is correct; the RESULT
+/// must not cross an authorization boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn joining_is_gated_on_the_verb_that_execution_ran() {
     let sh = Arc::new(Shared::default());
@@ -640,7 +636,7 @@ async fn the_ledger_view_is_caller_scoped() {
     assert!(seen_by(Some(&a)), "the originator lost its own row");
 }
 
-/// C22: the ledger row stores the execution's ORIGINAL PAYLOAD, and the join
+/// The ledger row stores the execution's ORIGINAL PAYLOAD, and the join
 /// denial gates the JOINED call's verb — not the verb the joiner happened to send.
 /// A joiner granted only `ps` must not be handed the record a `create_agent` made.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

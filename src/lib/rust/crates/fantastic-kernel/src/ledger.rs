@@ -7,8 +7,8 @@
 //! what a supplied `create_agent` id already means, applied to dispatch:
 //!
 //! - unknown id ⇒ dispatch and record (a name, not a new mechanism)
-//! - in flight  ⇒ JOIN — no second run (C10: once-only under concurrency)
-//! - settled    ⇒ the recorded outcome returns, the handler never runs (C9/C11)
+//! - in flight  ⇒ JOIN — no second run (once-only under concurrency)
+//! - settled    ⇒ the recorded outcome returns, the handler never runs
 //!
 //! A settled execution that was FLUSHED lives on as its `call` + `settle` rows in
 //! the kernel's memory store; `send` looks a name up there
@@ -122,7 +122,7 @@ impl Ledger {
     /// Claim `exec_id` for an execution, or discover it is already taken.
     ///
     /// `exec_id` is the KERNEL's id. `caller_id` is the CALLER's raw id as
-    /// given — a string name or an int (C38) — used ONLY to render the rebind
+    /// given — a string name or an int — used ONLY to render the rebind
     /// refusal in python's exact words; `name` is `Some` only for the
     /// string-name case (only a named row is a dedup contract, and the ring
     /// evicts the unnamed first).
@@ -144,7 +144,7 @@ impl Ledger {
             // a different intent wearing the same name — returning the other
             // execution's outcome would be silently wrong, so it refuses.
             //
-            // PYTHON'S PROSE, verbatim (r2 correction: BOTH ledgers render the
+            // PYTHON'S PROSE, verbatim (BOTH ledgers render the
             // CALLER's raw id, never the minted exec_id — `py_repr` for a
             // string, bare digits for an int; the target names via `py_repr`
             // too; no `bound_to`).
@@ -376,7 +376,7 @@ impl Ledger {
             .collect()
     }
 
-    /// PUT BACK ONE FLUSHED, SETTLED EXECUTION — the durable half of C9, python
+    /// PUT BACK ONE FLUSHED, SETTLED EXECUTION — the durable half of dedup, python
     /// `recall_executions`' `ledger_put`. `call` is its `call` row (target at
     /// `agent`, the payload, the retry budget, the name, the caller) and
     /// `outcome` the settle row's `outcome`: a NAMED call's settle kept its
@@ -521,17 +521,17 @@ pub fn is_dead(status: Status) -> bool {
 }
 
 /// WHAT A SETTLE ROW KEEPS of an outcome — the one definition (python
-/// `stored_outcome`, decided 2026-09-26).
+/// `stored_outcome`).
 ///
 /// A NAMED call keeps its whole result: its name is a dedup contract, and a
-/// re-send returns the recorded outcome (C9). A DEAD LETTER keeps its error text:
+/// re-send returns the recorded outcome. A DEAD LETTER keeps its error text:
 /// someone has to read why it died. Every other settle keeps a digest —
 /// `{status, bytes}`.
 ///
 /// Why not the body everywhere: the kernel's own store reads are executions too
 /// (the `ledger` projection, every AI agent's head read), so a settle holding its
-/// body re-recorded the store inside the store — measured ~6x growth per `ledger`
-/// call (2 KB → 14.8 MB in five). And a reply body is not persisted anyway: its
+/// body would re-record the store inside the store — geometric growth per
+/// `ledger` call. And a reply body is not persisted anyway: its
 /// receiver holds it in RAM with the one-line `origin` that gets it again.
 ///
 /// `body_as` says how a raw reply body is written where python's dict holds the

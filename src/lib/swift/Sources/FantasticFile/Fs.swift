@@ -194,8 +194,8 @@ public func fsReadText(_ root: String, _ path: String, base: String) throws(FsEr
 /// user with no group/other permission bits) through ONE open. `O_NOFOLLOW`
 /// refuses a symlink in the leaf's place, and the OPEN DESCRIPTOR is what is
 /// judged (`fstat`) and read, so nothing can swap the file between the check and
-/// the read (audit F5, 2026-10-03: an `lstat` of the path and then a read of the
-/// path again was a window). `O_NONBLOCK` so a FIFO planted there cannot hang the
+/// the read (an `lstat` of the path and then a read of the
+/// path again would be a window). `O_NONBLOCK` so a FIFO planted there cannot hang the
 /// open — it is judged and refused like any other non-regular entry. Throws an
 /// `FsError` carrying `notPrivate` (nothing read) when the entry is not private;
 /// the `OSError` text (`[Errno 2] …`) when absent.
@@ -261,8 +261,8 @@ public func fsWriteBytes(
     let target = try fsResolve(root, path, base: base)
     try pyMkdirParents(parentPath(target))
     // A FRESH tmp per write, created exclusively and never through a link: a
-    // fixed `<name>.tmp` followed whatever symlink sat at that name (a write
-    // escaped the root) and was shared by concurrent writers (audit 2026-10-14).
+    // fixed `<name>.tmp` would follow whatever symlink sat at that name (a write
+    // escaping the root) and be shared by concurrent writers.
     let tmp = target + ".tmp." + tokenHex(4)
     let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode ?? 0o666)
     if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }

@@ -6,7 +6,7 @@
                   --proofs … --landed … [--root-alias core]
     diff.py status --diff <stamp>/diff
 
-Three things it will not do, each for a reason the round-1/2 probes taught:
+Three things it will not do:
 
   * it does not normalise anything `rules.yaml` does not name, and every rule it
     applies is recorded on the line it changed, so a suppressed difference can
@@ -76,12 +76,9 @@ class Norm:
     ID_KEYS = {"id", "ids", "parent", "task_id", "job_id", "message_id", "pid", "refs", "expand",
                "after", "next", "bundles_next", "view_ids", "killed", "covers",
                # an AI status event's `msg` — the id of the message it is about.
-               # Measured 2026-09-30 on the python self-diff: `ai_paths` events
-               # `msg` 1177 against 1180, every relationship the same.
                "msg",
                # a streaming part's anchor — the message id the turn answers
-               # (`part_start.re`, owner 2026-10-04); measured on the python
-               # self-diff: `re` 187 against 186, every relationship the same.
+               # (`part_start.re`).
                "re"}
     COUNT_KEYS = {"bytes", "size", "body_len", "content-length", "__bytes_len__"}
     OSPID_KEYS = {"pid"}
@@ -89,10 +86,9 @@ class Norm:
 
     HARNESS_ID = re.compile(r"^(wirecap-|p-|p:|x-|s-|kv-|CASE=|reuse-|parity-|probe$)")
 
-    #: N8 — a port in TEXT only where a HOST or the word `port` puts one. The
-    #: round-3 form was a bare `:(\d{4,5})`, which turned `"max_tokens":4096` into
-    #: `<PORT:?>` in every prompt the capture recorded: a rule wide enough to eat
-    #: an item. Measured on the python self-diff, 2026-09-20.
+    #: N8 — a port in TEXT only where a HOST or the word `port` puts one. A bare
+    #: `:(\d{4,5})` would turn `"max_tokens":4096` into `<PORT:?>` in every
+    #: prompt: a rule wide enough to eat an item.
     PORT_AFTER_HOST = re.compile(
         r"(?<![\w.])((?:\d{1,3}(?:\.\d{1,3}){3}|localhost|\[::1\])):(\d{4,5})\b")
     PORT_AFTER_WORD = re.compile(
@@ -169,9 +165,9 @@ class Norm:
             # field is the runtime naming itself.
             (r"(\[fantastic\] )(python|rust|swift)( ·)", r"\1<RUNTIME>\3"),
             # …and the same reflect field as JSON INSIDE TEXT — a cli stdout, a
-            # REST body recorded as a string — quoted once or more (2026-10-01:
-            # `"runtime": "python"` in `cli/call_reflect_kv.stdout`, 9 lines a port;
-            # `\"runtime\":\"python\"` in a `wire/rest` body). The key-based pass
+            # REST body recorded as a string — quoted once or more
+            # (`"runtime": "python"` in a cli stdout; `\"runtime\":\"python\"`
+            # in a `wire/rest` body). The key-based pass
             # already gives the parsed field `<RUNTIME>`; this is the same value
             # where nothing parsed it.
             (r'(\\*"runtime\\*"\s*:\s*\\*")(python|rust|swift)(\\*")', r"\1<RUNTIME>\3"),
@@ -181,7 +177,7 @@ class Norm:
                 self.fired.add("N2")
             out = new
         # N26 — the ports' bundle CATALOG names `foundation_models_backend`, Apple's
-        # on-device model, which python does not ship (owner 2026-10-04, decision A).
+        # on-device model, which python does not ship.
         # Only that one entry of a `bundles=` list goes; every other name, and the
         # list's order, stay compared. The token counts derived from the longer
         # prompt are residual R-C1-1.
@@ -193,11 +189,10 @@ class Norm:
         # N3 — a minted guid inside TEXT. The key-based pass sees `{"guid": …}` in
         # a reply; it never sees `guid=<hex32>` in the system prompt, `"guid":
         # "<hex32>"` in cli stdout, or the same inside an HTTP body recorded as a
-        # string. Measured: 664 of the 1855 python self-diff lines were this one
-        # token in a stub request body.
+        # string.
         new = re.sub(r"(guid[\"']?\s*[:=]\s*[\"']?)[0-9a-f]{32}\b", r"\1<GUID:hex32>", out)
         # …and as the kernel half of a QUALIFIED caller, `<guid>|<agent>` — every
-        # bridge call names its sender that way (audit 2026-09-28). The agent
+        # bridge call names its sender that way. The agent
         # half stays compared.
         new = re.sub(r"(?<![0-9a-f])[0-9a-f]{32}(?=\|)", "<GUID:hex32>", new)
         if new != out:
@@ -220,7 +215,7 @@ class Norm:
         # N25 — the port's catalog without `foundation_models_backend`, in TEXT:
         # the comma-joined `bundles=…` a system prompt carries and a `"bundles":
         # [...]` id list inside an embedded json document. The PORT side only:
-        # python ships no such bundle (owner, 2026-10-02).
+        # python ships no such bundle.
         if self.runtime != "python":
             new = drop_fm_text(out)
             if new != out:
@@ -232,10 +227,9 @@ class Norm:
             (r"\bsnd_[0-9A-F]{8}\b", "<SEND_ID:snd_HEX8>", "N7"),
             (r"\bsch_[0-9a-f]{6}\b", "<SCH:hex6>", "N7"),
             (r"_ws_[0-9a-f]{6}\b", "<WS_CLIENT:hex6>", "N7"),
-            # an agent id may carry digits (`ai2:3d113b94`, a stream id — 2026-10-04)
+            # an agent id may carry digits (`ai2:3d113b94`, a stream id)
             (r"\b[a-z_][a-z0-9_]*:[0-9a-f]{8}\b", "<CPID:hex8>", "N7"),
-            # a bridge forward's frame id `<leg>-<boot nonce hex12>-<n>` (audit
-            # IO-5): the nonce is minted at every boot; the leg and the count stay.
+            # a bridge forward's frame id `<leg>-<boot nonce hex12>-<n>`: the nonce is minted at every boot; the leg and the count stay.
             (r"\b([a-z_][a-z0-9_]*)-[0-9a-f]{12}-(\d+)\b", r"\1-<NONCE:hex12>-\2", "N7"),
             (r"\b([a-z_]+)-(\d+)\b(?!\S)", r"<CORR:\1-#n>", "N7"),
         ):
@@ -304,11 +298,8 @@ class Norm:
         # <N> tokens and the digests use\n<M>.`, and `<M>` is a token count over
         # the digest block printed right underneath it — a block of
         # `<id> · <kind> · "<title>" · <n>B · ↑<parent>` lines whose ids N4 has
-        # just renamed and whose `<n>B` N10 has just dropped. Measured
-        # 2026-09-21b, `ctx/stub/req_108.bin`: 2141 against 2137, with the
-        # digest lines themselves IDENTICAL after normalisation — the four
-        # tokens are python's four-digit row ids against the ports' three-digit
-        # ones. The budget number beside it is NOT touched here: it is a
+        # just renamed and whose `<n>B` N10 has just dropped, so the estimate
+        # moves with the row ids' digit width. The budget number beside it is NOT touched here: it is a
         # different class (the system block's own size) and it is owned by a
         # residual, so it stays a line.
         new = re.sub(r"(the digests use\s+)\d+", r"\1<EST>", out)
@@ -319,9 +310,7 @@ class Norm:
         # reason. It is `window - reserve - the system block's own token count`,
         # and the system block carries `<RUNTIME>` — a placeholder whose
         # ORIGINAL is 4, 5 or 6 characters (N2), so the derived number is off by
-        # one on a runtime whose name is shorter. Measured 2026-09-21b,
-        # `ctx/req/ai_strip_context_recall.json`: 3869 against 3870, with the
-        # rest of the prompt identical. The INPUTS are compared exactly — the
+        # one on a runtime whose name is shorter. The INPUTS are compared exactly — the
         # window and the reserve in `meta.json` and in the agent record — and so
         # is the SAME number where it is recorded as a FIELD
         # (`$.rows[n].budget`), which is a diff line owned by residual R-N2-1.
@@ -335,11 +324,9 @@ class Norm:
         # ids. The send-to howto every AI system prompt carries shows a header
         # `[from solver_1 · to solver_2, solver_3 · msg 412]` and a list
         # `<ids><item>12</item><item>15</item></ids>`; both shapes are N4 anchors,
-        # so the example numbers were renamed like ids — and a REAL row that
-        # happened to be 412 then shared the example's placeholder on one run and
-        # not on the other. Measured 2026-10-02 on the python self-diff,
-        # `ctx/req/ai_compact_main_t11.json`: `↑<ID#3>` against `↑<ID#x1>`, the two
-        # runs' row ids 3 apart. The example text stays compared, verbatim.
+        # so renaming them like ids would let a REAL row that happens to be 412
+        # share the example's placeholder on one run and not on the other. The
+        # example text stays compared, verbatim.
         for doc, lit in self.DOC_EXAMPLES:
             if doc in out:
                 out = out.replace(doc, lit)
@@ -347,18 +334,17 @@ class Norm:
         # N4 text anchors.
         for pat in (r"\[reply to (\d+)", r"↑(\d+)",
                     # the same arrow ESCAPED, as a frame's `text` carries it
-                    # (`\u2191118` — 2026-10-01, `wire/frames` 6 lines a port)
+                    # (`\u2191118`)
                     r"\\+u2191(\d+)",
                     r"in batch (\d+)", r"<pid>(\d+)</pid>",
                     r"· msg (\d+)\]",
                     # …and before the stream a message was previewed as
-                    # (`[from ai2 · msg 1395 · stream ai2:…]`, owner 2026-10-04)
+                    # (`[from ai2 · msg 1395 · stream ai2:…]`)
                     r"· msg (\d+) · stream ",
                     r"<task_id>(\d+)</task_id>", r"<message_id>(\d+)</message_id>", r"\[fold (\d+) ·", r"\[recall (\d+) ·",
                     r"msg (\d+) · re (\d+)", r"joined execution (\d+)", r"(?m)^(\d+) · ",
                     # the dedup note a settled reply carries — `[identical to the
-                    # reply in row 718 — the same 6205 bytes …]`. Measured
-                    # 2026-09-30 on the python self-diff (718 against 721).
+                    # reply in row 718 — the same 6205 bytes …]`.
                     r"reply in row (\d+)",
                     # The same digest line, reached as the RAW request body the
                     # stub recorded: there the newline is still `\` `n` inside a
@@ -366,7 +352,7 @@ class Norm:
                     r"\\n(\d+) · "):
             # BY SPAN, not `.replace`: the id's digits can also sit inside the
             # anchor itself — `\u2191` then id 91 is `\u219191`, and a replace of
-            # "91" rewrote the arrow's own code too (2026-10-04, python self-diff).
+            # "91" would rewrite the arrow's own code too.
             out = re.sub(pat, lambda m: (
                 m.group(0)[:m.start(1) - m.start(0)]
                 + self._id_placeholder(int(m.group(1)))
@@ -375,9 +361,7 @@ class Norm:
         # into a system prompt (`next_id=1001`). The kernel reserves ids in
         # blocks and persists the block's end, so the mark says how many ids the
         # run had consumed when it was rendered — and the loader's debounced
-        # persistence consumes a different number on every run. Measured
-        # 2026-09-30 on the python self-diff: `next_id=2001` against `1001` in
-        # `store/stub/req_003.bin`, the rest of the prompt identical. Its
+        # persistence consumes a different number on every run. Its
         # PRESENCE and place stay compared.
         new = re.sub(r"(\bnext_id=)\d+\b", r"\1<NEXT_ID>", out)
         if new != out:
@@ -402,17 +386,15 @@ class Norm:
             return m.group(1) + re.sub(
                 r"\d+", lambda mm: self._id_placeholder(int(mm.group(0))), m.group(2)) + m.group(3)
         # `covers` too: a ledger flush row names the executions it wrote, and the
-        # memory store's state event quotes that row as embedded json (measured
-        # 2026-10-02, `wire/frames.jsonl` `"covers": [717, …]` against `[720, …]`,
-        # the runs' ids 3 apart). `\\?"` — the same document quoted once more.
+        # memory store's state event quotes that row as embedded json.
+        # `\\?"` — the same document quoted once more.
         out = re.sub(r'(\\?"(?:expand|ids|refs|view_ids|covers)\\?"\s*:\s*\[)([\d,\s]*)(\])',
                      _renumber_list, out)
         # N4 — a minted id inside an EMBEDDED json document (the fold prompt
         # quotes the rows it is folding as json). `pid` is left to N5: that one
         # is the operating system's.
         # `msg` too: an origin line quotes the `{to, msg}` it was sent with
-        # (`origin: readings reflect {"to": […], "msg": 1414}`) — measured
-        # 2026-09-30 on the python self-diff, 1414 against 1408.
+        # (`origin: readings reflect {"to": […], "msg": 1414}`).
         out = re.sub(r'(\\?"(?:id|task_id|job_id|message_id|parent_row|row_id|msg|re)\\?"\s*:\s*)(\d+)(?![\d.])',
                      lambda m: m.group(1) + self._id_placeholder(int(m.group(2))), out)
         # …and a job's id in an `origin` line, written `{job_id: <n>}` — a job's
@@ -423,8 +405,7 @@ class Norm:
         # `<id> · <role> · "<title>" · <n>B · ↑<parent>`: the count is over the
         # row's CONTENT, which is not in this line at all and which carries row
         # ids of its own. Two runs whose ids differ in digit width therefore
-        # disagree on the byte count of a row they agree about — measured on
-        # `store/stub/req_051..054`. It fires only on a line the id renaming has
+        # disagree on the byte count of a row they agree about. It fires only on a line the id renaming has
         # already touched, so a digest line about a row with no id in it keeps
         # its count.
         new = re.sub(r"(<ID#\d+:(?:int|str)> · (?:(?!\\n)[^\n]){0,300}?· )(\d+)(B · ↑)",
@@ -572,9 +553,8 @@ class Norm:
                 self.fired.add("N12")
                 x = self._blank(x, self.REWRITTEN_NUM, self.REWRITTEN_TEXT, "<REWRITTEN>")
                 # …and the read's `origin` line, which REPEATS those numbers in
-                # words (`bytes 0-193 of 193 — read_stream {…, length: 193}`):
-                # measured 2026-10-01, `schedules.yaml` 193 vs 195 — its float
-                # `next_run` printed to a different digit count. The words, the
+                # words (`bytes 0-193 of 193 — read_stream {…, length: 193}`) —
+                # a float `next_run` can print to a different digit count. The words, the
                 # path and the verb stay compared.
                 x = self._rewrite_origin(x)
             elif isinstance(name, str) and any(name.endswith(d) for d in self.DIGEST_OF_MINTED):
@@ -598,16 +578,12 @@ class Norm:
             # body and `system_chars` the length of its system block; BOTH are
             # recorded WHOLE as `ctx/stub/req_<n>.bin` and compared there, line
             # by line, after normalisation. What makes them incomparable AS
-            # NUMBERS is measured, and is two things the rules have already
-            # declared incomparable: the `runtime=` word (N2 — `runtime=python`
-            # is one byte longer than `runtime=swift`, two longer than
-            # `runtime=rust`: `system_chars` 23214 vs 23213, `bytes` 23815 vs
-            # 23814/23813, on 154 of the 412 ctx diff lines), and the id DIGIT
-            # WIDTH (N4 — python executes ~379 `ledger.json` writes against the
-            # ports' ~102, so its row ids reach four digits where theirs are
-            # three, and a `context_recall` body that quotes 18 of them is 18
-            # bytes longer: `ctx/reboot/stub_requests_during_boot.json` 2196 vs
-            # 2178).
+            # NUMBERS is two things the rules have already declared
+            # incomparable: the `runtime=` word (N2 — `runtime=python` is one
+            # byte longer than `runtime=swift`, two longer than `runtime=rust`),
+            # and the id DIGIT WIDTH (N4 — runtimes that execute different
+            # numbers of ledger writes reach different id widths, and a body
+            # quoting those ids changes length with them).
             # A ZERO IS KEPT AS ZERO on purpose: `system_chars: 0` says the
             # request carried NO system block at all, and a port that stopped
             # sending one must not land in the same bucket as a port that sent a
@@ -622,9 +598,7 @@ class Norm:
             # that settled it. That reply is recorded WHOLE in its own file by
             # the family that made the call and compared there, and it carries
             # row ids N4 renames, so the same reply is a different number of
-            # bytes on two runs. Measured 2026-09-30 on the python self-diff:
-            # `tree/kernel_ledger_after.json` 450 against 452 and 19970 against
-            # 19972. A ZERO IS KEPT AS ZERO (an outcome with no body is a
+            # bytes on two runs. A ZERO IS KEPT AS ZERO (an outcome with no body is a
             # different thing), and `status`/`attempts` beside it stay exact.
             if {"pid", "status", "bytes", "attempts"} <= set(x) \
                     and isinstance(x.get("bytes"), int) and not isinstance(x["bytes"], bool) \
@@ -668,9 +642,7 @@ class Norm:
             # where the raw digit widths put it, so the head is compared on the
             # prefix BOTH sides show — `compare_json` trims it, and only when the
             # two raw heads are the same length (the kernel's cap), recorded
-            # here as `HEAD_RAW_LEN`. Measured 2026-09-30 on the python
-            # self-diff: `store/s4/history_final.json` bytes 127 against 126,
-            # head ending `</v` against `</ve`.
+            # here as `HEAD_RAW_LEN`.
             if isinstance(out.get("head"), str) and isinstance(x.get("head"), str) \
                     and isinstance(out.get("bytes"), int) and not isinstance(out["bytes"], bool) \
                     and any(m in out["head"] for m in ("<ID#", "<TS:float>", "<TS:int>", "<OSPID>")):
@@ -683,9 +655,8 @@ class Norm:
             if isinstance(body, dict):
                 texts += [body[t] for t in ("text", "utf8") if isinstance(body.get(t), str)]
             # `<RUNTIME>` stands for a name of 4, 5 or 6 characters (N2), so a count
-            # over a text carrying it moves with the runtime — measured 2026-10-01:
-            # a REST reflect body 4645 vs 4643 (rust) / 4644 (swift) with its
-            # content-length, a cli `stdout_bytes` 2996 vs 2994. The text itself is
+            # over a text carrying it moves with the runtime (a REST body with its
+            # content-length, a cli `stdout_bytes`). The text itself is
             # compared beside the count, so a real difference still shows there.
             if texts and any(("<ID#" in t or "<TS:float>" in t or "<TS:int>" in t
                               or "<OSPID>" in t or "<RUNTIME>" in t) for t in texts):
@@ -738,9 +709,8 @@ def flatten(x, prefix="$"):
     return out
 
 
-#: WHERE ORDER IS NOT A CONTRACT (N15 / N12). Measured by the python self-diff:
-#: two runs of the SAME immutable tree disagreed on 4270 lines, and all of them
-#: were one of these three.
+#: WHERE ORDER IS NOT A CONTRACT (N15 / N12): two runs of the SAME immutable tree
+#: disagree on order in these places.
 #:
 #:   `ai_paths/**` rows — the family runs two AI agents that call each other, so
 #:     the two chains interleave differently every run and every row id after the
@@ -765,8 +735,7 @@ def by_mark_and_sock(entries: list) -> list:
     list. Order inside ONE socket is a contract (C76 — a state stream within one
     subscription, B2.13 — a turn's token/status sequence) and is kept exactly.
     The order in which two INDEPENDENT sockets received the same broadcast is
-    not: measured on the python self-diff, two runs of the same immutable tree
-    swapped `ctrl` and `proto` at four places out of 400 frames.
+    not: two runs of the same immutable tree can swap `ctrl` and `proto`.
 
     The stream is cut at each `mark` (the family's own phase boundary, written on
     sock `-`), and inside a phase the frames are grouped by socket. A frame that
@@ -794,7 +763,7 @@ def by_mark_and_sock(entries: list) -> list:
     return out
 
 
-#: N17 — TERMINAL `output` EVENT COALESCING, owner ruling 2026-09-21.
+#: N17 — TERMINAL `output` EVENT COALESCING.
 #:
 #: WHAT IT JOINS. A RUN of consecutive terminal `output` events on ONE ws leg
 #: becomes ONE frame whose `data` is the concatenation of the run's `data`
@@ -819,12 +788,9 @@ def by_mark_and_sock(entries: list) -> list:
 #: ports read on their own thread and see each write as it lands. No runtime has
 #: coalescing code, so there is nothing to mirror.
 #:
-#: MEASURED (2026-09-21 acceptance captures, `wire/frames.jsonl`): python 3
-#: `output` frames for the shell turn, rust 5 and then 4 after its drain fix,
-#: swift 6-9. The CONCATENATED BYTES were identical in every capture. Because
-#: the frame stream is diffed POSITIONALLY, one extra ctrl frame cascaded into
-#: ~200 diff lines — the census read ctrl 175 (python) vs 176 (rust) vs 179
-#: (swift) with every other leg matching exactly.
+#: The runtimes split one shell turn's output into different numbers of frames
+#: while the CONCATENATED BYTES are identical. Because the frame stream is
+#: diffed POSITIONALLY, one extra frame would cascade into every later line.
 #:
 #: WHAT IT MUST NOT HIDE. The concatenated bytes — a run whose joined `data`
 #: differs is still a diff line, and that is the measurement. The ORDER of an
@@ -914,9 +880,7 @@ def _frame_kind(e) -> str | None:
 def replies_after_events(entries: list) -> list:
     """N20 — on ONE socket, the order of a call's REPLY relative to the EVENTS a
     watch pushes is not a contract: both are written by different tasks onto one
-    socket, and which reaches it first is scheduling (measured 2026-10-01: the
-    `ctrl` socket's `wirecap-N` reply one or two frames earlier or later among
-    `reflect`/`status` events, rust 8 places, swift 1, in a 367-frame stream).
+    socket, and which reaches it first is scheduling.
     Inside a RUN of consecutive incoming reply/event frames on one socket, the
     events keep their order, the replies keep theirs, and the replies are put
     after the events. Anything else — an outgoing frame, a mark, another socket,
@@ -948,8 +912,7 @@ def frames_view(entries: list) -> list:
     return join_output_runs(replies_after_events(by_mark_and_sock(entries)))
 
 
-#: MEASURED, not assumed: two reads of the SAME python run disagree on these two
-#: files by hundreds of lines. `ledger.json` is rewritten continuously (C47 — each
+#: Two reads of the SAME run disagree on these two files. `ledger.json` is rewritten continuously (C47 — each
 #: flush is itself an execution whose settle re-kicks the flusher) and
 #: `messages.xml` grows while the snapshot walks it, so neither their bytes nor
 #: their rows are a comparable document. What IS comparable, and what C42/C46/C47
@@ -965,22 +928,17 @@ def shape_of(x, depth: int = 0):
         # A SET KEYED BY THE SHAPE, not a list. The document this reduction exists
         # for is `ledger.json`, whose rows are already declared unordered
         # (N15/N12): two reads of one run see the same row KINDS in a different
-        # order. v4 sorted the list, which fixed arrival order but NOT insertion:
-        # `flatten` indexes a list POSITIONALLY, so one shape present on one side
-        # only shifted every index after it and the file hit the 200-line cap.
-        # Measured 2026-09-21, `store/store_files_final/disk_raw/ledger.json`:
-        # 131 shapes (python) against 132 (rust) and 133 (swift), with only 2+3
-        # and 1+3 shapes actually one-sided — 201 diff lines for 5 real ones.
-        # Keying the dict BY the shape makes each one-sided shape exactly one
+        # order. A sorted list fixes arrival order but NOT insertion: `flatten`
+        # indexes a list POSITIONALLY, so one shape present on one side only
+        # would shift every index after it. Keying the dict BY the shape makes each one-sided shape exactly one
         # line, naming the shape, and hides nothing: a shape present on one side
-        # only is still `<absent>` on the other. (Owner, 2026-09-21: this is N12's
-        # `distinct_shapes: sorted` doing what it was written to do.)
+        # only is still `<absent>` on the other.
         seen = {json.dumps(shape_of(e, depth + 1), sort_keys=True, default=str) for e in x}
         return {"__distinct_shapes__": {s: True for s in sorted(seen)}}
     return type(x).__name__
 
 
-# ── N18 — THE LOADER'S OWN PERSISTENCE TRAFFIC. Owner ruling 2026-09-21. ─────
+# ── N18 — THE LOADER'S OWN PERSISTENCE TRAFFIC. ───────────────────────────────
 #
 # WHAT IT NORMALISES. Before an ON-DISK `ledger.json` or `messages.xml` snapshot
 # is compared, the loader's OWN persistence traffic is dropped from BOTH sides:
@@ -1005,31 +963,15 @@ def shape_of(x, depth: int = 0):
 # 150 ms debounce windows and each window writes; the ports burst and one write
 # covers the batch. The rows the kernel actually executed are the same.
 #
-# MEASURED, 2026-09-21 acceptance captures, `store/store_files_final/disk_raw`:
-#
-#   |                              | python | rust | swift |
-#   |------------------------------|--------|------|-------|
-#   | `ledger.json` write rows     |   379  |  132 |  102  |
-#   | `messages.xml` append rows   |    56  |   29 |   20  |
-#   | own-persistence rows, total  |   535  |  261 |  222  |
-#   | NON-persistence ledger rows  |   482  |  483 |  536  |
-#   | persisted ledger rows        |  1017  |  744 |  758  |
-#
-# So on RUST the hypothesis holds exactly: 274 fewer rows on disk, ALL of them
-# the loader's own, and the non-persistence total lands within the ±1 already
-# known (the +1 decomposes as -1 `kernel_state`←`rest`, +1 `rest`←`web`, +1
-# `ws`←`web`). On SWIFT it does NOT: swift carries 55 extra `kernel_state`←`ai`
-# rows and 3 fewer `kernel_state`←`rest`. Those rows have an ORIGIN, so this rule
-# never touches them — they are a real divergence and they stay in the diff.
+# Rows that have an ORIGIN are never touched by this rule — a divergence there
+# is real and stays in the diff.
 #
 # THE TAIL. `ledger.json` is rewritten WHILE the snapshot reads it (C47), so the
 # last rows the kernel executed may not be on disk yet. After the drop, if one
 # side's row list is a STRICT PREFIX of the other's, the surplus at the END of
 # the longer one is that un-flushed tail and is cut from both. It is a prefix or
 # the rule does not fire: a surplus in the MIDDLE is not a tail, it is a missing
-# or an extra row, and it stays. (Measured on these three captures: the clause is
-# INERT — the common prefix is 2 rows, the runtimes diverge immediately at the
-# `rest` boot row, so nothing was cut.)
+# or an extra row, and it stays.
 #
 # WHAT IT MUST STILL FLAG, and how — the drop removes rows, so the assertion the
 # rows carried is re-added explicitly as `__row_census__`, a DICT of row
@@ -1045,10 +987,10 @@ def shape_of(x, depth: int = 0):
 # these two files were already compared as SHAPE ONLY before this rule (N12 —
 # they are rewritten while they are read), and that is unchanged.
 #
-# THE DECISION (owner, 2026-09-21): normalise in the HARNESS. The alternative was
-# to make the ports' debounce imitate python's event-loop turn boundaries — a new
-# timing contract in three runtimes, to make a write count match that measures
-# nothing but which thread read the rows.
+# It is normalised in the HARNESS rather than by making the ports' debounce
+# imitate python's event-loop turn boundaries — that would be a new timing
+# contract in three runtimes, to make a write count match that measures nothing
+# but which thread read the rows.
 
 #: The loader's own task rows in `messages.xml`. `persist_writer` installs the
 #: write-through, `ledger_flush` is the record flusher's debounce kick and
@@ -1069,9 +1011,9 @@ def discover_store(rows: list) -> str | None:
         # missing key as "no origin" would drop every store row there, including
         # the ones an operator really sent. A row that does not carry the field
         # is not decidable, so N18 leaves it — and with no decidable row, no
-        # store is discovered and the rule is inert on that file. Measured
-        # 2026-09-21: it is inert on all six `final/kernel_ledger.json` captures
-        # and fires on the four `store_files_*/…/ledger.json` snapshots.
+        # store is discovered and the rule is inert on that file (the
+        # `final/kernel_ledger.json` captures); it fires on the
+        # `store_files_*/…/ledger.json` snapshots.
         if not isinstance(r, dict) or "origin" not in r or r.get("origin") is not None:
             continue
         if r.get("kind") not in (None, "call"):
@@ -1110,9 +1052,7 @@ def drop_own_persistence(rows: list) -> tuple:
 #: where the census only needs the attributes and the outcome status.
 #: The SELF-CLOSING form FIRST, and as its own alternative. A single pattern with
 #: an optional `(.*?)</row>` tail reads `<row …/>` as an OPEN tag and swallows
-#: every row up to the next `</row>` — measured 2026-09-21: it lost most of the
-#: log, so parents resolved to `<parent not in log>` and the census printed 199
-#: lines of nothing.
+#: every row up to the next `</row>`, losing most of the log.
 _ROW_RE = re.compile(r"<row\b([^>]*?)/>|<row\b([^>]*?)>(.*?)</row>", re.S)
 _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 
@@ -1181,12 +1121,10 @@ def message_census(kept: list, all_rows: list) -> dict:
             outcomes.setdefault(sig, set()).add(st)
     # THE STATUS IS A SET, NOT A COUNT, and the signature above does not carry it.
     # `messages.xml` is appended to WHILE the snapshot reads it (C47), so a row
-    # can be in the file with its `<outcome>` not yet written: measured
-    # 2026-09-21, `call · read · totals ← ai` stood at 7 unsettled + 2 settled on
-    # python against 0 + 9 on rust — the SAME NINE ROWS, read at two different
-    # moments. Counting by status therefore measured the read, and putting the
-    # status in the signature split every bucket in two. As a SET it still flags
-    # what the owner asked for: a row that ERRORED on one runtime and COMPLETED
+    # can be in the file with its `<outcome>` not yet written — the same rows read
+    # at two different moments. Counting by status would measure the read, and
+    # putting the status in the signature would split every bucket in two. As a
+    # SET it still flags what matters: a row that ERRORED on one runtime and COMPLETED
     # on the other is `["errored"]` against `["completed"]`, one line.
     return {"rows": rows, "outcomes": {k: sorted(v) for k, v in outcomes.items()}}
 
@@ -1251,7 +1189,7 @@ def bagify(x, keys, top=False):
 _PH = re.compile(r"<ID#(\d+):(int|str)>")
 
 
-#: N19 — ROW-ID ORDER WITHIN A TURN. Owner ruling 2026-09-21.
+#: N19 — ROW-ID ORDER WITHIN A TURN.
 #:
 #: WHAT IT NORMALISES. N4 replaces a minted row id with `<ID#n>` numbered BY
 #: FIRST APPEARANCE, i.e. by MINT ORDER. This pass throws that numbering away and
@@ -1271,17 +1209,13 @@ _PH = re.compile(r"<ID#(\d+):(int|str)>")
 #: runtimes, and the sequence RE-CONVERGES on the next row — the same rows, the
 #: same parents, the same content, a permuted id assignment.
 #:
-#: MEASURED (2026-09-21 acceptance captures, `ai_paths/**`): the SAME 408 ids on
-#: both sides, 20 + 9 occurrences of the permutation, 1515 diff lines, and the
-#: row bodies byte-identical apart from the ordinal (`"id": "<ID#36:int>"` on
-#: python against `"<ID#34:int>"` on rust). The amplification is the placeholder
-#: numbering, not the rows: one offset early in a file shifts every ordinal after
-#: it, and each shifted row is its own line.
+#: The amplification is the placeholder numbering, not the rows: one offset
+#: early in a file shifts every ordinal after it, and each shifted row is its own
+#: line.
 #:
-#: THE DECISION (owner, 2026-09-21): normalise in the HARNESS. THREE kernel-side
-#: mirrors were built and measured, and ALL THREE made the diff worse — the code
-#: was reverted. Making a port imitate python's suspension point is inventing a
-#: scheduling contract nobody wants, to make a number match that means nothing.
+#: It is normalised in the HARNESS: making a port imitate python's suspension
+#: point would invent a scheduling contract, to make a number match that means
+#: nothing.
 #:
 #: WHAT IT MUST NOT HIDE, and why it does not:
 #:   * A MISSING or EXTRA ROW. The rank is over the rows that are there, so a
@@ -1296,19 +1230,15 @@ _PH = re.compile(r"<ID#(\d+):(int|str)>")
 #:   * A DIFFERENT kind / verb / agent / content. All four are IN the key, so two
 #:     rows that differ in any of them cannot be given each other's ordinal.
 #:
-#: WHAT IT SUPERSEDES. The old `renumber()`, which re-numbered placeholders in
-#: the order they appeared in the BAGGED document. That was a fix for one
-#: symptom of the same defect (a bag's arrival order) and it is circular: the bag
-#: is sorted by strings that still carry the OLD numbering, so a permutation
-#: changed the sort, which changed the new numbering. Deriving the ordinal from
-#: content breaks the cycle, which is why this pass runs BEFORE `bagify` — the
-#: bag then sorts strings that are already canonical.
-#: HOW IT IS BOUNDED, and the measurement that forced the bound. The first cut
-#: of this rule numbered ids from content on EACH SIDE INDEPENDENTLY. That is
-#: unbounded, and it made the diff WORSE — 5435 → 7815 lines on the same rust
-#: capture (measured 2026-09-21): where a row's body genuinely differs between
-#: the runtimes, a content-derived ordinal scrambles for every row after it, so
-#: the rule amplified exactly what it was written to damp.
+#: WHY BEFORE `bagify`. Re-numbering placeholders in the order they appear in
+#: the BAGGED document is circular: the bag is sorted by strings that still carry
+#: the OLD numbering, so a permutation changes the sort, which changes the new
+#: numbering. Deriving the ordinal from content breaks the cycle — the bag then
+#: sorts strings that are already canonical.
+#: HOW IT IS BOUNDED. Numbering ids from content on EACH SIDE INDEPENDENTLY is
+#: unbounded: where a row's body genuinely differs between the runtimes, a
+#: content-derived ordinal scrambles for every row after it, amplifying exactly
+#: what the rule is meant to damp.
 #:
 #: So the pass is TWO-SIDED and bounded by AGREEMENT. Rows are paired across the
 #: two documents by their MASKED CONTENT — the row with every id placeholder
@@ -1467,8 +1397,6 @@ def drop_head_marks(x):
 #: ≤1 token at 4 chars a token). So the same budget is off by at most one token
 #: between runtimes. Compared PAIRWISE with that tolerance — never blanked — so a
 #: port computing it differently (off by more than one) is still a line.
-#: Measured 2026-10-01: `<budget>3158</budget>` vs 3159 in a recall reply's text,
-#: `"budget": 22301` vs 22302 in a view row, `$.budget` 3158 vs 3159.
 _BUDGET_TEXT = re.compile(r'(<budget>|\\*"budget\\*"\s*:\s*)(\d+)')
 BUDGET_TOLERANCE = 1
 
@@ -1500,8 +1428,7 @@ def _budget_close(key: str, va, vb) -> bool:
 def _name_length_delta(key: str, va, vb, na: "Norm", nb: "Norm") -> bool:
     """N2 — a `stdout_bytes` whose stdout was recorded only as a HEAD (so N10
     cannot see the text it counts) and that differs by EXACTLY the difference in
-    length of the two runtime names: the reflect it counts prints its runtime once
-    (measured 2026-10-01: `setup.reflect` 3120 python vs 3118 rust, 3119 swift).
+    length of the two runtime names: the reflect it counts prints its runtime once.
     Any other difference is still a line."""
     last = key.split("\x00")[0].rsplit(".", 1)[-1]
     if last != "stdout_bytes" or not (isinstance(va, (list, tuple))
@@ -1616,8 +1543,7 @@ def canon_self_reflect(events: list) -> list:
     waiting for. The peer turn's self-`reflect` (the agent reflecting itself as
     its prompt is assembled) and the reply's DELIVERY race: python records the
     reflect right after the peer `send`; swift records the reply's `send` and its
-    `queued` status first (measured 2026-10-01, `ai_paths/events.json` 386-388 and
-    `cases/cycle.json`). Owner, 2026-10-01: that order is not a contract.
+    `queued` status first. That order is not a contract.
 
     Canonical form: the first `reflect` after a peer `send` is moved to right
     after it, but ONLY across `send` events and `queued` statuses. A `thinking`
@@ -1664,8 +1590,8 @@ def exclude_flush_rows(doc):
     bookkeeping rows. Returns `(doc, fired)`.
 
     Each flush appends ONE `flush` row beside the batch it writes, and how many
-    flushes a run made is the flusher's debounce against the runtime's speed
-    (measured: python 334, rust/swift 333 on the same scenario). `store.py`
+    flushes a run made is the flusher's debounce against the runtime's speed.
+    `store.py`
     brackets the reflect with two `{rows, flush}` censuses of the whole store
     (one `dump` each) under `harness.flush_rows`. The census whose `rows` equals
     the reflect's is the store the reflect saw; its `flush` is subtracted and
@@ -1687,8 +1613,7 @@ def exclude_flush_rows(doc):
     return {**doc, "rows": f"<ROWS_EXCLUDING_FLUSH:{rows - flush.pop()}>"}, True
 
 
-#: N25 — python ships no `foundation_models_backend` (owner, 2026-10-02: py has
-#: no FM); rust and swift do. Dropped from the PORT side of a catalog only.
+#: N25 — python ships no `foundation_models_backend`; rust and swift do. Dropped from the PORT side of a catalog only.
 FM_BUNDLE = "foundation_models_backend"
 _FM_COMMA = re.compile(r"(?<![\w])bundles=([\w,]+)")
 #: A `"bundles": [...]` of NAMES inside text (a cli stdout, a REST body recorded
@@ -1841,10 +1766,8 @@ def file_lines(rel: str, pa: Path, pb: Path, ports_a, ports_b, root_alias, rt_b)
             # N12 — A SET KEYED BY THE SHAPE, not a sorted list, for exactly the
             # reason `shape_of` keys `__distinct_shapes__` that way: `flatten`
             # indexes a list POSITIONALLY, so ONE tag shape present on one side
-            # only shifted every index after it and turned a single one-sided
-            # row shape into a ~110-line cascade (measured 2026-09-21b, swift,
-            # `store/store_files_final/disk_raw/messages.xml`: 28 `__tag_shapes__`
-            # lines for 2 one-sided shapes). Keyed, a one-sided shape is exactly
+            # only would shift every index after it, turning a single one-sided
+            # row shape into a cascade. Keyed, a one-sided shape is exactly
             # one line and it NAMES the shape; it hides nothing, because a shape
             # on one side only is still `<absent>` on the other.
             import re as _re
@@ -1976,8 +1899,8 @@ def classify(lines: list, residuals: list, landed: list, proofs: dict, runtime: 
         if r is not None:
             used.add(r["id"])
             r_items = r.get("items") or []
-            # ACCEPTED wins over landed.yaml: the owner decided this difference IS
-            # the runtime's landed behaviour (residuals.yaml v6, 2026-10-01). A
+            # ACCEPTED wins over landed.yaml: an accepted difference IS the
+            # runtime's landed behaviour. A
             # PENDING residual whose items have all landed is a regression — the
             # undecided difference has outlived the claim.
             if r.get("state") == "accepted":
@@ -2060,8 +1983,8 @@ _STUB_AGENT = re.compile(r"\bid=(\w+)\s+model=")
 def pair_stub_requests(fa: dict, fb: dict) -> dict:
     """N22 — `ai_paths` runs TWO AI agents, and the stub numbers their requests in
     ARRIVAL order across both: when `ai2`'s turn reaches the stub before `ai`'s,
-    every number after it shifts (measured 2026-10-01: swift `req_068` is `ai2`'s
-    request, python's is `req_069`, so both files read as wholly different). Each
+    every number after it shifts, so paired files would read as wholly
+    different. Each
     AGENT's own request sequence is a contract and stays compared, in order: the
     k-th request of agent X is paired with the other side's k-th request of X
     (the agent is the `id=<agent>  model=` line of the system block). A request
@@ -2122,10 +2045,10 @@ def diff_dir(capture: Path) -> Path:
     is `capture.parent/diff` for the `<run>/<runtime>` layout every acceptance
     run uses. It is NOT `capture.parent/diff` when `capture` IS a run directory
     (`--other e2e/runs/parity/20260922_sw`, a capture with the families directly
-    under it): `parent` is then the runs ROOT, and the diff landed in
+    under it): `parent` is then the runs ROOT, and the diff would land in
     `e2e/runs/parity/diff/` — outside every capture, overwritten by the next
     run of any shape, and easy to read as belonging to a run it has nothing to
-    do with (measured 2026-09-21b: `e2e/runs/parity/diff/swift.jsonl`). The rule
+    do with. The rule
     is path-only and reads nothing from disk, so it cannot change its mind
     because a directory was tidied away."""
     return (capture if capture.parent == RUNS else capture.parent) / "diff"
@@ -2429,7 +2352,7 @@ def cmd_rulecheck() -> int:
             r.update(extra)
         return r
 
-    # The measured shape: a handler row (41) spawns two rows in one turn; python
+    # The shape: a handler row (41) spawns two rows in one turn; python
     # mints the task before the call, rust the other way round, and everything
     # after re-converges.
     base = {"rows": [R(41, verb="boot"), R(42, 41, verb="think"),
@@ -2527,7 +2450,7 @@ def cmd_rulecheck() -> int:
         print(f"  {'ok  ' if ok else 'FAIL'} N10 — {name}: {len(lines)} line(s), "
               f"expected {'>0' if want else '0'}")
 
-    # ── The 2026-09-30 python self-diff: counter ids a run consumed. ────────
+    # ── Counter ids a run consumed. ─────────────────────────────────────────
     # The loader's debounced persistence takes a different number of ids on
     # every run, so every id after it shifts and some cross a digit width. Each
     # rule both ways: the shift is forgiven, a changed RELATIONSHIP or a changed
@@ -2614,8 +2537,8 @@ def cmd_rulecheck() -> int:
         print(f"  {'ok  ' if ok else 'FAIL'} N3 — {name}: {len(lines)} line(s), "
               f"expected {'>0' if want else '0'}")
 
-    # ── 2026-10-01 — the parity-leftover rules (owner: tmp/todo.md (a)/(c)). ──
-    # Each both ways: the measured difference is forgiven, the real one beside it
+    # ── text forms, counts and order ─────────────────────────────────────────
+    # Each both ways: the known difference is forgiven, the real one beside it
     # is still a line.
     def cjr(a, b, rel, rt="rust"):
         return compare_json(rel, a, b, Norm({}, None, "python"), Norm({}, None, rt))
@@ -2809,7 +2732,7 @@ def cmd_rulecheck() -> int:
             total += 1
             print(f"  {'ok  ' if ok else 'FAIL'} {name}")
 
-    # ── N24 / N25 (2026-10-02) — each both ways, through `file_lines`, where
+    # ── N24 / N25 — each both ways, through `file_lines`, where
     # the two passes run. ─────────────────────────────────────────────────────
     def flines(a, b, rel, rt="rust"):
         with tempfile.TemporaryDirectory() as d:

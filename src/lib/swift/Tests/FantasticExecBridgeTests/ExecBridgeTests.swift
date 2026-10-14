@@ -165,7 +165,7 @@
 
         /// A broken `allowed` pattern permits nothing, even one the fullmatch
         /// wrapper would balance into match-everything (python `re.fullmatch`
-        /// raises; audit 2026-10-14).
+        /// raises).
         @Test func anUnbalancedAllowedPatternPermitsNothing() async {
             let kernel = freshKernel()
             let rec = kernel.agent(await create(kernel, id: "cp_bad", allowed: ["x)|(.*"]))
@@ -282,10 +282,9 @@
             #expect(refl["allowed"].asArray != nil, "discovery must work sealed")
         }
 
-        /// A1.2 — a rule object with no `type` is a plain SEAL, python's
-        /// `parse_spec` returning `(None, cfg)`: it used to throw out of `handle`
-        /// (and the write was refused), so a leg configured `{env: "X"}` took the
-        /// whole dispatch down instead of denying.
+        /// A rule object with no `type` is a plain SEAL, python's
+        /// `parse_spec` returning `(None, cfg)`: a leg configured `{env: "X"}`
+        /// denies instead of taking the whole dispatch down.
         @Test func aTypelessRuleObjectSealsLikePython() async {
             let kernel = freshKernel()
             let create: JSON = .object([
@@ -423,7 +422,7 @@
         var fds: [Int32] = [0, 0]
         precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0, "socketpair")
         let relay = Relay(fd: fds[0], owner: owner, jobId: jobId, kernel: kernel)
-        // A4.34 — the relay IS a kernel task; drive it the way `start` does:
+        // The relay IS a kernel task; drive it the way `start` does:
         // spawned from the owner's own handler, so it runs AS the owner.
         _ = kernel.asSelfNow(owner) {
             kernel.spawnTask(agent: owner, verb: "relay") { [relay] in
@@ -565,7 +564,7 @@
                 "a proxy leaked past teardown: \(owner.watcherIds())")
         }
 
-        /// Audit BV-8 — the seal covers every verb but `reflect`/`connector`, MAIL
+        /// The seal covers every verb but `reflect`/`connector`, MAIL
         /// INCLUDED. The fanout reaches the program's `_xbself_` proxy BEFORE the
         /// handler, so the relay's inbox drain drops what the gate refuses: a sealed
         /// leg's program receives nothing, and receives again once reopened.
@@ -608,9 +607,9 @@
             #expect(first == inboxFrame("after"), "\(first.serialize())")
         }
 
-        /// Audit BV-9 (python `test_the_inbox_relays_a_drive_verb_only_for_its_own_job`)
+        /// Python `test_the_inbox_relays_a_drive_verb_only_for_its_own_job`
         /// — the fanout mirrors every payload sent to the leg into the owner inbox,
-        /// so a program started by one caller saw another caller's `write`
+        /// so a program started by one caller would see another caller's `write`
         /// keystrokes, paste bytes and drive calls aimed at that caller's job. A drive
         /// verb whose `job_id` names ANOTHER job is dropped; one with no `job_id`
         /// (bulk) or naming this job is forwarded; other mail is unchanged.
@@ -656,10 +655,9 @@
             }
         }
 
-        /// Audit W-9 (python `test_a_malformed_ctrl_frame_is_skipped_never_fatal`) —
+        /// Python `test_a_malformed_ctrl_frame_is_skipped_never_fatal` —
         /// JSON that is no envelope, or a `src` that is no string, is skipped; the
-        /// relay keeps serving and the next call is answered. Python ended the relay
-        /// task here.
+        /// relay keeps serving and the next call is answered.
         @Test func aMalformedCtrlFrameIsSkippedNeverFatal() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "w9_junk")
@@ -688,7 +686,7 @@
             #expect(reply["data"]["jobs"].asArray != nil, "\(reply.serialize())")
         }
 
-        /// Audit ARCH2-5 — the owner-inbox table is keyed PER KERNEL. Two kernels in
+        /// The owner-inbox table is keyed PER KERNEL. Two kernels in
         /// one process, an exec agent of the same id in each: keyed by the bare id,
         /// kernel B's `onmessage` took kernel A's entry, and A's own `offmessage`
         /// then found B's job there and released nothing — A's proxy stayed watched.
@@ -750,9 +748,8 @@
     @Suite("exec_bridge refusals")
     struct ExecBridgeRefusalTests {
 
-        /// EVERY refusal on `start` carries a CODE. Sibling argument errors used to
-        /// split — `args`/`env` answered a typed message while `code`/`command`/the
-        /// policy wall answered a bare `{error}` with no `reason` at all.
+        /// EVERY refusal on `start` carries a CODE. Sibling argument errors and the
+        /// policy wall alike — never a bare `{error}` with no `reason`.
         @Test func everyStartRefusalCarriesACode() async {
             let kernel = freshKernel()
             let a = await create(kernel, id: "codes", allowed: ["echo( .*)?"])
@@ -789,8 +786,8 @@
         }
 
         /// `status`/`stop`/`interrupt` on a job_id naming nothing answer `not_found`
-        /// with the id. `stop`/`interrupt` used to answer `{killed:0}` — the same
-        /// reply as "it had already exited", so a typo read as success.
+        /// with the id. `{killed:0}` is the reply for "it had already exited",
+        /// and would read a typo as success.
         @Test func anUnknownJobIdIsNotFoundOnEveryVerb() async {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "nf")
@@ -880,7 +877,7 @@
         }
 
         /// `connector` hands over the reference wire client — a model pastes it instead
-        /// of re-deriving the socket framing (measured 2026-09-01: ten passes lost).
+        /// of re-deriving the socket framing.
         @Test func theConnectorVerbHandsOverTheReferenceClient() async {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "dur_conn")
@@ -892,9 +889,8 @@
 
         /// PARITY WITH PYTHON: a program's sends carry the RUNNER's identity and are
         /// gated by its grants — a sibling the runner holds no `can_call` for refuses
-        /// (`unauthorized`). Before 2026-09-01 the relay forwarded with NO sender —
-        /// operator, ungated — and a spawned program could reach any agent
-        /// (measured live: E30 subai, "as the root").
+        /// (`unauthorized`) — never forwarded with NO sender (operator, ungated),
+        /// which would let a spawned program reach any agent.
         @Test func theProgramIsGatedAsItsRunnerNotAsTheOperator() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
@@ -913,10 +909,8 @@
             #expect(out.contains("CORE kernel_state"), "the granted edge still answers: \(out)")
         }
 
-        /// PROGRESS IS LIVE. The pump used to buffer both pipes to EOF and emit every
-        /// line in one burst at exit, so exactly the jobs that need `progress` — a
-        /// durable tool that prints a line per request and never exits — produced no
-        /// output events at all and reported `lines: 0` for their whole life. This
+        /// PROGRESS IS LIVE: a durable tool that prints a line per request and never
+        /// exits still produces output events. This
         /// program never exits, so a burst-at-exit pump can only time out here.
         @Test func progressArrivesWhileTheProcessIsStillRunning() async throws {
             guard let py = py3() else { return }
@@ -938,7 +932,7 @@
             _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
         }
 
-        /// `tail` / `grep` read a RUNNING pipe job's output so far (owner, 2026-10-11):
+        /// `tail` / `grep` read a RUNNING pipe job's output so far:
         /// `status` holds stdout/stderr only once the job ends. Order holds within a
         /// stream only (stdout and stderr are read concurrently).
         @Test func tailAndGrepReadARunningJob() async throws {
@@ -1069,9 +1063,7 @@
     struct ExecBridgeWireBytesTests {
 
         /// `write_stream`/`read_stream` from a program: the bytes ride the fd as the
-        /// io_bridge binary frame (kind B) both ways — never base64, never None
-        /// (measured 2026-09-02, E30 subai:python: a `read_stream` reply was
-        /// unserializable on this wire and the worker got None).
+        /// io_bridge binary frame (kind B) both ways — never base64, never None.
         @Test func aStreamChunkCrossesTheWireRaw() async throws {
             guard let py = py3() else { return }
             let registry = BundleRegistry()
@@ -1136,10 +1128,10 @@
         }
     }
 
-    // ─── A4 python-parity twins ─────────────────────────────────────
+    // ─── python-parity twins ─────────────────────────────────────
     //
-    // One test per plan item, each pinning the PYTHON text or behaviour named
-    // there (`PB/io/exec_bridge/src/exec_bridge/`). Python is canonical; where a
+    // Each test pins the PYTHON text or behaviour
+    // (`PB/io/exec_bridge/src/exec_bridge/`). Python is canonical; where a
     // line here disagrees with it, this file is wrong.
 
     /// python's `readme.md`, for the byte-for-byte pin.
@@ -1177,9 +1169,9 @@
     @Suite("exec_bridge python parity")
     struct ExecBridgeParityTests {
 
-        // MARK: A4.1 / A4.2 / A4.26 / A4.27 — reflect
+        // MARK: reflect
 
-        /// A4.1 — reflect carries the full auth posture: `ingress_rule`,
+        /// Reflect carries the full auth posture: `ingress_rule`,
         /// `egress_rule` (default `silent_egress`) and `sealed`, in python's order.
         @Test func reflectReportsEgressPosture() async throws {
             let kernel = freshKernel()
@@ -1195,7 +1187,7 @@
             #expect(i < e && e < s, "python order is ingress_rule, egress_rule, sealed")
         }
 
-        /// A4.2 + A4.26 + A4.27 — the prose blocks are python's, verbatim: the
+        /// The prose blocks are python's, verbatim: the
         /// `authoring` tag example, the `wire` passage about the fd not being
         /// one-way, and `inbox`'s closing clause about a script that only defines
         /// something.
@@ -1215,13 +1207,13 @@
                 "\(r["notes"]["inbox"].serialize())")
         }
 
-        /// A4.28 — the vendored readme IS python's `readme.md`, byte for byte.
+        /// The vendored readme IS python's `readme.md`, byte for byte.
         @Test func vendoredReadmeMatchesPythonByteForByte() throws {
             #expect(ExecBridgeBundle().readme == (try pythonExecReadme()))
         }
 
-        /// A4.10 — reflect reports the record's `cwd` as written (null when unset —
-        /// there is no process default any more) and the `inherit_env` it runs with;
+        /// Reflect reports the record's `cwd` as written (null when unset —
+        /// there is no process default) and the `inherit_env` it runs with;
         /// `allowed` items go through `str(x)`, so `5` reads `5` and `true` reads `True`.
         @Test func reflectCoercesLikePython() async throws {
             let kernel = freshKernel()
@@ -1243,12 +1235,12 @@
             #expect(r2["inherit_env"] == .array([]), "\(r2.serialize())")
         }
 
-        // MARK: A4.3 — `shutdown` is mail
+        // MARK: `shutdown` is mail
 
-        /// A4.3 — python's VERBS table has no `shutdown`, so it is MAIL:
+        /// Python's VERBS table has no `shutdown`, so it is MAIL:
         /// `{queued:true}` with a live job and the unknown-type error without one.
         /// It is not advertised as a verb either. Gated like every verb but
-        /// `reflect`/`connector` (audit BV-8): a sealed leg refuses it.
+        /// `reflect`/`connector`: a sealed leg refuses it.
         @Test func shutdownIsMailNotAVerb() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "sd_open")
@@ -1279,9 +1271,9 @@
             #expect(s["reason"].asString == "unauthorized", "mail on a sealed leg: \(s.serialize())")
         }
 
-        // MARK: A4.4 / A4.5 — python repr in every refusal
+        // MARK: python repr in every refusal
 
-        /// A4.4 — `{x!r}` everywhere: the refused command line, the job id, and the
+        /// `{x!r}` everywhere: the refused command line, the job id, and the
         /// unknown mail type (absent ⇒ `None`). The allowlist is python's LIST repr.
         @Test func refusalTextsUsePythonRepr() async throws {
             let kernel = freshKernel()
@@ -1313,7 +1305,7 @@
                 "\(bare?.serialize() ?? "nil")")
         }
 
-        /// A4.5 — `validate_meta` texts are python's: the tag-shaped `allowed`
+        /// `validate_meta` texts are python's: the tag-shaped `allowed`
         /// example, and the spec/pattern spelled with `{x!r}`. The engine's own
         /// wording past `': '` is the residual ICU cannot reproduce.
         @Test func validateMetaTextsMatchPython() {
@@ -1336,9 +1328,9 @@
                     + "legal values: allow_all_ingress, deny_ingress")
         }
 
-        // MARK: A4.7 / A4.33 — the regex dialect
+        // MARK: the regex dialect
 
-        /// A4.7 (D5) — `allowed` is python's `re`: named groups spelled `(?P<n>…)`,
+        /// `allowed` is python's `re`: named groups spelled `(?P<n>…)`,
         /// a `(?P=n)` backreference and lookaround all compile and match.
         @Test func allowedAcceptsPythonRegexSyntax() async throws {
             let kernel = freshKernel()
@@ -1362,8 +1354,8 @@
                     ["allowed": .array([.string("(?P<w>\\w+) (?P=w)")])], record: [:]) == nil)
         }
 
-        /// A4.33 — a python `fullmatch` BACKTRACKS across alternation. ICU's
-        /// leftmost `firstMatch` stops at `ls` and the old range check then refused
+        /// A python `fullmatch` BACKTRACKS across alternation. ICU's
+        /// leftmost `firstMatch` stops at `ls`, and a range check on that would refuse
         /// `ls -la`; `\A(?:…)\z` makes the whole string the goal.
         @Test func fullmatchBacktracksAcrossAlternation() async throws {
             let kernel = freshKernel()
@@ -1376,7 +1368,7 @@
             #expect(commandPermitted(rec, "ls -l") != nil)
         }
 
-        // MARK: A4.8 — the job_id argument
+        // MARK: the job_id argument
 
         /// A job's id IS its kernel task id — an int (python `_job_arg`). Absent (or
         /// an explicit null) means every job of this agent; an int is looked up and
@@ -1416,9 +1408,9 @@
             #expect(cleared["cleared"].asInt == 0, "\(cleared.serialize())")
         }
 
-        // MARK: A4.9 / A4.31 / A4.32 — start
+        // MARK: start
 
-        /// A4.9 — python's coercions: an explicit null `args` is not a list (the
+        /// Python's coercions: an explicit null `args` is not a list (the
         /// KEY being absent is `[]`), scalars go through `str()` so a bool reads
         /// `True`, `env`/`cwd` are the RECORD's (any per-call value refuses, only an
         /// explicit null is absent), and a command that is all whitespace is MISSING.
@@ -1449,7 +1441,7 @@
                 #expect(r["arg"].asString == arg, "\(r.serialize())")
             }
             // A wake-up is a monitor's: `notify`/`match`/`every` on `start` refuse naming
-            // `monitor` (they were dropped silently — e2e monitor, 2026-10-13).
+            // `monitor`, never dropped silently.
             for (arg, val): (String, JSON) in [("notify", .string("ai")), ("match", .string("WAKE")), ("every", .integer(5))] {
                 let r = await start([arg: val])
                 #expect(r["reason"].asString == "bad_arg", "\(r.serialize())")
@@ -1468,7 +1460,7 @@
             #expect(blank["error"].asString == "start: command required", "\(blank.serialize())")
         }
 
-        /// A4.9 (the argv half) — scalars reach the child as python's `str(x)`:
+        /// The argv half — scalars reach the child as python's `str(x)`:
         /// `1`, `2.5`, `True`.
         @Test func startStringifiesScalarArgsLikePython() async throws {
             guard let py = py3() else { return }
@@ -1531,7 +1523,7 @@
                 "\(miss.serialize())")
         }
 
-        /// A4.31 — a command that never reaches `exec` is a TRANSPORT refusal whose
+        /// A command that never reaches `exec` is a TRANSPORT refusal whose
         /// text is python's `str(OSError)`.
         @Test func aMissingCommandIsASpawnFailedRefusal() async throws {
             let kernel = freshKernel()
@@ -1552,8 +1544,7 @@
         }
 
         /// A MISSING `cwd` is named, not the command — CPython's `noexec:chdir`
-        /// text. Measured 2026-10-06 (rust subai): `… 'python3'` for a leg whose cwd
-        /// did not exist sent the model hunting an interpreter for twenty turns.
+        /// text: naming the interpreter sends a model hunting one that is there.
         @Test func aMissingCwdIsNamedNotTheCommand() async throws {
             let kernel = freshKernel()
             let gone = "/nonexistent/fantastic_no_dir_\(UUID().uuidString)"
@@ -1571,9 +1562,8 @@
 
         /// One id space: the job's id IS its kernel task id — `ps` lists it,
         /// `cancel` takes it, and the status snapshot carries no separate
-        /// `task_id`. (The old random 8-hex ids came back from a model as ints or
-        /// infinite floats — `04203581`, `458e5912` — and 3.7% of jobs could not
-        /// be addressed again.) A string, even the stringified id, is a `bad_arg`.
+        /// `task_id`. (A random hex id would come back from a model as an int or an
+        /// infinite float — `04203581`, `458e5912`.) A string, even the stringified id, is a `bad_arg`.
         @Test func aJobIdIsTheJobsTaskIdAndNothingElseNamesIt() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
@@ -1601,9 +1591,9 @@
             ])
         }
 
-        // MARK: A4.6 / A4.14 / A4.15 / A4.29 / A4.30 — the pump
+        // MARK: the pump
 
-        /// A4.6 — a signal death is python's `returncode`: `-signal`, `ok:false`.
+        /// A signal death is python's `returncode`: `-signal`, `ok:false`.
         @Test func aKilledJobReportsNegativeSignalExitCode() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
@@ -1618,13 +1608,11 @@
             #expect(done?["ok"].asBool == false, "\(done?.serialize() ?? "none")")
         }
 
-        /// A4.8, the other half of the `no job` guard — a job_id naming a job that
-        /// DOES exist must fall THROUGH it. `known ? nil : noJob(want)` unified
-        /// both branches at `JSON` (which is `ExpressibleByNilLiteral`), so the
-        /// guard handed back `.some(.null)` for every LIVE job: `stop {job_id}`
-        /// answered `null`, signalled nothing, and the process ran to completion
-        /// with `job_done exit_code: 0`. Python answers `{killed: 1}` and the job
-        /// dies with -9. The unnamed `stop` was unaffected, which is why this
+        /// The other half of the `no job` guard — a job_id naming a job that
+        /// DOES exist must fall THROUGH it (`known ? nil : noJob(want)` would unify
+        /// both branches at `JSON`, which is `ExpressibleByNilLiteral`, and hand back
+        /// `.some(.null)` for every LIVE job). Python answers `{killed: 1}` and the job
+        /// dies with -9. The unnamed `stop` does not take this path, which is why this
         /// needs its own twin.
         @Test func aNamedLiveJobIsStoppedNotAnsweredNull() async throws {
             guard let py = py3() else { return }
@@ -1646,8 +1634,8 @@
             #expect(done?["job_id"].asInt == jid, "\(done?.serialize() ?? "none")")
         }
 
-        /// A4.14 — a line past 64 KiB is read whole: python's reader limit is
-        /// 16 MiB (2026-09-20), where it used to end the pipe with `[pump error]`.
+        /// A line past 64 KiB is read whole: python's reader limit is
+        /// 16 MiB.
         @Test func anOverlongLineIsReadWhole() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
@@ -1665,10 +1653,10 @@
             #expect(done?["error"].isNull == true, "\(done?.serialize() ?? "none")")
         }
 
-        /// Audit BV-5 — a NAMED `clear` follows the bulk form's rule: a `running`
-        /// (or `stopping`) row is refused. It used to drop the row whatever its
-        /// status, and the row is the only handle `stop`, `cancel`, delete and
-        /// shutdown kill a process through — the process outlived all four.
+        /// A NAMED `clear` follows the bulk form's rule: a `running`
+        /// (or `stopping`) row is refused. The row is the only handle `stop`,
+        /// `cancel`, delete and shutdown kill a process through — dropped, the
+        /// process would outlive all four.
         @Test func aNamedClearRefusesARunningJob() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
@@ -1701,7 +1689,7 @@
             #expect(await clear() == .object(["cleared": .integer(1)]))
         }
 
-        /// A4.29 — invalid UTF-8 is REPLACED, not dropped: python decodes with
+        /// Invalid UTF-8 is REPLACED, not dropped: python decodes with
         /// `errors="replace"`, so the rest of the output survives.
         @Test func invalidUtf8OutputIsReplacedNotDropped() async throws {
             guard let py = py3() else { return }
@@ -1721,7 +1709,7 @@
                 "the invalid byte was not replaced: \(out.debugDescription)")
         }
 
-        /// A4.30 — a cancelled job emits NO `job_done`: python's pump re-raises
+        /// A cancelled job emits NO `job_done`: python's pump re-raises
         /// `CancelledError` after labelling the row, so nothing announces a normal
         /// finish for a job the kernel killed.
         @Test func aCancelledJobEmitsNoJobDone() async throws {
@@ -1742,9 +1730,9 @@
                 "a cancelled job announced job_done: \(events.map { $0.serialize() })")
         }
 
-        // MARK: A4.12 — start order
+        // MARK: start order
 
-        /// A4.12 — `status` lists jobs in START order, the way python's dict does.
+        /// `status` lists jobs in START order, the way python's dict does.
         @Test func statusListsJobsInStartOrder() async throws {
             guard let py = py3() else { return }
             let kernel = freshKernel()
@@ -1771,9 +1759,9 @@
             _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
         }
 
-        // MARK: A4.11 / A4.13 / A4.34 — the relay
+        // MARK: the relay
 
-        /// A4.11 — python coerces both relay frames: `m.get("payload") or {}` and
+        /// Python coerces both relay frames: `m.get("payload") or {}` and
         /// `m.get("target") or owner_id`, so a program that omits either is not
         /// forwarding a null.
         @Test func relayCoercesFalsyPayloadAndTarget() async throws {
@@ -1884,9 +1872,9 @@
                     == Array(1...10), "\(seen.map { $0.serialize() })")
         }
 
-        /// A4.13 — a watching program's drains are kernel TASKS (`watch_drain` /
+        /// A watching program's drains are kernel TASKS (`watch_drain` /
         /// `inbox_drain`), parented to the relay, so `ps` shows what it holds.
-        /// A4.34 — and the relay itself is one, verb `relay`.
+        /// And the relay itself is one, verb `relay`.
         @Test func aWatchingProgramHoldsDrainTaskRows() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "drains")
@@ -1902,7 +1890,7 @@
             let inboxRow = try await waitForRow(kernel, agent: a.value, verb: "inbox_drain")
             #expect(watchRow["parent"].asInt == relayRow["id"].asInt, "\(watchRow.serialize())")
             #expect(inboxRow["parent"].asInt == relayRow["id"].asInt, "\(inboxRow.serialize())")
-            // C36 — and each fork is a `task` ROW under the same id, so a cold
+            // And each fork is a `task` ROW under the same id, so a cold
             // read of the message log says what the job held, not just `ps`.
             let stored = kernel.rows.all().filter { $0["agent"]?.asString == a.value }.filter { $0["kind"]?.asString == "task" }
             let forked = stored.map { ($0["id"]?.asInt, $0["verb"]?.asString) }
@@ -1913,7 +1901,7 @@
             }
         }
 
-        /// A4.34 — a real job holds a `relay` row for as long as its control socket
+        /// A real job holds a `relay` row for as long as its control socket
         /// lives, so a program's sends are rowed under work that is still alive.
         @Test func aJobHoldsARelayTaskRow() async throws {
             guard let py = py3() else { return }
@@ -1925,11 +1913,11 @@
             _ = await kernel.send([Item(a, .object(["type": .string("stop")]))])[0].result
         }
 
-        // MARK: A4.16 — the gate takes no credential from the record
+        // MARK: the gate takes no credential from the record
 
-        /// A4.16 — python builds the ingress action from the target and the payload
-        /// ALONE. A record that stores the group token used to satisfy its own
-        /// `password_ingress` — the leg letting itself in.
+        /// Python builds the ingress action from the target and the payload
+        /// ALONE. A record that stores the group token never satisfies its own
+        /// `password_ingress` — that would be the leg letting itself in.
         @Test func theRecordAuthTokenIsNeverACredential() async throws {
             let kernel = freshKernel()
             let a = await createPy(kernel, id: "self_cred")

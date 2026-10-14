@@ -1,5 +1,5 @@
 //! THE RECORD SCHEMA of an AI backend kind — what its record takes, readable
-//! with NO agent existing (owner, 2026-09-30, lib request #3). Python
+//! with NO agent existing. Python
 //! `ai_core/schema.py`, field for field and text for text.
 //!
 //! A set-up page asks the catalog (`reflect bundles=all`: each entry carries the

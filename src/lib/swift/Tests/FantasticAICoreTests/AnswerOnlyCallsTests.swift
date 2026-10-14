@@ -1,10 +1,7 @@
-// ONLY THE ANSWER ACTS (owner, 2026-10-07) — python `test_answer_only_calls.py`.
+// ONLY THE ANSWER ACTS — python `test_answer_only_calls.py`.
 //
 // A `<call>` written inside `<think>…</think>` is thinking — a draft, an
-// illustration, a plan — never an action: not dispatched, not stored. Measured
-// 2026-10-06/07 over 2,821 e2e turns: of 106 calls written inside thinking, 39 were
-// copies of an answer call (the action ran twice) and 67 were drafts that ran
-// although the model never wrote them in its answer.
+// illustration, a plan — never an action: not dispatched, not stored.
 
 import FantasticJSON
 import FantasticKernel

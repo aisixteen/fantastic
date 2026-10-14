@@ -1,4 +1,4 @@
-// CONNECTED PEER KERNELS — cross-kernel addressing (owner, 2026-09-30). Python
+// CONNECTED PEER KERNELS — cross-kernel addressing. Python
 // `PeerRoute` + `Kernel.peers` / `register_peer` / `unregister_peer` /
 // `peer_rows` (`kernel/_kernel.py`) and `RemoteTarget` / `_qualified_target`
 // (`kernel/_agent.py`).
@@ -11,7 +11,7 @@
 // carries frames; addressing is the kernel's. A guid that is not here is an
 // unknown target like any other.
 //
-// A SET PER GUID (owner, 2026-10-03): the tabs of one identity are ONE principal
+// A SET PER GUID: the tabs of one identity are ONE principal
 // — every tab says hello with the identity's guid, each is a live route of it, a
 // call to `<guid>|x` goes to all of them and settles with the first reply.
 
@@ -154,7 +154,7 @@ extension Kernel {
             for route in remote.routes {
                 group.addTask { await route.call(remote.agentId, payload, body: body) }
             }
-            // TODO (owner, open): first-reply-wins hides tab DESYNC — if the tabs
+            // TODO: first-reply-wins hides tab DESYNC — if the tabs
             // of one identity diverge, the other replies are dropped unseen. Must
             // be solved (later).
             let first = await group.next()!
@@ -166,7 +166,7 @@ extension Kernel {
     /// The dispatch of an EMIT to a remote target: the event goes to EVERY live
     /// route of the peer (each tab of one identity).
     ///
-    /// TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+    /// TODO: DESYNC between the tabs of one identity is envisioned
     /// and unsolved — each tab applies the event on its own; think later.
     func emitPeer(_ remote: RemoteRef, item: InboxItem) {
         for route in remote.routes {

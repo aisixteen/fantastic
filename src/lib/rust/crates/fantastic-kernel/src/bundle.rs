@@ -78,19 +78,17 @@ pub trait Bundle: Send + Sync {
     /// judge it — but the bundle can. Default: accept everything (most bundles have
     /// nothing to check). Mirrors python's duck-typed `validate_meta(meta, record)`.
     ///
-    /// Exists because `update_agent` used to accept anything: an agent set
-    /// `ingress_rule="password:kernel-internal-transcripts"`, got `{"updated":
-    /// true}` back, and believed a security control was in place that no resolver
-    /// implements. Accepting a value you cannot honour AND reporting success is the
-    /// worst of both.
+    /// Accepting a value you cannot honour AND reporting success is the worst of
+    /// both: an agent setting `ingress_rule="password:kernel-internal-transcripts"`
+    /// would believe a security control was in place that no resolver implements.
     ///
     /// `record` is the agent's CURRENT meta (empty at create), so a bundle
     /// validates the state the write WILL produce, not the patch in isolation —
     /// py-canonical: a cross-field rule (exec_bridge's `interpreter` against
     /// `interpreters`) is unenforceable from the patch alone, and checking the
-    /// patch falsely refused `update_agent id=x interpreter=<already allowed>`.
-    /// Called at BOTH create and update; create used to bypass it entirely,
-    /// which let a record be born with meta its own bundle refuses.
+    /// patch would falsely refuse `update_agent id=x interpreter=<already allowed>`.
+    /// Called at BOTH create and update, so no record is born with meta its own
+    /// bundle refuses.
     fn validate_meta(
         &self,
         _meta: &Map<String, Value>,
@@ -100,8 +98,8 @@ pub trait Bundle: Send + Sync {
     }
 
     /// What this bundle KIND's record takes — `{fields:[{name, type, required,
-    /// enum?, default?, hint}]}` — readable before any agent of it exists (lib
-    /// request #3, 2026-09-30); a key is a `credentials` field (`{store, ref}`),
+    /// enum?, default?, hint}]}` — readable before any agent of it exists; a key
+    /// is a `credentials` field (`{store, ref}`),
     /// never an environment variable. The substrate attaches it to this
     /// bundle's entry in the `reflect bundles=all` catalog, and nowhere else.
     /// Python's duck-typed module-level `RECORD_SCHEMA`.
@@ -117,8 +115,8 @@ pub trait Bundle: Send + Sync {
     /// HOW TO CALL this bundle's agents — `{verb: doc}` in the bundle's order,
     /// python's module-level `VERBS` docstrings. Served by the kernel's `docs`
     /// verb (oneliners: each doc's signature; detailed: the whole doc) and read
-    /// by [`crate::kernel::Kernel::advertises`]. Never on a reflect (owner,
-    /// 2026-10-05). Default: no verbs.
+    /// by [`crate::kernel::Kernel::advertises`]. Never on a reflect. Default: no
+    /// verbs.
     fn verb_docs(&self) -> Value {
         Value::Object(serde_json::Map::new())
     }
@@ -126,7 +124,7 @@ pub trait Bundle: Send + Sync {
     /// THIS AGENT'S verb docs, when its bundle serves different verbs per agent
     /// (an MCP server's tools) — python's duck-typed `instance_verbs(agent)`.
     /// `docs of=<agent id>` reads it before [`Self::verb_docs`]; `None` keeps the
-    /// bundle's (owner, 2026-10-08). Default: none.
+    /// bundle's. Default: none.
     fn instance_verb_docs(&self, _agent: &crate::agent::Agent) -> Option<Value> {
         None
     }
@@ -230,8 +228,8 @@ pub trait Bundle: Send + Sync {
         Ok(())
     }
 
-    /// Pre-shutdown hook — the ONLY hook the shutdown walk calls (audit
-    /// 2026-09-28, c9: there is no `on_delete` fallback). Default: noop.
+    /// Pre-shutdown hook — the ONLY hook the shutdown walk calls (there is no
+    /// `on_delete` fallback). Default: noop.
     async fn on_shutdown(
         &self,
         _agent_id: &AgentId,
@@ -248,7 +246,7 @@ pub trait Bundle: Send + Sync {
 
     /// Can a FOLDER BUNDLE (`<root>/bundles/<name>/bundle.yaml`, `base: <this
     /// bundle's name>`) extend this bundle? Python: the module exposes
-    /// `folder_bundle`. Default: no (owner, 2026-10-08).
+    /// `folder_bundle`. Default: no.
     fn folder_base(&self) -> bool {
         false
     }
@@ -292,8 +290,8 @@ pub trait Bundle: Send + Sync {
     ///
     /// `Err` = the hook RAISED — the raised reply (`{"error": "<Class>:
     /// <message>", "raised": true}`), which fails the whole reflect, as python's
-    /// bare hook call does. Swallowed, it dropped `persistence` and `guid` with
-    /// nothing to say so (audit 2026-10-03, ARCH2-9).
+    /// bare hook call does — never swallowed, which would drop `persistence` and
+    /// `guid` with nothing to say so.
     fn reflect_root_extra(
         &self,
         _agent: &Arc<crate::agent::Agent>,
@@ -320,7 +318,7 @@ pub trait Bundle: Send + Sync {
 pub struct BundleRegistry {
     by_handler: HashMap<String, Arc<dyn Bundle>>,
     unlisted: HashSet<String>,
-    /// FOLDER BUNDLES of this kernel's root (owner, 2026-10-08): name → the bundle
+    /// FOLDER BUNDLES of this kernel's root: name → the bundle
     /// its base built. Loaded at boot and re-loaded by `reload_bundle`, hence the
     /// lock — the installed map is fixed once the kernel exists.
     folders: std::sync::RwLock<HashMap<String, Arc<dyn Bundle>>>,

@@ -1,9 +1,9 @@
-"""Persistence is LOUD (audit 2026-09-28, d2): a discovered store that cannot hold the
+"""Persistence is LOUD: a discovered store that cannot hold the
 records, and every refused persist write, show up on stderr AND in the root reflect's
 `persistence.error` — and `persistence.provider` is reported only while writes land.
-Before this, a store whose `allow` did not expose the records was still discovered,
-every write was refused into the void, and the root reported it as the provider: a
-silent RAM-only kernel."""
+Otherwise a store whose `allow` does not expose the records would still be
+discovered, every write refused into the void, and the root would report it as the
+provider: a silent RAM-only kernel."""
 
 import asyncio
 

@@ -28,10 +28,9 @@ async def compact(
     # PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it
     # is the first thing the overflow split takes. A summary is a lossy retelling; the
     # one turn that must survive verbatim is the instruction the whole run serves.
-    # Measured 2026-08-20 (live, four runs): the agent reached the correct conclusion,
-    # then ended "healthy budget, no tasks" / "Give me a task whenever" — it had not
-    # refused to act, it no longer knew what it was doing. `truncate` already pins this
-    # turn; `compact` did not. Cost is one turn of budget, charged before the tail.
+    # Without it an agent can reach the correct conclusion and then end idle — not
+    # refusing to act, it no longer knows what it is doing. `truncate` pins this turn
+    # too. Cost is one turn of budget, charged before the tail.
     first = body[0]
     head_cost = estimate_one(first)
     kept = fit_tail(recent, max(0, avail - head_cost))

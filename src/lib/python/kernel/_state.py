@@ -36,8 +36,8 @@ def validate_records(records: list[dict], *, version: int = CURRENT_VERSION) -> 
 
     RESERVED KEYS. Every non-structural record key becomes `**meta` on
     `Agent.__init__`, so a record carrying `root_path` / `ctx` / `parent`
-    collides with a real parameter. Measured: `Kernel.load` CLEARS THE TREE and
-    only then raises `TypeError: Agent() got multiple values for keyword
+    collides with a real parameter: `Kernel.load` would CLEAR THE TREE and only
+    then raise `TypeError: Agent() got multiple values for keyword
     argument 'root_path'` — leaving `agents == {}` and `root is None`, a kernel
     bricked by a half-destroyed tree, from a document a human hand-authored.
     `root_path` is exactly the key someone writing a "where does this tree live"

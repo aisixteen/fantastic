@@ -52,7 +52,7 @@ def _as_id(x) -> int | None:
     if isinstance(x, int):
         return x if x > 0 else None
     # ASCII digits only: `'²'.isdigit()` is True and `int('²')` raises — a row id
-    # is a counter value, never a superscript (parity 2026-09-30; rust/swift agree).
+    # is a counter value, never a superscript.
     if isinstance(x, str) and x.strip().isascii() and x.strip().isdigit():
         return int(x.strip())
     return None

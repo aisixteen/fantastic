@@ -1,7 +1,7 @@
 // THE TUNABLES of the AI core — every number the loop, the context machinery and
-// the fold strategy run on, in ONE place (owner, 2026-09-30: "all constants to
-// constant file"). Each keeps the note that says why it has the value it has; a
-// change here is a change to measured behaviour, so re-measure before moving one.
+// the fold strategy run on, in ONE place. Each keeps the note that says why it
+// has the value it has; a change here is a change to measured behaviour, so
+// re-measure before moving one.
 //
 // Python `ai_core/constants.py` is the reference: same names, same values, same
 // notes. Every use site names `AIConstants.<NAME>` directly — there is no second
@@ -17,14 +17,6 @@ public enum AIConstants {
     /// ~chars per token for the estimate.
     public static let CHARS_PER_TOKEN = 4
     /// The window a caller gets when they say NOTHING.
-    ///
-    /// 4096 until 2026-08-24, and by then it did not fit the kernel's OWN system
-    /// block. Measured: budget = 4096 − 1024 output reserve = 3072, against a
-    /// default system prompt of ~3174 tok (identity + tree + bundle catalog + the
-    /// send and context howtos). Every agent created without an explicit
-    /// `context_window` failfasted with `too_small` before the model was ever
-    /// called — the margin had quietly reached zero, and a ~100-token addition to
-    /// a verb doc was enough to take it negative.
     ///
     /// 128k is not a guess about any particular model: it is the window a caller
     /// gets when they say NOTHING, and the honest default is one that fits this
@@ -103,47 +95,37 @@ public enum AIConstants {
 
     /// The longest a fold title may be, in chars.
     public static let MAX_TITLE = 140
-    /// THE SUMMARY BUDGET (owner, 2026-10-11): a fold summary gets a FIXED 1024
+    /// THE SUMMARY BUDGET : a fold summary gets a FIXED 1024
     /// tokens, and the model is told exactly that number; the fold's mechanical
-    /// index rides beside it, outside the budget. The old formula — a fifth of the
-    /// span, minus the index — put short, user-heavy chat spans on a 48-token floor:
-    /// the model overshot, the one re-summarise was cut while it counted tokens, and
-    /// nothing folded (measured, python E39).
+    /// index rides beside it, outside the budget.
     public static let SUMMARY_BUDGET: Int64 = 1024
     /// Re-summarises after the first answer; past them the fold fails LOUD (the turn
     /// ends `reason: fold_summary`), never a silent unfolded span.
     public static let SUMMARY_RETRIES = 3
-    /// THE THINKING ALLOWANCE on a summary call's `max_tokens` (decided
-    /// 2026-09-26). The endpoint counts a reasoning model's thought against
-    /// `max_tokens`; at a bare budget (as small as ~93 tokens for a short span)
-    /// the thought alone hit the bound, every small summary was cut and refused,
-    /// and the last-resort cut dropped the fold that held the run's decision
-    /// (measured, E81). The SUMMARY TEXT — thought stripped — must still fit the
+    /// THE THINKING ALLOWANCE on a summary call's `max_tokens`. The
+    /// endpoint counts a reasoning model's thought against `max_tokens`; at a bare
+    /// budget the thought alone hits the bound and the summary is cut. The SUMMARY TEXT — thought stripped — must still fit the
     /// budget; the allowance is for the thinking only.
     public static let THINK_ALLOWANCE: Int64 = 1024
     /// The user's own words, verbatim, at most this much per fold.
     public static let INDEX_USER_CHARS = 1200
     /// Rows at the end of the view that never fold — the live tail.
     public static let KEEP_TAIL = 6
-    /// WHEN AND HOW MUCH TO FOLD — shares of the body budget, never a row count
-    /// (owner, 2026-10-11). A fold starts once the view passes `FOLD_AT` of the
+    /// WHEN AND HOW MUCH TO FOLD — shares of the body budget, never a row count.
+    /// A fold starts once the view passes `FOLD_AT` of the
     /// budget; ONE fold then takes the oldest foldable rows, by tokens, until the
-    /// view lands at `LOW` or under. The old row count (SPAN = 8) folded a chat past
-    /// 8 rows at a time into fold rows nearly as big as the rows: 47 folds, 4
-    /// levels, 391 s before the first answer (python E39).
+    /// view lands at `LOW` or under.
     public static let FOLD_AT = 0.95
     /// Adjacent folds at the head of the view before they fold as a group.
     ///
     /// THREE, not four. A real run folds at most once per turn — each projection
     /// drops the view under the watermark and stops — so the head accumulates
     /// folds one at a time and this threshold is the whole story. At four it
-    /// never fired: measured 2026-09-11, `nested_folds` and `flat_roots` both
-    /// ended `levels [1]`, a head that grows one fold per span forever, which is
+    /// never fires: the head grows one fold per span forever, which is
     /// the growth this constant exists to stop.
     ///
     /// Three still skips-then-batches, so depth grows as log₃ of the history
-    /// rather than one level per cut (the 2026-09-06 measurement: twelve levels in
-    /// 26 cuts, when every span began on the previous fold).
+    /// rather than one level per cut.
     public static let FOLD_RUN = 3
 
     // ─── the no-call reminder (Routing.swift) ──────────────────────────────
@@ -152,7 +134,6 @@ public enum AIConstants {
     /// end the chain with `done`/`await`). MAX_SILENT_TURNS in a row — prose-only
     /// turns and dead turns (only thinking) alike, reset by any call — and the
     /// chain GIVES UP: no more reminders, the caller is told the model could not
-    /// answer (owner, 2026-09-30, after a single dead turn ended a 30-pass chain
-    /// and an unbounded reminder loop was the only alternative).
+    /// answer.
     public static let MAX_SILENT_TURNS = 10
 }

@@ -83,7 +83,7 @@ pub fn notes() -> Value {
 /// `_make_reflect`, key for key and in its order: `id, sentence, model,
 /// endpoint, context_window, context_strategy, memory_store_id, generating`. A
 /// backend adds only its own `reflect_extra` keys, which land after `generating`
-/// exactly as python's `out.update(extra)` does. No verb docs (owner, 2026-10-05).
+/// exactly as python's `out.update(extra)` does. No verb docs.
 ///
 /// `model`/`endpoint` are the RECORD's values, raw (absent ⇒ `null`: nothing is
 /// guessed); `context_strategy` takes its default only when ABSENT — a `null`
@@ -124,8 +124,7 @@ pub fn reflect_base(
         meta.get("memory_store_id").cloned().unwrap_or(Value::Null),
     );
     // WHERE its key is read — `{store, ref}`, a pointer, never the secret. An agent
-    // copying this one's record needs it (e2e subai, 2026-10-13: a keyed door, and
-    // the template it was told to read did not show it).
+    // copying this one's record needs it.
     out.insert(
         "credentials".to_string(),
         meta.get("credentials").cloned().unwrap_or(Value::Null),
@@ -157,7 +156,7 @@ pub fn status(agent_id: &AgentId, payload: &Value) -> Value {
 /// The `on_delete` bundle hook, SHARED by every backend (each one's hook calls
 /// it, like [`on_cancel`]; vllm drops its own table too). Drops every row this
 /// crate keeps for the deleted id, so an id re-created later starts clean and
-/// nothing leaks (audit ARCH2-2): the FIFO lock and queue, the in-flight entry,
+/// nothing leaks: the FIFO lock and queue, the in-flight entry,
 /// the projection and its marks, the fold and recall counters, the calibration
 /// (the state slot), the routing count, the silent streaks, the strip set, and
 /// this kernel's head, bodies, grants and watchers. Python `on_delete`.
@@ -183,7 +182,7 @@ pub async fn on_delete(agent_id: &AgentId, kernel: &Arc<Kernel>) {
 /// client is waiting on. No-op when the cancelled task is some OTHER dispatch on
 /// this agent (a `history`, a `reflect`).
 ///
-/// THE CUT (owner, 2026-10-04): every open part ABORTS for its watchers, and the
+/// THE CUT: every open part ABORTS for its watchers, and the
 /// turn leaves the incoming message + a marker row — never a half answer — so the
 /// model's next turn knows what it was asked, what it had visibly said, and who
 /// stopped it. Nothing of a stopped pass was dispatched. A store that refuses
@@ -319,7 +318,7 @@ pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
 /// `{rows:[], loaded:false}`. Returns `{rows, next, total, loaded}`.
 ///
 /// THE HEAD IS THIS KERNEL'S CACHE (`Mem::heads`, python `_mem(kernel)["heads"]`),
-/// never a store mirror (owner, 2026-10-04: a mirror desyncs). `after` matches a row id by
+/// never a store mirror (a mirror desyncs). `after` matches a row id by
 /// python `==` (an id not in the head pages nothing); `limit` is python
 /// `isinstance(limit, int) and limit > 0` (a bool is an int there); `next` is the
 /// page's last row id only when more rows follow; `total` is the whole head.
@@ -530,14 +529,13 @@ pub async fn history(
 
 /// Render ONE stored turn for a `recall` reply — python `_recall_render`.
 ///
-/// WHOLE, NOT CAPPED. Rust/swift truncated each turn at 2000 chars until
-/// 2026-09-02 while python returned it verbatim — same verb, same store, two
-/// different replies, and the cut half is exactly what a model pages back FOR.
+/// WHOLE, NOT CAPPED — python returns it verbatim, and the cut half would be
+/// exactly what a model pages back FOR.
 ///
 /// FROM THE CONTENT, NEVER THE ROW: a string content is itself (an EMPTY one
 /// included), and anything else is `json.dumps(content, default=str)` — so
-/// `{"k": "é"}` renders as `{"k": "\u00e9"}`. Serializing the whole row when the
-/// content was empty handed the model its own bookkeeping.
+/// `{"k": "é"}` renders as `{"k": "é"}`. Serializing the whole row when the
+/// content is empty would hand the model its own bookkeeping.
 fn recall_render(m: &Value) -> String {
     match m.get("content") {
         Some(Value::String(s)) => s.clone(),
@@ -590,10 +588,9 @@ pub async fn recall(
     let total = indexed.len();
     let truncated = total > limit;
     let mut page: Vec<&(usize, &Value)> = indexed[total.saturating_sub(limit)..].iter().collect();
-    // A PAGE MUST FIT THE WINDOW IT IS GOING INTO. Measured 2026-09-05 (python):
-    // the default 20 turns of 6.8KB reads came back as one 14,786-token reply
-    // against a 12,000 window; `too_small` fired as a failfast and the chain
-    // died. The page is trimmed from the OLDEST end (the newest of what was
+    // A PAGE MUST FIT THE WINDOW IT IS GOING INTO: a default page of large reads
+    // can exceed the window, `too_small` fires as a failfast and the chain dies.
+    // The page is trimmed from the OLDEST end (the newest of what was
     // asked for is kept) and says so, with the index to continue from — the
     // caller loses a page, never the run. Measured on the WHOLE reply serialized
     // as one user turn, which is the unit delivery measures.
@@ -781,8 +778,7 @@ pub async fn send(
     // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
     // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
     // inquiry arrives as bare prose and the receiver cannot tell it is being
-    // asked (measured 2026-09-12: six straight `peer_review:rust` runs whose
-    // reviewer never emitted `inquiry_answer`). The operator's own sends carry
+    // asked. The operator's own sends carry
     // no header, exactly as in python.
     if let Some(sender) = fantastic_kernel::current_origin() {
         if sender != *agent_id {
@@ -802,7 +798,7 @@ pub async fn send(
                 parts.push(format!("re {}", scalar_text(r)));
             }
             // the stream this message was previewed as — what an AI consumer
-            // that watched it stream matches its draft to (owner, 2026-10-04)
+            // that watched it stream matches its draft to
             if let Some(s) = payload.get("stream_id").filter(|v| !v.is_null()) {
                 parts.push(format!("stream {}", scalar_text(s)));
             }
@@ -909,9 +905,8 @@ pub async fn send(
     // enqueue → `lock.locked()` → acquire runs without yielding, so "the lock is
     // held" there also covers everyone already queued; on a multi-threaded
     // runtime two sends can both push and both see the lock free before either
-    // takes it, and neither said `queued` (measured, parity 2026-09-30: the
-    // `cycle` case lost its `status queued` event, and every later event ordinal
-    // shifted with it).
+    // takes it, and neither says `queued` (an event lost, and every later event
+    // ordinal shifted with it).
     let prior = {
         let mut q = state.queue.lock().expect("queue poisoned");
         let prior = q.len();
@@ -930,10 +925,10 @@ pub async fn send(
         armed: true,
     };
 
-    // Best-effort contention detection. ONE event, and it is the `status` one:
-    // a bare `{type:'queued'}` rode ahead of it on rust/swift until 2026-09-02,
-    // an undocumented extra type python never sends, which broke any per-submission
-    // event count and every cross-runtime event-stream diff.
+    // Best-effort contention detection. ONE event, and it is the `status` one —
+    // never a bare `{type:'queued'}` ahead of it, an undocumented type python
+    // never sends, which would break any per-submission event count and every
+    // cross-runtime event-stream diff.
     let contested = prior > 0 || state.lock.try_lock().is_err();
     if contested {
         let ahead = state
@@ -1071,7 +1066,7 @@ pub async fn send(
             .await;
             json!({"error": e.0, "reason": "system_prompt_file", "client_id": client_id})
         }
-        // FAIL LOUD (owner, 2026-10-11): a fold's summary would not fit its budget
+        // FAIL LOUD: a fold's summary would not fit its budget
         // after every re-summarise — no turn on an unfolded view, said so.
         Ok(Err(GenFailure::FoldSummary(e))) => {
             emit_status(kernel, &state, agent_id, &client_id, "done", {
@@ -1086,9 +1081,8 @@ pub async fn send(
         // PROVIDER FAILURE (python `core.py`'s `except Exception`):
         // `status(done, reason='error', error=str(e))` announces it, then python
         // re-raises, and a raise is a FAILED execution — which is what makes
-        // `retries` live and dead-lettering possible. Rust used to answer every
-        // failure with a completed `{error, client_id}`, so no AI failure was
-        // ever retryable.
+        // `retries` live and dead-lettering possible. A completed
+        // `{error, client_id}` would leave no AI failure retryable.
         Ok(Err(GenFailure::Provider(pe))) => {
             emit_status(kernel, &state, agent_id, &client_id, "done", {
                 let mut m = Map::new();
@@ -1206,10 +1200,10 @@ impl std::error::Error for PythonRaise {}
 
 // ── inquiry ─────────────────────────────────────────────────────────────────
 
-/// What an inquiry carries ON ITSELF (owner, 2026-10-06): that it IS one and how
-/// it is answered. Delivered bare as `[from ai]` + the question, the reviewer in
-/// peer_review (rust, twice) did the work, wrote `REJECT — timeout = 300` as prose
-/// and ended with `done`. Python `_INQUIRY_HEAD`, verbatim (who asked, the pid).
+/// What an inquiry carries ON ITSELF: that it IS one and how it is answered.
+/// Delivered bare as `[from ai]` + the question, a reviewer does the work, writes
+/// its verdict as prose and ends with `done`. Python `_INQUIRY_HEAD`, verbatim
+/// (who asked, the pid).
 pub fn inquiry_head(asker: &str, pid: &str) -> String {
     format!(
         "[inquiry from {asker} · re {pid} — do any work it needs, then answer with \
@@ -1268,14 +1262,13 @@ pub fn inquiry_open(payload: &Value) -> Result<Value, Value> {
     Ok(send_payload)
 }
 
-/// Accept an `inquiry` (owner, 2026-10-06: FULLY ASYNC): register it as open on
+/// Accept an `inquiry` (FULLY ASYNC): register it as open on
 /// its own chain, run that chain detached, and answer at once
 /// `{accepted, re, request_id}`. The answer the model gives with `inquiry_answer`
 /// in ANY turn of that chain — or the news that it ended without one — reaches
-/// the asker later as a message under this call's pid (`crate::route`). It used to
-/// be read off this agent's FIRST turn only, so a reviewer that read the spec and
-/// ran `git diff` first was told it had not answered (measured 2026-10-06,
-/// peer_review:rust). Python `_inquiry`.
+/// the asker later as a message under this call's pid (`crate::route`), so a
+/// reviewer that reads the spec and runs `git diff` first is not told it has not
+/// answered. Python `_inquiry`.
 pub fn inquiry_accept(
     agent_id: &AgentId,
     payload: &Value,

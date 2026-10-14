@@ -1,4 +1,4 @@
-// SECRET MARKS on a send item (owner, 2026-10-14) — python `kernel/_secret.py`.
+// SECRET MARKS on a send item — python `kernel/_secret.py`.
 //
 // An item may carry `secret: ["<dotted path>", ...]` — paths INTO its payload
 // (`"fields.api_key"`). The handler gets the payload as sent; everything the

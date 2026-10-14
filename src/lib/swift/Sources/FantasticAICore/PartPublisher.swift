@@ -42,7 +42,7 @@ final class PartPublisher {
         // `part.get("to") or ([part["target"]] if part.get("target") else [])`
         var addrs: [String] = part.to ?? []
         if addrs.isEmpty, let t = part.target, !t.isEmpty { addrs = [t] }
-        // DELTAS ARE QUIET (owner, 2026-10-04): the addressee's inbox (and its
+        // DELTAS ARE QUIET: the addressee's inbox (and its
         // watchers) only, never the state stream — a token-rate stream would flood
         // every subscriber. `part_start`/`part_end`/`part_abort` stay on it.
         let quiet = ev["type"] == .string("part_delta")

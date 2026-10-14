@@ -1,13 +1,12 @@
 """ai_paths — the AI paths that need a SCRIPTED model, one case at a time.
 
-§9.1 marks this row `source` in both rounds: inquiry, stateless `messages`,
+Covered: inquiry, stateless `messages`,
 `send_to`, a reply that arrives late, a cancel mid-stream, a send timeout, a
 cycle, a depth-9 chain, and every tag argument (`<timeout>`, `<exec_id>`,
-`<retries>`, `<to>`, `<type>`). None of it was driven, because the round-1/2
-stub answered one script per boot.
+`<retries>`, `<to>`, `<type>`).
 
-Here the stub keys on a `CASE=<name>#<n>` marker the harness plants in the send
-text (`SCR/parity_capture_store.py:142-178`), so twenty independent scripts run
+The stub keys on a `CASE=<name>#<n>` marker the harness plants in the send
+text, so twenty independent scripts run
 in ONE boot and none of them inherits another's turn counter. Each case records
 its reply, the rows it left, and the events its WS watcher saw.
 """
@@ -27,7 +26,7 @@ DONE = '<call name="done"></call>'
 
 #: The filler ONE scripted reply carries, so that this family's single
 #: compaction is FORCED rather than stumbled into. See `spec.AI_WINDOW` for the
-#: measurement and the owner ruling. Deterministic by construction: a fixed
+#: numbers. Deterministic by construction: a fixed
 #: sentence repeated to a fixed length, with no id, no timestamp, no path and no
 #: `<call` in it, so the text is byte-identical on every runtime and every run.
 FILL = ("The pump log is unremarkable and the valve is closed. " * 2000)[:AI_FILL_CHARS]
@@ -69,18 +68,16 @@ CASES = {
     "probe_raise": [tag("plant", "valve"), DONE],
     # B3.10 — a cycle, and a chain deep enough to hit the depth guard.
     #
-    # THE CYCLE IS BOUNDED: ai → ai2 → ai → done. It used to close on itself
-    # (`cycle_back` re-planted `CASE=cycle#1`), and because the stub keys on the
-    # marker in the newest message that restarted the case at step 0 on every
-    # hop: 73 model turns, ~200 rows, and the two chains interleaving differently
-    # every run. Measured on two python captures of the same immutable tree:
-    # every one of those rows was a diff line, because each row's text cites the
-    # id of another row and every id after the first crossing shifts.
+    # THE CYCLE IS BOUNDED: ai → ai2 → ai → done. An unbounded cycle (one that
+    # re-plants `CASE=cycle#1`) restarts the case at step 0 on every hop, because
+    # the stub keys on the marker in the newest message; the two chains then
+    # interleave differently every run, and every row is a diff line because
+    # each row's text cites the id of another row.
     #
-    # Nothing measured is lost by bounding it. Both guards B3.10 names — `cycle
-    # detected` and `max call depth 8 reached` — were absent from the runaway
-    # capture too (measured: zero occurrences anywhere under `a/ai_paths/`),
-    # because each hop is a fresh execution and the depth never accumulates.
+    # Nothing is lost by bounding it. Neither guard B3.10 names — `cycle
+    # detected` and `max call depth 8 reached` — fires in an unbounded cycle
+    # either, because each hop is a fresh execution and the depth never
+    # accumulates.
     # `depth9` is what drives the depth guard; what the cycle case records either
     # way is the rows one AI leaves when another AI calls it back.
     "cycle": [tag("ai2", "send", text="CASE=cycle_back#1 back to you"), DONE],
@@ -169,18 +166,14 @@ def run(ctx) -> None:  # noqa: C901
 
         # ONE SOCKET PER CASE, not one per run.
         #
-        # The first version opened a watcher on `ai` and on `ai2` before the
-        # first case and read both until the end. Measured on two python
-        # captures: both runs stopped receiving after the ninth case, and they
-        # stopped at a DIFFERENT frame (221 events against 233) — so fifteen
-        # cases recorded an empty event list on both runs, and the one case at
-        # the boundary recorded all of its frames on one run and none on the
-        # other. A stream that dies silently mid-run measures nothing after it
-        # dies and is not reproducible at the point where it does.
+        # One watcher per run, opened before the first case and read until the
+        # end, can stop receiving mid-run at a different frame on each run. A
+        # stream that dies silently mid-run measures nothing after it dies and
+        # is not reproducible at the point where it does.
         #
         # A fresh socket per case bounds that: each case's events are its own,
         # opened before its send and closed after its quiesce, and a leg that
-        # gives up during one case cannot empty the next fifteen.
+        # gives up during one case cannot empty the cases after it.
         def open_watch(agent: str, sink: list):
             w = WSWatcher(k.port, agent)
 

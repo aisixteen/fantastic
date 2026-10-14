@@ -466,7 +466,7 @@ struct BinaryBodyPathTests {
 
     /// A WS binary frame's `_binary_path` is a LIST of steps: `["payload", "a.b"]`
     /// is the literal key `"a.b"`, beside a nested `a` → `b` left as sent — the
-    /// slot web_rest's `X-Fantastic-Bytes-Field: a.b` binds. The old dotted string
+    /// slot web_rest's `X-Fantastic-Bytes-Field: a.b` binds. A dotted string
     /// is refused as a malformed frame, never read as a path. Python
     /// `test_binary_path_steps.py` (a).
     @Test(.timeLimit(.minutes(1)))

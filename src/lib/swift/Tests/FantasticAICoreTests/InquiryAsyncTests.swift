@@ -1,4 +1,4 @@
-// INQUIRY, FULLY ASYNC (owner, 2026-10-06) — python `test_inquiry_async.py`.
+// INQUIRY, FULLY ASYNC — python `test_inquiry_async.py`.
 //
 // An `inquiry` sent to an AI is ACCEPTED at once (`{accepted, re, request_id}`) and
 // runs as its own chain on the receiver. The answer the receiver gives with
@@ -107,7 +107,7 @@ struct InquiryAsyncTests {
         #expect(incoming(a)[2].contains("<answer>ship it</answer>"), "\(incoming(a))")
     }
 
-    /// The answer is the receiver's own send (owner, 2026-10-06): without the
+    /// The answer is the receiver's own send: without the
     /// reverse grant it is refused, and the RECEIVER is told — never dropped.
     @Test func anAnswerTheAskerDoesNotAdmitIsToldToTheReceiver() async throws {
         let (k, a, r) = await pair(

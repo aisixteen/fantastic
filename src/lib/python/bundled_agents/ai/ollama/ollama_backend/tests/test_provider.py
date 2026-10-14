@@ -80,7 +80,7 @@ def test_endpoint_and_model_are_required():
 
 async def test_the_client_is_opened_and_closed_per_call():
     """The provider is built per turn: each call opens its own client and closes
-    it, so nothing holds a connection past the turn (audit ARCH2-2)."""
+    it, so nothing holds a connection past the turn."""
     p = OllamaProvider(endpoint="http://ollama.test", model="ollama-test")
     client = _patched_client([_mk_chunk(content="ok")])
     with patch("ollama.AsyncClient", return_value=client) as made:

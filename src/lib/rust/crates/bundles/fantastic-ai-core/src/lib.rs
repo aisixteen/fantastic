@@ -11,11 +11,6 @@
 //! turn, and stop is the default. Nothing iterates on the model's behalf, and no
 //! provider's native tool API is ever used.
 //!
-//! (This header said "no tool parsing" and called the loop emergent until
-//! 2026-08-06. It was lagging, not principled: python superseded that doctrine on
-//! 2026-08-02, and every backend crate in this workspace already documented the
-//! parse as ai-core's. One of two stale copies of a fact is worse than none.)
-//!
 //! The other thing the backend owns, because it owns the per-client conversation,
 //! is **context management**: per-client history, auto-compaction on overflow, and
 //! the `recall` / `context_status` verbs (see [`projection`], [`strategies`],
@@ -69,7 +64,7 @@
 //! - `{type:"token", text, source, client_id}` — one per chunk.
 //! - `{type:"done", source, client_id}` — final event.
 //! - `{type:"context", ...}` — the compaction push half (see [`projection`]).
-//! - STREAMING PARTS ([`stream_parts`], owner 2026-10-04): the output split as it
+//! - STREAMING PARTS ([`stream_parts`]): the output split as it
 //!   is written into `text` / `thinking` / `call` parts — `part_start {stream_id,
 //!   source, kind, name?, target?, to?, re?}` (`re`: the message this turn
 //!   answers) → `part_delta {text}` (batched 50 ms) → `part_end {ok?}` (`ok` on a
@@ -89,7 +84,7 @@
 //! every provider reads BOTH and wraps the deliberation in
 //! [`think::THINK_OPEN`]/[`think::THINK_CLOSE`] — **once per turn**. Dispatch and
 //! history then read only the ANSWER (see [`think::without_thinking`]): a call
-//! written inside thinking never runs (owner, 2026-10-07).
+//! written inside thinking never runs.
 
 #![deny(missing_docs)]
 

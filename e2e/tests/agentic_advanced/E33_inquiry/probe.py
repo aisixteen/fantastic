@@ -114,8 +114,7 @@ async def _arm(name: str, answer: str):
         can_call={"prefs": "*", "cli": "*", "kernel_store": "*", "user": "*"},
         # THE OTHER HALF OF THE WIRE. The gate is two-sided and these two are
         # SIBLINGS, so there is no baseline edge: without this the human's task
-        # is refused at the AI's ingress and the chain never starts at all
-        # (measured 2026-09-04: zero turns, a clean cap, nothing to read).
+        # is refused at the AI's ingress and the chain never starts at all.
         callable_by={"user": "*"},
         limits=Limits.from_env(os.environ),
     )

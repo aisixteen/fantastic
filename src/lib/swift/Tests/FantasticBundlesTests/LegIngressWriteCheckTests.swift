@@ -1,11 +1,10 @@
-// Audit W-8 — the one write-time check every leg makes, and a malformed rule
+// The one write-time check every leg makes, and a malformed rule
 // that reaches a record anyway.
 //
 // Python `io_bridge.unknown_ingress_refusal`: an `ingress_rule` no rule
 // implements — an unknown name, or a malformed spec — is refused at the WRITE by
 // every leg's `validateMeta`, naming the leg's legal values. The wire legs
-// (ws_bridge, relay_connector, web_ws, web_rest) had no such check, and a
-// malformed rule a record still carries used to deny in words of its own.
+// (ws_bridge, relay_connector, web_ws, web_rest) included.
 
 import FantasticIoBridge
 import FantasticJSON

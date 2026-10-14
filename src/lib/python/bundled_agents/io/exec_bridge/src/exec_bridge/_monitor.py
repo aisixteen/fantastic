@@ -1,4 +1,4 @@
-"""MONITORS (owner, 2026-10-09): a filter on a running job's OUTPUT that tells an agent
+"""MONITORS: a filter on a running job's OUTPUT that tells an agent
 when something it watches for appears — how a long run is stopped EARLY.
 
 A job's output already flows through this bridge line by line, so a monitor POLLS
@@ -19,8 +19,8 @@ A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
 was still waiting. RAM only, like the job it watches.
 
 A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
-`unknown_agent`) ENDS the monitor — never a silent drop (fantastic-cli, 2026-10-12:
-an AI whose `callable_by` lacked the bridge got no turn and nobody learned it). The
+`unknown_agent`) ENDS the monitor — never a silent drop (an AI whose `callable_by`
+lacks the bridge would get no turn and nobody would learn it). The
 dead monitor stays in `monitors` with `status: "dead"` and the refusal as `error`
 until `unmonitor` clears it.
 """

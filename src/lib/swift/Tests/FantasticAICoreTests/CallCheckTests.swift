@@ -47,9 +47,8 @@ struct CallCheckTests {
                     + "write them again."))
     }
 
-    /// Measured 2026-10-07 (misleading_fold:rust): a grep scoped by `<ids>` lost
-    /// its leading `<` on the 3090 and the form to write kept only
-    /// target/title/type — the model rewrote it unscoped. Every argument the model
+    /// A grep scoped by `<ids>` that lost its leading `<` keeps its scope in the
+    /// form to write. Every argument the model
     /// wrote carries over, a nested `<item>` as part of its list.
     @Test func theVerbsOwnArgumentsCarryIntoTheFormToWrite() {
         let broken =

@@ -32,8 +32,8 @@ export interface TaskRow {
 
 /**
  * A KERNEL SERVICE TASK — a keepalive loop the ROOT owns: the execution flusher.
- * `cancel` never kills one (audit KV-5, owner 2026-10-03): killing it stopped
- * ledger durability until the process restarted, and nothing restarted it. It
+ * `cancel` never kills one: killing it would stop ledger durability until the
+ * process restarted, and nothing restarts it. It
  * stays listed in `ps`; the kernel's own stop ends it. Python
  * `Kernel.is_service_task`.
  */

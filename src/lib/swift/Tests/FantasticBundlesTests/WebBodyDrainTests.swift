@@ -1,13 +1,11 @@
-// A route that reads no body never buffers one (audit W-1, 2026-10-03).
+// A route that reads no body never buffers one.
 //
-// The host's preflight bounded only a web_rest POST (IO-4); every other route —
-// the favicon, the file proxy, web_rest's GET `_reflect` — was told to read its
-// body with NO bound, and the dispatch handler appended every chunk before
-// serving. A client that reaches the port, with no credential (the favicon is
-// always mounted and the origin guard skips GET), sent a GET with a multi-GB
-// body and the kernel grew until it was killed (measured: three 64 MiB GETs,
-// +196 MB). Python and rust never read those bodies. Now such a body is drained
-// unread and the route is served on its head, as before.
+// The host's preflight bounds a web_rest POST; every other route — the favicon,
+// the file proxy, web_rest's GET `_reflect` — drains a body unread and is served
+// on its head. Buffered, a GET with a multi-GB body from a client that reaches
+// the port with no credential (the favicon is always mounted and the origin
+// guard skips GET) would grow the kernel until it is killed. Python and rust
+// never read those bodies.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -61,7 +59,7 @@ struct WebBodyDrainTests {
         await mountRestLeg(k)
         let web = try #require(k.bundles.get("web.tools") as? WebBundle)
         let server = try #require(web.serverFor(AgentId("web")))
-        // the server's own authority — any other Host is refused first (audit W-2)
+        // the server's own authority — any other Host is refused first
         let host = "127.0.0.1:\(k.httpPort())"
         func head(_ method: HTTPMethod, _ uri: String) -> HTTPRequestHead {
             HTTPRequestHead(

@@ -9,17 +9,16 @@
 // A reasoning model streams two things. ollama labels them `message.thinking` /
 // `message.content`; vLLM labels them `reasoning_content` / `content`. We must
 // read BOTH — a turn spent entirely reasoning is otherwise an empty completion
-// that silently ends the chain (gemma4:12b, 2026-08-02). But we must not KEEP
+// that silently ends the chain. But we must not KEEP
 // both: feeding a reasoning model its own prior deliberation back is against
-// every vendor's guidance, and it compounds — gemma's 3,800-char turn-1
-// deliberation is re-sent in every later prompt, crowding out the task.
+// every vendor's guidance, and it compounds — each turn's deliberation
+// is re-sent in every later prompt, crowding out the task.
 //
 // Providers wrap reasoning in these markers, and everything downstream reads the
 // ANSWER — the text with every span dropped whole: dispatch parses it and history
-// persists it. A `<call>` written inside thinking is thinking (owner, 2026-10-07):
-// measured over 2,821 e2e turns, of 106 calls inside thinking 39 were copies of an
-// answer call (the action ran twice) and 67 were drafts that ran although the model
-// never wrote them in its answer. One convention, no provider learns anything about
+// persists it. A `<call>` written inside thinking is thinking: a call
+// there is a copy of an answer call (the action would run twice) or a draft the
+// model never wrote in its answer. One convention, no provider learns anything about
 // the tool protocol.
 //
 // The `token` events carry the RAW text — markers in — because they are exactly
@@ -39,7 +38,7 @@ public let THINK_CLOSE = "</think>"
 /// what is past them is counted in `thinking_cut`. Python `THINKING_CAP`.
 public let THINKING_CAP = 32000
 
-/// A generation's THINKING, for its assistant row (owner, 2026-10-12: a chat shows
+/// A generation's THINKING, for its assistant row (a chat shows
 /// it collapsed under the answer, after a reload too): every `<think>…</think>` span
 /// of `text` (an unclosed one runs to the end), joined by a blank line —
 /// `thinking`, the first `THINKING_CAP` characters (code points), plus

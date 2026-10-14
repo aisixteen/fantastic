@@ -101,7 +101,7 @@ struct AIRefusalPinTests {
             #"{"error":"inquiry: `text` must be a non-empty string","reason":"missing_arg","arg":"text"}"#
         #expect(await send(k, id.value, ["type": "inquiry"]) == empty)
         #expect(await send(k, id.value, ["type": "inquiry", "text": " \n "]) == empty)
-        // Anything else is ACCEPTED at once (owner, 2026-10-06: fully async); a run
+        // Anything else is ACCEPTED at once (fully async); a run
         // that ends without `inquiry_answer` is told to the asker later
         // (`InquiryAsyncTests`).
         let accepted = await send(k, id.value, ["type": "inquiry", "text": "a or b?", "request_id": "r-1"])

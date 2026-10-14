@@ -60,8 +60,8 @@ async def test_reflect(seeded_kernel, file_bridge):
 
 
 async def test_write_then_read(seeded_kernel, file_bridge, tmp_path):
-    """The STREAM verbs are the only byte path — the string `read`/`write` died
-    (a program in a JSON string is the measured envelope-escaping failure)."""
+    """The STREAM verbs are the only byte path (a program in a JSON string is the
+    envelope-escaping failure)."""
     w = await _ws(seeded_kernel, file_bridge, "hello.txt", b"hi there")
     assert w.get("written"), w
     r = await _rs(seeded_kernel, file_bridge, "hello.txt")
@@ -215,10 +215,10 @@ async def test_unknown_verb_errors(seeded_kernel, file_bridge):
 async def test_update_agent_refuses_a_rule_the_bundle_cannot_honour(seeded_kernel):
     """`update_agent` must REFUSE an ingress rule nobody implements.
 
-    It used to accept anything: on 2026-08-02 an agent set
-    `ingress_rule="password_ingress:kernel-internal-transcripts"` and got `{"updated":
-    true}` back, so it believed a security control was in place. The edge now seals
-    on an unknown rule rather than raising, so it was never unsafe — but reporting
+    Accepting `ingress_rule="password_ingress:kernel-internal-transcripts"` with
+    `{"updated": true}` would make the caller believe a security control is in place.
+    The edge seals on an unknown rule rather than raising, so it is never unsafe — but
+    reporting
     success for a value you cannot honour is its own failure, and the complaint
     belongs at the write, next to the typo."""
     rec = (
@@ -304,7 +304,7 @@ async def _fb(kernel, tmp_path, **meta) -> str:
     return rec["id"]
 
 
-# ─── the 2026-09-02 closing sweep — argument validation + refusal codes ──
+# ─── argument validation + refusal codes ─────────────────────────────────
 
 
 async def _call(kernel, fb, **payload):
@@ -314,9 +314,9 @@ async def _call(kernel, fb, **payload):
 async def test_negative_offset_and_zero_length_are_refused_not_fatal(
     seeded_kernel, file_bridge
 ):
-    """`offset`/`length`/`chunk` used to be `int()`-coerced OUTSIDE the try: a
-    string raised out of the handler, a negative `length` read 0 bytes and made
-    `pump` spin forever. Now every bad value is `bad_arg` naming the arg."""
+    """`offset`/`length`/`chunk` are validated: a string must not raise out of the
+    handler, nor a negative `length` read 0 bytes and make `pump` spin forever.
+    Every bad value is `bad_arg` naming the arg."""
     await _ws(seeded_kernel, file_bridge, "a.txt", b"abc")
     for payload in (
         {"type": "read_stream", "path": "a.txt", "offset": -1},
@@ -409,8 +409,8 @@ async def test_empty_path_delete_rename_mkdir_are_refused(
 async def test_absolute_path_is_refused_with_bad_arg(
     seeded_kernel, file_bridge, tmp_path
 ):
-    """Python used to `lstrip("/")` and serve `/README.md` as `root/README.md`,
-    against its own docstring; the ports refused. One rule now: refuse."""
+    """`/README.md` is never `lstrip("/")`-ed and served as `root/README.md`. One
+    rule: refuse."""
     await _ws(seeded_kernel, file_bridge, "README.md", b"r")
     for verb, extra in (
         ("read_stream", {"path": "/README.md"}),

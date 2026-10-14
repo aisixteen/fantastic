@@ -6,8 +6,7 @@
 // between, and streams RAW TEXT: FantasticAICore parses the `<call name=…>`
 // envelope out of it. NO native tool-calling.
 //
-// What is vLLM-specific here, and why each piece exists (measured by the
-// production deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
+// What is vLLM-specific here, and why each piece exists:
 //
 //   * THE THOUGHT CHANNEL. With `--reasoning-parser qwen3` the thought streams
 //     as `delta.reasoning_content` (some versions: `delta.reasoning`) and only
@@ -25,8 +24,8 @@
 //     capacity it preempts, and a preempted conversation re-prefills from
 //     scratch. The table keeps the conversations THIS kernel drives under that
 //     ceiling and rotates the least-recently-used one out.
-//   * THE KEY, when the door needs one (owner, 2026-09-30: an HTTPS door in
-//     front of the shared GPU takes `Authorization: Bearer <key>`). Read before
+//   * THE KEY, when the door needs one (an HTTPS door in front of
+//     a server takes `Authorization: Bearer <key>`). Read before
 //     EACH request through `key` — the record's `credentials` ref in a credential
 //     store (`Credentials.swift`), never the environment or the record; a record
 //     with no `credentials` sends no header at all, so a local vLLM started
@@ -47,16 +46,15 @@ let NAME = "vllm_backend"
 
 // MARK: - sampling
 
-/// Applied ONLY where the record sets nothing (owner's decision: a production
-/// deployment's agentic defaults, copied). Python `SAMPLING_DEFAULTS`, in its
+/// Applied ONLY where the record sets nothing (a production deployment's
+/// agentic defaults). Python `SAMPLING_DEFAULTS`, in its
 /// order — reflect shows them in this order and the body sends them in it.
 public let SAMPLING_DEFAULTS: OrderedDictionary<String, JSON> = [
     "temperature": .double(0.2),
     "top_p": .double(0.8),
     "top_k": .integer(20),
     // A CHAT-TEMPLATE input (a soft steer on how much the model wants to
-    // think); measured at max_tokens 6000: xhigh 26,440 thinking chars / 0
-    // answer, medium 5,607 / 18,935, low 4,313 / 20,199.
+    // think); a high setting can spend the whole output on thinking.
     "reasoning_effort": .string("medium"),
     // The HARD limit (see the header); medium thinks ~900 tokens on a normal
     // agent turn, so this only binds on a runaway.
@@ -64,8 +62,7 @@ public let SAMPLING_DEFAULTS: OrderedDictionary<String, JSON> = [
 ]
 
 /// Below this, NO thinking budget is sent: a handful of tokens of thinking is
-/// no thinking, and a model starved of it stops with an empty answer (measured:
-/// an 8-token budget on a 16-token turn, 2026-09-30).
+/// no thinking, and a model starved of it stops with an empty answer.
 public let BUDGET_FLOOR = 256
 
 /// vLLM accepts exactly these; "high" answers 400, so it is refused at write.
@@ -99,7 +96,7 @@ public let KV_OVERFLOWS = ["evict", "reject"]
 /// The LIVE conversations on ONE vLLM endpoint, least-recently-used first.
 ///
 /// Shared by every vllm_backend agent in this kernel that names the same
-/// endpoint (owner's decision: one table per endpoint, the closest a kernel
+/// endpoint (one table per endpoint, the closest a kernel
 /// gets to "one count per GPU"). It is BOOKKEEPING, not memory management:
 /// vLLM owns its prefix cache (content-addressed blocks, its own LRU) and the
 /// table frees no GPU memory — a conversation rotated out here that comes back
@@ -277,8 +274,7 @@ let MESSAGE_OVERHEAD = 16
 /// An UPPER bound on the prompt's tokens: every byte of each message's role and
 /// content (a byte-level BPE token is at least one byte) plus `MESSAGE_OVERHEAD`
 /// per message. Never below the server's count, so a turn it lets keep its
-/// `max_tokens` fits the window (owner, 2026-10-12: 64000 on a 65536 window with a
-/// 1537-token prompt was refused). python `prompt_bound`.
+/// `max_tokens` fits the window. python `prompt_bound`.
 func promptBound(_ messages: [JSON]) -> Int {
     messages.reduce(0) { total, m in
         let role = m["role"].asString ?? ""
@@ -377,8 +373,7 @@ enum VllmHTTP {
         return lock.withLock {
             if let c = clients[key] { return c }
             // A refused connect is retried by the client's pool until the
-            // connect timeout, then reported as the refusal itself (measured:
-            // POSIX 61 after 5.0 s) — python's httpx reports it at once. The
+            // connect timeout, then reported as the refusal itself — python's httpx reports it at once. The
             // sentence is the same; the short connect timeout bounds the wait.
             let c = HTTPClient(
                 eventLoopGroupProvider: .singleton,
@@ -408,8 +403,7 @@ struct VllmProvider: AIProvider {
     /// The record's `context_window`. A turn whose `max_tokens` reaches it asks for
     /// "the rest of the window": vLLM counts the prompt AND the output against one
     /// window, so a cap that is the whole window is refused (HTTP 400). Such a turn
-    /// sends NO max_tokens — vLLM then gives it what the prompt leaves (owner,
-    /// 2026-10-04: the e2e limit is the whole 260k). python `VllmProvider._window`.
+    /// sends NO max_tokens — vLLM then gives it what the prompt leaves. python `VllmProvider._window`.
     var window: Int? = nil
     let kvSlots: Int
     let kvOverflow: String
@@ -433,7 +427,7 @@ struct VllmProvider: AIProvider {
     let usage: AIUsage? = AIUsage()
 
     /// The `thinking_token_budget` to send on a call bounded by `callMax`
-    /// (owner's rule, 2026-09-30; python `VllmProvider._budget_for`):
+    /// (python `VllmProvider._budget_for`):
     ///
     /// - a MAIN turn with an EXPLICIT budget sends it as set — the write keeps
     ///   it below the record's `max_tokens`, so it can fire;
@@ -443,8 +437,8 @@ struct VllmProvider: AIProvider {
     ///   thumb, not tuned) — an explicit 8000 on a ~2000-token fold summary
     ///   becomes 1000 instead of refusing the fold;
     /// - below `BUDGET_FLOOR` NO budget is sent at all: a few tokens of thinking
-    ///   is no thinking — measured, an 8-token budget made the model stop with
-    ///   thinking only and no answer (a dead turn).
+    ///   is no thinking — the model stops with thinking only and no answer (a
+    ///   dead turn).
     func budget(for callMax: Int, sideCall: Bool) throws(PyError) -> Int? {
         guard let raw = sampling["thinking_token_budget"], raw != .null else { return nil }
         let budget = try pyInt(raw)
@@ -617,7 +611,7 @@ struct VllmProvider: AIProvider {
         // `max_tokens`) that stopped at its bound got what it asked for — an
         // answer; its caller reads `lastStopReason`. A MAIN turn that hit the
         // record's `max_tokens` did not finish, and returned as if it had, it
-        // parses as a truncated envelope (or, as measured on vLLM, a turn of pure
+        // parses as a truncated envelope (or, on vLLM, a turn of pure
         // thinking) and the chain dies downstream with the cause hidden — so it
         // fails, naming the cut. Same contract as every other backend.
         if sideBound == nil && usage?.lastStopReason == "max_tokens" {
@@ -869,12 +863,10 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
                 + "fire, and a turn would end mid-thought with no answer; keep it below "
                 + "max_tokens (half is a good start)"
         }
-        // EVERY required field, checked at the WRITE (owner's decision,
-        // 2026-09-30): a model spawning a sub-AI copies the fields it can see,
-        // and a record the write accepted but no turn could use failed only
-        // later, on every turn, far from the create that caused it (measured:
-        // E37 multisubai_build — the solvers carried endpoint/model/max_tokens
-        // but no kv_slots/kv_overflow). Named ALL at once, from the schema, so
+        // EVERY required field, checked at the WRITE: a model spawning a sub-AI
+        // copies the fields it can see, and a record the write accepted but no turn
+        // could use would fail only later, on every turn, far from the create that
+        // caused it. Named ALL at once, from the schema, so
         // one retry fixes the record. Checked LAST, so a field that is present
         // but malformed gets its own, more specific refusal above.
         return RecordSchema.validate(Self.RECORD_SCHEMA, backend: NAME, meta: meta, record: record)
@@ -882,7 +874,7 @@ public final class VllmBundle: AgentBundle, @unchecked Sendable {
 
     public var recordSchema: JSON? { Self.RECORD_SCHEMA }
 
-    /// THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read
+    /// THE RECORD SCHEMA — what this kind's record takes, read
     /// with no agent existing (`reflect bundles=all`). Built from the constants
     /// the provider runs on, and enforced by `validateMeta` above, so the page,
     /// the write check and the turn cannot disagree. `endpoint` and `kv_overflow`

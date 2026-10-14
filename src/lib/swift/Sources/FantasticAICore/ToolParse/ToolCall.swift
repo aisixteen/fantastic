@@ -2,8 +2,7 @@
 // minter every envelope's parser needs.
 //
 // Ported from the canonical Python `ai_core/tool_parse.py` (`_mint_id`). The
-// comments are part of the port: each records a measured failure, and it is the
-// only thing that stops the behaviour being "simplified" away later.
+// comments are part of the port: each records why the behaviour is what it is.
 
 import FantasticJSON
 import Foundation
@@ -22,7 +21,7 @@ struct ToolCall: Sendable, Equatable {
     /// The call's arguments object. Always an object by the time it lands here.
     let arguments: JSON
     /// The stream part this call was previewed as — python's `call["stream_id"]`,
-    /// stamped by `routeReply`'s match (owner, 2026-10-04). Never set by a parser.
+    /// stamped by `routeReply`'s match. Never set by a parser.
     var streamId: String? = nil
 }
 

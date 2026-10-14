@@ -1,5 +1,5 @@
-// Persistence is LOUD (audit 2026-09-28, d2) and the ROOT loader's tree is the
-// operator's (a15). Python `kernel_state/tests/test_persistence_loud.py` and
+// Persistence is LOUD and the ROOT loader's tree is the
+// operator's. Python `kernel_state/tests/test_persistence_loud.py` and
 // `test_blob.py::test_persist_record_refuses_a_siblings_namespace` are the oracles.
 
 import FantasticFile
@@ -84,7 +84,7 @@ struct PersistenceLoudTests {
 
 @Suite("the root loader's tree is the operator's")
 struct RootLoaderOwnTreeTests {
-    /// a15: no AGENT writes the root loader's tree — not a sibling's record and
+    /// No AGENT writes the root loader's tree — not a sibling's record and
     /// not its own. Named grants, so the LOADER's guard answers, not the gate.
     @Test func recordVerbsFromAnAgentAreRefused() async {
         let kernel = makeKernelWithAll()
@@ -149,7 +149,7 @@ struct RecordWritesThroughStoreTests {
     }
 
     /// A landed record write copies NO readme or `docs/` beside it — the
-    /// bundle serves them (owner 2026-10-14).
+    /// bundle serves them.
     @Test func aLandedWriteCopiesNoReadmeOrDocs() async throws {
         let fm = FileManager.default
         let (k, dir) = diskKernel()
@@ -174,8 +174,8 @@ struct RecordWritesThroughStoreTests {
 
     /// `flushRecords` returns once everything dirty has LANDED — also what the
     /// debounced writer took first. Past the 150 ms debounce the writer's own
-    /// drain holds the probe's record; the flush used to find its queue empty and
-    /// return with that write still in flight, so `agent.yaml` was not there yet.
+    /// drain holds the probe's record; the flush must not find its queue empty and
+    /// return with that write still in flight.
     @Test func aFlushWaitsForTheDrainTheWriterAlreadyTook() async throws {
         let fm = FileManager.default
         for gapMs: UInt64 in [152, 160, 175] {

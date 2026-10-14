@@ -1,11 +1,9 @@
 //! Relay DIRECTORY events reach the connector's inbox through the engine — the
 //! twin of python `test_watch_directory_re_emits_directory_events_on_the_connector_inbox`.
 //!
-//! Audit W-10 (2026-10-03): the relay transport surfaced a directory event as a
-//! bridge `event` with no `src`, and the engine re-emits only a subscribed `src`
-//! — so `watch_directory` delivered nothing. The transport now tags it
-//! `src:"relay"` and `watch_directory` subscribes the leg to it (the engine's
-//! `watching`), `unwatch_directory` withdraws it.
+//! The relay transport tags a directory event `src:"relay"` (the engine re-emits
+//! only a subscribed `src`), `watch_directory` subscribes the leg to it (the
+//! engine's `watching`), and `unwatch_directory` withdraws it.
 
 use super::*;
 use futures_util::{SinkExt, StreamExt};

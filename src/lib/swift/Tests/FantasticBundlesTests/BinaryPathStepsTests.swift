@@ -1,10 +1,9 @@
-// `_binary_path` is a LIST OF STEPS (owner-approved, 2026-10-02).
+// `_binary_path` is a LIST OF STEPS.
 //
-// A binary frame's header names where its raw body belongs. It used to spell that
-// as a dotted string, so a payload whose bytes sat at the LITERAL key `"a.b"`
-// (which web_rest's `X-Fantastic-Bytes-Field: a.b` binds) went out as
-// `"payload.a.b"` and the receiver rebuilt a NESTED `a` → `b` slot. Now the path
-// is a JSON array: a string step is an object key, taken literally; an integer
+// A binary frame's header names where its raw body belongs. A dotted string would
+// send a payload whose bytes sit at the LITERAL key `"a.b"` (which web_rest's
+// `X-Fantastic-Bytes-Field: a.b` binds) as `"payload.a.b"`, and the receiver
+// would rebuild a NESTED `a` → `b` slot. So the path is a JSON array: a string step is an object key, taken literally; an integer
 // step is a list index.
 //
 // The codec half of python `io_bridge/tests/test_binary_path_steps.py` (a): literal,

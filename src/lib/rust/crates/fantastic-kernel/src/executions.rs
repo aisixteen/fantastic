@@ -36,7 +36,7 @@ const READ_PAGE: i64 = 1000;
 /// payload or an outcome: `parent` (the task, or the settled execution), `caller`
 /// (who made a call / an ack; null = the operator), `settled` (the agent a settle
 /// closes). Every [`Kernel::rows_put`] announces `{agent_id, kind: "row", row:
-/// {id, kind, …}}` on the state stream (owner, 2026-10-08), so a reader fetches rows
+/// {id, kind, …}}` on the state stream, so a reader fetches rows
 /// only when told; like every state event, never from inside the kernel's own
 /// ledger flush, so an idle kernel publishes nothing. Python `row_event`.
 const ROW_EVENT_KEYS: [&str; 3] = ["parent", "caller", "settled"];
@@ -114,7 +114,7 @@ impl Kernel {
         if let Some(root) = self.root() {
             let mut patch = Map::new();
             patch.insert("next_id".to_string(), Value::from(bound));
-            // Inside the silent flush (`STATE_QUIET`, audit CLI-B) the reservation
+            // Inside the silent flush (`STATE_QUIET`) the reservation
             // publishes nothing, like everything else the flush does; the root
             // loader's writer is told directly, so the bound still lands — its own
             // call and settle ids are minted here too, and a bound that never
@@ -360,7 +360,7 @@ impl Kernel {
             return json!({"flushed": 0});
         }
         // Nothing of this flush is published — its own id mint (and an id-block
-        // reservation it crosses) included (audit CLI-B).
+        // reservation it crosses) included.
         let fid = crate::send::STATE_QUIET.sync_scope(true, || self.mint_id());
         let mut kinds: HashMap<i64, Option<String>> = HashMap::new();
         let mut batch: Vec<Value> = Vec::with_capacity(ids.len() + 1);
@@ -383,7 +383,7 @@ impl Kernel {
         let mut payload = Map::new();
         payload.insert("type".to_string(), Value::from("append"));
         payload.insert("rows".to_string(), Value::Array(batch));
-        // nothing of this write is published on the state stream (audit CLI-B)
+        // nothing of this write is published on the state stream
         let write = self.bookkeeping(&store, Value::Object(payload), None);
         let out = crate::send::STATE_QUIET.scope(true, write).await;
         let refused = out.result.get("error").is_some_and(py_truthy);
@@ -864,7 +864,7 @@ mod quiet_reservation_tests {
     use serde_json::{json, Map, Value};
     use std::sync::{Arc, Mutex};
 
-    /// Audit CLI-B: an id block reserved inside the kernel's own ledger flush
+    /// An id block reserved inside the kernel's own ledger flush
     /// publishes NOTHING on the state stream, and the root loader's writer still
     /// queues the root record — the bound lands.
     #[tokio::test]

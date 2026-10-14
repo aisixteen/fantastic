@@ -1,10 +1,9 @@
 // A binary item rides the ORDINARY batch.
 //
-// `sendWithBinary` bypassed `send` entirely, so a `write_stream` the model
-// issued through `send_binary` had no task row (invisible to `ps`, unreachable
-// by `cancel`), no ledger id (no dedup, no join) and no timeout — and the reply
-// tag it produced read `[reply to - · …]` because there was no pid to name
-// (measured 2026-09-02). An `Item` may now carry the blob, and the kernel
+// Bypassing `send`, a `write_stream` issued through `send_binary` would have no
+// task row (invisible to `ps`, unreachable by `cancel`), no ledger id (no dedup,
+// no join), no timeout, and no pid for its reply tag. An `Item` carries the
+// blob, and the kernel
 // dispatches it through `handleBinary` under the same row, id and deadline as
 // any other item.
 
@@ -99,10 +98,9 @@ struct BinaryBatchTests {
 
     @Test func aTimedBinaryItemStillReachesTheBinaryChannel() async {
         // The item's own DEADLINE must not cost it its bytes. `runDispatchOutcome`
-        // had two branches and only the untimed one forwarded the blob, so every
-        // item carrying a timeout silently fell to the TEXT channel. AI routing
-        // stamps the layer's deadline on EVERY item, which made this the ONLY
-        // shape a model could ever produce (e2e `E10_dialog:swift`, 2026-09-03).
+        // has two branches and both forward the blob: AI routing stamps the layer's
+        // deadline on EVERY item, so the timed branch is the ONLY shape a model
+        // produces.
         let (kernel, sink) = await mk()
         let payload = Data("42\n".utf8)
         let out = await kernel.send([
@@ -116,7 +114,7 @@ struct BinaryBatchTests {
         #expect(sink.received == payload, "a deadline must not divert the blob")
     }
 
-    /// C34: `send_binary` to a BARE agent (no handler_module) answers the SAME
+    /// `send_binary` to a BARE agent (no handler_module) answers the SAME
     /// UNHANDLED text + `verb` the text channel gives — python has no separate
     /// binary dispatch at all, one `_dispatch` resolution serves both.
     @Test func binaryToABareAgentIsTheSameUnhandledTextAsTheTextChannel() async {
@@ -138,7 +136,7 @@ struct BinaryBatchTests {
         #expect(binaryReply["verb"].asString == "write_stream")
     }
 
-    /// C34/C24: `send_binary` naming a `handler_module` no bundle answers
+    /// `send_binary` naming a `handler_module` no bundle answers
     /// answers the SAME `not_installed` text + `verb` as the text channel.
     @Test func binaryToAnUninstalledHandlerModuleIsTheSameTextAsTheTextChannel() async {
         let registry = BundleRegistry()
@@ -165,7 +163,7 @@ struct BinaryBatchTests {
         #expect(binaryReply["verb"].asString == "write_stream")
     }
 
-    /// C34: a binary handler that THROWS settles `raised:true`, exactly like
+    /// A binary handler that THROWS settles `raised:true`, exactly like
     /// the text channel's catch — a handler blowing up is a RESULT, not a
     /// crash, either way.
     @Test func aRaisingBinaryHandlerSettlesRaisedTrue() async {

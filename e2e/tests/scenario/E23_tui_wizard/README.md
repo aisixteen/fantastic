@@ -1,6 +1,6 @@
 # `tui_wizard` — the terminal's AI set-up wizard, keyboard-driven in a PTY
 
-The canvas's two-page wizard, in the terminal (owner 2026-10-12): a scripted
+The canvas's two-page wizard, in the terminal: a scripted
 keyboard in a pseudo-terminal (`src/tui/e2e/screenshot.rs`), the vLLM backend
 linked, **no model called** — an agent is made, never asked.
 

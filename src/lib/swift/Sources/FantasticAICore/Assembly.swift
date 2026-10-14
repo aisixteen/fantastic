@@ -63,8 +63,8 @@ private func renderReflectValue(_ v: JSON) -> String {
 ///
 /// It lands with ROUTING, never before it: a prompt that teaches an envelope
 /// nothing dispatches is strictly worse than a prompt that stays quiet, because
-/// the model then writes calls, receives no reply, and — measured repeatedly on
-/// gemma-4-12B — invents the replies it never got.
+/// the model then writes calls, receives no reply, and invents the replies it
+/// never got.
 ///
 /// MECHANISM, never strategy: the envelope's shape, that `reply_to` defaults to
 /// the sender (so an omitted key is a chain, not a discard), how a document

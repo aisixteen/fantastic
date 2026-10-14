@@ -49,7 +49,7 @@ INTERP = sys.executable
 
 #: name → (seconds until its FATAL line, -1 = never; the monitor cadence asked for).
 #: A monitor sees only output printed after it starts, and a model takes ~20 s from
-#: the starts to its monitors (measured 2026-10-09), so the FATALs come after that.
+#: the starts to its monitors, so the FATALs come after that.
 WORKERS = {"w5": (40, 5), "w10": (45, 10), "w20": (50, 20), "w60": (-1, 60)}
 #: Seconds a model may take, on top of a monitor's cadence, to see the match and kill.
 SLACK = 75.0

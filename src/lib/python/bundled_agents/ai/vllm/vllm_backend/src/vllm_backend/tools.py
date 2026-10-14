@@ -125,7 +125,7 @@ async def _reflect_extra(id, kernel):
     }
 
 
-#: THE RECORD SCHEMA (lib request #3) — what this kind's record takes, read with
+#: THE RECORD SCHEMA — what this kind's record takes, read with
 #: no agent existing (`reflect bundles=all`). Built from the constants the provider
 #: runs on, and enforced by `validate_meta` below, so the page, the write check and
 #: the turn cannot disagree. `endpoint` and `kv_overflow` are required; the counts
@@ -301,11 +301,9 @@ def validate_meta(meta: dict, record: dict) -> str | None:
             "never fire, and a turn would end mid-thought with no answer; keep it "
             "below max_tokens (half is a good start)"
         )
-    # EVERY required field, checked at the WRITE (owner's decision, 2026-09-30):
-    # a model spawning a sub-AI copies the fields it can see, and a record the
-    # write accepted but no turn could use failed only later, on every turn,
-    # far from the create that caused it (measured: E37 multisubai_build — the
-    # solvers carried endpoint/model/max_tokens but no kv_slots/kv_overflow).
+    # EVERY required field, checked at the WRITE: a model spawning a sub-AI copies
+    # the fields it can see, and a record the write accepted but no turn could use
+    # would fail only later, on every turn, far from the create that caused it.
     # Named ALL at once, from the schema, so one retry fixes the record.
     return validate(RECORD_SCHEMA, NAME, meta, record)
 

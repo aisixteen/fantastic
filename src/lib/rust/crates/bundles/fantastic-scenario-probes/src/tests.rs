@@ -54,7 +54,7 @@ async fn call<B: Bundle>(b: &B, kernel: &Arc<Kernel>, id: &AgentId, payload: Val
 
 // ── reflect bytes ───────────────────────────────────────────────────────────
 
-/// A10.1 — the plant's `count` doc is python's.
+/// The plant's `count` doc is python's.
 #[tokio::test]
 async fn plant_reflect_is_pythons_bytes() {
     let k = kernel();
@@ -69,7 +69,7 @@ async fn plant_reflect_is_pythons_bytes() {
     );
 }
 
-/// A10.2 — the desk's `count` doc is python's, "ever" included.
+/// The desk's `count` doc is python's, "ever" included.
 #[tokio::test]
 async fn purchase_reflect_is_pythons_bytes() {
     let k = kernel();
@@ -92,7 +92,7 @@ async fn purchase_reflect_is_pythons_bytes() {
 
 // ── refusals and raises ─────────────────────────────────────────────────────
 
-/// A10.3 — the plant RAISES, and the kernel renders the exception class.
+/// The plant RAISES, and the kernel renders the exception class.
 #[tokio::test]
 async fn plant_failures_render_pythons_error() {
     let k = kernel();
@@ -115,7 +115,7 @@ async fn plant_failures_render_pythons_error() {
     assert_eq!(e.to_string(), "RuntimeError: valve is rusted shut");
 }
 
-/// A10.11 — `secrets.token_hex(3)`: six hex characters, not eight.
+/// `secrets.token_hex(3)`: six hex characters, not eight.
 #[tokio::test]
 async fn plant_serial_is_six_hex() {
     let k = kernel();
@@ -135,7 +135,7 @@ async fn plant_serial_is_six_hex() {
     );
 }
 
-/// A10.4 — `unknown verb 'zap'`, python's repr: a quote inside the verb switches
+/// `unknown verb 'zap'`, python's repr: a quote inside the verb switches
 /// the quoting, which rust's `{:?}` never does.
 #[tokio::test]
 async fn unknown_verb_is_python_repr() {
@@ -161,7 +161,7 @@ async fn unknown_verb_is_python_repr() {
     );
 }
 
-/// A10.5 — the human's unknown-verb refusal, python repr and all.
+/// The human's unknown-verb refusal, python repr and all.
 #[tokio::test]
 async fn user_unknown_verb_is_python_repr() {
     let k = kernel();
@@ -172,7 +172,7 @@ async fn user_unknown_verb_is_python_repr() {
     );
 }
 
-/// A10.13 — the oracle names its verbs as python's `sorted(VERBS)` prints them.
+/// The oracle names its verbs as python's `sorted(VERBS)` prints them.
 #[tokio::test]
 async fn oracle_unknown_verb_names_its_verbs_like_python() {
     let k = kernel();
@@ -186,7 +186,7 @@ async fn oracle_unknown_verb_names_its_verbs_like_python() {
     );
 }
 
-/// A10.6 + A10.8 — the `kind` refusal lists python's list, and a present
+/// The `kind` refusal lists python's list, and a present
 /// non-string `kind` is refused rather than silently defaulted.
 #[tokio::test]
 async fn inquiry_kind_refusal_lists_python_list() {
@@ -208,7 +208,7 @@ async fn inquiry_kind_refusal_lists_python_list() {
         .await,
         refusal
     );
-    // A10.8 — a present non-string is not in KINDS either.
+    // A present non-string is not in KINDS either.
     assert_eq!(
         call(
             &p,
@@ -234,7 +234,7 @@ async fn inquiry_kind_refusal_lists_python_list() {
     assert_eq!(ok["accepted"], json!(true), "{ok}");
 }
 
-/// A10.12 — `send` refuses a payload whose `type` is falsy, not just absent.
+/// `send` refuses a payload whose `type` is falsy, not just absent.
 #[tokio::test]
 async fn user_send_refuses_a_falsy_type() {
     let k = kernel();
@@ -262,8 +262,8 @@ async fn user_send_refuses_a_falsy_type() {
 
 // ── tallies ─────────────────────────────────────────────────────────────────
 
-/// A10.7 — the inquiry reply carries `granted`, the count of grants APPLIED. The
-/// reply is the ACCEPTANCE (owner, 2026-10-06: fully async); the answer itself
+/// The inquiry reply carries `granted`, the count of grants APPLIED. The
+/// reply is the ACCEPTANCE (fully async); the answer itself
 /// arrives later as the human's own message under the inquiry's pid.
 #[tokio::test]
 async fn inquiry_reply_carries_granted() {
@@ -286,7 +286,7 @@ async fn inquiry_reply_carries_granted() {
     assert_eq!(r["accepted"], json!(true));
 }
 
-/// A10.9 — two humans keep two tallies, and their proposals stay apart.
+/// Two humans keep two tallies, and their proposals stay apart.
 #[tokio::test]
 async fn user_tallies_are_per_agent() {
     let k = kernel();
@@ -320,7 +320,7 @@ async fn user_tallies_are_per_agent() {
     );
 }
 
-/// A10.14 — two oracles keep two tallies.
+/// Two oracles keep two tallies.
 #[tokio::test]
 async fn oracle_tallies_per_agent() {
     let k = kernel();
@@ -355,7 +355,7 @@ async fn oracle_tallies_per_agent() {
 
 // ── oracle rendering and coercion ───────────────────────────────────────────
 
-/// A10.10 — a non-string ledger line is rendered with python's `str()`: a dict
+/// A non-string ledger line is rendered with python's `str()`: a dict
 /// reads `{\'a\': \'alpha\'}`, not JSON's `{"a":"alpha"}`.
 #[tokio::test]
 async fn oracle_renders_non_string_lines_with_python_str() {
@@ -383,7 +383,7 @@ async fn oracle_renders_non_string_lines_with_python_str() {
     );
 }
 
-/// A10.15 — `limit` is python's `int(x or 6)`, clamped to 1..=20, and an
+/// `limit` is python's `int(x or 6)`, clamped to 1..=20, and an
 /// unparsable value falls back to 6 rather than raising.
 #[tokio::test]
 async fn oracle_limit_coerces_like_python() {

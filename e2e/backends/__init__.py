@@ -1,10 +1,9 @@
 """THE PLUG POINT — one definition of "which model, reached how".
 
-Every probe used to carry its own `if BACKEND == …: … elif …` in two or three
-places (the record meta, the provider import, the model default). Ten probes ×
-three sites is thirty branches that drift independently, and they did: one probe
-never read its endpoint variable and so died on a 401 while its five siblings ran
-fine against the same server (measured 2026-08-24).
+A per-probe `if BACKEND == …: … elif …` in two or three places (the record meta,
+the provider import, the model default) is branches that drift independently — a
+probe that never reads its endpoint variable dies on a 401 while its siblings run
+fine against the same server.
 
 So the choice lives HERE, once. A probe asks for `backend()` and gets an object
 that knows how to describe itself as a record and what it needs before it can
@@ -31,12 +30,9 @@ from helpers.creds import KEYED, credentials
 #:
 #: `max_tokens` is a property of the MODEL PLUG, not of a test: it bounds one
 #: completion (thinking + text), and a test has no way to know what its ask costs
-#: in tokens. It used to be a per-test knob, and 25 files carried their own value
-#: — 4096, 8192, 16384, 32768 — set by whoever last watched a lane truncate.
-#: `E32_graph_shape` had none at all, so it silently ran at the backend's 8192
-#: while the sibling it is the A/B CONTROL for ran at 32768: the two differed in
-#: think budget as well as in the ask, and that comparison was never valid
-#: (measured 2026-09-03). A budget nobody can see is a budget that decides
+#: in tokens. As a per-test knob it drifts, and an A/B pair at different budgets
+#: differs in think budget as well as in the ask, so the comparison is not valid.
+#: A budget nobody can see is a budget that decides
 #: results by accident.
 #:
 #: THIS IS THE OUTPUT RESERVE, NOT THE WINDOW. The endpoint enforces
@@ -45,7 +41,7 @@ from helpers.creds import KEYED, credentials
 #: first send —
 #:   "you requested 260000 output tokens and your prompt contains at least 2145
 #:    input tokens, for a total of at least 262145"
-#: (measured 2026-09-03). A one-shot probe with a three-word prompt accepts
+#: A one-shot probe with a three-word prompt accepts
 #: 260_000, which is why the window looks like a valid cap and is not.
 #:
 #: 65536 sits comfortably above anything observed — the largest legitimate
@@ -228,8 +224,8 @@ class _FoundationModels(Backend):
 
 #: THE FM SYSTEM BLOCK — the record's `system_prompt`, which replaces the default
 #: block on every turn. The on-device window is 4096 tokens and the default block
-#: measured 6748 (d5489b5b): every turn was refused `context_insufficient` before
-#: the model ran. The file keeps the default block's essentials only — the call
+#: does not fit it: every turn would be refused `context_insufficient` before the
+#: model ran. The file keeps the default block's essentials only — the call
 #: grammar, replies, await/done, reflect. It names no agent id: `record()` is not
 #: told which agent it builds.
 FM_SYSTEM_PROMPT = os.path.join(os.path.dirname(__file__), "foundation_models.prompt.md")
@@ -257,8 +253,8 @@ REGISTRY = {
 def backend(name: str | None = None) -> Backend:
     """Resolve the backend. NAMED explicitly or via `BACKEND` — never guessed.
 
-    Probes used to default to `ollama`, which is not installed here; the failure
-    then looked like a substrate fault instead of an unset variable.
+    A default backend that is not installed makes the failure look like a substrate
+    fault instead of an unset variable.
     """
     name = name or os.environ.get("BACKEND")
     if not name:

@@ -1,5 +1,5 @@
 //! Every expected value below is python's: the negotiation vectors were measured
-//! against uvicorn 0.46 / websockets 16.0 (the repo venv, 2026-10-02) with raw
+//! against uvicorn 0.46 / websockets 16.0 with raw
 //! upgrade requests, the frame payloads were produced by websockets'
 //! `PerMessageDeflate.encode`.
 

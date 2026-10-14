@@ -26,11 +26,11 @@ pub use password::Password;
 /// opened with `ingress_rule=allow_all_ingress`/`password_ingress`).
 ///
 /// UNKNOWN TYPE ⇒ `DenyInbound::unknown(name)` — seal, and name the bad rule in every
-/// denial. It used to be `Err`, on the theory of failing loudly; but resolution runs
-/// PER CALL, and in python that `Err` surfaced as an unhandled exception out of the
-/// handler which killed the caller's whole chain with no reply. An unresolvable rule
-/// is not an authorization, so deny. A MALFORMED spec is named by its repr
-/// (`parse_spec`) and seals the same way, so resolution cannot fail. Mirrors py.
+/// denial. Not `Err`: resolution runs PER CALL, and in python an error there
+/// surfaces as an unhandled exception out of the handler, killing the caller's
+/// whole chain with no reply. An unresolvable rule is not an authorization, so
+/// deny. A MALFORMED spec is named by its repr (`parse_spec`) and seals the same
+/// way, so resolution cannot fail. Mirrors py.
 pub fn resolve(spec: Option<&Value>) -> Arc<dyn IngressRule> {
     let (name, token_env) = parse_spec(spec);
     match name.as_deref() {

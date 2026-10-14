@@ -1,10 +1,10 @@
-// C7 — the DISTILLED `tree` is the gated roster (python `_roster`).
+// The DISTILLED `tree` is the gated roster (python `_roster`).
 //
 // `tree=all` with `detail != full` answers `{id, sentence?, description?, mode?,
 // children}` — what each agent is FOR, not how it is wired. The sentence is
 // ASKED FROM THE AGENT ITSELF through a real internal dispatch, so it cannot
 // drift from what the agent says. A reflect that passes the gate returns the
-// tree WHOLE — no per-node hiding (owner decision 2026-10-03, minimal gate).
+// tree WHOLE — no per-node hiding (minimal gate).
 
 import FantasticJSON
 import Foundation

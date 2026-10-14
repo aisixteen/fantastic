@@ -14,12 +14,9 @@
 //     </bytes>
 //     </call>
 //
-// The three JSON-era envelopes this module used to accept — the taught
-// `<tool_call>{…}</tool_call>`, Claude's `<invoke>`, the gemma special-token
-// channel — and both `bytes` cuts are DELETED, not deprecated. A model's trained
-// format stopped being the argument the day the measurement went the other way
-// (2026-09-09, qwen3.8-27b: JSON 3/12 correct on shapes that carry a document,
-// bare child tags 12/12).
+// No other envelope is accepted — no `<tool_call>{…}</tool_call>`, no
+// `<invoke>`, no special-token channel: JSON fails on shapes that carry a
+// document, bare child tags do not.
 //
 // SWIFT-SPECIFIC: the scan indexes over `Array(text.unicodeScalars)` rather than
 // juggling `String.Index`, so its arithmetic matches python's CODE-POINT string
@@ -98,7 +95,7 @@ func terminatedCalls(_ text: String) -> [(call: ToolCall, body: String)] {
 }
 
 /// Non-streaming: pull every finalized `<call>` out of a complete string. A call
-/// with no `</call>` is NOT a call (owner, 2026-10-04): the model stopped
+/// with no `</call>` is NOT a call: the model stopped
 /// generating before it closed, so nothing is dispatched — the turn's cut marker
 /// names it as not sent (`cutMarker`).
 func extractToolCalls(_ text: String) -> [ToolCall] {

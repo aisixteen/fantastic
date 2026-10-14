@@ -1,4 +1,4 @@
-// Audit 2026-10-14 — twins of python `test_secret_marks.py`,
+// Twins of python `test_secret_marks.py`,
 // `test_minimal_gate.py::test_a_deleted_id_leaves_every_grant` and
 // `test_send_launch.py::test_draining_refuses_a_fork_but_admits_a_keepalive_one`.
 //
@@ -59,8 +59,8 @@ private func create(
     #expect(r["id"].asString == id, "\(r.serialize())")
 }
 
-@Suite("audit 2026-10-14")
-struct Audit20261014Tests {
+@Suite("secret marks, grant pruning, drain")
+struct SecretMarksGrantsDrainTests {
     @Test func aMarkedValueIsShownNeverKept() async {
         let k = makeKernel()
         await create(k, "sp")

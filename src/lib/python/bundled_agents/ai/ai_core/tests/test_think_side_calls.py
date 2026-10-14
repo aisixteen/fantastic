@@ -1,5 +1,5 @@
-"""Side calls (fold summaries, recall choices) strip reasoning like the main turn.
-Measured 2026-09-06: 172/172 model-written folds were titled `<think>The user wants…`."""
+"""Side calls (fold summaries, recall choices) strip reasoning like the main turn —
+unstripped, a model-written fold is titled `<think>The user wants…`."""
 
 from __future__ import annotations
 

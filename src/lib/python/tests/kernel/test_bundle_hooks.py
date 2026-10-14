@@ -227,9 +227,9 @@ async def test_a_raising_reflect_root_extra_fails_the_reflect(
     seeded_kernel, monkeypatch
 ):
     """The loader's `reflect_root_extra` is the ONLY source of `persistence` and
-    `guid` on the root reflect. A raise inside it was swallowed and the reflect
-    answered without them — an operator read "no persistence" and nothing said
-    why (audit 2026-10-03, ARCH2-9). The raise fails the reflect now."""
+    `guid` on the root reflect. A raise inside it must not be swallowed with the
+    reflect answering without them — an operator would read "no persistence" and
+    nothing would say why. The raise fails the reflect."""
     import kernel_state.tools as ks
 
     def _raise(agent, full=False):

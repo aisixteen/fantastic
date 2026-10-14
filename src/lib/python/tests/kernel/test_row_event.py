@@ -1,4 +1,4 @@
-"""The ROW STATE EVENT (owner, 2026-10-08): every EXECUTION row the kernel puts
+"""The ROW STATE EVENT: every EXECUTION row the kernel puts
 (`call`, `settle`, `task`, `ack`) is announced on the state stream as
 `{agent_id, kind: "row", row: {id, kind, parent?, caller?, settled?}}` — content-
 free, so a reader fetches rows only when told and polls nothing. Nothing inside

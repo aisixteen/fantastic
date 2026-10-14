@@ -1,5 +1,5 @@
 """anthropic_backend — the Messages wire it speaks, what it reads from the API when
-the record leaves it out, and the optional key (owner, 2026-10-07)."""
+the record leaves it out, and the optional key."""
 
 from __future__ import annotations
 

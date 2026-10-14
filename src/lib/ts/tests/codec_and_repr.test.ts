@@ -1,7 +1,6 @@
 // The recursive walkers: the frame codec's binary path (find, clone, place), and
 // how reflect quotes a readme key. Every expectation whose text python also
-// produces was measured on python (io_bridge/_codec.py, `_readme_view`) on
-// 2026-10-01.
+// produces was measured on python (io_bridge/_codec.py, `_readme_view`).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -157,7 +156,7 @@ test("pyRepr and pyDumps walk the same nested value as python's repr and json.du
 });
 
 test("a wire-parsed python float JS holds as an integer keeps python's repr", () => {
-  // python `repr(json.loads(text))`, printed 2026-10-03: a number spelled with a
+  // python `repr(json.loads(text))`: a number spelled with a
   // fraction or an exponent is a float (`1.0`, `1e+20`, `-0.0`); one spelled as
   // digits is an int (`-0` is `0`).
   const text =

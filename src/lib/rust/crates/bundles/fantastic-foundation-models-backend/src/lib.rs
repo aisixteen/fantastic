@@ -1,7 +1,7 @@
 //! foundation_models_backend — an LLM agent on Apple's on-device Foundation
 //! Models system model.
 //!
-//! Owner's decision (2026-10-02): this backend in BOTH swift and rust, with ONE
+//! This backend exists in BOTH swift and rust, with ONE
 //! implementation of the FoundationModels calls — the swift `FantasticFMCore`.
 //! The swift bundle calls it directly; this crate links it as a static library
 //! through `FantasticFMBridge`'s C ABI (`build.rs`, [`system`]). Python has none

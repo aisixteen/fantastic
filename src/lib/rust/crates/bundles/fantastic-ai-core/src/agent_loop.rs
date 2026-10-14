@@ -78,7 +78,7 @@ pub enum Generation {
         /// `call_streams`).
         call_streams: Vec<(String, String)>,
         /// The model stopped with a block open: NOTHING of this pass dispatches,
-        /// its closed calls included (owner, 2026-10-04).
+        /// its closed calls included.
         cut: bool,
     },
     /// A DEAD turn: nothing left once the thinking is stripped. DISCARDED —
@@ -149,7 +149,7 @@ fn notice_in_flight(state: &BackendState) -> bool {
 ///
 /// Returns the RAW completion text, thinking markers intact: [`crate::verbs::send`]
 /// hands it to the router, which reads only the ANSWER — a call written inside
-/// thinking never dispatches (owner, 2026-10-07). The DURABLE turn is the answer.
+/// thinking never dispatches. The DURABLE turn is the answer.
 ///
 /// The conversation is ALWAYS this agent's own (its memory store): there is no
 /// caller-supplied history — a one-off completion is a disposable agent with its
@@ -230,7 +230,7 @@ pub async fn run_generation(
     // A FRESH reading per pass: a provider that reports nothing this time must not
     // leave last pass's number standing.
     provider.clear_prompt_tokens();
-    // STREAMING PARTS (owner, 2026-10-04): the same chunks, split into parts as
+    // STREAMING PARTS: the same chunks, split into parts as
     // they are written — animation for the addressee, never action
     // ([`crate::stream_parts`]). Kept on the in-flight entry, where `stop` and
     // `on_cancel` find them. `part_start` carries `re` — the message this turn
@@ -298,7 +298,7 @@ pub async fn run_generation(
     // A block still open when the model stopped generating is CUT: an open call
     // is never dispatched (`extract_tool_calls` skips it) and the turn's row says
     // so.
-    // ONLY A SUCCESSFUL GENERATION DISPATCHES (owner, 2026-10-04): a pass cut with
+    // ONLY A SUCCESSFUL GENERATION DISPATCHES: a pass cut with
     // a block open sends nothing, its earlier closed calls included, and the marker
     // lists every call of the pass as not sent.
     let (cut_calls, call_streams) = {
@@ -324,20 +324,17 @@ pub async fn run_generation(
     }
 
     // A DEAD TURN — nothing left once the thinking is stripped — did not answer,
-    // whatever the provider's finish reason says. Measured 2026-09-30 on vLLM: a
-    // thinking budget of 8 tokens ended the thought, the model stopped cleanly
-    // (`finish_reason: stop`) with an empty answer, and the turn was stored as a
-    // completed, empty assistant row. The ANSWER is discarded here — never stored,
-    // never counted as an answer — and the turn is routed like any that
-    // dispatched nothing: the no-call reminder rerolls it (owner, 2026-09-30;
-    // python `_run`). Failing the turn outright ended a 30-pass chain on its first
-    // dead turn (E31, measured).
+    // whatever the provider's finish reason says (a tiny thinking budget can end
+    // the thought with a clean `finish_reason: stop` and an empty answer). The
+    // ANSWER is discarded here — never stored, never counted as an answer — and
+    // the turn is routed like any that dispatched nothing: the no-call reminder
+    // rerolls it (python `_run`). Failing the turn outright would end a long
+    // chain on its first dead turn.
     if without_thinking(&last_text).trim().is_empty() {
         // The INCOMING row is kept — only the empty answer is dropped. The turn
         // this one answered may be a reply batch carrying the results of the
         // model's own calls; unstored, the reroll would arrive with those results
-        // gone and the model would re-ask for them (found in the swift port's
-        // review, 2026-09-30).
+        // gone and the model would re-ask for them.
         let in_id = kernel.mint_id();
         let in_parent = incoming_parent(user_text);
         save_history(
@@ -397,10 +394,9 @@ pub async fn run_generation(
         // STRIPPED — the deliberation is not part of the conversation. The RAW
         // text (thinking included) is what the caller receives; the router parses
         // only the answer, and durable history loses the `<think>` spans, because a
-        // reasoning model re-fed its own prior deliberation drowns in it
-        // (gemma4:12b re-sent a 3,800-char turn-1 thought every later prompt,
-        // 2026-08-02). A pass the model stopped with a block open leaves the CUT
-        // MARKER instead, on top of the context (owner, 2026-10-04).
+        // reasoning model re-fed its own prior deliberation drowns in it. A pass
+        // the model stopped with a block open leaves the CUT MARKER instead, on top
+        // of the context.
         {
             let mut row = json!({
                 "role": "assistant",
@@ -428,8 +424,8 @@ pub async fn run_generation(
 
 /// Every open part ABORTS for its watchers (`"error"`), and the provider failure
 /// is handed back to propagate.
-/// The token figures a finished generation's `status` `done` carries (owner,
-/// 2026-10-12: a chat shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
+/// The token figures a finished generation's `status` `done` carries (a chat
+/// shows `42 tok/s · 3.1k / 64k ctx`): `prompt_tokens` and
 /// `completion_tokens` as the provider REPORTED them — estimated (this layer's
 /// own count) when it reported none, and then `prompt_tokens_estimated` /
 /// `completion_tokens_estimated` says so — `gen_seconds` (the wall time from the

@@ -1,4 +1,4 @@
-// credential_store — secrets an agent USES but never keeps (owner, 2026-10-01).
+// credential_store — secrets an agent USES but never keeps.
 //
 // Port of python `bundled_agents/security/credential_store/src/credential_store/
 // tools.py`, which is canonical: wire shapes, field order, refusal reasons and
@@ -25,7 +25,7 @@
 //   * `env`: read-only; each ref maps its fields to environment variables
 //     (`refs: {ref: {host, env: {api_key: VAR}}}`), for a container or CI.
 //
-// THE HOST IS STORED WITH THE VALUE (audit S3, 2026-10-03): `set` writes the ref's
+// THE HOST IS STORED WITH THE VALUE: `set` writes the ref's
 // declared host beside its fields — the file entry and the keychain item are
 // `{host, fields}` — and `get` refuses a value whose stored host is not the one its
 // declaration names, or that carries none: a store elsewhere declaring the same id
@@ -34,7 +34,7 @@
 // A REF IS DECLARED ONLY BY `update_agent` on the store's own record (the
 // operator, or the store's parent): `refs: {<ref>: {host, fields?/env?}}` (it
 // replaces the whole map; `host` is required — the binding). Only `update_agent`
-// writes or removes a declaration (audit AV-4/AV-5, 2026-10-03): `set` stores the
+// writes or removes a declaration: `set` stores the
 // value of a DECLARED ref, never creates one and takes no `host` (an undeclared ref
 // answers "no such ref"; a `host` on the call is refused); `forget` drops the value
 // and keeps the declaration. `fields` on a ref are the stored value's NAMES: `set`
@@ -42,7 +42,7 @@
 //
 // THE RECORD holds only metadata — the host and the field NAMES. The CALL carries
 // the value: a `set` payload and a `get` reply are recorded like any call's (the
-// ledger, the memory store, the state stream), in clear (owner, 2026-10-04).
+// ledger, the memory store, the state stream), in clear.
 //
 // WHO MAY CALL is the kernel's call gate alone: any caller it admits may
 // `set`/`get`/`forget` a declared ref — there are no per-ref access lists.
@@ -302,7 +302,7 @@ private struct Ctx {
             return Refusal.missing("\(NAME) set", "ref")
         }
         if case .object(let o) = payload, o["host"] != nil {
-            // the binding is the declaration's alone (audit AV-4)
+            // the binding is the declaration's alone
             return Refusal.make(
                 Refusal.badArg,
                 "\(NAME) set: takes no host — a ref's host is its declaration, written "
@@ -332,7 +332,7 @@ private struct Ctx {
         // declared by update_agent alone — set never makes one
         guard let existing = all[ref] else { return noSuchRef(ref) }
         var entry = existing.asObject ?? [:]
-        // the declared host is stored WITH the value (audit S3)
+        // the declared host is stored WITH the value
         try backend().put(ref, try hostOf(existing["host"]), fields)
         entry["fields"] = .array(names.map { .string($0) })  // the value's NAMES, never a value
         all[ref] = .object(entry)
@@ -364,7 +364,7 @@ private struct Ctx {
         let store = try backend()
         var stored = try store.get(ref)
         if let s = stored, !s.isEmpty, !(store is EnvBackend) {
-            // THE HOST AT REST (audit S3): a value is read only for the host it was
+            // THE HOST AT REST: a value is read only for the host it was
             // stored with — the declaration of a store elsewhere sharing this id and
             // ref names its own host, and reads nothing.
             if let bad = try hostAtRest(ref, s["host"] ?? .null, try hostOf(entry["host"])) {
@@ -415,7 +415,7 @@ private struct Ctx {
         var all = refs
         guard let entry = all[ref] else { return noSuchRef(ref) }
         try backend().drop(ref)
-        // the value's names go with the value (audit AV-5); the declaration stays
+        // the value's names go with the value; the declaration stays
         if case .object(var kept) = entry, kept["fields"] != nil {
             kept.removeValue(forKey: "fields")
             all[ref] = .object(kept)
@@ -430,7 +430,7 @@ private struct Ctx {
 private protocol CredentialBackend {
     /// The value at rest — `{host, fields}`; the env backend's fields alone.
     func get(_ ref: String) throws(PyError) -> OrderedDictionary<String, JSON>?
-    /// Store `fields` WITH `host` (audit S3).
+    /// Store `fields` WITH `host`.
     func put(_ ref: String, _ host: String?, _ fields: OrderedDictionary<String, JSON>) throws(PyError)
     func drop(_ ref: String) throws(PyError)
 }
@@ -442,7 +442,7 @@ private func atRest(_ host: String?, _ fields: OrderedDictionary<String, JSON>) 
 
 /// THE host-mismatch refusal: the ref is bound to `bound`, not `other`. One shape
 /// for a `get {ref, host}` naming another host and a value stored for another host
-/// — or for none (audit S3). Python `_host_mismatch`.
+/// — or for none. Python `_host_mismatch`.
 private func hostMismatch(_ ref: String, _ bound: JSON, _ other: JSON) -> JSON {
     Refusal.make(
         Refusal.badArg,
@@ -452,7 +452,7 @@ private func hostMismatch(_ ref: String, _ bound: JSON, _ other: JSON) -> JSON {
 }
 
 /// The refusal for a stored value whose host is not the declared one — or that
-/// carries none (audit S3) — or nil. Python `_host_at_rest`.
+/// carries none — or nil. Python `_host_at_rest`.
 private func hostAtRest(_ ref: String, _ stored: JSON, _ declared: String?) throws(PyError) -> JSON? {
     let at = try hostOf(stored)
     if let at, at == declared { return nil }
@@ -493,8 +493,8 @@ private struct FileBackend: CredentialBackend {
         do { present = try fsExists(root, name, base: base) } catch { throw raised(error) }
         if !present { return [:] }
         // ONE open, judged on its own descriptor (`fsReadPrivate`): checking the
-        // path and then reading the path again was a window a swapped leaf
-        // slipped through (audit F5, 2026-10-03).
+        // path and then reading the path again is a window a swapped leaf
+        // slips through.
         let raw: Data
         do { raw = try fsReadPrivate(root, name, base: base) } catch {
             if let p = error.notPrivate {

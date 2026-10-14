@@ -1,7 +1,7 @@
-// Twins of python `web/host/tests/test_origin_guard.py` (2026-09-24): the web
+// Twins of python `web/host/tests/test_origin_guard.py`: the web
 // host binds LOOPBACK unless its record names a `host`, refuses a FOREIGN
 // browser origin on websocket upgrades and non-GET/HEAD/OPTIONS HTTP requests
-// unless the record's `allowed_origins` lists it, and (audit W-2) refuses EVERY
+// unless the record's `allowed_origins` lists it, and refuses EVERY
 // request whose Host is not the host's own authority.
 
 import FantasticJSON
@@ -126,7 +126,7 @@ struct WebOriginGuardTests {
         #expect(await wsOpens(port, origin: "https://ui.example") == true)
     }
 
-    // MARK: - the Host guard (audit W-2)
+    // MARK: - the Host guard
 
     @Test func ownAuthoritiesAreTheBoundHostPortPlusLoopbackSpellings() {
         let loopback: Set<String> = ["127.0.0.1:8088", "localhost:8088", "[::1]:8088"]
@@ -192,7 +192,7 @@ struct WebOriginGuardTests {
 
     /// `0.0.0.0` publishes the port, but the only Host it answers is
     /// `0.0.0.0:<port>` — a port map, a LAN name, a tunnel name, even the loopback
-    /// spellings are other authorities (owner-accepted, audit W-2). Judged on the
+    /// spellings are other authorities. Judged on the
     /// request head, without binding a public port.
     @Test func aPublishedBindAdmitsOnlyItsOwnHostPort() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)

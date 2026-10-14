@@ -1,5 +1,5 @@
 // What a job printed, read the way a caller reads it now: `tail` over the job's
-// line ring (`job_done` carries no output since 2026-10-14). One line per entry,
+// line ring (`job_done` carries no output). One line per entry,
 // each with its newline.
 
 import FantasticJSON

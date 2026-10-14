@@ -12,8 +12,8 @@ import { page } from "./paging.ts";
 // THE DEFAULT IS DISTILLED. It answers the question a caller has on most
 // messages — who do I send to? — with a ROSTER `{id, sentence, description?,
 // mode?, children}`. `detail:"full"` is the WIRING tree (handler_module +
-// posture on every node). A reflect says what an agent IS, never how to call it
-// (owner, 2026-10-05): verb docs are the `docs` kernel verb.
+// posture on every node). A reflect says what an agent IS, never how to call it:
+// verb docs are the `docs` kernel verb.
 
 export interface BundleInfo {
   name: string;

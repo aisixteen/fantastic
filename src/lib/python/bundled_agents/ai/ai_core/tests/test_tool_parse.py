@@ -147,7 +147,7 @@ def test_bytes_is_never_trimmed_and_other_values_are():
 
 
 def test_an_unterminated_call_is_not_a_call():
-    """No `</call>`, no call (owner, 2026-10-04): the model stopped generating before
+    """No `</call>`, no call: the model stopped generating before
     it closed — nothing dispatches, nothing is "malformed"; the cut marker names it."""
     text = '<call name="send"><target_id>notes</target_id><type>reflect</type>'
     assert extract_tool_calls(text) == [] and malformed_calls(text) == []

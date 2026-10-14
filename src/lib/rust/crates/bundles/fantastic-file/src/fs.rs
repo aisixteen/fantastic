@@ -238,9 +238,9 @@ pub fn write_bytes(
     mkdir_parents(&target)?;
     if atomic {
         // A FRESH tmp per write, created exclusively and never through a link: a
-        // fixed `<name>.tmp` followed whatever symlink sat at that name (a write
-        // escaped the root) and was shared by concurrent writers, which tore the
-        // target (audit 2026-10-14).
+        // fixed `<name>.tmp` would follow whatever symlink sat at that name (a
+        // write escaping the root) and be shared by concurrent writers, tearing
+        // the target.
         let mut name = target.file_name().unwrap_or_default().to_os_string();
         name.push(format!(
             ".tmp.{}",
@@ -318,8 +318,8 @@ pub enum PrivateReadError {
 /// user with no group/other permission bits) through ONE open. `O_NOFOLLOW`
 /// refuses a symlink in the leaf's place, and the OPEN DESCRIPTOR is what is
 /// judged (`fstat`) and read, so nothing can swap the file between the check
-/// and the read (audit F5, 2026-10-03: an `lstat` of the path and then a read of
-/// the path again was a window). `O_NONBLOCK` so a FIFO planted there cannot
+/// and the read (an `lstat` of the path and then a read of the path again is a
+/// window). `O_NONBLOCK` so a FIFO planted there cannot
 /// hang the open — it is judged and refused like any other non-regular entry.
 ///
 /// # Errors

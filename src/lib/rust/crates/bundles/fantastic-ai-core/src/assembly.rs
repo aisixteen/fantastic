@@ -28,10 +28,8 @@ use std::sync::Arc;
 ///
 /// NO JSON ON THE MODEL PATH: a string goes through as-is, a list of scalars is
 /// comma-joined through `str()`, and anything nested is the REPLY NOTATION
-/// collapsed onto the line. Rust used to serialize every non-string as JSON, so
-/// a model read `parent_id=null`, `can_call={"$self":"*"}` and
-/// `tree=["kernel_state",…]` where python's says `parent_id=`, `can_call=<$self>*</$self>`
-/// and `tree=kernel_state,web`.
+/// collapsed onto the line — never JSON: python's says `parent_id=`,
+/// `can_call=<$self>*</$self>` and `tree=kernel_state,web`.
 fn reflect_field(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -239,8 +237,8 @@ const SELF_KEYS: [&str; 5] = [
     "callable_by",
 ];
 
-/// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn
-/// (owner, 2026-10-08) — so a prompt that REPLACES the default block keeps its
+/// THE PLACEHOLDERS a system prompt may hold, filled per agent and per turn —
+/// so a prompt that REPLACES the default block keeps its
 /// live parts: `{tree}` the kernel primer, `{self}` this agent's identity and
 /// grants, `{store}` its memory store id, `{howto}` the fixed how-to blocks.
 /// `{tree}\n\n{self}\n\n{howto}` IS the default block, byte for byte. Only the
@@ -387,7 +385,7 @@ async fn self_part(self_id: &AgentId, kernel: &Arc<Kernel>) -> String {
 
 /// THE system block a turn uses — the one choice `assemble_messages` builds the
 /// turn on and `context_recall` sizes the body budget against, so the two never
-/// drift (python `_system_content`). PRECEDENCE (owner, 2026-10-03, 2026-10-08):
+/// drift (python `_system_content`). PRECEDENCE:
 /// the per-call argument (this delivery) > the record's own `system_prompt` (read
 /// LIVE, so an `update_agent` lands on the next turn — a main turn, a
 /// self-delivery, a turn woken by a reply) > the file the record's
@@ -399,7 +397,7 @@ pub async fn system_content(
     kernel: &Arc<Kernel>,
     system_prompt: Option<&str>,
 ) -> Result<String, PromptFileError> {
-    // THE WRAP (owner, 2026-10-11): the record's `pre_system_prompt` goes BEFORE
+    // THE WRAP: the record's `pre_system_prompt` goes BEFORE
     // whichever prompt is in force and `post_system_prompt` AFTER it, each read
     // live and taken verbatim — no placeholders, and neither replaces anything.
     // Absent or null adds nothing (python `_system_content`).

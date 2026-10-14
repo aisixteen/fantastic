@@ -162,9 +162,8 @@ def live_env(kind: str) -> tuple[dict, dict]:
         miss.append("VLLM_API_KEY (or VLLM_API_KEY_FILE)")
     if miss:
         raise SystemExit(f"live vllm scenario: set {', '.join(miss)}")
-    # the record's sizing is the operator's, from the environment (owner: 262144
-    # for window and output, xhigh with a 64k thinking budget, the KV table's
-    # slots and overflow) — nothing is guessed
+    # the record's sizing is the operator's, from the environment (window, output,
+    # the KV table's slots and overflow) — nothing is guessed
     sizing = {"{ctx}": "CTX", "{max_tokens}": "MAX_TOKENS", "{vllm_kv_slots}": "VLLM_KV_SLOTS",
               "{vllm_kv_overflow}": "VLLM_KV_OVERFLOW"}
     miss = [v for v in sizing.values() if not os.environ.get(v)]
@@ -199,7 +198,7 @@ def seed(cwd: Path, items: list[dict], subst: dict) -> None:
 
 def kernel_rows_on_disk(store: Path) -> int:
     """The KERNEL'S execution rows (call / settle / task / flush) in `memory.db`.
-    Its store is RAM (`kernel_memory`, owner 2026-10-09): the file holds AI rows
+    Its store is RAM (`kernel_memory`): the file holds AI rows
     only, so this must be 0."""
     import sqlite3
 

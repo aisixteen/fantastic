@@ -55,8 +55,6 @@ func cliCoerce(_ v: String) -> JSON {
 ///
 /// Built BY ASSIGNMENT, like python's dict: a repeated key keeps its FIRST
 /// position and takes the LAST value, and `type=` overrides the verb in place.
-/// `uniqueKeysWithValues` used to trap here (`Fatal error: Duplicate key`) on
-/// `limit=1 limit=2` and on `reflect type=list_agents`.
 func cliPayload(verb: String, kvTokens: some Sequence<String>) -> JSON {
     var payload: OrderedDictionary<String, JSON> = ["type": .string(verb)]
     for kv in kvTokens {
@@ -85,7 +83,7 @@ struct FantasticCLI {
         // `help` / `-h` / `--help` as the FIRST word; later words ignored.
         if first == "-h" || first == "--help" || first == "help" { return .help }
         if first == "reflect" { return .reflect(Array(args.dropFirst())) }
-        // A14.3: checked by NAME, like `reflect` — `fantastic init` (a single
+        // Checked by NAME, like `reflect` — `fantastic init` (a single
         // word) still routes here, not to `.usage`, exactly as python's
         // `dispatch_argv` matches subcommands before the generic `len>=2` case.
         if first == "init" { return .initCmd(Array(args.dropFirst())) }
@@ -129,7 +127,7 @@ struct FantasticCLI {
         "usage: fantastic init <loader_bundle> <manifest>\n"
         + "   e.g. fantastic init static_loader ./fantastic.yaml"
 
-    // MARK: - ledger cap (C80)
+    // MARK: - ledger cap
 
     /// Python `main.py:_ledger_cap_from` — strip `--ledger-cap <v>` from argv
     /// (value REQUIRED: a trailing bare flag with nothing after it stays,
@@ -201,7 +199,7 @@ struct FantasticCLI {
             let kernel = await bootOrExit()
             FileHandle.standardOutput.write(
                 (CliBundle.helpText + "\n").data(using: .utf8) ?? Data())
-            // A14.18: every non-daemon mode ends with an idempotent kernel
+            // Every non-daemon mode ends with an idempotent kernel
             // shutdown (python's `atexit` → `Kernel.shutdown`).
             await kernel.shutdown()
         case .reflect(let argTokens):
@@ -228,7 +226,7 @@ struct FantasticCLI {
         async throws -> Kernel
     {
         let kernel = try await startKernel(workdir: cwd)
-        // C80: applied after EVERY kernel construction, python's own
+        // Applied after EVERY kernel construction, python's own
         // `if cap_set: kernel.ledger_cap = cap` right after `_build_kernel()`.
         // A no-op in tests, which never touch `ledgerCap` (stays `wasSet:
         // false`).
@@ -294,7 +292,7 @@ struct FantasticCLI {
         let body = cliPayload(verb: "reflect", kvTokens: kvTokens)
         let reply = await kernel.send([Item(AgentId(target), body)])[0].result
         print(replyJSON(reply))
-        // A14.18: no lock was ever taken, so shutdown runs right after the print.
+        // No lock was ever taken, so shutdown runs right after the print.
         await kernel.shutdown()
     }
 
@@ -307,7 +305,7 @@ struct FantasticCLI {
         // flock, BEFORE any bootstrap, so a conflicting invocation writes
         // nothing (python `dispatch.py:_lock_or_exit`). Only a live holder
         // refuses: a lock file naming a pid that is alive but holds no flock (a
-        // reused pid) is stale, and taken over (owner, 2026-10-03).
+        // reused pid) is stale, and taken over.
         let workdirURL = URL(
             fileURLWithPath: FileManager.default.currentDirectoryPath,
             isDirectory: true)
@@ -326,17 +324,16 @@ struct FantasticCLI {
         let reply = await dispatchOneShot(
             kernel: kernel, target: target, verb: verb, rest: rest.dropFirst())
         print(replyJSON(reply))
-        // A14.18: shutdown runs AFTER the lock is released, never via `defer`
+        // Shutdown runs AFTER the lock is released, never via `defer`
         // (which would fire before this line, running shutdown first).
         lock.release()
         await kernel.shutdown()
     }
 
-    /// A14.6's actual sequencing, factored out so a test can pin it without
+    /// The actual sequencing, factored out so a test can pin it without
     /// the process-level lock/exit plumbing around it: boot the ROOT LOADER
     /// FIRST, so THIS call's mutations (create/update/delete) subscribe +
-    /// persist (python `dispatch.py:73-78`) — rust/swift never did this: no
-    /// pump, no ledger, no record writer installed for a one-shot RPC. Then
+    /// persist (python `dispatch.py:73-78`). Then
     /// dispatch the call itself, and drain the debounced writer
     /// SYNCHRONOUSLY — its own 150ms tick would never fire before this
     /// process exits otherwise (python `await loop.aflush()`).
@@ -352,7 +349,7 @@ struct FantasticCLI {
         return reply
     }
 
-    // MARK: - init (A14.3)
+    // MARK: - init
 
     private static func runInit(rest: [String]) async {
         guard rest.count >= 2 else {
@@ -386,7 +383,7 @@ struct FantasticCLI {
         await kernel.shutdown()
     }
 
-    /// A14.3's USAGE branch, factored out like `dispatchInit` so a test can
+    /// `init`'s USAGE branch, factored out like `dispatchInit` so a test can
     /// pin the ORDER without the process-level `exit(2)`: python builds the
     /// kernel in `main` BEFORE `dispatch_argv` runs, so even `init`'s usage
     /// error leaves the SEEDED root behind — `.fantastic/` + `agent.yaml`.
@@ -400,7 +397,7 @@ struct FantasticCLI {
         return kernel
     }
 
-    /// A14.3's actual sequencing, factored out so a test can pin it without
+    /// `init`'s actual sequencing, factored out so a test can pin it without
     /// the process-level lock/exit plumbing: boot the root loader so the new
     /// loader record subscribes + persists, then `create_agent` it — which
     /// ALSO boots the loader CHILD, whose own boot reads the manifest and

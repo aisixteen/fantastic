@@ -122,8 +122,8 @@ async def test_worker_may_use_its_declared_edge_but_not_others(seeded_kernel):
 
 async def test_the_manifest_wins_over_the_hydrated_record(seeded_kernel):
     """THE MANIFEST IS TRUTH; a store is only a MEDIUM. Editing a grant in the
-    yaml and rebooting must change the live agent — it used to change nothing,
-    because an existing id was skipped and the hydrated record silently won."""
+    yaml and rebooting must change the live agent — never skip an existing id and
+    let the hydrated record silently win."""
     loader = await _init_loader(seeded_kernel)
     assert seeded_kernel.ctx.get("worker")["can_call"]["memory"] == ["write", "read"]
     Path("fantastic.yaml").write_text(
@@ -328,14 +328,14 @@ async def test_a_refused_create_and_a_refused_reapply_are_named(seeded_kernel):
     assert r == {"booted": True, "created": [], "reapplied": ["fb_r"]}
 
 
-# ─── who may boot: the kernel's own boot only (audit G-2/BV-2) ───────────────
+# ─── who may boot: the kernel's own boot only ────────────────────────────────
 
 
 async def test_an_agent_sent_boot_is_refused_and_re_runs_nothing(seeded_kernel):
     """The roster pass runs AS OPERATOR, so only the kernel's own boot (origin
-    none) may start it. Measured by the audit: a roster agent whose grant the
-    operator had revoked sent `boot` to its loader and got the grant back, and a
-    deleted roster agent came back. The edge is NAMED here on both ends, so the
+    none) may start it: otherwise a roster agent whose grant the operator revoked
+    could send `boot` to its loader and get the grant back, and a deleted roster
+    agent would come back. The edge is NAMED here on both ends, so the
     refusal is the loader's own, whatever the gate makes of `boot`."""
     k = seeded_kernel
     manifest = MANIFEST.replace(

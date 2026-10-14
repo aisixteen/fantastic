@@ -1,15 +1,14 @@
 //! Guards on the ROOT and on the record fields that name substrate wiring.
 //!
-//! Measured 2026-09-02 (python-canonical, ported):
+//! Python-canonical, ported:
 //!
-//! - `delete_agent id=<root>` cascaded the whole tree and answered
-//!   `{"deleted": true}`, leaving a process with no control surface.
-//! - `update_agent` silently DROPPED `handler_module` and the reserved keys and
-//!   still answered success, so a caller believed a change had landed that never
-//!   did.
-//! - A verb an agent cannot answer came back as a reason-less `{error: …}` which
-//!   `apply_reflect_flags` then decorated with `kernel_verbs`/`tree`/`more` — a
-//!   refusal wearing a reflect's clothes.
+//! - `delete_agent id=<root>` is refused — cascading the whole tree would leave
+//!   a process with no control surface.
+//! - `update_agent` refuses `handler_module` and the reserved keys instead of
+//!   dropping them and answering success.
+//! - A verb an agent cannot answer is a CODED refusal — a reason-less
+//!   `{error: …}` would be decorated by `apply_reflect_flags` with
+//!   `kernel_verbs`/`tree`/`more`, a refusal wearing a reflect's clothes.
 
 use async_trait::async_trait;
 use fantastic_kernel::{Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply};
@@ -158,7 +157,7 @@ async fn a_refusal_is_not_decorated_into_a_reflect() {
     }
 }
 
-/// C13: `persist_blob`/`load_blob` LEFT the kernel-verb set, so they no longer
+/// `persist_blob`/`load_blob` LEFT the kernel-verb set, so they no longer
 /// bypass root ingress. A grandchild granted exactly `kernel_state:[persist_blob]`
 /// is refused by the ROOT's `callable_by` — python's `namespacing` contract
 /// step, which expects `{allow: false, side: "ingress"}`.

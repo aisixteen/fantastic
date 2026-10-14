@@ -1,4 +1,4 @@
-"""mcp_client — ONE remote MCP server as an agent (owner, 2026-10-08).
+"""mcp_client — ONE remote MCP server as an agent.
 
 `create_agent handler_module=mcp_client.tools url=<the server's MCP endpoint>
 credentials={store, ref}` (optional — a keyless server takes none). Its `boot` asks

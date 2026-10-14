@@ -1,5 +1,4 @@
-# THE TERMINAL'S AI SET-UP WIZARD (owner 2026-10-12: "make the ai agent wizard
-# simple as the ai agent html" — the canvas's two pages, in the terminal), end to
+# THE TERMINAL'S AI SET-UP WIZARD (the canvas's two pages, in the terminal), end to
 # end, FREE: a scripted keyboard in a PTY, the vLLM backend linked, no model
 # called (an agent is made, not asked). What is measured is the binary and what it
 # leaves on disk — the run's throwaway home (`home/`, the rig's FANTASTIC_HOME)

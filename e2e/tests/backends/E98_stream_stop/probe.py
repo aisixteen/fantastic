@@ -1,4 +1,4 @@
-"""backends/stream_stop — a RECEIVER stops a live stream (owner, 2026-10-04). LLM-driven.
+"""backends/stream_stop — a RECEIVER stops a live stream. LLM-driven.
 
 The AI is asked to write a long message to `rx`. Its call streams to `rx` as `part_*`
 events (the stream junction, `helpers/stream.py`). Once the draft has some body, the

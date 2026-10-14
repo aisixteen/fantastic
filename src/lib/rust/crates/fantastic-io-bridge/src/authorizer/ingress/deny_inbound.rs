@@ -47,11 +47,10 @@ impl DenyInbound {
 
 impl IngressRule for DenyInbound {
     fn authorize(&self, action: &Action) -> Decision {
-        // EVERY inbound kind — py-canonical. This used to deny only `call`,
-        // which made the rust seal partial: `watch`/`state_subscribe` leaked
-        // telemetry through a "sealed" leg, and a new kind (`spawn`, measured
-        // 2026-08-07 porting exec_bridge) sailed straight through what its
-        // caller believed was a closed edge. A seal that filters by kind is a
+        // EVERY inbound kind — py-canonical. Denying only `call` would make the
+        // seal partial: `watch`/`state_subscribe` would leak telemetry through a
+        // "sealed" leg, and a new kind (`spawn`) would sail straight through what
+        // its caller believes is a closed edge. A seal that filters by kind is a
         // second truth about what "sealed" means.
         let _ = action;
         // PYTHON'S WORDS, both variants. The reason says WHAT happened, the hint
@@ -145,7 +144,7 @@ mod tests {
 
     /// A MALFORMED spec seals under its python repr — `{unknown!r}`, so a name
     /// holding `'` is double-quoted exactly as python prints it — and an empty
-    /// name is a plain seal (python-falsy). Audit W-8.
+    /// name is a plain seal (python-falsy).
     #[test]
     fn a_malformed_spec_seals_under_its_python_repr() {
         let rule = super::super::resolve(Some(&serde_json::json!({"type": ["x"]})));

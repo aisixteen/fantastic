@@ -77,7 +77,7 @@ CASES = {
     "f11_text_inside_call_body": [
         '<call name="send"><target_id>readings</target_id> stray words <type>list</type><path></path></call>',
     ],
-    # ── §5.4 additions: the tag-argument faults measured only in `SCR/tpf_py_probe*` ──
+    # ── the tag-argument faults ──
     "f12_exec_id_tag": [
         '<call name="send"><target_id>readings</target_id><type>list</type><path></path><exec_id>7</exec_id></call>',
     ],
@@ -126,7 +126,7 @@ def snapshot(ctx, k, tag: str) -> None:
     Each read is bounded by the size the LISTING reported, in one `read_stream`
     of that length. An eof-driven loop cannot terminate here: a kernel records
     each read's reply into its own log, which grows the file while it is being
-    read (measured on rust, round 2).
+    read.
     """
     rec = ctx.rec
     base = ctx.work / ".fantastic"
@@ -248,8 +248,8 @@ def memory_reflect(ctx, k) -> None:
     censuses.
 
     Its `rows` counts the kernel's `flush` bookkeeping rows too, and how many
-    flushes a run made is the flusher's debounce against the runtime's speed
-    (measured: python 334, rust/swift 333). The kernel has no verb that settles
+    flushes a run made is the flusher's debounce against the runtime's speed.
+    The kernel has no verb that settles
     the flusher, so the count cannot be made still without a wait; instead the
     flush rows are COUNTED at the same instant. A flush appends a batch, so the
     census whose `rows` equals the reflect's is the store the reflect saw — a
@@ -352,7 +352,7 @@ def run(ctx) -> None:
         for aid in (k.root_id, "readings", "runner", "ai"):
             label = "root" if aid == k.root_id else aid
             base = f"s2/{label}"
-            # tree = the four shapes plus the two falsy ones round 2 never sent
+            # tree = the four shapes plus the falsy ones
             for val, tag in (("ids", "tree_ids"), ("none", "tree_none"), ("all", "tree_all"),
                              (None, "tree_null"), (True, "tree_true"), (7, "tree_7"),
                              ("ALL", "tree_ALL")):

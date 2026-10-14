@@ -1,4 +1,4 @@
-//! The PUMP runs both ends AS THE FILE_BRIDGE itself (owner 2026-10-04) — the
+//! The PUMP runs both ends AS THE FILE_BRIDGE itself — the
 //! twin of python `file_bridge/tests/test_pump_identity.py`.
 //!
 //! Identity comes only from dispatch: `pump` sends its `read_stream` and

@@ -12,9 +12,8 @@ runtimes: [python, rust, swift]
 costs: turns
 # SINGLE LANE: the routine spawns live AI agents that share the proxy.
 long: true
-# 30 min (owner exception, 2026-10-13): it builds live agents, and every `docs`
-# reply leaves the view after one message, so planning re-pulls docs; 15 min stopped
-# it mid-build twice on rust, alone on the GPU.
+# 30 min: it builds live agents, and every `docs` reply leaves the view after one
+# message, so planning re-pulls docs; 15 min can stop it mid-build.
 hard_stop_minutes: 30
 limits:
   idle_seconds: 60
@@ -22,5 +21,5 @@ limits:
   no_progress_turns: 0   # disabled: planning-heavy — repeated reflects are not "no progress"; max_turns is the backstop
   turn_chars: 120000
   turn_seconds: 600
-env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning turns run 14-18k chars of thinking; 180 s cut the run at pass 6 while it was progressing (2026-09-10)
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "240"}  # the first planning turns run long thinking; 180 s can cut a progressing run
 # No free selftest: a perfect actor for this task needs a live sub-AI turn (costs turns).

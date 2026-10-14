@@ -1,16 +1,15 @@
-//! `_binary_path` is a LIST OF STEPS on the web legs (owner-approved,
-//! 2026-10-02) — the twins of python `io_bridge/tests/test_binary_path_steps.py`,
+//! `_binary_path` is a LIST OF STEPS on the web legs — the twins of python
+//! `io_bridge/tests/test_binary_path_steps.py`,
 //! web half: (b) a ws_bridge forward through web_ws, both ways, and (d) web_rest's
 //! literal binding forwarded to a peer kernel as `P-g|echo`, its reply named by
 //! `X-Fantastic-Bytes-Field`. The relay forward is in `fantastic-bridge`'s
 //! `tests_binary_steps.rs`; the guest wire in `fantastic-exec-bridge`'s.
 //!
-//! A binary frame's header names where its raw body belongs. It used to spell
-//! that as a dotted string, so a payload whose bytes sat at the LITERAL key
-//! `"a.b"` (which `X-Fantastic-Bytes-Field: a.b` binds) went out as
-//! `"payload.a.b"` and the receiver rebuilt a NESTED `a` → `b` slot. Now the path
-//! is a JSON array: a string step is an object key, taken literally; an integer
-//! step is a list index.
+//! A binary frame's header names where its raw body belongs, as a JSON array —
+//! never a dotted string, which would send bytes at the LITERAL key `"a.b"`
+//! (which `X-Fantastic-Bytes-Field: a.b` binds) out as `"payload.a.b"` and have
+//! the receiver rebuild a NESTED `a` → `b` slot. A string step is an object key,
+//! taken literally; an integer step is a list index.
 //!
 //! A bridge leg's far end is a REAL socket into web_ws (python's `_WsEnd`), so
 //! every frame crosses the io_bridge codec; the test keeps every binary head that

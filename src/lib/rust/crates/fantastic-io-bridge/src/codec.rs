@@ -64,8 +64,8 @@ pub fn encode_binary_frame(header: &Value, path: &[Step], body: &[u8]) -> Vec<u8
     out
 }
 
-/// JSON off the wire, STRICTLY — python `io_bridge.loads` (owner D13,
-/// 2026-10-01): only values EVERY runtime can hold. Refused, each as the caller's
+/// JSON off the wire, STRICTLY — python `io_bridge.loads`: only values EVERY
+/// runtime can hold. Refused, each as the caller's
 /// one "not valid JSON" answer:
 ///   * `NaN`, `Infinity`, `-Infinity` — not JSON (serde never parses them);
 ///   * an integer outside int64, or a number that overflows a double — this
@@ -166,7 +166,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// D13: python's `io_bridge.loads` refuses what not every runtime can hold.
+    /// Python's `io_bridge.loads` refuses what not every runtime can hold.
     #[test]
     fn loads_refuses_what_python_refuses() {
         assert_eq!(

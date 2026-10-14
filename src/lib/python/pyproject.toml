@@ -48,10 +48,9 @@ dev = [
   "httpx>=0.28",
 ]
 
-# Pin the lint gate. With no [tool.ruff] section, `uvx ruff check` applied whatever
-# the freshly-fetched ruff version defaults to — measured 2026-08-07: ruff 0.16.1's
-# widened defaults reported 212 findings on a tree that is clean under the set it was
-# written against. The gate CLAUDE.md documents must mean one thing across machines
+# Pin the lint gate. With no [tool.ruff] section, `uvx ruff check` applies whatever
+# the freshly-fetched ruff version defaults to, and widened defaults report findings
+# on a tree that is clean under the set it was written against. The gate CLAUDE.md documents must mean one thing across machines
 # and ruff releases.
 [tool.ruff]
 [tool.ruff.lint]
@@ -83,9 +82,8 @@ testpaths = [
   "bundled_agents/memory/ram_store/tests",
   "bundled_agents/security/credential_store/tests",
 ]
-# `-n auto` — xdist across every core BY DEFAULT. It used to live only in
-# run_checks.sh, so a bare `pytest` ran the whole suite on one core while the
-# other nine idled. Parallelism is a property of the suite, not of the one
+# `-n auto` — xdist across every core BY DEFAULT, so a bare `pytest` never runs the
+# whole suite on one core. Parallelism is a property of the suite, not of the one
 # script that happened to remember the flag.
 addopts = "-q -n auto"
 

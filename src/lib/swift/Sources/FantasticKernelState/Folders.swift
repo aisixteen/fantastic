@@ -1,10 +1,10 @@
-// FOLDER BUNDLES — `<root>/bundles/<name>/bundle.yaml` (owner, 2026-10-08): code
+// FOLDER BUNDLES — `<root>/bundles/<name>/bundle.yaml`: code
 // that EXTENDS a bundled agent (`base`), loaded from this kernel's own root at boot
 // (before the tree loads, so an instance's handler resolves) and by the root's
 // `reload_bundle`. The base builds the bundle (`AgentBundle.folderBundle`).
 // Python `kernel_state.load_bundle` / `load_bundles`; rust `fantastic-core
 // folders.rs` — read through the clamped `fs`, so a `bundles/<name>` that links
-// outside the running dir is refused like any escape (audit 2026-10-14).
+// outside the running dir is refused like any escape.
 
 import FantasticFile
 import FantasticJSON

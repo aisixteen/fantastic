@@ -150,7 +150,7 @@ async def test_writes_stay_inside_the_list_and_readonly_still_holds(kernel):
 async def test_the_web_serves_only_what_the_list_exposes(kernel):
     _tree()
     _bridge(kernel, allow=["docs/a.pdf"], callable_by={"web": ["read_stream"]})
-    # `port`: the authority the web's Host guard admits (audit W-2).
+    # `port`: the authority the web's Host guard admits.
     kernel.create("web.tools", id="web", port=8088, can_call={"fb": ["read_stream"]})
     with TestClient(make_app("web", kernel), base_url="http://127.0.0.1:8088") as c:
         r = c.get("/fb/file/docs/a.pdf")
@@ -160,9 +160,9 @@ async def test_the_web_serves_only_what_the_list_exposes(kernel):
         assert c.get("/fb/file/missing.txt").status_code == 404
 
 
-# ─── symlinks: BOTH ends must be exposed (audit 2026-09-28) ─────────────────
-# The list was checked on the path AS ASKED while the fs follows links, so a link
-# inside an exposed dir served whatever in-root file it pointed at.
+# ─── symlinks: BOTH ends must be exposed ─────────────────────────────────────
+# Checked only on the path AS ASKED while the fs follows links, a link inside an
+# exposed dir would serve whatever in-root file it pointed at.
 
 
 def _links():

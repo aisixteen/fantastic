@@ -4,7 +4,7 @@
 // `fixtures/agent.yaml` (a record) is what python's `yaml_io` writes for the
 // input below; swift must (1) build the same input in code and write the same
 // bytes, and (2) load the fixture and write it back byte-identical (load → dump
-// is the identity on a python file). There is no message tape any more: the
+// is the identity on a python file). There is no message tape: the
 // kernel keeps no conversation, and its execution rows live in its memory store.
 
 import FantasticJSON

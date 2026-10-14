@@ -21,9 +21,9 @@ public enum RootDocs {
     /// Python `Path.suffix`: the LAST dot in the name, but only counted when it
     /// is neither the first character (a dotfile has no suffix) nor the last (a
     /// trailing dot has no suffix either). A file named exactly `.md` has NO
-    /// suffix by this rule — `hasSuffix(".md")` said otherwise and, paired with
-    /// a stem of `dropLast(3)` giving `""`, walked back into the SAME directory
-    /// forever (C62; measured: kills the kernel, drops the REST connection).
+    /// suffix by this rule — `hasSuffix(".md")` says otherwise and, paired with
+    /// a stem of `dropLast(3)` giving `""`, would walk back into the SAME directory
+    /// forever.
     static func pySuffix(_ name: String) -> String {
         guard let i = name.lastIndex(of: ".") else { return "" }
         let idx = name.distance(from: name.startIndex, to: i)
@@ -51,12 +51,12 @@ public enum RootDocs {
     /// the children of a sibling dir of the same [`pyStem`]. Absent or empty dir
     /// → `[]`.
     ///
-    /// Python text mode (C59): UTF-8 decoded, `\r\n`/lone `\r` → `\n` — `body`,
+    /// Python text mode: UTF-8 decoded, `\r\n`/lone `\r` → `\n` — `body`,
     /// and everything derived from it (`desc`, `tokens`), is the TRANSLATED
     /// text. An OSError (permission, a race with a delete) is skipped like
     /// python's `except OSError: continue`; a `UnicodeDecodeError` is NOT an
     /// OSError — python lets it propagate, so this throws and fails the whole
-    /// reflect (C60).
+    /// reflect.
     public static func walk(_ dir: URL, prefix: String = "") throws(PyError) -> [Node] {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return [] }
@@ -104,7 +104,7 @@ public enum RootDocs {
 
     /// A bundle's flat `(key, body)` docs as the topic tree — a `/` in a key is
     /// a tier, each tier ordered as python orders a `docs/` dir's files (by
-    /// `<stem>.md`), bodies in python text mode (C59). A tier whose parent
+    /// `<stem>.md`), bodies in python text mode. A tier whose parent
     /// topic is absent is not listed, as python lists only `<key>.md` files.
     public static func tree(_ flat: [(key: String, body: String)], prefix: String = "")
         -> [Node]

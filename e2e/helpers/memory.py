@@ -51,8 +51,7 @@ async def _store(root: Any, payload: dict) -> dict:
 async def _grant_forensics(root: Any) -> str:
     """What the store's gate looked like when a read was refused, and every call
     THIS driver made that touched the store — so a grant that vanished mid-run
-    (rust E30, 2026-09-30: `rest` gone from `memory`'s callable_by, the model
-    never having touched it) leaves evidence instead of a bare refusal."""
+    leaves evidence instead of a bare refusal."""
     lines = []
     r = (await root.send([{"target": "kernel", "payload": {"type": "list_agents"}}]))[0]
     rec = next(
@@ -105,8 +104,8 @@ async def plant(
 ) -> list[int]:
     """Append rows to `aid`'s conversation. Returns the ids, in order.
 
-    The tables are rewritten at setup, from above (owner, 2026-10-04; in process too
-    since 2026-10-11), so `aid` need not exist yet. In process the rows carry real
+    The tables are rewritten at setup, from above (in process too), so `aid` need not
+    exist yet. In process the rows carry real
     ids. OVER THE WIRE the leg appends one throwaway row per id-less row under ITS OWN key
     (the kernel stays the only allocator), then `dump` → those rows dropped, `rows`
     added under `<guid>|<aid>` with the minted ids (a row's `refs` become its
@@ -117,13 +116,11 @@ async def plant(
     real one, and `remap(row, {placeholder: real})` rewrites each row's references
     before the ONE dump → inject. A history plants in one round, not one per row:
     the kernel's ledger lives in this store and records every inject WITH its
-    payload (the whole tables), so a round per row grew the next dump by the whole
-    store each time (measured 2026-10-07: ~4.5 min for 80 rows)."""
-    # ONE PATH, FROM ABOVE (2026-10-11): the store is rewritten (dump → rows added
-    # under `<guid>|<aid>` → inject), so the agent need not exist yet. In process
-    # used to append AS `aid` (`_as_self`), which raised KeyError for an agent not
-    # yet created — every probe that plants before creating its agent (synthetic_
-    # recall, nested_folds) died there on python. In process the rows already carry
+    payload (the whole tables), so a round per row would grow the next dump by the
+    whole store each time."""
+    # ONE PATH, FROM ABOVE: the store is rewritten (dump → rows added under
+    # `<guid>|<aid>` → inject), so the agent need not exist yet — appending AS `aid`
+    # would fail for an agent not yet created. In process the rows already carry
     # real ids from the kernel's counter, so nothing is minted.
     wire = getattr(root, "leg_id", None) is not None
     need = len(rows) if remap else sum(1 for x in rows if x.get("id") is None)
@@ -234,9 +231,8 @@ async def wire_in_process(root: Any) -> None:
 async def watch_store_writers(port: int, root_id: str) -> None:
     """Print WHO rewrites `memory`'s grants, and to what — every `update_agent`
     naming the store, read off the kernel's state stream with its `sender` (the
-    poll in `watch_store_grants` says WHEN a grant changed, not by whom; E30 lost
-    `rest` from the store twice with no writer in the builder's transcript,
-    2026-09-30). Run as a background task; cancel to stop."""
+    poll in `watch_store_grants` says WHEN a grant changed, not by whom). Run as a
+    background task; cancel to stop."""
     import time
 
     from helpers.host.ws import StateWatcher

@@ -34,16 +34,14 @@ let RECALL_PROMPT = """
 /// INCARNATION per agent id, bumped on every boot. A reply dispatched under one
 /// incarnation must not become a live turn of the next: after a reboot the
 /// rebuilt agent would be woken by answers to calls it no longer remembers
-/// making. Measured 2026-09-06 (python, reboot_continuity): the rebooted agent
-/// received phase-one read replies, went back to "verifying" work already
-/// folded, and never did the new instruction. Python `_incarnation` — one table
+/// making. Python `_incarnation` — one table
 /// for the whole process, keyed by agent id, because delivery is a free
 /// function that knows only the target's id.
 /// KEYED BY KERNEL, like `AIRunStates`: python's `_incarnation` is a module dict
 /// in a one-kernel-per-process runtime, while swift hosts many kernels at once.
-/// A flat id→int map let one kernel's `boot` bump another kernel's agent, and a
-/// reply already in flight there came back as a LATE reply — recorded, never
-/// acted on. The chain simply stopped, with nothing anywhere saying why.
+/// A flat id→int map would let one kernel's `boot` bump another kernel's agent,
+/// and a reply already in flight there would come back as a LATE reply —
+/// recorded, never acted on.
 enum AIIncarnation {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var table: [UInt64: [String: Int]] = [:]
@@ -292,12 +290,10 @@ extension AIBackend {
         let target = Int64(Double(bodyBudget) * AIConstants.LOW)
         // PYTHON TRUTHINESS: `dry:1`, `"false"` and `[0]` are all dry.
         let dry = pyTruthy(payload["dry"])
-        // A HEAD LONGER THAN THE BUDGET FOLDS FIRST (owner, 2026-10-07). A store
+        // A HEAD LONGER THAN THE BUDGET FOLDS FIRST. A store
         // written under a larger window — another model, a planted past — is folded
         // the way the turn's own `fold` projection folds it: oldest spans into fold
-        // rows, folds of folds as they pile up. Before this the fit below only
-        // stubbed every reply and dropped the oldest rows that still did not fit —
-        // no fold, no summary. Folding takes the model (a summary per span), so a
+        // rows, folds of folds as they pile up. Folding takes the model (a summary per span), so a
         // `dry` recall does not fold.
         var folded = 0
         if let provider, !dry, AIContext.strategy(agent).asString == "fold" {
@@ -426,12 +422,10 @@ extension AIBackend {
         // the decision is a ROW — the next reload reads why the last recall chose as it did
         let rid = kernel.mintId()
         // THE LIVE TASK IS NAMED. The view keeps the first root (the goal) at the
-        // top, and after a recall a model with several roots re-answered the FIRST
-        // one and called done (measured 2026-09-06, python fold_paging: TASK 0
-        // re-answered at turn 88 with TASK 15 and a FINAL pending). The newest root
+        // top, and after a recall a model with several roots may re-answer the FIRST
+        // one and call done. The newest root
         // is what is live; say so. Over the STORE, not the folded render: a root
-        // that a fold collapsed is still the live one if nothing newer came
-        // (measured 2026-09-06, folds_x_chains: TASK C folded, the row named TASK A).
+        // that a fold collapsed is still the live one if nothing newer came.
         let live = rows.last { r in
             // `not r.get("parent")` is python TRUTHINESS, and `kind in (None, "",
             // "user")` is EXACT membership — a row with `kind: 5` is not a root,
@@ -503,9 +497,9 @@ extension AIBackend {
 /// `for v in (value or [])` — python's iteration protocol over whatever the
 /// model answered.
 ///
-/// Python `_as_list(ans.get("expand"))` (2026-09-20): a list as is, a scalar
-/// WRAPPED, a falsy value nothing. A truthy string or number used to be
-/// iterated (characters, or a raise) — now it is one `_as_id` candidate.
+/// Python `_as_list(ans.get("expand"))`: a list as is, a scalar
+/// WRAPPED, a falsy value nothing. A truthy string or number is one `_as_id`
+/// candidate, never iterated.
 private func iterateExpand(_ v: JSON) -> [JSON] {
     if !pyTruthy(v) { return [] }
     if case .array(let items) = v { return items }

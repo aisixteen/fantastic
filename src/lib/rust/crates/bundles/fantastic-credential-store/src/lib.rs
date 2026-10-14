@@ -1,4 +1,4 @@
-//! credential_store — secrets an agent USES but never keeps (owner, 2026-10-01).
+//! credential_store — secrets an agent USES but never keeps.
 //!
 //! A rule-for-rule port of python's
 //! `bundled_agents/security/credential_store/src/credential_store/tools.py`,
@@ -30,7 +30,7 @@
 //!   * `env`: read-only; each ref maps its fields to environment variables
 //!     (`refs: {ref: {host, env: {api_key: VAR}}}`), for a container or CI.
 //!
-//! THE HOST IS STORED WITH THE VALUE (audit S3, 2026-10-03): `set` writes the ref's
+//! THE HOST IS STORED WITH THE VALUE: `set` writes the ref's
 //! declared host beside its fields — the file entry and the keychain item are
 //! `{host, fields}` — and `get` refuses a value whose stored host is not the one its
 //! declaration names, or that carries none: a store elsewhere declaring the same id
@@ -40,8 +40,8 @@
 //! store's parent or the operator, the one path:
 //! `refs: {<ref>: {host, fields?/env?}}` (it
 //! replaces the whole map; `host` is required — the binding). The DECLARATION is
-//! the operator's and only `update_agent` writes or removes it (audit AV-4/AV-5,
-//! 2026-10-03): `set` stores the value of a DECLARED ref, never creates one and
+//! the operator's and only `update_agent` writes or removes it:
+//! `set` stores the value of a DECLARED ref, never creates one and
 //! takes no `host` (an undeclared ref answers "no such ref", to the operator too;
 //! a `host` on the call is refused); `forget` drops the value and keeps the
 //! declaration. Any caller the kernel's call gate admits may `set`, `get` and
@@ -50,8 +50,7 @@
 //!
 //! THE RECORD holds only metadata — the host and the field NAMES. The CALL
 //! carries the value: a `set` payload and a `get` reply are recorded like any
-//! call's (the ledger, the memory store, the state stream), in clear (owner,
-//! 2026-10-04).
+//! call's (the ledger, the memory store, the state stream), in clear.
 //!
 //! WHO MAY CALL is the kernel's call gate alone.
 //!
@@ -335,7 +334,7 @@ fn sorted(v: &Value) -> Value {
 
 /// THE host-mismatch refusal: the ref is bound to `bound`, not `other`. One shape
 /// for a `get {ref, host}` naming another host and a value stored for another
-/// host — or for none (audit S3). Python `_host_mismatch`.
+/// host — or for none. Python `_host_mismatch`.
 fn host_mismatch(r: &str, bound: &Value, other: Option<&str>) -> Value {
     let mut out = refusal(
         BAD_ARG,
@@ -351,7 +350,7 @@ fn host_mismatch(r: &str, bound: &Value, other: Option<&str>) -> Value {
 }
 
 /// The refusal for a stored value whose host is not the declared one — or that
-/// carries none (audit S3) — or `None`. Python `_host_at_rest`.
+/// carries none — or `None`. Python `_host_at_rest`.
 fn host_at_rest(r: &str, stored: Option<&Value>, declared: Option<String>) -> Option<Value> {
     let at_rest = host(stored);
     if at_rest.is_some() && at_rest == declared {
@@ -405,8 +404,8 @@ impl FileBackend {
             return Ok(Map::new());
         }
         // ONE open, judged on its own descriptor (`fs::read_private`): checking the
-        // path and then reading the path again was a window a swapped leaf slipped
-        // through (audit F5, 2026-10-03).
+        // path and then reading the path again leaves a window a swapped leaf
+        // slips through.
         let raw = match fs::read_private(&self.base, &self.name) {
             Ok(raw) => raw,
             Err(fs::PrivateReadError::NotPrivate(np)) => {
@@ -587,7 +586,7 @@ impl Backend {
         }
     }
 
-    /// Store `fields` WITH `host` (audit S3): the value at rest is
+    /// Store `fields` WITH `host`: the value at rest is
     /// `{host, fields}` — python's `put(ref, host, fields)`.
     fn put(
         &self,
@@ -689,7 +688,7 @@ impl CredentialStoreBundle {
             return Ok(missing(&format!("{NAME} set"), "ref"));
         };
         if payload.get("host").is_some() {
-            // the binding is the declaration's alone (audit AV-4)
+            // the binding is the declaration's alone
             let mut out = refusal(
                 BAD_ARG,
                 format!(
@@ -734,7 +733,7 @@ impl CredentialStoreBundle {
             return Ok(no_such_ref(r));
         };
         let h = host(entry.get("host"));
-        // the declared host is stored WITH the value (audit S3)
+        // the declared host is stored WITH the value
         let mut sorted_names: Vec<String> = fields.keys().cloned().collect();
         sorted_names.sort();
         self.backend(id, &rec)?.put(r, h.clone(), fields)?;
@@ -774,7 +773,7 @@ impl CredentialStoreBundle {
         let mut fields = backend.get(r)?;
         if let Some(stored) = fields.as_ref().filter(|f| !f.is_empty()) {
             if !matches!(backend, Backend::Env(_)) {
-                // THE HOST AT REST (audit S3): a value is read only for the host it
+                // THE HOST AT REST: a value is read only for the host it
                 // was stored with — the declaration of a store elsewhere sharing
                 // this id and ref names its own host, and reads nothing.
                 if let Some(bad) = host_at_rest(r, stored.get("host"), host(entry.get("host"))) {
@@ -846,7 +845,7 @@ impl CredentialStoreBundle {
             return Ok(no_such_ref(r));
         };
         self.backend(id, &rec)?.drop_ref(r)?;
-        // the value's names go with the value (audit AV-5); the declaration stays
+        // the value's names go with the value; the declaration stays
         if entry.shift_remove("fields").is_some() {
             refs.insert(r.to_string(), Value::Object(entry));
             let mut patch = Map::new();

@@ -1,4 +1,4 @@
-"""`watch_path` (owner, 2026-10-08): a path under the disk watcher, any writer's change
+"""`watch_path`: a path under the disk watcher, any writer's change
 emitted on the bridge's own inbox as `{type: changed, path, kind}`. Against the real
 disk: a direct write (an editor), an atomic save (temp file renamed over), a write
 through the bridge, a directory's entries; refusals; `unwatch_path` ends it."""

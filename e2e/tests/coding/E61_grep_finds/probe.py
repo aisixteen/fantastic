@@ -1,7 +1,6 @@
 """coding/grep_finds — find the line, don't page for it.
 
-Measured 2026-09-06: without grep the model spent four ~10k-token thinking turns paging
-one body in 300-char windows to find a single line. This plants the same needle — a
+Without grep a model pages a body in small windows to find a single line. This plants the same needle — a
 marker mid-body in one of eight IDENTICAL-LENGTH fillers — tells the model it may search,
 and scores whether it grepped and how little it pulled. Pull count is the falsifier: paging
 costs ≥16 re-reads; a grep costs one call.

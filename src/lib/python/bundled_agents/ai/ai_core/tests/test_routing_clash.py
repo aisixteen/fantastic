@@ -1,7 +1,6 @@
-"""A ROUTING NAME A VERB ALSO TAKES (owner, 2026-10-11). `title`, `timeout`, `reply_to`
-… on a call are routing — lifted out, never sent to the target. A verb whose `docs`
-names an argument the same way could never receive it: a knowledge store's
-`create(title)` failed on every call and the model blamed the store. Now the call is
+"""A ROUTING NAME A VERB ALSO TAKES. `title`, `timeout`, `reply_to` … on a call are
+routing — lifted out, never sent to the target. A verb whose `docs` names an argument
+the same way could never receive it, and the model would blame the target. The call is
 refused, loud, naming the clash; a verb without such an argument is untouched."""
 
 from __future__ import annotations

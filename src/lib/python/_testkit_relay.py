@@ -1,9 +1,8 @@
 """Shared FAKE RELAY for tests — the relay kernel's routing emulated in-process.
 
-Extracted from `relay_connector/tests/test_relay_connector.py` (2026-08-25) so the
-C21 transport-symmetry suite can drive the SAME cases through the relay tunnel
-without importing a test module (xdist double-imports those — measured on
-`test_batch_send`, whose cross-test import made every wait time out).
+Shared so the transport-symmetry suite can drive the SAME cases through the relay
+tunnel without importing a test module (xdist double-imports those, and a
+cross-test import makes every wait time out).
 """
 
 from __future__ import annotations

@@ -1,14 +1,14 @@
-"""ws_bridge / io_bridge engine — the three ways a bridge used to break itself.
+"""ws_bridge / io_bridge engine — three ways a bridge could break itself.
 
-1. A RE-ENTRANT round trip deadlocked. The read loop served an inbound `call`
-   inline, so a handler that forwarded back over the same bridge could never
-   have its reply read — the loop was parked inside `kernel.send`. Both sides
-   waited for each other until the 30s forward timeout.
-2. ONE malformed frame killed the reader. `decode_frame` raised out of
-   `WSTransport.recv`, the read loop died, and `reflect` still said
-   `connected:true` while every forward timed out.
-3. TEARDOWN blocked the event loop. `st.cleanup` was a sync callable, so a
-   slow transport teardown froze every other agent on the loop.
+1. A RE-ENTRANT round trip must not deadlock. A read loop serving an inbound
+   `call` inline could never read the reply of a handler that forwarded back over
+   the same bridge — the loop parked inside `kernel.send`, both sides waiting for
+   each other until the forward timeout.
+2. ONE malformed frame must not kill the reader (`decode_frame` raising out of
+   `WSTransport.recv`, `reflect` still saying `connected:true` while every
+   forward times out).
+3. TEARDOWN must not block the event loop: a sync `st.cleanup` would let a slow
+   transport teardown freeze every other agent on the loop.
 """
 
 from __future__ import annotations
@@ -231,10 +231,10 @@ async def test_ws_transport_skips_malformed_frames_and_keeps_reading():
     ],
 )
 async def test_a_mistyped_answer_id_is_skipped_while_a_forward_waits(two_kernels, junk):
-    """Only a STRING id names one of our forwards. A list/object id used to be
-    hashed by `pending.pop` while a forward was waiting; the TypeError ended the
-    read loop, the forward failed `bridge transport closed`, and every later
-    frame went unread while `reflect` said `connected:true`. Now the frame is
+    """Only a STRING id names one of our forwards. A list/object id hashed by
+    `pending.pop` while a forward is waiting would end the read loop with a
+    TypeError, fail the forward `bridge transport closed`, and leave every later
+    frame unread while `reflect` says `connected:true`. The frame is
     skipped: the waiting forward settles with the peer's real reply and the next
     inbound call is served."""
     ka, _ = two_kernels

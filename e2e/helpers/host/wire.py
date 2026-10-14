@@ -33,11 +33,8 @@ class WireRoot:
     #: The REST leg the driver arrives as. Seeded by `HostKernel.seed`.
     leg_id = "rest"
     #: The agents a `watch` frame may be dispatched AS — each needs the target's
-    #: ingress like anyone. Every runtime dispatches a ws frame as the WS LEG now
-    #: (`web_ws`'s own id, the record its ingress rule hangs on); rust used to
-    #: dispatch it as the web HOST (`fantastic-web/src/lib.rs`,
-    #: `with_sender(host_agent_id)`) and was brought in line by the python parity
-    #: port. `web` stays in the tuple because the host is still the sender for the
+    #: ingress like anyone. Every runtime dispatches a ws frame as the WS LEG
+    #: (`web_ws`'s own id, the record its ingress rule hangs on). `web` stays in the tuple because the host is still the sender for the
     #: connect-time auto-watch on `/<id>/ws`, and granting an id that never calls
     #: costs a map entry.
     watch_ids = ("ws", "web")
@@ -52,12 +49,9 @@ class WireRoot:
         callers only ever send one.
 
         OFF THE EVENT LOOP. `HostKernel.send` is blocking `urllib`, and awaiting
-        it inline froze the whole drive loop — its tripwires, its idle counter
-        and its `ps` check all stop ticking while one request is outstanding.
-        Measured on `plan:rust`: a turn started an exec_bridge script that
-        POSTed back into the kernel, the next poll blocked on the driver's
-        300-second default, and a probe with `idle_seconds: 40` sat still for
-        eleven minutes without ever capping.
+        it inline would freeze the whole drive loop — its tripwires, its idle
+        counter and its `ps` check all stop ticking while one request is
+        outstanding.
         """
         out = []
         for i in items:
@@ -76,19 +70,16 @@ class WireRoot:
 
         A probe's SCORER reads the row store directly — a conversation whole, a
         planted history, the id counter. In-process that is `root.ctx`; across a
-        socket there is no kernel object, and every such probe died at its last
-        step with `'WireRoot' object has no attribute 'ctx'` AFTER the run had
-        finished and paid for itself (measured 2026-09-11: `subai` and
-        `subai_graph`, 27 minutes each).
+        socket there is no kernel object, so this provides one.
 
         This is NOT the in-process bypass wearing a wire coat: every method here
         goes through the memory store's own verbs (`dump`/`inject`), as the leg
         the store is a child of. One probe, one code path, every runtime — which is the
         rule the scenario suite exists under.
 
-        ONE PER ROOT (2026-10-11): it holds the placeholder-id counter, and a fresh
-        WireCtx per access restarted it — every `root.ctx.mint_id()` call returned the
-        same id (the e2e plant fit re-minted 300 rows to ONE id over rust).
+        ONE PER ROOT: it holds the placeholder-id counter, and a fresh WireCtx per
+        access would restart it — every `root.ctx.mint_id()` call would return the
+        same id.
         """
         if getattr(self, "_ctx", None) is None:
             self._ctx = WireCtx(self.k)
@@ -171,8 +162,7 @@ class WireTranscript:
         #
         # READ PAST `__getattribute__`. A read of `transcript`/`n` from here would
         # poll again from inside this poll; the 1 s throttle hid that only while a
-        # dump took under 1 s, and an hour-long run's dump does not (subai_graph,
-        # 2026-10-05: RecursionError after 3617 s).
+        # dump took under 1 s, and an hour-long run's dump does not.
         transcript = object.__getattribute__(self, "transcript")
         if len(turns) > len(transcript):
             fresh = turns[len(transcript):]

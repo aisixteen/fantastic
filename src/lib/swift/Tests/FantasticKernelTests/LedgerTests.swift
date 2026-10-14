@@ -1,4 +1,4 @@
-// #34–#37 — the execution ledger, as a CALLER sees it through `send`.
+// The execution ledger, as a CALLER sees it through `send`.
 //
 // In-process invariants: a named id runs once and only once, a concurrent
 // re-send JOINS rather than re-running, a retry budget re-dispatches under the
@@ -75,7 +75,7 @@ struct LedgerTests {
     }
 
     @Test func aNamedIdRunsTheHandlerExactlyOnce() async {
-        // C9/C11: the SECOND send of a settled id returns the recorded outcome
+        // The SECOND send of a settled id returns the recorded outcome
         // and the handler does not run. This is the whole dedup contract.
         let runs = Runs()
         let k = await makeKernel(runs)
@@ -97,7 +97,7 @@ struct LedgerTests {
     }
 
     @Test func concurrentSendsOfOneIdRunTheBodyOnce() async {
-        // C10: once-only under concurrency — what makes a double-click safe.
+        // Once-only under concurrency — what makes a double-click safe.
         let runs = Runs()
         let k = await makeKernel(runs)
         async let a = k.send([
@@ -130,8 +130,7 @@ struct LedgerTests {
         // NO RE-FETCH BY PID. Python's contract: a caller supplies a NAME, never
         // an id — "a name it has seen JOINS that execution, a name it has not
         // opens a new one". An unnamed pid is not a name; its outcome is read
-        // off the `ledger`, above. (The old assertion here was a swift-only
-        // shortcut, deleted 2026-09-12.)
+        // off the `ledger`, above.
         #expect(runs.count == 1)
     }
 
@@ -152,7 +151,7 @@ struct LedgerTests {
     }
 
     @Test func aSpentBudgetParksADeadLetterThatNeverReArms() async {
-        // C12: failed work must neither vanish nor loop. It parks WITH its
+        // Failed work must neither vanish nor loop. It parks WITH its
         // outcome, queryable; a retry is an explicit NEW id.
         let runs = Runs()
         runs.setFailUntil(99)
@@ -183,7 +182,7 @@ struct LedgerTests {
         #expect(runs.count == 2, "a parked dead letter re-armed")
     }
 
-    /// C80: `ExecutionLedger.setCap` sets the ring's cap AND immediately
+    /// `ExecutionLedger.setCap` sets the ring's cap AND immediately
     /// re-runs eviction against it — RETROACTIVE, unlike python's plain
     /// `ledger_cap` attribute set (only bites on the NEXT insert; harmless
     /// since the CLI always sets a cap before any execution exists). Same
@@ -221,7 +220,7 @@ struct LedgerTests {
         #expect(runs.count == 5, "the join must not have re-run the handler")
     }
 
-    /// C31 r2 correction: BOTH the text and the extras render the CALLER's
+    /// BOTH the text and the extras render the CALLER's
     /// RAW id (`pyRepr` for a string), never the minted exec_id; the target
     /// names via `pyRepr` too; there is no `bound_to`.
     @Test func anIdIsBoundToItsFirstTarget() async {
@@ -261,7 +260,7 @@ struct LedgerTests {
         #expect(p["next"].asString != nil, "a further page must be named")
     }
 
-    /// C16: python's exact key order — `{id, target, attempts, retries,
+    /// Python's exact key order — `{id, target, attempts, retries,
     /// named, name?, status, outcome?}`. `status`/`outcome` land AFTER
     /// `named`/`name`, not right after `target`.
     @Test func ledgerRowKeyOrderMatchesPython() async {
@@ -292,11 +291,8 @@ extension LedgerTests {
     /// verb, but equally a missing path or a patch that did not match — settles
     /// `errored`, not `completed`.
     ///
-    /// It used to settle `completed`, on the rule that the kernel does not
-    /// introspect domain replies, while the durable row already carried the
-    /// error copied off the result beside `status: completed`. One row said both
-    /// "fine" and "failed". Python and rust each had a test that moved when this
-    /// changed; swift had none, so the old behaviour was unpinned here.
+    /// `completed` beside the error the durable row carries would make one row
+    /// say both "fine" and "failed".
     @Test func aHandlerThatSaysNoSettlesErrored() async {
         let runs = Runs()
         let k = await makeKernel(runs)

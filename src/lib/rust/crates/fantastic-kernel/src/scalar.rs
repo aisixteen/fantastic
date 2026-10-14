@@ -35,11 +35,11 @@ pub fn py_strip(s: &str) -> &str {
 ///   `+`, and reject a leading, trailing or doubled underscore;
 /// - `int()` and `float()` both run `_PyUnicode_TransformDecimalAndSpaceToASCII`
 ///   first: every Unicode `Nd` digit becomes its ASCII value, mixed scripts
-///   allowed in one literal (`int('1١')` == 11 — C72);
+///   allowed in one literal (`int('1١')` == 11);
 /// - `float()` accepts `inf`, `infinity` and `nan` in any case, with a sign.
 ///
 /// TWO values a naive `i64`/`f64` cannot hold, both kept as an exact JSON
-/// NUMBER rather than mangled into a string (C74/D13): an integer wider than
+/// NUMBER rather than mangled into a string: an integer wider than
 /// `i64` (python's ints are unbounded — `f64` would lose digits, so this crate
 /// builds an ARBITRARY-PRECISION `serde_json::Number` instead; the workspace
 /// turns on serde_json's `arbitrary_precision` feature for exactly this, at
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn unicode_digits_follow_cpython() {
-        // C72: mixed scripts allowed in one literal — every Unicode `Nd`
+        // Mixed scripts allowed in one literal — every Unicode `Nd`
         // digit is its ASCII value, ASCII and non-ASCII interchangeably.
         assert_eq!(coerce_scalar("١٢"), json!(12)); // Arabic-Indic
         assert_eq!(coerce_scalar("1١"), json!(11)); // ASCII + Arabic-Indic

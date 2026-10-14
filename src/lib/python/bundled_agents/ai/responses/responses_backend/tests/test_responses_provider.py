@@ -132,7 +132,7 @@ async def test_budget_and_sampling_ride_the_body():
 
 def test_sampling_may_not_override_what_the_provider_owns():
     """`store:false` keeps the conversation ours and `model` is the record's — a
-    `sampling` key naming either is refused, not merged over it (audit d8)."""
+    `sampling` key naming either is refused, not merged over it."""
     for key in ("store", "model", "max_output_tokens"):
         with pytest.raises(ValueError, match=key):
             ResponsesProvider("http://x/v1/responses", "m", key=_key, sampling={key: 1})
@@ -288,8 +288,8 @@ async def test_transport_error_gives_up_after_the_bound():
 
 
 async def test_a_deliberate_answer_is_never_retried():
-    """A 404 JSON body — measured 2026-09-27 on a proxy with no /responses route —
-    is the endpoint answering; retrying would spend the same broken request N times."""
+    """A 404 JSON body — e.g. a proxy with no /responses route — is the endpoint
+    answering; retrying would spend the same broken request N times."""
     sink: list = []
     p = _seq_provider([(404, '{"error": "not found"}', "application/json")], sink)
     with pytest.raises(RuntimeError, match="responses 404"):
@@ -423,7 +423,7 @@ async def test_the_wire_trace_prints_what_left_and_what_came_back(monkeypatch, c
     assert "[wire] <- status='completed' reason=None items=['message']" in out
 
 
-# ── the key never leaves in an error text (audit S1) ─────────────────────────
+# ── the key never leaves in an error text ────────────────────────────────────
 
 
 async def _listener():

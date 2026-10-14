@@ -22,10 +22,9 @@ is tag-delimited, args INLINE:
     </bytes>
     </call>
 
-Why tags and not JSON (measured 2026-09-09, qwen3.8-27b, `tmp/tagprobe.py`, 4 trials ×
-3 shapes that had failed in e2e): JSON with a verbatim `bytes` cut 3/12 correct —
-escaped quotes, literal `\\n`, a `\\"}` inside content ending the value early; bare
-child tags 12/12, zero escapes, nested lists parsed every time. A `"` boundary inside
+Why tags and not JSON: JSON with a verbatim `bytes` cut goes wrong — escaped quotes,
+literal `\\n`, a `\\"}` inside content ending the value early; bare child tags need
+zero escapes, and nested lists parse every time. A `"` boundary inside
 JSON fires the model's escaping reflex; a tag boundary carries none. Every harness that
 carries documents in prompt-parsed calls moved them out of JSON quotes (aider text
 blocks, OpenHands/cline per-parameter tags, codex freeform grammar).
@@ -60,7 +59,7 @@ BYTES_CLOSE = "</bytes>"
 _HEAD = re.compile(r'^\s*name\s*=\s*"([A-Za-z_][\w]*)"\s*>', re.DOTALL)
 # A tag name is a KEY, not an XML name: grant maps are keyed by agent ids and the
 # relative tokens (`$self`, `$parent`, `$subtree`), and the model writes those as
-# tags (`<$self>*</$self>`, measured 2026-09-09 gated_write, 12 refusals) — so `$`,
+# tags (`<$self>*</$self>`) — so `$`,
 # `-` and `.` are letters here.
 _TAG = re.compile(r"<([A-Za-z_$][\w$.\-]*)>")
 # Call-level fields of a `send`: where it goes, where the answer goes, what it is for,
@@ -184,15 +183,13 @@ def _value(name: str, raw: str):
     names = [k for k, _ in kids]
     # A LIST is a tag whose children are all `<item>` — one element each, any
     # count, one element included. The same tag the reply notation renders, so
-    # what the model reads is what it writes (2026-09-09 subai_graph: a reply
-    # showed `<allowed><item>…</item></allowed>`, the model wrote it back, and a
-    # plural/singular rule read the lone child as a one-field object — three
-    # refusals and a JSON-string fallback).
+    # what the model reads is what it writes (a reply showing
+    # `<allowed><item>…</item></allowed>` is written back as-is, and a lone child
+    # is still a one-element list).
     if all(k == "item" for k in names):
         return [_value(k, v) for k, v in kids]
-    # `<item>` beside OTHER tags is an ordinary field named item (E14 2026-09-10:
-    # `<payload><type>buy</type><item>rocket</item></payload>` was refused as a
-    # list error and the purchase never left the model). Only a tag whose children
+    # `<item>` beside OTHER tags is an ordinary field named item
+    # (`<payload><type>buy</type><item>rocket</item></payload>`). Only a tag whose children
     # are ALL `<item>` is a list; a one-field object named `item` is the single
     # shape the notation cannot say.
     out: dict = {}
@@ -292,14 +289,12 @@ def _render_field(name: str, value) -> str:
 
 def render_reply(value) -> str:
     """A REPLY to the model, in the same tag notation it writes calls in — one
-    notation on the whole model↔harness path, no JSON either way (user, 2026-09-09:
-    "align answers in the same format"). A dict is one `<k>…</k>` per line; a list
+    notation on the whole model↔harness path, no JSON either way. A dict is one `<k>…</k>` per line; a list
     is its outer tag with one `<item>` per element; text
     with newlines spans lines verbatim; bytes are decoded utf-8 (replace); `None` is
-    an empty tag. Measured why (2026-09-06 note above `_pull`): a JSON envelope
-    escapes every newline and quote, so the model could not see a read's lines,
-    and (2026-09-09 program_tests) a refusal carrying a JSON-dumped list showed
-    doubled backslashes that cost a run."""
+    an empty tag. Why: a JSON envelope escapes every newline and quote, so the model
+    cannot see a read's lines, and a refusal carrying a JSON-dumped list shows
+    doubled backslashes."""
     if isinstance(value, dict):
         return "".join(_render_reply_field(k, v) for k, v in value.items()).rstrip("\n")
     if isinstance(value, list):
@@ -415,7 +410,7 @@ def terminated_calls(text: str) -> list[tuple[dict, str]]:
 
 def extract_tool_calls(text: str) -> list[dict]:
     """Non-streaming: pull every finalized `<call>` out of a complete string. A call
-    with no `</call>` is NOT a call (owner, 2026-10-04): the model stopped generating
+    with no `</call>` is NOT a call: the model stopped generating
     before it closed, so nothing is dispatched — the turn's cut marker names it as not
     sent (`stream_parts.cut_marker`)."""
     return [call for _, call, _f, done in _scan(text) if call is not None and done]
@@ -435,9 +430,8 @@ def _defang(text: str) -> str:
     """Neutralize envelope delimiters so quoted text cannot re-arm the scanner.
 
     Anything we echo back becomes conversation the model reads, quotes and reasons
-    about — and a quoted `<call` is indistinguishable from an emitted one. Measured
-    2026-08-06 (on the JSON envelope): echoing a block verbatim made this error
-    self-amplifying, each report seeding the next. Breaking the opener is enough."""
+    about — and a quoted `<call` is indistinguishable from an emitted one: echoing a
+    block verbatim makes this error self-amplifying, each report seeding the next. Breaking the opener is enough."""
     for tag in (OPEN, CLOSE, BYTES_OPEN, BYTES_CLOSE):
         text = text.replace(tag, tag.replace("<", "‹").replace(">", "›"))
     return text
@@ -449,10 +443,9 @@ def malformed_calls(text: str) -> list[dict]:
 
     Exists because a call that cannot be read is the one failure a model cannot
     debug: `extract_tool_calls` returns `[]` for it, which is byte-identical to a
-    turn that emitted no call at all — and that means "done". Measured on
-    gemma-4-12B (2026-08-06): nothing parsed, nothing dispatched, no error came back,
-    and the run ended looking finished with the task untouched. Earlier errors HAD
-    taught it — it self-corrected out loud — so the fix is not a better parser, it
+    turn that emitted no call at all — and that means "done": nothing parsed, nothing
+    dispatched, no error back, and the run ends looking finished with the task
+    untouched. Models self-correct from errors that reach them, so the fix is not a better parser, it
     is giving this failure the same voice the others already have."""
     out: list[dict] = []
     for block, call, fault, terminated in _scan(text):

@@ -102,9 +102,9 @@ pub fn recent_split(body: &[Value], recent_n: usize) -> (Vec<Value>, Vec<Value>)
 /// says whether the provider stopped AT that bound (`stop_reason ==
 /// "max_tokens"`), so a cut-off summary is never kept as if it were whole.
 ///
-/// NO INPUT CUT. A REASONING MODEL THINKS OUT LOUD HERE TOO: measured 2026-09-06
-/// (python), 172 of 172 model-written folds carried a title beginning
-/// `<think>The user wants me to summarize…`. Side calls strip like the main turn.
+/// NO INPUT CUT. A REASONING MODEL THINKS OUT LOUD HERE TOO: unstripped,
+/// model-written folds carry titles beginning `<think>The user wants me to
+/// summarize…`. Side calls strip like the main turn.
 pub async fn summarize(
     provider: &Arc<dyn Provider>,
     msgs: &[Value],
@@ -183,11 +183,10 @@ pub async fn compact(
     // PIN THE GOAL. The first turn is the task framing, and it is the OLDEST — so it is
     // the first thing the overflow split takes. A summary is a lossy retelling; the one
     // turn that must survive verbatim is the instruction the whole run serves.
-    // Measured 2026-08-20 (python, four live runs): the agent reached the correct
-    // conclusion, then ended "healthy budget, no tasks" / "Give me a task whenever" — it
-    // had not refused to act, it no longer knew what it was doing. `truncate` already
-    // pins this turn; `compact` did not. Cost is one turn of budget, charged before the
-    // tail.
+    // Without the pin the agent reaches the correct conclusion, then ends "healthy
+    // budget, no tasks" — it has not refused to act, it no longer knows what it is
+    // doing. `truncate` pins this turn too. Cost is one turn of budget, charged
+    // before the tail.
     let Some(first) = body.first() else {
         return Projection {
             body: fit_tail(&recent_turns, avail),

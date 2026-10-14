@@ -1,6 +1,5 @@
-// What a record leaves out is READ FROM THE SERVER (owner, 2026-10-07: "defaults
-// can be inferred from the endpoint") — python `vllm_backend/server.py`, text for
-// text.
+// What a record leaves out is READ FROM THE SERVER — python
+// `vllm_backend/server.py`, text for text.
 //
 // `model`, `max_tokens`, `context_window` and `kv_slots` may be left off the record.
 // Before a verb that runs a turn (`TURN_VERBS`), every one still absent is read from

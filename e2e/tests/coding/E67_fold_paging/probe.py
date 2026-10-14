@@ -71,8 +71,8 @@ async def main():
         report((recency, fold), lambda a: f"FINAL={want in a['body']}  folded={a['folded']}  descents={len(a['descents'])}  roots={a['roots']}")
         print(f"  observed: fold covering task {ask} = {right_fold}; opened = {sorted(opened)}")
         checks = [c for c in base_checks(recency, fold, planted=True) if not c[0].startswith("both arms produced")] + [
-            # 32k-only test (see test.yaml): at 32k the 16 tasks fold 3 times (measured
-            # 2026-09-08); paging through folds needs more than one, not many.
+            # 32k-only test (see test.yaml): at 32k the 16 tasks fold a few times;
+            # paging through folds needs more than one, not many.
             (f"a fold was written ({fold['folded']}, levels {fold['fold_levels']})", fold["folded"] >= 1),
             ("final.md carries task 3's checksum exactly", want in fold["body"]),
             ("the right fold was among those opened (or none needed)", not opened or right_fold in opened),

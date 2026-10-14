@@ -2,8 +2,7 @@
 // KV-cache session table it keeps per endpoint. Twins of python
 // `vllm_backend/tests/test_vllm_backend.py`.
 //
-// Every behaviour here traces to a measured failure on a live vLLM (a production
-// deployment, Qwen3.8-27B-FP8, vLLM 0.27.1): a dropped thought channel, a turn
+// Every behaviour here guards a failure mode of a live vLLM: a dropped thought channel, a turn
 // spent thinking with no answer, a stream that died without saying so, a system
 // message the template refused, and a cache that only pays off while the live
 // set stays under the server's KV ceiling.
@@ -120,8 +119,7 @@ struct VllmBackendTests {
     }
 
     /// python `test_a_cap_the_prompt_leaves_no_room_for_sends_no_max_tokens`: 64000
-    /// on a 65536 window — refused by vLLM with a 1537-token prompt (owner's 3090,
-    /// 2026-10-12). The prompt's bound plus the cap past the window asks for the rest
+    /// on a 65536 window — refused by vLLM with a 1537-token prompt. The prompt's bound plus the cap past the window asks for the rest
     /// of it; a prompt that leaves the room keeps the cap.
     @Test func aCapThePromptLeavesNoRoomForSendsNoMaxTokens() async throws {
         let stub = StubHTTP([sse([delta(finish: "stop")]), sse([delta(finish: "stop")])])
@@ -441,7 +439,7 @@ struct VllmBackendTests {
     }
 
     @Test func aRecordMissingRequiredFieldsIsRefusedAtTheWriteNamingAll() {
-        // what a model spawning a sub-AI wrote (E37): the fields it could see
+        // what a model spawning a sub-AI writes: the fields it could see
         let meta: OrderedDictionary<String, JSON> = [
             "endpoint": .string("http://vllm.test/v1"), "model": "qwen3.8-27b",
             "max_tokens": 65536,
@@ -545,7 +543,7 @@ struct VllmBackendTests {
     }
 }
 
-/// Audit ARCH2-5: the KV session table and the last-budget entry are keyed by
+/// The KV session table and the last-budget entry are keyed by
 /// kernel. Two kernels in one process with an agent of the same id on the same
 /// endpoint keep apart, and a kernel's teardown drops its rows.
 @Suite("vLLM side tables — keyed by kernel")

@@ -1,11 +1,9 @@
-// I-1 — the SEAL says python's words, and carries the repair with it.
+// The SEAL says python's words, and carries the repair with it.
 //
-// The same locked door has to say the same thing in every runtime. Before this,
-// python answered `edge sealed by policy` plus a hint naming
-// `update_agent <id> ingress_rule=allow_all_ingress`, while swift answered
-// `inbound calls denied by policy` with no hint at all — and `gateVerb` bolted on
-// one that claimed "the fs edge" for whichever leg had called it. A model taught
-// the python hint got nothing it could act on here.
+// The same locked door has to say the same thing in every runtime: python's
+// `edge sealed by policy` plus a hint naming
+// `update_agent <id> ingress_rule=allow_all_ingress`, so a model taught the
+// python hint can act on it here.
 
 import FantasticIoBridge
 import FantasticJSON
@@ -71,7 +69,7 @@ struct DenyInboundTests {
         #expect(d.hint.contains("allow_all_ingress, deny_ingress, password_ingress"))
     }
 
-    /// Audit W-8 — a MALFORMED spec (not a string or an object, or a `type`/`env`
+    /// A MALFORMED spec (not a string or an object, or a `type`/`env`
     /// that is not a string) is named by its python repr — a name no registry
     /// holds — so ingress seals on it, egress refuses it, reflect reports it, in
     /// python's words. It threw `unsupported rule spec`, read a non-string `type`

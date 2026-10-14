@@ -14,7 +14,7 @@
 //! L1  stub      [reply to pid · notes read · "survey chunk 2"] (stripped: 6800 bytes)
 //! ```
 //!
-//! TWO RULES THAT KEEP THE KV CACHE WARM. Measured on this stack (vLLM /metrics):
+//! TWO RULES THAT KEEP THE KV CACHE WARM. Under prefix caching (vLLM /metrics):
 //! an append after the cached prefix reuses it in full; any edit inside it reuses
 //! NOTHING. So —
 //!   * HYSTERESIS. Strip only past the HIGH watermark, and strip down to LOW in

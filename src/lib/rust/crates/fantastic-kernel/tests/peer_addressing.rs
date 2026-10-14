@@ -1,4 +1,4 @@
-//! CROSS-KERNEL ADDRESSING (owner, 2026-09-30): an agent on a connected peer
+//! CROSS-KERNEL ADDRESSING: an agent on a connected peer
 //! kernel is addressed `<guid>|<agent id>`, called with an ordinary `send`, and
 //! discovered through reflect. The KERNEL routes it — a transport only registers
 //! the peer it is connected to (`register_peer`) and carries the frames.
@@ -210,7 +210,7 @@ async fn the_root_reflect_lists_connected_peers() {
     assert_eq!(out.result["peers"], json!([]));
 }
 
-/// The tabs of one identity are ONE principal (owner, 2026-10-03): a second
+/// The tabs of one identity are ONE principal: a second
 /// route for a live guid is ADDED, and a disconnect removes only its own.
 #[tokio::test]
 async fn one_guid_holds_a_set_of_live_routes() {
@@ -416,7 +416,7 @@ async fn a_create_on_a_peer_is_gated_on_the_peer_target() {
     assert!(calls.lock().unwrap().is_empty());
 }
 
-/// `docs of: <guid>|<agent>` (owner, 2026-10-06): the question goes to the
+/// `docs of: <guid>|<agent>`: the question goes to the
 /// connected kernel's own `docs` and the reply names the qualified id. The asker's
 /// grant is `docs` on THIS root, like any `docs`; the peer judges its own leg.
 /// Python `test_docs_of_a_peer_agent_asks_that_kernel`.

@@ -159,8 +159,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
     /// `io_bridge._engine.validate_meta`.
     ///
     /// A relay leg also refuses, first, a malformed `credentials` ({store, ref})
-    /// — the relay password lives in a credential_store (audit IO-7/F4,
-    /// 2026-10-03). Python `relay_connector.tools.validate_meta`.
+    /// — the relay password lives in a credential_store. Python `relay_connector.tools.validate_meta`.
     public func validateMeta(
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
     ) -> String? {
@@ -394,8 +393,7 @@ public final class KernelBridgeBundle: AgentBundle, @unchecked Sendable {
         Dial a relay-KERNEL (`../fantastic_relay`) at `ws://<host>/<guid>` with the group
         password in `X-Fantastic-Auth` and subprotocol `fantastic.relay.v1`.
 
-        **The password lives in a credential_store, never on the record** (audit IO-7/F4,
-        2026-10-03): name it with `credentials: {store, ref}`; before EVERY dial the
+        **The password lives in a credential_store, never on the record**: name it with `credentials: {store, ref}`; before EVERY dial the
         connector reads the ref's `password` field AS ITSELF (`get {ref, host:<relay_url>}`
         — the dial runs in its own dispatch or a task it spawned), pinned to the relay
         URL's host, exactly as an AI

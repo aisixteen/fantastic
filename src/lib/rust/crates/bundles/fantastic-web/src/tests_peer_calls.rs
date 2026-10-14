@@ -2,7 +2,7 @@
 //! `hello {guid}`, the host kernel then reaches the page's agents as
 //! `<guid>|<agent>`, each call rides this socket as an outbound `call` frame
 //! answered by an inbound `reply`/`error` with the same id, and the page stops
-//! being an address the moment its socket closes (owner, 2026-09-30).
+//! being an address the moment its socket closes.
 //!
 //! The twin of python `web_ws/tests/test_peer_calls.py`, over a real socket: the
 //! test is the page, and sends INTO it from the kernel it is connected to.
@@ -180,7 +180,7 @@ async fn one_guid_per_connection() {
     stop(&kernel, "web_peer_pin").await;
 }
 
-/// Owner, 2026-10-03: every tab says hello with the identity's guid; the host
+/// Every tab says hello with the identity's guid; the host
 /// calls ALL of them, the first reply settles, the other is dropped; a closed tab
 /// leaves the guid routable through the other.
 #[tokio::test]
@@ -256,7 +256,7 @@ async fn two_tabs(tmp: &TempDir, web_id: &str) -> (Arc<Kernel>, TestWs, TestWs, 
     (kernel, ws, ws2, leg)
 }
 
-/// Owner, 2026-10-03: an emit to `<guid>|<agent>` reaches EVERY live tab of the
+/// An emit to `<guid>|<agent>` reaches EVERY live tab of the
 /// guid as `{type:"emit", target, payload}` — from an operator, or from an agent
 /// granted `emit` on the peer; no caller rides either way.
 #[tokio::test]
@@ -297,7 +297,7 @@ async fn an_emit_to_the_identity_reaches_every_tab() {
     stop(&kernel, "web_peer_emit").await;
 }
 
-/// Owner, 2026-10-03: a reply this leg sends one tab reaches the OTHER tabs of
+/// A reply this leg sends one tab reaches the OTHER tabs of
 /// its guid as `{type:"reply_mirror", id, data}` — never the asking tab itself.
 #[tokio::test]
 async fn a_reply_is_mirrored_to_the_sibling_tab() {

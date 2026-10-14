@@ -131,7 +131,7 @@ async def main():
             ("the EDIT organ was used", "<type>edit</type>" in transcript),
             (
                 # dispatched calls only — the model quoting the readme's `write`
-                # example in its thinking is not a rewrite (false XX, 2026-09-09)
+                # example in its thinking is not a rewrite
                 "no whole-file rewrite",
                 not any(
                     re.search(r"<type>\s*write\s*</type>", c)

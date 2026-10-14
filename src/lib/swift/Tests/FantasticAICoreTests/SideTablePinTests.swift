@@ -125,7 +125,7 @@ struct SideTablePinTests {
         #expect(!AIStripStrategy.has(nil, id))
     }
 
-    /// Audit ARCH2-5: the stripped set is keyed by kernel — two kernels with an
+    /// The stripped set is keyed by kernel — two kernels with an
     /// agent of the same id strip apart, forgetting one leaves the other, and a
     /// kernel's teardown drops its sets.
     @Test func theStripTableIsPerKernel() async {
@@ -145,7 +145,7 @@ struct SideTablePinTests {
         await b.shutdown()
     }
 
-    /// Audit ARCH2-2 (python `test_delete_drops_every_row_but_the_incarnation`):
+    /// Python `test_delete_drops_every_row_but_the_incarnation`:
     /// `delete_agent` runs the backend's `onDelete`, which drops every row the AI
     /// core keeps for the id, so the id re-created later starts clean. The
     /// incarnation stays monotonic: a reply to a call the deleted agent made

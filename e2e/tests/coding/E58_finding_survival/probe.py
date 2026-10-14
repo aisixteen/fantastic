@@ -81,10 +81,8 @@ async def main():
             return any(m.get("role") == "assistant" and token in str(m.get("content"))
                        for m in a["msgs"])
 
-            # NOT "both arms actually compacted": folding here was a side effect of a
-            # BLIND grep (2026-09-08: 12 greps, 12 zeros, then pulls filled the window).
-            # With grep reaching stored bodies (fixed 2026-09-09) the model never needs
-            # to hold them, so this test measures FACT SURVIVAL; folding is measured by
+            # NOT "both arms actually compacted": with grep reaching stored bodies the
+            # model never needs to hold them, so this test measures FACT SURVIVAL; folding is measured by
             # fold_paging / nested_folds / superlong_chain / user_fold.
         checks = [c for c in base_checks(recency, facts) if not c[0].startswith(('both arms produced', 'both arms actually compacted'))] + [
             ("the fold arm produced the artifact", bool(facts['body'].strip())),

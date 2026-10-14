@@ -28,12 +28,9 @@
 //! </call>
 //! ```
 //!
-//! The three JSON-era envelopes this module used to accept — the taught
-//! `<tool_call>{…}</tool_call>`, Claude's `<invoke>`, the special-token channel
-//! — and both `bytes` cuts are DELETED, not deprecated. A model's trained format
-//! stopped being the argument the day the measurement went the other way
-//! (2026-09-09, qwen3.8-27b: JSON 3/12 correct on shapes that carry a document,
-//! bare child tags 12/12).
+//! There is no other envelope — no `<tool_call>{…}</tool_call>`, no Claude
+//! `<invoke>`, no special-token channel — and no `bytes` cut: on shapes that
+//! carry a document, bare child tags beat a model's trained JSON format.
 
 pub mod grammar;
 pub mod render;
@@ -123,7 +120,7 @@ pub fn terminated_calls(text: &str) -> Vec<(ToolCall, String)> {
 }
 
 /// Non-streaming: pull every finalized `<call>` out of a complete string. A call
-/// with no `</call>` is NOT a call (owner, 2026-10-04): the model stopped
+/// with no `</call>` is NOT a call: the model stopped
 /// generating before it closed, so nothing is dispatched — the turn's cut marker
 /// names it as not sent ([`crate::stream_parts::cut_marker`]).
 #[must_use]
@@ -159,11 +156,11 @@ impl MalformedCall {
 ///
 /// Exists because a call that cannot be read is the one failure a model cannot
 /// debug: [`extract_tool_calls`] returns `[]` for it, which is byte-identical to
-/// a turn that emitted no call at all — and that means "done". Measured on
-/// gemma-4-12B (2026-08-06): nothing parsed, nothing dispatched, no error came
-/// back, and the run ended looking finished with the task untouched. Earlier
-/// errors HAD taught it — it self-corrected out loud — so the fix is not a
-/// better parser, it is giving this failure the same voice the others have.
+/// a turn that emitted no call at all — and that means "done": nothing parsed,
+/// nothing dispatched, no error came back, and the run ends looking finished
+/// with the task untouched. Models self-correct from an error out loud, so the
+/// fix is not a better parser, it is giving this failure the same voice the
+/// others have.
 #[must_use]
 pub fn malformed_calls(text: &str) -> Vec<MalformedCall> {
     scan(text)
@@ -189,9 +186,8 @@ pub fn malformed_calls(text: &str) -> Vec<MalformedCall> {
 ///
 /// Anything echoed back becomes conversation the model reads, quotes and reasons
 /// about — and a quoted `<call` is indistinguishable from an emitted one.
-/// Measured 2026-08-06 (on the JSON envelope): echoing a block verbatim made the
-/// error self-amplifying, each report seeding the next. Breaking the opener is
-/// enough.
+/// Echoing a block verbatim makes the error self-amplifying, each report seeding
+/// the next. Breaking the opener is enough.
 #[must_use]
 pub fn defang(text: &str) -> String {
     let mut out = text.to_string();

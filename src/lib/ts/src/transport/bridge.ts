@@ -64,17 +64,11 @@ class Conn {
   /**
    * Per-CONNECTION correlator prefix. Minted once, never reused.
    *
-   * MEASURED 2026-08-27 against the real python kernel: this used to be a bare
-   * counter (`"1"`, `"2"`, …), and the host now treats a frame's `id` as the
-   * EXECUTION id (#38) — the ledger's dedup/join key. Two browser tabs each
-   * open a socket, each start at `"1"`, and the second tab's very first call
-   * came back
-   *
-   *     {"error": "send: id '1' already names an execution on 'alpha',
-   *                not 'beta'", "reason": "bad_arg"}
-   *
-   * — refused outright. Aimed at the SAME target it was worse than refused: it
-   * silently JOINED the other tab's execution and returned that tab's result.
+   * The host treats a frame's `id` as the EXECUTION id — the ledger's
+   * dedup/join key. A bare per-socket counter would collide across tabs: the
+   * second tab's call is refused (`id '1' already names an execution`), or,
+   * aimed at the SAME target, silently JOINS the other tab's execution and
+   * returns that tab's result.
    *
    * A correlator must therefore be unique across every socket, tab and reload
    * that can reach one host. It is a STRING — on the host, the execution's
@@ -89,7 +83,7 @@ class Conn {
   private wantsState = false;
   private onState: ((frame: Envelope) => void) | null = null;
   private readonly pending = new Map<string, Pending>();
-  // THE PEER ROLE (cross-kernel addressing, owner 2026-09-30): the conn that says
+  // THE PEER ROLE (cross-kernel addressing): the conn that says
   // `hello {guid}` becomes this kernel's address on the host — the host's calls to
   // `<guid>|<agent>` arrive on it as `call` frames and are answered by `reply`.
   // The guid is the tree's: every tab of one identity says hello with it, and the
@@ -384,7 +378,7 @@ export class WsBridge implements Bridge {
           (frame) => void this.answerCall(conn, frame),
           (frame) => this.deliverEmit(frame),
           (frame) =>
-            // TODO (owner, open): DESYNC between the tabs of one identity is
+            // TODO: DESYNC between the tabs of one identity is
             // envisioned and unsolved — the mirror shows another tab's reply, it
             // reconciles nothing. Think later.
             this.kernel.emit(conn.endpoint, {
@@ -431,7 +425,7 @@ export class WsBridge implements Bridge {
 
   /**
    * The HOST emitting on `frame.target` of THIS kernel — every tab of this
-   * identity gets it (owner, 2026-10-03). Handed in as the operator, like a host
+   * identity gets it. Handed in as the operator, like a host
    * call, and only to this kernel's own agents. A malformed frame is dropped —
    * an emit has no reply.
    */
@@ -448,7 +442,7 @@ export class WsBridge implements Bridge {
       warn("ws_bridge: dropping malformed emit frame");
       return;
     }
-    // TODO (owner, open): DESYNC between the tabs of one identity is envisioned
+    // TODO: DESYNC between the tabs of one identity is envisioned
     // and unsolved — each tab gets the event, nothing reconciles what they do
     // with it. Think later.
     const id = this.kernel.resolveId(target);

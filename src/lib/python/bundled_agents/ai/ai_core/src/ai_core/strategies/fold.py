@@ -204,7 +204,7 @@ async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> d
 
     ids = [rows[i].get("id") for i in idxs]
     lvl = 1 + max((level(rows, rows[i]) for i in idxs if is_fold(rows[i])), default=0)
-    # THE INDEX RIDES BESIDE THE SUMMARY, outside its budget (owner, 2026-10-11).
+    # THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
     index = mechanical_index(rows, idxs)
     title, text, degraded = await _summarize(ctx, rows, idxs)
     if index:
@@ -238,8 +238,7 @@ def next_span(
     Never the goal turn, never the last `keep_tail` rows, and never ending between a
     call and its answer. Folds are ordinary members, but NOT the first pick: a stretch
     that starts on the previous fold wraps it, and doing that every time builds a linked
-    list of summaries-of-summaries (measured 2026-09-06: twelve levels deep in 26 cuts,
-    the model lost in it for 50 turns). So: skip the folds at the head and take the oldest
+    list of summaries-of-summaries the model gets lost in. So: skip the folds at the head and take the oldest
     NON-fold rows; only when `FOLD_RUN` folds sit adjacent at the head do they become the
     span themselves — a tree whose depth grows with the log of the history."""
     by_id = {r.get("id"): i for i, r in enumerate(rows) if r.get("id")}
@@ -290,12 +289,12 @@ async def fold_down(
             rows.append(await write_fold(ctx, rows, span))
             folded += 1
             view = render(rows)
-    # TIDY THE HEAD, budget or no budget. Coalescing used to happen only while
-    # the view was OVER the watermark, so a projection that dropped under it left
-    # its adjacent folds standing — and they stayed standing, because the next
+    # TIDY THE HEAD, budget or no budget. Coalescing only while the view is OVER
+    # the watermark would leave a projection that dropped under it with its
+    # adjacent folds standing — and they would stay standing, because the next
     # projection folds ordinary rows first and only revisits the head when it is
-    # over budget with `FOLD_RUN` folds already there. A session therefore grew
-    # one fold per span at the head, forever.
+    # over budget with `FOLD_RUN` folds already there. A session would grow one
+    # fold per span at the head, forever.
     #
     # Terminates: each pass replaces `FOLD_RUN` adjacent folds with ONE, so the
     # run shrinks by `FOLD_RUN - 1` every time and `next_span` stops selecting

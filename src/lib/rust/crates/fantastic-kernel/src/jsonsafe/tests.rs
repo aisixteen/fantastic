@@ -1,4 +1,4 @@
-//! D7: the non-finite number python writes must survive being embedded.
+//! The non-finite number python writes must survive being embedded.
 
 use super::{obj, record_value};
 use crate::agent::AgentRecord;
@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 
 #[test]
 fn json_macro_cannot_carry_a_non_finite_number() {
-    // The measured fault, pinned so the reason this module exists stays true:
+    // The fault, pinned so the reason this module exists stays true:
     // `to_value` re-parses the stored text and `NaN` is not JSON.
     let nan = coerce_scalar("nan");
     assert_eq!(nan.to_string(), "NaN");

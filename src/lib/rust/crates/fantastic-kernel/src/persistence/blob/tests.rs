@@ -1,5 +1,5 @@
 //! The blob channel — name validation. WHO may name a namespace is the grant
-//! alone (owner, 2026-10-06): an agent that reaches `persist_blob` names any.
+//! alone: an agent that reaches `persist_blob` names any.
 
 use super::*;
 
@@ -35,8 +35,8 @@ fn kernel_managed_files_are_reserved() {
 
 #[test]
 fn an_agent_id_that_walks_out_is_refused() {
-    // `agents/<agent_id>/` is a directory: `../bundles/x` reached a folder
-    // bundle's `bundle.yaml` (audit 2026-10-14).
+    // `agents/<agent_id>/` is a directory: `../bundles/x` would reach a folder
+    // bundle's `bundle.yaml`.
     for verb in ["persist_blob", "load_blob"] {
         for bad in ["../bundles/x", "a/b", "..", ".hidden"] {
             let payload =

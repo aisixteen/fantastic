@@ -297,10 +297,9 @@ struct FoldsTests {
         #expect(AIFolds.chains(a + [fd, late])[0].contains(a.count + 1))
     }
 
-    /// SPAN = 1024 (owner, 2026-10-11): one overflow folds the whole foldable
-    /// stretch into ONE fold — not 8 rows at a time (python E39: 47 folds, 4
-    /// levels). Twelve levels in 26 cuts was the older failure; one fold per
-    /// overflow cannot build that list.
+    /// SPAN = 1024: one overflow folds the whole foldable stretch into ONE fold —
+    /// not a few rows at a time. One fold per overflow cannot build a linked list
+    /// of summaries.
     @Test func oneOverflowFoldsTheWholeStretchOnce() async throws {
         let f = FoldFixture(agent: AI)
         let a = f.chain("a", 30)
@@ -326,12 +325,11 @@ struct FoldsTests {
     /// A real run folds ONCE per turn at most: each projection drops the view
     /// under the watermark and stops. So the head accumulates folds one at a
     /// time, and the threshold is the whole story. At FOLD_RUN=4 a run that
-    /// produced three folds never nested at all — measured 2026-09-11 (python),
-    /// `nested_folds` and `flat_roots` both ended `levels [1]`, a head that grows
-    /// one fold per span forever. The synthetic budget fixtures cannot show this:
+    /// produces three folds never nests at all — a head that grows one fold per
+    /// span forever. The synthetic budget fixtures cannot show this:
     /// they fold many times inside ONE call and sail past four.
     ///
-    /// So the rule is exercised directly, at exactly the count that failed.
+    /// So the rule is exercised directly, at exactly that count.
     @Test func threeAdjacentFoldsAtTheHeadFoldAsAGroup() {
         let f = FoldFixture(agent: AI)
         let goal = f.row("user", "GOAL", "user:goal")
@@ -344,13 +342,12 @@ struct FoldsTests {
         #expect(span == [1, 2, 3], "three adjacent folds at the head must fold as a group, got \(span)")
     }
 
-    /// Folds at the head used to coalesce ONLY while the view was over the
-    /// watermark. A projection that dropped under it left its adjacent folds
-    /// standing, and they stayed standing — the next projection folds ordinary
-    /// rows first and only revisits the head when it is over budget with FOLD_RUN
-    /// folds already there. So a session grew one fold per span at the head,
-    /// forever, which is the growth FOLD_RUN exists to stop. Measured 2026-09-11
-    /// (python) on `flat_roots`: three level-1 folds and no nesting across 51 turns.
+    /// Folds at the head coalesce even when the view is under the watermark.
+    /// Coalescing ONLY over it would leave a projection's adjacent folds standing
+    /// for good — the next projection folds ordinary rows first and only revisits
+    /// the head when it is over budget with FOLD_RUN folds already there — so a
+    /// session would grow one fold per span at the head, forever, which is the
+    /// growth FOLD_RUN exists to stop.
     ///
     /// Here the body ALREADY FITS the budget, so the fold loop never runs; only
     /// the tidy pass can produce the level-2 fold.
@@ -373,9 +370,9 @@ struct FoldsTests {
         #expect(!levels.isEmpty && (levels.max() ?? 0) >= 2, "the head was left uncoalesced while under budget: \(levels)")
     }
 
-    // B5.22: `_summarize` splits the model's text with python's `splitlines()`.
-    // Splitting on `"\n"` as a CHARACTER read a CRLF summary as ONE line, so the
-    // whole summary became the title and the body fell back to it.
+    // `_summarize` splits the model's text with python's `splitlines()`.
+    // Splitting on `"\n"` as a CHARACTER would read a CRLF summary as ONE line, so
+    // the whole summary would become the title.
     @Test func crlfSummarySplitsLikePython() async throws {
         let f = FoldFixture(agent: AI)
         let a = f.chain("a", 8)
@@ -392,7 +389,7 @@ struct FoldsTests {
         #expect(!content.contains("TITLE line\r\n"), "the title is not the whole text")
     }
 
-    // B5.22: `body or title` falls back to the UNCUT title, not the cut one.
+    // `body or title` falls back to the UNCUT title, not the cut one.
     @Test func summaryBodyFallsBackToTheUncutTitle() async throws {
         let f = FoldFixture(agent: AI)
         let a = f.chain("a", 8)
@@ -408,7 +405,7 @@ struct FoldsTests {
         #expect((fd["content"].asString ?? "").contains(long), "the BODY keeps all 200")
     }
 
-    /// A fold is sized by TOKENS, never a row count (owner, 2026-10-11): `nextSpan`
+    /// A fold is sized by TOKENS, never a row count: `nextSpan`
     /// takes the oldest rows until their tokens reach `need`, and no further.
     @Test func aSpanIsSizedByTokensNotRows() {
         let f = FoldFixture(agent: AI)

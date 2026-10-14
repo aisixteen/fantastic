@@ -46,7 +46,7 @@ private final class StalledProvider: AIProvider, @unchecked Sendable {
 @Suite("AI events and refusals")
 struct EventsAndRefusalsTests {
 
-    // ── B2.1 / B2.16: a provider failure raises ──────────────────────────
+    // ── a provider failure raises ──────────────────────────
 
     /// The handler RAISES. The kernel settles `failed` with
     /// `{error:"<Type>: <msg>", raised:true}` — a crash the caller can tell from
@@ -79,7 +79,7 @@ struct EventsAndRefusalsTests {
         // `str(e)` — the message alone, NOT the `<Type>: ` prefixed rendering
         // the settle carries.
         #expect(detail["error"].asString == "upstream said no")
-        // B2.16 + B2.17: the detail keys, in python's order.
+        // The detail keys, in python's order.
         #expect(
             detail.asObject.map { Array($0.keys) }
                 == ["reason", "error", "send_id", "started_at", "queue_depth"])
@@ -117,7 +117,7 @@ struct EventsAndRefusalsTests {
             sink.statusDone()?["detail"]["error"].asString == "sampling sets an owned key: 'model'")
     }
 
-    // ── B2.2: a projection refusal is the reply, verbatim ────────────────
+    // ── a projection refusal is the reply, verbatim ────────────────
 
     /// The too_small failsafe means the MODEL WAS NEVER CALLED: python returns
     /// the refusal body exactly as the seam built it — no `client_id` bolted on
@@ -155,7 +155,7 @@ struct EventsAndRefusalsTests {
             "no generation started, so nothing announces one ending")
     }
 
-    // ── B2.6: the send id ────────────────────────────────────────────────
+    // ── the send id ────────────────────────────────────────────────
 
     /// python `secrets.token_urlsafe(8)`: ELEVEN base64url characters, no
     /// prefix. Swift minted `snd_<8 hex>`.
@@ -181,7 +181,7 @@ struct EventsAndRefusalsTests {
             Comment(rawValue: sendId))
     }
 
-    // ── B2.10: `_safe_client` is per CODE POINT ──────────────────────────
+    // ── `_safe_client` is per CODE POINT ──────────────────────────
 
     @Test func safeClientMapsCodePointsLikePython() {
         let backend = buildAIBackend(baseConfig { MockProvider() })
@@ -203,7 +203,7 @@ struct EventsAndRefusalsTests {
         #expect(backend.safeClient("a/b c.d-e_f") == "a_b_c.d-e_f")
     }
 
-    // ── B2.14 / B2.15: the token event, and the absence of `done` ────────
+    // ── the token event, and the absence of `done` ────────
 
     @Test func tokenEventIsTypeTextSourceClientId() async throws {
         let (kernel, id) = try await freshMockKernel(
@@ -227,10 +227,10 @@ struct EventsAndRefusalsTests {
         #expect(sink.first(type: "done") == nil, "`status(done)` IS the completion")
     }
 
-    // ── B2.18: the ceiling covers the WHOLE generation ───────────────────
+    // ── the ceiling covers the WHOLE generation ───────────────────
 
-    /// A provider that never yields a first token used to run forever: swift
-    /// only compared a deadline BETWEEN chunks, so a stall before chunk one was
+    /// A provider that never yields a first token must not run forever: a
+    /// deadline compared only BETWEEN chunks leaves a stall before chunk one
     /// unbounded. python wraps the whole of `_run` in `asyncio.timeout`.
     @Test func aStalledProviderTimesOutAtTheCeiling() async throws {
         var cfg = baseConfig { StalledProvider() }
@@ -264,7 +264,7 @@ struct EventsAndRefusalsTests {
         #expect(s["generating"].asBool == false)
     }
 
-    // ── B2.19: the completion is announced BEFORE the turn is persisted ──
+    // ── the completion is announced BEFORE the turn is persisted ──
 
     @Test func statusDoneOkIsEmittedBeforeTheTurnIsPersisted() async throws {
         // The turn ENDS THE CHAIN (`done`), so the only status events are this
@@ -301,7 +301,7 @@ struct EventsAndRefusalsTests {
         #expect(conversationRows(kernel: kernel, id: id).count == before + 2)
     }
 
-    // ── B2.7: ONE caller route ───────────────────────────────────────────
+    // ── ONE caller route ───────────────────────────────────────────
 
     /// `client_id == 'cli'` → every stream event is a SEND to the `cli` agent
     /// (whose handler prints it), and NOTHING lands on the backend's inbox.
@@ -339,14 +339,14 @@ struct EventsAndRefusalsTests {
         let tokens = atCli.filter { $0["type"].asString == "token" }
         #expect(tokens.compactMap { $0["text"].asString }.joined().hasPrefix("hello "))
         #expect(atCli.allSatisfy { $0["client_id"].asString == "cli" })
-        // STREAMING PARTS (owner, 2026-10-04): prose and caller-bound call parts
+        // STREAMING PARTS: prose and caller-bound call parts
         // go where the tokens go.
         #expect(
             Set(atCli.compactMap { $0["type"].asString }).isSubset(
                 of: ["token", "status", "part_start", "part_delta", "part_end"]),
             "\(atCli.map { $0["type"].asString ?? "?" })")
         try await Task.sleep(nanoseconds: 50_000_000)
-        // The backend's OWN inbox carries the dispatch that was sent TO it — C76,
+        // The backend's OWN inbox carries the dispatch that was sent TO it —
         // python's `_fanout` at dispatch start — and NOTHING of the stream: no
         // token, no `say`, no status. Python asserts exactly this (its `emits`
         // filter over `token`/`say`/`status(done)` on the backend's own id).
@@ -395,7 +395,7 @@ struct EventsAndRefusalsTests {
             "a browser's stream never reaches the cli")
     }
 
-    // ── B3.1: the unknown-type refusal ───────────────────────────────────
+    // ── the unknown-type refusal ───────────────────────────────────
 
     @Test func unknownTypeNamesTheBundleAndReprsTheVerb() async throws {
         let (kernel, id) = try await freshMockKernel(
@@ -404,8 +404,8 @@ struct EventsAndRefusalsTests {
             Item(id, .object(["type": .string("garbage")]))
         ])[0].result
         #expect(garbage["error"].asString == "mock_backend: unknown type 'garbage'")
-        // `shutdown` IS UNKNOWN: python's verb map has no such entry, so the
-        // lifecycle no-op swift used to answer was a reply python never sends.
+        // `shutdown` IS UNKNOWN: python's verb map has no such entry, so a
+        // lifecycle no-op answer would be a reply python never sends.
         let shutdown = await kernel.send([
             Item(id, .object(["type": .string("shutdown")]))
         ])[0].result
@@ -414,12 +414,11 @@ struct EventsAndRefusalsTests {
         // kernel refuses the send first — so python's `{t!r}` of a number is a
         // branch nothing can observe.
         let numeric = await kernel.send([Item(id, .object(["type": .integer(5)]))])[0].result
-        // C30: python's tail names a non-string by its TYPE, never its repr
-        // (audit 2026-10-03, W-11).
+        // Python's tail names a non-string by its TYPE, never its repr.
         #expect(numeric["error"].asString == "send: payload.type must be a non-empty string, got int")
     }
 
-    // ── B3.2: the inquiry placeholder ────────────────────────────────────
+    // ── the inquiry placeholder ────────────────────────────────────
 
     @Test func theInquiryPlaceholderRefusalRendersPythonRepr() async throws {
         // `'...'` is the shape the refusal itself teaches, copied back verbatim.
@@ -443,7 +442,7 @@ struct EventsAndRefusalsTests {
 
     /// Run one `inquiry` whose turn emits `answer` and return the refusal the
     /// receiver is told in its NEXT turn (or nil when the answer was accepted and
-    /// the chain ended). Fully async (owner, 2026-10-06): the refusal is a turn, not
+    /// the chain ended). Fully async: the refusal is a turn, not
     /// the inquiry's reply.
     private func inquiryError(answer: String) async throws -> String? {
         let script = ProviderScript([["<call name=\"inquiry_answer\">\(answer)</call>"], [doneEnvelope]])
@@ -457,7 +456,7 @@ struct EventsAndRefusalsTests {
         return turn.split(separator: "\n").first { $0.contains("PLACEHOLDER") }.map(String.init)
     }
 
-    // ── B3.3: the two `status.current` shapes ────────────────────────────
+    // ── the two `status.current` shapes ────────────────────────────
 
     @Test func statusCurrentHasTwoShapes() async throws {
         let (kernel, id) = try await freshMockKernel(
@@ -510,7 +509,7 @@ struct EventsAndRefusalsTests {
         _ = await running.value
     }
 
-    // ── B3.10: the recursion guard, BEFORE the lock ──────────────────────
+    // ── the recursion guard, BEFORE the lock ──────────────────────
 
     @Test func sendRefusesACycleAndOverDepth() async throws {
         let (kernel, id) = try await freshMockKernel(

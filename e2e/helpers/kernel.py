@@ -227,5 +227,5 @@ def home(root) -> str:
     """Where a probe CREATES its agents. In process the probe is the operator and
     places them under the root. Over a wire every call is the `rest` leg, and a
     mutation must come from the operand's direct parent — so the leg's own subtree
-    is the test's world (owner, 2026-10-04, option a)."""
+    is the test's world."""
     return getattr(root, "leg_id", None) or root.id

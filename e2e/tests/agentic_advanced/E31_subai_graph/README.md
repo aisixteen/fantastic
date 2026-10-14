@@ -10,9 +10,7 @@ No graph library exists anywhere in this codebase; the SHAPE is the variable.
 
 Probe 06 asked for one program on `exec_bridge`. Probe 05 asked for a specialist with
 CHILD workers wired to a scheduler. Neither asked for all of it at once, and neither put
-an AI agent inside the thing being built. Measured 2026-08-07: opus passed 06 (both arms)
-and passed 05, but 05 ran before `kernel_state._EXECUTORS` named `exec_bridge`, so it
-authored on `python_runtime`. So THIS combination has never run:
+an AI agent inside the thing being built. THIS test combines them:
 
   * the totalling logic as a state graph — nodes, edge map, self-written runner,
   * inside a SPECIALIST that owns child workers (probe 05's shape),

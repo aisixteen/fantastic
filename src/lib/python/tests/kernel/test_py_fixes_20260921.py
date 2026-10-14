@@ -1,16 +1,15 @@
-"""Twins for the 2026-09-21 python fixes: the flusher loop and the one-shot spin.
+"""The flusher loop and the one-shot spin.
 
 A. THE KERNEL'S OWN FLUSH NEVER RE-RECORDS ITSELF. A flush is a call to the store,
    and recording THAT call would mint another flush, forever. The flush row the
    batch carries IS the record of that call (see `Kernel._is_own_flush_row`): an
    idle started kernel writes nothing.
 B. A ONE-SHOT SHUTS DOWN ON THE LOOP THAT RAN THE CALL, fast.
-C. A DAEMON RELEASES ITS PID LOCK ON SIGTERM. The quiet phase waited for the task
-   table to EMPTY, so a `spawn_task` service loop (the scheduler's `tick_loop`) —
-   which never settles by construction — held it for the whole `QUIET_TIMEOUT`:
-   SIGTERM→exit 10.25 s with a scheduler on the tree, 0.29 s without. The e2e
-   harness SIGKILLs 10 s after the SIGTERM, so the kill landed first and
-   `.fantastic/lock.yaml` survived the stop (`e2e/runs/parity/r3-20260921`).
+C. A DAEMON RELEASES ITS PID LOCK ON SIGTERM. A quiet phase that waits for the task
+   table to EMPTY would let a `spawn_task` service loop (the scheduler's `tick_loop`)
+   — which never settles by construction — hold it for the whole `QUIET_TIMEOUT`,
+   and a supervisor's SIGKILL could land first and leave `.fantastic/lock.yaml`
+   behind.
 """
 
 from __future__ import annotations
@@ -131,7 +130,7 @@ def _main(tmp_path, *argv):
 
 def test_a_lockless_invocation_writes_no_root_record(tmp_path):
     """`--help` takes no lock, so a fresh dir gets no `.fantastic/agent.yaml`;
-    the first locked one-shot writes it (audit 2026-10-14)."""
+    the first locked one-shot writes it."""
     assert _main(tmp_path, "--help").returncode == 0
     assert not (tmp_path / ".fantastic" / "agent.yaml").exists()
     p = _main(tmp_path, "kernel", "list_agents")
@@ -209,7 +208,7 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
         ingress_rule="allow_all_ingress",
     )
     # `web` is what keeps a non-tty kernel alive as a daemon at all; the
-    # scheduler is the service loop that used to hold the quiet phase open.
+    # scheduler is a service loop that must not hold the quiet phase open.
     _record(d, "web", handler_module="web.tools", port=_free_port())
     _record(d, "sched", handler_module="scheduler.tools")
 
@@ -245,16 +244,13 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
 
 
 # ─── D. THE REST LEG ANSWERS — IT DOES NOT RAISE INSIDE THE ASGI APP ───
-# Measured in `e2e/runs/parity/python-baseline/53801fd8-20260921/a/wire`: the
-# python kernel's OWN log carried two `Exception in ASGI application`
-# tracebacks (196 diff lines, identical against both ports) and uvicorn
-# answered a bare text/plain 500 for each — cases `invalid_utf8_body` (a body
-# that is not UTF-8, so `json.loads` raises UnicodeDecodeError, not
-# JSONDecodeError) and `rest_self_get_routes` (a reply carrying LIVE endpoint
-# callables, which `JSONResponse` cannot render). The second is fixed at the
-# source: `get_routes` is DECLARATIVE — the endpoints reach `web` through the
-# `route_endpoints(agent)` module hook — so the verb answers 200 like rust/swift
-# and its settled row survives `_ledger_dump`'s strict round-trip.
+# Two cases must never raise `Exception in ASGI application` (a bare text/plain
+# 500): `invalid_utf8_body` (a body that is not UTF-8, so `json.loads` raises
+# UnicodeDecodeError, not JSONDecodeError) and `rest_self_get_routes` (a reply
+# carrying LIVE endpoint callables, which `JSONResponse` cannot render). The second
+# is handled at the source: `get_routes` is DECLARATIVE — the endpoints reach `web`
+# through the `route_endpoints(agent)` module hook — so the verb answers 200 and its
+# settled row survives `_ledger_dump`'s strict round-trip.
 
 
 async def _rest_client(kernel, rid: str = "pyfix_rest"):

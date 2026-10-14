@@ -25,7 +25,7 @@ func makeKernelWithAll(
 ) -> Kernel {
     let registry = BundleRegistry()
     // THE ROOT IS THE LOADER, as in every real kernel: `persist_blob` /
-    // `load_blob` are its verbs (C13), and the root reflect frame is its
+    // `load_blob` are its verbs, and the root reflect frame is its
     // `reflectRootExtra`.
     registry.register(ROOT_HANDLER_MODULE, KernelStateBundle())
     registry.register("file_bridge.tools", FileBundle())
@@ -111,7 +111,7 @@ struct BundleSmokeTests {
             at: workdir.appendingPathComponent(".fantastic"), withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: workdir) }
         let kernel = makeDiskKernel(workdir: workdir)
-        // RECORDS PERSIST THROUGH THE ROOT LOADER'S WRITER now (C14), not at the
+        // RECORDS PERSIST THROUGH THE ROOT LOADER'S WRITER, not at the
         // verb — so the writer is installed and each assertion drains it. That
         // drain is the one-shot seam python's `call` mode uses
         // (`root._fs_flush_loop.aflush()`), not a test-only shortcut.
@@ -287,8 +287,8 @@ struct BundleSmokeTests {
         #expect(fired["fired"].asBool == true, "\(fired)")
         // the reply carries the fire's OUTCOME — the target's own answer
         #expect(!fired["result"]["agents"].isNull && fired["error"].isNull, "\(fired)")
-        // A target that refuses: `{fired:true}` alone hid sixteen refusals from the
-        // model (measured 2026-10-06, rust subai_graph). Python
+        // A target that refuses: `{fired:true}` alone would hide the refusals from
+        // the model. Python
         // `test_tick_now_reports_a_refused_fire`.
         let g = await kernel.send([Item("sched", [
                 "type": "schedule", "target": "ghost", "interval_seconds": .integer(3600),
@@ -316,7 +316,7 @@ struct BundleSmokeTests {
             fm.fileExists(atPath: dir.appendingPathComponent("agents/sched/schedule_events.yaml").path))
     }
 
-    // ── #82 / #145: boot needs no store; one concurrent batch per tick,
+    // ── boot needs no store; one concurrent batch per tick,
     //    persist-before-fire, per-schedule timeout ──────────────────
 
     /// A store-backed kernel with `probes` probe targets and a scheduler
@@ -399,9 +399,8 @@ struct BundleSmokeTests {
         // slow one was still inside its block" is the proof.
         //
         // The proof is a DEADLINE, not the gap between the two start stamps: the
-        // gap is load-dependent and flaked under the full suite (0.41s against a
-        // 0.25s tolerance, 2026-09-03) even though both fires were dispatched in
-        // one batch. The block is 4s and the deadline 3s, so the margin is wide
+        // gap is load-dependent under the full suite even when both fires are
+        // dispatched in one batch. The block is 4s and the deadline 3s, so the margin is wide
         // enough that saturation cannot fake a pass.
         let fm = FileManager.default
         let rel = "fantastic-schedbatch-\(UUID().uuidString)"
@@ -443,7 +442,7 @@ struct BundleSmokeTests {
         }
     }
 
-    /// No idle wakeups (owner, 2026-10-08): with nothing to wait for the loop
+    /// No idle wakeups: with nothing to wait for the loop
     /// waits on a change; a schedule, or the record's `paused` flipped by
     /// update_agent, wakes it.
     @Test func anIdleSchedulerNeverWakesAndAChangeWakesIt() async throws {
@@ -539,9 +538,8 @@ struct BundleSmokeTests {
     }
 
     @Test func nonIntArgsAreBadArgRefusals() async throws {
-        // #136 — a present-but-wrong number is a TYPO, not a new default.
-        // `asInt ?? 60` used to swallow `interval_seconds: "60"` and schedule
-        // hourly what the caller wrote as per-minute.
+        // A present-but-wrong number is a TYPO, not a new default: `asInt ?? 60`
+        // would swallow `interval_seconds: "60"`.
         let fm = FileManager.default
         let rel = "fantastic-schedints-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
@@ -581,7 +579,7 @@ struct BundleSmokeTests {
     }
 
     @Test func scheduleRefusesANonObjectPayload() async throws {
-        // #136 — `payload: [1]` can never carry a `type`; say so as an ARG error.
+        // `payload: [1]` can never carry a `type`; say so as an ARG error.
         let fm = FileManager.default
         let rel = "fantastic-schedpayload-\(UUID().uuidString)"
         let dir = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(rel)
@@ -678,7 +676,7 @@ struct BundleSmokeTests {
                 "handler_module": .string("web_ws.tools"),
                 "id": .string("web_ws"),
                 "ingress_rule": .string("allow_all_ingress"),
-                // The EGRESS half. An inbound frame dispatches AS THE LEG now, and
+                // The EGRESS half. An inbound frame dispatches AS THE LEG, and
                 // `fs` is the leg's cousin (child of core, while the leg is a child
                 // of web) — no baseline token reaches it.
                 "can_call": .object(["fs": .string("*")]),
@@ -809,8 +807,8 @@ struct BundleSmokeTests {
         _ = await kernelA.send([Item("br", ["type": "unwatch_remote", "target": "kernel_state"])])[0].result
     }
 
-    /// A11.5 — python's ws descriptor is `{kind:"websocket", path}` with NO
-    /// method (the host defaults it); swift declared `method: "GET"`.
+    /// Python's ws descriptor is `{kind:"websocket", path}` with NO
+    /// method (the host defaults it).
     @Test func webWSGetRoutesShape() async {
         let kernel = makeKernelWithAll()
         _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "web_ws.tools", "id": "ws"])])[0].result
@@ -827,7 +825,7 @@ struct BundleSmokeTests {
                 == "Declares this surface's HTTP/WS route mounts. No args. Returns", "\(refl)")
     }
 
-    /// A11.5 — the REST paths capture `{target_id}`, python's parameter name.
+    /// The REST paths capture `{target_id}`, python's parameter name.
     @Test func webRestGetRoutesNamespacedBySelf() async {
         let kernel = makeKernelWithAll()
         _ = await kernel.send([Item("kernel_state", ["type": "create_agent", "parent_id": "kernel_state", "handler_module": "web_rest.tools", "id": "rest"])])[0].result
@@ -838,7 +836,7 @@ struct BundleSmokeTests {
         #expect(methods == ["POST", "GET", "GET"])
     }
 
-    /// A11.28 — `handle_route` is NOT an agent verb: python mounts a callable,
+    /// `handle_route` is NOT an agent verb: python mounts a callable,
     /// so a served request is never a send on the leg (swift's extra hop held a
     /// second, parent task row that `shutdown_agents` then cancelled).
     @Test func webRestHandleRouteIsNotAVerb() async {
@@ -916,9 +914,9 @@ final class SchedProbe: AgentBundle, @unchecked Sendable {
     }
 }
 
-// ─── A5 python-parity twins ─────────────────────────────────────────
+// ─── python-parity twins ─────────────────────────────────────────
 //
-// One test per plan item, each pinning the PYTHON text or behaviour named there
+// Each test pins the PYTHON text or behaviour
 // (`PB/scheduler/src/scheduler/tools.py`). Python is canonical; where a line here
 // disagrees with it, this file is wrong.
 
@@ -988,7 +986,7 @@ private func pythonSchedulerReadme() throws -> String {
 @Suite("scheduler python parity")
 struct SchedulerParityTests {
 
-    /// A5.1 — the `schedule_fired` blurb is python's, verbatim: two em-dashes and
+    /// The `schedule_fired` blurb is python's, verbatim: two em-dashes and
     /// the clause that says the payload send IS the tick.
     @Test func schedulerDocsEmitsIsPythonVerbatim() async throws {
         let kernel = makeKernelWithAll()
@@ -1001,13 +999,13 @@ struct SchedulerParityTests {
             "\(r["emits"].serialize())")
     }
 
-    /// A5.2 — the readme IS python's `readme.md`, byte for byte, not a swift
+    /// The readme IS python's `readme.md`, byte for byte, not a swift
     /// paraphrase.
     @Test func schedulerReadmeIsPythonVerbatim() throws {
         #expect(SchedulerBundle().readme == (try pythonSchedulerReadme()))
     }
 
-    /// A5.3 + A5.13 — `shutdown` is not a verb here: python's VERBS table has no
+    /// `shutdown` is not a verb here: python's VERBS table has no
     /// such key, so it is the unknown-type error, spelled with `{t!r}`.
     @Test func schedulerShutdownIsAnUnknownType() async throws {
         let kernel = makeKernelWithAll()
@@ -1020,9 +1018,10 @@ struct SchedulerParityTests {
         #expect(n["error"].asString == "scheduler: unknown type 'wat'", "\(n.serialize())")
     }
 
-    /// A5.4 — `boot` ALWAYS replies `{running:true}` and nothing else, and it
-    /// RESTARTS a loop whose task is gone (a cancelled tick loop left its id in
-    /// the table, so the scheduler claimed to run and never ticked again).
+    /// `boot` ALWAYS replies `{running:true}` and nothing else, and it
+    /// RESTARTS a loop whose task is gone (a cancelled tick loop leaves its id in
+    /// the table; without the restart the scheduler would claim to run and never
+    /// tick again).
     @Test func schedulerBootAfterCancelRestartsTheTickLoop() async throws {
         let kernel = makeKernelWithAll()
         await newScheduler(kernel, "s_boot")
@@ -1050,7 +1049,7 @@ struct SchedulerParityTests {
             "boot must restart a dead loop: \(back.serialize())")
     }
 
-    /// A5.5 — the VALIDATION ORDER is observable. python checks the payload's
+    /// The VALIDATION ORDER is observable. python checks the payload's
     /// shape, then `interval_seconds`, then `target`, then `payload.type`, then
     /// `timeout`; a call with two faults must name the first of those.
     @Test func schedulerValidationOrderMatchesPython() async throws {
@@ -1085,7 +1084,7 @@ struct SchedulerParityTests {
         #expect(e["schedule"]["target"] == .integer(7), "\(e.serialize())")
     }
 
-    /// A5.6 — `timeout` is stored AS SENT: an int `5` stays an int, in the reply
+    /// `timeout` is stored AS SENT: an int `5` stays an int, in the reply
     /// and in the persisted bytes.
     @Test func anIntTimeoutStaysAnInt() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedto")
@@ -1099,7 +1098,7 @@ struct SchedulerParityTests {
         #expect(raw.contains("  fire_timeout: 5\n"), "widened on disk: \(raw)")
     }
 
-    /// A5.7 — every `schedule_id` read is python TRUTHINESS, and the value is
+    /// Every `schedule_id` read is python TRUTHINESS, and the value is
     /// echoed RAW.
     @Test func emptyScheduleIdIsAbsentLikePython() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedsid")
@@ -1121,7 +1120,7 @@ struct SchedulerParityTests {
         #expect(un["removed"].asBool == false, "\(un.serialize())")
     }
 
-    /// A5.13 — `schedule {sid!r} not found` quotes a string id.
+    /// `schedule {sid!r} not found` quotes a string id.
     @Test func schedulerRefusalTextUsesPythonRepr() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedrepr")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1129,13 +1128,13 @@ struct SchedulerParityTests {
         #expect(r["error"].asString == "schedule 'sch_zzz' not found", "\(r.serialize())")
     }
 
-    /// A5.8 — the fire outcome: COMPLETED puts the target's reply in `result` and
+    /// The fire outcome: COMPLETED puts the target's reply in `result` and
     /// leaves `error` null; anything else makes `'<status>: ' + str(detail)`, where
     /// the detail is `res["error"]` for a dict body and the body itself otherwise
     /// (so a cancelled fire with no detail reads `cancelled: None`).
     ///
-    /// The scheduler used to hoist an `error` key out of a COMPLETED reply, which
-    /// reported a failed fire for a verb that had answered.
+    /// An `error` key is never hoisted out of a COMPLETED reply, which would
+    /// report a failed fire for a verb that had answered.
     @Test func cancelledFireErrorReadsNone() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedout")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1162,7 +1161,7 @@ struct SchedulerParityTests {
         #expect(bad["result"].isNull, "\(bad.serialize())")
     }
 
-    /// A5.10 — the sidecars are python's `messages_yaml.dump`: `schedules.yaml`
+    /// The sidecars are python's `messages_yaml.dump`: `schedules.yaml`
     /// is a block-style YAML sequence, `schedule_events.yaml` a YAML stream of
     /// one `---` document per fire, BMP text verbatim (`allow_unicode`).
     @Test func sidecarsUsePythonYamlLayout() async throws {
@@ -1189,7 +1188,7 @@ struct SchedulerParityTests {
         #expect(try YamlIO.loadAll(hist).count == 1, "\(hist)")
     }
 
-    /// A5.11 — `paused` is read with python TRUTHINESS, on the record and on each
+    /// `paused` is read with python TRUTHINESS, on the record and on each
     /// schedule; reflect still reports a BOOL.
     @Test func pausedMetaUsesPythonTruthiness() async throws {
         let kernel = makeKernelWithAll()
@@ -1205,7 +1204,7 @@ struct SchedulerParityTests {
         #expect(z["paused"] == .bool(false), "0 is not paused: \(z.serialize())")
     }
 
-    /// A5.16 — pause/resume put the FLAG FIRST, python's dict order.
+    /// Pause/resume put the FLAG FIRST, python's dict order.
     @Test func schedulerPauseReplyKeyOrderMatchesPython() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedkeys")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1225,13 +1224,12 @@ struct SchedulerParityTests {
             "\(whole.serialize())")
     }
 
-    /// A5.9 — the RAM cache is updated BEFORE the persist, and the two directions
+    /// The RAM cache is updated BEFORE the persist, and the two directions
     /// differ: `pause` KEEPS its flip when the write fails (the next tick must
     /// already honour it), while `tick_now` ROLLS its bump back (a run nothing
     /// recorded must not show up in `list`).
     ///
-    /// Acceptance-deferred until C13: the persist-failure TEXT wraps the loader's
-    /// own refusal, which C13 rewrites. What is pinned here is the RAM half.
+    /// What is pinned here is the RAM half.
     @Test func failedTickPersistDoesNotRefireNextTick() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedcache")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -1259,8 +1257,8 @@ struct SchedulerParityTests {
             "a failed tick_now ROLLS the bump back: \(afterTick.serialize())")
     }
 
-    /// A5.14 — `delete_agent` evicts the schedule cache (python `on_delete`,
-    /// 2026-09-20): a scheduler recreated under the same id starts empty instead
+    /// `delete_agent` evicts the schedule cache (python `on_delete`):
+    /// a scheduler recreated under the same id starts empty instead
     /// of inheriting its predecessor's schedules.
     @Test func recreatedSchedulerDropsTheProcessCache() async throws {
         let (kernel, dir) = try await schedulerOnAStore("schedrecreate")
@@ -1276,17 +1274,16 @@ struct SchedulerParityTests {
     }
 }
 
-// ── A15.2 — the scheduler names its persistence failures on stderr ──
+// ── the scheduler names its persistence failures on stderr ──
 
 @Suite("scheduler stderr lines")
 struct SchedulerStderrTests {
 
     /// Python `scheduler/tools.py:236-239,286-289`: a tick that cannot persist
     /// prints `scheduler <sid>: persist failed: <error>` and a fire that cannot
-    /// append prints `scheduler <sid>: history persist failed: <error>`. Swift
-    /// discarded both results, so a scheduler whose store went away ticked on in
-    /// silence and lost every schedule on the next boot with nothing anywhere
-    /// saying why.
+    /// append prints `scheduler <sid>: history persist failed: <error>`. Discarding
+    /// both results would let a scheduler whose store went away tick on in silence
+    /// and lose every schedule on the next boot with nothing saying why.
     @Test func schedulerPersistFailurePrintsPythonLine() async throws {
         let fm = FileManager.default
         let rel = "fantastic-a152-\(UUID().uuidString)"

@@ -36,7 +36,7 @@ pub(crate) struct Shared {
     held: Mutex<HashSet<i64>>,
     /// How many times a counting handler actually RAN.
     runs: Mutex<usize>,
-    /// C87: when set, `on_cancel` answers `Err` instead of releasing the
+    /// When set, `on_cancel` answers `Err` instead of releasing the
     /// resource — exercises the "a hook that fails is logged and the kill
     /// still happens" path (`tasks.rs`'s `  [cancel] <id> bundle on_cancel
     /// raised: <e>` line).
@@ -403,12 +403,9 @@ async fn ps_shows_the_tree_of_a_nested_send() {
     let child = row_for(&kernel, &b, "slow").await.expect("b's slow row");
 
     // A TASK ID IS A MESSAGE ID — the one counter's number, positive and
-    // ascending. It used to be an opaque `<agent>:<8 hex>` token, hashed so a
-    // model could not read an ordering into it (measured 2026-08-20 in python:
-    // one inferred ordering from `<agent>:<n>` and re-polled forever). Python
-    // reversed that trade: one number naming one thing in `ps`, `cancel`, the
-    // ledger, a reply tag and the message log is worth more than a number that
-    // hides its order.
+    // ascending: one number naming one thing in `ps`, `cancel`, the ledger, a
+    // reply tag and the message log is worth more than a number that hides its
+    // order.
     for row in [&parent, &child] {
         assert!(row["id"].as_i64().expect("id") > 0);
     }
@@ -660,7 +657,7 @@ async fn on_cancel_hook_runs_and_releases_its_resource() {
 
 #[tokio::test]
 async fn on_cancel_failure_prints_python_line() {
-    // C87: python `print(f"  [cancel] {self.id} bundle on_cancel raised:
+    // Python `print(f"  [cancel] {self.id} bundle on_cancel raised:
     // {e}")` (`_agent.py:2858-2859`) — STDOUT, and cancel is not refusable:
     // the abort still happens even though the hook errored. (The line
     // itself is reviewed by inspection — see the note on the state-
@@ -762,7 +759,7 @@ async fn forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent() {
 async fn kernel_verbs_are_docs_not_reflect() {
     // `ps`/`cancel` and the tree verbs belong to no bundle — they are the
     // SUBSTRATE's own, answered by the root alone, and READ with `docs
-    // of=kernel` (owner, 2026-10-05: a reflect carries no verbs).
+    // of=kernel` (a reflect carries no verbs).
     let sh = Arc::new(Shared::default());
     let kernel = mk_kernel(Arc::clone(&sh));
     let a = mk_agent(&kernel, "slow_a").await;
@@ -1033,7 +1030,7 @@ async fn the_quiet_phase_still_waits_for_a_real_in_flight_dispatch() {
     assert_eq!(done.status, crate::outcome::Status::Completed, "{done:?}");
 }
 
-// ── C36: a fork is a message ───────────────────────────────────────────
+// ── a fork is a message ────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spawn_task_writes_a_task_row() {
@@ -1072,14 +1069,10 @@ async fn spawn_task_writes_a_task_row() {
     assert_eq!(kinds, vec!["call", "task"]);
 }
 
-/// D5 — a task whose parent has already ended keeps NAMING it.
-///
-/// `register` used to drop such a parent to `None` ("adopted by init"). Python
-/// removed exactly that line (`_kernel.py:602-616`): a task put outside every
-/// subtree cannot be reached by `cancel` on the caller that forked it.
-/// Measured: rust's `kernel ps` answered `parent: null` for the scheduler tick
-/// loop, the pty readers and `ps` itself, where python names the dispatch that
-/// spawned them.
+/// A task whose parent has already ended keeps NAMING it — never dropped to
+/// `None` (python `_kernel.py:602-616`): a task put outside every subtree cannot
+/// be reached by `cancel` on the caller that forked it, and `ps` would answer
+/// `parent: null` where python names the dispatch that spawned it.
 #[tokio::test]
 async fn a_task_keeps_a_parent_that_has_already_ended() {
     let sh = Arc::new(Shared::default());
@@ -1114,7 +1107,7 @@ async fn a_task_keeps_a_parent_that_has_already_ended() {
     assert!(!kernel.tasks.is_root(&forked));
 }
 
-/// PER-INSTANCE VERBS (owner, 2026-10-08) — python
+/// PER-INSTANCE VERBS — python
 /// `test_docs_of_an_agent_read_its_own_table_when_its_bundle_names_one`: a bundle
 /// whose agents serve different verbs names each one's table
 /// (`instance_verb_docs`); `None` keeps the bundle's.

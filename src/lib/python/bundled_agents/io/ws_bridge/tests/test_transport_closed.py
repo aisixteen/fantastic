@@ -1,11 +1,9 @@
-"""A ws leg reports its transport CLOSED once the remote drops (audit W-7,
-2026-10-03).
+"""A ws leg reports its transport CLOSED once the remote drops.
 
-`WSTransport.closed` read `getattr(self._ws, "closed", False)`, and a websockets 16
-`ClientConnection` has no `closed` attribute. After the remote closed, the read
-loop ended (`bridge_down`) while `reflect` kept saying `connected:true` and `boot`
-answered `{already:true}` — only `reconnect` dialed again. `closed` now reads the
-socket's own state.
+A websockets 16 `ClientConnection` has no `closed` attribute, so
+`getattr(self._ws, "closed", False)` would keep `reflect` saying `connected:true`
+and `boot` answering `{already:true}` after the read loop ended (`bridge_down`).
+`closed` reads the socket's own state.
 """
 
 from __future__ import annotations

@@ -7,8 +7,8 @@ refs. Nothing is rewritten, nothing is lost, and the history becomes a tree of m
 model walks down as far as it needs.
 
 CHAINS ARE DERIVED, NEVER STORED. A chain is a root row plus everything reachable from it
-through `parent`. Measured 2026-09-06: the model attributed rows 5/5 through 16 interleaved
-chains from `parent` alone, so the agent carries no thread concept — this module walks
+through `parent`. A model attributes rows through interleaved chains from `parent` alone,
+so the agent carries no thread concept — this module walks
 the links when a projection needs to know what is closed.
 """
 

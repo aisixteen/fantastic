@@ -1,9 +1,9 @@
 """The ONE watch path (connect-time auto-watch + explicit `watch` frame): the name
 resolves the way `send` resolves a target (an id or `kernel`), the watch runs under
 the leg's own identity, and a refusal is an `error` frame — never silence, and never
-recorded as watched. Measured before: a socket whose connect-time watch did not
-resolve mirrored nothing and said nothing, and the explicit watch that followed was
-skipped as a duplicate."""
+recorded as watched (a connect-time watch that did not resolve, recorded anyway, would
+mirror nothing, say nothing, and make the explicit watch that follows skip as a
+duplicate)."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ PY = sys.executable
 
 def _client(kernel, leg_id):
     # The web host's record: its port is the authority the Host guard admits
-    # (audit W-2) — the client names it on every request, the upgrade included.
+    # — the client names it on every request, the upgrade included.
     kernel.get("test_web") or kernel.create(None, id="test_web", port=8088)
     app = make_app("test_web", kernel)
     app.add_api_websocket_route("/{host_id}/ws", _make_endpoint(leg_id, kernel))

@@ -1,6 +1,5 @@
-//! Streaming parts — a model's output split into PARTS as it is written (owner
-//! design 2026-10-04, `tmp/streaming_parts.md`). A port of python
-//! `ai_core/stream_parts.py`, which is canonical.
+//! Streaming parts — a model's output split into PARTS as it is written. A port
+//! of python `ai_core/stream_parts.py`, which is canonical.
 //!
 //! The provider streams raw text; this splitter reads it incrementally, with the
 //! SAME grammar [`crate::tool_parse`] reads whole, and yields part lifecycle
@@ -17,8 +16,7 @@
 //!
 //! Kinds: `text` (prose), `thinking` (inside `<think>`), `call` (a `<call name="…">`
 //! envelope, its args streaming as they are written). A call written inside a
-//! thought is thinking text, never a call part — only the answer acts (owner,
-//! 2026-10-07).
+//! thought is thinking text, never a call part — only the answer acts.
 //!
 //! It is ANIMATION, never action: nothing here dispatches. The call parser in
 //! [`crate::tool_parse`] stays the one authority on what a call IS; this only
@@ -159,7 +157,7 @@ pub struct PartSplitter {
     pub parts: Vec<Part>,
     /// Every CLOSED call part, in order: `(stream_id, body)` — what a dispatched
     /// call is matched to by its exact body, so the message it becomes carries the
-    /// stream it was previewed as (owner, 2026-10-04).
+    /// stream it was previewed as.
     pub closed_calls: Vec<(String, String)>,
 }
 
@@ -308,7 +306,7 @@ impl PartSplitter {
         }
         // Outside a call: look for the next markup that changes the part. INSIDE
         // thinking only `</think>` does — a `<call>` there is thinking text, never a
-        // call part (owner, 2026-10-07: only the answer acts).
+        // call part (only the answer acts).
         let opens: &[&str] = if self.in_think {
             &[THINK_CLOSE]
         } else {
@@ -491,7 +489,7 @@ impl PartSplitter {
     }
 }
 
-/// The assistant row a CUT pass leaves (owner, 2026-10-04) — a marker on top of
+/// The assistant row a CUT pass leaves — a marker on top of
 /// the context, never a half answer. `why` is `"stopped by <receiver>"` (a
 /// receiver stopped the stream) or `"model stopped generating"` (the pass ended
 /// with a block still open). Kept: the VISIBLE text streamed so far, thinking

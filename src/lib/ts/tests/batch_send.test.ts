@@ -200,7 +200,7 @@ test("ps rows are {id, agent, parent, verb, started_at}; a nested send parents t
   await running;
 });
 
-// ── python parity (divergence fix 2026-10-01) ─────────────────────────────
+// ── python parity ─────────────────────────────────────────────────────────
 
 test("a handler that throws UNDER a timeout settles failed at once, not timed_out", async () => {
   // python: only a task still pending at the deadline times out; a raise is a

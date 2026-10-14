@@ -1,14 +1,13 @@
 """web_rest judges a request BEFORE it reads the body, and bounds the body.
 
-Audit IO-4 (2026-10-03): `await request.body()` buffered, then `strict_loads`
-parsed, the WHOLE body before the leg's ingress rule ran — a sealed or
-password-gated leg made the kernel hold and parse any amount of data from a client
-it was about to refuse. Now the rule judges the request on what it says up front
+Buffering (`await request.body()`) and parsing (`strict_loads`) the WHOLE body
+before the leg's ingress rule runs would make a sealed or password-gated leg hold
+and parse any amount of data from a client it is about to refuse. The rule judges the request on what it says up front
 (its target and its `X-Fantastic-Auth` credential), and only an admitted request's
 body is read — at most `MAX_BODY` bytes (16 MiB, io_bridge's `MAX_FRAME`: the one
 frame cap every wire leg holds); past it the request is refused, loud, 413.
 
-Audit IO-6 (2026-10-03) at this leg: a non-ASCII credential is a plain 403.
+At this leg a non-ASCII credential is a plain 403.
 """
 
 from __future__ import annotations

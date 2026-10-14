@@ -11,14 +11,14 @@
 // (`01`, `1.`, `.5`, `1.e5`) are refused. No JSON5 / comments / trailing
 // commas.
 //
-// `strict` adds what python's wire decoder (`io_bridge.loads`, owner D13)
+// `strict` adds what python's wire decoder (`io_bridge.loads`)
 // refuses on top: an integer outside int64 and a number that overflows a
 // double — values another runtime would hold differently. (`NaN`/`Infinity`
 // and lone surrogates are refused in every mode: this scanner never parses
 // them.)
 //
-// NESTING (IO-3): containers are walked with an explicit stack, never by
-// recursion, so no input reaches the thread's stack — a recursive walk let ONE
+// NESTING: containers are walked with an explicit stack, never by
+// recursion, so no input reaches the thread's stack — a recursive walk would let ONE
 // 100k-deep frame overflow an NIO thread (512 KiB) and kill the kernel before
 // any gate. Depth is bounded where python refuses: see `maxDepth`.
 
@@ -30,10 +30,10 @@ struct JSONScanner {
     /// `sys.getrecursionlimit()` (1000) and refuses past it with RecursionError
     /// "maximum recursion depth exceeded while decoding a JSON array|object from
     /// a unicode string". `io_bridge.loads` spends 6 of those frames itself, so
-    /// 994 nested containers parse and the 995th is refused — measured 2026-10-03
-    /// (CPython 3.11, `loads` called with no caller frames above it). That is the
-    /// deepest python ever takes: every caller's own frames lower it (measured
-    /// 963 through web_ws, 966 through web_rest), and a number leaf by 2 more.
+    /// 994 nested containers parse and the 995th is refused (CPython 3.11, `loads`
+    /// called with no caller frames above it). That is the deepest python ever
+    /// takes: every caller's own frames lower it (963 through web_ws, 966 through
+    /// web_rest), and a number leaf by 2 more.
     static let maxDepth = 994
 
     private let bytes: [UInt8]

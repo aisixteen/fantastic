@@ -1,4 +1,4 @@
-"""The system block from a FILE (owner, 2026-10-08): the record's `file_bridge_id`
+"""The system block from a FILE: the record's `file_bridge_id`
 names the file_bridge this agent reads files THROUGH, `system_prompt_file` a path on
 it. No `file_bridge_id` (or no path) → nothing is looked up.
 
