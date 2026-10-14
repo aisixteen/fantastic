@@ -1,6 +1,6 @@
 """The `client_id` round-trip contract — pinned, character by character.
 
-Field-measured 2026-08-26 (production session hub): the hub encoded correlation
+Field-measured 2026-08-26 (a client's session hub): the hub encoded correlation
 into client_id ("cid#turn"), ai_core silently rewrote `#` to `_`, and the
 demux broke — an hour lost to an undocumented alphabet. This file IS the
 documentation: exactly which characters survive `_safe_client` verbatim, what

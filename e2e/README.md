@@ -82,7 +82,7 @@ It sends the repetition knobs in `sampling.default.json` as record fields and le
 the thinking budget to the backend's own per-call rule. A door in front of the
 server that wants a key: export `VLLM_API_KEY` and the plug names the `vllm` ref (the
 store reads the variable); unset, the record names no `credentials` and no header goes
-out. For the shared GPU the URL is the production deployment's HTTPS door, with its
+out. For the shared GPU the URL is the shared deployment's HTTPS door, with its
 own key (recipe: `tmp/vllm_backend.md`); keep lanes at 1–2 there — its run slots are
 shared with production.
 

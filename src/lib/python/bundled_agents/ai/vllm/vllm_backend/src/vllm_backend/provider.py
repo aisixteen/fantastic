@@ -6,7 +6,7 @@ OpenAI-compatible surface — `POST {endpoint}/chat/completions` — with no pro
 and no protocol translation in between.
 
 What is vLLM-specific here, and why each piece exists (measured by the
-`production` deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
+production deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
 
 - THE THOUGHT CHANNEL. With `--reasoning-parser qwen3` the thought streams as
   `delta.reasoning_content` (some versions: `delta.reasoning`) and only the
@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 # ─── sampling ────────────────────────────────────────────────────────────────
 #
-# Applied ONLY where the record sets nothing (owner's decision: the production
+# Applied ONLY where the record sets nothing (owner's decision: a production
 # deployment's agentic defaults, copied). Each is a record field; a value set
 # on the record is sent verbatim.
 SAMPLING_DEFAULTS: dict = {
@@ -87,14 +87,14 @@ PASSTHROUGH = (
 # TWO timeouts on purpose. A stopped instance drops SYNs silently, so one long
 # timeout would hang a caller for the whole read deadline; connect fails fast.
 # Read is long because a max-length generation decodes for many minutes (a
-# clean run reached ~24k output tokens). Both are the production's values; each
+# clean run reached ~24k output tokens). Both are that deployment's values; each
 # is a record field.
 CONNECT_TIMEOUT = 5.0
 READ_TIMEOUT = 900.0
 
 # ─── the KV-cache session table ──────────────────────────────────────────────
 #
-# Seconds a conversation may sit idle before its slot frees itself (production's
+# Seconds a conversation may sit idle before its slot frees itself (the deployment's
 # value; a record field).
 KV_TTL = 1800.0
 KV_OVERFLOWS = ("evict", "reject")

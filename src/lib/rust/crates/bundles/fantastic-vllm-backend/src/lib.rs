@@ -7,7 +7,7 @@
 //! translation in between. NO native tool-calling: the provider streams raw
 //! text and ai-core parses the `<call name=…>` envelope out of it.
 //!
-//! What is vLLM-specific, and why each piece exists (measured by the `production`
+//! What is vLLM-specific, and why each piece exists (measured by a production
 //! deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
 //!
 //! - THE THOUGHT CHANNEL. With `--reasoning-parser qwen3` the thought streams
@@ -77,7 +77,7 @@ const CFG: BackendConfig = BackendConfig {
 
 // ─── sampling ───────────────────────────────────────────────────────────────
 
-/// Applied ONLY where the record sets nothing (owner's decision: the production
+/// Applied ONLY where the record sets nothing (owner's decision: a production
 /// deployment's agentic defaults, copied), in python's key order — the order
 /// reflect's `sampling` and the request body list them in.
 ///
@@ -120,7 +120,7 @@ pub const PASSTHROUGH: [&str; 7] = [
 /// TWO timeouts on purpose. A stopped instance drops SYNs silently, so one long
 /// timeout would hang a caller for the whole read deadline; connect fails fast.
 /// Read is long because a max-length generation decodes for many minutes.
-/// Both are the production's values; each is a record field.
+/// Both are that deployment's values; each is a record field.
 pub const CONNECT_TIMEOUT: f64 = 5.0;
 pub const READ_TIMEOUT: f64 = 900.0;
 

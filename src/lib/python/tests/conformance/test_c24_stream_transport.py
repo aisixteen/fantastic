@@ -1,4 +1,4 @@
-"""C24 across a transport — the streaming subscriber the production doc named.
+"""C24 across a transport — the streaming subscriber a client's doc named.
 
 `test_stream_semantics.py` pins C24 in-proc: order preserved, terminal closes,
 every subscriber sees the identical sequence. This file pins the SAME properties

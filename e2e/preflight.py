@@ -72,7 +72,7 @@ def main() -> int:
             blockers += resolve_backend(backend).blockers()
 
     # ── CONCURRENCY: the GPU is shared ──────────────────────────
-    # The vLLM GPU holds a fixed number of sequences and production production
+    # The vLLM GPU holds a fixed number of sequences and production
     # traffic shares it, so exceeding the cap degrades somebody else's work, not
     # just ours. It is a promise about another team's latency, not a throughput
     # dial.

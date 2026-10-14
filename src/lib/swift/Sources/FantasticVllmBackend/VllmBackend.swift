@@ -7,7 +7,7 @@
 // envelope out of it. NO native tool-calling.
 //
 // What is vLLM-specific here, and why each piece exists (measured by the
-// `production` deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
+// production deployment on Qwen3.8-27B-FP8, vLLM 0.27.1, 2026-09-29):
 //
 //   * THE THOUGHT CHANNEL. With `--reasoning-parser qwen3` the thought streams
 //     as `delta.reasoning_content` (some versions: `delta.reasoning`) and only
@@ -47,7 +47,7 @@ let NAME = "vllm_backend"
 
 // MARK: - sampling
 
-/// Applied ONLY where the record sets nothing (owner's decision: the production
+/// Applied ONLY where the record sets nothing (owner's decision: a production
 /// deployment's agentic defaults, copied). Python `SAMPLING_DEFAULTS`, in its
 /// order — reflect shows them in this order and the body sends them in it.
 public let SAMPLING_DEFAULTS: OrderedDictionary<String, JSON> = [
@@ -84,14 +84,14 @@ public let PASSTHROUGH = [
 /// TWO timeouts on purpose. A stopped instance drops SYNs silently, so one long
 /// timeout would hang a caller for the whole read deadline; connect fails fast.
 /// Read is long because a max-length generation decodes for many minutes (a
-/// clean run reached ~24k output tokens). Both are the production's values; each
+/// clean run reached ~24k output tokens). Both are that deployment's values; each
 /// is a record field.
 public let CONNECT_TIMEOUT = 5.0
 public let READ_TIMEOUT = 900.0
 
 // MARK: - the KV-cache session table
 
-/// Seconds a conversation may sit idle before its slot frees itself (production's
+/// Seconds a conversation may sit idle before its slot frees itself (the deployment's
 /// value; a record field).
 public let KV_TTL = 1800.0
 public let KV_OVERFLOWS = ["evict", "reject"]

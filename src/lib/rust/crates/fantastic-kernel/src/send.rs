@@ -1632,7 +1632,7 @@ impl Kernel {
     /// around `callable_by`: an agent that may not CALL an agent could still
     /// read everything sent TO it.
     ///
-    /// Found 2026-08-27 in a production audit: a browser leg granted exactly
+    /// Found 2026-08-27 in a client audit: a browser leg granted exactly
     /// `assistant:[send]` could mirror ANY agent's inbox in its session and read
     /// the packed confidential context out of the model's prompt. The `call`
     /// path went through the two-sided gate; this one never did.

@@ -1,7 +1,7 @@
 """vllm_backend — the wire it speaks, the turns it must not lose, and the
 KV-cache session table it keeps per endpoint.
 
-Every behaviour here traces to a measured failure on a live vLLM (the production
+Every behaviour here traces to a measured failure on a live vLLM (a production
 deployment, Qwen3.8-27B-FP8, vLLM 0.27.1): a dropped thought channel, a turn
 spent thinking with no answer, a stream that died without saying so, a system
 message the template refused, and a cache that only pays off while the live set

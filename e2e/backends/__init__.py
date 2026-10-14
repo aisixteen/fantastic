@@ -177,7 +177,7 @@ def _vllm() -> Backend:
     # A vLLM server reached DIRECTLY (no proxy) — its `/v1` URL, the served
     # model, and the KV-cache session table's size and rotation policy are all
     # the operator's to name: the backend requires every one of them, and so
-    # does this plug. For the shared production GPU the URL is its HTTPS door, which
+    # does this plug. For the shared GPU the URL is its HTTPS door, which
     # wants a key (recipe: tmp/vllm_backend.md) — keep lanes at 1–2 there, the
     # server's running slots are shared with production. THE KEY is optional on
     # a vLLM record: a run that exports `VLLM_API_KEY` names the `vllm` ref, one
