@@ -114,6 +114,10 @@ fn compile_pattern(pat: &str) -> Result<fancy_regex::Regex, fancy_regex::Error> 
     fancy_regex::Regex::new(pat)
 }
 
+/// Appended to an allowlist refusal when `command` holds several words and `args`
+/// is empty — py `COMMAND_ONE_PROGRAM`, the same bytes in every runtime.
+pub const COMMAND_ONE_PROGRAM: &str = " — `command` is ONE program and is quoted as one word; put its arguments in `args` (a list), e.g. command=python3 args=[\"-c\", \"print(1)\"]";
+
 /// `None` when `line` fullmatches an allowed pattern; else the refusal text.
 ///
 /// The FULL command line (command + args, shell-joined) is matched, ANCHORED — the
@@ -973,6 +977,11 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
                     .unwrap_or_default(),
                 py_repr(&shlex_join(&permitted))
             ));
+        }
+        if args.is_empty() && command.split_whitespace().count() > 1 {
+            // A whole line in `command` is quoted as ONE word, so no pattern over
+            // `<program> <args>` can ever match it — say where the words go.
+            why.push_str(COMMAND_ONE_PROGRAM);
         }
         return refusal_hint(
             UNAUTHORIZED,

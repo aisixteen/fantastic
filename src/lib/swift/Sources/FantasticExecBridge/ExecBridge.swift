@@ -124,6 +124,12 @@
     /// string (so `echo.*` cannot smuggle `echo; rm -rf /` past a prefix) and `.`
     /// spans newlines (an argv element may contain them). An empty allowlist runs
     /// nothing.
+    /// Appended to an allowlist refusal when `command` holds several words and
+    /// `args` is empty — py `COMMAND_ONE_PROGRAM`, the same bytes in every runtime.
+    let commandOneProgram =
+        " — `command` is ONE program and is quoted as one word; put its arguments "
+        + "in `args` (a list), e.g. command=python3 args=[\"-c\", \"print(1)\"]"
+
     func commandPermitted(_ record: Agent?, _ line: String) -> String? {
         let pats = allowedPatterns(record)
         if pats.isEmpty {
@@ -573,6 +579,13 @@
                     why +=
                         " (`shell=\(shown)` permits only the PTY line "
                         + "\(pyRepr(shlexJoin([shell] + tail))))"
+                }
+                if args.isEmpty
+                    && command.split(whereSeparator: { $0.isWhitespace }).count > 1
+                {
+                    // A whole line in `command` is quoted as ONE word, so no pattern
+                    // over `<program> <args>` can ever match it — say where the words go.
+                    why += commandOneProgram
                 }
                 return Refusal.make(
                     Refusal.unauthorized, why,

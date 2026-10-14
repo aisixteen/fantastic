@@ -296,9 +296,11 @@ async def plant_store(
 
 async def read_view(core, root, aid: str) -> dict | None:
     """The agent's VIEW — the ordered ids it sees, each at a resolution: the newest
-    `view` row in its memory store (in process: what `_load_view` reads)."""
-    if core is not None:
-        return await core._load_view(aid, root)
+    `view` row in its memory store, read from the store's dump. ONE PATH (2026-10-14):
+    in process this called `core._load_view` from outside the agent, so the store
+    answered under the CALLER's key and that read became the agent's head cache — a
+    rebooted agent then saw none of its own rows (E78 kernel_restart: b answered
+    "none")."""
     return await memory.latest_view(root, aid)
 
 

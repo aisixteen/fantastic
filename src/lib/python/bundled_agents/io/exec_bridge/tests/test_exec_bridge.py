@@ -143,6 +143,18 @@ async def test_unmatched_command_refused_naming_the_patterns(seeded_kernel):
     await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
     r = await _start(seeded_kernel, "runner", "cat", ["/etc/passwd"])
     assert "not allowed" in r["error"] and "echo( .*)?" in r["error"]
+    assert "ONE program" not in r["error"]
+
+
+async def test_whole_line_in_command_is_told_to_use_args(seeded_kernel):
+    """A whole line in `command` is quoted as one word and can never match — the
+    refusal says the arguments go in `args`."""
+    await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
+    import exec_bridge.tools as ebt
+
+    r = await _start(seeded_kernel, "runner", "echo hi", [])
+    assert r["reason"] == "unauthorized", r
+    assert r["error"].endswith(ebt.COMMAND_ONE_PROGRAM), r
 
 
 async def test_match_is_anchored_not_a_prefix(seeded_kernel):

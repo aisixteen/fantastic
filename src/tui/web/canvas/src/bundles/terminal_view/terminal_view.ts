@@ -336,6 +336,13 @@ export const terminalView: ViewBundle = {
         await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
         const replay = (await host.call(backend, { type: "output", job_id: jobId })) as { output?: string };
         if (replay && typeof replay.output === "string") term.write(replay.output);
+        // THE PROGRAM REDRAWS (owner 2026-10-13, half-blank cells after a reload):
+        // the ring drops its oldest bytes, so a full-screen program's last full
+        // paint is often gone and the replay holds only partial updates; a resize
+        // to the size it already has sends no SIGWINCH. One row off and back does,
+        // and the program repaints the whole screen.
+        await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: Math.max(1, term.rows - 1) });
+        await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
       } else if (next.start) {
         await startJob();
       }

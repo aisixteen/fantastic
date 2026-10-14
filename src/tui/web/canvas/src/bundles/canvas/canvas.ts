@@ -401,7 +401,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   };
   const applyView = (): void => {
     lockMobile();
-    world.style.transform = `translate(${view.ox}px, ${view.oy}px) scale(${view.z})`;
+    // WHOLE PIXELS (owner 2026-10-13, the flicker): a fractional translate put
+    // every cell's text and chrome between pixels, re-rasterized on each repaint
+    world.style.transform = `translate(${Math.round(view.ox)}px, ${Math.round(view.oy)}px) scale(${view.z})`;
     glHost?.applyCamera();
     placePinned();
   };
@@ -480,7 +482,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       if ((e.target as Element).closest(".agent-frame")) return;
       e.preventDefault();
       const factor = e.deltaY > 0 ? 0.95 : 1.05;
-      targetZ = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, targetZ * factor));
+      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, targetZ * factor));
+      // BACK TO 1 EXACTLY (owner 2026-10-13, the flicker): 0.95 and 1.05 never
+      // cancel (1.05 × 0.95 = 0.9975), so a zoom out and in again rested at a
+      // scale a hair off 1 — a step landing near 1, or crossing it, lands on it
+      targetZ = Math.abs(next - 1) < 0.02 || (targetZ - 1) * (next - 1) < 0 ? 1 : next;
       zoomSoon();
     },
     { passive: false },

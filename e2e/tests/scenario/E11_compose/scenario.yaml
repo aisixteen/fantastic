@@ -16,26 +16,11 @@ task: >-
   FIRST 12 CHARACTERS in a document named exactly 'digest' (no extension) in the `yaml_store` agent.
   You cannot know this value without computing it. Then say DONE.
 
+# `compute` is `exec_bridge` on every runtime: start a background job, then poll
+# `status` for its stdout — that takes more turns than a single call.
 limits:
-  max_turns: 14
-  idle_seconds: 120
-
-# DERIVED OVERRIDE — the BUDGET differs, the work does not.
-#
-# On a compiled kernel `compute` is `exec_bridge`: the model must start a
-# background job and then poll `status` for its stdout, which is several more
-# turns than the in-process evaluator python and js use for the same task. Both
-# rust and swift failed this scenario identically at the shared budget, which is
-# what a budget problem looks like as opposed to a capability one.
-#
-# Only limits and env may be overridden. Changing the TASK per runtime would
-# make the columns incomparable, which is the one thing this layout exists to
-# prevent.
-overrides:
-  rust:
-    limits: {max_turns: 24, idle_seconds: 240}
-  swift:
-    limits: {max_turns: 24, idle_seconds: 240}
+  max_turns: 24
+  idle_seconds: 240
 
 roster:
   - role: memory
@@ -53,7 +38,7 @@ roster:
     id: cli
 
 grants:
-  ai_can_call: [cli, yaml_store, compute]
+  ai_can_call: [cli, yaml_store, compute, "$root:docs"]
 
 # FALSIFIABLE against a value minted at test time. `$DIGEST` is the first 12
 # chars of sha256($NONCE), computed by the runner — never by the model.

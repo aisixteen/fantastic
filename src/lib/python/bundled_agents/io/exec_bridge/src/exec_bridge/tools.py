@@ -757,6 +757,14 @@ def _allowed_patterns(rec: dict) -> list[str]:
     return [str(x) for x in raw] if isinstance(raw, list) else []
 
 
+#: Appended to an allowlist refusal when `command` holds several words and `args`
+#: is empty — the same bytes in every runtime.
+COMMAND_ONE_PROGRAM = (
+    " — `command` is ONE program and is quoted as one word; put its arguments "
+    'in `args` (a list), e.g. command=python3 args=["-c", "print(1)"]'
+)
+
+
 def _command_permitted(rec: dict, line: str) -> str | None:
     """None when `line` matches an allowed pattern; else the refusal text.
 
@@ -943,6 +951,10 @@ async def _start(id, payload, kernel):
                 f" (`shell={json.dumps(rec.get('shell'))}` permits only the PTY line "
                 f"{shlex.join([env.get(SHELL_VAR) or '$' + SHELL_VAR, *_shell_tail(rec)])!r})"
             )
+        if not raw_args and len(command.split()) > 1:
+            # A whole line in `command` is quoted as ONE word, so no pattern
+            # over `<program> <args>` can ever match it — say where the words go.
+            why += COMMAND_ONE_PROGRAM
         return refusal(
             UNAUTHORIZED,
             why,

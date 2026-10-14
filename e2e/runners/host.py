@@ -320,6 +320,18 @@ def main(scenario_id: str) -> int:
                 print(
                     f"  {r.get('id')} ← {r.get('parent')} {str(r.get('kind')):8} {r.get('head', '')}"
                 )
+            # The digest cuts each row at 120 chars; the full text of every row
+            # comes from the store's dump (the harness reads the whole tables).
+            tables = (k.send("memory", {"type": "dump"}) or {}).get("tables") or {}
+            full = {
+                x["row"].get("id"): x["row"]
+                for x in tables.get("rows") or []
+                if str(x.get("owner", "")).split("|", 1)[-1] == "ai"
+            }
+            print("\n  --- full rows ---")
+            for r in rows:
+                row = full.get(r.get("id")) or {}
+                print(f"\n  [{r.get('id')} {row.get('role')}]\n{row.get('content', '')}")
 
         for agent, got in seen.items():
             print(f"\n  {agent}.read -> {got}")
