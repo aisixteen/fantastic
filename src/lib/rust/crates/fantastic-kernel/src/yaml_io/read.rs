@@ -235,7 +235,7 @@ unsafe fn problem_text(parser: *const unsafe_sys::yaml_parser_t) -> String {
     let problem = if parser.problem.is_null() {
         "parse error".to_string()
     } else {
-        std::ffi::CStr::from_ptr(parser.problem)
+        std::ffi::CStr::from_ptr(parser.problem.cast())
             .to_string_lossy()
             .into_owned()
     };

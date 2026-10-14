@@ -18,22 +18,29 @@ tools/esbuild/
 `pack.sh` selects `<platform>` from `uname -sm` and refuses to run if the binary's
 sha256 does not match `SHA256SUMS`.
 
-## Provenance / how it was built (pinned)
+## Provenance / how it is built (pinned, reproducible)
 
-Built from source via the Go module proxy (not npm) at a pinned tag:
+`pack.sh` builds the binary itself when it is missing (a clean checkout,
+`cargo install`): the pinned esbuild release, compiled by the pinned Go toolchain,
+with nothing host-specific in it — so every machine gets the same bytes, and the
+same sha256 gate verifies it:
 
 ```sh
-GOBIN="$PWD/tools/esbuild/darwin-arm64" \
+GOTOOLCHAIN=go1.23.4 CGO_ENABLED=0 GOFLAGS=-trimpath \
+  GOBIN="$PWD/tools/esbuild/<platform>" \
   go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
-shasum -a 256 tools/esbuild/darwin-arm64/esbuild   # → record in SHA256SUMS
 ```
 
-- pinned version: **esbuild v0.25.0**
-- `darwin-arm64`: sha256 `bf4a6098dc9370bbb4cb5086b4abba2fabc4f25e9be7c715d45a682c3a6de42a`
+Go ≥ 1.21 on PATH is the only requirement (it fetches go1.23.4 itself);
+the toolchain and the esbuild module come through Go's checksum database.
+
+- pinned: **esbuild v0.25.0**, built with **go1.23.4**
+- platforms in `SHA256SUMS`: `darwin-arm64`, `darwin-x64`, `linux-arm64`,
+  `linux-x64` (hashes measured 2026-10-15)
 
 ## Adding a platform
 
-On the target OS/arch, repeat the `go install` with `GOBIN` pointing at
-`tools/esbuild/<platform>/` (e.g. `linux-x64`), then append the new line to
-`SHA256SUMS`. Keep the same pinned `@vX.Y.Z` so all platforms match one esbuild
-release.
+Build it with the command above (`GOOS`/`GOARCH` set, without `GOBIN`, to build
+it from another machine), hash it, add the line to `SHA256SUMS` and its
+`uname -sm` case to `pack.sh`. Changing the esbuild or Go version re-hashes every
+platform.

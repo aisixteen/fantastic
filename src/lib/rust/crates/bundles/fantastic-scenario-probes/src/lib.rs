@@ -71,9 +71,7 @@ impl Counter {
 /// a scenario that pins a serial's shape pins the width too.
 fn token_hex(bytes: u32) -> String {
     let mut buf = vec![0u8; bytes as usize];
-    // SAFETY: `buf` is a valid writable buffer of exactly `bytes` bytes.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fantastic_kernel::lifecycle::fill_random(&mut buf);
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 

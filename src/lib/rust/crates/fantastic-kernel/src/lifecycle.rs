@@ -22,10 +22,24 @@ use std::sync::Arc;
 /// no second source, and a clock/pid mixer is not random at all.
 pub(crate) fn os_random(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
-    // SAFETY: `buf` is a valid writable buffer of exactly `n` bytes.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), n) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fill_random(&mut buf);
     buf
+}
+
+/// Fill `buf` from the OS CSPRNG — the ONE randomness call of every crate. The
+/// OS's own call, per OS: `getrandom` on Linux (the libc crate has no
+/// `getentropy` for musl), `getentropy` elsewhere (at most 256 bytes a call).
+/// A failure is FATAL: there is no second source.
+pub fn fill_random(buf: &mut [u8]) {
+    for chunk in buf.chunks_mut(256) {
+        // SAFETY: `chunk` is a valid writable buffer of exactly its length.
+        #[cfg(target_os = "linux")]
+        let ok = unsafe { libc::getrandom(chunk.as_mut_ptr().cast(), chunk.len(), 0) }
+            == chunk.len() as isize;
+        #[cfg(not(target_os = "linux"))]
+        let ok = unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) } == 0;
+        assert!(ok, "the OS randomness call failed: no randomness source");
+    }
 }
 
 /// Lowercase hex, python's `bytes.hex()` spelling.

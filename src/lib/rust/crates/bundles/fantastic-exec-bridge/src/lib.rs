@@ -1301,8 +1301,6 @@ fn now_secs() -> f64 {
 /// this. A failure is FATAL — there is no second source.
 pub(crate) fn rand_hex8() -> String {
     let mut buf = [0u8; 4];
-    // SAFETY: `buf` is a valid writable buffer of exactly 4 bytes.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fantastic_kernel::lifecycle::fill_random(&mut buf);
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }

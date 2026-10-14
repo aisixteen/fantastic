@@ -61,11 +61,29 @@ case "$(uname -sm)" in
 esac
 ESBUILD="$LIB/tools/esbuild/$PLAT/esbuild"
 SUMS="$LIB/tools/esbuild/SHA256SUMS"
+# PROVISION it from pinned source when absent (a clean checkout, `cargo install`):
+# the pinned esbuild release, built by the pinned Go toolchain, reproducibly
+# (`-trimpath`, no cgo) — so the binary it makes is the one SHA256SUMS names,
+# and the gate below verifies it like a vendored one. Go fetches the toolchain
+# and the module through its checksum database. Needs Go ≥ 1.21 on PATH.
+ESBUILD_VERSION=v0.25.0
+GO_TOOLCHAIN=go1.23.4
 if [ ! -x "$ESBUILD" ]; then
-  echo "pack.sh: missing vendored esbuild: $ESBUILD" >&2
-  echo "  rebuild it (sha-verified below) — see $LIB/tools/esbuild/README.md:" >&2
-  echo "    GOBIN=\"$LIB/tools/esbuild/$PLAT\" go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0" >&2
-  exit 1
+  if ! command -v go >/dev/null 2>&1; then
+    echo "pack.sh: no esbuild at $ESBUILD, and no Go to build it." >&2
+    echo "  install Go ≥ 1.21 (https://go.dev/dl/) and build again — it is built" >&2
+    echo "  once, from pinned source, and sha-verified (tools/esbuild/README.md)." >&2
+    exit 1
+  fi
+  GO_MINOR=$(go env GOVERSION | sed -n 's/^go1\.\([0-9]*\).*/\1/p')
+  if [ -z "$GO_MINOR" ] || [ "$GO_MINOR" -lt 21 ]; then
+    echo "pack.sh: Go $(go env GOVERSION) cannot fetch $GO_TOOLCHAIN (GOTOOLCHAIN needs Go ≥ 1.21)." >&2
+    exit 1
+  fi
+  echo "pack.sh: building esbuild $ESBUILD_VERSION with $GO_TOOLCHAIN for ${PLAT}…" >&2
+  GOTOOLCHAIN=$GO_TOOLCHAIN CGO_ENABLED=0 GOFLAGS=-trimpath \
+    GOBIN="$LIB/tools/esbuild/$PLAT" \
+    go install "github.com/evanw/esbuild/cmd/esbuild@$ESBUILD_VERSION"
 fi
 
 # ── integrity gate: refuse a tampered/unpinned packer ───────────────────────

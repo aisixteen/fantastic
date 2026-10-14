@@ -667,9 +667,7 @@ fn meta_string(agent_id: &AgentId, kernel: &Kernel, key: &str) -> Option<String>
 /// to it and never ran (audit IO-5). A failure is FATAL — no second source.
 pub(crate) fn new_corr_prefix(id: &AgentId) -> String {
     let mut b = [0u8; 6];
-    // SAFETY: `b` is a valid writable buffer of exactly 6 bytes.
-    let rc = unsafe { libc::getentropy(b.as_mut_ptr().cast(), b.len()) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fantastic_kernel::lifecycle::fill_random(&mut b);
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
     format!("{id}-{hex}")
 }
@@ -680,9 +678,7 @@ pub(crate) fn new_corr_prefix(id: &AgentId) -> String {
 /// second source (the time+pid+counter mixer this replaced was not random).
 fn mint_guid() -> String {
     let mut b = [0u8; 16];
-    // SAFETY: `b` is a valid writable buffer of exactly 16 bytes.
-    let rc = unsafe { libc::getentropy(b.as_mut_ptr().cast(), b.len()) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fantastic_kernel::lifecycle::fill_random(&mut b);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     b.iter().map(|x| format!("{x:02x}")).collect()

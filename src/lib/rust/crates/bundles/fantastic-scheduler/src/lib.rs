@@ -673,9 +673,7 @@ fn now_secs() -> f64 {
 /// the OS CSPRNG as 6 lowercase hex. A failure is FATAL — no second source.
 fn mint_id() -> String {
     let mut buf = [0u8; 3];
-    // SAFETY: `buf` is a valid writable buffer of exactly 3 bytes.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fantastic_kernel::lifecycle::fill_random(&mut buf);
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     format!("sch_{hex}")
 }

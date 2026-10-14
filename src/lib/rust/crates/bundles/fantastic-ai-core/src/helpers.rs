@@ -87,9 +87,7 @@ pub fn now_secs() -> f64 {
 /// python had `cijoBiyMnnw`. A failure is FATAL — there is no second source.
 pub(crate) fn os_random(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
-    // SAFETY: `buf` is a valid writable buffer of exactly `n` bytes.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), n) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fantastic_kernel::lifecycle::fill_random(&mut buf);
     buf
 }
 

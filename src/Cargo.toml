@@ -6,3 +6,10 @@
 members = ["tui", "tui/bundles/fantastic-web-mcp", "tui/bundles/fantastic-sqlite-store", "tui/bundles/fantastic-canvas-page", "tui/bundles/fantastic-user-home-store", "tui/bundles/fantastic-user"]
 exclude = ["lib"]
 resolver = "2"
+
+# Build-time crates (proc-macros, build scripts) keep their symbols in release:
+# stripped under `MACOSX_DEPLOYMENT_TARGET=14.0` (.cargo/config.toml), a proc-macro
+# dylib no longer loads into rustc, and every crate using it fails with
+# "can't find crate" (measured 2026-10-15, arc-swap → rustversion).
+[profile.release.build-override]
+strip = "none"

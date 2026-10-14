@@ -91,3 +91,10 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
 
+
+# Build-time crates (proc-macros, build scripts) keep their symbols in release:
+# stripped under `MACOSX_DEPLOYMENT_TARGET=14.0` (.cargo/config.toml), a proc-macro
+# dylib no longer loads into rustc, and every crate using it fails with
+# "can't find crate" (measured 2026-10-15, arc-swap → rustversion).
+[profile.release.build-override]
+strip = "none"

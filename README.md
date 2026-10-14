@@ -64,6 +64,57 @@ authority, and file access is clamped to the directory the kernel runs in. One
 root `reflect` shows the whole landscape — which legs are open, what each agent
 may call. Report issues privately: see [`SECURITY.md`](SECURITY.md).
 
+## Install
+
+The `fantastic` CLI runs on **macOS and Linux** (arm64 and x86_64). Its AI
+backends are vLLM, Ollama, the OpenAI Responses API and Anthropic.
+
+### Prebuilt binary
+
+Download the archive for your platform from the
+[latest release](https://github.com/aisixteen/fantastic/releases/latest) and put
+`fantastic` on your `PATH`. On a Mac with Apple silicon:
+
+```sh
+curl -LO https://github.com/aisixteen/fantastic/releases/latest/download/fantastic-aarch64-apple-darwin.tar.gz
+tar xzf fantastic-aarch64-apple-darwin.tar.gz && sudo mv fantastic /usr/local/bin/
+```
+
+The archives are `fantastic-<target>.tar.gz` for `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `aarch64-unknown-linux-musl` and
+`x86_64-unknown-linux-musl` (static Linux binaries), with `SHA256SUMS` beside
+them.
+
+### With cargo
+
+```sh
+cargo install --locked --git https://github.com/aisixteen/fantastic fantastic-tui \
+  --features vllm,ollama,responses,anthropic
+```
+
+This needs Rust ≥ 1.88, a C compiler, and **Go ≥ 1.21**. The canvas page is packed
+into the binary with a pinned esbuild, which the build compiles once from pinned
+source and verifies by sha256 ([`src/lib/ts/tools/esbuild/`](src/lib/ts/tools/esbuild/README.md)).
+Drop `--features` you don't need; with none, the binary has no AI backend.
+
+### Run from source
+
+```sh
+git clone https://github.com/aisixteen/fantastic && cd fantastic/src
+cargo run --release -p fantastic-tui --features vllm,ollama,responses,anthropic -- readme
+```
+
+Everything after `--` goes to `fantastic` (same requirements as `cargo install`).
+The kernel hosts run on their own too:
+
+```sh
+cd src/lib/python && uv sync && uv run fantastic_kernel   # the Python reference kernel
+cd src/lib/rust   && cargo run --bin fantastic_kernel      # the Rust kernel host
+cd src/lib/swift  && swift run fantastic_kernel            # the Swift kernel (macOS 14+)
+```
+
+Each runtime's build, test and lint commands are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 <!-- CLI SECTION — written and kept current by the CLI session; the lib side does not edit between these markers. -->
 
 ## The `fantastic` CLI

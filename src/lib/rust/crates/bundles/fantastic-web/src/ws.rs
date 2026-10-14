@@ -313,9 +313,7 @@ async fn forward_event(
 /// consumer (or capture diff) expects. A failure is FATAL — no second source.
 pub(crate) fn make_client_id() -> String {
     let mut buf = [0u8; 3];
-    // SAFETY: `buf` is a valid writable buffer of exactly 3 bytes.
-    let rc = unsafe { libc::getentropy(buf.as_mut_ptr().cast(), buf.len()) };
-    assert!(rc == 0, "getentropy failed: no randomness source");
+    fantastic_kernel::lifecycle::fill_random(&mut buf);
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     format!("_ws_{hex}")
 }
