@@ -770,18 +770,6 @@ impl App {
                     self.note(format!("cancelled {} task(s).", killed.len()));
                 }
             }
-            Got::RosterBooted { created, reapplied } => {
-                self.note(format!(
-                    "roster booted: created {}, reapplied {}.",
-                    if created.is_empty() {
-                        "nothing".into()
-                    } else {
-                        created.join(", ")
-                    },
-                    reapplied.len()
-                ));
-                self.last_tree = None;
-            }
             Got::Backends(b) => {
                 if let Some(p) = self.panels.get_mut(SETUP_ID) {
                     if let Some(s) = p.as_any_mut().downcast_mut::<SetupPanel>() {
@@ -875,12 +863,12 @@ impl App {
         // verbatim; this shell must never paraphrase the kernel's own advice.
         let extra = match (&what, &err) {
             (What::Send, KernelErr::Refused(r)) if r.side.as_deref() == Some("egress") => format!(
-                " Name it in {}.can_call in .fantastic/kernel.yaml, then boot the roster.",
+                " Grant it: the target in {}'s can_call (update_agent).",
                 self.cfg.user
             ),
             (What::Send, KernelErr::Refused(r)) if r.side.as_deref() == Some("ingress") => {
                 " The target does not accept this sender: name it in that agent's \
-                 callable_by, then boot the roster."
+                 callable_by (update_agent)."
                     .to_string()
             }
             _ => String::new(),

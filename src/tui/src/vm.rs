@@ -209,7 +209,7 @@ async fn run(
                     crate::kern::bundle_watch::spawn(Arc::clone(&h), paths.store.clone());
                     // each terminal's last launched command (`kern/term_watch`)
                     crate::kern::term_watch::spawn(Arc::clone(&h));
-                    cmds = Some(crate::kern::runner::spawn(Arc::clone(&h), tx.clone(), paths.clone()));
+                    cmds = Some(crate::kern::runner::spawn(Arc::clone(&h), tx.clone()));
                     if boot.canvas {
                         match crate::kern::web::ensure(&h, boot.port).await {
                             Ok(urls) => {

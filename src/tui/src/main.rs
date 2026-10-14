@@ -17,7 +17,6 @@ mod env;
 mod ev;
 mod kern;
 mod keys;
-mod manifest;
 mod mcp;
 mod panel;
 mod presence;

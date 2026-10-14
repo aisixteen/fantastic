@@ -74,11 +74,6 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
-    // The loader that reads `.fantastic/kernel.yaml`.
-    reg.register(
-        fantastic_static_loader::HANDLER_MODULE,
-        fantastic_static_loader::StaticLoaderBundle,
-    );
     // THE HUMAN, as an agent. This is the id the terminal acts as, so every act
     // carries a ledger row naming a person instead of an operator injection.
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
@@ -363,6 +358,11 @@ impl Host {
         // The kernel lands every record and every message itself
         // (`flush_pending`) before its teardown walk; the lock goes last.
         self.kernel.shutdown().await;
+        // Every row has landed: the SQLite stores fold their WAL into the file
+        // and close, so a stopped kernel leaves only `memory.db`.
+        for e in fantastic_sqlite_store::close_all(&self.kernel) {
+            tracing::warn!("shutdown: {e}");
+        }
         if let Err(e) = bootstrap::shutdown(&paths.cwd) {
             tracing::warn!("shutdown: {e}");
         }
@@ -553,7 +553,6 @@ mod tests {
             "setup.tools",
             "canvas.tools",
             "exec_bridge.tools",
-            "static_loader.tools",
             "user.tools",
             "web_mcp.tools",
             "web.tools",
@@ -567,6 +566,7 @@ mod tests {
         for m in [
             "web_rest.tools",
             "web_ui.tools",
+            "static_loader.tools",
             "ui.tools",
         ] {
             assert!(reg.get(m).is_none(), "{m} was never asked for");

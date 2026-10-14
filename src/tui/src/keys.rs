@@ -71,11 +71,6 @@ pub const TABLE: &[Binding] = &[
         does: "detach and quit; the kernel keeps running",
     },
     Binding {
-        scope: "any",
-        keys: "Ctrl-A b",
-        does: "boot the roster from the manifest",
-    },
-    Binding {
         scope: "tree",
         keys: "↑ ↓ / k j",
         does: "move",
@@ -269,8 +264,7 @@ fn key(app: &mut App, k: KeyEvent) {
                 // client by design.
                 app.quit_or_detach();
             }
-            KeyCode::Char('b') => app.push(Cmd::RosterBoot),
-            _ => app.note("Ctrl-A: m mouse · d detach · b boot the roster"),
+            _ => app.note("Ctrl-A: m mouse · d detach"),
         }
         return;
     }

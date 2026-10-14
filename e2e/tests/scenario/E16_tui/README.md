@@ -13,7 +13,7 @@ uv run python ../../../e2e/runners/tui.py tui --bin /path/to/fantastic
 |---|---|
 | `attract-leave` | the intro shows the block title, and leaving it without a key writes **nothing** — no `.fantastic` at all (the explicit init gate) |
 | `init` | one key inits from `blueprint.yaml`: the live tree shows every blueprint agent and no `mcp`; Ctrl-C ×2 exits 0 with the lock released and records and the memory store `memory.db` on disk |
-| `rehydrate` | the same dir skips the intro, shows the tree straight away, and the store's rows grow in the same `memory.db`; `fs_loader` opens in the default view |
+| `rehydrate` | the same dir skips the intro, shows the tree straight away, and the store's rows grow in the same `memory.db`; `mcp` opens in the default view |
 | `activity` | the `✉ Activity` row under the kernel opens the page of open questions (0 open on the base tree) |
 | `terminal` | `t` opens `$SHELL` below the page as the agent `term`; typed keys reach it in order (`hi-42` from the shell's own arithmetic); `t` closes it and its record is deleted |
 | `sidebar` | `v` flat (`# name` channels, `+ 2 system`), `<` the rail of tiles, `>` back, `v` the tree again |

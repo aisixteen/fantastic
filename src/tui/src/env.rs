@@ -69,9 +69,6 @@ impl Paths {
     pub fn is_fresh(&self) -> bool {
         !self.store.exists()
     }
-    pub fn manifest(&self) -> PathBuf {
-        self.store.join("kernel.yaml")
-    }
 }
 
 /// `tui-<hex6>`, distinct per process. Derived from the pid and the clock, which

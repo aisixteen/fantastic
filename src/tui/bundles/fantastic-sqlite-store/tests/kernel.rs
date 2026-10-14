@@ -293,6 +293,24 @@ async fn pruning_a_member_drops_its_fold_ref_in_the_file() {
 
 // ── many writers and the flusher on one file ───────────────────────────
 
+/// After the kernel's shutdown, `close_all` folds the WAL into the file and
+/// closes it: only `mem.db` is left, and the rows are in it.
+#[tokio::test]
+async fn close_all_after_shutdown_leaves_only_the_db() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let k = in_dir(&dir, &["alice"]).await;
+    let a = k.mint_id();
+    let r = call_as(&k, "alice", "memory", json!({"type": "append", "rows": [{"id": a, "content": "kept"}]})).await;
+    assert!(r.get("reason").is_none(), "{r}");
+    assert!(dir.join("mem.db-wal").exists(), "a WAL while the store is open");
+    k.shutdown().await;
+    assert!(fantastic_sqlite_store::close_all(&k).is_empty());
+    assert!(!dir.join("mem.db-wal").exists(), "the WAL is folded in and gone");
+    assert!(!dir.join("mem.db-shm").exists());
+    assert!(count(&open_db(&dir), "SELECT COUNT(*) FROM rows") >= 1);
+}
+
 #[tokio::test]
 async fn many_agents_and_the_flusher_share_one_file() {
     const AGENTS: usize = 12;

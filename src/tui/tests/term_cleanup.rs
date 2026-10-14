@@ -25,10 +25,6 @@ fn registry() -> BundleRegistry {
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
-    reg.register(
-        fantastic_static_loader::HANDLER_MODULE,
-        fantastic_static_loader::StaticLoaderBundle,
-    );
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
     reg
 }
@@ -47,7 +43,7 @@ fn seed(dir: &std::path::Path) {
         &a.join("user").join("agent.yaml"),
         &json!({
             "id":"user","handler_module":"user.tools",
-            "can_call":{"memory":"*","fs_loader":"*","exec":"*","files":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
+            "can_call":{"memory":"*","exec":"*","files":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
             "callable_by":{"exec":"*","files":"*"}
         }),
     );
@@ -57,13 +53,6 @@ fn seed(dir: &std::path::Path) {
             "id":"memory","handler_module":"sqlite_store.tools",
             "path":".fantastic/memory.db","operator":true,"admins":["kernel"],
             "callable_by":{"user":"*"}
-        }),
-    );
-    write(
-        &under.join("fs_loader").join("agent.yaml"),
-        &json!({
-            "id":"fs_loader","handler_module":"static_loader.tools",
-            "manifest":".fantastic/kernel.yaml","callable_by":{"user":"*"}
         }),
     );
     write(
@@ -82,7 +71,6 @@ fn seed(dir: &std::path::Path) {
             "callable_by":{"user":"*","exec":"*"},"can_call":{"user":"*"}
         }),
     );
-    std::fs::write(dir.join(".fantastic").join("kernel.yaml"), "agents: []\n").unwrap();
 }
 
 /// Dispatch as the human, exactly as the shell does: `user.forward` — the send

@@ -18,10 +18,6 @@ use serde_json::{Map, Value};
 
 use crate::atomic;
 use crate::env::Paths;
-use crate::manifest;
-
-/// The level-one loader. Its manifest is where ui agents arrive.
-pub const LOADER: &str = "fs_loader";
 
 /// The base tree, compiled in so the binary is self-contained.
 pub const BLUEPRINT: &str = include_str!("../../blueprint.yaml");
@@ -105,7 +101,7 @@ fn write_level(dir: &std::path::Path, list: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
-/// Init: write every record the blueprint names, plus the loader's manifest.
+/// Init: write every record the blueprint names.
 ///
 /// A partial tree is left in place on failure, and the error says so: silently
 /// removing a directory the user may have had other files in would be worse than
@@ -124,17 +120,7 @@ fn write_from(paths: &Paths, text: &str) -> Result<(), String> {
     // NOT WRITTEN HERE: `.fantastic/agent.yaml`. The kernel creates the root
     // itself on first boot, with its own id and a freshly minted guid. Writing it
     // from here would be this shell guessing at a record the kernel owns.
-    write_level(&paths.store.join("agents"), &list)?;
-
-    // The loader's manifest, ONLY IF ABSENT — a human's roster is never
-    // overwritten. It starts empty: every entry a loader creates lands under the
-    // loader, so the specified set lives on disk above and this file is reserved
-    // for the ui agents that arrive later.
-    let man = paths.manifest();
-    if !man.exists() {
-        manifest::write(&man, &[])?;
-    }
-    Ok(())
+    write_level(&paths.store.join("agents"), &list)
 }
 
 #[cfg(test)]
@@ -182,7 +168,7 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         inset.sort();
-        assert_eq!(inset, vec!["exec", "files", "fs_loader", "memory", "store"]);
+        assert_eq!(inset, vec!["exec", "files", "memory", "store"]);
 
         assert!(
             !p.is_fresh(),
@@ -224,7 +210,6 @@ mod tests {
         write_all(&p).unwrap();
         for r in [
             "user/agent.yaml",
-            "user/agents/fs_loader/agent.yaml",
             "user/agents/memory/agent.yaml",
             "user/agents/store/agent.yaml",
             "user/agents/exec/agent.yaml",
@@ -268,33 +253,17 @@ mod tests {
         let p = sandbox("grants");
         write_all(&p).unwrap();
         let u = rec(&p, "user/agent.yaml");
-        for id in ["exec", "files", "memory", "store", LOADER, ROOT_ID] {
+        for id in ["exec", "files", "memory", "store", ROOT_ID] {
             assert_eq!(u["can_call"][id], "*", "the human cannot reach {id}");
         }
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
 
     #[test]
-    fn the_manifest_starts_empty_because_loader_entries_land_under_the_loader() {
-        let p = sandbox("man");
+    fn init_writes_no_roster_file() {
+        let p = sandbox("noroster");
         write_all(&p).unwrap();
-        let text = std::fs::read_to_string(p.manifest()).unwrap();
-        assert!(text.contains("agents:"));
-        assert!(manifest::read(&p.manifest()).unwrap().is_empty());
-        for invented in ["web", "rest", "port", "notes"] {
-            assert!(!text.contains(invented), "{invented} was never asked for");
-        }
-        let _ = std::fs::remove_dir_all(&p.cwd);
-    }
-
-    #[test]
-    fn a_second_seed_never_overwrites_a_humans_manifest() {
-        let p = sandbox("keep");
-        write_all(&p).unwrap();
-        let mine = "agents:\n  - id: ui\n    handler_module: x.tools\n";
-        std::fs::write(p.manifest(), mine).unwrap();
-        write_all(&p).unwrap();
-        assert_eq!(std::fs::read_to_string(p.manifest()).unwrap(), mine);
+        assert!(!p.store.join("kernel.yaml").exists(), "every agent is a record under agents/");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
 

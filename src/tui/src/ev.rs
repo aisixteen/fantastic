@@ -11,9 +11,6 @@
 // watched agent (a watch frame carries no source id) and `Kernel::watch`es the
 // agent into it; each mirrored payload arrives as `LinkEv::AgentEvent`. Its
 // first consumer is the in-app terminal.
-//
-// `Cmd::ManifestPut` is implemented end to end in the runner and merely has no
-// keybinding: adding a ui agent is a manifest edit plus a roster boot.
 #![allow(dead_code)]
 
 use serde_json::Value;
@@ -97,10 +94,6 @@ pub enum Got {
     Cancelled {
         killed: Vec<RowId>,
     },
-    RosterBooted {
-        created: Vec<String>,
-        reapplied: Vec<String>,
-    },
     /// The backends this build links.
     Backends(Vec<crate::kern::setup::Backend>),
     /// Where provider keys are kept: the mode (`None` until chosen) and where
@@ -136,7 +129,8 @@ pub enum What {
     Reflect,
     Send,
     Cancel,
-    RosterBoot,
+    /// The shell's own housekeeping (terminals, keys, set-ups).
+    Act,
 }
 
 /// Outbound intents.
@@ -171,14 +165,6 @@ pub enum Cmd {
     Cancel {
         task_id: RowId,
     },
-    /// Add or replace one agent entry in `.fantastic/kernel.yaml`, then boot the
-    /// roster so the kernel picks it up. Wiring an agent is an EDIT TO THE
-    /// MANIFEST, not a hidden runtime call — the file stays the truth.
-    ManifestPut {
-        id: String,
-        entry: serde_yaml::Mapping,
-    },
-    RosterBoot,
     Watch(AgentId),
     Unwatch(AgentId),
     /// A stream consumer's own housekeeping — a flow-control `ack`, a
@@ -249,12 +235,11 @@ impl Cmd {
             Cmd::Reflect { .. } => What::Reflect,
             Cmd::Send { .. } => What::Send,
             Cmd::Cancel { .. } => What::Cancel,
-            Cmd::ManifestPut { .. } | Cmd::RosterBoot => What::RosterBoot,
             Cmd::Watch(_) | Cmd::Unwatch(_) | Cmd::Jump { .. } | Cmd::Quit => What::Ps,
             Cmd::Stream { .. } => What::Send,
-            Cmd::OpenTerminal { .. } | Cmd::CloseTerminal => What::RosterBoot,
-            Cmd::Backends | Cmd::Keys | Cmd::KeyMode | Cmd::Saved | Cmd::Prefer { .. } => What::RosterBoot,
-            Cmd::WizardCreate { .. } | Cmd::WizardFromSaved { .. } | Cmd::WizardSaveEdit { .. } => What::RosterBoot,
+            Cmd::OpenTerminal { .. } | Cmd::CloseTerminal => What::Act,
+            Cmd::Backends | Cmd::Keys | Cmd::KeyMode | Cmd::Saved | Cmd::Prefer { .. } => What::Act,
+            Cmd::WizardCreate { .. } | Cmd::WizardFromSaved { .. } | Cmd::WizardSaveEdit { .. } => What::Act,
         }
     }
 
@@ -264,7 +249,7 @@ impl Cmd {
     pub fn is_act(&self) -> bool {
         matches!(
             self,
-            Cmd::Send { .. } | Cmd::Cancel { .. } | Cmd::RosterBoot | Cmd::ManifestPut { .. }
+            Cmd::Send { .. } | Cmd::Cancel { .. }
         )
     }
 }
@@ -298,7 +283,6 @@ mod tests {
         };
         assert!(send.is_act());
         assert!(Cmd::Cancel { task_id: 1 }.is_act());
-        assert!(Cmd::RosterBoot.is_act());
     }
 
     #[test]

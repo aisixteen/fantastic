@@ -29,7 +29,7 @@ runs:
       # no docked title: the live shell gives every row to the work
       # the `mcp` leg is made at boot (owner 2026-10-08: it keeps the project's
       # .fantastic/.mcp.json right before any client connects), with its bridge
-      live: {contains: [fs_loader, exec, files, user, store, memory, mcp], contains_block_title: false}
+      live: {contains: [exec, files, user, store, memory, mcp], contains_block_title: false}
     after_exit:
       exit_code: 0
       lock_released: true
@@ -37,7 +37,6 @@ runs:
         - .fantastic/agents/user/agents/exec/agent.yaml
         - .fantastic/agents/user/agents/files/agent.yaml
         - .fantastic/agents/user/agent.yaml
-        - .fantastic/agents/user/agents/fs_loader/agent.yaml
         - .fantastic/agents/user/agents/store/agent.yaml
         - .fantastic/agents/user/agents/memory/agent.yaml
         - .fantastic/memory.db
@@ -46,10 +45,11 @@ runs:
         - .fantastic/prompt.md
         - .fantastic/.mcp.json
       # nothing outside `.fantastic` (owner 2026-10-12: no pollution)
-      files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .mcp.json, .claude]
+      # no roster file: every agent is a record under .fantastic/agents/
+      files_absent: [.fantastic/messages.yaml, .fantastic/ledger.json, .fantastic/kernel.yaml, .mcp.json, .claude]
 
   # ── 2 · the same directory: no intro, straight to the tree, log grows ──────
-  #       (under `user`: bundles_watch, exec, files, fs_loader … — sorted)
+  #       (under `user`: bundles_watch, exec, files, mcp … — sorted)
   #       …and an agent with no view of its own opens in the DEFAULT view
   - name: rehydrate
     script: |
@@ -77,11 +77,12 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; fs_loader is user's fourth child: seven down
+      # Activity, `kernel_memory` (the kernel's RAM store) and `user` sit under the kernel's row; mcp is user's fourth child: seven down
       live: {contains: [exec, files, user, "✉ Activity"], contains_block_title: false}
-      # fs_loader has no specific view: who it is, who it talks to, its verbs, its rows
+      # mcp has no specific view: who it is, who it talks to, its verbs (its rows
+      # sit below the frame: its grant lists are long)
       default_view:
-        contains: ["fs_loader  ● open", "EGRESS · may call", "INGRESS · callable by", "baseline: $self", "VERBS", "ROWS ·"]
+        contains: ["mcp  ● open", "EGRESS · may call", "INGRESS · callable by", "baseline: $self", "VERBS"]
         lacks: ["sealed —"]
     after_exit:
       exit_code: 0
@@ -158,12 +159,12 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      # FLAT: one level of channels; the loader and the store fold into one line
-      flat: {contains: ["# exec", "# files", "# user", "+ 2 system", "v tree · < collapse"], lacks: ["fs_loader"]}
+      # FLAT: one level of channels; the store folds into one line
+      flat: {contains: ["# exec", "# files", "# user", "+ 1 system", "v tree · < collapse"], lacks: ["# store"]}
       # RAIL: tiles, the selection's tall mark, the way back
       rail: {contains: ["▄▄▄▄▄", "▐   F", "» >"], lacks: ["# exec"]}
-      back: {contains: ["# exec", "+ 2 system"]}
-      tree: {contains: ["● fs_loader", "● store", "v flat · < collapse"]}
+      back: {contains: ["# exec", "+ 1 system"]}
+      tree: {contains: ["● mcp", "● store", "v flat · < collapse"]}
     after_exit:
       exit_code: 0
       lock_released: true
@@ -198,7 +199,7 @@ runs:
       lock_released: true
 
   # ── 7 · the mouse: a click on a sidebar row selects and opens it ──────────
-  #       (the tree box's border is row 0; `kernel_memory` takes a row above `user`: fs_loader is one lower)
+  #       (the tree box's border is row 0; `kernel_memory` takes a row above `user`: mcp is one lower)
   - name: mouse
     script: |
       wait 2500
@@ -210,7 +211,7 @@ runs:
       key ctrl-c
       exit 8000
     frames:
-      clicked: {contains: ["fs_loader  ● open", "╭", "╰"]}
+      clicked: {contains: ["mcp  ● open", "╭", "╰"]}
     after_exit:
       exit_code: 0
       lock_released: true

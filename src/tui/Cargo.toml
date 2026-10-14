@@ -49,7 +49,6 @@ fantastic-core = { path = "../lib/rust/crates/bundles/fantastic-core" }
 fantastic-web-ws = { path = "../lib/rust/crates/bundles/fantastic-web-ws" }
 fantastic-file = { path = "../lib/rust/crates/bundles/fantastic-file" }
 fantastic-exec-bridge = { path = "../lib/rust/crates/bundles/fantastic-exec-bridge" }
-fantastic-static-loader = { path = "../lib/rust/crates/bundles/fantastic-static-loader" }
 # The MCP leg — a bundle built HERE, outside the kernel tree, against the
 # kernel's public API only. Compile-time linked; `src/lib` is not edited.
 fantastic-web-mcp = { path = "bundles/fantastic-web-mcp" }

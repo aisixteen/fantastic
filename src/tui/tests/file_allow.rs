@@ -26,10 +26,6 @@ fn registry() -> BundleRegistry {
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
-    reg.register(
-        fantastic_static_loader::HANDLER_MODULE,
-        fantastic_static_loader::StaticLoaderBundle,
-    );
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
     reg
 }
@@ -67,7 +63,6 @@ fn seed(dir: &std::path::Path) {
         &a.join("term").join("agent.yaml"),
         &json!({"id":"term","handler_module":"user.tools","can_call":{"docs": ["read_stream"]}}),
     );
-    std::fs::write(dir.join(".fantastic").join("kernel.yaml"), "agents: []\n").unwrap();
 }
 
 async fn boot(dir: &std::path::Path) -> std::sync::Arc<Kernel> {

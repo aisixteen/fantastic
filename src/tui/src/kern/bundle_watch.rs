@@ -5,8 +5,9 @@
 //!   `bundle.yaml` re-read and every live instance stopped ABRUPTLY and restarted
 //!   (in-flight calls settle `reloaded`) — the owner's rule for a code change;
 //! - its VIEW file (the `record.view.bytes_file` its `bundle.yaml` names) → the
-//!   instances' `view.bytes` rewritten from it, so their cells re-render — no
-//!   restart for a view change.
+//!   instances' `view` written again (the bundle's declared fields, never the
+//!   file's bytes: the page reads the file through [`BRIDGE`]), so their cells
+//!   re-render — no restart for a view change.
 //!
 //! EVENT-DRIVEN (owner 2026-10-08: no idle loops): the lib's `watch_path` on
 //! [`BRIDGE`] — a read-only file_bridge rooted at the project, exposing the
@@ -49,10 +50,15 @@ pub fn view_file(dir: &Path) -> Option<PathBuf> {
     Some(dir.join(f))
 }
 
-/// Rewrite every instance of bundle `name`'s `view.bytes` from its view file.
+/// Write every instance of bundle `name`'s `view` again: the bundle's declared
+/// fields over the instance's own, and NO `bytes` — the record names the file
+/// (`bytes_file`), the page reads it through [`BRIDGE`], so the panel's source
+/// lives once, in the bundle. The write is the cells' signal to draw again.
 pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), String> {
     let Some(f) = view_file(dir) else { return Ok(()) };
-    let body = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+    if !f.is_file() {
+        return Err(format!("{}: no such file", f.display()));
+    }
     let instances: Vec<String> = h
         .kernel
         .agents
@@ -72,8 +78,7 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
             .and_then(|a| a.value().record().meta.get("view").and_then(Value::as_object).cloned())
             .unwrap_or_default();
         view.extend(bundle_view(dir).unwrap_or_default());
-        // the view's `{{agent}}` is the instance it shows (one bundle, many instances)
-        view.insert("bytes".into(), json!(body.replace("{{agent}}", &id)));
+        view.remove("bytes");
         let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "view": view})).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return Err(format!("{id}: its view: {e}"));
@@ -178,6 +183,10 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                 let is_view = view_file(&dir).is_some_and(|v| v.file_name() == Path::new(file).file_name());
                 if is_view { views.insert(name) } else { code.insert(name) };
             }
+            // a folder with no `bundle.yaml` yet is one being written, not a
+            // bundle: nothing to load (its `bundle.yaml` arriving is the event)
+            code.retain(|name| root.join(name).join("bundle.yaml").is_file());
+            views.retain(|name| root.join(name).join("bundle.yaml").is_file());
             for name in &code {
                 let r = h.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
                 if let Some(e) = err_of(&r) {

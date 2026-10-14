@@ -551,17 +551,43 @@ pub fn resolve_path(rec: &Map<String, Value>, kernel: &Kernel) -> Result<PathBuf
     Ok(work.join(path))
 }
 
-/// The `sqlite_store.tools` bundle: one connection per store agent, each behind
-/// its own lock.
+/// The `sqlite_store.tools` bundle. Its connections are the KERNEL'S state
+/// ([`Conns`]), not the bundle's: the host closes them after the kernel's
+/// last flush ([`close_all`]).
 #[derive(Default)]
-pub struct SqliteStoreBundle {
-    conns: Mutex<HashMap<String, Arc<Mutex<Connection>>>>,
+pub struct SqliteStoreBundle;
+
+/// One connection per store agent, each behind its own lock, kept on the kernel.
+#[derive(Default)]
+struct Conns(Mutex<HashMap<String, Arc<Mutex<Connection>>>>);
+
+const CONNS: &str = "sqlite_store.conns";
+
+fn conns(kernel: &Kernel) -> Arc<Conns> {
+    kernel.extension::<Conns>(CONNS)
+}
+
+/// Close every store `kernel` opened: checkpoint its WAL into the file
+/// (`TRUNCATE`) and drop the connection, so a stopped kernel leaves only the
+/// `.db`. For AFTER `Kernel::shutdown` — its teardown walk ([`Bundle::on_shutdown`])
+/// runs before the final flush, which still writes rows. Returns one line per
+/// store that could not checkpoint.
+pub fn close_all(kernel: &Kernel) -> Vec<String> {
+    let all: Vec<(String, Arc<Mutex<Connection>>)> = conns(kernel).0.lock().expect("sqlite_store poisoned").drain().collect();
+    let mut errs = Vec::new();
+    for (id, c) in all {
+        let c = c.lock().expect("sqlite_store connection poisoned");
+        if let Err(e) = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())) {
+            errs.push(format!("sqlite_store {id}: checkpoint: {e}"));
+        }
+    }
+    errs
 }
 
 impl SqliteStoreBundle {
     /// The store's connection, opened (and the schema ensured) on first use.
     fn conn(&self, id: &AgentId, kernel: &Arc<Kernel>) -> Result<Arc<Mutex<Connection>>, Value> {
-        if let Some(c) = self.conns.lock().expect("sqlite_store poisoned").get(&id.0) {
+        if let Some(c) = conns(kernel).0.lock().expect("sqlite_store poisoned").get(&id.0) {
             return Ok(Arc::clone(c));
         }
         let path = resolve_path(&record(kernel, id), kernel).map_err(|e| {
@@ -578,7 +604,8 @@ impl SqliteStoreBundle {
         c.busy_timeout(std::time::Duration::from_secs(5)).map_err(db_err)?;
         c.execute_batch(SCHEMA).map_err(db_err)?;
         let c = Arc::new(Mutex::new(c));
-        self.conns
+        conns(kernel)
+            .0
             .lock()
             .expect("sqlite_store poisoned")
             .entry(id.0.clone())
@@ -1001,7 +1028,7 @@ impl Bundle for SqliteStoreBundle {
     /// 2026-09-26). Only an explicit `delete_agent` reaches here: the stop's
     /// teardown walk calls [`Self::on_shutdown`], which keeps the file.
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
-        self.conns.lock().expect("sqlite_store poisoned").remove(&agent_id.0);
+        conns(kernel).0.lock().expect("sqlite_store poisoned").remove(&agent_id.0);
         let path = resolve_path(&record(kernel, agent_id), kernel)?;
         for suffix in ["", "-wal", "-shm"] {
             let f = PathBuf::from(format!("{}{suffix}", path.display()));
@@ -1015,7 +1042,8 @@ impl Bundle for SqliteStoreBundle {
     }
 
     /// NOT a close before the final flush, and never a delete: a teardown walk
-    /// must not lose the kernel's last rows. The file closes with the process.
+    /// must not lose the kernel's last rows. The host closes the file after the
+    /// flush ([`close_all`]).
     async fn on_shutdown(&self, _agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         Ok(())
     }

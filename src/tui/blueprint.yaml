@@ -19,7 +19,6 @@
 #   ├── kernel_memory            ram_store — the KERNEL'S store: its execution rows, in RAM
 #   └── user                     the human's own face: the ONE user, everything under it
 #       ├── memory               sqlite_store at .fantastic/memory.db — THE AI store (every AI agent's rows)
-#       ├── fs_loader            static_loader; ui agents get added under here
 #       ├── store                file_bridge over .fantastic, allow: ['.'] — the kernel's provider
 #       ├── exec                 exec_bridge, allowed: ['.*'], cwd: '.', inherit_env: ["*"]
 #       └── files                file_bridge, root: '.', allow: ['.']
@@ -54,7 +53,6 @@ agents:
     handler_module: user.tools
     can_call:
       memory: "*"
-      fs_loader: "*"
       store: "*"
       exec: "*"
       files: "*"
@@ -71,11 +69,6 @@ agents:
         handler_module: sqlite_store.tools
         path: .fantastic/memory.db
         admins: [kernel]
-        callable_by: {user: "*"}
-
-      - id: fs_loader
-        handler_module: static_loader.tools
-        manifest: .fantastic/kernel.yaml
         callable_by: {user: "*"}
 
       # THE STORE. The kernel persists records, the ledger and messages.xml only

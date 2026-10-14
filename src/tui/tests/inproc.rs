@@ -1,10 +1,9 @@
 //! THE END-TO-END PROOF, with no terminal in the way: seed a directory, boot the
 //! rust kernel in this process, and drive a real command through `user` to `exec`.
 //!
-//! This lives in its own integration binary on purpose. Two of the bundles resolve
-//! paths against `std::env::current_dir()` — `file_bridge`'s clamp and
-//! `static_loader`'s manifest — so the test must `chdir`, and chdir is
-//! process-global. One test per binary means no other test can be running when it
+//! This lives in its own integration binary on purpose. `file_bridge`'s clamp
+//! resolves paths against `std::env::current_dir()`, so the test must `chdir`,
+//! and chdir is process-global. One test per binary means no other test can be running when it
 //! happens.
 //!
 //! What it proves, in order: the tree is the specified shape; a call to its own
@@ -35,10 +34,6 @@ fn registry() -> BundleRegistry {
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
-    reg.register(
-        fantastic_static_loader::HANDLER_MODULE,
-        fantastic_static_loader::StaticLoaderBundle,
-    );
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
     reg
 }
@@ -57,7 +52,7 @@ fn seed(dir: &std::path::Path) {
         &a.join("user").join("agent.yaml"),
         &json!({
             "id":"user","handler_module":"user.tools",
-            "can_call":{"memory":"*","fs_loader":"*","exec":"*","files":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
+            "can_call":{"memory":"*","exec":"*","files":"*",bootstrap::DEFAULT_ROOT_ID:"*"},
             "callable_by":{"exec":"*","files":"*"}
         }),
     );
@@ -67,13 +62,6 @@ fn seed(dir: &std::path::Path) {
             "id":"memory","handler_module":"sqlite_store.tools",
             "path":".fantastic/memory.db","operator":true,"admins":["kernel"],
             "callable_by":{"user":"*"}
-        }),
-    );
-    write(
-        &under.join("fs_loader").join("agent.yaml"),
-        &json!({
-            "id":"fs_loader","handler_module":"static_loader.tools",
-            "manifest":".fantastic/kernel.yaml","callable_by":{"user":"*"}
         }),
     );
     write(
@@ -92,7 +80,6 @@ fn seed(dir: &std::path::Path) {
             "callable_by":{"user":"*","exec":"*"},"can_call":{"user":"*"}
         }),
     );
-    std::fs::write(dir.join(".fantastic").join("kernel.yaml"), "agents: []\n").unwrap();
 }
 
 /// Dispatch as the human, exactly as the shell does: `user.forward` — the send
@@ -147,7 +134,7 @@ async fn the_human_drives_the_specified_set_in_process() {
     let user = kernel.agents.get(&AgentId::from("user")).expect("the user loaded");
     let mut under: Vec<String> = user.child_ids().into_iter().map(|i| i.0).collect();
     under.sort();
-    assert_eq!(under, vec!["exec", "files", "fs_loader", "memory"], "under the user");
+    assert_eq!(under, vec!["exec", "files", "memory"], "under the user");
 
     // ── a call to its own child is authorized by the seeded grants ───────
     // The born-with baseline is {$self} alone, so `user` reaching `exec` is the
@@ -187,11 +174,11 @@ async fn the_human_drives_the_specified_set_in_process() {
     );
 
     // ── a call the grants do not cover is REFUSED, as data ───────────────
-    // Ask the loader to do something it does not own: an
+    // Ask the AI store to do something it does not own: an
     // unknown verb comes back as a refusal object, not a panic and not a success.
     let bad = act(
         &kernel,
-        "fs_loader",
+        "memory",
         json!({"type":"definitely_not_a_verb"}),
     )
     .await;

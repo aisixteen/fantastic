@@ -15,26 +15,23 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use crate::env::Paths;
 use crate::ev::{Cmd, Ev, Got};
 use crate::kern::host::Host;
 use crate::kern::model::KernelErr;
-use crate::manifest;
 
 pub struct Runner {
     host: Arc<Host>,
     tx: mpsc::Sender<Ev>,
-    paths: Paths,
     /// One forwarding task per watched agent, so `Unwatch` can stop it.
     watches: std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 /// Spawn the runner. Returns the sender a key handler pushes into.
-pub fn spawn(host: Arc<Host>, tx: mpsc::Sender<Ev>, paths: Paths) -> mpsc::Sender<Cmd> {
+pub fn spawn(host: Arc<Host>, tx: mpsc::Sender<Ev>) -> mpsc::Sender<Cmd> {
     // Deep enough that a burst of keys never blocks the render loop; bounded so a
     // wedged handler applies backpressure instead of growing without limit.
     let (ctx, mut crx) = mpsc::channel::<Cmd>(256);
-    let r = Arc::new(Runner { host, tx, paths, watches: Default::default() });
+    let r = Arc::new(Runner { host, tx, watches: Default::default() });
     tokio::spawn(async move {
         // KEYSTROKES ARE ORDERED. Every other command runs in its own task, but
         // `write`s to one agent go through that agent's own queue, one at a
@@ -287,57 +284,6 @@ impl Runner {
                     Err(e) => self.refused(&cmd, e).await,
                 }
             }
-
-            // Wiring a ui agent is an EDIT TO THE MANIFEST followed by a boot. The
-            // file stays the truth; the boot is what makes the kernel agree.
-            Cmd::ManifestPut { id, entry } => {
-                let path = self.paths.manifest();
-                let r = manifest::read(&path).and_then(|mut e| {
-                    manifest::put(&mut e, entry.clone())?;
-                    manifest::write(&path, &e)
-                });
-                match r {
-                    Ok(()) => self.boot(&cmd).await,
-                    Err(why) => {
-                        self.note(format!("{id}: could not write the manifest: {why}"))
-                            .await
-                    }
-                }
-            }
-
-            Cmd::RosterBoot => self.boot(&cmd).await,
-        }
-    }
-
-    /// Boot the loader. OPERATOR, not the human: re-applying the manifest is this
-    /// shell's own housekeeping, and it must be able to create agents the human's
-    /// own grants do not cover.
-    async fn boot(&self, cmd: &Cmd) {
-        let out = self
-            .host
-            .operator(crate::boot::seed::LOADER, json!({"type":"boot"}))
-            .await;
-        match Host::read(out) {
-            Ok(v) => {
-                let list = |k: &str| -> Vec<String> {
-                    serde_json::from_value(v.get(k).cloned().unwrap_or(json!([])))
-                        .unwrap_or_default()
-                };
-                self.got(Got::RosterBooted {
-                    created: list("created"),
-                    reapplied: list("reapplied"),
-                })
-                .await;
-                // The roster just changed which agents exist.
-                if let Some(t) = self.host.tree() {
-                    self.got(Got::Tree(t)).await;
-                }
-                self.got(Got::Agents {
-                    records: self.host.records(),
-                })
-                .await;
-            }
-            Err(e) => self.refused(cmd, e).await,
         }
     }
 

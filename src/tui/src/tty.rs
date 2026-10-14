@@ -34,12 +34,39 @@ pub struct Screen {
     pub term: Terminal<CrosstermBackend<File>>,
 }
 
-/// Point fds 1 and 2 at `path`, keeping nothing on the screen. Returns the log
-/// path actually used so a failure can name it.
+/// The log keeps its last this-many lines: older ones go when a run opens it.
+pub(crate) const LOG_KEEP_LINES: usize = 10_000;
+
+/// Cut `path` to its last `keep` lines, IN PLACE (same file: a running kernel's
+/// append descriptor keeps writing to it). A missing file is nothing to cut.
+fn keep_last_lines(path: &Path, keep: usize) -> Result<()> {
+    let text = match std::fs::read(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+    };
+    let lines = text.iter().filter(|&&b| b == b'\n').count();
+    if lines <= keep {
+        return Ok(());
+    }
+    // the byte after the (lines - keep)-th newline starts the kept tail
+    let cut = text
+        .iter()
+        .enumerate()
+        .filter(|(_, &b)| b == b'\n')
+        .nth(lines - keep - 1)
+        .map_or(0, |(i, _)| i + 1);
+    std::fs::write(path, &text[cut..]).with_context(|| format!("could not write {}", path.display()))
+}
+
+/// Point fds 1 and 2 at `path`, keeping nothing on the screen. The log is cut
+/// to its last [`LOG_KEEP_LINES`] lines first. Returns the log path actually
+/// used so a failure can name it.
 pub(crate) fn redirect_std_to(path: &Path) -> Result<()> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d).with_context(|| format!("could not write {}", d.display()))?;
     }
+    keep_last_lines(path, LOG_KEEP_LINES)?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -159,6 +186,22 @@ mod tests {
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
+    }
+
+    #[test]
+    fn the_log_keeps_only_its_last_lines() {
+        let d = std::env::temp_dir().join(format!("fc-tty3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("kernel.log");
+        let body: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&p, &body).unwrap();
+        keep_last_lines(&p, 20).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), body, "under the cap: untouched");
+        keep_last_lines(&p, 3).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "line 10\nline 11\nline 12\n");
+        keep_last_lines(&d.join("none.log"), 3).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
