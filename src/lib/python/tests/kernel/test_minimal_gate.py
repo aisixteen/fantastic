@@ -364,3 +364,22 @@ async def test_legal_keys_are_accepted(seeded_kernel):
         ]
     )
     assert out[0]["result"].get("id") == "legal", out
+
+
+async def test_a_deleted_id_leaves_every_grant(kernel):
+    """Grant keys are literal ids: a deleted agent's id is pruned from every
+    record that named it, so re-creating the id inherits nothing."""
+    _mk(kernel, "vault", callable_by={"$self": "*", "reader": ["get"]})
+    _mk(kernel, "reader", can_call={"$self": "*", "vault": ["get"]})
+    _mk(kernel, "reader_kid", parent="reader")
+    _mk(kernel, "other", callable_by={"$self": "*", "reader_kid": "*", "vault": "*"})
+    out = await kernel.delete("reader")
+    assert out["deleted"] is True
+    assert kernel.ctx.agents["vault"]._meta["callable_by"] == {"$self": "*"}
+    assert kernel.ctx.agents["other"]._meta["callable_by"] == {
+        "$self": "*",
+        "vault": "*",
+    }
+    _mk(kernel, "reader", can_call={"$self": "*", "vault": ["get"]})
+    denied = await _as(kernel, "reader", "vault", {"type": "get"})
+    assert denied["status"] == "failed" and denied["result"]["side"] == "ingress"

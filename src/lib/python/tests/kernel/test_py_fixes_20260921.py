@@ -117,6 +117,37 @@ def test_a_one_shot_is_fast_and_clean(tmp_path):
     assert '"tasks"' in p.stdout, p.stdout
 
 
+def _main(tmp_path, *argv):
+    import main
+
+    return subprocess.run(
+        [sys.executable, str(Path(main.__file__)), *argv],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_a_lockless_invocation_writes_no_root_record(tmp_path):
+    """`--help` takes no lock, so a fresh dir gets no `.fantastic/agent.yaml`;
+    the first locked one-shot writes it (audit 2026-10-14)."""
+    assert _main(tmp_path, "--help").returncode == 0
+    assert not (tmp_path / ".fantastic" / "agent.yaml").exists()
+    p = _main(tmp_path, "kernel", "list_agents")
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / ".fantastic" / "agent.yaml").exists()
+
+
+def test_an_unreadable_root_record_is_never_written_over(tmp_path):
+    d = tmp_path / ".fantastic"
+    d.mkdir()
+    (d / "agent.yaml").write_text("id: [unclosed\n")
+    p = _main(tmp_path, "kernel", "list_agents")
+    assert p.returncode != 0 and "unreadable" in p.stderr, p.stderr
+    assert (d / "agent.yaml").read_text() == "id: [unclosed\n"
+
+
 async def test_a_service_loop_does_not_hold_the_quiet_phase(seeded_kernel):
     """A `spawn_task` fork is cancelled by the stop, never waited for."""
     k = seeded_kernel

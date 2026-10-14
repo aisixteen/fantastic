@@ -81,6 +81,11 @@ extension Kernel {
         guard let aid = payload["agent_id"].asString, !aid.isEmpty else {
             return (nil, .object(["error": .string("\(verb): agent_id (str) required")]))
         }
+        // The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
+        // `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
+        if let bad = Refusal.guardAgentId(verb, aid, arg: "agent_id") {
+            return (nil, bad)
+        }
         let checked = Kernel.guardBlobName(payload["name"].asString)
         guard let name = checked.name else {
             return (

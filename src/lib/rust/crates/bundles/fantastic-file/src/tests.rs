@@ -63,9 +63,16 @@ fn an_atomic_write_with_a_mode_creates_exactly_those_bits() {
         std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    assert!(!tmp.path().join("d/secret.yaml.tmp").exists());
-    // a rewrite replaces it, the bits held — a stale `.tmp` is cleared first
-    std::fs::write(tmp.path().join("d/secret.yaml.tmp"), b"stale").unwrap();
+    let names = |d: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&tmp.path().join("d")), ["secret.yaml"], "no tmp left");
+    // a rewrite replaces it, the bits held
     fs::write_bytes(tmp.path(), "d/secret.yaml", b"k: w\n", true, Some(0o600)).unwrap();
     assert_eq!(std::fs::read(&p).unwrap(), b"k: w\n");
     assert_eq!(
@@ -1698,5 +1705,22 @@ async fn a_leg_that_is_not_registered_says_no_agent_on_both_channels() {
             "{verb}"
         );
         assert_eq!(body, None, "{verb}");
+    }
+}
+
+#[test]
+fn an_atomic_write_never_follows_a_planted_tmp_link() {
+    // A symlink at `<name>.tmp` pointing outside the root is never written
+    // through: each write stages in a fresh, exclusively created tmp.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let outside = tmp.path().join("outside.txt");
+    std::fs::write(&outside, b"keep").unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("f.txt.tmp")).unwrap();
+    for mode in [None, Some(0o600)] {
+        fs::write_bytes(&root, "f.txt", b"new", true, mode).unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+        assert_eq!(std::fs::read(root.join("f.txt")).unwrap(), b"new");
     }
 }

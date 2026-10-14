@@ -33,6 +33,12 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// python `secrets.token_hex(n)` — `n` CSPRNG bytes as lowercase hex.
+#[must_use]
+pub fn token_hex(n: usize) -> String {
+    hex(&os_random(n))
+}
+
 /// Mint a fresh id from `handler_module` (`<bundle>.tools` →
 /// `<bundle>_<hex6>`) — python `_agent.py`'s
 /// `f"{bundle}_{secrets.token_hex(3)}"`, where `bundle` is the SECOND-LAST
@@ -427,7 +433,10 @@ pub(crate) async fn delete_from_payload(
         crate::refusal::with(&mut r, "id", json!(id.0));
         return r;
     }
+    let mut gone = Vec::new();
+    subtree_ids(kernel, &target, &mut gone);
     cascade_delete(kernel, &target).await;
+    prune_grants(kernel, &gone);
     // Emit `agent_deleted` on the caller's inbox so watchers refresh
     // (canvas frame chrome, etc.). Mirrors Python's
     // `await self.emit(self.id, {type:"agent_deleted", id})`.
@@ -435,6 +444,47 @@ pub(crate) async fn delete_from_payload(
         .emit(&caller.id, json!({"type": "agent_deleted", "id": id.0}))
         .await;
     json!({ "deleted": true, "id": id.0 })
+}
+
+fn subtree_ids(kernel: &Arc<Kernel>, agent: &Arc<Agent>, out: &mut Vec<AgentId>) {
+    out.push(agent.id.clone());
+    for cid in agent.child_ids() {
+        if let Some(c) = kernel.agents.get(&cid).map(|e| Arc::clone(&e)) {
+            subtree_ids(kernel, &c, out);
+        }
+    }
+}
+
+/// A deleted id leaves every grant that named it — python `_prune_grants`. Grant
+/// keys are literal ids, so a stale one would hand its edge to whoever
+/// re-creates that id (audit 2026-10-14). Each changed record is re-persisted by
+/// its `updated` event ([`Kernel::update`]).
+fn prune_grants(kernel: &Arc<Kernel>, gone: &[AgentId]) {
+    let agents: Vec<Arc<Agent>> = kernel
+        .agents
+        .iter()
+        .map(|e| Arc::clone(e.value()))
+        .collect();
+    for a in agents {
+        let rec = a.record();
+        let mut patch = Map::new();
+        for field in ["can_call", "callable_by"] {
+            let Some(Value::Object(grants)) = rec.meta.get(field) else {
+                continue;
+            };
+            if gone.iter().any(|g| grants.contains_key(&g.0)) {
+                let kept: Map<String, Value> = grants
+                    .iter()
+                    .filter(|(k, _)| !gone.iter().any(|g| &g.0 == *k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                patch.insert(field.to_string(), Value::Object(kept));
+            }
+        }
+        if !patch.is_empty() {
+            kernel.update(&a.id, patch);
+        }
+    }
 }
 
 /// Depth-first delete: each leaf's `on_delete` hook fires before its

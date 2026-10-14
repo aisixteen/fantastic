@@ -209,6 +209,12 @@ extension Kernel {
         case .ok(let r): retries = r
         case .refused(let r): return .settled(Outcome.refused(r))
         }
+        // 6b. secret marks — paths into the payload, shown as `[secret]`.
+        let marks: [String]
+        switch Secret.check(item.secret) {
+        case .success(let m): marks = m
+        case .failure(let e): return .settled(Outcome.refused(e.refusal))
+        }
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancelTask` marks
         // the whole subtree before it aborts anything, because `onCancel`
         // hooks await — so a doomed handler gets scheduling passes on its way
@@ -232,9 +238,11 @@ extension Kernel {
         // started. Python `Agent._send` (`kernel/_agent.py`).
         if draining && !KernelTaskLocals.inShutdown {
             let control = isControl(target: item.target.value, payload: item.payload)
-            let cur = KernelTaskLocals.currentTask
-            let insideLiveWork = cur.map { tasks.contains($0) } ?? false
-            if !control && !insideLiveWork && !tasks.isRegistered() {
+            // a live DISPATCH, or a keepalive fork; any other fork starts new
+            // work — a ws call used to pass where the same REST call was refused
+            // (audit 2026-10-14)
+            let insideLiveWork = tasks.drainAdmits(KernelTaskLocals.currentTask)
+            if !control && !insideLiveWork {
                 return .settled(
                     Outcome.refused(
                         Refusal.make(
@@ -338,7 +346,7 @@ extension Kernel {
             ]
             callRow["parent"] = KernelTaskLocals.currentTask.map { JSON.integer($0.value) } ?? .null
             callRow["caller"] = caller.map { JSON.string($0.value) } ?? .null
-            callRow["payload"] = Kernel.tapedPayload(item.payload, item.binary)
+            callRow["payload"] = Kernel.tapedPayload(Secret.shown(item.payload, marks), item.binary)
             callRow["named"] = .bool(name != nil)
             callRow["retries"] = .integer(Int64(retries))
             callRow["attempts"] = .integer(1)
@@ -350,6 +358,8 @@ extension Kernel {
                 callRow["timeout"] = timeout.map { JSON.double($0.seconds) } ?? .null
             }
             if let name { callRow["name"] = .string(name) }
+            // the marks are paths, not values
+            if !marks.isEmpty { callRow["secret"] = .array(marks.map { .string($0) }) }
             _ = try? rowsPut(target.id, callRow)
         }
 
@@ -365,7 +375,7 @@ extension Kernel {
             Dispatch(
                 target: target, payload: item.payload, verb: verb,
                 timeout: timeout, execId: execId, taskId: taskId,
-                binary: item.binary, rawReply: item.rawReply))
+                binary: item.binary, rawReply: item.rawReply, marks: marks))
     }
 
     /// `timeout` validation (C30/C38): `item.rawTimeout`, when forwarded by a
@@ -492,7 +502,7 @@ extension Kernel {
                 let (r, s, b) = await runDispatchOutcome(
                     target: d.target, payload: d.payload, verb: d.verb,
                     taskOut: box, timeout: d.timeout, taskId: nextPid, binary: d.binary,
-                    rawReply: d.rawReply)
+                    rawReply: d.rawReply, marks: d.marks)
                 reply = r
                 status = s
                 body = b
@@ -675,6 +685,8 @@ struct Dispatch {
     /// The binary channel with no request body — the reply's chunk comes back
     /// raw (`Item.rawReply`).
     let rawReply: Bool
+    /// The item's `secret` marks (`Secret`), carried to every attempt.
+    let marks: [String]
 }
 
 /// An item's own deadline: the seconds the kernel waits, and the value as the

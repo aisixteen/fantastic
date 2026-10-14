@@ -367,3 +367,25 @@ async def test_draining_lets_a_live_dispatch_send(seeded_kernel):
     inner = out["result"]
     assert inner["status"] == "completed" and inner["result"] == {"ok": "sink"}, inner
     assert isinstance(inner["pid"], int)
+
+
+async def test_draining_refuses_a_fork_but_admits_a_keepalive_one(seeded_kernel):
+    """A FORK (a ws call, a scheduler tick, a bridge read loop) starting a send
+    while draining is new work: refused. A keepalive fork — a persister that must
+    outlive the quiet phase — still sends."""
+    k = seeded_kernel
+    _mk(k, "d2")
+
+    async def fork_send():
+        return await _one(k, {"target": "d2", "payload": {"type": "work"}})
+
+    k.ctx.draining = True
+    try:
+        for keepalive, expect in ((False, "failed"), (True, "completed")):
+            tid = k.ctx.spawn_task("d2", "loop", fork_send(), keepalive=keepalive)
+            out = await asyncio.wait_for(k.ctx.tasks[tid]["_task"], timeout=2)
+            assert out["status"] == expect, (keepalive, out)
+            if expect == "failed":
+                assert out["result"]["reason"] == "draining"
+    finally:
+        k.ctx.draining = False

@@ -24,10 +24,7 @@ public enum Bootstrap {
     /// workdir lock; throws if another process already owns it. The tree
     /// comes ONLY from the `agent.yaml` records (`startKernel`) — python reads
     /// no snapshot file at boot.
-    public static func daemon(
-        workdir: String,
-        portHint: UInt16 = 0
-    ) async throws -> (kernel: Kernel, lock: WorkdirLock) {
+    public static func daemon(workdir: String) async throws -> (kernel: Kernel, lock: WorkdirLock) {
         let url = URL(fileURLWithPath: workdir, isDirectory: true)
         let fm = FileManager.default
         var isDir: ObjCBool = false
@@ -46,7 +43,9 @@ public enum Bootstrap {
         // the tree and the id counter (the root record's reserved bound);
         // execution rows live in the root's memory store, which `kernel_start`
         // wires.
-        let kernel = try await startKernel(workdir: workdir, portHint: portHint)
+        let kernel = try await startKernel(workdir: workdir)
+        // the lock is held: a fresh root's record lands now
+        try kernel.takeSeed()
         return (kernel, lock)
     }
 
@@ -57,7 +56,7 @@ public enum Bootstrap {
     public static func oneShot(
         workdir: String
     ) async throws -> Kernel {
-        try await startKernel(workdir: workdir, portHint: 0)
+        try await startKernel(workdir: workdir)
     }
 
     /// Block until an OS stop signal (SIGINT/SIGTERM/SIGHUP) arrives OR the

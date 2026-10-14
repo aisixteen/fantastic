@@ -168,3 +168,21 @@ async fn what_is_not_exposed_or_not_there_is_refused() {
         assert_eq!(r["reason"], "not_found", "{payload}: {r}");
     }
 }
+
+/// `allow` is read live: narrowed after the watch was armed, the path's changes
+/// stop reaching watchers (audit 2026-10-14).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_path_the_bridge_stops_exposing_reports_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp, json!(["."])).await;
+    std::fs::create_dir_all(served(&tmp).join("notes")).unwrap();
+    std::fs::write(served(&tmp).join("notes/a.md"), "x").unwrap();
+    let mut rx = inbox(&k).await;
+    call(&k, json!({"type": "watch_path", "path": "notes"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut patch = serde_json::Map::new();
+    patch.insert("allow".into(), json!(["other.md"]));
+    k.update(&AgentId::from("fb"), patch);
+    std::fs::write(served(&tmp).join("notes/a.md"), "y").unwrap();
+    assert!(next_changed(&mut rx, "notes/a.md", 1).await.is_none());
+}

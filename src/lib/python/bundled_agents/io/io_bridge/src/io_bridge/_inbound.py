@@ -65,4 +65,15 @@ async def hand_in(kernel: Any, leg_id: str, payload: dict):
     inbound verb and return the leg's reply. Made from the transport's loop —
     outside every dispatch, so it is the operator's (`kernel` is any agent of the
     tree; the send's identity is the context's, and here there is none)."""
-    return (await kernel.send([{"target": leg_id, "payload": payload}]))[0]["result"]
+    hand = {"target": leg_id, "payload": payload}
+    # An inbound call's `secret` marks (paths into ITS payload) mark the hand-in
+    # too: the leg's own call row holds the item, so its values are shown as the
+    # onward call's are (`kernel/_secret`).
+    marks = (
+        (payload.get("item") or {}).get("secret")
+        if isinstance(payload.get("item"), dict)
+        else None
+    )
+    if isinstance(marks, list) and all(isinstance(m, str) for m in marks):
+        hand["secret"] = [f"item.payload.{m}" for m in marks]
+    return (await kernel.send([hand]))[0]["result"]

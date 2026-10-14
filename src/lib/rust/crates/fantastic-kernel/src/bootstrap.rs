@@ -104,6 +104,23 @@ pub struct BootedKernel {
     /// Ids of every agent loaded during hydration (excluding root).
     /// Useful for boot-time `boot` verb dispatch.
     pub loaded: Vec<AgentId>,
+    /// A FRESH root's record, not yet on disk: a lockless boot defers it to the
+    /// mode that takes the dir's lock ([`Self::write_seed`]).
+    pub pending_seed: Option<(PathBuf, crate::agent::AgentRecord)>,
+}
+
+impl BootedKernel {
+    /// Write a fresh root's record now that this process holds the dir's lock;
+    /// once. Python `kernel/modes` `take_seed`.
+    ///
+    /// # Errors
+    /// The record write's.
+    pub fn write_seed(&mut self) -> KernelResult<()> {
+        match self.pending_seed.take() {
+            Some((path, rec)) => persistence::write_record_at(&path, &rec),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Drives the boot sequence. Caller fills `bundles` first.
@@ -124,11 +141,13 @@ fn boot_disk(
     opts: &BootstrapOptions,
 ) -> KernelResult<BootedKernel> {
     let fantastic_dir = workdir.join(".fantastic");
-    std::fs::create_dir_all(&fantastic_dir).map_err(|e| KernelError::Persistence {
-        path: fantastic_dir.clone(),
-        source: e,
-    })?;
+    // A LOCKLESS boot (`--help`, `reflect`) creates nothing on disk; the lock
+    // lives in `.fantastic`, so a locked one makes the dir first.
     if opts.acquire_lock {
+        std::fs::create_dir_all(&fantastic_dir).map_err(|e| KernelError::Persistence {
+            path: fantastic_dir.clone(),
+            source: e,
+        })?;
         lock::acquire(workdir)?;
     }
 
@@ -136,10 +155,23 @@ fn boot_disk(
     // missing or unparseable root `agent.yaml` does not hide the children under
     // `agents/` (python `read_tree`, 2026-09-20) — they are parented to the root
     // id the seed below mints.
-    let mut records = read_tree(&fantastic_dir, &opts.root_id)?;
+    let mut records = if fantastic_dir.is_dir() {
+        read_tree(&fantastic_dir, &opts.root_id)?
+    } else {
+        Vec::new()
+    };
     let seeded = !records
         .iter()
         .any(|r| r.get("parent_id").is_none_or(Value::is_null));
+    let root_file = fantastic_dir.join(persistence::RECORD_FILE);
+    if seeded && root_file.exists() {
+        // A root record that is THERE but did not parse is never written over —
+        // the seed lost its other keys (python `main._bootstrap`; audit 2026-10-14).
+        return Err(KernelError::InvalidSnapshot(format!(
+            "{} is unreadable — fix or remove it; the root is not re-seeded over it",
+            root_file.display()
+        )));
+    }
     if seeded {
         let mut seed = Map::new();
         seed.insert("id".to_string(), Value::from(opts.root_id.clone()));
@@ -161,7 +193,9 @@ fn boot_disk(
         .unwrap_or_default();
     // FOLDER BUNDLES before the tree loads, so an instance's handler resolves
     // (python main._bootstrap → kernel_state.load_bundles).
-    crate::folders::load_bundles(kernel, &fantastic_dir);
+    if let Some(b) = kernel.bundles.get(&root_hm) {
+        b.cold_boot(kernel, &fantastic_dir);
+    }
     kernel.load_records(records)?;
     // The root weak-loads like any record: a runtime without its loader bundle
     // has no tree to run. Said, not papered over with a root it cannot serve.
@@ -176,11 +210,14 @@ fn boot_disk(
     // its order (`can_call, callable_by`), and the loader's `boot` appends
     // `guid` after them. COLD primitive — this runs before any agent (and thus
     // any `file_bridge` store provider) exists, so it cannot route through one.
-    if seeded && opts.storage.is_disk() {
-        persistence::write_record_at(
-            &fantastic_dir.join(persistence::RECORD_FILE),
-            &root.record(),
-        )?;
+    // Written only under the dir's lock: a lockless boot hands it back as
+    // `pending_seed`, for the mode that takes the lock to write
+    // ([`BootedKernel::write_seed`]; python `Kernel.pending_seed`).
+    let mut pending_seed = (seeded && opts.storage.is_disk()).then(|| (root_file, root.record()));
+    if opts.acquire_lock {
+        if let Some((path, rec)) = pending_seed.take() {
+            persistence::write_record_at(&path, &rec)?;
+        }
     }
     let loaded: Vec<AgentId> = kernel
         .agent_ids()
@@ -190,6 +227,7 @@ fn boot_disk(
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
         loaded,
+        pending_seed,
     })
 }
 
@@ -262,6 +300,7 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
     Ok(BootedKernel {
         kernel: Arc::clone(kernel),
         loaded: Vec::new(),
+        pending_seed: None,
     })
 }
 

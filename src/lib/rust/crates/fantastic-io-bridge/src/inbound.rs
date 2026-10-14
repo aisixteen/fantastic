@@ -103,6 +103,9 @@ async fn inbound_call(
     if let Some(id) = item.get("id").filter(|v| !v.is_null()) {
         onward = onward.with_raw_id(id.clone());
     }
+    if let Some(marks) = item.get("secret").filter(|v| !v.is_null()) {
+        onward = onward.with_raw_secret(marks.clone());
+    }
     if let Some(b) = onward_body {
         onward = onward.with_binary(b.path, b.bytes);
     }
@@ -174,7 +177,22 @@ pub async fn hand_in(
     payload: Value,
     body: Option<Blob>,
 ) -> Outcome {
+    // An inbound call's `secret` marks (paths into ITS payload) mark the hand-in
+    // too: the leg's own call row holds the item, so its values are shown as the
+    // onward call's are (`fantastic_kernel::secret`).
+    let marks: Option<Vec<String>> = payload
+        .get("item")
+        .and_then(|i| i.get("secret"))
+        .and_then(Value::as_array)
+        .and_then(|a| {
+            a.iter()
+                .map(|m| m.as_str().map(|m| format!("item.payload.{m}")))
+                .collect()
+        });
     let mut item = Item::new(leg.clone(), payload);
+    if let Some(m) = marks {
+        item = item.with_secret(m);
+    }
     if let Some(b) = body {
         item = item.with_binary(b.path, b.bytes);
     }

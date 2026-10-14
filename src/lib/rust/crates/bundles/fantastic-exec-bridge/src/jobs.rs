@@ -61,13 +61,9 @@ pub struct Job {
     pub lines: u64,
     /// The most recent output line.
     pub last_line: String,
-    /// Collected stdout (newlines preserved).
-    pub stdout: String,
-    /// Collected stderr (newlines preserved).
-    pub stderr: String,
     /// THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
-    /// `(n, stream, line)`, the last `LINE_RING` bytes — what `tail`/`grep` read
-    /// while the job runs (its stdout/stderr land only when it ends).
+    /// `(n, stream, line)`, the last `LINE_RING` bytes — what `tail`/`grep` read,
+    /// running or ended. The job's only copy of its output (audit 2026-10-14).
     pub line_ring: std::collections::VecDeque<(u64, String, String)>,
     /// Bytes held in `line_ring` (each line + its newline).
     pub line_ring_bytes: usize,
@@ -140,10 +136,6 @@ pub fn snap(job_id: TaskId, j: &Job, full: bool) -> Value {
         v["rows"] = json!(rows);
     }
     if full {
-        if j.pty.is_none() {
-            v["stdout"] = json!(j.stdout);
-            v["stderr"] = json!(j.stderr);
-        }
         v["cwd"] = j.cwd.clone();
     }
     v
@@ -190,9 +182,8 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     stream: &'static str,
     kernel: Arc<Kernel>,
     counter: Arc<Mutex<Counter>>,
-) -> Result<String, ()> {
+) -> Result<(), ()> {
     let mut rd = BufReader::with_capacity(LINE_LIMIT, reader);
-    let mut collected = String::new();
     loop {
         // One line, assembled a buffered chunk at a time so the LIMIT is checked as
         // the data arrives — the whole point of it is that an unterminated stream is
@@ -225,10 +216,9 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
             }
         }
         if raw.is_empty() {
-            return Ok(collected);
+            return Ok(());
         }
         let text = String::from_utf8_lossy(&raw).into_owned();
-        collected.push_str(&text);
         let line = text.trim_end_matches('\n').to_string();
         crate::monitor::feed_line(&owner, job_id, &line);
         let n = {
@@ -253,7 +243,7 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
             )
             .await;
         if eof {
-            return Ok(collected);
+            return Ok(());
         }
     }
 }
@@ -356,7 +346,7 @@ pub async fn pump(
                     )
                     .await
                 }
-                None => Ok(String::new()),
+                None => Ok(()),
             }
         },
         async {
@@ -372,42 +362,42 @@ pub async fn pump(
                     )
                     .await
                 }
-                None => Ok(String::new()),
+                None => Ok(()),
             }
         }
     );
-    // py `out, err = await asyncio.gather(...)` under `except Exception as e: err =
-    // f"[pump error] {e}"`: a raise from EITHER pipe leaves `out` empty and puts the
-    // message in `err`, whatever the other pipe had read (A4.14).
-    let (o, e) = match (ro, re) {
-        (Ok(o), Ok(e)) => (o, e),
-        _ => (String::new(), format!("[pump error] {LINE_LIMIT_ERROR}")),
+    // py `except Exception as e: fault = f"[pump error] {e}"`: a raise from EITHER
+    // pipe is the job's `error` (A4.14).
+    let fault = match (ro, re) {
+        (Ok(()), Ok(())) => None,
+        _ => Some(format!("[pump error] {LINE_LIMIT_ERROR}")),
     };
     // py `code = await process.wait()`: a signal death is `-signal`, not `None`.
     let code = child.wait().await.ok().and_then(exit_code);
     finalize.disarm();
-    {
+    let (lines, last_line) = {
         let mut g = jobs();
-        if let Some(j) = g.get_mut(&(owner.clone(), job_id)) {
-            j.exit_code = code;
-            j.stdout = o.clone();
-            j.stderr = e.clone();
-            j.status = if j.status == "stopping" {
-                "stopped".to_string()
-            } else if code == Some(0) {
-                "done".to_string()
-            } else {
-                "failed".to_string()
-            };
+        match g.get_mut(&(owner.clone(), job_id)) {
+            None => (0, String::new()),
+            Some(j) => {
+                j.exit_code = code;
+                j.status = if j.status == "stopping" {
+                    "stopped".to_string()
+                } else if code == Some(0) {
+                    "done".to_string()
+                } else {
+                    "failed".to_string()
+                };
+                (j.lines, j.last_line.clone())
+            }
         }
+    };
+    let mut done = json!({"type": "job_done", "job_id": job_id.get(), "exit_code": code,
+                          "ok": code == Some(0), "lines": lines, "last_line": last_line});
+    if let Some(f) = fault {
+        done["error"] = json!(f);
     }
-    kernel
-        .emit(
-            &owner,
-            json!({"type": "job_done", "job_id": job_id.get(), "exit_code": code,
-                   "ok": code == Some(0), "stdout": o, "stderr": e}),
-        )
-        .await;
+    kernel.emit(&owner, done).await;
 }
 
 /// python's `Process.returncode`: the exit status, or `-N` when a signal killed it.
@@ -442,4 +432,21 @@ pub fn teardown(j: &mut Job) {
     // in `kernel.inboxes`, and detached drain tasks. `notify_one` leaves a permit
     // if the relay is mid-`send`, so the signal is never missed.
     j.stop.notify_one();
+}
+
+/// TEST ONLY: what a job printed on `stream`, from its line ring — one line per
+/// entry, each with its newline (the ring keeps lines, not raw text).
+#[cfg(test)]
+pub(crate) fn printed(owner: &AgentId, done: &Value, stream: &str) -> String {
+    let jid = TaskId(done["job_id"].as_i64().expect("job_done names its job"));
+    jobs()
+        .get(&(owner.clone(), jid))
+        .map(|j| {
+            j.line_ring
+                .iter()
+                .filter(|(_, s, _)| s == stream)
+                .map(|(_, _, l)| format!("{l}\n"))
+                .collect()
+        })
+        .unwrap_or_default()
 }

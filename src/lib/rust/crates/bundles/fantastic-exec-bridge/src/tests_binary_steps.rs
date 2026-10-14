@@ -265,7 +265,7 @@ async fn a_job_round_trips_a_literal_key_through_the_kernel() {
         .expect("no job_done");
     assert_eq!(done["exit_code"], 0, "{done}");
     assert!(
-        done["stdout"]
+        json!(crate::jobs::printed(&a, &done, "stdout"))
             .as_str()
             .unwrap_or("")
             .contains("GOT ['a', 'a.b', 'type'] True {'y': 'kept'}"),

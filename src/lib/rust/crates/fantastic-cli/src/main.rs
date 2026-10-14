@@ -376,9 +376,8 @@ async fn dispatch(
     let workdir = std::env::current_dir()?;
 
     // Mode 1: `help` / `-h` / `--help` as the FIRST word — later words are
-    // IGNORED (`P/kernel/modes/dispatch.py:19-21`). python has already built the
-    // kernel by now, so a virgin dir is seeded before the cheatsheet prints; the
-    // bootstrap here takes no lock, so it works under a running daemon.
+    // IGNORED (`P/kernel/modes/dispatch.py:19-21`). The bootstrap here takes no
+    // lock, so it writes nothing and works under a running daemon.
     if matches!(
         args.first().map(String::as_str),
         Some("-h") | Some("--help") | Some("help")
@@ -437,10 +436,7 @@ async fn dispatch(
     if args.first().map(String::as_str) == Some("init") {
         let rest = &args[1..];
         if rest.len() < 2 {
-            // python builds the kernel in `main` BEFORE `dispatch_argv` runs, so
-            // even the usage error leaves the seeded root record behind — the
-            // readme seed above writes `readme.md` + `docs/` but never
-            // `.fantastic/agent.yaml` (measured: 19 created paths vs rust's 18).
+            // lockless: the usage error writes nothing
             let opts = BootstrapOptions::one_shot(&workdir);
             let booted = bootstrap::bootstrap(register_default_bundles(), opts)?;
             apply_ledger_cap(&booted, cap);
@@ -595,6 +591,9 @@ async fn dispatch(
     // conflict." `?` surfaces `KernelError::LockHeld` through main()'s
     // `[kernel] {e}` printer (C81).
     lock::acquire(&workdir)?;
+    // A fresh root's record lands only now, under the lock.
+    let mut booted = booted;
+    booted.write_seed()?;
 
     // THE START SEQUENCE — the root's memory store first, then everyone (python
     // `kernel.start(boot_all=True)`). A root with no `memory_store_id` does not

@@ -4,6 +4,7 @@
 #if os(macOS)
     import FantasticJSON
     import FantasticKernel
+import FantasticKernelState
     import Foundation
     import OrderedCollections
     import Testing
@@ -223,6 +224,22 @@
             #expect(second["echo"].asString == "v2:a", "\(second)")
             #expect(second["pid"] != first["pid"])
             await b.delete("sw_r1")
+        }
+
+        /// A `bundles/<name>` that links OUTSIDE the running dir is refused by the
+        /// clamp, never loaded (python reads through `fs`; audit 2026-10-14).
+        @Test func aBundleFolderLinkingOutsideIsRefused() async throws {
+            let b = Box()
+            let real = try b.bundle("sw_escape_src")
+            let away = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "pyagent_away_\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: away) }
+            try FileManager.default.moveItem(at: real, to: away)
+            try FileManager.default.createSymbolicLink(
+                at: b.root.appendingPathComponent("bundles/sw_escape"), withDestinationURL: away)
+            let err = Folders.loadBundle(kernel: b.kernel, root: b.root, name: "sw_escape")
+            #expect(err?.contains("escapes root") == true, "\(String(describing: err))")
+            #expect(b.kernel.bundles.get("sw_escape") == nil)
         }
 
         @Test func aFailedReloadKeepsThePreviousLoadRunning() async throws {

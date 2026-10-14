@@ -32,13 +32,29 @@ struct FsModeTests {
         #expect(Int(st.st_mode) & 0o777 == 0o600)
         #expect((st.st_mode & S_IFMT) == S_IFREG)
         #expect(st.st_uid == getuid())
-        // a rewrite over a stale tmp keeps the mode (the tmp is unlinked, O_EXCL)
-        FileManager.default.createFile(atPath: d + "/s/secret.yaml.tmp", contents: Data("x".utf8))
-        chmod(d + "/s/secret.yaml.tmp", 0o644)
+        // a rewrite keeps the mode, and leaves no tmp behind
         try fsWriteBytes(d, "s/secret.yaml", Data("k: w\n".utf8), base: d, mode: 0o600)
         #expect(Int(own(d + "/s/secret.yaml").st_mode) & 0o777 == 0o600)
         #expect(try fsReadText(d, "s/secret.yaml", base: d) == "k: w\n")
-        #expect(!FileManager.default.fileExists(atPath: d + "/s/secret.yaml.tmp"))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: d + "/s") == ["secret.yaml"])
+    }
+
+    /// A symlink at `<name>.tmp` pointing outside the root is never written
+    /// through: each write stages in a fresh, exclusively created tmp (audit
+    /// 2026-10-14).
+    @Test func anAtomicWriteNeverFollowsAPlantedTmpLink() throws {
+        let d = tmp()
+        defer { try? FileManager.default.removeItem(atPath: d) }
+        let outside = d + "/outside.txt"
+        FileManager.default.createFile(atPath: outside, contents: Data("keep".utf8))
+        let root = d + "/root"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        symlink(outside, root + "/f.txt.tmp")
+        for mode: mode_t? in [nil, 0o600] {
+            try fsWriteBytes(root, "f.txt", Data("new".utf8), base: d, mode: mode)
+            #expect(try String(contentsOfFile: outside, encoding: .utf8) == "keep")
+            #expect(try fsReadText(root, "f.txt", base: d) == "new")
+        }
     }
 
     /// F5 (audit 2026-10-03): `fsReadPrivate` opens ONCE (`O_NOFOLLOW`) and

@@ -437,11 +437,10 @@ struct RootBootTests {
             to: dir.appendingPathComponent("agent.yaml"), atomically: true, encoding: .utf8)
     }
 
-    /// C56 — python's `read_tree` returns `[]` when the root `agent.yaml` is
-    /// MISSING **or not JSON**, and the bootstrap then seeds a fresh root,
-    /// overwrites the file, and hydrates NO children on that boot. Swift used to
-    /// overwrite the corrupt root and hydrate the children anyway.
-    @Test func testCorruptRootRecordReseedsAndKeepsChildren() async throws {
+    /// A root record that is THERE but does not parse is never written over: the
+    /// start refuses and the file stays as it was (python `main._bootstrap`;
+    /// audit 2026-10-14).
+    @Test func anUnreadableRootRecordRefusesTheStartAndIsLeftAlone() async throws {
         let tmp = makeTempDir()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let dot = tmp.appendingPathComponent(".fantastic")
@@ -449,16 +448,26 @@ struct RootBootTests {
         try "{not json".write(
             to: dot.appendingPathComponent("agent.yaml"), atomically: true, encoding: .utf8)
         try seedChild(tmp, "orphan")
+        await #expect(throws: (any Error).self) { _ = try await startKernel(workdir: tmp.path) }
+        #expect(
+            try String(contentsOf: dot.appendingPathComponent("agent.yaml"), encoding: .utf8)
+                == "{not json")
+    }
 
+    /// A MISSING root record reseeds the CONSTRUCTED root (the grant baseline in
+    /// its order, no guid yet — the loader's boot mints that) and keeps the
+    /// children; the record lands only when the lock is held (`takeSeed`).
+    @Test func aMissingRootRecordReseedsAndKeepsChildren() async throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dot = tmp.appendingPathComponent(".fantastic")
+        try seedChild(tmp, "orphan")
         let kernel = try await startKernel(workdir: tmp.path)
         #expect(kernel.root?.id.value == "kernel_state")
-        #expect(kernel.root?.handlerModule == "kernel_state.tools")
         #expect(kernel.agent(AgentId("orphan")) != nil, "children survive a reseed (python 2026-09-20)")
-        // The file was overwritten with the CONSTRUCTED root: the grant baseline
-        // in its order, and no guid yet (the loader's boot mints that).
+        #expect(!FileManager.default.fileExists(atPath: dot.appendingPathComponent("agent.yaml").path))
+        try kernel.takeSeed()
         let parsed = try YamlIO.load(String(decoding: try Data(contentsOf: dot.appendingPathComponent("agent.yaml")), as: UTF8.self))
-        #expect(parsed["id"].asString == "kernel_state")
-        #expect(parsed["handler_module"].asString == "kernel_state.tools")
         #expect(
             parsed.asObject.map { Array($0.keys) }
                 == ["id", "handler_module", "can_call", "callable_by"], "\(parsed.serialize())")
@@ -472,7 +481,7 @@ struct RootBootTests {
         let fm = FileManager.default
         let dot = tmp.appendingPathComponent(".fantastic")
         for _ in 0..<2 {
-            _ = try await startKernel(workdir: tmp.path)
+            try await startKernel(workdir: tmp.path).takeSeed()
             #expect(fm.fileExists(atPath: dot.appendingPathComponent("agent.yaml").path))
             #expect(!fm.fileExists(atPath: dot.appendingPathComponent("readme.md").path))
             #expect(!fm.fileExists(atPath: dot.appendingPathComponent("docs").path))
@@ -480,7 +489,7 @@ struct RootBootTests {
     }
 
     /// A `.fantastic` that cannot be made, or a root record that cannot be
-    /// written, FAILS the start, as python's seed raises. Both were `try?`: the
+    /// written, FAILS the start (the seed under the lock), as python's seed raises. Both were `try?`: the
     /// kernel booted "fine" with an unpersisted root and minted a new guid every
     /// start, breaking peers pinned to it (audit 2026-10-03, ARCH2-9).
     @Test func aFailedColdSeedFailsTheStart() async throws {
@@ -489,7 +498,9 @@ struct RootBootTests {
         defer { try? fm.removeItem(at: blockedDir) }
         try "a FILE where .fantastic goes".write(
             to: blockedDir.appendingPathComponent(".fantastic"), atomically: true, encoding: .utf8)
-        await #expect(throws: (any Error).self) { _ = try await startKernel(workdir: blockedDir.path) }
+        await #expect(throws: (any Error).self) {
+            try await startKernel(workdir: blockedDir.path).takeSeed()
+        }
 
         let blockedRecord = makeTempDir()
         defer { try? fm.removeItem(at: blockedRecord) }

@@ -528,6 +528,7 @@ pub(crate) async fn ws_loop(
         // python `frame.get("id", "")` — kept RAW (any JSON type) and always
         // echoed; only a non-empty STRING names the execution.
         let fid = frame.get("id").cloned().unwrap_or_else(|| json!(""));
+        let secret = frame.get("secret").cloned();
         let kernel = Arc::clone(&state.kernel);
         let leg = leg_agent_id.clone();
         let out = out_tx.clone();
@@ -563,6 +564,10 @@ pub(crate) async fn ws_loop(
                     item.insert("payload".into(), payload);
                     if let Some(s) = fid.as_str().filter(|s| !s.is_empty()) {
                         item.insert("id".into(), json!(s));
+                    }
+                    // paths into `payload`, shown as `[secret]`
+                    if let Some(m) = secret {
+                        item.insert("secret".into(), m);
                     }
                     // ONLY A BINARY FRAME OVERWRITES THE KEY. python's
                     // `payload[field] = body` runs where a body EXISTS; a TEXT

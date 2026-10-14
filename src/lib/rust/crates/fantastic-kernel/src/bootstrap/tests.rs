@@ -269,7 +269,7 @@ fn root_meta_order_is_grants_then_guid() {
 /// C56: a root record that is MISSING or not JSON reseeds like a virgin dir and
 /// STILL hydrates the children under `agents/` (python `read_tree`, 2026-09-20).
 #[test]
-fn a_missing_or_corrupt_root_record_reseeds_and_keeps_children() {
+fn a_missing_root_record_reseeds_and_keeps_children() {
     let tmp = TempDir::new().unwrap();
     let fdir = tmp.path().join(".fantastic");
     std::fs::create_dir_all(fdir.join("agents/child_a")).unwrap();
@@ -278,8 +278,6 @@ fn a_missing_or_corrupt_root_record_reseeds_and_keeps_children() {
         r#"{"id":"child_a","handler_module":"noop.tools"}"#,
     )
     .unwrap();
-    // Not JSON at all — python swallows the decode error and returns `[]`.
-    std::fs::write(fdir.join("agent.yaml"), "{").unwrap();
     let mut reg = with_loader(BundleRegistry::new());
     reg.register("noop.tools", Noop);
     let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
@@ -289,12 +287,33 @@ fn a_missing_or_corrupt_root_record_reseeds_and_keeps_children() {
         vec![AgentId::from("child_a")],
         "children survive a reseed"
     );
-    assert!(booted.kernel.agents.contains_key(&AgentId::from("child_a")));
-    // The file was OVERWRITTEN with the fresh root, not left corrupt.
     let raw = std::fs::read_to_string(fdir.join("agent.yaml")).unwrap();
     let rec: Value = crate::yaml_io::load(&raw).expect("reseeded record parses");
     assert_eq!(rec["id"], json!("kernel_state"));
     shutdown(tmp.path()).unwrap();
+}
+
+/// A root record that is THERE but does not parse is never written over: the
+/// boot refuses and the file stays as it was (python `main._bootstrap`; audit
+/// 2026-10-14).
+#[test]
+fn an_unreadable_root_record_refuses_the_boot_and_is_left_alone() {
+    let tmp = TempDir::new().unwrap();
+    let fdir = tmp.path().join(".fantastic");
+    std::fs::create_dir_all(&fdir).unwrap();
+    std::fs::write(fdir.join("agent.yaml"), "{").unwrap();
+    let Err(e) = bootstrap(
+        with_loader(BundleRegistry::new()),
+        BootstrapOptions::daemon(tmp.path()),
+    ) else {
+        panic!("a corrupt root record booted");
+    };
+    assert!(e.to_string().contains("unreadable"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(fdir.join("agent.yaml")).unwrap(),
+        "{"
+    );
+    let _ = shutdown(tmp.path());
 }
 
 /// THE COUNTER COMES BACK WITH THE GUID: a root record's reserved bound

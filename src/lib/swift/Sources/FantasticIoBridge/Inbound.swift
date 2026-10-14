@@ -84,6 +84,7 @@ public enum Inbound {
         if let id = it["id"], id != .null { item.rawId = id }
         if let t = it["timeout"], t != .null { item.rawTimeout = t }
         if let r = it["retries"], r != .null { item.rawRetries = r }
+        if let m = it["secret"], m != .null { item.secret = m }
         if let b = innerBody {
             item.binary = b
         } else if rawReply || body != nil {
@@ -134,6 +135,16 @@ public enum Inbound {
     public static func handIn(
         _ kernel: Kernel, legId: AgentId, _ payload: JSON, binary: Blob? = nil
     ) async -> Outcome {
-        await kernel.send([Item(legId, payload, binary: binary, rawReply: binary == nil)])[0]
+        var item = Item(legId, payload, binary: binary, rawReply: binary == nil)
+        // An inbound call's `secret` marks (paths into ITS payload) mark the
+        // hand-in too: the leg's own call row holds the item, so its values are
+        // shown as the onward call's are (`Secret`).
+        if let marks = payload["item"]["secret"].asArray {
+            let ms = marks.compactMap(\.asString)
+            if ms.count == marks.count {
+                item.secret = .array(ms.map { .string("item.payload.\($0)") })
+            }
+        }
+        return await kernel.send([item])[0]
     }
 }

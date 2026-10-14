@@ -90,9 +90,7 @@ async def test_load_absent_is_null_not_error(seeded_kernel, store_agent):
     assert "error" not in r
 
 
-@pytest.mark.parametrize(
-    "bad", ["agent.yaml", "../escape", "sub/dir.yaml", ".hidden"]
-)
+@pytest.mark.parametrize("bad", ["agent.yaml", "../escape", "sub/dir.yaml", ".hidden"])
 async def test_guard_rejects_dangerous_names(seeded_kernel, store_agent, bad):
     aid = await _mk_target(seeded_kernel)
     w = (
@@ -111,6 +109,18 @@ async def test_guard_rejects_dangerous_names(seeded_kernel, store_agent, bad):
         )
     )[0]["result"]
     assert "error" in w, f"guard must reject {bad!r}: {w!r}"
+
+
+@pytest.mark.parametrize("verb", ["persist_blob", "load_blob"])
+@pytest.mark.parametrize("bad", ["../bundles/x", "a/b", "..", ".hidden"])
+async def test_guard_rejects_dangerous_agent_ids(seeded_kernel, store_agent, verb, bad):
+    """`agent_id` becomes a directory (`agents/<agent_id>/`): `../bundles/x` would
+    reach a folder bundle's `bundle.yaml` — refused before any store is asked."""
+    payload = {"type": verb, "agent_id": bad, "name": "bundle.yaml", "content": "x"}
+    r = (await seeded_kernel.send([{"target": "kernel_state", "payload": payload}]))[0][
+        "result"
+    ]
+    assert r.get("arg") == "agent_id", f"{verb} must refuse {bad!r}: {r!r}"
 
 
 async def test_no_store_failfasts_no_ram(seeded_kernel):

@@ -315,13 +315,17 @@ struct CLIBootstrapTests {
         #expect(kernel.root?.metaValue(forKey: "guid")?.asString == "deadbeef")
     }
 
-    @Test func aVirginDirIsSeeded() async throws {
+    /// A lockless boot writes nothing; the seed lands once the lock is held
+    /// (`takeSeed`; audit 2026-10-14).
+    @Test func aVirginDirIsSeededOnlyUnderTheLock() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("fantastic-virgin-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        _ = try await FantasticCLI.bootDiskBacked(cwd: dir.path)
+        let kernel = try await FantasticCLI.bootDiskBacked(cwd: dir.path)
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent(".fantastic").path))
+        try kernel.takeSeed()
         #expect(
             FileManager.default.fileExists(
                 atPath: dir.appendingPathComponent(".fantastic/agent.yaml").path))
@@ -404,13 +408,10 @@ struct CLIBootstrapTests {
         #expect(kernel.agent(AgentId("static_loader")) != nil)
     }
 
-    // A14.3, the USAGE half: python builds the kernel BEFORE `dispatch_argv`
-    // looks at argv, so `fantastic init` (no args) and `fantastic init
-    // static_loader` (one arg) print the usage, exit 2 — AND STILL LEAVE THE
-    // SEEDED ROOT BEHIND. Measured in the acceptance capture
-    // (`cli/cli/init_no_args.json`, `cli/cli/init_usage.json`): python and
-    // rust create the root record, swift used to create none.
-    @Test func initUsageStillSeedsTheRoot() async throws {
+    // A14.3, the USAGE half: `fantastic init` (no args) and `fantastic init
+    // static_loader` (one arg) print the usage and exit 2. The usage error takes
+    // no lock, so it writes nothing (audit 2026-10-14, all three runtimes).
+    @Test func initUsageWritesNothing() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("fantastic-init-usage-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -419,7 +420,6 @@ struct CLIBootstrapTests {
         let kernel = await FantasticCLI.initUsage(cwd: dir.path)
         await kernel.shutdown()
 
-        // The seeded root is the record alone — no readme or docs copy.
         // Resolved on both sides: on macOS the temp dir is a `/var` symlink and
         // the enumerator hands back the `/private/var` spelling.
         let root = dir.resolvingSymlinksInPath()
@@ -430,6 +430,7 @@ struct CLIBootstrapTests {
                 u.resolvingSymlinksInPath().path
                     .replacingOccurrences(of: root.path + "/", with: ""))
         }
-        #expect(seeded == [".fantastic", ".fantastic/agent.yaml"], "\(seeded.sorted())")
+        // a lockless usage error writes nothing (audit 2026-10-14)
+        #expect(seeded.isEmpty, "\(seeded.sorted())")
     }
 }

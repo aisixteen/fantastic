@@ -17,7 +17,7 @@ task: >-
   You cannot know this value without computing it. Then say DONE.
 
 # `compute` is `exec_bridge` on every runtime: start a background job, then poll
-# `status` for its stdout — that takes more turns than a single call.
+# `status` until it ends and `tail` its output — that takes more turns than a single call.
 limits:
   max_turns: 24
   idle_seconds: 240

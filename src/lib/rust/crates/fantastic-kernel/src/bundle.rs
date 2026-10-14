@@ -240,6 +240,12 @@ pub trait Bundle: Send + Sync {
         Ok(())
     }
 
+    /// THE ROOT LOADER'S COLD PASS, before the tree loads — python
+    /// `main._bootstrap` → `kernel_state.load_bundles`: the root's bundle reads
+    /// what the kernel needs registered first (its folder bundles) from its own
+    /// root, `fantastic_dir`. Default: nothing.
+    fn cold_boot(&self, _kernel: &Kernel, _fantastic_dir: &std::path::Path) {}
+
     /// Can a FOLDER BUNDLE (`<root>/bundles/<name>/bundle.yaml`, `base: <this
     /// bundle's name>`) extend this bundle? Python: the module exposes
     /// `folder_bundle`. Default: no (owner, 2026-10-08).

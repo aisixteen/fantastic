@@ -416,6 +416,8 @@ struct Dispatch {
     /// operator send. Every attempt's mirrors and its handler's `current_origin`
     /// read it.
     caller: Option<AgentId>,
+    /// The item's `secret` marks (`crate::secret`), carried to every attempt.
+    marks: Arc<Vec<String>>,
     /// A caller-NAMED `kernel` reflect — python's flags-done fast path: the
     /// FIRST attempt is a bare identity read with the flags applied (no task
     /// row, no fanout, no `_in_flight`, and no enforced deadline: `cancel_task`
@@ -719,6 +721,11 @@ impl Kernel {
             Ok(v) => v,
             Err(r) => return Launched::Settled(Outcome::refused(r)),
         };
+        // 6b. secret marks — paths into the payload, shown as `[secret]`.
+        let marks = match crate::secret::check(item.secret.as_ref()) {
+            Ok(m) => Arc::new(m),
+            Err(r) => return Launched::Settled(Outcome::refused(r)),
+        };
         // 7. killed — A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks
         // the whole subtree before it aborts anything, because `on_cancel`
         // hooks await — so a doomed handler gets scheduling passes on its way
@@ -745,7 +752,10 @@ impl Kernel {
         // `Agent._send` (`kernel/_agent.py`).
         if self.draining() && !in_shutdown() {
             let control = self.is_control(item.target.as_str(), &item.payload);
-            let inside_live_work = current_task().is_some_and(|t| self.tasks.contains(&t));
+            // a live DISPATCH, or a keepalive fork; any other fork starts new
+            // work — a ws call used to pass where the same REST call was refused
+            // (audit 2026-10-14)
+            let inside_live_work = current_task().is_some_and(|t| self.tasks.drain_admits(&t));
             if !control && !inside_live_work {
                 return Launched::Settled(Outcome::refused(crate::refusal::refusal(
                     crate::refusal::DRAINING,
@@ -882,7 +892,10 @@ impl Kernel {
                 );
                 row.insert(
                     "payload".to_string(),
-                    taped_payload(&item.payload, item.binary.as_ref()),
+                    taped_payload(
+                        &crate::secret::shown(&item.payload, &marks),
+                        item.binary.as_ref(),
+                    ),
                 );
                 row.insert("named".to_string(), Value::from(name.is_some()));
                 row.insert("retries".to_string(), Value::from(retries));
@@ -893,6 +906,10 @@ impl Kernel {
                 );
                 if let Some(n) = name.as_deref() {
                     row.insert("name".to_string(), Value::from(n));
+                }
+                if !marks.is_empty() {
+                    // the marks are paths, not values
+                    row.insert("secret".to_string(), json!(marks.as_ref()));
                 }
                 let _ = self.rows_put(&target.id, row);
             }
@@ -907,6 +924,7 @@ impl Kernel {
             task_id,
             binary: item.binary,
             caller,
+            marks,
             // A JOIN never reaches here; a fresh NAMED `kernel` reflect does.
             named_fast_reflect: kernel_reflect,
         }))
@@ -969,6 +987,7 @@ impl Kernel {
             task_id,
             binary,
             caller,
+            marks,
             named_fast_reflect,
         } = d;
 
@@ -1017,6 +1036,7 @@ impl Kernel {
                     next_pid,
                     binary.clone(),
                     caller.clone(),
+                    Arc::clone(&marks),
                 )
                 .await;
             // Universal post-process, PER ATTEMPT (python applies it inside
@@ -1108,6 +1128,7 @@ impl Kernel {
                 TaskId(pid),
                 None,
                 caller,
+                Arc::new(Vec::new()),
             )
             .await;
         (reply, status)
@@ -1150,11 +1171,14 @@ impl Kernel {
         if let Some(b) = &body {
             let _ = b.take(&mut for_handler);
         }
-        let run = CURRENT_ORIGIN.scope(
-            None,
-            CURRENT_SENDER.scope(
-                Some(agent.id.clone()),
-                dispatch(Arc::clone(self), Arc::clone(agent), for_handler, body),
+        let run = crate::secret::CURRENT_SECRET.scope(
+            Arc::new(Vec::new()),
+            CURRENT_ORIGIN.scope(
+                None,
+                CURRENT_SENDER.scope(
+                    Some(agent.id.clone()),
+                    dispatch(Arc::clone(self), Arc::clone(agent), for_handler, body),
+                ),
             ),
         );
         let (result, status, body) = match std::panic::AssertUnwindSafe(run).catch_unwind().await {
@@ -1320,6 +1344,7 @@ impl Kernel {
         task_id: TaskId,
         binary: Option<crate::outcome::Blob>,
         caller: Option<AgentId>,
+        marks: Arc<Vec<String>>,
     ) -> (Value, Status, Option<crate::outcome::Blob>) {
         // The pid was minted in the SYNCHRONOUS launch phase and IS the ledger
         // key — minting a second one here would split the two apart, so the row
@@ -1352,6 +1377,8 @@ impl Kernel {
         // everything else — the task row above, the deadline, the settle.
         let _in_flight = (!target.is_remote()).then(|| InFlightGuard::enter(self, target));
         if !target.is_remote() {
+            // A MARKED call is mirrored as shown (`crate::secret`).
+            let payload = &crate::secret::shown(payload, &marks);
             let item = match binary.clone() {
                 // A REQUEST BODY rides at ITS path — where python's own payload
                 // dict holds it, in the caller's position when the payload names
@@ -1408,40 +1435,43 @@ impl Kernel {
                 STATE_QUIET
                     .scope(
                         quiet,
-                        CURRENT_ORIGIN.scope(
-                            origin,
-                            CURRENT_SENDER.scope(
-                                Some(sender),
-                                CURRENT_TASK.scope(
-                                    tid,
-                                    CURRENT_KILLED.scope(killed, async move {
-                                        tokio::select! {
-                                            biased;
-                                            // Stopped: DROP the dispatch future — the
-                                            // abort half of `cancel`.
-                                            _ = cancel.notified() => None,
-                                            // A request body rides under this same
-                                            // row/ledger/timeout, and ANY REPLY BODY
-                                            // comes back with it (C37): the batch IS
-                                            // the carrier for bytes, so any verb
-                                            // through `send` returns its chunk the
-                                            // way python's reply dict holds one.
-                                            v = async {
-                                                // ANOTHER KERNEL'S AGENT: the call
-                                                // goes to its peer's route, bytes
-                                                // and all; no handler runs here.
-                                                // Its reply is that kernel's answer,
-                                                // relayed verbatim: never a raise here.
-                                                if let Some(remote) = tgt.remote.as_ref() {
-                                                    return Ok(crate::peers::call_peer(
-                                                        remote, payload, binary,
-                                                    )
-                                                    .await);
-                                                }
-                                                dispatch(kernel, tgt, payload, binary).await
-                                            } => Some(v),
-                                        }
-                                    }),
+                        crate::secret::CURRENT_SECRET.scope(
+                            marks,
+                            CURRENT_ORIGIN.scope(
+                                origin,
+                                CURRENT_SENDER.scope(
+                                    Some(sender),
+                                    CURRENT_TASK.scope(
+                                        tid,
+                                        CURRENT_KILLED.scope(killed, async move {
+                                            tokio::select! {
+                                                biased;
+                                                // Stopped: DROP the dispatch future — the
+                                                // abort half of `cancel`.
+                                                _ = cancel.notified() => None,
+                                                // A request body rides under this same
+                                                // row/ledger/timeout, and ANY REPLY BODY
+                                                // comes back with it (C37): the batch IS
+                                                // the carrier for bytes, so any verb
+                                                // through `send` returns its chunk the
+                                                // way python's reply dict holds one.
+                                                v = async {
+                                                    // ANOTHER KERNEL'S AGENT: the call
+                                                    // goes to its peer's route, bytes
+                                                    // and all; no handler runs here.
+                                                    // Its reply is that kernel's answer,
+                                                    // relayed verbatim: never a raise here.
+                                                    if let Some(remote) = tgt.remote.as_ref() {
+                                                        return Ok(crate::peers::call_peer(
+                                                            remote, payload, binary,
+                                                        )
+                                                        .await);
+                                                    }
+                                                    dispatch(kernel, tgt, payload, binary).await
+                                                } => Some(v),
+                                            }
+                                        }),
+                                    ),
                                 ),
                             ),
                         ),

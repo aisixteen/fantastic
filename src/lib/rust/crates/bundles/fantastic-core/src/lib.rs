@@ -34,6 +34,8 @@ use fantastic_kernel::agent::Agent;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{persistence, AgentId, Kernel};
 
+pub mod folders;
+
 /// The `handler_module` this bundle answers to — python's package path.
 pub const HANDLER_MODULE: &str = "kernel_state.tools";
 
@@ -574,6 +576,17 @@ impl Bundle for KernelStateBundle {
         DOCS
     }
 
+    /// FOLDER BUNDLES before the tree loads, read through the clamp from the
+    /// root's own `.fantastic` (python `main._bootstrap` → `load_bundles`).
+    fn cold_boot(&self, kernel: &Kernel, fantastic_dir: &Path) {
+        let Some(base) = fantastic_dir.parent() else {
+            return;
+        };
+        if let Ok(root) = fantastic_fs::resolve_root(&fantastic_dir.to_string_lossy(), base) {
+            folders::load_bundles(kernel, &root);
+        }
+    }
+
     async fn handle(
         &self,
         agent_id: &AgentId,
@@ -686,18 +699,6 @@ impl Bundle for KernelStateBundle {
         if let Some(w) = writer {
             w.flush(kernel).await;
         }
-        // DEBUG FILE FLUSH — a tree with no record store lives in RAM; with
-        // `FANTASTIC_DEBUG_FLUSH=1` (set by the e2e harness, never by default)
-        // every non-ephemeral record lands in its `agent.yaml` at stop, so a test
-        // restart boots the tree it stopped. The wire twin of `_testkit.persist`.
-        if std::env::var("FANTASTIC_DEBUG_FLUSH").as_deref() == Ok("1") {
-            let agents: Vec<Arc<Agent>> = kernel.agents.iter().map(|e| Arc::clone(&e)).collect();
-            for a in agents.iter().filter(|a| !a.ephemeral) {
-                if let Value::Object(rec) = persistence::record_map(&a.record()) {
-                    write_record(&clamp(kernel, &a.root_path)?, &rec)?;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -755,15 +756,15 @@ async fn reload_bundle(
     };
     let root = clamp(kernel, &loader_root(agent))?;
     let shown = fantastic_fs::file_name(&root);
-    let rel = format!("{}/{name}", fantastic_kernel::folders::BUNDLES_DIR);
-    if !(fantastic_kernel::folders::is_folder_name(name) && root.join(&rel).exists()) {
+    let rel = format!("{}/{name}", crate::folders::BUNDLES_DIR);
+    if !(crate::folders::is_folder_name(name) && root.join(&rel).exists()) {
         return Ok(refusal_hint(
             NOT_FOUND,
             format!("reload_bundle: no folder {shown}/{rel}"),
             "a bundle is a folder under .fantastic/bundles/ with a bundle.yaml",
         ));
     }
-    if let Some(err) = fantastic_kernel::folders::load_bundle(kernel, &root, name) {
+    if let Some(err) = crate::folders::load_bundle(kernel, &root, name) {
         return Ok(refusal(INVALID_META, err));
     }
     let mut live: Vec<Arc<Agent>> = kernel
@@ -792,7 +793,7 @@ fn read_bundles(
     payload: &Value,
     kernel: &Arc<Kernel>,
 ) -> Result<Value, BundleError> {
-    use fantastic_kernel::folders::{is_folder_name, BUNDLES_DIR, BUNDLE_FILE};
+    use crate::folders::{is_folder_name, BUNDLES_DIR, BUNDLE_FILE};
     use fantastic_kernel::refusal::{bad, refusal_hint, NOT_FOUND};
     let root = clamp(kernel, &loader_root(agent))?;
     let shown = fantastic_fs::file_name(&root);

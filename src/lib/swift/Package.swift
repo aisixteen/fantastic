@@ -374,6 +374,8 @@ let package = Package(
             name: "FantasticExecBridgeTests",
             dependencies: [
                 "FantasticExecBridge", "FantasticKernel", "FantasticJSON", "FantasticIoBridge",
+                // folder bundles load through the root loader (`Folders`)
+                "FantasticKernelState",
             ]
         ),
         // ── Cross-runtime parity (Phase 8J) ──────────────────────

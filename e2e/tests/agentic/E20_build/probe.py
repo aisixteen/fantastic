@@ -804,15 +804,33 @@ async def run(
                         ]
                     )
                 )[0]["result"]
+                # The output lives in the job's line ring — `tail` reads it.
+                _tl = (
+                    await root.send(
+                        [
+                            {
+                                "target": runner_id,
+                                "payload": {
+                                    "type": "tail",
+                                    "job_id": _cs["job_id"],
+                                    "lines": 40,
+                                },
+                            }
+                        ]
+                    )
+                )[0]["result"]
+                _out = "\n".join(
+                    f"{ln.get('stream')}: {ln.get('line')}"
+                    for ln in (_tl or {}).get("lines") or []
+                )
                 for _j in (_js or {}).get("jobs") or []:
                     print(
                         f"       canary job: status={_j.get('status')!r} "
                         f"exit={_j.get('exit_code')!r} "
-                        f"stderr={(_j.get('stderr') or '')[:400]!r} "
-                        # stdout carries the guest's OWN prints — and nothing
+                        # the output carries the guest's OWN prints — and nothing
                         # else: a refused send returns an error DICT the code may
                         # silently ignore, which is exactly the invisible case.
-                        f"stdout={(_j.get('stdout') or '')[:400]!r}"
+                        f"output={_out[-800:]!r}"
                     )
             # DUMP THE MEMORY — files now: list every candidate document the
             # scorer's scan can see, so a canary NO says what was actually there.

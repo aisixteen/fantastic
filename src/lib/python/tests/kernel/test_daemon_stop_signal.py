@@ -30,6 +30,7 @@ class _Ctx:
     def __init__(self) -> None:
         self.agents = {"web": types.SimpleNamespace(handler_module=_WEB)}
         self.shutdowns = 0
+        self.pending_seed = None  # an existing tree: nothing to seed
 
     async def start(self, boot_all: bool) -> dict:
         return {"ok": True}

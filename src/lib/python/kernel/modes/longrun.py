@@ -15,6 +15,14 @@ from kernel.modes.parse import _coerce, _parse_at
 from kernel.modes.print import _print_result, _read_line
 
 
+def take_seed(kernel) -> None:
+    """Write a fresh root's record now that this process holds the dir's lock
+    (`Kernel.pending_seed`, set by the bootstrap); once."""
+    seed, kernel.pending_seed = kernel.pending_seed, None
+    if seed is not None:
+        seed()
+
+
 async def _default(kernel) -> None:
     """Compose & run the long-running default. Acquires the lock for
     the lifetime of the process — refuses cleanly if another fantastic
@@ -38,6 +46,7 @@ async def _default(kernel) -> None:
 
     # Lock-first — before booting (so port binds don't happen on conflict).
     with FantasticLock():
+        take_seed(kernel)
         # First PTY push (tty only): orient whoever lands in the terminal —
         # human or an LLM dropped into the PTY — BEFORE boot, while the port is
         # still unknown. The text lives in the `cli` renderer bundle; the kernel

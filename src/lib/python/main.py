@@ -41,6 +41,13 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     # (id="kernel_state"). Seed its agent.yaml + readme now so the next boot
     # reads it (read-only `reflect` paths take no lock and write nothing).
     seeded = not any(r.get("parent_id") is None for r in records)
+    if seeded and (root_dir / "agent.yaml").exists():
+        # A root record that is THERE but did not parse is never written over —
+        # the seed merged onto nothing and lost its other keys (audit 2026-10-14).
+        raise SystemExit(
+            f"[kernel] {root_dir / 'agent.yaml'} is unreadable — fix or remove it; "
+            "the root is not re-seeded over it"
+        )
     if seeded:
         records = [
             {"id": "kernel_state", "handler_module": "kernel_state.tools"}
@@ -52,10 +59,11 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     # No stream provider is composed here. kernel_state's AUTO-FLUSH persists ONLY
     # through a DISCOVERED provider (a file_bridge child rooted at `.fantastic` that an
     # operator/LLM wires) — with none wired the live tree stays in RAM (no fallback).
-    # The COLD primitives are direct by design: this one-time seed write below, and
+    # The COLD primitives are direct by design: the one-time seed write below, and
     # `read_tree` at boot — the chicken-egg bring-up before any provider can exist.
     if seeded:
-        write_record(
+        # Written by the first mode that takes the dir's lock — never before it.
+        kernel.pending_seed = lambda: write_record(
             fs.Root(kernel.workdir, kernel.root._root_path), kernel.root.record
         )
     if sys.stdin.isatty():

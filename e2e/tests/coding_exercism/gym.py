@@ -279,7 +279,8 @@ async def one(ex: Path, lang: str, runtime: str) -> dict:
             f"it returns {{job_id}} at once; the suite runs in the background. "
             f"Then POLL {{\"type\":\"status\",\"job_id\":...}} until `status` is "
             f"no longer 'running' — NEVER end your run with a job still "
-            f"running. Read its stdout/stderr for failures, fix the stub, "
+            f"running. Read its output with {{\"type\":\"tail\",\"job_id\":...}} "
+            f"for failures, fix the stub, "
             "start again until the suite exits 0. "
             f"When it is green, {DONE}."
         )

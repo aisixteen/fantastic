@@ -135,7 +135,12 @@ pub fn command_permitted(meta: &Map<String, Value>, line: &str) -> Option<String
         );
     }
     for pat in &pats {
-        // A broken pattern permits nothing; validate_meta refuses new ones.
+        // A broken pattern permits nothing; validate_meta refuses new ones. The
+        // BARE pattern compiles first: wrapped, an unbalanced one (`x)|(?:.*`)
+        // closes the group early and matches every line (audit 2026-10-14).
+        if compile_pattern(pat).is_err() {
+            continue;
+        }
         if let Ok(re) = compile_pattern(&format!(r"\A(?s:{pat})\z")) {
             if re.is_match(line).unwrap_or(false) {
                 return None;
@@ -257,7 +262,7 @@ pub struct ExecBridgeBundle;
 fn verb_docs_json() -> Value {
     json!({
         "start": "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
-        "status": "args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
+        "status": "args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
         "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
         "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
         "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
@@ -282,7 +287,7 @@ fn emits_json() -> Value {
     json!({
         "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
         "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
-        "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
+        "job_done": "{type:'job_done', job_id, exit_code, ok, lines?, last_line?, error?} — a pipe job's output is read with `tail`/`grep`; a PTY job carries exit_code and ok only",
         "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
     })
 }
@@ -1135,8 +1140,6 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             exit_code: None,
             lines: 0,
             last_line: String::new(),
-            stdout: String::new(),
-            stderr: String::new(),
             line_ring: std::collections::VecDeque::new(),
             line_ring_bytes: 0,
             line_ring_dropped: 0,

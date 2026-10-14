@@ -51,9 +51,23 @@ def test_clamped_path_escape_refuses(tmp_path):
 def test_atomic_write_is_default(tmp_path):
     R = fs.Root(tmp_path, "root")
     fs.write_bytes(R, "f.bin", b"\x00\x01")
-    # no stray .tmp left behind after the rename
-    assert not (tmp_path / "root" / "f.bin.tmp").exists()
+    # no stray tmp left behind after the rename
+    assert [p.name for p in (tmp_path / "root").iterdir()] == ["f.bin"]
     assert fs.read_bytes(R, "f.bin") == b"\x00\x01"
+
+
+@pytest.mark.parametrize("mode", [None, 0o600])
+def test_atomic_write_never_follows_a_planted_tmp_link(tmp_path, mode):
+    """A symlink at `<name>.tmp` pointing outside the root is never written
+    through: each write stages in a fresh, exclusively created tmp."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "f.txt.tmp").symlink_to(outside)
+    fs.write_bytes(fs.Root(tmp_path, "root"), "f.txt", b"new", mode=mode)
+    assert outside.read_text() == "keep"
+    assert (root / "f.txt").read_bytes() == b"new"
 
 
 # ─── external surface (operator/peer base, anywhere) ────────────

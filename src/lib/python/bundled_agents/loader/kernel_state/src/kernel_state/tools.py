@@ -33,7 +33,6 @@ Disk layout (provider-relative, under `.fantastic`):
 from __future__ import annotations
 
 import asyncio
-import os
 import posixpath
 import re
 import secrets
@@ -1041,8 +1040,12 @@ async def _persist_blob(id, payload, agent):
     aid = payload.get("agent_id")
     name = payload.get("name")
     content = payload.get("content")
+    # The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
+    # `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
     if not isinstance(aid, str) or not aid:
         return {"error": "persist_blob: agent_id (str) required"}
+    if (bad_id := guard_agent_id("persist_blob", aid, arg="agent_id")) is not None:
+        return bad_id
     if err := _guard_blob_name(name):
         return {"error": f"persist_blob: {err}"}
     if not isinstance(content, str):
@@ -1057,8 +1060,12 @@ async def _load_blob(id, payload, agent):
     error; the consumer decides whether to treat that as empty."""
     aid = payload.get("agent_id")
     name = payload.get("name")
+    # The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
+    # `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
     if not isinstance(aid, str) or not aid:
         return {"error": "load_blob: agent_id (str) required"}
+    if (bad_id := guard_agent_id("load_blob", aid, arg="agent_id")) is not None:
+        return bad_id
     if err := _guard_blob_name(name):
         return {"error": f"load_blob: {err}"}
     return await load_blob(agent, aid, name)
@@ -1075,14 +1082,6 @@ async def flush_pending(agent):
     loop = getattr(agent, "_fs_flush_loop", None)
     if loop is not None:
         await loop.aflush()
-    # DEBUG FILE FLUSH — a tree with no record store lives in RAM; with
-    # `FANTASTIC_DEBUG_FLUSH=1` (set by the e2e harness, never by default) every
-    # non-ephemeral record lands in its `agent.yaml` at stop, so a test restart
-    # boots the tree it stopped. The wire twin of `_testkit.persist`.
-    if os.environ.get("FANTASTIC_DEBUG_FLUSH") == "1":
-        for a in list(agent.ctx.agents.values()):
-            if not type(a).ephemeral:
-                write_record(fs.Root(agent.ctx.workdir, a._root_path), a.record)
 
 
 async def on_shutdown(agent):

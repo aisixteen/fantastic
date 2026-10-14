@@ -242,6 +242,11 @@ def _make_post_endpoint(self_id: str, kernel):
         exec_id = request.headers.get("X-Fantastic-Execution-Id")
         if exec_id:
             item["id"] = exec_id
+        # `secret` marks (comma-separated paths into the body) ride their own
+        # header, like the id: the body's values at them are shown as `[secret]`.
+        secret = request.headers.get("X-Fantastic-Secret")
+        if secret:
+            item["secret"] = [m.strip() for m in secret.split(",")]
         reply = await hand_in(kernel, self_id, {"type": "inbound_call", "item": item})
         if reply is None:
             return Response(status_code=204)

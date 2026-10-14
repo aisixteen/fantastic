@@ -883,7 +883,7 @@ pub(crate) fn allow_list(meta: &Map<String, Value>) -> Vec<String> {
 }
 
 /// Is `path` exposed — a listed path, or under a listed directory?
-fn exposed(allow: &[String], path: &str) -> bool {
+pub(crate) fn exposed(allow: &[String], path: &str) -> bool {
     let Some(p) = norm(path) else { return false };
     allow
         .iter()

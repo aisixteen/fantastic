@@ -111,8 +111,15 @@
     /// must span the WHOLE string AND the engine backtracks across alternation to
     /// find one (`a|ab` DOES fullmatch `ab` in python; ICU's leftmost `firstMatch`
     /// stops at `a` and would refuse it).
+    ///
+    /// The BARE pattern compiles first: wrapped, an unbalanced one (`x)|(.*`)
+    /// closes the group early and matches every line, where python's
+    /// `re.fullmatch` raises — a broken pattern permits nothing (audit 2026-10-14).
     func pyFullmatch(_ pattern: String) -> NSRegularExpression? {
-        try? NSRegularExpression(
+        guard (try? NSRegularExpression(pattern: pyRegexSource(pattern))) != nil else {
+            return nil
+        }
+        return try? NSRegularExpression(
             pattern: "\\A(?:\(pyRegexSource(pattern)))\\z",
             options: [.dotMatchesLineSeparators])
     }
@@ -227,7 +234,7 @@
             ),
             "progress": .string("{type:'progress', job_id, n, line, stream} — one per output line"),
             "job_done": .string(
-                "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split"
+                "{type:'job_done', job_id, exit_code, ok, lines?, last_line?, error?} — a pipe job's output is read with `tail`/`grep`; a PTY job carries exit_code and ok only"
             ),
             "output": .string("{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
         ]
@@ -248,7 +255,7 @@
 
         static let verbDocs: OrderedDictionary<String, JSON> = [
             "start": .string("args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
-            "status": .string("args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."),
+            "status": .string("args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."),
             "stop": .string(
                 "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent."
             ),
@@ -295,8 +302,6 @@
             let counter: LineCounter
             var status: String = "running"
             var exitCode: Int32? = nil
-            var stdout: String = ""
-            var stderr: String = ""
             /// The terminal of a PTY job (`start pty={cols,rows}`); nil for a pipe job.
             var pty: PtyJob? = nil
         }
@@ -732,16 +737,12 @@
             async let errD = pumpStream(
                 spawned.stderr, stream: "stderr", agentId: agentId, jobId: jobId,
                 counter: counter, kernel: kernel)
-            var o = await outD
-            var e = await errD
+            let o = await outD
+            let e = await errD
             // A PUMP FAULT is one fault for the whole pump, python's `gather` shape:
-            // both reads are abandoned, `stdout` reads `''` and `stderr` carries the
-            // `[pump error] …` line. A line over the 64 KiB frame is the only one
-            // either runtime raises.
-            if let fault = o.fault ?? e.fault {
-                o = PumpOut(text: "", fault: nil)
-                e = PumpOut(text: "[pump error] \(fault)", fault: nil)
-            }
+            // the job's `error` (`[pump error] …`). The output itself lives in the
+            // line ring only — the job's one copy (audit 2026-10-14).
+            let fault = (o.fault ?? e.fault).map { "[pump error] \($0)" }
             let code = await spawned.child.wait()
             relayFor(jobId)?.stop()
             // CANCELLED: python's pump re-raises `CancelledError` after labelling the
@@ -760,21 +761,19 @@
             lock.withLock {
                 if var j = jobs[jobId] {
                     j.exitCode = code
-                    j.stdout = o.text
-                    j.stderr = e.text
                     j.status =
                         j.status == "stopping"
                         ? "stopped" : (code == 0 ? "done" : "failed")
                     jobs[jobId] = j
                 }
             }
-            await kernel.emit(
-                agentId,
-                .object([
-                    "type": .string("job_done"), "job_id": .integer(jobId.value),
-                    "exit_code": .integer(Int64(code)), "ok": .bool(code == 0),
-                    "stdout": .string(o.text), "stderr": .string(e.text),
-                ]))
+            var done: OrderedDictionary<String, JSON> = [
+                "type": .string("job_done"), "job_id": .integer(jobId.value),
+                "exit_code": .integer(Int64(code)), "ok": .bool(code == 0),
+                "lines": .integer(Int64(counter.lines)), "last_line": .string(counter.lastLine),
+            ]
+            if let fault { done["error"] = .string(fault) }
+            await kernel.emit(agentId, .object(done))
         }
 
         /// THE JOB'S TASK for a PTY job (python `_pty_pump`): the terminal's own
@@ -1184,10 +1183,6 @@
                 o["rows"] = .integer(Int64(p.rows))
             }
             if full {
-                if j.pty == nil {
-                    o["stdout"] = .string(j.stdout)
-                    o["stderr"] = .string(j.stderr)
-                }
                 o["cwd"] = j.cwd
             }
             return .object(o)
@@ -1375,7 +1370,6 @@
             _ handle: FileHandle, stream: String, agentId: AgentId, jobId: TaskId,
             counter: LineCounter, kernel: Kernel
         ) async -> PumpOut {
-            let box = DataBox()
             let carry = CarryBox()
             let (lines, cont) = AsyncStream<String>.makeStream()
             handle.readabilityHandler = { h in
@@ -1391,7 +1385,6 @@
                 // reading here and the pipe fills, the child blocks on `write`, and
                 // the job never exits at all.
                 if carry.overran { return }
-                box.append(chunk)
                 let (ls, overrun) = carry.push(chunk)
                 for line in ls { cont.yield(line) }
                 if overrun {
@@ -1399,7 +1392,6 @@
                     // `ValueError("Separator is not found, and chunk exceed the limit")`
                     // once its 64 KiB buffer holds no newline. The pump catches it and
                     // BOTH reads are lost.
-                    box.clear()
                     cont.finish()
                 }
             }
@@ -1409,13 +1401,9 @@
                     kernel: kernel)
             }
             if carry.overran {
-                return PumpOut(
-                    text: "", fault: "Separator is not found, and chunk exceed the limit")
+                return PumpOut(fault: "Separator is not found, and chunk exceed the limit")
             }
-            // REPLACED, not dropped: python decodes `errors="replace"`, so an invalid
-            // byte becomes U+FFFD and the rest of the output survives. `String(data:
-            // encoding:)` answers nil for the whole buffer instead.
-            return PumpOut(text: String(decoding: box.take(), as: UTF8.self), fault: nil)
+            return PumpOut(fault: nil)
         }
 
         /// Free the REAL resource of ONE job: SIGKILL its child + stop its relay, and
@@ -1568,7 +1556,8 @@
               record's `allowed` regexes or the start is refused, naming the patterns. There is no
               blocking run-and-wait verb: a pipe job's output streams as `progress` events on this
               agent's inbox (one per line, `{n, line, stream}`) with a final `job_done`
-              (`{exit_code, ok, stdout, stderr}`), after a `job_started`.
+              (`{exit_code, ok, lines, last_line}`), after a `job_started`. The output itself is
+              read with `tail`/`grep` — the job keeps its last 256 KiB of lines, nothing more.
             - **A terminal is a PTY job**: `start(command, args, pty={cols, rows})` runs the command on
               a pseudo-terminal (`TERM=xterm-256color`), same gate. **Leave `command` out** and it runs
               the CHILD's own `$SHELL` — read from the environment the record passes down
@@ -1586,7 +1575,7 @@
               `job_id`) does.
               Nothing respawns a terminal — `boot` starts nothing; a client that attaches and finds no
               live PTY job `start`s one.
-            - `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr (a PTY job: its
+            - `status(job_id?)` → `{jobs:[…]}` — one job with its `cwd` (a PTY job: its
               `cols`/`rows`), or every job of this agent as summaries.
             - `stop(job_id?)` SIGKILL the job's whole session — the command and everything it
               launched (`server &`, a `nohup`, a shell's background jobs); deleting the agent or
@@ -1669,8 +1658,7 @@
 
             ## Look at a job's output NOW — `tail`, `grep`
 
-            A pipe job's `stdout`/`stderr` land in `status` only when it ends; while it runs, read it
-            with `tail(job_id, lines?, stream?)` — the last lines printed so far — and
+            A job's output is read, running or ended, with `tail(job_id, lines?, stream?)` — the last lines printed so far — and
             `grep(job_id, match, lines?, stream?)` — the lines so far matching a regex (the last
             `lines` of them). Both work on any job, running or ended, pipe or PTY; each line comes as
             `{n, stream, line}`. The job keeps its last 256 KiB of lines; older ones are gone and
@@ -1805,7 +1793,6 @@
     /// a fault for the pump: `stdout` comes back `''` and `stderr` carries
     /// `[pump error] <str(exc)>`.
     struct PumpOut {
-        let text: String
         let fault: String?
     }
 
@@ -1824,8 +1811,8 @@
         private var last = ""
 
         /// THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
-        /// (n, stream, line), the last `LINE_RING` bytes — what `tail`/`grep` read
-        /// while the job runs (its stdout/stderr land only when it ends).
+        /// (n, stream, line), the last `LINE_RING` bytes — what `tail`/`grep` read,
+        /// running or ended. The job's only copy of its output.
         private var ring: [(Int, String, String)] = []
         private var ringHead = 0
         private var ringBytes = 0
@@ -1906,31 +1893,6 @@
             let s = String(decoding: buf, as: UTF8.self)
             buf.removeAll()
             return s
-        }
-    }
-
-    /// Accumulates pipe chunks arriving on Foundation's reader queue.
-    private final class DataBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var data = Data()
-
-        func append(_ chunk: Data) {
-            lock.lock()
-            data.append(chunk)
-            lock.unlock()
-        }
-
-        func take() -> Data {
-            lock.lock()
-            defer { lock.unlock() }
-            return data
-        }
-
-        /// Drop everything collected — a faulted pump reports `''`, not a prefix.
-        func clear() {
-            lock.lock()
-            data.removeAll()
-            lock.unlock()
         }
     }
 

@@ -15,17 +15,15 @@
 //   - the substrate module `FantasticKernel`, which cannot depend on a bundle:
 //     `WorkdirLock` (`lock.yaml`), `Persistence` (`readRecord`, and the cold
 //     tree read — `readTree` / `walkRecords` / `readRecordClamped`, clamped as
-//     this file clamps), the reflect path in `KernelDispatch`
-//     (an agent's own `readme.md` and `docs/` topic tree, via `RootDocs.walk`),
-//     and `RootReadme.seed` / `RootDocs.seed` (the cold copy-if-missing seed of
-//     `.fantastic/readme.md` + `docs/`);
-//   - `FantasticKernelStartup`: `startKernel` creates `.fantastic`, reads the
-//     root record (`readRecordClamped`) and writes the virgin seed's root
-//     record; `daemon` checks the workdir is a directory;
+//     this file clamps);
+//   - `FantasticKernelStartup`: `startKernel` reads the root record
+//     (`readRecordClamped`) and, under the lock (`Kernel.takeSeed`), creates
+//     `.fantastic` and writes a fresh root's record; `daemon` checks the workdir
+//     is a directory;
 //   - the `Fantastic` CLI target's `.env` read (`loadDotEnv`);
-//   - `KernelStateBundle`'s `fileExists` probes of clamped paths (a session
-//     loader's anchor record, a forgotten record's dir) before it writes or
-//     removes through here;
+//   - `KernelStateBundle`'s `fileExists` probes of clamped paths (a forgotten
+//     record's dir, a `reload_bundle` folder) before it writes, removes or
+//     loads through here — its folder bundles (`Folders`) read through here;
 //   - `FantasticExecBridge`'s process plumbing: `Spawn` probes the child's
 //     `PATH` dirs for a bare command (`fileExists` + `access` — metadata only;
 //     the OS opens what it execs), `PtyJob.pasteDirectory` creates a PTY job's
@@ -241,8 +239,17 @@ public func fsReadBytes(_ root: String, _ path: String, base: String) throws(FsE
     try readWhole(try fsResolve(root, path, base: base))
 }
 
-/// python `fs.write_bytes` (atomic) — whole-file write through a tmp sibling
-/// (`<name>.tmp`) and an atomic rename; parent dirs created.
+/// python `secrets.token_hex(n)` — `n` CSPRNG bytes as lowercase hex.
+private func tokenHex(_ n: Int) -> String {
+    // `SystemRandomNumberGenerator` is the OS CSPRNG
+    (0..<n).map { _ -> String in
+        let h = String(UInt8.random(in: 0...255), radix: 16)
+        return h.count < 2 ? "0" + h : h
+    }.joined()
+}
+
+/// python `fs.write_bytes` (atomic) — whole-file write through a fresh tmp
+/// sibling (`<name>.tmp.<hex>`) and an atomic rename; parent dirs created.
 ///
 /// `mode` creates the file with exactly those permission bits — a 0600 secret
 /// file is never readable by others, not even between create and chmod: the tmp
@@ -253,37 +260,33 @@ public func fsWriteBytes(
 ) throws(FsError) {
     let target = try fsResolve(root, path, base: base)
     try pyMkdirParents(parentPath(target))
-    let tmp = target + ".tmp"
-    let fd: Int32
-    if let mode {
-        // `tmp.unlink(missing_ok=True)`
-        if unlink(tmp) != 0, errno != ENOENT { throw FsError(osErrorStr(errno, tmp)) }
-        fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, mode)
-        if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }
-        if fchmod(fd, mode) != 0 {
-            let e = errno
-            close(fd)
-            throw FsError(osErrorStr(e))
-        }
-    } else {
-        fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0o666)
-        if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }
+    // A FRESH tmp per write, created exclusively and never through a link: a
+    // fixed `<name>.tmp` followed whatever symlink sat at that name (a write
+    // escaped the root) and was shared by concurrent writers (audit 2026-10-14).
+    let tmp = target + ".tmp." + tokenHex(4)
+    let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode ?? 0o666)
+    if fd < 0 { throw FsError(osErrorStr(errno, tmp)) }
+    let fail = { (e: Int32) -> FsError in
+        close(fd)
+        unlink(tmp)
+        return FsError(osErrorStr(e))
     }
+    if let mode, fchmod(fd, mode) != 0 { throw fail(errno) }
     var written = 0
     while written < data.count {
         let n = data.withUnsafeBytes { raw -> Int in
             write(fd, raw.baseAddress!.advanced(by: written), data.count - written)
         }
-        if n < 0 {
-            let e = errno
-            close(fd)
-            throw FsError(osErrorStr(e))
-        }
+        if n < 0 { throw fail(errno) }
         if n == 0 { break }
         written += n
     }
     close(fd)
-    if rename(tmp, target) != 0 { throw FsError(osErrorStr(errno, tmp, target)) }
+    if rename(tmp, target) != 0 {
+        let e = errno
+        unlink(tmp)
+        throw FsError(osErrorStr(e, tmp, target))
+    }
 }
 
 private func readWhole(_ target: String) throws(FsError) -> Data {

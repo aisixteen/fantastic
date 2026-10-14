@@ -72,7 +72,7 @@ fn kernel_for(tmp: &TempDir) -> Arc<Kernel> {
 }
 
 fn load(kernel: &Arc<Kernel>, tmp: &TempDir) {
-    fantastic_kernel::folders::load_bundles(kernel, &tmp.path().join(".fantastic"));
+    fantastic_core::folders::load_bundles(kernel, &tmp.path().join(".fantastic"));
 }
 
 async fn call(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
@@ -270,7 +270,7 @@ async fn reload_restarts_the_instance_and_answers_the_inflight_call() {
     )
     .unwrap();
     // what the root's `reload_bundle` does: re-load, then shutdown + boot each instance
-    assert!(fantastic_kernel::folders::load_bundle(
+    assert!(fantastic_core::folders::load_bundle(
         &kernel,
         &tmp.path().join(".fantastic"),
         "rs_reloaded"
@@ -308,7 +308,7 @@ async fn a_failed_reload_keeps_the_previous_load_running() {
     let first = call(&kernel, "rs_kp1", json!({"type": "echo", "text": "a"})).await;
     std::fs::write(folder.join("bundle.yaml"), "base: py_agent\n").unwrap(); // sentence gone
     let err =
-        fantastic_kernel::folders::load_bundle(&kernel, &tmp.path().join(".fantastic"), "rs_kept")
+        fantastic_core::folders::load_bundle(&kernel, &tmp.path().join(".fantastic"), "rs_kept")
             .expect("refused");
     assert!(err.contains("sentence"), "{err}");
     // the live instance runs the previous load, untouched; the catalog keeps it too
@@ -448,4 +448,22 @@ async fn a_chatty_program_does_not_block_on_its_own_output() {
     let out = call(&kernel, "rs_ch1", json!({"type": "chatty"})).await;
     assert_eq!(out, json!({"chatted": true}), "{out}");
     delete(&kernel, "rs_ch1").await;
+}
+
+/// A `bundles/<name>` that links OUTSIDE the running dir is refused by the clamp,
+/// never loaded (python reads through `fs`; audit 2026-10-14).
+#[tokio::test]
+async fn a_bundle_folder_linking_outside_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let real = bundle(&tmp, "rs_escape_src", ECHO, VERBS);
+    let away = outside.path().join("rs_escape");
+    std::fs::rename(&real, &away).unwrap();
+    std::os::unix::fs::symlink(&away, tmp.path().join(".fantastic/bundles/rs_escape")).unwrap();
+    let kernel = kernel_for(&tmp);
+    let err =
+        fantastic_core::folders::load_bundle(&kernel, &tmp.path().join(".fantastic"), "rs_escape")
+            .expect("refused");
+    assert!(err.contains("escapes root"), "{err}");
+    assert!(kernel.bundles.get("rs_escape").is_none());
 }

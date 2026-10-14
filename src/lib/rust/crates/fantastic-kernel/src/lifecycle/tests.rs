@@ -844,3 +844,50 @@ async fn lifecycle_events_name_an_empty_display_name_by_id() {
     }
     assert_eq!(kinds, vec!["added", "removed"]);
 }
+
+/// A deleted id leaves every grant that named it (python `_prune_grants`): a
+/// re-created id inherits nothing (audit 2026-10-14).
+#[tokio::test]
+async fn a_deleted_id_leaves_every_grant() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let kernel = mk_rooted(&tmp);
+    let mk = |id: &str, parent: &str, extra: Value| {
+        let mut p = json!({"type":"create_agent","parent_id":parent,"handler_module":"counting.tools","id":id});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        Item::new(AgentId::from("kernel"), p)
+    };
+    kernel
+        .send(vec![
+            mk(
+                "vault",
+                "kernel",
+                json!({"callable_by": {"$self": "*", "reader": ["get"]}}),
+            ),
+            mk("reader", "kernel", json!({})),
+            mk(
+                "other",
+                "kernel",
+                json!({"callable_by": {"$self": "*", "reader_kid": "*", "vault": "*"}}),
+            ),
+        ])
+        .await;
+    kernel
+        .send(vec![mk("reader_kid", "reader", json!({}))])
+        .await;
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":"reader"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["deleted"], true, "{r}");
+    let cb = |id: &str| {
+        kernel.agents.get(&AgentId::from(id)).unwrap().record().meta["callable_by"].clone()
+    };
+    assert_eq!(cb("vault"), json!({"$self": "*"}));
+    assert_eq!(cb("other"), json!({"$self": "*", "vault": "*"}));
+}

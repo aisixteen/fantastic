@@ -163,6 +163,16 @@
             #expect(shlexJoin(["echo", "it's"]) == "echo 'it'\"'\"'s'")
         }
 
+        /// A broken `allowed` pattern permits nothing, even one the fullmatch
+        /// wrapper would balance into match-everything (python `re.fullmatch`
+        /// raises; audit 2026-10-14).
+        @Test func anUnbalancedAllowedPatternPermitsNothing() async {
+            let kernel = freshKernel()
+            let rec = kernel.agent(await create(kernel, id: "cp_bad", allowed: ["x)|(.*"]))
+            #expect(commandPermitted(rec, "rm -rf /") != nil)
+            #expect(commandPermitted(rec, "x") != nil)
+        }
+
         @Test func commandPermittedFullmatchesAndRefuses() async {
             let kernel = freshKernel()
             // Empty allowlist ⇒ a loud refusal telling the operator what to set.
@@ -865,7 +875,7 @@
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let done = events.first { $0["type"].asString == "job_done" }
             #expect(
-                done?["stdout"].asString?.contains("GOT kernel_state") == true,
+                (await printed(kernel, a, done)).contains("GOT kernel_state"),
                 "connector send did not round-trip: \(done?.serialize() ?? "none")")
         }
 
@@ -898,7 +908,7 @@
                     + "r2 = kernel.send('kernel_state', {'type': 'reflect'})\nprint('CORE', r2.get('id'))",
                 connector: true))])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
-            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            let out = (await printed(kernel, a, events.first { $0["type"].asString == "job_done" }))
             #expect(out.contains("SIB unauthorized"), "the sibling must refuse: \(out)")
             #expect(out.contains("CORE kernel_state"), "the granted edge still answers: \(out)")
         }
@@ -1088,7 +1098,7 @@
                     + "type(r['bytes']).__name__)",
                 connector: true))])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
-            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            let out = (await printed(kernel, a, events.first { $0["type"].asString == "job_done" }))
             #expect(out.contains("WROTE 768 READ 768 True bytes"), "bytes did not round-trip raw: \(out)")
         }
 
@@ -1121,7 +1131,7 @@
                     + "r.get('bytes') == raw)",
                 connector: true))])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
-            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            let out = (await printed(kernel, a, events.first { $0["type"].asString == "job_done" }))
             #expect(out.contains("READ None bytes True"), "a text send's bytes reply was not raw: \(out)")
         }
     }
@@ -1478,7 +1488,7 @@
                     ]))
             ])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
-            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            let out = (await printed(kernel, a, events.first { $0["type"].asString == "job_done" }))
             #expect(out.contains("['1', '2.5', 'True']"), "argv was not python-stringified: \(out)")
         }
 
@@ -1511,8 +1521,8 @@
             let s = await start(b, "ft_only_here")
             #expect(s["job_id"].asInt != nil, "\(s.serialize())")
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
-            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString
-            #expect(out == "found-by-child-path\n", "\(out ?? "nil")")
+            let out = (await printed(kernel, b, events.first { $0["type"].asString == "job_done" }))
+            #expect(out == "found-by-child-path\n", "\(out)")
             // …and one only the kernel's PATH holds is not found.
             let miss = await start(b, "echo")
             #expect(
@@ -1649,9 +1659,10 @@
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
             let done = events.first { $0["type"].asString == "job_done" }
             #expect(
-                done?["stdout"].asString?.hasPrefix(String(repeating: "x", count: 150000)) == true,
+                (await printed(kernel, a, done)).hasPrefix(String(repeating: "x", count: 150000)),
                 "\(done?.serialize().prefix(200) ?? "none")")
-            #expect(done?["stderr"].asString == "", "\(done?["stderr"].serialize() ?? "none")")
+            #expect(await printed(kernel, a, done, "stderr") == "", "\(done?.serialize() ?? "none")")
+            #expect(done?["error"].isNull == true, "\(done?.serialize() ?? "none")")
         }
 
         /// Audit BV-5 — a NAMED `clear` follows the bulk form's rule: a `running`
@@ -1703,7 +1714,7 @@
                     pyStart(py, "import sys; sys.stdout.buffer.write(b'\\xff' + b'ok\\n')"))
             ])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
-            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            let out = (await printed(kernel, a, events.first { $0["type"].asString == "job_done" }))
             #expect(out.contains("ok"), "the valid tail was dropped: \(out.debugDescription)")
             #expect(
                 out.contains("\u{FFFD}"),
@@ -2187,7 +2198,7 @@
                         connector: true))
             ])[0].result
             let events = await drainUntil(stream) { $0["type"].asString == "job_done" }
-            let out = events.first { $0["type"].asString == "job_done" }?["stdout"].asString ?? ""
+            let out = (await printed(kernel, runner, events.first { $0["type"].asString == "job_done" }))
             // the reply's chunk lands in the program at the LITERAL key `x.y`
             #expect(out.contains("GOT ['a', 'a.b', 'type'] True {'y': 'kept'}"), "\(out)")
         }

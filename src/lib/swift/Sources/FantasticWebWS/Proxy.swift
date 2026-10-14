@@ -581,6 +581,8 @@ final class WebSocketProxyHandler: ChannelInboundHandler, @unchecked Sendable {
                     "target": .string(target), "payload": payload,
                 ]
                 if let s = fid.asString, !s.isEmpty { item["id"] = .string(s) }
+                // paths into `payload`, shown as `[secret]`
+                if let m = frame.asObject?["secret"] { item["secret"] = m }
                 // HANDED TO THE LEG (`inbound_call`), which sends it AS ITSELF.
                 //
                 // EVERY CALL MAY BE ANSWERED WITH RAW BYTES, whatever its verb:

@@ -1,14 +1,16 @@
 //! FOLDER BUNDLES — `<root>/bundles/<name>/bundle.yaml` (owner, 2026-10-08): code
-//! that EXTENDS a bundled agent (`base`), loaded from this kernel's own root at
+//! that EXTENDS a bundled agent (`base`), loaded from this loader's own root at
 //! boot (before the tree loads, so an instance's handler resolves) and by the
-//! root's `reload_bundle`. The base builds the bundle ([`Bundle::folder_bundle`]).
-//! Python `kernel_state.load_bundle` / `load_bundles`, text for text.
+//! root's `reload_bundle`. The base builds the bundle (`Bundle::folder_bundle`).
+//! Python `kernel_state.load_bundle` / `load_bundles`, text for text — read
+//! through the clamped `fs`, so a `bundles/<name>` that links outside the
+//! running dir is refused like any escape (audit 2026-10-14).
 
 use std::path::Path;
 
+use fantastic_file::fs as fantastic_fs;
+use fantastic_kernel::Kernel;
 use serde_json::{json, Value};
-
-use crate::kernel::Kernel;
 
 /// The bundles dir under a kernel root.
 pub const BUNDLES_DIR: &str = "bundles";
@@ -26,14 +28,12 @@ pub fn is_folder_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Load ONE folder bundle `<root>/bundles/<name>/` into `kernel`'s registry. →
-/// `None`, or the error — recorded on its catalog row too, never loaded.
+/// Load ONE folder bundle `<root>/bundles/<name>/` into `kernel`'s registry —
+/// `root` the loader's CLAMPED root. → `None`, or the error — recorded on its
+/// catalog row too, never loaded.
 #[must_use]
 pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
-    let shown = root.file_name().map_or_else(
-        || root.display().to_string(),
-        |n| n.to_string_lossy().to_string(),
-    );
+    let shown = fantastic_fs::file_name(root);
     let row = json!({
         "name": name,
         "handler_module": name,
@@ -59,11 +59,22 @@ pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
             fantastic_bundle::py_repr(name)
         ));
     }
-    let folder = root.join(BUNDLES_DIR).join(name);
-    let Ok(text) = std::fs::read_to_string(folder.join(BUNDLE_FILE)) else {
-        return refuse("no bundle.yaml".to_string());
+    let rel = format!("{BUNDLES_DIR}/{name}");
+    // THE CLAMP: the folder resolves inside the root, or it is no folder of this
+    // kernel's — a link out of the running dir is refused, never followed.
+    let folder = match fantastic_fs::resolve(root, &rel) {
+        Ok(f) => f,
+        Err(e) => return refuse(e),
     };
-    let spec = match crate::yaml_io::load(&text) {
+    let manifest = format!("{rel}/{BUNDLE_FILE}");
+    if !fantastic_fs::is_file(root, &manifest).unwrap_or(false) {
+        return refuse("no bundle.yaml".to_string());
+    }
+    let text = match fantastic_fs::read_text(root, &manifest) {
+        Ok(t) => t,
+        Err(e) => return refuse(e),
+    };
+    let spec = match fantastic_kernel::yaml_io::load(&text) {
         Ok(v) => v,
         Err(e) => return refuse(format!("bundle.yaml does not parse: {e}")),
     };
@@ -99,8 +110,7 @@ pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
             fantastic_bundle::py_repr(base)
         ));
     };
-    let abs = folder.canonicalize().unwrap_or(folder);
-    match base_bundle.folder_bundle(name, &abs, &spec) {
+    match base_bundle.folder_bundle(name, &folder, &spec) {
         Ok(built) => {
             let mut r = row;
             r["base"] = json!(base);
@@ -112,15 +122,21 @@ pub fn load_bundle(kernel: &Kernel, root: &Path, name: &str) -> Option<String> {
     }
 }
 
-/// Load every folder under `<root>/bundles/` — the cold read at boot.
+/// Load every folder under `<root>/bundles/` — the cold read at boot. `root` is
+/// the loader's CLAMPED root.
 pub fn load_bundles(kernel: &Kernel, root: &Path) {
-    let Ok(entries) = std::fs::read_dir(root.join(BUNDLES_DIR)) else {
+    let dirs = fantastic_fs::is_dir(root, BUNDLES_DIR).unwrap_or(false);
+    let Ok(entries) = (if dirs {
+        fantastic_fs::list_dir(root, BUNDLES_DIR)
+    } else {
+        Ok(Vec::new())
+    }) else {
         return;
     };
     let mut names: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| e.file_name().to_string_lossy().to_string())
+        .iter()
+        .map(|p| fantastic_fs::file_name(p))
+        .filter(|n| fantastic_fs::is_dir(root, &format!("{BUNDLES_DIR}/{n}")).unwrap_or(true))
         .collect();
     names.sort();
     for n in names {

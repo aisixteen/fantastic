@@ -172,6 +172,9 @@ public struct Item: Sendable {
     /// The RAW `retries`, forwarded untouched (C38) for the same reason. Set,
     /// this SUPERSEDES the typed `retries` above.
     public var rawRetries: JSON?
+    /// SECRET MARKS (`Secret`): dotted paths into the payload whose values the
+    /// kernel keeps and shows only as `[secret]`. RAW — the kernel validates.
+    public var secret: JSON?
 
     /// A plain item: call `target` with `payload`, wait forever, no retries.
     public init(

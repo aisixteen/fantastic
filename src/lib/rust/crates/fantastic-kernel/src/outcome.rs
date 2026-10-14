@@ -243,6 +243,9 @@ pub struct Item {
     /// The RAW `retries`, forwarded untouched (C38) for the same reason.
     /// Set, this SUPERSEDES the typed `retries` above.
     pub raw_retries: Option<Value>,
+    /// SECRET MARKS (`crate::secret`): dotted paths into the payload whose values
+    /// the kernel keeps and shows only as `[secret]`. RAW — the kernel validates.
+    pub secret: Option<Value>,
 }
 
 impl Item {
@@ -259,7 +262,25 @@ impl Item {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
+            secret: None,
         }
+    }
+
+    /// Mark payload paths SECRET (`crate::secret`): the handler gets them as
+    /// sent; every row, event and mirror shows them as `[secret]`.
+    #[must_use]
+    pub fn with_secret<S: Into<String>>(mut self, marks: impl IntoIterator<Item = S>) -> Self {
+        self.secret = Some(Value::Array(
+            marks.into_iter().map(|m| Value::from(m.into())).collect(),
+        ));
+        self
+    }
+
+    /// Forward a RAW `secret` field (a wire frame's) for the kernel to validate.
+    #[must_use]
+    pub fn with_raw_secret(mut self, v: Value) -> Self {
+        self.secret = Some(v);
+        self
     }
 
     /// Carry a RAW request body at `path` of the payload (its steps, relative to

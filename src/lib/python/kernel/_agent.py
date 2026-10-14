@@ -89,6 +89,7 @@ from kernel._kernel import (
     Kernel,
     TIMED_OUT,
     _current_origin,
+    _current_secret,
     _current_sender,
     _current_task,
     _summarize_payload,
@@ -104,7 +105,7 @@ from kernel._bundles import (
     import_handler,
     is_folder,
 )
-from kernel import _docs
+from kernel import _docs, _secret
 
 
 # System verbs answered natively by every Agent for its own children.
@@ -274,6 +275,8 @@ class _Dispatched:
     flags_done: bool = False
     # The caller's NAME for this execution (its item `id`), echoed on the outcome.
     name: str | None = None
+    # The item's `secret` marks (`kernel/_secret`), carried to every attempt.
+    marks: tuple = ()
 
 
 class RemoteTarget:
@@ -301,7 +304,9 @@ class RemoteTarget:
         self._meta: dict = {"callable_by": {}}
         self.handler_module = None
 
-    async def _dispatch_task(self, task_id, payload: dict, origin: str | None = None):
+    async def _dispatch_task(
+        self, task_id, payload: dict, origin: str | None = None, marks: tuple = ()
+    ):
         _current_task.set(task_id)
         calls = [
             asyncio.ensure_future(r.call(self.agent_id, payload)) for r in self.routes
@@ -776,6 +781,9 @@ class Agent:
         bad_retries = self._check_retries(item)
         if bad_retries is not None:
             return bad_retries
+        marks, bad_secret = _secret.check(item)
+        if bad_secret is not None:
+            return outcome(None, FAILED, bad_secret)
         # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
         # subtree before it aborts anything, because `on_cancel` hooks await —
         # so a doomed handler gets scheduling passes on its way out, and what it
@@ -783,10 +791,14 @@ class Agent:
         cur = _current_task.get()
         if cur is not None and (self.ctx.tasks.get(cur) or {}).get("_killed"):
             return outcome(None, CANCELLED, {"cancelled": True})
-        # WHILE DRAINING, NO NEW ROOTS. A send from inside live work (a parent task
-        # in the table — including an agent's own `shutdown` dispatch using its tools)
-        # passes; the kernel's own shutdown traffic passes; everything else is a
-        # new root and is refused before it costs an id.
+        # WHILE DRAINING, NO NEW ROOTS. A send from inside a live DISPATCH (a
+        # parent call in the table — including an agent's own `shutdown` dispatch
+        # using its tools) passes; the kernel's own shutdown traffic and its
+        # keepalive persisters pass; everything else is a new root and is refused
+        # before it costs an id. A FORK (a ws call, a scheduler tick, a bridge's
+        # read loop, a job's relay) starts new work, so it is refused like any
+        # transport — a ws call used to pass where the same REST call was refused
+        # (audit 2026-10-14).
         # The root's own control surface stays open while draining: kernel verbs
         # (`shutdown_agents` again, `shutdown_kernel`, `ps`, `messages`, `ledger`)
         # and `reflect` are how an operator watches and finishes the stop. Over a
@@ -797,8 +809,7 @@ class Agent:
             self.ctx.draining
             and not _in_shutdown.get()
             and not self._is_control(target_id, payload)
-            and (cur is None or cur not in self.ctx.tasks)
-            and not self.ctx.is_registered(asyncio.current_task())
+            and not self.ctx.drain_admits(cur, asyncio.current_task())
         ):
             return outcome(
                 None,
@@ -892,7 +903,7 @@ class Agent:
             # is a field on it.
             exec_id = self.ctx.mint_id()
             fut, bad = self._ledger_open(
-                exec_id, target, payload, timeout, item, name=name
+                exec_id, target, payload, timeout, item, name=name, marks=marks
             )
             if bad is not None:
                 return bad
@@ -919,7 +930,9 @@ class Agent:
                     )
                 )
                 return None
-            pid, task = self._spawn_dispatch(target, payload, task_id=exec_id)
+            pid, task = self._spawn_dispatch(
+                target, payload, task_id=exec_id, marks=marks
+            )
             dispatched.append(
                 _Dispatched(
                     index,
@@ -930,6 +943,7 @@ class Agent:
                     payload,
                     exec_fut=fut,
                     name=name,
+                    marks=marks,
                 )
             )
             return None
@@ -945,12 +959,16 @@ class Agent:
         # The row opens BEFORE the spawn: `retries` was validated up front, so
         # nothing here can refuse after work has started.
         pid = self.ctx.mint_id()
-        fut, bad = self._ledger_open(pid, target, payload, timeout, item, name=None)
+        fut, bad = self._ledger_open(
+            pid, target, payload, timeout, item, name=None, marks=marks
+        )
         if bad is not None:
             return bad
-        pid, task = self._spawn_dispatch(target, payload, task_id=pid)
+        pid, task = self._spawn_dispatch(target, payload, task_id=pid, marks=marks)
         dispatched.append(
-            _Dispatched(index, pid, task, timeout, target, payload, exec_fut=fut)
+            _Dispatched(
+                index, pid, task, timeout, target, payload, exec_fut=fut, marks=marks
+            )
         )
         return None
 
@@ -971,10 +989,14 @@ class Agent:
             )
         return None
 
-    def _ledger_open(self, exec_id: int, target, payload, timeout, item, *, name):
+    def _ledger_open(
+        self, exec_id: int, target, payload, timeout, item, *, name, marks=()
+    ):
         """Open one execution under a pre-minted id: the CALL ROW in the message
         store (what outlives the process) and the process side (`executions`).
-        `retries` already validated. Returns (fut, refusal?)."""
+        `retries` already validated. Returns (fut, refusal?). The row keeps the
+        payload AS SHOWN (`kernel/_secret`); the RAM side keeps the real one, which
+        a retry re-sends."""
         retries = item.get("retries", 0)
         if bad := self._check_retries(item):
             return None, bad
@@ -994,7 +1016,7 @@ class Agent:
             "verb": payload.get("type"),
             "parent": _current_task.get(),
             "caller": caller,
-            "payload": payload,
+            "payload": _secret.shown(payload, marks),
             "named": name is not None,
             "retries": retries,
             "attempts": 1,
@@ -1002,6 +1024,8 @@ class Agent:
         }
         if name is not None:
             row["name"] = name
+        if marks:
+            row["secret"] = list(marks)  # the marks are paths, not values
         self.ctx.rows_put(target.id, row)
         # The side entry is the WHOLE engine: dedup and join key on it, retry
         # re-issues against it, dead-letter is reading it. `attempts` counts real
@@ -1023,7 +1047,7 @@ class Agent:
         return fut, None
 
     def _spawn_dispatch(
-        self, target: "Agent", payload: dict, *, task_id: int
+        self, target: "Agent", payload: dict, *, task_id: int, marks: tuple = ()
     ) -> tuple[int, "asyncio.Task"]:
         """Start ONE dispatch as a registered asyncio.Task — the unit of the task
         table — under the message id its call row was opened with. Tasks never
@@ -1034,7 +1058,7 @@ class Agent:
         # target's own id — this is the same value the gate just authorized.
         origin = _current_sender.get()
         task = asyncio.create_task(
-            target._dispatch_task(task_id, payload, origin),
+            target._dispatch_task(task_id, payload, origin, marks),
             name=f"fantastic:{task_id}",
         )
         ctx.register_task(
@@ -1071,7 +1095,9 @@ class Agent:
             # forget_task has already dropped the previous attempt's row, so the
             # SAME task id is free to register again — one id, one `cancel`
             # handle, attempt after attempt.
-            _pid, task = self._spawn_dispatch(d.target, d.payload, task_id=d.pid)
+            _pid, task = self._spawn_dispatch(
+                d.target, d.payload, task_id=d.pid, marks=d.marks
+            )
             d.task = task
 
     async def _settle_once(self, d: "_Dispatched") -> dict:
@@ -1902,8 +1928,33 @@ class Agent:
                 blocked_by=blocked_by,
                 id=agent_id,
             )
+        gone = set(target._subtree_ids())
         await target._cascade_delete()
+        self._prune_grants(gone)
         return {"deleted": True, "id": agent_id}
+
+    def _subtree_ids(self):
+        yield self.id
+        for c in self._children.values():
+            yield from c._subtree_ids()
+
+    def _prune_grants(self, gone: set) -> None:
+        """A deleted id leaves every grant that named it. Grant keys are literal
+        ids, so a stale one would hand its edge to whoever re-creates that id
+        (audit 2026-10-14). Each record changed is re-persisted by its `updated`."""
+        for agent in tuple(self.ctx.agents.values()):
+            changed = []
+            for field in ("can_call", "callable_by"):
+                grants = agent._meta.get(field)
+                if isinstance(grants, dict) and gone.intersection(grants):
+                    agent._meta[field] = {
+                        k: v for k, v in grants.items() if k not in gone
+                    }
+                    changed.append(field)
+            if changed:
+                self.ctx.publish_state(
+                    {"agent_id": agent.id, "kind": "updated", "changed": changed}
+                )
 
     # ─── public API: state stream ──────────────────────────────
 
@@ -1919,7 +1970,7 @@ class Agent:
     # ─── dispatch (internal) ───────────────────────────────────
 
     async def _dispatch_task(
-        self, task_id: str, payload: dict, origin: str | None = None
+        self, task_id: str, payload: dict, origin: str | None = None, marks: tuple = ()
     ) -> dict | None:
         """The body of a registered task: stamp `_current_task` so nested sends
         become CHILDREN of this task, then dispatch. The contextvar is set (not
@@ -1931,6 +1982,7 @@ class Agent:
         # PAYLOAD names a resource can tell whose it is. `_current_sender` is
         # about to become this agent's own id, which is why this is separate.
         _current_origin.set(origin)
+        _current_secret.set(marks)
         try:
             return await self._dispatch(payload)
         except SystemExit as e:
@@ -1962,16 +2014,18 @@ class Agent:
         runs as this agent (its sends and spawned tasks are its own) with NO
         origin — no caller asked; the kernel did. A raise propagates."""
         token = _current_origin.set(None)
+        stoken = _current_secret.set(())
         try:
             return await self._dispatch(payload)
         finally:
+            _current_secret.reset(stoken)
             _current_origin.reset(token)
 
     async def _dispatch(self, payload: dict) -> dict | None:
         """Resolve verb → native or handler_module, run as this agent."""
         verb = payload.get("type")
         self._in_flight += 1
-        self._fanout(payload, kind="send")
+        self._fanout(_secret.shown(payload, _current_secret.get()), kind="send")
         token = _current_sender.set(self.id)
         try:
             if verb in _SYSTEM_VERBS:

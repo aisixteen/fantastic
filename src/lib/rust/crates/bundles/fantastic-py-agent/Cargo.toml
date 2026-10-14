@@ -15,5 +15,6 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+fantastic-core = { path = "../fantastic-core" }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

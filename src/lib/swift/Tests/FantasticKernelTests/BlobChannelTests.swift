@@ -222,6 +222,26 @@ struct BlobChannelTests {
         #expect(files.paths.contains("agents/desk/state.yaml"), "\(files.paths)")
     }
 
+    /// `agent_id` becomes a directory (`agents/<agent_id>/`): `../bundles/x`
+    /// would reach a folder bundle's `bundle.yaml` (audit 2026-10-14).
+    @Test func anAgentIdThatWalksOutIsRefused() async {
+        let files = Files()
+        let k = await makeKernel(files)
+        for verb in ["persist_blob", "load_blob"] {
+            for bad in ["../bundles/x", "a/b", "..", ".hidden"] {
+                let r = await k.send([
+                    Item(
+                        AgentId("kernel"),
+                        .object([
+                            "type": .string(verb), "agent_id": .string(bad),
+                            "name": .string("bundle.yaml"), "content": .string("x"),
+                        ]))
+                ])[0].result
+                #expect(r["arg"] == .string("agent_id"), "\(verb) \(bad): \(r)")
+            }
+        }
+    }
+
     @Test func reservedAndEscapingNamesAreRefused() async {
         let files = Files()
         let k = await makeKernel(files)

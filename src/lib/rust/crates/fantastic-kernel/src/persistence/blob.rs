@@ -133,6 +133,11 @@ fn guard_args<'a>(verb: &str, payload: &'a Value) -> Result<(&'a str, &'a str), 
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| err(verb, "agent_id (str) required"))?;
+    // The id BECOMES A DIRECTORY (`agents/<agent_id>/`): one safe segment, or
+    // `../bundles/x` writes a folder bundle's `bundle.yaml` (audit 2026-10-14).
+    if let Some(r) = crate::refusal::guard_agent_id_as(verb, "agent_id", aid) {
+        return Err(r);
+    }
     let name = guard_name(payload.get("name").and_then(Value::as_str)).map_err(|e| err(verb, e))?;
     Ok((aid, name))
 }

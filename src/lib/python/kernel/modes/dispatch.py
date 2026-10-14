@@ -9,7 +9,7 @@ from typing import Any
 from kernel._lock import LockHeld, acquire_lock, release_lock
 
 from kernel.modes.help import _print_help
-from kernel.modes.longrun import _default
+from kernel.modes.longrun import _default, take_seed
 from kernel.modes.parse import _parse_kv
 
 
@@ -65,6 +65,7 @@ async def call(kernel, target: str, rest: list[str]) -> None:
         "Stop it, or forward your call over the WS bridge "
         "(see ws_bridge bundle)."
     )
+    take_seed(kernel)
     try:
         # Boot the root loader so this call's mutations (create/update/
         # delete) subscribe + persist. The debounce task won't tick
@@ -119,6 +120,7 @@ async def init(kernel, rest: list[str]) -> None:
         sys.exit(2)
     loader_name, manifest = rest[0], rest[1]
     _lock_or_exit("[init] another fantastic owns this dir (pid={pid}). Stop it first.")
+    take_seed(kernel)
     try:
         if kernel.root is not None:
             # Boot the root loader so the new records subscribe + persist.

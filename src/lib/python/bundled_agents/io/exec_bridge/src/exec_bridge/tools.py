@@ -79,7 +79,7 @@ from kernel._refusal import (
 MAX_FRAME = 16 * 1024 * 1024
 
 # job_id (the job's kernel TASK id, an int) -> {owner, proc, status,
-#            started_at, exit_code, lines, last_line, stdout, stderr, task, ctrl_sock,
+#            started_at, exit_code, lines, last_line, line_ring, task, ctrl_sock,
 #            ctrl_task}.
 # status: running|stopping|done|failed|stopped. Module-global (shared across
 # exec_bridge agents); every op filters by owner (the agent). Who may call a verb —
@@ -123,12 +123,11 @@ def _has_running_job(owner_id: str) -> bool:
 
 
 async def _read_stream(reader, job, stream, owner, job_id, kernel):
-    """Stream one pipe line-by-line: a `progress` event per line + collect the raw text
-    (newlines preserved) for the final job_done/status output."""
-    parts: list[str] = []
+    """Stream one pipe line-by-line: a `progress` event per line, the line into the
+    job's ring. Nothing else keeps it — the ring is the job's only copy, so a
+    chatty job never grows past it (audit 2026-10-14)."""
     async for raw in reader:
         text = raw.decode("utf-8", errors="replace")
-        parts.append(text)
         job["lines"] += 1
         job["last_line"] = text.rstrip("\n")
         _line_ring_add(job, job["lines"], stream, job["last_line"])
@@ -143,7 +142,6 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
                 "stream": stream,
             },
         )
-    return "".join(parts)
 
 
 async def _pump(owner, ready, process, kernel):
@@ -165,40 +163,39 @@ async def _pump(owner, ready, process, kernel):
 
 
 async def _pipe_body(job, job_id, owner, process, kernel):
-    out, err = "", ""
+    fault = None
     try:
         try:
-            out, err = await asyncio.gather(
+            await asyncio.gather(
                 _read_stream(process.stdout, job, "stdout", owner, job_id, kernel),
                 _read_stream(process.stderr, job, "stderr", owner, job_id, kernel),
             )
         except asyncio.CancelledError:
             raise
         except Exception as e:  # a pump fault must never take down the loop
-            err = f"[pump error] {e}"
+            fault = f"[pump error] {e}"
         code = await process.wait()
     except asyncio.CancelledError:
         job["status"] = "stopped"
         job["exit_code"] = process.returncode
         raise
     job["exit_code"] = code
-    job["stdout"], job["stderr"] = out, err
     job["status"] = (
         "stopped"
         if job["status"] == "stopping"
         else ("done" if code == 0 else "failed")
     )
-    await kernel.emit(
-        owner,
-        {
-            "type": "job_done",
-            "job_id": job_id,
-            "exit_code": code,
-            "ok": code == 0,
-            "stdout": out,
-            "stderr": err,
-        },
-    )
+    done = {
+        "type": "job_done",
+        "job_id": job_id,
+        "exit_code": code,
+        "ok": code == 0,
+        "lines": job["lines"],
+        "last_line": job["last_line"],
+    }
+    if fault is not None:
+        done["error"] = fault
+    await kernel.emit(owner, done)
 
 
 # ─── connector relay (spawner side of the control fd) ───────────
@@ -1028,11 +1025,9 @@ async def _start(id, payload, kernel):
         "exit_code": None,
         "lines": 0,
         "last_line": "",
-        "stdout": "",
-        "stderr": "",
         # THE LIVE LINE RING (owner, 2026-10-11): every line a pipe job prints, as
-        # (n, stream, line), the last LINE_RING bytes — what `tail`/`grep` read while
-        # the job runs (its stdout/stderr land only when it ends).
+        # (n, stream, line), the last LINE_RING bytes — what `tail`/`grep` read,
+        # running or ended. The job's only copy of its output.
         "line_ring": collections.deque(),
         "line_ring_bytes": 0,
         "line_ring_dropped": 0,
@@ -1112,15 +1107,12 @@ def _snap(job_id: int, full: bool = False) -> dict:
     if j.get("pty") is not None:
         s["cols"], s["rows"] = j["pty"]["cols"], j["pty"]["rows"]
     if full:
-        if j.get("pty") is None:
-            s["stdout"] = j["stdout"]
-            s["stderr"] = j["stderr"]
         s["cwd"] = j.get("cwd")
     return s
 
 
 async def _status(id, payload, kernel):
-    """args: job_id:int? — one job (with full stdout/stderr), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."""
+    """args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."""
     jid, err = _job_arg("status", payload, required=False)
     if err:
         return err
@@ -1510,7 +1502,7 @@ async def _connector(id, payload, kernel):
 EMITS = {
     "job_started": "{type:'job_started', job_id, command, args} — the RESOLVED invocation (a PTY start without `command` names the shell it ran)",
     "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
-    "job_done": "{type:'job_done', job_id, exit_code, ok, stdout?, stderr?} — a PTY job carries no stdout/stderr split",
+    "job_done": "{type:'job_done', job_id, exit_code, ok, lines?, last_line?, error?} — a pipe job's output is read with `tail`/`grep`; a PTY job carries exit_code and ok only",
     "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
 }
 

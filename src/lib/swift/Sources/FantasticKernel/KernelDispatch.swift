@@ -95,7 +95,10 @@ extension Kernel {
     /// `agent`, with no origin: the kernel asked. A raise is `failed`, a refusal
     /// `errored`, anything else `completed`.
     public func bookkeeping(_ agent: Agent, _ payload: JSON) async -> (result: JSON, status: Status) {
-        let (reply, status) = await runHandler(agent, payload)
+        // no caller's marks reach a call the kernel makes itself
+        let (reply, status) = await KernelTaskLocals.$secret.withValue([]) {
+            await runHandler(agent, payload)
+        }
         return (reply, status)
     }
 
@@ -592,12 +595,13 @@ extension Kernel {
     /// COMPLETES — `cancelTask` no-ops on a finished id.
     func runDispatchOutcome(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        timeout: Deadline?, taskId: TaskId, binary: Blob?, rawReply: Bool
+        timeout: Deadline?, taskId: TaskId, binary: Blob?, rawReply: Bool,
+        marks: [String] = []
     ) async -> (JSON, Status, Blob?) {
         guard let deadline = timeout else {
             let end = await runDispatch(
                 target: target, payload: payload, verb: verb, taskOut: taskOut,
-                taskId: taskId, binary: binary, rawReply: rawReply)
+                taskId: taskId, binary: binary, rawReply: rawReply, marks: marks)
             let (reply, status) = classify(end)
             return (reply, status, end.body)
         }
@@ -619,7 +623,7 @@ extension Kernel {
         // channel" for a call that was correct (e2e `E10_dialog:swift`).
         let end = await runDispatch(
             target: target, payload: payload, verb: verb, taskOut: taskOut, taskId: taskId,
-            binary: binary, rawReply: rawReply)
+            binary: binary, rawReply: rawReply, marks: marks)
         killer.cancel()
         if end.stopped && fired.isSet {
             // Python `_agent.py`: `f"send: {d.target.id} {d.payload['type']!r} "
@@ -662,7 +666,7 @@ extension Kernel {
         _ = try? rowsPut(target.id, row)
         let end = await runDispatch(
             target: target, payload: payload, verb: payload["type"].asString ?? "",
-            taskOut: nil, taskId: TaskId(pid), binary: nil, rawReply: false)
+            taskOut: nil, taskId: TaskId(pid), binary: nil, rawReply: false, marks: [])
         return classify(end)
     }
 
@@ -704,7 +708,7 @@ extension Kernel {
     /// channel with no request body — a raw read) or neither (the text channel).
     private func runDispatch(
         target: Agent, payload: JSON, verb: String, taskOut: TaskIdBox?,
-        taskId: TaskId?, binary: Blob?, rawReply: Bool
+        taskId: TaskId?, binary: Blob?, rawReply: Bool, marks: [String]
     ) async -> DispatchEnd {
         // (A killed sender never reaches here: `launch` settles it `cancelled`
         // before an id is minted.)
@@ -759,9 +763,11 @@ extension Kernel {
             // holds it — so a watcher receives the body, not a header with a hole
             // where it was. A call that only READS a raw chunk carries none: its
             // payload is a plain dict, a text frame.
+            // A MARKED call is mirrored as shown (`Secret`).
+            let shown = Secret.shown(payload, marks)
             fanout(
                 target, "send",
-                binary.map { Kernel.binaryItem(payload, $0) } ?? .text(payload))
+                binary.map { Kernel.binaryItem(shown, $0) } ?? .text(shown))
         }
         // The BINARY channel whenever bytes travel either way: a request body
         // goes in, or the reply's chunk comes back raw. A request body IS the
@@ -791,10 +797,12 @@ extension Kernel {
                             await KernelTaskLocals.$currentTask.withValue(taskId) {
                                 await KernelTaskLocals.$ownTask.withValue(taskId) {
                                     await KernelTaskLocals.$currentKilled.withValue(handle.killed) {
-                                        await self.dispatchBody(
-                                            target: target, payload: payload,
-                                            handlerPayload: handlerPayload, binary: binary,
-                                            binaryChannel: binaryChannel, extras: extras)
+                                        await KernelTaskLocals.$secret.withValue(marks) {
+                                            await self.dispatchBody(
+                                                target: target, payload: payload,
+                                                handlerPayload: handlerPayload, binary: binary,
+                                                binaryChannel: binaryChannel, extras: extras)
+                                        }
                                     }
                                 }
                             }

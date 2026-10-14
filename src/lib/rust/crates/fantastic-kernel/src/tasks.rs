@@ -394,6 +394,20 @@ impl TaskTable {
         remove_and_reparent(&mut inner, id);
     }
 
+    /// While draining, may a send made under task `id` start? Yes inside a live
+    /// DISPATCH and inside a keepalive fork (a persister that must outlive the
+    /// quiet phase); no inside any other fork — a ws call, a scheduler tick, a
+    /// bridge read loop starts new work (python `Kernel.drain_admits`).
+    #[must_use]
+    pub fn drain_admits(&self, id: &TaskId) -> bool {
+        self.inner
+            .lock()
+            .expect("task table poisoned")
+            .tasks
+            .get(id)
+            .is_some_and(|e| !e.forked || e.keepalive)
+    }
+
     /// `true` iff `id` names a live task.
     pub fn contains(&self, id: &TaskId) -> bool {
         self.inner

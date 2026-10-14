@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import errno
 import os
+import secrets
 import stat
 from pathlib import Path
 from typing import NamedTuple
@@ -186,17 +187,23 @@ def write_bytes(
     target = resolve(root, path, external=external)
     target.parent.mkdir(parents=True, exist_ok=True)
     if atomic:
-        tmp = target.with_name(target.name + ".tmp")
-        if mode is None:
-            tmp.write_bytes(data)
-        else:
-            tmp.unlink(missing_ok=True)
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-            try:
+        # A FRESH tmp per write, created exclusively and never through a link: a
+        # fixed `<name>.tmp` followed whatever symlink sat at that name (a write
+        # escaped the root) and was shared by concurrent writers (audit 2026-10-14).
+        tmp = target.with_name(f"{target.name}.tmp.{secrets.token_hex(4)}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(tmp, flags, 0o666 if mode is None else mode)
+        try:
+            if mode is not None:
                 os.fchmod(fd, mode)  # the umask may have narrowed it; never widened
-                os.write(fd, data)
-            finally:
-                os.close(fd)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+        except BaseException:
+            os.close(fd)
+            tmp.unlink(missing_ok=True)
+            raise
+        os.close(fd)
         os.replace(tmp, target)
     else:
         if mode is not None:

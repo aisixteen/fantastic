@@ -227,7 +227,7 @@ struct FantasticCLI {
     static func bootDiskBacked(cwd: String = FileManager.default.currentDirectoryPath)
         async throws -> Kernel
     {
-        let kernel = try await startKernel(workdir: cwd, portHint: 0)
+        let kernel = try await startKernel(workdir: cwd)
         // C80: applied after EVERY kernel construction, python's own
         // `if cap_set: kernel.ledger_cap = cap` right after `_build_kernel()`.
         // A no-op in tests, which never touch `ledgerCap` (stays `wasSet:
@@ -254,11 +254,15 @@ struct FantasticCLI {
 
     /// `bootDiskBacked` for the process entrypoints: a failure here is a dead
     /// invocation, so it prints and exits rather than propagating.
-    private static func bootOrExit(cwd: String = FileManager.default.currentDirectoryPath)
-        async -> Kernel
-    {
+    /// `locked`: this process holds the dir's lock, so a fresh root's record is
+    /// written now (`Kernel.takeSeed`); a lockless mode writes nothing.
+    private static func bootOrExit(
+        cwd: String = FileManager.default.currentDirectoryPath, locked: Bool = false
+    ) async -> Kernel {
         do {
-            return try await bootDiskBacked(cwd: cwd)
+            let kernel = try await bootDiskBacked(cwd: cwd)
+            if locked { try kernel.takeSeed() }
+            return kernel
         } catch {
             errLine("fantastic: kernel boot failed: \(error)")
             exit(1)
@@ -318,7 +322,7 @@ struct FantasticCLI {
             exit(1)
         }
 
-        let kernel = await bootOrExit()
+        let kernel = await bootOrExit(locked: true)
         let reply = await dispatchOneShot(
             kernel: kernel, target: target, verb: verb, rest: rest.dropFirst())
         print(replyJSON(reply))
@@ -375,7 +379,7 @@ struct FantasticCLI {
             exit(1)
         }
 
-        let kernel = await bootOrExit()
+        let kernel = await bootOrExit(locked: true)
         let reply = await dispatchInit(kernel: kernel, loaderName: loaderName, manifest: manifest)
         print(replyJSON(reply))
         lock.release()

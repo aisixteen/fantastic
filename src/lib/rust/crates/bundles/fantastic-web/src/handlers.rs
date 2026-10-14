@@ -21,6 +21,8 @@ use tokio::sync::RwLock as AsyncRwLock;
 /// Header carrying a caller-chosen execution id on a REST POST. Mirrors
 /// `X-Fantastic-Auth`: dispatch metadata rides the carrier, never the body.
 const EXEC_ID_HEADER: &str = "x-fantastic-execution-id";
+/// `secret` marks — comma-separated paths into the body, shown as `[secret]`.
+const SECRET_HEADER: &str = "x-fantastic-secret";
 /// The binary leg — JSON has no bytes type, so a verb whose payload OR reply
 /// carries RAW bytes rides an octet-stream body: the raw body IS the blob, the
 /// rest of the envelope is JSON on `X-Fantastic-Payload`, and the one
@@ -309,6 +311,9 @@ async fn rest_post(
     let header_str =
         |name: &str| -> Option<String> { headers.get(name).map(|v| routes::latin1(v.as_bytes())) };
     let exec_id = header_str(EXEC_ID_HEADER).filter(|v| !v.is_empty());
+    let secret: Option<Vec<String>> = header_str(SECRET_HEADER)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.split(',').map(|m| m.trim().to_string()).collect());
     let content_type = header_str(header::CONTENT_TYPE.as_str()).unwrap_or_default();
     let auth_token = header_str(AUTH_HEADER);
     // THE GATE FIRST, on what the request says before its body: the target and
@@ -382,7 +387,7 @@ async fn rest_post(
         let out = fantastic_io_bridge::inbound::hand_in(
             &state.kernel,
             &owner,
-            inbound_call(&target, payload, exec_id),
+            inbound_call(&target, payload, exec_id, secret),
             Some(body),
         )
         .await;
@@ -427,7 +432,7 @@ async fn rest_post(
     let out = fantastic_io_bridge::inbound::hand_in(
         &state.kernel,
         &owner,
-        inbound_call(&target, payload, exec_id),
+        inbound_call(&target, payload, exec_id, secret),
         None,
     )
     .await;
@@ -436,12 +441,20 @@ async fn rest_post(
 
 /// The hand-in of one admitted REST call: `{type: inbound_call, item: {target,
 /// payload, id?}}` — the leg's handler sends the item onward AS THE LEG.
-fn inbound_call(target: &AgentId, payload: Value, exec_id: Option<String>) -> Value {
+fn inbound_call(
+    target: &AgentId,
+    payload: Value,
+    exec_id: Option<String>,
+    secret: Option<Vec<String>>,
+) -> Value {
     let mut item = serde_json::Map::new();
     item.insert("target".into(), json!(target.as_str()));
     item.insert("payload".into(), payload);
     if let Some(id) = exec_id {
         item.insert("id".into(), json!(id));
+    }
+    if let Some(m) = secret {
+        item.insert("secret".into(), json!(m));
     }
     json!({"type": "inbound_call", "item": Value::Object(item)})
 }
@@ -523,7 +536,7 @@ async fn rest_reflect(
     let reply = fantastic_io_bridge::inbound::hand_in(
         &state.kernel,
         &owner,
-        inbound_call(&target, payload, None),
+        inbound_call(&target, payload, None, None),
         None,
     )
     .await

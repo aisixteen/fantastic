@@ -79,7 +79,7 @@ public enum KernelTaskLocals {
 
     /// The row THIS Swift task runs under — stamped only by the table's own
     /// runners (`spawnTask`, `runDispatch`), never inherited as a parent link
-    /// the way `currentTask` may be. `TaskTable.isRegistered` reads it: python
+    /// the way `currentTask` may be. `TaskTable.drainAdmits` reads it: python
     /// compares the asyncio task object against every row's handle.
     @TaskLocal static var ownTask: TaskId? = nil
 
@@ -241,6 +241,24 @@ public final class Kernel: @unchecked Sendable {
     /// and the kernel's own `shutdown` verbs, still pass.
     let lifecycleLock = NSLock()
     var _draining = false
+    /// A FRESH root's first record write, deferred until a mode holds the dir's
+    /// lock: a lockless invocation (`--help`, `reflect`) writes nothing. Set by
+    /// `startKernel`, run once by `takeSeed` (python `Kernel.pending_seed`).
+    private var _pendingSeed: (@Sendable () throws -> Void)?
+    public var pendingSeed: (@Sendable () throws -> Void)? {
+        get { lifecycleLock.withLock { _pendingSeed } }
+        set { lifecycleLock.withLock { _pendingSeed = newValue } }
+    }
+
+    /// Write a fresh root's record now that this process holds the dir's lock;
+    /// once. Python `kernel/modes` `take_seed`.
+    public func takeSeed() throws {
+        let seed: (@Sendable () throws -> Void)? = lifecycleLock.withLock {
+            defer { _pendingSeed = nil }
+            return _pendingSeed
+        }
+        try seed?()
+    }
     /// `shutdown()` ran to the end — the SIGTERM path and any safety net
     /// collapse to one walk. Python `_shutdown_complete`.
     var _shutdownComplete = false

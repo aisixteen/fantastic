@@ -2334,3 +2334,127 @@ async fn ack_deadletter_refusals_and_acks_are_byte_exact() {
         format!(r#"{{"acked":true,"id":{fid},"already":true}}"#)
     );
 }
+
+/// SECRET MARKS (`crate::secret`): the handler gets the payload as sent and reads
+/// the marks; the call row and every state event carry the value as `[secret]`.
+#[tokio::test]
+async fn a_marked_value_is_shown_never_kept() {
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Probe;
+    #[async_trait::async_trait]
+    impl Bundle for Probe {
+        fn name(&self) -> &str {
+            "secret_probe"
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(Some(
+                json!({"got": payload["fields"]["api_key"], "marks": crate::secret::current_secret()}),
+            ))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("secret_probe.tools", Probe);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    kernel.register(Agent::new(
+        AgentId::from("sp"),
+        Some("secret_probe.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("sp"),
+        true,
+    ));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&seen);
+    let _t = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _b| {
+        sink.lock().expect("sink poisoned").push(ev.clone());
+    }));
+    let payload = json!({"type": "set", "ref": "r", "fields": {"api_key": "sk-REAL"}});
+    let out = kernel
+        .send(vec![
+            Item::new("sp", payload).with_secret(["fields.api_key"])
+        ])
+        .await
+        .remove(0);
+    assert_eq!(
+        out.result,
+        json!({"got": "sk-REAL", "marks": ["fields.api_key"]})
+    );
+    let rows = crate::test_support::rows_about(&kernel, &AgentId::from("sp"));
+    let call = rows
+        .iter()
+        .find(|r| r.get("kind") == Some(&json!("call")))
+        .expect("a call row");
+    assert_eq!(
+        call.get("payload").map(|p| p["fields"]["api_key"].clone()),
+        Some(json!("[secret]"))
+    );
+    assert_eq!(call.get("secret"), Some(&json!(["fields.api_key"])));
+    let events = format!("{:?}", seen.lock().expect("sink poisoned"));
+    assert!(
+        !events.contains("sk-REAL"),
+        "the state stream carried the value"
+    );
+    assert!(events.contains("[secret]"));
+    // malformed marks are refused before anything runs
+    for bad in [
+        json!("fields.api_key"),
+        json!([""]),
+        json!(["a..b"]),
+        json!([1]),
+        json!(["type"]),
+    ] {
+        let out = kernel
+            .send(vec![
+                Item::new("sp", json!({"type": "set"})).with_raw_secret(bad.clone())
+            ])
+            .await
+            .remove(0);
+        assert_eq!(out.result["arg"], json!("secret"), "{bad}");
+    }
+}
+
+/// While draining, a FORK starting a send is new work: refused. A keepalive fork
+/// (a persister) still sends (python `drain_admits`; audit 2026-10-14).
+#[tokio::test]
+async fn while_draining_a_fork_is_refused_and_a_keepalive_fork_is_not() {
+    let (kernel, _log) = hop_chain();
+    let _ = kernel.shutdown_agents().await;
+    assert!(kernel.draining());
+    for keepalive in [false, true] {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let k = Arc::clone(&kernel);
+        let work = async move {
+            let out = k
+                .send(vec![Item::new(
+                    AgentId::from("h_c"),
+                    json!({"type": "hop"}),
+                )])
+                .await
+                .remove(0);
+            let _ = tx.send(out);
+        };
+        if keepalive {
+            kernel.spawn_keepalive_task(&AgentId::from("h_a"), "loop", work);
+        } else {
+            kernel.spawn_task(&AgentId::from("h_a"), "loop", work);
+        }
+        let out = rx.await.expect("the fork ran");
+        if keepalive {
+            assert_eq!(
+                out.status,
+                crate::outcome::Status::Completed,
+                "{}",
+                out.result
+            );
+        } else {
+            assert_eq!(out.result["reason"], "draining", "{}", out.result);
+        }
+    }
+}

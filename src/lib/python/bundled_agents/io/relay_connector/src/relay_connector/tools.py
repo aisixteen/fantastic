@@ -82,7 +82,9 @@ async def _list_peers(id, payload, kernel):
             "relay_connector.list_peers: not connected",
             hint="call boot first",
         )
-    return await st.transport.list_peers(timeout=float(payload.get("list_timeout", 30.0)))
+    return await st.transport.list_peers(
+        timeout=float(payload.get("list_timeout", 30.0))
+    )
 
 
 async def _watch_directory(id, payload, kernel):

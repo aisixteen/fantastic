@@ -231,6 +231,11 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
         if let execId = headers["x-fantastic-execution-id"].asString, !execId.isEmpty {
             item["id"] = .string(execId)
         }
+        // `secret` marks — comma-separated paths into the body, shown as `[secret]`
+        if let s = headers["x-fantastic-secret"].asString, !s.isEmpty {
+            item["secret"] = .array(
+                s.split(separator: ",").map { .string($0.trimmingCharacters(in: .whitespaces)) })
+        }
         // HANDED TO THIS LEG (`inbound_call`), which sends it as itself — an HTTP
         // caller has no agent identity of its own.
         //

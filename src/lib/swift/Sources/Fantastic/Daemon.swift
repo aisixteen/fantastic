@@ -84,7 +84,7 @@ enum DaemonMode {
             // The kernel keeps no conversation and hydrates no rows: `load`
             // restores the tree and the id counter; execution rows live in the
             // root's memory store, which `kernel_start` wires below.
-            kernel = try await startKernel(workdir: cwd, portHint: 0)
+            kernel = try await startKernel(workdir: cwd)
             // C80: applied after every kernel construction (this mode builds
             // its own, separate from `FantasticCLI.bootDiskBacked`'s).
             if FantasticCLI.ledgerCap.wasSet { kernel.ledger.setCap(FantasticCLI.ledgerCap.cap) }
@@ -123,6 +123,13 @@ enum DaemonMode {
         } catch {
             FileHandle.standardError.write(
                 "fantastic: lock acquisition failed: \(error)\n"
+                    .data(using: .utf8) ?? Data())
+            exit(1)
+        }
+        // A fresh root's record lands only now, under the lock.
+        do { try kernel.takeSeed() } catch {
+            FileHandle.standardError.write(
+                "fantastic: the root record could not be written: \(error)\n"
                     .data(using: .utf8) ?? Data())
             exit(1)
         }

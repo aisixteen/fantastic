@@ -237,12 +237,19 @@ pub fn write_bytes(
     let target = resolve(root, path)?;
     mkdir_parents(&target)?;
     if atomic {
+        // A FRESH tmp per write, created exclusively and never through a link: a
+        // fixed `<name>.tmp` followed whatever symlink sat at that name (a write
+        // escaped the root) and was shared by concurrent writers, which tore the
+        // target (audit 2026-10-14).
         let mut name = target.file_name().unwrap_or_default().to_os_string();
-        name.push(".tmp");
+        name.push(format!(
+            ".tmp.{}",
+            fantastic_kernel::lifecycle::token_hex(4)
+        ));
         let tmp = target.with_file_name(name);
-        match mode {
-            None => std::fs::write(&tmp, data).map_err(|e| io_error_str(&e, &tmp))?,
-            Some(mode) => write_new_with_mode(&tmp, data, mode)?,
+        if let Err(e) = write_new_with_mode(&tmp, data, mode) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
         }
         std::fs::rename(&tmp, &target).map_err(|e| io_error_str(&e, &target))
     } else {
@@ -253,25 +260,22 @@ pub fn write_bytes(
     }
 }
 
-/// python's `tmp.unlink(missing_ok=True)` → `os.open(tmp, O_WRONLY|O_CREAT|O_EXCL,
-/// mode)` → `os.fchmod(fd, mode)` → `os.write(fd, data)`.
-fn write_new_with_mode(tmp: &Path, data: &[u8], mode: u32) -> Result<(), String> {
+/// python's `os.open(tmp, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, mode or 0o666)` →
+/// `os.fchmod(fd, mode)` (a mode given) → `os.write(fd, data)`.
+fn write_new_with_mode(tmp: &Path, data: &[u8], mode: Option<u32>) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    match std::fs::remove_file(tmp) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            return Err(io_error_str(&e, tmp));
-        }
-        _ => {}
-    }
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(mode.unwrap_or(0o666))
         .open(tmp)
         .map_err(|e| io_error_str(&e, tmp))?;
-    f.set_permissions(std::fs::Permissions::from_mode(mode))
-        .map_err(|e| io_error_str(&e, tmp))?;
+    if let Some(mode) = mode {
+        f.set_permissions(std::fs::Permissions::from_mode(mode))
+            .map_err(|e| io_error_str(&e, tmp))?;
+    }
     f.write_all(data).map_err(|e| io_error_str(&e, tmp))
 }
 

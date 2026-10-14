@@ -221,6 +221,8 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         item = {"target": target, "payload": payload}
         if isinstance(fid, str) and fid:
             item["id"] = fid
+        if "secret" in frame:  # paths into `payload`, shown as `[secret]`
+            item["secret"] = frame["secret"]
         reply = await hand_in(
             kernel, web_agent_id, {"type": "inbound_call", "item": item}
         )

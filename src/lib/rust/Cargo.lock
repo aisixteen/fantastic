@@ -617,6 +617,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "fantastic-bundle",
+ "fantastic-core",
  "fantastic-exec-bridge",
  "fantastic-kernel",
  "serde_json",

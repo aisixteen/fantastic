@@ -139,7 +139,11 @@ final class Watches: @unchecked Sendable {
         let stream = watcher.stream
         kernel.spawnTask(agent: bridge, verb: "watch_path") {
             for await batch in stream {
-                for (rel, kind) in batch {
+                // `allow` is read LIVE: a path the bridge stopped exposing after
+                // the watch was armed reports nothing more (audit 2026-10-14).
+                let allow = (kernel.agent(bridge)?.metaValue(forKey: "allow")?.asArray ?? [])
+                    .compactMap { $0.asString.flatMap(allowNorm) }
+                for (rel, kind) in batch where allowExposed(allow, rel) {
                     await kernel.emit(
                         bridge,
                         .object([

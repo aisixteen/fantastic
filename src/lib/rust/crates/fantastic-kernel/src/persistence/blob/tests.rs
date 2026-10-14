@@ -32,3 +32,17 @@ fn kernel_managed_files_are_reserved() {
         assert!(e.contains("reserved"), "{reserved}: {e}");
     }
 }
+
+#[test]
+fn an_agent_id_that_walks_out_is_refused() {
+    // `agents/<agent_id>/` is a directory: `../bundles/x` reached a folder
+    // bundle's `bundle.yaml` (audit 2026-10-14).
+    for verb in ["persist_blob", "load_blob"] {
+        for bad in ["../bundles/x", "a/b", "..", ".hidden"] {
+            let payload =
+                serde_json::json!({"agent_id": bad, "name": "bundle.yaml", "content": "x"});
+            let e = guard_args(verb, &payload).expect_err(bad);
+            assert_eq!(e["arg"], "agent_id", "{verb} {bad}: {e}");
+        }
+    }
+}

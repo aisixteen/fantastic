@@ -279,8 +279,8 @@ fn help_prints_cli_help_md_verbatim() {
         );
         assert_eq!(out.stdout.len(), 1545, "python's help.md is 1545 bytes");
         assert!(
-            tmp.path().join(".fantastic/agent.yaml").exists(),
-            "{spelling:?} must seed the workdir like every other mode"
+            !tmp.path().join(".fantastic").exists(),
+            "{spelling:?} takes no lock, so it writes nothing (audit 2026-10-14)"
         );
     }
 }
@@ -352,8 +352,8 @@ fn single_positional_prints_usage_and_exits_2() {
          \u{20}                                              daemon when a web agent is persisted)\n",
     );
     assert!(
-        tmp.path().join(".fantastic/agent.yaml").exists(),
-        "python seeds before it refuses"
+        !tmp.path().join(".fantastic").exists(),
+        "a lockless usage error writes nothing"
     );
 }
 
@@ -865,14 +865,28 @@ fn init_with_one_arg_prints_usage_exit_2() {
         "usage: fantastic init <loader_bundle> <manifest>\n   \
          e.g. fantastic init static_loader ./fantastic.yaml\n"
     );
-    // python builds the kernel BEFORE dispatch, so the usage error still leaves
-    // the seeded ROOT RECORD behind, not just the readme + docs tree.
-    let rec = tmp.path().join(".fantastic").join("agent.yaml");
-    assert!(rec.is_file(), "the usage error still seeds the root record");
-    let text = std::fs::read_to_string(&rec).unwrap();
-    assert!(
-        text.starts_with("id: kernel_state\n") && text.contains("\ncallable_by:"),
-        "seeded record: {text}"
+    // a lockless usage error writes nothing (audit 2026-10-14)
+    assert!(!tmp.path().join(".fantastic").exists());
+}
+
+/// A root record that is there but does not parse is never written over: the
+/// boot refuses (python `main._bootstrap`; audit 2026-10-14).
+#[test]
+fn an_unreadable_root_record_is_never_written_over() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let d = tmp.path().join(".fantastic");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("agent.yaml"), "id: [unclosed\n").unwrap();
+    let out = Command::new(fantastic_bin())
+        .args(["kernel", "list_agents"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("run fantastic");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unreadable"));
+    assert_eq!(
+        std::fs::read_to_string(d.join("agent.yaml")).unwrap(),
+        "id: [unclosed\n"
     );
 }
 

@@ -359,14 +359,17 @@ public final class TaskTable: @unchecked Sendable {
         return tasks[id] != nil
     }
 
-    /// Whether the CURRENT Swift task IS a row of the table (a spawned loop,
-    /// e.g. the loader's pump) — live work by definition, whatever its
-    /// `currentTask` says. Python compares the asyncio task object against
-    /// every row's handle; here the table's own runners stamp the row id they
-    /// run under as `KernelTaskLocals.ownTask`, which nothing else sets.
-    public func isRegistered() -> Bool {
-        guard let own = KernelTaskLocals.ownTask else { return false }
-        return contains(own)
+    /// While draining, may a send made under task `cur` (inside the current
+    /// Swift task) start? Yes inside a live DISPATCH and inside a keepalive fork
+    /// (a persister that must outlive the quiet phase); no inside any other fork
+    /// — a ws call, a scheduler tick, a bridge read loop starts new work (python
+    /// `Kernel.drain_admits`; audit 2026-10-14).
+    public func drainAdmits(_ cur: TaskId?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let e = cur.flatMap { tasks[$0] } ?? KernelTaskLocals.ownTask.flatMap { tasks[$0] }
+        guard let e else { return false }
+        return !e.forked || e.keepalive
     }
 
     /// The public table — the `ps` reply rows `{id, agent, parent, verb,

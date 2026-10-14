@@ -338,7 +338,22 @@ async def _leg_exec(ka, kb, bridge_a, relay_a):
         if row.get("status") == "done":
             break
     assert row.get("status") == "done", f"exec job never finished: {row!r}"
-    stdout = [ln for ln in (row.get("stdout") or "").splitlines() if ln.strip()]
+    tail = (
+        await kb.send(
+            [
+                {
+                    "target": "c21_exec",
+                    "payload": {
+                        "type": "tail",
+                        "job_id": r["job_id"],
+                        "lines": 500,
+                        "stream": "stdout",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    stdout = [ln["line"] for ln in tail.get("lines") or [] if ln["line"].strip()]
     assert len(stdout) == len(CASES), f"exec emitted {len(stdout)} lines: {stdout!r}"
     return [_norm(json.loads(ln)) for ln in stdout]
 

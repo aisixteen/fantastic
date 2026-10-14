@@ -320,7 +320,11 @@ async fn the_kernel_env_reaches_a_child_only_by_name() {
         )
         .await;
         let done = next_of(&mut rx, "job_done").await;
-        assert_eq!(done["stdout"], json!(format!("{want}\n")), "{id}: {done}");
+        assert_eq!(
+            json!(crate::jobs::printed(&AgentId::from(id), &done, "stdout")),
+            json!(format!("{want}\n")),
+            "{id}: {done}"
+        );
     }
 }
 

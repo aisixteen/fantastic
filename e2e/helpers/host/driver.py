@@ -145,6 +145,10 @@ def ensure_runtime(repo, name: str) -> dict:
     return spec
 
 
+#: The record store's id (`seed`).
+RECORDS = "records"
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -177,10 +181,10 @@ class HostKernel:
         """
         self.cmd = spec["cmd"]
         self.root_id = spec["root_id"]
-        # The tree wires no record store — it lives in RAM. FANTASTIC_DEBUG_FLUSH
-        # lands every record on disk at stop, so `reopen_kernel` boots the tree
-        # the probe stopped (the wire twin of `_testkit.persist`).
-        self.env = {**os.environ, "FANTASTIC_DEBUG_FLUSH": "1", **(spec.get("env") or {})}
+        # The tree persists through a RECORD STORE the seed wires (`records`, a
+        # file_bridge rooted at `.fantastic`), as a product tree does — so
+        # `reopen_kernel` boots the tree the probe stopped.
+        self.env = {**os.environ, **(spec.get("env") or {})}
         self.workdir = workdir
         self.reach = list(reach or [])
         self.port: int | None = None
@@ -212,27 +216,14 @@ class HostKernel:
         was added.
         """
         port = free_port()
-        # Python and rust seed `.fantastic` from a one-shot `reflect`; swift
-        # only from the daemon. Checked, not assumed — the binaries differ.
-        subprocess.run([*self.cmd, "reflect"], cwd=self.workdir, env=self.env,
-                       capture_output=True, check=False)
+        # THE ROOT RECORD is written here: a lockless invocation (`reflect`)
+        # writes nothing, and every runtime's root is the same `kernel_state`
+        # loader — the kernel mints its guid at boot.
         w = self.workdir / ".fantastic"
         if not (w / "agent.yaml").exists():
-            seed = subprocess.Popen(self.cmd, cwd=self.workdir, env=self.env,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    start_new_session=True)
-            for _ in range(100):
-                if (w / "agent.yaml").exists():
-                    break
-                time.sleep(0.1)
-            seed.terminate()
-            try:
-                seed.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                seed.kill()
-        if not (w / "agent.yaml").exists():
-            raise SystemExit(f"kernel never seeded {w}/agent.yaml")
+            w.mkdir(parents=True, exist_ok=True)
+            (w / "agent.yaml").write_text(_dump(
+                {"id": self.root_id, "handler_module": "kernel_state.tools"}))
 
         rest_dir = w / "agents/web/agents/rest"
         rest_dir.mkdir(parents=True, exist_ok=True)
@@ -262,6 +253,14 @@ class HostKernel:
             (rest_dir / "agents" / memory.MEMORY).mkdir(parents=True, exist_ok=True)
             (rest_dir / "agents" / memory.MEMORY / "agent.yaml").write_text(_dump(
                 memory.store_record("rest", callable_by={**BASE, "$parent": "*", "ws": "*", "web": "*"})))
+            # THE RECORD STORE — the root loader discovers it (a file_bridge
+            # rooted at its own `.fantastic`) and persists every record through it.
+            (w / "agents" / RECORDS).mkdir(parents=True, exist_ok=True)
+            (w / "agents" / RECORDS / "agent.yaml").write_text(_dump(
+                {"id": RECORDS, "handler_module": "file_bridge.tools",
+                 "parent_id": self.root_id, "root": ".fantastic", "allow": ["."],
+                 "ingress_rule": "allow_all_ingress",
+                 "callable_by": {**BASE, "$parent": "*"}}))
             (rest_dir / "agents" / creds.CREDS).mkdir(parents=True, exist_ok=True)
             (rest_dir / "agents" / creds.CREDS / "agent.yaml").write_text(_dump(
                 {**creds.store_record("rest", creds.env_refs()), "callable_by": {**BASE, "$parent": "*"}}))

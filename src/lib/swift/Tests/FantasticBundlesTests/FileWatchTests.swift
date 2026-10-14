@@ -119,6 +119,22 @@ struct FileWatchTests {
         #expect(await nextChanged(q, "notes/a.md", 5)?["kind"] == "modified", "an entry's edit")
     }
 
+    /// `allow` is read live: narrowed after the watch was armed, the path's
+    /// changes stop reaching watchers (audit 2026-10-14).
+    @Test func aPathTheBridgeStopsExposingReportsNothing() async throws {
+        let (k, served, tmp) = await boot(allow: ["."])
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(
+            at: served.appendingPathComponent("notes"), withIntermediateDirectories: true)
+        write(served.appendingPathComponent("notes/a.md"), "x")
+        let q = inbox(k)
+        _ = await call(k, ["type": "watch_path", "path": "notes"])
+        await settle()
+        k.update(AgentId("fb"), ["allow": .array([.string("other.md")])])
+        write(served.appendingPathComponent("notes/a.md"), "y")
+        #expect(await nextChanged(q, "notes/a.md", 1) == nil)
+    }
+
     @Test func onlyTheWatchedPathIsReportedAndUnwatchEndsIt() async throws {
         let (k, served, tmp) = await boot(allow: ["."])
         defer { try? FileManager.default.removeItem(at: tmp) }

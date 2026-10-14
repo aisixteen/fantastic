@@ -485,7 +485,10 @@ time.sleep(30)
         .await
         .expect("no job_done after interrupt");
     assert!(
-        done["stdout"].as_str().unwrap_or("").contains("CAUGHT"),
+        json!(crate::jobs::printed(&pid, &done, "stdout"))
+            .as_str()
+            .unwrap_or("")
+            .contains("CAUGHT"),
         "handler did not run: {done}"
     );
 }
@@ -726,7 +729,11 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     let done = until(&mut rx, |p| p["type"] == "job_done", 10)
         .await
         .expect("job_done");
-    assert_eq!(done["stdout"], json!("found-by-child-path\n"), "{done}");
+    assert_eq!(
+        json!(crate::jobs::printed(&b, &done, "stdout")),
+        json!("found-by-child-path\n"),
+        "{done}"
+    );
     // …and one only the kernel's PATH holds is not found.
     let r = k2
         .send(vec![Item::new(
@@ -800,8 +807,14 @@ async fn progress_streams_per_line_with_a_shared_counter() {
         .await
         .expect("no job_done");
     assert_eq!(done["ok"], true, "job failed: {done}");
-    assert!(done["stdout"].as_str().unwrap().contains("o1"));
-    assert!(done["stderr"].as_str().unwrap().contains("e1"));
+    assert!(json!(crate::jobs::printed(&a, &done, "stdout"))
+        .as_str()
+        .unwrap()
+        .contains("o1"));
+    assert!(json!(crate::jobs::printed(&a, &done, "stderr"))
+        .as_str()
+        .unwrap()
+        .contains("e1"));
 }
 
 /// The connector round-trip: a program that includes the wire client reaches ANOTHER
@@ -831,7 +844,7 @@ async fn the_program_can_send_to_another_agent_and_read_the_reply() {
         .await
         .expect("no job_done");
     assert!(
-        done["stdout"]
+        json!(crate::jobs::printed(&a, &done, "stdout"))
             .as_str()
             .unwrap()
             .contains("GOT kernel_state"),
@@ -940,7 +953,8 @@ async fn the_program_is_gated_as_its_runner_not_as_the_operator() {
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
-    let out = done["stdout"].as_str().unwrap();
+    let out = crate::jobs::printed(&a, &done, "stdout");
+    let out = out.as_str();
     assert!(
         out.contains("SIB unauthorized"),
         "the sibling must refuse: {done}"
@@ -1093,7 +1107,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
         .await
         .expect("no job_done");
     assert!(
-        done["stdout"]
+        json!(crate::jobs::printed(&a, &done, "stdout"))
             .as_str()
             .unwrap()
             .contains("WROTE 768 READ 768 True bytes"),
@@ -1166,7 +1180,7 @@ async fn a_text_sends_bytes_reply_comes_back_raw() {
         .await
         .expect("no job_done");
     assert!(
-        done["stdout"]
+        json!(crate::jobs::printed(&a, &done, "stdout"))
             .as_str()
             .unwrap()
             .contains("READ None bytes True"),
@@ -2325,7 +2339,12 @@ async fn output_is_collected_raw_like_python() {
     let done = until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done");
-    assert_eq!(done["stdout"], "a\r\nb\u{fffd}", "{done}");
+    // the ring keeps LINES: `\r` stays, a last line without `\n` gets one
+    assert_eq!(
+        json!(crate::jobs::printed(&a, &done, "stdout")),
+        "a\r\nb\u{fffd}\n",
+        "{done}"
+    );
 }
 
 /// A line past the old 64 KiB bound is read whole: python raised asyncio's
@@ -2350,13 +2369,15 @@ async fn an_overlong_line_is_read_whole() {
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
-    let out = done["stdout"].as_str().unwrap_or("");
+    let out = crate::jobs::printed(&a, &done, "stdout");
+    let out = out.as_str();
     assert!(
         out.starts_with(&"x".repeat(200_000)),
         "stdout len {}",
         out.len()
     );
-    assert_eq!(done["stderr"], "");
+    assert_eq!(json!(crate::jobs::printed(&a, &done, "stderr")), "");
+    assert!(done.get("error").is_none(), "{done}");
 }
 
 /// A4.6 — a signal death reports `exit_code = -signal`, `ok:false`. `ExitStatus::
@@ -2524,7 +2545,8 @@ async fn caller_env_cannot_override_the_control_vars() {
     let done = until(&mut rx, |v| v["type"] == "job_done", 25)
         .await
         .expect("no job_done");
-    let out = done["stdout"].as_str().unwrap_or("");
+    let out = crate::jobs::printed(&a, &done, "stdout");
+    let out = out.as_str();
     assert!(out.contains(&format!("ID {a} ")), "{done}");
     assert!(
         !out.contains("FD 0"),
@@ -2902,4 +2924,15 @@ async fn tail_and_grep_read_a_running_job() {
     let bad = ask(json!({"type": "tail", "job_id": jid, "lines": 0})).await;
     assert_eq!(bad["arg"], "lines", "{bad}");
     let _ = ask(json!({"type": "stop", "job_id": jid})).await;
+}
+
+/// A broken `allowed` pattern permits nothing, even one the fullmatch wrapper
+/// would balance into match-everything (python `re.fullmatch` raises; audit
+/// 2026-10-14).
+#[test]
+fn an_unbalanced_allowed_pattern_permits_nothing() {
+    let mut meta = Map::new();
+    meta.insert("allowed".into(), json!(["ls)|(?:.*"]));
+    assert!(command_permitted(&meta, "rm -rf /").is_some());
+    assert!(command_permitted(&meta, "ls").is_some());
 }

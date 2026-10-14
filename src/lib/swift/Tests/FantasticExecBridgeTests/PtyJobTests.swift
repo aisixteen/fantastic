@@ -390,7 +390,7 @@
                     ])
                 let done = await nextOf(inbox, "job_done")
                 #expect(
-                    done?["stdout"].asString == "\(want)\n", "\(id): \(done?.serialize() ?? "nil")")
+                    await printed(k, AgentId(id), done) == "\(want)\n", "\(id): \(done?.serialize() ?? "nil")")
             }
         }
 

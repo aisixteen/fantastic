@@ -191,9 +191,18 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
                     }
                 }
             }
+            // `allow` is read LIVE: a path the bridge stopped exposing after the
+            // watch was armed reports nothing more (audit 2026-10-14).
+            let allow = k
+                .agents
+                .get(&me)
+                .map(|a| crate::allow_list(&a.record().meta))
+                .unwrap_or_default();
             for (rel, kind) in seen {
-                k.emit(&me, json!({"type": "changed", "path": rel, "kind": kind}))
-                    .await;
+                if crate::exposed(&allow, &rel) {
+                    k.emit(&me, json!({"type": "changed", "path": rel, "kind": kind}))
+                        .await;
+                }
             }
             if closed {
                 return;

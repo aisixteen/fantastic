@@ -667,7 +667,10 @@ extension Kernel {
                     ("id", .string(id.value)),
                 ])
         }
+        var gone: Set<String> = []
+        subtreeIds(target, into: &gone)
         await cascadeDelete(target: target)
+        pruneGrants(gone)
         await emit(
             caller.id,
             .object([
@@ -678,6 +681,30 @@ extension Kernel {
             "deleted": .bool(true),
             "id": .string(id.value),
         ])
+    }
+
+    private func subtreeIds(_ a: Agent, into out: inout Set<String>) {
+        out.insert(a.id.value)
+        for cid in a.childIds() {
+            if let c = agent(cid) { subtreeIds(c, into: &out) }
+        }
+    }
+
+    /// A deleted id leaves every grant that named it — python `_prune_grants`.
+    /// Grant keys are literal ids, so a stale one would hand its edge to whoever
+    /// re-creates that id (audit 2026-10-14). Each changed record is re-persisted
+    /// by its `updated` event (`update`).
+    private func pruneGrants(_ gone: Set<String>) {
+        for a in allAgents() {
+            var patch: OrderedDictionary<String, JSON> = [:]
+            for field in ["can_call", "callable_by"] {
+                guard case .object(let grants)? = a.metaValue(forKey: field),
+                    grants.keys.contains(where: gone.contains)
+                else { continue }
+                patch[field] = .object(grants.filter { !gone.contains($0.key) })
+            }
+            if !patch.isEmpty { update(a.id, patch) }
+        }
     }
 
     private func findLockedDescendant(of target: Agent) -> AgentId? {

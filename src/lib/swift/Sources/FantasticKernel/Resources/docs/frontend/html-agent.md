@@ -35,9 +35,9 @@ the body uses to reach the JS kernel — no import, no URL:
 `exec_bridge` is an ASYNC job spawner: `start {command, args}` runs a command
 from its `allowed` allowlist in the background (many in parallel) and returns
 `{job_id}` at once; it streams
-stdout/stderr as `progress` events + a final `job_done` (with the collected
-output); use `status`/`stop` by job_id. There is no blocking "run-and-wait" —
-watch the events or poll `status`.
+stdout/stderr as `progress` events + a final `job_done` (exit code and line
+count); read its output with `tail`/`grep`, `status`/`stop` by job_id. There is
+no blocking "run-and-wait" — watch the events or poll `status`.
 
 Connector surface (mirrors the kernel): `send(target,payload)→reply`,
 `emit(target,payload)` (fire-and-forget), `watch(src,cb)→unwatch`,

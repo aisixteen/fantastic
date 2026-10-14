@@ -139,3 +139,23 @@ async def test_deleting_the_bridge_stops_its_watcher(seeded_kernel, file_bridge)
     await asyncio.sleep(0.1)
     assert task.cancelled() or task.done()
     assert fb not in _WATCH
+
+
+async def test_a_path_the_bridge_stops_exposing_reports_nothing(
+    seeded_kernel, file_bridge
+):
+    """`allow` is read live: narrowed after the watch was armed, the path's
+    changes stop reaching watchers."""
+    k, fb = seeded_kernel, file_bridge
+    Path("notes").mkdir()
+    Path("notes/a.md").write_text("x")
+    await asyncio.sleep(0.6)  # the creation is old news before the watch arms
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "notes"})
+    await asyncio.sleep(0.3)
+    k.ctx.update(fb, allow=["other.md"])
+    await asyncio.sleep(0.3)
+    while not q.empty():  # anything the watcher saw before the narrowing
+        q.get_nowait()
+    Path("notes/a.md").write_text("y")
+    assert await _quiet(q, "notes/a.md")

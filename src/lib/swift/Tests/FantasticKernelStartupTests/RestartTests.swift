@@ -34,7 +34,7 @@ struct RestartTests {
     /// A root with the real record store wired and a `ram_store` named as the
     /// root's memory store — created on the FIRST boot only.
     private func bootWithStore(_ wd: URL, create: Bool) async throws -> Kernel {
-        let k = try await startKernel(workdir: wd.path, portHint: 0)
+        let k = try await startKernel(workdir: wd.path)
         if create {
             // THE ROOT BOOTS FIRST: its record writer subscribes, so every record
             // created below lands on disk through the discovered provider.
@@ -80,7 +80,7 @@ struct RestartTests {
         #expect(rec["next_id"].asInt == bound, "the bound reached agent.yaml: \(rec.serialize())")
         #expect(rec["memory_store_id"].asString == "memory")
         #expect(rec["guid"].asString?.isEmpty == false)
-        let k2 = try await startKernel(workdir: wd.path, portHint: 0)
+        let k2 = try await startKernel(workdir: wd.path)
         #expect(k2.root?.metaValue(forKey: "guid") == rec["guid"])
         #expect(k2.mintId() >= bound, "a reboot resumes past the reserved block")
         await k2.shutdown()
@@ -112,7 +112,7 @@ struct RestartTests {
     @Test func aDaemonRootWithoutAStoreDoesNotStart() async throws {
         let wd = try workdir()
         defer { try? FileManager.default.removeItem(at: wd) }
-        let k = try await startKernel(workdir: wd.path, portHint: 0)
+        let k = try await startKernel(workdir: wd.path)
         let out = await k.start(bootAll: true)
         #expect(out["reason"].asString == "missing_arg", "\(out.serialize())")
         #expect(out["hint"].asString?.contains("create a ram_store") == true)

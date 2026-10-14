@@ -25,7 +25,8 @@ absolute path; with no `PATH` the start is refused naming it.
   record's `allowed` regexes or the start is refused, naming the patterns. There is no
   blocking run-and-wait verb: a pipe job's output streams as `progress` events on this
   agent's inbox (one per line, `{n, line, stream}`) with a final `job_done`
-  (`{exit_code, ok, stdout, stderr}`), after a `job_started`.
+  (`{exit_code, ok, lines, last_line}`), after a `job_started`. The output itself is
+  read with `tail`/`grep` — the job keeps its last 256 KiB of lines, nothing more.
 - **A terminal is a PTY job**: `start(command, args, pty={cols, rows})` runs the command on
   a pseudo-terminal (`TERM=xterm-256color`), same gate. **Leave `command` out** and it runs
   the CHILD's own `$SHELL` — read from the environment the record passes down
@@ -43,7 +44,7 @@ absolute path; with no `PATH` the start is refused naming it.
   `job_id`) does.
   Nothing respawns a terminal — `boot` starts nothing; a client that attaches and finds no
   live PTY job `start`s one.
-- `status(job_id?)` → `{jobs:[…]}` — one job with its full stdout/stderr (a PTY job: its
+- `status(job_id?)` → `{jobs:[…]}` — one job with its `cwd` (a PTY job: its
   `cols`/`rows`), or every job of this agent as summaries.
 - `stop(job_id?)` SIGKILL the job's whole session — the command and everything it
   launched (`server &`, a `nohup`, a shell's background jobs); deleting the agent or
@@ -126,8 +127,7 @@ anywhere, call an AI, or spawn more jobs — tools compose into tools.
 
 ## Look at a job's output NOW — `tail`, `grep`
 
-A pipe job's `stdout`/`stderr` land in `status` only when it ends; while it runs, read it
-with `tail(job_id, lines?, stream?)` — the last lines printed so far — and
+A job's output is read, running or ended, with `tail(job_id, lines?, stream?)` — the last lines printed so far — and
 `grep(job_id, match, lines?, stream?)` — the lines so far matching a regex (the last
 `lines` of them). Both work on any job, running or ended, pipe or PTY; each line comes as
 `{n, stream, line}`. The job keeps its last 256 KiB of lines; older ones are gone and

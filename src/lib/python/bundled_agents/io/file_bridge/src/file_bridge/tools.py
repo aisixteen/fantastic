@@ -1105,8 +1105,12 @@ async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, st
             if d is not None:
                 name = os.path.basename(p)
                 seen[name if d == "." else f"{d}/{name}"] = change.name
+        # `allow` is read LIVE: a path the bridge stopped exposing after the watch
+        # was armed reports nothing more (audit 2026-10-14).
+        allow = _allow(kernel.get(id) or {})
         for rel, kind in seen.items():
-            await kernel.emit(id, {"type": "changed", "path": rel, "kind": kind})
+            if _exposed(allow, rel):
+                await kernel.emit(id, {"type": "changed", "path": rel, "kind": kind})
 
 
 # ─── dispatch ───────────────────────────────────────────────────

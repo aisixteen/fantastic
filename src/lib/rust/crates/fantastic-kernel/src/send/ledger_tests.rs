@@ -455,6 +455,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
+            secret: None,
         }])
         .await
         .remove(0)
@@ -477,6 +478,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
+            secret: None,
         }])
         .await
         .remove(0)
@@ -500,6 +502,7 @@ async fn joining_is_gated_on_the_verb_that_execution_ran() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
+            secret: None,
         }])
         .await
         .remove(0)
@@ -665,6 +668,7 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
+            secret: None,
         }])
         .await
         .remove(0)
@@ -686,6 +690,7 @@ async fn a_joiner_is_gated_with_the_executions_original_payload() {
             raw_id: None,
             raw_timeout: None,
             raw_retries: None,
+            secret: None,
         }])
         .await
         .remove(0)

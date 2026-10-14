@@ -164,10 +164,7 @@ public func startKernelInMemory(portHint: UInt16 = 0) async throws -> Kernel {
 ///
 /// Throws `KernelStartupError.workdirInvalid` if the workdir doesn't
 /// exist or isn't readable.
-public func startKernel(
-    workdir: String,
-    portHint: UInt16 = 0
-) async throws -> Kernel {
+public func startKernel(workdir: String) async throws -> Kernel {
     let url = URL(fileURLWithPath: workdir, isDirectory: true)
     let fm = FileManager.default
     var isDir: ObjCBool = false
@@ -180,9 +177,12 @@ public func startKernel(
         bundles: defaultBundleRegistry()
     )
     let dotFantastic = url.appendingPathComponent(".fantastic")
-    // THROWS, as python's seed raises: a `.fantastic` that cannot be made left a
-    // kernel booting "fine" with nothing persisted (audit 2026-10-03, ARCH2-9).
-    try fm.createDirectory(at: dotFantastic, withIntermediateDirectories: true)
+    // A LOCKLESS boot creates nothing: `.fantastic` is made by the seed write
+    // (`takeSeed`), under the lock.
+    var fantasticIsDir: ObjCBool = false
+    let hasFantastic =
+        fm.fileExists(atPath: dotFantastic.path, isDirectory: &fantasticIsDir)
+        && fantasticIsDir.boolValue
     // THE ROOT RECORD, or a fresh seed. When `.fantastic/agent.yaml` is MISSING
     // **or not a YAML mapping**, python's `_bootstrap` seeds a fresh root and
     // overwrites the file — and its `read_tree` still walks the children under the
@@ -196,7 +196,7 @@ public func startKernel(
     var rootHandler: String? = ROOT_HANDLER_MODULE
     var rootMeta: OrderedDictionary<String, JSON> = [:]
     var seeded = true
-    if let obj = try Persistence.readRecordClamped(dotFantastic, RECORD_FILE) {
+    if hasFantastic, let obj = try Persistence.readRecordClamped(dotFantastic, RECORD_FILE) {
         seeded = false
         // A PERSISTED RECORD IS AUTHORITATIVE, id and handler_module included —
         // the tree on disk says what its root is called and what answers for it.
@@ -227,11 +227,23 @@ public func startKernel(
     // disk carries the grant baseline `Agent.init` stamps, in its
     // order (`can_call, callable_by`), and the loader's `boot` appends `guid`
     // after them. COLD primitive — it runs before any provider exists.
+    if seeded && fm.fileExists(atPath: rootRecordFile.path) {
+        // A root record that is THERE but did not parse is never written over —
+        // the seed lost its other keys (python `main._bootstrap`; audit 2026-10-14).
+        throw KernelStartupError.internalError(
+            "\(rootRecordFile.path) is unreadable — fix or remove it; the root is not "
+                + "re-seeded over it")
+    }
     if seeded {
-        // THROWS, as python's `write_record` raises: a root record that never
-        // landed minted a new guid every boot, breaking peers pinned to it.
-        try Persistence.recordBytes(root.record().ordered)
-            .write(to: rootRecordFile, options: .atomic)
+        // Written by the first mode that takes the dir's lock — never before it.
+        // THROWS there, as python's `write_record` raises: a root record that
+        // never landed minted a new guid every boot, breaking peers pinned to it.
+        let bytes = Persistence.recordBytes(root.record().ordered)
+        kernel.pendingSeed = {
+            try FileManager.default.createDirectory(
+                at: dotFantastic, withIntermediateDirectories: true)
+            try bytes.write(to: rootRecordFile, options: .atomic)
+        }
     }
 
     // Hydrate persisted children. Reads every
@@ -242,7 +254,9 @@ public func startKernel(
     // `read_tree`, 2026-09-20): the walk runs whether or not the root parsed.
     // THROWS where python's clamped walk raises: a `children_dir` or a record
     // that resolves outside `.fantastic` refuses the boot.
-    var records = try Persistence.readTree(rootDir: dotFantastic, fallbackRootId: rootId)
+    var records =
+        hasFantastic
+        ? try Persistence.readTree(rootDir: dotFantastic, fallbackRootId: rootId) : []
     if !records.isEmpty {
         // `readTree` yields the root record first when `.fantastic/agent.yaml`
         // parsed; a reseeded root is not on disk as a record it yields, so the
@@ -266,10 +280,6 @@ public func startKernel(
             throw error
         }
     }
-
-    // NOTE: `portHint` is unused in disk mode — CLI / daemon mode passes the
-    // port via meta on the persisted `web` record (a vestige of the old
-    // auto-create-web path, kept in the signature for the daemon entrypoint).
 
     return kernel
 }

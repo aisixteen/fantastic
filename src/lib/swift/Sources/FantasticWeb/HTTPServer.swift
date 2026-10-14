@@ -939,6 +939,10 @@ public final class WebServer: @unchecked Sendable {
         if let execId = headers["x-fantastic-execution-id"], !execId.isEmpty {
             item["id"] = .string(execId)
         }
+        if let s = headers["x-fantastic-secret"], !s.isEmpty {
+            item["secret"] = .array(
+                s.split(separator: ",").map { .string($0.trimmingCharacters(in: .whitespaces)) })
+        }
         let out = await Inbound.handIn(
             kernel, legId: owner,
             .object(["type": .string("inbound_call"), "item": .object(item)]),

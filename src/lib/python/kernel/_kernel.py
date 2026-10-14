@@ -125,6 +125,18 @@ _current_origin: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+_current_secret: contextvars.ContextVar[tuple] = contextvars.ContextVar(
+    "_current_secret", default=()
+)
+
+
+def current_secret() -> tuple:
+    """The `secret` marks of the item this dispatch serves (`kernel/_secret`) —
+    dotted paths into its payload. A handler that relays a marked value onward
+    marks its own send with them, so the value stays shown as `[secret]`."""
+    return _current_secret.get()
+
+
 def current_origin() -> str | None:
     """The id that ORIGINATED this dispatch, or None for an operator send.
 
@@ -514,6 +526,10 @@ class Kernel:
     # are refused `{reason:"draining"}`; sends with a live parent task, and the
     # kernel's own `shutdown` verbs, still pass.
     draining: bool = False
+    # A FRESH root's first record write, deferred until a mode holds the dir's
+    # lock (`kernel/modes`): a lockless invocation (`--help`, `reflect`) writes
+    # nothing. Set by the bootstrap, run once by `take_seed`.
+    pending_seed: "Callable[[], None] | None" = None
 
     def mint_id(self) -> int:
         """The next message id. The ONLY allocator in the kernel: a call, a forked
@@ -1161,10 +1177,20 @@ class Kernel:
         )
         return task_id
 
-    def is_registered(self, task) -> bool:
-        """Whether this asyncio task IS a row of the table (a spawned loop, e.g. the
-        loader's pump) — live work by definition, whatever its contextvar says."""
-        return task is not None and any(e["_task"] is task for e in self.tasks.values())
+    def drain_admits(self, cur: int | None, task) -> bool:
+        """While draining, may a send made under task id `cur` (inside the asyncio
+        `task`) start? Yes inside a live DISPATCH, and inside a keepalive fork (a
+        persister that must outlive the quiet phase); no inside any other fork —
+        that would be new work."""
+
+        def ok(e: dict) -> bool:
+            return not e["_forked"] or e["_keepalive"]
+
+        entry = self.tasks.get(cur) if cur is not None else None
+        if entry is not None:
+            return ok(entry)
+        own = next((e for e in self.tasks.values() if e["_task"] is task), None)
+        return own is not None and ok(own)
 
     def forget_task(self, task_id: int) -> None:
         """Drop one entry. Surviving children are RE-PARENTED to the dead
