@@ -2,8 +2,8 @@
 # The js KERNEL LIBRARY archive — the ts lib's public entry (src/index.ts:
 # Kernel, WsBridge, ProxyLoader, Host, ram_store, the AI backend, `boot`) as one
 # browser ESM bundle + its readme. NO page: an app (the CLI's canvas, in
-# src/tui/web/canvas) packs its own page on top. Mirrors the `js` job in
-# .github/workflows/release.yml, which runs this same script.
+# src/tui/web/canvas) packs its own page on top. This script IS the release
+# recipe, run locally.
 #
 # `release` minifies; `debug` is the same bundle unminified, so a stack trace
 # names real identifiers. pack.sh writes src/lib/ts/dist/js_kernel.zip; --out

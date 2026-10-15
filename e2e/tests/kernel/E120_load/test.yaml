@@ -1,0 +1,13 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the packaged kernel of each host
+# runtime under load (1000 hydrated agents, 500 REST calls, one 500-item batch),
+# driven over web_rest. Times are reported; bounds catch only a gross regression.
+id: kernel_load
+group: kernel
+title: "load: 1000 agents hydrate at boot (time vs the bare seed), all listed and indexed; 500 REST reflects; one AI turn's 500 calls as ONE kernel batch, all replies back as one turn"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+solo: true
+limits:
+  idle_seconds: 300
+  turn_seconds: 600

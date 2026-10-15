@@ -1610,7 +1610,7 @@ class Kernel:
                 try:
                     import_handler(hm)
                 except Exception:
-                    # canonical log shape — CI + selftests grep it verbatim.
+                    # canonical log shape — tests + selftests grep it verbatim.
                     sys.stderr.write(
                         f"[kernel] skipping agent {rec.get('id')}: "
                         f"bundle {hm} not installed in this runtime\n"

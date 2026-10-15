@@ -134,7 +134,7 @@ def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsy
     nothing crashes. Install the bundle and the agent rehydrates on
     the next boot. Wipe-and-rebuild safe.
 
-    Log line shape is part of the contract (grep-able from CI +
+    Log line shape is part of the contract (grep-able from tests +
     selftests):
         [kernel] skipping agent <id>: bundle <module> not installed in this runtime
     """

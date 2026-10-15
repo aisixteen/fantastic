@@ -8,11 +8,10 @@
 //! python's walks go through `file_bridge.fs`.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use crate::oserror::os_error_str;
+use crate::sys;
 
 /// python `os.path.realpath(p, strict=False)` — the canonical path, with every
 /// symlink it can follow followed and a missing tail normalized.
@@ -23,7 +22,7 @@ use crate::oserror::os_error_str;
 /// (`[Errno 2] No such file or directory`).
 pub fn realpath(p: &Path) -> Result<PathBuf, String> {
     let mut seen: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::new();
-    let (path, _ok) = join_realpath(Vec::new(), p.as_os_str().as_bytes().to_vec(), &mut seen);
+    let (path, _ok) = join_realpath(Vec::new(), sys::os_bytes(p.as_os_str()).to_vec(), &mut seen);
     abspath(path)
 }
 
@@ -79,7 +78,7 @@ fn join_realpath(
             continue;
         };
         seen.insert(newpath.clone(), None);
-        let (walked, ok) = join_realpath(path, link.into_os_string().into_vec(), seen);
+        let (walked, ok) = join_realpath(path, sys::os_into_bytes(link.into_os_string()), seen);
         path = walked;
         if !ok {
             return (join(&path, &rest), false);
@@ -99,7 +98,7 @@ fn abspath(path: Vec<u8>) -> Result<PathBuf, String> {
             e.raw_os_error()
                 .map_or_else(|| e.to_string(), |n| os_error_str(n, None))
         })?;
-        join(cwd.as_os_str().as_bytes(), &path)
+        join(sys::os_bytes(cwd.as_os_str()), &path)
     };
     Ok(bytes_path(&normpath(&path)))
 }
@@ -171,5 +170,5 @@ fn partition(s: &[u8], sep: u8) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn bytes_path(b: &[u8]) -> PathBuf {
-    PathBuf::from(OsString::from_vec(b.to_vec()))
+    PathBuf::from(sys::os_from_bytes(b.to_vec()))
 }

@@ -7,14 +7,13 @@
 #   2. 18-agent hydrate reflect (target < 100 ms, ceiling 200 ms)
 #   3. boot-to-listening        (target < 200 ms, ceiling 400 ms)
 #
-# Run locally with strict targets; CI runs with the relaxed ceilings
-# (2× the targets) via FANTASTIC_BENCH_RELAXED=1 to absorb cloud-runner
-# variance.
+# Strict targets by default; FANTASTIC_BENCH_RELAXED=1 uses relaxed
+# ceilings (2× the targets) on a slower or noisier host.
 #
 # Environment:
 #   FANTASTIC_RUST          path to the release binary
 #                            (default: src/lib/rust/target/release/fantastic_kernel)
-#   FANTASTIC_BENCH_RELAXED 1 → use 2× ceilings (CI default)
+#   FANTASTIC_BENCH_RELAXED 1 → use 2× ceilings
 #   FANTASTIC_BENCH_PORT    port for boot-to-listening (default 18282)
 
 set -euo pipefail
@@ -33,7 +32,7 @@ if [ "${FANTASTIC_BENCH_RELAXED:-0}" = "1" ]; then
     TARGET_VIRGIN_MS=100
     TARGET_HYDRATE_MS=200
     TARGET_LISTEN_MS=400
-    echo "[bench] mode: RELAXED (CI ceilings, 2× local targets)"
+    echo "[bench] mode: RELAXED (2× local targets)"
 else
     TARGET_VIRGIN_MS=50
     TARGET_HYDRATE_MS=100

@@ -340,7 +340,7 @@ kernel.load_json(&json)?;                            // both modes (parse + repl
 and `diff`-style review.
 
 A black-box `scripts/compat-python.sh` runs wire-protocol probes
-against the running binary; CI fails on any divergence.
+against the running binary; it exits non-zero on any divergence.
 
 ## Cross-runtime workdir compatibility
 
@@ -373,8 +373,8 @@ Release binary's boot budget, measured by `scripts/bench-coldstart.sh`:
 | boot-to-listening (HTTP)  | 200 ms  |  88 ms |
 
 Captured on macOS arm64 (M-series) in release mode against a fresh
-tempdir. CI runs the same script with 2× ceilings via
-`FANTASTIC_BENCH_RELAXED=1` to absorb cloud-runner variance.
+tempdir. `FANTASTIC_BENCH_RELAXED=1` runs the same script with 2×
+ceilings on a slower or noisier host.
 
 Run locally:
 
@@ -405,12 +405,10 @@ See [`selftest.md`](selftest.md) for the index + driving workflow.
 > **Working with Claude on this repo?** Run `./scripts/quality.sh`
 > (or its individual sections) before every commit you ask Claude
 > to make. Claude SHOULD pick the strictest tools available — clippy
-> with `-D warnings`, `cargo fmt --check`, `cargo deny`, strict YAML
-> parsing on workflow edits — so CI doesn't surface lint issues
-> the local toolchain quietly accepted (Rust toolchain version
-> skew has burned us twice). No git hooks installed by design;
-> the gate is operator-driven via the script + Claude's own
-> pre-commit sweep.
+> with `-D warnings`, `cargo fmt --check`, `cargo deny` — there is
+> no CI, so this local gate is the only lint check. No git hooks
+> installed by design; the gate is operator-driven via the script +
+> Claude's own pre-commit sweep.
 
 Single command — `./scripts/quality.sh` runs the canonical gate
 (8 sections): `compile`, `fmt`, `clippy`, `test`, `deny`, `audit`,
@@ -437,10 +435,7 @@ cargo check -p fantastic-cli --no-default-features --features embedded
 ./scripts/bench-coldstart.sh
 ```
 
-CI runs the workspace tests on Linux + macOS via
-`.github/workflows/rust-build.yml`. Release builds (4-target tarballs)
-are driven by `.github/workflows/release-rust.yml` — see
-[`RELEASING.md`](RELEASING.md) for how to cut a release.
+See [`RELEASING.md`](RELEASING.md) for how to cut a release.
 
 ## License & brand
 

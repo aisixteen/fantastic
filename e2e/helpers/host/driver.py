@@ -120,7 +120,7 @@ def runtime(repo, name: str | None = None) -> tuple[str, dict]:
 def ensure_runtime(repo, name: str) -> dict:
     """Stage the kernel as a PACKAGED ARTIFACT and return the spec that runs it.
 
-    The build + packaging mirror `.github/workflows/release.yml` step for step —
+    The build + packaging are the release recipe (`scripts/build/<runtime>.sh`) —
     same command, same product name, same working directory, same tarball
     layout — with DEBUG in place of `--release`. See `artifacts.py`: running the
     packaged thing is what makes a packaging bug (a bundle the tarball forgot, an

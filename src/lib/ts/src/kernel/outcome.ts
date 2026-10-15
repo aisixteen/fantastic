@@ -48,6 +48,9 @@ export interface Item {
   timeout?: number;
   /** Re-dispatch budget for a terminal failure under the SAME id. */
   retries?: number;
+  /** Dotted paths into `payload` whose values the kernel shows as `[secret]`
+   *  everywhere it keeps or mirrors the call (`secret.ts`). */
+  secret?: string[];
 }
 
 export interface Outcome {

@@ -134,10 +134,26 @@ final class Tables: @unchecked Sendable {
     var foldRefs: [Key: [Int64]] = [:]
     var refByMember: [Key: Set<Int64>] = [:]
     var text: [Key: String] = [:]
+    /// (owner, name) → the ids of the rows carrying that `name`, ascending: the
+    /// kernel looks a caller's execution name up on every named call, and a scan
+    /// of every row there grows with the whole history.
+    var byName: [String: [String: [Int64]]] = [:]
 
     // ── rows ──
     func has(_ owner: String, _ rid: Int64) -> Bool { rows[owner]?[rid] != nil }
     func ids(_ owner: String) -> [Int64] { order[owner] ?? [] }
+    func named(_ owner: String, _ name: String) -> [Int64] { byName[owner]?[name] ?? [] }
+
+    /// Where `rid` goes in an ascending id list.
+    private static func slot(_ ids: [Int64], _ rid: Int64) -> Int {
+        var lo = 0
+        var hi = ids.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if ids[mid] <= rid { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
+    }
 
     func get(_ owner: String, _ rid: Int64) -> Row? {
         guard var out = rows[owner]?[rid] else { return nil }
@@ -154,10 +170,13 @@ final class Tables: @unchecked Sendable {
             var stored = row
             let refs = stored.removeValue(forKey: "refs")
             rows[owner, default: [:]][rid] = stored
-            var o = order[owner] ?? []
-            let at = o.firstIndex { $0 > rid } ?? o.count
-            o.insert(rid, at: at)
-            order[owner] = o
+            // In place: a copy of the owner's whole id list per row would make
+            // every append cost the size of the history.
+            order[owner, default: []].insert(rid, at: Self.slot(order[owner] ?? [], rid))
+            if case .string(let name)? = stored["name"] {
+                byName[owner, default: [:]][name, default: []]
+                    .insert(rid, at: Self.slot(byName[owner]?[name] ?? [], rid))
+            }
             if case .array(let list)? = refs {
                 let members = list.compactMap { $0.asInt }
                 foldRefs[Key(owner: owner, id: rid)] = members
@@ -173,7 +192,10 @@ final class Tables: @unchecked Sendable {
         let table = rows[owner] ?? [:]
         let doomed = doomedIn.filter { table[$0] != nil }
         for rid in doomed {
-            rows[owner]?.removeValue(forKey: rid)
+            if case .string(let name)? = rows[owner]?.removeValue(forKey: rid)?["name"] {
+                byName[owner]?[name]?.removeAll { $0 == rid }
+                if byName[owner]?[name]?.isEmpty == true { byName[owner]?[name] = nil }
+            }
             let k = Key(owner: owner, id: rid)
             text.removeValue(forKey: k)
             // FK fold_refs.fold_id → rows: the fold's member list goes with it.
@@ -537,10 +559,17 @@ public final class RamStoreBundle: AgentBundle, @unchecked Sendable {
         case .failure(let r): return .failure(r)
         case .success(let o): owner = o
         }
-        var ids = t.ids(owner)
+        // A `name` to match starts from the rows carrying it — the same ids, in the
+        // same order, as the scan below would keep.
+        var ids: [Int64]
+        if case .object(let match) = payload["match"], case .string(let name)? = match["name"] {
+            ids = t.named(owner, name)
+        } else {
+            ids = t.ids(owner)
+        }
         let row = { (i: Int64) -> Row in t.rows[owner]?[i] ?? [:] }
         if case .string(let flk) = payload["from_last_kind"], !flk.isEmpty {
-            if let last = ids.last(where: { row($0)["kind"]?.asString == flk }) {
+            if let last = t.ids(owner).last(where: { row($0)["kind"]?.asString == flk }) {
                 ids = ids.filter { $0 >= last }
             }
         }

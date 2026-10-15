@@ -8,8 +8,8 @@
 #   PUSH=1 ARCH=arm64 TAG=ghcr.io/aisixteen/fantastic:0.3.0-linux-arm64 sh …/build.sh  # publish one arch
 #
 # `ARCH` builds ONE platform on whatever builder you run it on — native on a
-# matching host (arm64 on Apple silicon), emulated otherwise. That's the local
-# mirror of the per-arch CI release jobs. `PLATFORM` (a list) still does the
+# matching host (arm64 on Apple silicon), emulated otherwise. That is how each
+# per-arch release image is built. `PLATFORM` (a list) still does the
 # combined manifest path. All three modes share the same prereqs below.
 #
 # Works with podman OR docker. The prebuilt src/lib/ts/dist/js_kernel.zip (the js
@@ -24,7 +24,7 @@ ARCH="${ARCH:-}"
 PLATFORM="${PLATFORM:-}"
 PUSH="${PUSH:-0}"
 # Baked into the image as FANTASTIC_VERSION → surfaced in the kernel's reflect.
-# Defaults to "dev" for local builds; CI passes the release tag (e.g. v0.5.3).
+# Defaults to "dev"; a release build passes the release tag (e.g. v0.5.3).
 VERSION="${FANTASTIC_VERSION:-dev}"
 
 # ── prereq: the bundled js kernel library (copied prebuilt from src/lib/ts) ──
@@ -44,8 +44,8 @@ else echo "build.sh: need podman or docker" >&2; exit 1; fi
 
 cd "$REPO"
 
-# ── per-arch single build (ARCH=amd64|arm64) — the local mirror of the CI ───
-# per-arch release jobs. Native on a matching host, emulated otherwise. Default
+# ── per-arch single build (ARCH=amd64|arm64) — how each per-arch release ────
+# image is built. Native on a matching host, emulated otherwise. Default
 # tag is fantastic:<arch> (override with TAG, e.g. a GHCR per-arch tag).
 if [ -n "$ARCH" ]; then
   case "$ARCH" in

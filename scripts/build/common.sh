@@ -1,7 +1,7 @@
 # Shared by every `scripts/build/<runtime>.sh`. Sourced, never executed.
 #
-# ONE PLACE knows how to build each runtime's artifact. The release workflow and
-# the e2e harness both call these scripts, so "e2e runs what we ship" is true by
+# ONE PLACE knows how to build each runtime's artifact. The release (built
+# locally) and the e2e harness both call these scripts, so "e2e runs what we ship" is true by
 # construction rather than by two lists that drift.
 #
 # Every script takes the same two options and prints the artifact path it wrote:

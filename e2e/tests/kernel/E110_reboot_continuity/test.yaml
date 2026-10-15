@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the packaged kernel of each
+# host runtime, spawned twice on one directory, driven over web_rest.
+id: reboot_continuity
+group: kernel
+title: "a tree built over REST (nested agents, fields, grants, files, deletes) comes back whole on the next boot of the same dir; an agent deleted and re-created on its id keeps its store rows and its files"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

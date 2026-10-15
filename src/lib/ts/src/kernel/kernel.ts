@@ -18,6 +18,7 @@ import { errorShaped } from "./outcome.ts";
 import { BAD_ARG, LOCKED, UNHANDLED, refusal, unknown } from "./refusal.ts";
 import { answerKernelVerb, isKernelVerb } from "./kernel_verbs.ts";
 import { authorizeCall, denial } from "./authz.ts";
+import { shown } from "./secret.ts";
 import type { FolderBase, FolderBuilt, ReadFolders } from "./folders.ts";
 
 /**
@@ -27,8 +28,9 @@ import type { FolderBase, FolderBuilt, ReadFolders } from "./folders.ts";
  */
 export interface Bridge {
   /** Call `target` on the host. The host judges the call as the leg this kernel
-   *  is connected through — the frame names no caller. */
-  forward(target: string, payload: Payload): Promise<Json>;
+   *  is connected through — the frame names no caller. `secret` is the item's
+   *  marks (`secret.ts`), carried on the frame so the host shows them too. */
+  forward(target: string, payload: Payload, secret?: readonly string[]): Promise<Json>;
   /** like forward, but the payload may carry a binary blob (Uint8Array). */
   forwardBinary(target: string, payload: Record<string, unknown>): Promise<Json>;
   emitRemote(target: string, payload: Payload): void;
@@ -104,6 +106,12 @@ export class Kernel {
    * keys every row by its writer.
    */
   readonly currentCaller: string | null = null;
+  /**
+   * The `secret` marks of the item the dispatch now running serves
+   * (`secret.ts`) — an agent that relays the value onward marks its own send
+   * with them, so the value stays shown as `[secret]`.
+   */
+  readonly currentSecret: readonly string[] = [];
   /**
    * The SHUTDOWN of a stop (python `shutdown_context`): set on the view a
    * `shutdown` bookkeeping call runs under, so what that handler sends passes
@@ -391,7 +399,7 @@ export class Kernel {
     const build = (rec: AgentRecord, parentId: string | null): void => {
       const hm = rec.handler_module ?? null;
       if (hm !== null && !this.handlers.has(hm)) {
-        // canonical log shape — CI + selftests grep it verbatim, identical
+        // canonical log shape — tests + selftests grep it verbatim, identical
         // across runtimes. Guarded globalThis.console keeps the pure kernel
         // env-agnostic (no DOM/node lib).
         (
@@ -431,10 +439,16 @@ export class Kernel {
    *  asked (null: the operator, or the kernel's own bookkeeping). Shares all
    *  state by prototype — the ledger, the table and the tree are the SAME
    *  objects, only the origin differs. */
-  private viewFor(agentId: string, taskId: number | null, caller: string | null): Kernel {
+  private viewFor(
+    agentId: string,
+    taskId: number | null,
+    caller: string | null,
+    secret: readonly string[] = [],
+  ): Kernel {
     const view = Object.create(this) as Kernel;
     Object.defineProperty(view, "currentOrigin", { value: agentId, enumerable: true });
     Object.defineProperty(view, "currentCaller", { value: caller, enumerable: true });
+    Object.defineProperty(view, "currentSecret", { value: secret, enumerable: true });
     setTask(view, taskId, this.tasks);
     return view;
   }
@@ -568,16 +582,21 @@ export class Kernel {
    * the ledger and the task row. Local agent → run here; unknown target →
    * forward over the bridge to the host.
    */
-  async dispatch(targetId: string, payload: Payload, taskId: number): Promise<Json> {
+  async dispatch(
+    targetId: string,
+    payload: Payload,
+    taskId: number,
+    secret: readonly string[] = [],
+  ): Promise<Json> {
     const id = this.resolve(targetId);
     const target = this.agents.get(id);
     if (target === undefined) {
       // FEDERATION: not ours, so it belongs to the host. `launch` already
       // refused the no-bridge case, so a bridge is present here.
-      return (this.bridge as Bridge).forward(id, payload);
+      return (this.bridge as Bridge).forward(id, payload, secret);
     }
     // `this` is the CALLER's view; the handler runs under the target's own.
-    return this.run(target, payload, this.viewFor(target.id, taskId, this.currentOrigin));
+    return this.run(target, payload, this.viewFor(target.id, taskId, this.currentOrigin, secret));
   }
 
   /**
@@ -623,8 +642,8 @@ export class Kernel {
     const verb = str(payload, "type");
     // EVERY DISPATCH IS MIRRORED (python `_fanout(kind="send")`): the payload
     // lands in the target's own inbox and in every watcher's — which is what a
-    // `watch` subscribes to, and why it is gated like a call.
-    this.fanout(id, payload);
+    // `watch` subscribes to, and why it is gated like a call. Mirrored AS SHOWN.
+    this.fanout(id, shown(payload, view.currentSecret));
     if (verb === "reflect") {
       const identity = reflectIdentity(target, this.rootId);
       return applyReflectFlags(this, target, payload, identity);
@@ -670,7 +689,12 @@ export class Kernel {
    *  Distinct from `emit`, which is LOCAL fan-out only — the bridge calls
    *  `emit` for inbound host events, so routing `emit` to the bridge would loop. */
   emitRemote(targetId: string, payload: Payload): void {
-    this.bridge?.emitRemote(this.resolve(targetId), payload);
+    if (this.bridge === null) return;
+    const id = this.resolve(targetId);
+    // An AGENT's emit passes its own egress gate for verb `emit` (the host
+    // judges the rest); a denied emit is dropped — an emit has no reply.
+    if (this.currentOrigin !== null && this.egressGate(this.currentOrigin, "emit", id) !== null) return;
+    this.bridge.emitRemote(id, payload);
   }
 
   /** Call a REMOTE host agent with a binary-bearing payload (e.g. paste_image). */

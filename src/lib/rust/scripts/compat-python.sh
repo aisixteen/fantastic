@@ -5,8 +5,7 @@
 # REST surface, asserts each response matches the contract. Run from
 # the repo root or from rust/.
 #
-# CI parity: .github/workflows/compat.yml invokes this script. Any
-# divergence from the documented wire shape fails the build.
+# Any divergence from the documented wire shape exits non-zero.
 #
 # Environment:
 #   FANTASTIC_RUST   path to the rust `fantastic` binary

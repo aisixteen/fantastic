@@ -5,7 +5,7 @@
 //! for the operator. A program that wants a `kernel` global includes
 //! [`CONNECTOR_SRC`] in its own source (the bridge prepends nothing now). When the
 //! host has no python (rare on dev machines, common on minimal CI containers) those
-//! tests return successfully — we don't fail CI on systems without Python. The gate
+//! tests return successfully — the suite doesn't fail on systems without Python. The gate
 //! tests need no interpreter at all.
 
 use super::*;
@@ -538,7 +538,7 @@ async fn stop_sigkills_the_job() {
 /// and mysteriously fails on another.
 ///
 /// Skips (loudly) when the python tree is absent — the container's rust stage copies
-/// only `src/lib/rust/`. CI checks out the whole repo, so it runs there.
+/// only `src/lib/rust/`. A full checkout runs it.
 #[test]
 fn connector_matches_python_source() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

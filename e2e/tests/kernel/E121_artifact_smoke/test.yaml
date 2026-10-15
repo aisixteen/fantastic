@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the packaged kernel of each host
+# runtime, booted in an empty dir and driven over web_rest.
+id: artifact_smoke
+group: kernel
+title: "the packaged artifact boots in an empty dir and describes itself: root reflect keys, the doc tree, every shipped bundle kind with its docs — the kind set, verbs and schema fields vs python"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

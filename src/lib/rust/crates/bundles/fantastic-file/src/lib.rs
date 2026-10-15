@@ -41,6 +41,7 @@
 #![deny(missing_docs)]
 
 pub mod fs;
+mod sys;
 mod text;
 mod watch;
 

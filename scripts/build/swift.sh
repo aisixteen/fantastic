@@ -1,6 +1,5 @@
 #!/bin/sh
-# The swift kernel host binary. Mirrors the `swift` job in
-# .github/workflows/release.yml.
+# The swift kernel host binary. This script IS the release recipe, run locally.
 #
 #   swift build -c <profile> --product fantastic_kernel   (cwd src/lib/swift)
 #   tar -czf <out> -C .build/<profile> fantastic_kernel *.bundle

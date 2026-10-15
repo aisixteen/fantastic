@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the two-sided call gate,
+# agents sending as themselves (user_probe `send`), driven over web_rest.
+id: call_gate
+group: kernel
+title: "two-sided call gate over the wire: egress/ingress halves, verb-level grants, $self/$parent/$subtree, no self-raise, grant shape at the write, delete prunes grants"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 60
+  turn_seconds: 180

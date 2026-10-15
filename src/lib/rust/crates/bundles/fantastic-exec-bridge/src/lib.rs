@@ -696,6 +696,7 @@ mod monitor;
 pub mod pty;
 pub mod relay;
 pub mod spawn;
+mod sys;
 mod tail;
 
 #[cfg(test)]
@@ -711,7 +712,7 @@ mod tests_monitor;
 ///
 /// Both now address the JOB TABLE. There is exactly one registry: a private pid set
 /// alongside it would be a second truth, and `start`'s jobs would be invisible to it.
-fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: nix::sys::signal::Signal) -> u64 {
+fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: sys::Signal) -> u64 {
     let mut g = jobs::jobs();
     let mut n = 0u64;
     for ((_, id), j) in g.iter_mut() {
@@ -721,11 +722,11 @@ fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: nix::sys::signal:
         if !jobs::alive(j) {
             continue; // already gone — never pretend
         }
-        let signalled = if sig == nix::sys::signal::Signal::SIGKILL {
+        let signalled = if sig == sys::Signal::SIGKILL {
             j.status = "stopping".to_string();
             jobs::kill(j)
         } else {
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(j.pid as i32), sig).is_ok()
+            sys::signal(j.pid, sig)
         };
         if signalled {
             n += 1;
@@ -829,9 +830,9 @@ fn interrupt_reply(agent_id: &AgentId, payload: &Value) -> Value {
         Ok(w) => w,
         Err(e) => return e,
     };
-    no_job(agent_id, want.as_ref()).unwrap_or_else(|| {
-        json!({"interrupted": signal_jobs(agent_id, want.as_ref(), nix::sys::signal::Signal::SIGINT)})
-    })
+    no_job(agent_id, want.as_ref()).unwrap_or_else(
+        || json!({"interrupted": signal_jobs(agent_id, want.as_ref(), sys::Signal::SIGINT)}),
+    )
 }
 
 fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
@@ -839,9 +840,9 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
         Ok(w) => w,
         Err(e) => return e,
     };
-    no_job(agent_id, want.as_ref()).unwrap_or_else(|| {
-        json!({"killed": signal_jobs(agent_id, want.as_ref(), nix::sys::signal::Signal::SIGKILL)})
-    })
+    no_job(agent_id, want.as_ref()).unwrap_or_else(
+        || json!({"killed": signal_jobs(agent_id, want.as_ref(), sys::Signal::SIGKILL)}),
+    )
 }
 
 /// `start` — spawn the COMMAND in the BACKGROUND and return at once.
@@ -1014,7 +1015,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             env.insert("TERM".to_string(), json!("xterm-256color"));
             crate::spawn::spawn_pty(&argv, agent_id.as_str(), &env, &cwd, cols, rows).and_then(
                 |(s, master)| {
-                    set_nonblocking(&master)?;
+                    sys::set_nonblocking(&master)?;
                     Ok((s, Some(pty::Pty::new(master, cols, rows)?)))
                 },
             )
@@ -1191,18 +1192,6 @@ pub fn child_env(meta: &Map<String, Value>) -> Map<String, Value> {
         }
     }
     env
-}
-
-fn set_nonblocking(fd: &std::os::fd::OwnedFd) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-    // SAFETY: fcntl on an fd we own.
-    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
-    if flags == -1
-        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
-    {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 /// `boot` — a NO-OP returning null. Nothing auto-restarts: a command is started by a

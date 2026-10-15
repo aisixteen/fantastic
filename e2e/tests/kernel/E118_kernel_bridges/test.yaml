@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: two packaged kernels (the
+# runtime under test + a python peer; rust when the runtime is python) wired by
+# ws_bridge both ways and by relay_connector through a stub relay, over web_rest.
+id: kernel_bridges
+group: kernel
+title: "two kernels bridged: ws_bridge both ways (remote reflect, send, raw bytes each way, read_stream to eof, watch_remote events, the remote's gate), a dead peer (bounded failure, explicit reconnect), relay_connector through a stub relay (store password, binary frames, live seal)"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

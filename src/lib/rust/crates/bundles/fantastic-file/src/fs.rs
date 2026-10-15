@@ -43,10 +43,11 @@
 //! a caller renders `str(e)` by forwarding the string.
 
 use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use fantastic_bundle::{io_error_str, os_error_str2, py_repr, realpath, utf8_decode_error_str};
+
+use crate::sys;
 
 /// python `fs.resolve_root` — clamp `root` to the running dir `base` (the
 /// kernel's [`fantastic_kernel::Kernel::workdir`], python's `fs.Root.base` — the
@@ -264,17 +265,9 @@ pub fn write_bytes(
 /// `os.fchmod(fd, mode)` (a mode given) → `os.write(fd, data)`.
 fn write_new_with_mode(tmp: &Path, data: &[u8], mode: Option<u32>) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .mode(mode.unwrap_or(0o666))
-        .open(tmp)
-        .map_err(|e| io_error_str(&e, tmp))?;
+    let mut f = sys::create_new_nofollow(tmp, mode).map_err(|e| io_error_str(&e, tmp))?;
     if let Some(mode) = mode {
-        f.set_permissions(std::fs::Permissions::from_mode(mode))
-            .map_err(|e| io_error_str(&e, tmp))?;
+        sys::set_mode(&f, mode).map_err(|e| io_error_str(&e, tmp))?;
     }
     f.write_all(data).map_err(|e| io_error_str(&e, tmp))
 }
@@ -327,22 +320,18 @@ pub enum PrivateReadError {
 /// private; [`PrivateReadError::Os`] when it is absent or unreadable.
 pub fn read_private(root: &Path, path: &str) -> Result<Vec<u8>, PrivateReadError> {
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let leaf = lexical_leaf(root, path).map_err(PrivateReadError::Os)?;
-    let opened = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(&leaf);
+    let opened = sys::open_private(&leaf);
     let mut f = match opened {
         Ok(f) => f,
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+        Err(e) if sys::is_symlink_refusal(&e) => {
             // the symlink itself, named in the refusal — never read
             let st = std::fs::symlink_metadata(&leaf)
                 .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
             return Err(PrivateReadError::NotPrivate(NotPrivate {
                 path: leaf,
-                mode: st.mode() & 0o7777,
-                uid: st.uid(),
+                mode: sys::mode_bits(&st),
+                uid: sys::owner_uid(&st),
             }));
         }
         Err(e) => return Err(PrivateReadError::Os(io_error_str(&e, &leaf))),
@@ -350,14 +339,13 @@ pub fn read_private(root: &Path, path: &str) -> Result<Vec<u8>, PrivateReadError
     let st = f
         .metadata()
         .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
-    let mode = st.mode() & 0o7777;
-    // SAFETY: `getuid` has no preconditions and cannot fail.
-    let me = unsafe { libc::getuid() };
-    if !st.file_type().is_file() || st.uid() != me || mode & 0o077 != 0 {
+    let mode = sys::mode_bits(&st);
+    let me = sys::current_uid();
+    if !st.file_type().is_file() || sys::owner_uid(&st) != me || mode & 0o077 != 0 {
         return Err(PrivateReadError::NotPrivate(NotPrivate {
             path: leaf,
             mode,
-            uid: st.uid(),
+            uid: sys::owner_uid(&st),
         }));
     }
     let mut out = Vec::new();
@@ -379,7 +367,7 @@ pub fn list_dir(root: &Path, path: &str) -> Result<Vec<PathBuf>, String> {
     }
     // python sorts `Path` objects, which compare by their parts — all entries
     // share a parent, so this is the name's code points, i.e. utf-8 bytes.
-    out.sort_by(|a, b| a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes()));
+    out.sort_by(|a, b| sys::os_bytes(a.as_os_str()).cmp(sys::os_bytes(b.as_os_str())));
     Ok(out)
 }
 

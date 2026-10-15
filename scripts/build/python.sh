@@ -1,6 +1,6 @@
 #!/bin/sh
-# The python kernel host. Mirrors the `python` job in
-# .github/workflows/release.yml: it ships SOURCE, and installing it is `uv sync`.
+# The python kernel host. This script IS the release recipe, run locally: it
+# ships SOURCE, and installing it is `uv sync`.
 # There is no compile step, so `--profile` changes nothing here — it is accepted
 # so every runtime's script takes the same options.
 . "$(dirname "$0")/common.sh"

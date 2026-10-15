@@ -1,6 +1,6 @@
 # typos.toml — allowlist for `crate-ci/typos`.
 #
-# Run by .github/workflows/spellcheck.yml on every PR. Add a term
+# Run locally with `typos` from the repo root. Add a term
 # here when it's an intentional identifier the spell-checker flags
 # as a typo. Keep the list small — every entry weakens the gate.
 

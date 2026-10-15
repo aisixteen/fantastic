@@ -46,6 +46,7 @@ pub mod secret;
 pub mod send;
 pub mod state;
 pub mod storage;
+mod sys;
 pub mod tasks;
 pub mod yaml_io;
 

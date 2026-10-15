@@ -519,13 +519,16 @@ struct BundleSmokeTests {
         // reads, so nothing races. `tick_now` fires regardless of `paused`.
         let (kernel, _) = await makeProbedScheduler(
             dir: dir, rel: rel, probes: ["p_hang"], paused: true)
-        let r = await schedule(kernel, "p_hang", interval: 60, hit: ["block": .double(2.0)], timeout: .double(0.1))
+        // The probe blocks 10 s; the bound is 5 s. The gap is what proves the
+        // timeout cut the fire, and it leaves seconds of slack for a loaded
+        // executor (a full parallel run delays a 0.1 s timer by ~2 s).
+        let r = await schedule(kernel, "p_hang", interval: 60, hit: ["block": .double(10.0)], timeout: .double(0.1))
         let sid = try #require(r["schedule_id"].asString)
         #expect(r["schedule"]["fire_timeout"].asDouble == 0.1, "\(r)")
         let t0 = Date()
         let fired = await kernel.send([Item("sched", ["type": "tick_now", "schedule_id": .string(sid)])])[0].result
         #expect(fired["fired"].asBool == true, "\(fired)")
-        #expect(Date().timeIntervalSince(t0) < 1.5, "fire was not bounded by the schedule timeout")
+        #expect(Date().timeIntervalSince(t0) < 5.0, "fire was not bounded by the schedule timeout")
         let h = await kernel.send([Item("sched", ["type": "history", "schedule_id": .string(sid)])])[0].result
         #expect(h["count"].asInt == 1, "\(h)")
         #expect((h["history"][0]["error"].asString ?? "").contains("timed_out"), "\(h)")
@@ -1320,10 +1323,18 @@ struct SchedulerStderrTests {
         // next sweep attempts now fails at the loader.
         _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "store"])
 
-        // The schedule is due at +1s; the loop wakes then. Kept as short as the
-        // 1 s minimum interval allows.
+        // The schedule is due at +1s; the loop wakes then. Captured until BOTH
+        // lines are in (a loaded executor wakes the loop late), bounded at 15 s.
+        // The OUTER capture keeps every line; the inner ones only poll for both.
         let lines = await RuntimeLog.capture {
-            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            let deadline = Date().addingTimeInterval(15)
+            var polled: [String] = []
+            while Date() < deadline {
+                polled += await RuntimeLog.capture { try? await Task.sleep(nanoseconds: 50_000_000) }
+                if polled.contains(where: { $0.hasPrefix("scheduler sched: persist failed: ") })
+                    && polled.contains(where: { $0.hasPrefix("scheduler sched: history persist failed: ") })
+                { break }
+            }
         }
         _ = await ask(kernel, "kernel", ["type": "delete_agent", "id": "sched"])
         let persist = lines.filter { $0.hasPrefix("scheduler sched: persist failed: ") }

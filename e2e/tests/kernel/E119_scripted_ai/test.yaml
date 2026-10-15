@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a scripted OpenAI-compatible
+# server plays the model for the kernel's own vllm_backend agent, driven over web_rest.
+id: scripted_ai
+group: kernel
+title: "an AI agent's call loop against a scripted model: a call runs and its reply is the next prompt, a file write lands verbatim, calls written wrong get the compiler-style report, a call inside <think> is not dispatched, done ends the chain"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

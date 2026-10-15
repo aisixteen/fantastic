@@ -1,6 +1,5 @@
 #!/bin/sh
-# The rust kernel host binary. Mirrors the `rust` job in
-# .github/workflows/release.yml.
+# The rust kernel host binary. This script IS the release recipe, run locally.
 #
 #   cargo build [--release] --bin fantastic_kernel   (cwd src/lib/rust)
 #   tar -czf <out> -C target/<profile> fantastic_kernel

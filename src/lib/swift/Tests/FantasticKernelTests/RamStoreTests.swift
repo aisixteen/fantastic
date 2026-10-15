@@ -197,6 +197,35 @@ struct RamStoreTests {
         #expect(ids(rest) == [3, 4])
     }
 
+    @Test func aNameMatchReadsTheRowsCarryingIt() async {
+        let k = await store()
+        func r(_ id: Int64, _ kind: String, _ name: JSON? = nil, _ extra: OrderedDictionary<String, JSON> = [:]) -> JSON {
+            var o: OrderedDictionary<String, JSON> = ["kind": .string(kind)]
+            if let name { o["name"] = name }
+            for (key, v) in extra { o[key] = v }
+            return row(id, o)
+        }
+        _ = await append(k, "alice", [
+            r(1, "call", .string("job")), r(2, "settle", .string("job")),
+            r(3, "call", .string("other")), r(4, "call", .string("job"), ["verb": .string("x")]),
+            r(5, "clear"), r(6, "call", .integer(7)),
+        ])
+        _ = await append(k, "bob", [r(1, "call", .string("job"))])
+        func read(_ q: OrderedDictionary<String, JSON>) async -> [Int64] {
+            ids(await call(k, p("read", q), as: "alice"))
+        }
+        let job: JSON = .object(["name": .string("job")])
+        #expect(await read(["match": job]) == [1, 2, 4])
+        #expect(await read(["kinds": .array([.string("call")]), "match": job]) == [1, 4])
+        #expect(await read(["match": .object(["name": .string("job"), "verb": .string("x")])]) == [4])
+        #expect(await read(["match": job, "order": .string("desc"), "limit": .integer(1)]) == [4])
+        #expect(await read(["match": job, "from_last_kind": .string("clear")]) == [])
+        #expect(await read(["match": .object(["name": .string("nobody")])]) == [])
+        #expect(await read(["match": .object(["name": .integer(7)])]) == [6])
+        _ = await call(k, p("prune", ["before_id": .integer(3)]), as: "alice")
+        #expect(await read(["match": job]) == [4])
+    }
+
     @Test func dumpInjectRoundtrip() async {
         let k = await store()
         _ = await append(

@@ -15,6 +15,7 @@ pub mod path;
 mod pyset;
 mod realpath;
 mod repr;
+mod sys;
 mod text;
 mod unicode;
 mod unicode_tables;

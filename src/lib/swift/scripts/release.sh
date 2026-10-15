@@ -2,9 +2,8 @@
 #
 # Cut a `fantastic` CLI release.
 #
-# Mirrors the historical `rust/scripts/release.sh` operator-driven
-# pattern: ALL work happens locally on the maintainer's Mac. CI does
-# lint only (no automated release workflow). The maintainer reviews
+# Same operator-driven pattern as `rust/scripts/release.sh`: ALL work
+# happens locally on the maintainer's Mac. The maintainer reviews
 # the artifacts, then runs the printed `git tag` + `gh release
 # create` commands themselves.
 #

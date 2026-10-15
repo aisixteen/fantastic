@@ -62,6 +62,10 @@ HISTORY_MAX = 500
 
 _tick_tasks: dict[str, asyncio.Task] = {}
 _cache: dict[str, list[dict]] = {}  # in-process schedules cache
+# Per scheduler: one history append at a time. An append reads the event file,
+# adds one document and writes it back across awaits; two fires (a schedule's own
+# and a `tick_now`) interleaving there would each write over the other's event.
+_history_locks: dict[str, asyncio.Lock] = {}
 # Per scheduler: what wakes its fire loop (a change), and the state tap that
 # sets it when the scheduler's own record is updated.
 _wake: dict[str, asyncio.Event] = {}
@@ -171,13 +175,14 @@ async def _save(sid: str, kernel) -> dict | None:
 
 
 async def _append_history(sid: str, kernel, event: dict) -> dict | None:
-    raw = await _file_read(sid, kernel, _HISTORY_NAME) or ""
-    appended = raw + yaml_io.row_to_doc(event)
-    # Ring-trim if oversize: keep the newest HISTORY_MAX documents.
-    events = _parse_events(appended)
-    if len(events) > 2 * HISTORY_MAX:
-        appended = "".join(yaml_io.row_to_doc(e) for e in events[-HISTORY_MAX:])
-    return await _file_write(sid, kernel, _HISTORY_NAME, appended)
+    async with _history_locks.setdefault(sid, asyncio.Lock()):
+        raw = await _file_read(sid, kernel, _HISTORY_NAME) or ""
+        appended = raw + yaml_io.row_to_doc(event)
+        # Ring-trim if oversize: keep the newest HISTORY_MAX documents.
+        events = _parse_events(appended)
+        if len(events) > 2 * HISTORY_MAX:
+            appended = "".join(yaml_io.row_to_doc(e) for e in events[-HISTORY_MAX:])
+        return await _file_write(sid, kernel, _HISTORY_NAME, appended)
 
 
 def _parse_events(raw: str) -> list[dict]:
@@ -532,6 +537,7 @@ async def on_delete(agent):
     re-created scheduler with the same id does not list and fire the old
     schedules."""
     _cache.pop(agent.id, None)
+    _history_locks.pop(agent.id, None)
     t = _tick_tasks.pop(agent.id, None)
     if t is not None and not t.done():
         t.cancel()

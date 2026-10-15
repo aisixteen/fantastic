@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the packaged kernel of each
+# host runtime, the scheduler firing at a probe agent, driven over web_rest.
+id: scheduler_restart
+group: kernel
+title: "the scheduler fires on its own, fire_timeout bounds a hung fire (tick_now and scheduled) without blocking the others, a refused fire is recorded; schedules, paused flags and history survive a restart and fire after it"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

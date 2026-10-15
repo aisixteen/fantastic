@@ -218,7 +218,7 @@ def _make_post_endpoint(self_id: str, kernel):
                 # Uncaught, that would raise inside the ASGI app and uvicorn would
                 # answer a bare text/plain 500 with a traceback in the kernel log.
                 # Don't echo the parser exception back — generic message
-                # only (CodeQL: information exposure through an exception).
+                # only (information exposure through an exception).
                 return JSONResponse(
                     {"error": "web_rest: request body is not valid JSON"},
                     status_code=400,

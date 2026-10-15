@@ -37,53 +37,18 @@ pub trait Keychain: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OsKeychain;
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
 impl Keychain for OsKeychain {
     fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(service, account).map_err(|e| e.to_string())?;
-        match entry.get_password() {
-            Ok(v) => Ok(Some(v)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
+        crate::sys::keychain_get(service, account)
     }
 
     fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
-        keyring::Entry::new(service, account)
-            .and_then(|e| e.set_password(password))
-            .map_err(|e| e.to_string())
+        crate::sys::keychain_set(service, account, password)
     }
 
     fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
-        keyring::Entry::new(service, account)
-            .and_then(|e| e.delete_credential())
-            .map_err(|e| e.to_string())
+        crate::sys::keychain_delete(service, account)
     }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
-impl Keychain for OsKeychain {
-    fn get_password(&self, _service: &str, _account: &str) -> Result<Option<String>, String> {
-        Err(no_keychain())
-    }
-
-    fn set_password(&self, _service: &str, _account: &str, _password: &str) -> Result<(), String> {
-        Err(no_keychain())
-    }
-
-    fn delete_password(&self, _service: &str, _account: &str) -> Result<(), String> {
-        Err(no_keychain())
-    }
-}
-
-/// The loud answer of a platform with no keychain in this runtime.
-#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
-fn no_keychain() -> String {
-    format!(
-        "credential_store: the keychain backend has no OS keychain on {} in this runtime \
-         — choose backend file or env",
-        std::env::consts::OS
-    )
 }
 
 /// An in-memory keychain — the tests' double, never the real one.

@@ -107,6 +107,21 @@ static SCHEDULER_TASKS: OnceLockTaskMap = OnceLockTaskMap::new();
 /// ever evicts it — not even `delete_agent`.
 static SCHEDULE_CACHE: OnceLockScheduleCache = OnceLockScheduleCache::new();
 
+/// Per scheduler: one history append at a time, python's `_history_locks`. An
+/// append reads the event file, adds one document and writes it back across
+/// awaits; two fires (a schedule's own and a `tick_now`) interleaving there
+/// would each write over the other's event.
+static HISTORY_LOCKS: OnceLock<Mutex<HashMap<AgentId, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
+
+fn history_locks() -> std::sync::MutexGuard<'static, HashMap<AgentId, Arc<tokio::sync::Mutex<()>>>>
+{
+    HISTORY_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // ── once-lock map helpers ───────────────────────────────────────────
 
 struct OnceLockTaskMap(OnceLock<Mutex<HashMap<AgentId, fantastic_kernel::TaskId>>>);
@@ -250,6 +265,7 @@ impl Bundle for SchedulerBundle {
         // The cache goes with the agent: a re-created scheduler with the same id
         // never lists or fires the old schedules.
         SCHEDULE_CACHE.lock().remove(agent_id);
+        history_locks().remove(agent_id);
         shutdown_tick(agent_id, kernel).await;
         if let Some((_, Some(token))) = wakes().remove(agent_id) {
             kernel.remove_state_subscriber(token);
@@ -457,6 +473,8 @@ async fn append_history(
     kernel: &Arc<Kernel>,
     event: &Value,
 ) -> Result<(), PersistError> {
+    let serial = Arc::clone(history_locks().entry(agent_id.clone()).or_default());
+    let _one_at_a_time = serial.lock().await;
     let prev = file_read(agent_id, kernel, HISTORY_BLOB)
         .await
         .unwrap_or_default();

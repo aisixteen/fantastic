@@ -406,8 +406,7 @@ pub async fn pump(
 /// running" everywhere liveness is `exit_code.is_none()` and lost the cause of death
 /// from `job_done`.
 pub fn exit_code(s: std::process::ExitStatus) -> Option<i32> {
-    use std::os::unix::process::ExitStatusExt;
-    s.code().or_else(|| s.signal().map(|n| -n))
+    crate::sys::exit_code(s)
 }
 
 /// SIGKILL one job: its whole SESSION — the command and everything it launched

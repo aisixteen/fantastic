@@ -145,6 +145,8 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// Bad JSON on disk reads as an empty list, exactly as `json.JSONDecodeError`
     /// does there.
     private var cache: [String: [JSON]] = [:]
+    /// Each scheduler's latest history append; the next one waits on it.
+    private var historyTails: [String: Task<JSON?, Never>] = [:]
     /// Per scheduler: what wakes its fire loop (a change), and the state tap that
     /// pokes it when the scheduler's own record is updated. Python `_wake`/`_unsub`.
     private var wakes: [String: Wake] = [:]
@@ -239,7 +241,10 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
     /// recreated under the same id never lists or fires its predecessor's
     /// schedules (python `on_delete`).
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
-        lock.withLock { cache[agentId.value] = nil }
+        lock.withLock {
+            cache[agentId.value] = nil
+            historyTails[agentId.value] = nil
+        }
         _ = await stopTick(agentId, kernel: kernel)
         let token: SubscriberToken? = lock.withLock {
             wakes[agentId.value] = nil
@@ -323,8 +328,26 @@ public final class SchedulerBundle: AgentBundle, @unchecked Sendable {
 
     /// Returns the persist error, if any — python's `_append_history` hands it
     /// back so `_fire_many` can name it on stderr.
+    ///
+    /// ONE APPEND AT A TIME per scheduler (python's `_history_locks`): an append
+    /// reads the event file, adds one document and writes it back across awaits,
+    /// and two fires (a schedule's own and a `tick_now`) interleaving there would
+    /// each write over the other's event. Each append waits on the one before it.
     @discardableResult
     private func appendHistory(_ id: AgentId, _ kernel: Kernel, _ event: JSON) async -> JSON? {
+        let append: Task<JSON?, Never> = lock.withLock {
+            let before = historyTails[id.value]
+            let next = Task<JSON?, Never> {
+                _ = await before?.value
+                return await self.appendHistoryNow(id, kernel, event)
+            }
+            historyTails[id.value] = next
+            return next
+        }
+        return await append.value
+    }
+
+    private func appendHistoryNow(_ id: AgentId, _ kernel: Kernel, _ event: JSON) async -> JSON? {
         let prev = await fileRead(id, kernel, Self.historyBlob) ?? ""
         // One `---` document per event (python `messages_yaml.row_to_doc`).
         var combined = prev + YamlIO.rowToDoc(event.asObject ?? [:])

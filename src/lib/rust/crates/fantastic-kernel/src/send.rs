@@ -987,6 +987,16 @@ impl Kernel {
             named_fast_reflect,
         } = d;
 
+        // A KILLED CALLER STILL SETTLES. Killing a subtree drops its futures
+        // without unwinding, so the settle below never runs for a call whose
+        // caller died with it (a leg's `inbound_call` cancelled by a drain);
+        // the guard records it `cancelled`, as python's `CancelledError` does on
+        // its way out through `_settle`.
+        let _settle_on_drop = SettleOnDrop {
+            kernel: Arc::clone(self),
+            exec_id,
+            target: target.id.clone(),
+        };
         let mut next_pid = task_id;
         let mut fast_first = named_fast_reflect;
         // The pid of the attempt that actually SETTLED — a retry re-dispatches
@@ -1205,7 +1215,21 @@ impl Kernel {
     /// timed_out / cancelled) is ANNOUNCED — `on_deadletter` — because nothing
     /// retries it on its own: someone has to look.
     async fn stamp_call(self: &Arc<Self>, pid: Option<TaskId>, out: &Outcome, target: &AgentId) {
-        let Some(pid) = pid else { return };
+        if let Some(pid) = self.stamp_call_rows(pid, out, target) {
+            self.announce_deadletter(pid.get(), out, out.attempts).await;
+        }
+    }
+
+    /// The rows half of [`Self::stamp_call`], synchronous: the call row's
+    /// `outcome` and the root's settle row. `Some(pid)` when the outcome is a
+    /// dead letter still to be announced.
+    fn stamp_call_rows(
+        &self,
+        pid: Option<TaskId>,
+        out: &Outcome,
+        target: &AgentId,
+    ) -> Option<TaskId> {
+        let pid = pid?;
         let mut stamp = Map::new();
         stamp.insert("status".to_string(), Value::from(out.status.as_str()));
         if let Some(res) = out.result.as_object() {
@@ -1242,9 +1266,7 @@ impl Kernel {
             settle.insert("attempts".to_string(), Value::from(out.attempts));
             let _ = self.rows_put(&root.id, settle);
         }
-        if crate::ledger::is_dead(out.status) {
-            self.announce_deadletter(pid.get(), out, out.attempts).await;
-        }
+        crate::ledger::is_dead(out.status).then_some(pid)
     }
 
     /// Wait for an execution someone else owns.
@@ -1817,10 +1839,6 @@ impl Drop for InFlightGuard {
     }
 }
 
-/// Caller-side guard for one dispatch: on ANY exit path (reply, kill, or the
-/// caller's own future being dropped) it stops the dispatch task and drops its
-/// row. Stopping a task that already finished is a no-op; forgetting a row that
-/// `cancel` already removed is a no-op — both are idempotent by design.
 /// Best-effort human text out of a panic payload — the two shapes
 /// `panic!` produces plus a fallback, so a handler that panicked with a
 /// non-string never reads as "panic: <nothing>". `pub(crate)`: also the
@@ -1835,6 +1853,10 @@ pub(crate) fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Caller-side guard for one dispatch: on ANY exit path (reply, kill, or the
+/// caller's own future being dropped) it stops the dispatch task and drops its
+/// row. Stopping a task that already finished is a no-op; forgetting a row that
+/// `cancel` already removed is a no-op — both are idempotent by design.
 struct DispatchGuard {
     kernel: Arc<Kernel>,
     id: TaskId,
@@ -1845,6 +1867,39 @@ impl Drop for DispatchGuard {
     fn drop(&mut self) {
         self.handle.stop();
         self.kernel.tasks.forget(&self.id);
+    }
+}
+
+/// Settles an execution `cancelled` when its settling future is dropped before
+/// the ledger holds an outcome — the caller was killed. The ledger and the rows
+/// are written here, synchronously, so a drain waiting on `unsettled` sees the
+/// call end; the dead-letter announcement is a fanout and runs as its own task.
+struct SettleOnDrop {
+    kernel: Arc<Kernel>,
+    exec_id: i64,
+    target: AgentId,
+}
+
+impl Drop for SettleOnDrop {
+    fn drop(&mut self) {
+        if self.kernel.ledger.is_done(self.exec_id) {
+            return;
+        }
+        let pid = Some(TaskId(self.exec_id));
+        let out = self.kernel.ledger.settle(
+            self.exec_id,
+            Outcome::new(pid, Status::Cancelled, json!({ "cancelled": true })),
+        );
+        if let Some(pid) = self.kernel.stamp_call_rows(pid, &out, &self.target) {
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                let kernel = Arc::clone(&self.kernel);
+                rt.spawn(async move {
+                    kernel
+                        .announce_deadletter(pid.get(), &out, out.attempts)
+                        .await;
+                });
+            }
+        }
     }
 }
 

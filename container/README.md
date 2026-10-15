@@ -81,8 +81,8 @@ PUSH=1 ARCH=arm64 TAG=ghcr.io/aisixteen/fantastic:arm64 sh container/build.sh
 PUSH=1 ARCH=amd64 TAG=ghcr.io/aisixteen/fantastic:amd64 sh container/build.sh
 ```
 
-CI builds each arch on its OWN native runner (amd64 on `ubuntu-latest`, arm64 on
-`ubuntu-24.04-arm`) and pushes its own tag — see `.github/workflows/release.yml`.
+Each arch is built (natively where the host matches, emulated otherwise) and
+pushed under its own tag with the `PUSH=1 ARCH=…` commands above.
 
 > **Per-arch tags, not a merged manifest.** The image is published as **`:amd64`**
 > and **`:arm64`** (+ `:vX.Y.Z-<arch>`) — pick one explicitly. `python` / `rust` are

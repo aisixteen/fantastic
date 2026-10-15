@@ -200,7 +200,7 @@ extension Kernel {
             // WEAK LOAD. A record whose bundle is not installed in THIS runtime
             // (the browser's `*.ts` agents persist into the same tree) is
             // skipped along with its whole subtree, and says so on stderr in
-            // python's exact words — CI and the selftests grep this line.
+            // python's exact words — the tests and selftests grep this line.
             // Registering the shell instead put an agent in the tree that could
             // answer nothing and still handed its children a live parent.
             if let hm = rec.handlerModule, bundles.get(hm) == nil {

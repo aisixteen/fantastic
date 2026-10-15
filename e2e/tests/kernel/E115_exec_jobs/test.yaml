@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the kernel's own exec_bridge,
+# driven over web_rest (events over the ws face) on every host runtime.
+id: exec_jobs
+group: kernel
+title: "exec_bridge jobs: the allowlist (a broken regex permits nothing), job_done's exact shape, tail/grep over the 256 KiB line ring, a PTY job, kernel cancel of a running job, status shape"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

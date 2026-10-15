@@ -196,3 +196,33 @@ async def test_a_superscript_digit_is_no_id_and_raises_nothing(kernel, store):
     out = await _call(kernel, "mem", {"type": "read", "ids": ["²", "101"]}, as_="alice")
     assert "error" not in out, out
     assert [r["id"] for r in out["rows"]] == [101], out
+
+
+async def test_a_name_match_reads_the_rows_carrying_it(kernel, store):
+    await _append(
+        kernel,
+        "alice",
+        [
+            {"id": 1, "kind": "call", "name": "job"},
+            {"id": 2, "kind": "settle", "name": "job"},
+            {"id": 3, "kind": "call", "name": "other"},
+            {"id": 4, "kind": "call", "name": "job", "verb": "x"},
+            {"id": 5, "kind": "clear"},
+            {"id": 6, "kind": "call", "name": 7},
+        ],
+    )
+    await _append(kernel, "bob", [{"id": 1, "kind": "call", "name": "job"}])
+
+    async def ids(**q):
+        out = await _call(kernel, "mem", {"type": "read", **q}, as_="alice")
+        return [r["id"] for r in out["rows"]]
+
+    assert await ids(match={"name": "job"}) == [1, 2, 4]
+    assert await ids(kinds=["call"], match={"name": "job"}) == [1, 4]
+    assert await ids(match={"name": "job", "verb": "x"}) == [4]
+    assert await ids(match={"name": "job"}, order="desc", limit=1) == [4]
+    assert await ids(match={"name": "job"}, from_last_kind="clear") == []
+    assert await ids(match={"name": "nobody"}) == []
+    assert await ids(match={"name": 7}) == [6]
+    await _call(kernel, "mem", {"type": "prune", "before_id": 3}, as_="alice")
+    assert await ids(match={"name": "job"}) == [4]

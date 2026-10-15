@@ -10,7 +10,7 @@
 // payloads, the Swift kernel is wrong. This test is the mechanical
 // drift detector that survives author memory.
 //
-// CI gating: the suite returns cleanly (no recorded failures) when
+// Gating: the suite returns cleanly (no recorded failures) when
 // `PYTHON_KERNEL_BIN` env var is unset or the binary isn't
 // executable. To run locally:
 //

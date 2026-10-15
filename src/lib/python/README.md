@@ -266,7 +266,7 @@ Two complementary layers:
 
 ## Pre-push checks
 
-CI gates run on PR; mirror them locally before pushing:
+There is no CI; run these locally before pushing:
 
 ```bash
 uvx ruff check kernel/ main.py bundled_agents/ tests/

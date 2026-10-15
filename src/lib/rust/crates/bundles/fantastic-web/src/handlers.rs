@@ -413,7 +413,7 @@ async fn rest_post(
         match fantastic_io_bridge::codec::loads(&text) {
             Ok(v) => v,
             // Don't echo the parser exception back — generic message only
-            // (CodeQL: information exposure through an exception).
+            // (information exposure through an exception).
             Err(_) => {
                 return json_error(
                     StatusCode::BAD_REQUEST,

@@ -22,11 +22,10 @@
 //! ATTACH to asks [`held`] — the same flock, probed, never taken.
 
 use crate::errors::{KernelError, KernelResult};
+use crate::sys;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -42,8 +41,8 @@ static HELD: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
 /// Check whether a pid is alive on this system.
 ///
 /// On unix: `kill(pid, 0)`. On other platforms: assume alive (we
-/// only run macOS + Linux today; Windows handling lands when we
-/// add Windows CI).
+/// only run macOS + Linux; Windows handling lands with Windows
+/// support).
 pub fn pid_alive(pid: u32) -> bool {
     // python `_pid_alive`: `pid <= 0` is dead, no syscall. `kill(0, sig)`
     // targets the CALLER'S OWN process GROUP (not "pid 0" as a process), so
@@ -53,15 +52,7 @@ pub fn pid_alive(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        // Safety: kill(pid, 0) only checks existence + permission; no
-        // signal is actually delivered.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        if rc == 0 {
-            return true;
-        }
-        // -1 + ESRCH = dead; -1 + EPERM = alive but not ours.
-        let errno = std::io::Error::last_os_error().raw_os_error();
-        errno == Some(libc::EPERM)
+        sys::pid_alive(pid)
     }
     #[cfg(not(unix))]
     {
@@ -87,18 +78,17 @@ pub fn acquire(workdir: &Path) -> KernelResult<PathBuf> {
         "lock.yaml.tmp.{}",
         crate::lifecycle::hex(&crate::lifecycle::os_random(4))
     ));
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&staged)
-        .map_err(io)?;
+    let mut file = sys::set_create_mode(
+        OpenOptions::new().read(true).write(true).create_new(true),
+        0o644,
+    )
+    .open(&staged)
+    .map_err(io)?;
     // python `yaml.dump({"pid": os.getpid()}, CSafeDumper, sort_keys=False)`.
     let body = crate::yaml_io::dump(&serde_json::json!({"pid": std::process::id()}));
     let published = (|| -> KernelResult<()> {
         file.write_all(body.as_bytes()).map_err(io)?;
-        flock(&file, libc::LOCK_EX).map_err(io)?; // uncontended: the staged file is ours alone
+        sys::flock_exclusive(&file).map_err(io)?; // uncontended: the staged file is ours alone
         while !publish(&staged, &path)? {}
         Ok(())
     })();
@@ -135,7 +125,7 @@ fn publish(staged: &Path, path: &Path) -> KernelResult<bool> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(io(e)),
     };
-    if let Err(e) = flock(&cur, libc::LOCK_EX | libc::LOCK_NB) {
+    if let Err(e) = sys::try_flock_exclusive(&cur) {
         if e.kind() != ErrorKind::WouldBlock {
             return Err(io(e));
         }
@@ -161,21 +151,11 @@ fn publish(staged: &Path, path: &Path) -> KernelResult<bool> {
         Err(e) => return Err(io(e)),
     };
     let held = cur.metadata().map_err(io)?;
-    if (named.dev(), named.ino()) != (held.dev(), held.ino()) {
+    if !sys::same_file(&named, &held) {
         return Ok(false);
     }
     fs::rename(staged, path).map_err(io)?;
     Ok(true)
-}
-
-/// `flock(2)` on `file`'s descriptor.
-fn flock(file: &File, op: libc::c_int) -> std::io::Result<()> {
-    // SAFETY: the descriptor is owned by `file`, open for this whole call.
-    if unsafe { libc::flock(file.as_raw_fd(), op) } == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
 }
 
 /// Release the workdir lock — but only if THIS process holds it.
@@ -228,7 +208,7 @@ pub fn held(workdir: &Path) -> KernelResult<Option<u32>> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(io(e)),
     };
-    match flock(&cur, libc::LOCK_SH | libc::LOCK_NB) {
+    match sys::try_flock_shared(&cur) {
         Ok(()) => Ok(None), // granted: nobody holds it; closing `cur` drops it
         Err(e) if e.kind() == ErrorKind::WouldBlock => {
             let mut raw = Vec::new();

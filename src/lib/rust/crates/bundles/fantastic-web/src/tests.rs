@@ -10,7 +10,7 @@ use tempfile::TempDir;
 /// Acquire a free local port — bind to 127.0.0.1:0 and read back the
 /// assigned port. We close the listener before the test boots web; a
 /// rebind race is theoretically possible but vanishingly rare in
-/// practice and the kernel-binary CI runs serial.
+/// practice.
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 0");
     let port = listener.local_addr().expect("local addr").port();

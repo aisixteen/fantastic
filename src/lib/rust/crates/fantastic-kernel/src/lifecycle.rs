@@ -26,20 +26,11 @@ pub(crate) fn os_random(n: usize) -> Vec<u8> {
     buf
 }
 
-/// Fill `buf` from the OS CSPRNG — the ONE randomness call of every crate. The
-/// OS's own call, per OS: `getrandom` on Linux (the libc crate has no
-/// `getentropy` for musl), `getentropy` elsewhere (at most 256 bytes a call).
-/// A failure is FATAL: there is no second source.
+/// Fill `buf` from the OS CSPRNG — the ONE randomness call of every crate,
+/// the OS's own call ([`crate::sys`]). A failure is FATAL: there is no second
+/// source.
 pub fn fill_random(buf: &mut [u8]) {
-    for chunk in buf.chunks_mut(256) {
-        // SAFETY: `chunk` is a valid writable buffer of exactly its length.
-        #[cfg(target_os = "linux")]
-        let ok = unsafe { libc::getrandom(chunk.as_mut_ptr().cast(), chunk.len(), 0) }
-            == chunk.len() as isize;
-        #[cfg(not(target_os = "linux"))]
-        let ok = unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) } == 0;
-        assert!(ok, "the OS randomness call failed: no randomness source");
-    }
+    crate::sys::fill_random(buf);
 }
 
 /// Lowercase hex, python's `bytes.hex()` spelling.

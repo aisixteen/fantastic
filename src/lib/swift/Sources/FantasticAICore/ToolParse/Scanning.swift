@@ -21,9 +21,14 @@ import Foundation
 /// Index of `needle` in `haystack` at or after `from`, or nil.
 ///
 /// Python's `str.find(sub, i)`, minus the `-1` sentinel.
-func findScalars(_ haystack: [Unicode.Scalar], _ needle: [Unicode.Scalar], from: Int) -> Int? {
+func findScalars(
+    _ haystack: [Unicode.Scalar], _ needle: [Unicode.Scalar], from: Int, startBefore: Int? = nil
+) -> Int? {
     if needle.isEmpty || from >= haystack.count { return nil }
-    let last = haystack.count - needle.count
+    // `startBefore` stops the scan where a caller would discard a later hit
+    // anyway — a match STARTING at or past it — so a search bounded to one call
+    // never walks the rest of a long completion.
+    let last = min(haystack.count - needle.count, (startBefore ?? Int.max) - 1)
     if last < from { return nil }
     var start = from
     while start <= last {

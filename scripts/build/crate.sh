@@ -128,6 +128,7 @@ rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 description = "Aisixteen Fantastic — a kernel of agents: the fantastic CLI with its in-process kernel, browser canvas and MCP face"
 repository = "https://github.com/aisixteen/fantastic"
+homepage = "https://aisixteen.com/fantastic/"
 readme = "README.md"
 keywords = ["agents", "ai", "llm", "mcp", "kernel"]
 categories = ["command-line-utilities", "development-tools"]

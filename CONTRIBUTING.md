@@ -55,7 +55,8 @@ the full detail.
 
 Container changes: `sh container/build.sh` then `sh container/test/build_smoke.sh`.
 
-CI runs lint, CodeQL, and spellcheck on every PR; keep them green.
+There is no CI: run the lint and test commands above for every runtime you
+touched, locally, before opening a PR.
 
 ## Commits & pushes
 

@@ -240,6 +240,57 @@ async fn read_paging_and_selectors() {
 }
 
 #[tokio::test]
+async fn a_name_match_reads_the_rows_carrying_it() {
+    let k = store();
+    append(
+        &k,
+        "alice",
+        json!([
+            {"id": 1, "kind": "call", "name": "job"},
+            {"id": 2, "kind": "settle", "name": "job"},
+            {"id": 3, "kind": "call", "name": "other"},
+            {"id": 4, "kind": "call", "name": "job", "verb": "x"},
+            {"id": 5, "kind": "clear"},
+            {"id": 6, "kind": "call", "name": 7},
+        ]),
+    )
+    .await;
+    append(&k, "bob", json!([{"id": 1, "kind": "call", "name": "job"}])).await;
+    let read = |q: Value| {
+        let k = &k;
+        async move {
+            let mut q = q;
+            q["type"] = json!("read");
+            ids(&call(k, q, Some("alice")).await)
+        }
+    };
+    assert_eq!(read(json!({"match": {"name": "job"}})).await, vec![1, 2, 4]);
+    assert_eq!(
+        read(json!({"kinds": ["call"], "match": {"name": "job"}})).await,
+        vec![1, 4]
+    );
+    assert_eq!(
+        read(json!({"match": {"name": "job", "verb": "x"}})).await,
+        vec![4]
+    );
+    assert_eq!(
+        read(json!({"match": {"name": "job"}, "order": "desc", "limit": 1})).await,
+        vec![4]
+    );
+    assert_eq!(
+        read(json!({"match": {"name": "job"}, "from_last_kind": "clear"})).await,
+        Vec::<i64>::new()
+    );
+    assert_eq!(
+        read(json!({"match": {"name": "nobody"}})).await,
+        Vec::<i64>::new()
+    );
+    assert_eq!(read(json!({"match": {"name": 7}})).await, vec![6]);
+    call(&k, json!({"type": "prune", "before_id": 3}), Some("alice")).await;
+    assert_eq!(read(json!({"match": {"name": "job"}})).await, vec![4]);
+}
+
+#[tokio::test]
 async fn dump_inject_roundtrip() {
     let k = store();
     append(

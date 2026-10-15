@@ -8,10 +8,10 @@
 #   1. Verify clean working tree + on `main`
 #   2. Bump `rust/Cargo.toml [workspace.package].version`
 #   3. Run `./rust/scripts/quality.sh` (8/8 PASS required)
-#   4. Print the exact `git tag` + `git push` commands to fire CI
+#   4. Print the exact `git tag` + `git push` commands
 #
-# Does NOT push anything. The trigger stays manual — operator copies
-# the two commands and runs them to fire `.github/workflows/release-rust.yml`.
+# Does NOT push anything — operator copies the two commands and runs
+# them. The tarballs are built locally and published with `gh release`.
 
 set -uo pipefail
 
@@ -79,16 +79,16 @@ ok "quality sweep clean"
 # ─── 4. print tag + push commands ───────────────────────────────
 step "4. ready"
 TAG="rust-v$VERSION"
-printf "\n${GREEN}All checks passed.${RESET} To fire the release workflow:\n\n"
+printf "\n${GREEN}All checks passed.${RESET} Next:\n\n"
 if [ "$CURRENT" != "$VERSION" ]; then
     printf "  ${CYAN}# 1. commit the version bump${RESET}\n"
     printf "  git add rust/Cargo.toml rust/Cargo.lock\n"
     printf "  git commit -m \"rust: bump to v$VERSION\"\n\n"
 fi
-printf "  ${CYAN}# 2. tag + push (this fires .github/workflows/release-rust.yml)${RESET}\n"
+printf "  ${CYAN}# 2. tag + push${RESET}\n"
 printf "  git tag %s\n" "$TAG"
 printf "  git push origin %s\n" "$TAG"
 printf "  ${DIM}# (also push the commit if you didn't already: git push)${RESET}\n\n"
-printf "Artifacts will land at:\n"
+printf "Publish the tarballs with \`gh release create\`; they land at:\n"
 printf "  https://github.com/aisixteen/fantastic/releases/tag/%s\n" "$TAG"
 printf "  https://github.com/aisixteen/fantastic/releases/latest/download/fantastic-rust-<triple>.tar.gz\n"

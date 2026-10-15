@@ -1,6 +1,5 @@
 //! CPython `OSError.__str__` and `UnicodeDecodeError.__str__`.
 
-use std::ffi::CStr;
 use std::path::Path;
 
 use crate::repr::py_repr;
@@ -8,17 +7,7 @@ use crate::repr::py_repr;
 /// The C library's message for `errno` — what CPython's `OSError` carries.
 #[must_use]
 pub fn strerror(errno: i32) -> String {
-    let mut buf = [0 as libc::c_char; 512];
-    // SAFETY: `buf` is a valid writable buffer of the length passed, and the
-    // XSI `strerror_r` NUL-terminates what it writes on success.
-    let rc = unsafe { libc::strerror_r(errno, buf.as_mut_ptr(), buf.len()) };
-    if rc != 0 {
-        return format!("Unknown error {errno}");
-    }
-    // SAFETY: on success `buf` holds a NUL-terminated C string.
-    unsafe { CStr::from_ptr(buf.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
+    crate::sys::strerror(errno)
 }
 
 /// `str(OSError(errno, strerror(errno), path))`:
@@ -92,21 +81,5 @@ pub fn utf8_decode_error_str(bytes: &[u8], err: &std::str::Utf8Error) -> String 
 /// everything else stays `OSError`.
 #[must_use]
 pub fn os_error_class(errno: i32) -> &'static str {
-    match errno {
-        libc::EAGAIN | libc::EALREADY | libc::EINPROGRESS => "BlockingIOError",
-        libc::EPIPE | libc::ESHUTDOWN => "BrokenPipeError",
-        libc::ECHILD => "ChildProcessError",
-        libc::ECONNABORTED => "ConnectionAbortedError",
-        libc::ECONNREFUSED => "ConnectionRefusedError",
-        libc::ECONNRESET => "ConnectionResetError",
-        libc::EEXIST => "FileExistsError",
-        libc::ENOENT => "FileNotFoundError",
-        libc::EINTR => "InterruptedError",
-        libc::EISDIR => "IsADirectoryError",
-        libc::ENOTDIR => "NotADirectoryError",
-        libc::EACCES | libc::EPERM => "PermissionError",
-        libc::ESRCH => "ProcessLookupError",
-        libc::ETIMEDOUT => "TimeoutError",
-        _ => "OSError",
-    }
+    crate::sys::os_error_class(errno)
 }

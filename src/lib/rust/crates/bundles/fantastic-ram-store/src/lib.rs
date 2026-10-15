@@ -150,6 +150,10 @@ struct Tables {
     fold_refs: BTreeMap<(String, i64), Vec<i64>>,
     ref_by_member: HashMap<(String, i64), HashSet<i64>>,
     text: HashMap<(String, i64), String>,
+    /// (owner, name) → the ids of the rows carrying that `name`, ascending: the
+    /// kernel looks a caller's execution name up on every named call, and a scan
+    /// of every row there grows with the whole history.
+    by_name: HashMap<(String, String), Vec<i64>>,
 }
 
 impl Tables {
@@ -159,6 +163,13 @@ impl Tables {
 
     fn ids(&self, owner: &str) -> Vec<i64> {
         self.order.get(owner).cloned().unwrap_or_default()
+    }
+
+    fn named(&self, owner: &str, name: &str) -> Vec<i64> {
+        self.by_name
+            .get(&(owner.to_string(), name.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn row(&self, owner: &str, rid: i64) -> Option<&Row> {
@@ -189,6 +200,14 @@ impl Tables {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let text = text_of(&row).to_lowercase();
+            if let Some(name) = stored.get("name").and_then(Value::as_str) {
+                let named = self
+                    .by_name
+                    .entry((owner.to_string(), name.to_string()))
+                    .or_default();
+                let at = named.partition_point(|x| *x <= rid);
+                named.insert(at, rid);
+            }
             self.rows
                 .entry(owner.to_string())
                 .or_default()
@@ -219,8 +238,16 @@ impl Tables {
             .filter(|r| self.has(owner, *r))
             .collect();
         for rid in &doomed {
-            if let Some(t) = self.rows.get_mut(owner) {
-                t.remove(rid);
+            if let Some(row) = self.rows.get_mut(owner).and_then(|t| t.remove(rid)) {
+                if let Some(name) = row.get("name").and_then(Value::as_str) {
+                    let nk = (owner.to_string(), name.to_string());
+                    if let Some(named) = self.by_name.get_mut(&nk) {
+                        named.retain(|i| i != rid);
+                        if named.is_empty() {
+                            self.by_name.remove(&nk);
+                        }
+                    }
+                }
             }
             let key = (owner.to_string(), *rid);
             self.text.remove(&key);
@@ -571,17 +598,28 @@ impl RamStoreBundle {
                 Ok(r) => r,
                 Err(e) => return e,
             };
-            let mut ids = t.ids(&owner);
-            let row_of = |i: &i64| t.row(&owner, *i).cloned().unwrap_or_default();
+            // A `name` to match starts from the rows carrying it — the same ids, in
+            // the same order, as the scan below would keep.
+            let mut ids = match payload
+                .get("match")
+                .and_then(|m| m.get("name"))
+                .and_then(Value::as_str)
+            {
+                Some(name) => t.named(&owner, name),
+                None => t.ids(&owner),
+            };
+            // Borrowed, never cloned: a filter reads one field of each row.
+            let field = |i: &i64, k: &str| t.row(&owner, *i).and_then(|r| r.get(k));
             if let Some(flk) = payload
                 .get("from_last_kind")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
             {
-                let last = ids
+                let last = t
+                    .ids(&owner)
                     .iter()
                     .rev()
-                    .find(|i| row_of(i).get("kind").and_then(Value::as_str) == Some(flk))
+                    .find(|i| field(i, "kind").and_then(Value::as_str) == Some(flk))
                     .copied();
                 if let Some(last) = last {
                     ids.retain(|i| *i >= last);
@@ -592,10 +630,7 @@ impl RamStoreBundle {
                 .and_then(Value::as_array)
                 .filter(|k| !k.is_empty())
             {
-                ids.retain(|i| {
-                    let k = row_of(i).get("kind").cloned().unwrap_or(Value::Null);
-                    kinds.contains(&k)
-                });
+                ids.retain(|i| kinds.contains(field(i, "kind").unwrap_or(&Value::Null)));
             }
             if let Some(m) = payload
                 .get("match")
@@ -603,8 +638,8 @@ impl RamStoreBundle {
                 .filter(|m| !m.is_empty())
             {
                 ids.retain(|i| {
-                    let r = row_of(i);
-                    m.iter().all(|(k, v)| r.get(k).unwrap_or(&Value::Null) == v)
+                    m.iter()
+                        .all(|(k, v)| field(i, k).unwrap_or(&Value::Null) == v)
                 });
             }
             if let Some(want) = payload.get("ids").and_then(Value::as_array) {

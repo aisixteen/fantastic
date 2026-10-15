@@ -52,6 +52,7 @@ plug.
 | `agentic/` | a model doing real work in the substrate — building, composing, planning, discovering peers, and the kernel contracts (ledger, dead letters, user actions) measured *through* a model |
 | `agentic_advanced/` | the hard end: structures that OUTLIVE the conversation — durable sub-agents, wired graphs, A/B on whether naming the graph changes its shape |
 | `backends/` | the inference plug itself — the Responses wire measured raw (`wire_responses`) and the provider contract ai_core relies on, through a live agent (`provider_contract`, any `BACKEND`) |
+| `kernel/` | the kernel's own contracts on every host runtime, NO model (`costs: free`) — reboot continuity, drain and the pid lock, the scheduler across a restart, secret marks, the call gate, exec jobs, the file clamp, folder bundles, kernel-to-kernel bridges and a stub relay, a scripted AI on a mock backend, load (`kernel_load`, solo), the packaged artifact's smoke |
 | `connectors/` | an outside service as an agent, NO model — a scripted fake of the service, the kernel's connector on every host runtime over `web_rest`, what crosses the wire (`mcp_client`: tools → verbs, every result mapping, the key on every request) |
 
 The top level is by *kind*, deliberately: not every future test type is an LLM

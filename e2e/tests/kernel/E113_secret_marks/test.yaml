@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: secret marks on send items,
+# driven over web_rest + web_ws on every host runtime.
+id: secret_marks
+group: kernel
+title: "secret marks: the handler gets the clear value (REST header, ws frame, nested path); call rows, state stream and inbox mirror show [secret]; malformed or `type` marks are bad_arg"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 60
+  turn_seconds: 180

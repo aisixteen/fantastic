@@ -33,7 +33,7 @@ test("an operator send is ungated — it is the origin root of trust", async () 
 
 test("identity comes only from dispatch — the kernel has no API to send as anyone", () => {
   const k = tree();
-  for (const gone of ["scopedFor", "foreignView", "operatorView", "kernelView", "taskView", "isForeign", "qualifiedCaller", "currentSecret", "base"]) {
+  for (const gone of ["scopedFor", "foreignView", "operatorView", "kernelView", "taskView", "isForeign", "qualifiedCaller", "base"]) {
     assert.equal(gone in k, false, gone);
   }
 });

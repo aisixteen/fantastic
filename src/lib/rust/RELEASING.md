@@ -2,11 +2,11 @@
 
 The `fantastic` binary's Rust runtime ships as **prebuilt tarballs**
 attached to GitHub Releases under the `rust-v*` tag namespace. The
-trigger is fully manual — there is no scheduled or auto-tag release.
+tarballs are built locally and published with `gh release`; there is
+no CI.
 
 > **Scope** — this is the Rust runtime only. Python (the reference
-> runtime) is development-only today; if a Python release pipeline
-> ever ships it'll live in a parallel `python-v*` workflow.
+> runtime) is development-only.
 
 ## Targets
 
@@ -80,19 +80,13 @@ git commit -m "rust: bump to v0.1.0"
 git push                            # the version bump
 
 git tag rust-v0.1.0
-git push origin rust-v0.1.0         # fires .github/workflows/release-rust.yml
+git push origin rust-v0.1.0
 ```
 
-The push of the **tag** is what triggers CI. Pushing the commit alone
-does nothing release-wise.
+Then attach the locally built tarballs + checksums file to the tag's
+release with `gh release create`.
 
-### 3. Wait for CI (~10 min)
-
-`gh run watch` follows the run. When the matrix finishes, the
-`release` job creates the GH Release, uploads all four tarballs +
-the checksums file, and marks the tag as `latest`.
-
-### 4. Verify
+### 3. Verify
 
 ```bash
 # Pinned URL works
@@ -107,9 +101,7 @@ curl -fIsS https://github.com/aisixteen/fantastic/releases/latest/download/fanta
 ## Versioning
 
 Standard semver — `MAJOR.MINOR.PATCH`. Pre-releases use SUFFIX dashes
-(`0.2.0-rc1`, `1.0.0-beta`). Pre-release tags also become `latest`
-in this workflow (intentional — see "`make_latest`" decision below)
-unless you manually toggle them off in the GH UI.
+(`0.2.0-rc1`, `1.0.0-beta`).
 
 | change | bump |
 |---|---|
@@ -121,27 +113,9 @@ unless you manually toggle them off in the GH UI.
 
 ### Tag namespace — `rust-v*`
 
-Per-runtime release pipelines use prefixed namespaces so they don't
+Per-runtime releases use prefixed namespaces so they don't
 collide: `rust-v*` for the binary release here, `python-v*` reserved
-for future Python pipelines. GH Actions tag globs are literal-prefix
-matches; the prefixes are disjoint.
-
-### `make_latest: true`
-
-Every successful `rust-v*` tag becomes the GH `latest` redirect. This
-keeps the `releases/latest/download/...` URL fresh without operator
-clicks. If you cut a pre-release (`rust-v1.0.0-rc1`) that you DON'T
-want to publish as latest, edit the release in the GH UI after CI
-finishes and uncheck "Set as the latest release".
-
-### Why a separate `release.sh`?
-
-Two reasons:
-1. **Local verification** — quality sweep + version bump under your
-   own clock, not waiting on CI to discover an obvious problem.
-2. **Manual safety gate** — the script prints the tag commands but
-   doesn't run them. Operator has to consciously fire CI by pushing
-   the tag. No "auto-release on merge" surprises.
+for future Python releases. The prefixes are disjoint.
 
 ## Consuming the release
 

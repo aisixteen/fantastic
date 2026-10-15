@@ -1,5 +1,6 @@
 import type { Bridge, Kernel } from "../kernel/kernel.ts";
 import type { Json, Payload } from "../kernel/json.ts";
+import type { Item } from "../kernel/outcome.ts";
 import { unknown } from "../kernel/refusal.ts";
 import { encodeFrame, sendable, decodeFrame } from "./frame.ts";
 import type { Envelope } from "./frame.ts";
@@ -219,11 +220,13 @@ class Conn {
     }
   }
 
-  async call(envelopePayload: Envelope, target: string): Promise<Json> {
+  async call(envelopePayload: Envelope, target: string, secret: readonly string[] = []): Promise<Json> {
     await this.ready;
     if (!this.connected || this.ws === null) throw new Error("disconnected");
     const id = `${this.idPrefix}-${this.nextId++}`;
-    const frame = encodeFrame({ type: "call", target, payload: envelopePayload, id });
+    const env: Envelope = { type: "call", target, payload: envelopePayload, id };
+    if (secret.length > 0) env["secret"] = [...secret]; // paths into `payload`
+    const frame = encodeFrame(env);
     return new Promise<Json>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
       try {
@@ -419,7 +422,11 @@ export class WsBridge implements Bridge {
       conn.answer(id, unknown(target, [...this.kernel.agents.keys()]));
       return;
     }
-    const [out] = await this.kernel.send([{ target: local, payload: payload as Payload }]);
+    const item: Item = { target: local, payload: payload as Payload };
+    // paths into `payload`, shown as `[secret]`; a malformed field is the
+    // kernel's `bad_arg` refusal
+    if ("secret" in frame) item.secret = frame["secret"] as string[];
+    const [out] = await this.kernel.send([item]);
     conn.answer(id, (out?.result ?? null) as Json);
   }
 
@@ -457,9 +464,9 @@ export class WsBridge implements Bridge {
   }
 
   /** Forward a call to `target`: its own socket if watched, else the control one. */
-  forward(target: string, payload: Payload): Promise<Json> {
+  forward(target: string, payload: Payload, secret: readonly string[] = []): Promise<Json> {
     const conn = this.conns.get(target) ?? this.connFor(this.controlEndpoint);
-    return conn.call(payload, target);
+    return conn.call(payload, target, secret);
   }
 
   /** Forward a call whose payload carries a binary blob (e.g. paste_image). */

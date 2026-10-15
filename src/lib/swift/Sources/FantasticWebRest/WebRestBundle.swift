@@ -197,7 +197,7 @@ public final class WebRestBundle: AgentBundle, WebRouteEndpoints, @unchecked Sen
             // number are not valid JSON on the wire.
             guard let parsed = try? JSON.parseStrict(body) else {
                 // Don't echo the parser exception back — generic message only
-                // (CodeQL: information exposure through an exception).
+                // (information exposure through an exception).
                 return (
                     Self.jsonResponse(
                         400,

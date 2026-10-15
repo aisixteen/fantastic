@@ -11,7 +11,6 @@
 //! streamer's `ack` resumes it under [`LOW_WATERMARK`]).
 
 use std::collections::VecDeque;
-use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -19,9 +18,9 @@ use fantastic_bundle::{py_repr, py_repr_value, py_str};
 use fantastic_kernel::refusal::{bad, missing, refusal, with, NOT_FOUND, TRANSPORT_ERROR};
 use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
-use tokio::io::unix::AsyncFd;
 
 use crate::jobs;
+use crate::sys::{self, AsyncFd, OwnedFd};
 
 /// The scrollback ring a re-attaching client replays (python `PTY_RING`).
 pub const PTY_RING: usize = 256 * 1024;
@@ -100,17 +99,7 @@ impl Pty {
 
 /// Set the window size on the master (the tty sends SIGWINCH to the program).
 pub fn set_winsize(fd: i32, cols: u16, rows: u16) -> std::io::Result<()> {
-    let ws = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: a valid winsize on an fd we own.
-    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    sys::set_winsize(fd, cols, rows)
 }
 
 /// THE JOB'S TASK for a PTY job (python `_pty_pump`). It owns the reader — reading
@@ -147,15 +136,7 @@ pub async fn pump(
             pty.lock().eof = true;
             break;
         };
-        let read = guard.try_io(|inner| {
-            // SAFETY: a valid buffer on an fd we own.
-            let n = unsafe { libc::read(inner.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-            if n < 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(usize::try_from(n).unwrap_or(0))
-            }
-        });
+        let read = guard.try_io(|inner| sys::read_fd(inner.get_ref(), &mut buf));
         let n = match read {
             Err(_would_block) => continue,
             // EOF, or EIO once the child closed the slave: the program is done.
@@ -234,16 +215,7 @@ async fn write_all(pty: &Pty, data: &[u8]) -> std::io::Result<usize> {
     let mut written = 0;
     while written < data.len() {
         let mut guard = pty.fd.writable().await?;
-        match guard.try_io(|inner| {
-            let rest = &data[written..];
-            // SAFETY: a valid buffer on an fd we own.
-            let n = unsafe { libc::write(inner.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
-            if n < 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(usize::try_from(n).unwrap_or(0))
-            }
-        }) {
+        match guard.try_io(|inner| sys::write_fd(inner.get_ref(), &data[written..])) {
             Ok(Ok(n)) => written += n,
             Ok(Err(e)) => return Err(e),
             Err(_would_block) => {}
@@ -346,7 +318,7 @@ pub fn resize_reply(owner: &AgentId, payload: &Value) -> Value {
         g.cols = cols;
         g.rows = rows;
     }
-    if let Err(e) = set_winsize(pty.fd.get_ref().as_raw_fd(), cols, rows) {
+    if let Err(e) = set_winsize(sys::master_fd(pty.fd.get_ref()), cols, rows) {
         return refusal(TRANSPORT_ERROR, format!("exec_bridge: resize failed: {e}"));
     }
     json!({"resized": true, "cols": cols, "rows": rows})
@@ -464,7 +436,7 @@ pub async fn paste_image_reply(owner: &AgentId, header: &Value, data: &[u8]) -> 
         let existing = pty.lock().paste_dir.clone();
         match existing {
             Some(d) => d,
-            None => match mkdtemp(&format!("fantastic_paste_{owner}_")) {
+            None => match sys::mkdtemp(&format!("fantastic_paste_{owner}_")) {
                 Ok(d) => {
                     pty.lock().paste_dir = Some(d.clone());
                     d
@@ -497,18 +469,4 @@ pub async fn paste_image_reply(owner: &AgentId, header: &Value, data: &[u8]) -> 
         );
     }
     json!({"path": path, "bytes": data.len()})
-}
-
-/// python `tempfile.mkdtemp(prefix=…)` — a 0700 dir in the system temp dir.
-fn mkdtemp(prefix: &str) -> std::io::Result<PathBuf> {
-    let template = std::env::temp_dir().join(format!("{prefix}XXXXXXXX"));
-    let mut bytes = template.to_string_lossy().into_owned().into_bytes();
-    bytes.push(0);
-    // SAFETY: a NUL-terminated, writable template buffer.
-    let ptr = unsafe { libc::mkdtemp(bytes.as_mut_ptr().cast()) };
-    if ptr.is_null() {
-        return Err(std::io::Error::last_os_error());
-    }
-    bytes.pop();
-    Ok(PathBuf::from(String::from_utf8_lossy(&bytes).to_string()))
 }

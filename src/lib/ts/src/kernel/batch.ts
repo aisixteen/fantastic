@@ -28,6 +28,7 @@ import { isKernelVerb } from "./kernel_verbs.ts";
 import { applyReflectFlags, reflectIdentity } from "./reflect.ts";
 import { pyRepr, pyTypeNameAt } from "./pyjson.ts";
 import { timers } from "./timers.ts";
+import { check as checkSecret, shown } from "./secret.ts";
 
 /** An item that reached the ledger and now needs settling. */
 interface Launched {
@@ -44,6 +45,8 @@ interface Launched {
    *  no dispatch, no task row. Unnamed it has no pid, no rows and no ledger
    *  entry at all; named it is ledgered (dedup + join) but still has no task. */
   identityRead?: boolean;
+  /** The item's `secret` marks, carried to every attempt. */
+  marks?: readonly string[];
 }
 
 function isPlainObject(v: unknown): v is Payload {
@@ -147,6 +150,8 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
       ),
     };
   }
+  const { marks, bad: badSecret } = checkSecret(item.secret);
+  if (badSecret !== null) return { index, settled: refused(badSecret) };
   // A DYING TASK REGISTERS NO NEW WORK. `cancel` marks the whole subtree before
   // anything settles, and JS cannot abort a handler — so a killed handler runs
   // on, and what it sends from then on would start fresh work that outlives the
@@ -235,15 +240,16 @@ export function launch(k: Kernel, index: number, item: Item): Launched {
   // NEW: the message id is minted like any other; a name is a field on it.
   // UNNAMED work is ledgered too, under its minted id: one id space, one engine.
   const pid = k.mintId();
-  const exec = openExecution(k, pid, resolvedId, verb, payload, timeout, retries, name);
-  return { index, exec, target: resolvedId, payload, timeout, identityRead };
+  const exec = openExecution(k, pid, resolvedId, verb, payload, timeout, retries, name, marks);
+  return { index, exec, target: resolvedId, payload, timeout, identityRead, marks };
 }
 
 /**
  * Open one execution under a pre-minted id: the CALL ROW (what outlives RAM, once
  * flushed) and the process side (the ledger entry). EVERY SEND IS A MESSAGE: the
  * row names the call — who asked whom what, from which task — and carries the
- * dispatch payload verbatim, the retry budget and the deadline. The caller field is `caller` (the id that
+ * dispatch payload AS SHOWN (`secret.ts`), the retry budget and the deadline;
+ * the ledger entry keeps the real payload, which a retry re-sends. The caller field is `caller` (the id that
  * originated it; null = operator).
  */
 function openExecution(
@@ -255,6 +261,7 @@ function openExecution(
   timeout: number | undefined,
   retries: number,
   name: string | null,
+  marks: readonly string[],
 ): Exec {
   const row: Payload & { kind: string; id: number } = {
     id: pid,
@@ -262,13 +269,14 @@ function openExecution(
     verb,
     parent: k.currentTask,
     caller: k.currentOrigin,
-    payload,
+    payload: shown(payload, marks),
     named: name !== null,
     retries,
     attempts: 1,
     timeout: timeout ?? null,
   };
   if (name !== null) row["name"] = name;
+  if (marks.length > 0) row["secret"] = [...marks]; // the marks are paths, not values
   k.store.put(target, row);
   return k.ledger.open({ id: pid, target, verb, payload, timeout, retries, name, caller: k.currentOrigin });
 }
@@ -367,7 +375,7 @@ async function runOnce(k: Kernel, l: Launched, pid: number, attempt: number): Pr
   const killed = new Promise<typeof CANCELLED>((res) => {
     task.onCancel.push(() => res(CANCELLED));
   });
-  const run = k.dispatch(target, payload, pid);
+  const run = k.dispatch(target, payload, pid, l.marks ?? []);
   run.catch(() => undefined); // a late failure after a cancel has no reader
   try {
     const raced = Promise.race([run, killed]);

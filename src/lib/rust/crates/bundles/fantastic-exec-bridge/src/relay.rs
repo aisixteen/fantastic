@@ -30,7 +30,8 @@ use fantastic_io_bridge::codec::{decode_binary_frame, encode_binary_frame};
 use fantastic_kernel::{AgentId, Blob, Item, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+use crate::sys::{OwnedReadHalf, OwnedWriteHalf};
 
 /// ONE frame bound on this wire, both ends, every runtime. A corrupt length must
 /// not become a 4 GiB allocation, and a program that means to move 20 MB means to

@@ -10,7 +10,7 @@ to be the cwd — is invisible until someone installs a release and it does not
 boot.
 
 The recipes are NOT duplicated here: each runtime is built by
-`scripts/build/<runtime>.sh`, the SAME script the release workflow runs, called
+`scripts/build/<runtime>.sh`, the SAME script the release is built with, called
 with `--profile debug` instead of `--profile release`. Same command, same product
 name, same working directory, same tarball layout — only the optimiser (and, for
 ts, the minifier) is off. One recipe, so the two cannot drift.
@@ -103,7 +103,7 @@ def stage(repo: Path, name: str, spec: dict) -> dict:
     """Build → package → extract, and return `spec` pointing at the artifact.
 
     The build itself is `scripts/build/<name>.sh --profile debug` — the SAME
-    script the release workflow runs, with `debug` in place of `release`. e2e
+    script the release is built with, with `debug` in place of `release`. e2e
     owns no second recipe, so the two cannot drift.
 
     Idempotent: if the staged artifact is newer than every watched source file,

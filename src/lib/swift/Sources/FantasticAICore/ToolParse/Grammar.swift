@@ -64,7 +64,8 @@ func findClose(_ chars: [Unicode.Scalar], _ start: Int) -> Int? {
     var i = start
     while true {
         let c = findScalars(chars, CLOSE, from: i)
-        let b = findScalars(chars, BYTES_OPEN, from: i)
+        // only a `<bytes>` BEFORE the close matters
+        let b = findScalars(chars, BYTES_OPEN, from: i, startBefore: c)
         guard let bAt = b else { return c }
         if let cAt = c, cAt < bAt { return cAt }
         // An open document runs to the end: unterminated.
@@ -114,7 +115,7 @@ func nextTag(_ chars: [Unicode.Scalar], from: Int, hi: Int) -> (
 )? {
     var search = from
     while search < hi {
-        guard let lt = findScalars(chars, ["<"], from: search), lt < hi else { return nil }
+        guard let lt = findScalars(chars, ["<"], from: search, startBefore: hi) else { return nil }
         var i = lt + 1
         var name: [Unicode.Scalar] = []
         if i < hi, isNameStart(chars[i]) {
@@ -170,9 +171,10 @@ func matchingClose(_ chars: [Unicode.Scalar], _ name: [Unicode.Scalar], _ start:
     var depth = 1
     var i = start
     while depth > 0 {
-        guard let c = findScalars(chars, closer, from: i), c < hi else { return nil }
-        let o = findScalars(chars, opener, from: i).flatMap { $0 < hi ? $0 : nil }
-        let b = findScalars(chars, BYTES_OPEN, from: i).flatMap { $0 < hi ? $0 : nil }
+        guard let c = findScalars(chars, closer, from: i, startBefore: hi) else { return nil }
+        // only an opener or a `<bytes>` BEFORE that close can change the answer
+        let o = findScalars(chars, opener, from: i, startBefore: c)
+        let b = findScalars(chars, BYTES_OPEN, from: i, startBefore: c)
         let next = [c, o, b].compactMap { $0 }.min() ?? c
         if next == b {
             guard let e = findScalars(chars, BYTES_CLOSE, from: next + BYTES_OPEN.count) else {
@@ -222,7 +224,7 @@ func elements(_ chars: [Unicode.Scalar], lo: Int, hi: Int) throws -> [Element] {
         }
         let closer: [Unicode.Scalar] = ["<", "/"] + tag.name + [">"]
         if tag.name == BYTES_NAME {
-            guard let end = findScalars(chars, closer, from: tag.body), end < hi else {
+            guard let end = findScalars(chars, closer, from: tag.body, startBefore: hi) else {
                 throw Malformed(
                     message: "`<bytes>` opened and never closed — close the document with "
                         + "`</bytes>`, then the call with `</call>`")
@@ -360,7 +362,7 @@ private func head(_ chars: [Unicode.Scalar], lo: Int, hi: Int) -> (name: String,
 /// — the model mentioning `<call` in prose.
 func parseCall(_ chars: [Unicode.Scalar], lo: Int, hi: Int) throws -> ToolCall? {
     guard let h = head(chars, lo: lo, hi: hi) else {
-        let upTo = findScalars(chars, [">"], from: lo).map { min($0, hi) } ?? hi
+        let upTo = findScalars(chars, [">"], from: lo, startBefore: hi) ?? hi
         let headText = pyStrip(scalarText(chars, lo, upTo))
         if !headText.hasPrefix("name=") { return nil }
         throw Malformed(

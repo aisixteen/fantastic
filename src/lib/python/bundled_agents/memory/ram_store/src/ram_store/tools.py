@@ -76,6 +76,10 @@ class Tables:
         self.fold_refs: dict[tuple[str, int], list[int]] = {}
         self.ref_by_member: dict[tuple[str, int], set[int]] = {}
         self.text: dict[tuple[str, int], str] = {}
+        # (owner, name) → the ids of the rows carrying that `name`, ascending: the
+        # kernel looks a caller's execution name up on every named call, and a
+        # scan of every row there grows with the whole history.
+        self.by_name: dict[tuple[str, str], list[int]] = {}
 
     # ── rows ─────────────────────────────────────────────────────────
     def has(self, owner: str, rid: int) -> bool:
@@ -83,6 +87,9 @@ class Tables:
 
     def ids(self, owner: str) -> list[int]:
         return self.order.get(owner, [])
+
+    def named(self, owner: str, name: str) -> list[int]:
+        return self.by_name.get((owner, name), [])
 
     def get(self, owner: str, rid: int) -> dict | None:
         row = self.rows.get(owner, {}).get(rid)
@@ -110,6 +117,9 @@ class Tables:
                 for m in members:
                     self.ref_by_member.setdefault((owner, m), set()).add(rid)
             self.text[(owner, rid)] = _text_of(row).lower()
+            name = stored.get("name")
+            if isinstance(name, str):
+                bisect.insort(self.by_name.setdefault((owner, name), []), rid)
 
     def delete(self, owner: str, doomed: set[int]) -> int:
         """DELETE FROM rows WHERE owner=? AND id IN doomed — with every cascade.
@@ -117,6 +127,13 @@ class Tables:
         table = self.rows.get(owner, {})
         doomed = {r for r in doomed if r in table}
         for rid in doomed:
+            name = table[rid].get("name")
+            if isinstance(name, str):
+                named = self.by_name.get((owner, name), [])
+                if rid in named:
+                    named.remove(rid)
+                if not named:
+                    self.by_name.pop((owner, name), None)
             del table[rid]
             self.text.pop((owner, rid), None)
             # FK fold_refs.fold_id → rows: the fold's member list goes with it.
@@ -329,18 +346,22 @@ async def _read(id, payload, agent):
     if isinstance(who, dict):
         return who
     owner = who[0]
-    ids = list(t.ids(owner))
+    match = payload.get("match")
+    # A `name` to match starts from the rows carrying it — the same ids, in the
+    # same order, as the scan below would keep.
+    named = match.get("name") if isinstance(match, dict) else None
+    ids = list(t.named(owner, named) if isinstance(named, str) else t.ids(owner))
     flk = payload.get("from_last_kind")
     if isinstance(flk, str) and flk:
         last = next(
-            (i for i in reversed(ids) if t.rows[owner][i].get("kind") == flk), None
+            (i for i in reversed(t.ids(owner)) if t.rows[owner][i].get("kind") == flk),
+            None,
         )
         if last is not None:
             ids = [i for i in ids if i >= last]
     kinds = payload.get("kinds")
     if isinstance(kinds, list) and kinds:
         ids = [i for i in ids if t.rows[owner][i].get("kind") in kinds]
-    match = payload.get("match")
     if isinstance(match, dict) and match:
         ids = [
             i

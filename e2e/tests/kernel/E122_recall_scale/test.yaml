@@ -1,0 +1,16 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the packaged kernel of each host
+# runtime, driven over web_rest, its memory store filled to 0 / 10k / 50k / 100k
+# stored calls; at each checkpoint the latency of a call carrying a FRESH execution
+# name vs an unnamed one. The bound holds only when a fresh name costs no scan of
+# the stored calls.
+id: recall_scale
+group: kernel
+title: "recall scale: a call with a FRESH execution name vs an unnamed call, at 0 / 10k / 50k / 100k calls in the kernel's memory store — fresh-name median at 100k ≤ 3 × unnamed + 5 ms"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+solo: true
+hard_stop_minutes: 120
+limits:
+  idle_seconds: 1800
+  turn_seconds: 3600

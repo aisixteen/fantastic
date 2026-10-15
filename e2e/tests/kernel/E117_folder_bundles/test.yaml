@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: folder bundles (base py_agent)
+# on the packaged host of every runtime, driven over web_rest.
+id: folder_bundles
+group: kernel
+title: "a folder bundle under .fantastic/bundles/ is a creatable kind: cold-loaded at boot, listed, documented, its verbs answer; reload_bundle hot-loads a new folder and restarts live instances on an edited program; a malformed or reserved-verb bundle.yaml is listed with its error, never fatal"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300
