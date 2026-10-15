@@ -48,12 +48,14 @@ QUIET_S = float(LIMITS["quiet_seconds"])
 
 def build(feature: str, into: Path) -> Path:
     with build_lock(E2E_TARGET):  # the build AND the copy: no other build lands in between
-        r = subprocess.run(["cargo", "build", "-p", "fantastic-tui", "--features", feature], cwd=SRC, capture_output=True, text=True,
-                           env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
-        if r.returncode != 0:
-            raise SystemExit(f"cargo build --features {feature} failed:\n{r.stderr[-2000:]}")
+        src = Path(os.environ["FANTASTIC_BIN"]).expanduser().resolve() if os.environ.get("FANTASTIC_BIN") else BIN
+        if not os.environ.get("FANTASTIC_BIN"):
+            r = subprocess.run(["cargo", "build", "-p", "fantastic-tui", "--features", feature], cwd=SRC, capture_output=True, text=True,
+                               env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+            if r.returncode != 0:
+                raise SystemExit(f"cargo build --features {feature} failed:\n{r.stderr[-2000:]}")
         b = into / "fantastic"
-        shutil.copy2(BIN, b)  # a private copy: another build cannot swap it mid-run
+        shutil.copy2(src, b)  # a private copy: another build cannot swap it mid-run
     return b
 
 

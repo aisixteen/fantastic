@@ -182,11 +182,13 @@ class Rig:
         # the build AND the copy under one lock: another test's build (other
         # features) cannot land in between
         with build_lock(E2E_TARGET):
-            r = subprocess.run(args, cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
-            if r.returncode != 0:
-                raise SystemExit(f"{' '.join(args)} failed:\n{r.stderr[-2000:]}")
+            src = Path(os.environ["FANTASTIC_BIN"]).expanduser().resolve() if os.environ.get("FANTASTIC_BIN") else BIN
+            if not os.environ.get("FANTASTIC_BIN"):
+                r = subprocess.run(args, cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+                if r.returncode != 0:
+                    raise SystemExit(f"{' '.join(args)} failed:\n{r.stderr[-2000:]}")
             self.binary = self.art / "fantastic"
-            shutil.copy2(BIN, self.binary)  # a private copy: another build cannot swap it mid-run
+            shutil.copy2(src, self.binary)  # a private copy: another build cannot swap it mid-run
 
     def make_home(self, record: dict | None = None, name: str = "plug") -> None:
         """A throwaway FANTASTIC_HOME — with `record` saved as the default, or none."""

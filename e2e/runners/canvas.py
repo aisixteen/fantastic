@@ -96,12 +96,14 @@ def free_port() -> int:
 # ── build ─────────────────────────────────────────────────────────────────────
 def build_bin(into: Path) -> Path:
     with build_lock(E2E_TARGET):  # the build AND the copy: no other build lands in between
-        r = subprocess.run(["cargo", "build", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
-        if r.returncode != 0:
-            raise SystemExit(f"cargo build fantastic-tui failed:\n{r.stderr[-2000:]}")
+        src = Path(os.environ["FANTASTIC_BIN"]).expanduser().resolve() if os.environ.get("FANTASTIC_BIN") else BIN
+        if not os.environ.get("FANTASTIC_BIN"):
+            r = subprocess.run(["cargo", "build", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
+            if r.returncode != 0:
+                raise SystemExit(f"cargo build fantastic-tui failed:\n{r.stderr[-2000:]}")
         b = into / "fantastic"
         b.unlink(missing_ok=True)  # never cp over a signed binary (macOS kills it)
-        shutil.copy2(BIN, b)
+        shutil.copy2(src, b)
     return b
 
 
