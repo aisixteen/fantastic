@@ -5,8 +5,6 @@
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 
-<a href="https://launchnest.io/p/fantastic" target="_blank"><img src="https://launchnest.io/badge/fantastic.svg?variant=featured" alt="Aisixteen Fantastic on LaunchNest" width="220" height="56" /></a>
-
 Fantastic is a kernel of **agents**. A model, a program, a file tree, a shell, a
 browser canvas and the human at the keyboard are all agents in one tree, addressed
 by id and reached the same way: one call, `send`. Compute, inference and memory are
