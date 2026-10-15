@@ -53,12 +53,19 @@ pub fn view_file(dir: &Path) -> Option<PathBuf> {
 /// Write every instance of bundle `name`'s `view` again: the bundle's declared
 /// fields over the instance's own, and NO `bytes` — the record names the file
 /// (`bytes_file`), the page reads it through [`BRIDGE`], so the panel's source
-/// lives once, in the bundle. The write is the cells' signal to draw again.
+/// lives once, in the bundle. `bytes_rev` (the file's content hash) makes the
+/// write a change; the change is the cells' signal to draw again.
 pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), String> {
     let Some(f) = view_file(dir) else { return Ok(()) };
-    if !f.is_file() {
-        return Err(format!("{}: no such file", f.display()));
-    }
+    let bytes = std::fs::read(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+    // the panel's REVISION: a view edit changes no other field of the record,
+    // and an unchanged record redraws nothing
+    let rev = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        format!("{:016x}", h.finish())
+    };
     let instances: Vec<String> = h
         .kernel
         .agents
@@ -79,6 +86,7 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
             .unwrap_or_default();
         view.extend(bundle_view(dir).unwrap_or_default());
         view.remove("bytes");
+        view.insert("bytes_rev".into(), json!(rev));
         let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "view": view})).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return Err(format!("{id}: its view: {e}"));

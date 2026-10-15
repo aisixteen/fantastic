@@ -41,8 +41,12 @@ def main() -> bool:
         except ValueError:
             return {"error": (r.stdout + r.stderr)[-300:]}
 
+    replies: dict = {}  # diagnostics: each agent's last raw `hello` reply
+
     def hello(agent: str) -> str:
-        return str(send(agent, {"type": "hello"}).get("greeting", ""))
+        r = send(agent, {"type": "hello"})
+        replies[agent] = r
+        return str(r.get("greeting", ""))
 
     async def until(pred, secs: float) -> bool:
         for _ in range(int(secs * 2)):
@@ -119,7 +123,7 @@ def main() -> bool:
     order = ["ai_ready", "bundle_made", "instance_made", "view_shown", "hello_works", "logic_live", "view_live",
              "release_loaded", "independent", "hydrated", "ai_updates_release", "ai_overwrites_release"]
     checks = {k: bool(r.get(k)) for k in order}
-    rig.summary.update({"checks": checks, **info})
+    rig.summary.update({"checks": checks, **info, "hello_replies": replies})
     return verdict(*rig.finish(all(checks.values()), " ".join(f"{k}={'✓' if v else '✗'}" for k, v in checks.items())))
 
 

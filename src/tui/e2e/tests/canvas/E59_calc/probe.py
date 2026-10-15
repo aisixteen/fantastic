@@ -189,7 +189,35 @@ def main() -> bool:
     async def drive():
         from _lib.dev_surface import click_button
         async with rig.page(1900, 1100) as pg:
-            done, said = await ask(pg, 250, 300, ASK, rig.budget(rig.limits["total_seconds"], reserve=60), rig.limits["quiet_seconds"])
+            # THE TURN AS IT GOES (diagnostics): every 30 s, from the SHELL (the
+            # page's CDP socket has one reader), each AI agent's `status`
+            samples: list = []
+            rig.summary["samples"] = samples
+
+            def shell(target: str, payload: dict) -> dict:
+                r = subprocess.run([str(rig.binary), "send", json.dumps({"target": target, "payload": payload})],
+                                   cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=30)
+                try:
+                    return json.loads(r.stdout).get("result") or {}
+                except ValueError:
+                    return {"raw": r.stdout[-300:], "err": r.stderr[-300:]}
+
+            def snap() -> dict:
+                ags = shell("kernel", {"type": "list_agents", "limit": 200}).get("agents") or []
+                ais = [a["id"] for a in ags if str(a.get("handler_module", "")).endswith("_backend.tools")]
+                return {a: shell(a, {"type": "status"}) for a in ais}
+
+            async def sample() -> None:
+                t0 = asyncio.get_running_loop().time()
+                while True:
+                    await asyncio.sleep(30)
+                    samples.append({"t": round(asyncio.get_running_loop().time() - t0), "status": await asyncio.to_thread(snap)})
+
+            sampler = asyncio.create_task(sample())
+            try:
+                done, said = await ask(pg, 250, 300, ASK, rig.budget(rig.limits["total_seconds"], reserve=60), rig.limits["quiet_seconds"])
+            finally:
+                sampler.cancel()
             await asyncio.sleep(2)
             clicked = [await click_button(pg, fn) for fn in FNS]
             got: dict = {}

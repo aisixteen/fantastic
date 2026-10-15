@@ -9,4 +9,4 @@ limits:
   # one ask; the checks need ≈60 s more (cut to fit the runner's 15-minute hard stop)
   total_seconds: 600
   quiet_seconds: 30
-env: {}
+env: {FANTASTIC_AI_SEND_TIMEOUT: "600"}  # one ask writes a whole module + its tests: a turn of long thinking runs past 180 s at the GPU's speed
