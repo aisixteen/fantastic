@@ -5,6 +5,8 @@
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
 
+<a href="https://launchnest.io/p/fantastic" target="_blank"><img src="https://launchnest.io/badge/fantastic.svg?variant=featured" alt="Aisixteen Fantastic on LaunchNest" width="220" height="56" /></a>
+
 Fantastic is a kernel of **agents**. A model, a program, a file tree, a shell, a
 browser canvas and the human at the keyboard are all agents in one tree, addressed
 by id and reached the same way: one call, `send`. Compute, inference and memory are
@@ -56,6 +58,36 @@ model to take it from there with `create_agent`, `send` and `docs`.
   as `[secret]`), a persistent tree on
   disk under `.fantastic/`, and a task table with Unix-style `ps` / `cancel`.
 
+## Fantastic and other agent harnesses
+
+What agent frameworks and coding harnesses typically offer as of October 2026
+(LangGraph, Microsoft Agent Framework, OpenAI Agents SDK, Claude Agent SDK, Google
+ADK, CrewAI, Mastra, Pydantic AI, Letta, Claude Code, Codex, Gemini CLI and
+others), and what Fantastic does instead. "Not built" means exactly that.
+
+| Typical in other harnesses | Fantastic |
+|---|---|
+| **Agent loop**: a while-loop per agent (model → tools → repeat until a step cap), or a hand-built state graph | No loop object. A model pass is one message; a chain continues only when the model sends — to itself or to others. All calls of a turn dispatch at once as one kernel batch, and their replies come back later as one message: flat asynchronous flows between addressable agents, mailbox-style. A chain ends only by the model's own `done`; silent turns are capped and thought-only turns are rerolled |
+| **Tool calling**: the provider's native function-calling API with JSON schemas | One prompt-taught `<call>` tag grammar, no JSON on the model path, the same on every provider and local model. A malformed call gets a compiler-style report (line, caret, the form to write); a call written inside the model's thinking never runs |
+| **Tool discovery**: a fixed tool list in the prompt; skill files for progressive disclosure | Every agent answers `reflect` (what it is) and `docs` (how to call it, one-liners or detailed). A model drills down on demand, and docs it already read shrink to stubs |
+| **Parallel tool calls** in one turn, when the provider supports them | Every send is a batch. One turn of 500 calls runs as one kernel batch on every runtime |
+| **Multi-agent**: handoffs, supervisor, swarm, agent-as-tool, sub-agents with their own context | Every AI is an agent with an id: AI-to-AI sends, fan-out to many recipients, inquiries between AIs. Models build their own durable teams — sub-AIs, workers, schedules — and tear them down. No prebuilt supervisor or handoff presets |
+| **Graphs and workflows**: an explicit state-graph or workflow DSL with conditional edges, cycles and fan-out | No graph DSL. The graph is the agent tree plus its grant edges, and a node can be code, a model, a process or a file store — interchangeably. Models wire graphs from the agents' own self-descriptions; a scheduler drives recurring flows |
+| **Durable state**: a per-thread checkpointer; crash-resume through a durable execution engine (Temporal, DBOS, Restate, Inngest) that logs every step and replays to the point of the crash | A kernel ledger: every call and its outcome is a row in a memory-store agent. A named execution is idempotent — a repeat joins it or gets its recorded outcome — with retries and dead letters (listed, acked, never silently re-sent). The agent tree, schedules and conversations are persisted and rehydrate. Not built: replaying an interrupted turn to where it stopped — an interrupted call becomes a dead letter |
+| **Checkpoints and time travel**: replay or fork a run from a past checkpoint; coding CLIs rewind edits through a shadow git repo | The ledger already holds every conversation row and every tree change, so both are a projection away from rewind and fork. Not built: the rewind verb, and the record of replaced file bytes — today one undo slot per edited file |
+| **Human in the loop**: interrupt and resume; approve, edit or reject a tool call; permission modes | The human is an agent (`user`). A model asks through `inquiry` (text, single, multi, confirm) or a plain send and continues when answered; nothing blocks the kernel. Approval splits the rights: a model without the grant proposes a named action, the person who holds it approves, and it runs exactly once under the approver's authority. Not built: turning a denied call into an approval question automatically |
+| **Memory**: thread state, a long-term store with vector search, self-edited memory blocks, instruction files | Every message lives in a memory-store agent (RAM, or SQLite with full-text search in the CLI), per agent, searchable with `grep` and `recall`. Durable notes are files the model writes through a file agent. No vector search, by design: similarity is approximate, and a memory read should return exactly what was written |
+| **Context management**: summarize or compact at a threshold; tool-result clearing | Nested folds: the model summarizes spans of its own history, then folds of folds. Nothing is deleted — `recall`, `grep` and descending into a fold reach everything; `clear` is a boundary, not a deletion. The budget is calibrated from the server's own prompt-size reports |
+| **Streaming and cancellation**: token and event streams, an abort signal | Streamed parts (text, thinking, call drafts) to whoever watches; the receiver can stop a stream. Every dispatch is a kernel task: `ps` lists them, `cancel` kills a whole subtree, real OS processes included. Timeouts are per item and never defaulted |
+| **Security**: approval modes, hooks, OS sandboxes (Seatbelt, bubblewrap, containers, microVMs), guardrail classifiers | A deny-all, two-sided call gate on every agent-to-agent call; every IO leg sealed until opened; file access clamped to the run directory with an allow list; commands allow-listed by regex; secret marks; credentials by reference, bound to one host. That governs what may be launched; containing a launched process is not built — no OS sandbox, so an allowed command runs with the user's rights |
+| **Protocols**: MCP client (universal), MCP server, A2A, AG-UI, ACP | MCP client (2026-07-28; each remote tool becomes a verb), an MCP server face for coding CLIs (`fantastic mcp`, stdio), its own WebSocket and REST wire, and kernel-to-kernel bridges, direct or through a relay. No A2A, AG-UI or ACP |
+| **Observability**: OpenTelemetry traces, hosted tracing, eval suites, visual debuggers | A live state stream of who sent what to whom, the ledger, the task table, and the canvas views over them. No OpenTelemetry export; evaluation is the e2e suites and an Exercism benchmark |
+| **Background work**: hosted agent runtimes, cron triggers, cloud background agents | A scheduler (interval-based, persisted, fires under its own grants), command and terminal jobs as kernel tasks, folder-bundle programs as agents. No cron expressions, no hosted platform |
+| **Runtimes**: mostly Python and TypeScript; some .NET, Go, Java | One protocol in Python, Rust and Swift (in-process on Apple platforms) plus a browser kernel in TypeScript; a single static binary; a contract corpus pins identical behaviour across them |
+| **Models**: provider SDKs; other providers through adapters | vLLM, Ollama, the OpenAI Responses API, Anthropic, and Apple's on-device model — the same call grammar on all; a KV-cache slot table for shared vLLM servers |
+| **UI**: chat UI kits, generative UI, IDE extensions, studios | A terminal UI and a browser canvas where a model builds live panels, terminals and services and wires them by grants |
+| **Extensibility**: plugins, skill files, tools written in code | Folder bundles — a `bundle.yaml` plus a program becomes a new kind of agent, hot-reloaded, self-describing like every other |
+
 ## Security posture
 
 Nothing is open by default. Every IO leg denies until an operator opens it,
@@ -87,14 +119,28 @@ them.
 
 ### With cargo
 
+From crates.io:
+
+```sh
+cargo install fantastic --locked
+```
+
+This needs Rust ≥ 1.88 and a C compiler. The package carries the canvas page
+prebuilt, so no Go is needed. Its default features are `vllm`, `ollama`,
+`responses` and `anthropic`; pick a subset with
+`--no-default-features --features <list>` (with none, the binary has no AI backend).
+
+From git:
+
 ```sh
 cargo install --locked --git https://github.com/aisixteen/fantastic fantastic-tui \
   --features vllm,ollama,responses,anthropic
 ```
 
-This needs Rust ≥ 1.88, a C compiler, and **Go ≥ 1.21**. The canvas page is packed
-into the binary with a pinned esbuild, which the build compiles once from pinned
-source and verifies by sha256 ([`src/lib/ts/tools/esbuild/`](src/lib/ts/tools/esbuild/README.md)).
+This builds the source tree, which packs the canvas page at build time, so it also
+needs **Go ≥ 1.21**: the page is packed with a pinned esbuild, which the build
+compiles once from pinned source and verifies by sha256
+([`src/lib/ts/tools/esbuild/`](src/lib/ts/tools/esbuild/README.md)).
 Drop `--features` you don't need; with none, the binary has no AI backend.
 
 ### Run from source
