@@ -69,6 +69,17 @@ SNAP_KEYS = {"job_id", "status", "exit_code", "started_at", "lines", "last_line"
              "command", "args", "pty"}
 
 
+#: A terminal's control sequences — CSI (`ESC [ … final`) and OSC (`ESC ] … BEL|ST`):
+#: a console (ConPTY) writes them around a program's text where a unix tty
+#: writes none.
+_ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def plain(line: str) -> str:
+    """A PTY line as the program wrote it: escapes and the trailing CR off."""
+    return _ESCAPES.sub("", line).rstrip("\r").strip()
+
+
 def watch(port: int, aid: str) -> list:
     """Collect `aid`'s events over the ws face, in a daemon thread, for the run."""
     seen: list = []
@@ -249,7 +260,7 @@ def main() -> int:
         need(set(evp) == PTY_DONE_KEYS and evp.get("exit_code") == 0 and evp.get("ok") is True,
              f"PTY job_done exactly {sorted(PTY_DONE_KEYS)}: {evp}")
         t = ex({"type": "tail", "job_id": jp})
-        need(any(x.get("line", "").rstrip("\r") == "got:zz" for x in t.get("lines") or [])
+        need(any(plain(x.get("line", "")) == "got:zz" for x in t.get("lines") or [])
              and all(x.get("stream") == "pty" for x in t.get("lines") or []),
              f"tail on a PTY job: {t.get('lines')}")
         o = ex({"type": "output", "job_id": jp})

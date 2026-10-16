@@ -214,7 +214,12 @@ async fn a_pty_job_is_gated_like_any_start_and_its_verbs_want_a_pty_job() {
     let k = kernel_with(
         &tmp,
         "term_g",
-        json!({"allowed": [format!("{} -c .*", py.display())]}),
+        // the shell-joined line, the interpreter's path regex-escaped (a Windows
+        // path's `\` is a regex escape)
+        json!({"allowed": [format!(
+            "{} -c .*",
+            fancy_regex::escape(&crate::shlex_join(&[py.to_string_lossy().to_string()]))
+        )]}),
     )
     .await;
     let r = call(

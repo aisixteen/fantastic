@@ -139,7 +139,7 @@ def main() -> int:
         hk = boot("first boot")
         for aid in ("slow", "w"):
             hk.create(parent_id="rest", handler_module="slow_probe.tools", id=aid, callable_by=CB)
-        need(lock_pid(work) == hk.proc.pid, f"lock.yaml names the serving pid ({lock_pid(work)} vs {hk.proc.pid})")
+        need(lock_pid(work) == hk.pid, f"lock.yaml names the serving pid ({lock_pid(work)} vs {hk.pid})")
         log = work.parent / f"{work.name}-second.out"
         with log.open("wb") as f:
             second = subprocess.Popen(hk.cmd, cwd=work, env=hk.env, stdout=f,
@@ -152,9 +152,9 @@ def main() -> int:
         said = log.read_text(errors="replace")
         log.unlink(missing_ok=True)
         need(rc not in (None, 0), f"a second kernel in the same dir exits non-zero (got {rc})")
-        need(str(hk.proc.pid) in said, f"it names the owner's pid: {said.strip()[:200]!r}")
+        need(str(hk.pid) in said, f"it names the owner's pid: {said.strip()[:200]!r}")
         need(hk.send("w", {"type": "work"}).get("runs") == 1, "the first kernel still serves")
-        need(lock_pid(work) == hk.proc.pid, "lock.yaml still names the first kernel")
+        need(lock_pid(work) == hk.pid, "lock.yaml still names the first kernel")
 
         # 2 · the drain, with a call in flight
         bg, tid = in_flight(hk)
@@ -184,13 +184,13 @@ def main() -> int:
         st = hk.send("kernel", {"type": "kernel_stop"})
         need(st == {"type": "kernel_stop", "ok": True}, f"kernel_stop is acked: {st}")
         stopped(hk, "kernel_stop after the drain")
-        need(lock_pid(work) != hk.proc.pid, f"the lock no longer names the stopped pid ({lock_pid(work)})")
+        need(lock_pid(work) != hk.pid, f"the lock no longer names the stopped pid ({lock_pid(work)})")
 
         # 4 · stale locks
         gone = dead_pid()
         (work / ".fantastic" / "lock.yaml").write_text(yaml.safe_dump({"pid": gone}))
         hk = boot(f"a lock naming a dead pid ({gone})")
-        need(lock_pid(work) == hk.proc.pid, f"the new kernel takes the lock ({lock_pid(work)})")
+        need(lock_pid(work) == hk.pid, f"the new kernel takes the lock ({lock_pid(work)})")
         need(hk.send("w", {"type": "work"}).get("runs") == 1, "it serves new work")
         # 5 · kernel_stop with a call in flight, no drain before it
         bg, tid = in_flight(hk)
@@ -203,7 +203,7 @@ def main() -> int:
 
         (work / ".fantastic" / "lock.yaml").write_text(yaml.safe_dump({"pid": os.getpid()}))
         hk = boot(f"a lock naming a live pid that holds no lock ({os.getpid()})")
-        need(lock_pid(work) == hk.proc.pid, f"the new kernel takes the lock ({lock_pid(work)})")
+        need(lock_pid(work) == hk.pid, f"the new kernel takes the lock ({lock_pid(work)})")
     finally:
         for k in kernels:
             k.close()

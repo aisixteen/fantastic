@@ -218,3 +218,63 @@ def ensure_utf8() -> None:
         return
     os.environ["PYTHONUTF8"] = "1"
     raise SystemExit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
+
+
+def lf_text_files() -> None:
+    """Every text file this process writes through `Path.write_text` ends its
+    lines with `\\n`, on every OS: fixtures are compared byte for byte with what a
+    kernel reads back, and Windows' text mode would write `\\r\\n`. An explicit
+    `newline=` still wins. POSIX writes `\\n` already: nothing changes there."""
+    if not WINDOWS:
+        return
+    import pathlib
+
+    orig = pathlib.Path.write_text
+    if getattr(orig, "_lf", False):
+        return
+
+    def write_text(self, data, encoding=None, errors=None, newline="\n"):
+        return orig(self, data, encoding, errors, newline)
+
+    write_text._lf = True
+    pathlib.Path.write_text = write_text
+
+
+def program_pid(proc: subprocess.Popen, timeout: float = 10.0) -> int:
+    """The pid of the PROGRAM `proc` runs. On POSIX `proc.pid`. On Windows a venv's
+    `python.exe` is a launcher that starts the real interpreter as its one child:
+    that child's pid (waited for, up to `timeout`)."""
+    if not WINDOWS or Path(proc.args[0]).parent.name.lower() != "scripts":
+        return proc.pid
+    import ctypes
+    import time
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+        e = PROCESSENTRY32W()
+        e.dwSize = ctypes.sizeof(e)
+        child = None
+        ok = k32.Process32FirstW(snap, ctypes.byref(e))
+        while ok:
+            if e.th32ParentProcessID == proc.pid:
+                child = e.th32ProcessID
+                break
+            ok = k32.Process32NextW(snap, ctypes.byref(e))
+        k32.CloseHandle(snap)
+        if child is not None:
+            return child
+        time.sleep(0.05)
+    return proc.pid

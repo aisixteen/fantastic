@@ -49,6 +49,7 @@ async fn refusal(json: &str) -> String {
 #[test]
 fn availability_and_the_window_come_from_the_bridge() {
     let e = SystemEngine::new();
+    let available = matches!(e.availability(), FmAvailability::Available);
     match e.availability() {
         FmAvailability::Available => {}
         FmAvailability::Unavailable(r) => assert!(
@@ -64,8 +65,10 @@ fn availability_and_the_window_come_from_the_bridge() {
             "an unknown reason sentence: {r}"
         ),
     }
+    // the model's own window where there is a model; a Mac without one (a CI VM)
+    // reports 0
     let n = e.context_size();
-    assert!(n >= 1, "{n}");
+    assert!(!available || n >= 1, "{n}");
     assert_eq!(e.context_size(), n, "read once");
 }
 

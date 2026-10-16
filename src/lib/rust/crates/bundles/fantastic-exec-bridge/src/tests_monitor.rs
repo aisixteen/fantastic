@@ -237,11 +237,9 @@ async fn every_throttles_and_tail_caps() {
     )
     .await;
     let stamps = ear.stamps();
-    assert!(
-        (2..=5).contains(&stamps.len()),
-        "{} deliveries for ~1 s at every=0.4",
-        stamps.len()
-    );
+    // the THROTTLE is the gap between deliveries; how many there are follows from
+    // how long the printer took, which a loaded runner stretches
+    assert!(stamps.len() >= 2, "{} deliveries", stamps.len());
     for w in stamps.windows(2) {
         assert!(
             w[1].duration_since(w[0]).as_secs_f64() >= 0.35,

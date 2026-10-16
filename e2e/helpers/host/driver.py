@@ -298,6 +298,7 @@ class HostKernel:
             self.cmd, cwd=self.workdir, env=self.env,
             stdout=self.klog, stderr=subprocess.STDOUT,
             **oslayer.group_kwargs())
+        self._pid = None  # this boot's kernel (see `pid`)
         # AT EXIT, NOT AT `close`. Probes bind `close_kernel` and never call it —
         # the kernel dies with the process — so a dump that lived only in `close`
         # would never run.
@@ -311,6 +312,14 @@ class HostKernel:
                     return self
             time.sleep(0.1)
         raise SystemExit(f"kernel did not serve on :{self.port}")
+
+    @property
+    def pid(self) -> int:
+        """The KERNEL's pid — the program the spawned process runs (on Windows a
+        venv's `python.exe` launcher is its parent; `oslayer.program_pid`)."""
+        if getattr(self, "_pid", None) is None:
+            self._pid = oslayer.program_pid(self.proc)
+        return self._pid
 
     def close(self) -> None:
         """Stop the kernel's whole process group, then dump. Idempotent — it runs

@@ -145,7 +145,13 @@ def main() -> int:
             events, stop = watch(hk.port, aid)
             # a browser-style client: its events reach the agent's watchers
             out = hk.send(aid, {"type": "send", "text": "say the word", "client_id": "tab1"})
-            time.sleep(0.5)
+            # the done status follows the reply on its own stream: waited for, not
+            # a fixed sleep (a loaded runner delivers it later than half a second)
+            end = time.monotonic() + 10
+            while time.monotonic() < end and not any(
+                e.get("type") == "status" and e.get("phase") == "done" for e in list(events)
+            ):
+                time.sleep(0.05)
             stop.set()
             need(word in str(out.get("response")) and not out.get("error"),
                  f"{p}: the turn answers the mock's text: {str(out)[:200]}")

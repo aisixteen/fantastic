@@ -56,6 +56,11 @@ def bootstrap() -> None:
 
 bootstrap()
 
+# Every harness process writes LF text files on every OS (see the function).
+from helpers import oslayer as _oslayer  # noqa: E402
+
+_oslayer.lf_text_files()
+
 # LAZY re-exports. The names below reach into the AI machinery (`ai_core`, the
 # backends) and the contract-corpus runner needs NONE of it — that half of this
 # package is free and non-LLM. Importing them eagerly made `helpers` unusable

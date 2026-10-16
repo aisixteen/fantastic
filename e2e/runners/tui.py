@@ -41,7 +41,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from e2e_build import build_lock  # noqa: E402
+from e2e_build import build_lock, variant_name  # noqa: E402
 from helpers import oslayer, verdict  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
@@ -77,10 +77,17 @@ def build(what: list[str]) -> None:
 
 def resolve(argv: list[str], features: list[str], into: Path) -> tuple[Path, Path]:
     """(the shell binary, the PTY rig), both copied into `into`. The rig is
-    always this repo's."""
+    always this repo's.
+
+    The shell is built WITH EXACTLY the scenario's `features` (a scenario that
+    checks "not in this build" needs a build without that backend): `--bin`
+    wins; a prebuilt run (`E2E_ARTIFACTS`) takes that feature set's variant;
+    else FANTASTIC_BIN; else it is built here."""
     if "--bin" in argv:
         i = argv.index("--bin")
         b = Path(argv[i + 1]).expanduser().resolve()
+    elif os.environ.get("E2E_ARTIFACTS"):
+        b = oslayer.exe(Path(os.environ["E2E_ARTIFACTS"]).resolve() / variant_name(features))
     elif os.environ.get("FANTASTIC_BIN"):
         b = Path(os.environ["FANTASTIC_BIN"]).expanduser().resolve()
     else:

@@ -159,6 +159,10 @@ pub struct PartSplitter {
     /// call is matched to by its exact body, so the message it becomes carries the
     /// stream it was previewed as.
     pub closed_calls: Vec<(String, String)>,
+    /// STOPPED is terminal: the stop runs while the pass's own task is still
+    /// alive, so a chunk the provider already handed over may still be fed — it
+    /// opens no part after the aborts (python `PartSplitter._stopped`).
+    stopped: bool,
 }
 
 impl PartSplitter {
@@ -177,6 +181,7 @@ impl PartSplitter {
             in_bytes: false,
             parts: Vec::new(),
             closed_calls: Vec::new(),
+            stopped: false,
         }
     }
 
@@ -184,6 +189,9 @@ impl PartSplitter {
 
     /// The next chunk of the stream.
     pub fn feed(&mut self, chunk: &str) -> Vec<PartEvent> {
+        if self.stopped {
+            return Vec::new();
+        }
         self.buf.push_str(chunk);
         let mut out = Vec::new();
         while self.step(&mut out) {}
@@ -198,6 +206,9 @@ impl PartSplitter {
 
     /// [`Self::finish`] with the abort reason named.
     pub fn finish_because(&mut self, why: &str) -> Vec<PartEvent> {
+        if self.stopped {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         if self.call.is_some() {
             let rest = std::mem::take(&mut self.buf);
@@ -220,8 +231,10 @@ impl PartSplitter {
         out
     }
 
-    /// Stopped mid-stream: every open part ABORTS (nothing is half-ended).
+    /// Stopped mid-stream: every open part ABORTS (nothing is half-ended), and
+    /// nothing fed after opens another.
     pub fn stop(&mut self, why: &str) -> Vec<PartEvent> {
+        self.stopped = true;
         let mut out = Vec::new();
         if self.call.is_some() {
             out.extend(self.abort_call(why));

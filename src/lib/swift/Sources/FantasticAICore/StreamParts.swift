@@ -166,6 +166,10 @@ final class PartSplitter {
     /// call is matched to by its exact body, so the message it becomes carries the
     /// stream it was previewed as.
     private(set) var closedCalls: [(streamId: String, body: String)] = []
+    /// STOPPED is terminal: the stop runs while the pass's own task is still alive,
+    /// so a chunk the provider already handed over may still be fed — it opens no
+    /// part after the aborts (python `PartSplitter._stopped`).
+    private var stopped = false
 
     init(source: String) {
         self.source = source
@@ -174,6 +178,7 @@ final class PartSplitter {
     // ── public ──
 
     func feed(_ chunk: String) -> [PartEvent] {
+        if stopped { return [] }
         buf.append(contentsOf: chunk.unicodeScalars)
         var out: [PartEvent] = []
         while step(&out) {}
@@ -188,6 +193,7 @@ final class PartSplitter {
     /// The pass ended: flush prose, END an open text/thinking part, ABORT an open
     /// call (a call that never closed was never a call).
     func finish(_ why: String = "no_close_tag") -> [PartEvent] {
+        if stopped { return [] }
         var out: [PartEvent] = []
         if call != nil {
             callBody += buf[pos...]
@@ -212,8 +218,10 @@ final class PartSplitter {
         return out
     }
 
-    /// Stopped mid-stream: every open part ABORTS (nothing is half-ended).
+    /// Stopped mid-stream: every open part ABORTS (nothing is half-ended), and
+    /// nothing fed after opens another.
     func stop(_ why: String) -> [PartEvent] {
+        stopped = true
         var out: [PartEvent] = []
         if call != nil {
             out += abortCall(why)

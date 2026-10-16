@@ -38,11 +38,16 @@ fn agent_id_for(tmp: &TempDir) -> String {
 
 /// A `start` payload that runs `code` under `py`. `with_connector` prepends the
 /// vendored wire client, exactly as a program wanting a `kernel` global would.
+/// A test program's first line: its stdout/stderr end a line with `\n` on every
+/// OS (Windows' text mode writes `\r\n`, and a job keeps the `\r` as data).
+const LF_STDIO: &str =
+    "import sys; sys.stdout.reconfigure(newline='\\n'); sys.stderr.reconfigure(newline='\\n')\n";
+
 fn py_start(py: &Path, code: &str, with_connector: bool) -> Value {
     let program = if with_connector {
-        format!("{CONNECTOR_SRC}\n{code}")
+        format!("{LF_STDIO}{CONNECTOR_SRC}\n{code}")
     } else {
-        code.to_string()
+        format!("{LF_STDIO}{code}")
     };
     json!({
         "type": "start",
@@ -2858,7 +2863,8 @@ async fn arg_refusals_are_byte_exact_in_key_order() {
              (or env={{\\\"PATH\\\": …}}), or start an absolute path\",\"arg\":\"PATH\"}}"
         )
     );
-    // a PTY start with no command and no SHELL in the child env
+    // a PTY start with no command and no SHELL (the OS's shell var) in the child env
+    let v = crate::SHELL_VAR;
     assert_eq!(
         ask(
             Arc::clone(&k),
@@ -2868,10 +2874,10 @@ async fn arg_refusals_are_byte_exact_in_key_order() {
         .await,
         format!(
             "{{\"error\":\"exec_bridge: start named no command and the child's environment has \
-             no SHELL to run — a PTY start without `command` runs the shell the record passes \
+             no {v} to run — a PTY start without `command` runs the shell the record passes \
              down, never a guessed one\",\"reason\":\"missing_arg\",\"hint\":\"update_agent {a} \
-             inherit_env=[\\\"SHELL\\\"] (or env={{\\\"SHELL\\\": …}}), or name `command`\",\
-             \"arg\":\"SHELL\"}}"
+             inherit_env=[\\\"{v}\\\"] (or env={{\\\"{v}\\\": …}}), or name `command`\",\
+             \"arg\":\"{v}\"}}"
         )
     );
     // a leg with no cwd

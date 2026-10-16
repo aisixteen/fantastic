@@ -182,7 +182,9 @@ async def test_every_throttles_and_tail_caps(seeded_kernel):
         "two deliveries, one cut by tail",
     )
     stamps = [t for t, _ in _HEARD.get("ear", [])]
-    assert 2 <= len(stamps) <= 5, f"{len(stamps)} deliveries for ~1 s at every=0.4"
+    # the THROTTLE is the gap between deliveries; how many there are follows from
+    # how long the printer took, which a loaded runner stretches
+    assert len(stamps) >= 2, f"{len(stamps)} deliveries"
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
     assert all(g >= 0.35 for g in gaps), gaps
     for text in _heard():

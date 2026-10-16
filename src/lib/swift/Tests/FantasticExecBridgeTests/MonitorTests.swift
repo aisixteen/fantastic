@@ -190,7 +190,9 @@
                 ear.stamps.count >= 2 && ear.texts.contains { $0.contains("earlier lines dropped") }
             }
             let stamps = ear.stamps
-            #expect((2...5).contains(stamps.count), "\(stamps.count) deliveries for ~1 s at every=0.4")
+            // the THROTTLE is the gap between deliveries; how many there are follows
+            // from how long the printer took, which a loaded runner stretches
+            #expect(stamps.count >= 2, "\(stamps.count) deliveries")
             let gaps = zip(stamps, stamps.dropFirst()).map { $1.timeIntervalSince($0) }
             #expect(gaps.allSatisfy { $0 >= 0.35 }, "\(gaps)")
             for text in ear.texts {

@@ -22,3 +22,9 @@ def build_lock(target: Path):
     target.mkdir(parents=True, exist_ok=True)
     with oslayer.exclusive_lock(target / ".e2e-build.lock"):
         yield
+
+
+def variant_name(features: list[str]) -> str:
+    """The prebuilt shell a scenario with these cargo `features` runs
+    (`e2e/build.py` writes one per feature set): `fantastic-tui-<f1+f2|none>`."""
+    return "fantastic-tui-" + ("+".join(sorted(features)) or "none")

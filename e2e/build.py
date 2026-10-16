@@ -10,7 +10,10 @@ Writes into `<dir>` exactly what `run.py` takes when `E2E_ARTIFACTS=<dir>`:
     local run builds with);
   * `fantastic` — the CLI product, the binary a release ships
     (`scripts/build/cli.sh`, which also writes the shipping archive to `dist/`);
-  * `screenshot` — the CLI's PTY rig, the shell's e2e driver (never shipped).
+  * `screenshot` — the CLI's PTY rig, the shell's e2e driver (never shipped);
+  * `fantastic-tui-<features|none>` — the shell built with exactly the cargo
+    `features` a tui scenario names (`e2e/tests/scenario/*/scenario.yaml`): a
+    scenario that checks "not in this build" needs a build without that backend.
 
 Nothing here is a second recipe: each piece is the script the local run and the
 release already use, pointed at `<dir>`.
@@ -27,11 +30,26 @@ from pathlib import Path
 E2E = Path(__file__).resolve().parent
 sys.path.insert(0, str(E2E))
 
+import yaml  # noqa: E402
+
 from helpers import oslayer  # noqa: E402
 from helpers.host.artifacts import build_kernel  # noqa: E402
 from run import HOST_RUNTIMES  # noqa: E402
 
+sys.path.insert(0, str(E2E / "runners"))
+from e2e_build import variant_name  # noqa: E402
+
 REPO = E2E.parent
+
+
+def tui_feature_sets() -> set[tuple[str, ...]]:
+    """Every cargo feature set a tui scenario names."""
+    out = set()
+    for f in sorted(E2E.glob("tests/scenario/*/scenario.yaml")):
+        doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        if "tui" in (doc.get("runtimes") or []):
+            out.add(tuple(sorted(doc.get("features") or [])))
+    return out
 
 
 def host_target() -> str:
@@ -68,6 +86,17 @@ def main() -> int:
         cargo.append("--release")
     subprocess.run(cargo, cwd=REPO / "src", check=True)
     shutil.copy2(oslayer.exe(built / "examples" / "screenshot"), oslayer.exe(out / "screenshot"))
+
+    for features in sorted(tui_feature_sets()):
+        name = variant_name(list(features))
+        print(f"═══ {name}", flush=True)
+        cargo = ["cargo", "build", "--locked", "-p", "fantastic-tui", "--target", target]
+        if features:
+            cargo += ["--features", ",".join(features)]
+        if a.profile == "release":
+            cargo.append("--release")
+        subprocess.run(cargo, cwd=REPO / "src", check=True)
+        shutil.copy2(oslayer.exe(built / "fantastic"), oslayer.exe(out / name))
 
     print(f"═══ e2e artifacts in {out}:", *sorted(p.name for p in out.iterdir()), flush=True)
     return 0
