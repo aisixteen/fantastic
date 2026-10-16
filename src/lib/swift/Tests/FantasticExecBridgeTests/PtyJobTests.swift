@@ -22,6 +22,14 @@
         print('GOT', line.strip(), flush=True)
         """
 
+    /// Floods past the high-water mark, then prints a marker and waits on a line.
+    private let FLOOD = """
+        import sys
+        sys.stdout.write('x' * 150000 + '\\nDONE\\n')
+        sys.stdout.flush()
+        sys.stdin.readline()
+        """
+
     private func py3() -> String? {
         for p in ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
         where FileManager.default.isExecutableFile(atPath: p) { return p }
@@ -408,6 +416,42 @@
             let r = await call(
                 k2, "no_cwd", ["type": "start", "command": "/bin/sh", "args": ["-c", "true"]])
             #expect(r["reason"] == "missing_arg" && r["arg"] == "cwd", "\(r.serialize())")
+        }
+
+        /// A viewer that streamed but never acked (a reloaded page) leaves `unacked`
+        /// past HIGH and the reader paused. The new viewer's `output` replay hands it
+        /// everything so far, so it zeroes the count and resumes the reader — python
+        /// `test_a_replay_clears_the_backlog_a_gone_viewer_left`.
+        @Test func aReplayClearsTheBacklogAGoneViewerLeft() async {
+            guard let py = py3() else { return }
+            let k = await kernelWith("term_f")
+            let inbox = k.ensureInbox(AgentId("term_f"))
+            let r = await call(
+                k, "term_f",
+                [
+                    "type": "start", "command": .string(py), "args": ["-c", .string(FLOOD)],
+                    "pty": ["cols": 80, "rows": 24],
+                ])
+            let jid = r["job_id"]
+            let probe: OrderedDictionary<String, JSON> = ["type": "ack", "job_id": jid, "chars": 0]
+            var st = JSON.object([:])
+            for _ in 0..<250 {
+                st = await call(k, "term_f", probe)
+                if st["paused"] == true { break }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            #expect(
+                st["paused"] == true && (st["unacked"].asInt ?? 0) > 100_000, "\(st.serialize())")
+            _ = await call(k, "term_f", ["type": "output", "job_id": jid])
+            st = await call(k, "term_f", probe)
+            // the count restarted at 0; the resumed reader may already have counted more
+            #expect(
+                st["paused"] == false && (st["unacked"].asInt ?? .max) < 100_000,
+                "\(st.serialize())")
+            // the rest of the flood (under HIGH) arrives with no further ack
+            let text = await outputUntil(inbox) { $0.contains("DONE") }
+            #expect(text.contains("DONE"))
+            _ = await call(k, "term_f", ["type": "write", "job_id": jid, "data": "\n"])
         }
     }
 #endif

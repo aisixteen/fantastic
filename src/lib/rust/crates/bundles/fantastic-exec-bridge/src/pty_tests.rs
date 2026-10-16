@@ -507,3 +507,60 @@ async fn write_bytes_is_verbatim_so_enter_reaches_the_program() {
     assert_eq!(w, json!({"written": 6}));
     output_until(&mut rx, |t| t.contains("GOT hello")).await;
 }
+
+/// Floods past the high-water mark, then prints a marker and waits on a line.
+const FLOOD: &str = "import sys
+sys.stdout.write('x' * 150000 + '\\nDONE\\n')
+sys.stdout.flush()
+sys.stdin.readline()
+";
+
+/// A viewer that streamed but never acked (a reloaded page) leaves `unacked` past
+/// HIGH and the reader paused. The new viewer's `output` replay hands it everything
+/// so far, so it zeroes the count and resumes the reader — python
+/// `test_a_replay_clears_the_backlog_a_gone_viewer_left`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
+    let Some(py) = python() else { return };
+    let tmp = TempDir::new().unwrap();
+    let k = kernel_with(&tmp, "term_f", json!({})).await;
+    let mut rx = k.ensure_inbox(&AgentId::from("term_f"));
+    let r = call(
+        &k,
+        "term_f",
+        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", FLOOD],
+               "pty": {"cols": 80, "rows": 24}}),
+    )
+    .await;
+    let jid = r["job_id"].as_i64().unwrap();
+    let probe = json!({"type": "ack", "job_id": jid, "chars": 0});
+    let mut st = json!({});
+    for _ in 0..250 {
+        st = call(&k, "term_f", probe.clone()).await;
+        if st["paused"] == json!(true) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        st["paused"] == json!(true)
+            && st["unacked"].as_u64().unwrap() > crate::pty::HIGH_WATERMARK as u64,
+        "{st}"
+    );
+    call(&k, "term_f", json!({"type": "output", "job_id": jid})).await;
+    let st = call(&k, "term_f", probe).await;
+    // the count restarted at 0; the resumed reader may already have counted more
+    assert!(
+        st["paused"] == json!(false)
+            && st["unacked"].as_u64().unwrap() < crate::pty::HIGH_WATERMARK as u64,
+        "{st}"
+    );
+    // the rest of the flood (under HIGH) arrives with no further ack
+    output_until(&mut rx, |t| t.contains("DONE")).await;
+    call(
+        &k,
+        "term_f",
+        json!({"type": "write", "job_id": jid, "data": "\n"}),
+    )
+    .await;
+}

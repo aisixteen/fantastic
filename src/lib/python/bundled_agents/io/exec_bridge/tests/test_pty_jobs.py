@@ -73,7 +73,8 @@ async def _until(k, pred, secs=10.0):
         assert left > 0, f"timed out; got {text!r}"
         ev = await asyncio.wait_for(q.get(), timeout=left)
         events.append(ev)
-        if ev.get("type") == "output":
+        # an `output` CALL to the job (a replay) is mirrored too — it has no data
+        if ev.get("type") == "output" and "data" in ev:
             text += ev["data"]
     return text, events
 
@@ -295,3 +296,41 @@ async def test_every_teardown_kills_the_whole_session(term):
                 break
             await asyncio.sleep(0.05)
         assert not alive, (end, alive)
+
+
+# Floods past the high-water mark, then prints a marker and waits on a line.
+_FLOOD = (
+    "import sys\n"
+    "sys.stdout.write('x' * 150000 + '\\nDONE\\n')\n"
+    "sys.stdout.flush()\n"
+    "sys.stdin.readline()\n"
+)
+
+
+async def test_a_replay_clears_the_backlog_a_gone_viewer_left(term):
+    """A viewer that streamed but never acked (a reloaded page) leaves `unacked`
+    past HIGH and the reader paused. The new viewer's `output` replay hands it
+    everything so far, so it zeroes the count and resumes the reader."""
+    r = await _call(
+        term,
+        {
+            "type": "start",
+            "command": PY,
+            "args": ["-c", _FLOOD],
+            "pty": {"cols": 80, "rows": 24},
+        },
+    )
+    jid = r["job_id"]
+    for _ in range(250):
+        st = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+        if st["paused"]:
+            break
+        await asyncio.sleep(0.02)
+    assert st["paused"] and st["unacked"] > ebt.HIGH_WATERMARK, st
+    await _call(term, {"type": "output", "job_id": jid})
+    st = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+    # the count restarted at 0; the resumed reader may already have counted more
+    assert not st["paused"] and st["unacked"] < ebt.HIGH_WATERMARK, st
+    # the rest of the flood (under HIGH) arrives with no further ack
+    await _until(term, lambda t: "DONE" in t)
+    await _call(term, {"type": "write", "job_id": jid, "data": "\n"})

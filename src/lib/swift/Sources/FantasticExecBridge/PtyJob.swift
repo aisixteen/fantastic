@@ -318,7 +318,21 @@
             return snap
         }
 
-        /// `output` — the ring, for a client re-attaching.
+        /// `output` — the ring, for a client re-attaching. The replay hands that viewer
+        /// everything so far: what a gone viewer streamed but never acked is owed to no
+        /// one, so the backlog clears and the reader resumes.
+        func replay() -> String {
+            state.lock()
+            defer { state.unlock() }
+            unacked = 0
+            if paused {
+                paused = false
+                state.broadcast()
+            }
+            return ring.joined()
+        }
+
+        /// The ring's text NOW — what `tail`/`grep` read on a PTY job.
         func ringText() -> String {
             state.lock()
             defer { state.unlock() }

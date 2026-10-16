@@ -366,7 +366,19 @@ pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
         );
     };
     drop(g);
-    let mut text: String = pty.lock().ring.iter().map(String::as_str).collect();
+    let mut text: String = {
+        let mut g = pty.lock();
+        // The replay hands this viewer everything so far: what a gone viewer
+        // streamed but never acked is owed to no one, so the backlog clears and
+        // the reader resumes.
+        g.unacked = 0;
+        if g.paused {
+            g.paused = false;
+            // the pump re-reads in the job's own context
+            pty.wake.notify_one();
+        }
+        g.ring.iter().map(String::as_str).collect()
+    };
     if let Some(mb) = payload.get("max_bytes").filter(|v| !v.is_null()) {
         let Some(mb) = mb.as_u64().and_then(|n| usize::try_from(n).ok()) else {
             return bad("output", "max_bytes", "a non-negative integer");

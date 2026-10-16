@@ -1382,7 +1382,7 @@ async def _ack(id, payload, kernel):
 
 
 async def _output(id, payload, kernel):
-    """args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events. Returns {job_id, output:str}."""
+    """args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer). Returns {job_id, output:str}."""
     jid, err = _job_arg("output", payload, required=True)
     if err:
         return err
@@ -1391,7 +1391,14 @@ async def _output(id, payload, kernel):
         return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
     if job.get("pty") is None:
         return bad("output", "job_id", "a PTY job (a pipe job's output is in `status`)")
-    text = "".join(job["pty"]["ring"])
+    pt = job["pty"]
+    text = "".join(pt["ring"])
+    # The replay hands this viewer everything so far: what a gone viewer streamed
+    # but never acked is owed to no one, so the backlog clears and the reader resumes.
+    pt["unacked"] = 0
+    if pt["paused"]:
+        pt["paused"] = False
+        pt["wake"].set()  # the pump re-attaches the reader in the job's own context
     mb = payload.get("max_bytes")
     if mb is not None:
         if isinstance(mb, bool) or not isinstance(mb, int) or mb < 0:
