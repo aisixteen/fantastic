@@ -185,14 +185,6 @@ pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
             return Err(format!("`{TERM_ID}` output: {e}"));
         }
         let replay = r.result.get("output").and_then(Value::as_str).unwrap_or_default().to_string();
-        // the replay shows everything so far: what an earlier viewer drew but
-        // never acked is acked here, or it stays counted and, viewer after
-        // viewer, pauses the PTY past the exec agent's high-water mark for good
-        let left = host.act(TERM_ID, json!({"type": "ack", "job_id": job_id, "chars": 0})).await;
-        let n = stale(&left.result);
-        if n > 0 {
-            host.act(TERM_ID, json!({"type": "ack", "job_id": job_id, "chars": n})).await;
-        }
         return Ok(Attach { job_id, replay });
     }
 
@@ -234,23 +226,8 @@ pub async fn close(host: &Host) -> Result<(), String> {
     Ok(())
 }
 
-/// What a job still counts unacked, from an `ack` reply (`{unacked}`); 0 for a
-/// refusal or anything that is not a positive count.
-fn stale(reply: &Value) -> u64 {
-    reply.get("unacked").and_then(Value::as_u64).unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn the_stale_count_is_a_positive_unacked() {
-        assert_eq!(stale(&json!({"unacked": 95101, "paused": true})), 95101);
-        assert_eq!(stale(&json!({"unacked": 0, "paused": false})), 0);
-        assert_eq!(stale(&json!({"error": "no such job"})), 0);
-        assert_eq!(stale(&json!({"unacked": -3})), 0);
-        assert_eq!(stale(&json!({"unacked": "x"})), 0);
-    }
-
     use super::*;
 
     #[test]

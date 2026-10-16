@@ -1,4 +1,3 @@
-import { clearBacklog } from "./backlog.ts";
 import { useSharedWebgl } from "./renderer.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
@@ -206,6 +205,9 @@ export const terminalView: ViewBundle = {
     // resolved by the job's next output frame while an attach holds them
     let answered: (() => void) | undefined;
     const offOutput = host.on(backend, "output", (e) => {
+      // the PTY's bytes only: a call's own `output` event (the ring replay this
+      // frame asked for) carries no `data` — it is not the program answering
+      if (typeof e["data"] !== "string") return;
       if (jobId !== undefined && !attaching) return draw(e);
       early.push(e);
       if (e["job_id"] === jobId) answered?.();
@@ -360,7 +362,6 @@ export const terminalView: ViewBundle = {
           covered = early.length;
           term.write(replay.output);
         }
-        await clearBacklog((t, p) => host.call(t, p), backend, jobId);
         // THE PROGRAM REDRAWS (owner 2026-10-13, half-blank cells after a reload):
         // the ring drops its oldest bytes, so a full-screen program's last full
         // paint is often gone and the replay holds only partial updates; a resize
