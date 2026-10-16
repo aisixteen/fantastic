@@ -40,7 +40,7 @@ def main() -> bool:
         info["file"] = doc
         servers = doc.get("mcpServers", {})
         fan = servers.get("fantastic", {})
-        r["entry"] = fan.get("args") == ["mcp"] and Path(str(fan.get("command", ""))).is_absolute() and Path(fan["command"]).name == "fantastic"
+        r["entry"] = fan.get("args") == ["mcp"] and Path(str(fan.get("command", ""))).is_absolute() and Path(fan["command"]).name == rig.binary.name
         r["other_kept"] = servers.get("z_other") == OTHER["z_other"] and doc.get("keep") == 1 and list(servers)[0] == "z_other"
         before = cfg.read_bytes()
         rig.stop()

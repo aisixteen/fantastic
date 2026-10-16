@@ -87,12 +87,12 @@ def main() -> bool:
         asyncio.run(drive())
         # b) the agent, its ref, no key on any record
         # the connector agents, under the canvas's node (not the `mcp` leg's own bridge)
-        recs = [p for p in (rig.proj / ".fantastic" / "agents").rglob("mcp_*/agent.yaml") if "canvas_root/agents/" in str(p)]
+        recs = [p for p in (rig.proj / ".fantastic" / "agents").rglob("mcp_*/agent.yaml") if "canvas_root/agents/" in p.as_posix()]
         info["agents"] = [str(p.relative_to(rig.proj)) for p in recs]
         import yaml
         rec = yaml.safe_load(recs[0].read_text()) if recs else {}
         aid = rec.get("id", "")
-        r["agent_under_canvas"] = bool(recs) and "canvas_root/agents/" in str(recs[0])
+        r["agent_under_canvas"] = bool(recs) and "canvas_root/agents/" in recs[0].as_posix()
         r["agent_names_ref"] = (rec.get("credentials") or {}).get("ref", "").startswith("mcp_client/127.0.0.1:")
         leaked = [str(p) for p in (rig.proj / ".fantastic").rglob("*.yaml") if key in p.read_text(errors="ignore")]
         r["key_on_no_record"] = not leaked

@@ -416,6 +416,9 @@ class Rig:
         (`return verdict(*rig.finish(ok, note))`)."""
         self.summary.update({"ok": ok, "note": note, "page_calls": self.page_calls()})
         (self.art / "summary.json").write_text(json.dumps(self.summary, indent=1, ensure_ascii=False))
+        if not ok and self.log.exists():
+            # the run's own log: a CI run keeps only what is printed
+            print("host.log (tail):\n" + "\n".join(self.log.read_text(errors="replace").splitlines()[-40:]))
         print(f"artifacts: {self.art}")
         return ok, note
 
