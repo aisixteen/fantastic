@@ -14,7 +14,8 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # `main`, and any `ci/…` branch: push one to run CI without opening a PR.
+    branches: [main, "ci/**"]
   pull_request:
   workflow_dispatch:
 
