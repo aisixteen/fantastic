@@ -35,12 +35,12 @@ from relay_harness import (  # noqa: E402
     LEG,
     Relay,
     require_relay,
-    seed_relay_creds,
+    seed_relay,
     set_relay_password,
 )
 
 from helpers.kernel_proc import KernelProc  # noqa: E402
-from helpers.seeding import seed_create, seed_web, seed_web_ws  # noqa: E402
+from helpers.seeding import BASE, seed_create, seed_web, seed_web_ws  # noqa: E402
 from test_relay_matrix import RELAY_RUNTIMES, _HANDLER_MODULE, _relay_meta  # noqa: E402
 
 # A python driver streams to each host runtime's fs through the relay.
@@ -139,17 +139,22 @@ async def test_relay_streams_raw_bytes(
     for binary, wd, port in [(bin_a, wd_a, port_a), (bin_b, wd_b, port_b)]:
         seed_web(binary, wd, port)
         seed_web_ws(binary, wd)
-        seed_relay_creds(binary, wd, relay)
-    # B's fs edge — an OPEN file_bridge rooted INSIDE B's workdir (the clamp).
+        seed_relay(binary, wd, relay)
+    # B's fs edge — an OPEN file_bridge rooted INSIDE B's workdir (the clamp). A's
+    # tunneled stream calls are served AS B's leg, so the fs accepts the leg (and
+    # the leg reaches it — `reach` on its record below).
     (wd_b / "streams").mkdir()
-    seed_create(
+    fs = seed_create(
         bin_b,
         wd_b,
-        handler_module="file_bridge.tools", allow=["."],
+        handler_module="file_bridge.tools",
+        allow=["."],
         agent_id="fs",
         root="streams",
         ingress_rule="allow_all_ingress",
+        callable_by={**BASE, LEG: ["write_stream", "read_stream"]},
     )
+    assert "error" not in fs, f"fs seed failed: {fs}"
 
     relay.start()
     spawned: list[KernelProc] = []
@@ -173,8 +178,10 @@ async def test_relay_streams_raw_bytes(
             guid="B",
             partner_guid="A",
             relay_url=relay.url,
-            # B answers inbound forwards — its leg must be explicitly OPEN.
+            # B answers inbound forwards — its leg must be explicitly OPEN, and it
+            # reaches the fs it serves them to.
             auth="allow_all",
+            reach={"fs": ["write_stream", "read_stream"]},
         )
         await asyncio.gather(
             kp_a.call("kernel", "create_agent", **meta_a),

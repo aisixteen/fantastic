@@ -21,12 +21,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from relay_harness import (  # noqa: E402
-    CREDS,
     LEG,
+    ROOT,
     Relay,
+    leg_grants,
     relay_credentials,
     require_relay,
-    seed_relay_creds,
+    seed_relay,
     set_relay_password,
 )
 
@@ -69,13 +70,17 @@ def _relay_meta(
     partner_guid: str,
     relay_url: str,
     auth: str | None = None,
+    reach: dict | None = None,
 ) -> dict:
-    """The relay_connector agent record. The relay CONNECTION password
-    (X-Fantastic-Auth) is never on it: `credentials` names the kernel's store and
-    ref (`seed_relay_creds`), and `can_call` lets the leg `get` it before each dial.
-    The per-leg `auth`/`ingress_rule`/`egress_rule` gate the tunneled bridge calls
-    and are INDEPENDENT of it."""
+    """The relay_connector agent record — a top-level agent (`parent_id` the
+    root), created by the driver. The relay CONNECTION password (X-Fantastic-Auth)
+    is never on it: `credentials` names the kernel's store and ref (`seed_relay`),
+    and the leg's grants (`leg_grants`) let it `get` that before each dial, serve
+    an inbound reflect of its root, and accept the driver. The per-leg
+    `auth`/`ingress_rule`/`egress_rule` gate the tunneled bridge calls and are
+    INDEPENDENT of the connection password."""
     meta = {
+        "parent_id": ROOT,
         "handler_module": handler_module,
         "id": LEG,
         "transport": "relay",
@@ -83,11 +88,12 @@ def _relay_meta(
         "guid": guid,
         "partner_guid": partner_guid,
         "credentials": relay_credentials(),
-        "can_call": {CREDS: ["get"]},
         "heartbeat": 0,
+        **leg_grants(reach),
     }
-    # IO legs SEAL by default (absent rule ⇒ deny_inbound); a leg that must answer
-    # inbound forwards sets this explicitly (allow_all, or password for the group tests).
+    # IO legs SEAL by default (absent rule ⇒ deny_ingress); a leg that must answer
+    # inbound forwards sets this explicitly (the `auth` stem `allow_all`, or
+    # `password` for the group tests — both directions at once).
     if auth is not None:
         meta["auth"] = auth
     return meta
@@ -95,14 +101,14 @@ def _relay_meta(
 
 async def _await_connected(kp: KernelProc, created: list) -> dict:
     """Poll the leg's connectivity flag (some runtimes boot the transport async)."""
-    rcb = await kp.call("cb", "reflect")
+    rcb = await kp.call(LEG, "reflect")
     for _ in range(50):
         if rcb.get("connected"):
             break
         await asyncio.sleep(0.1)
-        rcb = await kp.call("cb", "reflect")
+        rcb = await kp.call(LEG, "reflect")
     assert rcb.get("connected") is True, (
-        f"A relay_connector not connected after 5s.\n  create: {created}\n  reflect: {rcb}"
+        f"{kp.label} relay_connector not connected after 5s.\n  create: {created}\n  reflect: {rcb}"
     )
     return rcb
 
@@ -131,7 +137,7 @@ async def _spawn_pair(
     for binary, wd, port in [(bin_a, wd_a, port_a), (bin_b, wd_b, port_b)]:
         seed_web(binary, wd, port)
         seed_web_ws(binary, wd)
-        seed_relay_creds(binary, wd, relay)
+        seed_relay(binary, wd, relay)
     spawned: list[KernelProc] = []
     kp_a = bin_a.start_daemon(wd_a, port_a, label=rt_a, extra_env=env_a)
     spawned.append(kp_a)
@@ -156,8 +162,9 @@ async def test_relay_any_to_any(
     free_port: Callable[[], int],
 ) -> None:
     """Each host-runtime pair round-trips a kernel.send through the relay over
-    relay_connector. A is directional (deny_inbound): A→B succeeds (B is
-    allow_all); B→A is refused on arrival at A — the cross-runtime wire-shape guard."""
+    relay_connector. A is directional (sealed — `auth: deny` ⇒ `deny_ingress`): A→B
+    succeeds (B is `allow_all`); B→A is refused on arrival at A — the cross-runtime
+    wire-shape guard."""
     reason = _pair_skip_reason(rt_a, rt_b)
     if reason:
         pytest.skip(reason)
@@ -176,7 +183,7 @@ async def test_relay_any_to_any(
                         guid="A",
                         partner_guid="B",
                         relay_url=relay.url,
-                        auth="deny_inbound",
+                        auth="deny",
                     ),
                 ),
                 kp_b.call(
@@ -192,7 +199,7 @@ async def test_relay_any_to_any(
                 ),
             )
             rcb = await _await_connected(kp_a, created)
-            assert rcb.get("ingress_rule") == "deny_inbound", f"A reflect: {rcb}"
+            assert rcb.get("ingress_rule") == "deny_ingress", f"A reflect: {rcb}"
 
             # A→B: forward a reflect to B's root over the relay; reply round-trips.
             reply = await kp_a.call("cb", "forward", target="kernel", payload={"type": "reflect"})
@@ -202,7 +209,7 @@ async def test_relay_any_to_any(
                 f"reply lacks B's reflect: {list(reply.keys())}"
             )
 
-            # B→A: refused on arrival at A's deny_inbound leg (same wire shape everywhere).
+            # B→A: refused on arrival at A's sealed leg (same wire shape everywhere).
             reverse = await kp_b.call("cb", "forward", target="kernel", payload={"type": "reflect"})
             assert reverse.get("reason") == "unauthorized", f"B→A should be denied: {reverse}"
         finally:
@@ -243,7 +250,8 @@ async def _drive_password(
         ),
     )
     rcb = await _await_connected(kp_a, created)
-    assert rcb.get("ingress_rule") == "password", f"A reflect: {rcb}"
+    assert rcb.get("ingress_rule") == "password_ingress", f"A reflect: {rcb}"
+    assert rcb.get("egress_rule") == "password_egress", f"A reflect: {rcb}"
 
     reply = await kp_a.call("cb", "forward", target="kernel", payload={"type": "reflect"})
     assert isinstance(reply, dict), f"non-dict reply: {reply!r}"
@@ -361,8 +369,8 @@ async def test_relay_asymmetric_rules(rt_a: str, rt_b: str, request, parity_tmp,
                 partner_guid="B",
                 relay_url=relay.url,
             )
-            meta_a["ingress_rule"] = "deny_inbound"
-            meta_a["egress_rule"] = "password"
+            meta_a["ingress_rule"] = "deny_ingress"
+            meta_a["egress_rule"] = "password_egress"
             created = await asyncio.gather(
                 kp_a.call("kernel", "create_agent", **meta_a),
                 kp_b.call(
@@ -378,15 +386,15 @@ async def test_relay_asymmetric_rules(rt_a: str, rt_b: str, request, parity_tmp,
                 ),
             )
             rcb = await _await_connected(kp_a, created)
-            assert rcb.get("ingress_rule") == "deny_inbound", f"A ingress: {rcb}"
-            assert rcb.get("egress_rule") == "password", f"A egress: {rcb}"
+            assert rcb.get("ingress_rule") == "deny_ingress", f"A ingress: {rcb}"
+            assert rcb.get("egress_rule") == "password_egress", f"A egress: {rcb}"
 
             # A→B: A's egress presents the fleet token, B's ingress accepts → round-trip.
             reply = await kp_a.call("cb", "forward", target="kernel", payload={"type": "reflect"})
             assert isinstance(reply, dict) and "id" in reply and "tree" in reply, (
                 f"A→B (egress presents, B checks) should round-trip: {reply}"
             )
-            # B→A: A's ingress is deny_inbound → refused regardless of B's token.
+            # B→A: A's ingress is deny_ingress → refused regardless of B's token.
             reverse = await kp_b.call("cb", "forward", target="kernel", payload={"type": "reflect"})
             assert reverse.get("reason") == "unauthorized", f"B→A should be denied: {reverse}"
         finally:
@@ -460,18 +468,14 @@ async def test_relay_directory(rt, request, parity_tmp, free_port) -> None:
 # ── kernelgroup directory typing (manager / owned-kernel) ───────
 
 
-@pytest.mark.skip(
-    reason="pending relay kernelgroup support — the relay must store the connector's "
-    "`announce` attrs blob, reflect it into `list_peers` entries (under `attrs`), and "
-    "emit `peer_updated`. Contract: fantastic_relay/tmp/kernelgroup_handoff.md. The "
-    "canvas side (advertise on connect + set_identity) is unit-tested per runtime."
-)
 @pytest.mark.parametrize("rt", ["python", "rust", "swift"])
 @pytest.mark.asyncio
 async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> None:
     """A manager peer and an owned kernel join; `list_peers` carries each peer's
     advertised typing (`attrs.role`/`owner_guid`/`exposes`), and `set_identity`
-    live-updates it. Enable once the relay honors the `announce` contract."""
+    live-updates it (the relay stores each `announce` attrs blob verbatim).
+    `owner_guid` is the managing peer's KERNEL-INSTANCE guid (its root reflect's
+    `guid`), not its relay-leg guid."""
     if _pair_skip_reason(rt, rt):
         pytest.skip("relay_connector not available")
     relay = Relay(require_relay(), free_port()).start()
@@ -495,7 +499,10 @@ async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> N
                 relay_url=relay.url,
                 auth="allow_all",
             )
-            owned["owner_guid"] = "A"  # B is a kernel owned by manager A
+            # B is a kernel owned by manager A: `owner_guid` names A's kernel.
+            a_guid = (await kp_a.call("kernel", "reflect")).get("guid")
+            assert isinstance(a_guid, str) and a_guid, f"A's root reflect has no guid: {a_guid!r}"
+            owned["owner_guid"] = a_guid
             owned["exposes"] = ["stop"]
             created = await asyncio.gather(
                 kp_a.call("kernel", "create_agent", **mgr),
@@ -508,7 +515,7 @@ async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> N
             snap = await kp_a.call("cb", "list_peers")
             by_guid = {p.get("guid"): p for p in snap.get("peers", [])}
             assert by_guid["A"].get("attrs", {}).get("role") == "manager", snap
-            assert by_guid["B"].get("attrs", {}).get("owner_guid") == "A", snap
+            assert by_guid["B"].get("attrs", {}).get("owner_guid") == a_guid, snap
             assert by_guid["B"].get("attrs", {}).get("exposes") == ["stop"], snap
 
             # set_identity live-updates the control surface → reflected in list_peers.
@@ -556,7 +563,7 @@ async def test_relay_reconnects_after_relay_restart(request, parity_tmp, free_po
             return m
 
         created = await asyncio.gather(
-            kp_a.call("kernel", "create_agent", **meta("A", "B", "deny_inbound")),
+            kp_a.call("kernel", "create_agent", **meta("A", "B", "deny")),
             kp_b.call("kernel", "create_agent", **meta("B", "A", "allow_all")),
         )
         await _await_connected(kp_a, created)

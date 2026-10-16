@@ -11,16 +11,34 @@ to each other by GUID, so a `kernel.send` round-trips A → relay → B → repl
 No certs, no TLS/mTLS, no Ed25519, no token-issuer, no rendezvous — that whole
 zero-trust `cloud_bridge` model is gone. The only relay-connection secret is the
 group password (`RELAY_PASSWORD`), set on the relay as `FANTASTIC_GROUP_TOKEN` with
-`RELAY_INGRESS_RULE=password`. The per-leg `ingress_rule`/`egress_rule`/`auth` that
+`RELAY_INGRESS_RULE=password_ingress`. The per-leg `ingress_rule`/`egress_rule`/`auth` that
 gate the **tunneled** bridge calls are INDEPENDENT of that connection password.
 
 On each kernel the password lives in a `credential_store`, never on the leg's record
-(`relay_token` is not a `relay_connector` field). `seed_relay_creds` (operator,
-before the daemon starts) creates `creds` declaring the ref `relay/group` — `host` =
-the relay's `host:port`, `readers` = [the leg `cb`], `writers` = [`web_ws`] — and
-grants `web_ws` `get`/`set` on it; `set_relay_password` writes the `password` field
-through `web_ws`, marked `secret: ['payload.fields']`; the leg names
-`credentials: {store: creds, ref: relay/group}` with `can_call: {creds: [get]}`.
+(`relay_token` is not a `relay_connector` field). `seed_relay` (operator, before the
+daemon starts) creates `creds` declaring the ref `relay/group` (`host` = the relay's
+`host:port`), accepting `get` from the leg `cb` and `set` from `web_ws`;
+`set_relay_password` writes the `password` field through `web_ws`, marked
+`secret: ["fields"]`; the leg names `credentials: {store: creds, ref: relay/group}`.
+
+## Grants (the kernel is deny-all)
+
+Every agent is stamped `{$self: "*"}` on both `can_call` and `callable_by`; every
+other edge is granted explicitly on BOTH ends. Each kernel is seeded (operator
+one-shots, `helpers/seeding.py` + `seed_relay`) with:
+
+| agent | role | grants |
+|---|---|---|
+| `kernel_state` (root) | names `memory_store_id: memory` (no daemon starts without one) | accepts `web_ws` (`*`) and the leg's `reflect` |
+| `store` | `file_bridge` @ `.fantastic` — the record store | — (the loader writes as bookkeeping) |
+| `memory` | `ram_store` — the kernel's execution rows | — (the kernel writes as bookkeeping) |
+| `web` | the HTTP host | reaches `$subtree` (pulls its legs' `get_routes`) |
+| `web_ws` | the driver — every `KernelProc.call` is performed AS it | reaches the root, `creds` (`set`), `cb` (`*`); accepts `$parent` |
+| `creds` | `credential_store`, file backend | accepts `cb` (`get`), `web_ws` (`set`) |
+| `cb` | the `relay_connector` leg, created by `web_ws` under the root | reaches `creds` (`get`), the root (`reflect`) — a tunneled inbound call is served AS the leg; accepts `web_ws` |
+
+The stream test adds B's `fs` file_bridge, accepting the leg's
+`write_stream`/`read_stream`, and names it in B's leg's `can_call`.
 
 ## Two targets (like the rest of the suite)
 
@@ -46,11 +64,15 @@ only if a runtime's binary isn't built (clear skip reason).
 
 ### Tests
 
-- **`test_relay_any_to_any`** — A carries `auth="deny_inbound"`, B is opened with
-  `allow_all`. A→B forward round-trips B's root reflect; B→A is refused on arrival
-  at A with `{reason:"unauthorized"}` — the cross-runtime wire-shape guard.
-- **`test_relay_password_group_member`** — both legs `auth="password"` with the SAME
-  group token in env (`FANTASTIC_GROUP_TOKEN`, never persisted): the token is
+- **`test_relay_any_to_any`** — A is sealed (`auth="deny"` ⇒ `deny_ingress`), B is
+  opened with `auth="allow_all"` (⇒ `allow_all_ingress`). A→B forward round-trips B's
+  root reflect; B→A is refused on arrival at A with `{reason:"unauthorized"}` — the
+  cross-runtime wire-shape guard. (Rule names are manifold-scoped: `auth` takes the
+  bare stem, `ingress_rule`/`egress_rule` the scoped name, and `reflect` reports
+  the scoped names.)
+- **`test_relay_password_group_member`** — both legs `auth="password"`
+  (⇒ `password_ingress` + `password_egress`) with the SAME group token in env
+  (`FANTASTIC_GROUP_TOKEN`, never persisted): the token is
   presented on each call envelope, survives the relay, is checked on arrival —
   A→B and B→A both round-trip across every pair.
 - **`test_relay_password_rejects_outsider`** — A presents a DIFFERENT token than B
@@ -69,13 +91,15 @@ only if a runtime's binary isn't built (clear skip reason).
   `reconnect=1` forwards, the relay is killed + restarted on the SAME port, the
   leg re-dials with its backoff, and a forward round-trips again over the healed
   connection. The reconnect logic is shared/mirrored across runtimes.
-- **`test_relay_kernelgroup_typing[python|rust|swift]`** — **SKIPPED pending the
-  relay half** (the relay must store each peer's advertised `announce` attrs blob,
-  reflect it into `list_peers` entries' `attrs`, and emit `peer_updated`). A manager
-  peer + an owned kernel join; `list_peers` carries `attrs.role`/`owner_guid`/
-  `exposes` and `set_identity` live-updates it. Contract:
-  `fantastic_relay/tmp/kernelgroup_handoff.md`. The canvas side (advertise on
-  connect + `set_identity`) is unit-tested per runtime.
+- **`test_relay_kernelgroup_typing[python|rust|swift]`** — a manager peer + an
+  owned kernel join; `list_peers` carries each peer's `announce`d attrs blob
+  (`attrs.role`/`owner_guid`/`exposes`, stored verbatim by the relay) and
+  `set_identity` live-updates it. `owner_guid` is the manager's kernel-instance
+  guid (its root reflect's `guid`), not its relay-leg guid.
+- **`test_relay_streams_raw_bytes[python|rust|swift]`** (`test_relay_stream.py`) —
+  a python A writes raw (non-UTF-8) bytes over a binary web_ws frame → its leg →
+  the relay → B's leg → B's `fs`, they land verbatim on B's disk, and `read_stream`
+  brings them back byte-identical over the same chain.
 
 ## Run it
 
@@ -96,11 +120,12 @@ uv run pytest relay_e2e/ -v
 
 - `relay_harness.Relay` locates the newest built `relayd` (release preferred), boots
   it on a loopback port with `FANTASTIC_GROUP_TOKEN=<RELAY_PASSWORD>` +
-  `RELAY_INGRESS_RULE=password` (local target), or runs `relay:latest` published on
+  `RELAY_INGRESS_RULE=password_ingress` (local target), or runs `relay:latest` published on
   the host (container target). It skips cleanly when the binary/image is missing.
-- Each daemon boots with `web` + `web_ws` (drivable over WS, no auto-booting relay
-  leg) + the `creds` store holding the relay password. The test then `create_agent`s a `relay_connector` leg on **both
-  concurrently** (`asyncio.gather`), polls `reflect.connected`, and `forward`s a
-  reflect through the relay.
+- Each daemon boots with `store` + `memory` + `web` + `web_ws` (drivable over WS, no
+  auto-booting relay leg) + the `creds` store holding the relay password, all granted
+  as in the table above. The test then `create_agent`s (`parent_id` = the root) a
+  `relay_connector` leg on **both concurrently** (`asyncio.gather`), polls
+  `reflect.connected`, and `forward`s a reflect through the relay.
 - The relay binary is parametrizable via the harness; the same suite runs the Swift
   `relayd` locally and the `relay:latest` container under the two targets.

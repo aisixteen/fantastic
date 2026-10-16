@@ -66,9 +66,10 @@ async def ws_call(
     as a verb arg (e.g. `bridge.forward(target=..., payload=...)`)
     without colliding with this helper's first parameter.
 
-    `secret` is the call's SECRET MARKS (`["payload.fields"]`, `["result"]`),
-    carried on the frame's own `secret` key — the kernel records the marked
-    values as `<secret>`; a credential_store `set`/`get` is refused unmarked.
+    `secret` is the call's SECRET MARKS — dotted paths INTO the payload
+    (`["fields"]`, `["fields.api_key"]`), carried on the frame's own `secret` key;
+    everything the kernel keeps or shows of the call carries each marked value
+    as `[secret]`.
 
     Drops the WS after the round-trip. Not appropriate for streaming
     consumers — use `ws_session` (below) when you need to drain
