@@ -1,0 +1,219 @@
+# Build, unit tests and the model-free ("free") e2e on Linux, macOS and Windows.
+#
+# FREE TO RUN: the repo is public, and every job here runs on a STANDARD
+# GitHub-hosted runner (ubuntu-latest, macos-26, windows-latest), which costs
+# nothing on a public repo. A larger runner (`-large`, `-xlarge`, custom sizes)
+# is billed even on a public repo — never name one here.
+#
+# The e2e job runs `e2e/run.py --only-free`: the tests that spend no model turns
+# (`costs: free`). The paid suite needs a model plug and never runs here.
+#
+# Swift builds and runs on Linux and macOS; it has no Windows leg.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The canvas packer provisions its pinned esbuild with this toolchain
+  # (src/lib/ts/scripts/pack.sh); naming it here means no second download.
+  GO_VERSION: "1.23.4"
+  NODE_VERSION: "24"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  python:
+    name: python · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: src/lib/python
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - name: build
+        run: uv sync --locked
+      - name: unit tests
+        run: uv run pytest -n auto -q --no-header
+
+  rust:
+    name: rust kernel · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: src/lib/rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/lib/rust
+      - name: build
+        run: cargo build --workspace --locked
+      - name: unit tests
+        run: cargo test --workspace --locked
+
+  cli:
+    name: cli · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: zip (the canvas packer's; not on the Windows image)
+        if: runner.os == 'Windows'
+        run: choco install zip --no-progress -y
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+      - name: build
+        run: cargo build --locked
+      - name: unit tests
+        run: cargo test --locked
+
+  swift:
+    name: swift · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: src/lib/swift
+    steps:
+      - uses: actions/checkout@v7
+      - name: build
+        run: swift build
+      - name: unit tests
+        run: swift test
+
+  ts:
+    name: ts · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: src/lib/ts/package-lock.json
+      - name: build (library)
+        working-directory: src/lib/ts
+        run: |
+          npm ci
+          npm run build
+      - name: unit tests (library)
+        working-directory: src/lib/ts
+        run: npm test
+      - name: typecheck (canvas page)
+        working-directory: src/tui/web/canvas
+        run: npm run typecheck
+      - name: unit tests (canvas page)
+        working-directory: src/tui/web/canvas
+        run: npm test
+
+  e2e:
+    name: e2e (free) · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            skip: ""
+          - os: macos-26
+            skip: ""
+          - os: windows-latest
+            skip: "--exclude-runtime swift"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: src/lib/ts/package-lock.json
+      - name: zip (the canvas packer's; not on the Windows image)
+        if: runner.os == 'Windows'
+        run: choco install zip --no-progress -y
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/lib/rust
+            src
+      - name: build
+        run: |
+          (cd src/lib/python && uv sync --locked)
+          (cd src/lib/ts && npm ci)
+      - name: e2e (model-free)
+        working-directory: src/lib/python
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: uv run python ../../../e2e/run.py --only-free --lanes 2 ${{ matrix.skip }}
+      - name: keep the run logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-runs-${{ matrix.os }}
+          path: |
+            e2e/runs/
+            src/tui/e2e/runs/
+          retention-days: 14

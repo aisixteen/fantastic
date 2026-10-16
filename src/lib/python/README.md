@@ -266,7 +266,8 @@ Two complementary layers:
 
 ## Pre-push checks
 
-There is no CI; run these locally before pushing:
+CI runs the tests on every push and PR (`.github/workflows/ci.yml`); lint is
+local only — run these before pushing:
 
 ```bash
 uvx ruff check kernel/ main.py bundled_agents/ tests/
@@ -286,6 +287,7 @@ uv run pytest -n auto
 │   ├── modes/                               # dispatch_argv + one-shots (reflect/call) + default (boot + REPL)
 │   ├── _bundles.py                          # entry-point discovery (`fantastic.bundles`) + catalog-only `import_handler`
 │   ├── _lock.py                             # serve lock (.fantastic/lock.yaml)
+│   ├── _sys/                                # the OS boundary: posix.py / nt.py (lock, stop signals, OSError text)
 │   └── _env.py                              # .env autoloader
 ├── pyproject.toml                            # workspace + bundle deps
 ├── selftest.md                               # selftest INDEX + LLM protocol

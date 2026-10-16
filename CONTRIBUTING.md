@@ -55,8 +55,10 @@ the full detail.
 
 Container changes: `sh container/build.sh` then `sh container/test/build_smoke.sh`.
 
-There is no CI: run the lint and test commands above for every runtime you
-touched, locally, before opening a PR.
+CI (`.github/workflows/ci.yml`) builds every runtime and runs its unit tests and
+the model-free e2e (`e2e/run.py --only-free`) on Linux, macOS and Windows (swift:
+Linux and macOS), on every push to `main` and every PR. Lint is not in CI: run the
+lint commands above for every runtime you touched, locally, before opening a PR.
 
 ## Commits & pushes
 

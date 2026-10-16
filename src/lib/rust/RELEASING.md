@@ -3,7 +3,7 @@
 A release is the `fantastic` CLI: the Rust kernel in-process, the terminal UI, the
 browser canvas and the MCP face. It ships two ways: the crates.io package
 `fantastic`, and prebuilt binaries on a GitHub Release. Everything is built and
-published locally. There is no CI.
+published locally; CI (`.github/workflows/ci.yml`) only builds and tests.
 
 ## Version
 

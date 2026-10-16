@@ -1,7 +1,9 @@
 # `e2e/` — the live suite
 
-Tests that spend **real model turns**. Nothing here runs automatically and
-nothing should: no pytest collection, no CI, no `npm test`. They exist to answer
+Tests that spend **real model turns**. Nothing that spends a turn runs
+automatically and nothing should: no pytest collection, no `npm test`, and CI runs
+only the FREE tests (`costs: free`, no model — `run.py --only-free`, on Linux,
+macOS and Windows; see `.github/workflows/ci.yml`). The paid ones exist to answer
 one question a unit test cannot — *can a model, given only this substrate's own
 self-description, actually use it?*
 

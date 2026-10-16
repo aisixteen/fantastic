@@ -414,8 +414,9 @@ See [`selftest.md`](selftest.md) for the index + driving workflow.
 > **Working with Claude on this repo?** Run `./scripts/quality.sh`
 > (or its individual sections) before every commit you ask Claude
 > to make. Claude SHOULD pick the strictest tools available — clippy
-> with `-D warnings`, `cargo fmt --check`, `cargo deny` — there is
-> no CI, so this local gate is the only lint check. No git hooks
+> with `-D warnings`, `cargo fmt --check`, `cargo deny` — CI
+> (`.github/workflows/ci.yml`) builds and tests only, so this local gate is the
+> only lint check. No git hooks
 > installed by design; the gate is operator-driven via the script +
 > Claude's own pre-commit sweep.
 
