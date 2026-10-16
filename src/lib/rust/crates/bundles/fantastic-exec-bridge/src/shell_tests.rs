@@ -333,13 +333,19 @@ async fn shell_login_permits_exactly_the_login_line() {
     .await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
     assert!(
-        r["error"].as_str().unwrap_or("").contains("`shell=\"login\"`"),
+        r["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("`shell=\"login\"`"),
         "{r}"
     );
     // no command and no args: the record's whole line — the login line
     let r = call(&k, "sh_login", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(r["status"], "running", "{r}");
-    let up = std::iter::once("SHELL_UP").chain(login.iter().copied()).collect::<Vec<_>>().join(" ");
+    let up = std::iter::once("SHELL_UP")
+        .chain(login.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
     events_until(&mut rx, |t| t.contains(&up)).await;
     call(&k, "sh_login", json!({"type": "stop"})).await;
     // …and the line spelled out is the same line

@@ -30,9 +30,9 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     AddAccessAllowedAce, CreateWellKnownSid, EqualSid, GetAce, GetLengthSid,
-    GetSecurityDescriptorControl, GetSidSubAuthority, GetSidSubAuthorityCount,
-    GetTokenInformation, InitializeAcl, TokenOwner, TokenUser, WinWorldSid, ACCESS_ALLOWED_ACE,
-    ACE_HEADER, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    GetSecurityDescriptorControl, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    InitializeAcl, TokenOwner, TokenUser, WinWorldSid, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+    ACL_REVISION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_MAX_SID_SIZE,
     SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
 };
@@ -61,8 +61,7 @@ pub(crate) fn path_order(a: &Path, b: &Path) -> Ordering {
 /// junction is removed as the directory entry it is (`RemoveDirectoryW`, which
 /// leaves its target alone), everything else with `DeleteFileW`.
 pub(crate) fn unlink(path: &Path) -> io::Result<()> {
-    let dir_link =
-        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink_dir());
+    let dir_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink_dir());
     if dir_link {
         std::fs::remove_dir(path)
     } else {

@@ -176,12 +176,14 @@
         func everyThrottlesTailCaps() async throws {
             guard let py = py3() else { return }
             let (k, ear) = await setup()
-            let jid = await printer(k, py, n: 40, gap: 0.025)  // ~1 s of output, 40 lines
+            // ~4 s of output: the monitor attaches mid-stream however late it starts, and
+            // a window holds more than `tail` lines however slow the runner's sleeps are
+            let jid = await printer(k, py, n: 400, gap: 0.01)
             let r = await monitor(
                 k,
                 [
                     "job_id": .integer(jid), "notify": .string("ear"), "every": .double(0.4),
-                    "tail": .integer(5),
+                    "tail": .integer(2),
                 ])
             #expect(r["monitor_id"].asInt != nil, "\(r)")
             // waited ON the deliveries, not on a clock: a loaded runner starts the
@@ -198,7 +200,7 @@
             for text in ear.texts {
                 let lines = text.components(separatedBy: "\n").dropFirst()
                     .filter { $0.hasPrefix("INFO") || $0.hasPrefix("FATAL") }
-                #expect(lines.count <= 5, "\(text)")
+                #expect(lines.count <= 2, "\(text)")
             }
             #expect(ear.texts.contains { $0.contains("earlier lines dropped") }, "tail cut something")
             await stopAll(k)

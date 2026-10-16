@@ -570,7 +570,10 @@ fn daemon_output_lines_match_python() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains(&format!("\n[kernel] {} — shutting down...\n", sys::STOP_NAME)),
+        stderr.contains(&format!(
+            "\n[kernel] {} — shutting down...\n",
+            sys::STOP_NAME
+        )),
         "stderr={stderr}"
     );
     assert!(

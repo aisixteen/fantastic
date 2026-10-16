@@ -158,7 +158,9 @@ async def test_a_match_is_sent_with_its_header_and_nothing_else(seeded_kernel):
 async def test_every_throttles_and_tail_caps(seeded_kernel):
     k = seeded_kernel
     await _setup(k)
-    jid = await _printer(k, 40, 0.025)  # ~1 s of output, 40 lines
+    # ~4 s of output: the monitor attaches mid-stream however late it starts, and
+    # a window holds more than `tail` lines however slow the runner's sleeps are
+    jid = await _printer(k, 400, 0.01)
     r = await _call(
         k,
         "runner",
@@ -167,7 +169,7 @@ async def test_every_throttles_and_tail_caps(seeded_kernel):
             "job_id": jid,
             "notify": "ear",
             "every": 0.4,
-            "tail": 5,
+            "tail": 2,
         },
     )
     assert r.get("monitor_id"), r
@@ -190,7 +192,7 @@ async def test_every_throttles_and_tail_caps(seeded_kernel):
     for text in _heard():
         body = text.split("\n")[1:]
         lines = [x for x in body if x.startswith(("INFO", "FATAL"))]
-        assert len(lines) <= 5, text
+        assert len(lines) <= 2, text
     assert any("earlier lines dropped" in t for t in _heard()), "tail cut something"
 
 

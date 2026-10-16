@@ -216,12 +216,14 @@ async fn every_throttles_and_tail_caps() {
     let tmp = TempDir::new().unwrap();
     let (k, ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
-    let jid = printer(&k, &rn, 40, 0.025, "", 5.0).await;
+    // ~4 s of output: the monitor attaches mid-stream however late it starts, and
+    // a window holds more than `tail` lines however slow the runner's sleeps are
+    let jid = printer(&k, &rn, 400, 0.01, "", 5.0).await;
     let r = call(
         &k,
         &rn,
         json!({"type": "monitor", "job_id": jid, "notify": en,
-        "every": 0.4, "tail": 5}),
+        "every": 0.4, "tail": 2}),
     )
     .await;
     assert!(r["monitor_id"].is_i64(), "{r}");
@@ -230,7 +232,10 @@ async fn every_throttles_and_tail_caps() {
     until(
         || {
             ear.stamps().len() >= 2
-                && ear.texts().iter().any(|t| t.contains("earlier lines dropped"))
+                && ear
+                    .texts()
+                    .iter()
+                    .any(|t| t.contains("earlier lines dropped"))
         },
         8.0,
         "two deliveries, one cut by tail",
@@ -252,7 +257,7 @@ async fn every_throttles_and_tail_caps() {
             .skip(1)
             .filter(|l| l.starts_with("INFO") || l.starts_with("FATAL"))
             .count();
-        assert!(lines <= 5, "{t}");
+        assert!(lines <= 2, "{t}");
     }
     assert!(
         ear.texts()

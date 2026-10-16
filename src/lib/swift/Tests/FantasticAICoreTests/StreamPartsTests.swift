@@ -232,7 +232,10 @@ struct StreamPartsTests {
         // the send dispatch lasts as long as the stream: run it, stop it mid-way
         let turn = Task { await sendText(k, ai, "go", client: "tab") }
         #expect(await slow.script.waitForCalls(1))
-        try await Task.sleep(nanoseconds: 200_000_000)  // some text has streamed
+        // some text has streamed: waited ON the deltas, a slow runner streams less per tick
+        try await waitUntil("partial words streamed") {
+            partEvents(sink).compactMap { $0["text"].asString }.joined().contains("partial words")
+        }
         let out = await KernelTaskLocals.$sender.withValue(AgentId("rx")) {
             await k.send([Item(ai, .object(["type": .string("stop")]))])[0]
         }

@@ -93,7 +93,9 @@ pub(crate) fn strerror(errno: i32) -> String {
         let text = text
             .strip_suffix(&format!(" (os error {errno})"))
             .unwrap_or(&text);
-        return text.trim_end_matches(|c: char| c.is_whitespace() || c == '.').to_string();
+        return text
+            .trim_end_matches(|c: char| c.is_whitespace() || c == '.')
+            .to_string();
     }
     // SAFETY: the C runtime returns a pointer to a NUL-terminated message in a
     // per-thread buffer, valid until this thread's next `strerror`.
@@ -151,9 +153,8 @@ pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
         p.to_path_buf()
     } else {
         // `ntpath.abspath`: joined to the cwd, then normalized lexically.
-        std::path::absolute(p).map_err(|e| {
-            errno_of(&e).map_or_else(|| e.to_string(), |n| os_error_str(n, None))
-        })?
+        std::path::absolute(p)
+            .map_err(|e| errno_of(&e).map_or_else(|| e.to_string(), |n| os_error_str(n, None)))?
     };
     let (path, initial) = match std::fs::canonicalize(&path) {
         Ok(real) => (real, None),

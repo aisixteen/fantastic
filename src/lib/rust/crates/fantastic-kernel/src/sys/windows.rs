@@ -65,7 +65,11 @@ fn file_id(f: &File) -> std::io::Result<(u32, u32, u32)> {
     if unsafe { GetFileInformationByHandle(f.as_raw_handle() as HANDLE, &mut info) } == 0 {
         return Err(Error::last_os_error());
     }
-    Ok((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
 }
 
 /// Blocking exclusive lock on `file`'s handle.
@@ -117,7 +121,10 @@ pub(crate) fn fill_random(buf: &mut [u8]) {
                 BCRYPT_USE_SYSTEM_PREFERRED_RNG,
             )
         };
-        assert!(status == 0, "the OS randomness call failed: no randomness source");
+        assert!(
+            status == 0,
+            "the OS randomness call failed: no randomness source"
+        );
     }
 }
 

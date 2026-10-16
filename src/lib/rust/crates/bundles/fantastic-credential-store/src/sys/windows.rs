@@ -14,7 +14,10 @@ pub(crate) fn expanduser(p: &str) -> Option<String> {
         None => {
             let path = std::env::var_os("HOMEPATH")?;
             let drive = std::env::var_os("HOMEDRIVE").unwrap_or_default();
-            PathBuf::from(drive).join(path).to_string_lossy().into_owned()
+            PathBuf::from(drive)
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
         }
     };
     if i != 1 {
@@ -67,7 +70,9 @@ pub(crate) fn split_path(p: &str) -> (String, String) {
             Component::ParentDir | Component::Normal(_) => parts.push(c.as_os_str()),
         }
     }
-    let name = parts.pop().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let name = parts
+        .pop()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let mut parent = anchor;
     parent.extend(parts);
     let parent = if parent.as_os_str().is_empty() {

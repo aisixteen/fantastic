@@ -56,8 +56,10 @@ def stdin_is_terminal() -> bool:
     `isatty()`: on Windows that is true of any character device, `NUL` included,
     so a daemon spawned with stdin=DEVNULL would start a REPL on it. A console
     handle is the one whose mode can be read."""
+    if not (sys.stdin and sys.stdin.isatty()):
+        return False
     mode = wintypes.DWORD()
-    handle = msvcrt.get_osfhandle(sys.stdin.fileno()) if sys.stdin else -1
+    handle = msvcrt.get_osfhandle(sys.stdin.fileno())
     return handle != -1 and bool(kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
 
 

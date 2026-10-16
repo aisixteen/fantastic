@@ -141,7 +141,11 @@ fn cold_walk_refuses_an_outward_symlinked_entry() {
     seed(&work.join(".fantastic/agent.yaml"), "id: kernel_state\n");
     seed(&tmp.path().join("outside/agent.yaml"), "id: probe_out\n");
     std::fs::create_dir_all(work.join(".fantastic/agents")).unwrap();
-    symlink(tmp.path().join("outside"), work.join(".fantastic/agents/evil")).unwrap();
+    symlink(
+        tmp.path().join("outside"),
+        work.join(".fantastic/agents/evil"),
+    )
+    .unwrap();
     let err = boot_err(&work);
     assert!(
         err.ends_with(": fs: path 'agents/evil/agent.yaml' escapes root"),

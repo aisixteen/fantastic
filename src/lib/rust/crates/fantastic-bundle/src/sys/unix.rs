@@ -151,9 +151,8 @@ fn abspath(path: Vec<u8>) -> Result<PathBuf, String> {
     let path = if path.first() == Some(&b'/') {
         path
     } else {
-        let cwd = std::env::current_dir().map_err(|e| {
-            errno_of(&e).map_or_else(|| e.to_string(), |n| os_error_str(n, None))
-        })?;
+        let cwd = std::env::current_dir()
+            .map_err(|e| errno_of(&e).map_or_else(|| e.to_string(), |n| os_error_str(n, None)))?;
         join(os_bytes(cwd.as_os_str()), &path)
     };
     Ok(bytes_path(&normpath(&path)))

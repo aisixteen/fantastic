@@ -6,14 +6,14 @@
 
 use super::*;
 use crate::keychain::MemoryKeychain;
+use fantastic_file::test_support::{mode_of, own_uid, set_mode};
 use fantastic_kernel::agent::Agent;
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
 use fantastic_kernel::bundle::BundleRegistry;
 use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::test_support::register_root_loader;
-use fantastic_kernel::{Item, Outcome};
-use fantastic_file::test_support::{mode_of, own_uid, set_mode};
 use fantastic_kernel::test_support::symlink;
+use fantastic_kernel::{Item, Outcome};
 use std::path::Path;
 
 const KEY: &str = "sk-live-0123456789abcdef";

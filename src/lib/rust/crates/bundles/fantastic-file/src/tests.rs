@@ -563,16 +563,23 @@ fn os_error_text_is_python_oserror_str() {
         )),
         "{reply}"
     );
-    // mkdir THROUGH a file: python names the path whose `mkdir` failed.
+    // mkdir THROUGH a file: python names the path whose `mkdir` failed. POSIX
+    // fails `f.txt/x` itself (ENOTDIR); Windows says ERROR_PATH_NOT_FOUND
+    // (ENOENT), so pathlib's `parents` walk makes the parent and that is the
+    // FileExistsError.
     let reply = mkdir_reply(&r, &json!({"path": "f.txt/x"}), false);
-    assert_eq!(
-        reply["error"],
-        json!(format!(
+    let through = if cfg!(windows) {
+        format!(
+            "[Errno 17] File exists: {}",
+            fantastic_bundle::py_repr(&full.join("f.txt").to_string_lossy())
+        )
+    } else {
+        format!(
             "[Errno 20] Not a directory: {}",
             fantastic_bundle::py_repr(&full.join("f.txt").join("x").to_string_lossy())
-        )),
-        "{reply}"
-    );
+        )
+    };
+    assert_eq!(reply["error"], json!(through), "{reply}");
     // mkdir over an existing FILE keeps python's FileExistsError.
     let reply = mkdir_reply(&r, &json!({"path": "f.txt"}), false);
     assert_eq!(
