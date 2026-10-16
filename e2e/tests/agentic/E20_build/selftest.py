@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
 import secrets
 import sys
 import tempfile
@@ -194,7 +195,8 @@ async def scenario(name: str, own: bool) -> bool:
                 "inherit_env": ["PATH", "HOME"],
                 "ingress_rule": "allow_all_ingress",
                 "callable_by": {"ai": "*", "rest": "*", "web": "*"},
-                "allowed": [rf"{re.escape(sys.executable)} \S+"],
+                # the SHELL-JOINED line: a path that needs quoting (Windows') is quoted
+                "allowed": [rf"{re.escape(shlex.quote(sys.executable))} \S+"],
                 "can_call": {"totals": "*"},
             }}]))[0]["result"]["id"]
     else:

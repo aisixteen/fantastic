@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO / "e2e" / "runners"))
 
 import websockets  # noqa: E402
 
-from canvas import MAC_CHROME, Page, attach, free_port  # noqa: E402
+from canvas import DESKTOP_POINTER, MAC_CHROME, Page, attach, free_port  # noqa: E402
 from e2e_build import build_lock  # noqa: E402
 from helpers import oslayer  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
@@ -374,7 +374,7 @@ class Rig:
         # rate is the GPU's, not the software rasterizer's)
         # headless: software WebGL (SwiftShader) — the terminals draw with WebGL
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-        chrome = subprocess.Popen([os.environ.get("CHROME") or MAC_CHROME, *mode, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
+        chrome = subprocess.Popen([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
                                    f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
                                    "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

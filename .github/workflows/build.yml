@@ -282,8 +282,13 @@ jobs:
             macOS)
               echo "path=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" >> "$GITHUB_OUTPUT" ;;
             Windows)
-              echo "path=C:\Program Files\Google\Chrome\Application\chrome.exe" >> "$GITHUB_OUTPUT" ;;
+              # the runner's Chrome comes up too slowly there for the CDP waits;
+              # Chrome for Testing (the next step) does not
+              ;;
           esac
+      - uses: browser-actions/setup-chrome@v2
+        if: runner.os == 'Windows'
+        id: cft
       - name: ffmpeg (the media test makes its clips with it)
         run: |
           case "$RUNNER_OS" in
@@ -303,7 +308,9 @@ jobs:
       - name: e2e (model-free)
         working-directory: src/lib/python
         env:
-          CHROME: ${{ steps.chrome.outputs.path }}
+          CHROME: ${{ steps.chrome.outputs.path || steps.cft.outputs.chrome-path }}
+          # the shell's frames, kept with the run's logs
+          E2E_TUI_FRAMES: ${{ github.workspace }}/e2e/runs/tui-frames
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
         run: uv run python ../../../e2e/run.py --only-free --lanes 2 ${{ matrix.skip }}

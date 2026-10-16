@@ -49,10 +49,16 @@ expect:
       operator: {to: shell_term, send: {type: start, args: ['-c', 'id'], pty: {cols: 80, rows: 24}}}
       expect: {reason: unauthorized}
       because: EXS-4
-    - name: "`shell: login` does not cover the bare shell"
-      operator: {to: login_term, send: {type: start, pty: {cols: 80, rows: 24}}}
+    - name: "`shell: login` does not cover the bare shell, named"
+      operator: {to: login_term, send: {type: start, command: /bin/sh, pty: {cols: 80, rows: 24}}}
       expect: {reason: unauthorized}
       because: EXS-4
+    - name: "no `command` and no `args` under `shell: login` is its whole line, `$SHELL -l`"
+      operator: {to: login_term, send: {type: start, pty: {cols: 80, rows: 24}}}
+      expect: {contains: {status: running}}
+      because: EXS-1
+    - name: (cleanup) that login shell stops
+      operator: {to: login_term, send: {type: stop}}
     - name: "`shell: login` covers exactly `$SHELL -l`"
       operator: {to: login_term, send: {type: start, args: ['-l'], pty: {cols: 80, rows: 24}}}
       expect: {contains: {status: running}}

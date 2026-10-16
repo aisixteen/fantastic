@@ -267,7 +267,7 @@ pub struct ExecBridgeBundle;
 /// each), served by the kernel's `docs` verb.
 fn verb_docs_json() -> Value {
     json!({
-        "start": "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
+        "start": "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
         "status": "args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
         "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
         "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
@@ -901,7 +901,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
     // `isinstance(a, (str, int, float))` ACCEPTS a bool (a bool IS an int there), and
     // `str(True)` is `True`; an explicit `null` is not a list and refuses.
     let raw_args = payload.get("args").cloned().unwrap_or_else(|| json!([]));
-    let args: Vec<String> = match &raw_args {
+    let mut args: Vec<String> = match &raw_args {
         Value::Array(a) => {
             let mut out = Vec::with_capacity(a.len());
             for v in a {
@@ -932,7 +932,17 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         // down to the child as SHELL. No chain (zsh → bash → sh) behind it — a
         // child env without one is refused, naming where it comes from.
         None if dims.is_some() => match child_var(&env, SHELL_VAR).filter(|s| !s.is_empty()) {
-            Some(shell) => Value::String(shell),
+            Some(shell) => {
+                // …and with no `args` either, it is the SHELL LINE the record
+                // permits: `$SHELL` under `shell: true`, its login line under
+                // `shell: "login"` (`-l`; nothing on Windows) — a client asks for
+                // "the shell" without knowing which OS, or which flag, makes it a
+                // login shell (py `raw_args = _shell_tail(rec) or []`).
+                if args.is_empty() {
+                    args = shell_tail(&meta).unwrap_or_default();
+                }
+                Value::String(shell)
+            }
             None => {
                 let mut v = refusal_hint(
                     MISSING_ARG,

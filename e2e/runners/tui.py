@@ -337,7 +337,9 @@ def main(argv: list[str]) -> int:
     failures: list[str] = []
     state: dict = {}
     stub = None
-    with tempfile.TemporaryDirectory(prefix="e2e-tui-") as tmp:
+    # a binary still running (a shell the script could not stop) cannot be deleted
+    # on Windows: the verdict is the run's, not the cleanup's
+    with tempfile.TemporaryDirectory(prefix="e2e-tui-", ignore_cleanup_errors=True) as tmp:
         binary, rig = resolve(argv[1:], sc.get("features") or [], Path(tmp))
         print(f"{path.parent.name} · {sc.get('title')}\n  binary: {binary}", flush=True)
         subst = {}

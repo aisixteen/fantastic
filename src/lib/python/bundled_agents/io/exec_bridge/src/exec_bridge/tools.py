@@ -825,7 +825,7 @@ def _child_env(rec: dict) -> dict:
 
 
 async def _start(id, payload, kernel):
-    """args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.
+    """args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell="login"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.
     The FULL line (command + args) must fullmatch one of the
     record's `allowed` regexes or the start is refused naming the patterns.
     A PTY start with no `command` runs the CHILD's own `$SHELL` (read from the
@@ -896,6 +896,12 @@ async def _start(id, payload, kernel):
                 f'(or env={{"{SHELL_VAR}": …}}), or name `command`',
                 arg=SHELL_VAR,
             )
+        # …and with no `args` either, it is the SHELL LINE the record permits:
+        # `$SHELL` under `shell: true`, its login line under `shell: "login"` (`-l`;
+        # nothing on Windows) — a client asks for "the shell" without knowing
+        # which OS, or which flag, makes it a login shell.
+        if not raw_args:
+            raw_args = _shell_tail(rec) or []
     if not isinstance(command, str) or not command.strip():
         # A pipe job always names its command; so does a PTY start that passed
         # one explicitly (an empty string is a typo, not "use the shell").

@@ -22,7 +22,7 @@ import yaml
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from canvas import MAC_CHROME, Host, Page, build_bin, free_port, host_call, yaml_of  # noqa: E402
+from canvas import DESKTOP_POINTER, MAC_CHROME, Host, Page, build_bin, free_port, host_call, yaml_of  # noqa: E402
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
@@ -40,7 +40,7 @@ class Browser:
         chrome = os.environ.get("CHROME") or MAC_CHROME
         if not Path(chrome).exists():
             raise SystemExit(f"no Chrome at {chrome}: set CHROME")
-        self.proc = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", f"--window-size={w['width']},{w['height']}",
+        self.proc = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
                                       f"--remote-debugging-port={self.port}", f"--user-data-dir={tmp / ('chrome-' + name)}",
                                       "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.used_first = False

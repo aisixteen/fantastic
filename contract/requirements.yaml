@@ -85,7 +85,7 @@ requirements:
     title: "opening one half never silently closes another"
   - id: EXS-1
     level: MUST
-    title: "an exec_bridge PTY `start` with no `command` runs the CHILD's own `$SHELL` and reports the resolved command"
+    title: "an exec_bridge PTY `start` with no `command` runs the CHILD's own `$SHELL` (with no `args` either: the record's whole `shell` line) and reports the resolved command"
   - id: EXS-2
     level: MUST
     title: "a child environment without `SHELL` is refused `missing_arg` naming SHELL — no fallback shell"

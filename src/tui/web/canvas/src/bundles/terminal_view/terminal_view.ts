@@ -11,7 +11,8 @@ import type { TermState } from "./last_cmd.ts";
 // `shell: "login"` (the child's OWN `$SHELL -l`, found in the environment the
 // record passes down — nobody names the program), and `boot` starts nothing, so
 // attach is this view's: `status` finds a live PTY job and re-attaches (its
-// `output` ring replays), else `start {pty, args: ["-l"]}` with no command.
+// `output` ring replays), else `start {pty}` — no command, no args: the record's
+// own shell line (`$SHELL -l`; the kernel knows the OS's login flag, if any).
 // When the job ends the frame closes — view and exec agent together, as ✕ does. xterm is the
 // vendored UMD bundle (sets globalThis.Terminal / globalThis.FitAddon), lazily
 // imported only when a terminal actually mounts. Preserves VSCode-style flow
@@ -395,7 +396,7 @@ export const terminalView: ViewBundle = {
     const startJob = async (): Promise<boolean> => {
       const r = (await host.call(backend, {
         type: "start",
-        ...(argv.length ? { command: argv[0]!, args: argv.slice(1) } : { args: ["-l"] }),
+        ...(argv.length ? { command: argv[0]!, args: argv.slice(1) } : {}),
         pty: { cols: term.cols, rows: term.rows },
       })) as { job_id?: number; error?: string; reason?: string };
       if (typeof r?.job_id !== "number") {

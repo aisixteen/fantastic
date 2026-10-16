@@ -62,6 +62,7 @@ runs:
       key down
       key enter
       until 30000 this agent has not loaded its history yet
+      until 20000 · vllm-1 ·
       shot created
       key ctrl-c
       wait 150

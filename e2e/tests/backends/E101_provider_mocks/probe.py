@@ -171,7 +171,8 @@ def main() -> int:
                 and "completion_tokens_estimated" not in d
                 and isinstance(d.get("gen_seconds"), (int, float))
                 and d.get("context_window") == read.get("context_window", fields.get("context_window")),
-                f"{p}: the done status carries the reported usage: {d}",
+                f"{p}: the done status carries the reported usage: {d}"
+                + ("" if d else f" — every done seen: {done} · {len(events)} events"),
             )
             probes = sorted({r['path'] for r in m.requests if r['kind'] == 'probe'})
             print(f"     probes: {probes}  turns: {len(m.turns())}", flush=True)

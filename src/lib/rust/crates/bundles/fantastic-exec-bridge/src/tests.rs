@@ -1874,7 +1874,7 @@ async fn verb_docs_are_python_first_docstring_lines() {
     );
     assert_eq!(
         verbs["start"],
-        "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."
+        "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."
     );
     assert_eq!(
         verbs["clear"],

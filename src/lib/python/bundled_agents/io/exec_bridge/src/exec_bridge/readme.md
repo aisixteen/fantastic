@@ -98,7 +98,9 @@ update_agent <id> inherit_env='["SHELL", "PATH"]' shell=login    # PTY start →
 ```
 
 It is ONE exact line on a PTY job, not a pattern: other args, and every pipe job, still need
-an `allowed` match. A shell on a terminal runs whatever is typed into it — `shell` states which
+an `allowed` match. A PTY `start` that names neither `command` nor `args` asks for exactly that
+line — the client never needs to know which flag makes a login shell (`-l`; on Windows,
+where the shell is `%COMSPEC%`, none). A shell on a terminal runs whatever is typed into it — `shell` states which
 program `start` spawns, not a limit on what that program can do.
 
 **Know what a `.*` tail grants.** `*` is allowed here like on every gate — whoever writes

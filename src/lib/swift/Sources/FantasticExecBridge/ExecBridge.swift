@@ -257,7 +257,7 @@
         ]
 
         static let verbDocs: OrderedDictionary<String, JSON> = [
-            "start": .string("args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
+            "start": .string("args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."),
             "status": .string("args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."),
             "stop": .string(
                 "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent."
@@ -551,6 +551,13 @@
                         extra: [("arg", .string(SHELL_VAR))])
                 }
                 rawCommand = .string(shell)
+                // …and with no `args` either, it is the SHELL LINE the record
+                // permits: `$SHELL` under `shell: true`, its login line under
+                // `shell: "login"` — a client asks for "the shell" without knowing
+                // which flag makes it a login shell (py `_shell_tail(rec) or []`).
+                if args.isEmpty {
+                    args = shellTail(record) ?? []
+                }
             }
             // A pipe job always names its command; so does a PTY start that passed
             // one explicitly (an empty string is a typo, not "use the shell").
@@ -1624,7 +1631,9 @@
             ```
 
             It is ONE exact line on a PTY job, not a pattern: other args, and every pipe job, still need
-            an `allowed` match. A shell on a terminal runs whatever is typed into it — `shell` states which
+            an `allowed` match. A PTY `start` that names neither `command` nor `args` asks for exactly that
+            line — the client never needs to know which flag makes a login shell (`-l`; on Windows,
+            where the shell is `%COMSPEC%`, none). A shell on a terminal runs whatever is typed into it — `shell` states which
             program `start` spawns, not a limit on what that program can do.
 
             **Know what a `.*` tail grants.** `*` is allowed here like on every gate — whoever writes

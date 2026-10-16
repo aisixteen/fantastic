@@ -20,9 +20,11 @@ def surface(port: int) -> list[dict]:
 <script>let runJob=null;
 async function go(w){{
   if(w==='build'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(build[0])},args:{json.dumps(build[1:])}}});fantastic.emit('buildlog',{{type:'job',job_id:r&&r.job_id}});fantastic.emit('status',{{type:'state',s:'building'}});}}
-  if(w==='run'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(run[0])},args:{json.dumps(run[1:])}}});runJob=r&&r.job_id;fantastic.emit('runlog',{{type:'job',job_id:runJob}});fantastic.emit('status',{{type:'state',s:'running'}});setTimeout(()=>fantastic.emit('app',{{type:'reload'}}),1200);}}
+  if(w==='run'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(run[0])},args:{json.dumps(run[1:])}}});runJob=r&&r.job_id;fantastic.emit('runlog',{{type:'job',job_id:runJob}});fantastic.emit('status',{{type:'state',s:'running'}});}}
   if(w==='stop'&&runJob!==null){{await fantastic.send('dev',{{type:'stop',job_id:runJob}});}}
-}}</script>"""
+}}
+// the app is shown the moment the server says it listens — not on a guessed delay
+fantastic.watch('dev',ev=>{{if(ev&&ev.type==='progress'&&ev.job_id===runJob&&/^Serving HTTP/.test(ev.line))fantastic.emit('app',{{type:'reload'}});}});</script>"""
     log = lambda title: f"""<h3>{title}</h3><pre id=l></pre><script>let job=null;
 fantastic.onMessage(p=>{{if(p&&p.type==='job')job=p.job_id}});
 fantastic.watch('dev',ev=>{{if(!ev||ev.job_id!==job)return; if(ev.type==='progress')document.getElementById('l').textContent+=ev.line+'\\n'; if(ev.type==='job_done')document.getElementById('l').textContent+='[exit '+ev.exit_code+']\\n';}});</script>"""

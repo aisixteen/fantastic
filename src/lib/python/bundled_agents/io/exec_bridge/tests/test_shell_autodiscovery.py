@@ -181,18 +181,23 @@ async def test_shell_login_permits_exactly_the_login_line(k, fake_shell):
     # nothing on Windows, where `cmd.exe` has no login mode).
     login = list(proc.LOGIN_ARGS)
     if login:
-        # the bare shell is NOT the login line
-        r = await _call(k, "sh", {"type": "start", "pty": PTY})
+        # the bare shell, NAMED, is not the login line
+        r = await _call(k, "sh", {"type": "start", "command": fake_shell, "pty": PTY})
         assert r["reason"] == "unauthorized", r
         assert login[0] in r["error"], r
     # another tail is not it either
     r = await _call(k, "sh", {"type": "start", "args": ["-x"], "pty": PTY})
     assert r["reason"] == "unauthorized", r
     assert '`shell="login"`' in r["error"], r
-    r = await _call(k, "sh", {"type": "start", "args": login, "pty": PTY})
+    # no command and no args: the record's whole line — the login line
+    r = await _call(k, "sh", {"type": "start", "pty": PTY})
     assert r.get("status") == "running", r
     up = " ".join(["SHELL_UP", *login])
     await _events_until(k, lambda t: up in t)
+    await _call(k, "sh", {"type": "stop"})
+    # …and the line spelled out is the same line
+    r = await _call(k, "sh", {"type": "start", "args": login, "pty": PTY})
+    assert r.get("status") == "running", r
 
 
 async def test_without_shell_the_resolved_line_still_needs_allowed(k, fake_shell):

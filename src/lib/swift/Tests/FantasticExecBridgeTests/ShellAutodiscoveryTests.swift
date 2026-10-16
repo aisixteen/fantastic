@@ -196,17 +196,23 @@
             let k = shellKernel()
             await mk(k, "sh", ["env": ["SHELL": .string(fake)], "shell": "login"])
             let inbox = k.ensureInbox(AgentId("sh"))
-            // the bare shell is NOT the login line
-            let bare = await call(k, "sh", ["type": "start", "pty": PTY])
+            // the bare shell, NAMED, is not the login line
+            let bare = await call(
+                k, "sh", ["type": "start", "command": .string(fake), "pty": PTY])
             #expect(bare["reason"] == "unauthorized", "\(bare.serialize())")
             #expect(
                 (bare["error"].asString ?? "").hasSuffix(
                     " (`shell=\"login\"` permits only the PTY line \(pyRepr(fake + " -l")))"),
                 "\(bare.serialize())")
-            let r = await call(k, "sh", ["type": "start", "args": ["-l"], "pty": PTY])
+            // no command and no args: the record's whole line — the login line
+            let r = await call(k, "sh", ["type": "start", "pty": PTY])
             #expect(r["status"] == "running", "\(r.serialize())")
             let (text, _) = await eventsUntil(inbox) { $0.contains("SHELL_UP -l") }
             #expect(text.contains("SHELL_UP -l"), "\(text)")
+            _ = await call(k, "sh", ["type": "stop"])
+            // …and the line spelled out is the same line
+            let spelled = await call(k, "sh", ["type": "start", "args": ["-l"], "pty": PTY])
+            #expect(spelled["status"] == "running", "\(spelled.serialize())")
             _ = await call(k, "sh", ["type": "stop"])
         }
 

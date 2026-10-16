@@ -310,8 +310,13 @@ async fn shell_login_permits_exactly_the_login_line() {
     // nothing on Windows, where `cmd.exe` has no login mode).
     let login = crate::sys::LOGIN_ARGS;
     if !login.is_empty() {
-        // the bare shell is NOT the login line
-        let r = call(&k, "sh_login", json!({"type": "start", "pty": pty()})).await;
+        // the bare shell, NAMED, is not the login line
+        let r = call(
+            &k,
+            "sh_login",
+            json!({"type": "start", "command": sh, "pty": pty()}),
+        )
+        .await;
         assert_eq!(r["reason"], "unauthorized", "{r}");
         let err = r["error"].as_str().unwrap_or("");
         assert!(
@@ -331,6 +336,13 @@ async fn shell_login_permits_exactly_the_login_line() {
         r["error"].as_str().unwrap_or("").contains("`shell=\"login\"`"),
         "{r}"
     );
+    // no command and no args: the record's whole line — the login line
+    let r = call(&k, "sh_login", json!({"type": "start", "pty": pty()})).await;
+    assert_eq!(r["status"], "running", "{r}");
+    let up = std::iter::once("SHELL_UP").chain(login.iter().copied()).collect::<Vec<_>>().join(" ");
+    events_until(&mut rx, |t| t.contains(&up)).await;
+    call(&k, "sh_login", json!({"type": "stop"})).await;
+    // …and the line spelled out is the same line
     let r = call(
         &k,
         "sh_login",
@@ -338,8 +350,6 @@ async fn shell_login_permits_exactly_the_login_line() {
     )
     .await;
     assert_eq!(r["status"], "running", "{r}");
-    let up = std::iter::once("SHELL_UP").chain(login.iter().copied()).collect::<Vec<_>>().join(" ");
-    events_until(&mut rx, |t| t.contains(&up)).await;
     teardown("sh_login");
 }
 
