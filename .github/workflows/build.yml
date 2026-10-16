@@ -271,6 +271,13 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - uses: browser-actions/setup-chrome@v2
         id: chrome
+      - name: ffmpeg (the media test makes its clips with it)
+        run: |
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get update -q && sudo apt-get install -y -q ffmpeg ;;
+            macOS) brew install ffmpeg ;;
+            Windows) choco install ffmpeg --no-progress -y ;;
+          esac
       - uses: actions/download-artifact@v7
         with:
           name: e2e-${{ matrix.os }}
@@ -287,6 +294,18 @@ jobs:
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
         run: uv run python ../../../e2e/run.py --only-free --lanes 2 ${{ matrix.skip }}
+      - name: the failures' logs, here
+        if: failure()
+        run: |
+          for summary in e2e/runs/*/SUMMARY.txt; do
+            dir="$(dirname "$summary")"
+            grep -v "^pass" "$summary" | cut -f2 | while read -r name; do
+              log="$dir/$(printf '%s' "$name" | tr ':' '@').log"
+              echo "::group::$name"
+              tail -n 60 "$log"
+              echo "::endgroup::"
+            done
+          done
       - name: keep the run logs
         if: failure()
         uses: actions/upload-artifact@v7

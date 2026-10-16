@@ -14,7 +14,7 @@ Three properties worth stating, because each replaces something that bit:
   * LANES ARE A SHARED RESOURCE. The GPU behind the endpoint holds a fixed
     number of sequences and other people's traffic shares it. `--lanes` is a promise
     about someone else's latency, not a throughput dial.
-  * EVERY RUN KEEPS ITS LOG. `runs/<stamp>/<group>.<id>.log` holds the full
+  * EVERY RUN KEEPS ITS LOG. `runs/<stamp>/<group>.<id>.log` (`:` spelled `@`) holds the full
     transcript. A failure you cannot re-read is a failure you cannot diagnose —
     and these cost real turns, so re-running to look again is not free.
 """
@@ -366,6 +366,12 @@ LONG_LANES = 2
 HARD_STOP_S = 15 * 60
 
 
+def log_name(name: str) -> str:
+    """A test's log file: its name with `:` (`provider_mocks:rust`) spelled `@` —
+    a `:` names an alternate data stream on NTFS, and artifact stores refuse it."""
+    return name.replace(":", "@") + ".log"
+
+
 async def run_one(
     t: dict,
     bk,
@@ -384,7 +390,7 @@ async def run_one(
 
 async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: dict, name: str):
     async with sem:
-        log = logdir / f"{name}.log"
+        log = logdir / log_name(name)
         # The knobs a test owns, rendered into the env its runner already reads.
         env = {**os.environ, **limit_env(t)}
         # THE METER (E2E_METER=1): this test's model traffic goes through the
@@ -694,7 +700,7 @@ async def main() -> int:
                     "      env: "
                     + " ".join(f"{k}={v}" for k, v in sorted(env_over.items()))
                 )
-            print(f"      log: runs/<stamp>/{t['group']}.{t['id']}.log")
+            print(f"      log: runs/<stamp>/{log_name(t['group'] + '.' + t['id'])}")
         print(f"\n  nothing was run · {len(picked)} tests would spend model turns")
         return 0
 
