@@ -262,7 +262,11 @@ def main() -> int:
 
         # 4 · the call rows in the memory store
         # each face's leg is the caller of its onward call
-        poll(lambda: call_rows("write", FB, "rest") and call_rows("write", FB, "ws"), "rows")
+        # every row this step reads has landed (the kernel flushes its rows to the
+        # store on its own beat — a loaded runner lands the last ones later)
+        poll(lambda: call_rows("write", FB, "rest") and call_rows("write", FB, "ws")
+             and any(isinstance(dig(r, "payload.cfg"), dict)
+                     for r in call_rows("update_agent", root, "rest")), "rows")
         by_path = {dig(r, "payload.path"): r
                    for r in call_rows("write", FB, "rest") + call_rows("write", FB, "ws")}
         rw, ww = by_path.get("rest.txt") or {}, by_path.get("ws.txt") or {}

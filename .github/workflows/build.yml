@@ -269,8 +269,21 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: browser-actions/setup-chrome@v2
+      - name: Chrome — the runner's own Google Chrome
         id: chrome
+        # (Chrome for Testing, as setup-chrome installs it, never answers CDP on
+        # the macOS image.) Ubuntu 24.04 forbids the unprivileged user namespaces
+        # Chrome's sandbox is built on: allowed here, so the sandbox stays ON.
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+              echo "path=/usr/bin/google-chrome" >> "$GITHUB_OUTPUT" ;;
+            macOS)
+              echo "path=/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" >> "$GITHUB_OUTPUT" ;;
+            Windows)
+              echo "path=C:\Program Files\Google\Chrome\Application\chrome.exe" >> "$GITHUB_OUTPUT" ;;
+          esac
       - name: ffmpeg (the media test makes its clips with it)
         run: |
           case "$RUNNER_OS" in
@@ -290,7 +303,7 @@ jobs:
       - name: e2e (model-free)
         working-directory: src/lib/python
         env:
-          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          CHROME: ${{ steps.chrome.outputs.path }}
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
         run: uv run python ../../../e2e/run.py --only-free --lanes 2 ${{ matrix.skip }}
@@ -311,7 +324,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: e2e-runs-${{ matrix.os }}
+          # the logs, not the runs' project dirs and browser profiles (~500 MB)
           path: |
             e2e/runs/
-            src/tui/e2e/runs/
+            src/tui/e2e/runs/**/*.log
+            src/tui/e2e/runs/**/*.txt
+            src/tui/e2e/runs/**/*.json
           retention-days: 14

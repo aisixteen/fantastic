@@ -33,6 +33,7 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 import yaml
+from helpers import oslayer
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.verdict import verdict
 
@@ -81,15 +82,7 @@ def bundle(root: Path, name: str, *, version: str = "v1", verbs: dict | None = N
 
 
 def alive(pid) -> bool:
-    if not isinstance(pid, int):
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return isinstance(pid, int) and oslayer.pid_alive(pid)
 
 
 def gone(pid, within: float = 10.0) -> bool:
@@ -263,10 +256,7 @@ def main() -> int:
         need(gone(pid), f"{aid}'s program is gone after the kernel stops (pid {pid})")
     for pid in pids.values():  # never leave one behind, whatever the verdict
         if alive(pid):
-            try:
-                os.kill(pid, 9)
-            except ProcessLookupError:
-                pass
+            oslayer.kill_group(pid)
     shutil.rmtree(work, ignore_errors=True)
 
     verdict(not bad, f"{RUNTIME}: {len(bad)} failed" + (f" — first: {bad[0]}" if bad else ""))

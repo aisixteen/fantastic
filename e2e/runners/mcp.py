@@ -109,7 +109,8 @@ class Client:
         )
         self.next_id = 0
         self._stderr: list[str] = []
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        self._drain = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._drain.start()
 
     def _drain_stderr(self):
         for line in self.proc.stderr:
@@ -150,10 +151,14 @@ class Client:
         except Exception:
             pass
         try:
-            return self.proc.wait(timeout=timeout)
+            code = self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             self.proc.kill()
             return -9
+        # everything it wrote to stderr, read: the pipe outlives the process by a
+        # moment, and a check of `stderr` right after the exit raced its reader
+        self._drain.join(5)
+        return code
 
 
 # ── expectations ────────────────────────────────────────────────────────────
