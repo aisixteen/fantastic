@@ -23,6 +23,13 @@ the packaged `main.py`'s own entry).
 
 Artifacts land under `e2e/dist/<runtime>/`, rebuilt only when a source file is
 newer than the tarball — a no-op run costs a stat walk, not a toolchain call.
+
+BUILD OR USE BUILT — one switch, `E2E_ARTIFACTS`:
+  * unset: each kernel is built here, `E2E_PROFILE` (`debug` unless set);
+  * `E2E_ARTIFACTS=<dir>`: nothing is built — the tarballs in `<dir>` are staged
+    as they are: `fantastic-<runtime>-<profile>.tar.gz`, what
+    `scripts/build/<runtime>.sh --profile <profile>` wrote with `PROBE_ENV` set
+    (CI's build job). A missing one fails loud; there is no building instead.
 """
 
 from __future__ import annotations
@@ -38,6 +45,16 @@ from helpers import oslayer
 
 #: Where staged artifacts live. Wipe-and-rebuild safe; nothing else reads it.
 DIST = "e2e/dist"
+
+#: The build profile of the kernels under test (built here, or the prebuilt ones
+#: `E2E_ARTIFACTS` names).
+PROFILE = os.environ.get("E2E_PROFILE", "debug")
+
+
+def prebuilt_dir() -> Path | None:
+    """The prebuilt artifacts' directory (`E2E_ARTIFACTS`), or None: build here."""
+    d = os.environ.get("E2E_ARTIFACTS")
+    return Path(d).resolve() if d else None
 
 #: Source trees whose mtime decides whether a rebuild is needed. Deliberately
 #: coarse: a stat walk is cheap next to a toolchain that has to be woken anyway.
@@ -101,36 +118,52 @@ def _extract(tarball: Path, into: Path) -> None:
         tf.extractall(into, filter="data")
 
 
+def build_kernel(repo: Path, name: str, profile: str, out: Path) -> None:
+    """`scripts/build/<name>.sh --profile <profile> --out <out>` with the probe
+    switches on — the ONE recipe for a kernel under test, whether `stage` builds
+    it here or `e2e/build.py` builds it for another machine."""
+    _run(
+        ["sh", str(repo / "scripts/build" / f"{name}.sh"), "--profile", profile, "--out", str(out)],
+        repo,
+        f"scripts/build/{name}.sh --profile {profile}",
+        env=dict(os.environ, **PROBE_ENV.get(name, {})),
+    )
+
+
 def stage(repo: Path, name: str, spec: dict) -> dict:
-    """Build → package → extract, and return `spec` pointing at the artifact.
+    """Build (or take the prebuilt) → package → extract, and return `spec`
+    pointing at the artifact.
 
-    The build itself is `scripts/build/<name>.sh --profile debug` — the SAME
-    script the release is built with, with `debug` in place of `release`. e2e
-    owns no second recipe, so the two cannot drift.
+    The build itself is `scripts/build/<name>.sh --profile <PROFILE>` — the SAME
+    script the release is built with. e2e owns no second recipe, so the two
+    cannot drift. With `E2E_ARTIFACTS` the tarball that script wrote elsewhere
+    is taken as it is.
 
-    Idempotent: if the staged artifact is newer than every watched source file,
-    nothing runs.
+    Idempotent: if the staged artifact is newer than its source — the watched
+    source files, or the prebuilt tarball — nothing runs.
     """
     dist = repo / DIST / name
-    tarball = repo / DIST / f"{name}-debug.tar.gz"
     stamp = dist / ".staged"
-    if stamp.exists() and stamp.stat().st_mtime >= _newest_source(repo, name):
+    prebuilt = prebuilt_dir()
+    if prebuilt is not None:
+        tarball = prebuilt / f"fantastic-{name}-{PROFILE}.tar.gz"
+        if not tarball.is_file():
+            raise SystemExit(f"E2E_ARTIFACTS: no {tarball.name} in {prebuilt}")
+        newest = tarball.stat().st_mtime
+    else:
+        tarball = repo / DIST / f"{name}-{PROFILE}.tar.gz"
+        newest = _newest_source(repo, name)
+    # The stamp names the tarball it was staged from: a debug staging is never
+    # taken for a release run, nor a local build for a prebuilt one.
+    if (
+        stamp.exists()
+        and stamp.read_text().splitlines()[:1] == [str(tarball)]
+        and stamp.stat().st_mtime >= newest
+    ):
         return _point_at(repo, name, spec, dist)
 
-    env = dict(os.environ, **PROBE_ENV.get(name, {}))
-    _run(
-        [
-            "sh",
-            str(repo / "scripts/build" / f"{name}.sh"),
-            "--profile",
-            "debug",
-            "--out",
-            str(tarball),
-        ],
-        repo,
-        f"scripts/build/{name}.sh --profile debug",
-        env=env,
-    )
+    if prebuilt is None:
+        build_kernel(repo, name, PROFILE, tarball)
     _extract(tarball, dist)
     if name == "python":
         # The release ships SOURCE; installing it is `uv sync`. Syncing inside
@@ -139,7 +172,7 @@ def stage(repo: Path, name: str, spec: dict) -> dict:
         _run(["uv", "sync"], dist / "src/lib/python", "uv sync (packaged python kernel)")
     else:
         oslayer.exe(dist / "fantastic_kernel").chmod(0o755)
-    stamp.write_text(f"{time.time()}\n")
+    stamp.write_text(f"{tarball}\n{time.time()}\n")
     return _point_at(repo, name, spec, dist)
 
 

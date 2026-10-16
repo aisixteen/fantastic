@@ -1,0 +1,298 @@
+# THE BUILD — one reusable workflow, called with what to do:
+#
+#   profile    debug | release — what every job builds
+#   units      the unit tests of every runtime, per OS
+#   e2e        build the shipping binaries + the kernels under test, then run the
+#              model-free e2e (`e2e/run.py --only-free`) on EXACTLY those
+#              (`E2E_ARTIFACTS`) — the e2e runs what ships
+#   artifacts  the shipping archives of every release target, as artifacts
+#              (`release-<target>`); `release.yml` publishes them
+#
+# Callers: `ci.yml` ({debug, units} and {release, e2e}), `release.yml`
+# ({release, e2e, artifacts}). FREE: standard GitHub-hosted runners only
+# (ubuntu-latest, ubuntu-24.04-arm, xcode-27, windows-latest) — a `-large` /
+# `-xlarge` label is billed even on a public repo; never name one here.
+#
+# macOS is `xcode-27` (macOS 27 + Xcode 27, a preview image): the Apple
+# Foundation Models bridge the rust kernel links needs the macOS 27 SDK. Swift is
+# the Apple app's kernel: it builds and tests on macOS only, and the e2e on Linux
+# and Windows runs every runtime but swift.
+
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        required: true
+      units:
+        type: boolean
+        default: false
+      e2e:
+        type: boolean
+        default: false
+      artifacts:
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The canvas packer provisions its pinned esbuild with this toolchain
+  # (src/lib/ts/scripts/pack.sh); naming it here means no second download.
+  GO_VERSION: "1.23.4"
+  NODE_VERSION: "24"
+  # cargo's flag for the profile (`debug` is cargo's default `dev`).
+  CARGO_PROFILE: ${{ inputs.profile == 'release' && '--release' || '' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ── units ────────────────────────────────────────────────────────────────
+  python:
+    if: inputs.units
+    name: python · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, xcode-27, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: src/lib/python
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - name: build
+        run: uv sync --locked
+      - name: unit tests
+        run: uv run pytest -n auto -q --no-header
+
+  rust:
+    if: inputs.units
+    name: rust kernel · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, xcode-27, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: src/lib/rust
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/lib/rust
+          key: ${{ inputs.profile }}
+      - name: build
+        run: cargo build --workspace --locked $CARGO_PROFILE
+      - name: unit tests
+        run: cargo test --workspace --locked $CARGO_PROFILE
+
+  cli:
+    if: inputs.units
+    name: cli · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, xcode-27, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: zip (the canvas packer's; not on the Windows image)
+        if: runner.os == 'Windows'
+        run: choco install zip --no-progress -y
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: ${{ inputs.profile }}
+      - name: build
+        run: cargo build --locked $CARGO_PROFILE
+      - name: unit tests
+        run: cargo test --locked $CARGO_PROFILE
+
+  swift:
+    if: inputs.units
+    name: swift · xcode-27
+    runs-on: xcode-27
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: src/lib/swift
+    steps:
+      - uses: actions/checkout@v7
+      - name: build
+        run: swift build -c ${{ inputs.profile }}
+      - name: unit tests
+        run: swift test -c ${{ inputs.profile }}
+
+  ts:
+    if: inputs.units
+    name: ts · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, xcode-27, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: src/lib/ts/package-lock.json
+      - name: build (library)
+        working-directory: src/lib/ts
+        run: |
+          npm ci
+          npm run build
+      - name: unit tests (library)
+        working-directory: src/lib/ts
+        run: npm test
+      - name: typecheck (canvas page)
+        working-directory: src/tui/web/canvas
+        run: npm run typecheck
+      - name: unit tests (canvas page)
+        working-directory: src/tui/web/canvas
+        run: npm test
+
+  # ── the shipping binaries (+ the e2e's) ──────────────────────────────────
+  binaries:
+    if: inputs.e2e || inputs.artifacts
+    name: build · ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # `e2e`: the OS whose e2e runs this target's binaries (one native target
+        # per OS); the cross targets are built only when the archives ship.
+        include: ${{ fromJSON(inputs.artifacts && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl","e2e":"ubuntu-latest"},{"os":"xcode-27","target":"aarch64-apple-darwin","e2e":"xcode-27"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","e2e":"windows-latest"},{"os":"xcode-27","target":"x86_64-apple-darwin","e2e":""},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","e2e":""}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl","e2e":"ubuntu-latest"},{"os":"xcode-27","target":"aarch64-apple-darwin","e2e":"xcode-27"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","e2e":"windows-latest"}]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: musl (the static Linux targets)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - name: zip (the canvas packer's; not on the Windows image)
+        if: runner.os == 'Windows'
+        run: choco install zip --no-progress -y
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/lib/rust
+            src
+          key: ${{ matrix.target }}-${{ inputs.profile }}
+      - uses: astral-sh/setup-uv@v10.3.0
+        if: inputs.e2e && matrix.e2e != ''
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - name: the CLI + the e2e's kernels and rig
+        if: inputs.e2e && matrix.e2e != ''
+        working-directory: src/lib/python
+        run: |
+          uv run python ../../../e2e/build.py --out ../../../dist/e2e \
+            --profile ${{ inputs.profile }} --target ${{ matrix.target }} \
+            ${{ runner.os != 'macOS' && '--exclude-runtime swift' || '' }}
+          # one tar: upload-artifact drops the executable bit
+          tar -cf ../../../dist/e2e.tar -C ../../../dist/e2e .
+      - name: the CLI
+        if: ${{ !(inputs.e2e && matrix.e2e != '') }}
+        run: sh scripts/build/cli.sh --profile ${{ inputs.profile }} --target ${{ matrix.target }}
+      - name: keep the shipping archive
+        if: inputs.artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/fantastic-${{ matrix.target }}.*
+          if-no-files-found: error
+          retention-days: 7
+      - name: keep the e2e's binaries
+        if: inputs.e2e && matrix.e2e != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ matrix.e2e }}
+          path: dist/e2e.tar
+          if-no-files-found: error
+          retention-days: 3
+
+  # ── the model-free e2e, on the binaries just built ───────────────────────
+  e2e:
+    if: inputs.e2e
+    needs: binaries
+    name: e2e (free) · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            skip: "--exclude-runtime swift"
+          - os: xcode-27
+            skip: ""
+          - os: windows-latest
+            skip: "--exclude-runtime swift"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - uses: actions/download-artifact@v7
+        with:
+          name: e2e-${{ matrix.os }}
+          path: dist
+      - name: the binaries
+        run: |
+          mkdir -p dist/e2e && tar -xf dist/e2e.tar -C dist/e2e
+          ls -l dist/e2e
+          (cd src/lib/python && uv sync --locked)
+      - name: e2e (model-free)
+        working-directory: src/lib/python
+        env:
+          CHROME: ${{ steps.chrome.outputs.chrome-path }}
+          E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
+          E2E_PROFILE: ${{ inputs.profile }}
+        run: uv run python ../../../e2e/run.py --only-free --lanes 2 ${{ matrix.skip }}
+      - name: keep the run logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-runs-${{ matrix.os }}
+          path: |
+            e2e/runs/
+            src/tui/e2e/runs/
+          retention-days: 14

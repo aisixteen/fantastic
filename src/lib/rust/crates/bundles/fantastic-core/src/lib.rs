@@ -185,13 +185,14 @@ fn reported_root(agent: &Arc<Agent>, kernel: &Kernel) -> Result<String, BundleEr
     Ok(py_path_str(&shown))
 }
 
-/// `str(Path(p))`: no `.` segments, no trailing or doubled separator; empty ⇒ `.`.
+/// `Path(p).as_posix()`: no `.` segments, no trailing or doubled separator, `/`
+/// between the parts on every OS; empty ⇒ `.`.
 fn py_path_str(p: &Path) -> String {
     let parts: PathBuf = p
         .components()
         .filter(|c| !matches!(c, std::path::Component::CurDir))
         .collect();
-    let text = parts.to_string_lossy().into_owned();
+    let text = fantastic_bundle::as_posix(&parts);
     if text.is_empty() {
         ".".to_string()
     } else {

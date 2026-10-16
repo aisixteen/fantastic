@@ -921,7 +921,8 @@ async fn a_loader_with_an_absolute_root_meta_reflects_it_as_given() {
         .await
         .remove(0)
         .result;
-    assert_eq!(reflect["root"], json!(format!("{base}/.fantastic/abs")));
+    let want = fantastic_bundle::as_posix(std::path::Path::new(&format!("{base}/.fantastic/abs")));
+    assert_eq!(reflect["root"], json!(want));
 }
 
 /// With no `root` meta the reflect shows the agent's address relative to the

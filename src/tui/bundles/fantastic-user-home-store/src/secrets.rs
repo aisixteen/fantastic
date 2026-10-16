@@ -168,8 +168,13 @@ mod tests {
         d
     }
 
-    fn rand_suffix() -> u64 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64
+    /// Unique per call: the clock alone is not (macOS gives microseconds, and
+    /// two tests can start inside one).
+    fn rand_suffix() -> String {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        format!("{t}-{n}")
     }
 
     #[test]

@@ -133,6 +133,11 @@ pub(crate) fn has_drive(p: &str) -> bool {
     matches!(Path::new(p).components().next(), Some(Component::Prefix(_)))
 }
 
+/// `PureWindowsPath.as_posix()`: every `\\` separator turned to `/`.
+pub(crate) fn as_posix(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
 // ── ntpath.realpath ─────────────────────────────────────────────────────────
 
 /// python `ntpath.realpath(p, strict=False)`: the OS resolves the path

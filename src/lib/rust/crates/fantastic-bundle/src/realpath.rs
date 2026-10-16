@@ -25,6 +25,14 @@ pub fn realpath(p: &Path) -> Result<PathBuf, String> {
     sys::realpath(p)
 }
 
+/// python `PurePath.as_posix()` — the path as the wire spells it, `/` between its
+/// parts on every OS. A unix path is itself (a `\` there is a name's own
+/// character); a Windows one has its `\` separators turned to `/`.
+#[must_use]
+pub fn as_posix(p: &Path) -> String {
+    sys::as_posix(p)
+}
+
 /// Is a request path ABSOLUTE — refused, never re-rooted under a root? A
 /// `/`-prefixed path on every OS (a wire path is `/`-separated); on Windows also
 /// one with a drive (`C:`) or UNC (`\\server\share`) prefix ([`crate::sys`]).

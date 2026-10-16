@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 
 use crate::oserror::os_error_str;
 
+/// `PurePosixPath.as_posix()`: the path's own text.
+pub(crate) fn as_posix(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
 /// The errno an OS error carries — on POSIX, the raw OS error itself.
 pub(crate) fn errno_of(e: &std::io::Error) -> Option<i32> {
     e.raw_os_error()

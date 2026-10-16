@@ -171,7 +171,16 @@ async def test_every_throttles_and_tail_caps(seeded_kernel):
         },
     )
     assert r.get("monitor_id"), r
-    await asyncio.sleep(1.6)
+    # waited ON the deliveries, not on a clock: a loaded runner starts the
+    # printer late, and a fixed sleep then sees too little of its output
+    await _until(
+        lambda: (
+            len(_HEARD.get("ear", [])) >= 2
+            and any("earlier lines dropped" in t for t in _heard())
+        ),
+        8.0,
+        "two deliveries, one cut by tail",
+    )
     stamps = [t for t, _ in _HEARD.get("ear", [])]
     assert 2 <= len(stamps) <= 5, f"{len(stamps)} deliveries for ~1 s at every=0.4"
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]

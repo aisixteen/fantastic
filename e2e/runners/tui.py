@@ -93,8 +93,12 @@ def resolve(argv: list[str], features: list[str], into: Path) -> tuple[Path, Pat
             print(f"building {TUI} {' '.join(what)}…", flush=True)
             build(what)
             b = oslayer.exe(TARGET / "fantastic")
-        build(["--example", "screenshot"])
-        rig = oslayer.exe(TARGET / "examples" / "screenshot")
+        # the rig: FANTASTIC_TUI_RIG (prebuilt, as FANTASTIC_BIN is), else built here
+        if os.environ.get("FANTASTIC_TUI_RIG"):
+            rig = Path(os.environ["FANTASTIC_TUI_RIG"]).resolve()
+        else:
+            build(["--example", "screenshot"])
+            rig = oslayer.exe(TARGET / "examples" / "screenshot")
         out = []
         for p in (b, rig):
             if not p.is_file() or not os.access(p, os.X_OK):

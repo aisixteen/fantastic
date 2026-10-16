@@ -98,7 +98,8 @@ may call. Report issues privately: see [`SECURITY.md`](SECURITY.md).
 
 ## Install
 
-The `fantastic` CLI runs on **macOS and Linux** (arm64 and x86_64). Its AI
+The `fantastic` CLI runs on **macOS, Linux** (arm64 and x86_64) **and Windows**
+(x86_64). Its AI
 backends are vLLM, Ollama, the OpenAI Responses API and Anthropic.
 
 ### Prebuilt binary
@@ -114,8 +115,8 @@ tar xzf fantastic-aarch64-apple-darwin.tar.gz && sudo mv fantastic /usr/local/bi
 
 The archives are `fantastic-<target>.tar.gz` for `aarch64-apple-darwin`,
 `x86_64-apple-darwin`, `aarch64-unknown-linux-musl` and
-`x86_64-unknown-linux-musl` (static Linux binaries), with `SHA256SUMS` beside
-them.
+`x86_64-unknown-linux-musl` (static Linux binaries), plus
+`fantastic-x86_64-pc-windows-msvc.zip`, with `SHA256SUMS` beside them.
 
 ### With cargo
 

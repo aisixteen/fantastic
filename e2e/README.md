@@ -113,6 +113,21 @@ on the store, so an agent a MODEL creates reads its key the same way.
 number of sequences and production traffic shares it. `--lanes` is a promise
 about that, not a throughput dial.
 
+## Build or use built
+
+By default a run builds what it tests from source (`E2E_PROFILE`, `debug` unless
+set): each kernel through `scripts/build/<runtime>.sh`, the CLI with cargo.
+`E2E_ARTIFACTS=<dir>` makes it build nothing and test the binaries in `<dir>`
+instead — what `e2e/build.py --out <dir>` writes (the kernels' tarballs with the
+probe switches, the `fantastic` CLI a release ships, its PTY rig `screenshot`).
+CI builds them once per OS and runs the free suite on exactly those:
+
+```sh
+cd src/lib/python
+uv run python ../../../e2e/build.py --out /tmp/e2e-art --profile release
+E2E_ARTIFACTS=/tmp/e2e-art E2E_PROFILE=release uv run python ../../../e2e/run.py --only-free
+```
+
 ## No guessed defaults
 
 `BACKEND` and `FANTASTIC_AI_MODEL` are required and never inferred. This is the

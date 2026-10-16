@@ -225,7 +225,17 @@ async fn every_throttles_and_tail_caps() {
     )
     .await;
     assert!(r["monitor_id"].is_i64(), "{r}");
-    tokio::time::sleep(Duration::from_millis(1600)).await;
+    // waited ON the deliveries, not on a clock: a loaded runner starts the
+    // printer late, and a fixed sleep then sees too little of its output
+    until(
+        || {
+            ear.stamps().len() >= 2
+                && ear.texts().iter().any(|t| t.contains("earlier lines dropped"))
+        },
+        8.0,
+        "two deliveries, one cut by tail",
+    )
+    .await;
     let stamps = ear.stamps();
     assert!(
         (2..=5).contains(&stamps.len()),

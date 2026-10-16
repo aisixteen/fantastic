@@ -2,8 +2,10 @@
 
 A release is the `fantastic` CLI: the Rust kernel in-process, the terminal UI, the
 browser canvas and the MCP face. It ships two ways: the crates.io package
-`fantastic`, and prebuilt binaries on a GitHub Release. Everything is built and
-published locally; CI (`.github/workflows/ci.yml`) only builds and tests.
+`fantastic`, and prebuilt binaries on a GitHub Release. The tag is pushed from a
+laptop; GitHub Actions then builds every target, runs the model-free e2e on those
+binaries and publishes the GitHub Release (`.github/workflows/release.yml`).
+crates.io stays a local step.
 
 ## Version
 
@@ -29,7 +31,11 @@ All steps run from the repo root, on `main`, with a clean tree.
    git tag -a vX.Y.Z -m vX.Y.Z
    git push origin main vX.Y.Z
    ```
-4. **crates.io.**
+   The tag starts `.github/workflows/release.yml`: it refuses a tag that is not on
+   `main` or has no `## [X.Y.Z]` CHANGELOG section, builds the archives below
+   (`scripts/build/cli.sh`), runs the model-free e2e on them, and publishes the
+   GitHub Release with `SHA256SUMS` and that CHANGELOG section as the notes.
+4. **crates.io** (local — the registry token never goes to GitHub).
    ```sh
    CARGO_REGISTRY_TOKEN=… sh scripts/build/crate.sh --publish
    ```
@@ -38,7 +44,7 @@ All steps run from the repo root, on `main`, with a clean tree.
    installing it needs no Go. It then runs `cargo package` (a full build) and
    `cargo publish`. Without `--publish` it stops after packaging. Users install
    with `cargo install fantastic --locked`.
-5. **GitHub Release** (optional, per release). Attach four archives plus
+5. **GitHub Release** — published by the workflow (step 3): five archives plus
    `SHA256SUMS`:
 
    | archive | for |
@@ -47,6 +53,10 @@ All steps run from the repo root, on `main`, with a clean tree.
    | `fantastic-x86_64-apple-darwin.tar.gz` | macOS, Intel (macOS 14+) |
    | `fantastic-aarch64-unknown-linux-musl.tar.gz` | Linux arm64, static |
    | `fantastic-x86_64-unknown-linux-musl.tar.gz` | Linux x86_64, static |
+   | `fantastic-x86_64-pc-windows-msvc.zip` | Windows x86_64 |
+
+   One archive by hand: `sh scripts/build/cli.sh --target <triple>` writes
+   `dist/fantastic-<triple>.tar.gz` (`.zip` for Windows).
 
    The Linux builds are musl-static, so they run without a matching glibc. The AI
    backends built in are vLLM, Ollama, the OpenAI Responses API and Anthropic.

@@ -4,10 +4,11 @@
 # locally) and the e2e harness both call these scripts, so "e2e runs what we ship" is true by
 # construction rather than by two lists that drift.
 #
-# Every script takes the same two options and prints the artifact path it wrote:
+# Every script takes the same options and prints the artifact path it wrote:
 #
 #   --profile debug|release   default: release
 #   --out <path>              default: dist/fantastic-<runtime>-<profile>.<ext>
+#   --target <triple>         cli.sh only: the rust target (default: the host's)
 #
 # `release` is what the published artifact is built with; `debug` is the SAME
 # command, product and packaging with the optimiser off (and, for ts, the
@@ -18,12 +19,14 @@ set -eu
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 PROFILE=release
 OUT=""
+TARGET=""
 
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --profile) PROFILE="${2:?--profile needs a value}"; shift 2 ;;
       --out)     OUT="${2:?--out needs a value}"; shift 2 ;;
+      --target)  TARGET="${2:?--target needs a triple}"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) echo "$(basename "$0"): unknown option '$1'" >&2; usage >&2; exit 2 ;;
     esac
@@ -35,7 +38,7 @@ parse_args() {
 }
 
 usage() {
-  echo "usage: $(basename "$0") [--profile debug|release] [--out <path>]"
+  echo "usage: $(basename "$0") [--profile debug|release] [--out <path>] [--target <triple>]"
 }
 
 # Default artifact path for a runtime, if --out was not given.

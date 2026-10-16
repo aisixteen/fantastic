@@ -62,7 +62,7 @@ enum REPLMode {
     static func run(kernel: Kernel) async {
         while true {
             print("fantastic> ", terminator: "")
-            fflush(nil)  // every output stream, stdout included (Glibc's `stdout` is a mutable global)
+            fflush(stdout)
             let read = await readLineAsync()
             // CANCELLED (the daemon's stop leg won the race): return at once,
             // printing NOTHING. Python's `input()` sits on a thread the process

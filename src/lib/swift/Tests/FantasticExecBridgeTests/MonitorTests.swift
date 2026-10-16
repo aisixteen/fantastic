@@ -184,7 +184,11 @@
                     "tail": .integer(5),
                 ])
             #expect(r["monitor_id"].asInt != nil, "\(r)")
-            try await Task.sleep(nanoseconds: 1_600_000_000)
+            // waited ON the deliveries, not on a clock: a loaded runner starts the
+            // printer late, and a fixed sleep then sees too little of its output
+            _ = await until("two deliveries, one cut by tail", secs: 8) {
+                ear.stamps.count >= 2 && ear.texts.contains { $0.contains("earlier lines dropped") }
+            }
             let stamps = ear.stamps
             #expect((2...5).contains(stamps.count), "\(stamps.count) deliveries for ~1 s at every=0.4")
             let gaps = zip(stamps, stamps.dropFirst()).map { $1.timeIntervalSince($0) }

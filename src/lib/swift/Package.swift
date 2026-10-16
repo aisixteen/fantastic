@@ -89,10 +89,6 @@ let package = Package(
         // wss:// dials (the only vetted TLS-1.3-over-buffers path in Swift).
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
-        // swift-crypto: the CryptoKit API on every platform — CryptoKit itself
-        // on Apple's, BoringSSL on Linux (no CryptoKit there). `version`
-        // hashes and the vllm session key are SHA-256.
-        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         // Cross-platform (macOS + Linux) streaming HTTP client for the LLM
         // backends — replaces URLSession.bytes (Apple-only) so ollama/vllm
         // stream on Linux too. NIO-based, shares the swift-nio above.
@@ -138,8 +134,7 @@ let package = Package(
         .target(
             name: "FantasticFile",
             dependencies: ["FantasticKernel", "FantasticJSON", "FantasticIoBridge",
-                           .product(name: "OrderedCollections", package: "swift-collections"),
-                           .product(name: "Crypto", package: "swift-crypto")]
+                           .product(name: "OrderedCollections", package: "swift-collections")]
         ),
         // The `kernel_state.tools` ROOT LOADER — the durable-state bundle the
         // tree root carries. Its verb surface only; the boot machinery lives in
@@ -288,8 +283,7 @@ let package = Package(
             dependencies: ["FantasticAICore", "FantasticKernel", "FantasticJSON",
                            .product(name: "OrderedCollections", package: "swift-collections"),
                            .product(name: "AsyncHTTPClient", package: "async-http-client"),
-                           .product(name: "NIOCore", package: "swift-nio"),
-                           .product(name: "Crypto", package: "swift-crypto")]
+                           .product(name: "NIOCore", package: "swift-nio")]
         ),
         // Anthropic's Messages API — raw prompt-and-parse, an optional key
         // (python `anthropic_backend`).
@@ -500,7 +494,6 @@ let package = Package(
                 .product(name: "Yams", package: "Yams"),
                 "FantasticExecBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
-                .product(name: "Crypto", package: "swift-crypto"),
                 // A stub leg's websocket endpoint is a NIO handler (the web
                 // route seam).
                 .product(name: "NIOCore", package: "swift-nio"),

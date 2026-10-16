@@ -28,7 +28,7 @@ pub use oserror::{
 };
 pub use path::Step;
 pub use pyset::py_set_order;
-pub use realpath::{is_absolute, realpath};
+pub use realpath::{as_posix, is_absolute, realpath};
 pub use repr::{py_float_repr, py_repr, py_repr_value, py_str, py_truthy};
 pub use text::{py_isdecimal, py_isdigit, py_split_whitespace, py_splitlines, py_strip};
 pub use unicode::{

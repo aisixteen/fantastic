@@ -596,6 +596,20 @@ async def main() -> int:
     )
     a = ap.parse_args()
 
+    # BUILD OR USE BUILT. `E2E_ARTIFACTS=<dir>` hands the run prebuilt binaries:
+    # the kernels' tarballs (`helpers/host/artifacts.py`) and the CLI product —
+    # `fantastic` and its PTY rig `screenshot` — which every runner takes as
+    # FANTASTIC_BIN / FANTASTIC_TUI_RIG (cells inherit them). Unset, each is
+    # built from source here.
+    if built := os.environ.get("E2E_ARTIFACTS"):
+        built_dir = Path(built).resolve()
+        for var, name in (("FANTASTIC_BIN", "fantastic"), ("FANTASTIC_TUI_RIG", "screenshot")):
+            path = oslayer.exe(built_dir / name)
+            if not path.is_file():
+                print(f"REFUSING TO RUN — E2E_ARTIFACTS has no {path.name} ({built_dir})")
+                return 1
+            os.environ[var] = str(path)
+
     # A FREE-ONLY run spends no model turns, so it needs no model plug: naming
     # a BACKEND for it would be a lie about what the run uses. Any run that can
     # select a paid test still resolves it, and still fails loud when unset.
