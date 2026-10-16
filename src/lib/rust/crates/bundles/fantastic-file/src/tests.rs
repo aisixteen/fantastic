@@ -540,7 +540,8 @@ fn bare_delete_refuses_a_populated_dir_recursive_removes_it() {
 
 #[test]
 fn os_error_text_is_python_oserror_str() {
-    // Every OS failure renders as python's `OSError.__str__`.
+    // Every OS failure renders as python's `OSError.__str__` — the path as
+    // python's repr (a Windows `\\` doubled).
     let tmp = tempfile::TempDir::new().unwrap();
     let root = served(&tmp);
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -557,8 +558,8 @@ fn os_error_text_is_python_oserror_str() {
     assert_eq!(
         reply["error"],
         json!(format!(
-            "[Errno {not_empty}] Directory not empty: '{}'",
-            full.join("src").display()
+            "[Errno {not_empty}] Directory not empty: {}",
+            fantastic_bundle::py_repr(&full.join("src").to_string_lossy())
         )),
         "{reply}"
     );
@@ -567,8 +568,8 @@ fn os_error_text_is_python_oserror_str() {
     assert_eq!(
         reply["error"],
         json!(format!(
-            "[Errno 20] Not a directory: '{}'",
-            full.join("f.txt/x").display()
+            "[Errno 20] Not a directory: {}",
+            fantastic_bundle::py_repr(&full.join("f.txt").join("x").to_string_lossy())
         )),
         "{reply}"
     );
@@ -577,8 +578,8 @@ fn os_error_text_is_python_oserror_str() {
     assert_eq!(
         reply["error"],
         json!(format!(
-            "[Errno 17] File exists: '{}'",
-            full.join("f.txt").display()
+            "[Errno 17] File exists: {}",
+            fantastic_bundle::py_repr(&full.join("f.txt").to_string_lossy())
         )),
         "{reply}"
     );

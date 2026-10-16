@@ -180,9 +180,14 @@ fn final_path_nonstrict(mut path: PathBuf) -> PathBuf {
         if let Ok(real) = std::fs::canonicalize(&path) {
             return join_tail(real, &tail);
         }
+        // A dangling link: followed by hand, and its TARGET resolved the same way
+        // (its existing part by the OS) — a target written with an 8.3 short
+        // name (`RUNNER~1`) must compare with the long one the root resolves to.
+        // `seen` stops a loop: a link already followed is not followed again.
         let linked = readlink_deep(&path, &mut seen);
         if linked != path {
-            return join_tail(linked, &tail);
+            path = linked;
+            continue;
         }
         match (path.parent(), path.file_name()) {
             (Some(parent), Some(name)) => {
