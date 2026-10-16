@@ -213,6 +213,12 @@ async fn run(
                             Ok(urls) => {
                                 boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
                                 app.note(format!("the canvas: {}", urls.canvas));
+                                if let Err(e) = crate::kern::web::write_run_file(&paths.cwd, &urls) {
+                                    app.note(format!("the run file: {e}"));
+                                }
+                                if let Err(e) = crate::kern::user_store::set_canvas(&h, &urls.canvas).await {
+                                    app.note(e);
+                                }
                             }
                             // No page to serve is fatal where the page is the
                             // only View; with a terminal it is a note there.
@@ -432,6 +438,7 @@ async fn run(
         h.shutdown(&paths).await;
         crate::mcp::close_socket();
         crate::share::close();
+        crate::kern::web::remove_run_file(&paths.cwd);
     }
     // Dropping the sender tells every View the ViewModel is gone.
     drop(frames);

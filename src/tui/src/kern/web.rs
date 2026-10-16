@@ -162,9 +162,27 @@ fn free_port() -> Result<u16, String> {
     l.local_addr().map(|a| a.port()).map_err(|e| format!("no free port to pick: {e}"))
 }
 
-/// What `ensure` serves: the canvas's page.
+/// What `ensure` serves: the canvas's page, on its port.
 pub struct Urls {
     pub canvas: String,
+    pub port: u16,
+}
+
+/// THE RUN FILE (owner 2026-10-16, for a local manager of fantastics): while this
+/// process serves the canvas, `{pid, port, url}` — written once it serves,
+/// removed at a clean exit. Under the project dir. A killed process leaves it
+/// behind: the lock (`.fantastic/lock.yaml`, flocked while the kernel runs) says
+/// whether it is live.
+pub const RUN_FILE: &str = ".fantastic/cli/canvas.yaml";
+
+/// Write `dir`'s [`RUN_FILE`] for this process.
+pub fn write_run_file(dir: &std::path::Path, urls: &Urls) -> Result<(), String> {
+    crate::atomic::write_yaml(&dir.join(RUN_FILE), &json!({"pid": std::process::id(), "port": urls.port, "url": urls.canvas}))
+}
+
+/// Remove `dir`'s [`RUN_FILE`] at a clean exit (none written: nothing to remove).
+pub fn remove_run_file(dir: &std::path::Path) {
+    let _ = std::fs::remove_file(dir.join(RUN_FILE));
 }
 
 /// Create what is missing, grant, boot, mount. Returns the pages' URLs.
@@ -267,5 +285,25 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
     crate::kern::reach::grant_all(h).await?;
     Ok(Urls {
         canvas: format!("http://127.0.0.1:{port}/{CANVAS_PAGE_ID}/file/index.html"),
+        port,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_run_file_names_this_process_its_port_and_url_until_a_clean_exit() {
+        let d = std::env::temp_dir().join(format!("fc-runfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let urls = Urls { canvas: "http://127.0.0.1:8123/canvas_page/file/index.html".into(), port: 8123 };
+        write_run_file(&d, &urls).unwrap();
+        let v = crate::atomic::read_yaml(&d.join(RUN_FILE)).unwrap();
+        assert_eq!(v, json!({"pid": std::process::id(), "port": 8123, "url": urls.canvas}));
+        remove_run_file(&d);
+        assert!(!d.join(RUN_FILE).exists());
+        remove_run_file(&d); // nothing left: still fine
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

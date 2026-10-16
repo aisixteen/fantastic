@@ -12,9 +12,15 @@
   .here { color: #7ee2a8; font-size: 11px; }
   .empty { color: rgba(255,255,255,.35); padding: 4px 0; }
   .err { color: #f7768e; }
+  label.sw { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+  label.sw input { margin: 0; accent-color: #b78cff; }
+  input.name { flex: 1 1 auto; min-width: 0; font: 12px ui-monospace, SFMono-Regular, monospace; color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.14); border-radius: 6px; padding: 3px 7px; }
+  a { color: #b78cff; }
 </style>
 <h2>This fantastic</h2>
 <div id="here" class="row"></div>
+<div class="row"><input id="name" class="name" spellcheck="false"><button id="rename">name folder</button></div>
+<div id="folder" class="dim"></div>
 <h2>Stored locations</h2>
 <div id="locs"></div>
 <div style="margin-top:8px"><button id="others">unstore all others</button></div>
@@ -38,18 +44,22 @@ async function render() {
   const r = await call("list");
   if (!r || r.error) return;
   $("here").innerHTML = `<span class="grow"><code>${esc(r.here.path)}</code></span>` +
-    (r.here.stored ? `<button id="unhere">unstore</button>` : `<button id="store">store</button>`);
-  const b = $("store") || $("unhere");
-  b.onclick = async () => { await call(r.here.stored ? "unstore" : "store_here"); render(); };
+    `<label class="sw" title="a folder in the home's fantastics, written again on every start"><input type="checkbox" id="reg"${r.here.register_home_folder ? " checked" : ""}>register in home</label>`;
+  $("reg").onchange = async (e) => { await call("register_home_folder", { value: e.target.checked }); render(); };
+  $("name").value = r.here.name || "";
+  $("name").placeholder = r.here.guid || "";
+  $("folder").textContent = r.here.stored ? `folder: fantastics/${r.here.folder}` : "not registered";
   $("locs").innerHTML = r.locations.length === 0 ? `<div class="empty">none stored</div>` : r.locations.map((l, i) =>
-    `<div class="row"><span class="grow"><b>${esc(l.name)}</b> ${l.here ? '<span class="here">· this one</span>' : ""}<br><code class="dim">${esc(l.path)}</code>${l.exists ? "" : ' <span class="err">· gone</span>'}</span>` +
-    `<span class="dim">${esc(ago(l.last_seen))}</span><button class="x" data-i="${i}" title="unstore">×</button></div>`).join("");
-  for (const x of $("locs").querySelectorAll("button[data-i]")) x.onclick = async () => { await call("unstore", { path: r.locations[+x.dataset.i].path }); render(); };
+    `<div class="row"><span class="grow"><b>${esc(l.folder)}</b> ${l.here ? '<span class="here">· this one</span>' : ""}<br><code class="dim">${esc(l.path)}</code>${l.exists ? "" : ' <span class="err">· gone</span>'}` +
+    `${l.canvas ? `<br><a href="${esc(l.canvas)}" target="_blank" rel="noopener">canvas</a>` : ""}</span>` +
+    `<span class="dim">${esc(ago(l.last_seen))}</span>${l.here ? "" : `<button class="x" data-i="${i}" title="unstore">×</button>`}</div>`).join("");
+  for (const x of $("locs").querySelectorAll("button[data-i]")) x.onclick = async () => { await call("unstore", { guid: r.locations[+x.dataset.i].guid }); render(); };
   $("others").disabled = !r.locations.some((l) => !l.here);
   $("keys").innerHTML = r.keys.length === 0 ? `<div class="empty">none stored</div>` : r.keys.map((k) => `<div class="row"><code class="grow">${esc(k.ref)}</code><span class="dim">${esc(k.host)}</span></div>`).join("");
   $("tpls").innerHTML = r.saved.length === 0 ? `<div class="empty">none saved</div>` : r.saved.map((t) => `<div class="row"><code class="grow">${esc(t)}</code></div>`).join("");
   $("home").textContent = `kept in ${r.home}`;
 }
 $("others").onclick = async () => { await call("unstore_others"); render(); };
+$("rename").onclick = async () => { await call("name_home_folder", { name: $("name").value.trim() || null }); render(); };
 render();
 </script>

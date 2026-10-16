@@ -105,11 +105,23 @@ asks the server again. The key goes to your credential store, never a record.
 
 USER STORE: the double-click's `user store` shows the `user_store` host agent:
 what your home keeps across every fantastic — the stored keys (refs and hosts,
-never values), the AI set-ups, and the stored LOCATIONS of your fantastics
-(`<home>/fantastics/`, one file each: path, name, when stored, last seen).
-`store` / `unstore` this fantastic, × unstores one, `unstore all others` keeps
-only this one. A stored fantastic's `last seen` moves on each start — the list a
-local manager of fantastics reads.
+never values), the AI set-ups, and a FOLDER per registered fantastic
+(`<home>/fantastics/<guid or name>/fantastic.yaml`: guid, name, path, pid, the
+canvas URL this run serves, when stored, last seen). `register in home` is this
+fantastic's switch (`register_home_folder`, off by default): on writes its folder
+and keeps it — the switch is on its record, so every start writes it again
+(`last seen` and `pid` move, a removed folder comes back); off removes it. The
+switch lands on disk before the home is touched, and every start makes the home
+match it — a crash between the two is healed. The
+folder is named by the kernel's guid; `name folder` names it (`name_home_folder`,
+the folder renamed at once; empty = the guid). × unstores another one, `unstore
+all others` keeps only this one. A clean stop sets the folder's `pid` and
+`canvas` to null. The list a local manager of fantastics reads.
+
+THE RUN FILE: while `fantastic canvas` serves, `.fantastic/cli/canvas.yaml`
+holds `{pid, port, url}`; a clean exit removes it. Whether the run is live is
+the lock's (`.fantastic/lock.yaml`, flocked while the kernel runs) — a killed
+process leaves both files behind.
 
 PAGE BUNDLES: `<a canvas's records root>/bundles/<name>/bundle.yaml` with
 `base: html_agent`, `sentence`, and `html: |` (the body each instance starts

@@ -12,7 +12,15 @@ use crate::kern::host::Host;
 pub const ID: &str = "user_store";
 
 /// The verbs its view calls.
-const VERBS: [&str; 5] = ["list", "store_here", "unstore", "unstore_others", "reflect"];
+const VERBS: [&str; 7] = [
+    "list",
+    fantastic_user_home_store::user_store::SWITCH,
+    "name_home_folder",
+    "set_canvas",
+    "unstore",
+    "unstore_others",
+    "reflect",
+];
 
 const VIEW: &str = include_str!("user_store_view.html");
 
@@ -30,6 +38,16 @@ pub async fn ensure(host: &Host) -> Result<(), String> {
     let r = host.act("kernel", payload).await.result;
     match r.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("could not make `{ID}`: {e}")),
+        None => Ok(()),
+    }
+}
+
+/// The canvas this run serves, told to `user_store` — written into this
+/// fantastic's home folder while it is registered, for a manager to open.
+pub async fn set_canvas(host: &Host, url: &str) -> Result<(), String> {
+    let r = host.act(ID, json!({"type": "set_canvas", "url": url})).await.result;
+    match r.get("error").and_then(Value::as_str) {
+        Some(e) => Err(format!("`{ID}` set_canvas: {e}")),
         None => Ok(()),
     }
 }
