@@ -31,7 +31,7 @@ use fantastic_kernel::{AgentId, Blob, Item, Kernel, TaskId};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::sys::{OwnedReadHalf, OwnedWriteHalf};
+use crate::sys::{CtrlReadHalf, CtrlWriteHalf};
 
 /// ONE frame bound on this wire, both ends, every runtime. A corrupt length must
 /// not become a 4 GiB allocation, and a program that means to move 20 MB means to
@@ -64,7 +64,7 @@ struct Sub {
 }
 
 /// Write one frame: `[4-byte BE len | kind | rest]`.
-async fn write_frame(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, kind: u8, rest: &[u8]) {
+async fn write_frame(wr: &Arc<tokio::sync::Mutex<CtrlWriteHalf>>, kind: u8, rest: &[u8]) {
     let mut buf = Vec::with_capacity(5 + rest.len());
     buf.extend_from_slice(&((rest.len() + 1) as u32).to_be_bytes());
     buf.push(kind);
@@ -75,7 +75,7 @@ async fn write_frame(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, kind: u8, res
 }
 
 /// Frame one JSON value onto the socket (kind `T`).
-async fn push(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, v: &Value) {
+async fn push(wr: &Arc<tokio::sync::Mutex<CtrlWriteHalf>>, v: &Value) {
     // python's `encode_frame` text half — `json.dumps(v, default=str)`, so the
     // separators and the `\uXXXX` escapes match byte for byte.
     let body = fantastic_io_bridge::codec::encode_frame(v).into_bytes();
@@ -87,7 +87,7 @@ async fn push(wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>, v: &Value) {
 /// holds `null` there in python's position (in place when the slot exists,
 /// appended when not — python's `encode_frame` nulls the bytes where they sat).
 async fn push_binary(
-    wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    wr: &Arc<tokio::sync::Mutex<CtrlWriteHalf>>,
     mut envelope: Value,
     body: &Blob,
 ) {
@@ -137,7 +137,7 @@ fn payload_body(blob: Option<Blob>) -> Option<Blob> {
 /// a `write_stream` mirrored to a watching program reaches it whole, not as a
 /// header with a hole where the body was.
 async fn push_item(
-    wr: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    wr: &Arc<tokio::sync::Mutex<CtrlWriteHalf>>,
     envelope: Value,
     item: &fantastic_kernel::inbox::InboxItem,
 ) {
@@ -204,7 +204,7 @@ fn inbox_framer(p: &Value, owner: &AgentId, job_id: TaskId, kernel: &Kernel) -> 
 /// Read one `[4-byte BE len | payload]` frame. `None` = the socket is finished:
 /// EOF, an error, or a length over [`MAX_FRAME`] — a wire violation the stream
 /// cannot be resynchronised after.
-async fn read_frame(rd: &mut OwnedReadHalf) -> Option<Vec<u8>> {
+async fn read_frame(rd: &mut CtrlReadHalf) -> Option<Vec<u8>> {
     let mut head = [0u8; 4];
     rd.read_exact(&mut head).await.ok()?;
     let n = u32::from_be_bytes(head);
@@ -223,8 +223,8 @@ async fn read_frame(rd: &mut OwnedReadHalf) -> Option<Vec<u8>> {
 /// the whole point of the signal — the previous teardown aborted this task, which
 /// skipped that block and leaked every proxy the job held.
 pub async fn serve(
-    rd: OwnedReadHalf,
-    wr: OwnedWriteHalf,
+    rd: CtrlReadHalf,
+    wr: CtrlWriteHalf,
     owner: AgentId,
     job_id: TaskId,
     kernel: Arc<Kernel>,

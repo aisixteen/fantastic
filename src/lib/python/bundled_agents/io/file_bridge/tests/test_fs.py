@@ -5,8 +5,9 @@ that may live anywhere, path still clamped within it). Never tried in sequence."
 from __future__ import annotations
 
 import pytest
+from _testkit import posix_only
 
-from file_bridge import fs
+from file_bridge import _sys, fs
 
 
 # ─── clamped surface (the running-dir law) ──────────────────────
@@ -152,25 +153,46 @@ def test_read_private_judges_the_open_descriptor_it_reads(tmp_path):
     """`read_private` opens ONCE (`O_NOFOLLOW`) and judges
     the open descriptor — regular, this user's, no group/other bits — before
     reading it, so no swap can land between the check and the read. A symlink in
-    the leaf's place, a widened mode and a FIFO are refused (`NotPrivate`, a
-    PermissionError, nothing read); an absent file is FileNotFoundError."""
-    import os
-
+    the leaf's place and a widened mode are refused (`NotPrivate`, a
+    PermissionError, nothing read); an absent file is FileNotFoundError. (On
+    Windows the mode is the DACL's, set and read through `_sys`.)"""
     secret = tmp_path / "s.yaml"
     secret.write_bytes(b"k: v\n")
-    os.chmod(secret, 0o600)
+    _sys.set_mode(secret, 0o600)
     assert fs.read_private(tmp_path, "s.yaml", external=True) == b"k: v\n"
-    os.chmod(secret, 0o644)
+    _sys.set_mode(secret, 0o644)
     with pytest.raises(fs.NotPrivate) as wide:
         fs.read_private(tmp_path, "s.yaml", external=True)
-    assert (wide.value.mode, wide.value.uid) == (0o644, os.getuid())
+    assert (wide.value.mode, wide.value.uid) == (0o644, _sys.own_uid())
     assert isinstance(wide.value, PermissionError)
-    os.chmod(secret, 0o600)
+    _sys.set_mode(secret, 0o600)
     (tmp_path / "link.yaml").symlink_to(secret)
     with pytest.raises(fs.NotPrivate):
         fs.read_private(tmp_path, "link.yaml", external=True)
+    with pytest.raises(FileNotFoundError):
+        fs.read_private(tmp_path, "absent.yaml", external=True)
+
+
+@posix_only("a FIFO does not exist on Windows")
+def test_read_private_refuses_a_fifo_without_hanging(tmp_path):
+    import os
+
     os.mkfifo(tmp_path / "pipe")
     with pytest.raises(fs.NotPrivate):  # judged, never a hang on the open
         fs.read_private(tmp_path, "pipe", external=True)
-    with pytest.raises(FileNotFoundError):
-        fs.read_private(tmp_path, "absent.yaml", external=True)
+
+
+def test_a_private_write_is_private_from_its_create(tmp_path):
+    """`mode=0o600` makes the file private on the create itself — `read_private`
+    takes it as written."""
+    fs.write_bytes(str(tmp_path), "w.yaml", b"x: 1\n", external=True, mode=0o600)
+    assert _sys.mode_of(tmp_path / "w.yaml") == 0o600
+    assert fs.read_private(tmp_path, "w.yaml", external=True) == b"x: 1\n"
+
+
+def test_an_absolute_path_is_refused_on_every_os(tmp_path):
+    """`/…` is absolute on every OS; on Windows a drive or a UNC share too
+    (`fs.is_absolute`) — refused, never re-rooted."""
+    assert fs.is_absolute("/x") and not fs.is_absolute("a/b")
+    with pytest.raises(ValueError):
+        fs.resolve(fs.Root(tmp_path, "root"), "/x")

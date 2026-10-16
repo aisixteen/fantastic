@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import signal
 import re
 import sys
 import time
@@ -33,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backends import THINK_BUDGET
 from backends import backend as resolve_backend  # noqa: E402
+from helpers import oslayer  # noqa: E402
 from helpers.verdict import MARKER  # noqa: E402
 
 from helpers.host.driver import ensure_runtime  # noqa: E402
@@ -315,7 +315,7 @@ def check_rosters(tests) -> list[str]:
     return drift
 
 
-def select(tests, groups, ids, backend_name, include_free, runtimes=()):
+def select(tests, groups, ids, backend_name, include_free, runtimes=(), excluded=()):
     """Narrow the batch along any axis, in any combination.
 
     A scenario id matches BOTH its bare name and its per-runtime instance:
@@ -329,6 +329,8 @@ def select(tests, groups, ids, backend_name, include_free, runtimes=()):
         if groups and t["group"] not in groups:
             continue
         if runtimes and t.get("runtime") not in runtimes:
+            continue
+        if t.get("runtime") in excluded:
             continue
         # Accept any of: the full id (`E10_dialog:rust`), the numbered stem
         # (`E10_dialog`), the bare scenario name (`dialog`), or the code alone
@@ -420,20 +422,17 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
                 env=env,
                 stdout=fh,
                 stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,  # a lane is a process group: killed whole, never orphaned
+                **oslayer.group_kwargs(),  # a lane is a process group: killed whole, never orphaned
             )
             try:
                 try:
                     rc = await asyncio.wait_for(proc.wait(), stop_s)
                 except TimeoutError:
-                    try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                    oslayer.stop_group(proc.pid)
                     try:
                         rc = await asyncio.wait_for(proc.wait(), 20)
                     except TimeoutError:
-                        os.killpg(proc.pid, signal.SIGKILL)
+                        oslayer.kill_group(proc.pid)
                         rc = await proc.wait()
                     fh.write(
                         f"\n{MARKER} FAIL — HARD STOP: still running after "
@@ -443,10 +442,7 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
             except (asyncio.CancelledError, KeyboardInterrupt):
                 # THE LANE DIES WITH THE RUN: Ctrl-C or a cancelled batch must not
                 # leave the probe and its spawned kernel running.
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+                oslayer.stop_group(proc.pid)
                 raise
         took = time.monotonic() - began
         body = log.read_text()
@@ -580,6 +576,12 @@ async def main() -> int:
         help="python | rust | swift — narrow the cross-product",
     )
     ap.add_argument(
+        "--exclude-runtime",
+        action="append",
+        default=[],
+        help="drop one runtime's cells, keep everything else (CI: no swift on Windows)",
+    )
+    ap.add_argument(
         "--free", action="store_true", help="include the free harness self-tests"
     )
     ap.add_argument("--only-free", action="store_true")
@@ -601,9 +603,9 @@ async def main() -> int:
     tests = load_suite()
     if a.only_free:
         tests = [t for t in tests if t.get("costs") == "free"]
-        picked = select(tests, a.group, a.id, bk.name, True, a.runtime)
+        picked = select(tests, a.group, a.id, bk.name, True, a.runtime, a.exclude_runtime)
     else:
-        picked = select(tests, a.group, a.id, bk.name, a.free, a.runtime)
+        picked = select(tests, a.group, a.id, bk.name, a.free, a.runtime, a.exclude_runtime)
 
     if a.list:
         for t in picked:

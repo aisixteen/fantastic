@@ -38,11 +38,8 @@ struct LockFile {
 /// python's `_held`. A lock is held exactly as long as its entry is here.
 static HELD: Mutex<Vec<(PathBuf, File)>> = Mutex::new(Vec::new());
 
-/// Check whether a pid is alive on this system.
-///
-/// On unix: `kill(pid, 0)`. On other platforms: assume alive (we
-/// only run macOS + Linux; Windows handling lands with Windows
-/// support).
+/// Check whether a pid is alive on this system — ours or not (the OS probe is
+/// [`sys::pid_alive`]).
 pub fn pid_alive(pid: u32) -> bool {
     // python `_pid_alive`: `pid <= 0` is dead, no syscall. `kill(0, sig)`
     // targets the CALLER'S OWN process GROUP (not "pid 0" as a process), so
@@ -50,14 +47,7 @@ pub fn pid_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    #[cfg(unix)]
-    {
-        sys::pid_alive(pid)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    sys::pid_alive(pid)
 }
 
 /// Acquire the workdir lock for the current process: take the flock on
@@ -145,13 +135,12 @@ fn publish(staged: &Path, path: &Path) -> KernelResult<bool> {
     }
     // Nobody holds it: its holder died. Replace it — but only while it is
     // still the file `lock.yaml` names (another taker may have replaced it).
-    let named = match fs::metadata(path) {
-        Ok(m) => m,
+    let named = match File::open(path) {
+        Ok(f) => f,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(io(e)),
     };
-    let held = cur.metadata().map_err(io)?;
-    if !sys::same_file(&named, &held) {
+    if !sys::same_file(&named, &cur).map_err(io)? {
         return Ok(false);
     }
     fs::rename(staged, path).map_err(io)?;

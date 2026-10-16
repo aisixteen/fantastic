@@ -9,6 +9,7 @@ import json
 import threading
 from pathlib import Path
 
+from _testkit import command_rx
 from kernel._agent import _as_id, _json_safe
 
 
@@ -240,7 +241,7 @@ async def test_a_long_line_does_not_end_the_pipe(seeded_kernel):
                         "handler_module": "exec_bridge.tools",
                         "id": "runner",
                         "ingress_rule": "allow_all_ingress",
-                        "allowed": [f"{py} .*"],
+                        "allowed": [f"{command_rx(py)} .*"],
                         "cwd": ".",
                     },
                 }

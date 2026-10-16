@@ -43,16 +43,13 @@ from __future__ import annotations
 import asyncio
 import codecs
 import collections
-import fcntl
+import functools
 import json
 import os
 import re
 import secrets
-import signal as signal_mod
-import socket
 import struct
 import tempfile
-import termios
 import time
 
 from exec_bridge import _monitor, proc
@@ -572,10 +569,6 @@ _IMAGE_EXT = {
 MAX_PASTE_IMAGE = 5 * 1024 * 1024
 
 
-def _set_winsize(fd: int, cols: int, rows: int) -> None:
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-
-
 def _ring_add(pt: dict, text: str) -> None:
     pt["ring"].append(text)
     pt["ring_bytes"] += len(text.encode("utf-8", errors="replace"))
@@ -584,22 +577,16 @@ def _ring_add(pt: dict, text: str) -> None:
         pt["ring_bytes"] -= len(old.encode("utf-8", errors="replace"))
 
 
-def _pty_readable(owner: str, job_id: int, kernel) -> None:
-    """The master fd is readable: one chunk out as an `output` event. EOF (or EIO —
-    the slave closed with the child) wakes the pump; a backlog past HIGH_WATERMARK
-    detaches the reader so the tty fills and the program throttles."""
+def _pty_output(owner: str, job_id: int, kernel, data: bytes) -> None:
+    """The terminal gave one chunk: out as an `output` event. EOF (`b""` — on POSIX
+    also EIO, the slave closed with the child) wakes the pump; a backlog past
+    HIGH_WATERMARK detaches the reader so the tty fills and the program throttles."""
     job = _jobs.get(job_id)
     if job is None:
         return
     pt = job["pty"]
-    try:
-        data = os.read(pt["fd"], 4096)
-    except BlockingIOError:
-        return
-    except OSError:
-        data = b""
     if not data:
-        asyncio.get_running_loop().remove_reader(pt["fd"])
+        pt["term"].stop_reading()
         pt["eof"] = True
         pt["wake"].set()
         return
@@ -613,7 +600,7 @@ def _pty_readable(owner: str, job_id: int, kernel) -> None:
     )
     pt["unacked"] += len(text)
     if pt["unacked"] > HIGH_WATERMARK:
-        asyncio.get_running_loop().remove_reader(pt["fd"])
+        pt["term"].stop_reading()
         pt["paused"] = True
         pt["wake"].set()
 
@@ -635,13 +622,13 @@ async def _pty_pump(owner, ready, process, kernel):
 
 async def _pty_body(job, job_id, owner, process, kernel):
     pt = job["pty"]
-    loop = asyncio.get_running_loop()
+    on_data = functools.partial(_pty_output, owner, job_id, kernel)
     try:
         try:
             while not pt["eof"]:
                 pt["wake"].clear()
                 if not pt["paused"]:
-                    loop.add_reader(pt["fd"], _pty_readable, owner, job_id, kernel)
+                    pt["term"].start_reading(on_data)
                 await pt["wake"].wait()
             code = await process.wait()
         except asyncio.CancelledError:
@@ -650,11 +637,11 @@ async def _pty_body(job, job_id, owner, process, kernel):
             raise
     finally:
         try:
-            loop.remove_reader(pt["fd"])
+            pt["term"].stop_reading()
         except (ValueError, OSError):
             pass
         try:
-            os.close(pt["fd"])
+            pt["term"].close()
         except OSError:
             pass
         if pt.get("paste_dir"):
@@ -672,26 +659,6 @@ async def _pty_body(job, job_id, owner, process, kernel):
         owner,
         {"type": "job_done", "job_id": job_id, "exit_code": code, "ok": code == 0},
     )
-
-
-async def _write_all(fd: int, buf: bytes) -> int:
-    """Write the FULL buffer to the non-blocking master fd. `os.write` short-writes
-    and raises `BlockingIOError` when the tty buffer is full; one unchecked write
-    drops the tail — a bracketed paste then loses its end marker and the shell
-    sticks in paste mode. Loop until every byte lands."""
-    loop = asyncio.get_running_loop()
-    written = 0
-    while written < len(buf):
-        try:
-            written += os.write(fd, buf[written:])
-        except BlockingIOError:
-            ev = asyncio.Event()
-            loop.add_writer(fd, ev.set)
-            try:
-                await ev.wait()
-            finally:
-                loop.remove_writer(fd)
-    return written
 
 
 def _job_arg(verb: str, payload: dict, *, required: bool):
@@ -807,7 +774,9 @@ def _command_permitted(rec: dict, line: str) -> str | None:
 # fullmatch `allowed`. Who may set `shell` is who may write the record — the
 # same authority that writes `allowed`.
 
-SHELL_VAR = "SHELL"
+# `SHELL` and `-l` are POSIX's; the OS names both (`proc.SHELL_VAR`,
+# `proc.LOGIN_ARGS` — `COMSPEC` and nothing on Windows).
+SHELL_VAR = proc.SHELL_VAR
 
 
 def _shell_tail(rec: dict) -> list[str] | None:
@@ -818,7 +787,7 @@ def _shell_tail(rec: dict) -> list[str] | None:
     if v is True:
         return []
     if v == "login":
-        return ["-l"]
+        return list(proc.LOGIN_ARGS)
     return None
 
 
@@ -845,6 +814,12 @@ def _child_env(rec: dict) -> dict:
         env = dict(os.environ)
     else:
         env = {n: os.environ[n] for n in names if n in os.environ}
+    # What the OS itself needs in every process (`proc.OS_ENV`: nothing on POSIX,
+    # SYSTEMROOT on Windows) comes down from the kernel's env even when
+    # `inherit_env` leaves it out; the record's `env` still has the last word.
+    env.update(
+        {n: os.environ[n] for n in proc.OS_ENV if n in os.environ and n not in env}
+    )
     env.update({str(k): str(v) for k, v in (rec.get("env") or {}).items()})
     return env
 
@@ -965,29 +940,27 @@ async def _start(id, payload, kernel):
             arg="cwd",
         )
 
-    parent_sock, child_sock = socket.socketpair()
+    parent_sock, child_sock = proc.ctrl_pair()
     env["FANTASTIC_CTRL_FD"] = str(child_sock.fileno())
     # The OWNER AGENT id (the tool's public id), NOT the ephemeral job id — so a
     # tool can address and tag itself by the id others use.
     env["FANTASTIC_SELF_ID"] = id
-    master = slave = None
+    term = None
     try:
         if dims is None:
             process = await proc.spawn_argv(
                 argv, cwd=cwd, env=env, pass_fd=child_sock.fileno()
             )
         else:
-            master, slave = os.openpty()
-            _set_winsize(master, *dims)
+            term = proc.open_pty(*dims)
             env["TERM"] = "xterm-256color"
             process = await proc.spawn_pty(
-                argv, cwd=cwd, env=env, pass_fd=child_sock.fileno(), slave=slave
+                argv, cwd=cwd, env=env, pass_fd=child_sock.fileno(), term=term
             )
-            os.set_blocking(master, False)
     except proc.NoPath:
         parent_sock.close()
-        if master is not None:
-            os.close(master)
+        if term is not None:
+            term.close()
         return refusal(
             MISSING_ARG,
             f"exec_bridge: {command!r} is a bare command and this leg gives the "
@@ -998,16 +971,14 @@ async def _start(id, payload, kernel):
         )
     except Exception as e:
         parent_sock.close()
-        if master is not None:
-            os.close(master)
+        if term is not None:
+            term.close()
         return refusal(TRANSPORT_ERROR, f"exec_bridge: spawn failed: {e}")
     finally:
         # The parent's copy of the CHILD end must go, or EOF never fires and a parked
-        # program never learns the kernel died. Same for the PTY slave: the master
-        # sees EOF only once every slave copy is closed.
+        # program never learns the kernel died. (The PTY's child side went with the
+        # spawn: the terminal sees EOF only once the job's last copy is closed.)
         child_sock.close()
-        if slave is not None:
-            os.close(slave)
 
     job = {
         "owner": id,
@@ -1035,7 +1006,7 @@ async def _start(id, payload, kernel):
         "pty": None
         if dims is None
         else {
-            "fd": master,
+            "term": term,
             "cols": dims[0],
             "rows": dims[1],
             "ring": collections.deque(),
@@ -1281,7 +1252,7 @@ async def _interrupt(id, payload, kernel):
             continue
         if _alive(v):
             try:
-                v["proc"].send_signal(signal_mod.SIGINT)
+                proc.interrupt(v["proc"], v["pty"]["term"] if v.get("pty") else None)
             except (ProcessLookupError, OSError):
                 pass
             n += 1
@@ -1342,7 +1313,7 @@ async def _write(id, payload, kernel):
     pt = job["pty"]
     try:
         async with pt["write_lock"]:
-            written = await _write_all(pt["fd"], buf)
+            written = await pt["term"].write(buf)
     except OSError as e:
         return refusal(TRANSPORT_ERROR, f"exec_bridge: write failed: {e}")
     return {"written": written}
@@ -1359,7 +1330,7 @@ async def _resize(id, payload, kernel):
     pt = job["pty"]
     pt["cols"], pt["rows"] = dims
     try:
-        _set_winsize(pt["fd"], *dims)
+        pt["term"].resize(*dims)
     except OSError as e:
         return refusal(TRANSPORT_ERROR, f"exec_bridge: resize failed: {e}")
     return {"resized": True, "cols": dims[0], "rows": dims[1]}
@@ -1444,7 +1415,7 @@ async def _paste_image(id, payload, kernel):
         async with pt["write_lock"]:
             # the path at the cursor with a trailing space, no newline — pasting
             # must not submit
-            await _write_all(pt["fd"], (path + " ").encode("utf-8"))
+            await pt["term"].write((path + " ").encode("utf-8"))
     except (OSError, ValueError) as e:
         return refusal(TRANSPORT_ERROR, f"exec_bridge: paste_image failed: {e}")
     return {"path": path, "bytes": len(data)}

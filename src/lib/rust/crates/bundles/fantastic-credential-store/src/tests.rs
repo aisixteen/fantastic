@@ -12,7 +12,8 @@ use fantastic_kernel::bundle::BundleRegistry;
 use fantastic_kernel::test_support::as_agent;
 use fantastic_kernel::test_support::register_root_loader;
 use fantastic_kernel::{Item, Outcome};
-use std::os::unix::fs::PermissionsExt;
+use fantastic_file::test_support::{mode_of, own_uid, set_mode};
+use fantastic_kernel::test_support::symlink;
 use std::path::Path;
 
 const KEY: &str = "sk-live-0123456789abcdef";
@@ -162,8 +163,7 @@ async fn set_stores_the_value_0600_and_the_record_keeps_only_metadata() {
         out.result,
         json!({"ref": "openai/main", "host": "api.openai.com", "fields": ["api_key"], "stored": true})
     );
-    let meta = std::fs::metadata(f.file()).unwrap();
-    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(mode_of(f.file()).unwrap() & 0o777, 0o600);
     assert!(std::fs::read_to_string(f.file()).unwrap().contains(KEY));
     let rec = Value::Object(record(&f.k, &AgentId::from("creds")));
     assert!(!rec.to_string().contains(KEY));
@@ -207,7 +207,7 @@ async fn the_file_is_pythons_bytes() {
          h.example\n",
     )
     .unwrap();
-    std::fs::set_permissions(f.file(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(f.file(), 0o600).unwrap();
     let got = call(&f.k, json!({"type": "get", "ref": "openai/main"}), None).await;
     assert_eq!(got.result["fields"], json!({"api_key": "sk-from-python"}));
 }
@@ -429,11 +429,10 @@ async fn forget_on_the_env_backend_is_refused() {
 async fn a_file_others_can_read_is_refused_loud() {
     let f = mk(json!({})).await;
     seed(&f.k).await;
-    std::fs::set_permissions(f.file(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    set_mode(f.file(), 0o644).unwrap();
     let out = call(&f.k, json!({"type": "get", "ref": "openai/main"}), None).await;
     assert_eq!(out.status.as_str(), "failed", "{}", out.result);
-    // SAFETY: `getuid` has no preconditions.
-    let uid = unsafe { libc::getuid() };
+    let uid = own_uid();
     assert_eq!(
         out.result["error"],
         json!(format!(
@@ -444,10 +443,10 @@ async fn a_file_others_can_read_is_refused_loud() {
     );
     assert_eq!(out.result["raised"], json!(true));
     // a symlink is not a regular file — refused before it is followed
-    std::fs::set_permissions(f.file(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    set_mode(f.file(), 0o600).unwrap();
     let real = f.tmp.path().join("real.yaml");
     std::fs::rename(f.file(), &real).unwrap();
-    std::os::unix::fs::symlink(&real, f.file()).unwrap();
+    symlink(&real, f.file()).unwrap();
     let out = call(&f.k, json!({"type": "get", "ref": "openai/main"}), None).await;
     assert_eq!(out.status.as_str(), "failed", "{}", out.result);
     assert!(out.result["error"]
@@ -794,7 +793,7 @@ async fn a_stored_value_without_a_host_is_refused() {
                 format!("refs:\n  openai/main:\n    api_key: {KEY}\n"),
             )
             .unwrap();
-            std::fs::set_permissions(f.file(), std::fs::Permissions::from_mode(0o600)).unwrap();
+            set_mode(f.file(), 0o600).unwrap();
         } else {
             f.keychain
                 .set_password(

@@ -1,0 +1,5 @@
+# Every text file is LF in the working tree on every OS. Git for Windows checks
+# out CRLF by default, and here that breaks shell scripts (`sh` reads the `\r`),
+# YAML/JSON fixtures and every byte-compared test vector. Binary files are left
+# alone (`auto` detects them).
+* text=auto eol=lf

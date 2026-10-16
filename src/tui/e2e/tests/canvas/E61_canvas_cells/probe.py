@@ -28,6 +28,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict, open_sidebar, spot  # noqa: E402
+from helpers import oslayer  # noqa: E402
 
 FAKE = "claude"
 MARK = "FAKE-CODER-READY"
@@ -41,10 +42,8 @@ def main() -> bool:
     # the fake coding agent, FIRST on the host's PATH
     fake_dir = rig.proj.parent / "fakebin"
     fake_dir.mkdir(parents=True, exist_ok=True)
-    fake = fake_dir / FAKE
-    fake.write_text(f"#!/bin/sh\necho {MARK}\nexec cat\n")
-    fake.chmod(0o755)
-    os.environ["PATH"] = f"{fake_dir}:{os.environ.get('PATH', '')}"
+    fake = oslayer.fake_command(fake_dir, FAKE, MARK)
+    os.environ["PATH"] = f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}"
     # g) both flags together: refused before anything is written
     bare = rig.proj.parent / "refuse"
     bare.mkdir(parents=True, exist_ok=True)

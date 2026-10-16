@@ -202,12 +202,16 @@ fn shlex_quote(s: &str) -> String {
 //   shell: true     → exactly [$SHELL]        (the bare shell)
 //   shell: "login"  → exactly [$SHELL, "-l"]  (a login shell)
 //
+// `SHELL` and `-l` are unix's; the OS names both (`sys::SHELL_VAR`,
+// `sys::LOGIN_ARGS` — `COMSPEC` and nothing on Windows).
+//
 // It is a LINE, not a pattern: any other argv, and every pipe job, still has to
 // fullmatch `allowed`. Who may set `shell` is who may write the record — the
 // same authority that writes `allowed`.
 
-/// The child env var a PTY `start` without `command` runs.
-pub const SHELL_VAR: &str = "SHELL";
+/// The child env var a PTY `start` without `command` runs (`SHELL`; the OS
+/// names it — [`sys::SHELL_VAR`]).
+pub const SHELL_VAR: &str = sys::SHELL_VAR;
 
 /// The argv the record's `shell` permits AFTER `$SHELL`, or `None` when the record
 /// permits no shell line. Only JSON `true` and the string `"login"` count — a `1`
@@ -215,7 +219,9 @@ pub const SHELL_VAR: &str = "SHELL";
 pub fn shell_tail(meta: &Map<String, Value>) -> Option<Vec<String>> {
     match meta.get("shell") {
         Some(Value::Bool(true)) => Some(vec![]),
-        Some(Value::String(s)) if s == "login" => Some(vec!["-l".to_string()]),
+        Some(Value::String(s)) if s == "login" => {
+            Some(sys::LOGIN_ARGS.iter().map(|a| (*a).to_string()).collect())
+        }
         _ => None,
     }
 }
@@ -709,11 +715,20 @@ mod tests;
 #[cfg(test)]
 mod tests_monitor;
 
+/// What `interrupt` / `stop` do to a live job.
+#[derive(Clone, Copy)]
+enum Signal {
+    /// Its Ctrl-C ([`jobs::interrupt`]).
+    Interrupt,
+    /// Its whole session, killed ([`jobs::kill`]).
+    Kill,
+}
+
 /// `interrupt` / `stop` — signal this agent's jobs, or one named job.
 ///
 /// Both now address the JOB TABLE. There is exactly one registry: a private pid set
 /// alongside it would be a second truth, and `start`'s jobs would be invisible to it.
-fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: sys::Signal) -> u64 {
+fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: Signal) -> u64 {
     let mut g = jobs::jobs();
     let mut n = 0u64;
     for ((_, id), j) in g.iter_mut() {
@@ -723,11 +738,12 @@ fn signal_jobs(agent_id: &AgentId, want: Option<&JobRef>, sig: sys::Signal) -> u
         if !jobs::alive(j) {
             continue; // already gone — never pretend
         }
-        let signalled = if sig == sys::Signal::SIGKILL {
-            j.status = "stopping".to_string();
-            jobs::kill(j)
-        } else {
-            sys::signal(j.pid, sig)
+        let signalled = match sig {
+            Signal::Kill => {
+                j.status = "stopping".to_string();
+                jobs::kill(j)
+            }
+            Signal::Interrupt => jobs::interrupt(j),
         };
         if signalled {
             n += 1;
@@ -832,7 +848,7 @@ fn interrupt_reply(agent_id: &AgentId, payload: &Value) -> Value {
         Err(e) => return e,
     };
     no_job(agent_id, want.as_ref()).unwrap_or_else(
-        || json!({"interrupted": signal_jobs(agent_id, want.as_ref(), sys::Signal::SIGINT)}),
+        || json!({"interrupted": signal_jobs(agent_id, want.as_ref(), Signal::Interrupt)}),
     )
 }
 
@@ -841,9 +857,8 @@ fn stop_reply(agent_id: &AgentId, payload: &Value) -> Value {
         Ok(w) => w,
         Err(e) => return e,
     };
-    no_job(agent_id, want.as_ref()).unwrap_or_else(
-        || json!({"killed": signal_jobs(agent_id, want.as_ref(), sys::Signal::SIGKILL)}),
-    )
+    no_job(agent_id, want.as_ref())
+        .unwrap_or_else(|| json!({"killed": signal_jobs(agent_id, want.as_ref(), Signal::Kill)}))
 }
 
 /// `start` — spawn the COMMAND in the BACKGROUND and return at once.
@@ -1014,12 +1029,8 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         None => crate::spawn::spawn_job(&argv, agent_id.as_str(), &env, &cwd).map(|s| (s, None)),
         Some((cols, rows)) => {
             env.insert("TERM".to_string(), json!("xterm-256color"));
-            crate::spawn::spawn_pty(&argv, agent_id.as_str(), &env, &cwd, cols, rows).and_then(
-                |(s, master)| {
-                    sys::set_nonblocking(&master)?;
-                    Ok((s, Some(pty::Pty::new(master, cols, rows)?)))
-                },
-            )
+            crate::spawn::spawn_pty(&argv, agent_id.as_str(), &env, &cwd, cols, rows)
+                .map(|(s, master)| (s, Some(pty::Pty::new(master, cols, rows))))
         }
     };
     let (spawned, pty_state) = match spawned {
@@ -1047,9 +1058,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             // named instead, as CPython names it (its `noexec:chdir` path): a leg
             // whose cwd does not exist answering `No such file or directory:
             // 'python3'` would send the model hunting an interpreter that is there.
-            let culprit = if e.kind() == std::io::ErrorKind::NotFound
-                && !std::path::Path::new(&cwd).is_dir()
-            {
+            let culprit = if sys::cwd_failed(&e, &cwd) {
                 &cwd
             } else {
                 &command
@@ -1184,6 +1193,16 @@ pub fn child_env(meta: &Map<String, Value>) -> Map<String, Value> {
         for n in &names {
             if let Ok(v) = std::env::var(n) {
                 env.insert(n.clone(), json!(v));
+            }
+        }
+    }
+    // What the OS itself needs in every process (`sys::OS_ENV`: nothing on unix,
+    // `SYSTEMROOT` on Windows) comes down from the kernel's env even when
+    // `inherit_env` leaves it out; the record's `env` still has the last word.
+    for n in sys::OS_ENV {
+        if !env.contains_key(*n) {
+            if let Ok(v) = std::env::var(n) {
+                env.insert((*n).to_string(), json!(v));
             }
         }
     }

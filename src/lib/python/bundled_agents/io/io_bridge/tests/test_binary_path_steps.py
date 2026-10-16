@@ -31,7 +31,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.websockets import WebSocketState
 
-from _testkit import boot_root
+from _testkit import LF_STDIO, boot_root, child_env, child_environ, command_rx
 from _testkit_relay import _pair as relay_pair
 from io_bridge import (
     ConnectionClosed,
@@ -44,6 +44,8 @@ from io_bridge import (
 from web_rest.tools import _make_post_endpoint
 from web_ws._proxy import run as ws_run
 from kernel import register_unlisted
+
+from exec_bridge import _sys
 
 # ─── the far kernel's probe ──────────────────────────────────────────────────
 
@@ -417,10 +419,12 @@ def test_the_guest_wire_carries_a_literal_key_both_ways():
         "print(sorted(r), r['x.y'], r['x'])\n"
     )
     parent, child_end = socket.socketpair()
-    proc = subprocess.Popen(
+    proc = _sys.popen_inheriting(
         [sys.executable, "-u", "-c", code],
-        env={"FANTASTIC_CTRL_FD": str(child_end.fileno()), "PATH": "/usr/bin:/bin"},
-        pass_fds=[child_end.fileno()],
+        child_end,
+        env=child_environ(
+            FANTASTIC_CTRL_FD=str(child_end.fileno()), PATH="/usr/bin:/bin"
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -463,10 +467,12 @@ def test_the_guest_wire_carries_a_list_index_from_the_program():
         "kernel.emit({'type': 'chunks', 'items': [{'n': 0}, {'data': b'hi'}]})\n"
     )
     parent, child_end = socket.socketpair()
-    proc = subprocess.Popen(
+    proc = _sys.popen_inheriting(
         [sys.executable, "-u", "-c", code],
-        env={"FANTASTIC_CTRL_FD": str(child_end.fileno()), "PATH": "/usr/bin:/bin"},
-        pass_fds=[child_end.fileno()],
+        child_end,
+        env=child_environ(
+            FANTASTIC_CTRL_FD=str(child_end.fileno()), PATH="/usr/bin:/bin"
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -509,13 +515,13 @@ async def test_a_job_round_trips_a_literal_key_through_the_kernel(
             "handler_module": "exec_bridge.tools",
             "ingress_rule": "allow_all_ingress",
             "cwd": ".",
-            "inherit_env": ["PATH"],
-            "allowed": [rf"{py} -c .*"],
+            "inherit_env": child_env("PATH"),
+            "allowed": [rf"{command_rx(py)} -c .*"],
             "can_call": {"echo": "*"},
         },
     )
     assert made["result"].get("id") == "runner", made
-    child = (
+    child = LF_STDIO + (
         "r = kernel.send('echo', {'type': 'take', 'a': {'b': 'kept'}, "
         "'a.b': b'\\x00raw\\xff'})\n"
         "print('GOT', r['keys'], r['x.y'] == b'\\x00raw\\xff', r['x'])\n"

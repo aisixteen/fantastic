@@ -93,7 +93,7 @@ def _root(kernel, rec: dict) -> fs.Root:
 def _norm(path: str) -> str | None:
     """A root-relative path, normalised (`posixpath.normpath`); None when it is
     absolute or climbs out. The empty path is the root, `.`."""
-    if path.startswith("/"):
+    if fs.is_absolute(path):
         return None
     p = posixpath.normpath(path or ".")
     if p == ".." or p.startswith("../"):
@@ -193,7 +193,7 @@ def _path_arg(verb: str, payload: dict, name: str = "path"):
         p = ""
     if not isinstance(p, str):
         return None, bad(verb, name, "a string")
-    if p.startswith("/"):
+    if fs.is_absolute(p):
         return None, bad(verb, name, "a root-relative path (no leading '/')")
     return p, None
 

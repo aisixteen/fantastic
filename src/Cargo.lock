@@ -741,6 +741,7 @@ dependencies = [
  "nix 0.29.0",
  "serde_json",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -756,6 +757,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -800,6 +802,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unsafe-libyaml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -939,6 +942,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.2.0",
  "vt100",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -962,6 +966,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

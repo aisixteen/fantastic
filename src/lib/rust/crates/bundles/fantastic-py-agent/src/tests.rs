@@ -2,6 +2,7 @@
 //! case: real programs (python, speaking the canonical reference helper).
 
 use super::*;
+use fantastic_kernel::test_support::symlink;
 use fantastic_kernel::{Agent, Item};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -459,7 +460,7 @@ async fn a_bundle_folder_linking_outside_is_refused() {
     let real = bundle(&tmp, "rs_escape_src", ECHO, VERBS);
     let away = outside.path().join("rs_escape");
     std::fs::rename(&real, &away).unwrap();
-    std::os::unix::fs::symlink(&away, tmp.path().join(".fantastic/bundles/rs_escape")).unwrap();
+    symlink(&away, tmp.path().join(".fantastic/bundles/rs_escape")).unwrap();
     let kernel = kernel_for(&tmp);
     let err =
         fantastic_core::folders::load_bundle(&kernel, &tmp.path().join(".fantastic"), "rs_escape")

@@ -18,8 +18,8 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -39,13 +39,14 @@ import websockets  # noqa: E402
 
 from canvas import MAC_CHROME, Page, attach, free_port  # noqa: E402
 from e2e_build import build_lock  # noqa: E402
+from helpers import oslayer  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
 SRC = REPO / "src"
 # e2e builds go to their OWN target dir: the dev binary (`src/target/debug/fantastic`,
 # often linked as `~/.local/bin/fantastic`) keeps the features its owner built it with
 E2E_TARGET = SRC / "target" / "e2e"
-BIN = E2E_TARGET / "debug" / "fantastic"
+BIN = oslayer.exe(E2E_TARGET / "debug" / "fantastic")
 RUNS = SRC / "tui" / "e2e" / "runs"
 #: The backends the CLI links, and the cargo feature that links each.
 FEATURES = {
@@ -117,7 +118,7 @@ def private_dirs(d: Path) -> None:
         d = d.parent
     for m in reversed(missing):
         m.mkdir(mode=0o700)
-        os.chmod(m, 0o700)
+        oslayer.make_private(m)
 
 
 def private_write(p: Path, text: str) -> None:
@@ -125,10 +126,27 @@ def private_write(p: Path, text: str) -> None:
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.write(fd, text.encode())
     os.close(fd)
+    oslayer.make_private(p)
 
 
 # the root view's backend folder on the host: a cell's backend lives here
 FOLDER = "agents/user/agents/web/agents/canvas_page/agents/canvas_root"
+
+#: The interpreter a test PROGRAM runs under: this one, by absolute path, so no
+#: program needs a `python3` on some PATH (Windows has none).
+PY = sys.executable
+
+
+def py_job(*args: str) -> tuple[list[str], str]:
+    """`(argv, its exact allowed line)` for a job that runs `PY` on `args`."""
+    argv = [PY, *args]
+    return argv, "^" + re.escape(shlex.join(argv)) + "$"
+
+
+def py_typed(*args: str) -> str:
+    """A command line running `PY` on `args`, as typed into ANY shell (sh, bash,
+    zsh, cmd.exe): the interpreter's path double-quoted, nothing else."""
+    return " ".join([f'"{PY}"', *args])
 
 
 #: The runner's hard stop per test (`e2e/run.py` HARD_STOP_S), less a margin
@@ -187,13 +205,13 @@ class Rig:
                 r = subprocess.run(args, cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
                 if r.returncode != 0:
                     raise SystemExit(f"{' '.join(args)} failed:\n{r.stderr[-2000:]}")
-            self.binary = self.art / "fantastic"
+            self.binary = oslayer.exe(self.art / "fantastic")
             shutil.copy2(src, self.binary)  # a private copy: another build cannot swap it mid-run
 
     def make_home(self, record: dict | None = None, name: str = "plug") -> None:
         """A throwaway FANTASTIC_HOME — with `record` saved as the default, or none."""
         private_dirs(saved_dir(self.home))
-        os.chmod(self.home, 0o700)
+        oslayer.make_private(self.home)
         if record is not None:
             record = seed_key(self.home, record)
             private_write(saved_dir(self.home) / f"{name}.yaml", yaml.safe_dump(record, sort_keys=False))
@@ -208,7 +226,8 @@ class Rig:
         args = [str(self.binary), "canvas", *(["--port", str(self.port)] if first else [])]
         with open(self.log, "a") as f:
             f.write("\n=== start\n")
-        self.host = subprocess.Popen(args, cwd=self.proj, env=self.env(), stdout=open(self.log, "a"), stderr=subprocess.STDOUT)
+        self.host = subprocess.Popen(args, cwd=self.proj, env=self.env(), stdout=open(self.log, "a"), stderr=subprocess.STDOUT,
+                                     **oslayer.group_kwargs())
         for _ in range(600):
             if self.host.poll() is not None:
                 raise SystemExit(f"the host exited {self.host.returncode}: {self.log.read_text()[-800:]}")
@@ -223,7 +242,7 @@ class Rig:
     def stop(self) -> None:
         if self.host is None:
             return
-        self.host.send_signal(signal.SIGTERM)
+        oslayer.stop(self.host)
         try:
             self.host.wait(30)
         except subprocess.TimeoutExpired:
@@ -355,7 +374,7 @@ class Rig:
         # rate is the GPU's, not the software rasterizer's)
         # headless: software WebGL (SwiftShader) — the terminals draw with WebGL
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-        chrome = subprocess.Popen([MAC_CHROME, *mode, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
+        chrome = subprocess.Popen([os.environ.get("CHROME") or MAC_CHROME, *mode, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
                                    f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
                                    "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

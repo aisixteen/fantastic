@@ -4,7 +4,7 @@
 use super::*;
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
-use fantastic_kernel::test_support::as_agent;
+use fantastic_kernel::test_support::{as_agent, symlink};
 use fantastic_kernel::{Agent, AgentRecord, Item};
 use serde_json::{json, Map};
 
@@ -428,7 +428,7 @@ fn a_symlinked_manifest_escaping_cwd_is_refused() {
     // under the `cannot read manifest` prefix.
     let (fixture, rel) = write_manifest(MANIFEST);
     let link = std::path::Path::new(&rel).with_file_name("link.yaml");
-    std::os::unix::fs::symlink("/etc/hosts", &link).unwrap();
+    symlink("/etc/hosts", &link).unwrap();
     let rel_link = link.display().to_string();
     let agent = loader_with_meta(meta_of(&[("manifest", json!(rel_link.clone()))]));
     assert_eq!(

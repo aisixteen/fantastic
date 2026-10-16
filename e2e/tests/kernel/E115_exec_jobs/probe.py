@@ -16,12 +16,18 @@ swift), every call through `web_rest`, its events watched over the `ws` face:
   5. kernel `cancel task_id=<job_id>` on a running job: `ps` listed it, the OS
      process is gone, the row settles `stopped` and leaves `ps`;
   6. `status` shape: one job (with `cwd`) and the summary (without).
+
+Every job is THIS interpreter running a `-c` program (absolute path, so the child
+needs no PATH; output written as bytes, so no OS rewrites a line ending) — the same
+fixture on every OS.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -34,23 +40,29 @@ import yaml
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from helpers import oslayer
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.host.ws import WSWatcher
 from helpers.verdict import verdict
 
 REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
-SH = "/bin/sh"
-ALLOWED = [r"/bin/sh -c .*"]
-ENV = {"PATH": "/usr/bin:/bin"}
+PY = sys.executable
+# The allowlist matches the SHELL-JOINED line, where the interpreter's path is
+# quoted as python's `shlex.quote` quotes it.
+PY_LINE = re.escape(shlex.quote(PY))
+ALLOWED = [PY_LINE + r" -c .*"]
+ENV = oslayer.child_env()
 GRANTS = {"$self": "*", "$parent": "*", "ws": "*"}
 # 20000 lines of 32 chars: 33 ring bytes each (line + 1) → 7943 fit in 256 KiB.
 BIG_N, BIG_W = 20000, 32
 RING = 256 * 1024
 KEPT = RING // (BIG_W + 1)
 BIG = (
-    f"awk 'BEGIN{{for(i=1;i<={BIG_N};i++) printf \"line %06d xxxxxxxxxxxxxxxxxxxx\\n\", i}}'"
+    "import sys; o = sys.stdout.buffer\n"
+    f"for i in range(1, {BIG_N} + 1): o.write(b'line %06d xxxxxxxxxxxxxxxxxxxx\\n' % i)"
 )
+ONE_TWO = "import sys; sys.stdout.buffer.write(b'one\\ntwo\\n')"
 DONE_KEYS = {"type", "job_id", "exit_code", "ok", "lines", "last_line"}
 PTY_DONE_KEYS = {"type", "job_id", "exit_code", "ok"}
 SNAP_KEYS = {"job_id", "status", "exit_code", "started_at", "lines", "last_line",
@@ -96,7 +108,7 @@ def main() -> int:
     (broken / "agent.yaml").write_text(yaml.safe_dump({
         "id": "ex_broken", "handler_module": "exec_bridge.tools", "parent_id": "rest",
         "ingress_rule": "allow_all_ingress", "cwd": str(run_dir), "env": ENV,
-        "allowed": ["/bin/sh -c (.*"], "callable_by": GRANTS,
+        "allowed": [PY_LINE + " -c (.*"], "callable_by": GRANTS,
     }, sort_keys=False))
     hk = HostKernel(spec, work, reach=["ex", "ex_broken"]).boot()
     root = hk.root_id
@@ -111,8 +123,8 @@ def main() -> int:
         r = hk.send(target, payload, timeout=60)
         return r if isinstance(r, dict) else {"error": f"non-dict reply {r!r}"}
 
-    def start(script: str, **kw) -> dict:
-        return ex({"type": "start", "command": SH, "args": ["-c", script], **kw})
+    def start(program: str, **kw) -> dict:
+        return ex({"type": "start", "command": PY, "args": ["-c", program], **kw})
 
     def status(jid: int) -> dict:
         jobs = ex({"type": "status", "job_id": jid}).get("jobs") or [{}]
@@ -132,7 +144,7 @@ def main() -> int:
 
         # 1 · the allowlist. The first job doubles as the watcher's barrier: its
         # job_done arriving proves the ws watch is live.
-        s = start("echo one; echo two")
+        s = start(ONE_TWO)
         jid = s.get("job_id")
         need(isinstance(jid, int) and not isinstance(jid, bool)
              and s.get("status") == "running" and s.get("pty") is False,
@@ -140,7 +152,7 @@ def main() -> int:
         ev = poll(lambda: done_event(jid), "job_done of the first job", timeout=5)
         if ev is None:
             # The watch may have registered after the job ended: one more job.
-            jid = start("echo one; echo two").get("job_id")
+            jid = start(ONE_TWO).get("job_id")
             ev = poll(lambda: done_event(jid), "job_done (retry after watch)")
         need(ev is not None, "job_done arrives on the agent's event stream")
         ev = ev or {}
@@ -150,27 +162,30 @@ def main() -> int:
         need("stdout" not in ev and "stderr" not in ev, "job_done carries no stdout/stderr")
 
         before = len(ex({"type": "status"}).get("jobs") or [])
-        r = ex({"type": "start", "command": "/bin/echo", "args": ["hi"]})
+        r = ex({"type": "start", "command": PY, "args": ["-V"]})
         need(r.get("reason") == "unauthorized" and "job_id" not in r,
              f"a line no pattern matches is refused unauthorized: {str(r)[:200]}")
         after = len(ex({"type": "status"}).get("jobs") or [])
         need(after == before, f"the refused line started nothing ({before} → {after} jobs)")
-        r = ex({"type": "start", "command": "/bin/sh -c echo hi"})
+        r = ex({"type": "start", "command": f"{PY} -c print(1)"})
         need(r.get("reason") == "unauthorized",
              f"a whole line in `command` is one word, refused: {str(r)[:160]}")
 
-        r = ex({"type": "start", "command": SH, "args": ["-c", "echo x"]}, target="ex_broken")
+        r = ex({"type": "start", "command": PY, "args": ["-c", "print(1)"]}, target="ex_broken")
         need(r.get("reason") == "unauthorized" and "job_id" not in r,
              f"a broken `allowed` regex permits nothing: {str(r)[:200]}")
-        r = hk.send(root, {"type": "update_agent", "id": "ex", "allowed": ["/bin/sh (.*"]})
+        r = hk.send(root, {"type": "update_agent", "id": "ex", "allowed": [PY_LINE + " (.*"]})
         need(bool(r.get("error")) and r.get("updated") is not True,
              f"update_agent refuses a broken regex: {str(r)[:200]}")
-        r = start("echo still")
+        r = start("print('still')")
         need(isinstance(r.get("job_id"), int),
              f"the refused update left the allowlist as it was: {str(r)[:160]}")
 
         # 2 · a failing job: exit code, ok, stderr counted as lines
-        j2 = start("echo out1; echo err1 >&2; echo out2; exit 3").get("job_id")
+        j2 = start("import sys\n"
+                   "sys.stdout.buffer.write(b'out1\\n'); sys.stdout.flush()\n"
+                   "sys.stderr.buffer.write(b'err1\\n'); sys.stderr.flush()\n"
+                   "sys.stdout.buffer.write(b'out2\\n'); sys.exit(3)").get("job_id")
         ev2 = poll(lambda: done_event(j2), "job_done of the failing job") or {}
         need(set(ev2) == DONE_KEYS and ev2.get("exit_code") == 3 and ev2.get("ok") is False
              and ev2.get("lines") == 3,
@@ -222,7 +237,7 @@ def main() -> int:
         need(r.get("reason") == "bad_arg", f"grep with a broken regex refused: {str(r)[:120]}")
 
         # 4 · a PTY job
-        sp = start('read x; echo "got:$x"', pty={"cols": 100, "rows": 30})
+        sp = start("x = input(); print('got:' + x)", pty={"cols": 100, "rows": 30})
         jp = sp.get("job_id")
         need(isinstance(jp, int) and sp.get("pty") is True, f"a PTY start: {sp}")
         sj = status(jp)
@@ -242,7 +257,9 @@ def main() -> int:
              f"output replays the PTY ring: {str(o)[:160]}")
 
         # 5 · cancel a running job
-        jc = start("echo $$; exec sleep 60").get("job_id")
+        jc = start("import os, sys, time\n"
+                   "sys.stdout.buffer.write(b'%d\\n' % os.getpid()); sys.stdout.flush()\n"
+                   "time.sleep(60)").get("job_id")
         pid_line = poll(lambda: (ex({"type": "tail", "job_id": jc}).get("lines") or [None])[0],
                         "the sleeper's pid")
         pid = int(pid_line["line"]) if pid_line and pid_line.get("line", "").isdigit() else None
@@ -258,13 +275,7 @@ def main() -> int:
         need(sc.get("status") == "stopped", f"the cancelled job settles stopped: {sc}")
 
         def gone() -> bool:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return True
-            except PermissionError:
-                return False
-            return False
+            return not oslayer.pid_alive(pid)
 
         need(pid is not None and bool(poll(gone, "the OS process to die", timeout=10)),
              f"the OS process {pid} is gone")
@@ -275,7 +286,7 @@ def main() -> int:
         one = ex({"type": "status", "job_id": jid})
         oj = (one.get("jobs") or [{}])[0]
         need(set(oj) == SNAP_KEYS | {"cwd"} and oj.get("cwd") == str(run_dir)
-             and oj.get("command") == SH and oj.get("args") == ["-c", "echo one; echo two"]
+             and oj.get("command") == PY and oj.get("args") == ["-c", ONE_TWO]
              and oj.get("status") == "done" and oj.get("exit_code") == 0
              and isinstance(oj.get("started_at"), (int, float)),
              f"status job_id=: {oj}")

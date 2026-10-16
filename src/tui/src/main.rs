@@ -36,6 +36,8 @@ mod tty;
 mod ui;
 mod vm;
 
+use std::io::IsTerminal;
+
 use anyhow::Result;
 
 /// The entry point, and nothing else: the loop lives in `run`, the state in
@@ -47,7 +49,7 @@ use anyhow::Result;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // NOT ON A TERMINAL, NO ARGUMENTS: the readme, and nothing runs.
-    if args.is_empty() && !sys::stdout_is_tty() {
+    if args.is_empty() && !std::io::stdout().is_terminal() {
         print!("{}", readme::text());
         return Ok(());
     }
@@ -61,9 +63,9 @@ fn main() -> Result<()> {
         send::main(&args[1..])
     }
     match recipe::parse(&args) {
-        // THE UI NEEDS A TERMINAL (it draws on `/dev/tty`): without one, say so
-        // here — before fds 1 and 2 are pointed at the log file — and stop
-        Ok(o) if !o.headless && std::fs::OpenOptions::new().read(true).write(true).open(sys::TTY).is_err() => {
+        // THE UI NEEDS A TERMINAL (it draws on `/dev/tty`, `sys::TTY`): without
+        // one, say so here — before fds 1 and 2 are pointed at the log file — and stop
+        Ok(o) if !o.headless && sys::open_tty().is_err() => {
             eprintln!("fantastic: the UI needs a terminal — where there is none, run `fantastic canvas` or `fantastic --headless`");
             std::process::exit(1);
         }

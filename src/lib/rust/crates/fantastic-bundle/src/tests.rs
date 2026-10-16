@@ -154,7 +154,10 @@ fn os_error_str_matches_cpython() {
         os_error_str(66, Some("/abs")),
         "[Errno 66] Directory not empty: '/abs'"
     );
-    let e = std::io::Error::from_raw_os_error(20);
+    // The OS's own code for "not a directory": ENOTDIR on unix, ERROR_DIRECTORY
+    // on Windows — both read as python's errno 20.
+    let raw = if cfg!(windows) { 267 } else { 20 };
+    let e = std::io::Error::from_raw_os_error(raw);
     assert_eq!(
         io_error_str(&e, std::path::Path::new("/f/x")),
         "[Errno 20] Not a directory: '/f/x'"

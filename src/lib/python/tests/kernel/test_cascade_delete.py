@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 
+from _testkit import command_rx
+
 
 async def test_cascade_walks_deepest_first(seeded_kernel):
     """Three-level pyramid: delete root of subtree → all descendants
@@ -130,7 +132,7 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
                         "handler_module": "exec_bridge.tools",
                         "ingress_rule": "allow_all_ingress",
                         "cwd": ".",
-                        "allowed": [rf"{sys.executable} -c .*"],
+                        "allowed": [rf"{command_rx(sys.executable)} -c .*"],
                     },
                 }
             ]

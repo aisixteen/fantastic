@@ -725,6 +725,17 @@ review, force-push surprise, polluted history) is high.
     detailed docs.
   - `VERBS = {"<name>": _<name>, ...}` dispatch table.
   - `async def handler(id, payload, kernel)` 4-line dispatcher.
+- **The OS boundary is `_sys`** — every OS-specific call lives in a package's
+  `_sys/` (`posix.py` / `nt.py`, picked once on `os.name`): `kernel/_sys` (the lock,
+  the stop signals — SIGINT/SIGTERM/SIGHUP, on Windows SIGBREAK, the CTRL_BREAK a
+  polite stop sends, in SIGHUP's place — UTF-8 stdio, the POSIX-shaped `OSError`
+  text: `[Errno N] <C runtime strerror>` on every OS), `file_bridge/_sys` (the
+  no-follow create, the PRIVATE-file judgment — on Windows the handle's owner +
+  a protected DACL naming only this user — which wire paths are absolute: a drive
+  or UNC prefix too on Windows), `exec_bridge/_sys` (a job's container — a session,
+  a Job Object on Windows — its interrupt, the control socket pair, the PTY —
+  ConPTY on Windows — the PATH grammar — PATHEXT on Windows). Call sites never
+  branch on the OS; a test of a concept one OS lacks is `_testkit.posix_only`.
 - Records in `.fantastic/agents/<id>/agent.yaml` carry only metadata.
   Process-memory state (PTY child, uvicorn server, in-flight tasks)
   is per-process and visible only to the kernel that owns it —
@@ -798,8 +809,8 @@ The ONLY disk code outside `fs`: the substrate's fixed-path bootstrap (`kernel/_
 `_env` — the substrate is decoupled from bundles, cannot import one);
 `importlib.resources` reads of a bundle's OWN baked-in assets (readme + `docs/` topic
 tree via `Agent._read_readme`, help/index/favicon — a package lookup, not an arbitrary path);
-`exec_bridge`'s process plumbing — `proc` lists `/proc` (Linux) for a job's session
-members and probes the child's `PATH` dirs for a bare command (`os.path.isfile` +
+`exec_bridge`'s process plumbing — its `_sys` lists `/proc` (Linux) for a job's session
+members and `proc` probes the child's `PATH` dirs for a bare command (`os.path.isfile` +
 `os.access`, metadata only), and `paste_image` creates its scratch dir with
 `tempfile.mkdtemp` (the image is then written through `fs`, `external=True`); and the
 `file_bridge` agent's `list`, which stats the entries `fs.list_dir` returned.
@@ -811,6 +822,7 @@ members and probes the child's `PATH` dirs for a bare command (`os.path.isfile` 
 - The file_bridge's path-safety refuses anything escaping its `root`, and
   the running-dir law clamps the `root` itself inside the kernel's running dir.
 - `fantastic` writes `.fantastic/lock.yaml` with `{pid}` and holds an
-  flock on it; a second serve in the same dir refuses with a clear error
+  flock on it (on Windows a `LockFileEx` lock on byte 2^62 of it — the one rust
+  takes); a second serve in the same dir refuses with a clear error
   and a lock no live process holds is taken over. The one-shots (`<id>
   <verb>`, `init`) take the SAME flock — they never judge the pid.

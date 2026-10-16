@@ -59,6 +59,61 @@ def persist(root) -> None:
             write_record(fs.Root(root.ctx.workdir, a._root_path), a.record)
 
 
+# ─── the OS a test runs on ───────────────────────────────────────────────────
+#
+# THE tests' one OS switch — the twin of the packages' `_sys` modules (which hold
+# every OS-specific fixture a test reads: `file_bridge._sys.set_mode`,
+# `exec_bridge._sys.session_members`, …). A test of a concept Windows does not
+# have is marked `posix_only("<why>")`; a value that differs by OS is `per_os`.
+import os as _os  # noqa: E402 — after the module prose above
+import re as _re  # noqa: E402
+import shlex as _shlex  # noqa: E402
+import signal as _signal  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+import pytest as _pytest  # noqa: E402
+
+WINDOWS = _os.name == "nt"
+
+
+def posix_only(reason: str):
+    """Skip on Windows: the test is of a concept Windows does not have — `reason`
+    says which, in one line."""
+    return _pytest.mark.skipif(WINDOWS, reason=reason)
+
+
+def per_os(*, posix, nt):
+    """`posix` on POSIX, `nt` on Windows — a fixture value that differs by OS."""
+    return nt if WINDOWS else posix
+
+
+#: Popen kwargs for a child a test stops politely (`polite_stop`): on Windows it
+#: leads its own process group, the one a CTRL_BREAK addresses.
+POLITE_SPAWN = (
+    {"creationflags": _subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {}
+)
+
+
+def polite_stop(p) -> None:
+    """Ask a child spawned with `POLITE_SPAWN` to stop — its SIGTERM: SIGTERM on
+    POSIX, CTRL_BREAK (the kernel's SIGBREAK) on Windows."""
+    p.send_signal(_signal.CTRL_BREAK_EVENT if WINDOWS else _signal.SIGTERM)
+
+
+#: A python program's first line, making its stdout/stderr end a line with `\n`:
+#: Windows' text mode writes `\r\n`, and a job keeps the `\r` as data.
+LF_STDIO = (
+    "import sys; sys.stdout.reconfigure(newline='\\n'); "
+    "sys.stderr.reconfigure(newline='\\n')\n"
+)
+
+
+def command_rx(program: str) -> str:
+    """An `allowed` regex fragment matching `program` as exec_bridge's shell-joined
+    line spells it (`shlex.quote` — a Windows path with `\\` is quoted)."""
+    return _re.escape(_shlex.quote(program))
+
+
 # ─── running a PYTHON helper on the command runner ──────────────────────────
 #
 # exec_bridge is a general-purpose COMMAND runner. A test that wants a python
@@ -67,13 +122,32 @@ def persist(root) -> None:
 import sys as _sys  # noqa: E402 — after the module prose above
 
 
+def child_env(*names: str) -> list[str]:
+    """An `inherit_env` naming `names` plus what a child needs from the OS just to
+    start (`exec_bridge._sys.OS_ENV`: nothing on POSIX, SYSTEMROOT on Windows —
+    the connector's socket needs it)."""
+    from exec_bridge._sys import OS_ENV
+
+    return [*names, *OS_ENV]
+
+
+def child_environ(**env: str) -> dict:
+    """A whole environment for a child a test spawns itself: `env` plus the values
+    of `exec_bridge._sys.OS_ENV` from this process (none on POSIX)."""
+    from exec_bridge._sys import OS_ENV
+
+    return {**{n: _os.environ[n] for n in OS_ENV if n in _os.environ}, **env}
+
+
 def py_runner_meta(**extra) -> dict:
     """create_agent meta for an exec_bridge leg permitted to run `python -c …`."""
+    os_env = child_env()
     return {
         "handler_module": "exec_bridge.tools",
-        "allowed": [f"{_sys.executable} -c .*"],
+        "allowed": [f"{command_rx(_sys.executable)} -c .*"],
         "ingress_rule": "allow_all_ingress",
         "cwd": ".",
+        **({"inherit_env": os_env} if os_env else {}),
         **extra,
     }
 

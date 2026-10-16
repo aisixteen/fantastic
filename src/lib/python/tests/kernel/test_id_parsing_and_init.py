@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import os
 import types
@@ -20,7 +19,7 @@ import pytest
 import yaml
 from _testkit import memory_meta
 
-from kernel import dispatch_argv, register_unlisted
+from kernel import _sys, dispatch_argv, register_unlisted
 
 ARABIC = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
 
@@ -310,12 +309,13 @@ async def test_init_seeds_and_boots_a_loader_and_prints_its_record(
 
 def _held_lock(tmp_path, pid: int) -> int:
     """`lock.yaml` naming `pid`, its flock HELD on a descriptor of its own — what
-    a live daemon's lock is. The caller closes the descriptor."""
+    a live daemon's lock is (`_sys.lock`: on Windows the same byte-range lock).
+    The caller releases it with `_sys.unlock_close`."""
     d = tmp_path / ".fantastic"
     d.mkdir(exist_ok=True)
     (d / "lock.yaml").write_text(yaml.safe_dump({"pid": pid}))
-    fd = os.open(d / "lock.yaml", os.O_RDONLY)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    fd = _sys.open_lock(d / "lock.yaml", os.O_RDONLY)
+    _sys.lock(fd)
     return fd
 
 
@@ -335,7 +335,7 @@ async def test_init_refuses_while_another_fantastic_owns_the_dir(
         with pytest.raises(SystemExit) as e:
             await dispatch_argv(kernel.ctx, ["init", "static_loader", "./x.yaml"])
     finally:
-        os.close(fd)
+        _sys.unlock_close(fd)
     assert e.value.code == 1
     assert capsys.readouterr().err == (
         f"[init] another fantastic owns this dir (pid={os.getppid()}). Stop it first.\n"
@@ -375,7 +375,7 @@ async def test_call_refuses_while_another_fantastic_owns_the_dir(
         with pytest.raises(SystemExit) as e:
             await dispatch_argv(kernel.ctx, ["kernel", "ps"])
     finally:
-        os.close(fd)
+        _sys.unlock_close(fd)
     assert e.value.code == 1
     assert capsys.readouterr().err == (
         f"[call] another fantastic owns this dir (pid={os.getppid()}). Stop it, or "

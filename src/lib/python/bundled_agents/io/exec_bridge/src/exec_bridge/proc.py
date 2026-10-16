@@ -25,55 +25,58 @@ pick a different one. Anything stronger needs an OS mechanism — `sandbox-exec`
 separate uid, a container — none reachable in-process. Stated plainly because the
 previous executor's security section was a documented hole, and replacing an honest hole
 with a dishonest reassurance would be worse.
+
+## What differs by OS
+
+How a job is contained and killed, how it is interrupted, how its control channel and
+its terminal are made, and what a bare command's PATH search tries live in `_sys` —
+one module per OS family (POSIX: a session, `killpg`-style SIGKILL, `socketpair`, a
+pty; Windows: a Job Object, CTRL_BREAK, a loopback TCP pair, ConPTY). Everything here
+is OS-neutral; the rest of the bundle (and `py_agent`) sees only this module.
 """
 
 from __future__ import annotations
 
-import asyncio
-import ctypes
 import errno
-import fcntl
 import os
-import signal
-import sys
-import termios
+
+from exec_bridge import _sys
+
+#: The terminal a PTY job runs on — `open_pty`'s, driven by `tools`.
+Pty = _sys.Pty
+#: The child env var naming the child's own shell (`SHELL`; Windows: `COMSPEC`).
+SHELL_VAR = _sys.SHELL_VAR
+#: The args that make that shell a login shell (`-l`; Windows: none).
+LOGIN_ARGS = _sys.LOGIN_ARGS
+#: What the OS needs in every child's environment (nothing on POSIX).
+OS_ENV = _sys.OS_ENV
 
 
-def _all_pids() -> list[int]:
-    """Every pid the OS lists right now — `proc_listallpids` on macOS, `/proc` on
-    Linux. Picked by platform, statically; there is no third source."""
-    if sys.platform == "darwin":
-        libc = ctypes.CDLL(None)
-        n = libc.proc_listallpids(None, 0)
-        buf = (ctypes.c_int * (n + 64))()
-        got = libc.proc_listallpids(buf, ctypes.sizeof(buf))
-        return [buf[i] for i in range(max(got, 0)) if buf[i] > 0]
-    return [int(d) for d in os.listdir("/proc") if d.isdigit()]
+def ctrl_pair():
+    """The control channel: a CONNECTED stream-socket pair `(parent, child)`. The
+    relay serves `parent`; `child` is inherited by exactly one job, and its number
+    (`child.fileno()`) is what `FANTASTIC_CTRL_FD` advertises — the connector's
+    `socket.socket(fileno=…)` takes it on every OS."""
+    return _sys.ctrl_pair()
 
 
 def kill_session(leader: int) -> None:
-    """SIGKILL a job's WHOLE session: every member first, then the leader.
+    """SIGKILL a job's WHOLE session — the command and everything it launched — by
+    the job's pid. POSIX: every member of the session the job leads, then the
+    leader (`_sys`); Windows: the job's own Job Object."""
+    _sys.kill_session(leader)
 
-    Every job leads its own session (`start_new_session`, pipe and PTY alike).
-    What it launched stays in that session — `server &` from a script, a `nohup`,
-    and each job an interactive shell puts in its OWN process group, which
-    neither a kill of the leader nor a tty hangup (foreground group only)
-    reaches. Once the leader is gone they reparent to init, so the members are
-    found by session id BEFORE the leader dies. A process that `setsid()`s
-    itself out of the session leaves it by design: containment beyond that is
-    the OS's (devops), not this bridge's."""
-    for pid in _all_pids():
-        if pid == leader:
-            continue
-        try:
-            if os.getsid(pid) == leader:
-                os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            continue  # gone meanwhile, or not ours to see
-    try:
-        os.kill(leader, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+
+def interrupt(process, term: Pty | None) -> None:
+    """The polite stop — a Ctrl-C — to one job: SIGINT on POSIX; on Windows a
+    CTRL_BREAK to a pipe job's process group, `\x03` typed into a PTY job's
+    console."""
+    _sys.interrupt(process, term)
+
+
+def open_pty(cols: int, rows: int) -> Pty:
+    """A fresh terminal of `cols` x `rows`, for `spawn_pty`."""
+    return _sys.open_pty(cols, rows)
 
 
 class NoPath(Exception):
@@ -81,20 +84,23 @@ class NoPath(Exception):
 
 
 def resolve(command: str, cwd: str, env: dict) -> str:
-    """argv[0] → the file to exec. A command with a `/` is exec'd as written
-    (relative to `cwd`). A bare name is looked up in the CHILD's `PATH` only —
-    never the kernel's, never a built-in default path; a child env without `PATH`
-    raises `NoPath` (the operator names it in `inherit_env` or `env`)."""
-    if "/" in command:
+    """argv[0] → the file to exec. A command naming a file (a `/`; on Windows a `\\`
+    too) is exec'd as written (relative to `cwd`). A bare name is looked up in the
+    CHILD's `PATH` only — never the kernel's, never a built-in default path; a child
+    env without `PATH` raises `NoPath` (the operator names it in `inherit_env` or
+    `env`). Which names a bare command may be found under is the OS's (`_sys`: the
+    name itself; on Windows its `PATHEXT` spellings, as `shutil.which`)."""
+    if _sys.names_a_file(command):
         return command
-    path = env.get("PATH")
+    path = _sys.child_path(env)
     if path is None:
         raise NoPath(command)
     for d in path.split(os.pathsep):
-        # POSIX: an empty entry is the working directory — the CHILD's.
-        full = os.path.abspath(os.path.join(cwd, d or ".", command))
-        if os.path.isfile(full) and os.access(full, os.X_OK):
-            return full
+        for name in _sys.exe_names(command):
+            # POSIX: an empty entry is the working directory — the CHILD's.
+            full = os.path.abspath(os.path.join(cwd, d or ".", name))
+            if _sys.is_executable(full):
+                return full
     raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), command)
 
 
@@ -108,40 +114,15 @@ async def spawn_argv(argv: list[str], cwd: str, env: dict, pass_fd: int):
     reads the fd). The child LEADS ITS OWN SESSION, so `kill_session` takes the
     command and everything it launched (`server &`, a `nohup`) — and a Ctrl-C at
     the kernel's terminal is the kernel's to handle, not a signal to every job."""
-    return await asyncio.create_subprocess_exec(
-        *argv,
-        executable=resolve(argv[0], cwd, env),
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-        pass_fds=(pass_fd,),
-        start_new_session=True,
-        # A line longer than asyncio's 64 KiB default would end the whole pipe with
-        # `[pump error]`; a program's line is not bounded.
-        limit=16 * 1024 * 1024,
-    )
+    return await _sys.spawn_argv(argv, resolve(argv[0], cwd, env), cwd, env, pass_fd)
 
 
-def _controlling_tty() -> None:
-    """In the child, after `setsid`: make the PTY slave (fd 0) the controlling
-    terminal, so job control, Ctrl-C and SIGWINCH reach the program."""
-    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-
-
-async def spawn_pty(argv: list[str], cwd: str, env: dict, pass_fd: int, slave: int):
-    """Start ARGV on a PTY: stdin/stdout/stderr are the SLAVE end, the child leads a
-    new session with that tty as its controlling terminal. Same gate, same env rule,
-    same control fd as `spawn_argv` — a terminal is a job, not a second spawner."""
-    return await asyncio.create_subprocess_exec(
-        *argv,
-        executable=resolve(argv[0], cwd, env),
-        cwd=cwd,
-        stdin=slave,
-        stdout=slave,
-        stderr=slave,
-        env=env,
-        pass_fds=(pass_fd,),
-        start_new_session=True,
-        preexec_fn=_controlling_tty,
+async def spawn_pty(argv: list[str], cwd: str, env: dict, pass_fd: int, term: Pty):
+    """Start ARGV on the terminal `term`: its stdin/stdout/stderr are the terminal,
+    and the child leads a new session with it as its controlling terminal. Same
+    gate, same env rule, same control fd as `spawn_argv` — a terminal is a job, not
+    a second spawner. `term`'s child side is the job's from here on (the kernel's
+    copy goes, so the kernel sees EOF when the job's last copy closes)."""
+    return await _sys.spawn_pty(
+        argv, resolve(argv[0], cwd, env), cwd, env, pass_fd, term
     )

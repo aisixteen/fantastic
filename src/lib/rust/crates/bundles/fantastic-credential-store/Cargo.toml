@@ -15,7 +15,9 @@ fantastic-kernel = { path = "../../fantastic-kernel" }
 fantastic-file = { path = "../fantastic-file" }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-# getuid / getpwnam_r: the owner check on the credential file and `~` expansion.
+
+# `sys::unix` — getpwuid_r / getpwnam_r: `~` expansion.
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 # THE OS KEYCHAIN — the `keychain` backend only, and only where this runtime has

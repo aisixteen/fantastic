@@ -16,6 +16,28 @@ import socket
 import struct
 import sys
 
+from _testkit import child_env, child_environ, command_rx, per_os
+
+from exec_bridge import _sys
+
+# The commands these tests run are python programs (`PY -c …`): the same act on
+# every OS, where a POSIX tool (`echo`, `sleep`, `/bin/sh`) has no Windows twin.
+PY = sys.executable
+PY_RX = command_rx(PY)
+SLEEP = ["-c", "import time; time.sleep(30)"]
+
+
+def _say(text: str) -> list[str]:
+    """`-c` args printing `text` + newline as raw bytes — no `\\r` a text-mode
+    stdout adds on Windows."""
+    return ["-c", f"import sys; sys.stdout.buffer.write({(text + chr(10)).encode()!r})"]
+
+
+def _line(row: dict) -> str:
+    """A job's last line, as written — a console program on Windows (a `.cmd`)
+    ends its line with `\\r\\n`, the `\\r` kept as data."""
+    return (row.get("last_line") or "").rstrip("\r")
+
 
 async def _mk(kernel, agent_id="runner", **extra):
     meta = {
@@ -26,8 +48,9 @@ async def _mk(kernel, agent_id="runner", **extra):
         "ingress_rule": "allow_all_ingress",
         # WHERE a command runs is the record's, required — never guessed
         "cwd": ".",
-        # a bare command is found on the CHILD's PATH only
-        "inherit_env": ["PATH"],
+        # a bare command is found on the CHILD's PATH only (+ what the OS needs to
+        # start a child at all: `_sys.OS_ENV`)
+        "inherit_env": child_env("PATH"),
         **extra,
     }
     r = (await kernel.send([{"target": kernel.id, "payload": meta}]))[0]["result"]
@@ -207,8 +230,8 @@ async def test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it(seeded_ker
     the old random 8-hex ids came back from a model as ints or infinite floats
     (`04203581`, `458e5912`) and 3.7% of jobs could not be addressed again."""
     k = seeded_kernel
-    await _mk(k, agent_id="ids", allowed=[rf"{sys.executable} .*"])
-    r = await _start(k, "ids", sys.executable, ["-c", "import time; time.sleep(30)"])
+    await _mk(k, agent_id="ids", allowed=[rf"{PY_RX} .*"])
+    r = await _start(k, "ids", PY, SLEEP)
     jid = r["job_id"]
     assert isinstance(jid, int) and not isinstance(jid, bool), r
     ps = (await k.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0]["result"]
@@ -239,8 +262,8 @@ async def test_write_time_refusal_for_broken_regex(seeded_kernel):
 
 
 async def test_command_runs_and_captures_output(seeded_kernel):
-    await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
-    r = await _start(seeded_kernel, "runner", "echo", ["hello", "world"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, _say("hello world"))
     assert r.get("status") == "running", r
     row = await _wait_done(seeded_kernel, "runner", r["job_id"])
     assert row["exit_code"] == 0
@@ -249,14 +272,14 @@ async def test_command_runs_and_captures_output(seeded_kernel):
 
 async def test_nonzero_exit_is_failed(seeded_kernel):
     await _mk(seeded_kernel, allowed=[r".*"])
-    r = await _start(seeded_kernel, "runner", "false")
+    r = await _start(seeded_kernel, "runner", PY, ["-c", "raise SystemExit(1)"])
     row = await _wait_done(seeded_kernel, "runner", r["job_id"])
     assert row["status"] == "failed" and row["exit_code"] != 0
 
 
 async def test_stop_kills_a_running_job(seeded_kernel):
-    await _mk(seeded_kernel, allowed=[r"sleep .*"])
-    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, SLEEP)
     s = (
         await seeded_kernel.send(
             [{"target": "runner", "payload": {"type": "stop", "job_id": r["job_id"]}}]
@@ -268,10 +291,19 @@ async def test_stop_kills_a_running_job(seeded_kernel):
 
 
 async def test_the_records_env_reaches_the_child(seeded_kernel):
-    await _mk(seeded_kernel, allowed=[r"/bin/sh -c .*"], env={"MARK": "x42"})
-    r = await _start(seeded_kernel, "runner", "/bin/sh", ["-c", "echo $MARK"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"], env={"MARK": "x42"})
+    r = await _start(seeded_kernel, "runner", PY, ["-c", _PRINT_ENV + "show('MARK')"])
     row = await _wait_done(seeded_kernel, "runner", r["job_id"])
     assert row["last_line"] == "x42"
+
+
+# Prints env values `/`-joined, an unset one as `none` (the shell's `${X:-none}`).
+_PRINT_ENV = (
+    "import os, sys\n"
+    "def show(*names):\n"
+    "    vals = [os.environ.get(n, 'none') for n in names]\n"
+    "    sys.stdout.buffer.write(('/'.join(vals) + chr(10)).encode())\n"
+)
 
 
 # ─── the child's WHOLE environment is the record's ──────────────────────────
@@ -309,23 +341,31 @@ async def test_a_leg_with_no_cwd_runs_nothing(seeded_kernel):
 async def test_the_kernel_env_reaches_a_child_only_by_name(seeded_kernel, monkeypatch):
     monkeypatch.setenv("FT_SECRET", "s3cret")
     monkeypatch.setenv("FT_OPEN", "open")
-    line = ["-c", "echo ${FT_SECRET:-none}/${FT_OPEN:-none}"]
+    line = ["-c", _PRINT_ENV + "show('FT_SECRET', 'FT_OPEN')"]
     for aid, inherit, want in (
         ("bare", None, "none/none"),
         ("named", ["FT_OPEN"], "none/open"),
         ("all", ["*"], "s3cret/open"),
     ):
         await _mk(
-            seeded_kernel, agent_id=aid, allowed=[r"/bin/sh -c .*"], inherit_env=inherit
+            seeded_kernel,
+            agent_id=aid,
+            allowed=[rf"{PY_RX} -c .*"],
+            inherit_env=inherit,
         )
-        r = await _start(seeded_kernel, aid, "/bin/sh", line)
+        r = await _start(seeded_kernel, aid, PY, line)
         row = await _wait_done(seeded_kernel, aid, r["job_id"])
         assert row["last_line"] == want, (aid, row)
 
 
 async def test_a_bare_command_is_found_on_the_childs_path_only(seeded_kernel, tmp_path):
-    tool = tmp_path / "ft_only_here"
-    tool.write_text("#!/bin/sh\necho found-by-child-path\n")
+    # a script found by name: `sh` on POSIX, a `.cmd` (a PATHEXT name) on Windows
+    name, body = per_os(
+        posix=("ft_only_here", "#!/bin/sh\necho found-by-child-path\n"),
+        nt=("ft_only_here.cmd", "@echo found-by-child-path\r\n"),
+    )
+    tool = tmp_path / name
+    tool.write_text(body)
     tool.chmod(0o755)
     # No PATH in the child env: refused naming it — no kernel PATH, no default path.
     await _mk(seeded_kernel, agent_id="nopath", allowed=[r"echo .*"], inherit_env=None)
@@ -341,7 +381,7 @@ async def test_a_bare_command_is_found_on_the_childs_path_only(seeded_kernel, tm
     )
     r = await _start(seeded_kernel, "ownpath", "ft_only_here")
     row = await _wait_done(seeded_kernel, "ownpath", r["job_id"])
-    assert row["last_line"] == "found-by-child-path", row
+    assert _line(row) == "found-by-child-path", row
     # …and one only the kernel's PATH holds is not found.
     r = await _start(seeded_kernel, "ownpath", "echo", ["x"])
     assert r["reason"] == "transport_error" and "No such file" in r["error"], r
@@ -352,21 +392,21 @@ async def test_a_missing_cwd_is_named_not_the_command(seeded_kernel, tmp_path):
     the command — naming the interpreter for a cwd that does not exist sends a
     model hunting for the interpreter."""
     gone = tmp_path / "no_such_dir"
-    await _mk(
-        seeded_kernel, agent_id="nowhere", allowed=[r"/bin/echo( .*)?"], cwd=str(gone)
-    )
-    r = await _start(seeded_kernel, "nowhere", "/bin/echo", ["x"])
+    await _mk(seeded_kernel, agent_id="nowhere", allowed=[r".*"], cwd=str(gone))
+    r = await _start(seeded_kernel, "nowhere", PY, _say("x"))
     assert r["reason"] == "transport_error", r
-    assert r["error"] == (
-        f"exec_bridge: spawn failed: [Errno 2] No such file or directory: '{gone}'"
-    ), r
+    # POSIX names the failed chdir; Windows' CreateProcessW answers ERROR_DIRECTORY
+    why = per_os(
+        posix="[Errno 2] No such file or directory", nt="[Errno 20] Not a directory"
+    )
+    assert r["error"] == f"exec_bridge: spawn failed: {why}: {str(gone)!r}", r
 
 
 async def test_many_jobs_run_in_parallel(seeded_kernel):
-    await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
     ids = []
     for i in range(3):
-        r = await _start(seeded_kernel, "runner", "echo", [str(i)])
+        r = await _start(seeded_kernel, "runner", PY, _say(str(i)))
         ids.append(r["job_id"])
     for i, j in enumerate(ids):
         row = await _wait_done(seeded_kernel, "runner", j)
@@ -377,8 +417,8 @@ async def test_many_jobs_run_in_parallel(seeded_kernel):
 
 
 async def test_a_job_holds_a_task_row_and_cancel_reaps_it(seeded_kernel):
-    await _mk(seeded_kernel, allowed=[r"sleep .*"])
-    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, SLEEP)
     st = (
         await seeded_kernel.send(
             [{"target": "runner", "payload": {"type": "status", "job_id": r["job_id"]}}]
@@ -400,8 +440,8 @@ async def test_a_job_holds_a_task_row_and_cancel_reaps_it(seeded_kernel):
 async def test_delete_agent_reaps_running_jobs(seeded_kernel):
     import exec_bridge.tools as ebt
 
-    await _mk(seeded_kernel, allowed=[r"sleep .*"])
-    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, SLEEP)
     proc = ebt._jobs[r["job_id"]]["proc"]
     await seeded_kernel.send(
         [
@@ -436,9 +476,8 @@ async def test_mail_reaches_a_live_job_over_the_wire(seeded_kernel):
     """A command may still speak the control wire — the fd survives the redesign.
     The child here is `python -c <program>`: just a COMMAND with args, which is
     the whole point of the general-purpose runner."""
-    py = sys.executable
-    await _mk(seeded_kernel, allowed=[rf"{py} -c .*"])
-    r = await _start(seeded_kernel, "runner", py, ["-c", _WIRE_CHILD])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, ["-c", _WIRE_CHILD])
     await asyncio.sleep(0.4)  # let it register on_message
     ack = (
         await seeded_kernel.send([{"target": "runner", "payload": {"type": "ping"}}])
@@ -501,7 +540,6 @@ async def test_a_stream_chunk_crosses_the_wire_raw(
     from exec_bridge._connector import CONNECTOR_SRC
 
     monkeypatch.chdir(tmp_path)
-    py = sys.executable
     fb = (
         await seeded_kernel.send(
             [
@@ -522,12 +560,12 @@ async def test_a_stream_chunk_crosses_the_wire_raw(
         )
     )[0]["result"]["id"]
     await _mk(
-        seeded_kernel, allowed=[rf"{py} -c .*"], can_call={fb: "*"}, env={"FB": fb}
+        seeded_kernel, allowed=[rf"{PY_RX} -c .*"], can_call={fb: "*"}, env={"FB": fb}
     )
-    r = await _start(seeded_kernel, "runner", py, ["-c", CONNECTOR_SRC + _STREAM_CHILD])
+    r = await _start(seeded_kernel, "runner", PY, ["-c", CONNECTOR_SRC + _STREAM_CHILD])
     row = await _wait_done(seeded_kernel, "runner", r["job_id"], secs=15.0)
     assert row["exit_code"] == 0, row
-    assert row["last_line"] == "WROTE 768 READ 768 True bytes", row
+    assert _line(row) == "WROTE 768 READ 768 True bytes", row
     assert (tmp_path / "sd" / "blob.bin").read_bytes() == bytes(range(256)) * 3
 
 
@@ -549,10 +587,12 @@ def test_the_connector_raises_when_the_relay_cannot_deliver():
         "    print('RAISED', e)\n"
     )
     parent, child_end = socket.socketpair()
-    proc = subprocess.Popen(
+    proc = _sys.popen_inheriting(
         [sys.executable, "-u", "-c", code],
-        env={"FANTASTIC_CTRL_FD": str(child_end.fileno()), "PATH": "/usr/bin:/bin"},
-        pass_fds=[child_end.fileno()],
+        child_end,
+        env=child_environ(
+            FANTASTIC_CTRL_FD=str(child_end.fileno()), PATH="/usr/bin:/bin"
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -627,10 +667,12 @@ def test_the_connector_refuses_to_send_an_oversized_frame():
         "    print('REFUSED', e)\n"
     )
     parent, child_end = socket.socketpair()
-    proc = subprocess.Popen(
+    proc = _sys.popen_inheriting(
         [sys.executable, "-u", "-c", code],
-        env={"FANTASTIC_CTRL_FD": str(child_end.fileno()), "PATH": "/usr/bin:/bin"},
-        pass_fds=[child_end.fileno()],
+        child_end,
+        env=child_environ(
+            FANTASTIC_CTRL_FD=str(child_end.fileno()), PATH="/usr/bin:/bin"
+        ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -656,10 +698,9 @@ async def test_stopping_a_watching_program_leaves_no_proxy_or_watcher(seeded_ker
     into a Queue nobody drains, one per (job, watched src), forever."""
     from exec_bridge._connector import CONNECTOR_SRC
 
-    py = sys.executable
-    await _mk(seeded_kernel, allowed=[rf"{py} -u -c .*"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -u -c .*"])
     r = await _start(
-        seeded_kernel, "runner", py, ["-u", "-c", CONNECTOR_SRC + _WATCHER_CHILD]
+        seeded_kernel, "runner", PY, ["-u", "-c", CONNECTOR_SRC + _WATCHER_CHILD]
     )
     boxes = seeded_kernel.ctx.inboxes
     proxies = ("_xbw_%s_runner" % r["job_id"], "_xbself_%s" % r["job_id"])
@@ -679,8 +720,8 @@ async def test_stopping_a_watching_program_leaves_no_proxy_or_watcher(seeded_ker
 async def test_a_cancelled_job_finalises_to_stopped_and_clear_removes_it(seeded_kernel):
     """A cancelled job's row must not sit at `stopping` forever: `clear` refuses
     that label by design, so an immortal row would be unforgettable."""
-    await _mk(seeded_kernel, allowed=[r"sleep .*"])
-    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, SLEEP)
     st = (
         await seeded_kernel.send(
             [{"target": "runner", "payload": {"type": "status", "job_id": r["job_id"]}}]
@@ -738,29 +779,44 @@ async def test_password_ingress_is_refused_on_fs_and_process_legs(seeded_kernel)
         assert "wire envelope" in r["error"], r
 
 
+# What a job launches, per OS: a script's `sleep &` and a `nohup` (other process
+# groups of the job's session) on POSIX; on Windows three python children (the job
+# object holds every process its job starts).
+_LAUNCHER = per_os(
+    posix=(
+        r"/bin/sh -c .*",
+        "/bin/sh",
+        ["-c", "sleep 303 & nohup sleep 304 >/dev/null 2>&1 & sleep 305"],
+    ),
+    nt=(
+        rf"{PY_RX} -c .*",
+        PY,
+        [
+            "-c",
+            "import subprocess, sys, time\n"
+            "for _ in range(3):\n"
+            "    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+            "time.sleep(300)\n",
+        ],
+    ),
+)
+
+
 async def test_stop_and_delete_kill_everything_a_job_launched(seeded_kernel):
-    """A plain job leads its own session, so `stop` and `delete_agent` take what it
-    launched too — a script's `sleep &` and a `nohup` never outlive it. Twin of
-    the PTY case (`test_pty_jobs.py::test_every_teardown_kills_the_whole_session`)."""
-    import os
-
+    """A plain job leads its own session (on Windows: its own Job Object), so
+    `stop` and `delete_agent` take what it launched too — a script's `sleep &` and
+    a `nohup` never outlive it. Twin of the PTY case
+    (`test_pty_jobs.py::test_every_teardown_kills_the_whole_session`)."""
     import exec_bridge.tools as ebt
-    from exec_bridge import proc
 
-    line = "sleep 303 & nohup sleep 304 >/dev/null 2>&1 & sleep 305"
+    allowed, command, args = _LAUNCHER
     for aid, end in (("pipe_stop", "stop"), ("pipe_delete", "delete_agent")):
-        await _mk(seeded_kernel, agent_id=aid, allowed=[r"/bin/sh -c .*"])
-        r = await _start(seeded_kernel, aid, "/bin/sh", ["-c", line])
+        await _mk(seeded_kernel, agent_id=aid, allowed=[allowed])
+        r = await _start(seeded_kernel, aid, command, args)
         leader = ebt._jobs[r["job_id"]]["proc"].pid
         members: list[int] = []
         for _ in range(100):
-            members = []
-            for p in proc._all_pids():
-                try:
-                    if p != leader and os.getsid(p) == leader:
-                        members.append(p)
-                except OSError:
-                    continue
+            members = _sys.session_members(leader)
             if len(members) >= 3:
                 break
             await asyncio.sleep(0.05)
@@ -780,14 +836,7 @@ async def test_stop_and_delete_kill_everything_a_job_launched(seeded_kernel):
             )
         alive = [leader, *members]
         for _ in range(100):
-            left = []
-            for p in alive:
-                try:
-                    os.kill(p, 0)
-                    left.append(p)
-                except ProcessLookupError:
-                    pass
-            alive = left
+            alive = [p for p in alive if _sys.pid_alive(p)]
             if not alive:
                 break
             await asyncio.sleep(0.05)
@@ -962,8 +1011,8 @@ async def test_a_named_clear_refuses_a_running_job(seeded_kernel):
     cancel, delete and shutdown kill a process through. A named job follows the bulk form's rule."""
     import exec_bridge.tools as ebt
 
-    await _mk(seeded_kernel, allowed=[r"sleep .*"])
-    r = await _start(seeded_kernel, "runner", "sleep", ["30"])
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, SLEEP)
     jid = r["job_id"]
 
     async def clear():

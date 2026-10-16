@@ -10,7 +10,7 @@
 //! child is authorized by the seeded grants; the command actually ran; and a call the grants
 //! do not cover is REFUSED as data rather than succeeding.
 
-use std::process::Command;
+mod sys;
 
 /// Drive everything through the binary's own modules by re-exec'ing? No — the
 /// crate is a binary, so its modules are not importable. Instead this test drives
@@ -142,10 +142,11 @@ async fn the_human_drives_the_specified_set_in_process() {
     // A UNIQUE MARKER, not `pwd`: a status reply echoes the job's own `cwd`, so
     // matching a path would pass on metadata without the command ever running.
     const MARKER: &str = "FC-MARKER-8f3a1c";
+    let (command, args) = sys::echo(MARKER);
     let started = act(
         &kernel,
         "exec",
-        json!({"type":"start","command":"echo","args":[MARKER]}),
+        json!({"type":"start","command":command,"args":args}),
     )
     .await;
     assert!(
@@ -208,5 +209,4 @@ async fn the_human_drives_the_specified_set_in_process() {
     // Leave the cwd somewhere that exists, then clean up.
     std::env::set_current_dir(std::env::temp_dir()).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    let _ = Command::new("true").status();
 }

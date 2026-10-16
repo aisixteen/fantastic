@@ -12,8 +12,11 @@ from importlib import resources
 from pathlib import Path
 
 import pytest
+from _testkit import child_env
 from file_bridge import fs
 from kernel_state.tools import load_bundles
+
+from exec_bridge import _sys
 
 HELPER = resources.files("py_agent").joinpath("fantastic_agent.py")
 
@@ -67,6 +70,10 @@ def _bundle(root: Path, name: str, *, program: str = ECHO, verbs=None, **extra) 
     ]
     for v, d in (verbs or VERBS).items():
         lines.append(f"  {v}: {d!r}")
+    # what the OS needs to start the program at all (`exec_bridge._sys.OS_ENV`:
+    # on Windows the connector's socket needs SYSTEMROOT)
+    if (os_env := child_env()) and "record" not in extra:
+        extra["record"] = "{inherit_env: [%s]}" % ", ".join(os_env)
     for k, v in extra.items():
         lines.append(f"{k}: {v}")
     (folder / "bundle.yaml").write_text("\n".join(lines) + "\n")
@@ -100,9 +107,7 @@ async def _create(kernel, handler_module, id_):
 async def _gone(pid: int) -> bool:
     """Has process `pid` exited (within 5 s)?"""
     for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _sys.pid_alive(pid):
             return True
         await asyncio.sleep(0.1)
     return False
@@ -327,9 +332,7 @@ async def test_cancelling_the_programs_task_kills_the_program(kernel, workdir):
     prog = next(t for t in tasks if t["agent"] == "c1" and t["verb"] == "program")
     await _call(kernel, "kernel", {"type": "cancel", "task_id": prog["id"]})
     for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _sys.pid_alive(pid):
             break
         await asyncio.sleep(0.1)
     else:

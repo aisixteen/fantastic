@@ -30,6 +30,8 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+mod sys;
+
 fn register_default_bundles() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
 
@@ -620,7 +622,7 @@ async fn dispatch(
     // signal at once, and a SIGTERM that landed before the handler existed took
     // the default action — the process died with no teardown and the lock held
     // (`daemon_output_lines_match_python` flaked on exactly that window).
-    let mut stop = match StopSignals::install() {
+    let mut stop = match sys::StopSignals::install() {
         Ok(s) => s,
         Err(e) => {
             kernel.shutdown().await;
@@ -670,58 +672,6 @@ async fn dispatch(
     // exits, AFTER the teardown prints above.
     bootstrap::shutdown(&workdir)?;
     Ok(ExitCode::SUCCESS)
-}
-
-/// The daemon's stop signals — SIGINT, SIGTERM and SIGHUP, the three python's
-/// `_request_stop` handles. INSTALLED by [`StopSignals::install`]: from the moment
-/// it returns, a delivered signal is HELD until [`StopSignals::recv`] takes it,
-/// however late that await starts. A registration that fails is an error, never a
-/// signal quietly left at its default action.
-#[cfg(unix)]
-struct StopSignals {
-    int: tokio::signal::unix::Signal,
-    term: tokio::signal::unix::Signal,
-    hup: tokio::signal::unix::Signal,
-}
-
-#[cfg(unix)]
-impl StopSignals {
-    fn install() -> std::io::Result<Self> {
-        use tokio::signal::unix::{signal, SignalKind};
-        Ok(Self {
-            int: signal(SignalKind::interrupt())?,
-            term: signal(SignalKind::terminate())?,
-            hup: signal(SignalKind::hangup())?,
-        })
-    }
-
-    /// The name of the first stop signal to arrive.
-    async fn recv(&mut self) -> &'static str {
-        tokio::select! {
-            _ = self.int.recv() => "SIGINT",
-            _ = self.term.recv() => "SIGTERM",
-            _ = self.hup.recv() => "SIGHUP",
-        }
-    }
-}
-
-/// Off unix there is only Ctrl-C (python's loop cannot install signal handlers
-/// there either).
-#[cfg(not(unix))]
-struct StopSignals;
-
-#[cfg(not(unix))]
-impl StopSignals {
-    fn install() -> std::io::Result<Self> {
-        Ok(Self)
-    }
-
-    async fn recv(&mut self) -> &'static str {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("the Ctrl-C handler must install");
-        "SIGINT"
-    }
 }
 
 /// k=v value coercion for one-shot `fantastic <id> <verb> k=v`. Mirrors the
@@ -776,30 +726,6 @@ mod parse_kv_tests {
         assert_eq!(parse_kv("hello"), json!("hello"));
         assert_eq!(parse_kv("a{b"), json!("a{b"));
         assert_eq!(parse_kv("web.tools"), json!("web.tools"));
-    }
-}
-
-/// The daemon installs its stop handlers BEFORE it prints `[kernel] up`; this
-/// pins what that buys: a SIGTERM that lands after `install` and before anyone
-/// awaits is HELD for `recv`, not lost to the default action (which killed the
-/// process with no teardown when the handler was only registered on the first
-/// poll, after the up line).
-#[cfg(all(test, unix))]
-mod stop_signal_tests {
-    use super::StopSignals;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn a_sigterm_before_the_wait_is_held_not_lost() {
-        let mut stop = StopSignals::install().expect("install the stop handlers");
-        // Safety: `raise` only delivers SIGTERM to this process, whose handler is
-        // installed above (tokio keeps it for the life of the process).
-        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let got = tokio::time::timeout(Duration::from_secs(5), stop.recv())
-            .await
-            .expect("the SIGTERM raised before the wait must be held");
-        assert_eq!(got, "SIGTERM");
     }
 }
 

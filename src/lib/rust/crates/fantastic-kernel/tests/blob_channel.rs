@@ -9,6 +9,7 @@
 //! `fantastic-file` bundle cannot be a dev-dep here without a cycle).
 
 use async_trait::async_trait;
+use fantastic_kernel::test_support::symlink;
 use fantastic_kernel::{
     Agent, AgentId, Bundle, BundleRegistry, Item, Kernel, Reply, Status, StorageMode,
 };
@@ -249,7 +250,7 @@ async fn a_walk_that_escapes_the_root_raises_the_blob_verb() {
     std::fs::create_dir_all(tmp.path().join("outside")).unwrap();
     std::fs::write(tmp.path().join("outside/agent.yaml"), "id: probe_out\n").unwrap();
     std::fs::create_dir_all(store.join("agents")).unwrap();
-    std::os::unix::fs::symlink(tmp.path().join("outside"), store.join("agents/evil")).unwrap();
+    symlink(tmp.path().join("outside"), store.join("agents/evil")).unwrap();
 
     for payload in [
         json!({"type": "persist_blob", "agent_id": "ghost", "name": "s.yaml", "content": "x"}),

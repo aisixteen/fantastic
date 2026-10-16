@@ -6,14 +6,13 @@ in-memory keyring."""
 from __future__ import annotations
 
 import json
-import os
-import stat
 
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
 
 from _testkit import as_agent
+from file_bridge import _sys as fb_sys
 
 KEY = "sk-live-0123456789abcdef"
 KEY2 = "sk-live-rotated-fedcba98"
@@ -98,7 +97,7 @@ async def test_set_stores_the_value_0600_and_the_record_keeps_only_metadata(
         "stored": True,
     }
     f = tmp_path / "creds.yaml"
-    assert stat.S_IMODE(f.stat().st_mode) == 0o600
+    assert fb_sys.mode_of(f) == 0o600
     assert KEY in f.read_text()
     rec = k.ctx.agents["creds"].record
     assert KEY not in repr(rec)
@@ -304,7 +303,7 @@ async def test_the_file_is_judged_on_the_one_open_it_is_read_from(
         "refs:\n  openai/main:\n    fields:\n      api_key: sk-PLANTED\n"
         "    host: api.openai.com\n"
     )
-    os.chmod(planted, 0o600)
+    fb_sys.set_mode(planted, 0o600)
     # the old shape's path check (`fs.lstat`, gone with the fix): swap right after it
     real_lstat = getattr(fs, "lstat", None)
 
@@ -354,7 +353,7 @@ async def test_forget_on_the_env_backend_is_refused(seeded_kernel, tmp_path):
 async def test_a_file_others_can_read_is_refused_loud(seeded_kernel, tmp_path):
     k = _mk(seeded_kernel, tmp_path)
     await _seed(k)
-    os.chmod(tmp_path / "creds.yaml", 0o644)
+    fb_sys.set_mode(tmp_path / "creds.yaml", 0o644)
     out = await _call(k, {"type": "get", "ref": "openai/main"})
     assert out["status"] == "failed", out
     assert "mode 0600" in out["result"]["error"] and "0o644" in out["result"]["error"]
@@ -656,7 +655,7 @@ async def test_a_stored_value_without_a_host_is_refused(
     if backend == "file":
         f = tmp_path / "creds.yaml"
         f.write_text(f"refs:\n  openai/main:\n    api_key: {KEY}\n")
-        os.chmod(f, 0o600)
+        fb_sys.set_mode(f, 0o600)
     else:
         mem_keyring.items[("fantastic", "creds/openai/main")] = json.dumps(
             {"api_key": KEY}

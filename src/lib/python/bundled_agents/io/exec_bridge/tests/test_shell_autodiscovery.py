@@ -18,20 +18,37 @@ import stat
 import sys
 
 import pytest
+from _testkit import child_env, command_rx, per_os
 
+from exec_bridge import proc
 from exec_bridge import tools as ebt
 
 PY = sys.executable
 PTY = {"cols": 80, "rows": 24}
+#: The child env var naming its shell (`SHELL`; on Windows `COMSPEC`).
+SHELL_VAR = proc.SHELL_VAR
+#: The Enter key as these tests type it: `\n` on a tty; a Windows console
+#: takes `\r` (its line input ends on a carriage return).
+ENTER = per_os(posix="\n", nt="\r")
 
 
 @pytest.fixture
 def fake_shell(tmp_path):
     """An executable that stands in for a login shell: it announces its argv,
     then echoes one typed line — enough to prove WHICH line was spawned and
-    that it sits on the terminal."""
-    path = tmp_path / "fakesh"
-    path.write_text('#!/bin/sh\necho "SHELL_UP $*"\nread line\necho "GOT $line"\n')
+    that it sits on the terminal (a `sh` script; on Windows a `.cmd`)."""
+    name, body = per_os(
+        posix=(
+            "fakesh",
+            '#!/bin/sh\necho "SHELL_UP $*"\nread line\necho "GOT $line"\n',
+        ),
+        nt=(
+            "fakesh.cmd",
+            "@echo off\r\necho SHELL_UP %*\r\nset /p line=\r\necho GOT %line%\r\n",
+        ),
+    )
+    path = tmp_path / name
+    path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return str(path)
 
@@ -44,6 +61,8 @@ async def _mk(kernel, agent_id, **extra):
         "handler_module": "exec_bridge.tools",
         "ingress_rule": "allow_all_ingress",
         "cwd": ".",
+        # what the OS needs to start a child at all (`exec_bridge._sys.OS_ENV`)
+        "inherit_env": child_env(),
         **extra,
     }
     return (await kernel.send([{"target": kernel.id, "payload": meta}]))[0]["result"]
@@ -79,7 +98,7 @@ async def _events_until(k, pred, secs=10.0):
 
 
 async def test_a_pty_start_without_command_runs_the_childs_shell(k, fake_shell):
-    await _mk(k, "sh", env={"SHELL": fake_shell}, shell=True)
+    await _mk(k, "sh", env={SHELL_VAR: fake_shell}, shell=True)
     k.watch("sh", "viewer")
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
     assert r.get("status") == "running" and r.get("pty") is True, r
@@ -97,7 +116,7 @@ async def test_a_pty_start_without_command_runs_the_childs_shell(k, fake_shell):
     snap = (await _call(k, "sh", {"type": "status", "job_id": jid}))["jobs"][0]
     assert (snap["command"], snap["args"], snap["pty"]) == (fake_shell, [], True)
     # It is a real terminal job: a typed line reaches the shell.
-    await _call(k, "sh", {"type": "write", "job_id": jid, "data": "hi\n"})
+    await _call(k, "sh", {"type": "write", "job_id": jid, "data": "hi" + ENTER})
     await _events_until(k, lambda t: "GOT hi" in t)
 
 
@@ -106,26 +125,30 @@ async def test_the_shell_comes_from_the_childs_env_not_the_kernels(
 ):
     # The kernel HAS a SHELL — but the record passes nothing down, so the child
     # has none, and the start is refused naming where it would come from.
-    monkeypatch.setenv("SHELL", fake_shell)
+    monkeypatch.setenv(SHELL_VAR, fake_shell)
     await _mk(k, "sh", shell=True)
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
-    assert (r["reason"], r["arg"]) == ("missing_arg", "SHELL"), r
+    assert (r["reason"], r["arg"]) == ("missing_arg", SHELL_VAR), r
     assert "inherit_env" in r["hint"], r
     # Passing it down by NAME is the whole repair.
-    await _call(k, k.id, {"type": "update_agent", "id": "sh", "inherit_env": ["SHELL"]})
+    await _call(
+        k,
+        k.id,
+        {"type": "update_agent", "id": "sh", "inherit_env": child_env(SHELL_VAR)},
+    )
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
     assert r.get("status") == "running", r
 
 
 async def test_an_empty_shell_in_the_child_env_is_refused_too(k):
-    await _mk(k, "sh", env={"SHELL": ""}, shell=True)
+    await _mk(k, "sh", env={SHELL_VAR: ""}, shell=True)
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
-    assert (r["reason"], r["arg"]) == ("missing_arg", "SHELL"), r
+    assert (r["reason"], r["arg"]) == ("missing_arg", SHELL_VAR), r
 
 
 async def test_a_pipe_job_always_names_its_command(k, fake_shell):
     # Autodiscovery is PTY-only: a shell on a pipe has no terminal to talk to.
-    await _mk(k, "sh", env={"SHELL": fake_shell}, shell=True)
+    await _mk(k, "sh", env={SHELL_VAR: fake_shell}, shell=True)
     r = await _call(k, "sh", {"type": "start"})
     assert (r["reason"], r["arg"]) == ("missing_arg", "command"), r
     # …and an explicit empty command on a PTY is a typo, not "use the shell".
@@ -134,7 +157,7 @@ async def test_a_pipe_job_always_names_its_command(k, fake_shell):
 
 
 async def test_shell_true_permits_only_the_bare_shell_line(k, fake_shell):
-    await _mk(k, "sh", env={"SHELL": fake_shell}, shell=True)
+    await _mk(k, "sh", env={SHELL_VAR: fake_shell}, shell=True)
     # extra args are a different line — `shell` does not cover it
     r = await _call(k, "sh", {"type": "start", "args": ["-c", "id"], "pty": PTY})
     assert r["reason"] == "unauthorized", r
@@ -148,34 +171,49 @@ async def test_shell_true_permits_only_the_bare_shell_line(k, fake_shell):
 
 
 async def test_shell_login_permits_exactly_the_login_line(k, fake_shell):
-    await _mk(k, "sh", env={"SHELL": fake_shell}, shell="login")
+    await _mk(k, "sh", env={SHELL_VAR: fake_shell}, shell="login")
     k.watch("sh", "viewer")
-    # the bare shell is NOT the login line
-    r = await _call(k, "sh", {"type": "start", "pty": PTY})
+    # The login line is the shell plus what the OS names a login (`-l` on POSIX;
+    # nothing on Windows, where `cmd.exe` has no login mode).
+    login = list(proc.LOGIN_ARGS)
+    if login:
+        # the bare shell is NOT the login line
+        r = await _call(k, "sh", {"type": "start", "pty": PTY})
+        assert r["reason"] == "unauthorized", r
+        assert login[0] in r["error"], r
+    # another tail is not it either
+    r = await _call(k, "sh", {"type": "start", "args": ["-x"], "pty": PTY})
     assert r["reason"] == "unauthorized", r
-    assert "-l" in r["error"], r
-    r = await _call(k, "sh", {"type": "start", "args": ["-l"], "pty": PTY})
+    assert '`shell="login"`' in r["error"], r
+    r = await _call(k, "sh", {"type": "start", "args": login, "pty": PTY})
     assert r.get("status") == "running", r
-    await _events_until(k, lambda t: "SHELL_UP -l" in t)
+    up = " ".join(["SHELL_UP", *login])
+    await _events_until(k, lambda t: up in t)
 
 
 async def test_without_shell_the_resolved_line_still_needs_allowed(k, fake_shell):
     # No `shell` on the record: the autodiscovered line is judged by `allowed`
     # like any other — autodiscovery never widens the gate.
-    await _mk(k, "sh", env={"SHELL": fake_shell})
+    await _mk(k, "sh", env={SHELL_VAR: fake_shell})
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
     assert r["reason"] == "unauthorized", r
     await _call(
         k,
         k.id,
-        {"type": "update_agent", "id": "sh", "allowed": [fake_shell]},
+        {"type": "update_agent", "id": "sh", "allowed": [command_rx(fake_shell)]},
     )
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
     assert r.get("status") == "running", r
 
 
 async def test_shell_does_not_disable_the_allowlist(k, fake_shell):
-    await _mk(k, "sh", env={"SHELL": fake_shell}, shell=True, allowed=[rf"{PY} -c .*"])
+    await _mk(
+        k,
+        "sh",
+        env={SHELL_VAR: fake_shell},
+        shell=True,
+        allowed=[rf"{command_rx(PY)} -c .*"],
+    )
     r = await _call(k, "sh", {"type": "start", "command": PY, "args": ["-c", "0"]})
     assert r.get("status") == "running", r
 
@@ -201,7 +239,7 @@ async def test_write_bytes_is_verbatim_so_enter_reaches_the_shell(k, fake_shell)
     """A `<call>` strips a scalar like `data`, so a key ending in Enter rides
     `bytes`, written verbatim: the line runs. Exactly one of
     `data`/`bytes` is accepted."""
-    await _mk(k, "sh", env={"SHELL": fake_shell}, shell=True)
+    await _mk(k, "sh", env={SHELL_VAR: fake_shell}, shell=True)
     k.watch("sh", "viewer")
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
     jid = r["job_id"]
@@ -212,6 +250,8 @@ async def test_write_bytes_is_verbatim_so_enter_reaches_the_shell(k, fake_shell)
     assert both.get("arg") == "data" and "exactly one" in both["error"], both
     none = await _call(k, "sh", {"type": "write", "job_id": jid})
     assert none.get("arg") == "data", none
-    out = await _call(k, "sh", {"type": "write", "job_id": jid, "bytes": b"yo\n"})
+    out = await _call(
+        k, "sh", {"type": "write", "job_id": jid, "bytes": ("yo" + ENTER).encode()}
+    )
     assert out == {"written": 3}, out
     await _events_until(k, lambda t: "GOT yo" in t)

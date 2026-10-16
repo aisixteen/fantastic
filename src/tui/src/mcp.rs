@@ -28,7 +28,8 @@
 //!
 //! SHUTDOWN, in the kernel's order: `Kernel::shutdown` (drain, shutdown verbs,
 //! cancel what remains, final ledger flush), then the lock release — on stdin
-//! EOF, SIGTERM or SIGINT, and the process does not exit before both finish.
+//! EOF, SIGTERM or SIGINT (Ctrl-Break or Ctrl-C on Windows), and the process
+//! does not exit before both finish.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -49,7 +50,8 @@ pub const LEG: &str = "mcp";
 
 /// The kernel's MCP socket, RELATIVE to the directory: every process runs in
 /// the directory it serves, and a relative path never meets the ~104-byte
-/// limit on a unix socket's address.
+/// limit on a unix socket's address. (On Windows the path is a private file
+/// naming a loopback port — `sys`.)
 pub const SOCKET: &str = ".fantastic/cli/mcp.sock";
 
 /// Entry point, called from `main` before any runtime exists.

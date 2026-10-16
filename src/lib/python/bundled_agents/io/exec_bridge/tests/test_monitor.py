@@ -12,6 +12,8 @@ import types
 
 import pytest
 
+from _testkit import LF_STDIO, child_env
+
 from kernel import register_unlisted
 
 # ─── a listener that records every message it is sent ───────────────────────
@@ -34,7 +36,7 @@ _listener.VERBS = {}
 register_unlisted("monitor_listener_probe.tools", _listener)
 
 # Prints `n` lines, one every `gap` seconds; FATAL on the ones listed; then sleeps.
-PRINTER = (
+PRINTER = LF_STDIO + (
     "import sys, time\n"
     "n, gap, fatal, hold = int(sys.argv[1]), float(sys.argv[2]), set(sys.argv[3].split(',')), float(sys.argv[4])\n"
     "for k in range(n):\n"
@@ -81,7 +83,7 @@ async def _setup(k, listener="ear"):
             "handler_module": "exec_bridge.tools",
             "ingress_rule": "allow_all_ingress",
             "cwd": ".",
-            "inherit_env": ["PATH"],
+            "inherit_env": child_env("PATH"),
             "allowed": [".*"],
             "can_call": {listener: ["send"]},
         },

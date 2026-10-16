@@ -27,7 +27,6 @@ import re
 import os
 import secrets
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -40,19 +39,21 @@ E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exis
 sys.path.insert(0, str(E2E))
 
 from e2e_build import build_lock  # noqa: E402
-from helpers import verdict  # noqa: E402
+from helpers import oslayer, verdict  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
 # else ~/.config/fantastic. A test must never read or write the owner's real
 # home: every binary this runner launches inherits a throwaway one.
-os.environ["FANTASTIC_HOME"] = tempfile.mkdtemp(prefix="fc-e2e-home-")
+_HOME = Path(tempfile.mkdtemp(prefix="fc-e2e-home-"))
+oslayer.make_private(_HOME)  # the store refuses a home that is not owner-only
+os.environ["FANTASTIC_HOME"] = str(_HOME)
 
 REPO = E2E.parent
 SRC = REPO / "src"
 # e2e builds go to their OWN target dir: the dev binary (`src/target/debug/fantastic`,
 # often linked as `~/.local/bin/fantastic`) keeps the features its owner built it with
 E2E_TARGET = SRC / "target" / "e2e"
-BIN = E2E_TARGET / "debug" / "fantastic"
+BIN = oslayer.exe(E2E_TARGET / "debug" / "fantastic")
 MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # a terminal's text, from its BUFFER (the WebGL renderer leaves no text in the DOM)
 XTERM_TEXT = "((()=>{const t=document.querySelector('.agent-frame .frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
@@ -101,7 +102,7 @@ def build_bin(into: Path) -> Path:
             r = subprocess.run(["cargo", "build", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
             if r.returncode != 0:
                 raise SystemExit(f"cargo build fantastic-tui failed:\n{r.stderr[-2000:]}")
-        b = into / "fantastic"
+        b = oslayer.exe(into / "fantastic")
         b.unlink(missing_ok=True)  # never cp over a signed binary (macOS kills it)
         shutil.copy2(src, b)
     return b
@@ -123,7 +124,8 @@ class Host:
         with open(self.log, "a") as f:
             f.write("\n=== start\n")
         f = open(self.log, "a")
-        self.proc = subprocess.Popen([str(self.binary), *args], cwd=self.cwd, stdout=f, stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen([str(self.binary), *args], cwd=self.cwd, stdout=f, stderr=subprocess.STDOUT,
+                                     **oslayer.group_kwargs())
         deadline = time.time() + 30
         while time.time() < deadline:
             if self.proc.poll() is not None:
@@ -138,7 +140,7 @@ class Host:
 
     def stop(self) -> int:
         assert self.proc is not None
-        self.proc.send_signal(signal.SIGTERM)
+        oslayer.stop(self.proc)
         try:
             code = self.proc.wait(20)
         except subprocess.TimeoutExpired:

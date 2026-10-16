@@ -10,15 +10,17 @@ use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
+use crate::sys::ENTER;
 use crate::{ExecBridgeBundle, HANDLER_MODULE};
 
 /// A tiny program that proves it sits on a terminal: its stdin is a tty, TERM is
-/// set, the window size is the one asked for, and a typed line reaches it.
-const CHILD: &str = "import fcntl,os,struct,sys,termios,signal
+/// set, the window size is the one asked for, and a typed line reaches it. A
+/// resize is announced where the OS signals one (SIGWINCH).
+const CHILD: &str = "import os,sys,signal
 def size():
-    r,c=struct.unpack('HHHH',fcntl.ioctl(0,termios.TIOCGWINSZ,b'\\0'*8))[:2]
-    return c,r
-signal.signal(signal.SIGWINCH, lambda *a: print('WINCH %d %d' % size(), flush=True))
+    return tuple(os.get_terminal_size(1))
+if hasattr(signal, 'SIGWINCH'):
+    signal.signal(signal.SIGWINCH, lambda *a: print('WINCH %d %d' % size(), flush=True))
 print('TTY', os.isatty(0), os.environ.get('TERM'), flush=True)
 print('SIZE %d %d' % size(), flush=True)
 line = sys.stdin.readline()
@@ -126,7 +128,7 @@ async fn a_pty_job_runs_on_a_terminal_and_takes_keystrokes() {
     let w = call(
         &k,
         "term_a",
-        json!({"type": "write", "job_id": jid, "data": "hello\n"}),
+        json!({"type": "write", "job_id": jid, "data": format!("hello{ENTER}")}),
     )
     .await;
     assert_eq!(w, json!({"written": 6}));
@@ -153,6 +155,8 @@ async fn resize_reaches_the_program_and_status_reports_it() {
     )
     .await;
     assert_eq!(r, json!({"resized": true, "cols": 120, "rows": 40}));
+    // SIGWINCH is unix's: a Windows console program is not signalled a resize.
+    #[cfg(unix)]
     output_until(&mut rx, |t| t.contains("WINCH 120 40")).await;
     let snap = call(&k, "term_r", json!({"type": "status", "job_id": jid})).await;
     let s = &snap["jobs"][0];
@@ -168,7 +172,7 @@ async fn resize_reaches_the_program_and_status_reports_it() {
     call(
         &k,
         "term_r",
-        json!({"type": "write", "job_id": jid, "data": "x\n"}),
+        json!({"type": "write", "job_id": jid, "data": format!("x{ENTER}")}),
     )
     .await;
 }
@@ -198,7 +202,7 @@ async fn output_replays_the_ring_for_a_client_that_re_attaches() {
     call(
         &k,
         "term_o",
-        json!({"type": "write", "job_id": jid, "data": "x\n"}),
+        json!({"type": "write", "job_id": jid, "data": format!("x{ENTER}")}),
     )
     .await;
 }
@@ -291,7 +295,7 @@ async fn paste_image_types_a_saved_path() {
     call(
         &k,
         "term_p",
-        json!({"type": "write", "job_id": jid, "data": "\n"}),
+        json!({"type": "write", "job_id": jid, "data": ENTER}),
     )
     .await;
     let text = output_until(&mut rx, |t| t.contains("GOT") && t.contains(".png")).await;
@@ -304,7 +308,7 @@ async fn paste_image_types_a_saved_path() {
 async fn the_kernel_env_reaches_a_child_only_by_name() {
     std::env::set_var("FT_SECRET_RS", "s3cret");
     std::env::set_var("FT_OPEN_RS", "open");
-    let line = json!(["-c", "echo ${FT_SECRET_RS:-none}/${FT_OPEN_RS:-none}"]);
+    let (command, args) = crate::sys::print_env_job();
     for (id, inherit, want) in [
         ("env_bare", Value::Null, "none/none"),
         ("env_named", json!(["FT_OPEN_RS"]), "none/open"),
@@ -316,12 +320,14 @@ async fn the_kernel_env_reaches_a_child_only_by_name() {
         call(
             &k,
             id,
-            json!({"type": "start", "command": "/bin/sh", "args": line}),
+            json!({"type": "start", "command": command, "args": args}),
         )
         .await;
         let done = next_of(&mut rx, "job_done").await;
+        // a console program on Windows ends its line with `\r\n`
+        let printed = crate::jobs::printed(&AgentId::from(id), &done, "stdout");
         assert_eq!(
-            json!(crate::jobs::printed(&AgentId::from(id), &done, "stdout")),
+            json!(printed.replace("\r\n", "\n")),
             json!(format!("{want}\n")),
             "{id}: {done}"
         );
@@ -346,39 +352,32 @@ async fn a_leg_with_no_cwd_runs_nothing() {
     );
 }
 
-fn in_session(leader: i32) -> Vec<i32> {
-    crate::spawn::all_pids_for_tests()
-        .into_iter()
-        // SAFETY: `getsid` on a plain pid.
-        .filter(|p| *p != leader && unsafe { libc::getsid(*p) } == leader)
-        .collect()
+/// The processes in the job `leader` leads, other than the leader: its session
+/// on unix, its Job Object on Windows.
+fn in_session(leader: u32) -> Vec<u32> {
+    crate::sys::job_members(leader)
 }
 
-fn exists(pid: i32) -> bool {
-    // SAFETY: signal 0 probes existence only.
-    unsafe { libc::kill(pid, 0) == 0 }
+fn exists(pid: u32) -> bool {
+    fantastic_kernel::lock::pid_alive(pid)
 }
 
 /// A shell puts each job it starts in its OWN process group inside the PTY
 /// session, so killing the leader alone (and the tty's hangup, which reaches the
 /// foreground group only) would leave `sleep &` and a `nohup` running,
 /// reparented to init. `stop` and `delete_agent` (the kernel's shutdown runs the
-/// same teardown) kill the whole session. Twin of python
-/// `test_every_teardown_kills_the_whole_session`.
+/// same teardown) kill the whole session — on Windows, the job's Job Object. Twin
+/// of python `test_every_teardown_kills_the_whole_session`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_teardown_kills_the_whole_session() {
+    let (command, args, env, typed) = crate::sys::interactive_shell();
     for (aid, end) in [("sh_stop", "stop"), ("sh_delete", "delete_agent")] {
         let tmp = TempDir::new().unwrap();
-        let k = kernel_with(
-            &tmp,
-            aid,
-            json!({"allowed": ["/bin/sh -i"], "env": {"PATH": "/usr/bin:/bin"}}),
-        )
-        .await;
+        let k = kernel_with(&tmp, aid, json!({"env": env})).await;
         let r = call(
             &k,
             aid,
-            json!({"type": "start", "command": "/bin/sh", "args": ["-i"],
+            json!({"type": "start", "command": command, "args": args,
                    "pty": {"cols": 80, "rows": 24}}),
         )
         .await;
@@ -386,12 +385,11 @@ async fn every_teardown_kills_the_whole_session() {
         let leader = crate::jobs::jobs()
             .get(&(AgentId::from(aid), fantastic_kernel::TaskId(jid)))
             .expect("job row")
-            .pid as i32;
+            .pid;
         call(
             &k,
             aid,
-            json!({"type": "write", "job_id": jid,
-                   "data": "sleep 300 &\nnohup sleep 301 >/dev/null 2>&1 &\nsleep 302\n"}),
+            json!({"type": "write", "job_id": jid, "data": typed}),
         )
         .await;
         let mut members = Vec::new();
@@ -413,7 +411,7 @@ async fn every_teardown_kills_the_whole_session() {
             )
             .await;
         }
-        let mut alive: Vec<i32> = std::iter::once(leader).chain(members).collect();
+        let mut alive: Vec<u32> = std::iter::once(leader).chain(members).collect();
         for _ in 0..100 {
             alive.retain(|p| exists(*p));
             if alive.is_empty() {
@@ -430,26 +428,21 @@ async fn every_teardown_kills_the_whole_session() {
 /// Twin of python `test_stop_and_delete_kill_everything_a_job_launched`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_and_delete_kill_everything_a_job_launched() {
-    let line = "sleep 303 & nohup sleep 304 >/dev/null 2>&1 & sleep 305";
+    let (command, args, env) = crate::sys::launcher_job();
     for (aid, end) in [("pipe_stop", "stop"), ("pipe_delete", "delete_agent")] {
         let tmp = TempDir::new().unwrap();
-        let k = kernel_with(
-            &tmp,
-            aid,
-            json!({"allowed": ["/bin/sh -c .*"], "env": {"PATH": "/usr/bin:/bin"}}),
-        )
-        .await;
+        let k = kernel_with(&tmp, aid, json!({"env": env})).await;
         let r = call(
             &k,
             aid,
-            json!({"type": "start", "command": "/bin/sh", "args": ["-c", line]}),
+            json!({"type": "start", "command": command, "args": args}),
         )
         .await;
         let jid = r["job_id"].as_i64().expect("job_id");
         let leader = crate::jobs::jobs()
             .get(&(AgentId::from(aid), fantastic_kernel::TaskId(jid)))
             .expect("job row")
-            .pid as i32;
+            .pid;
         let mut members = Vec::new();
         for _ in 0..100 {
             members = in_session(leader);
@@ -469,7 +462,7 @@ async fn stop_and_delete_kill_everything_a_job_launched() {
             )
             .await;
         }
-        let mut alive: Vec<i32> = std::iter::once(leader).chain(members).collect();
+        let mut alive: Vec<u32> = std::iter::once(leader).chain(members).collect();
         for _ in 0..100 {
             alive.retain(|p| exists(*p));
             if alive.is_empty() {
@@ -501,7 +494,7 @@ async fn write_bytes_is_verbatim_so_enter_reaches_the_program() {
     let w = call(
         &k,
         "term_b",
-        json!({"type": "write", "job_id": jid, "bytes": "hello\n"}),
+        json!({"type": "write", "job_id": jid, "bytes": format!("hello{ENTER}")}),
     )
     .await;
     assert_eq!(w, json!({"written": 6}));
@@ -560,7 +553,7 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
     call(
         &k,
         "term_f",
-        json!({"type": "write", "job_id": jid, "data": "\n"}),
+        json!({"type": "write", "job_id": jid, "data": ENTER}),
     )
     .await;
 }

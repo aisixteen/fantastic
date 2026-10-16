@@ -42,12 +42,14 @@ sys.path.insert(0, str(E2E))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from e2e_build import build_lock  # noqa: E402
-from helpers import verdict  # noqa: E402
+from helpers import oslayer, verdict  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
 # else ~/.config/fantastic. A test must never read or write the owner's real
 # home: every binary this runner launches inherits a throwaway one.
-os.environ["FANTASTIC_HOME"] = tempfile.mkdtemp(prefix="fc-e2e-home-")
+_HOME = Path(tempfile.mkdtemp(prefix="fc-e2e-home-"))
+oslayer.make_private(_HOME)  # the store refuses a home that is not owner-only
+os.environ["FANTASTIC_HOME"] = str(_HOME)
 
 REPO = E2E.parent
 TUI = REPO / "src" / "tui"
@@ -90,9 +92,9 @@ def resolve(argv: list[str], features: list[str], into: Path) -> tuple[Path, Pat
             what = ["--features", ",".join(features)] if features else []
             print(f"building {TUI} {' '.join(what)}…", flush=True)
             build(what)
-            b = TARGET / "fantastic"
+            b = oslayer.exe(TARGET / "fantastic")
         build(["--example", "screenshot"])
-        rig = TARGET / "examples" / "screenshot"
+        rig = oslayer.exe(TARGET / "examples" / "screenshot")
         out = []
         for p in (b, rig):
             if not p.is_file() or not os.access(p, os.X_OK):

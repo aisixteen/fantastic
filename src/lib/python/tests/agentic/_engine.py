@@ -780,7 +780,7 @@ def _disk_files(root: Path) -> list[str]:
         rel = p.relative_to(root)
         if "docs" in rel.parts or rel.name == "readme.md":
             continue
-        out.append(str(rel))
+        out.append(rel.as_posix())  # `/`-separated on every OS
     return out
 
 

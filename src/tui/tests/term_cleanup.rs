@@ -1,6 +1,11 @@
 //! STRAY PROCESSES: closing a terminal (and stopping the kernel) must leave
 //! nothing the shell started running.
 
+// Unix only: the fixture is POSIX job control — `&`, `nohup` (a child that
+// ignores SIGHUP) and `pgrep`; on Windows a job's processes all live in its Job
+// Object, which the exec bridge ends whole.
+#![cfg(unix)]
+
 use std::process::Command;
 
 /// Drive everything through the binary's own modules by re-exec'ing? No — the

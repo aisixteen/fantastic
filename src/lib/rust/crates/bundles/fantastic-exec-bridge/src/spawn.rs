@@ -7,16 +7,14 @@
 //! gate is the caller's regex allowlist on the shell-joined line, and this function
 //! adds nothing to it.
 //!
-//! The OS half — the close-on-exec socket pair, the session, the PTY — lives in
-//! [`crate::sys`].
+//! The OS half — the socket pair, the job's container (a session, a Job Object),
+//! the PTY — lives in [`crate::sys`].
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use serde_json::{Map, Value};
-use tokio::process::{Child, Command};
 
-use crate::sys::{self, OwnedFd, StdUnixStream, UnixStream};
+use crate::sys::{self, Child, CtrlStream};
 
 /// A bare command, and the child's environment has no `PATH` to find it in — the
 /// error payload [`spawn_job`]/[`spawn_pty`] return for it (python `proc.NoPath`).
@@ -31,12 +29,15 @@ impl std::fmt::Display for NoPath {
 
 impl std::error::Error for NoPath {}
 
-/// python `proc.resolve`: argv[0] → the file to exec. A command with a `/` is exec'd
-/// as written (relative to `cwd`). A bare name is looked up in the CHILD's `PATH`
-/// only — never the kernel's, never a built-in default path (std's search falls back
-/// to both); a child env without `PATH` is [`NoPath`].
+/// python `proc.resolve`: argv[0] → the file to exec. A command naming a file (a
+/// `/` in it; on Windows a `\` too) is exec'd as written — relative to `cwd` on
+/// unix, to the kernel's directory on Windows (`CreateProcessW` resolves it before
+/// the job has a directory, as python's `subprocess` does there). A bare name is looked up in the CHILD's `PATH` only — never the kernel's, never a
+/// built-in default path (std's search falls back to both); a child env without
+/// `PATH` is [`NoPath`]. Each `PATH` dir is tried under each name the OS runs the
+/// command as (on Windows: with its `PATHEXT` extensions, `shutil.which`'s order).
 fn resolve(command: &str, cwd: &str, env: &Map<String, Value>) -> std::io::Result<PathBuf> {
-    if command.contains('/') {
+    if sys::names_a_file(command) {
         return Ok(PathBuf::from(command));
     }
     let Some(path) = env.get("PATH") else {
@@ -45,23 +46,18 @@ fn resolve(command: &str, cwd: &str, env: &Map<String, Value>) -> std::io::Resul
             NoPath,
         ));
     };
-    for dir in value_to_env(path).split(':') {
+    let names = sys::exe_names(command);
+    for dir in value_to_env(path).split(sys::PATH_LIST_SEP) {
         // POSIX: an empty entry is the working directory — the CHILD's.
-        let rel = Path::new(cwd)
-            .join(if dir.is_empty() { "." } else { dir })
-            .join(command);
-        let full = std::path::absolute(&rel)?;
-        if sys::is_executable(&full) {
-            return Ok(full);
+        let base = Path::new(cwd).join(if dir.is_empty() { "." } else { dir });
+        for name in &names {
+            let full = std::path::absolute(base.join(name))?;
+            if sys::is_executable(&full) {
+                return Ok(full);
+            }
         }
     }
     Err(sys::not_found())
-}
-
-/// Every pid the OS lists right now, for the teardown tests that look for survivors.
-#[cfg(test)]
-pub(crate) fn all_pids_for_tests() -> Vec<i32> {
-    sys::all_pids()
 }
 
 /// SIGKILL a job's WHOLE session: every member first, then the leader (python
@@ -70,8 +66,9 @@ pub(crate) fn all_pids_for_tests() -> Vec<i32> {
 /// shell puts in its OWN process group, which neither a kill of the leader nor a
 /// tty hangup (foreground group only) reaches. Once the leader is gone they
 /// reparent to init — so the members are found by session id BEFORE it dies. A process that `setsid()`s out of the
-/// session leaves it by design: containment beyond that is the OS's. Returns
-/// whether the leader was signalled.
+/// session leaves it by design: containment beyond that is the OS's. On Windows
+/// the session is the job's Job Object, terminated whole. Returns whether the
+/// leader was signalled.
 pub fn kill_session(leader: i32) -> bool {
     sys::kill_session(leader)
 }
@@ -81,7 +78,7 @@ pub struct Spawned {
     /// The running process.
     pub child: Child,
     /// Parent end of the control socket — hand this to the relay.
-    pub ctrl: UnixStream,
+    pub ctrl: CtrlStream,
 }
 
 /// Spawn `argv` AS GIVEN (already gated by the caller's regex allowlist on the
@@ -108,14 +105,14 @@ pub fn spawn_job(
 /// stdout and stderr), leading a new session with that tty as its controlling
 /// terminal. Same gate, same env rule, same control fd as [`spawn_job`] — a
 /// terminal is a job, not a second spawner. Returns the MASTER end beside it.
-pub fn spawn_pty(
+pub(crate) fn spawn_pty(
     argv: &[String],
     self_id: &str,
     env: &Map<String, Value>,
     cwd: &str,
     cols: u16,
     rows: u16,
-) -> std::io::Result<(Spawned, OwnedFd)> {
+) -> std::io::Result<(Spawned, sys::PtyMaster)> {
     let (master, slave) = sys::open_pty(cols, rows)?;
     let spawned = spawn(argv, self_id, env, cwd, Some(slave))?;
     Ok((spawned, master))
@@ -126,7 +123,7 @@ fn spawn(
     self_id: &str,
     env: &Map<String, Value>,
     cwd: &str,
-    pty_slave: Option<OwnedFd>,
+    pty_slave: Option<sys::PtySlave>,
 ) -> std::io::Result<Spawned> {
     let Some((exe, rest)) = argv.split_first() else {
         return Err(std::io::Error::new(
@@ -135,44 +132,28 @@ fn spawn(
         ));
     };
     let program = resolve(exe, cwd, env)?;
-    let (parent, child_end) = sys::socket_pair()?;
-    let child_raw = sys::raw_fd(&child_end);
+    let (parent, child_end) = sys::ctrl_pair()?;
 
-    // The RESOLVED file, argv[0] as the caller wrote it.
-    let mut cmd = Command::new(&program);
-    sys::set_arg0(&mut cmd, exe);
-    cmd.args(rest).kill_on_drop(false);
-    let is_pty = pty_slave.is_some();
-    match pty_slave {
-        None => {
-            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        }
-        Some(slave) => {
-            cmd.stdin(Stdio::from(slave.try_clone()?))
-                .stdout(Stdio::from(slave.try_clone()?))
-                .stderr(Stdio::from(slave));
-        }
-    }
     // THE CHILD'S WHOLE ENVIRONMENT is the record's — each value stringified,
     // exactly like python's `{str(k): str(v) …}`. The kernel's own environment
-    // does not leak in (`env_clear`).
+    // does not leak in.
     //
-    // The two control vars are written OVER it, so a record `env` cannot
-    // make a job claim another agent's identity, nor point `FANTASTIC_CTRL_FD` at a
-    // descriptor it chose.
-    cmd.env_clear();
-    for (k, v) in env {
-        cmd.env(k, value_to_env(v));
-    }
-    cmd.env("FANTASTIC_CTRL_FD", child_raw.to_string())
-        .env("FANTASTIC_SELF_ID", self_id);
-    cmd.current_dir(cwd);
+    // The two control vars are written OVER it (a later pair wins), so a record
+    // `env` cannot make a job claim another agent's identity, nor point
+    // `FANTASTIC_CTRL_FD` at a descriptor it chose.
+    let mut child_env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| (k.clone(), value_to_env(v)))
+        .collect();
+    child_env.push((
+        "FANTASTIC_CTRL_FD".to_string(),
+        advertised_fd(&child_end).to_string(),
+    ));
+    child_env.push(("FANTASTIC_SELF_ID".to_string(), self_id.to_string()));
 
-    // Keep the control fd across exec, lead a new session, take the PTY as the
-    // controlling terminal.
-    sys::child_setup(&mut cmd, child_raw, is_pty);
-
-    let spawned = cmd.spawn();
+    // The RESOLVED file, argv[0] as the caller wrote it; the control end kept
+    // open in the child at the number advertised; a new session (Job Object).
+    let spawned = sys::spawn(&program, exe, rest, &child_env, cwd, &child_end, pty_slave);
     // DROP THE CHILD END ON BOTH PATHS. If the parent keeps it, the socket never reaches
     // EOF when the relay closes, the connector's reader thread never returns, and
     // `_o._exit(0)` never runs — the durable tool becomes an orphan. Python does this in
@@ -180,8 +161,7 @@ fn spawn(
     drop(child_end);
     let child = spawned?;
 
-    parent.set_nonblocking(true)?;
-    let ctrl = UnixStream::from_std(parent)?;
+    let ctrl = sys::ctrl_stream(parent)?;
     Ok(Spawned { child, ctrl })
 }
 
@@ -191,12 +171,9 @@ fn value_to_env(v: &Value) -> String {
     fantastic_bundle::py_str(v)
 }
 
-/// The fd number the child was told to use. Exposed for tests.
-///
-/// Deliberately NOT a constant like 3: std dup2s stdio onto 0/1/2 before running
-/// `pre_exec` and separately allocates an internal pipe to report exec failure, so
-/// 3-6 are std's. Clobbering the exec-error pipe turns a failed spawn into a silent
-/// hang. Whatever number the OS handed us is already ours and can never be 0/1/2.
-pub fn advertised_fd(s: &StdUnixStream) -> i32 {
-    sys::raw_fd(s)
+/// The number the child is told to use (`FANTASTIC_CTRL_FD`): the control end's
+/// own fd on unix, its SOCKET handle on Windows — see [`sys::ctrl_number`] for why
+/// it is never a fixed one.
+fn advertised_fd(s: &sys::CtrlEnd) -> u64 {
+    sys::ctrl_number(s)
 }

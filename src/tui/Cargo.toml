@@ -28,8 +28,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 serde_yaml = "0.9"
-# dup2, to get the kernel's own stdout prints off the screen the TUI draws on.
-libc = "0.2"
 tokio-util = "0.7"
 
 # ── the kernel, IN-PROCESS ───────────────────────────────────────────────────
@@ -85,6 +83,19 @@ async-trait = "0.1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
+
+# ── the OS surface (`src/sys`) ───────────────────────────────────────────────
+# dup2, to get the kernel's own stdout prints off the screen the TUI draws on.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The std handles pointed at the kernel log, and the console's UTF-8 code page.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_System_Console",
+] }
 
 [features]
 # Links the OpenAI Responses backend (`responses_backend.tools`): `endpoint` (the

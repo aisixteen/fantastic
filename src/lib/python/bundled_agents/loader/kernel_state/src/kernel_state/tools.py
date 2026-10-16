@@ -372,7 +372,7 @@ def _store_reldir(agent, abs_path: Path) -> str:
         rel = Path(abs_path).relative_to(_root(agent))
     except ValueError:
         rel = Path(abs_path)
-    s = str(rel)
+    s = rel.as_posix()  # a path on the wire is `/`-separated on every OS
     return "" if s == "." else s
 
 
@@ -380,7 +380,7 @@ def _covers(allow, path: str) -> bool:
     """Does a store's `allow` list expose `path` (a listed path, or under a listed
     directory)? The file_bridge's own rule, read off its record."""
     for s in allow if isinstance(allow, list) else []:
-        if not isinstance(s, str) or s.startswith("/"):
+        if not isinstance(s, str) or fs.is_absolute(s):
             continue
         e = posixpath.normpath(s or ".")
         if e == "." or path == e or path.startswith(e + "/"):
@@ -656,7 +656,7 @@ async def _reflect(id, payload, agent):
         "id": id,
         "sentence": "Disk persistence/hydration root — owns .fantastic; "
         "answers load_tree / persist_record / forget_record.",
-        "root": str(_root(agent)),
+        "root": _root(agent).as_posix(),
     }
 
 

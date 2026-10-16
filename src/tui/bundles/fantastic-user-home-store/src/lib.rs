@@ -105,14 +105,15 @@ pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
 }
 
 /// Where the saved set-ups live, resolved ONCE by the binary: `FANTASTIC_HOME`, else
-/// `$HOME/.config/fantastic`. `Err` names what is missing — never guessed.
+/// `$HOME/.config/fantastic` (`%USERPROFILE%` on Windows). `Err` names what is
+/// missing — never guessed.
 pub fn home_dir_from_env() -> Result<PathBuf, String> {
     if let Some(h) = std::env::var_os(HOME_VAR).filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(h));
     }
-    match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+    match std::env::var_os(sys::USER_HOME).filter(|v| !v.is_empty()) {
         Some(h) => Ok(PathBuf::from(h).join(".config").join("fantastic")),
-        None => Err(format!("neither {HOME_VAR} nor HOME is set — no home dir for saved set-ups")),
+        None => Err(format!("neither {HOME_VAR} nor {} is set — no home dir for saved set-ups", sys::USER_HOME)),
     }
 }
 
@@ -151,14 +152,12 @@ impl UserHomeStore {
 
 /// Refuse a path others can read or write — the ssh rule — naming the fix.
 pub(crate) fn private(p: &Path, dir: bool) -> Result<(), Value> {
-    let m = fs::metadata(p).map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", p.display())))?;
-    let mode = sys::mode_bits(&m);
+    let mode = sys::mode_of(p).map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", p.display())))?;
     if mode & 0o077 != 0 {
-        let want = if dir { "700" } else { "600" };
         return Err(refusal_hint(
             UNAUTHORIZED,
             format!("user_home_store: {} is readable by others (mode {mode:o})", p.display()),
-            format!("chmod {want} {}", p.display()),
+            sys::private_fix(p, dir),
         ));
     }
     Ok(())

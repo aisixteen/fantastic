@@ -45,7 +45,9 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use fantastic_bundle::{io_error_str, os_error_str2, py_repr, realpath, utf8_decode_error_str};
+use fantastic_bundle::{
+    io_error_str, is_absolute, os_error_str2, py_repr, realpath, utf8_decode_error_str,
+};
 
 use crate::sys;
 
@@ -59,7 +61,7 @@ use crate::sys;
 /// cwd's `OSError` text when a relative path cannot absolutize ([`realpath`]).
 pub fn resolve_root(root: &str, base: &Path) -> Result<PathBuf, String> {
     let base = realpath(base)?;
-    let joined = if root.starts_with('/') {
+    let joined = if is_absolute(root) {
         PathBuf::from(root)
     } else {
         base.join(root)
@@ -83,7 +85,7 @@ pub fn resolve_root(root: &str, base: &Path) -> Result<PathBuf, String> {
 /// `OSError` text when a relative root cannot absolutize ([`realpath`]).
 pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     let root_p = realpath(root)?;
-    if path.starts_with('/') {
+    if is_absolute(path) {
         // An absolute path is a hard escape — refused, never silently re-rooted
         // (a stripped slash would serve `/etc/passwd` as `root/etc/passwd`).
         return Err(format!("fs: path {} escapes root", py_repr(path)));
@@ -249,7 +251,7 @@ pub fn write_bytes(
         ));
         let tmp = target.with_file_name(name);
         if let Err(e) = write_new_with_mode(&tmp, data, mode) {
-            let _ = std::fs::remove_file(&tmp);
+            let _ = sys::unlink(&tmp);
             return Err(e);
         }
         std::fs::rename(&tmp, &target).map_err(|e| io_error_str(&e, &target))
@@ -262,13 +264,11 @@ pub fn write_bytes(
 }
 
 /// python's `os.open(tmp, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, mode or 0o666)` →
-/// `os.fchmod(fd, mode)` (a mode given) → `os.write(fd, data)`.
+/// `os.fchmod(fd, mode)` (a mode given) → `os.write(fd, data)`; the create and
+/// its mode are [`sys::create_new_nofollow`].
 fn write_new_with_mode(tmp: &Path, data: &[u8], mode: Option<u32>) -> Result<(), String> {
     use std::io::Write;
     let mut f = sys::create_new_nofollow(tmp, mode).map_err(|e| io_error_str(&e, tmp))?;
-    if let Some(mode) = mode {
-        sys::set_mode(&f, mode).map_err(|e| io_error_str(&e, tmp))?;
-    }
     f.write_all(data).map_err(|e| io_error_str(&e, tmp))
 }
 
@@ -279,9 +279,9 @@ fn write_new_with_mode(tmp: &Path, data: &[u8], mode: Option<u32>) -> Result<(),
 pub struct NotPrivate {
     /// The leaf that was opened (or the symlink standing in its place).
     pub path: PathBuf,
-    /// Its permission bits (`S_IMODE`).
+    /// Its permission bits (`S_IMODE`; on Windows synthesized from its DACL).
     pub mode: u32,
-    /// Its owner.
+    /// Its owner (on Windows the owner SID's RID).
     pub uid: u32,
 }
 
@@ -314,6 +314,8 @@ pub enum PrivateReadError {
 /// and the read (an `lstat` of the path and then a read of the path again is a
 /// window). `O_NONBLOCK` so a FIFO planted there cannot
 /// hang the open — it is judged and refused like any other non-regular entry.
+/// On Windows the same one open judges the handle's owner and DACL
+/// ([`sys::open_private`]).
 ///
 /// # Errors
 /// [`PrivateReadError::NotPrivate`] (nothing read) when the entry is not
@@ -321,33 +323,18 @@ pub enum PrivateReadError {
 pub fn read_private(root: &Path, path: &str) -> Result<Vec<u8>, PrivateReadError> {
     use std::io::Read;
     let leaf = lexical_leaf(root, path).map_err(PrivateReadError::Os)?;
-    let opened = sys::open_private(&leaf);
+    let opened =
+        sys::open_private(&leaf).map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
     let mut f = match opened {
-        Ok(f) => f,
-        Err(e) if sys::is_symlink_refusal(&e) => {
-            // the symlink itself, named in the refusal — never read
-            let st = std::fs::symlink_metadata(&leaf)
-                .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
+        sys::Private::File(f) => f,
+        sys::Private::Not { mode, uid } => {
             return Err(PrivateReadError::NotPrivate(NotPrivate {
                 path: leaf,
-                mode: sys::mode_bits(&st),
-                uid: sys::owner_uid(&st),
+                mode,
+                uid,
             }));
         }
-        Err(e) => return Err(PrivateReadError::Os(io_error_str(&e, &leaf))),
     };
-    let st = f
-        .metadata()
-        .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
-    let mode = sys::mode_bits(&st);
-    let me = sys::current_uid();
-    if !st.file_type().is_file() || sys::owner_uid(&st) != me || mode & 0o077 != 0 {
-        return Err(PrivateReadError::NotPrivate(NotPrivate {
-            path: leaf,
-            mode,
-            uid: sys::owner_uid(&st),
-        }));
-    }
     let mut out = Vec::new();
     f.read_to_end(&mut out)
         .map_err(|e| PrivateReadError::Os(io_error_str(&e, &leaf)))?;
@@ -366,8 +353,8 @@ pub fn list_dir(root: &Path, path: &str) -> Result<Vec<PathBuf>, String> {
         out.push(entry.map_err(|e| io_error_str(&e, &target))?.path());
     }
     // python sorts `Path` objects, which compare by their parts — all entries
-    // share a parent, so this is the name's code points, i.e. utf-8 bytes.
-    out.sort_by(|a, b| sys::os_bytes(a.as_os_str()).cmp(sys::os_bytes(b.as_os_str())));
+    // share a parent, so this is the order of their names.
+    out.sort_by(|a, b| sys::path_order(a, b));
     Ok(out)
 }
 
@@ -425,7 +412,7 @@ pub fn rename(root: &Path, old: &str, new: &str) -> Result<(), String> {
     let o = resolve(root, old)?;
     let n = resolve(root, new)?;
     mkdir_parents(&n)?;
-    std::fs::rename(&o, &n).map_err(|e| match e.raw_os_error() {
+    std::fs::rename(&o, &n).map_err(|e| match fantastic_bundle::errno_of(&e) {
         Some(errno) => os_error_str2(errno, &o.to_string_lossy(), &n.to_string_lossy()),
         None => e.to_string(),
     })
@@ -442,7 +429,7 @@ pub fn rename(root: &Path, old: &str, new: &str) -> Result<(), String> {
 pub fn remove(root: &Path, path: &str, recursive: bool) -> Result<(), String> {
     let leaf = lexical_leaf(root, path)?;
     if std::fs::symlink_metadata(&leaf).is_ok_and(|m| m.file_type().is_symlink()) {
-        return std::fs::remove_file(&leaf).map_err(|e| io_error_str(&e, &leaf));
+        return sys::unlink(&leaf).map_err(|e| io_error_str(&e, &leaf));
     }
     let target = resolve(root, path)?;
     if target.is_dir() {
@@ -452,7 +439,7 @@ pub fn remove(root: &Path, path: &str, recursive: bool) -> Result<(), String> {
             std::fs::remove_dir(&target).map_err(|e| io_error_str(&e, &target))
         }
     } else {
-        std::fs::remove_file(&target).map_err(|e| io_error_str(&e, &target))
+        sys::unlink(&target).map_err(|e| io_error_str(&e, &target))
     }
 }
 
@@ -467,7 +454,7 @@ fn rmtree(target: &Path) -> Result<(), String> {
         if is_real_dir {
             rmtree(&sub)?;
         } else {
-            std::fs::remove_file(&sub).map_err(|e| io_error_str(&e, &sub))?;
+            sys::unlink(&sub).map_err(|e| io_error_str(&e, &sub))?;
         }
     }
     std::fs::remove_dir(target).map_err(|e| io_error_str(&e, target))

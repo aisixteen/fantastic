@@ -20,7 +20,7 @@ use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 
 use crate::jobs;
-use crate::sys::{self, AsyncFd, OwnedFd};
+use crate::sys;
 
 /// The scrollback ring a re-attaching client replays (python `PTY_RING`).
 pub const PTY_RING: usize = 256 * 1024;
@@ -40,7 +40,7 @@ const IMAGE_EXT: [(&str, &str); 4] = [
 
 /// One PTY job's terminal: the master end and its mutable state.
 pub struct Pty {
-    fd: AsyncFd<OwnedFd>,
+    master: sys::PtyMaster,
     st: Mutex<PtyInner>,
     /// Woken by `ack` when the backlog drains — the PUMP re-reads, in its own task.
     wake: tokio::sync::Notify,
@@ -61,10 +61,10 @@ struct PtyInner {
 }
 
 impl Pty {
-    /// Wrap a fresh master fd (already non-blocking) at the size it was opened with.
-    pub fn new(master: OwnedFd, cols: u16, rows: u16) -> std::io::Result<Arc<Self>> {
-        Ok(Arc::new(Self {
-            fd: AsyncFd::new(master)?,
+    /// Wrap a fresh master at the size it was opened with.
+    pub(crate) fn new(master: sys::PtyMaster, cols: u16, rows: u16) -> Arc<Self> {
+        Arc::new(Self {
+            master,
             st: Mutex::new(PtyInner {
                 cols,
                 rows,
@@ -78,7 +78,7 @@ impl Pty {
             }),
             wake: tokio::sync::Notify::new(),
             write_lock: tokio::sync::Mutex::new(()),
-        }))
+        })
     }
 
     fn lock(&self) -> MutexGuard<'_, PtyInner> {
@@ -95,11 +95,12 @@ impl Pty {
         let g = self.lock();
         (g.cols, g.rows)
     }
-}
 
-/// Set the window size on the master (the tty sends SIGWINCH to the program).
-pub fn set_winsize(fd: i32, cols: u16, rows: u16) -> std::io::Result<()> {
-    sys::set_winsize(fd, cols, rows)
+    /// The master end — what [`crate::jobs::interrupt`] types a Ctrl-C into where
+    /// the OS interrupts a terminal job through its console.
+    pub(crate) fn master(&self) -> &sys::PtyMaster {
+        &self.master
+    }
 }
 
 /// THE JOB'S TASK for a PTY job (python `_pty_pump`). It owns the reader — reading
@@ -109,7 +110,7 @@ pub fn set_winsize(fd: i32, cols: u16, rows: u16) -> std::io::Result<()> {
 pub async fn pump(
     owner: AgentId,
     ready: jobs::Ready,
-    mut child: tokio::process::Child,
+    mut child: sys::Child,
     pty: Arc<Pty>,
     kernel: Arc<Kernel>,
 ) {
@@ -132,19 +133,13 @@ pub async fn pump(
             pty.wake.notified().await;
             continue;
         }
-        let Ok(mut guard) = pty.fd.readable().await else {
-            pty.lock().eof = true;
-            break;
-        };
-        let read = guard.try_io(|inner| sys::read_fd(inner.get_ref(), &mut buf));
-        let n = match read {
-            Err(_would_block) => continue,
+        let n = match pty.master.read(&mut buf).await {
             // EOF, or EIO once the child closed the slave: the program is done.
-            Ok(Ok(0) | Err(_)) => {
+            Ok(0) | Err(_) => {
                 pty.lock().eof = true;
                 break;
             }
-            Ok(Ok(n)) => n,
+            Ok(n) => n,
         };
         let text = {
             let mut g = pty.lock();
@@ -207,19 +202,13 @@ fn ring_add(g: &mut PtyInner, text: &str) {
     }
 }
 
-/// Write the FULL buffer to the non-blocking master: `write` short-writes and
-/// fails `EAGAIN` when the tty buffer is full; one unchecked write drops the tail
-/// — a bracketed paste then loses its end marker and the shell sticks in paste
-/// mode. Loop until every byte lands.
+/// Write the FULL buffer to the master: a write short-writes when the tty buffer
+/// is full; one unchecked write drops the tail — a bracketed paste then loses its
+/// end marker and the shell sticks in paste mode. Loop until every byte lands.
 async fn write_all(pty: &Pty, data: &[u8]) -> std::io::Result<usize> {
     let mut written = 0;
     while written < data.len() {
-        let mut guard = pty.fd.writable().await?;
-        match guard.try_io(|inner| sys::write_fd(inner.get_ref(), &data[written..])) {
-            Ok(Ok(n)) => written += n,
-            Ok(Err(e)) => return Err(e),
-            Err(_would_block) => {}
-        }
+        written += pty.master.write(&data[written..]).await?;
     }
     Ok(written)
 }
@@ -318,7 +307,7 @@ pub fn resize_reply(owner: &AgentId, payload: &Value) -> Value {
         g.cols = cols;
         g.rows = rows;
     }
-    if let Err(e) = set_winsize(sys::master_fd(pty.fd.get_ref()), cols, rows) {
+    if let Err(e) = pty.master.resize(cols, rows) {
         return refusal(TRANSPORT_ERROR, format!("exec_bridge: resize failed: {e}"));
     }
     json!({"resized": true, "cols": cols, "rows": rows})

@@ -1,8 +1,9 @@
 //! Unix (macOS, Linux): libc and `std::os::unix`.
 
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
+use std::path::Path;
 
 /// `kill(pid, 0)`: `true` when the process exists, ours or not.
 pub(crate) fn pid_alive(pid: u32) -> bool {
@@ -22,9 +23,10 @@ pub(crate) fn set_create_mode(opts: &mut OpenOptions, mode: u32) -> &mut OpenOpt
     opts.mode(mode)
 }
 
-/// Do two metadata describe the same file — same device, same inode?
-pub(crate) fn same_file(a: &Metadata, b: &Metadata) -> bool {
-    (a.dev(), a.ino()) == (b.dev(), b.ino())
+/// Are two open files the same file — same device, same inode?
+pub(crate) fn same_file(a: &File, b: &File) -> std::io::Result<bool> {
+    let (a, b) = (a.metadata()?, b.metadata()?);
+    Ok((a.dev(), a.ino()) == (b.dev(), b.ino()))
 }
 
 /// Blocking exclusive `flock(LOCK_EX)` on `file`'s descriptor.
@@ -67,4 +69,10 @@ pub(crate) fn fill_random(buf: &mut [u8]) {
         let ok = unsafe { libc::getentropy(chunk.as_mut_ptr().cast(), chunk.len()) } == 0;
         assert!(ok, "the OS randomness call failed: no randomness source");
     }
+}
+
+/// A symlink at `link` pointing at `target` — the fixture
+/// [`crate::test_support::symlink`] plants.
+pub(crate) fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
 }

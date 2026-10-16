@@ -299,15 +299,14 @@ fn write_failed(r: &Value) -> bool {
 fn covers(allow: Option<&Value>, path: &str) -> bool {
     allow.and_then(Value::as_array).is_some_and(|items| {
         items.iter().filter_map(Value::as_str).any(|s| {
-            if s.starts_with('/') {
+            if fantastic_bundle::is_absolute(s) {
                 return false;
             }
             let e = normalize_lexical(
                 Path::new("/"),
                 Path::new(if s.is_empty() { "." } else { s }),
             );
-            let e = e.strip_prefix("/").map(Path::to_path_buf).unwrap_or(e);
-            let e = e.to_string_lossy();
+            let e = wire_path(e.strip_prefix("/").unwrap_or(&e));
             e.is_empty() || e == path || path.starts_with(&format!("{e}/"))
         })
     })
@@ -375,13 +374,23 @@ fn normalize_lexical(base: &Path, p: &Path) -> PathBuf {
 
 /// An agent's dir RELATIVE to the loader's store root (`.fantastic`). The root
 /// loader itself → `""` (its `agent.yaml` sits at the provider root); a child →
-/// `agents/<id>` (recursively). Both paths share the same base, so this is a
-/// plain prefix-strip (no canonicalization).
+/// `agents/<id>` (recursively), `/`-separated on every OS — it is a wire path.
+/// Both paths share the same base, so this is a plain prefix-strip (no
+/// canonicalization).
 pub fn store_reldir(store_root: &Path, agent_root: &Path) -> String {
     match agent_root.strip_prefix(store_root) {
-        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Ok(rel) => wire_path(rel),
         Err(_) => agent_root.to_string_lossy().into_owned(),
     }
+}
+
+/// A relative path as the wire spells it: its parts joined with `/` on every OS
+/// (python `PurePath.as_posix`).
+fn wire_path(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// `read_stream` a store-relative path through the provider, PUMPED TO EOF,
@@ -567,7 +576,7 @@ pub async fn forget_path(kernel: &Arc<Kernel>, loader: &Agent, agent_root: &Path
 pub(crate) fn clamp(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let escapes = || format!("fs: path {} escapes root", fantastic_bundle::py_repr(rel));
     let root_p = fantastic_bundle::realpath(root)?;
-    if rel.starts_with('/') {
+    if fantastic_bundle::is_absolute(rel) {
         return Err(escapes());
     }
     let target = if rel.is_empty() {

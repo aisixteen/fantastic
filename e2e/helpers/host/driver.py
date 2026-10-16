@@ -30,7 +30,6 @@ import json
 
 import yaml
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -41,7 +40,7 @@ import urllib.request
 from pathlib import Path
 
 from . import artifacts
-from helpers import creds, memory
+from helpers import creds, memory, oslayer
 
 #: The only stamped edge is `$self` — every other edge is an explicit grant.
 BASE = {"$self": "*"}
@@ -79,7 +78,7 @@ RUNTIMES = {
         # which then runs `main.py`'s own entry. A production python kernel never
         # runs it, so `dispenser_probe.tools` does not resolve and the role cannot
         # be played — the same gate the compiled runtimes get from a build flag.
-        "cmd": ["src/lib/python/.venv/bin/python", "e2e/probes/scenario_probes.py"],
+        "cmd": [str(oslayer.venv_python(Path("src/lib/python/.venv"))), "e2e/probes/scenario_probes.py"],
         "root_id": "kernel_state",
     },
     "rust": {
@@ -288,8 +287,7 @@ class HostKernel:
     def boot(self) -> "HostKernel":
         # A SIGTERM (run.py killing the lane, a pkill) must run the exit hooks, or the
         # kernel group below outlives the probe; python's default handler skips them.
-        if signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, None):
-            signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+        oslayer.install_stop_handler(lambda *_: sys.exit(143))
         self.port = self.seed()
         self.klog = self.klog_path.open("wb")
         # ITS OWN PROCESS GROUP, KILLED AS A GROUP. A kernel is a daemon by design —
@@ -299,7 +297,7 @@ class HostKernel:
         self.proc = subprocess.Popen(
             self.cmd, cwd=self.workdir, env=self.env,
             stdout=self.klog, stderr=subprocess.STDOUT,
-            start_new_session=True)
+            **oslayer.group_kwargs())
         # AT EXIT, NOT AT `close`. Probes bind `close_kernel` and never call it —
         # the kernel dies with the process — so a dump that lived only in `close`
         # would never run.
@@ -318,22 +316,16 @@ class HostKernel:
         """Stop the kernel's whole process group, then dump. Idempotent — it runs
         from the probe's `finally` and again at exit."""
         if self.proc and self.proc.poll() is None:
-            self._signal_group(signal.SIGTERM)
+            oslayer.stop_group(self.proc.pid)
             try:
                 self.proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self._signal_group(signal.SIGKILL)
+                oslayer.kill_group(self.proc.pid)
                 try:
                     self.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass
         self.dump()
-
-    def _signal_group(self, sig: int) -> None:
-        try:
-            os.killpg(os.getpgid(self.proc.pid), sig)
-        except ProcessLookupError:
-            pass
 
     def dump(self) -> None:
         """The kernel's own words, INTO THE TEST LOG.

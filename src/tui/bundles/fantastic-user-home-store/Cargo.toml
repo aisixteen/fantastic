@@ -14,6 +14,18 @@ async-trait = "0.1"
 serde_json = "1"
 sha2 = "0.10"
 
+# `sys::windows` — the private-file contract as DACLs: the token's SIDs, a
+# descriptor from SDDL for a private create, the owner and DACL of a handle.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tempfile = "3"

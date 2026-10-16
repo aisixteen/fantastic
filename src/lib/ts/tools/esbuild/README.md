@@ -36,7 +36,7 @@ the toolchain and the esbuild module come through Go's checksum database.
 
 - pinned: **esbuild v0.25.0**, built with **go1.23.4**
 - platforms in `SHA256SUMS`: `darwin-arm64`, `darwin-x64`, `linux-arm64`,
-  `linux-x64`
+  `linux-x64`, `win32-x64` (`esbuild.exe`)
 
 ## Adding a platform
 

@@ -50,3 +50,10 @@ default_out() {
 }
 
 say() { echo "build/$(basename "$0" .sh): $*"; }
+
+# A built binary's file suffix: `.exe` on Windows (Git for Windows' sh, whose
+# `uname -s` names the MSYS2 flavour), nothing elsewhere.
+case "$(uname -s)" in
+  MINGW*|MSYS*) EXE=.exe ;;
+  *) EXE="" ;;
+esac

@@ -7,15 +7,19 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from _testkit import LF_STDIO, child_env
 from test_exec_bridge import _mk, _start, _wait_done
 
-PROG = """import sys, time
+PROG = (
+    LF_STDIO
+    + """import sys, time
 for i in range(6):
     print(f"step {i} ok", flush=True)
 print("ERROR disk full", file=sys.stderr, flush=True)
 print("step 6 ok", flush=True)
 time.sleep(30)
 """
+)
 
 
 async def _ask(k, payload):
@@ -35,7 +39,7 @@ async def test_tail_and_grep_read_a_running_job(seeded_kernel, tmp_path):
     k = seeded_kernel
     prog = tmp_path / "w.py"
     prog.write_text(PROG)
-    await _mk(k, allowed=[r".*"], inherit_env=["PATH"])
+    await _mk(k, allowed=[r".*"], inherit_env=child_env("PATH"))
     r = await _start(k, "runner", sys.executable, [str(prog)])
     jid = r["job_id"]
     await _until(k, jid, 8)
@@ -84,7 +88,7 @@ async def test_tail_and_grep_read_a_running_job(seeded_kernel, tmp_path):
 async def test_bad_arguments_are_refused(seeded_kernel):
     k = seeded_kernel
     await _mk(k, allowed=[r".*"])
-    r = await _start(k, "runner", "echo", ["hi"])
+    r = await _start(k, "runner", sys.executable, ["-c", "print('hi')"])
     jid = r["job_id"]
     for p, arg in [
         ({"type": "grep", "job_id": jid}, "match"),

@@ -34,6 +34,8 @@ import tarfile
 import time
 from pathlib import Path
 
+from helpers import oslayer
+
 #: Where staged artifacts live. Wipe-and-rebuild safe; nothing else reads it.
 DIST = "e2e/dist"
 
@@ -136,7 +138,7 @@ def stage(repo: Path, name: str, spec: dict) -> dict:
         # rather than on a user's machine.
         _run(["uv", "sync"], dist / "src/lib/python", "uv sync (packaged python kernel)")
     else:
-        (dist / "fantastic_kernel").chmod(0o755)
+        oslayer.exe(dist / "fantastic_kernel").chmod(0o755)
     stamp.write_text(f"{time.time()}\n")
     return _point_at(repo, name, spec, dist)
 
@@ -147,7 +149,7 @@ def _point_at(repo: Path, name: str, spec: dict, dist: Path) -> dict:
         # The PACKAGED venv runs the repo's probe launcher; its `import main`
         # resolves to the packaged `main.py` (the venv's editable install).
         py = dist / "src/lib/python"
-        spec["cmd"] = [str(py / ".venv/bin/python"), str(repo / "e2e/probes/scenario_probes.py")]
+        spec["cmd"] = [str(oslayer.venv_python(py / ".venv")), str(repo / "e2e/probes/scenario_probes.py")]
     else:
-        spec["cmd"] = [str(dist / "fantastic_kernel")]
+        spec["cmd"] = [str(oslayer.exe(dist / "fantastic_kernel"))]
     return spec

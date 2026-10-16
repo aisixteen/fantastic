@@ -19,7 +19,8 @@
 #
 # NO npm, NO node, NO Python. The packer is the vendored, sha256-pinned esbuild
 # Go binary under tools/esbuild/ (see tools/esbuild/README.md). The only other
-# deps are coreutils: shasum/sha256sum, awk, grep, sed, zip.
+# deps are coreutils: shasum/sha256sum, awk, grep, sed, zip (on Windows: Git for
+# Windows' sh and tools, plus Info-ZIP `zip`).
 set -eu
 
 if [ "$#" -lt 3 ]; then
@@ -51,15 +52,19 @@ sha256() {
 }
 
 # ── select the vendored esbuild for this platform ───────────────────────────
+# Windows runs this under Git for Windows' sh (MSYS2), whose `uname -s` names
+# the MSYS2 flavour and the NT build; Go names the binary `esbuild.exe` there.
+EXE=""
 case "$(uname -sm)" in
   "Darwin arm64")   PLAT=darwin-arm64 ;;
   "Darwin x86_64")  PLAT=darwin-x64 ;;
   "Linux x86_64")   PLAT=linux-x64 ;;
   "Linux aarch64")  PLAT=linux-arm64 ;;
+  MINGW64_NT*" x86_64"|MSYS_NT*" x86_64") PLAT=win32-x64; EXE=.exe ;;
   *) echo "pack.sh: unsupported platform '$(uname -sm)'. Vendor esbuild for it" \
           "under tools/esbuild/<platform>/ and add it to SHA256SUMS." >&2; exit 1 ;;
 esac
-ESBUILD="$LIB/tools/esbuild/$PLAT/esbuild"
+ESBUILD="$LIB/tools/esbuild/$PLAT/esbuild$EXE"
 SUMS="$LIB/tools/esbuild/SHA256SUMS"
 # PROVISION it from pinned source when absent (a clean checkout, `cargo install`):
 # the pinned esbuild release, built by the pinned Go toolchain, reproducibly
@@ -87,8 +92,8 @@ if [ ! -x "$ESBUILD" ]; then
 fi
 
 # ── integrity gate: refuse a tampered/unpinned packer ───────────────────────
-EXPECTED=$(awk -v p="$PLAT/esbuild" '$2==p {print $1}' "$SUMS")
-[ -n "$EXPECTED" ] || { echo "pack.sh: no SHA256SUMS entry for $PLAT/esbuild" >&2; exit 1; }
+EXPECTED=$(awk -v p="$PLAT/esbuild$EXE" '$2==p {print $1}' "$SUMS")
+[ -n "$EXPECTED" ] || { echo "pack.sh: no SHA256SUMS entry for $PLAT/esbuild$EXE" >&2; exit 1; }
 GOT=$(sha256 "$ESBUILD")
 if [ "$EXPECTED" != "$GOT" ]; then
   echo "pack.sh: esbuild sha256 MISMATCH — refusing to run." >&2

@@ -8,6 +8,7 @@
 //! followed symlinks, hydrating records from another directory.
 
 use fantastic_kernel::bootstrap::{bootstrap, BootstrapOptions};
+use fantastic_kernel::test_support::symlink;
 use fantastic_kernel::{Agent, AgentId, BundleRegistry, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -140,11 +141,7 @@ fn cold_walk_refuses_an_outward_symlinked_entry() {
     seed(&work.join(".fantastic/agent.yaml"), "id: kernel_state\n");
     seed(&tmp.path().join("outside/agent.yaml"), "id: probe_out\n");
     std::fs::create_dir_all(work.join(".fantastic/agents")).unwrap();
-    std::os::unix::fs::symlink(
-        tmp.path().join("outside"),
-        work.join(".fantastic/agents/evil"),
-    )
-    .unwrap();
+    symlink(tmp.path().join("outside"), work.join(".fantastic/agents/evil")).unwrap();
     let err = boot_err(&work);
     assert!(
         err.ends_with(": fs: path 'agents/evil/agent.yaml' escapes root"),
@@ -160,7 +157,7 @@ fn cold_walk_follows_an_inward_symlinked_entry() {
     seed(&fdir.join("agent.yaml"), "id: kernel_state\n");
     seed(&fdir.join("stash/a/agent.yaml"), "id: a\n");
     std::fs::create_dir_all(fdir.join("agents")).unwrap();
-    std::os::unix::fs::symlink(fdir.join("stash/a"), fdir.join("agents/a")).unwrap();
+    symlink(fdir.join("stash/a"), fdir.join("agents/a")).unwrap();
     let booted = bootstrap(BundleRegistry::new(), BootstrapOptions::one_shot(&work)).unwrap();
     let a = booted
         .kernel

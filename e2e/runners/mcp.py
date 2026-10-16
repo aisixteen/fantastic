@@ -25,7 +25,6 @@ import json
 import re
 import os
 import secrets
-import signal
 import subprocess
 import sys
 import tempfile
@@ -38,16 +37,18 @@ import yaml
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
-from helpers import verdict  # noqa: E402
+from helpers import oslayer, verdict  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
 # else ~/.config/fantastic. A test must never read or write the owner's real
 # home: every binary this runner launches inherits a throwaway one.
-os.environ["FANTASTIC_HOME"] = tempfile.mkdtemp(prefix="fc-e2e-home-")
+_HOME = Path(tempfile.mkdtemp(prefix="fc-e2e-home-"))
+oslayer.make_private(_HOME)  # the store refuses a home that is not owner-only
+os.environ["FANTASTIC_HOME"] = str(_HOME)
 
 REPO = E2E.parent
 TUI = REPO / "src" / "tui"
-DEFAULT_BIN = REPO / "src" / "target" / "debug" / "fantastic"
+DEFAULT_BIN = oslayer.exe(REPO / "src" / "target" / "debug" / "fantastic")
 READ_TIMEOUT = 30.0
 
 
@@ -374,7 +375,8 @@ def main(argv: list[str]) -> int:
             host = None
             if "host_argv" in run:
                 host = subprocess.Popen([str(binary), *run["host_argv"]], cwd=cwd,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        **oslayer.group_kwargs())
                 sock = cwd / ".fantastic" / "cli" / "mcp.sock"
                 for _ in range(300):
                     if sock.exists() or host.poll() is not None:
@@ -406,7 +408,7 @@ def main(argv: list[str]) -> int:
                 lock = yaml.safe_load((cwd / ".fantastic" / "lock.yaml").read_text()) or {}
                 if run.get("after_exit", {}).get("lock_held_by_host") and lock.get("pid") != host.pid:
                     failures.append(f"{run['name']}/after: lock pid {lock.get('pid')} != host {host.pid}")
-                host.send_signal(signal.SIGTERM)
+                oslayer.stop(host)
                 try:
                     hc = host.wait(30)
                 except subprocess.TimeoutExpired:

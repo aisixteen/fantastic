@@ -16,6 +16,6 @@ set -- --bin fantastic_kernel
 
 say "cargo build $*"
 ( cd "$REPO/src/lib/rust" && cargo build "$@" )
-tar -czf "$OUT" -C "$REPO/src/lib/rust/target/$PROFILE" fantastic_kernel
+tar -czf "$OUT" -C "$REPO/src/lib/rust/target/$PROFILE" "fantastic_kernel$EXE"
 say "wrote $OUT"
 echo "$OUT"

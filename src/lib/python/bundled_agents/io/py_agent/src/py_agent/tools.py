@@ -28,7 +28,6 @@ and network never pass a gate.
 from __future__ import annotations
 
 import asyncio
-import socket
 from types import ModuleType
 
 from exec_bridge import proc
@@ -199,7 +198,7 @@ async def _start(id: str, name: str, folder: str, spec: dict, kernel) -> dict | 
         return None
     record = {**(spec.get("record") or {}), **(kernel.get(id) or {})}
     env = _child_env(record)
-    parent, child = socket.socketpair()
+    parent, child = proc.ctrl_pair()
     env["FANTASTIC_CTRL_FD"] = str(child.fileno())
     env["FANTASTIC_SELF_ID"] = id
     try:

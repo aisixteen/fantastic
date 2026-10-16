@@ -8,10 +8,10 @@
 //! line and nothing wider; every other argv, and every pipe job, still needs
 //! `allowed`.
 //!
-//! The "shell" here is a tiny executable script, so the tests read the same on
-//! every OS: it prints its argv and echoes one typed line back.
+//! The "shell" here is a tiny executable script (`sys::fake_shell`: `sh` on unix,
+//! `cmd` on Windows), so the tests read the same on every OS: it prints its argv
+//! and echoes one typed line back.
 
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
-use crate::{jobs, ExecBridgeBundle, HANDLER_MODULE};
+use crate::{jobs, ExecBridgeBundle, HANDLER_MODULE, SHELL_VAR};
 
 fn pty() -> Value {
     json!({"cols": 80, "rows": 24})
@@ -29,16 +29,9 @@ fn pty() -> Value {
 /// echoes one typed line — enough to prove WHICH line was spawned and that it
 /// sits on the terminal.
 fn fake_shell(tmp: &TempDir) -> String {
-    let path = tmp.path().join("fakesh");
-    std::fs::write(
-        &path,
-        "#!/bin/sh\necho \"SHELL_UP $*\"\nread line\necho \"GOT $line\"\n",
-    )
-    .unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path.to_string_lossy().to_string()
+    crate::sys::fake_shell(tmp.path(), "fakesh")
+        .to_string_lossy()
+        .to_string()
 }
 
 /// A kernel with only the root; agents are created per test with exactly the
@@ -122,7 +115,7 @@ async fn a_pty_start_without_command_runs_the_childs_shell() {
         &k,
         &tmp,
         "sh_run",
-        json!({"env": {"SHELL": sh}, "shell": true}),
+        json!({"env": {SHELL_VAR: sh}, "shell": true}),
     )
     .await;
     let mut rx = k.ensure_inbox(&AgentId::from("sh_run"));
@@ -154,7 +147,7 @@ async fn a_pty_start_without_command_runs_the_childs_shell() {
     call(
         &k,
         "sh_run",
-        json!({"type": "write", "job_id": jid, "data": "hi\n"}),
+        json!({"type": "write", "job_id": jid, "data": format!("hi{}", crate::sys::ENTER)}),
     )
     .await;
     events_until(&mut rx, |t| t.contains("GOT hi")).await;
@@ -172,7 +165,7 @@ async fn the_shell_comes_from_the_childs_env_not_the_kernels() {
     let r = call(&k, "sh_env", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("SHELL")),
+        (&json!("missing_arg"), &json!(SHELL_VAR)),
         "{r}"
     );
     assert!(
@@ -182,7 +175,7 @@ async fn the_shell_comes_from_the_childs_env_not_the_kernels() {
         "{r}"
     );
     // Passing it down by NAME is the whole repair — when this process has one.
-    let Ok(kernel_shell) = std::env::var("SHELL") else {
+    let Ok(kernel_shell) = std::env::var(SHELL_VAR) else {
         return;
     };
     if kernel_shell.is_empty() {
@@ -191,7 +184,7 @@ async fn the_shell_comes_from_the_childs_env_not_the_kernels() {
     let u = call(
         &k,
         "kernel_state",
-        json!({"type": "update_agent", "id": "sh_env", "inherit_env": ["SHELL"]}),
+        json!({"type": "update_agent", "id": "sh_env", "inherit_env": [SHELL_VAR]}),
     )
     .await;
     assert!(u.get("error").is_none(), "{u}");
@@ -215,13 +208,13 @@ async fn an_empty_shell_in_the_child_env_is_refused_too() {
         &k,
         &tmp,
         "sh_empty",
-        json!({"env": {"SHELL": ""}, "shell": true}),
+        json!({"env": {SHELL_VAR: ""}, "shell": true}),
     )
     .await;
     let r = call(&k, "sh_empty", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(
         (&r["reason"], &r["arg"]),
-        (&json!("missing_arg"), &json!("SHELL")),
+        (&json!("missing_arg"), &json!(SHELL_VAR)),
         "{r}"
     );
 }
@@ -236,7 +229,7 @@ async fn a_pipe_job_always_names_its_command() {
         &k,
         &tmp,
         "sh_pipe",
-        json!({"env": {"SHELL": sh}, "shell": true}),
+        json!({"env": {SHELL_VAR: sh}, "shell": true}),
     )
     .await;
     let r = call(&k, "sh_pipe", json!({"type": "start"})).await;
@@ -268,7 +261,7 @@ async fn shell_true_permits_only_the_bare_shell_line() {
         &k,
         &tmp,
         "sh_bare",
-        json!({"env": {"SHELL": sh}, "shell": true}),
+        json!({"env": {SHELL_VAR: sh}, "shell": true}),
     )
     .await;
     // extra args are a different line — `shell` does not cover it
@@ -309,26 +302,44 @@ async fn shell_login_permits_exactly_the_login_line() {
         &k,
         &tmp,
         "sh_login",
-        json!({"env": {"SHELL": sh}, "shell": "login"}),
+        json!({"env": {SHELL_VAR: sh}, "shell": "login"}),
     )
     .await;
     let mut rx = k.ensure_inbox(&AgentId::from("sh_login"));
-    // the bare shell is NOT the login line
-    let r = call(&k, "sh_login", json!({"type": "start", "pty": pty()})).await;
+    // The login line is the shell plus what the OS names a login (`-l` on unix;
+    // nothing on Windows, where `cmd.exe` has no login mode).
+    let login = crate::sys::LOGIN_ARGS;
+    if !login.is_empty() {
+        // the bare shell is NOT the login line
+        let r = call(&k, "sh_login", json!({"type": "start", "pty": pty()})).await;
+        assert_eq!(r["reason"], "unauthorized", "{r}");
+        let err = r["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains(login[0]) && err.contains("`shell=\"login\"`"),
+            "{r}"
+        );
+    }
+    // another tail is not it either
+    let r = call(
+        &k,
+        "sh_login",
+        json!({"type": "start", "args": ["-x"], "pty": pty()}),
+    )
+    .await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
-    let err = r["error"].as_str().unwrap_or("");
     assert!(
-        err.contains("-l") && err.contains("`shell=\"login\"`"),
+        r["error"].as_str().unwrap_or("").contains("`shell=\"login\"`"),
         "{r}"
     );
     let r = call(
         &k,
         "sh_login",
-        json!({"type": "start", "args": ["-l"], "pty": pty()}),
+        json!({"type": "start", "args": login, "pty": pty()}),
     )
     .await;
     assert_eq!(r["status"], "running", "{r}");
-    events_until(&mut rx, |t| t.contains("SHELL_UP -l")).await;
+    let up = std::iter::once("SHELL_UP").chain(login.iter().copied()).collect::<Vec<_>>().join(" ");
+    events_until(&mut rx, |t| t.contains(&up)).await;
     teardown("sh_login");
 }
 
@@ -339,7 +350,7 @@ async fn without_shell_the_resolved_line_still_needs_allowed() {
     let tmp = TempDir::new().unwrap();
     let sh = fake_shell(&tmp);
     let k = kernel(&tmp);
-    mk(&k, &tmp, "sh_allow", json!({"env": {"SHELL": sh}})).await;
+    mk(&k, &tmp, "sh_allow", json!({"env": {SHELL_VAR: sh}})).await;
     let r = call(&k, "sh_allow", json!({"type": "start", "pty": pty()})).await;
     assert_eq!(r["reason"], "unauthorized", "{r}");
     // No `shell` ⇒ no shell suffix on the refusal.
@@ -350,11 +361,13 @@ async fn without_shell_the_resolved_line_still_needs_allowed() {
             .contains("permits only the PTY line"),
         "{r}"
     );
-    // `allowed` is a regex: escape the path so its `.`/`/` match literally.
+    // `allowed` is a regex over the shell-joined line: escape the line (the path,
+    // quoted when it must be) so its `.`/`/` match literally.
+    let line = fancy_regex::escape(&crate::shlex_join(std::slice::from_ref(&sh))).to_string();
     let u = call(
         &k,
         "kernel_state",
-        json!({"type": "update_agent", "id": "sh_allow", "allowed": [fancy_regex::escape(&sh)]}),
+        json!({"type": "update_agent", "id": "sh_allow", "allowed": [line]}),
     )
     .await;
     assert!(u.get("error").is_none(), "{u}");
@@ -368,17 +381,24 @@ async fn shell_does_not_disable_the_allowlist() {
     let tmp = TempDir::new().unwrap();
     let sh = fake_shell(&tmp);
     let k = kernel(&tmp);
+    let echo = crate::sys::echo_script(tmp.path(), "say", "x")
+        .to_string_lossy()
+        .to_string();
+    let allowed = format!(
+        "{} .*",
+        fancy_regex::escape(&crate::shlex_join(std::slice::from_ref(&echo)))
+    );
     mk(
         &k,
         &tmp,
         "sh_list",
-        json!({"env": {"SHELL": sh}, "shell": true, "allowed": ["/bin/echo .*"]}),
+        json!({"env": {SHELL_VAR: sh}, "shell": true, "allowed": [allowed]}),
     )
     .await;
     let r = call(
         &k,
         "sh_list",
-        json!({"type": "start", "command": "/bin/echo", "args": ["x"]}),
+        json!({"type": "start", "command": echo, "args": ["x"]}),
     )
     .await;
     assert_eq!(r["status"], "running", "{r}");

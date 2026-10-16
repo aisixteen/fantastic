@@ -233,47 +233,14 @@ fn backend_kind(rec: &Map<String, Value>) -> String {
 
 // ─── where the values live ───────────────────────────────────────
 
-/// python `os.path.expanduser` (what `Path.expanduser` applies): a leading `~`
-/// is `$HOME` (the password database when unset), `~user` that user's home.
+/// python `Path.expanduser`: a leading `~` or `~user` expanded by the OS's
+/// `os.path.expanduser` ([`sys::expanduser`]).
 fn expanduser(p: &str) -> Result<String, BundleError> {
     if !p.starts_with('~') {
         return Ok(p.to_string());
     }
-    let i = p[1..].find('/').map_or(p.len(), |j| j + 1);
-    let home = if i == 1 {
-        match std::env::var("HOME") {
-            Ok(h) => Some(h),
-            Err(_) => sys::home_of(None),
-        }
-    } else {
-        sys::home_of(Some(&p[1..i]))
-    };
-    let Some(home) = home else {
-        // pathlib raises when nothing expanded the `~`.
-        return Err(raise("RuntimeError", "Could not determine home directory."));
-    };
-    let trimmed = home.trim_end_matches('/');
-    let out = format!("{trimmed}{}", &p[i..]);
-    Ok(if out.is_empty() { "/".to_string() } else { out })
-}
-
-/// pathlib's split of a path into (parent, name): empty and `.` parts dropped,
-/// `..` kept, the parent of a bare name `.` (or `/` under the root).
-fn split_path(p: &str) -> (String, String) {
-    let absolute = p.starts_with('/');
-    let mut parts: Vec<&str> = p
-        .split('/')
-        .filter(|s| !s.is_empty() && *s != ".")
-        .collect();
-    let name = parts.pop().unwrap_or("").to_string();
-    let joined = parts.join("/");
-    let parent = match (absolute, joined.is_empty()) {
-        (true, true) => "/".to_string(),
-        (true, false) => format!("/{joined}"),
-        (false, true) => ".".to_string(),
-        (false, false) => joined,
-    };
-    (parent, name)
+    // pathlib raises when nothing expanded the `~`.
+    sys::expanduser(p).ok_or_else(|| raise("RuntimeError", "Could not determine home directory."))
 }
 
 /// python `sort_keys=True`: every mapping's keys in order, all the way down.
@@ -321,10 +288,11 @@ fn host_at_rest(r: &str, stored: Option<&Value>, declared: Option<String>) -> Op
     Some(host_mismatch(r, &bound, at_rest.as_deref()))
 }
 
-/// The refusal for a `file` that is not absolute (`/…` or `~…`), or `None`.
+/// The refusal for a `file` that is not absolute (`/…` — on Windows also a
+/// drive or UNC path, [`fantastic_bundle::is_absolute`] — or `~…`), or `None`.
 /// Python `_relative_file`.
 fn relative_file(p: &str) -> Option<String> {
-    if p.starts_with('/') || p.starts_with('~') {
+    if fantastic_bundle::is_absolute(p) || p.starts_with('~') {
         return None;
     }
     Some(format!(
@@ -352,7 +320,7 @@ impl FileBackend {
             // a record written past `validate_meta`
             return Err(raise("ValueError", format!("{NAME}: {why}")));
         }
-        let (parent, name) = split_path(&expanduser(&p)?);
+        let (parent, name) = sys::split_path(&expanduser(&p)?);
         Ok(Self {
             base: PathBuf::from(parent),
             name,

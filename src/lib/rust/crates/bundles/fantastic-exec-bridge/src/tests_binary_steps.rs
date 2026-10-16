@@ -83,7 +83,7 @@ fn head_of(frame: &[u8]) -> Value {
 }
 
 /// One frame off the parent end: `(kind, rest)`.
-async fn read_frame(ctrl: &mut tokio::net::UnixStream) -> (u8, Vec<u8>) {
+async fn read_frame(ctrl: &mut crate::sys::CtrlStream) -> (u8, Vec<u8>) {
     use tokio::io::AsyncReadExt;
     let mut head = [0u8; 4];
     tokio::time::timeout(Duration::from_secs(10), ctrl.read_exact(&mut head))
@@ -102,7 +102,7 @@ fn spawn_program(py: &Path, code: &str) -> crate::spawn::Spawned {
         "-c".to_string(),
         format!("{CONNECTOR_SRC}{code}"),
     ];
-    crate::spawn::spawn_job(&argv, "owner_agent", &Map::new(), ".").expect("spawn")
+    crate::spawn::spawn_job(&argv, "owner_agent", &super::base_env(), ".").expect("spawn")
 }
 
 /// The frame a program writes names the literal key; a kind-B reply placed by
@@ -145,15 +145,15 @@ async fn the_guest_wire_carries_a_literal_key_both_ways() {
         .write_all(&[&(body.len() as u32).to_be_bytes()[..], &body].concat())
         .await
         .expect("write");
-    let out = tokio::time::timeout(Duration::from_secs(10), sp.child.wait_with_output())
-        .await
-        .expect("the program did not finish")
-        .expect("wait");
+    let (stdout, stderr) =
+        tokio::time::timeout(Duration::from_secs(10), super::output_of(&mut sp.child))
+            .await
+            .expect("the program did not finish");
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        String::from_utf8_lossy(&stdout).trim(),
         "['x', 'x.y'] b'back' {'y': 'kept'}",
         "{}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&stderr)
     );
 }
 

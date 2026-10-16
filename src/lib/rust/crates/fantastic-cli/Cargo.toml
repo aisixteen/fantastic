@@ -73,5 +73,16 @@ scenario-probes = ["dep:fantastic-scenario-probes"]
 
 [dev-dependencies]
 tempfile = "3"
-# SIGTERM a spawned daemon in the lifecycle-lines integration test.
+
+# The tests' `sys::unix` — SIGTERM a spawned daemon (and the stop-signal unit
+# test raises one at itself).
+[target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }
+
+# The tests' `sys::windows` — Ctrl-Break a spawned daemon in its own process
+# group.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }

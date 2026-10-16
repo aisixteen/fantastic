@@ -38,10 +38,18 @@ pub fn os_error_str2(errno: i32, path: &str, path2: &str) -> String {
 /// none did not come from the OS and keeps its own text.
 #[must_use]
 pub fn io_error_str(e: &std::io::Error, path: &Path) -> String {
-    match e.raw_os_error() {
+    match errno_of(e) {
         Some(errno) => os_error_str(errno, Some(&path.to_string_lossy())),
         None => e.to_string(),
     }
+}
+
+/// The errno python's `OSError` carries for an OS error — the raw error on
+/// POSIX; on Windows the Win32 code mapped as CPython maps it
+/// (`winerror_to_errno`). `None` when the error did not come from the OS.
+#[must_use]
+pub fn errno_of(e: &std::io::Error) -> Option<i32> {
+    crate::sys::errno_of(e)
 }
 
 /// `str(UnicodeDecodeError)` for the first invalid sequence in `bytes`:

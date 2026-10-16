@@ -2,9 +2,9 @@
 full-screen (owner 2026-10-15: after a reload `claude` came back, `htop` and
 `sudo mactop` stayed blank):
 
-a) a terminal cell runs PAINTER: alternate screen, and on SIGWINCH it reads the
-   size and repaints `PAINT-<n>` ONLY if the size differs from its last paint —
-   the way curses programs (htop) do;
+a) a terminal cell runs PAINTER: alternate screen, and on SIGWINCH (polled on
+   Windows, which has none) it reads the size and repaints `PAINT-<n>` ONLY if the
+   size differs from its last paint — the way curses programs (htop) do;
 b) the page reloads; the re-attach shrinks the PTY by a row and restores it;
 c) PAINTER painted again (its counter rose) and its paint is on screen — two
    resizes landing before the program reads the size would leave it unchanged
@@ -18,14 +18,18 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import FOLDER, Rig, verdict  # noqa: E402
+from _lib.canvas_live import FOLDER, Rig, verdict, py_job  # noqa: E402
 
 PAINTER = r'''import os, signal, sys, time
 n, last, flag = 0, None, [True]
-signal.signal(signal.SIGWINCH, lambda *a: flag.__setitem__(0, True))
+# A curses program hears SIGWINCH; a console without it (Windows) reads its size
+# every tick — either way it repaints only on a CHANGED size.
+winch = getattr(signal, "SIGWINCH", None)
+if winch is not None:
+    signal.signal(winch, lambda *a: flag.__setitem__(0, True))
 sys.stdout.write("\x1b[?1049h")
 while True:
-    if flag[0]:
+    if flag[0] or winch is None:
         flag[0] = False
         size = os.get_terminal_size()
         if size != last:
@@ -54,10 +58,10 @@ def main() -> bool:
     rig.proj.mkdir(parents=True, exist_ok=True)
     (rig.proj / "painter.py").write_text(PAINTER)
     cell = {"id": CELL, "handler_module": "terminal_view.ts", "backend_id": BACKEND, "owns_backend": False,
-            "command": ["python3", "painter.py"], "can_call": {"$self": "*", BACKEND: VERBS}, "callable_by": {"$self": "*"},
+            "command": py_job("painter.py")[0], "can_call": {"$self": "*", BACKEND: VERBS}, "callable_by": {"$self": "*"},
             "x": 40, "y": 40, "width": 520, "height": 320}
     host = {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-            "ingress_rule": "allow_all_ingress", "allowed": [r"^python3 painter\.py$"], "cell_id": CELL, "can_call": {"$self": "*"},
+            "ingress_rule": "allow_all_ingress", "allowed": [py_job("painter.py")[1]], "cell_id": CELL, "can_call": {"$self": "*"},
             "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}}
     rig.init(cells=[cell], host_agents=[(FOLDER, host)])
     r: dict = {}

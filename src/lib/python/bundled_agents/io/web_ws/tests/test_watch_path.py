@@ -8,10 +8,10 @@ duplicate)."""
 from __future__ import annotations
 
 import json
-import re
 import sys
 import time
 
+from _testkit import command_rx
 from fastapi.testclient import TestClient
 from web.app import make_app
 from web_ws.tools import _make_endpoint
@@ -50,7 +50,7 @@ def _exec(k, *, grant: bool):
         "exec_bridge.tools",
         id="exec",
         ingress_rule="allow_all_ingress",
-        allowed=[re.escape(PY) + r" -c .*"],
+        allowed=[command_rx(PY) + r" -c .*"],
         cwd=".",
         callable_by={**BASE, "leg": "*"} if grant else dict(BASE),
     )

@@ -5,7 +5,8 @@ on `lock.yaml`, held on an open descriptor for the life of the process: the OS
 grants it to exactly one opener, and drops it the moment its holder exits —
 however it exits — so a dead holder's lock is simply taken over. Python, rust
 and swift take the SAME flock on the SAME file, so kernels of different
-runtimes exclude each other too.
+runtimes exclude each other too. (On Windows the lock is a `LockFileEx` lock on
+one byte of the file, the one rust locks — the OS calls live in `_sys`.)
 
 Lock file contents: `{pid: int}` as a YAML mapping (`pid: 123`) — the holder's
 pid, for the human-readable refusal, never for the decision. The one-shot CLI
@@ -28,12 +29,13 @@ own refusal from `LockHeld`, and releases in a `finally`.
 from __future__ import annotations
 
 import atexit
-import fcntl
 import os
 import secrets
 from pathlib import Path
 
 import yaml
+
+from kernel import _sys
 
 FANTASTIC_DIR = Path(".fantastic")
 LOCK_FILE = FANTASTIC_DIR / "lock.yaml"
@@ -80,7 +82,7 @@ def acquire_lock() -> None:
     global _held
     FANTASTIC_DIR.mkdir(parents=True, exist_ok=True)
     staged = LOCK_FILE.with_name(f"{LOCK_FILE.name}.tmp.{secrets.token_hex(4)}")
-    fd = os.open(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+    fd = _sys.open_lock(staged, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
     try:
         os.write(
             fd,
@@ -88,11 +90,11 @@ def acquire_lock() -> None:
                 {"pid": os.getpid()}, Dumper=yaml.CSafeDumper, sort_keys=False
             ).encode(),
         )
-        fcntl.flock(fd, fcntl.LOCK_EX)  # uncontended: the staged file is ours alone
+        _sys.lock(fd)  # uncontended: the staged file is ours alone
         while not _publish(staged):
             pass
     except BaseException:
-        os.close(fd)
+        _sys.unlock_close(fd)
         staged.unlink(missing_ok=True)
         raise
     staged.unlink(missing_ok=True)
@@ -110,12 +112,12 @@ def _publish(staged: Path) -> bool:
     except FileExistsError:
         pass
     try:
-        cur = os.open(LOCK_FILE, os.O_RDONLY)
+        cur = _sys.open_lock(LOCK_FILE, os.O_RDONLY)
     except FileNotFoundError:
         return False  # its holder released it between the two calls
     try:
         try:
-            fcntl.flock(cur, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _sys.try_lock(cur)
         except BlockingIOError:
             # Held: a live owner — or a taker still replacing a dead lock, whose
             # file (and dead pid) this racer then reads. Either way, refused.
@@ -134,10 +136,10 @@ def _publish(staged: Path) -> bool:
             return False
         if not same:
             return False
-        os.rename(staged, LOCK_FILE)
+        _sys.replace(staged, LOCK_FILE)
         return True
     finally:
-        os.close(cur)
+        _sys.unlock_close(cur)
 
 
 def release_lock() -> None:
@@ -153,7 +155,7 @@ def release_lock() -> None:
             LOCK_FILE.unlink()
         except OSError:
             pass
-    os.close(_held)
+    _sys.unlock_close(_held)
     _held = None
 
 

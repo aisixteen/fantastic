@@ -1,6 +1,8 @@
 //! Unit tests for this bundle crate. Every text pinned here is python's.
 
 use super::*;
+use crate::test_support::{mode_of, own_uid, set_mode};
+use fantastic_kernel::test_support::symlink;
 use fantastic_kernel::{Agent, Item};
 use serde_json::json;
 
@@ -54,15 +56,11 @@ fn resolve_refuses_absolute_path() {
 
 #[test]
 fn an_atomic_write_with_a_mode_creates_exactly_those_bits() {
-    use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::TempDir::new().unwrap();
     fs::write_bytes(tmp.path(), "d/secret.yaml", b"k: v\n", true, Some(0o600)).unwrap();
     let p = tmp.path().join("d/secret.yaml");
     assert_eq!(std::fs::read(&p).unwrap(), b"k: v\n");
-    assert_eq!(
-        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert_eq!(mode_of(&p).unwrap() & 0o777, 0o600);
     let names = |d: &std::path::Path| -> Vec<String> {
         let mut v: Vec<String> = std::fs::read_dir(d)
             .unwrap()
@@ -75,10 +73,7 @@ fn an_atomic_write_with_a_mode_creates_exactly_those_bits() {
     // a rewrite replaces it, the bits held
     fs::write_bytes(tmp.path(), "d/secret.yaml", b"k: w\n", true, Some(0o600)).unwrap();
     assert_eq!(std::fs::read(&p).unwrap(), b"k: w\n");
-    assert_eq!(
-        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert_eq!(mode_of(&p).unwrap() & 0o777, 0o600);
     // python: `ValueError("fs: `mode` needs an atomic write")`
     assert_eq!(
         fs::write_bytes(tmp.path(), "x", b"", false, Some(0o600)).unwrap_err(),
@@ -89,39 +84,29 @@ fn an_atomic_write_with_a_mode_creates_exactly_those_bits() {
 /// `read_private` opens ONCE (`O_NOFOLLOW`) and judges
 /// the open descriptor — regular, this user's, no group/other bits — before
 /// reading it, so no swap can land between the check and the read. A symlink in
-/// the leaf's place, a widened mode and a FIFO are refused (`NotPrivate`,
-/// nothing read); an absent file is python's `FileNotFoundError` text. Python
+/// the leaf's place, a widened mode and a FIFO ([`read_private_refuses_a_fifo`])
+/// are refused (`NotPrivate`, nothing read); an absent file is python's
+/// `FileNotFoundError` text. Python
 /// `test_read_private_judges_the_open_descriptor_it_reads`.
 #[test]
 fn read_private_judges_the_open_descriptor_it_reads() {
-    use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::TempDir::new().unwrap();
     let secret = tmp.path().join("s.yaml");
     std::fs::write(&secret, b"k: v\n").unwrap();
-    let chmod = |m: u32| {
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(m)).unwrap();
-    };
+    let chmod = |m: u32| set_mode(&secret, m).unwrap();
     chmod(0o600);
     assert_eq!(fs::read_private(tmp.path(), "s.yaml").unwrap(), b"k: v\n");
     chmod(0o644);
-    // SAFETY: `getuid` has no preconditions and cannot fail.
-    let me = unsafe { libc::getuid() };
     match fs::read_private(tmp.path(), "s.yaml") {
-        Err(fs::PrivateReadError::NotPrivate(np)) => assert_eq!((np.mode, np.uid), (0o644, me)),
+        Err(fs::PrivateReadError::NotPrivate(np)) => {
+            assert_eq!((np.mode, np.uid), (0o644, own_uid()));
+        }
         other => panic!("a widened mode is refused: {other:?}"),
     }
     chmod(0o600);
-    std::os::unix::fs::symlink(&secret, tmp.path().join("link.yaml")).unwrap();
+    symlink(&secret, tmp.path().join("link.yaml")).unwrap();
     assert!(matches!(
         fs::read_private(tmp.path(), "link.yaml"),
-        Err(fs::PrivateReadError::NotPrivate(_))
-    ));
-    let pipe = std::ffi::CString::new(tmp.path().join("pipe").to_str().unwrap()).unwrap();
-    // SAFETY: a valid NUL-terminated path; mkfifo has no other preconditions.
-    assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0);
-    // judged, never a hang on the open
-    assert!(matches!(
-        fs::read_private(tmp.path(), "pipe"),
         Err(fs::PrivateReadError::NotPrivate(_))
     ));
     match fs::read_private(tmp.path(), "absent.yaml") {
@@ -133,6 +118,19 @@ fn read_private_judges_the_open_descriptor_it_reads() {
         }
         other => panic!("an absent file: {other:?}"),
     }
+}
+
+/// A FIFO in the leaf's place is judged and refused, never a hang on the open
+/// (`O_NONBLOCK`). Unix only: Windows has no FIFO in a directory.
+#[cfg(unix)]
+#[test]
+fn read_private_refuses_a_fifo() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    sys::mkfifo(&tmp.path().join("pipe")).unwrap();
+    assert!(matches!(
+        fs::read_private(tmp.path(), "pipe"),
+        Err(fs::PrivateReadError::NotPrivate(_))
+    ));
 }
 
 #[test]
@@ -271,7 +269,7 @@ fn root_symlink_pointing_outside_the_running_dir_refuses() {
     // to admit an outward symlinked root.
     let base = tempfile::TempDir::new().unwrap();
     let outside = tempfile::TempDir::new().unwrap();
-    std::os::unix::fs::symlink(outside.path(), base.path().join("out")).unwrap();
+    symlink(outside.path(), base.path().join("out")).unwrap();
     assert_eq!(
         fs::resolve_root("out", base.path()).unwrap_err(),
         "fs: root 'out' escapes the running dir"
@@ -459,7 +457,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     let outside = tmp.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("secret.txt"), b"outside").unwrap();
-    std::os::unix::fs::symlink(&outside, root.join("docs")).unwrap();
+    symlink(&outside, root.join("docs")).unwrap();
     let r = at(&root);
     // The lexical form is in-root; the canonical form is not.
     let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "docs/secret.txt"}));
@@ -473,7 +471,7 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     assert!(!outside.join("new.txt").exists());
     // An in-root symlink still serves.
     std::fs::write(root.join("real.txt"), b"r").unwrap();
-    std::os::unix::fs::symlink(root.join("real.txt"), root.join("alias.txt")).unwrap();
+    symlink(root.join("real.txt"), root.join("alias.txt")).unwrap();
     let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "alias.txt"}));
     assert!(m.get("error").is_none(), "{m}");
     assert_eq!(b, Some(b"r".to_vec()));
@@ -488,7 +486,7 @@ fn dangling_symlink_pointing_outside_root_refuses() {
     let root = served(&tmp);
     let outside = tmp.path().join("outside");
     std::fs::create_dir_all(&outside).unwrap();
-    std::os::unix::fs::symlink(outside.join("gone.txt"), root.join("dangling")).unwrap();
+    symlink(outside.join("gone.txt"), root.join("dangling")).unwrap();
     let r = at(&root);
     let w = write_stream_reply(&r, &json!({"path": "dangling"}), Some(b"x"), false);
     assert_eq!(w["reason"], "transport_error", "{w}");
@@ -497,7 +495,7 @@ fn dangling_symlink_pointing_outside_root_refuses() {
     let (m, _) = read_stream_reply(&fb(), &r, &json!({"path": "dangling"}));
     assert_eq!(m["error"], "fs: path 'dangling' escapes root", "{m}");
     // A dangling link pointing INSIDE the root is still a deletable name.
-    std::os::unix::fs::symlink(root.join("gone.txt"), root.join("inside")).unwrap();
+    symlink(root.join("gone.txt"), root.join("inside")).unwrap();
     let d = delete_reply(&r, &json!({"path": "inside"}), false);
     assert_eq!(d, json!({"path": "inside", "deleted": true}), "{d}");
 }
@@ -508,7 +506,7 @@ fn delete_on_symlink_removes_the_link_only() {
     let root = served(&tmp);
     std::fs::create_dir_all(root.join("data")).unwrap();
     std::fs::write(root.join("data/keep.txt"), b"k").unwrap();
-    std::os::unix::fs::symlink(root.join("data"), root.join("link")).unwrap();
+    symlink(root.join("data"), root.join("link")).unwrap();
     let r = at(&root);
     let reply = delete_reply(&r, &json!({"path": "link", "recursive": true}), false);
     assert_eq!(reply["deleted"], true, "{reply}");
@@ -716,7 +714,7 @@ fn list_paths_are_relative_to_resolved_root() {
     std::fs::create_dir_all(root.join("x")).unwrap();
     std::fs::create_dir_all(root.join("sub")).unwrap();
     std::fs::write(root.join("x/a.txt"), b"ab").unwrap();
-    std::os::unix::fs::symlink(root.join("x/gone.txt"), root.join("x/dangling")).unwrap();
+    symlink(root.join("x/gone.txt"), root.join("x/dangling")).unwrap();
     let r = at(&root);
     let reply = list_reply(&fb(), &r, &json!({"path": "sub/../x"}));
     let files = reply["files"].as_array().unwrap();
@@ -1392,11 +1390,11 @@ async fn writes_stay_inside_the_list_and_readonly_still_holds() {
 async fn linked(tmp: &tempfile::TempDir, allow: Value) -> Arc<Kernel> {
     let k = bridge(tmp, Some(allow)).await;
     let s = served(tmp);
-    std::os::unix::fs::symlink("../secret.txt", s.join("docs/leak")).unwrap();
-    std::os::unix::fs::symlink("b.pdf", s.join("docs/sib")).unwrap();
+    symlink("../secret.txt", s.join("docs/leak")).unwrap();
+    symlink("b.pdf", s.join("docs/sib")).unwrap();
     std::fs::create_dir_all(s.join("shared")).unwrap();
     std::fs::write(s.join("shared/c.txt"), b"c\n").unwrap();
-    std::os::unix::fs::symlink("../shared", s.join("docs/shared")).unwrap();
+    symlink("../shared", s.join("docs/shared")).unwrap();
     k
 }
 
@@ -1716,7 +1714,7 @@ fn an_atomic_write_never_follows_a_planted_tmp_link() {
     std::fs::write(&outside, b"keep").unwrap();
     let root = tmp.path().join("root");
     std::fs::create_dir(&root).unwrap();
-    std::os::unix::fs::symlink(&outside, root.join("f.txt.tmp")).unwrap();
+    symlink(&outside, root.join("f.txt.tmp")).unwrap();
     for mode in [None, Some(0o600)] {
         fs::write_bytes(&root, "f.txt", b"new", true, mode).unwrap();
         assert_eq!(std::fs::read(&outside).unwrap(), b"keep");

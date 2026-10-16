@@ -42,11 +42,13 @@
 
 pub mod fs;
 mod sys;
+#[doc(hidden)]
+pub mod test_support;
 mod text;
 mod watch;
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_repr, py_repr_value, py_str, py_truthy};
+use fantastic_bundle::{is_absolute, py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{body_at, AgentId, Blob, Item, Kernel};
@@ -171,7 +173,7 @@ impl Bundle for FileBundle {
             let ok = a.as_array().is_some_and(|items| {
                 items.iter().all(|x| {
                     x.as_str()
-                        .is_some_and(|s| !s.is_empty() && !s.starts_with('/') && norm(s).is_some())
+                        .is_some_and(|s| !s.is_empty() && !is_absolute(s) && norm(s).is_some())
                 })
             });
             if !ok {
@@ -586,7 +588,7 @@ pub(crate) fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result
         Some(Value::String(s)) => s.as_str(),
         Some(_) => return Err(rf::bad(verb, name, "a string")),
     };
-    if p.starts_with('/') {
+    if is_absolute(p) {
         return Err(rf::bad(verb, name, "a root-relative path (no leading '/')"));
     }
     Ok(p)
@@ -851,9 +853,9 @@ pub fn password_refusal(meta: &Map<String, Value>, edge: &str) -> Option<String>
 // or not it exists, and `list` also shows the directories on the way to one.
 
 /// python `posixpath.normpath(path or ".")` of a ROOT-RELATIVE path; `None` when
-/// it is absolute or climbs out.
+/// it is absolute ([`is_absolute`]) or climbs out.
 pub(crate) fn norm(path: &str) -> Option<String> {
-    if path.starts_with('/') {
+    if is_absolute(path) {
         return None;
     }
     let mut parts: Vec<&str> = Vec::new();

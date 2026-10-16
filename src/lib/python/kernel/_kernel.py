@@ -54,6 +54,7 @@ from kernel._refusal import (
     UNKNOWN_AGENT,
     refusal,
 )
+from kernel import _sys
 from kernel._state import CURRENT_VERSION, validate_records
 
 if TYPE_CHECKING:
@@ -727,9 +728,13 @@ class Kernel:
         try:
             res = await agent._kernel_run(payload)
         except Exception as e:  # noqa: BLE001 — a handler raise is a RESULT
+            raised = _sys.posix_error(e)  # an OSError reads as POSIX prints it
             return {
                 "status": FAILED,
-                "result": {"error": f"{type(e).__name__}: {e}", "raised": True},
+                "result": {
+                    "error": f"{type(raised).__name__}: {raised}",
+                    "raised": True,
+                },
             }
         if isinstance(res, dict) and res.get("error"):
             return {"status": ERRORED, "result": res}

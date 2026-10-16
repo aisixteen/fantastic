@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import signal
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import _testkit
 
 
 async def _start_with_store(k):
@@ -220,6 +221,7 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=subprocess.STDOUT,
+            **_testkit.POLITE_SPAWN,
         )
         try:
             for _ in range(600):
@@ -231,7 +233,7 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
                 raise AssertionError(f"never booted:\n{klog.read_text()}")
             assert (d / "lock.yaml").exists(), "the daemon took no lock"
             t0 = time.monotonic()
-            p.send_signal(signal.SIGTERM)
+            _testkit.polite_stop(p)  # SIGTERM; on Windows CTRL_BREAK
             rc = p.wait(timeout=30)
             wall = time.monotonic() - t0
         finally:

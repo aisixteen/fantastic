@@ -15,7 +15,9 @@
 //! So the split is at the file-descriptor level: the terminal is opened directly
 //! as `/dev/tty` and the TUI draws THERE, while fds 1 and 2 are pointed at
 //! `.fantastic/cli/kernel.log`. Everything the kernel says is kept, readable, and
-//! off the screen. Input still comes from fd 0, which is untouched.
+//! off the screen. Input still comes from fd 0, which is untouched. (On Windows
+//! the terminal is the console's screen buffer, `CONOUT$`, and the std handles
+//! are what is pointed at the log — `sys`.)
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -78,11 +80,8 @@ pub(crate) fn redirect_std_to(path: &Path) -> Result<()> {
 /// BEFORE panicking, so a crash leaves a usable shell rather than a wrecked one.
 pub fn open(log: &Path) -> Result<Screen> {
     redirect_std_to(log)?;
-    let mut tty = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(crate::sys::TTY)
-        .context("could not open /dev/tty — this shell needs a terminal")?;
+    let mut tty = crate::sys::open_tty()
+        .with_context(|| format!("could not open {} — this shell needs a terminal", crate::sys::TTY))?;
 
     enable_raw_mode().context("could not enter raw mode")?;
     crossterm::execute!(
@@ -109,7 +108,7 @@ pub fn open(log: &Path) -> Result<Screen> {
 /// its own handle rather than borrowing one that may be poisoned.
 pub fn restore() {
     let _ = disable_raw_mode();
-    if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open(crate::sys::TTY) {
+    if let Ok(mut tty) = crate::sys::open_tty() {
         let _ = crossterm::execute!(
             tty,
             crossterm::event::DisableBracketedPaste,
@@ -125,7 +124,7 @@ pub fn restore() {
 /// Say something to the human AFTER the screen is restored. Goes to the tty, not
 /// to stderr, because stderr is the kernel's log now.
 pub fn say(line: &str) {
-    if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open(crate::sys::TTY) {
+    if let Ok(mut tty) = crate::sys::open_tty() {
         let _ = writeln!(tty, "{line}");
     }
 }

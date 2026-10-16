@@ -5,9 +5,11 @@ print, a SIGTERM in that window took the default action: the process died with n
 teardown and the PID lock held (rust closed the same window, `StopSignals::install`
 and its `a_sigterm_before_the_wait_is_held_not_lost`).
 
-The test raises SIGTERM the instant `[kernel] up` is printed and expects the clean
-path: the per-signal line, the teardown, `[kernel] down`, the lock released. A
-python-level guard catches a SIGTERM that arrives with no loop handler, so a
+The test raises each of the OS's stop signals (`_sys.STOP_SIGNALS`: SIGTERM, and
+SIGINT / SIGHUP; on Windows SIGBREAK — the CTRL_BREAK a polite stop sends — in
+SIGHUP's place) the instant `[kernel] up` is printed and expects the clean path:
+the per-signal line, the teardown, `[kernel] down`, the lock released. A
+python-level guard catches a signal that arrives with no loop handler, so a
 regression fails this test instead of killing the test worker.
 """
 
@@ -19,7 +21,10 @@ import signal
 import sys
 import types
 
+import pytest
+
 import kernel.modes.longrun as longrun
+from kernel import _sys
 
 _WEB = types.ModuleType("web.tools")
 
@@ -39,38 +44,39 @@ class _Ctx:
         self.shutdowns += 1
 
 
-async def test_a_sigterm_the_instant_up_is_printed_shuts_down_cleanly(
-    tmp_path, monkeypatch, capsys
+@pytest.mark.parametrize("name", _sys.STOP_SIGNALS)
+async def test_a_stop_signal_the_instant_up_is_printed_shuts_down_cleanly(
+    tmp_path, monkeypatch, capsys, name
 ):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(longrun, "_find_bundle_module", lambda name, ctx: _WEB)
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(isatty=lambda: False))
+    sig = getattr(signal, name)
 
     def _print(*args, **kw):
         builtins.print(*args, **kw)
         if args == ("[kernel] up",):
-            signal.raise_signal(signal.SIGTERM)
+            signal.raise_signal(sig)
 
     monkeypatch.setattr(longrun, "print", _print, raising=False)
 
     stray: list[int] = []
-    sigs = [signal.SIGINT, signal.SIGTERM, signal.SIGHUP]
+    sigs = [getattr(signal, n) for n in _sys.STOP_SIGNALS]
     saved = {s: signal.getsignal(s) for s in sigs}
-    signal.signal(signal.SIGTERM, lambda signum, frame: stray.append(signum))
+    signal.signal(sig, lambda signum, frame: stray.append(signum))
     ctx = _Ctx()
     try:
         await asyncio.wait_for(longrun._default(ctx), timeout=10)
     finally:
-        loop = asyncio.get_running_loop()
+        _sys.remove_stop_signals(asyncio.get_running_loop())
         for s in sigs:
-            loop.remove_signal_handler(s)
             signal.signal(s, saved[s])
 
     out, err = capsys.readouterr()
-    assert stray == [], "the SIGTERM landed before the daemon's handler existed"
+    assert stray == [], f"the {name} landed before the daemon's handler existed"
     assert out == "[kernel] up\n"
     assert err == (
-        "\n[kernel] SIGTERM — shutting down...\n"
+        f"\n[kernel] {name} — shutting down...\n"
         "[kernel] tearing down agents...\n"
         "[kernel] down\n"
     )

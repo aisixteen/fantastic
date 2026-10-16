@@ -63,6 +63,27 @@ async fn mk_kernel(tmp: &TempDir) -> (Arc<Kernel>, AgentId) {
     mk_kernel_with(tmp, extra).await
 }
 
+/// The environment a record that inherits nothing gives a child: only what the
+/// OS needs in every process (`sys::OS_ENV`).
+fn base_env() -> Map<String, Value> {
+    child_env(&Map::new())
+}
+
+/// What a child spawned straight through `spawn_job` printed, `(stdout,
+/// stderr)`, once it has exited — both pipes read together, so neither can fill
+/// and stall it.
+async fn output_of(child: &mut crate::sys::Child) -> (Vec<u8>, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut so = child.stdout.take().expect("piped stdout");
+    let mut se = child.stderr.take().expect("piped stderr");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let (o, e) = tokio::join!(so.read_to_end(&mut out), se.read_to_end(&mut err));
+    o.expect("read stdout");
+    e.expect("read stderr");
+    child.wait().await.expect("wait");
+    (out, err)
+}
+
 /// `mk_kernel`, but the agent record carries exactly the meta given.
 async fn mk_kernel_with(tmp: &TempDir, extra: Map<String, Value>) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
@@ -459,8 +480,10 @@ async fn interrupt_sends_sigint_to_the_job() {
     let code = r#"import signal,time,sys
 def h(s,f):
     print("CAUGHT"); sys.stdout.flush(); sys.exit(0)
-signal.signal(signal.SIGINT, h)
-time.sleep(30)
+# the OS's interrupt: SIGINT, or SIGBREAK (a Windows pipe job's CTRL_BREAK)
+signal.signal(getattr(signal, "SIGBREAK", signal.SIGINT), h)
+for _ in range(300):
+    time.sleep(0.1)
 "#;
     let r = kernel
         .send(vec![Item::new(pid.clone(), py_start(&py, code, false))])
@@ -597,10 +620,12 @@ async fn the_child_receives_the_control_socket_on_the_advertised_fd() {
         eprintln!("skipping: no python3");
         return;
     };
+    // The connector's own call: a stream socket at that number, on every OS.
     let code = r#"
-import os, stat
+import os, socket
 fd = int(os.environ["FANTASTIC_CTRL_FD"])
-print("fd", fd, "sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ["FANTASTIC_SELF_ID"], "env", os.environ.get("MYVAR"))
+s = socket.socket(fileno=fd)
+print("fd", fd, "sock", s.type == socket.SOCK_STREAM, "self", os.environ["FANTASTIC_SELF_ID"], "env", os.environ.get("MYVAR"))
 "#;
     let argv = vec![
         py.to_string_lossy().to_string(),
@@ -608,11 +633,11 @@ print("fd", fd, "sock", stat.S_ISSOCK(os.fstat(fd).st_mode), "self", os.environ[
         "-c".to_string(),
         code.to_string(),
     ];
-    let mut env = Map::new();
+    let mut env = base_env();
     env.insert("MYVAR".to_string(), json!("hello"));
-    let sp = crate::spawn::spawn_job(&argv, "owner_agent", &env, ".").expect("spawn");
-    let out = sp.child.wait_with_output().await.expect("wait");
-    let text = String::from_utf8_lossy(&out.stdout);
+    let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", &env, ".").expect("spawn");
+    let (out, _) = output_of(&mut sp.child).await;
+    let text = String::from_utf8_lossy(&out);
     assert!(
         text.contains("sock True"),
         "control fd is not a socket: {text}"
@@ -643,7 +668,7 @@ async fn the_child_self_reaps_when_the_control_socket_closes() {
         "-c".to_string(),
         program,
     ];
-    let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", &Map::new(), ".").expect("spawn");
+    let mut sp = crate::spawn::spawn_job(&argv, "owner_agent", &base_env(), ".").expect("spawn");
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         sp.child.try_wait().expect("try_wait").is_none(),
@@ -688,9 +713,7 @@ async fn until(
 async fn a_bare_command_is_found_on_the_childs_path_only() {
     let tmp = TempDir::new().unwrap();
     let bin = TempDir::new().unwrap();
-    let tool = bin.path().join("ft_only_here");
-    std::fs::write(&tool, "#!/bin/sh\necho found-by-child-path\n").unwrap();
-    std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    crate::sys::echo_script(bin.path(), "ft_only_here", "found-by-child-path");
     let mut extra = Map::new();
     extra.insert("ingress_rule".to_string(), json!("allow_all_ingress"));
     extra.insert("allowed".to_string(), json!([".*"]));
@@ -728,8 +751,10 @@ async fn a_bare_command_is_found_on_the_childs_path_only() {
     let done = until(&mut rx, |p| p["type"] == "job_done", 10)
         .await
         .expect("job_done");
+    // a console program on Windows ends its line with `\r\n`
+    let printed = crate::jobs::printed(&b, &done, "stdout");
     assert_eq!(
-        json!(crate::jobs::printed(&b, &done, "stdout")),
+        json!(printed.replace("\r\n", "\n")),
         json!("found-by-child-path\n"),
         "{done}"
     );
@@ -1291,11 +1316,13 @@ fn wire(
     owner: &AgentId,
     job_id: i64,
 ) -> (
-    tokio::net::UnixStream,
+    crate::sys::CtrlStream,
     Arc<tokio::sync::Notify>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (parent, child) = tokio::net::UnixStream::pair().expect("socketpair");
+    let (parent, child) = crate::sys::ctrl_pair().expect("socketpair");
+    let parent = crate::sys::ctrl_stream(parent).expect("async parent end");
+    let child = crate::sys::ctrl_stream(child).expect("async child end");
     let (rd, wr) = parent.into_split();
     let stop = Arc::new(tokio::sync::Notify::new());
     let relay = tokio::spawn(fantastic_kernel::test_support::as_agent(
@@ -1313,7 +1340,7 @@ fn wire(
     (child, stop, relay)
 }
 
-async fn wire_write(child: &mut tokio::net::UnixStream, v: &Value) {
+async fn wire_write(child: &mut crate::sys::CtrlStream, v: &Value) {
     use tokio::io::AsyncWriteExt;
     let body = [b"T".as_slice(), &serde_json::to_vec(v).unwrap()].concat();
     child
@@ -1322,7 +1349,7 @@ async fn wire_write(child: &mut tokio::net::UnixStream, v: &Value) {
         .expect("write");
 }
 
-async fn wire_read(child: &mut tokio::net::UnixStream) -> Value {
+async fn wire_read(child: &mut crate::sys::CtrlStream) -> Value {
     use tokio::io::AsyncReadExt;
     let mut head = [0u8; 4];
     tokio::time::timeout(Duration::from_secs(5), child.read_exact(&mut head))
@@ -2377,6 +2404,8 @@ async fn an_overlong_line_is_read_whole() {
 /// A signal death reports `exit_code = -signal`, `ok:false`. `ExitStatus::
 /// code()` answers `None` for a signal, which read as "still running" everywhere
 /// liveness is `exit_code.is_none()` and lost the cause of death from `job_done`.
+/// (Windows has no signals: a killed job reports the code its Job Object was
+/// terminated with — `sys::KILLED_EXIT_CODE`, `-9` on unix.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_killed_job_reports_negative_signal_exit_code() {
     let Some(py) = find_real_python() else {
@@ -2402,7 +2431,7 @@ async fn a_killed_job_reports_negative_signal_exit_code() {
     let done = until(&mut rx, |v| v["type"] == "job_done", 20)
         .await
         .expect("no job_done");
-    assert_eq!(done["exit_code"], -9, "{done}");
+    assert_eq!(done["exit_code"], crate::sys::KILLED_EXIT_CODE, "{done}");
     assert_eq!(done["ok"], false, "{done}");
 }
 
@@ -2494,11 +2523,16 @@ async fn a_missing_cwd_is_named_not_the_command() {
         .await
         .remove(0)
         .result;
+    // `[Errno 2] No such file or directory` — chdir's ENOENT; on Windows
+    // CreateProcessW's ERROR_DIRECTORY, `[Errno 20] Not a directory`
     assert_eq!(
         r["error"],
         json!(format!(
-            "exec_bridge: spawn failed: [Errno 2] No such file or directory: '{}'",
-            gone.to_string_lossy()
+            "exec_bridge: spawn failed: {}",
+            fantastic_bundle::os_error_str(
+                crate::sys::MISSING_CWD_ERRNO,
+                Some(&gone.to_string_lossy())
+            )
         )),
         "{r}"
     );

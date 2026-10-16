@@ -105,7 +105,7 @@ from kernel._bundles import (
     import_handler,
     is_folder,
 )
-from kernel import _docs, _secret
+from kernel import _docs, _secret, _sys
 
 
 # System verbs answered natively by every Agent for its own children.
@@ -1193,7 +1193,8 @@ class Agent:
                 return self._record(d, outcome(d.pid, CANCELLED, {"cancelled": True}))
             raise
         except Exception as e:  # noqa: BLE001 — a handler raise is a RESULT
-            raised = e.__cause__ if isinstance(e, _Exited) else e
+            # An OSError reads as POSIX python prints it on every OS (`_sys`).
+            raised = _sys.posix_error(e.__cause__ if isinstance(e, _Exited) else e)
             return self._record(
                 d,
                 outcome(

@@ -15,8 +15,6 @@ fantastic-file = { path = "../fantastic-file" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-nix = { version = "0.29", features = ["signal"] }
-libc = { workspace = true }
 # The command gate is a REGEX allowlist over the shell-joined line, in PYTHON's
 # `re` dialect: a backtracker, so `(?P<name>…)`, `(?P=name)`, backreferences
 # and lookaround all compile. Anchored `\A(?s:…)\z` gives `re.fullmatch` + DOTALL.
@@ -26,6 +24,25 @@ fancy-regex = "0.11"
 indexmap = "2"
 # A PTY job's incremental UTF-8 decode (a char split across reads is held, not shattered).
 encoding_rs = "0.8"
+
+# The OS boundary (`src/sys`): sessions, signals, `openpty`, `socketpair` on unix…
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+libc = { workspace = true }
+
+# …CreateProcessW, Job Objects, ConPTY and pipes on Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # The ROOT LOADER bundle — tests need it registered so the root answers the

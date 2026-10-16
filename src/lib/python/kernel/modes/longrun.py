@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import shlex
-import signal
 import sys
 from typing import Any
 
+from kernel import _sys
 from kernel._bundles import _find_bundle_module
 from kernel._lock import FantasticLock
 
@@ -93,16 +93,9 @@ async def _default(kernel) -> None:
                 )
                 stop.set()
 
-        for sig_name in ("SIGINT", "SIGTERM", "SIGHUP"):
-            sig = getattr(signal, sig_name, None)
-            if sig is None:
-                continue
-            try:
-                loop.add_signal_handler(sig, _request_stop, sig_name)
-            except NotImplementedError:
-                # Windows / non-Unix loops can't install signal
-                # handlers — KeyboardInterrupt still propagates.
-                pass
+        # The OS's stop signals (`_sys.STOP_SIGNALS`: SIGINT / SIGTERM / SIGHUP;
+        # on Windows SIGBREAK — a CTRL_BREAK — in SIGHUP's place) all land here.
+        _sys.install_stop_signals(loop, _request_stop)
 
         # Second PTY push: the "all booted" close. Each agent already announced
         # its OWN endpoints to cli during its boot (e.g. web sent its listening

@@ -6,7 +6,8 @@
 //! ran, not a prompt's helper (those stay in the shell's own group). A new one
 //! is saved on the exec agent's record (`last_cmd`, it survives a restart) and
 //! emitted on it (`{type: "last_cmd", cmd}`): the terminal cell shows it, and
-//! after a restart offers to run it again.
+//! after a restart offers to run it again. A Windows console has no foreground
+//! process group: there the watch sees none (`sys::process_table`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -60,11 +61,6 @@ fn shells() -> Vec<(AgentId, u32)> {
         .collect()
 }
 
-fn ps() -> Option<String> {
-    let out = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,pgid=,tpgid=,args="]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 /// Watch for the life of the process.
 pub fn spawn(h: Arc<Host>) {
     tokio::spawn(async move {
@@ -76,7 +72,7 @@ pub fn spawn(h: Arc<Host>) {
             if shells.is_empty() {
                 continue;
             }
-            let Some(out) = tokio::task::spawn_blocking(ps).await.ok().flatten() else { continue };
+            let Some(out) = tokio::task::spawn_blocking(crate::sys::process_table).await.ok().flatten() else { continue };
             let procs = parse_ps(&out);
             for (agent, shell) in shells {
                 let Some(fg) = foreground_child(&procs, shell) else { continue };

@@ -9,17 +9,16 @@ the target dir, released when the process lets go of it.
 
 from __future__ import annotations
 
-import fcntl
+import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from helpers import oslayer  # noqa: E402
 
 
 @contextmanager
 def build_lock(target: Path):
     target.mkdir(parents=True, exist_ok=True)
-    with open(target / ".e2e-build.lock", "w") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
+    with oslayer.exclusive_lock(target / ".e2e-build.lock"):
+        yield

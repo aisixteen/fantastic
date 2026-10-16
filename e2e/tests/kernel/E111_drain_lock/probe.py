@@ -36,6 +36,7 @@ import yaml
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
+from helpers import oslayer
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
 from helpers.verdict import verdict
 
@@ -91,7 +92,7 @@ def lock_pid(work: Path):
 
 def dead_pid() -> int:
     """A pid that WAS a process and is not one now."""
-    p = subprocess.Popen(["true"])
+    p = subprocess.Popen([sys.executable, "-c", ""])
     p.wait()
     return p.pid
 
@@ -142,7 +143,7 @@ def main() -> int:
         log = work.parent / f"{work.name}-second.out"
         with log.open("wb") as f:
             second = subprocess.Popen(hk.cmd, cwd=work, env=hk.env, stdout=f,
-                                      stderr=subprocess.STDOUT, start_new_session=True)
+                                      stderr=subprocess.STDOUT, **oslayer.group_kwargs())
         stray.append(second)
         try:
             rc = second.wait(30)
@@ -208,10 +209,7 @@ def main() -> int:
             k.close()
         for p in stray:
             if p.poll() is None:
-                try:
-                    os.killpg(os.getpgid(p.pid), 9)
-                except ProcessLookupError:
-                    pass
+                oslayer.kill_group(p.pid)
         shutil.rmtree(work, ignore_errors=True)
 
     verdict(not bad, f"{RUNTIME}: {len(bad)} failed" + (f" — first: {bad[0]}" if bad else ""))

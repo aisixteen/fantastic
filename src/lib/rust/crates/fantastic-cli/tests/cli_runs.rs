@@ -5,6 +5,8 @@
 
 use std::process::Command;
 
+mod sys;
+
 fn fantastic_bin() -> &'static str {
     env!("CARGO_BIN_EXE_fantastic_kernel")
 }
@@ -541,7 +543,7 @@ fn daemon_output_lines_match_python() {
     )
     .unwrap();
 
-    let mut child = Command::new(fantastic_bin())
+    let mut child = sys::stoppable(&mut Command::new(fantastic_bin()))
         .current_dir(tmp.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -553,16 +555,13 @@ fn daemon_output_lines_match_python() {
         .expect("the daemon must print [kernel] up within 10s");
     assert_eq!(up_line, "[kernel] up");
 
-    // SIGTERM — one of the three signals python installs a handler for.
-    // Safety: `child.id()` is a live pid this process owns; signal 0 is
-    // never sent (SIGTERM only checks/delivers, it doesn't inspect memory).
-    unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
-    }
+    // SIGTERM — one of the three signals python installs a handler for
+    // (Ctrl-Break on Windows).
+    sys::stop(&child);
 
     let out = child
         .wait_with_output()
-        .expect("the daemon exits after SIGTERM");
+        .expect("the daemon exits after the stop");
     assert!(
         out.status.success(),
         "a clean stop exits 0: status={:?} stderr={}",
@@ -571,7 +570,7 @@ fn daemon_output_lines_match_python() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("\n[kernel] SIGTERM — shutting down...\n"),
+        stderr.contains(&format!("\n[kernel] {} — shutting down...\n", sys::STOP_NAME)),
         "stderr={stderr}"
     );
     assert!(
@@ -731,10 +730,7 @@ fn one_shot_refuses_a_live_lock_with_python_text() {
 fn one_shots_take_over_a_lock_whose_pid_holds_no_flock() {
     let tmp = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join(".fantastic")).unwrap();
-    let mut alive = Command::new("/bin/sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn a live pid");
+    let mut alive = sys::sleeper();
     let pid = alive.id();
     let stale = || {
         std::fs::write(
@@ -1177,7 +1173,7 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
         ],
     );
 
-    let mut child = Command::new(fantastic_bin())
+    let mut child = sys::stoppable(&mut Command::new(fantastic_bin()))
         .current_dir(tmp.path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1201,13 +1197,10 @@ fn a_daemon_with_a_store_stops_cleanly_and_releases_its_lock() {
         "the live REST call must settle: {reply}"
     );
 
-    // Safety: `child.id()` is a live pid this process owns.
-    unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
-    }
+    sys::stop(&child);
     let out = child
         .wait_with_output()
-        .expect("the daemon exits after SIGTERM");
+        .expect("the daemon exits after the stop");
     assert!(
         out.status.success(),
         "a clean stop exits 0: status={:?} stderr={}",

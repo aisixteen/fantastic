@@ -447,6 +447,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -510,6 +511,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "which",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -526,6 +528,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -573,6 +576,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unsafe-libyaml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -90,8 +90,9 @@ def _host(h) -> str | None:
 
 
 def _relative_file(p: str) -> str | None:
-    """The refusal for a `file` that is not absolute (`/…` or `~…`), or None."""
-    if p.startswith("/") or p.startswith("~"):
+    """The refusal for a `file` that is not absolute (`/…` or `~…`; on Windows a
+    drive or UNC path too — `fs.is_absolute`), or None."""
+    if p.startswith("~") or fs.is_absolute(p):
         return None
     return f"file={p!r} must be an absolute path (starting with / or ~) — a relative path is refused"
 

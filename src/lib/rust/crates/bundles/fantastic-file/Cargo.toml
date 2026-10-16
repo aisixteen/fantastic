@@ -17,11 +17,25 @@ async-trait = { workspace = true }
 sha2 = "0.10"
 # the per-document edit locks.
 tokio = { workspace = true }
-# `read_private`'s one open: O_NOFOLLOW | O_NONBLOCK, ELOOP, getuid.
-libc = { workspace = true }
 # `watch_path`'s disk watcher — native events (FSEvents / inotify / kqueue), the
 # library python's `watchfiles` is built on.
 notify = "6"
+
+# `sys::unix` — `read_private`'s one open: O_NOFOLLOW | O_NONBLOCK, ELOOP, getuid.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+# `sys::windows` — the private-file contract on the handle: the token's SIDs, the
+# owner and DACL (`GetSecurityInfo` / `SetSecurityInfo`), the no-follow open.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

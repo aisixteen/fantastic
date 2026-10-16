@@ -45,7 +45,7 @@ The ONLY disk code outside this module is:
   - reads of a bundle's OWN baked-in package resources via `importlib.resources` (the
     installed wheel, e.g. a seeded `readme.md` / `help.md` / `index.html` / favicon) — a
     resource lookup in the package, not an arbitrary filesystem path.
-  - `exec_bridge`'s process plumbing: `proc._all_pids` lists `/proc` (Linux) to find a
+  - `exec_bridge`'s process plumbing: its `_sys` lists `/proc` (Linux) to find a
     job's session members; `proc.resolve` probes the child's `PATH` dirs for a bare
     command (`os.path.isfile` + `os.access` — metadata only; the OS opens what it
     execs); `tools._paste_image` creates a PTY job's paste scratch dir in the system
@@ -58,16 +58,21 @@ Everything that takes an arbitrary path comes through here.
 Every function takes `(root, path)`: `root` is the clamp boundary (a `Root`), `path` is
 relative to it. Pass `external=True` (with a plain base path) for the unclamped-base
 surface described above.
+
+What differs by OS — the no-follow create, the private-file judgment, which wire paths
+are absolute — lives in `file_bridge._sys`; every `OSError` this module raises reads as
+POSIX python prints it, on every OS (`kernel._sys.posix_errors`).
 """
 
 from __future__ import annotations
 
-import errno
 import os
 import secrets
-import stat
 from pathlib import Path
 from typing import NamedTuple
+
+from file_bridge import _sys
+from kernel._sys import posix_errors
 
 
 class Root(NamedTuple):
@@ -102,6 +107,12 @@ def resolve_external_root(root: str | Path) -> Path:
     return Path(str(root or "")).expanduser().resolve()
 
 
+def is_absolute(path: str) -> bool:
+    """Is a WIRE path absolute — refused, never re-rooted? `/…` on every OS; on
+    Windows also a drive (`C:`) or a UNC share (`_sys`)."""
+    return _sys.is_absolute(path)
+
+
 def resolve(
     root: Root | str | Path, path: str | Path, *, external: bool = False
 ) -> Path:
@@ -110,7 +121,7 @@ def resolve(
     `..`/absolute/symlink either way. Returns the resolved absolute Path."""
     root_p = resolve_external_root(root) if external else resolve_root(root)
     rel = str(path or "")
-    if rel.startswith("/"):
+    if is_absolute(rel):
         # An absolute path is a hard escape — refused, never silently re-rooted
         # (a stripped slash would serve `/etc/passwd` as `root/etc/passwd`, and
         # the docstring above promised the opposite). The agent layer answers
@@ -135,27 +146,33 @@ def _lexical_leaf(root, path, *, external: bool = False) -> Path:
     return parent / name if name else parent
 
 
+@posix_errors
 def is_symlink(root, path, *, external: bool = False) -> bool:
     """True if `path` ITSELF is a symlink (dangling or not) — `exists()` follows
-    links, so a dangling one reports absent while still occupying the name."""
-    return _lexical_leaf(root, path, external=external).is_symlink()
+    links, so a dangling one reports absent while still occupying the name. (On
+    Windows a junction is a link too — `_sys.is_link`.)"""
+    return _sys.is_link(_lexical_leaf(root, path, external=external))
 
 
 # ─── existence / stat ───────────────────────────────────────────
 
 
+@posix_errors
 def exists(root, path, *, external: bool = False) -> bool:
     return resolve(root, path, external=external).exists()
 
 
+@posix_errors
 def is_file(root, path, *, external: bool = False) -> bool:
     return resolve(root, path, external=external).is_file()
 
 
+@posix_errors
 def is_dir(root, path, *, external: bool = False) -> bool:
     return resolve(root, path, external=external).is_dir()
 
 
+@posix_errors
 def size(root, path, *, external: bool = False) -> int:
     return resolve(root, path, external=external).stat().st_size
 
@@ -163,14 +180,17 @@ def size(root, path, *, external: bool = False) -> int:
 # ─── whole-file read / write ────────────────────────────────────
 
 
+@posix_errors
 def read_bytes(root, path, *, external: bool = False) -> bytes:
     return resolve(root, path, external=external).read_bytes()
 
 
+@posix_errors
 def read_text(root, path, *, external: bool = False) -> str:
     return resolve(root, path, external=external).read_text(encoding="utf-8")
 
 
+@posix_errors
 def write_bytes(
     root,
     path,
@@ -191,11 +211,8 @@ def write_bytes(
         # fixed `<name>.tmp` would follow whatever symlink sat at that name (a write
         # escaping the root) and be shared by concurrent writers.
         tmp = target.with_name(f"{target.name}.tmp.{secrets.token_hex(4)}")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        fd = os.open(tmp, flags, 0o666 if mode is None else mode)
+        fd = _sys.create_new(tmp, mode)
         try:
-            if mode is not None:
-                os.fchmod(fd, mode)  # the umask may have narrowed it; never widened
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view) :]
@@ -211,6 +228,7 @@ def write_bytes(
         target.write_bytes(data)
 
 
+@posix_errors
 def write_text(
     root,
     path,
@@ -238,6 +256,7 @@ class NotPrivate(PermissionError):
         )
 
 
+@posix_errors
 def read_private(root, path, *, external: bool = False) -> bytes:
     """Read a PRIVATE file — a regular file owned by this user with no group/other
     permission bits — through ONE open. `O_NOFOLLOW` refuses a symlink in the
@@ -245,21 +264,14 @@ def read_private(root, path, *, external: bool = False) -> bytes:
     so nothing can swap the file between the check and the read (an `lstat` of
     the path and then a read of the path again would be a window). `O_NONBLOCK` so a FIFO planted there cannot hang the open — it is
     judged and refused like any other non-regular entry. Raises `NotPrivate`
-    (nothing read) when the entry is not private; `FileNotFoundError` when absent."""
+    (nothing read) when the entry is not private; `FileNotFoundError` when absent.
+    (On Windows the same one open judges the handle's owner and DACL — `_sys`.)"""
     leaf = _lexical_leaf(root, path, external=external)
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    judged = _sys.open_private(leaf)
+    if judged.fd is None:
+        raise NotPrivate(leaf, judged.mode, judged.uid)
+    fd = judged.fd
     try:
-        fd = os.open(leaf, flags)
-    except OSError as e:
-        if e.errno != errno.ELOOP:
-            raise
-        st = leaf.lstat()  # the symlink itself, named in the refusal — never read
-        raise NotPrivate(leaf, stat.S_IMODE(st.st_mode), st.st_uid) from None
-    try:
-        st = os.fstat(fd)
-        mode = stat.S_IMODE(st.st_mode)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or mode & 0o077:
-            raise NotPrivate(leaf, mode, st.st_uid)
         chunks = []
         while chunk := os.read(fd, 1 << 16):
             chunks.append(chunk)
@@ -271,6 +283,7 @@ def read_private(root, path, *, external: bool = False) -> bytes:
 # ─── chunked / streaming (the stream-verb backing) ──────────────
 
 
+@posix_errors
 def read_chunk(
     root, path, offset: int, length: int, *, external: bool = False
 ) -> tuple[bytes, int]:
@@ -285,6 +298,7 @@ def read_chunk(
     return chunk, total
 
 
+@posix_errors
 def write_chunk(
     root,
     path,
@@ -311,6 +325,7 @@ def write_chunk(
 # ─── directory walk / mutate ────────────────────────────────────
 
 
+@posix_errors
 def list_dir(root, path, *, external: bool = False):
     """Sorted entries of a dir as resolved Paths (raw — exposure is the AGENT's `allow`
     list, not a disk concern). Raises if not a dir."""
@@ -318,17 +333,20 @@ def list_dir(root, path, *, external: bool = False):
     return sorted(target.iterdir())
 
 
+@posix_errors
 def mkdir(root, path, *, external: bool = False) -> None:
     resolve(root, path, external=external).mkdir(parents=True, exist_ok=True)
 
 
+@posix_errors
 def rename(root, old, new, *, external: bool = False) -> None:
     o = resolve(root, old, external=external)
     n = resolve(root, new, external=external)
     n.parent.mkdir(parents=True, exist_ok=True)
-    o.rename(n)
+    o.replace(n)  # `rename(2)` on every OS: an existing `new` is replaced
 
 
+@posix_errors
 def remove(root, path, *, recursive: bool = False, external: bool = False) -> None:
     """Delete a file, an empty dir, or (recursive) a dir tree. Clamped to root.
 
@@ -337,8 +355,8 @@ def remove(root, path, *, recursive: bool = False, external: bool = False) -> No
     real `data/` and leave the link dangling — the target dead, the name
     surviving, and the dangling name never deletable (`exists()` follows). A dangling symlink is deletable for the same reason."""
     leaf = _lexical_leaf(root, path, external=external)
-    if leaf.is_symlink():
-        leaf.unlink()
+    if _sys.is_link(leaf):
+        leaf.unlink()  # a directory link (Windows) too: CPython removes the entry
         return
     target = resolve(root, path, external=external)
     if target.is_dir():
@@ -352,7 +370,7 @@ def remove(root, path, *, recursive: bool = False, external: bool = False) -> No
 
 def _rmtree(target: Path) -> None:
     for sub in target.iterdir():
-        if sub.is_dir() and not sub.is_symlink():
+        if sub.is_dir() and not _sys.is_link(sub):
             _rmtree(sub)
         else:
             sub.unlink()

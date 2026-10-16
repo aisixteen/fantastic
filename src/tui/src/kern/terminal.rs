@@ -33,11 +33,13 @@ pub struct Attach {
     pub replay: String,
 }
 
-/// The shell the terminal runs. `$SHELL`, and nothing is guessed when it is unset.
+/// The shell the terminal runs. `$SHELL` (`%COMSPEC%` on Windows, `sys`), and
+/// nothing is guessed when it is unset.
 fn shell() -> Result<String, String> {
-    match std::env::var("SHELL") {
+    let var = crate::sys::SHELL_VAR;
+    match std::env::var(var) {
         Ok(s) if !s.trim().is_empty() => Ok(s),
-        _ => Err("SHELL is not set — the terminal runs $SHELL and guesses no other".into()),
+        _ => Err(format!("{var} is not set — the terminal runs ${var} and guesses no other")),
     }
 }
 

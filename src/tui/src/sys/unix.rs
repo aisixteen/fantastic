@@ -1,20 +1,21 @@
 //! The Unix side of [`crate::sys`]: descriptors, the controlling terminal, local
-//! sockets and signals.
+//! sockets, signals, the user's shell and the process table.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 
-/// The controlling terminal, opened read-write to draw the TUI on.
+/// The controlling terminal the TUI draws on.
 pub(crate) const TTY: &str = "/dev/tty";
 /// The sink that discards everything written to it.
 pub(crate) const NULL_DEVICE: &str = "/dev/null";
+/// The variable naming the user's shell — what the terminal runs.
+pub(crate) const SHELL_VAR: &str = "SHELL";
 
-/// Whether stdout is a terminal.
-pub(crate) fn stdout_is_tty() -> bool {
-    // SAFETY: isatty only inspects descriptor 1.
-    unsafe { libc::isatty(1) != 0 }
+/// The controlling terminal, opened read-write to draw the TUI on.
+pub(crate) fn open_tty() -> io::Result<File> {
+    OpenOptions::new().read(true).write(true).open(TTY)
 }
 
 /// Point stdout and stderr at `file`. The File may drop afterwards; the two
@@ -72,12 +73,25 @@ pub(crate) fn make_private(path: &str) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
+/// What [`terminate`] answers: each SIGTERM, from `recv`.
+pub(crate) type Terminate = tokio::signal::unix::Signal;
+/// What [`interrupt`] answers: each SIGINT, from `recv`.
+pub(crate) type Interrupt = tokio::signal::unix::Signal;
+
 /// The termination request (SIGTERM).
-pub(crate) fn terminate() -> io::Result<tokio::signal::unix::Signal> {
+pub(crate) fn terminate() -> io::Result<Terminate> {
     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
 }
 
 /// The interrupt (SIGINT).
-pub(crate) fn interrupt() -> io::Result<tokio::signal::unix::Signal> {
+pub(crate) fn interrupt() -> io::Result<Interrupt> {
     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+}
+
+/// Every process, one `pid ppid pgid tpgid args` row each
+/// (`ps -A -o pid=,ppid=,pgid=,tpgid=,args=`): where a shell's foreground
+/// command is read from (`kern/term_watch`).
+pub(crate) fn process_table() -> Option<String> {
+    let out = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,pgid=,tpgid=,args="]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }

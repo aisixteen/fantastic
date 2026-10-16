@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import FOLDER, Rig, verdict  # noqa: E402
+from _lib.canvas_live import FOLDER, Rig, verdict, py_job  # noqa: E402
 
 TICKER = r'''import sys, time
 n = 0
@@ -50,10 +50,10 @@ def main() -> bool:
     rig.proj.mkdir(parents=True, exist_ok=True)
     (rig.proj / "ticker.py").write_text(TICKER)
     cell = {"id": CELL, "handler_module": "terminal_view.ts", "backend_id": BACKEND, "owns_backend": False,
-            "command": ["python3", "ticker.py"], "can_call": {"$self": "*", BACKEND: VERBS}, "callable_by": {"$self": "*"},
+            "command": py_job("ticker.py")[0], "can_call": {"$self": "*", BACKEND: VERBS}, "callable_by": {"$self": "*"},
             "x": 40, "y": 40, "width": 600, "height": 300}
     host = {"id": BACKEND, "handler_module": "exec_bridge.tools", "cwd": ".", "inherit_env": ["*"], "shell": "login",
-            "ingress_rule": "allow_all_ingress", "allowed": [r"^python3 ticker\.py$"], "cell_id": CELL, "can_call": {"$self": "*"},
+            "ingress_rule": "allow_all_ingress", "allowed": [py_job("ticker.py")[1]], "cell_id": CELL, "can_call": {"$self": "*"},
             "callable_by": {"$self": "*", "mcp": ["*"], "user": ["*"], "canvas_root": ["*"], "canvas_ws": ["watch"]}}
     rig.init(cells=[cell], host_agents=[(FOLDER, host)])
     sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))

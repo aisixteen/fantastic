@@ -193,7 +193,7 @@ mod tests {
         let h = home();
         Secrets::new(Ok(h.clone())).set_mode(Mode::Plain).unwrap();
         for d in ["", "agents", "agents/ai_agent", "agents/ai_agent/keys"] {
-            assert_eq!(crate::sys::mode_bits(&fs::metadata(h.join(d)).unwrap()), 0o700, "{d}");
+            assert_eq!(crate::sys::mode_of(&h.join(d)).unwrap(), 0o700, "{d}");
         }
         assert!(h.join("agents/ai_agent/keys/mode").is_file());
         assert!(!h.join("secrets").exists(), "nothing at the old place");
@@ -203,7 +203,9 @@ mod tests {
     #[test]
     fn each_mode_names_its_credential_store_backend() {
         let h = PathBuf::from("/h");
-        assert_eq!(Mode::Plain.store(&h), json!({"backend": "file", "file": "/h/agents/ai_agent/keys/credentials.yaml"}));
+        // `/h/agents/ai_agent/keys/credentials.yaml`, in this OS's separators
+        let file = ["agents", "ai_agent", "keys", CREDENTIALS].iter().fold(h.clone(), |p, c| p.join(c));
+        assert_eq!(Mode::Plain.store(&h), json!({"backend": "file", "file": file.display().to_string()}));
         assert_eq!(Mode::Secure.store(&h)["backend"], "keychain");
     }
 }

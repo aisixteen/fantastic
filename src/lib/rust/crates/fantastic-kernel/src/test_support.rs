@@ -316,3 +316,9 @@ pub fn wire(kernel: &Arc<Kernel>, sender: &str, target: &str, verbs: Value) {
 pub async fn as_agent<F: std::future::Future>(agent: impl Into<AgentId>, work: F) -> F::Output {
     crate::send::as_agent(&agent.into(), work).await
 }
+
+/// A symlink at `link` pointing at `target`, on every OS — the fixture a test of
+/// the clamp plants (on Windows a typed link, see the kernel's `sys`).
+pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+    crate::sys::symlink(target.as_ref(), link.as_ref())
+}

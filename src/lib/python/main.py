@@ -24,7 +24,7 @@ from cli import Cli
 from file_bridge import fs
 from kernel_state.tools import load_bundles, read_tree, write_record
 
-from kernel import Kernel, _load_dotenv, dispatch_argv
+from kernel import Kernel, _load_dotenv, _sys, dispatch_argv
 
 
 def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
@@ -109,6 +109,7 @@ def _ledger_cap_from(argv: list[str]) -> tuple[list[str], int | None, bool]:
 
 
 def main_dispatch() -> None:
+    _sys.utf8_stdio()  # the kernel's text is UTF-8 on every OS
     n = _load_dotenv()
     if n:
         print(f"[kernel] loaded {n} var(s) from .env", file=sys.stderr)

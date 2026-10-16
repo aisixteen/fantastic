@@ -30,7 +30,8 @@ pub struct Job {
     /// The agent that owns it. Every verb filters on this, so a known job_id from
     /// another agent is still "no job".
     pub owner: AgentId,
-    /// OS pid — `stop`/`interrupt` signal it directly.
+    /// OS pid — what `stop` kills the job's session (Job Object) by and
+    /// `interrupt` addresses.
     pub pid: u32,
     /// The relay task serving this job's control socket — its row in the kernel
     /// task table, like the pump above. It is real work (a send per frame the
@@ -55,7 +56,7 @@ pub struct Job {
     pub status: String,
     /// Unix epoch seconds at spawn.
     pub started_at: f64,
-    /// Process exit code; `None` while it runs. Negative on a signal death.
+    /// Process exit code; `None` while it runs. Negative on a signal death (unix).
     pub exit_code: Option<i32>,
     /// Output lines seen so far — ONE counter across stdout and stderr.
     pub lines: u64,
@@ -286,7 +287,7 @@ impl Drop for FinalizeRow {
                 // `on_cancel` SIGKILLed the child before the abort; say so, and
                 // leave a label `clear` accepts.
                 j.status = "stopped".to_string();
-                j.exit_code = Some(-9);
+                j.exit_code = Some(crate::sys::KILLED_EXIT_CODE);
             }
         }
     }
@@ -305,7 +306,7 @@ pub type Ready = tokio::sync::oneshot::Receiver<TaskId>;
 /// dispatch itself died. There is then no row to report into and nobody who can
 /// reach the process, so it is killed here rather than left running unowned
 /// (a child is spawned with `kill_on_drop(false)`).
-pub(crate) async fn await_id(ready: Ready, child: &tokio::process::Child) -> Option<TaskId> {
+pub(crate) async fn await_id(ready: Ready, child: &crate::sys::Child) -> Option<TaskId> {
     let id = ready.await.ok();
     if id.is_none() {
         if let Some(pid) = child.id() {
@@ -316,12 +317,7 @@ pub(crate) async fn await_id(ready: Ready, child: &tokio::process::Child) -> Opt
 }
 
 /// The job's task-table body: drain both pipes, await exit, emit `job_done`.
-pub async fn pump(
-    owner: AgentId,
-    ready: Ready,
-    mut child: tokio::process::Child,
-    kernel: Arc<Kernel>,
-) {
+pub async fn pump(owner: AgentId, ready: Ready, mut child: crate::sys::Child, kernel: Arc<Kernel>) {
     let Some(job_id) = await_id(ready, &child).await else {
         return;
     };
@@ -415,6 +411,13 @@ pub fn exit_code(s: std::process::ExitStatus) -> Option<i32> {
 /// job's own process was signalled.
 pub fn kill(j: &Job) -> bool {
     crate::spawn::kill_session(j.pid as i32)
+}
+
+/// Interrupt one job — its Ctrl-C (python `proc.send_signal(SIGINT)`): SIGINT to
+/// its process on unix; on Windows a Ctrl-C typed at a PTY job's console, a
+/// CTRL_BREAK to a pipe job's process group. Returns whether it was delivered.
+pub fn interrupt(j: &Job) -> bool {
+    crate::sys::interrupt(j.pid, j.pty.as_deref().map(crate::pty::Pty::master))
 }
 
 /// SIGKILL the job's whole session and ask the relay to stop.
