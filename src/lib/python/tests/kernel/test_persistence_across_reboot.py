@@ -163,7 +163,7 @@ def test_agent_record_roundtrip_on_disk(tmp_path, monkeypatch):
     k.create("file_bridge.tools", allow=["."], id="ondisk", x=1, y=2, display_name="d")
     persist(k)
     af = tmp_path / ".fantastic" / "agents" / "ondisk" / "agent.yaml"
-    rec = yaml.safe_load(af.read_text())
+    rec = yaml.safe_load(af.read_text(encoding="utf-8"))
     assert rec["id"] == "ondisk"
     assert rec["handler_module"] == "file_bridge.tools"
     assert rec["parent_id"] == "kernel_state"

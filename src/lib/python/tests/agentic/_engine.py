@@ -115,7 +115,7 @@ def _index(rows) -> dict[str, Requirement]:
 
 
 def _load_requirements() -> tuple[dict[str, Requirement], frozenset[str]]:
-    doc = yaml.safe_load(REQUIREMENTS_FILE.read_text()) or {}
+    doc = yaml.safe_load(REQUIREMENTS_FILE.read_text(encoding="utf-8")) or {}
     rows = tuple(
         (r["id"], r["level"], r["title"]) for r in (doc.get("requirements") or [])
     )
@@ -500,7 +500,7 @@ def load_config(spec_path: str | Path) -> Config:
     file it was found in.
     """
     spec_path = Path(spec_path)
-    spec_raw = yaml.safe_load(spec_path.read_text()) or {}
+    spec_raw = yaml.safe_load(spec_path.read_text(encoding="utf-8")) or {}
     spec_raw = _reject_unknown(str(spec_path), spec_raw, _SPEC_KEYS)
 
     cfg_name = spec_raw.get("config")
@@ -511,7 +511,7 @@ def load_config(spec_path: str | Path) -> Config:
     cfg_path = spec_path.parent.parent / "configs" / str(cfg_name)
     if not cfg_path.exists():
         raise ConfigError(f"{spec_path}: config {cfg_name!r} not found at {cfg_path}")
-    cfg_raw = yaml.safe_load(cfg_path.read_text()) or {}
+    cfg_raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     cfg_raw = _reject_unknown(str(cfg_path), cfg_raw, _CONFIG_KEYS)
 
     # One runtime object; the split is on disk, not in the validators' hands.

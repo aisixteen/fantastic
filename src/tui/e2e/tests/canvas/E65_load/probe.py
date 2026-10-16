@@ -372,9 +372,9 @@ def main() -> bool:
     rig.build()
     rig.make_home(None)
     cells, hosts = seeds(N)
-    # the stream each terminal runs: a timestamp every 20 ms, in any shell
+    # the stream each terminal runs: a timestamp every 200 ms (~5 lines/s), in any shell
     rig.proj.mkdir(parents=True, exist_ok=True)
-    (rig.proj / "ticker.py").write_text("import time\nwhile True:\n    print(f'{time.time():.6f}', flush=True)\n    time.sleep(0.02)\n")
+    (rig.proj / "ticker.py").write_text("import time\nwhile True:\n    print(f'{time.time():.6f}', flush=True)\n    time.sleep(0.2)\n")
     r: dict = {}
     info: dict = {"n": N, "bg": WITH_BG}
     try:

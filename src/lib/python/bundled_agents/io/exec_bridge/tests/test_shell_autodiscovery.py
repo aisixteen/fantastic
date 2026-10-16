@@ -120,17 +120,19 @@ async def test_a_pty_start_without_command_runs_the_childs_shell(k, fake_shell):
     await _events_until(k, lambda t: "GOT hi" in t)
 
 
-async def test_the_shell_comes_from_the_childs_env_not_the_kernels(
-    k, fake_shell, monkeypatch
-):
-    # The kernel HAS a SHELL — but the record passes nothing down, so the child
-    # has none, and the start is refused naming where it would come from.
-    monkeypatch.setenv(SHELL_VAR, fake_shell)
+async def test_the_shell_comes_from_the_childs_env_not_the_kernels(k):
+    # Whatever shell this process has, the record passes nothing down — so the
+    # child has none, and the start is refused naming where it would come from.
+    # (The process env is not mutated: on Windows the kernel's own COMSPEC is the
+    # interpreter the OS runs a `.cmd` through.)
     await _mk(k, "sh", shell=True)
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
     assert (r["reason"], r["arg"]) == ("missing_arg", SHELL_VAR), r
     assert "inherit_env" in r["hint"], r
-    # Passing it down by NAME is the whole repair.
+    # Passing it down by NAME is the whole repair — when this process has one.
+    kernel_shell = os.environ.get(SHELL_VAR)
+    if not kernel_shell:
+        return
     await _call(
         k,
         k.id,
@@ -138,6 +140,8 @@ async def test_the_shell_comes_from_the_childs_env_not_the_kernels(
     )
     r = await _call(k, "sh", {"type": "start", "pty": PTY})
     assert r.get("status") == "running", r
+    snap = (await _call(k, "sh", {"type": "status", "job_id": r["job_id"]}))["jobs"][0]
+    assert snap["command"] == kernel_shell, snap
 
 
 async def test_an_empty_shell_in_the_child_env_is_refused_too(k):

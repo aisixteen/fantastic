@@ -18,7 +18,7 @@ def test_clamped_round_trip(tmp_path):
     fs.write_text(R, "a/b.txt", "hi")
     assert fs.read_text(R, "a/b.txt") == "hi"
     assert fs.exists(R, "a/b.txt")
-    assert (tmp_path / ".fantastic" / "a" / "b.txt").read_text() == "hi"
+    assert (tmp_path / ".fantastic" / "a" / "b.txt").read_text(encoding="utf-8") == "hi"
 
 
 def test_clamp_base_is_the_named_running_dir_not_the_cwd(tmp_path, monkeypatch):
@@ -28,7 +28,7 @@ def test_clamp_base_is_the_named_running_dir_not_the_cwd(tmp_path, monkeypatch):
     (tmp_path / "elsewhere").mkdir()
     monkeypatch.chdir(tmp_path / "elsewhere")
     fs.write_text(fs.Root(tmp_path / "work", "d"), "f.txt", "x")
-    assert (tmp_path / "work" / "d" / "f.txt").read_text() == "x"
+    assert (tmp_path / "work" / "d" / "f.txt").read_text(encoding="utf-8") == "x"
     with pytest.raises(ValueError):
         fs.resolve(fs.Root(tmp_path / "work", str(tmp_path / "elsewhere")), "")
 
@@ -67,7 +67,7 @@ def test_atomic_write_never_follows_a_planted_tmp_link(tmp_path, mode):
     root.mkdir()
     (root / "f.txt.tmp").symlink_to(outside)
     fs.write_bytes(fs.Root(tmp_path, "root"), "f.txt", b"new", mode=mode)
-    assert outside.read_text() == "keep"
+    assert outside.read_text(encoding="utf-8") == "keep"
     assert (root / "f.txt").read_bytes() == b"new"
 
 
@@ -122,7 +122,7 @@ def test_remove_unlinks_a_symlink_not_its_target(tmp_path, monkeypatch):
     os.symlink(tmp_path / "root" / "data", tmp_path / "root" / "link")
     fs.remove(R, "link", recursive=True)
     assert not os.path.lexists(tmp_path / "root" / "link")
-    assert (tmp_path / "root" / "data" / "keep.txt").read_text() == "k"
+    assert (tmp_path / "root" / "data" / "keep.txt").read_text(encoding="utf-8") == "k"
     # a file symlink too — the target survives
     os.symlink(tmp_path / "root" / "data" / "keep.txt", tmp_path / "root" / "flink")
     fs.remove(R, "flink")

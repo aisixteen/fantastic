@@ -76,8 +76,8 @@ def remove_stop_signals(loop) -> None:
 
 
 def utf8_stdio() -> None:
-    """stdout/stderr write UTF-8, as the rust kernel's do — already so here (a
-    UTF-8 locale; PEP 538/540 coerce the C one)."""
+    """stdout/stderr write UTF-8 lines ending in `\\n`, as the rust kernel's do —
+    already so here (a UTF-8 locale; PEP 538/540 coerce the C one)."""
 
 
 # ─── OS errors on the wire ──────────────────────────────────────

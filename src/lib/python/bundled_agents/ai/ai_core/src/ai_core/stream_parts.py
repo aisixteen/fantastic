@@ -61,9 +61,16 @@ class PartSplitter:
         # call is matched to by its exact body, so the message it becomes carries
         # the stream it was previewed as
         self.closed_calls: list[tuple[str, str]] = []
+        # STOPPED is terminal: the stop runs while the pass's own task is still
+        # alive (its `on_cancel` awaits before the abort lands), so a chunk the
+        # provider had already handed over may still be fed — it opens no part
+        # after the aborts.
+        self._stopped = False
 
     # ── public ──
     def feed(self, chunk: str) -> list[tuple]:
+        if self._stopped:
+            return []
         self._buf += chunk
         out: list[tuple] = []
         while self._step(out):
@@ -73,6 +80,8 @@ class PartSplitter:
     def finish(self, why: str = "no_close_tag") -> list[tuple]:
         """The pass ended: flush prose, END an open text/thinking part, ABORT an open
         call (a call that never closed was never a call)."""
+        if self._stopped:
+            return []
         out: list[tuple] = []
         if self._call is not None:
             self._call_body += self._buf
@@ -91,7 +100,9 @@ class PartSplitter:
         return out
 
     def stop(self, why: str) -> list[tuple]:
-        """Stopped mid-stream: every open part ABORTS (nothing is half-ended)."""
+        """Stopped mid-stream: every open part ABORTS (nothing is half-ended), and
+        nothing fed after opens another."""
+        self._stopped = True
         out: list[tuple] = []
         if self._call is not None:
             out += self._abort_call(why)

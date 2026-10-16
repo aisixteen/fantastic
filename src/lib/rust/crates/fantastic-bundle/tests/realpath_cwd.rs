@@ -4,6 +4,10 @@
 //! such file or directory`. The error is propagated, never defaulted to `""`.
 //!
 //! Its own test binary: it changes the process cwd.
+//!
+//! POSIX only: Windows refuses to remove a directory some process has as its
+//! cwd, so a cwd that is gone does not exist there.
+#![cfg(unix)]
 
 use std::path::Path;
 

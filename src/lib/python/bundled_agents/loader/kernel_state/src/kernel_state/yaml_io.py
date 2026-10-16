@@ -40,7 +40,7 @@ emitter, so the same requested styles give the same bytes):
         those as strings and would write them plain, but a 1.2 loader (the
         rust/swift ports) would read a number — so they are quoted, and the file
         means the same thing to every runtime. Regex (fullmatch):
-        `[-+]?0o[0-7]+|[-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?`
+        `[-+]?0o[0-7]+|[-+]?(\\.[0-9]+|[0-9]+(\\.[0-9]*)?)([eE][-+]?[0-9]+)?`
         (a string the 1.1 resolver already quotes is quoted either way).
   * scalars: int as decimal, float as PyYAML `repr` form (`1.5`, `.inf`, `.nan`),
     bool `true`/`false`, None `null` (kept, not omitted).

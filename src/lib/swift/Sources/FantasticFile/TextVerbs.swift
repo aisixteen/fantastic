@@ -6,7 +6,7 @@
 // `readonly`; a commit is `fsWriteBytes` (a tmp sibling + atomic rename), the tmp
 // judged by the TARGET path's exposure.
 
-import CryptoKit
+import Crypto
 import FantasticJSON
 import FantasticKernel
 import Foundation

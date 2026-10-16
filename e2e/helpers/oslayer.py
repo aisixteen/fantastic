@@ -204,3 +204,17 @@ def cpu_percent(*needles: str) -> float:
         ["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True
     ).stdout.strip()
     return float(out or 0)
+
+
+def ensure_utf8() -> None:
+    """Run the harness — and every process it starts — in python's UTF-8 mode
+    where the locale's encoding is not UTF-8 (Windows: cp1252): every file the
+    suite reads or writes is UTF-8. Runs this interpreter again, once, as a child
+    (a Windows `execv` would end this process before the run does) and exits
+    with its code. A UTF-8 locale (macOS, Linux) changes nothing."""
+    import locale
+
+    if sys.flags.utf8_mode or locale.getpreferredencoding(False).lower().replace("-", "") == "utf8":
+        return
+    os.environ["PYTHONUTF8"] = "1"
+    raise SystemExit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))

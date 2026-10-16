@@ -32,7 +32,7 @@
 //     without `--api-key` keeps working. A 401 or 403 says to name `credentials`.
 
 import AsyncHTTPClient
-import CryptoKit
+import Crypto
 import FantasticAICore
 import FantasticJSON
 import FantasticKernel

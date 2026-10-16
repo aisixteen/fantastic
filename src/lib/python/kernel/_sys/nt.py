@@ -142,7 +142,12 @@ def posix_error(e: BaseException) -> BaseException:
     by errno — does not change."""
     if not isinstance(e, OSError) or e.winerror is None:
         return e
-    return OSError(e.errno, _strerror(e.errno), e.filename, None, e.filename2)
+    # Built from (errno, text, filename) ONLY: any 4th argument — even None —
+    # fills the `winerror` slot, and `str()` then prints `[WinError None]`.
+    shaped = OSError(e.errno, _strerror(e.errno), e.filename)
+    if e.filename2 is not None:
+        shaped.filename2 = e.filename2
+    return shaped
 
 
 def posix_errors(fn):
@@ -187,12 +192,12 @@ def create_file(path, access: int, disposition: int, flags: int = 0) -> int:
 
 
 def utf8_stdio() -> None:
-    """stdout/stderr write UTF-8, as the rust kernel's do. A redirected stream
-    (the e2e harness' log, a pipe) would otherwise be the ANSI code page: the
-    stop line's `—` written as cp1252, a `→` in a refusal raising on stdout. (A
-    console is UTF-8 already: python writes it as UTF-16.)"""
+    """stdout/stderr write UTF-8 lines ending in `\\n`, as the rust kernel's do. A
+    redirected stream (the e2e harness' log, a pipe) would otherwise be the ANSI
+    code page with `\\r\\n` line ends: the stop line's `—` written as cp1252, a
+    `→` in a refusal raising on stdout."""
     for stream in (sys.stdout, sys.stderr):
-        stream.reconfigure(encoding="utf-8")
+        stream.reconfigure(encoding="utf-8", newline="\n")
 
 
 # ─── the workdir lock ───────────────────────────────────────────

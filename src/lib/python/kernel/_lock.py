@@ -52,7 +52,7 @@ class LockHeld(RuntimeError):
         super().__init__(
             f"another fantastic owns this dir: pid={pid}\n"
             f"  -> kill it:  kill {pid}\n"
-            f"  -> or, if stale, remove the lock:  rm {LOCK_FILE}"
+            f"  -> or, if stale, remove the lock:  rm {LOCK_FILE.as_posix()}"
         )
         self.pid = pid
 
@@ -69,7 +69,7 @@ def _read_lock() -> dict | None:
     if not LOCK_FILE.exists():
         return None
     try:
-        return _parse_lock(LOCK_FILE.read_text())
+        return _parse_lock(LOCK_FILE.read_text(encoding="utf-8"))
     except OSError:
         return None
 
@@ -125,7 +125,7 @@ def _publish(staged: Path) -> bool:
             pid = doc.get("pid") if doc else None
             if not isinstance(pid, int):
                 raise RuntimeError(
-                    f"lock file at {LOCK_FILE}: lock.yaml malformed"
+                    f"lock file at {LOCK_FILE.as_posix()}: lock.yaml malformed"
                 ) from None
             raise LockHeld(pid) from None
         # Nobody holds it: its holder died. Replace it — but only while it is

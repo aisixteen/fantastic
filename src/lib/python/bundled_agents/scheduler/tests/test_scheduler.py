@@ -123,9 +123,9 @@ async def test_schedule_persists_through_loader(seeded_kernel, store_agent, tmp_
         )
     )[0]["result"]
     assert "schedule_id" in r
-    persisted = (
-        tmp_path / ".fantastic" / "agents" / sid / "schedules.yaml"
-    ).read_text()
+    persisted = (tmp_path / ".fantastic" / "agents" / sid / "schedules.yaml").read_text(
+        encoding="utf-8"
+    )
     assert r["schedule_id"] in persisted
 
 
@@ -273,7 +273,7 @@ async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
     # schedule_events.yaml now exists
     hist_path = tmp_path / ".fantastic" / "agents" / sid / "schedule_events.yaml"
     assert hist_path.exists()
-    assert "schedule_fired" in hist_path.read_text()
+    assert "schedule_fired" in hist_path.read_text(encoding="utf-8")
 
 
 async def test_tick_now_reports_a_refused_fire(seeded_kernel, store_agent):
@@ -413,7 +413,7 @@ async def _probe_handler(id, payload, kernel):
         doc = None
         p = _probe.capture_path
         if p is not None and p.exists():
-            doc = yaml.safe_load(p.read_text())
+            doc = yaml.safe_load(p.read_text(encoding="utf-8"))
         _probe.hits[id] = {"at": time.time(), "doc": doc}
         _probe.started.setdefault(id, asyncio.Event()).set()
         if other := payload.get("wait_for"):

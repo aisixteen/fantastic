@@ -50,7 +50,7 @@ from kernel import register_unlisted
 _CORPUS = (
     Path(__file__).resolve().parents[5] / "contract" / "conformance" / "cases.json"
 )
-_DOC = json.loads(_CORPUS.read_text())
+_DOC = json.loads(_CORPUS.read_text(encoding="utf-8"))
 # `$root` means THIS runtime's root id; each runner substitutes its own.
 ROOT_ID = "kernel_state"
 

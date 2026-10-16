@@ -52,7 +52,7 @@ async def test_persist_then_load_round_trips(seeded_kernel, store_agent):
     # Lands on disk store-relative, next to the agent's record dir.
     on_disk = Path(f".fantastic/agents/{aid}/state.yaml")
     assert on_disk.exists(), "blob must land under .fantastic/agents/<id>/"
-    assert "Ada" in on_disk.read_text()
+    assert "Ada" in on_disk.read_text(encoding="utf-8")
     r = (
         await seeded_kernel.send(
             [

@@ -98,7 +98,7 @@ async def test_set_stores_the_value_0600_and_the_record_keeps_only_metadata(
     }
     f = tmp_path / "creds.yaml"
     assert fb_sys.mode_of(f) == 0o600
-    assert KEY in f.read_text()
+    assert KEY in f.read_text(encoding="utf-8")
     rec = k.ctx.agents["creds"].record
     assert KEY not in repr(rec)
     assert rec["refs"]["openai/main"]["host"] == "api.openai.com"
@@ -189,7 +189,9 @@ async def test_set_takes_no_host_the_declaration_is_the_binding(
     }, rebind
     entry = k.ctx.agents["creds"].record["refs"]["openai/main"]
     assert entry["host"] == "api.openai.com", entry
-    assert KEY2 not in (tmp_path / "creds.yaml").read_text(), "nothing stored"
+    assert KEY2 not in (tmp_path / "creds.yaml").read_text(encoding="utf-8"), (
+        "nothing stored"
+    )
     # the operator too: the host moves only with the declaration
     op = await _call(
         k,
@@ -259,7 +261,7 @@ async def test_forget_drops_the_value_and_keeps_the_declaration(
     declared = dict(k.ctx.agents["creds"].record["refs"]["openai/main"])
     out = await _call(k, {"type": "forget", "ref": "openai/main"}, as_="bob")
     assert out["result"] == {"forgotten": True, "ref": "openai/main"}
-    assert KEY not in (tmp_path / "creds.yaml").read_text()
+    assert KEY not in (tmp_path / "creds.yaml").read_text(encoding="utf-8")
     entry = k.ctx.agents["creds"].record["refs"]["openai/main"]
     assert entry == {"host": declared["host"]}, entry
     # a reader now finds the ref declared and empty
@@ -557,7 +559,7 @@ async def test_the_file_is_the_kernel_emitters_bytes_sorted(seeded_kernel, tmp_p
             {"type": "set", "ref": ref, "fields": fields},
         )
         assert out["result"]["stored"] is True, out
-    assert (tmp_path / "creds.yaml").read_text() == (
+    assert (tmp_path / "creds.yaml").read_text(encoding="utf-8") == (
         "refs:\n"
         "  alpha:\n    fields:\n      t: '0o17'\n    host: h.example\n"
         "  zeta:\n    fields:\n      api_key: '1e3'\n      b: x\n    host: h.example\n"

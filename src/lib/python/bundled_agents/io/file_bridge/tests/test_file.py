@@ -66,13 +66,13 @@ async def test_write_then_read(seeded_kernel, file_bridge, tmp_path):
     assert w.get("written"), w
     r = await _rs(seeded_kernel, file_bridge, "hello.txt")
     assert r["content"] == "hi there"
-    assert (tmp_path / "hello.txt").read_text() == "hi there"
+    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hi there"
 
 
 async def test_write_creates_parent_dirs(seeded_kernel, file_bridge, tmp_path):
     w = await _ws(seeded_kernel, file_bridge, "a/b/c.txt", b"deep")
     assert w.get("written"), w
-    assert (tmp_path / "a" / "b" / "c.txt").read_text() == "deep"
+    assert (tmp_path / "a" / "b" / "c.txt").read_text(encoding="utf-8") == "deep"
 
 
 async def test_read_missing_file_errors(seeded_kernel, file_bridge):
@@ -136,7 +136,7 @@ async def test_rename(seeded_kernel, file_bridge, tmp_path):
         )
     )[0]["result"]
     assert r["new_path"] == "new.txt"
-    assert (tmp_path / "new.txt").read_text() == "o"
+    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "o"
 
 
 async def test_mkdir(seeded_kernel, file_bridge, tmp_path):

@@ -82,7 +82,7 @@ def test_write_record_merge_not_overwrite(tmp_path, monkeypatch):
     )
     # the kernel re-persists only its keys; the sidecar field must survive
     write_record(fs.Root(tmp_path, d), {"id": "a", "handler_module": "x.tools", "x": 2})
-    on_disk = yaml.safe_load((d / "agent.yaml").read_text())
+    on_disk = yaml.safe_load((d / "agent.yaml").read_text(encoding="utf-8"))
     assert on_disk["custom_sidecar"] == 1  # preserved
     assert on_disk["x"] == 2  # added
     assert on_disk["id"] == "a"
@@ -173,7 +173,10 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
         agent_dir = tmp_path / ".fantastic" / "agents" / aid
         await asyncio.sleep(0.3)  # let the debounce flush stream the record
         assert (agent_dir / "agent.yaml").exists()
-        assert yaml.safe_load((agent_dir / "agent.yaml").read_text())["x"] == 7
+        assert (
+            yaml.safe_load((agent_dir / "agent.yaml").read_text(encoding="utf-8"))["x"]
+            == 7
+        )
         assert not (agent_dir / "readme.md").exists()  # served from the bundle
 
         (
@@ -334,7 +337,7 @@ async def test_a_record_commits_atomically_and_leaves_no_debris(
     agent_dir = root / "agents" / "atomic_probe"
     on_disk = agent_dir / "agent.yaml"
     assert on_disk.exists(), sorted(p.name for p in agent_dir.iterdir())
-    parsed = yaml.safe_load(on_disk.read_text())
+    parsed = yaml.safe_load(on_disk.read_text(encoding="utf-8"))
     assert parsed["id"] == "atomic_probe" and parsed["display_name"] == "Atomic"
     debris = [p.name for p in agent_dir.iterdir() if ".tmp." in p.name]
     assert debris == [], f"the commit must leave no tmp behind: {debris}"

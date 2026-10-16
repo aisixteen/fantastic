@@ -50,7 +50,7 @@ def test_binary_leg_request_and_reply_round_trip(seeded_kernel, tmp_path, monkey
         callable_by={"rest_xyz": ["*"]},
     )
     (tmp_path / "work").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "work" / "m.py").write_text("a = 1\nb = 2\n")
+    (tmp_path / "work" / "m.py").write_bytes(b"a = 1\nb = 2\n")
 
     with TestClient(_mount(seeded_kernel)) as c:
         # REQUEST binary: the patch is the octet body; the envelope is a header.
@@ -68,7 +68,9 @@ def test_binary_leg_request_and_reply_round_trip(seeded_kernel, tmp_path, monkey
         )
         assert r.status_code == 200
         assert r.json()["edited"] is True
-        assert (tmp_path / "work" / "m.py").read_text() == "a = 1\nb = 20\n"
+        assert (tmp_path / "work" / "m.py").read_text(
+            encoding="utf-8"
+        ) == "a = 1\nb = 20\n"
 
         # REPLY binary: read_stream's chunk comes back as an octet body.
         r2 = c.post(

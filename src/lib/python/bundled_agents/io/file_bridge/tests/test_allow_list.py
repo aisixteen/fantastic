@@ -29,7 +29,7 @@ def _tree():
     Path("site/docs").mkdir(parents=True)
     Path("site/docs/a.pdf").write_bytes(b"%PDF-a")
     Path("site/docs/b.pdf").write_bytes(b"%PDF-b")
-    Path("site/secret.txt").write_text("private\n")
+    Path("site/secret.txt").write_bytes(b"private\n")
 
 
 def _bridge(kernel, **meta):
@@ -170,7 +170,7 @@ def _links():
     Path("site/docs/leak").symlink_to("../secret.txt")
     Path("site/docs/sib").symlink_to("b.pdf")
     Path("site/shared").mkdir()
-    Path("site/shared/c.txt").write_text("c\n")
+    Path("site/shared/c.txt").write_bytes(b"c\n")
     Path("site/docs/shared").symlink_to("../shared")
 
 
@@ -183,7 +183,7 @@ async def test_a_link_inside_the_list_to_a_file_outside_it_serves_nothing(kernel
         kernel, {"type": "write_stream", "path": "docs/leak", "bytes": b"pwn"}
     )
     assert w["reason"] == "not_found", w
-    assert Path("site/secret.txt").read_text() == "private\n"
+    assert Path("site/secret.txt").read_text(encoding="utf-8") == "private\n"
     names = [
         f["name"]
         for f in (await _call(kernel, {"type": "list", "path": "docs"}))["files"]

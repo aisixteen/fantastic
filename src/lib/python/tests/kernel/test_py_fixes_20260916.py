@@ -210,7 +210,7 @@ async def test_scheduler_forgets_its_cache_on_delete(seeded_kernel, store_agent)
 def test_exec_drain_rows_are_filed_under_the_owner():
     import exec_bridge.tools as x
 
-    src = Path(x.__file__).read_text()
+    src = Path(x.__file__).read_text(encoding="utf-8")
     assert "spawn_task(\n                            id," not in src
     assert (
         'spawn_task(\n                            owner_id,\n                            "watch_drain"'
@@ -222,7 +222,9 @@ def test_web_serve_task_detaches_from_the_boot_dispatch():
     import web.tools as w
 
     # an EMPTY context: no task parent (and, a transport, no identity)
-    assert "context=contextvars.Context()" in Path(w.__file__).read_text()
+    assert "context=contextvars.Context()" in Path(w.__file__).read_text(
+        encoding="utf-8"
+    )
 
 
 async def test_a_long_line_does_not_end_the_pipe(seeded_kernel):
@@ -323,5 +325,5 @@ async def test_records_over_a_chunk_keep_every_key(tmp_path, monkeypatch):
     await asyncio.sleep(0.6)
     f = tmp_path / ".fantastic" / "agents" / "fat" / "agent.yaml"
     assert f.exists(), "record not persisted"
-    doc = yaml.safe_load(f.read_text())
+    doc = yaml.safe_load(f.read_text(encoding="utf-8"))
     assert doc.get("mark") == 1 and doc.get("note") == big

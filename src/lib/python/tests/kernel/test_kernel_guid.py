@@ -54,7 +54,9 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
 
     # Materialize to disk and confirm the on-disk root record carries it.
     persist(k1)
-    disk = yaml.safe_load((tmp_path / ".fantastic" / "agent.yaml").read_text())
+    disk = yaml.safe_load(
+        (tmp_path / ".fantastic" / "agent.yaml").read_text(encoding="utf-8")
+    )
     assert disk["guid"] == minted
 
 

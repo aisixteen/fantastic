@@ -5,7 +5,7 @@
 // posture cases (readonly, sealed) are answered by the bridge's own gate. `undo`
 // is one RAM slot per path — a second undo is redo.
 
-import CryptoKit
+import Crypto
 import FantasticFile
 import FantasticJSON
 import FantasticKernel

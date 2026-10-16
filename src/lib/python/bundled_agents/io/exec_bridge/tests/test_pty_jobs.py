@@ -107,13 +107,13 @@ async def _until(k, pred, secs=10.0):
     return text, events
 
 
-async def _start(k, cols=91, rows=37):
+async def _start(k, cols=91, rows=37, program=_CHILD):
     r = await _call(
         k,
         {
             "type": "start",
             "command": PY,
-            "args": ["-c", _CHILD],
+            "args": ["-c", program],
             "pty": {"cols": cols, "rows": rows},
         },
     )
@@ -166,7 +166,10 @@ async def test_output_replays_the_ring_for_a_client_that_re_attaches(term):
 async def test_flow_control_pauses_the_reader_until_acked(term, monkeypatch):
     monkeypatch.setattr(ebt, "HIGH_WATERMARK", 10)
     monkeypatch.setattr(ebt, "LOW_WATERMARK", 5)
-    jid = await _start(term)
+    # The program stays up after its answer: a tty holds a writer's exit until its
+    # output is read (the slave's close drains), a console does not — and a job
+    # whose program has exited takes no `ack`.
+    jid = await _start(term, program=_CHILD + "sys.stdin.readline()\n")
     pt = ebt._jobs[jid]["pty"]
     for _ in range(250):
         if pt["paused"]:

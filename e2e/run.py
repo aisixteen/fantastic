@@ -758,4 +758,5 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    oslayer.ensure_utf8()
     raise SystemExit(asyncio.run(main()))

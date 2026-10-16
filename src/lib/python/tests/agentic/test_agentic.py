@@ -30,14 +30,30 @@ import pytest
 
 from _core import CORE_AFTER, CORE_BEFORE, run_core
 from _engine import config_paths, load_config, run_steps
+from _testkit import posix_only
 
 # Discovery is a GLOB: adding a scenario is adding a file. Specs, not configs —
 # a config is a deployable kernel document and says nothing about being tested,
 # so the suite is enumerated by what ASSERTS, and each spec names its config.
 _SPECS = config_paths() or [None]
 
+# Scenarios whose CONFIG is a POSIX system: `exec_shell` passes `SHELL=/bin/sh`
+# down and permits `$SHELL -l` — a unix shell, its env var and its login flag.
+# Its Windows twin (COMSPEC, no login mode) is exec_bridge's
+# `test_shell_autodiscovery`.
+_POSIX_CONFIGS = {
+    "exec_shell": posix_only("its config runs /bin/sh as $SHELL — a POSIX shell"),
+}
 
-@pytest.mark.parametrize("spec_path", _SPECS, ids=lambda p: p.stem if p else "none")
+
+def _param(p):
+    marks = (
+        [_POSIX_CONFIGS[p.stem]] if p is not None and p.stem in _POSIX_CONFIGS else []
+    )
+    return pytest.param(p, marks=marks, id=p.stem if p else "none")
+
+
+@pytest.mark.parametrize("spec_path", [_param(p) for p in _SPECS])
 async def test_scenario(spec_path, hydrate_scenario):
     if spec_path is None:
         pytest.skip("no scenarios in contract/agentic/specs")

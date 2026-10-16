@@ -44,7 +44,7 @@ def test_direct_sink_merge_keeps_unknown_keys_and_key_order(tmp_path, monkeypatc
     d.mkdir()
     (d / "agent.yaml").write_text("id: m\nunknown: kept\nx: 1\n")
     write_record(fs.Root(tmp_path, Path("m")), {"id": "m", "x": 2, "y": 3})
-    on_disk = yaml.safe_load((d / "agent.yaml").read_text())
+    on_disk = yaml.safe_load((d / "agent.yaml").read_text(encoding="utf-8"))
     assert on_disk == {"id": "m", "unknown": "kept", "x": 2, "y": 3}
     assert list(on_disk) == ["id", "unknown", "x", "y"]
 
@@ -80,7 +80,10 @@ async def test_store_sink_writes_records_only(wired, tmp_path):
     root.create("kernel_state.tools", id="session", watch=False, root="sess")
     await _flush(root)
     d = tmp_path / ".fantastic"
-    assert yaml.safe_load((d / "agent.yaml").read_text())["note"] == "touch"
+    assert (
+        yaml.safe_load((d / "agent.yaml").read_text(encoding="utf-8"))["note"]
+        == "touch"
+    )
     assert not (d / "readme.md").exists() and not (d / "docs").exists()
     assert _tree(d / "agents" / "session") == ["agent.yaml"]
     # a session loader keeps no copy of its record in its namespace
@@ -92,7 +95,7 @@ async def test_store_sink_merge_keeps_unknown_keys_past_one_chunk(wired, tmp_pat
     root.create("file_bridge.tools", id="big", allow=["."])
     await _flush(root)
     f = tmp_path / ".fantastic" / "agents" / "big" / "agent.yaml"
-    on_disk = yaml.safe_load(f.read_text())
+    on_disk = yaml.safe_load(f.read_text(encoding="utf-8"))
     # an operator-added key big enough that the record spans two read_stream chunks,
     # and one more unknown key AFTER it (only a paged read reaches it)
     on_disk["blob"] = "x" * 70_000
@@ -101,7 +104,7 @@ async def test_store_sink_merge_keeps_unknown_keys_past_one_chunk(wired, tmp_pat
     assert f.stat().st_size > 65_536
     root.ctx.update("big", y=2)
     await _flush(root)
-    after = yaml.safe_load(f.read_text())
+    after = yaml.safe_load(f.read_text(encoding="utf-8"))
     assert after["blob"] == "x" * 70_000 and after["tail_key"] == "kept"
     assert after["y"] == 2 and after["id"] == "big"
 
@@ -114,7 +117,7 @@ async def test_store_sink_a_corrupt_record_is_replaced_not_merged(wired, tmp_pat
     f.write_text("{not: yaml: at all")
     root.ctx.update("torn", y=5)
     await _flush(root)
-    after = yaml.safe_load(f.read_text())
+    after = yaml.safe_load(f.read_text(encoding="utf-8"))
     assert after["y"] == 5 and after["id"] == "torn"
 
 
@@ -125,13 +128,13 @@ async def test_store_sink_a_refused_write_leaves_the_old_record(
     root.create("file_bridge.tools", id="keep", allow=["."], v=1)
     await _flush(root)
     f = tmp_path / ".fantastic" / "agents" / "keep" / "agent.yaml"
-    before = f.read_text()
+    before = f.read_text(encoding="utf-8")
     root.ctx.update("store", readonly=True)
     await _flush(root)  # the store's own update is refused too
     capsys.readouterr()
     root.ctx.update("keep", v=2)
     await _flush(root)
-    assert f.read_text() == before
+    assert f.read_text(encoding="utf-8") == before
     err = capsys.readouterr().err
     assert (
         "  [kernel_state] persist through 'store' failed: agents/keep/agent.yaml" in err
@@ -150,7 +153,7 @@ async def test_store_sink_a_failed_rename_leaves_the_old_record_and_the_tmp(
     root.create("file_bridge.tools", id="mv", allow=["."], v=1)
     await _flush(root)
     d = tmp_path / ".fantastic" / "agents" / "mv"
-    before = (d / "agent.yaml").read_text()
+    before = (d / "agent.yaml").read_text(encoding="utf-8")
 
     async def refuse(id, payload, kernel):
         return {"error": "rename: disk full", "reason": "bad_arg"}
@@ -158,10 +161,10 @@ async def test_store_sink_a_failed_rename_leaves_the_old_record_and_the_tmp(
     monkeypatch.setitem(fbt.VERBS, "rename", refuse)
     root.ctx.update("mv", v=2)
     await _flush(root)
-    assert (d / "agent.yaml").read_text() == before
+    assert (d / "agent.yaml").read_text(encoding="utf-8") == before
     debris = [p.name for p in d.iterdir() if p.name.startswith("agent.yaml.tmp.")]
     assert len(debris) == 1, debris
-    assert yaml.safe_load((d / debris[0]).read_text())["v"] == 2
+    assert yaml.safe_load((d / debris[0]).read_text(encoding="utf-8"))["v"] == 2
     assert (
         "  [kernel_state] persist through 'store' failed: agents/mv/agent.yaml: "
         "rename: disk full"
@@ -337,7 +340,11 @@ async def test_persist_record_merges_onto_the_live_agents_dir(tmp_path, monkeypa
         root, {"type": "persist_record", "record": {"id": "pr", "x": 1}}
     )
     assert out == {"ok": True}
-    assert yaml.safe_load(f.read_text()) == {"id": "pr", "unknown": "kept", "x": 1}
+    assert yaml.safe_load(f.read_text(encoding="utf-8")) == {
+        "id": "pr",
+        "unknown": "kept",
+        "x": 1,
+    }
     assert (f.parent / "readme.md").exists() is False  # no handler_module named
 
 

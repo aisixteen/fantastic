@@ -36,7 +36,7 @@ def _cwd(tmp_path, monkeypatch):
 def test_acquire_writes_lock_when_none():
     acquire_lock()
     assert LOCK_FILE.exists()
-    data = yaml.safe_load(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8"))
     assert data == {"pid": os.getpid()}
 
 
@@ -54,7 +54,7 @@ def test_acquire_raises_when_live_lock_present(tmp_path):
         "  -> or, if stale, remove the lock:  rm .fantastic/lock.yaml"
     )
     # Existing lock untouched.
-    assert yaml.safe_load(LOCK_FILE.read_text())["pid"] == pid
+    assert yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8"))["pid"] == pid
 
 
 def test_a_live_pid_without_the_flock_is_taken_over():
@@ -64,7 +64,7 @@ def test_a_live_pid_without_the_flock_is_taken_over():
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCK_FILE.write_text(json.dumps({"pid": os.getppid()}))
     acquire_lock()
-    assert yaml.safe_load(LOCK_FILE.read_text()) == {"pid": os.getpid()}
+    assert yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8")) == {"pid": os.getpid()}
 
 
 def test_acquire_leaves_no_staged_file():
@@ -79,7 +79,7 @@ def test_acquire_overwrites_stale_lock():
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCK_FILE.write_text(json.dumps({"pid": 2**31 - 2}))
     acquire_lock()
-    data = yaml.safe_load(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8"))
     assert data == {"pid": os.getpid()}
 
 
@@ -87,7 +87,7 @@ def test_acquire_overwrites_corrupt_lock():
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     LOCK_FILE.write_text("not json {{{")
     acquire_lock()
-    data = yaml.safe_load(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8"))
     assert data == {"pid": os.getpid()}
 
 
@@ -109,7 +109,7 @@ def test_release_lets_the_next_acquire_in():
     acquire_lock()
     release_lock()
     acquire_lock()
-    assert yaml.safe_load(LOCK_FILE.read_text()) == {"pid": os.getpid()}
+    assert yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8")) == {"pid": os.getpid()}
 
 
 def test_release_silent_when_no_lock():
@@ -134,7 +134,9 @@ def test_context_manager_acquires_and_releases():
     assert not LOCK_FILE.exists()
     with FantasticLock():
         assert LOCK_FILE.exists()
-        assert yaml.safe_load(LOCK_FILE.read_text()) == {"pid": os.getpid()}
+        assert yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8")) == {
+            "pid": os.getpid()
+        }
     assert not LOCK_FILE.exists()
 
 
@@ -146,13 +148,15 @@ def test_context_manager_raises_on_conflict():
             with FantasticLock():
                 pass
         # the refused inner lock did not release the outer one
-        assert yaml.safe_load(LOCK_FILE.read_text()) == {"pid": os.getpid()}
+        assert yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8")) == {
+            "pid": os.getpid()
+        }
 
 
 def test_lock_shape():
     """The lock file is `{pid:int}`."""
     acquire_lock()
-    data = yaml.safe_load(LOCK_FILE.read_text())
+    data = yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8"))
     assert data == {"pid": os.getpid()}
 
 

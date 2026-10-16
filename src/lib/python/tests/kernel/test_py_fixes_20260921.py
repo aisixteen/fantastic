@@ -145,7 +145,7 @@ def test_an_unreadable_root_record_is_never_written_over(tmp_path):
     (d / "agent.yaml").write_text("id: [unclosed\n")
     p = _main(tmp_path, "kernel", "list_agents")
     assert p.returncode != 0 and "unreadable" in p.stderr, p.stderr
-    assert (d / "agent.yaml").read_text() == "id: [unclosed\n"
+    assert (d / "agent.yaml").read_text(encoding="utf-8") == "id: [unclosed\n"
 
 
 async def test_a_service_loop_does_not_hold_the_quiet_phase(seeded_kernel):
@@ -230,7 +230,9 @@ def test_a_daemon_releases_its_lock_well_inside_the_stop_window(tmp_path):
                 assert p.poll() is None, klog.read_text(errors="replace")
                 time.sleep(0.1)
             else:
-                raise AssertionError(f"never booted:\n{klog.read_text()}")
+                raise AssertionError(
+                    f"never booted:\n{klog.read_text(encoding='utf-8')}"
+                )
             assert (d / "lock.yaml").exists(), "the daemon took no lock"
             t0 = time.monotonic()
             _testkit.polite_stop(p)  # SIGTERM; on Windows CTRL_BREAK

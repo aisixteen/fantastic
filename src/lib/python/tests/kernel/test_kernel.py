@@ -27,7 +27,7 @@ def test_create_persists_to_disk(kernel, tmp_path):
     persist(kernel)
     f = tmp_path / ".fantastic" / "agents" / rec["id"] / "agent.yaml"
     assert f.exists()
-    on_disk = yaml.safe_load(f.read_text())
+    on_disk = yaml.safe_load(f.read_text(encoding="utf-8"))
     assert on_disk["id"] == rec["id"]
     assert on_disk["model"] == "gemma4"
 

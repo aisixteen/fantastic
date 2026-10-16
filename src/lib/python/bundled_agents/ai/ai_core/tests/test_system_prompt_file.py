@@ -168,7 +168,7 @@ async def test_the_file_is_the_block_and_an_edit_is_live_next_turn(
 ):
     k = seeded_kernel
     _bridge(k, ["pf_ai"])
-    Path("prompt.md").write_text("FILE-ROLE for {store}\n")
+    Path("prompt.md").write_bytes(b"FILE-ROLE for {store}\n")
     fp = _ai(k, "pf_ai", fake_providers, file=True)
     assert await _turn(k, "pf_ai", fp) == "FILE-ROLE for memory\n"
     # held under the bridge's watcher, as the agent
@@ -176,7 +176,7 @@ async def test_the_file_is_the_block_and_an_edit_is_live_next_turn(
 
     assert _WATCH["prompts"]["paths"] == {"prompt.md": {"pf_ai"}}
     await asyncio.sleep(0.3)
-    Path("prompt.md").write_text("EDITED {self}\n")  # an editor's save
+    Path("prompt.md").write_bytes(b"EDITED {self}\n")  # an editor's save
     await _until_stale("pf_ai")
     assert (await _turn(k, "pf_ai", fp)).startswith("EDITED You are `pf_ai`.")
     # no change: no read (the bridge saw one read per change)
@@ -191,7 +191,7 @@ async def test_a_record_prompt_beats_the_file_and_clearing_the_field_drops_it(
 
     k = seeded_kernel
     _bridge(k, ["pf2"])
-    Path("prompt.md").write_text("FILE\n")
+    Path("prompt.md").write_bytes(b"FILE\n")
     fp = _ai(k, "pf2", fake_providers, file=True, system_prompt="RECORD")
     assert await _turn(k, "pf2", fp) == "RECORD"
     await _op(k, {"type": "update_agent", "id": "pf2", "system_prompt": None})
@@ -228,7 +228,7 @@ async def test_a_missing_file_fails_the_turn_and_reflect_says_why(
     assert "prompt.md" in rf.get("system_prompt_file_error", ""), rf
     # the file appears: the watcher reports it, the next turn uses it
     await asyncio.sleep(0.3)
-    Path("prompt.md").write_text("NOW\n")
+    Path("prompt.md").write_bytes(b"NOW\n")
     await _until_stale("pf3")
     assert await _turn(k, "pf3", fp) == "NOW\n"
     rf = (await k.send([{"target": "pf3", "payload": {"type": "reflect"}}]))[0][
@@ -242,7 +242,7 @@ async def test_without_the_grants_the_turn_fails_and_nothing_is_read(
 ):
     k = seeded_kernel
     _bridge(k, [])  # the bridge does not accept the agent
-    Path("prompt.md").write_text("SECRET\n")
+    Path("prompt.md").write_bytes(b"SECRET\n")
     fp = _ai(k, "pf4", fake_providers, file=True)
     res = await _failed_turn(k, "pf4", fp)
     assert "watch_path" in res["error"] and "SECRET" not in res["error"], res
@@ -251,7 +251,7 @@ async def test_without_the_grants_the_turn_fails_and_nothing_is_read(
 async def test_an_empty_file_fails_the_turn(seeded_kernel, fake_providers):
     k = seeded_kernel
     _bridge(k, ["pf7"])
-    Path("prompt.md").write_text(" \n")
+    Path("prompt.md").write_bytes(b" \n")
     fp = _ai(k, "pf7", fake_providers, file=True)
     res = await _failed_turn(k, "pf7", fp)
     assert "empty" in res["error"], res
@@ -262,7 +262,7 @@ async def test_deleting_the_agent_releases_the_file(seeded_kernel, fake_provider
 
     k = seeded_kernel
     _bridge(k, ["pf5"])
-    Path("prompt.md").write_text("X\n")
+    Path("prompt.md").write_bytes(b"X\n")
     fp = _ai(k, "pf5", fake_providers, file=True)
     await _turn(k, "pf5", fp)
     await _op(k, {"type": "delete_agent", "id": "pf5"})

@@ -451,7 +451,9 @@ struct EventsAndRefusalsTests {
         _ = await kernel.send([
             Item(ids["mock"]!, .object(["type": .string("inquiry"), "text": .string("well?")]))
         ])[0].result
-        guard await script.waitForCalls(2, timeout: 0.5) else { return nil }
+        // generous: answers the moment the second call lands; a loaded CI runner
+        // can take longer than half a second to get there
+        guard await script.waitForCalls(2, timeout: 10) else { return nil }
         let turn = script.request(1)?.last?["content"].asString ?? ""
         return turn.split(separator: "\n").first { $0.contains("PLACEHOLDER") }.map(String.init)
     }

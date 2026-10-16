@@ -113,7 +113,9 @@ async def test_the_password_is_read_from_the_store_and_never_recorded(
     assert PW not in repr(ledger)
     persist(k)
     on_disk = "".join(
-        p.read_text() for p in (tmp_path / ".fantastic").rglob("*.yaml") if p.is_file()
+        p.read_text(encoding="utf-8")
+        for p in (tmp_path / ".fantastic").rglob("*.yaml")
+        if p.is_file()
     )
     assert PW not in on_disk
 

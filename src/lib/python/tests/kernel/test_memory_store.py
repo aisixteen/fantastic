@@ -536,7 +536,9 @@ async def test_the_id_counter_reserves_blocks_in_the_root_record(tmp_path, monke
     assert root.record["next_id"] > bound, "a started kernel persists the next block"
     bound = root.record["next_id"]
     persist(root)
-    on_disk = yaml.safe_load((Path(".fantastic") / "agent.yaml").read_text())
+    on_disk = yaml.safe_load(
+        (Path(".fantastic") / "agent.yaml").read_text(encoding="utf-8")
+    )
     assert on_disk["next_id"] == bound
     root2 = boot_root()
     assert root2.ctx.mint_id() >= bound, "a reboot resumes past the reserved block"

@@ -280,6 +280,18 @@ def _read_until_type(ws, ftype, max_frames=10):
             struct.pack(">I", 200_000) + b"[" * 100_000 + b"]" * 100_000 + b"x",
         ),
     ],
+    # short ids: pytest puts the id in the PYTEST_CURRENT_TEST env var, and a
+    # 200 kB frame as the id is past what an environment holds (Windows: 32767)
+    ids=[
+        "short-prefix",
+        "header-past-end",
+        "bad-header-json",
+        "text-not-json",
+        "text-list",
+        "text-number",
+        "text-too-deep",
+        "bytes-too-deep",
+    ],
 )
 def test_malformed_frame_answers_an_error_and_the_socket_survives(client, send, raw):
     """Before this, `decode_frame`/`.get` raised out of the receive loop and the
