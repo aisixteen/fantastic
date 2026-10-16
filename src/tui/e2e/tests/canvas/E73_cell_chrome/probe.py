@@ -2,7 +2,10 @@
 OUTSIDE a cell, on its real border (not only over the content); a handle on
 every corner resizes it with the opposite corner fixed; and the hover costs
 nothing measurable — the frame rate and the GPU process's CPU while the pointer
-sweeps over the cells match the pointer at rest, over an animated background."""
+sweeps over the cells match the pointer at rest, over an animated background;
+its ▁ button minimizes the cell to its bar and back (as a double click on the
+head does), and its ⤢ button views it full (as a click on it in the tree does)
+and, viewed full, takes it back to its view."""
 
 from __future__ import annotations
 
@@ -102,6 +105,24 @@ def main() -> bool:
                 await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=1390, y=890)
                 info["rest"] = await sample(False)
                 info["sweep"] = await sample(True)
+                # 4. the ▁ and ⤢ buttons on c1
+                frame = "document.querySelector('.agent-frame[data-id=c1]')"
+                btn = lambda b: pg.js(f"{frame}.querySelector(':scope > .frame-head .{b}').click()")
+                state = lambda: pg.js(f"({{min: {frame}.classList.contains('minimized'), full: {frame}.classList.contains('full') && document.getElementById('canvas').classList.contains('full-view'), hash: location.hash, glyph: {frame}.querySelector(':scope > .frame-head .max').textContent}})")
+                steps = {}
+                await btn("min")
+                await pg.until(f"{frame}.classList.contains('minimized')", 5)
+                steps["min"] = await state()
+                await btn("min")
+                await pg.until(f"!{frame}.classList.contains('minimized')", 5)
+                steps["unmin"] = await state()
+                await btn("max")
+                await pg.until(f"{frame}.classList.contains('full')", 5)
+                steps["max"] = await state()
+                await btn("max")
+                await pg.until("!document.getElementById('canvas').classList.contains('full-view')", 5)
+                steps["back"] = await state()
+                info["buttons"] = steps
                 info["console"] = [x for x in pg.logs if "WebGL" not in x][:6]
 
         asyncio.run(run())
@@ -122,6 +143,10 @@ def main() -> bool:
         (fr, cr), (fs, cs) = info["rest"], info["sweep"]
         r["hover_costs_no_frames"] = fs >= 0.9 * fr
         r["hover_costs_no_gpu"] = cs <= 1.5 * cr + 50
+        b = info.get("buttons") or {}
+        r["min_button_minimizes"] = bool(b.get("min", {}).get("min")) and not b.get("unmin", {}).get("min", True)
+        r["max_button_views_full"] = bool(b.get("max", {}).get("full")) and "c1" in b.get("max", {}).get("hash", "") and b.get("max", {}).get("glyph") == "⤡"
+        r["max_button_goes_back"] = b.get("back", {}).get("full") is False and b.get("back", {}).get("glyph") == "⤢"
     finally:
         rig.stop()
     rig.summary["checks"] = r

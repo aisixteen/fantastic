@@ -638,7 +638,7 @@ impl Bundle for BackendBundle {
                     "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
                     "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles)}.",
-                    "spawn": "args: saved:str? (else the default) | bundle:str (a NEW project bundle from that starter) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, saved, handler_module, model}.",
+                    "spawn": "args: saved:str? (else the default) | bundle:str (a NEW project bundle from that starter — only when the user asks for a bundle) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, saved, handler_module, model}.",
                     "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
                     "rename": "args: id:str, name:str. {id, name}.",
                     "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, saved, live}]}.",

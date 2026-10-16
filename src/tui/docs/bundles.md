@@ -17,6 +17,9 @@ From the canvas: double-click → **python agent** (host group). That copies the
 CLI's starter into a NEW bundle (`.fantastic/bundles/py_<hex>/`) and places one
 instance (`py_<hex>_1`), its view on the canvas.
 
+An AI or a coding CLI writes a new bundle ONLY when the user asks for one;
+otherwise it makes agents with `create_agent` from the bundles `reflect` lists.
+
 ## Change it (instantly)
 
 - **logic**: edit `agent.py`; a new verb is a function in `fa.serve({...})` AND a

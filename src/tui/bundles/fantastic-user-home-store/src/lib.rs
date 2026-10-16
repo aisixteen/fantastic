@@ -36,7 +36,6 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -97,9 +96,7 @@ pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
     }
     for d in &levels {
         if !d.exists() {
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(d)
+            sys::create_private_dir(d)
                 .map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", d.display())))?;
         }
         private(d, true)?;
@@ -155,7 +152,7 @@ impl UserHomeStore {
 /// Refuse a path others can read or write — the ssh rule — naming the fix.
 pub(crate) fn private(p: &Path, dir: bool) -> Result<(), Value> {
     let m = fs::metadata(p).map_err(|e| refusal(BAD_ARG, format!("user_home_store: {}: {e}", p.display())))?;
-    let mode = m.permissions().mode() & 0o777;
+    let mode = sys::mode_bits(&m);
     if mode & 0o077 != 0 {
         let want = if dir { "700" } else { "600" };
         return Err(refusal_hint(
@@ -198,7 +195,7 @@ fn name_arg(verb: &str, payload: &Value) -> Result<String, Value> {
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Value> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let io = |e: std::io::Error| refusal(BAD_ARG, format!("user_home_store: {}: {e}", path.display()));
-    let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).map_err(io)?;
+    let mut f = sys::create_private_file(&tmp).map_err(io)?;
     f.write_all(bytes).and_then(|()| f.sync_all()).map_err(io)?;
     fs::rename(&tmp, path).map_err(io)
 }
@@ -430,6 +427,7 @@ impl Bundle for UserHomeStore {
 }
 
 pub mod secrets;
+mod sys;
 pub mod user_store;
 
 #[cfg(test)]

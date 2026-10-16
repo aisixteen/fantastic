@@ -183,10 +183,8 @@ async fn run(
     // A SIGNAL IS A QUIT, the same quit a key makes: the kernel shuts down in
     // its own order and the lock is released. Without this, `kill` on a
     // headless `fantastic canvas` left the lock file behind (measured).
-    let mut term_sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("SIGTERM handler");
-    let mut int_sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-        .expect("SIGINT handler");
+    let mut term_sig = crate::sys::terminate().expect("SIGTERM handler");
+    let mut int_sig = crate::sys::interrupt().expect("SIGINT handler");
 
     loop {
         // BOOT, once, as soon as the directory is seeded — BEFORE the wait: with

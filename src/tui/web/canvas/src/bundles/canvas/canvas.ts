@@ -733,6 +733,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
           <span class="pin" title="pin to the screen's bottom (mobile)">📌</span>
           <span class="lock ${locked ? "locked" : ""}" title="${locked ? "unlock (allow delete)" : "lock (refuse delete)"}">${locked ? "🔒" : "🔓"}</span>
           <span class="reload" title="reload">⟳</span>
+          <span class="min" title="minimize to its bar (again: back)">▁</span>
+          <span class="max" title="view full (again: back)">⤢</span>
           <span class="close" title="close the view (a host agent lives on)">×</span>
         </span>
       </div>
@@ -759,12 +761,24 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       startDrag(e, rec.id, el);
     });
     // MINIMIZE TO ITS BAR (owner 2026-10-12): a double click on the head; again: back
-    head.addEventListener("dblclick", (e) => {
-      if ((e.target as Element).closest(".actions, .grip")) return;
-      e.stopPropagation();
+    const toggleMinimized = (): void => {
       const v = containerNow();
       const t = themeNow();
       setMinimized(kernel, v, t, rec.id, !minimizedOf(kernel, v, t).has(rec.id));
+    };
+    head.addEventListener("dblclick", (e) => {
+      if ((e.target as Element).closest(".actions, .grip")) return;
+      e.stopPropagation();
+      toggleMinimized();
+    });
+    (el.querySelector(".min") as HTMLElement).addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleMinimized();
+    });
+    // VIEW FULL, as a click on it in the tree; viewed full, back to its view
+    (el.querySelector(".max") as HTMLElement).addEventListener("click", (e) => {
+      e.stopPropagation();
+      setViewed(viewed === rec.id ? containerNow() : rec.id);
     });
     const grip = el.querySelector(":scope > .frame-head .grip") as HTMLElement;
     grip.addEventListener("pointerdown", (e) => startReorder(e, rec.id, el, grip));
@@ -1053,7 +1067,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       world.style.visibility = "hidden";
       canvas.classList.remove("full-view");
       fullHint.hidden = true;
-      for (const f of frames.values()) f.el.classList.remove("full");
+      for (const f of frames.values()) {
+        f.el.classList.remove("full");
+        const max = f.el.querySelector(":scope > .frame-head .max");
+        if (max) max.textContent = "⤢";
+      }
     }
     fullShown = full;
     const cont = kernel.get(containerNow());
@@ -1207,7 +1225,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     for (const [id, f] of frames) f.el.classList.toggle("minimized", mins.has(id));
     glHost?.prune(seenGl);
     canvas.classList.toggle("full-view", full);
-    for (const [id, f] of frames) f.el.classList.toggle("full", full && id === viewed);
+    for (const [id, f] of frames) {
+      f.el.classList.toggle("full", full && id === viewed);
+      const max = f.el.querySelector(":scope > .frame-head .max");
+      if (max) max.textContent = full && id === viewed ? "⤡" : "⤢";
+    }
     // VIEWED FULL (owner 2026-10-11): its name on the middle of its top border,
     // and the way back
     fullHint.hidden = !full;

@@ -47,11 +47,12 @@ its targets and `memory`), grants both sides, boots and flushes it.
   the canvas cell), or from a shell with `fantastic send` and `$env:NAME`
   (`fantastic readme mcp`). `set` only stores a value for a DECLARED ref: a
   new ref is declared first with `update_agent` on `credentials`, its `refs`
-  map (`{<ref>: {host, readers, writers}}`, written whole), naming the caller
-  in its `writers`.
-- The store refuses an unmarked `set` / `get`; every value travels with a
-  `secret` mark, so no row, ledger, reflect or stream holds it. An AI model
-  never calls the store (`holds_secrets: true`).
+  map (`{<ref>: {host}}`, written whole). There are no per-ref access lists:
+  any caller the kernel's call gate admits may `set`, `get` and `forget` a
+  declared ref.
+- The store's record holds only metadata (the host and the field names). The
+  value travels in the call: a `set` payload and a `get` reply are recorded
+  like any call's (the ledger, the memory store, the state stream), in clear.
 
 ## Saved set-ups
 

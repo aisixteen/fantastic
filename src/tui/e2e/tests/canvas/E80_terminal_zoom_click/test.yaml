@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: terminal_zoom_click
+group: canvas
+title: "a click in a terminal cell lands on the row and column under the pointer at every canvas zoom"
+runner: probe.py
+costs: free
+limits:
+  seconds: 60
+env: {}

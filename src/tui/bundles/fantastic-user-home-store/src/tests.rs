@@ -73,8 +73,8 @@ async fn a_saved_setup_saves_lists_and_forgets_as_a_private_file() {
     let saved = call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": rec})).await;
     assert!(saved.get("version").is_some(), "{saved}");
     let file = home.join("agents/ai_agent/saved/opus.yaml");
-    assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(fs::metadata(home.join("agents/ai_agent/saved")).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(crate::sys::mode_bits(&fs::metadata(&file).unwrap()), 0o600);
+    assert_eq!(crate::sys::mode_bits(&fs::metadata(home.join("agents/ai_agent/saved")).unwrap()), 0o700);
     let tree = call(&k, "user", json!({"type": "load_tree"})).await;
     assert_eq!(tree["saved"][0]["name"], "opus");
     assert_eq!(tree["saved"][0]["record"]["model"], "m-1");
@@ -129,7 +129,7 @@ async fn a_stale_save_is_refused_and_a_loose_file_is_refused_naming_the_chmod() 
     let r = call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": rec, "if_match": v1})).await;
     assert_eq!(r["arg"], "if_match", "a lost update is refused: {r}");
     let file = home.join("agents/ai_agent/saved/opus.yaml");
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    crate::sys::set_mode(&file, 0o644).unwrap();
     let r = call(&k, "user", json!({"type": "load_tree"})).await;
     assert!(r["hint"].as_str().unwrap_or("").starts_with("chmod 600"), "{r}");
 }

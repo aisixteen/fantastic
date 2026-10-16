@@ -1,8 +1,9 @@
 """E63 prompt_file — `.fantastic/prompt.md`, the project's system block:
 
 a) a fresh project SEEDS it with ai_core's default block as placeholders
-   (`{tree}`, `{self}`, `{howto}`) — so the first turn's system block is the
-   default one (who it is, the tree, the how-tos);
+   (`{tree}`, `{self}`, `{howto}`) and the CLI's building rules — so the first
+   turn's system block is the default one (who it is, the tree, the how-tos)
+   and the rules;
 b) a canvas AI names it (`system_prompt_file: {bridge: prompt_file, path:
    prompt.md}`) and reads it through the bridge, as itself;
 c) an EDIT of the file is the block from the next turn on — no restart; the
@@ -81,12 +82,13 @@ def main() -> bool:
         async with rig.page(1600, 1000) as pg:
             await asyncio.sleep(1.5)
             # a) seeded, the default layout
-            r["seeded"] = prompt.exists() and prompt.read_text().strip() == "{tree}\n\n{self}\n\n{howto}"
+            seeded = prompt.read_text() if prompt.exists() else ""
+            r["seeded"] = seeded.startswith("{tree}\n\n{self}\n\n{howto}\n\n## Building here\n") and "create_agent" in seeded
             await spot(pg, 400, 300, "hello")
             r["turn1"] = await turns(1)
             s1 = systems[0] if systems else ""
             info["turn1"] = s1[:300]
-            r["turn1_default"] = "You are `" in s1 and "## Reaching other agents" in s1 and "{tree}" not in s1
+            r["turn1_default"] = "You are `" in s1 and "## Reaching other agents" in s1 and "{tree}" not in s1 and "## Building here" in s1
             # b) the AI names the file
             import yaml
             recs = [yaml.safe_load(p.read_text()) or {} for p in (rig.proj / ".fantastic" / "agents").rglob("agent.yaml")]

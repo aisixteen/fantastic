@@ -71,7 +71,7 @@ agents:
         admins: [kernel]
         callable_by: {user: "*"}
 
-      # THE STORE. The kernel persists records, the ledger and messages.xml only
+      # THE STORE. The kernel persists its records (YAML) only
       # through a file_bridge whose root is the store dir itself; without one it
       # says "no store wired — messages stay in RAM" and nothing survives a
       # restart. It is found by position (anywhere under the root) and must exist

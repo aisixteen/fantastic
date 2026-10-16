@@ -71,7 +71,7 @@ export const CANVAS_CSS = `
   }
   .frame-head .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .frame-head .actions { display: flex; gap: 6px; align-items: center; flex: 0 0 auto; }
-  .frame-head .reload, .frame-head .lock, .frame-head .close {
+  .frame-head .reload, .frame-head .lock, .frame-head .min, .frame-head .max, .frame-head .close {
     display: inline-flex; align-items: center; justify-content: center;
     width: 20px; height: 20px; border-radius: 4px;
     background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.06);
@@ -87,7 +87,7 @@ export const CANVAS_CSS = `
   }
   .frame-head .ext:hover { background: rgba(183, 140, 255, 0.32); color: #fff; }
   .frame-head .ext.active { background: rgba(183, 140, 255, 0.45); color: #fff; }
-  .frame-head .reload:hover, .frame-head .lock:hover, .frame-head .close:hover {
+  .frame-head .reload:hover, .frame-head .lock:hover, .frame-head .min:hover, .frame-head .max:hover, .frame-head .close:hover {
     background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.9);
   }
   .frame-head .lock.locked { color: #f7768e; background: rgba(247, 118, 142, 0.10); }

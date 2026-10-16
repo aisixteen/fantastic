@@ -40,12 +40,7 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
     if opts.headless {
         // Keep the real stdout for the announce line and the message stream,
         // before it becomes the kernel log.
-        // SAFETY: dup of fd 1 returns a fresh descriptor this File owns.
-        let out = unsafe { libc::dup(1) };
-        anyhow::ensure!(out >= 0, "could not keep stdout");
-        let announce = Some(std::sync::Arc::new(unsafe {
-            <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(out)
-        }));
+        let announce = Some(std::sync::Arc::new(crate::sys::dup_stdout().map_err(|_| anyhow::anyhow!("could not keep stdout"))?));
         crate::tty::redirect_std_to(&paths.cli.join("kernel.log"))?;
         let boot = vm::Boot { canvas: opts.canvas(), port: opts.port, ai: opts.ai.clone(), run: opts.run.clone(), tui: false, announce };
         let (_h, model) = vm::new();

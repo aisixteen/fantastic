@@ -32,7 +32,6 @@
 
 use std::collections::HashMap;
 use std::io::Write as _;
-use std::os::fd::FromRawFd;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -87,7 +86,7 @@ fn attach(pid: u32) -> ! {
         }
     };
     let code = rt.block_on(async move {
-        let sock = match tokio::net::UnixStream::connect(SOCKET).await {
+        let sock = match crate::sys::connect_local(SOCKET).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("fantastic mcp: a kernel (pid {pid}) runs in this directory, but its MCP socket `{SOCKET}` does not answer: {e}");
@@ -119,14 +118,13 @@ fn own(paths: Paths) -> ! {
     let fresh = paths.is_fresh();
 
     // ── stdio hygiene ────────────────────────────────────────────────────────
-    // SAFETY: plain descriptor duplication; 1 and 2 are open at process start.
-    let (proto_fd, err_fd) = unsafe { (libc::dup(1), libc::dup(2)) };
-    if proto_fd < 0 || err_fd < 0 {
-        eprintln!("fantastic mcp: could not duplicate stdout/stderr");
-        std::process::exit(1);
-    }
-    // SAFETY: `err_fd` was just duplicated and is owned by this File from here on.
-    let mut err_out = unsafe { std::fs::File::from_raw_fd(err_fd) };
+    let (std_out, mut err_out) = match (crate::sys::dup_stdout(), crate::sys::dup_stderr()) {
+        (Ok(o), Ok(e)) => (o, e),
+        _ => {
+            eprintln!("fantastic mcp: could not duplicate stdout/stderr");
+            std::process::exit(1);
+        }
+    };
     let _ = err_out.write_all(shape().as_bytes());
     if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
         let _ = writeln!(err_out, "fantastic mcp: {e}");
@@ -148,7 +146,7 @@ fn own(paths: Paths) -> ! {
             std::process::exit(1);
         }
     };
-    let code = rt.block_on(serve(paths, fresh, proto_fd, &mut err_out));
+    let code = rt.block_on(serve(paths, fresh, std_out, &mut err_out));
     drop(rt);
     std::process::exit(code);
 }
@@ -167,7 +165,7 @@ fn fatal(err_out: &mut std::fs::File, msg: &str) -> i32 {
     1
 }
 
-async fn serve(paths: Paths, fresh: bool, proto_fd: i32, err_out: &mut std::fs::File) -> i32 {
+async fn serve(paths: Paths, fresh: bool, std_out: std::fs::File, err_out: &mut std::fs::File) -> i32 {
     if fresh {
         if let Err(e) = crate::boot::seed::write_all(&paths) {
             return fatal(err_out, &format!("init failed: {e}"));
@@ -198,9 +196,7 @@ async fn serve(paths: Paths, fresh: bool, proto_fd: i32, err_out: &mut std::fs::
         return code;
     }
 
-    // SAFETY: `proto_fd` is the duplicated original stdout, owned from here on.
-    let std_out = unsafe { std::fs::File::from_raw_fd(proto_fd) };
-    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+    let mut term = match crate::sys::terminate() {
         Ok(s) => s,
         Err(e) => return fatal(err_out, &format!("no SIGTERM handler: {e}")),
     };
@@ -248,8 +244,8 @@ impl Served {
 /// already there is stale.
 pub fn listen(served: Arc<Served>) -> Result<(), String> {
     let _ = std::fs::remove_file(SOCKET);
-    let l = tokio::net::UnixListener::bind(SOCKET).map_err(|e| format!("could not open the MCP socket `{SOCKET}`: {e}"))?;
-    std::fs::set_permissions(SOCKET, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+    let l = crate::sys::bind_local(SOCKET).map_err(|e| format!("could not open the MCP socket `{SOCKET}`: {e}"))?;
+    crate::sys::make_private(SOCKET)
         .map_err(|e| format!("could not make `{SOCKET}` private: {e}"))?;
     tokio::spawn(async move {
         loop {

@@ -190,11 +190,10 @@ mod tests {
 
     #[test]
     fn keys_live_under_agents_ai_agent_keys_every_level_private() {
-        use std::os::unix::fs::PermissionsExt;
         let h = home();
         Secrets::new(Ok(h.clone())).set_mode(Mode::Plain).unwrap();
         for d in ["", "agents", "agents/ai_agent", "agents/ai_agent/keys"] {
-            assert_eq!(fs::metadata(h.join(d)).unwrap().permissions().mode() & 0o777, 0o700, "{d}");
+            assert_eq!(crate::sys::mode_bits(&fs::metadata(h.join(d)).unwrap()), 0o700, "{d}");
         }
         assert!(h.join("agents/ai_agent/keys/mode").is_file());
         assert!(!h.join("secrets").exists(), "nothing at the old place");

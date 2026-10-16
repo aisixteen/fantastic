@@ -12,12 +12,15 @@ e) `new_canvas` on the canvas node makes a PEER canvas, opened by its URL: its
    own page records and guid, empty, and its tree view does not list the first
    canvas's agents;
 f) a page bundle in that canvas's own folder runs its instance, and an edit of
-   its bundle.yaml re-renders it live."""
+   its bundle.yaml re-renders it live;
+g) `--headless canvas` is refused (`canvas` is headless already) and leaves the
+   directory untouched — no `.fantastic`."""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,10 +45,15 @@ def main() -> bool:
     fake.write_text(f"#!/bin/sh\necho {MARK}\nexec cat\n")
     fake.chmod(0o755)
     os.environ["PATH"] = f"{fake_dir}:{os.environ.get('PATH', '')}"
+    # g) both flags together: refused before anything is written
+    bare = rig.proj.parent / "refuse"
+    bare.mkdir(parents=True, exist_ok=True)
+    both = subprocess.run([str(rig.binary), "--headless", "canvas"], cwd=bare, env=rig.env(), capture_output=True, text=True, timeout=30)
+    refused = both.returncode != 0 and not (bare / ".fantastic").exists()
     rig.init()
     from _lib.dev_surface import frame_eval
 
-    r: dict = {}
+    r: dict = {"headless_canvas_refused": refused}
     secs = rig.limits["seconds"]
     frames = "[...document.querySelectorAll('.agent-frame')]"
 
@@ -115,6 +123,7 @@ def main() -> bool:
             r["peer_isolated"] = PEER in names and backend not in names
 
     info: dict = {}
+    info["headless_canvas"] = (both.stderr or both.stdout).strip()[-200:]
     try:
         asyncio.run(first())
         main_rec = rig.proj / ".fantastic/web/agents/canvas/agent.yaml"

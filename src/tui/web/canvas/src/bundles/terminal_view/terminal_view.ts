@@ -20,6 +20,9 @@ import type { TermState } from "./last_cmd.ts";
 const ACK_SIZE = 5000; // CHAR_COUNT_ACK_SIZE — VSCode's AckDataBufferer
 /** What an off-screen terminal holds before backpressure takes over (chars). */
 const HOLD_MAX = 2_000_000;
+// how long a re-attach waits for the program to answer the one-row shrink
+// before it restores the size (an idle shell may answer nothing)
+const REPAINT_WAIT_MS = 300;
 
 interface XTermGlobals {
   Terminal: new (opts: unknown) => XTerm;
@@ -199,7 +202,13 @@ export const terminalView: ViewBundle = {
 
     // held while an attach runs too: its ring replay covers what came before it
     let attaching = false;
-    const offOutput = host.on(backend, "output", (e) => (jobId === undefined || attaching ? early.push(e) : draw(e)));
+    // resolved by the job's next output frame while an attach holds them
+    let answered: (() => void) | undefined;
+    const offOutput = host.on(backend, "output", (e) => {
+      if (jobId !== undefined && !attaching) return draw(e);
+      early.push(e);
+      if (e["job_id"] === jobId) answered?.();
+    });
     const offDone = host.on(backend, "job_done", (e) => (jobId === undefined || attaching ? early.push(e) : ended(e)));
 
     // THE LAST LAUNCHED COMMAND (owner 2026-10-12, `last_cmd.ts`): a bar on the
@@ -238,8 +247,23 @@ export const terminalView: ViewBundle = {
     });
     drawLast();
 
+    // THE INPUT BOX holds nothing typed (owner 2026-10-16: a typed line came out
+    // repeated from its start). xterm empties its hidden textarea only on Enter,
+    // Ctrl-C or blur, so the whole line sits in it; a text service of the OS
+    // working on that box (Safari's inline suggestions, Writing Tools) can hand
+    // the whole line back as new input. The services are off, and the box is
+    // emptied after each input — not while an input method composes.
+    const box = (term as unknown as { textarea?: HTMLTextAreaElement }).textarea;
+    let composing = false;
+    if (box) {
+      box.setAttribute("writingsuggestions", "false");
+      box.setAttribute("autocomplete", "off");
+      box.addEventListener("compositionstart", () => (composing = true));
+      box.addEventListener("compositionend", () => (composing = false));
+    }
     term.onData((data: string) => {
       if (jobId !== undefined) void host.call(backend, { type: "write", job_id: jobId, data });
+      if (box) setTimeout(() => !composing && (box.value = ""), 0);
     });
     term.onResize(({ cols, rows }) => {
       if (jobId !== undefined) void host.call(backend, { type: "resize", job_id: jobId, cols, rows });
@@ -339,8 +363,17 @@ export const terminalView: ViewBundle = {
         // the ring drops its oldest bytes, so a full-screen program's last full
         // paint is often gone and the replay holds only partial updates; a resize
         // to the size it already has sends no SIGWINCH. One row off and back does,
-        // and the program repaints the whole screen.
+        // and the program repaints the whole screen — but only once it has SEEN
+        // the smaller size: back-to-back, htop reads the size after both, finds it
+        // unchanged and repaints nothing (measured: 0 bytes; 50 ms apart, a full
+        // screen; `sudo mactop` stayed blank the same way). So the size comes back after the
+        // program's next output after the shrink took effect, or REPAINT_WAIT_MS.
         await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: Math.max(1, term.rows - 1) });
+        await new Promise<void>((res) => {
+          answered = res;
+          setTimeout(res, REPAINT_WAIT_MS);
+        });
+        answered = undefined;
         await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
       } else if (next.start) {
         await startJob();

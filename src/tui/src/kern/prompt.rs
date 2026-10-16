@@ -2,9 +2,9 @@
 //! "bundled default, seeded, then replace if defined, no appends").
 //!
 //! - SEEDED when missing, at every boot, with [`DEFAULT`] — ai_core's own block
-//!   written in its placeholders (`{tree}\n\n{self}\n\n{howto}` is the default,
-//!   byte for byte), so a fresh project behaves as before until the human edits
-//!   it. A human, or a coding CLI reading the folder, sees and changes it.
+//!   written in its placeholders (`{tree}\n\n{self}\n\n{howto}`, ai_core's
+//!   default), then the CLI's building rules — until the human edits it. A
+//!   human, or a coding CLI reading the folder, sees and changes it.
 //! - Every AI agent READS it, as itself, through [`BRIDGE`] (a read-only
 //!   file_bridge exposing only that file): its record names `file_bridge_id:
 //!   prompt_file` and `system_prompt_file: .fantastic/prompt.md` — stamped on
@@ -30,8 +30,10 @@ pub const FILE: &str = "prompt.md";
 pub const PATH: &str = ".fantastic/prompt.md";
 /// The read-only bridge every AI reads it through.
 pub const BRIDGE: &str = "prompt_file";
-/// What a fresh project's file holds: ai_core's default block, as placeholders.
-pub const DEFAULT: &str = "{tree}\n\n{self}\n\n{howto}\n";
+/// What a fresh project's file holds: ai_core's default block, as placeholders,
+/// then the CLI's building rules (owner 2026-10-16: agents through `create_agent`,
+/// a new bundle only when the user asks, `fit` an html cell after placing it).
+pub const DEFAULT: &str = "{tree}\n\n{self}\n\n{howto}\n\n## Building here\n- Make every agent with a `create_agent` call to `kernel`, from the bundles reflect lists.\n- Write a new bundle (`.fantastic/bundles/<name>/`, or `spawn` with `bundle`) ONLY when the user asks for one.\n- After placing or updating an html cell, size it to its content: `fit {id}` on its view.\n";
 
 fn exists(h: &Host, id: &str) -> bool {
     h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))

@@ -146,7 +146,10 @@ def main() -> bool:
                 mock.clear()
                 mock.reply("S5-after")
                 await send(pg, a, "after the stop")
-                r["S5 stops, then answers the next"] = bool(idle) and not info["S5_dialog_has_never"] and bool(await pg.until(f"{dialog(a)}.includes('S5-after')", 10))
+                t5 = time.time()
+                after = bool(await pg.until(f"{dialog(a)}.includes('S5-after')", 10))
+                info["S5_idle"], info["S5_after_s"] = bool(idle), round(time.time() - t5, 2) if after else None
+                r["S5 stops, then answers the next"] = bool(idle) and not info["S5_dialog_has_never"] and after
                 # S6 keep, reload: the history is back
                 # every dialog is kept from its start: no keep button, the badge is its name
                 info["S6_keep_button"] = await pg.js(f"!!document.querySelector('.agent-frame[data-id=\"{a}\"] .c-keep')")

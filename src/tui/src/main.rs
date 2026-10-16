@@ -27,6 +27,7 @@ mod seen;
 mod send;
 mod share;
 mod store;
+mod sys;
 mod tags;
 mod theme;
 mod theme_gen;
@@ -46,8 +47,7 @@ use anyhow::Result;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // NOT ON A TERMINAL, NO ARGUMENTS: the readme, and nothing runs.
-    // SAFETY: isatty only inspects descriptor 1.
-    if args.is_empty() && unsafe { libc::isatty(1) } == 0 {
+    if args.is_empty() && !sys::stdout_is_tty() {
         print!("{}", readme::text());
         return Ok(());
     }
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
     match recipe::parse(&args) {
         // THE UI NEEDS A TERMINAL (it draws on `/dev/tty`): without one, say so
         // here — before fds 1 and 2 are pointed at the log file — and stop
-        Ok(o) if !o.headless && std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").is_err() => {
+        Ok(o) if !o.headless && std::fs::OpenOptions::new().read(true).write(true).open(sys::TTY).is_err() => {
             eprintln!("fantastic: the UI needs a terminal — where there is none, run `fantastic canvas` or `fantastic --headless`");
             std::process::exit(1);
         }

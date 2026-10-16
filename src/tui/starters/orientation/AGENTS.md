@@ -1,4 +1,4 @@
-# This folder holds a live Aisixteen Fantastic kernel
+# This folder holds a live AISixteen Fantastic kernel
 
 A tree of agents; everything is one verb — `send(target, payload) → reply`.
 
@@ -26,6 +26,13 @@ A tree of agents; everything is one verb — `send(target, payload) → reply`.
   send `<guid>|background` `{type: set_bg, bytes: <three.js source>}`.
 
 ## Building an agentic system here
+- Make every agent with a `create_agent` call to `kernel` (send `kernel`
+  `{type: create_agent, handler_module: <a bundle reflect lists>, …}`).
+- Write a bundle (`.fantastic/bundles/<name>/`) ONLY when the user asks for
+  one. Otherwise build from the bundles reflect already lists.
+- After adding (or updating) an html cell, size it to its content: send the
+  view `<page guid>|<view id>` `{type: fit, id: <cell id>}`.
+
 The canvas is for DEVELOPMENT. A new agent may start SEALED (`exec_bridge`:
 `ingress_rule: deny_ingress`) — every call refused, grants or not. When you
 build a system, unseal what it needs right away (`ingress_rule:
@@ -35,6 +42,6 @@ the user which agents you unsealed — they may seal them again later.
 ## What you may edit
 - `.fantastic/prompt.md` — every in-canvas AI's system block (`{tree}`,
   `{self}`, `{howto}` placeholders); a save is live on the AIs' next turn.
-- `.fantastic/bundles/<name>/` — your agents' code; changes reload live.
+- `.fantastic/bundles/<name>/` — a bundle the user asked for; changes reload live.
 - Never hand-edit `.fantastic/agents/**`: records change through `update_agent`
   while the kernel runs.

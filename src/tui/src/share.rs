@@ -109,8 +109,8 @@ impl Share {
 /// already there is stale.
 pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Frames>>>) -> Result<Arc<Share>, String> {
     let _ = std::fs::remove_file(SOCKET);
-    let l = tokio::net::UnixListener::bind(SOCKET).map_err(|e| format!("could not open the TUI socket `{SOCKET}`: {e}"))?;
-    std::fs::set_permissions(SOCKET, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+    let l = crate::sys::bind_local(SOCKET).map_err(|e| format!("could not open the TUI socket `{SOCKET}`: {e}"))?;
+    crate::sys::make_private(SOCKET)
         .map_err(|e| format!("could not make `{SOCKET}` private: {e}"))?;
     let share = Arc::new(Share::default());
     let s = Arc::clone(&share);
@@ -132,7 +132,7 @@ pub fn close() {
 
 async fn serve(
     id: ViewId,
-    stream: tokio::net::UnixStream,
+    stream: crate::sys::LocalStream,
     input: mpsc::Sender<VmIn>,
     mut frames: watch::Receiver<Option<Arc<Frames>>>,
     mut bye: oneshot::Receiver<String>,
@@ -193,7 +193,7 @@ async fn serve(
 /// no state of its own. Returns when the owner ends or this client detaches;
 /// the reason is said after the screen is restored.
 pub async fn attach(paths: &Paths, pid: u32) -> Result<()> {
-    let stream = tokio::net::UnixStream::connect(SOCKET).await.with_context(|| {
+    let stream = crate::sys::connect_local(SOCKET).await.with_context(|| {
         format!("a kernel (pid {pid}) runs in this directory, but its terminal UI socket `{SOCKET}` does not answer (is it `fantastic mcp`?)")
     })?;
     let (mut r, mut w) = stream.into_split();
@@ -202,7 +202,7 @@ pub async fn attach(paths: &Paths, pid: u32) -> Result<()> {
         other => anyhow::bail!("the TUI socket did not greet (got {other:?})"),
     }
     let _ = paths;
-    let mut screen = crate::tty::open(std::path::Path::new("/dev/null"))?;
+    let mut screen = crate::tty::open(std::path::Path::new(crate::sys::NULL_DEVICE))?;
     let why = run_client(&mut screen.term, &mut r, &mut w, pid).await;
     crate::tty::restore();
     match why {
@@ -214,8 +214,8 @@ pub async fn attach(paths: &Paths, pid: u32) -> Result<()> {
 
 async fn run_client(
     term: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::fs::File>>,
-    r: &mut tokio::net::unix::OwnedReadHalf,
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    r: &mut crate::sys::LocalReadHalf,
+    w: &mut crate::sys::LocalWriteHalf,
     pid: u32,
 ) -> Result<String> {
     let size = term.size()?;

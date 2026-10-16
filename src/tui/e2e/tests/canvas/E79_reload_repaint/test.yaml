@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: reload_repaint
+group: canvas
+title: "a full-screen program that repaints only on a CHANGED size (as htop does) repaints after a page reload re-attaches its terminal"
+runner: probe.py
+costs: free
+limits:
+  seconds: 30
+env: {}

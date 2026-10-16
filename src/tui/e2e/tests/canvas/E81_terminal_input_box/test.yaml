@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: terminal_input_box
+group: canvas
+title: "a terminal's hidden input box holds nothing typed and has the OS text services off, so a typed line reaches the program once"
+runner: probe.py
+costs: free
+limits:
+  seconds: 60
+env: {}

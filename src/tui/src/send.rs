@@ -113,7 +113,7 @@ fn resolve(v: &mut Value, env: &impl Fn(&str) -> Option<String>) -> Result<(), S
 /// One MCP session over the socket: initialize, the `send` tool with the one
 /// item, its row back.
 async fn call(item: Value) -> Result<Value, String> {
-    let sock = tokio::net::UnixStream::connect(SOCKET)
+    let sock = crate::sys::connect_local(SOCKET)
         .await
         .map_err(|e| format!("the kernel's socket `{SOCKET}` does not answer: {e}"))?;
     let (r, mut w) = sock.into_split();

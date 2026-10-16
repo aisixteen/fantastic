@@ -9,7 +9,9 @@ c) the placed panel re-renders to the NEW body, its cell is granted `scan`, and 
    click on the panel's button reaches `scan` on the host;
 d) the folder copied to a new name (`dash_release`) is a tile in the popup's
    `host · bundles` group;
-e) that tile places `dash_release_1`, its panel the new one, its button working."""
+e) that tile places `dash_release_1`, its panel the new one, its button working;
+f) panel.html ALONE rewritten (code and verbs unchanged): the placed panel
+   re-renders to that body — a view whose record is unchanged still redraws."""
 
 from __future__ import annotations
 
@@ -111,6 +113,13 @@ def main() -> bool:
                 await click_panel(pg, cell)
                 await asyncio.sleep(2.0)
                 r["panel_click_reaches_new_verb"] = calls_to(rig, inst, "scan") > before
+                # f) the panel alone: only the file's content changes
+                (folder / "panel.html").write_text(PANEL.replace("SCAN-E67", "SCAN-E67-PANEL-ONLY"))
+                r["panel_only_edit_rerendered"] = bool(await pg.until(
+                    f"(document.querySelector('.agent-frame[data-id={json.dumps(cell)}] iframe')?.srcdoc||'').includes('SCAN-E67-PANEL-ONLY')", 20))
+                (folder / "panel.html").write_text(PANEL)
+                await pg.until(
+                    f"!(document.querySelector('.agent-frame[data-id={json.dumps(cell)}] iframe')?.srcdoc||'').includes('SCAN-E67-PANEL-ONLY')", 20)
                 # d) bundled under a new name → a popup tile
                 shutil.copytree(folder, bundles / RELEASE, ignore=shutil.ignore_patterns("__pycache__"))
                 await asyncio.sleep(2.0)

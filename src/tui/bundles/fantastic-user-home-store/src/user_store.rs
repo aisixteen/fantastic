@@ -253,8 +253,7 @@ mod tests {
         assert_eq!(l["here"]["stored"], true);
         let names: Vec<&str> = l["locations"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"a") && names.contains(&"bee"));
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(fs::metadata(locations_dir(&h)).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(crate::sys::mode_bits(&fs::metadata(locations_dir(&h)).unwrap()), 0o700);
         // a stores again: the name kept
         sb.store_here(&json!({})).unwrap();
         assert!(sb.list().unwrap()["locations"].as_array().unwrap().iter().any(|x| x["name"] == "bee"));

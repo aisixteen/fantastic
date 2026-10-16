@@ -19,7 +19,6 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -72,16 +71,7 @@ pub(crate) fn redirect_std_to(path: &Path) -> Result<()> {
         .append(true)
         .open(path)
         .with_context(|| format!("could not open {}", path.display()))?;
-    let fd = log.as_raw_fd();
-    // SAFETY: `fd` is open for the life of this call, and 1/2 are valid targets.
-    // dup2 closes the old descriptor atomically, so no write can slip between.
-    unsafe {
-        if libc::dup2(fd, 1) < 0 || libc::dup2(fd, 2) < 0 {
-            anyhow::bail!("could not redirect stdout/stderr to {}", path.display());
-        }
-    }
-    // The File may drop now; fds 1 and 2 are independent duplicates.
-    Ok(())
+    crate::sys::redirect_stdio_to(&log).with_context(|| format!("could not redirect stdout/stderr to {}", path.display()))
 }
 
 /// Open the screen. The panic hook is installed here and restores the terminal
@@ -91,7 +81,7 @@ pub fn open(log: &Path) -> Result<Screen> {
     let mut tty = OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/tty")
+        .open(crate::sys::TTY)
         .context("could not open /dev/tty — this shell needs a terminal")?;
 
     enable_raw_mode().context("could not enter raw mode")?;
@@ -119,7 +109,7 @@ pub fn open(log: &Path) -> Result<Screen> {
 /// its own handle rather than borrowing one that may be poisoned.
 pub fn restore() {
     let _ = disable_raw_mode();
-    if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") {
+    if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open(crate::sys::TTY) {
         let _ = crossterm::execute!(
             tty,
             crossterm::event::DisableBracketedPaste,
@@ -135,7 +125,7 @@ pub fn restore() {
 /// Say something to the human AFTER the screen is restored. Goes to the tty, not
 /// to stderr, because stderr is the kernel's log now.
 pub fn say(line: &str) {
-    if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") {
+    if let Ok(mut tty) = OpenOptions::new().read(true).write(true).open(crate::sys::TTY) {
         let _ = writeln!(tty, "{line}");
     }
 }

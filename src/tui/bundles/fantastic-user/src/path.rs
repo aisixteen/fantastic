@@ -8,7 +8,6 @@
 //! alone. Nothing is read but directory listings and file modes.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -53,7 +52,7 @@ pub fn executables(dirs: &[String]) -> BTreeMap<String, String> {
             }
             // follows symlinks: a linked program is its target
             let Ok(m) = std::fs::metadata(e.path()) else { continue };
-            if m.is_file() && m.permissions().mode() & 0o111 != 0 {
+            if m.is_file() && crate::sys::is_executable(&m) {
                 out.insert(name, e.path().to_string_lossy().into_owned());
             }
         }
@@ -93,7 +92,7 @@ mod tests {
         for (dir, name, mode) in [(&a, "tool", 0o755), (&b, "tool", 0o755), (&b, "other", 0o755), (&b, "data", 0o644)] {
             let f = dir.join(name);
             std::fs::write(&f, "x").unwrap();
-            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+            crate::sys::set_mode(&f, mode).unwrap();
         }
         let got = executables(&[a.to_string_lossy().into(), b.to_string_lossy().into()]);
         assert_eq!(got.get("tool").map(String::as_str), Some(a.join("tool").to_str().unwrap()));
