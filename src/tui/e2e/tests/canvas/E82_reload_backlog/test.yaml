@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: reload_backlog
+group: canvas
+title: "page reloads leave no unacked output behind: a busy terminal reloaded many times keeps drawing, its PTY never pauses"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}
