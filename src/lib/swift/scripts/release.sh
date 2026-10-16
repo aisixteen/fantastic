@@ -2,7 +2,7 @@
 #
 # Cut a `fantastic` CLI release.
 #
-# Same operator-driven pattern as `rust/scripts/release.sh`: ALL work
+# Operator-driven: ALL work
 # happens locally on the maintainer's Mac. The maintainer reviews
 # the artifacts, then runs the printed `git tag` + `gh release
 # create` commands themselves.
