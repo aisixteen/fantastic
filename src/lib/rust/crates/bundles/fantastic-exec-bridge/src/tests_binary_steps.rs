@@ -166,7 +166,10 @@ async fn the_guest_wire_carries_a_list_index_from_the_program() {
     };
     let mut sp = spawn_program(
         &py,
-        "kernel.emit({'type': 'chunks', 'items': [{'n': 0}, {'data': b'hi'}]})\n",
+        // held open after the emit: a Windows process that exits with its socket
+        // open may close it with a RESET, and the frame races it
+        "kernel.emit({'type': 'chunks', 'items': [{'n': 0}, {'data': b'hi'}]})\n\
+         import time; time.sleep(3)\n",
     );
     let (kind, frame) = read_frame(&mut sp.ctrl).await;
     assert_eq!(kind, b'B');

@@ -102,6 +102,52 @@ The `fantastic` CLI runs on **macOS, Linux** (arm64 and x86_64) **and Windows**
 (x86_64). Its AI
 backends are vLLM, Ollama, the OpenAI Responses API and Anthropic.
 
+### For an AI agent: pull, verify, read
+
+Every release carries one archive per platform and a `SHA256SUMS`, at
+`https://github.com/aisixteen/fantastic/releases/latest/download/<archive>`:
+
+| this machine (`uname -sm`, or Windows) | archive | binary inside |
+|---|---|---|
+| `Darwin arm64` (Apple silicon) | `fantastic-aarch64-apple-darwin.tar.gz` | `fantastic` |
+| `Darwin x86_64` (Intel Mac) | `fantastic-x86_64-apple-darwin.tar.gz` | `fantastic` |
+| `Linux x86_64` | `fantastic-x86_64-unknown-linux-musl.tar.gz` (static) | `fantastic` |
+| `Linux aarch64` | `fantastic-aarch64-unknown-linux-musl.tar.gz` (static) | `fantastic` |
+| Windows x86_64 | `fantastic-x86_64-pc-windows-msvc.zip` | `fantastic.exe` |
+
+macOS / Linux:
+
+```sh
+A=fantastic-aarch64-apple-darwin.tar.gz          # the row for this machine
+U=https://github.com/aisixteen/fantastic/releases/latest/download
+curl -fsSLO "$U/$A" && curl -fsSLO "$U/SHA256SUMS"
+grep " $A\$" SHA256SUMS | shasum -a 256 -c -     # Linux: sha256sum -c -
+tar xzf "$A"                                      # → ./fantastic
+```
+
+Windows (PowerShell):
+
+```powershell
+$A = "fantastic-x86_64-pc-windows-msvc.zip"
+$U = "https://github.com/aisixteen/fantastic/releases/latest/download"
+Invoke-WebRequest "$U/$A" -OutFile $A; Invoke-WebRequest "$U/SHA256SUMS" -OutFile SHA256SUMS
+(Get-FileHash $A -Algorithm SHA256).Hash.ToLower() -eq ((Select-String " $A$" SHA256SUMS).Line -split " ")[0]
+Expand-Archive $A -DestinationPath .               # → .\fantastic.exe
+```
+
+Then READ before running anything — **doc mode** starts nothing and writes nothing:
+
+```sh
+./fantastic                  # stdout not a terminal (an agent's shell): the readme + every command
+./fantastic readme           # the docs index, one line per doc
+./fantastic readme mcp       # one doc: canvas, mcp, setup, bundles, and the kernel's own
+```
+
+From there, run the mode the user asks for (see [Commands](#commands)): `fantastic mcp`
+to drive it as an MCP server, `fantastic canvas` for the browser canvas,
+`fantastic --headless` for the message stream alone. It lives in the directory it is
+started in (`.fantastic/`) and nowhere else.
+
 ### Prebuilt binary
 
 Download the archive for your platform from the

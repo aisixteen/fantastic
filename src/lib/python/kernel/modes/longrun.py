@@ -39,7 +39,7 @@ async def _default(kernel) -> None:
         if web_mod
         else []
     )
-    has_repl = sys.stdin.isatty()
+    has_repl = _sys.stdin_is_terminal()
 
     if not web_agents and not has_repl:
         return  # nothing to do — exit silently, no lock

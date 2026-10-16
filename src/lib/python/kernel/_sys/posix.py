@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import sys
 import signal
 
 __all__ = [
@@ -16,10 +17,19 @@ __all__ = [
     "posix_errors",
     "remove_stop_signals",
     "replace",
+    "stdin_is_terminal",
     "try_lock",
     "unlock_close",
     "utf8_stdio",
 ]
+
+# ─── the terminal ───────────────────────────────────────────────
+
+
+def stdin_is_terminal() -> bool:
+    """Is stdin a terminal — a human (or a PTY) to run the REPL for?"""
+    return sys.stdin.isatty()
+
 
 # ─── the workdir lock ───────────────────────────────────────────
 

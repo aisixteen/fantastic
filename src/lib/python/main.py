@@ -66,7 +66,7 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
         kernel.pending_seed = lambda: write_record(
             fs.Root(kernel.workdir, kernel.root._root_path), kernel.root.record
         )
-    if sys.stdin.isatty():
+    if _sys.stdin_is_terminal():
         Cli(kernel, parent=kernel.root)  # ephemeral stdout renderer
 
 

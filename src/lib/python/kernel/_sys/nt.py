@@ -39,6 +39,7 @@ __all__ = [
     "posix_errors",
     "remove_stop_signals",
     "replace",
+    "stdin_is_terminal",
     "try_lock",
     "unlock_close",
     "utf8_stdio",
@@ -48,6 +49,17 @@ __all__ = [
 # with the other packages' Windows halves (`file_bridge._sys.nt`,
 # `exec_bridge._sys.nt`) — one declaration of each Win32 call.
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def stdin_is_terminal() -> bool:
+    """Is stdin a CONSOLE — a human (or a ConPTY) to run the REPL for? Not
+    `isatty()`: on Windows that is true of any character device, `NUL` included,
+    so a daemon spawned with stdin=DEVNULL would start a REPL on it. A console
+    handle is the one whose mode can be read."""
+    mode = wintypes.DWORD()
+    handle = msvcrt.get_osfhandle(sys.stdin.fileno()) if sys.stdin else -1
+    return handle != -1 and bool(kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+
 
 kernel32.CreateFileW.argtypes = [
     wintypes.LPCWSTR,
