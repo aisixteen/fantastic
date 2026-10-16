@@ -7,27 +7,44 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shlex
+import sys
 from pathlib import Path
 
-BUILD_SH = """mkdir -p dist
-printf '<h1 id="t">%s</h1>' "$(cat app/title.txt)" > dist/index.html
-echo "built: $(cat app/title.txt)"
+#: Both steps run THIS interpreter (absolute: no `sh`, no `python3` needed on
+#: any PATH — Windows has neither).
+PY = sys.executable
+BUILD_PY = """import pathlib
+title = pathlib.Path("app/title.txt").read_text()
+pathlib.Path("dist").mkdir(exist_ok=True)
+pathlib.Path("dist/index.html").write_text(f'<h1 id="t">{title}</h1>')
+print(f"built: {title}", flush=True)
 """
+
+
+def build_argv() -> list[str]:
+    """The build step: `PY build.py`."""
+    return [PY, "build.py"]
+
+
+def run_argv(port: int) -> list[str]:
+    """The static server on `port`, serving `dist`."""
+    return [PY, "-m", "http.server", str(port), "--directory", "dist"]
 
 
 def write_project(proj: Path, title: str = "Hello v1") -> None:
     (proj / "app").mkdir(exist_ok=True)
     (proj / "app" / "title.txt").write_text(title)
-    (proj / "build.sh").write_text(BUILD_SH)
+    (proj / "build.py").write_text(BUILD_PY)
 
 
 def exec_record(port: int) -> dict:
-    """`dev`: exactly `sh build.sh` and the static server on `port`."""
+    """`dev`: exactly the build step and the static server on `port`."""
     return {
         "id": "dev",
         "handler_module": "exec_bridge.tools",
         "parent_id": "canvas_root",
-        "allowed": [r"^sh build\.sh$", rf"^python3 -m http\.server {port} --directory dist$"],
+        "allowed": ["^" + re.escape(shlex.join(a)) + "$" for a in (build_argv(), run_argv(port))],
         "cwd": ".",
         "inherit_env": ["*"],
         "ingress_rule": "allow_all_ingress",

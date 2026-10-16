@@ -58,4 +58,7 @@ for _ in range(14):
         line.append(f"\x1b[0;{R.choice(STYLES)};38;{colour()}" + (f";48;{colour()}" if R.random() < 0.3 else "") + f"m{g}")
         width += w
     out.append("".join(line) + "\x1b[0m\r\n")
+# A marker (argv 3), written at row 15 once the sweep is out: what the probe waits for.
+if len(sys.argv) > 3:
+    out.append(f"\x1b[15;1H{sys.argv[3]}")
 sys.stdout.write("".join(out))

@@ -105,13 +105,8 @@ async fn delete(kernel: &Arc<Kernel>, id: &str) {
 }
 
 fn alive(pid: i64) -> bool {
-    // SAFETY: signal 0 only probes the pid.
-    unsafe { libc_kill(pid as i32, 0) == 0 }
-}
-
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
+    // the kernel's own probe: kill(pid, 0) on unix, the process handle on Windows
+    fantastic_kernel::lock::pid_alive(pid as u32)
 }
 
 async fn gone(pid: i64) -> bool {

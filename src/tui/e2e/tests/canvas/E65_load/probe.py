@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import FOLDER, Rig, verdict  # noqa: E402
+from _lib.canvas_live import FOLDER, Rig, py_typed, verdict  # noqa: E402
 
 N = int(os.environ.get("LOAD_N", "10"))
 SECONDS = float(os.environ.get("LOAD_SECONDS", "20"))
@@ -101,9 +101,13 @@ ARM = """(()=>{const cid=%s, mk=%s; window.__lat=window.__lat||{};
   const t0=performance.now(); const d=t.onRender(()=>{ if((""" + TEXT + """)(f).includes(mk)){ window.__lat[mk]=performance.now()-t0; d.dispose(); } });})()"""
 
 
-def system_sample(host_pid: int) -> dict:
+def system_sample(host_pid: int) -> dict | None:
     """One sample of the machine: load average, and %CPU by who — the host
-    (fantastic), Chrome (by its process type), the shells, everything else."""
+    (fantastic), Chrome (by its process type), the shells, everything else.
+    Read with macOS's own tools (sysctl, ps, ioreg): elsewhere `None`, not
+    measured — the load's own numbers (echo, fps, store, rows) still are."""
+    if sys.platform != "darwin":
+        return None
     import subprocess
     la = subprocess.run(["sysctl", "-n", "vm.loadavg"], capture_output=True, text=True).stdout.strip("{} \n").split()
     rows = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pcpu=,rss=,comm=,args="], capture_output=True, text=True).stdout.splitlines()
@@ -209,7 +213,7 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
         while time.time() - t0b < 60 + N * 0.3:
             n = await pg.js("document.querySelectorAll('.agent-frame').length")
             smp = system_sample(rig.host.pid)
-            tl.append(f"{time.time() - t0b:.0f}s:{n} cells, load {smp['load'][0]}, cpu {smp['cpu_total_pct']}%, gpu {smp['gpu_pct']}%")
+            tl.append(f"{time.time() - t0b:.0f}s:{n} cells" + (f", load {smp['load'][0]}, cpu {smp['cpu_total_pct']}%, gpu {smp['gpu_pct']}%" if smp else ""))
             if n >= N:
                 break
             await asyncio.sleep(5)
@@ -245,7 +249,7 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
             job = next((j.get("job_id") for j in st.get("jobs", []) if j.get("pty") and j.get("status") == "running"), None)
             if job is None:
                 return False
-            w = await host_call(rig.port, bid, {"type": "write", "job_id": job, "data": "zmodload zsh/zselect; while :; do print $EPOCHREALTIME; zselect -t 20; done\r"})
+            w = await host_call(rig.port, bid, {"type": "write", "job_id": job, "data": py_typed("ticker.py") + "\r"})
             return "error" not in w
         # at most 16 at a time: N connections at once overran the host's listen backlog
         gate = asyncio.Semaphore(16)
@@ -316,7 +320,8 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
                 guard = f"the store grew past {DISK_MB} MB — load stopped"
                 break
             fps.append(await pg.js(fps_js))
-            sys_samples.append(system_sample(rig.host.pid))
+            if (smp := system_sample(rig.host.pid)) is not None:
+                sys_samples.append(smp)
             for cid in sample:
                 # timed IN THE PAGE: a MutationObserver on that terminal's screen
                 # stamps the moment the marker is drawn (no polling resolution)
@@ -367,6 +372,9 @@ def main() -> bool:
     rig.build()
     rig.make_home(None)
     cells, hosts = seeds(N)
+    # the stream each terminal runs: a timestamp every 20 ms, in any shell
+    rig.proj.mkdir(parents=True, exist_ok=True)
+    (rig.proj / "ticker.py").write_text("import time\nwhile True:\n    print(f'{time.time():.6f}', flush=True)\n    time.sleep(0.02)\n")
     r: dict = {}
     info: dict = {"n": N, "bg": WITH_BG}
     try:

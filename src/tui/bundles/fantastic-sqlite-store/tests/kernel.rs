@@ -389,6 +389,9 @@ async fn a_stop_keeps_the_file_and_delete_agent_removes_it() {
     k.flush_executions().await;
     let before = count(&open_db(&dir), "SELECT COUNT(*) FROM rows");
     k.shutdown().await; // kernel_stop: the teardown walk runs over both stores
+    // …then the host closes the files after the final flush, as `vm` does — on
+    // Windows an open SQLite file cannot be deleted by the next kernel.
+    assert!(fantastic_sqlite_store::close_all(&k).is_empty());
     assert!(dir.join("notes.db").is_file() && dir.join("mem.db").is_file(), "a stop deletes nothing");
     let after = count(&open_db(&dir), "SELECT COUNT(*) FROM rows");
     assert!(after >= before, "every row is still in the file: {before} → {after}");

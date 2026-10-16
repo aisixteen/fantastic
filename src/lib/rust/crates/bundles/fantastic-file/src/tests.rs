@@ -549,10 +549,15 @@ fn os_error_text_is_python_oserror_str() {
     let r = at(&root);
     let full = fantastic_bundle::realpath(&root).unwrap();
     let reply = delete_reply(&r, &json!({"path": "src"}), false);
+    // ENOTEMPTY's NUMBER is the OS's (66 on macOS, 39 on Linux, 41 on Windows'
+    // C runtime): read it off a real failure, the text is python's on every OS.
+    let probe = tmp.path().join("probe_not_empty");
+    std::fs::create_dir_all(probe.join("x")).unwrap();
+    let not_empty = fantastic_bundle::errno_of(&std::fs::remove_dir(&probe).unwrap_err()).unwrap();
     assert_eq!(
         reply["error"],
         json!(format!(
-            "[Errno 66] Directory not empty: '{}'",
+            "[Errno {not_empty}] Directory not empty: '{}'",
             full.join("src").display()
         )),
         "{reply}"

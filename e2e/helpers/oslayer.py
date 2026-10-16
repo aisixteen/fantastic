@@ -177,3 +177,30 @@ def child_env() -> dict:
     Windows `SYSTEMROOT` (without it the C runtime cannot start Winsock or find
     system DLLs)."""
     return {"SYSTEMROOT": os.environ["SYSTEMROOT"]} if WINDOWS else {}
+
+
+def cpu_percent(*needles: str) -> float:
+    """%CPU (one core = 100) summed over every process whose command line holds
+    all of `needles` — `ps -A -o pcpu=,args=` on POSIX; on Windows the
+    per-process performance counters, joined to command lines by pid."""
+    if not WINDOWS:
+        rows = subprocess.run(
+            ["ps", "-A", "-o", "pcpu=,args="], capture_output=True, text=True
+        ).stdout.splitlines()
+        return sum(
+            float(r.split(None, 1)[0])
+            for r in rows
+            if r.strip() and all(n in r for n in needles)
+        )
+    has = " -and ".join("$c.Contains('" + n.replace("'", "''") + "')" for n in needles)
+    script = (
+        "$ids = @(Get-CimInstance Win32_Process | Where-Object { $c = $_.CommandLine; "
+        f"$c -and {has} }} | ForEach-Object {{ $_.ProcessId }}); "
+        "if ($ids.Count -eq 0) { 0 } else { (Get-CimInstance "
+        "Win32_PerfFormattedData_PerfProc_Process | Where-Object { $ids -contains "
+        "$_.IDProcess } | Measure-Object PercentProcessorTime -Sum).Sum }"
+    )
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True
+    ).stdout.strip()
+    return float(out or 0)

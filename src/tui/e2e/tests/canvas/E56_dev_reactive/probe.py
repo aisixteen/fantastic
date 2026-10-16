@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sys
 from pathlib import Path
@@ -13,12 +14,13 @@ from _lib.canvas_live import FOLDER, Rig, verdict, answer, ask, html_cell, http_
 def surface(port: int) -> list[dict]:
     """The REFERENCE dev surface, wired by hand: what E55 asks an AI to build."""
     grant = {"dev": ["start", "stop", "status", "watch", "reflect"]}
-    run_args = ["-m", "http.server", str(port), "--directory", "dist"]
+    from _lib.dev_surface import build_argv, run_argv
+    build, run = build_argv(), run_argv(port)
     controls = f"""<h3>Controls</h3><button onclick="go('build')">Build</button> <button onclick="go('run')">Run</button> <button onclick="go('stop')">Stop</button>
 <script>let runJob=null;
 async function go(w){{
-  if(w==='build'){{const r=await fantastic.send('dev',{{type:'start',command:'sh',args:['build.sh']}});fantastic.emit('buildlog',{{type:'job',job_id:r&&r.job_id}});fantastic.emit('status',{{type:'state',s:'building'}});}}
-  if(w==='run'){{const r=await fantastic.send('dev',{{type:'start',command:'python3',args:{run_args!r}}});runJob=r&&r.job_id;fantastic.emit('runlog',{{type:'job',job_id:runJob}});fantastic.emit('status',{{type:'state',s:'running'}});setTimeout(()=>fantastic.emit('app',{{type:'reload'}}),1200);}}
+  if(w==='build'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(build[0])},args:{json.dumps(build[1:])}}});fantastic.emit('buildlog',{{type:'job',job_id:r&&r.job_id}});fantastic.emit('status',{{type:'state',s:'building'}});}}
+  if(w==='run'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(run[0])},args:{json.dumps(run[1:])}}});runJob=r&&r.job_id;fantastic.emit('runlog',{{type:'job',job_id:runJob}});fantastic.emit('status',{{type:'state',s:'running'}});setTimeout(()=>fantastic.emit('app',{{type:'reload'}}),1200);}}
   if(w==='stop'&&runJob!==null){{await fantastic.send('dev',{{type:'stop',job_id:runJob}});}}
 }}</script>"""
     log = lambda title: f"""<h3>{title}</h3><pre id=l></pre><script>let job=null;

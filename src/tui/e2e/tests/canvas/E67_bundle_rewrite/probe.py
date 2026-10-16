@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, spot, verdict  # noqa: E402
+from _lib.canvas_live import PY, Rig, spot, verdict  # noqa: E402
 
 RELEASE = "dash_release"
 AGENT_PY = '''import fantastic_agent as fa
@@ -37,7 +37,7 @@ fa.serve({"scan": scan})
 '''
 BUNDLE_YAML = '''base: py_agent
 sentence: A project dashboard (E67) — one verb, scan.
-command: [python3, agent.py]
+command: [__PY__, agent.py]
 verbs:
   scan: "args: none. Returns {files, lines}."
 record:
@@ -100,7 +100,7 @@ def main() -> bool:
                 info["bundle"], info["instance"], info["cell"] = name, inst, cell
                 # b) ONE save: code, verbs and panel together
                 (folder / "agent.py").write_text(AGENT_PY)
-                (folder / "bundle.yaml").write_text(BUNDLE_YAML)
+                (folder / "bundle.yaml").write_text(BUNDLE_YAML.replace("__PY__", json.dumps(PY)))
                 (folder / "panel.html").write_text(PANEL)
                 # c) the placed panel is the new one, granted `scan`, and its click reaches it
                 r["panel_rerendered"] = bool(await pg.until(

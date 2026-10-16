@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import FOLDER, Rig, verdict  # noqa: E402
+from _lib.canvas_live import FOLDER, Rig, py_typed, verdict  # noqa: E402
 
 K = int(os.environ.get("FIDELITY_K", "12"))
 # pixels a terminal may change on a redraw: a glyph that overhangs its cell can
@@ -136,7 +136,7 @@ async def run(rig: Rig, r: dict, info: dict) -> None:
             mk = f"DONE{rnd:02d}"
             # the sweep, then a marker line the probe waits for
             await asyncio.gather(*(host_call(rig.port, f"exec_bridge_fid{i:03d}", {"type": "write", "job_id": jobs[f"exec_bridge_fid{i:03d}"],
-                                   "data": f"python3 glyphs.py {i} {rnd}; printf '\\033[15;1H{mk}'\r"}) for i in range(K)))
+                                   "data": py_typed("glyphs.py", str(i), str(rnd), mk) + "\r"}) for i in range(K)))
             await pg.until(" && ".join(f"window.__fid.text({json.dumps(c)}).includes({json.dumps(mk)})" for c in ids), 30)
             await pg.js("window.__fid.quiet()")
             before = await settle(pg)

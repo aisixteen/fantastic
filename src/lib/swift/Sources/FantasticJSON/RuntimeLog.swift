@@ -61,7 +61,7 @@ public enum RuntimeLog {
         lock.unlock()
         if active.isEmpty {
             print(line)
-            fflush(stdout)
+            fflush(nil)  // every output stream, stdout included (Glibc's `stdout` is a mutable global)
             return
         }
         for box in active { box.append(line) }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -19,13 +20,13 @@ def main() -> bool:
     rig.make_home(rig.plug.record())
 
     from _lib.canvas_live import free_port
-    from _lib.dev_surface import exec_record, reactive_check, write_project
+    from _lib.dev_surface import build_argv, exec_record, reactive_check, run_argv, write_project
     port = free_port()
     write_project(rig.proj)
     rig.init(host_agents=[(FOLDER, exec_record(port))])
     # the same surface in fewer panels (owner 2026-10-06: less filler, same
     # complexity): buttons drive `dev`, its events update the page by themselves
-    ask_text = (f"Using the exec agent `dev` (it may run exactly `sh build.sh` and `python3 -m http.server {port} --directory dist`), "
+    ask_text = (f"Using the exec agent `dev` (it may run exactly `{shlex.join(build_argv())}` and `{shlex.join(run_argv(port))}`), "
                 "build: a panel with Build, Run and Stop buttons, a live log and a status line (built / running / stopped), "
                 "and a panel showing the running app — all updating by themselves.")
 

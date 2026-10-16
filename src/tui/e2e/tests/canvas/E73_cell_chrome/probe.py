@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))
 from _lib.canvas_live import Rig, html_cell, verdict  # noqa: E402
+from helpers import oslayer  # noqa: E402
 
 BG = """
 const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, depthTest:false, depthWrite:false,
@@ -34,8 +34,7 @@ HEAD_SHOWN = "(id)=>getComputedStyle(document.querySelector(`.agent-frame[data-i
 def gpu_cpu(profile: str) -> float:
     """THIS test's Chrome GPU process only (its own profile dir is on its args):
     every other test's headless Chrome runs at the same time."""
-    rows = subprocess.run(["ps", "-A", "-o", "pcpu=,args="], capture_output=True, text=True).stdout.splitlines()
-    return sum(float(x.split(None, 1)[0]) for x in rows if "--type=gpu-process" in x and profile in x)
+    return oslayer.cpu_percent("--type=gpu-process", profile)
 
 
 def main() -> bool:

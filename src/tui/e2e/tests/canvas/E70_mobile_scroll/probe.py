@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import FOLDER, Rig, html_cell, verdict  # noqa: E402
+from helpers import oslayer  # noqa: E402
 
 # an animated background (a full-screen fragment shader, every frame)
 BG = """
@@ -70,15 +71,13 @@ def main() -> bool:
                 await asyncio.sleep(1.0)
                 # the GPU process's CPU and the frame rate as shipped vs with every backdrop blur removed,
                 # over an animated background
-                import subprocess
                 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))
                 from canvas import host_call
                 await host_call(rig.port, f"{rig.page_guid()}|background", {"type": "set_bg", "bytes": BG})
                 await asyncio.sleep(3.0)
 
                 def gpu_cpu() -> float:
-                    rows = subprocess.run(["ps", "-A", "-o", "pcpu=,args="], capture_output=True, text=True).stdout.splitlines()
-                    return sum(float(x.split(None, 1)[0]) for x in rows if "--type=gpu-process" in x and "headless" in x)
+                    return oslayer.cpu_percent("--type=gpu-process", "headless")
 
                 async def sample(tag: str) -> None:
                     await asyncio.sleep(2.0)

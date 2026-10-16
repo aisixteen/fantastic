@@ -28,7 +28,7 @@ import asyncio
 import json
 import os
 import re
-import subprocess
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -37,7 +37,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e"))
-from _lib.canvas_live import FOLDER, Rig, other_setups, private_write, rebound, say, spot, verdict, saved_dir  # noqa: E402
+from _lib.canvas_live import FOLDER, PY, Rig, other_setups, private_write, rebound, say, spot, verdict, saved_dir  # noqa: E402
+from helpers import oslayer  # noqa: E402
 from mocks.vllm import VllmMock  # noqa: E402
 
 CHATS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
@@ -94,7 +95,7 @@ def main() -> bool:
     try:
         # an exec agent the AI may run the ticker on (exactly that command)
         rig.init(host_agents=[(FOLDER, {"id": "svc", "handler_module": "exec_bridge.tools", "parent_id": "canvas_root",
-                                         "allowed": [r"^sh -c .*E75TICK.*$"], "cwd": ".", "inherit_env": ["*"],
+                                         "allowed": ["^" + re.escape(shlex.quote(PY)) + r" -c .*E75TICK.*$"], "cwd": ".", "inherit_env": ["*"],
                                          "ingress_rule": "allow_all_ingress"})])
         view = f"{rig.page_guid()}|view_root"
 
@@ -180,7 +181,9 @@ def main() -> bool:
                 await asyncio.sleep(1.5)
                 ai = next((x.get("backend_id") for x in rig.cells() if x.get("id") == b), None)
                 info["S9_ai"] = ai
-                script = "i=0; while [ $i -lt 6 ]; do i=$((i+1)); echo E75TICK $i; sleep 1; done; sleep 60"
+                # the ticker: this interpreter, its pid in a file (to find it after the stop)
+                script = ("import os, time; open('e75tick.pid', 'w').write(str(os.getpid())); "
+                          "[(print('E75TICK', i, flush=True), time.sleep(1)) for i in range(1, 7)]; time.sleep(60)")
                 st = {"step": 0, "job": None, "delivered": False, "tail": ""}
 
                 def call(verb: str, **f) -> str:
@@ -192,7 +195,7 @@ def main() -> bool:
                     j = re.search(r"<job_id>(\d+)</job_id>", last)  # a reply comes back as tags
                     if st["step"] == 0 and "E75-run-ticker" in last:
                         st["step"] = 1
-                        return call("start", command="sh", args=f"<item>-c</item><item>{script}</item>")
+                        return call("start", command=PY, args=f"<item>-c</item><item>{script}</item>")
                     if st["step"] == 1 and j:
                         st["job"], st["step"] = int(j.group(1)), 2
                         return call("monitor", job_id=st["job"], notify=ai, match="E75TICK 2")
@@ -235,9 +238,12 @@ def main() -> bool:
                 done9 = st["step"] == 7
                 mock.responder = None
                 await asyncio.sleep(1)
-                alive = subprocess.run(["pgrep", "-f", "E75TICK"], capture_output=True, text=True).stdout.split()
+                pidf = rig.proj / "e75tick.pid"
+                tick_pid = int(pidf.read_text()) if pidf.exists() else None
+                alive = [tick_pid] if tick_pid is not None and oslayer.pid_alive(tick_pid) else []
                 info["S9_state"] = {k: v for k, v in st.items() if k != "tail"}
-                subprocess.run(["pkill", "-f", "E75TICK"])  # the test's own ticker, whatever happened
+                for p in alive:
+                    oslayer.kill_group(p)  # the test's own ticker, whatever happened
                 info["S9_tail_has_ticks"] = "E75TICK" in st["tail"]
                 info["S9_left_alive"] = alive
                 r["S9 start, status, tail, stop a subprocess"] = bool(done9) and info["S9_tail_has_ticks"] and not alive
