@@ -289,6 +289,7 @@ fn emits_json() -> Value {
         "progress": "{type:'progress', job_id, n, line, stream} — one per output line",
         "job_done": "{type:'job_done', job_id, exit_code, ok, lines?, last_line?, error?} — a pipe job's output is read with `tail`/`grep`; a PTY job carries exit_code and ok only",
         "output": "{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)",
+        "monitor_dead": "{type:'monitor_dead', monitor_id, job_id, notify, reason, error} — `notify` REFUSED a monitor's delivery (`reason` unauthorized|unknown_agent); the monitor ended, nothing more is sent",
     })
 }
 

@@ -11,8 +11,8 @@ Production runtime — full parity with the Python reference kernel.
 
 |                                              | value                                   |
 |----------------------------------------------|-----------------------------------------|
-| Bundles                                      | **16** (15 iOS-safe + 1 full-tier subprocess) |
-| Cargo tests passing                          | **1091** (workspace, default features)  |
+| Bundles                                      | **19** crates (17 iOS-safe + 2 full-tier subprocess) |
+| Cargo tests passing                          | **1565** (workspace, default features)  |
 | `./scripts/quality.sh`                       | 8 / 8 PASS (compile, fmt, clippy, test, deny, audit, machete, tree) |
 | Feature gates                                | `full` (default) / `embedded` (no-subprocess) |
 | Embedded slice (`cli --no-default-features --features embedded`) | clean compile, subprocess-using bundles excluded |
@@ -166,13 +166,14 @@ full     # CLI + server + macOS Pro + Linux unsandboxed
 embedded # iOS Lite, iPadOS, visionOS, sandboxed macOS
 ```
 
-**`full`** includes every ported bundle. The subprocess-spawning bundle
-(`exec_bridge` — commands and PTY jobs, the one spawner) is gated to this feature.
+**`full`** includes every ported bundle. The subprocess-spawning bundles
+(`exec_bridge` — commands and PTY jobs — and `py_agent`, which runs a folder
+bundle's program over the exec_bridge connector channel) are gated to this feature.
 
 **`embedded`** compiles without any subprocess code. iOS app sandboxes
 forbid `fork()` / `Process` / dynamic library loading; the embedded
-slice excludes anything that touches them at compile time. 16 of 17
-bundles ship under embedded — the iOS-safe ceiling.
+slice excludes anything that touches them at compile time. 17 of 19
+bundle crates ship under embedded — the iOS-safe ceiling.
 
 Switch with `--no-default-features --features embedded`:
 
@@ -201,10 +202,12 @@ Bundles that compile under either tier:
 | `fantastic-web-ws`             | WS verb channel (mounted onto a parent web); sealed by default; an admitted frame is handed to the leg (`inbound_call`/`inbound_emit`/`inbound_watch`/`inbound_state_subscribe`) and sent onward AS THE LEG |
 | `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; an admitted call is handed to the leg (`inbound_call`) and sent onward AS THE LEG |
 | `fantastic-scheduler`          | recurring tasks on a tokio tick; a schedule fires AS THE SCHEDULER (its `can_call` decides), and every caller the gate admits sees and drives every schedule |
-| `fantastic-bridge`             | cross-kernel bridge — WS-only, asymmetric (memory / WS); an inbound `call` frame is served AS THE LEG (its `can_call`, the target's `callable_by`); a leg's rules are read off its record per frame; frame ids are `<leg>-<boot nonce>-<n>`; a relay leg reads its password from a credential_store ref (`credentials: {store, ref}`) before every dial |
+| `fantastic-bridge`             | cross-kernel bridge — two bundles, `ws_bridge.tools` and `relay_connector.tools` — WS-only, asymmetric (memory / WS); an inbound `call` frame is served AS THE LEG (its `can_call`, the target's `callable_by`); a leg's rules are read off its record per frame; frame ids are `<leg>-<boot nonce>-<n>`; a relay leg reads its password from a credential_store ref (`credentials: {store, ref}`) before every dial |
 | `fantastic-ollama-backend`     | local LLM via ollama |
 | `fantastic-responses-backend`  | the OpenAI Responses API |
 | `fantastic-vllm-backend`       | a vLLM server, directly (OpenAI chat wire) — KV-cache session table per endpoint |
+| `fantastic-anthropic-backend`  | Anthropic's Messages API (`anthropic_backend.tools`) — streamed, no native tools; the key from a credential_store ref, sent as `x-api-key` |
+| `fantastic-mcp-client`         | ONE remote MCP server as an agent (`mcp_client.tools`) — each server tool is a verb of the agent, documented per instance; static key from a credential_store ref |
 | `fantastic-foundation-models-backend` | Apple's on-device Foundation Models system model — links the swift `FantasticFMCore` through its C ABI (`FantasticFMBridge`) on macOS; refuses naming the platform everywhere else (see below) |
 | `fantastic-cli-bundle`         | the `cli` render sink (token/done/say/error/status/context to stdout) |
 
@@ -213,11 +216,13 @@ Full-tier-only bundles (subprocess; excluded from the embedded slice):
 | crate                          | role |
 |--------------------------------|------|
 | `fantastic-exec-bridge`        | the process edge — a general-purpose command runner, sealed, gated by a regex allowlist; a terminal is a PTY job (flow control, UTF-8 incremental decode, image-paste); any caller the gate admits drives a job |
+| `fantastic-py-agent`           | the base a folder bundle (`bundles/<name>/bundle.yaml`, `base: py_agent`) extends — runs the folder's program per instance and reaches it only through its declared verbs |
 
 Internal / test crates:
 
 | crate                          | role |
 |--------------------------------|------|
+| `fantastic-io-bridge`          | the IO base, a shared library (not a bundle) — per-leg authorization rule registries, the binary-frame codec, the inbound choke point, permessage-deflate |
 | `fantastic-ai-core`            | shared LLM-agent machinery behind a `Provider` seam — memory-store conversation, `<call>` tag grammar, compaction (folds); the AI backends bind to it |
 | `fantastic-scenario-probes`    | TEST-ONLY fixture agents the shared e2e scenarios name (behind a feature) |
 
@@ -230,6 +235,7 @@ rust/
 │   ├── fantastic-kernel/              substrate (Agent + Kernel + send/emit/watch/reflect)
 │   ├── fantastic-bundle/              bundle trait every bundle re-exports
 │   ├── fantastic-cli/                 the `fantastic_kernel` headless host binary
+│   ├── fantastic-io-bridge/           IO base library (authorizer, frame codec, deflate)
 │   └── bundles/
 │       ├── fantastic-core/                kernel_state.tools root loader
 │       ├── fantastic-ram-store/           the memory store (in RAM)
@@ -245,9 +251,12 @@ rust/
 │       ├── fantastic-ollama-backend/      local LLM (thin binding over ai-core)
 │       ├── fantastic-responses-backend/   OpenAI Responses API (thin binding over ai-core)
 │       ├── fantastic-vllm-backend/        vLLM, directly (thin binding over ai-core)
+│       ├── fantastic-anthropic-backend/   Anthropic Messages API (thin binding over ai-core)
+│       ├── fantastic-mcp-client/          a remote MCP server as an agent
 │       ├── fantastic-foundation-models-backend/  Apple on-device model (swift FMCore via C ABI)
 │       ├── fantastic-cli-bundle/          the cli render sink
 │       ├── fantastic-exec-bridge/         command runner + PTY jobs (full-tier only)
+│       ├── fantastic-py-agent/            folder-bundle program base (full-tier only)
 │       └── fantastic-scenario-probes/     e2e fixture agents (test-only feature)
 ├── scripts/
 │   ├── build-cli.sh                       cargo build --release --bin fantastic_kernel

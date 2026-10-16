@@ -35,6 +35,9 @@ requirements:
   - id: C1
     level: MUST
     title: "asking the human is a CALL and its reply resumes the run — tests/conformance/test_c1_suspend_resume, tests/kernel/test_inquiry_plumbed"
+  - id: C12
+    level: MUST
+    title: "bounded retries end in a dead letter — `retries` re-dispatches under the same id; a terminal failure settles a dead letter that is announced, listed by `ledger` and retired by `ack_deadletter` — tests/kernel/test_execution_ledger, tests/kernel/test_memory_store, tests/kernel/test_id_parsing_and_init, e2e/tests/scenario/E13_deadletter"
   - id: C14
     level: MUST
     title: "cancel stops a live dispatch before its next step, observably"

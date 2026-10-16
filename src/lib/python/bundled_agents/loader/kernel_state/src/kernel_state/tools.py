@@ -545,6 +545,11 @@ class _FlushLoop:
         self._persist: dict[str, None] = {}  # ordered set of ids to write
         self._forget: dict[str, Path] = {}  # id -> dir to remove
         self._paths: dict[str, Path] = {}  # id -> dir cache (for removed ids)
+        # Ids `added` since the loop started whose record no drain has taken yet:
+        # nothing of theirs is on disk, so their `removed` has no dir to forget.
+        # An id leaves the set the moment a drain takes its write (before the
+        # write lands), so a `removed` racing that write still forgets the dir.
+        self._unwritten: set[str] = set()
         self._wake = asyncio.Event()
         self._drain = asyncio.Lock()  # one drain at a time; flushes wait FIFO
         self._unsub = None
@@ -552,7 +557,8 @@ class _FlushLoop:
 
     def start(self) -> None:
         for a in self.kernel.agents.values():
-            self._paths[a.id] = a._root_path
+            if not type(a).ephemeral:
+                self._paths[a.id] = a._root_path
         self._unsub = self.kernel.add_state_subscriber(self._on_state)
         # REGISTERED, and KEEPALIVE: the persistence writer must outlive the
         # quiet phase of `shutdown_agents` (it is what flushes what shutdown
@@ -575,14 +581,23 @@ class _FlushLoop:
                 return
             self._paths[aid] = a._root_path
             self._persist[aid] = None
-            self._forget.pop(aid, None)
+            # A re-created id whose old dir is still queued for removal writes
+            # into that dir (it exists); any other `added` has nothing on disk.
+            if self._forget.pop(aid, None) is None and kind == "added":
+                self._unwritten.add(aid)
             self._wake.set()
         elif kind == "removed":
             path = self._paths.pop(aid, None)
-            if path is not None:
-                self._forget[aid] = path
-                self._persist.pop(aid, None)
-                self._wake.set()
+            if path is None:
+                return
+            self._persist.pop(aid, None)
+            if aid in self._unwritten:
+                # Added and removed between two drains: no record was ever
+                # written, so there is no dir to remove.
+                self._unwritten.discard(aid)
+                return
+            self._forget[aid] = path
+            self._wake.set()
 
     async def _run(self) -> None:
         try:
@@ -616,6 +631,7 @@ class _FlushLoop:
                 a = self.kernel.get_agent(aid)
                 if a is None or type(a).ephemeral:
                     continue
+                self._unwritten.discard(aid)
                 await _persist_via_store(self.agent, store_id, a._root_path, a.record)
             for path in forget.values():
                 await _forget_via_store(self.agent, store_id, path)
@@ -657,10 +673,10 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
     run-scoped runtime/env/version, which are read inline from the environment each
     reflect). Sourced from the persisted meta so it round-trips a reboot verbatim.
 
-    Also surfaces the always-on doc-tree FRAME: `readmes` (the top-level
-    token-annotated topic index) + `docs` (a one-liner teaching keyed fetch).
-    So the manual's map is in front of a caller from the first root reflect —
-    it drills with `readme=index` / `readme=<key>` instead of eating a monolith."""
+    On `detail="full"` only, also surfaces the doc-tree FRAME: `readmes` (the
+    top-level token-annotated topic index) + `docs` (a one-liner teaching keyed
+    fetch). The distilled default leaves it out; a caller drills with
+    `readme=index` / `readme=<key>` instead of eating a monolith."""
     err = getattr(agent, "_persist_error", None)
     persistence = {"provider": None if err else _find_store(agent)}
     if err:
@@ -672,7 +688,7 @@ def reflect_root_extra(agent, *, full: bool = True) -> dict:
     if not full:
         # DISTILLED: the doc frame is 1,267 tok of inlined manual (readmes + docs +
         # the long self_extension prose) that `readme=index` serves on demand, and
-        # the reply's `more` line names it.
+        # the short `self_extension` below names it.
         #
         # But the SHAPE of a durable program cannot be left to a readme, because a
         # model that lacks it writes something that cannot work — and the weak models

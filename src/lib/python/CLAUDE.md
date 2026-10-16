@@ -309,9 +309,10 @@ they did not register.
   `"<key>"` drills one topic (body + its sub-docs' index); an unknown key
   → `{error,keys}`. Discovery is one round-trip;
   transport/wire docs live in the doc tree (`reflect readme=index`, then
-  drill by key). The ROOT reflect always carries `readmes` (the top-level
-  topic index) + a `docs` one-liner, so the manual's map rides the first
-  reflect.
+  drill by key). The ROOT reflect with `detail:"full"` carries `readmes`
+  (the top-level topic index) + a `docs` one-liner; the distilled default
+  leaves them out (a short `self_extension` points at the doc tree), and
+  `readme:"index"` serves the map on demand.
 - **SECRET MARKS** (`kernel/_secret.py`) — a send item may carry
   `secret: ["<dotted path>", …]`, paths into its payload (`"fields.api_key"`). The
   handler gets the payload as sent; the call row, the state stream (`payload`,
@@ -333,7 +334,7 @@ they did not register.
   duck-typed `instance_verbs(agent)` is documented by THAT table (None keeps the
   module's) — an MCP server's tools; rust `Bundle::instance_verb_docs`, swift
   `instanceVerbDocs`.
-  **Never gated** — the call gate's one exemption by verb name. In `ai_core` a
+  **Gated like every kernel verb** — a `docs` grant on the root, both halves. In `ai_core` a
   `docs` reply is cut to a one-line stub once the model has answered it
   (`drop_read_docs`), and a refusal of the model's own call (`unhandled` naming
   the verb, `missing_arg` naming the arg) gets a hint pointing at `docs`.

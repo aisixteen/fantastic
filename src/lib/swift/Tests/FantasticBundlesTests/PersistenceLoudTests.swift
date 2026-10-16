@@ -172,6 +172,43 @@ struct RecordWritesThroughStoreTests {
         await k.shutdown()
     }
 
+    /// An agent created and deleted between two drains has no dir on disk: the
+    /// drain neither writes it nor asks the store to delete it — no
+    /// `persist through … does not exist` for a dir nobody wrote. Nested too.
+    /// python `test_store_sink_an_agent_added_and_removed_between_drains_forgets_nothing`.
+    @Test func anAgentAddedAndRemovedBetweenDrainsForgetsNothing() async throws {
+        let fm = FileManager.default
+        let (k, dir) = diskKernel()
+        defer { try? fm.removeItem(at: dir) }
+        await createStore(k, ["allow": ["."]])
+        _ = await k.send([Item("kernel_state", ["type": "boot"])])
+        await k.flushRecords()
+        let lines = await RuntimeLog.capture {
+            for (id, parent) in [("brief", "kernel_state"), ("inner", "brief")] {
+                let r = await k.send([
+                    Item(
+                        "kernel_state",
+                        [
+                            "type": "create_agent", "parent_id": .string(parent),
+                            "id": .string(id), "handler_module": "file_bridge.tools",
+                            "allow": ["."],
+                        ])
+                ])[0].result
+                #expect(r["id"] == .string(id), "\(r.serialize())")
+            }
+            let d = await k.send([Item("kernel_state", ["type": "delete_agent", "id": "brief"])])[0]
+                .result
+            #expect(d["deleted"] == true, "\(d.serialize())")
+            await k.flushRecords()
+        }
+        // The log capture is process-wide (parallel suites write to it too), so
+        // the check names this test's own paths.
+        #expect(!lines.contains { $0.contains("agents/brief") }, "\(lines)")
+        #expect(await persistence(k) == ["provider": "store"])
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent(".fantastic/agents/brief").path))
+        await k.shutdown()
+    }
+
     /// `flushRecords` returns once everything dirty has LANDED — also what the
     /// debounced writer took first. Past the 150 ms debounce the writer's own
     /// drain holds the probe's record; the flush must not find its queue empty and

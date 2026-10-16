@@ -31,8 +31,11 @@ public struct AIBackendConfig: Sendable {
     /// cannot know its model's window and keeps `AIConstants.DEFAULT_CONTEXT_WINDOW`
     /// (the record's `context_window` is the lever); a backend that can READ the
     /// real one says so here (foundation_models_backend: the SDK's `contextSize`).
-    /// Its schema's `context_window` default is the same number.
-    public var modelWindow: Int64
+    /// Its schema's `context_window` default is the same number. READ ON USE,
+    /// never at construction: the SDK read is a blocking XPC round trip, and a
+    /// kernel registers every bundle whether or not one of its agents runs.
+    public var modelWindow: Int64 { readModelWindow() }
+    private let readModelWindow: @Sendable () -> Int64
 
     /// Extra fields merged into the `reflect` reply AFTER the shared base, in
     /// the order the backend lists them — python `cfg.reflect_extra`, whose
@@ -54,7 +57,7 @@ public struct AIBackendConfig: Sendable {
         kind: String,
         sentence: String,
         sendTimeout: Double = AIConstants.SEND_TIMEOUT,
-        modelWindow: Int64 = AIConstants.DEFAULT_CONTEXT_WINDOW,
+        modelWindow: @autoclosure @escaping @Sendable () -> Int64 = AIConstants.DEFAULT_CONTEXT_WINDOW,
         reflectExtra: @escaping @Sendable (Agent, Kernel) -> OrderedDictionary<String, JSON> = {
             _, _ in [:]
         },
@@ -64,7 +67,7 @@ public struct AIBackendConfig: Sendable {
         self.kind = kind
         self.sentence = sentence
         self.sendTimeout = sendTimeout
-        self.modelWindow = modelWindow
+        self.readModelWindow = modelWindow
         self.reflectExtra = reflectExtra
         self.makeProvider = makeProvider
     }

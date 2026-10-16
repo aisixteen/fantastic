@@ -964,8 +964,8 @@ extension Kernel {
         // process. Root-only, gated inside their handler to the tree root.
         case "kernel_start", "shutdown_agents", "kernel_stop":
             return true
-        // HOW TO CALL an agent — its bundle's verb docs. Answered by the root,
-        // and the one verb the call gate never checks (`gate`).
+        // HOW TO CALL an agent — its bundle's verb docs. Answered by the root
+        // and gated like every kernel verb (`gate`).
         case "docs":
             return true
         default:

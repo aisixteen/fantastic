@@ -818,6 +818,11 @@ struct Dirty {
     forget: Vec<(AgentId, PathBuf)>,
     /// id → dir cache, so a REMOVED agent's path is still known.
     paths: std::collections::HashMap<AgentId, PathBuf>,
+    /// Ids `added` since the writer started whose record no drain has taken
+    /// yet: nothing of theirs is on disk, so their `removed` has no dir to
+    /// forget. An id leaves the set the moment a drain takes its write (before
+    /// the write lands), so a `removed` racing that write still forgets the dir.
+    unwritten: std::collections::HashSet<AgentId>,
 }
 
 /// A running record writer: the state-stream subscription plus the keepalive
@@ -851,7 +856,7 @@ impl PersistWriter {
     /// Mark one record dirty with NO state event and wake the writer — the
     /// root's id-block reservation inside the silent ledger flush.
     pub(crate) fn mark_dirty(&self, kernel: &Kernel, id: &AgentId) {
-        if mark_persist(kernel, &self.dirty, id) {
+        if mark_persist(kernel, &self.dirty, id, false) {
             self.wake.notify_one();
         }
     }
@@ -879,7 +884,12 @@ impl PersistWriter {
 
 /// Queue one live, non-ephemeral record for the writer — what an `added` /
 /// `updated` event does. `false` when there is nothing to write.
-fn mark_persist(kernel: &Kernel, dirty: &std::sync::Mutex<Dirty>, aid: &AgentId) -> bool {
+fn mark_persist(
+    kernel: &Kernel,
+    dirty: &std::sync::Mutex<Dirty>,
+    aid: &AgentId,
+    added: bool,
+) -> bool {
     let Some(agent) = kernel.agents.get(aid).map(|e| Arc::clone(&e)) else {
         return false;
     };
@@ -888,7 +898,13 @@ fn mark_persist(kernel: &Kernel, dirty: &std::sync::Mutex<Dirty>, aid: &AgentId)
     }
     let mut d = dirty.lock().expect("dirty poisoned");
     d.paths.insert(aid.clone(), agent.root_path.clone());
+    // A re-created id whose old dir is still queued for removal writes into
+    // that dir (it exists); any other `added` has nothing on disk.
+    let queued = d.forget.len();
     d.forget.retain(|(i, _)| i != aid);
+    if d.forget.len() == queued && added {
+        d.unwritten.insert(aid.clone());
+    }
     if !d.persist.contains(aid) {
         d.persist.push(aid.clone());
     }
@@ -906,7 +922,9 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
     {
         let mut d = dirty.lock().expect("dirty poisoned");
         for e in kernel.agents.iter() {
-            d.paths.insert(e.key().clone(), e.value().root_path.clone());
+            if !e.value().ephemeral {
+                d.paths.insert(e.key().clone(), e.value().root_path.clone());
+            }
         }
     }
     let wake = Arc::new(tokio::sync::Notify::new());
@@ -923,8 +941,8 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
         }
         let aid = AgentId::from(aid);
         match evt.get("kind").and_then(Value::as_str) {
-            Some("added") | Some("updated") => {
-                if !mark_persist(&k_sub, &d_sub, &aid) {
+            Some(kind @ ("added" | "updated")) => {
+                if !mark_persist(&k_sub, &d_sub, &aid, kind == "added") {
                     return;
                 }
             }
@@ -934,6 +952,11 @@ pub fn install_persist_writer(kernel: &Arc<Kernel>, loader_id: &AgentId) -> Pers
                     return;
                 };
                 d.persist.retain(|i| i != &aid);
+                // Added and removed between two drains: no record was ever
+                // written, so there is no dir to remove.
+                if d.unwritten.remove(&aid) {
+                    return;
+                }
                 d.forget.push((aid, path));
             }
             _ => return,
@@ -1002,6 +1025,7 @@ async fn flush_records(
         if agent.ephemeral {
             continue;
         }
+        dirty.lock().expect("dirty poisoned").unwritten.remove(&aid);
         // The record only — a bundle's readme and docs are served from the
         // bundle, never copied.
         let _ = persist(kernel, &loader, &agent).await;

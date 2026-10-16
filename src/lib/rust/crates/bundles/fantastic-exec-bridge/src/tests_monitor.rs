@@ -412,6 +412,9 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
     let tmp = TempDir::new().unwrap();
     let (k, ear) = setup(&tmp).await;
     let (rn, en) = ids(&tmp);
+    let mut inbox = k.ensure_inbox(&AgentId::from(rn.as_str()));
+    // Parallel tests may write into the sink too: every read is scoped to THIS runner.
+    *crate::monitor::LOG_SINK.lock().unwrap() = Some(Vec::new());
     let r = call(
         &k,
         "kernel_state",
@@ -448,6 +451,47 @@ async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {
     );
     assert_eq!(m["delivered"], json!(0), "{m}");
     assert!(ear.texts().is_empty());
+    // loud: the event on the bridge's inbox ...
+    let mut dead = Vec::new();
+    // the event lands right after the status flips: wait for it, then drain the rest
+    while dead.is_empty() {
+        let it = tokio::time::timeout(Duration::from_secs(3), inbox.recv())
+            .await
+            .expect("no monitor_dead event within 3s")
+            .expect("inbox closed");
+        if it.payload["type"] == json!("monitor_dead") {
+            dead.push(it.payload);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while let Some(it) = inbox.try_recv() {
+        if it.payload["type"] == json!("monitor_dead") {
+            dead.push(it.payload);
+        }
+    }
+    assert_eq!(
+        dead,
+        vec![
+            json!({"type": "monitor_dead", "monitor_id": mid, "job_id": jid,
+            "notify": en, "reason": "unauthorized", "error": m["error"]})
+        ],
+    );
+    // ... and the warning line
+    let lines: Vec<String> = crate::monitor::LOG_SINK
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l.starts_with(&format!("exec_bridge {rn}: ")))
+        .collect();
+    let want =
+        format!("exec_bridge {rn}: monitor {mid} (job {jid}) dead — {en} refused the delivery: ");
+    assert!(
+        lines.iter().any(|l| l.starts_with(&want)
+            && l.contains(&format!("{en} does not accept 'send' from {rn}"))),
+        "{lines:?}"
+    );
     // dead stays dead: later output is not sent
     tokio::time::sleep(Duration::from_millis(300)).await;
     let rows = listed().await;

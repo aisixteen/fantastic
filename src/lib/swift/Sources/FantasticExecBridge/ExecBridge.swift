@@ -237,6 +237,9 @@
                 "{type:'job_done', job_id, exit_code, ok, lines?, last_line?, error?} — a pipe job's output is read with `tail`/`grep`; a PTY job carries exit_code and ok only"
             ),
             "output": .string("{type:'output', job_id, data} — a PTY job's output chunk (UTF-8)"),
+            "monitor_dead": .string(
+                "{type:'monitor_dead', monitor_id, job_id, notify, reason, error} — `notify` REFUSED a monitor's delivery (`reason` unauthorized|unknown_agent); the monitor ended, nothing more is sent"
+            ),
         ]
 
         /// How a running program talks back — served by `docs` (tier detailed).
@@ -1676,8 +1679,9 @@
 
             Deliveries are this agent's own calls: the listener's `callable_by` must name this agent, and
             this agent's `can_call` the listener. A delivery the listener REFUSES (no grant, no such agent)
-            ends the monitor: `monitors` keeps it with `status: "dead"` and the refusal as `error`, nothing
-            more is sent, and `unmonitor` clears it. A source that does not push (a URL, a remote status) gets
+            ends the monitor, loudly: a stderr warning names it, a `monitor_dead` event (`monitor_id`,
+            `job_id`, `notify`, `reason`, `error`) goes on this agent's inbox, `monitors` keeps it with
+            `status: "dead"` and the refusal as `error`, nothing more is sent, and `unmonitor` clears it. A source that does not push (a URL, a remote status) gets
             its cadence from the `scheduler`: a schedule fires a one-shot check job every
             `interval_seconds`.
 

@@ -965,9 +965,9 @@ const EXPECTED = {
   partial: ["PC-4", "C15", "C18", "C20", "TSG-6"],
   notApplicable: ["PC-5", "C17", "C23", "EXS-1", "EXS-2", "EXS-3", "EXS-4", "EXS-5", "CRED-1", "CRED-2", "CRED-3", "CRED-4", "CRED-5"],
   // Registry rows whose evidence is NOT in the data corpus: the registry itself
-  // points at host test files (C1, C24) or at conformance/cases.json (C21, which
+  // points at host test files (C1, C12, C24) or at conformance/cases.json (C21, which
   // `c21_conformance.test.ts` replays against this kernel).
-  elsewhere: { C1: "python tests/conformance/test_c1_suspend_resume + tests/kernel/test_inquiry_plumbed — no corpus data to replay", C21: "contract/conformance/cases.json — replayed by c21_conformance.test.ts", C24: "python tests/conformance + test_stream_semantics — no corpus data to replay" } as { [k: string]: string },
+  elsewhere: { C1: "python tests/conformance/test_c1_suspend_resume + tests/kernel/test_inquiry_plumbed — no corpus data to replay", C12: "python tests/kernel/test_execution_ledger + test_memory_store + e2e scenario E13_deadletter — no corpus data to replay", C21: "contract/conformance/cases.json — replayed by c21_conformance.test.ts", C24: "python tests/conformance + test_stream_semantics — no corpus data to replay" } as { [k: string]: string },
 };
 
 test("coverage matrix — N of M requirements, and every exclusion with its reason", (t) => {

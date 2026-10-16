@@ -299,12 +299,16 @@ async def test_a_monitor_ends_with_its_job_delivering_what_waited(seeded_kernel)
     )
 
 
-async def test_a_refused_delivery_ends_the_monitor_and_monitors_says_why(seeded_kernel):
+async def test_a_refused_delivery_ends_the_monitor_and_monitors_says_why(
+    seeded_kernel, caplog
+):
     """The listener does not accept the bridge's `send` (its `callable_by` lacks it):
-    the first delivery is refused, the monitor ENDS — never a silent drop — and
+    the first delivery is refused, the monitor ENDS — never a silent drop: a warning
+    line names it, a `monitor_dead` event lands on the bridge's inbox, and
     `monitors` keeps it as `dead` with the refusal until `unmonitor` clears it."""
     k = seeded_kernel
     await _setup(k, "deaf")
+    inbox = k.ctx.ensure_inbox("runner")
     r = await _call(
         k, k.id, {"type": "update_agent", "id": "deaf", "callable_by": {"$self": "*"}}
     )
@@ -333,6 +337,41 @@ async def test_a_refused_delivery_ends_the_monitor_and_monitors_says_why(seeded_
     assert "deaf does not accept 'send' from runner" in m["error"], m
     assert m["delivered"] == 0, m
     assert _heard("deaf") == []
+    # loud: the event on the bridge's inbox ...
+    dead = []
+
+    async def drain():
+        while not inbox.empty():
+            p = inbox.get_nowait()
+            if p.get("type") == "monitor_dead":
+                dead.append(p)
+
+    # the event lands right after the status flips: wait for it, then drain the rest
+    for _ in range(150):
+        await drain()
+        if dead:
+            break
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.1)
+    await drain()
+    assert len(dead) == 1, dead
+    assert dead[0] == {
+        "type": "monitor_dead",
+        "monitor_id": mid,
+        "job_id": jid,
+        "notify": "deaf",
+        "reason": "unauthorized",
+        "error": m["error"],
+    }, dead
+    # ... and the warning line
+    warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any(
+        f"exec_bridge runner: monitor {mid} (job {jid}) dead — deaf refused the "
+        "delivery: "
+        in w
+        and "deaf does not accept 'send' from runner" in w
+        for w in warned
+    ), warned
     # dead stays dead: later output is not sent
     await asyncio.sleep(0.3)
     await listed()

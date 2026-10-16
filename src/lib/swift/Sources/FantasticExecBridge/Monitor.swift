@@ -17,9 +17,11 @@
 // still waited. RAM only, like the job it watches.
 //
 // A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
-// `unknown_agent`) ENDS the monitor — never a silent drop. The dead monitor stays in
-// `monitors` with `status: "dead"` and the refusal as `error` until `unmonitor`
-// clears it.
+// `unknown_agent`) ENDS the monitor — never a silent drop. The refusal is LOUD
+// three ways: a python `logger.warning` line naming monitor, job, target and
+// refusal; a `monitor_dead` event on this bridge's inbox (its watchers see it); and
+// the dead monitor stays in `monitors` with `status: "dead"` and the refusal as
+// `error` until `unmonitor` clears it.
 
 #if os(macOS)
 
@@ -338,8 +340,27 @@
                     delivered = max(0, delivered - 1)
                     return true
                 }
-                if first { wake() }
+                guard first else { return }
+                wake()
+                await refused(reason: reason, why: why, kernel: kernel)
             }
+        }
+
+        /// The monitor just died of a refused delivery: say so — python `_refused`,
+        /// a stderr warning and a `monitor_dead` event on the bridge's inbox. The gate
+        /// decision stands; only the silence is removed.
+        private func refused(reason: String, why: String, kernel: Kernel) async {
+            let mid = monitorId
+            RuntimeLog.warn(
+                "exec_bridge \(owner.value): monitor \(mid) (job \(jobId.value)) dead — \(args.notify) refused the delivery: \(why)"
+            )
+            await kernel.emit(
+                owner,
+                .object([
+                    "type": .string("monitor_dead"), "monitor_id": .integer(mid),
+                    "job_id": .integer(jobId.value), "notify": .string(args.notify),
+                    "reason": .string(reason), "error": .string(why),
+                ]))
         }
 
         /// One row of `monitors`.

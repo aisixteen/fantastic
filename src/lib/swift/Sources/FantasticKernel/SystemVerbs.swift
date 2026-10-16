@@ -413,8 +413,8 @@ extension Kernel {
                     + "manual. <type>reflect</type> on the root is the briefing: each agent's "
                     + "purpose, plus `self_extension` (how to author your own durable tools "
                     + "in THIS kernel — which executor, and the fields without which the "
-                    + "agent is created and never runs) and `readmes` (the manual index). "
-                    + "Reflect the root before building anything."),
+                    + "agent is created and never runs) and, with `detail:\"full\"`, `readmes` "
+                    + "(the manual index). Reflect the root before building anything."),
         ])
     }
 

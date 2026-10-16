@@ -186,6 +186,58 @@ async def test_store_sink_forget_removes_the_whole_subtree(wired, tmp_path):
     assert (tmp_path / ".fantastic" / "agent.yaml").exists()  # the root stays
 
 
+async def test_store_sink_an_agent_added_and_removed_between_drains_forgets_nothing(
+    wired, tmp_path, capsys
+):
+    """An agent created and deleted before any drain took its write has no dir on
+    disk: the drain neither writes it nor asks the store to delete it — no
+    `persist through … does not exist` for a dir nobody wrote. Nested too."""
+    root = wired
+    await _flush(root)
+    capsys.readouterr()
+    root.create("file_bridge.tools", id="brief", allow=["."])
+    root.ctx.agents["brief"].create("file_bridge.tools", id="inner", allow=["."])
+    out = (
+        await root.send(
+            [{"target": "kernel", "payload": {"type": "delete_agent", "id": "brief"}}]
+        )
+    )[0]
+    assert out["status"] == "completed", out
+    await _flush(root)
+    assert "persist through" not in capsys.readouterr().err
+    assert not (tmp_path / ".fantastic" / "agents" / "brief").exists()
+    assert root._persist_error is None
+
+
+async def test_store_sink_a_removed_racing_its_first_write_still_forgets(
+    wired, tmp_path, monkeypatch
+):
+    """A `removed` that lands while a drain is writing the agent's FIRST record
+    still removes the dir that write leaves behind."""
+    root = wired
+    real = kst._persist_via_store
+    took, release = asyncio.Event(), asyncio.Event()
+
+    async def held(agent, store_id, abs_path, record):
+        if record.get("id") == "racer":
+            took.set()
+            await release.wait()
+        await real(agent, store_id, abs_path, record)
+
+    monkeypatch.setattr(kst, "_persist_via_store", held)
+    root.create("file_bridge.tools", id="racer", allow=["."])
+    await asyncio.wait_for(took.wait(), 2)  # the debounced drain holds the write
+    out = (
+        await root.send(
+            [{"target": "kernel", "payload": {"type": "delete_agent", "id": "racer"}}]
+        )
+    )[0]
+    assert out["status"] == "completed", out
+    release.set()
+    await _flush(root)
+    assert not (tmp_path / ".fantastic" / "agents" / "racer").exists()
+
+
 async def test_a_flush_waits_for_the_drain_the_loop_already_took(
     wired, tmp_path, monkeypatch
 ):

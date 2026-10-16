@@ -20,16 +20,21 @@ was still waiting. RAM only, like the job it watches.
 
 A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
 `unknown_agent`) ENDS the monitor — never a silent drop (an AI whose `callable_by`
-lacks the bridge would get no turn and nobody would learn it). The
-dead monitor stays in `monitors` with `status: "dead"` and the refusal as `error`
-until `unmonitor` clears it.
+lacks the bridge would get no turn and nobody would learn it). The refusal is
+LOUD three ways: a `logger.warning` line naming monitor, job, target and refusal;
+a `monitor_dead` event on this bridge's inbox (its watchers see it); and the dead
+monitor stays in `monitors` with `status: "dead"` and the refusal as `error` until
+`unmonitor` clears it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
 
 #: Lines in one delivery when the caller names no `tail`.
 DEFAULT_TAIL = 100
@@ -191,5 +196,31 @@ def _deliver(m: dict, lines: list[str], ended: bool, kernel) -> None:
             m["error"] = str(got.get("error") or got.get("reason"))
             m["delivered"] -= 1
             m["queue"].put_nowait(_DEAD)
+            await _refused(m, got["reason"], kernel)
 
     kernel.ctx.spawn_task(m["owner"], "monitor_notify", send())
+
+
+async def _refused(m: dict, reason: str, kernel) -> None:
+    """The monitor just died of a refused delivery: say so — a stderr warning and a
+    `monitor_dead` event on the bridge's inbox. The gate decision stands; only the
+    silence is removed."""
+    logger.warning(
+        "exec_bridge %s: monitor %s (job %s) dead — %s refused the delivery: %s",
+        m["owner"],
+        m["id"],
+        m["job_id"],
+        m["notify"],
+        m["error"],
+    )
+    await kernel.emit(
+        m["owner"],
+        {
+            "type": "monitor_dead",
+            "monitor_id": m["id"],
+            "job_id": m["job_id"],
+            "notify": m["notify"],
+            "reason": reason,
+            "error": m["error"],
+        },
+    )

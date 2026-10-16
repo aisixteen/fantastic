@@ -37,6 +37,11 @@ public final class RecordWriter: @unchecked Sendable {
     private var forget: [(AgentId, URL)] = []
     /// id → dir cache, so a REMOVED agent's path is still known.
     private var paths: [AgentId: URL] = [:]
+    /// Ids `added` since the writer started whose record no drain has taken
+    /// yet: nothing of theirs is on disk, so their `removed` has no dir to
+    /// forget. An id leaves the set the moment a drain takes its write (before
+    /// the write lands), so a `removed` racing that write still forgets the dir.
+    private var unwritten: Set<AgentId> = []
     private var token: SubscriberToken?
     private var task: TaskId?
     private let wake: AsyncStream<Void>
@@ -87,7 +92,7 @@ public final class RecordWriter: @unchecked Sendable {
 
     func start(loader: AgentId) {
         withLock {
-            for a in kernel.allAgents() { paths[a.id] = a.rootPath }
+            for a in kernel.allAgents() where !a.ephemeral { paths[a.id] = a.rootPath }
         }
         token = kernel.subscribe { [weak self] evt, _ in
             self?.onState(evt)
@@ -106,17 +111,25 @@ public final class RecordWriter: @unchecked Sendable {
         guard let aid = evt["agent_id"].asString, !aid.isEmpty else { return }
         let id = AgentId(aid)
         switch evt["kind"].asString {
-        case "added", "updated":
+        case let kind? where kind == "added" || kind == "updated":
             guard let a = kernel.agent(id), !a.ephemeral else { return }
             withLock {
                 paths[id] = a.rootPath
+                // A re-created id whose old dir is still queued for removal
+                // writes into that dir (it exists); any other `added` has
+                // nothing on disk.
+                let queued = forget.count
                 forget.removeAll { $0.0 == id }
+                if forget.count == queued, kind == "added" { unwritten.insert(id) }
                 if !persist.contains(id) { persist.append(id) }
             }
         case "removed":
             let known: URL? = withLock {
                 guard let path = paths.removeValue(forKey: id) else { return nil }
                 persist.removeAll { $0 == id }
+                // Added and removed between two drains: no record was ever
+                // written, so there is no dir to remove.
+                if unwritten.remove(id) != nil { return nil }
                 forget.append((id, path))
                 return path
             }
@@ -150,6 +163,7 @@ public final class RecordWriter: @unchecked Sendable {
         }
         for id in ids {
             guard let a = kernel.agent(id), !a.ephemeral else { continue }
+            withLock { _ = unwritten.remove(id) }
             // EVERY DRAINED WRITE THAT LANDS SEEDS THE SIDECARS (python
             // `_persist_via_store` → `_seed_readme_via_store`), not only the
             // create that first made the record — a record written before a

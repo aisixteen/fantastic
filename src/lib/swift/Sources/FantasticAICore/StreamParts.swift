@@ -91,12 +91,12 @@ enum PartEvent {
 /// How many trailing scalars of `buf` could be the start of one of `tags` — held
 /// back until the next chunk says whether they are markup or prose. Python
 /// `_held_tail`.
-private func heldTail(_ buf: [Unicode.Scalar], _ tags: [[Unicode.Scalar]]) -> Int {
+private func heldTail(_ buf: ArraySlice<Unicode.Scalar>, _ tags: [[Unicode.Scalar]]) -> Int {
     var best = 0
     for tag in tags {
         var n = min(tag.count - 1, buf.count)
         while n > 0 {
-            if tag.starts(with: buf[(buf.count - n)...]) {
+            if tag.starts(with: buf[(buf.endIndex - n)...]) {
                 best = max(best, n)
                 break
             }
@@ -104,6 +104,23 @@ private func heldTail(_ buf: [Unicode.Scalar], _ tags: [[Unicode.Scalar]]) -> In
         }
     }
     return best
+}
+
+/// The EARLIEST of `tags` at or after `from` — one pass over the text, every
+/// tag tried at each position (in list order, so a tie keeps the first tag as
+/// `min` over per-tag finds did). Per-tag finds each walked to the END when
+/// their tag was absent, which re-read the whole unconsumed text every step.
+private func firstOf(
+    _ hay: [Unicode.Scalar], _ tags: [[Unicode.Scalar]], from: Int
+) -> (Int, [Unicode.Scalar])? {
+    var at = max(0, from)
+    let n = hay.count
+    while at < n {
+        let c = hay[at]
+        for t in tags where t[0] == c && matchesAt(hay, t, at) { return (at, t) }
+        at += 1
+    }
+    return nil
 }
 
 /// `str.split(sep)` on code points.
@@ -129,7 +146,8 @@ private func joinScalars(_ s: some Collection<Unicode.Scalar>) -> String {
 /// (`AIStreamParts`).
 final class PartSplitter {
     private let source: String
-    private var buf: [Unicode.Scalar] = []  // unconsumed text
+    private var buf: [Unicode.Scalar] = []  // text fed; `buf[pos...]` is unconsumed
+    private var pos = 0  // where the unconsumed text starts — consuming never copies
     private(set) var inThink = false
     private var part: StreamPart?  // the open text/thinking part
     private var call: StreamPart?  // the open call part
@@ -137,6 +155,11 @@ final class PartSplitter {
     private var callStarted = false  // its `start` was emitted
     private var callPending: [Unicode.Scalar] = []  // deltas held until the addressee is known
     private var inBytes = false
+    /// `learnAddressee`'s scan state per tag, so a growing body is never re-read
+    /// from 0: where the open tag sits once found, and where each search resumes.
+    private var addrOpenAt: [String: Int] = [:]
+    private var addrOpenFrom: [String: Int] = [:]
+    private var addrCloseFrom: [String: Int] = [:]
     /// Every part opened, in order.
     private(set) var parts: [StreamPart] = []
     /// Every CLOSED call part, in order: (stream_id, body) — what a dispatched
@@ -154,6 +177,11 @@ final class PartSplitter {
         buf.append(contentsOf: chunk.unicodeScalars)
         var out: [PartEvent] = []
         while step(&out) {}
+        // Drop the consumed head (what is left is a held tail or a pending head).
+        if pos > 0 {
+            buf.removeFirst(pos)
+            pos = 0
+        }
         return out
     }
 
@@ -162,14 +190,16 @@ final class PartSplitter {
     func finish(_ why: String = "no_close_tag") -> [PartEvent] {
         var out: [PartEvent] = []
         if call != nil {
-            callBody += buf
+            callBody += buf[pos...]
             buf = []
+            pos = 0
             out += abortCall(why)
         } else {
-            if !buf.isEmpty {
-                emitText(&out, buf)
-                buf = []
+            if pos < buf.count {
+                emitText(&out, buf[pos...])
             }
+            buf = []
+            pos = 0
             if let p = part {
                 if p.kind == "thinking" {
                     out.append(.abort(p, why))
@@ -193,6 +223,7 @@ final class PartSplitter {
             part = nil
         }
         buf = []
+        pos = 0
         return out
     }
 
@@ -235,82 +266,82 @@ final class PartSplitter {
         // thinking only `</think>` does — a `<call>` there is thinking text, never a
         // call part (only the answer acts).
         let opens = inThink ? [THINK_CLOSE_S] : [OPEN, THINK_OPEN_S]
-        let hits = opens.compactMap { t in findScalars(buf, t, from: 0).map { ($0, t) } }
-        guard let hit = hits.min(by: { $0.0 < $1.0 }) else {
-            let hold = heldTail(buf, opens)
-            emitText(&out, buf[..<(buf.count - hold)])
-            buf = Array(buf[(buf.count - hold)...])
+        guard let (i, tag) = firstOf(buf, opens, from: pos) else {
+            let hold = heldTail(buf[pos...], opens)
+            emitText(&out, buf[pos..<(buf.count - hold)])
+            pos = buf.count - hold
             return false
         }
-        let (i, tag) = hit
-        emitText(&out, buf[..<i])
+        emitText(&out, buf[pos..<i])
         if tag == OPEN {
-            let rest = Array(buf[(i + OPEN.count)...])
+            let restAt = i + OPEN.count
             // `<call` + whitespace + `name="X">` — anything else is prose (`<caller>`).
-            if rest.isEmpty {
-                buf = Array(buf[i...])
+            if restAt >= buf.count {
+                pos = i
                 return false
             }
-            if !pyIsSpace(rest[0]) {
+            if !pyIsSpace(buf[restAt]) {
                 emitText(&out, OPEN)
-                buf = rest
+                pos = restAt
                 return true
             }
-            let head = Array(rest[skipWS(rest, 0)...])
+            let headAt = skipWS(buf, restAt)
+            let head = buf[headAt...]
             if head.count < NAME_HEAD.count || !head.starts(with: NAME_HEAD) {
                 if NAME_HEAD.starts(with: head) {
-                    buf = Array(buf[i...])  // could still become a call
+                    pos = i  // could still become a call
                     return false
                 }
                 emitText(&out, OPEN)
-                buf = rest
+                pos = restAt
                 return true
             }
-            let q = findScalars(head, QUOTE, from: NAME_HEAD.count)
-            let gt = q.flatMap { findScalars(head, GT, from: $0 + 1) }
+            let q = findScalars(buf, QUOTE, from: headAt + NAME_HEAD.count)
+            let gt = q.flatMap { findScalars(buf, GT, from: $0 + 1) }
             guard let q, let gt else {
-                buf = Array(buf[i...])
+                pos = i
                 return false
             }
             closeTextPart(&out)
-            call = newPart("call", name: joinScalars(head[NAME_HEAD.count..<q]))
+            call = newPart("call", name: joinScalars(buf[(headAt + NAME_HEAD.count)..<q]))
             callBody = []
             callStarted = false
             callPending = []
             inBytes = false
-            buf = Array(head[(gt + 1)...])
+            addrOpenAt = [:]
+            addrOpenFrom = [:]
+            addrCloseFrom = [:]
+            pos = gt + 1
             return true
         }
         // a thinking boundary
         closeTextPart(&out)
         inThink = tag == THINK_OPEN_S
-        buf = Array(buf[(i + tag.count)...])
+        pos = i + tag.count
         return true
     }
 
     private func stepCall(_ out: inout [PartEvent]) -> Bool {
         let stopTags = inBytes ? [BYTES_CLOSE] : [BYTES_OPEN, CLOSE]
-        let hits = stopTags.compactMap { t in findScalars(buf, t, from: 0).map { ($0, t) } }
-        guard let hit = hits.min(by: { $0.0 < $1.0 }) else {
-            let hold = heldTail(buf, stopTags)
-            callText(&out, Array(buf[..<(buf.count - hold)]))
-            buf = Array(buf[(buf.count - hold)...])
+        guard let (i, tag) = firstOf(buf, stopTags, from: pos) else {
+            let hold = heldTail(buf[pos...], stopTags)
+            callText(&out, buf[pos..<(buf.count - hold)])
+            pos = buf.count - hold
             return false
         }
-        let (i, tag) = hit
         if tag == CLOSE {
-            callText(&out, Array(buf[..<i]))
-            buf = Array(buf[(i + CLOSE.count)...])
+            callText(&out, buf[pos..<i])
+            pos = i + CLOSE.count
             endCall(&out)
             return true
         }
-        callText(&out, Array(buf[..<(i + tag.count)]))
-        buf = Array(buf[(i + tag.count)...])
+        callText(&out, buf[pos..<(i + tag.count)])
+        pos = i + tag.count
         inBytes = tag == BYTES_OPEN
         return true
     }
 
-    private func callText(_ out: inout [PartEvent], _ s: [Unicode.Scalar]) {
+    private func callText(_ out: inout [PartEvent], _ s: ArraySlice<Unicode.Scalar>) {
         if s.isEmpty { return }
         callBody += s
         if callStarted {
@@ -330,9 +361,23 @@ final class PartSplitter {
     private func learnAddressee() {
         let body = callBody
         for tag in ["target_id", "to"] {
-            let a = findScalars(body, Array("<\(tag)>".unicodeScalars), from: 0)
-            let b = a.flatMap { findScalars(body, Array("</\(tag)>".unicodeScalars), from: $0 + 1) }
-            guard let a, let b else { continue }
+            // The FIRST `<tag>` and the first `</tag>` after it, as a from-0
+            // search finds them — resumed where the last search stopped (a hit
+            // never moves once the body only grows).
+            let open = Array("<\(tag)>".unicodeScalars)
+            let close = Array("</\(tag)>".unicodeScalars)
+            if addrOpenAt[tag] == nil {
+                guard let a = findScalars(body, open, from: addrOpenFrom[tag] ?? 0) else {
+                    addrOpenFrom[tag] = max(0, body.count - open.count + 1)
+                    continue
+                }
+                addrOpenAt[tag] = a
+            }
+            let a = addrOpenAt[tag]!
+            guard let b = findScalars(body, close, from: max(a + 1, addrCloseFrom[tag] ?? 0)) else {
+                addrCloseFrom[tag] = max(a + 1, body.count - close.count + 1)
+                continue
+            }
             let lo = a + tag.unicodeScalars.count + 2
             let inner = lo < b ? Array(body[lo..<b]) : []
             if tag == "target_id" {

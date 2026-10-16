@@ -39,14 +39,14 @@ env var; skipped cleanly when unset.
 - 2 umbrella targets (`FantasticKernelEmbedded`,
   `FantasticKernelFull`) — Apple-app entry points
 - 1 CLI executable (`fantastic`)
-- 1100+ tests across substrate, bundles, parity harness, public API
+- 1600+ tests across substrate, bundles, parity harness, public API
 
 ## Tiers
 
 | product | platforms | includes |
 |---|---|---|
 | `FantasticKernelEmbedded` | iOS, iPadOS, visionOS, tvOS, watchOS, sandboxed macOS | All bundles EXCEPT subprocess-using ones |
-| `FantasticKernelFull` | macOS Pro (unsandboxed) | All bundles including `exec_bridge` (commands + PTY jobs) |
+| `FantasticKernelFull` | macOS Pro (unsandboxed) | All bundles including `exec_bridge` (commands + PTY jobs) and `py_agent` (folder-bundle programs) |
 
 Both tiers are first-class products of this `Package.swift`. The
 Apple app declares the dependency as:
@@ -85,8 +85,11 @@ kernel modules.
 | ollama_backend | `FantasticOllamaBackend` | both | local LLM (thin over `FantasticAICore`) |
 | responses_backend | `FantasticResponsesBackend` | both | OpenAI Responses-API LLM (thin over `FantasticAICore`) |
 | vllm_backend | `FantasticVllmBackend` | both | LLM on a vLLM server, spoken to directly; a KV-cache session table per endpoint (thin over `FantasticAICore`) |
+| anthropic_backend | `FantasticAnthropicBackend` | both | Anthropic Messages-API LLM — streamed, no native tools; the key from a credential_store ref, sent as `x-api-key` (thin over `FantasticAICore`) |
+| mcp_client | `FantasticMcpClient` | both | ONE remote MCP server as an agent (`mcp_client.tools`) — each server tool is a verb of the agent, documented per instance; static key from a credential_store ref |
 | foundation_models_backend | `FantasticFoundationModelsBackend` + `FantasticFMCore` | both | Apple's on-device model (macOS 26+ with Apple Intelligence; anywhere else a send fails naming why); no endpoint, model or key; `context_window` defaults to the SDK's real window (4096 measured on macOS 27.0). `FantasticFMCore` is the ONE implementation of the FoundationModels calls — rust links it through `FantasticFMBridge`, a static C ABI (`fm_bridge.h`) (thin over `FantasticAICore`) |
 | exec_bridge | `FantasticExecBridge` | Pro | macOS-only — the process edge: a general-purpose command runner gated by a regex allowlist (`allowed`), sealed by default; jobs are kernel tasks; a terminal is a PTY job (`forkpty`); any caller the call gate admits drives any job of the agent |
+| py_agent | `FantasticExecBridge` | Pro | macOS-only — the base a folder bundle (`bundles/<name>/bundle.yaml`, `base: py_agent`) extends: runs the folder's program per instance over the exec_bridge relay, reached only through its declared verbs |
 | scenario probes | `FantasticScenarioProbes` | test | fixture agents the shared e2e scenarios name |
 
 ## Wire compatibility
@@ -133,16 +136,15 @@ swift/
     FantasticCredentialStore/          secrets by ref (file / keychain / env)
     FantasticAICore/                   shared LLM machinery (memory-store conversation,
                                        tag grammar, folds, grants); AI backends are thin over this
-    Fantastic{Ollama,Responses,Vllm}Backend/
+    Fantastic{Ollama,Responses,Vllm,Anthropic}Backend/
                                        the AI backends
     FantasticFMCore/                   Apple Foundation Models calls (the one implementation)
     FantasticFMBridge/                 its C ABI for rust — static lib + fm_bridge.h
     FantasticFoundationModelsBackend/  the on-device AI backend (+ Resources/readme.md)
     Fantastic{File,Scheduler,StaticLoader,
-              CliBundle,IoBridge,KernelBridge,WebWS,WebRest}/
+              CliBundle,IoBridge,KernelBridge,WebWS,WebRest,McpClient}/
                                        supporting bundles
-    Fantastic{Terminal,Exec}{Backend,Bridge}/
-                                       macOS-only Pro-tier bundles
+    FantasticExecBridge/               macOS-only Pro-tier bundles (exec_bridge, py_agent)
     FantasticScenarioProbes/           e2e fixture agents (test)
     Fantastic/                         `fantastic` CLI executable
     FantasticKernelEmbedded/           Apple-app umbrella target (Lite tier)

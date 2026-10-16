@@ -40,7 +40,7 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             | "shutdown_agents"
             | "kernel_stop"
             // HOW TO CALL an agent — its bundle's verb docs. Answered by the
-            // root, and the one verb the call gate never checks (`gate`).
+            // root and gated like every kernel verb (`gate`).
             | "docs"
     )
 }

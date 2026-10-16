@@ -44,8 +44,9 @@ entry shows its ~token cost so you can budget BEFORE fetching:
   e.g. `readme=self-extension`, `readme=streams`, `readme=transports`.
 - `reflect kernel readme=true` → this orientation.
 
-The root reflect always carries `readmes` (the top-level topic index) and a
-`docs` one-liner, so the map is in front of you from the first round-trip.
+The root reflect with `detail=full` carries `readmes` (the top-level topic
+index) and a `docs` one-liner; the default distilled reflect leaves them out —
+ask for the map with `readme=index`.
 If you mean to BUILD, the first topic to read is **`self-extension`** — you
 author your own durable tools here.
 

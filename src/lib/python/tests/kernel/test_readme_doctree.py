@@ -6,8 +6,8 @@ a `docs/` topic tree. `reflect` gains a polymorphic `readme` value:
   - `readme="index"` → a token-annotated topic tree `{key, desc, tokens, children}`.
   - `readme="<key>"` → one topic's body + its sub-docs' index.
   - unknown key      → `{error, keys:[…]}` (reply stays well-formed).
-The ROOT reflect always carries `readmes` (the index) + `docs` (a one-liner) —
-the manual's map is in front of a caller from the first round-trip.
+The ROOT reflect with `detail="full"` carries `readmes` (the index) + `docs` (a
+one-liner); the distilled default leaves them out.
 
 The tree is served from the bundle package — nothing is copied to disk.
 """
@@ -263,7 +263,7 @@ async def test_readme_key_cannot_escape_docs_dir(kernel):
     assert "error" in r["readme"]
 
 
-# ─── always-on root frame (readmes + docs) ─────────────────────
+# ─── the root frame on detail=full (readmes + docs) ─────────────────────
 
 
 async def test_root_reflect_full_carries_readmes_and_docs(kernel):

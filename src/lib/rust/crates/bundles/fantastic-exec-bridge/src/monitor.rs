@@ -17,9 +17,11 @@
 //! still waited. RAM only, like the job it watches.
 //!
 //! A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
-//! `unknown_agent`) ENDS the monitor — never a silent drop. The dead monitor stays in
-//! `monitors` with `status: "dead"` and the refusal as `error` until `unmonitor`
-//! clears it.
+//! `unknown_agent`) ENDS the monitor — never a silent drop. The refusal is LOUD
+//! three ways: a python `logger.warning` line naming monitor, job, target and
+//! refusal; a `monitor_dead` event on this bridge's inbox (its watchers see it); and
+//! the dead monitor stays in `monitors` with `status: "dead"` and the refusal as
+//! `error` until `unmonitor` clears it.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -267,6 +269,7 @@ fn deliver(cfg: &Cfg, key: &Key, lines: Vec<String>, ended: bool, kernel: &Arc<K
     let k = Arc::clone(kernel);
     let target = AgentId::from(cfg.notify.as_str());
     let key = key.clone();
+    let (owner, job_id, notify) = (cfg.owner.clone(), cfg.job_id.get(), cfg.notify.clone());
     kernel.spawn_task(&cfg.owner, "monitor_notify", async move {
         let out = k
             .send(vec![Item::new(
@@ -280,15 +283,72 @@ fn deliver(cfg: &Cfg, key: &Key, lines: Vec<String>, ended: bool, kernel: &Arc<K
             .map(|o| o.result)
             .unwrap_or(Value::Null);
         let reason = got.get("reason").and_then(Value::as_str).unwrap_or("");
-        if REFUSED.contains(&reason) {
-            if let Some(m) = monitors().get_mut(&key).filter(|m| m.error.is_none()) {
-                let why = got.get("error").and_then(Value::as_str).unwrap_or(reason);
-                m.error = Some(why.to_string());
-                m.delivered = m.delivered.saturating_sub(1);
-                let _ = m.tx.send(Msg::Dead);
-            }
+        if !REFUSED.contains(&reason) {
+            return;
         }
+        let why = {
+            let mut g = monitors();
+            let Some(m) = g.get_mut(&key).filter(|m| m.error.is_none()) else {
+                return;
+            };
+            let why = got
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or(reason)
+                .to_string();
+            m.error = Some(why.clone());
+            m.delivered = m.delivered.saturating_sub(1);
+            let _ = m.tx.send(Msg::Dead);
+            why
+        };
+        refused(&owner, id, job_id, &notify, reason, &why, &k).await;
     });
+}
+
+/// The monitor just died of a refused delivery: say so — python `_refused`, a
+/// stderr warning and a `monitor_dead` event on the bridge's inbox. The gate
+/// decision stands; only the silence is removed.
+async fn refused(
+    owner: &AgentId,
+    id: i64,
+    job_id: i64,
+    notify: &str,
+    reason: &str,
+    why: &str,
+    kernel: &Arc<Kernel>,
+) {
+    log_line(format!(
+        "exec_bridge {}: monitor {id} (job {job_id}) dead — {notify} refused the delivery: {why}",
+        owner.0
+    ));
+    kernel
+        .emit(
+            owner,
+            json!({
+                "type": "monitor_dead",
+                "monitor_id": id,
+                "job_id": job_id,
+                "notify": notify,
+                "reason": reason,
+                "error": why,
+            }),
+        )
+        .await;
+}
+
+/// Lines a test reads back instead of stderr — `None` sends them to stderr.
+pub(crate) static LOG_SINK: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// One python `logging.lastResort` line (no handler is configured anywhere, so a
+/// `logger.warning` prints the BARE message to stderr).
+fn log_line(msg: String) {
+    let mut g = LOG_SINK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match g.as_mut() {
+        Some(buf) => buf.push(msg),
+        None => eprintln!("{msg}"),
+    }
 }
 
 /// `monitor {job_id, notify, match?, every?, tail?, label?}` — python `_monitor_verb`.

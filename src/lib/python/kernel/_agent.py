@@ -138,7 +138,7 @@ _SYSTEM_VERBS = frozenset(
         "shutdown_agents",
         "kernel_stop",
         # HOW TO CALL an agent — its bundle's verb docs, in two tiers. Answered
-        # by the root, and the one verb the call gate never checks (`_gate`).
+        # by the root and gated like every kernel verb (`_gate`).
         "docs",
     }
 )
@@ -2413,7 +2413,8 @@ class Agent:
         "<type>reflect</type> on the root is the briefing: each agent's purpose, plus "
         "`self_extension` (how to author your own durable tools in THIS kernel — which "
         "executor, and the fields without which the agent is created and never runs) "
-        "and `readmes` (the manual index). Reflect the root before building anything."
+        'and, with `detail:"full"`, `readmes` (the manual index). Reflect the root '
+        "before building anything."
     )
 
     def _verb_list_agents(self, payload: dict) -> dict:

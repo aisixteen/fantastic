@@ -49,8 +49,11 @@ plug.
 
 | group | what lives there |
 |---|---|
-| `agentic/` | a model doing real work in the substrate — building, composing, planning, discovering peers, and the kernel contracts (ledger, dead letters, user actions) measured *through* a model |
+| `agentic/` | a model doing real work in the substrate — building a program, planning posture, learning a deep agent's verbs from `docs` |
 | `agentic_advanced/` | the hard end: structures that OUTLIVE the conversation — durable sub-agents, wired graphs, A/B on whether naming the graph changes its shape |
+| `coding/` | the coder organs, model-driven — file edits, search, git, tests, cancel, job mail, peer review, gated writes — and the context protocol over long runs (folds, recall, restarts, `context_clear`), plus exec_bridge monitors |
+| `memory/` | what survives compaction and restarts in the memory store — plans and their reasons, rules, poisoned folds, repeat reads, the budget trigger; the free ones (graceful stop, clean start, rehydrate, growth) need no model |
+| `scenario/` | shared scenarios as DATA (`scenario.yaml`), one runner per runtime over `web_rest` — dialog, compose, and the kernel contracts measured *through* a model (ledger, dead letters, user actions); plus scripted runs of the CLI's MCP leg, shell, set-up and canvas |
 | `backends/` | the inference plug itself — the Responses wire measured raw (`wire_responses`) and the provider contract ai_core relies on, through a live agent (`provider_contract`, any `BACKEND`) |
 | `kernel/` | the kernel's own contracts on every host runtime, NO model (`costs: free`) — reboot continuity, drain and the pid lock, the scheduler across a restart, secret marks, the call gate, exec jobs, the file clamp, folder bundles, kernel-to-kernel bridges and a stub relay, a scripted AI on a mock backend, load (`kernel_load`, solo), the packaged artifact's smoke |
 | `connectors/` | an outside service as an agent, NO model — a scripted fake of the service, the kernel's connector on every host runtime over `web_rest`, what crosses the wire (`mcp_client`: tools → verbs, every result mapping, the key on every request) |

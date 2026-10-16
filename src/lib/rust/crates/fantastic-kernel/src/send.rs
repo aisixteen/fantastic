@@ -2032,8 +2032,9 @@ fn taped_payload(value: &Value, body: Option<&crate::outcome::Blob>) -> Value {
 const LIST_HINT: &str = "Raw records — how agents are WIRED, not what they are FOR, \
 and no manual. <type>reflect</type> on the root is the briefing: each agent's purpose, \
 plus `self_extension` (how to author your own durable tools in THIS kernel — which \
-executor, and the fields without which the agent is created and never runs) and \
-`readmes` (the manual index). Reflect the root before building anything.";
+executor, and the fields without which the agent is created and never runs) and, \
+with `detail:\"full\"`, `readmes` (the manual index). Reflect the root before building \
+anything.";
 
 mod gate;
 mod kernel_verbs;

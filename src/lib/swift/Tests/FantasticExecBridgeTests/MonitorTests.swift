@@ -293,6 +293,7 @@
         func refusedDeliveryEndsMonitor() async throws {
             guard let py = py3() else { return }
             let (k, ear) = await setup()
+            let inbox = k.ensureInbox(AgentId("runner"))
             let u = await call(
                 k, "kernel_state",
                 [
@@ -300,13 +301,29 @@
                     "callable_by": .object(["$self": .string("*")]),
                 ])
             #expect(u["updated"].asBool == true, "\(u)")
-            let jid = await printer(k, py, n: 30, gap: 0.05)
-            let mid =
-                await monitor(
-                    k, ["job_id": .integer(jid), "notify": .string("ear"), "match": .string("INFO")]
-                )["monitor_id"].asInt ?? -1
-            _ = await until("the monitor is dead") {
-                await liveMonitors(k).first?["status"].asString == "dead"
+            var jid: Int64 = -1
+            var mid: Int64 = -1
+            var dead: [JSON] = []
+            let logged = await RuntimeLog.capture {
+                jid = await printer(k, py, n: 30, gap: 0.05)
+                mid =
+                    await monitor(
+                        k, ["job_id": .integer(jid), "notify": .string("ear"), "match": .string("INFO")]
+                    )["monitor_id"].asInt ?? -1
+                _ = await until("the monitor is dead") {
+                    await liveMonitors(k).first?["status"].asString == "dead"
+                }
+                // the event lands right after the status flips: wait for it, then drain the rest
+                _ = await until("the monitor_dead event") {
+                    while let it = inbox.tryTake() {
+                        if it.payload["type"].asString == "monitor_dead" { dead.append(it.payload) }
+                    }
+                    return !dead.isEmpty
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                while let it = inbox.tryTake() {
+                    if it.payload["type"].asString == "monitor_dead" { dead.append(it.payload) }
+                }
             }
             let rows = await liveMonitors(k)
             #expect(rows.count == 1, "\(rows)")
@@ -316,6 +333,19 @@
                 "\(rows)")
             #expect(rows.first?["delivered"].asInt == 0, "\(rows)")
             #expect(ear.texts.isEmpty)
+            // loud: the event on the bridge's inbox ...
+            let want: JSON = .object([
+                "type": .string("monitor_dead"), "monitor_id": .integer(mid), "job_id": .integer(jid),
+                "notify": .string("ear"), "reason": .string("unauthorized"),
+                "error": rows.first?["error"] ?? .null,
+            ])
+            #expect(dead == [want], "\(dead)")
+            // ... and the warning line
+            let head = "exec_bridge runner: monitor \(mid) (job \(jid)) dead — ear refused the delivery: "
+            #expect(
+                logged.contains {
+                    $0.hasPrefix(head) && $0.contains("ear does not accept 'send' from runner")
+                }, "\(logged)")
             // dead stays dead: later output is not sent
             try await Task.sleep(nanoseconds: 300_000_000)
             let again = await liveMonitors(k)

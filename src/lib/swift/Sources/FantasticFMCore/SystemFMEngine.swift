@@ -23,6 +23,14 @@ import Foundation
     import FoundationModels
 #endif
 
+#if canImport(FoundationModels) && os(macOS)
+    /// The SDK's window, read once (a `static let` initialises exactly once).
+    @available(macOS 26.0, *)
+    private enum SDKWindow {
+        static let size = SystemLanguageModel.default.contextSize
+    }
+#endif
+
 public struct SystemFMEngine: FMEngine {
     public init() {}
 
@@ -41,11 +49,15 @@ public struct SystemFMEngine: FMEngine {
     }
 
     /// The model's window, READ from the SDK where one exists; Apple's documented
-    /// figure (`FM_DOCUMENTED_CONTEXT_SIZE`) where none can be asked.
+    /// figure (`FM_DOCUMENTED_CONTEXT_SIZE`) where none can be asked. The SDK
+    /// getter is a synchronous XPC round trip (a semaphore wait, ~40 ms, and
+    /// concurrent readers queue behind each other), so it is read ONCE per
+    /// process: a getter called per reflect/validate/schema parked every
+    /// cooperative thread that asked.
     public var contextSize: Int {
         #if canImport(FoundationModels) && os(macOS)
             if #available(macOS 26.0, *) {
-                return SystemLanguageModel.default.contextSize
+                return SDKWindow.size
             }
         #endif
         return FM_DOCUMENTED_CONTEXT_SIZE

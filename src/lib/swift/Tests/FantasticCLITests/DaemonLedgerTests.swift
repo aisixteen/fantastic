@@ -221,8 +221,14 @@
             proc.standardOutput = outPipe
             proc.standardError = errPipe
             let tail = Tail()
-            outPipe.fileHandleForReading.readabilityHandler = { tail.append($0.availableData) }
-            errPipe.fileHandleForReading.readabilityHandler = { tail.append($0.availableData) }
+            // An empty read is EOF: the handler unhooks itself, or it spins on the
+            // closed pipe for the rest of the test.
+            for pipe in [outPipe, errPipe] {
+                pipe.fileHandleForReading.readabilityHandler = { h in
+                    let d = h.availableData
+                    if d.isEmpty { h.readabilityHandler = nil } else { tail.append(d) }
+                }
+            }
             try launch(proc)
             defer {
                 if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
@@ -273,8 +279,9 @@
 
             // SIGTERM — the graceful path python takes.
             kill(proc.processIdentifier, SIGTERM)
+            // `!isRunning` means the exit status is in; `waitUntilExit()` would block
+            // a cooperative thread on its run loop and can hang there.
             await wait(60, "the daemon to exit", tail.text) { !proc.isRunning }
-            proc.waitUntilExit()
             #expect(proc.terminationStatus == 0, "exit \(proc.terminationStatus): \(tail.text)")
             // THE COUNTER'S BOUND IS ON DISK, beside the guid: a restart never
             // repeats an id. No message log was written.

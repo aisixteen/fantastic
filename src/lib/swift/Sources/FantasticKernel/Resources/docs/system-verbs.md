@@ -5,8 +5,8 @@
 These are baked into the substrate, not into any bundle. Read their signatures
 with `docs` — send `kernel` `{type: docs, of: kernel}` (add `verb: <name>, tier:
 detailed` for one verb's full text); only the ROOT ANSWERS them. Address `kernel`.
-`docs` is one of them, and the one verb the call gate never checks: any agent may
-read any bundle's docs with no grant.
+`docs` is one of them, gated like the rest: reading docs takes a `docs` grant
+on the root, `can_call` on the reader and `callable_by` on the root.
 
 They act on the TREE, or on the kernel-wide task table. **The agent you name is
 the OPERAND, not the actor** — `parent_id`, `id`, `task_id` say what is acted on.
