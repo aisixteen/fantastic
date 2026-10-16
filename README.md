@@ -165,41 +165,106 @@ Each runtime's build, test and lint commands are in [`CONTRIBUTING.md`](CONTRIBU
 
 ## The `fantastic` CLI
 
-`fantastic` runs the Rust kernel in-process in the current directory (`.fantastic/`):
-a terminal coder, a browser **canvas** where you build, run and engineer your own
-systems visually with an AI, and an MCP face for coding CLIs.
+`fantastic` is one static binary that runs the Rust kernel in-process, in the
+current directory. Everything it keeps lives in `.fantastic/`, and nothing is
+created outside it. It gives you a terminal UI, a browser **canvas** where you
+build, run and wire systems visually with an AI, and an MCP face for coding CLIs.
+One kernel runs per folder: a second `fantastic` started there attaches to the
+running one.
 
 ```sh
-cargo install --path src/tui    # builds `fantastic` (Rust toolchain; the canvas is packed into the binary)
+cargo install --path src/tui    # builds `fantastic`; the canvas page is packed into the binary
 ```
 
 ### Start with your coding agent
 
-Open your favourite CLI agent (Claude Code, Codex, Gemini CLI, …) in a project
-folder and paste:
+Open your CLI agent (Claude Code, Codex, Gemini CLI, …) in a project folder and
+paste:
 
 > Run `fantastic` and read what it prints. Explain to me what it is, then ask me
 > how I want to run it.
 
-Run without a terminal, as an agent's shell runs it, `fantastic` is in **doc
-mode**: it prints its readme and the command list, and starts and writes nothing.
-`fantastic readme [key]` opens any doc (`canvas`, `mcp`, `setup`, `bundles`, and
-the kernel's own). From there the agent can start it the way you choose, or wire
-itself in through `fantastic mcp`.
+Without a terminal, as an agent's shell runs it, `fantastic` is in **doc mode**:
+it prints its readme and the command list, and starts and writes nothing.
+`fantastic readme [key]` prints any doc: `canvas`, `mcp`, `setup`, `bundles`, and
+the kernel's own.
 
 ### Commands
 
 ```sh
-fantastic                       # the terminal UI
-fantastic canvas [--port N]     # the browser canvas, headless: the kernel's messages stream in this terminal
-fantastic --headless            # no UI, no canvas: the message stream only
-fantastic ai vllm -p PORT       # the root AI on a backend (also ollama -p PORT, responses|anthropic --model M)
-fantastic run CMD [ARGS]        # your own program in a terminal (with canvas: a terminal cell)
-fantastic mcp                   # MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)
-fantastic readme [key]          # the docs
+fantastic                         # the terminal UI; a fresh folder is seeded on launch
+fantastic canvas [--port N]       # the browser canvas, headless; the kernel's message stream on stdout
+fantastic --headless              # no UI, no canvas: the message stream only
+fantastic [canvas] ai BACKEND     # the root AI `ai`: vllm -p PORT | ollama -p PORT | responses|anthropic --model M
+fantastic [canvas] run CMD [ARGS] # your own program from $PATH in a terminal (with canvas: a terminal cell)
+fantastic mcp                     # MCP over stdio (tools `reflect`, `send`); attaches to a running kernel, or runs it
+fantastic send '<item json>'      # one call into the running kernel; `$env:NAME` values come from this shell, marked secret
+fantastic readme [key]            # the docs
 ```
 
-One kernel runs per folder; a bare `fantastic` started there while it runs attaches to it.
+These words are **recipes**: each adds its agents only if they are missing, then
+runs them. `--port` is recorded on the first `canvas` and reused after that.
+
+### The canvas
+
+The page is its own kernel in the browser, bridged to the host kernel through the
+`canvas_ws` leg. It holds no memory and no AI: every cell is a **view** of a host
+agent (a terminal, an AI chat, a python agent, an MCP server), or page-side
+content (`html`, `gl`).
+
+- **Double-click** opens the selector, which lists everything that can be placed
+  there: `AI agent`, a terminal, coding agents found on your `PATH` (`claude`,
+  `codex`, `aider`, `opencode`, `fantastic`), `python agent`, `mcp connector`,
+  `tree view`, `canvas theme`, `user store`, `tips`, and your bundles. Nothing
+  floats on the canvas; every surface is a cell.
+- **AI agents** are set up in a two-page wizard: the provider (responses,
+  anthropic, ollama or vllm), then its name, URL, model and key. Saved set-ups
+  live in your home folder, and the ★ one is the default. Nothing is guessed:
+  there are no default endpoints, and keys are never read from the environment.
+- **Terminals** are `exec_bridge` PTY jobs running your login `$SHELL`, drawn by
+  WebGL through one shared GPU context, so hundreds of them stay smooth. Nothing
+  starts on its own: after a restart a terminal shows as stopped until you press
+  `▶`. A terminal re-attaches to its live job after a reload and redraws.
+- **html cells** run sandboxed (null origin) unless `trusted: true`. Their only
+  way out is the connector: `fantastic.send`, `emit`, `onMessage`, `watch`. An AI
+  builds them with the view's verbs `place`, `update`, `fit`, `move`, `wire`
+  and `remove`.
+- **Canvases** are flat peers. `new_canvas {name}` makes one, and
+  `?canvas=<node id>` opens it. Each has its own page kernel and shows only its
+  own subtree. **Themes** (free canvas, one column, your own) move cells and
+  never the agents.
+- **Grants**: `user`, and every AI under a canvas, may call every host agent
+  with every verb (god mode, granted on both sides). You narrow it with
+  `update_agent`.
+- **The system block**: `.fantastic/prompt.md` is every AI's system prompt. Edit
+  it, and every AI uses your text from its next turn.
+
+### Agents, bundles and keys
+
+- **Folder bundles**: `.fantastic/bundles/<name>/` holds `bundle.yaml` (its
+  verbs), `agent.py` and `panel.html` (its live view). A save restarts every
+  instance, and a panel edit re-renders every cell. Page bundles
+  (`.fantastic/web/bundles/<name>/bundle.yaml`, `base: html_agent`) are reusable
+  html cells. An AI writes a bundle only when you ask for one; otherwise it makes
+  agents with `create_agent` from the bundles `reflect` lists.
+- **Keys** live in the `credentials` agent, under a ref `<provider>/<host>` that
+  is bound to that host. Storage is the human's choice: plain (one 0600 file) or
+  secure (the keychain). Your home is `FANTASTIC_HOME`, or
+  `~/.config/fantastic`, and holds saved set-ups, key refs and the list of your
+  fantastics.
+- **Coding CLIs** connect through `.fantastic/.mcp.json`, which every start
+  writes (`claude --mcp-config .fantastic/.mcp.json`). The client is the `mcp`
+  agent, and each tool call is a kernel task that `ps` lists and MCP
+  cancellation stops.
+
+### How the CLI is tested
+
+- Unit suites: `cargo test -p fantastic-tui`, and the page's `npm test` in
+  `src/tui/web/canvas`.
+- Model-driven e2e in [`src/tui/e2e/`](src/tui/e2e/tests/README.md): a real
+  headless canvas in Chrome, driven by a live model or by CPU-only probes
+  (terminal zoom clicks, typing, redraw after a reload, PTY backpressure). Each
+  run is scored by what it produced.
 
 <!-- /CLI SECTION -->
 
