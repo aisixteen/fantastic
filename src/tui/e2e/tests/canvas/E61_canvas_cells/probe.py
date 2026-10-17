@@ -102,8 +102,13 @@ def main() -> bool:
             rec = next((c for c in rig.cells() if c.get("id") == cell), {})
             r["coding_cell"] = rec.get("command") == [str(fake)]
             backend = rec.get("backend_id", "")
-            # the exact line, shell-joined then regex-escaped (a Windows path is quoted)
-            r["coding_exact"] = (rig.host_record(backend) or {}).get("allowed") == [re.escape(shlex.join([str(fake)]))]
+            # the exact line: ONE pattern, the shell-joined argv (a Windows path is
+            # quoted) with every character literal — unescaped, it is that line
+            # (the escaper is rust's, which leaves `-` bare where python's does not)
+            line = shlex.join([str(fake)])
+            pats = (rig.host_record(backend) or {}).get("allowed") or []
+            literal = len(pats) == 1 and not set(re.sub(r"\\.", "", pats[0])) & set(".^$*+?{}[]|()")
+            r["coding_exact"] = literal and re.sub(r"\\(.)", r"\1", pats[0]) == line
             # d) a tree view cell from the double-click
             r["sidebar_cell"] = await open_sidebar(pg, 1250, 80)
             r["sidebar_lists_backend"] = bool(await pg.until(
