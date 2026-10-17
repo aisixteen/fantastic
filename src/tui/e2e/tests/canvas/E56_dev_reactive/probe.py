@@ -25,9 +25,14 @@ async function go(w){{
 }}
 // the app is shown the moment the server says it listens — not on a guessed delay
 fantastic.watch('dev',ev=>{{if(ev&&ev.type==='progress'&&ev.job_id===runJob&&/^Serving HTTP/.test(ev.line))fantastic.emit('app',{{type:'reload'}});}});</script>"""
-    log = lambda title: f"""<h3>{title}</h3><pre id=l></pre><script>let job=null;
-fantastic.onMessage(p=>{{if(p&&p.type==='job')job=p.job_id}});
-fantastic.watch('dev',ev=>{{if(!ev||ev.job_id!==job)return; if(ev.type==='progress')document.getElementById('l').textContent+=ev.line+'\\n'; if(ev.type==='job_done')document.getElementById('l').textContent+='[exit '+ev.exit_code+']\\n';}});</script>"""
+    # each job's lines kept as they come: a job's first line can land before the
+    # controls name the job to this panel
+    log = lambda title: f"""<h3>{title}</h3><pre id=l></pre><script>let job=null; const lines={{}};
+const show=()=>{{document.getElementById('l').textContent=job===null?'':(lines[job]||'')}};
+fantastic.onMessage(p=>{{if(p&&p.type==='job'){{job=p.job_id; show();}}}});
+fantastic.watch('dev',ev=>{{if(!ev||ev.job_id===undefined)return; const k=ev.job_id;
+ if(ev.type==='progress')lines[k]=(lines[k]||'')+ev.line+'\\n'; else if(ev.type==='job_done')lines[k]=(lines[k]||'')+'[exit '+ev.exit_code+']\\n'; else return;
+ if(k===job)show();}});</script>"""
     status = """<h3>Status</h3><p id=s>idle</p><script>
 fantastic.onMessage(p=>{if(p&&p.type==='state')document.getElementById('s').textContent=p.s});
 fantastic.watch('dev',ev=>{if(!ev)return; if(ev.type==='progress'&&/^built:/.test(ev.line))document.getElementById('s').textContent='built';

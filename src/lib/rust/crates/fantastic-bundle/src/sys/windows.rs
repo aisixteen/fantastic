@@ -172,7 +172,16 @@ pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
         // made (PATH_NOT_FOUND → FILE_NOT_FOUND), a file mid-replace (ACCESS_DENIED
         // ↔ FILE_NOT_FOUND) — changes the code, and the `\\?\` left on put the
         // path outside its root (python's one-threaded kernel never sees it).
-        Err(e) => e.raw_os_error() == initial || (unseen(e.raw_os_error()) && unseen(initial)),
+        //
+        // Seen at the first look and gone at the second (a folder deleted, a
+        // file mid-replace — not found, access denied, in use): the same file,
+        // changing under another thread; the stripped form named it a moment
+        // ago. Any other refusal of the stripped form (a name only `\\?\` can
+        // spell) keeps the prefix.
+        Err(e) => match initial {
+            None => matches!(e.raw_os_error(), Some(2 | 3 | 5 | 32)),
+            Some(_) => e.raw_os_error() == initial || (unseen(e.raw_os_error()) && unseen(initial)),
+        },
     };
     Ok(if keep { stripped } else { path })
 }

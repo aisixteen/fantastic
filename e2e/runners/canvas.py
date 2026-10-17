@@ -73,10 +73,11 @@ def _scenario_path(scenario_id: str) -> Path:
     raise SystemExit(f"no scenario {scenario_id!r}")
 
 
-async def attach(cdp_port: int, timeout: float = 10.0):
+async def attach(cdp_port: int, timeout: float = 30.0):
     """Chrome's page target, CONNECTED: a fresh Chrome lists its debugging port
     before its page, and can refuse the page's socket (HTTP 404) for a moment
-    after listing it — retry both until `timeout`, then fail saying which."""
+    after listing it — retry both until `timeout`, then fail saying which. A
+    runner's first Chrome (cold disk) has taken past 10 s to listen."""
     import websockets
     deadline = time.time() + timeout
     why = "its debugging port never answered"
@@ -606,7 +607,7 @@ async def run_all(sc: dict, tmp: Path) -> bool:
     try:
         host.start()
         url = host.url
-        async with await attach(cdp_port, 15) as ws:
+        async with await attach(cdp_port) as ws:
             page = Page(ws)
             await page.cdp("Runtime.enable")
             await page.cdp("Page.enable")

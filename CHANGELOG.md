@@ -17,6 +17,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   it loads, and its own `added` event reloads nothing — that event, late on
   Windows, restarted the instance the spawn had just made, mid-call. A
   hand-made folder, or one made again after its removal, still loads.
+- Windows: a path seen at the first look and gone (or mid-replace) at the
+  second drops its `\\?\` too — kept, it put a record being saved outside its
+  root (`persist_record … escapes root`, a canvas cell under load).
 - e2e: the reference dev surface serves with its own `serve.py` (`-m
   http.server` reverse-resolves its address before it says it listens — a
   macOS runner stalled there); a TUI shot waits for its page's footer (ConPTY
@@ -28,6 +31,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   its message; a cell deleted between a listing and its read is skipped; the
   Swift scheduler-batch test waits for its fires to be recorded before its
   directory is removed (it left `fantastic-schedbatch-*` behind).
+- e2e: a cold Chrome is given 30 s to attach; the reference surface's log
+  panels keep each job's lines (a first line could land before the job was
+  named to them).
 - CI: the Windows e2e runs one test at a time; a failed canvas test prints
   every page wait that ran out, when, and where the host's log stood.
 
