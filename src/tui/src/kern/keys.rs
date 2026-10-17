@@ -141,6 +141,11 @@ pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Resu
     ensure_store(h).await?;
     // the ref is DECLARED first, on the store's record (`set` never creates one)
     declare(h, &r, &host_of(endpoint).unwrap_or_default()).await?;
+    // `set` goes through `user`, whose grant on a store made a moment ago (the
+    // first key, its mode just chosen) is written by the reach watch when the
+    // state stream reports it — awaited, or a loaded machine refused the key
+    // (`user may not call 'set' on credentials`)
+    crate::kern::reach::granted(h, STORE).await?;
     let out = h.act_secret(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}}), &["fields.api_key"]).await.result;
     if let Some(e) = out.get("error").and_then(Value::as_str) {
         return Err(format!("the key was not stored: {e}"));

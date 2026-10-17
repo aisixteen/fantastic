@@ -17,13 +17,18 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   it loads, and its own `added` event reloads nothing — that event, late on
   Windows, restarted the instance the spawn had just made, mid-call. A
   hand-made folder, or one made again after its removal, still loads.
-- Windows: a path seen at the first look and gone (or mid-replace) at the
-  second drops its `\\?\` too — kept, it put a record being saved outside its
-  root (`persist_record … escapes root`, a canvas cell under load).
+- Windows realpath: the `\\?\` the OS hands back is dropped unless the path
+  without it resolves ELSEWHERE — another thread's save or delete between the
+  two looks left it on, and a record being saved or forgotten "escaped" its
+  root (`persist_record` / `forget_record … escapes root`, canvas cells under
+  load).
+- `fantastic` key store: storing a key waits for `user`'s grant on a store
+  made a moment ago (the first key, its mode just chosen) — a loaded machine
+  refused it (`user may not call 'set' on credentials`).
 - e2e: the reference dev surface serves with its own `serve.py` (`-m
   http.server` reverse-resolves its address before it says it listens — a
-  macOS runner stalled there); a TUI shot waits for its page's footer (ConPTY
-  hands a redraw over in pieces); a click waits for its target to be SHOWN,
+  macOS runner stalled there); a TUI shot waits for its page's last row
+  (ConPTY hands a redraw over in pieces); a click waits for its target to be SHOWN,
   not only present (a stopped terminal's ▶ is in the DOM hidden until its
   attach); the AI-cell
   mock answers the runtime's no-call reminder `done` at once, so it never takes

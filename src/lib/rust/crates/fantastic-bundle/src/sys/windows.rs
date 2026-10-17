@@ -146,7 +146,7 @@ pub(crate) fn as_posix(p: &Path) -> String {
 /// (`GetFinalPathNameByHandleW`, here `std::fs::canonicalize`); when it cannot,
 /// the longest prefix it can is resolved and the rest joined on literally — a
 /// dangling symlink followed to where it points. The `\\?\` prefix the OS hands
-/// back is dropped when the path names the same file without it.
+/// back is dropped unless the path without it resolves ELSEWHERE.
 pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
     let had_prefix = is_verbatim(p);
     let path = if had_prefix {
@@ -156,44 +156,25 @@ pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
         std::path::absolute(p)
             .map_err(|e| errno_of(&e).map_or_else(|| e.to_string(), |n| os_error_str(n, None)))?
     };
-    let (path, initial) = match std::fs::canonicalize(&path) {
-        Ok(real) => (real, None),
-        Err(e) => (final_path_nonstrict(path), e.raw_os_error()),
+    let path = match std::fs::canonicalize(&path) {
+        Ok(real) => real,
+        Err(_) => final_path_nonstrict(path),
     };
     if had_prefix || !is_verbatim(&path) {
         return Ok(path);
     }
     let stripped = strip_verbatim(&path);
-    let keep = match std::fs::canonicalize(&stripped) {
+    // python keeps the prefix when the stripped form fails with another code
+    // than the first look did. Here another THREAD saves between the two looks —
+    // a folder made or deleted, a file mid-replace — and each changes the code;
+    // the `\\?\` left on then put the path outside its root (`escapes root`,
+    // python's one-threaded kernel never sees it). The input had no prefix, so
+    // the stripped form is what it named: kept unless it resolves elsewhere.
+    let strip = match std::fs::canonicalize(&stripped) {
         Ok(again) => again == path,
-        // Missing now and missing at first: strip it anyway. "Missing" is any
-        // code the nonstrict walk itself steps over (`unseen`), not only the
-        // same one twice: another thread's save between the two looks — a folder
-        // made (PATH_NOT_FOUND → FILE_NOT_FOUND), a file mid-replace (ACCESS_DENIED
-        // ↔ FILE_NOT_FOUND) — changes the code, and the `\\?\` left on put the
-        // path outside its root (python's one-threaded kernel never sees it).
-        //
-        // Seen at the first look and gone at the second (a folder deleted, a
-        // file mid-replace — not found, access denied, in use): the same file,
-        // changing under another thread; the stripped form named it a moment
-        // ago. Any other refusal of the stripped form (a name only `\\?\` can
-        // spell) keeps the prefix.
-        Err(e) => match initial {
-            None => matches!(e.raw_os_error(), Some(2 | 3 | 5 | 32)),
-            Some(_) => e.raw_os_error() == initial || (unseen(e.raw_os_error()) && unseen(initial)),
-        },
+        Err(_) => true,
     };
-    Ok(if keep { stripped } else { path })
-}
-
-/// The codes python's `_getfinalpathname_nonstrict` walks past — the path (or a
-/// part of it) cannot be seen right now: missing, access denied (a file being
-/// replaced, a folder being deleted), in use, a bad name, a network path down.
-fn unseen(code: Option<i32>) -> bool {
-    matches!(
-        code,
-        Some(1 | 2 | 3 | 5 | 21 | 32 | 50 | 53 | 65 | 67 | 87 | 123 | 161 | 1920 | 1921)
-    )
+    Ok(if strip { stripped } else { path })
 }
 
 /// python `ntpath._getfinalpathname_nonstrict`: walk up until the OS can

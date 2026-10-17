@@ -15,8 +15,9 @@
 #     host), a new model SAVED back; `d` stops it being the default.
 # Each step waits on what the screen shows (`until`), never a guessed time: under
 # a loaded machine (23 lanes) fixed waits shot frames before the app drew them.
-# A page's shot waits for its FOOTER (the last row drawn): ConPTY hands a redraw
-# over in pieces, and a shot on the page's title caught the page before it.
+# A page's shot waits for its LAST row (the footer, or the say line under it):
+# ConPTY hands a redraw over in pieces, and a shot on the page's title caught
+# the page before it.
 
 id: tui_wizard
 title: fantastic — the terminal's two-page AI set-up wizard makes an agent, saves its set-up and key, makes more from it
@@ -147,8 +148,8 @@ runs:
       key down
       key down
       key enter
-      until 20000 ✓ saved
       until 20000 enter: a saved one
+      until 20000 ✓ saved `vllm-1`
       shot saved
       type d
       until 20000 no default AI set-up
