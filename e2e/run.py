@@ -591,6 +591,13 @@ async def main() -> int:
         "--free", action="store_true", help="include the free harness self-tests"
     )
     ap.add_argument("--only-free", action="store_true")
+    ap.add_argument(
+        "--shard",
+        default="",
+        help="i/n — only the i-th of n slices of the selection (1-based, every n-th "
+        "test from the i-th: neighbours, often one scenario's runtimes, land apart); "
+        "CI runs one OS's suite as n jobs",
+    )
     ap.add_argument("--list", action="store_true")
     ap.add_argument(
         "--dry-run",
@@ -626,6 +633,14 @@ async def main() -> int:
         picked = select(tests, a.group, a.id, bk.name, True, a.runtime, a.exclude_runtime)
     else:
         picked = select(tests, a.group, a.id, bk.name, a.free, a.runtime, a.exclude_runtime)
+
+    if a.shard:
+        m = re.fullmatch(r"(\d+)/(\d+)", a.shard)
+        if not m or not 1 <= int(m.group(1)) <= int(m.group(2)):
+            print(f"REFUSING TO RUN — --shard {a.shard!r} is not i/n with 1 <= i <= n")
+            return 1
+        i, n = int(m.group(1)), int(m.group(2))
+        picked = picked[i - 1 :: n]
 
     if a.list:
         for t in picked:

@@ -1,13 +1,14 @@
 # RELEASE — run BY HAND on a pushed tag `vX.Y.Z`
 # (`gh workflow run release.yml --ref vX.Y.Z`, src/lib/rust/RELEASING.md); the
-# tag push itself starts nothing. Builds the `fantastic` CLI for every release
-# target, runs the model-free e2e on those binaries, and publishes a GitHub
-# Release with the archives and `SHA256SUMS`.
+# tag push itself starts nothing. It builds nothing: it publishes the archives a
+# GREEN `ci.yml` run built and tested for the tagged commit — every release
+# target, the model-free e2e passed on the very binaries — as a GitHub Release
+# with `SHA256SUMS`.
 #
-#   guard    the ref is a `vX.Y.Z` tag on `main`, and CHANGELOG.md has its
-#            `## [X.Y.Z]` section
-#   build    the reusable BUILD (`build.yml`): {release, e2e, artifacts}
-#   publish  the archives + SHA256SUMS, the CHANGELOG section as the notes
+#   guard    the ref is a `vX.Y.Z` tag on `main`, CHANGELOG.md has its
+#            `## [X.Y.Z]` section, and a `ci.yml` run on that commit succeeded
+#            (none → start one: `gh workflow run ci.yml --ref vX.Y.Z`)
+#   publish  that run's archives + SHA256SUMS, the CHANGELOG section as the notes
 #
 # crates.io is NOT published here: that stays a local step with a local token
 # (`scripts/build/crate.sh --publish`). No registry token is stored on GitHub.
@@ -19,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -33,12 +35,15 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      ci_run: ${{ steps.v.outputs.ci_run }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: v
-        name: the tag is a release
+        name: the tag is a release, and CI passed on it
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
@@ -48,28 +53,37 @@ jobs:
             || { echo "::error::$tag is not on main"; exit 1; }
           grep -q "^## \[$version\]" CHANGELOG.md \
             || { echo "::error::CHANGELOG.md has no '## [$version]' section"; exit 1; }
+          run=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          [ -n "$run" ] \
+            || { echo "::error::no green ci.yml run on $GITHUB_SHA — start one: gh workflow run ci.yml --ref $tag"; exit 1; }
+          echo "ci run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: guard
-    uses: ./.github/workflows/build.yml
-    with:
-      profile: release
-      e2e: true
-      artifacts: true
+          echo "ci_run=$run" >> "$GITHUB_OUTPUT"
 
   publish:
-    needs: [guard, build]
+    needs: guard
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
         with:
+          run-id: ${{ needs.guard.outputs.ci_run }}
+          github-token: ${{ github.token }}
           pattern: release-*
           path: dist
           merge-multiple: true
+      - name: every release target is there
+        working-directory: dist
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl \
+                   aarch64-unknown-linux-musl x86_64-pc-windows-msvc; do
+            ls fantastic-$t.* > /dev/null \
+              || { echo "::error::the CI run kept no archive for $t"; exit 1; }
+          done
       - name: SHA256SUMS
         working-directory: dist
         run: |

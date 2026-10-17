@@ -4,7 +4,9 @@
 #
 #   units   debug    every runtime's unit tests on Linux, macOS and Windows
 #   e2e     release  the shipping binaries built per OS, then the model-free e2e
-#                    (`e2e/run.py --only-free`, no model turns) on exactly those
+#                    (`e2e/run.py --only-free`, no model turns) on exactly those;
+#                    every release target's archive is kept (`release-<target>`)
+#                    — a green run is what `release.yml` publishes for its commit
 #
 # Free: standard GitHub-hosted runners on a public repo (see `build.yml`).
 
@@ -32,3 +34,4 @@ jobs:
     with:
       profile: release
       e2e: true
+      artifacts: true

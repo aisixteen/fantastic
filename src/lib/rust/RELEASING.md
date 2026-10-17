@@ -3,9 +3,10 @@
 A release is the `fantastic` CLI: the Rust kernel in-process, the terminal UI, the
 browser canvas and the MCP face. It ships two ways: the crates.io package
 `fantastic`, and prebuilt binaries on a GitHub Release. The tag is pushed from a
-laptop, and the release workflow is then started by hand on it; GitHub Actions
-builds every target, runs the model-free e2e on those binaries and publishes the
-GitHub Release (`.github/workflows/release.yml`).
+laptop, and the release workflow is then started by hand on it. It builds
+nothing: it publishes the archives a green CI run (`.github/workflows/ci.yml`)
+built for that very commit — every target, the model-free e2e passed on those
+binaries — as the GitHub Release (`.github/workflows/release.yml`).
 crates.io stays a local step.
 
 ## Version
@@ -27,17 +28,19 @@ All steps run from the repo root, on `main`, with a clean tree.
 2. **Changelog.** In `CHANGELOG.md`, add a `## [X.Y.Z] - YYYY-MM-DD` heading under
    `## [Unreleased]`, so the entries collected so far fall under the new version
    and `[Unreleased]` starts empty again. Commit it as `release: X.Y.Z`.
-3. **Tag, push, run the release.**
+3. **Tag, push, CI, release.**
    ```sh
    git tag -a vX.Y.Z -m vX.Y.Z
    git push origin main vX.Y.Z
-   gh workflow run release.yml --ref vX.Y.Z
+   gh workflow run ci.yml --ref vX.Y.Z        # skip if CI is already green on this commit
+   gh workflow run release.yml --ref vX.Y.Z   # once it is
    ```
-   The push starts nothing; `gh workflow run` starts
-   `.github/workflows/release.yml` on the tag: it refuses a ref that is not a tag on
-   `main` or has no `## [X.Y.Z]` CHANGELOG section, builds the archives below
-   (`scripts/build/cli.sh`), runs the model-free e2e on them, and publishes the
-   GitHub Release with `SHA256SUMS` and that CHANGELOG section as the notes.
+   The push starts nothing. CI builds the archives below (`scripts/build/cli.sh`)
+   for every target, runs the model-free e2e on them and keeps them for 30 days.
+   `.github/workflows/release.yml` refuses a ref that is not a tag on `main`, has
+   no `## [X.Y.Z]` CHANGELOG section, or has no green CI run on its commit; it
+   publishes that run's archives as the GitHub Release, with `SHA256SUMS` and the
+   CHANGELOG section as the notes.
 4. **crates.io** (local — the registry token never goes to GitHub).
    ```sh
    CARGO_REGISTRY_TOKEN=… sh scripts/build/crate.sh --publish

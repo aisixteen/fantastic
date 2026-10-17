@@ -4,12 +4,14 @@
 #   units      the unit tests of every runtime, per OS
 #   e2e        build the shipping binaries + the kernels under test, then run the
 #              model-free e2e (`e2e/run.py --only-free`) on EXACTLY those
-#              (`E2E_ARTIFACTS`) — the e2e runs what ships
+#              (`E2E_ARTIFACTS`) — the e2e runs what ships — each OS's suite as
+#              three parallel jobs (`--shard i/3`)
 #   artifacts  the shipping archives of every release target, as artifacts
-#              (`release-<target>`); `release.yml` publishes them
+#              (`release-<target>`); `release.yml` publishes the ones a green
+#              run of `ci.yml` kept for the tagged commit
 #
-# Callers: `ci.yml` ({debug, units} and {release, e2e}), `release.yml`
-# ({release, e2e, artifacts}). FREE: standard GitHub-hosted runners only
+# Callers: `ci.yml` ({debug, units} and {release, e2e, artifacts}). FREE:
+# standard GitHub-hosted runners only
 # (ubuntu-latest, ubuntu-24.04-arm, xcode-27, windows-latest) — a `-large` /
 # `-xlarge` label is billed even on a public repo; never name one here.
 #
@@ -184,8 +186,11 @@ jobs:
       fail-fast: false
       matrix:
         # `e2e`: the OS whose e2e runs this target's binaries (one native target
-        # per OS); the cross targets are built only when the archives ship.
-        include: ${{ fromJSON(inputs.artifacts && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl","e2e":"ubuntu-latest"},{"os":"xcode-27","target":"aarch64-apple-darwin","e2e":"xcode-27"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","e2e":"windows-latest"},{"os":"xcode-27","target":"x86_64-apple-darwin","e2e":""},{"os":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","e2e":""}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl","e2e":"ubuntu-latest"},{"os":"xcode-27","target":"aarch64-apple-darwin","e2e":"xcode-27"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","e2e":"windows-latest"}]') }}
+        # per OS). The targets no e2e runs on are `cross`, below.
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, e2e: ubuntu-latest }
+          - { os: xcode-27, target: aarch64-apple-darwin, e2e: xcode-27 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, e2e: windows-latest }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -233,7 +238,8 @@ jobs:
           name: release-${{ matrix.target }}
           path: dist/fantastic-${{ matrix.target }}.*
           if-no-files-found: error
-          retention-days: 7
+          # a release publishes these up to a month after the green run
+          retention-days: 30
       - name: keep the e2e's binaries
         if: inputs.e2e && matrix.e2e != ''
         uses: actions/upload-artifact@v7
@@ -243,14 +249,58 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  # ── the model-free e2e, on the binaries just built ───────────────────────
-  e2e:
-    if: inputs.e2e
-    needs: binaries
-    name: e2e (free) · ${{ matrix.os }}
+  # ── the release targets no e2e runs on (shipped, not tested here) ───────
+  cross:
+    if: inputs.artifacts
+    name: build · ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
+        include:
+          - { os: xcode-27, target: x86_64-apple-darwin }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: musl (the static Linux targets)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/lib/rust
+            src
+          key: ${{ matrix.target }}-${{ inputs.profile }}
+      - name: the CLI
+        run: sh scripts/build/cli.sh --profile ${{ inputs.profile }} --target ${{ matrix.target }}
+      - name: keep the shipping archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/fantastic-${{ matrix.target }}.*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── the model-free e2e, on the binaries just built ───────────────────────
+  # Each OS's suite runs as three jobs side by side (`--shard i/3`): the wall
+  # time is a third, and parallel jobs cost nothing on a public repo.
+  e2e:
+    if: inputs.e2e
+    needs: binaries
+    name: e2e (free) · ${{ matrix.os }} · ${{ matrix.shard }}/3
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, xcode-27, windows-latest]
+        shard: [1, 2, 3]
         include:
           - os: ubuntu-latest
             skip: "--exclude-runtime swift"
@@ -313,7 +363,7 @@ jobs:
           E2E_TUI_FRAMES: ${{ github.workspace }}/e2e/runs/tui-frames
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
-        run: uv run python ../../../e2e/run.py --only-free --lanes 2 ${{ matrix.skip }}
+        run: uv run python ../../../e2e/run.py --only-free --lanes 2 --shard ${{ matrix.shard }}/3 ${{ matrix.skip }}
       - name: the failures' logs, here
         if: failure()
         run: |
@@ -330,7 +380,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-runs-${{ matrix.os }}
+          name: e2e-runs-${{ matrix.os }}-${{ matrix.shard }}
           # the logs, not the runs' project dirs and browser profiles (~500 MB)
           path: |
             e2e/runs/
