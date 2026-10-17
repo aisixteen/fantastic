@@ -83,6 +83,12 @@ struct Scenario {
     config: Value,
 }
 
+/// Scenarios whose CONFIG is a POSIX system, not run on Windows: `exec_shell`
+/// passes `SHELL=/bin/sh` down and permits `$SHELL -l` — a unix shell, its env
+/// var and its login flag. Its Windows twin (COMSPEC, no login mode) is
+/// exec_bridge's `shell_tests`; python skips the same scenario the same way.
+const POSIX_CONFIGS: &[&str] = &["exec_shell"];
+
 fn load_scenarios() -> Vec<Scenario> {
     let specs_dir = contract_dir().join("agentic/specs");
     let mut paths: Vec<_> = std::fs::read_dir(&specs_dir)
@@ -1062,6 +1068,9 @@ async fn the_shared_agentic_corpus_holds_on_this_runtime() {
     let mut ran = 0usize;
 
     for sc in &scenarios {
+        if cfg!(windows) && POSIX_CONFIGS.contains(&sc.name.as_str()) {
+            continue;
+        }
         let declared = sc.spec["expect"]["hydration"]
             .as_str()
             .unwrap_or("ok")

@@ -99,7 +99,9 @@ jobs:
       - name: build
         run: cargo build --workspace --locked $CARGO_PROFILE
       - name: unit tests
-        run: cargo test --workspace --locked $CARGO_PROFILE
+        # every crate's tests, even after one fails: a Windows run otherwise
+        # stopped at the first failing crate and hid the rest
+        run: cargo test --workspace --locked --no-fail-fast $CARGO_PROFILE
 
   cli:
     if: inputs.units
@@ -130,7 +132,7 @@ jobs:
       - name: build
         run: cargo build --locked $CARGO_PROFILE
       - name: unit tests
-        run: cargo test --locked $CARGO_PROFILE
+        run: cargo test --locked --no-fail-fast $CARGO_PROFILE
 
   swift:
     if: inputs.units
