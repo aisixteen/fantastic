@@ -225,8 +225,8 @@ class Page:
             if await self.js(expr):
                 return True
             await asyncio.sleep(0.1)
-        if expr.strip() == "false":
-            return False  # a probe's pause, not a wait
+        if expr.strip() == "false" or timeout < 1:
+            return False  # a probe's pause, or one beat of its own polling loop
         at = self.mark() if self.mark else ""
         self.misses.append(f"+{time.time() - self.t0:.1f}s {timeout:g}s {' '.join(expr.split())[:160]}{' @ ' + at if at else ''}")
         return False

@@ -177,10 +177,11 @@ def main() -> bool:
                         keyed.error(None)
                         # E. ⚙ settings: a changed model, live
                         await pg.js(f"[...document.querySelectorAll('.agent-frame[data-id=\"{a}\"] > .frame-head .ext')].find(c=>c.textContent==='⚙')?.click()")
-                        await pg.until("(document.querySelector('.wiz h1')?.textContent||'').startsWith('Settings')", 8)
+                        # (a slow runner opens and saves the settings in seconds: the bounds are wide)
+                        await pg.until("(document.querySelector('.wiz h1')?.textContent||'').startsWith('Settings')", 20)
                         await pg.js("(()=>{const l=[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent==='model'); l.querySelector('input').value='mock-y';})()")
                         await pg.js(f"{BTN}('save')?.click()")
-                        p["E_saved"] = bool(await pg.until("(document.querySelector('.wiz .say')?.textContent||'').includes('saved')", 8))
+                        p["E_saved"] = bool(await pg.until("(document.querySelector('.wiz .say')?.textContent||'').includes('saved')", 20))
                         await pg.until("!document.querySelector('.wiz')", 10)
                         cellrec = next((x for x in rig.cells() if x.get("id") == a), {})
                         ai = cellrec.get("backend_id")
