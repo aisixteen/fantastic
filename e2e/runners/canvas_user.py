@@ -44,6 +44,7 @@ class Browser:
                                       f"--remote-debugging-port={self.port}", f"--user-data-dir={tmp / ('chrome-' + name)}",
                                       "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.used_first = False
+        self.size = (w["width"], w["height"])
 
     def ws_url(self) -> str:
         deadline = time.time() + 15
@@ -75,6 +76,7 @@ async def tab(b: Browser, url: str, *, stack) -> Page:
     p = Page(ws)
     await p.cdp("Runtime.enable")
     await p.cdp("Page.enable")
+    await p.viewport(*b.size)
     await p.open(url)
     return p
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -81,6 +82,11 @@ def main() -> bool:
         r["chrome_always_shown"] = info.get("a_head_opacity") == "1"
         r["column_scrolled"] = isinstance(info.get("a_top_after_scroll"), (int, float)) and info["a_top_after_scroll"] < 0
         r["pin_holds_while_scrolling"] = ps == pa
+        # the layout is written a moment after the pin (the loader's flush): waited for
+        for _ in range(40):
+            if rig.pinned("mobile") == "b":
+                break
+            time.sleep(0.25)
         r["pin_saved_in_layout"] = rig.pinned("mobile") == "b"
         asyncio.run(desktop())
         r["canvas_kept"] = info["desk_a"][:2] == [900, 100] and rig.rects("canvas").get("a", {}).get("x") == 900

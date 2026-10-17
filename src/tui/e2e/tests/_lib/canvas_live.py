@@ -383,6 +383,7 @@ class Rig:
                 pg = Page(ws)
                 await pg.cdp("Runtime.enable")
                 await pg.cdp("Page.enable")
+                await pg.viewport(width, height)
                 if os.environ.get("CANVAS_WS_LOG") == "1":
                     pg.ws_log = []
                     await pg.cdp("Network.enable")

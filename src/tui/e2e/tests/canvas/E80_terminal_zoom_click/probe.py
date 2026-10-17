@@ -17,9 +17,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import FOLDER, Rig, verdict, py_job  # noqa: E402
+from helpers import oslayer  # noqa: E402
 
-CLICKS = r'''import os, re, sys, tty
-tty.setraw(0)
+CLICKS = oslayer.RAW_TTY_PY + r'''import os, re, sys
 sys.stdout.write("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[HREADY")
 sys.stdout.flush()
 buf = b""

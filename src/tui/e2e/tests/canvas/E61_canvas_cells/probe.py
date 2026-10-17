@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -100,7 +102,8 @@ def main() -> bool:
             rec = next((c for c in rig.cells() if c.get("id") == cell), {})
             r["coding_cell"] = rec.get("command") == [str(fake)]
             backend = rec.get("backend_id", "")
-            r["coding_exact"] = (rig.host_record(backend) or {}).get("allowed") == [str(fake).replace(".", "\\.")]
+            # the exact line, shell-joined then regex-escaped (a Windows path is quoted)
+            r["coding_exact"] = (rig.host_record(backend) or {}).get("allowed") == [re.escape(shlex.join([str(fake)]))]
             # d) a tree view cell from the double-click
             r["sidebar_cell"] = await open_sidebar(pg, 1250, 80)
             r["sidebar_lists_backend"] = bool(await pg.until(

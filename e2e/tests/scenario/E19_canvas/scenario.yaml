@@ -40,7 +40,8 @@ runs:
   # ── the pair: a double click spawns a backend (a child of `canvas_root`) + its cell
   - name: spawn-terminal
     dblclick: {x: 500, y: 350}
-    type: "echo hi-$((6*7))"
+    # a line whose OUTPUT is the answer, not its echo — per shell (`oslayer.for_os`)
+    type: {posix: "echo hi-$((6*7))", nt: "set /a x=6*7>nul & call echo hi-%x%"}
     expect:
       xterm_contains: ["hi-42"]
       canvas_members: 1
@@ -55,11 +56,11 @@ runs:
   # ── the backend lives its own life: the page leaving and coming back never
   #    touches the backend behind it — the shell keeps its state
   - name: page-reload
-    type: "export FC_MARK=7; echo set-$FC_MARK"
+    type: {posix: "export FC_MARK=7; echo set-$FC_MARK", nt: "set \"FC_MARK=7\" & call echo set-%FC_MARK%"}
     # leave only once the shell has taken the line (keys in flight at unload are the page's to lose)
     before_reload_xterm: "set-7"
     reload_page: true
-    type_after: "echo mark-$FC_MARK$FC_MARK"
+    type_after: {posix: "echo mark-$FC_MARK$FC_MARK", nt: "echo mark-%FC_MARK%%FC_MARK%"}
     expect:
       canvas_members: 1
       backend_kept: true
@@ -79,7 +80,7 @@ runs:
     # nothing starts on its own (TOS): the shell comes back
     # STOPPED — the human's ▶ starts it
     click: ".term-stopped .start"
-    type: "echo again-$((7*6))"
+    type: {posix: "echo again-$((7*6))", nt: "set /a y=7*6>nul & call echo again-%y%"}
     expect:
       # the headless stdout is the kernel's message stream, no escapes
       stream: true

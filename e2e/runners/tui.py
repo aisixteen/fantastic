@@ -364,6 +364,9 @@ def main(argv: list[str]) -> int:
             text = run["script"]
             for k, v in subst.items():
                 text = text.replace(k, v)
+            # `{name}` in the script: the run's `vars`, each this OS's (`for_os`)
+            for k, v in (run.get("vars") or {}).items():
+                text = text.replace("{" + k + "}", oslayer.for_os(v))
             script.write_text(text)
             env = {**os.environ, **extra_env, "FT_CWD": str(cwd),
                    "FT_ROWS": str(screen.get("rows", 30)), "FT_COLS": str(screen.get("cols", 110))}

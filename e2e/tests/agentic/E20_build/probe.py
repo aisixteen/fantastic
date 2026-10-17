@@ -222,7 +222,8 @@ async def wire_executor_leg(
                         "callable_by": {"ai": "*", "rest": "*", "web": "*"},
                         # THE GATE: run THIS interpreter against a file argument. A model reflects
                         # the leg, reads the exact interpreter path here, and runs `<interp> <file>`.
-                        "allowed": [rf"{re.escape(interp)} \S+"],
+                        # the SHELL-JOINED line: a path that needs quoting (Windows') is quoted
+                        "allowed": [rf"{re.escape(shlex.quote(interp))} \S+"],
                         # The running program reaches the memory agent over its control wire; that
                         # send lands FROM this leg (its owner), so the leg needs egress to totals.
                         "can_call": {"totals": "*"},

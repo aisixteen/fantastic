@@ -101,6 +101,7 @@ runs:
       shot listed
       key enter
       until 30000 this agent has not loaded its history yet
+      until 30000 · vllm-1-2 ·
       shot made
       key ctrl-c
       wait 150

@@ -34,6 +34,28 @@ def exe(path: Path) -> Path:
     return path.with_name(path.name + ".exe") if WINDOWS else path
 
 
+#: Python source a probe's PTY guest program starts with: its terminal (fd 0) in
+#: RAW mode — every key and mouse report reaches `os.read(0, n)` as the bytes the
+#: terminal sent, no line editing, no echo. POSIX: `tty.setraw`. Windows: the
+#: console's VT input mode alone (ENABLE_VIRTUAL_TERMINAL_INPUT, every cooked
+#: mode off), so ConPTY hands the terminal's VT bytes through.
+RAW_TTY_PY = (
+    "import ctypes, msvcrt\n"
+    "ctypes.windll.kernel32.SetConsoleMode(msvcrt.get_osfhandle(0), 0x0200)\n"
+    if WINDOWS
+    else "import tty\ntty.setraw(0)\n"
+)
+
+
+def for_os(value):
+    """A scenario value that differs by OS — a map `{posix: …, nt: …}` (a shell
+    line: sh's `$((6*7))` and `export` are cmd.exe's `set /a` and `set`) — as
+    this OS's; any other value as it is."""
+    if isinstance(value, dict) and set(value) == {"posix", "nt"}:
+        return value["nt" if WINDOWS else "posix"]
+    return value
+
+
 def venv_python(venv: Path) -> Path:
     """The interpreter of the virtualenv at `venv`."""
     return venv / "Scripts" / "python.exe" if WINDOWS else venv / "bin" / "python"

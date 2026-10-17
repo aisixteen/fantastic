@@ -72,16 +72,20 @@ def watch(port: int, aid: str) -> tuple[list, threading.Event]:
         w = WSWatcher(port, aid)
         await w.connect()
         ready.set()
-        it = w.events().__aiter__()
+
+        async def pump():
+            async for ev in w.events():
+                seen.append(ev)
+
+        # the stream is read by ONE task, never under a timeout: a timed-out wait
+        # cancels the generator's `__anext__`, and a cancelled async generator is
+        # closed — every later event was lost after the first quiet 0.2 s
+        reader = asyncio.ensure_future(pump())
         try:
-            while not stop.is_set():
-                try:
-                    seen.append(await asyncio.wait_for(it.__anext__(), 0.2))
-                except asyncio.TimeoutError:
-                    continue
-                except StopAsyncIteration:
-                    return
+            while not stop.is_set() and not reader.done():
+                await asyncio.sleep(0.05)
         finally:
+            reader.cancel()
             await w.close()
 
     threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()

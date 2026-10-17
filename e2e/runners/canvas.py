@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -223,8 +224,28 @@ class Page:
         return False
 
     async def open(self, url: str) -> None:
-        await self.cdp("Page.navigate", url=url)
-        await self.until("document.readyState === 'complete' && !!document.querySelector('#status, .status, body')", 15)
+        """The page AT `url`, loaded. A navigation the host refused (its server a
+        moment from listening) leaves Chrome's own error page — complete, with a
+        body — so the check is the page's origin, and a miss navigates again."""
+        origin = json.dumps(urllib.parse.urlsplit(url)._replace(path="", query="", fragment="").geturl())
+        loaded = f"document.readyState === 'complete' && location.origin === {origin} && !!document.querySelector('#status, .status, body')"
+        for _ in range(10):
+            nav = await self.cdp("Page.navigate", url=url)
+            if not nav.get("errorText") and await self.until(loaded, 15):
+                return
+            await asyncio.sleep(1.0)
+        raise SystemExit(f"the page never loaded {url}: {nav.get('errorText') or 'not at its origin'}")
+
+    async def viewport(self, width: int, height: int) -> None:
+        """The page's viewport AT LEAST `width` x `height` — what the window size
+        gives on macOS and Linux (where a headless window is never narrower than
+        ~500px, which the phone-wide probes are drawn for). Windows takes its
+        frame out of the window (1400x900 drew 1354x775) and a probe's points near
+        the bottom fell off the page: there, and only there, it is set."""
+        have = await self.js("[innerWidth, innerHeight]") or [0, 0]
+        w, h = max(width, have[0]), max(height, have[1])
+        if [w, h] != have:
+            await self.cdp("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=0, mobile=False)
 
     async def mouse(self, typ: str, x: float, y: float, clicks: int = 1) -> None:
         await self.cdp("Input.dispatchMouseEvent", type=typ, x=x, y=y, button="left", clickCount=clicks)
@@ -298,7 +319,7 @@ def host_record(cwd: Path, agent_id: str) -> Path | None:
     return None
 
 
-def wait_disk(cond, timeout: float = 5.0) -> bool:
+def wait_disk(cond, timeout: float = 15.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if cond():
@@ -408,7 +429,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         if not await page.until("!!document.querySelector('.xterm-helper-textarea')", 10):
             bad.append("no terminal to type into")
         await asyncio.sleep(0.8)  # the shell's prompt
-        await page.type(run["type"])
+        await page.type(oslayer.for_os(run["type"]))
     if "before_reload_xterm" in run:
         w = run["before_reload_xterm"]
         # a login shell under load can take a while to answer; this returns on the hit
@@ -420,7 +441,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         if not await page.until("!!document.querySelector('.xterm-helper-textarea')", 10):
             bad.append("no terminal to type into after the reload")
         await asyncio.sleep(0.8)
-        await page.type(run["type_after"])
+        await page.type(oslayer.for_os(run["type_after"]))
     if "then_restart" in run:
         await restart(run["then_restart"], page, host, cwd, url, state, exp, bad)
 
@@ -565,6 +586,7 @@ async def run_all(sc: dict, tmp: Path) -> bool:
             page = Page(ws)
             await page.cdp("Runtime.enable")
             await page.cdp("Page.enable")
+            await page.viewport(w["width"], w["height"])
             await page.open(url)
             state: dict = {}
             for run in sc["runs"]:

@@ -18,9 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import FOLDER, Rig, verdict, py_job  # noqa: E402
+from helpers import oslayer  # noqa: E402
 
-REC = r'''import os, sys, tty
-tty.setraw(0)
+REC = oslayer.RAW_TTY_PY + r'''import os, sys
 sys.stdout.write("READY\r\n")
 sys.stdout.flush()
 while True:

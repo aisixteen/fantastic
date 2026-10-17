@@ -112,11 +112,14 @@ runs:
   # ── 4 · the in-app terminal: `t` opens $SHELL below the page as an agent,
   #       typed keys reach it, Esc hands the keyboard back, `t` closes it ─────
   - name: terminal
+    # a line whose OUTPUT is the answer, not its echo — per shell (`oslayer.for_os`)
+    vars:
+      hi_42: {posix: "echo hi-$((6*7))", nt: "set /a x=6*7>nul & call echo hi-%x%"}
     script: |
       wait 2500
       key t
       wait 2500
-      type echo hi-$((6*7))
+      type {hi_42}
       key enter
       wait 1200
       shot open

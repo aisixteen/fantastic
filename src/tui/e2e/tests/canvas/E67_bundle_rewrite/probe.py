@@ -71,6 +71,20 @@ async def click_panel(pg, cell: str) -> None:
     await pg.mouse("mouseReleased", x, y)
 
 
+async def click_reaches(pg, rig: Rig, cell: str, agent: str, verb: str) -> bool:
+    """A click on the panel's button reaches `verb` on `agent` — clicked again
+    while it has not (a freshly drawn panel's script attaches a moment after its
+    body shows; a loaded runner makes that moment long)."""
+    before = calls_to(rig, agent, verb)
+    for _ in range(6):
+        await click_panel(pg, cell)
+        for _ in range(20):
+            if calls_to(rig, agent, verb) > before:
+                return True
+            await asyncio.sleep(0.1)
+    return False
+
+
 def cell_of(rig: Rig, backend: str) -> dict:
     return next((c for c in rig.cells() if c.get("backend_id") == backend), {})
 
@@ -109,10 +123,7 @@ def main() -> bool:
                 grant = ((next((c for c in rig.cells() if c.get("id") == cell), {}).get("can_call")) or {}).get(inst) or []
                 info["cell_grant"] = grant
                 r["panel_granted_new_verb"] = "scan" in grant and "hello" not in grant
-                before = calls_to(rig, inst, "scan")
-                await click_panel(pg, cell)
-                await asyncio.sleep(2.0)
-                r["panel_click_reaches_new_verb"] = calls_to(rig, inst, "scan") > before
+                r["panel_click_reaches_new_verb"] = await click_reaches(pg, rig, cell, inst, "scan")
                 # f) the panel alone: only the file's content changes
                 (folder / "panel.html").write_text(PANEL.replace("SCAN-E67", "SCAN-E67-PANEL-ONLY"))
                 r["panel_only_edit_rerendered"] = bool(await pg.until(
@@ -141,10 +152,7 @@ def main() -> bool:
                 r["release_placed"] = bool(placed) and rcell != ""
                 if rcell:
                     await asyncio.sleep(1.0)  # its panel's script attached, as in (c)
-                    before = calls_to(rig, rel, "scan")
-                    await click_panel(pg, rcell)
-                    await asyncio.sleep(2.0)
-                    r["release_click_works"] = calls_to(rig, rel, "scan") > before
+                    r["release_click_works"] = await click_reaches(pg, rig, rcell, rel, "scan")
                 info["page_errors"] = pg.logs[:5]
 
         asyncio.run(run())
