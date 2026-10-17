@@ -1,8 +1,11 @@
-# RELEASE — pushing a tag `vX.Y.Z` (src/lib/rust/RELEASING.md) builds the
-# `fantastic` CLI for every release target, runs the model-free e2e on those
-# binaries, and publishes a GitHub Release with the archives and `SHA256SUMS`.
+# RELEASE — run BY HAND on a pushed tag `vX.Y.Z`
+# (`gh workflow run release.yml --ref vX.Y.Z`, src/lib/rust/RELEASING.md); the
+# tag push itself starts nothing. Builds the `fantastic` CLI for every release
+# target, runs the model-free e2e on those binaries, and publishes a GitHub
+# Release with the archives and `SHA256SUMS`.
 #
-#   guard    the tag is on `main`, and CHANGELOG.md has its `## [X.Y.Z]` section
+#   guard    the ref is a `vX.Y.Z` tag on `main`, and CHANGELOG.md has its
+#            `## [X.Y.Z]` section
 #   build    the reusable BUILD (`build.yml`): {release, e2e, artifacts}
 #   publish  the archives + SHA256SUMS, the CHANGELOG section as the notes
 #
@@ -12,8 +15,7 @@
 name: release
 
 on:
-  push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -40,6 +42,8 @@ jobs:
         run: |
           tag="${GITHUB_REF_NAME}"
           version="${tag#v}"
+          [ "$GITHUB_REF_TYPE" = tag ] && [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::run it on a vX.Y.Z tag (--ref vX.Y.Z), not '$tag'"; exit 1; }
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
             || { echo "::error::$tag is not on main"; exit 1; }
           grep -q "^## \[$version\]" CHANGELOG.md \

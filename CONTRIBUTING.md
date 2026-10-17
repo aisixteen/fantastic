@@ -57,8 +57,10 @@ Container changes: `sh container/build.sh` then `sh container/test/build_smoke.s
 
 CI (`.github/workflows/ci.yml`) builds every runtime and runs its unit tests and
 the model-free e2e (`e2e/run.py --only-free`) on Linux, macOS and Windows (swift:
-Linux and macOS), on every push to `main` and every PR. Lint is not in CI: run the
-lint commands above for every runtime you touched, locally, before opening a PR.
+Linux and macOS). It runs only when started by hand —
+`gh workflow run ci.yml --ref <branch>` or the Actions tab — never on a push or a
+PR. Lint is not in CI: run the lint commands above for every runtime you touched,
+locally, before opening a PR.
 
 ## Commits & pushes
 

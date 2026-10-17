@@ -248,8 +248,8 @@ async fn an_unreadable_manifest_is_reported_at_boot() {
         json!({
             "error": format!(
                 "static_loader: cannot read manifest 'nope.yaml': \
-                 [Errno 2] No such file or directory: '{}'",
-                abs.display()
+                 [Errno 2] No such file or directory: {}",
+                fantastic_bundle::py_repr(&abs.to_string_lossy())
             ),
             "booted": false,
         })
@@ -414,9 +414,8 @@ fn an_absolute_manifest_inside_cwd_is_refused() {
     assert_eq!(
         load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
         format!(
-            "static_loader: cannot read manifest '{}': fs: path '{}' escapes root",
-            abs.display(),
-            abs.display()
+            "static_loader: cannot read manifest {q}: fs: path {q} escapes root",
+            q = fantastic_bundle::py_repr(&abs.to_string_lossy())
         )
     );
     drop(fixture);
@@ -434,7 +433,8 @@ fn a_symlinked_manifest_escaping_cwd_is_refused() {
     assert_eq!(
         load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
         format!(
-            "static_loader: cannot read manifest '{rel_link}': fs: path '{rel_link}' escapes root"
+            "static_loader: cannot read manifest {q}: fs: path {q} escapes root",
+            q = fantastic_bundle::py_repr(&rel_link)
         )
     );
     drop(fixture);
@@ -457,7 +457,10 @@ fn a_falsy_yaml_document_boots_empty() {
     let agent = loader_with_meta(meta_of(&[("manifest", json!(rel.clone()))]));
     assert_eq!(
         load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
-        format!("static_loader: manifest '{rel}' must be a mapping with `agents:`")
+        format!(
+            "static_loader: manifest {} must be a mapping with `agents:`",
+            fantastic_bundle::py_repr(&rel)
+        )
     );
     drop(fixture);
 }
@@ -667,7 +670,8 @@ fn an_unhashable_mapping_key_is_invalid_yaml() {
         let err = load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err();
         assert!(
             err.starts_with(&format!(
-                "static_loader: manifest '{rel}' is not valid YAML: "
+                "static_loader: manifest {} is not valid YAML: ",
+                fantastic_bundle::py_repr(&rel)
             )) && err.contains("found unhashable key"),
             "{doc:?}: {err}"
         );

@@ -1,5 +1,6 @@
-# CI — every push to `main` or a `ci/…` branch, and every PR: the reusable
-# BUILD (`build.yml`) twice, side by side —
+# CI — run BY HAND only (`gh workflow run ci.yml --ref <branch>`, or the
+# Actions tab's "Run workflow"); nothing starts it on a push or a PR. The
+# reusable BUILD (`build.yml`) twice, side by side —
 #
 #   units   debug    every runtime's unit tests on Linux, macOS and Windows
 #   e2e     release  the shipping binaries built per OS, then the model-free e2e
@@ -10,10 +11,6 @@
 name: ci
 
 on:
-  push:
-    # `main`, and any `ci/…` branch: push one to run CI without opening a PR.
-    branches: [main, "ci/**"]
-  pull_request:
   workflow_dispatch:
 
 permissions:

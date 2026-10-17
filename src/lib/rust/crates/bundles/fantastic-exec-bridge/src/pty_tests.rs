@@ -185,8 +185,18 @@ async fn output_replays_the_ring_for_a_client_that_re_attaches() {
     let mut rx = k.ensure_inbox(&AgentId::from("term_o"));
     let jid = start(&k, "term_o", &py).await;
     output_until(&mut rx, |t| t.contains("SIZE")).await;
-    let ring = call(&k, "term_o", json!({"type": "output", "job_id": jid})).await;
-    let ring = ring["output"].as_str().unwrap().to_string();
+    // the ring once the guest's last line is all in (it then waits on input):
+    // the line's end can land a moment after its text
+    let mut ring = String::new();
+    loop {
+        let now = call(&k, "term_o", json!({"type": "output", "job_id": jid})).await;
+        let now = now["output"].as_str().unwrap().to_string();
+        if now == ring {
+            break;
+        }
+        ring = now;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     assert!(
         ring.contains("TTY True") && ring.contains("SIZE 91 37"),
         "{ring}"

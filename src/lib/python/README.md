@@ -266,8 +266,9 @@ Two complementary layers:
 
 ## Pre-push checks
 
-CI runs the tests on every push and PR (`.github/workflows/ci.yml`); lint is
-local only — run these before pushing:
+CI runs the tests when started by hand (`.github/workflows/ci.yml`,
+`gh workflow run ci.yml --ref <branch>`); lint is local only — run these before
+pushing:
 
 ```bash
 uvx ruff check kernel/ main.py bundled_agents/ tests/
