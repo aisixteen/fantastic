@@ -38,7 +38,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   directory is removed (it left `fantastic-schedbatch-*` behind).
 - e2e: a cold Chrome is given 30 s to attach; the reference surface's log
   panels keep each job's lines (a first line could land before the job was
-  named to them).
+  named to them) and its status follows the run's own job (a build's late
+  exit read as the run stopping); the hover-cost check compares the best of
+  three interleaved samples (one each measured a shared runner's noise).
 - CI: the Windows e2e runs one test at a time; a failed canvas test prints
   every page wait that ran out, when, and where the host's log stood.
 

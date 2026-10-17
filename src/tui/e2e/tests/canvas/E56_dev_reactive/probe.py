@@ -20,7 +20,7 @@ def surface(port: int) -> list[dict]:
 <script>let runJob=null;
 async function go(w){{
   if(w==='build'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(build[0])},args:{json.dumps(build[1:])}}});fantastic.emit('buildlog',{{type:'job',job_id:r&&r.job_id}});fantastic.emit('status',{{type:'state',s:'building'}});}}
-  if(w==='run'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(run[0])},args:{json.dumps(run[1:])}}});runJob=r&&r.job_id;fantastic.emit('runlog',{{type:'job',job_id:runJob}});fantastic.emit('status',{{type:'state',s:'running'}});}}
+  if(w==='run'){{const r=await fantastic.send('dev',{{type:'start',command:{json.dumps(run[0])},args:{json.dumps(run[1:])}}});runJob=r&&r.job_id;fantastic.emit('runlog',{{type:'job',job_id:runJob}});fantastic.emit('status',{{type:'state',s:'running',job:runJob}});}}
   if(w==='stop'&&runJob!==null){{await fantastic.send('dev',{{type:'stop',job_id:runJob}});}}
 }}
 // the app is shown the moment the server says it listens — not on a guessed delay
@@ -33,10 +33,12 @@ fantastic.onMessage(p=>{{if(p&&p.type==='job'){{job=p.job_id; show();}}}});
 fantastic.watch('dev',ev=>{{if(!ev||ev.job_id===undefined)return; const k=ev.job_id;
  if(ev.type==='progress')lines[k]=(lines[k]||'')+ev.line+'\\n'; else if(ev.type==='job_done')lines[k]=(lines[k]||'')+'[exit '+ev.exit_code+']\\n'; else return;
  if(k===job)show();}});</script>"""
-    status = """<h3>Status</h3><p id=s>idle</p><script>
-fantastic.onMessage(p=>{if(p&&p.type==='state')document.getElementById('s').textContent=p.s});
-fantastic.watch('dev',ev=>{if(!ev)return; if(ev.type==='progress'&&/^built:/.test(ev.line))document.getElementById('s').textContent='built';
- if(ev.type==='job_done'&&document.getElementById('s').textContent==='running')document.getElementById('s').textContent='stopped';});</script>"""
+    # the run's OWN job: a build's events can land after the run started (its
+    # exit, late on Windows, read as the run stopping)
+    status = """<h3>Status</h3><p id=s>idle</p><script>let run=null; const s=()=>document.getElementById('s');
+fantastic.onMessage(p=>{if(p&&p.type==='state'){s().textContent=p.s; if(p.job!==undefined)run=p.job;}});
+fantastic.watch('dev',ev=>{if(!ev)return; if(ev.type==='progress'&&/^built:/.test(ev.line)&&ev.job_id!==run&&s().textContent!=='running')s().textContent='built';
+ if(ev.type==='job_done'&&ev.job_id===run&&s().textContent==='running')s().textContent='stopped';});</script>"""
     app = f"""<h3>App</h3><iframe id=f style="width:100%;height:120px" src="about:blank"></iframe><script>
 fantastic.onMessage(p=>{{if(p&&p.type==='reload')document.getElementById('f').src='http://127.0.0.1:{port}/?'+Date.now()}});</script>"""
     wires = lambda to: {"can_call": {**grant, to: ["emit"]}} if to else {"can_call": grant}

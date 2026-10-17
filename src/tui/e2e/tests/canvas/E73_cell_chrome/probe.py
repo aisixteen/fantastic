@@ -86,13 +86,13 @@ def main() -> bool:
                     after = await pg.js(f"({geo})('c4')")
                     info["corners"][corner] = [before, after]
                 # 3. the cost of hovering: at rest vs the pointer sweeping over the cells
-                async def sample(sweep: bool) -> tuple[int, float]:
-                    # frames counted IN the page over ~3 s, the pointer moved (or not)
-                    # between counts; the GPU process sampled as it goes
+                async def sample(sweep: bool, secs: float) -> tuple[int, float]:
+                    # frames counted IN the page over `secs`, the pointer moved (or
+                    # not) between counts; the GPU process sampled as it goes
                     await pg.js("(()=>{window.__n=0; window.__t0=performance.now(); const f=()=>{window.__n++; requestAnimationFrame(f)}; if(!window.__counting){window.__counting=1; requestAnimationFrame(f)}})()")
                     cpu, k = [], 0
                     t0 = asyncio.get_event_loop().time()
-                    while asyncio.get_event_loop().time() - t0 < 3.0:
+                    while asyncio.get_event_loop().time() - t0 < secs:
                         if sweep:
                             await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=100 + (k * 37) % 1200, y=100 + (k * 53) % 700)
                         k += 1
@@ -102,8 +102,16 @@ def main() -> bool:
                     fps = await pg.js("Math.round(window.__n * 1000 / (performance.now() - window.__t0))")
                     return fps, round(sum(cpu) / max(len(cpu), 1))
                 await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=1390, y=890)
-                info["rest"] = await sample(False)
-                info["sweep"] = await sample(True)
+                # interleaved, the best of each: a shared runner's load comes and
+                # goes (at rest 21 fps, not 60) — one sample of each compared its
+                # noise, not the hover's cost
+                rests, sweeps = [], []
+                for _ in range(3):
+                    rests.append(await sample(False, 1.5))
+                    sweeps.append(await sample(True, 1.5))
+                info["rest"] = max(rests, key=lambda x: x[0])
+                info["sweep"] = max(sweeps, key=lambda x: x[0])
+                info["samples"] = {"rest": rests, "sweep": sweeps}
                 # 4. the ▁ and ⤢ buttons on c1
                 frame = "document.querySelector('.agent-frame[data-id=c1]')"
                 btn = lambda b: pg.js(f"{frame}.querySelector(':scope > .frame-head .{b}').click()")
