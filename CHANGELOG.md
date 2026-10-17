@@ -5,6 +5,65 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-10-17
+
+### Added
+
+- Windows (x86_64): the `fantastic` CLI, the rust kernel and the python kernel
+  run on Windows. Every OS call lives in the crate's (package's) `sys` module,
+  one file per OS family: the workdir lock (`LockFileEx`), owner-only files
+  (a protected DACL), exec_bridge jobs (Job Objects, ConPTY terminals, a
+  peer-verified loopback control socket), the console, Ctrl-Break as SIGTERM.
+- GitHub Release archives for five targets: macOS arm64 + x86_64, Linux musl
+  x86_64 + arm64, and `fantastic-x86_64-pc-windows-msvc.zip`, with
+  `SHA256SUMS`.
+- CI (`.github/workflows/ci.yml`, started by hand — `gh workflow run ci.yml
+  --ref <branch>`): every runtime's unit tests on Linux, macOS and Windows, the
+  five release archives, and the model-free e2e on those very binaries, each
+  OS's suite as three parallel shards. `release.yml` (by hand, on a `vX.Y.Z`
+  tag) publishes the archives of a green CI run on the tagged commit.
+- e2e: `E2E_ARTIFACTS=<dir>` runs the suite on prebuilt binaries
+  (`e2e/build.py` writes them); unset, it builds from source. `--shard i/n`
+  runs one slice of the selection.
+- README: for an AI agent — which archive to pull, how to verify it, and doc
+  mode (`fantastic` off a terminal, `fantastic readme [key]`).
+- user home store: `register_home_folder` / `name_home_folder` keep a
+  fantastic's folder in `<home>/fantastics/`; `fantastic canvas` writes
+  `.fantastic/cli/canvas.yaml` while it serves.
+
+### Changed
+
+- exec_bridge (python, rust, swift): a PTY `start` with neither `command` nor
+  `args` runs the record's whole `shell` line (`$SHELL -l` under
+  `shell: "login"`); the canvas no longer sends `-l`.
+- exec_bridge: the OS's required environment (`SYSTEMROOT` on Windows) reaches
+  every job, whatever `inherit_env` says.
+- A loader's reflected `root` and every path on the wire are `/`-separated on
+  every OS.
+
+### Fixed
+
+- The part splitter's stop is terminal in every runtime (a chunk fed after a
+  stop opened a new part).
+- python: on Windows, stdin is a terminal only if it is a console (`NUL` read
+  as a tty and started a REPL).
+- rust: a dangling link's target resolves through its existing part (an 8.3
+  short path compared unequal with its long form).
+- rust (Windows): a path another thread was saving at the same moment kept its
+  `\\?\` prefix and was refused as escaping its root (a canvas save lost).
+- canvas: a terminal re-attached after a page reload keeps its one-row shrink
+  at least 150 ms, so a full-screen program on Windows (ConPTY) repaints.
+
+### Known issues
+
+- The model-free e2e is not yet green on CI's runners: on Windows several
+  canvas probes time out (page, terminal and wizard steps run ~50× slower than
+  on a desktop), and a few probes race the slower Linux/macOS runners too. Unit
+  tests pass on all three OSes, and every archive is built by CI.
+- canvas: an AI cell stopped under load can keep its phase pill on "thinking"
+  after the stop (the turn is stopped; the next message answers).
+
+
 ## [0.0.4] - 2026-10-16
 
 ### Added
