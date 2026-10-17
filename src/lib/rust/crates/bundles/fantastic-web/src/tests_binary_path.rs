@@ -159,15 +159,22 @@ async fn paste_image_reads_its_body_at_data_over_ws_and_rest() {
     let port = free_port();
     let web = "web_bp_paste";
     let kernel = stage(&tmp, port, web).await;
-    // Each leg pastes into a terminal it started itself.
+    // Each leg pastes into a terminal it started itself — a program that waits
+    // on its terminal: `cat` on unix, the console shell (`%COMSPEC%`) on Windows.
+    let waiter = if cfg!(windows) {
+        std::env::var("COMSPEC").expect("COMSPEC")
+    } else {
+        "/bin/cat".to_string()
+    };
     let start_as = |leg: String| {
         let k = Arc::clone(&kernel);
+        let waiter = waiter.clone();
         async move {
             let started = fantastic_kernel::test_support::as_agent(
                 AgentId::from(leg.as_str()),
                 k.send(vec![Item::new(
                     AgentId::from("term"),
-                    json!({"type": "start", "command": "/bin/cat",
+                    json!({"type": "start", "command": waiter,
                            "pty": {"cols": 80, "rows": 24}}),
                 )]),
             )
