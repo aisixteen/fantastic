@@ -263,10 +263,19 @@ class Page:
 
 
 # ── disk ──────────────────────────────────────────────────────────────────────
+async def prompt(page: Page, bad: list[str]) -> None:
+    """The shell is up: its prompt is on the screen (a login shell started a
+    moment ago — after a restart's ▶ — can take seconds; keys typed before it
+    reads them are its to lose)."""
+    if not await page.until(XTERM_TEXT + ".trim().length > 0", 20):
+        bad.append("the shell drew no prompt")
+    await asyncio.sleep(0.3)
+
+
 def yaml_of(p: Path) -> dict:
     import yaml
 
-    return yaml.safe_load(p.read_text()) or {}
+    return yaml.safe_load(oslayer.read_text(p)) or {}
 
 
 # the root view's records, under the page root `canvas`
@@ -428,7 +437,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
     if "type" in run:
         if not await page.until("!!document.querySelector('.xterm-helper-textarea')", 10):
             bad.append("no terminal to type into")
-        await asyncio.sleep(0.8)  # the shell's prompt
+        await prompt(page, bad)
         await page.type(oslayer.for_os(run["type"]))
     if "before_reload_xterm" in run:
         w = run["before_reload_xterm"]
@@ -440,7 +449,7 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
     if "type_after" in run:
         if not await page.until("!!document.querySelector('.xterm-helper-textarea')", 10):
             bad.append("no terminal to type into after the reload")
-        await asyncio.sleep(0.8)
+        await prompt(page, bad)
         await page.type(oslayer.for_os(run["type_after"]))
     if "then_restart" in run:
         await restart(run["then_restart"], page, host, cwd, url, state, exp, bad)

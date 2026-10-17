@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -45,6 +46,20 @@ RAW_TTY_PY = (
     if WINDOWS
     else "import tty\ntty.setraw(0)\n"
 )
+
+
+def read_text(path: Path) -> str:
+    """A file another process may be replacing at this moment (a kernel's atomic
+    save). Windows refuses the open while the writer's rename lands — a sharing
+    violation, `PermissionError` — so it is opened again; POSIX never refuses."""
+    for _ in range(100):
+        try:
+            return path.read_text()
+        except PermissionError:
+            if not WINDOWS:
+                raise
+            time.sleep(0.02)
+    return path.read_text()
 
 
 def for_os(value):

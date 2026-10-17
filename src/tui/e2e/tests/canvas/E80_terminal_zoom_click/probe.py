@@ -73,8 +73,17 @@ def main() -> bool:
         for _ in range(40):
             g = await pg.js(GRID)
             if g and ok(g["scale"]):
-                await asyncio.sleep(0.6)  # the zoom's lerp at rest
-                return await pg.js(GRID)
+                # the zoom's lerp at REST: the grid where two reads apart agree (a
+                # loaded runner is still easing at a fixed 0.6 s, and a press there
+                # misses the moving grid)
+                last = None
+                for _ in range(50):
+                    await asyncio.sleep(0.15)
+                    g = await pg.js(GRID)
+                    if g == last:
+                        break
+                    last = g
+                return g
             await pg.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=bg[0], y=bg[1], deltaX=0, deltaY=delta)
             await asyncio.sleep(0.15)
         return None

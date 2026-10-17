@@ -170,6 +170,14 @@ async def reactive_check(pg, proj: Path, port: int) -> dict:
     r["run_clicked"] = await click_button(pg, "run")
     await after("run_clicked", "run_status", lambda: _has(pg, r"(?i)\brunning\b"), 20)
     await after("run_clicked", "app_shown", lambda: _app(pg, port, "Hello v1"), 25)
+    if r["run_clicked"] and not r["app_shown"]:
+        # what the page holds instead: every frame's url, the app frame's src, the run log
+        print("app diag:", json.dumps({
+            "frames": [f.get("url") for f in await _frames(pg)],
+            "app_src": await pg.js("[...document.querySelectorAll('.agent-frame iframe')].map(f=>{try{return f.contentDocument?.querySelector('#f')?.src||null}catch(e){return 'x-origin'}})"),
+            "text": await app_text(pg, port),
+            "runlog": [v for v in await frame_eval(pg, "document.getElementById('l')?.textContent || null") if v][:4],
+        })[:2000], flush=True)
     r["stop_clicked"] = await click_button(pg, "stop")
     await after("stop_clicked", "stop_status", lambda: _has(pg, r"(?i)\bstopped\b|\bexited\b|\bdone\b"), 20)
     (proj / "app" / "title.txt").write_text("Hello v2")

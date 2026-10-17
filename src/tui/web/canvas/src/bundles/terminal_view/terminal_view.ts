@@ -24,6 +24,10 @@ const HOLD_MAX = 2_000_000;
 // how long a re-attach waits for the program to answer the one-row shrink
 // before it restores the size (an idle shell may answer nothing)
 const REPAINT_WAIT_MS = 300;
+// and at least this long, answered or not: a Windows console (ConPTY) redraws
+// its own buffer on every resize, at once — output that is no sign the program
+// has read the smaller size (one polling it every 50 ms never saw it)
+const REPAINT_MIN_MS = 150;
 
 interface XTermGlobals {
   Terminal: new (opts: unknown) => XTerm;
@@ -373,10 +377,13 @@ export const terminalView: ViewBundle = {
         // screen; `sudo mactop` stayed blank the same way). So the size comes back after the
         // program's next output after the shrink took effect, or REPAINT_WAIT_MS.
         await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: Math.max(1, term.rows - 1) });
-        await new Promise<void>((res) => {
-          answered = res;
-          setTimeout(res, REPAINT_WAIT_MS);
-        });
+        await Promise.all([
+          new Promise<void>((res) => {
+            answered = res;
+            setTimeout(res, REPAINT_WAIT_MS);
+          }),
+          new Promise<void>((res) => setTimeout(res, REPAINT_MIN_MS)),
+        ]);
         answered = undefined;
         await host.call(backend, { type: "resize", job_id: jobId, cols: term.cols, rows: term.rows });
       } else if (next.start) {

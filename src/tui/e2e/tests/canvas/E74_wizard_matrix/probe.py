@@ -52,11 +52,12 @@ async def page2(pg, provider: str, url: str, model: str, key: str) -> dict:
     """Page 1 → the provider's NEW tile → page 2 filled: URL, model, every required
     field, and the key source (`saved` | `new` | `none`). Returns what page 2 showed."""
     await pg.js(f"[...document.querySelectorAll('.wiz .tiles button')].find(b=>b.firstChild.textContent==={json.dumps(provider)}).click()")
-    await pg.until("!!document.querySelector('.wiz label input')", 10)
+    await pg.until("!!document.querySelector('.wiz label input')", 30)
+    # no page 2 (it never came): what it showed is nothing, and every check on it fails
     shown = await pg.js("""(()=>{const l=[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent==='key'); return {
         name: document.querySelector('.wiz label input').value,
         key_source: l ? l.querySelector('select').value : null,
-        key_options: l ? [...l.querySelector('select').options].map(o=>o.value) : []}})()""")
+        key_options: l ? [...l.querySelector('select').options].map(o=>o.value) : []}})()""") or {}
     await pg.js("""((url, model, key, secret)=>{
         const lab = (n)=>[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent===n);
         const set = (n, v)=>{const l=lab(n); const i=l&&l.querySelector('input'); if(i){i.value=v; i.dispatchEvent(new Event('input'));}};

@@ -302,12 +302,12 @@ class Rig:
     def pinned(self, theme: str = "mobile") -> str | None:
         """The cell pinned in `theme` (its layout agent's `pinned`)."""
         f = self.cells_dir / f"layout_{theme}" / "agent.yaml"
-        return (yaml.safe_load(f.read_text()) or {}).get("pinned") if f.exists() else None
+        return (yaml.safe_load(oslayer.read_text(f)) or {}).get("pinned") if f.exists() else None
 
     def rects(self, theme: str = "canvas") -> dict:
         """Where the root view's cells sit in `theme` (its layout agent's rects)."""
         f = self.cells_dir / f"layout_{theme}" / "agent.yaml"
-        return dict((yaml.safe_load(f.read_text()) or {}).get("rects") or {}) if f.exists() else {}
+        return dict((yaml.safe_load(oslayer.read_text(f)) or {}).get("rects") or {}) if f.exists() else {}
 
     def seed_host_agent(self, parent_path: str, rec: dict) -> None:
         """Write a HOST agent record under `parent_path` (e.g. `FOLDER`, the
@@ -319,7 +319,7 @@ class Rig:
     def patch_host_agent(self, agent_id: str, fields: dict) -> None:
         """Merge `fields` into a HOST agent's record on disk (host stopped)."""
         for f in (self.proj / ".fantastic").rglob(f"{agent_id}/agent.yaml"):
-            rec = yaml.safe_load(f.read_text()) or {}
+            rec = yaml.safe_load(oslayer.read_text(f)) or {}
             rec.update(fields)
             f.write_text(yaml.safe_dump(rec, sort_keys=False))
             return
@@ -328,18 +328,18 @@ class Rig:
     def cells(self) -> list[dict]:
         out = []
         for f in sorted(self.cells_dir.glob("*/agent.yaml")):
-            r = yaml.safe_load(f.read_text()) or {}
+            r = yaml.safe_load(oslayer.read_text(f)) or {}
             if r.get("handler_module") not in ("background.ts", "layout.ts"):
                 out.append(r)
         return out
 
     def page_guid(self) -> str:
         f = self.proj / ".fantastic/web/agents/canvas/agent.yaml"
-        return (yaml.safe_load(f.read_text()) or {}).get("guid", "") if f.exists() else ""
+        return (yaml.safe_load(oslayer.read_text(f)) or {}).get("guid", "") if f.exists() else ""
 
     def host_record(self, agent_id: str) -> dict | None:
         for f in (self.proj / ".fantastic").rglob(f"{agent_id}/agent.yaml"):
-            return yaml.safe_load(f.read_text()) or {}
+            return yaml.safe_load(oslayer.read_text(f)) or {}
         return None
 
     # ── the evidence: the host's own stream ─────────────────────────────────

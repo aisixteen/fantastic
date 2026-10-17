@@ -314,6 +314,12 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
+      - name: no real-time scan (Windows)
+        # Defender scans every file a kernel writes (each record is a file):
+        # off on the throwaway runner VM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true

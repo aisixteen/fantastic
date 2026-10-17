@@ -32,6 +32,8 @@ runs:
       wait 200
       key enter
       until 20000 not in this build
+      # the whole list: the provider this build has is its last row
+      until 20000 vllm
       shot page1
       key down
       key down

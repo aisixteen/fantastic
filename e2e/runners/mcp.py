@@ -316,7 +316,7 @@ def after(run: dict, cwd: Path, code: int, client: Client, state: dict) -> list[
                     continue
                 import yaml
 
-                rec = yaml.safe_load(f.read_text())
+                rec = yaml.safe_load(oslayer.read_text(f))
                 for fk, fv in fields.items():
                     if fk.endswith("_has"):
                         m = rec.get(fk[: -len("_has")]) or {}

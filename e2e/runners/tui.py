@@ -300,7 +300,7 @@ def after(run: dict, cwd: Path, out: str, state: dict) -> list[str]:
             import yaml
 
             f = cwd / "home" / "agents" / "ai_agent" / "keys" / "credentials.yaml"
-            refs = ((yaml.safe_load(f.read_text()) or {}).get("refs") or {}) if f.is_file() else {}
+            refs = ((yaml.safe_load(oslayer.read_text(f)) or {}).get("refs") or {}) if f.is_file() else {}
             got = [(e.get("fields") or {}).get("api_key", "") for e in refs.values()]
             want_v = os.environ.get(want, "")
             if not got:

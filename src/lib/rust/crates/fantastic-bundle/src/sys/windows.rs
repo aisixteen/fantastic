@@ -166,10 +166,19 @@ pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
     let stripped = strip_verbatim(&path);
     let keep = match std::fs::canonicalize(&stripped) {
         Ok(again) => again == path,
-        // Missing now and missing at first: strip it anyway.
-        Err(e) => e.raw_os_error() == initial,
+        // Missing now and missing at first: strip it anyway. "Missing" is either
+        // code — a FOLDER of the path made between the two looks (another
+        // thread's save; python's one-threaded kernel never sees it) turns
+        // ERROR_PATH_NOT_FOUND into ERROR_FILE_NOT_FOUND, and the `\\?\` left
+        // on put the path outside its root.
+        Err(e) => e.raw_os_error() == initial || (missing(e.raw_os_error()) && missing(initial)),
     };
     Ok(if keep { stripped } else { path })
+}
+
+/// ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND: nothing at the path.
+fn missing(code: Option<i32>) -> bool {
+    matches!(code, Some(2 | 3))
 }
 
 /// python `ntpath._getfinalpathname_nonstrict`: walk up until the OS can

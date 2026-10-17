@@ -26,7 +26,7 @@ from canvas import DESKTOP_POINTER, MAC_CHROME, Host, Page, build_bin, free_port
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
-from helpers import verdict  # noqa: E402
+from helpers import oslayer, verdict  # noqa: E402
 
 SC = E2E / "tests" / "scenario" / "E21_canvas_user" / "scenario.yaml"
 FRAMES = "document.querySelectorAll('#world .agent-frame, .agent-frame').length"
@@ -101,7 +101,7 @@ def members(cwd: Path, under: str = "view_root") -> list[str]:
     if under != "view_root":
         d = d / under / "agents"
     return sorted(f.parent.name for f in d.glob("*/agent.yaml")
-                  if (yaml.safe_load(f.read_text()) or {}).get("handler_module") not in ("background.ts", "selector.ts")) if d.is_dir() else []
+                  if (yaml.safe_load(oslayer.read_text(f)) or {}).get("handler_module") not in ("background.ts", "selector.ts")) if d.is_dir() else []
 
 
 async def wait_for(cond, timeout: float = 8.0) -> bool:
