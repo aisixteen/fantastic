@@ -39,22 +39,54 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e"))
 from _lib.canvas_live import FOLDER, PY, Rig, other_setups, private_write, rebound, say, spot, verdict, saved_dir  # noqa: E402
 from helpers import oslayer  # noqa: E402
+from mocks import DONE  # noqa: E402
 from mocks.vllm import VllmMock  # noqa: E402
 
 CHATS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
+
+
+def last_text(req: dict) -> str:
+    """The newest message of a request, as text."""
+    msgs = req.get("messages") or [{}]
+    c = msgs[-1].get("content", "")
+    return c if isinstance(c, str) else json.dumps(c)
+
+
+def is_nudge(req: dict) -> bool:
+    """A turn the RUNTIME starts after a plain answer (no call): its no-call
+    reminder, alone, as the newest message."""
+    return last_text(req).lstrip().startswith(("[no call was dispatched]", "[no answer]"))
 
 
 class SlowVllm(VllmMock):
     """The vLLM mock, held `stall` seconds before a turn's first byte (the model
     "thinking") — what a stop or a queued message needs to happen during. Its
     usage reports the prompt's real size (≈4 characters a token), not a fixed one:
-    the fold trigger calibrates on the reported prompt size."""
+    the fold trigger calibrates on the reported prompt size.
+
+    THE NUDGE ENDS THE CHAIN AT ONCE: after every plain answer the runtime sends
+    its no-call reminder as a turn of its own. Answered from the queue, it took
+    the NEXT step's reply whenever it reached the mock after that step queued it
+    (a slow runner): S4's first answer, S5's stalled one (the stop then cut the
+    reminder, not the turn it meant). It gets `done`, unstalled, and takes nothing."""
 
     stall = 0.0
+    nudges = 0
+
+    def next_text(self, req):
+        if self.responder is not None:
+            got = self.responder(req)
+            if got is not None:
+                return got
+        if is_nudge(req):
+            self.nudges += 1
+            return DONE
+        with self.lock:
+            return self._replies.pop(0) if self._replies else DONE
 
     def turn(self, h, req, text):
         self.prompt_tokens = max(1, len(json.dumps(req.get("messages", []))) // 4)
-        if self.stall:
+        if self.stall and not is_nudge(req):
             time.sleep(self.stall)
         return super().turn(h, req, text)
 
@@ -65,6 +97,16 @@ def saved_record(url: str, **extra) -> str:
 
 def dialog(cell: str) -> str:
     return f"(document.querySelector('.agent-frame[data-id=\"{cell}\"] .c-dialog')?.innerText||'')"
+
+
+async def until_turn(mock: VllmMock, words: str, secs: float) -> bool:
+    """The mock has received the turn whose newest message carries `words`."""
+    end = time.time() + secs
+    while time.time() < end:
+        if any(words in last_text(t.get("body", {})) for t in mock.turns()):
+            return True
+        await asyncio.sleep(0.1)
+    return False
 
 
 async def ready(pg, cell: str) -> None:
@@ -137,6 +179,8 @@ def main() -> bool:
                 mock.stall = 6.0
                 mock.reply("S5-never")
                 await send(pg, a, "stop me")
+                # THIS turn is the one at the model (stalled there) before the stop
+                info["S5_at_model"] = await until_turn(mock, "stop me", 10)
                 # in flight (thinking): the send button is STOP now
                 info["S5_thinking"] = bool(await pg.until(f"document.querySelector('.agent-frame[data-id=\"{a}\"] .phase-pill')?.dataset.phase === 'thinking'", 5))
                 info["S5_button"] = await pg.js(f"document.querySelector('.agent-frame[data-id=\"{a}\"] .c-send')?.textContent")
@@ -296,7 +340,8 @@ def main() -> bool:
                 mock.reply("S11-fresh")
                 await send(pg, b, "after the clear")
                 await pg.until(f"{dialog(b)}.includes('S11-fresh')", 10)
-                body11 = json.dumps((mock.turns() or [{}])[0].get("body", {}).get("messages", []))
+                # the request that answered THIS message (a reminder of the turn before may come first)
+                body11 = json.dumps(next((t.get("body", {}).get("messages", []) for t in mock.turns() if "after the clear" in last_text(t.get("body", {}))), []))
                 info["S11_old_in_request"] = "S3-answer" in body11
                 info["S11_stats"] = await pg.js(f"document.querySelector('.agent-frame[data-id=\"{b}\"] .c-stats')?.textContent")
                 r["S11 clear starts a new thread"] = bool(cleared) and not info["S11_old_in_request"]
@@ -420,6 +465,7 @@ def main() -> bool:
         small.stop()
         rig.stop()
     rig.summary["checks"] = r
+    info["nudges_answered_done"] = [mock.nudges, small.nudges]
     rig.summary["info"] = info
     print(json.dumps(info, indent=1, default=str)[:3000])
     failed = [k for k, v in r.items() if not v]

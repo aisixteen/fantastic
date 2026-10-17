@@ -303,13 +303,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, xcode-27, windows-latest]
         shard: [1, 2, 3]
+        # LANES: tests at once. Windows runs one: two software-GL Chromes and
+        # their hosts on its 4 vCPUs pushed the canvas waits past their bounds.
         include:
           - os: ubuntu-latest
             skip: "--exclude-runtime swift"
+            lanes: 2
           - os: xcode-27
             skip: ""
+            lanes: 2
           - os: windows-latest
             skip: "--exclude-runtime swift"
+            lanes: 1
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
@@ -371,7 +376,7 @@ jobs:
           E2E_TUI_FRAMES: ${{ github.workspace }}/e2e/runs/tui-frames
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
-        run: uv run python ../../../e2e/run.py --only-free --lanes 2 --shard ${{ matrix.shard }}/3 ${{ matrix.skip }}
+        run: uv run python ../../../e2e/run.py --only-free --lanes ${{ matrix.lanes }} --shard ${{ matrix.shard }}/3 ${{ matrix.skip }}
       - name: the failures' logs, here
         if: failure()
         run: |

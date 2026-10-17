@@ -29,8 +29,11 @@ def build_argv() -> list[str]:
 
 def run_argv(port: int) -> list[str]:
     """The static server on `port`, serving `dist` — unbuffered, so its
-    "Serving HTTP" line reaches the run log the moment it listens."""
-    return [PY, "-u", "-m", "http.server", str(port), "--directory", "dist"]
+    "Serving HTTP" line reaches the run log the moment it listens. Bound to
+    loopback, where the app frame loads it: on all interfaces (`::`) it
+    reverse-resolves that address before it prints, which a macOS runner's
+    resolver stalls on past the check's wait."""
+    return [PY, "-u", "-m", "http.server", str(port), "--bind", "127.0.0.1", "--directory", "dist"]
 
 
 def write_project(proj: Path, title: str = "Hello v1") -> None:

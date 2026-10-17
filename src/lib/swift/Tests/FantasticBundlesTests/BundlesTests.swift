@@ -434,6 +434,16 @@ struct BundleSmokeTests {
             + "fast=\(probe.hit("p_fast")?.at ?? -1) list=\(dbgList.serialize())"
         #expect(fastEarly, "not one batch: the fast fire waited for the slow one; \(dbg)")
         let both = await waitFor({ probe.hit("p_slow") != nil && probe.hit("p_fast") != nil }, seconds: 6.0)
+        // The batch records its fires only when the slow one's block ends: wait
+        // for both events, or that late write re-creates `dir` after the defer
+        // removed it, leaving a `fantastic-schedbatch-*` behind in the cwd.
+        var recorded = 0
+        for _ in 0..<160 where recorded < 2 {
+            let h = await kernel.send([Item("sched", ["type": "history"])])[0].result
+            recorded = Int(h["count"].asInt ?? 0)
+            if recorded < 2 { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        #expect(recorded == 2, "the batch must record both fires")
         _ = await kernel.send([Item("kernel", ["type": "delete_agent", "id": "sched"])])[0].result
         #expect(both, "both probes must be hit")
         let list = await kernel.send([Item("sched", ["type": "list"])])[0].result

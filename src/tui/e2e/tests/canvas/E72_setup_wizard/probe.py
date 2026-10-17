@@ -53,7 +53,8 @@ def main() -> bool:
                 info["cell"] = cell
                 # 2. its settings: the wizard for it
                 await pg.js("document.querySelector('.ai-not-set-up .nsu-settings').click()")
-                await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 20)
+                if not await pg.until("document.querySelectorAll('.wiz .tiles button').length === 4", 20):
+                    info["wiz2_instead"] = await pg.js("document.querySelector('.wiz')?.innerText?.slice(0, 300) ?? 'no wizard'")
                 await pg.js("[...document.querySelectorAll('.wiz .tiles button')].find(b=>b.firstChild.textContent==='vllm').click()")
                 await pg.until("!!document.querySelector('.wiz label input')", 10)
                 vals = "[...document.querySelectorAll('.wiz label')].map(l=>[l.querySelector('span').textContent, (l.querySelector('input,select')||{}).value])"

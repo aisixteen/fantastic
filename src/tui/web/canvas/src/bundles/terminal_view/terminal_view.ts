@@ -390,13 +390,18 @@ export const terminalView: ViewBundle = {
         await startJob();
       }
       attaching = false;
+      drainEarly(covered);
+      drawLast();
+    };
+    // the frames held while the job was unknown (or an attach ran), in order;
+    // the first `covered` are in a ring replay already
+    const drainEarly = (covered: number): void => {
       early.splice(0).forEach((e, i) => {
         if (e["type"] === "job_done") return ended(e);
         // in the replay already: not drawn again, acked once (it was sent once)
         if (i < covered && e["job_id"] === jobId) return ackChars(typeof e["data"] === "string" ? (e["data"] as string).length : 0);
         draw(e);
       });
-      drawLast();
     };
     // START the cell's program (its first placement, or the human's ▶): once
     // started, the cell records it — later it waits for ▶ instead
@@ -420,7 +425,11 @@ export const terminalView: ViewBundle = {
     const press = async (run: boolean): Promise<void> => {
       if (jobId !== undefined) return;
       term.reset();
-      if (!(await startJob())) return;
+      const ok = await startJob();
+      // what the program wrote before the start's reply named its job (a
+      // shell's first prompt, on a slow host) was held: it is drawn now
+      drainEarly(0);
+      if (!ok) return;
       if (run && last.cmd !== null && jobId !== undefined) void host.call(backend, { type: "write", job_id: jobId, data: runLine(last.cmd) });
       last = pressed(last);
       drawLast();

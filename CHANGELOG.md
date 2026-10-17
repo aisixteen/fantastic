@@ -5,6 +5,23 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- canvas terminal: a ▶ start no longer drops what the program wrote before
+  the start's reply named its job (a shell's first prompt on a slow host) —
+  it is drawn and acked, as an attach already did.
+- e2e: the reference dev surface's server binds loopback (on every interface
+  it reverse-resolves `::` before it says it listens — a macOS runner stalls
+  there); a click waits for its target to be SHOWN, not only present (a
+  stopped terminal's ▶ is in the DOM hidden until its attach); the AI-cell
+  mock answers the runtime's no-call reminder `done` at once, so it never takes
+  the next step's reply (S4, S5, S11); prompt_file checks the turn that answers
+  its message; a cell deleted between a listing and its read is skipped; the
+  Swift scheduler-batch test waits for its fires to be recorded before its
+  directory is removed (it left `fantastic-schedbatch-*` behind).
+- CI: the Windows e2e runs one test at a time; a failed canvas test prints
+  every page wait that ran out, when, and where the host's log stood.
+
 ## [0.0.5] - 2026-10-17
 
 ### Added

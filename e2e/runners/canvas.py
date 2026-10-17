@@ -180,6 +180,10 @@ class Page:
 
     def __init__(self, ws):
         self.ws, self.n, self.logs = ws, 0, []
+        #: every `until` that ran out, as it happened — a failure's timeline:
+        #: seconds since the page opened, the wait, its expression, and `mark()`
+        #: (a probe may set it, e.g. to where the host's log stands)
+        self.t0, self.misses, self.mark = time.time(), [], None
 
     async def cdp(self, method: str, **params):
         self.n += 1
@@ -221,6 +225,8 @@ class Page:
             if await self.js(expr):
                 return True
             await asyncio.sleep(0.1)
+        at = self.mark() if self.mark else ""
+        self.misses.append(f"+{time.time() - self.t0:.1f}s {timeout:g}s {' '.join(expr.split())[:160]}{' @ ' + at if at else ''}")
         return False
 
     async def open(self, url: str) -> None:
@@ -385,11 +391,14 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
 
 
 async def click(page: Page, sel: str, bad: list[str]) -> None:
-    # a target drawn a moment after the page (a stopped terminal's ▶, past its attach)
-    await page.until(f"!!document.querySelector({json.dumps(sel)})", 10)
+    # a target SHOWN a moment after the page: a stopped terminal's ▶ is in the
+    # DOM from the start, hidden (0×0 at the corner) until its attach finds the
+    # program stopped — a click at that rect lands on nothing
+    await page.until(f"(()=>{{const e=document.querySelector({json.dumps(sel)});"
+                     "if(!e) return false; const r=e.getBoundingClientRect(); return r.width>0&&r.height>0;})()", 10)
     r = await page.rect(sel)
-    if r is None:
-        bad.append(f"nothing to click at {sel}")
+    if r is None or not (r["w"] > 0 and r["h"] > 0):
+        bad.append(f"nothing shown to click at {sel}")
         return
     await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
     await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)

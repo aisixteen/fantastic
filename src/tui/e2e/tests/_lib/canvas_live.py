@@ -181,6 +181,7 @@ class Rig:
         self.url: str | None = None
         self.port = free_port()
         self.summary: dict[str, Any] = {"id": self.id}
+        self.misses: list[str] = []
 
     # ── the model plug (live tests) ─────────────────────────────────────────
     def plug_or_refusal(self) -> str | None:
@@ -328,7 +329,11 @@ class Rig:
     def cells(self) -> list[dict]:
         out = []
         for f in sorted(self.cells_dir.glob("*/agent.yaml")):
-            r = yaml.safe_load(oslayer.read_text(f)) or {}
+            # a cell deleted between the listing and the read is no longer a cell
+            try:
+                r = yaml.safe_load(oslayer.read_text(f)) or {}
+            except FileNotFoundError:
+                continue
             if r.get("handler_module") not in ("background.ts", "layout.ts"):
                 out.append(r)
         return out
@@ -339,8 +344,19 @@ class Rig:
 
     def host_record(self, agent_id: str) -> dict | None:
         for f in (self.proj / ".fantastic").rglob(f"{agent_id}/agent.yaml"):
-            return yaml.safe_load(oslayer.read_text(f)) or {}
+            try:
+                return yaml.safe_load(oslayer.read_text(f)) or {}
+            except FileNotFoundError:
+                continue  # deleted between the listing and the read
         return None
+
+    def log_at(self) -> str:
+        """Where the host's log stands: its newest `[n]` line."""
+        try:
+            lines = self.log.read_text(errors="replace").splitlines()
+        except OSError:
+            return ""
+        return next((ln[:80] for ln in reversed(lines) if ln.startswith("[")), "")
 
     # ── the evidence: the host's own stream ─────────────────────────────────
     def page_calls(self) -> list[str]:
@@ -381,6 +397,8 @@ class Rig:
         try:
             async with await attach(cdp) as ws:
                 pg = Page(ws)
+                pg.mark = self.log_at
+                self.misses = pg.misses
                 await pg.cdp("Runtime.enable")
                 await pg.cdp("Page.enable")
                 await pg.viewport(width, height)
@@ -417,6 +435,9 @@ class Rig:
         (`return verdict(*rig.finish(ok, note))`)."""
         self.summary.update({"ok": ok, "note": note, "page_calls": self.page_calls()})
         (self.art / "summary.json").write_text(json.dumps(self.summary, indent=1, ensure_ascii=False))
+        if not ok and self.misses:
+            # every page wait that ran out, when, and where the host's log stood
+            print("waits that ran out:\n  " + "\n  ".join(self.misses[-20:]))
         if not ok and self.log.exists():
             # the run's own log: a CI run keeps only what is printed
             print("host.log (tail):\n" + "\n".join(self.log.read_text(errors="replace").splitlines()[-40:]))

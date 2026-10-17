@@ -53,12 +53,17 @@ def main() -> bool:
         port = s.getsockname()[1]
     stub = OpenAIChatStub(_Rec(rig.art / "stub"), "stub", port)
     systems: list[str] = []
+    #: each request's newest message, beside its system block: a plain answer
+    #: starts the runtime's no-call reminders, turns of their own, so "the next
+    #: request" may be one of those — a turn is found by what it answers
+    lasts: list[str] = []
 
     def responder(req: dict, _raw: bytes):
         msgs = req.get("messages") or []
         if msgs and msgs[0].get("role") == "system":
-            c = msgs[0].get("content")
+            c, last = msgs[0].get("content"), msgs[-1].get("content")
             systems.append(c if isinstance(c, str) else json.dumps(c))
+            lasts.append(last if isinstance(last, str) else json.dumps(last))
         return "ok"
     stub.responder = responder
     stub.start(Handler)
@@ -78,6 +83,15 @@ def main() -> bool:
             await asyncio.sleep(0.5)
         return False
 
+    async def turn_of(words: str, start: int) -> int | None:
+        """The index of the first request from `start` on answering `words`."""
+        for _ in range(secs * 2):
+            hit = next((i for i in range(start, len(lasts)) if words in lasts[i]), None)
+            if hit is not None:
+                return hit
+            await asyncio.sleep(0.5)
+        return None
+
     async def drive() -> None:
         async with rig.page(1600, 1000) as pg:
             await asyncio.sleep(1.5)
@@ -96,15 +110,15 @@ def main() -> bool:
             info["ai"] = rec.get("id")
             r["ai_names_file"] = rec.get("file_bridge_id") == "prompt_file" and rec.get("system_prompt_file") == ".fantastic/prompt.md"
             r["records_persist"] = "persist through 'prompt_file' failed" not in (rig.proj / ".fantastic" / "cli" / "kernel.log").read_text(errors="ignore")
-            # c) an edit is the block on the next turn (a turn may make several
-            # requests: let the first settle, then look at the first one AFTER)
+            # c) an edit is the block on the next turn: the turn that answers "again"
             await asyncio.sleep(4)
             before = len(systems)
             prompt.write_text(f"{MARK} — you are on a test canvas.\n\n{{self}}\n")
             await asyncio.sleep(1.5)
             await say(pg, "again")
-            r["turn2"] = await turns(before + 1)
-            s2 = systems[before] if len(systems) > before else ""
+            at = await turn_of("again", before)
+            r["turn2"] = at is not None
+            s2 = systems[at] if at is not None else ""
             info["turn2"] = s2[:300]
             r["turn2_edited"] = s2.startswith(MARK) and f"You are `{rec.get('id', '?')}`" in s2 and "## Reaching other agents" not in s2
 
