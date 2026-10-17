@@ -114,6 +114,20 @@ pub async fn ensure_bridge(h: &Host) -> Result<(), String> {
     err_of(&r).map_or(Ok(()), |e| Err(format!("the bundle watcher's bridge `{BRIDGE}`: {e}")))
 }
 
+/// The new folders whose files were watched BEFORE their bundle loaded (a
+/// spawn arms its folder, then loads it): their own `added` event, however late
+/// it comes (Windows), has nothing left to load — reloading then restarted the
+/// instance made since, mid-call.
+static ARMED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// Watch new bundle folder `name`'s files before it is loaded: an edit from now
+/// on is an event, and the folder's own `added` event reloads nothing.
+pub async fn arm(h: &Host, name: &str) {
+    // marked first: the folder's event may be handled while the watch is armed
+    ARMED.lock().expect("armed folders").insert(name.to_string());
+    watch_path(h, &format!("{BUNDLES}/{name}")).await;
+}
+
 async fn watch_path(h: &Host, path: &str) {
     let r = h.operator(BRIDGE, json!({"type": "watch_path", "path": path})).await.result;
     if let Some(e) = err_of(&r) {
@@ -156,8 +170,6 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                 }
             }
         }
-        // the folders seen REMOVED: one made again is new to the kernel's load
-        let mut gone: BTreeSet<String> = BTreeSet::new();
         while let Some(first) = rx.recv().await {
             // the burst: this event and every one within SETTLE
             let mut items = vec![first];
@@ -176,20 +188,16 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                 let dir = root.join(&name);
                 if !dir.is_dir() {
                     if is_folder {
-                        gone.insert(name);
+                        // made again later, it is a new folder
+                        ARMED.lock().expect("armed folders").remove(&name);
                     }
                     continue; // removed: nothing to load
                 }
                 if is_folder {
-                    // a NEW folder: watch its files too, and load it — unless the
-                    // kernel has loaded it already (a spawn scaffolds the folder and
-                    // loads it itself): reloading it then restarted the instance the
-                    // spawn had just made, mid-call, whenever the disk's event came
-                    // after it (Windows). A hand-made folder, or one made again
-                    // after its removal, loads.
-                    watch_path(&h, &format!("{BUNDLES}/{name}")).await;
-                    let again = gone.remove(&name);
-                    if again || !h.kernel.bundles.is_folder(&name) {
+                    // a NEW bundle: watch its files too, and load it — unless it
+                    // was armed before its load (`arm`)
+                    if !ARMED.lock().expect("armed folders").contains(&name) {
+                        watch_path(&h, &format!("{BUNDLES}/{name}")).await;
                         code.insert(name);
                     }
                     continue;

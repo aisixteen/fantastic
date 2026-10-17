@@ -13,11 +13,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - canvas terminal: keys reach the program in the order typed — one `write` in
   flight at a time, what is typed meanwhile sent next, whole. The host runs
   each call as its own task, so a line and its Enter could arrive swapped.
-- `fantastic canvas` dev watcher: a new bundle folder the kernel has already
-  loaded (a spawn scaffolds and loads it) is watched, not reloaded — the late
-  disk event restarted the instance the spawn had just made, mid-call
-  (Windows). A hand-made folder, or one made again after its removal, still
-  loads.
+- `fantastic canvas` dev watcher: a spawned bundle's folder is watched BEFORE
+  it loads, and its own `added` event reloads nothing — that event, late on
+  Windows, restarted the instance the spawn had just made, mid-call. A
+  hand-made folder, or one made again after its removal, still loads.
 - e2e: the reference dev surface serves with its own `serve.py` (`-m
   http.server` reverse-resolves its address before it says it listens — a
   macOS runner stalled there); a TUI shot waits for its page's footer (ConPTY

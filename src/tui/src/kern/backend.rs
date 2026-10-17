@@ -234,6 +234,9 @@ impl BackendBundle {
             Ok(d) => d,
             Err(e) => return refuse("bad_arg", format!("spawn: {e}"), ""),
         };
+        // its files watched BEFORE it loads: an edit from now on reloads it, and
+        // the folder's own (late) event does not restart the instance made below
+        crate::kern::bundle_watch::arm(host, &name).await;
         let r = host.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return refuse("bad_arg", format!("spawn: loading the bundle `{name}`: {e}"), "");
