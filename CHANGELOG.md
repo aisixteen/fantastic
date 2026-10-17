@@ -10,10 +10,20 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - canvas terminal: a ▶ start no longer drops what the program wrote before
   the start's reply named its job (a shell's first prompt on a slow host) —
   it is drawn and acked, as an attach already did.
-- e2e: the reference dev surface's server binds loopback (on every interface
-  it reverse-resolves `::` before it says it listens — a macOS runner stalls
-  there); a click waits for its target to be SHOWN, not only present (a
-  stopped terminal's ▶ is in the DOM hidden until its attach); the AI-cell
+- canvas terminal: keys reach the program in the order typed — one `write` in
+  flight at a time, what is typed meanwhile sent next, whole. The host runs
+  each call as its own task, so a line and its Enter could arrive swapped.
+- `fantastic canvas` dev watcher: a new bundle folder the kernel has already
+  loaded (a spawn scaffolds and loads it) is watched, not reloaded — the late
+  disk event restarted the instance the spawn had just made, mid-call
+  (Windows). A hand-made folder, or one made again after its removal, still
+  loads.
+- e2e: the reference dev surface serves with its own `serve.py` (`-m
+  http.server` reverse-resolves its address before it says it listens — a
+  macOS runner stalled there); a TUI shot waits for its page's footer (ConPTY
+  hands a redraw over in pieces); a click waits for its target to be SHOWN,
+  not only present (a stopped terminal's ▶ is in the DOM hidden until its
+  attach); the AI-cell
   mock answers the runtime's no-call reminder `done` at once, so it never takes
   the next step's reply (S4, S5, S11); prompt_file checks the turn that answers
   its message; a cell deleted between a listing and its read is skipped; the

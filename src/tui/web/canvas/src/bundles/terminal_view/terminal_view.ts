@@ -269,8 +269,27 @@ export const terminalView: ViewBundle = {
       box.addEventListener("compositionstart", () => (composing = true));
       box.addEventListener("compositionend", () => (composing = false));
     }
+    // KEYS IN ORDER: the host runs each call as a task of its own, so two
+    // writes in flight at once could reach the program swapped (a typed line,
+    // then its Enter, arrived Enter first). One write at a time; what is typed
+    // meanwhile goes as the next one, whole.
+    let unsent = "";
+    let writing = false;
+    const sendKeys = async (): Promise<void> => {
+      writing = true;
+      while (unsent !== "" && jobId !== undefined) {
+        const data = unsent;
+        unsent = "";
+        await host.call(backend, { type: "write", job_id: jobId, data }).catch((e: Error) => console.warn("[terminal] write failed:", e));
+      }
+      unsent = "";
+      writing = false;
+    };
     term.onData((data: string) => {
-      if (jobId !== undefined) void host.call(backend, { type: "write", job_id: jobId, data });
+      if (jobId !== undefined) {
+        unsent += data;
+        if (!writing) void sendKeys();
+      }
       if (box) setTimeout(() => !composing && (box.value = ""), 0);
     });
     term.onResize(({ cols, rows }) => {

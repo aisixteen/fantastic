@@ -156,6 +156,8 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                 }
             }
         }
+        // the folders seen REMOVED: one made again is new to the kernel's load
+        let mut gone: BTreeSet<String> = BTreeSet::new();
         while let Some(first) = rx.recv().await {
             // the burst: this event and every one within SETTLE
             let mut items = vec![first];
@@ -173,12 +175,23 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                 let Some((name, is_folder)) = p.get("path").and_then(Value::as_str).and_then(bundle_of) else { continue };
                 let dir = root.join(&name);
                 if !dir.is_dir() {
+                    if is_folder {
+                        gone.insert(name);
+                    }
                     continue; // removed: nothing to load
                 }
                 if is_folder {
-                    // a NEW bundle: watch its files too, and load it
+                    // a NEW folder: watch its files too, and load it — unless the
+                    // kernel has loaded it already (a spawn scaffolds the folder and
+                    // loads it itself): reloading it then restarted the instance the
+                    // spawn had just made, mid-call, whenever the disk's event came
+                    // after it (Windows). A hand-made folder, or one made again
+                    // after its removal, loads.
                     watch_path(&h, &format!("{BUNDLES}/{name}")).await;
-                    code.insert(name);
+                    let again = gone.remove(&name);
+                    if again || !h.kernel.bundles.is_folder(&name) {
+                        code.insert(name);
+                    }
                     continue;
                 }
                 let file = p.get("path").and_then(Value::as_str).unwrap_or("");

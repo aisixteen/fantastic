@@ -20,6 +20,20 @@ pathlib.Path("dist").mkdir(exist_ok=True)
 pathlib.Path("dist/index.html").write_text(f'<h1 id="t">{title}</h1>')
 print(f"built: {title}", flush=True)
 """
+#: The static server: `dist` on loopback. Not `-m http.server`: its bind
+#: reverse-resolves the address (`socket.getfqdn`) before it says it listens,
+#: and a CI resolver stalled that past the check's wait (macOS runners).
+SERVE_PY = """import functools, http.server, socketserver, sys
+class Server(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+port = int(sys.argv[1])
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory="dist")
+with Server(("127.0.0.1", port), handler) as httpd:
+    print(f"Serving HTTP on 127.0.0.1 port {port}", flush=True)
+    httpd.serve_forever()
+"""
 
 
 def build_argv() -> list[str]:
@@ -28,18 +42,16 @@ def build_argv() -> list[str]:
 
 
 def run_argv(port: int) -> list[str]:
-    """The static server on `port`, serving `dist` — unbuffered, so its
-    "Serving HTTP" line reaches the run log the moment it listens. Bound to
-    loopback, where the app frame loads it: on all interfaces (`::`) it
-    reverse-resolves that address before it prints, which a macOS runner's
-    resolver stalls on past the check's wait."""
-    return [PY, "-u", "-m", "http.server", str(port), "--bind", "127.0.0.1", "--directory", "dist"]
+    """The static server on `port`, serving `dist` on loopback — its "Serving
+    HTTP" line reaches the run log the moment it listens."""
+    return [PY, "-u", "serve.py", str(port)]
 
 
 def write_project(proj: Path, title: str = "Hello v1") -> None:
     (proj / "app").mkdir(exist_ok=True)
     (proj / "app" / "title.txt").write_text(title)
     (proj / "build.py").write_text(BUILD_PY)
+    (proj / "serve.py").write_text(SERVE_PY)
 
 
 def exec_record(port: int) -> dict:
