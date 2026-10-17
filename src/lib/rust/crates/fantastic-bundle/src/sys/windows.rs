@@ -166,19 +166,25 @@ pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
     let stripped = strip_verbatim(&path);
     let keep = match std::fs::canonicalize(&stripped) {
         Ok(again) => again == path,
-        // Missing now and missing at first: strip it anyway. "Missing" is either
-        // code — a FOLDER of the path made between the two looks (another
-        // thread's save; python's one-threaded kernel never sees it) turns
-        // ERROR_PATH_NOT_FOUND into ERROR_FILE_NOT_FOUND, and the `\\?\` left
-        // on put the path outside its root.
-        Err(e) => e.raw_os_error() == initial || (missing(e.raw_os_error()) && missing(initial)),
+        // Missing now and missing at first: strip it anyway. "Missing" is any
+        // code the nonstrict walk itself steps over (`unseen`), not only the
+        // same one twice: another thread's save between the two looks — a folder
+        // made (PATH_NOT_FOUND → FILE_NOT_FOUND), a file mid-replace (ACCESS_DENIED
+        // ↔ FILE_NOT_FOUND) — changes the code, and the `\\?\` left on put the
+        // path outside its root (python's one-threaded kernel never sees it).
+        Err(e) => e.raw_os_error() == initial || (unseen(e.raw_os_error()) && unseen(initial)),
     };
     Ok(if keep { stripped } else { path })
 }
 
-/// ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND: nothing at the path.
-fn missing(code: Option<i32>) -> bool {
-    matches!(code, Some(2 | 3))
+/// The codes python's `_getfinalpathname_nonstrict` walks past — the path (or a
+/// part of it) cannot be seen right now: missing, access denied (a file being
+/// replaced, a folder being deleted), in use, a bad name, a network path down.
+fn unseen(code: Option<i32>) -> bool {
+    matches!(
+        code,
+        Some(1 | 2 | 3 | 5 | 21 | 32 | 50 | 53 | 65 | 67 | 87 | 123 | 161 | 1920 | 1921)
+    )
 }
 
 /// python `ntpath._getfinalpathname_nonstrict`: walk up until the OS can

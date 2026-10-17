@@ -12,6 +12,7 @@ c) each press reached CLICKS as `6 4`."""
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -108,6 +109,10 @@ def main() -> bool:
     async def drive() -> None:
         async with rig.page(1400, 900) as pg:
             r["ready"] = bool(await pg.until(READY, 20))
+            if not r["ready"]:
+                # what the terminal shows instead (the guest's traceback, a prompt)
+                info["screen"] = await pg.js("(()=>{const f=document.querySelector(" + json.dumps(FRAME + " .frame-body") + "); const t=f&&f.xterm; if(!t) return null;"
+                                             " const b=t.buffer.active; let s=''; for(let i=0;i<Math.min(b.length,12);i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})()")
             await asyncio.sleep(1.0)  # the first fit's resizes answered
             await press(pg, "zoom_1", await pg.js(GRID))
             await press(pg, "zoomed_in", await zoom_until(pg, -100, lambda s: s > 1.5))

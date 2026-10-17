@@ -228,8 +228,12 @@ class Page:
         moment from listening) leaves Chrome's own error page — complete, with a
         body — so the check is the page's origin, and a miss navigates again."""
         origin = json.dumps(urllib.parse.urlsplit(url)._replace(path="", query="", fragment="").geturl())
-        loaded = f"document.readyState === 'complete' && location.origin === {origin} && !!document.querySelector('#status, .status, body')"
+        # the NEW document: the one in the tab is marked first, so its own
+        # `complete` (a reload's outgoing page) is never taken for the load
+        loaded = (f"document.readyState === 'complete' && location.origin === {origin} && !window.__e2e_left"
+                  " && !!document.querySelector('#status, .status, body')")
         for _ in range(10):
+            await self.js("window.__e2e_left = true")
             nav = await self.cdp("Page.navigate", url=url)
             if not nav.get("errorText") and await self.until(loaded, 15):
                 return

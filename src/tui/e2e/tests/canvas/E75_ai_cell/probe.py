@@ -138,9 +138,12 @@ def main() -> bool:
                 mock.reply("S5-never")
                 await send(pg, a, "stop me")
                 # in flight (thinking): the send button is STOP now
-                await pg.until(f"document.querySelector('.agent-frame[data-id=\"{a}\"] .phase-pill')?.dataset.phase === 'thinking'", 5)
+                info["S5_thinking"] = bool(await pg.until(f"document.querySelector('.agent-frame[data-id=\"{a}\"] .phase-pill')?.dataset.phase === 'thinking'", 5))
+                info["S5_button"] = await pg.js(f"document.querySelector('.agent-frame[data-id=\"{a}\"] .c-send')?.textContent")
                 await pg.js(f"document.querySelector('.agent-frame[data-id=\"{a}\"] .c-send').click()")
                 idle = await pg.until(f"document.querySelector('.agent-frame[data-id=\"{a}\"] .phase-pill')?.dataset.phase === 'idle'", 8)
+                # what the pill says instead (a CI-only miss: the diagnosis)
+                info["S5_pill"] = await pg.js(f"(p=>p&&[p.dataset.phase,p.dataset.reason,p.title])(document.querySelector('.agent-frame[data-id=\"{a}\"] .phase-pill'))")
                 await asyncio.sleep(6.5)
                 mock.stall = 0.0
                 info["S5_dialog_has_never"] = await pg.js(f"{dialog(a)}.includes('S5-never')")
