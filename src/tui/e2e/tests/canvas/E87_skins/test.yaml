@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: skins
+group: canvas
+title: "skins: the canvas is drawn from design tokens; a skin an AI adds applies live (no reload), a bad token is refused naming its path, a native skin is refused in a browser tab, the panel's Skins section switches them; under an emulated native shell glass makes the page transparent and hides the background without touching its record"
+runner: probe.py
+costs: free
+limits:
+  seconds: 180
+env: {}

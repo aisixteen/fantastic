@@ -15,7 +15,8 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "resolveJsonModule": true
   },
   "include": ["src/**/*.ts"],
   // the esbuild-only entry: its css default import is typed by no one

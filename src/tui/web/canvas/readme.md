@@ -24,6 +24,8 @@ bundles, seeds an empty tree with the canvas root, and mounts.
   through the kernel (`ps` → `cancel`).
 - **html_agent** / **gl_agent** — frontend CONTENT agents (a mutable HTML body in
   a sandboxed frame; a WebGL shader). Content, not host clients.
+- **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
+  drawn with, per backdrop; it takes skins an AI writes (`fantastic readme skins`).
 
 The view↔backend pairing is **never hardcoded** — each view's reflect names the
 host capability + verb surface it fronts; an LLM weaves the binding from that plus

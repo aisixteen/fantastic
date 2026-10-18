@@ -16,6 +16,8 @@
 // saved set-up the first tile opens set-up instead — nothing is guessed. ←↑↓→ move
 // across the grid, ⏎ goes, esc / a click away closes; a pick replaces the popup.
 
+import { tint, tok } from "../skin/css.ts";
+
 export type Pick =
   | { kind: "ai"; text: string }
   | { kind: "terminal" }
@@ -226,29 +228,29 @@ const SECTION_TITLE: Record<Section, string> = { page: "page", host: "host", cod
 
 const CSS = `
   .action-popup { position: fixed; z-index: 1000; width: 520px; max-width: calc(100vw - 32px);
-    background: rgba(22, 20, 32, 0.96);
-    border-radius: 16px;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.10), 0 0 0 1px rgba(255,255,255,0.12), 0 22px 60px -12px rgba(0,0,0,0.65);
-    font: 13px system-ui, sans-serif; color: #e5e1ee; overflow: hidden; }
+    background: ${tok("color.surface.popup")};
+    border-radius: ${tok("radius.bezel")};
+    box-shadow: ${tok("shadow.popup")};
+    font: 13px ${tok("font.family.sans")}; color: ${tok("color.text.primary")}; overflow: hidden; }
   .action-popup input { width: 100%; box-sizing: border-box; background: transparent; border: 0; outline: none;
-    color: #fff; font: 20px system-ui, sans-serif; padding: 14px 16px 12px 46px; }
-  .action-popup .title { padding: 11px 16px 0; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: rgba(220,230,245,0.55);
+    color: ${tok("color.text.bright")}; font: 20px ${tok("font.family.sans")}; padding: 14px 16px 12px 46px; }
+  .action-popup .title { padding: 11px 16px 0; font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: ${tint("color.text.cool", 55)};
     cursor: grab; user-select: none; }
   .action-popup.dragging .title { cursor: grabbing; }
 
   .action-popup .ask { position: relative; }
-  .action-popup .spark { position: absolute; left: 14px; top: 13px; color: #b78cff; }
-  .action-popup .grid { border-top: 1px solid rgba(255,255,255,0.08); padding: 6px 10px 8px; max-height: 360px; overflow-y: auto; }
-  .action-popup .sect { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: rgba(220,230,245,0.42); padding: 8px 6px 4px; }
+  .action-popup .spark { position: absolute; left: 14px; top: 13px; color: ${tok("color.accent.base")}; }
+  .action-popup .grid { border-top: 1px solid ${tint("color.ink", 8)}; padding: 6px 10px 8px; max-height: 360px; overflow-y: auto; }
+  .action-popup .sect { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: ${tint("color.text.cool", 42)}; padding: 8px 6px 4px; }
   .action-popup .row { display: grid; grid-template-columns: repeat(${COLS}, 1fr); gap: 4px; }
   .action-popup .tile { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 10px 4px 8px;
-    border-radius: 12px; cursor: pointer; color: #d9d4e6; min-width: 0; }
-  .action-popup .tile .ic { color: #b78cff; display: flex; }
+    border-radius: ${tok("radius.bubble")}; cursor: pointer; color: ${tok("color.text.primary")}; min-width: 0; }
+  .action-popup .tile .ic { color: ${tok("color.accent.base")}; display: flex; }
   .action-popup .tile .lb { font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .action-popup .tile .ht { font-size: 10px; color: rgba(220,230,245,0.42); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .action-popup .tile.sel { background: rgba(183,140,255,0.22); box-shadow: inset 0 0 0 1px rgba(183,140,255,0.45); }
-  .action-popup .tile[data-section="chats"] .ic { color: #7ee2a8; }
-  .action-popup .foot { padding: 6px 16px 9px; color: rgba(220,230,245,0.4); font-size: 11px; border-top: 1px solid rgba(255,255,255,0.06); }
+  .action-popup .tile .ht { font-size: 10px; color: ${tint("color.text.cool", 42)}; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .action-popup .tile.sel { background: ${tint("color.accent.base", 22)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 45)}; }
+  .action-popup .tile[data-section="chats"] .ic { color: ${tok("color.status.ok")}; }
+  .action-popup .foot { padding: 6px 16px 9px; color: ${tint("color.text.cool", 40)}; font-size: 11px; border-top: 1px solid ${tint("color.ink", 6)}; }
   /* NARROW SCREENS (a phone): one vertical list, full width, centred — each tile
      a row (icon · label · hint) */
   @media (max-width: 640px) {

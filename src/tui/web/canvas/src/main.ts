@@ -11,6 +11,10 @@ import { onHostStopping, registerCanvas } from "./bundles/canvas/canvas_agent.ts
 import { registerBackground } from "./bundles/canvas/background_agent.ts";
 import { registerSelector } from "./bundles/canvas/selector_agent.ts";
 import { registerLayout } from "./bundles/canvas/layout.ts";
+import { registerSkin } from "./bundles/skin/skin_agent.ts";
+import { bootSkin, installSkin } from "./bundles/skin/apply.ts";
+import { tok } from "./bundles/skin/css.ts";
+import { readShell } from "./bundles/shell.ts";
 
 // The canvas page. The frontend kernel boots as a PEER of the host: it dials the host's `web_loader` (by id) over the bridge (a host-side
 // `kernel_state` rooted at `.fantastic/web/`, which the operator created — no
@@ -42,6 +46,7 @@ function register(kernel: Kernel): void {
   registerSelector(kernel); // the double-click popup, as its singleton, delete-locked agent
   registerLayout(kernel); // a view's layout per theme (canvas | mobile): where its cells sit
   registerBackgrounds(kernel); // the backgrounds manager: stock + the user's own, random, every minute
+  registerSkin(kernel); // the page's skin: its design tokens and backdrop (`skin`, made by mountCanvas)
   // View bundles that front a host backend are real frontend agents too — a
   // no-op handler makes their records load-able; the ViewBundle renders them.
   kernel.registerBundle("terminal_view.ts", () => null);
@@ -99,6 +104,23 @@ function seed(kernel: Kernel): void {
       sentence: "The canvas — the page's root; its views are under it.",
     }),
   );
+}
+
+// THE SKIN FIRST, before anything awaits: the shell's flag says the backdrop
+// (a plain tab has none: web), and its stock skin is installed so the first
+// paint — the refused box too — is already skinned. The skin agent's record
+// (`watchSkin`, from mountCanvas) takes over once the tree is loaded. A
+// malformed flag is the shell's bug: said in place of the canvas, and nothing
+// else runs.
+try {
+  readShell();
+} catch (e) {
+  document.body.textContent = (e as Error).message;
+  throw e;
+}
+{
+  const boot = bootSkin();
+  installSkin(boot.name, boot.skin);
 }
 
 // THE BOOT, the library's `boot` composed here with one change: every host call
@@ -239,6 +261,6 @@ function refused(why: string): void {
   const box = document.createElement("p");
   box.className = "host-refused";
   box.textContent = `The host refused this canvas — ${why}.`;
-  box.style.cssText = "position:fixed;inset:0;display:grid;place-content:center;font:14px system-ui;color:#cde;background:#0b0b10";
+  box.style.cssText = `position:fixed;inset:0;display:grid;place-content:center;font:14px ${tok("font.family.sans")};color:${tok("color.text.cool")};background:${tok("color.page.bg")}`;
   document.body.replaceChildren(box);
 }
