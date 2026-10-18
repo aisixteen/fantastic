@@ -368,7 +368,7 @@ async fn records_land_where_the_layout_table_says() {
     // Nothing is written under <home> outside W.
     let outside: Vec<String> = files(&f.home)
         .into_iter()
-        .filter(|p| !p.starts_with(".fantastic/app/"))
+        .filter(|p| !Path::new(p).starts_with(Path::new(".fantastic").join("app")))
         .collect();
     assert!(outside.is_empty(), "{outside:?}");
     let levels: Vec<String> = std::fs::read_dir(&f.home)

@@ -12,6 +12,9 @@ use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 
 use super::HomeBundle;
+
+/// An absolute path's prefix on this OS: `/w/ok` is absolute on Unix only.
+const D: &str = if cfg!(windows) { "C:" } else { "" };
 use crate::home::fake::{run, FakeOs, Folder};
 use crate::home::{HomeOs, ID, VERBS};
 
@@ -31,7 +34,7 @@ fn t_with(meta: Value, config: HomeConfig) -> T {
         None,
         None,
         Default::default(),
-        PathBuf::from("/h/.fantastic/app/.fantastic"),
+        PathBuf::from(&format!("{D}/h/.fantastic/app/.fantastic")),
         false,
     );
     kernel.register(Arc::clone(&root));
@@ -218,21 +221,38 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
         "home: open: \"notes\" is not an absolute path",
     );
     assert_eq!(r["arg"], json!("paths"));
-    t.os.set_resolve("/w/file.txt", Err("/w/file.txt is not a directory".into()));
+    t.os.set_resolve(
+        &format!("{D}/w/file.txt"),
+        Err(format!("{D}/w/file.txt is not a directory")),
+    );
     let r = t
-        .call(json!({"type": "open", "paths": ["/w/ok", "/w/file.txt"]}))
+        .call(json!({"type": "open", "paths": [&format!("{D}/w/ok"), &format!("{D}/w/file.txt")]}))
         .await;
-    refused(&r, "bad_arg", "home: open: \"/w/ok\" is not a folder");
-    t.os.set_resolve("/w/ok", Ok("/w/ok".into()));
+    refused(
+        &r,
+        "bad_arg",
+        &format!("home: open: \"{D}/w/ok\" is not a folder"),
+    );
+    t.os.set_resolve(&format!("{D}/w/ok"), Ok(format!("{D}/w/ok")));
     let r = t
-        .call(json!({"type": "open", "paths": ["/w/ok", "/w/file.txt"]}))
+        .call(json!({"type": "open", "paths": [&format!("{D}/w/ok"), &format!("{D}/w/file.txt")]}))
         .await;
-    refused(&r, "bad_arg", "home: open: \"/w/file.txt\" is not a folder");
-    assert_eq!(r["hint"], json!("/w/file.txt is not a directory"));
+    refused(
+        &r,
+        "bad_arg",
+        &format!("home: open: \"{D}/w/file.txt\" is not a folder"),
+    );
+    assert_eq!(
+        r["hint"],
+        json!(&format!("{D}/w/file.txt is not a directory"))
+    );
     for (payload, reason) in [
         (json!({"type": "open"}), "missing_arg"),
         (json!({"type": "open", "paths": []}), "missing_arg"),
-        (json!({"type": "open", "paths": "/w/ok"}), "bad_arg"),
+        (
+            json!({"type": "open", "paths": &format!("{D}/w/ok")}),
+            "bad_arg",
+        ),
         (json!({"type": "open", "paths": [7]}), "bad_arg"),
     ] {
         let r = t.call(payload.clone()).await;
@@ -253,26 +273,34 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
 async fn open_and_register_refuse_the_homes_own_folder() {
     let t = t_with(
         json!({}),
-        HomeConfig::new(Mode::Lock).own_folder("/h/.fantastic/app".into()),
+        HomeConfig::new(Mode::Lock).own_folder(format!("{D}/h/.fantastic/app")),
     );
-    t.os.set_resolve("/h/.fantastic/app", Ok("/h/.fantastic/app".into()));
-    t.os.set_resolve("/h/.fantastic/app/", Ok("/h/.fantastic/app".into()));
+    t.os.set_resolve(
+        &format!("{D}/h/.fantastic/app"),
+        Ok(format!("{D}/h/.fantastic/app")),
+    );
+    t.os.set_resolve(
+        &format!("{D}/h/.fantastic/app/"),
+        Ok(format!("{D}/h/.fantastic/app")),
+    );
     t.boot().await;
     let r = t
-        .call(json!({"type": "open", "paths": ["/h/.fantastic/app/"]}))
+        .call(json!({"type": "open", "paths": [&format!("{D}/h/.fantastic/app/")]}))
         .await;
     refused(
         &r,
         "bad_arg",
-        "home: open: \"/h/.fantastic/app/\" is the home's own folder — it is never listed",
+        &format!(
+            "home: open: \"{D}/h/.fantastic/app/\" is the home's own folder — it is never listed"
+        ),
     );
     let r = t
-        .call(json!({"type": "register", "path": "/h/.fantastic/app"}))
+        .call(json!({"type": "register", "path": &format!("{D}/h/.fantastic/app")}))
         .await;
     refused(
         &r,
         "bad_arg",
-        "home: register: \"/h/.fantastic/app\" is the home's own folder — it is never listed",
+        &format!("home: register: \"{D}/h/.fantastic/app\" is the home's own folder — it is never listed"),
     );
     assert_eq!(r["arg"], json!("path"));
     t.bundle.runner().settle().await;
@@ -283,11 +311,11 @@ async fn open_and_register_refuse_the_homes_own_folder() {
 #[tokio::test]
 async fn register_refuses_a_listed_folder() {
     let t = t();
-    t.os.set_registry(vec![entry("g1", "/w/atlas", None, None)]);
-    t.stopped("/w/atlas");
-    t.os.set_resolve("/w/link-to-atlas", Ok("/w/atlas".into()));
+    t.os.set_registry(vec![entry("g1", &format!("{D}/w/atlas"), None, None)]);
+    t.stopped(&format!("{D}/w/atlas"));
+    t.os.set_resolve(&format!("{D}/w/link-to-atlas"), Ok(format!("{D}/w/atlas")));
     t.boot().await;
-    for path in ["/w/atlas", "/w/link-to-atlas"] {
+    for path in [&format!("{D}/w/atlas"), &format!("{D}/w/link-to-atlas")] {
         let r = t.call(json!({"type": "register", "path": path})).await;
         refused(
             &r,
@@ -296,17 +324,19 @@ async fn register_refuses_a_listed_folder() {
         );
     }
     // a new folder is added, as open adds it
-    t.os.set_resolve("/w/new", Ok("/w/new".into()));
-    let s = t.call(json!({"type": "register", "path": "/w/new"})).await;
-    assert_eq!(s["selection"], json!("adding:/w/new"));
+    t.os.set_resolve(&format!("{D}/w/new"), Ok(format!("{D}/w/new")));
+    let s = t
+        .call(json!({"type": "register", "path": &format!("{D}/w/new")}))
+        .await;
+    assert_eq!(s["selection"], json!(&format!("adding:{D}/w/new")));
     t.shutdown().await;
 }
 
 #[tokio::test]
 async fn start_refuses_a_running_entry() {
     let t = t();
-    t.os.set_registry(vec![entry("g2", "/w/b", Some(7), Some(8100))]);
-    t.running("/w/b", 7, 8100, "g2");
+    t.os.set_registry(vec![entry("g2", &format!("{D}/w/b"), Some(7), Some(8100))]);
+    t.running(&format!("{D}/w/b"), 7, 8100, "g2");
     t.boot().await;
     let r = t.call(json!({"type": "start", "id": "g2"})).await;
     refused(&r, "bad_arg", "home: b cannot start now — it is running");
@@ -319,8 +349,8 @@ async fn start_refuses_a_running_entry() {
 #[tokio::test]
 async fn select_page_out_of_range_is_refused() {
     let t = t();
-    t.os.set_registry(vec![entry("g1", "/w/a", None, None)]);
-    t.stopped("/w/a");
+    t.os.set_registry(vec![entry("g1", &format!("{D}/w/a"), None, None)]);
+    t.stopped(&format!("{D}/w/a"));
     t.boot().await;
     let r = t.call(json!({"type": "select_page", "index": 0})).await;
     refused(&r, "bad_arg", "home: select_page: no page 0 (there are 0)");
@@ -341,12 +371,16 @@ async fn select_page_out_of_range_is_refused() {
 async fn log_answers_the_tail_or_not_found() {
     let t = t();
     t.os.set_registry(vec![
-        entry("g1", "/w/a", None, None),
-        entry("g2", "/w/b", None, None),
+        entry("g1", &format!("{D}/w/a"), None, None),
+        entry("g2", &format!("{D}/w/b"), None, None),
     ]);
-    t.stopped("/w/a");
-    t.stopped("/w/b");
-    t.os.set_log("/w/a", "/logs/a-12345678.log", "line 3\nline 4");
+    t.stopped(&format!("{D}/w/a"));
+    t.stopped(&format!("{D}/w/b"));
+    t.os.set_log(
+        &format!("{D}/w/a"),
+        "/logs/a-12345678.log",
+        "line 3\nline 4",
+    );
     t.boot().await;
     let r = t.call(json!({"type": "log", "id": "g1"})).await;
     assert_eq!(
@@ -389,11 +423,11 @@ async fn boot_restores_pages_and_selection_from_the_record() {
         HomeConfig::new(Mode::Lock),
     );
     t.os.set_registry(vec![
-        entry("g1", "/w/a", None, None),
-        entry("g2", "/w/b", None, None),
+        entry("g1", &format!("{D}/w/a"), None, None),
+        entry("g2", &format!("{D}/w/b"), None, None),
     ]);
-    t.stopped("/w/a");
-    t.stopped("/w/b");
+    t.stopped(&format!("{D}/w/a"));
+    t.stopped(&format!("{D}/w/b"));
     assert_eq!(t.boot().await, json!({"booted": true}));
     let s = t.call(json!({"type": "list"})).await;
     assert_eq!(
@@ -488,7 +522,7 @@ async fn reflect_names_the_protocol_and_version() {
     assert_eq!(r["protocol"], json!("fantastic.home"));
     assert_eq!(r["version"], json!(1));
     assert_eq!(r["mode"], json!("lock"));
-    assert_eq!(r["home"], json!("/h"));
+    assert_eq!(r["home"], json!(&format!("{D}/h")));
     assert_eq!(r["poll_ms"], json!(2000));
     assert!(r["sentence"].as_str().is_some_and(|s| !s.is_empty()));
 }
