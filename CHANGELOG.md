@@ -35,6 +35,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- The lockfile no longer pins the yanked `yoke-derive 0.8.3` (now 0.8.4).
 - AI agents: fold summaries no longer leave the view once the next prompt is
   rebuilt from the view array. Each new fold records its place (`anchor`), so it
   is placed even when its members are not in the rows being rendered; a store
