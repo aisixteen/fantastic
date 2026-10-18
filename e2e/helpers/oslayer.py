@@ -96,6 +96,25 @@ def stop_group(pid: int) -> None:
         pass
 
 
+def stop_fantastic(binary: Path, pid: int) -> None:
+    """Ask the fantastic `pid` to stop, the way the home does: SIGTERM to the group
+    it leads on POSIX; on Windows `<binary> __ctrl_break <pid>` with no console of
+    its own (`DETACHED_PROCESS`), which attaches to the fantastic's console. A
+    canvas the home started runs in a hidden console of its own, which
+    `os.kill(pid, CTRL_BREAK_EVENT)` from this console cannot reach."""
+    if not WINDOWS:
+        stop_group(pid)
+        return
+    subprocess.run(
+        [str(binary), "__ctrl_break", str(pid)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.DETACHED_PROCESS,
+        timeout=10,
+    )
+
+
 def kill_group(pid: int) -> None:
     """Kill the group `pid` leads — and every process under it — now."""
     if WINDOWS:

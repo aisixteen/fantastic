@@ -140,6 +140,12 @@ SCENARIO_RUNNERS = {
         "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/canvas.py")],
         "cwd": "pyroot",
     },
+    # THE HOME: the home kernel hosted in-process by the test host
+    # (`fantastic-home-host`), managing real `fantastic canvas` processes (E24). No model.
+    "home": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/home.py")],
+        "cwd": "pyroot",
+    },
     # THE CANVAS'S ONE USER: one host, a headless Chrome per browser storage (E21). No model.
     "canvas_user": {
         "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/canvas_user.py")],
@@ -616,7 +622,11 @@ async def main() -> int:
     # built from source here.
     if built := os.environ.get("E2E_ARTIFACTS"):
         built_dir = Path(built).resolve()
-        for var, name in (("FANTASTIC_BIN", "fantastic"), ("FANTASTIC_TUI_RIG", "screenshot")):
+        for var, name in (
+            ("FANTASTIC_BIN", "fantastic"),
+            ("FANTASTIC_TUI_RIG", "screenshot"),
+            ("FANTASTIC_HOME_HOST", "fantastic-home-host"),
+        ):
             path = oslayer.exe(built_dir / name)
             if not path.is_file():
                 print(f"REFUSING TO RUN — E2E_ARTIFACTS has no {path.name} ({built_dir})")

@@ -11,6 +11,7 @@ Writes into `<dir>` exactly what `run.py` takes when `E2E_ARTIFACTS=<dir>`:
   * `fantastic` — the CLI product, the binary a release ships
     (`scripts/build/cli.sh`, which also writes the shipping archive to `dist/`);
   * `screenshot` — the CLI's PTY rig, the shell's e2e driver (never shipped);
+  * `fantastic-home-host` — the home kernel's test-only host (E24; never shipped);
   * `fantastic-tui-<features|none>` — the shell built with exactly the cargo
     `features` a tui scenario names (`e2e/tests/scenario/*/scenario.yaml`): a
     scenario that checks "not in this build" needs a build without that backend.
@@ -86,6 +87,14 @@ def main() -> int:
         cargo.append("--release")
     subprocess.run(cargo, cwd=REPO / "src", check=True)
     shutil.copy2(oslayer.exe(built / "examples" / "screenshot"), oslayer.exe(out / "screenshot"))
+
+    print("═══ the home host", flush=True)
+    cargo = ["cargo", "build", "--locked", "-p", "fantastic-home-kernel", "--features", "host",
+             "--bin", "fantastic-home-host", "--target", target]
+    if a.profile == "release":
+        cargo.append("--release")
+    subprocess.run(cargo, cwd=REPO / "src", check=True)
+    shutil.copy2(oslayer.exe(built / "fantastic-home-host"), oslayer.exe(out / "fantastic-home-host"))
 
     for features in sorted(tui_feature_sets()):
         name = variant_name(list(features))

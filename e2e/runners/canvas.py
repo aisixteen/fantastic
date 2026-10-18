@@ -115,6 +115,25 @@ def build_bin(into: Path) -> Path:
     return b
 
 
+def build_home_host(into: Path) -> Path:
+    """The test-only home host (`fantastic-home-host`, the home kernel hosted
+    in-process): `FANTASTIC_HOME_HOST` when set, else built into the e2e target."""
+    with build_lock(E2E_TARGET):
+        built = os.environ.get("FANTASTIC_HOME_HOST")
+        src = Path(built).expanduser().resolve() if built else oslayer.exe(E2E_TARGET / "debug" / "fantastic-home-host")
+        if not built:
+            r = subprocess.run(
+                ["cargo", "build", "--locked", "-p", "fantastic-home-kernel", "--features", "host", "--bin", "fantastic-home-host"],
+                cwd=SRC, capture_output=True, text=True, env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)},
+            )
+            if r.returncode != 0:
+                raise SystemExit(f"cargo build fantastic-home-host failed:\n{r.stderr[-2000:]}")
+        b = oslayer.exe(into / "fantastic-home-host")
+        b.unlink(missing_ok=True)  # never cp over a signed binary (macOS kills it)
+        shutil.copy2(src, b)
+    return b
+
+
 # ── the host: the product, headless ───────────────────────────────────────────
 class Host:
     def __init__(self, binary: Path, cwd: Path, port: int):
