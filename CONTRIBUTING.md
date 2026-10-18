@@ -62,8 +62,9 @@ Container changes: `sh container/build.sh` then `sh container/test/build_smoke.s
 
 CI (`.github/workflows/ci.yml`) builds every runtime and runs its unit tests on
 Linux, macOS and Windows (swift: Linux and macOS). A full run adds every release
-binary and the model-free e2e (`e2e/run.py --only-free`) on them. It runs only
-when started by hand — never on a push or a PR: a bug fix gets the units
+binary and the model-free e2e (`e2e/run.py --only-free`) on them. A push to a
+`fix/**` or `feat/**` branch runs the units by itself; everything else is
+started by hand, never on a PR: a bug fix gets the units
 (`gh workflow run ci.yml --ref <branch>`), a completed phase or a release the
 full run (`gh workflow run ci.yml --ref <branch> -f e2e=true`). Lint is not in CI: run the lint commands above for every runtime you touched,
 locally, before opening a PR.

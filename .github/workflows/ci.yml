@@ -1,5 +1,7 @@
-# CI — run BY HAND only (`gh workflow run ci.yml --ref <branch>`, or the
-# Actions tab's "Run workflow"); nothing starts it on a push or a PR. Two sizes:
+# CI — run BY HAND (`gh workflow run ci.yml --ref <branch>`, or the Actions
+# tab's "Run workflow"). The ONE automatic start: a push to a `fix/**` or
+# `feat/**` branch runs the units only (a newer push cancels the older run).
+# Nothing else starts it — no PR trigger, no other branch, no tag. Two sizes:
 #
 #   units only (default)   a bug fix: every runtime's unit tests, debug, on
 #                          Linux, macOS and Windows
@@ -27,6 +29,8 @@ name: ci
 run-name: ${{ inputs.e2e && 'ci · full' || 'ci · units' }}
 
 on:
+  push:
+    branches: ["fix/**", "feat/**"]
   workflow_dispatch:
     inputs:
       e2e:

@@ -25,6 +25,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   release binaries and the e2e run on request (`-f e2e=true`, titled
   `ci · full`): for a completed phase or a release. `release.yml` publishes only
   a green full run.
+- CI: a push to a `fix/**` or `feat/**` branch runs the unit suites by itself
+  (`ci · units`); a newer push to the same branch cancels the older run. Every
+  other run is still started by hand.
 
 ## [0.0.6] - 2026-10-18
 
