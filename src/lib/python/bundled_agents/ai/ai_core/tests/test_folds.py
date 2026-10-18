@@ -40,11 +40,20 @@ def _id(tag):
     return _IDS[tag]
 
 
+def _fresh(tag):
+    """A NEW id for `tag`, minted now: a row built later carries a larger id, as in the
+    store, where the kernel mints a row's id when it lands. `_id(tag)` then names it."""
+    if tag is None or isinstance(tag, int):
+        return tag
+    _IDS[tag] = next(_NEXT)
+    return _IDS[tag]
+
+
 def _row(role, content, id_, parent=None, **extra):
     return {
         "role": role,
         "content": content,
-        "id": _id(id_),
+        "id": _fresh(id_),
         "parent": _id(parent),
         **extra,
     }
@@ -53,10 +62,31 @@ def _row(role, content, id_, parent=None, **extra):
 _FOLD_IDS = iter(range(10_000, 20_000))
 
 
+_ANCHORS: dict[int, int] = {}
+
+
 def _fold(self_id, refs, title, body, degraded, **kw):
-    """`make_fold` for tests: the store mints in the product; here a fixture id."""
+    """`make_fold` for tests: the store mints in the product; here a fixture id. The
+    anchor is what the product writes — the smallest leaf id, a member fold made here
+    contributing its own anchor; a fold with no refs names its anchor."""
     kw.setdefault("id", next(_FOLD_IDS))
-    return folds.make_fold(self_id, [_id(r) for r in refs], title, body, degraded, **kw)
+    ids = [_id(r) for r in refs]
+    if "anchor" not in kw:
+        kw["anchor"] = min(_ANCHORS.get(x, x) for x in ids)
+    f = folds.make_fold(self_id, ids, title, body, degraded, **kw)
+    _ANCHORS[f["id"]] = f["anchor"]
+    return f
+
+
+def _render(rows):
+    """`render` over rows that are the whole head: anchors from the same rows."""
+    return folds.render(rows, folds.anchors_of(rows))
+
+
+async def _fold_over_head(body, system_block, rec, ctx):
+    """The `fold` projection as a turn runs it, `body` being the whole head."""
+    ctx.anchors = folds.anchors_of(body)
+    return await get_strategy("fold")(body, system_block, rec, ctx)
 
 
 def _chain(tag, n_calls, big=True, open_end=False):
@@ -105,6 +135,15 @@ def _interleave(*chains):
         i = rng.choice([i for i in range(len(chains)) if ptr[i] < len(chains[i])])
         out.append(chains[i][ptr[i]])
         ptr[i] += 1
+    # ARRIVAL ORDER IS ID ORDER: the rows are minted again, in place, in the order
+    # they arrive (their tags follow), as the kernel's counter would have numbered them.
+    new = {r["id"]: next(_NEXT) for r in out}
+    for tag, old in list(_IDS.items()):
+        if old in new:
+            _IDS[tag] = new[old]
+    for r in out:
+        r["id"] = new[r["id"]]
+        r["parent"] = new.get(r["parent"], r["parent"])
     return out
 
 
@@ -112,7 +151,7 @@ async def _fake_summary(msgs, max_tokens=None):
     return "TITLE of the fold\n\nBody of the fold: what happened."
 
 
-def _ctx(bud, kernel=None, summarize=_fake_summary):
+def _ctx(bud, kernel=None, summarize=_fake_summary, anchors=None):
     return ProjectionCtx(
         budget=bud,
         recent_n=4,
@@ -120,6 +159,7 @@ def _ctx(bud, kernel=None, summarize=_fake_summary):
         self_id="ai",
         kernel=kernel,
         client_id="c",
+        anchors=anchors,
     )
 
 
@@ -169,7 +209,7 @@ def test_rows_without_ids_are_their_own_roots_and_never_fold():
 def test_a_fold_hides_its_refs_and_sits_where_its_first_ref_was():
     rows = _chain("a", 2, big=False) + [_row("user", "later", "user:l")]
     f = _fold("ai", [r["id"] for r in rows[:5]], "done a", "body a", False)
-    view = folds.render(rows + [f])
+    view = _render(rows + [f])
     ids = [r.get("id") for r in view]
     assert ids[0] == f["id"], "the fold renders at the first ref's position"
     assert not any(r["id"] in f["refs"] for r in view)
@@ -181,7 +221,7 @@ def test_a_fold_of_folds_hides_the_inner_fold():
     rows = _chain("a", 1, big=False)
     inner = _fold("ai", [r["id"] for r in rows], "inner", "b", False)
     outer = _fold("ai", [inner["id"]], "outer", "b", False)
-    view = folds.render(rows + [inner, outer])
+    view = _render(rows + [inner, outer])
     assert [r.get("id") for r in view] == [outer["id"]]
 
 
@@ -202,7 +242,7 @@ async def test_fold_collapses_the_oldest_stretch_first_and_persists_it():
     mid = _interleave(a, b, c)
     body = [_row("user", "GOAL", "user:goal")] + mid + [_row("user", "now?", None)]
     full = estimate_tokens(body)
-    proj = await get_strategy("fold")(body, [], {}, _ctx(int(full * 0.45), k))
+    proj = await _fold_over_head(body, [], {}, _ctx(int(full * 0.45), k))
     assert proj.folded >= 1
     assert len(k.folds_of()) == proj.folded, "every fold row was persisted"
     blob = json.dumps(proj.body)
@@ -219,11 +259,11 @@ async def test_a_fold_is_monotone_across_projections():
     a, b = _chain("a", 2), _chain("b", 2)
     body = [_row("user", "GOAL", "user:goal")] + a + b + [_row("user", "now?", None)]
     bud = int(estimate_tokens(body) * 0.5)
-    p1 = await get_strategy("fold")(body, [], {}, _ctx(bud, k))
+    p1 = await _fold_over_head(body, [], {}, _ctx(bud, k))
     # next turn: the store now carries the fold rows; the view must not unfold them
     persisted = list(k.rows_of())
     body2 = body[:-1] + [r for r in persisted if r.get("kind") == "fold"] + [body[-1]]
-    p2 = await get_strategy("fold")(body2, [], {}, _ctx(bud * 10, k))
+    p2 = await _fold_over_head(body2, [], {}, _ctx(bud * 10, k))
     assert p2.folded == 0
     # the SAME collapse renders: the folds visible now are exactly the ones visible then
     assert {r["id"] for r in p2.body if folds.is_fold(r)} == {
@@ -238,7 +278,7 @@ async def test_a_failed_summarizer_still_writes_a_fold_and_says_so():
     k = _K()
     a = _chain("a", 8)
     body = [_row("user", "GOAL", "user:goal")] + a + [_row("user", "now?", None)]
-    proj = await get_strategy("fold")(
+    proj = await _fold_over_head(
         body, [], {}, _ctx(int(estimate_tokens(body) * 0.6), k, boom)
     )
     assert proj.folded >= 1
@@ -296,14 +336,14 @@ async def test_an_open_superlong_chain_folds_its_oldest_stretch_and_keeps_the_ta
     k = _K()
     ch = _chain("a", 12, open_end=True)  # 25 rows, still awaiting a reply
     body = [_row("user", "GOAL", "user:goal")] + ch + [_row("user", "now?", None)]
-    span = next_span(body, folds.render(body), need=estimate_tokens(body))
+    span = next_span(body, _render(body), need=estimate_tokens(body))
     assert len(span) >= 2 and 0 not in span
     tail_ids = {r["id"] for r in ch[-5:]}
     assert not any(body[i]["id"] in tail_ids for i in span), "the live tail never folds"
     assert body[span[-1]]["role"] != "assistant", (
         "a span never ends between a call and its answer"
     )
-    proj = await get_strategy("fold")(
+    proj = await _fold_over_head(
         body, [], {}, _ctx(int(estimate_tokens(body) * 0.4), k)
     )
     assert proj.folded >= 1
@@ -323,9 +363,12 @@ async def test_folds_are_ordinary_members_so_nesting_needs_no_second_stage():
             _fold("ai", [r["id"] for r in c], f"done {c[0]['id']}", "S" * 1500, False)
         )
     rows.append(_row("user", "now?", None))
-    proj = await get_strategy("fold")(rows, [], {}, _ctx(1200, k))
-    top = [r for r in proj.body if folds.is_fold(r) and r.get("level", 1) >= 2]
+    await _fold_over_head(rows, [], {}, _ctx(1200, k))
+    # The store, not the cut view: a fold of folds sits where its oldest member sat,
+    # at the front of the body, which is what an absurdly small budget cuts first.
+    top = [r for r in k.folds_of() if r.get("level", 1) >= 2]
     assert top, "a fold whose members were folds was written by the SAME path"
+    assert all(r["anchor"] == min(_ANCHORS[m] for m in r["refs"]) for r in top)
     assert all(r.get("body") and r.get("title") for r in top), (
         "every level carries a summary"
     )
@@ -339,7 +382,7 @@ async def test_fold_of_folds_terminates_when_even_folds_do_not_fit():
         rows += c
         rows.append(_fold("ai", [r["id"] for r in c], f"done {t}", "S" * 5000, False))
     rows.append(_row("user", "now?", None))
-    proj = await get_strategy("fold")(rows, [], {}, _ctx(300, k))  # absurdly small
+    proj = await _fold_over_head(rows, [], {}, _ctx(300, k))  # absurdly small
     assert proj is not None  # it returned — no infinite loop
 
 
@@ -360,10 +403,10 @@ async def test_a_fold_written_twice_over_the_same_stretch_is_not_written_twice()
     a = _chain("a", 8)
     body = [_row("user", "GOAL", "user:goal")] + a + [_row("user", "now?", None)]
     bud = int(estimate_tokens(body) * 0.5)
-    p1 = await get_strategy("fold")(body, [], {}, _ctx(bud, k))
+    p1 = await _fold_over_head(body, [], {}, _ctx(bud, k))
     persisted = list(k.rows_of())
     body2 = body[:-1] + [r for r in persisted if r.get("kind") == "fold"] + [body[-1]]
-    p2 = await get_strategy("fold")(body2, [], {}, _ctx(bud, k))
+    p2 = await _fold_over_head(body2, [], {}, _ctx(bud, k))
     n = len(k.folds_of())
     assert n == p1.folded + p2.folded, (
         "no duplicate fold over an already-folded stretch"
@@ -374,7 +417,7 @@ async def test_overlapping_folds_never_show_a_member_twice():
     a = _chain("a", 2, big=False)
     f1 = _fold("ai", [r["id"] for r in a[:3]], "part", "b", False)
     f2 = _fold("ai", [r["id"] for r in a], "whole", "b", False)
-    view = folds.render(a + [f1, f2])
+    view = _render(a + [f1, f2])
     ids = [r.get("id") for r in view]
     assert len(ids) == len(set(ids))
     assert not any(i in {r["id"] for r in a} for i in ids)
@@ -383,7 +426,7 @@ async def test_overlapping_folds_never_show_a_member_twice():
 def test_a_fold_whose_member_was_pruned_still_renders_and_expands():
     a = _chain("a", 1, big=False)
     f = _fold("ai", [r["id"] for r in a] + ["gone:0000"], "done", "b", False)
-    view = folds.render(a + [f])
+    view = _render(a + [f])
     assert [r.get("id") for r in view] == [f["id"]]
     assert _id("gone:0000") in folds.expand_ids(a + [f], [f["id"]])
 
@@ -397,7 +440,7 @@ def test_a_late_reply_whose_parent_is_folded_stays_visible_and_attached():
         "ai:late",
         "ai:a0",
     )
-    view = folds.render(a + [f, late])
+    view = _render(a + [f, late])
     assert [r.get("id") for r in view] == [f["id"], _id("ai:late")]
     assert (
         folds.chains(a + [f, late])[0][-1] == len(a) + 1 or True
@@ -412,7 +455,7 @@ async def test_one_overflow_folds_the_whole_stretch_once():
     a = _chain("a", 30)
     body = [_row("user", "GOAL", "user:goal")] + a + [_row("user", "now?", None)]
     bud = int(estimate_tokens(body) * 0.35)
-    await get_strategy("fold")(body, [], {}, _ctx(bud, k))
+    await _fold_over_head(body, [], {}, _ctx(bud, k))
     stored = list(k.rows_of())
     levels = [r.get("level", 1) for r in stored if r.get("kind") == "fold"]
     assert levels == [1], levels
@@ -442,7 +485,10 @@ def test_three_adjacent_folds_at_the_head_fold_as_a_group():
     from ai_core.strategies.fold import KEEP_TAIL, next_span
 
     goal = _row("user", "GOAL", "user:goal")
-    heads = [_fold("ai", [], f"fold {i}", "body", False, parent=None) for i in range(3)]
+    heads = [
+        _fold("ai", [], f"fold {i}", "body", False, parent=None, anchor=i + 1)
+        for i in range(3)
+    ]
     for i, f in enumerate(heads):
         f["id"] = 1000 + i
     tail = [_row("user", f"t{i}", f"user:t{i}") for i in range(KEEP_TAIL + 1)]
@@ -480,7 +526,7 @@ async def test_the_head_is_coalesced_even_when_the_view_already_fits():
     tail = [_row("user", f"t{i}", f"user:t{i}") for i in range(7)]
     body = [goal] + src + heads + tail
     huge = estimate_tokens(body) * 100  # comfortably under budget
-    await get_strategy("fold")(body, [], {}, _ctx(huge, k))
+    await _fold_over_head(body, [], {}, _ctx(huge, k))
     levels = [r.get("level", 1) for r in k.rows_of() if r.get("kind") == "fold"]
     assert levels and max(levels) >= 2, (
         f"the head was left uncoalesced while under budget: {levels}"
@@ -498,14 +544,16 @@ async def test_a_fold_starts_at_fold_at_and_lands_at_low_by_tokens():
         + _chain("a", 30)
         + [_row("user", "now?", None)]
     )
-    size = estimate_tokens(folds.render(body))
+    size = estimate_tokens(_render(body))
     k = _K()
-    _, view, folded = await fold_down(
-        body, _ctx(int(size / (FOLD_AT - 0.05)), k), int(size / (FOLD_AT - 0.05))
+    _, view, folded, _ = await fold_down(
+        body,
+        _ctx(int(size / (FOLD_AT - 0.05)), k, anchors={}),
+        int(size / (FOLD_AT - 0.05)),
     )
     assert folded == 0, "under FOLD_AT nothing folds"
     k = _K()
     bud = int(size / 1.0)  # the view is the whole budget: past FOLD_AT
-    _, view, folded = await fold_down(body, _ctx(bud, k), bud)
+    _, view, folded, _ = await fold_down(body, _ctx(bud, k, anchors={}), bud)
     assert folded == 1, f"one fold per overflow, got {folded}"
     assert estimate_tokens(view) <= int(bud * LOW), (estimate_tokens(view), bud)

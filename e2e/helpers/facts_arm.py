@@ -185,7 +185,7 @@ async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, ba
     id. Over the wire there is no in-process ai_core to measure with: said, not fitted."""
     from ai_core.constants import FOLD_AT
     from ai_core.context import estimate_one, estimate_tokens
-    from ai_core.folds import render
+    from ai_core.folds import anchors_of, render
     from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
 
     if core is not None:
@@ -204,13 +204,13 @@ async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, ba
     lo, hi = band
 
     def ratio() -> float:
-        return estimate_tokens(render(rows)) / trigger
+        return estimate_tokens(render(rows, anchors_of(rows))) / trigger
 
     before = ratio()
     if before > hi:
         # OVER: AUTOSIZE THE WINDOW — the planted content and its
         # needles stay whole; the window grows until the past sits mid-band.
-        size = estimate_tokens(render(rows))
+        size = estimate_tokens(render(rows, anchors_of(rows)))
         want_body = int(size / (((lo + hi) / 2) * FOLD_AT))
         w = want_body + sys_tok + NOTICE_ENVELOPE_RESERVE
         while core.budget({"context_window": w}) - sys_tok - NOTICE_ENVELOPE_RESERVE < want_body:
@@ -230,7 +230,7 @@ async def fit_planted(core, root, aid: str, rows: list[dict], *, window: int, ba
         fillers: list[dict] = []
         answers: dict[int, dict] = {}  # assistant filler → its user turn (by position)
         k = 0
-        while (estimate_tokens(render(rows + fillers)) / trigger) < (lo + hi) / 2:
+        while (estimate_tokens(render(rows + fillers, anchors_of(rows + fillers))) / trigger) < (lo + hi) / 2:
             u = {"role": "user", "id": 0, "parent": None,
                  "content": f"[from user]\nbackground note {k} (no action needed): "
                             + LOREM[: 600]}

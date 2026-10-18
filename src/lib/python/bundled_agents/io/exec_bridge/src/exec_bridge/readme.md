@@ -152,8 +152,9 @@ It polls nothing: an idle monitor wakes never. It is how a long run is stopped E
   lines below. The listener decides: show them, and stop the job early with kernel `cancel`
   (`task_id` = its `job_id`).
 - A monitor is a kernel task: `ps` lists it, `monitors` lists this agent's, kernel `cancel` (or
-  `unmonitor`) ends it, and it ends with its job after delivering what still waited. Monitors
-  on different jobs, at different cadences, run in parallel.
+  `unmonitor`) ends it, and it ends with its job: one last delivery, headed `job ended`, carries
+  what still waited (the header alone when nothing did). Monitors on different jobs, at
+  different cadences, run in parallel.
 
 Deliveries are this agent's own calls: the listener's `callable_by` must name this agent, and
 this agent's `can_call` the listener. A delivery the listener REFUSES (no grant, no such agent)

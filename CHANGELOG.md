@@ -15,6 +15,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   restart with no dump and inject. Same schema as the CLI's rust store.
 - `contract/memory_store/cases.json`: shared memory-store cases that python and
   rust replay against both of their stores.
+- AI agents: `context_forget` compacts an agent's own store. It deletes the rows
+  its folds already summarise and every superseded `view` row (with
+  `include_cleared`, everything before the last `clear` as well), keeps every
+  fold, and leaves the next prompt unchanged.
 - Skins: the canvas draws every colour, radius, font family, shadow and motion
   value from design tokens (W3C 2025.10), compiled in the page. A `skin` page
   agent picks the skin per backdrop and takes skins an AI writes (`schema`,
@@ -36,6 +40,17 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - CI: a push to a `fix/**` or `feat/**` branch runs the unit suites by itself
   (`ci · units`); a newer push to the same branch cancels the older run. Every
   other run is still started by hand.
+
+### Fixed
+
+- exec_bridge (python, rust, swift): a monitor always ends with one delivery
+  headed `job ended`, even when nothing waited any more, and `monitor` refuses a
+  job whose end already went out (flaky on Windows, #64).
+- The lockfile no longer pins the yanked `yoke-derive 0.8.3` (now 0.8.4).
+- AI agents: fold summaries no longer leave the view once the next prompt is
+  rebuilt from the view array. Each new fold records its place (`anchor`), so it
+  is placed even when its members are not in the rows being rendered; a store
+  written before the field renders as it did.
 
 ## [0.0.6] - 2026-10-18
 

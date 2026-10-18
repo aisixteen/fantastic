@@ -248,5 +248,6 @@ pub async fn strip(
         stripped: n,
         stripped_bytes: saved,
         folded: 0,
+        unanchored: 0,
     })
 }

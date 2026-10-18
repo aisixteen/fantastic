@@ -36,6 +36,7 @@ class Projection:
     stripped: int = 0
     stripped_bytes: int = 0
     folded: int = 0  # `fold`: fold rows written this projection
+    unanchored: int = 0  # `fold`: folds left out of the view, their anchor unknown
 
 
 # (body, system_block, rec, ctx) -> Projection (body excludes the system block)

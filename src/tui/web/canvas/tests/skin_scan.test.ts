@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { SKIN_SCHEMA } from "../src/bundles/skin/schema.ts";
 import { STOCK_SKINS } from "../src/bundles/skin/stock.ts";
 import { compileSkin } from "../src/bundles/skin/tokens.ts";
@@ -110,9 +110,11 @@ test("every tok() and tint() path is in SKIN_SCHEMA and every tinted path is opa
   // TINTED fills with every tinted one
   for (const { rel } of sources()) {
     if (rel === "main.ts" || rel === "bundle.ts") continue; // the page's entry: it boots
-    await import(join(SRC, rel));
+    // a file:// URL, not a path: Windows' ESM loader takes no `D:\…` path
+    await import(pathToFileURL(join(SRC, rel)).href);
   }
-  const { TINTED } = await import("../src/bundles/skin/css.ts");
+  // the same URL the modules above reached it by: one module instance, one TINTED
+  const { TINTED } = await import(pathToFileURL(join(SRC, "bundles/skin/css.ts")).href);
   assert.ok(TINTED.size > 0);
   const opaque = new Set(SKIN_SCHEMA.filter((t) => t.opaque === true).map((t) => t.path));
   for (const p of TINTED) assert.ok(opaque.has(p), `${p} is tinted but not opaque in SKIN_SCHEMA`);

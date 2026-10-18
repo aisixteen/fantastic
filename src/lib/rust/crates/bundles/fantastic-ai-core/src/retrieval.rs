@@ -295,7 +295,11 @@ pub async fn context_clear(
     let members: Vec<i64> = head(agent_id, kernel)
         .await?
         .iter()
-        .filter(|r| r.get("kind").and_then(Value::as_str) != Some("view"))
+        .filter(|r| {
+            !r.get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|k| crate::memory::BOOKKEEPING.contains(&k))
+        })
         .filter_map(|r| r.get("id").and_then(Value::as_i64))
         .collect();
     // python `" ".join(str(payload.get("why") or "").split())[:200]`.
@@ -350,6 +354,176 @@ pub async fn context_clear(
     Ok(json!({"cleared": rid, "rows": members.len()}))
 }
 
+/// `context_forget`: compact this agent's OWN store — drop the rows the model can
+/// no longer see and keep every fold. Python `_context_forget`, rule for rule:
+/// under the turn lock, ONE `anchors` row for the folds written without an
+/// `anchor` whose place is about to rest on it, ONE `prune {ids}`, and the head
+/// cache read again from the store (the prune cascaded each pruned member out of
+/// every fold's refs).
+///
+/// # Errors
+/// The memory store refused a read, the append or the prune.
+pub async fn context_forget(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+) -> MemResult<Value> {
+    use crate::folds::{anchors_of, chains, is_fold, is_open, recorded_anchors, refs_of};
+    use crate::memory::{refresh_head, rows_of, BOOKKEEPING, TURN_ROLES};
+    let include_cleared = match payload.get("include_cleared") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Ok(fantastic_kernel::refusal::bad(
+                "context_forget",
+                "include_cleared",
+                "a bool",
+            ))
+        }
+    };
+    let st = crate::state::state_for(agent_id);
+    let lock = Arc::clone(&st.lock);
+    let _turn = lock.lock().await;
+    let kind = |r: &Value| r.get("kind").and_then(Value::as_str).map(str::to_string);
+    let head_rows = refresh_head(agent_id, kernel).await?;
+    let everything = rows_of(
+        &store_call(agent_id, kernel, json!({"type": "read"})).await?,
+        agent_id,
+    );
+    let anchors = anchors_of(&head_rows);
+    let by_id: std::collections::HashMap<i64, &Value> = head_rows
+        .iter()
+        .filter_map(|r| row_id(r).map(|id| (id, r)))
+        .collect();
+    let head_folds: Vec<&Value> = head_rows.iter().filter(|r| is_fold(r)).collect();
+    let turns: Vec<Value> = head_rows
+        .iter()
+        .filter(|r| !kind(r).is_some_and(|k| BOOKKEEPING.contains(&k.as_str())))
+        .filter(|r| {
+            r.get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|role| TURN_ROLES.contains(&role))
+        })
+        .cloned()
+        .collect();
+    let open_ids: HashSet<i64> = chains(&turns)
+        .into_iter()
+        .filter(|c| is_open(&turns, c))
+        .flat_map(|c| {
+            c.into_iter()
+                .filter_map(|i| row_id(&turns[i]))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut doomed: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+    // 1. the rows folds already summarise — under a fold whose place is known
+    for f in &head_folds {
+        if !row_id(f).is_some_and(|id| anchors.contains_key(&id)) {
+            continue;
+        }
+        let mut stack = refs_of(f);
+        let mut seen: HashSet<i64> = HashSet::new();
+        while let Some(x) = stack.pop() {
+            if !seen.insert(x) {
+                continue;
+            }
+            let Some(r) = by_id.get(&x) else {
+                continue;
+            };
+            if is_fold(r) {
+                stack.extend(refs_of(r));
+            } else if !open_ids.contains(&x) {
+                doomed.insert(x);
+            }
+        }
+    }
+    // 2. every view row but the one in force
+    let current = head_rows
+        .iter()
+        .rev()
+        .find(|r| kind(r).as_deref() == Some("view"))
+        .and_then(row_id);
+    doomed.extend(
+        everything
+            .iter()
+            .filter(|r| kind(r).as_deref() == Some("view"))
+            .filter_map(row_id)
+            .filter(|id| Some(*id) != current),
+    );
+    // 3. behind the last clear, on request; the clear row itself stays
+    if include_cleared {
+        if let Some(last) = everything
+            .iter()
+            .rposition(|r| kind(r).as_deref() == Some("clear"))
+        {
+            doomed.extend(everything[..last].iter().filter_map(row_id));
+        }
+    }
+    // A fold written before folds carried `anchor` is placed by deriving from its
+    // members — about to go. Its place is recorded first, in ONE `anchors` row; an
+    // older `anchors` row is superseded by the newest one that holds it all.
+    let want: std::collections::BTreeMap<i64, i64> = head_folds
+        .iter()
+        .filter(|f| crate::folds::own_anchor(f).is_none())
+        .filter_map(|f| row_id(f).and_then(|id| anchors.get(&id).map(|a| (id, *a))))
+        .collect();
+    let rows_of_anchors: Vec<&Value> = head_rows
+        .iter()
+        .filter(|r| kind(r).as_deref() == Some("anchors"))
+        .collect();
+    let newest = rows_of_anchors.last().copied();
+    let holds = newest.is_some_and(|n| {
+        let rec = recorded_anchors(std::slice::from_ref(n));
+        want.iter().all(|(k, v)| rec.get(k) == Some(v))
+    });
+    if !want.is_empty() && !holds {
+        let map: Map<String, Value> = want
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::from(*v)))
+            .collect();
+        save_history(
+            agent_id,
+            kernel,
+            &[json!({"kind": "anchors", "v": 1, "anchors": map})],
+        )
+        .await?;
+        doomed.extend(rows_of_anchors.iter().filter_map(|r| row_id(r)));
+    } else {
+        let keep = if want.is_empty() {
+            None
+        } else {
+            newest.and_then(row_id)
+        };
+        doomed.extend(
+            rows_of_anchors
+                .iter()
+                .filter_map(|r| row_id(r))
+                .filter(|id| Some(*id) != keep),
+        );
+    }
+    let mut pruned = 0i64;
+    if !doomed.is_empty() {
+        let res = store_call(
+            agent_id,
+            kernel,
+            json!({"type": "prune", "ids": doomed.iter().collect::<Vec<_>>()}),
+        )
+        .await?;
+        pruned = res.get("pruned").and_then(Value::as_i64).unwrap_or(0);
+    }
+    // THE STORE IS THE TRUTH: the prune cascaded each pruned member out of every
+    // fold's refs, so the head cache is read again, not patched.
+    crate::memory::forget_head(agent_id, kernel);
+    let fresh = head(agent_id, kernel).await?;
+    let after = anchors_of(&fresh);
+    let left: Vec<&Value> = fresh.iter().filter(|r| is_fold(r)).collect();
+    let lost = left
+        .iter()
+        .filter(|f| !row_id(f).is_some_and(|id| after.contains_key(&id)))
+        .count();
+    Ok(json!({"pruned": pruned, "kept_folds": left.len(), "unanchored": lost}))
+}
+
 /// `context_recall`: rebuild this agent's VIEW from its store — with
 /// `context_strategy` fold, a head longer than the budget is FOLDED first (oldest
 /// spans into fold rows, as a turn's projection folds); then fit the head to the
@@ -397,6 +571,7 @@ pub async fn context_recall(
     // and drops what still does not fit. Folding takes the model (a summary per
     // span), so a `dry` recall does not fold.
     let mut folded = 0usize;
+    let anchors = crate::folds::anchors_of(&head(agent_id, kernel).await?);
     if let Some(p) = provider {
         if meta.get("context_strategy").and_then(Value::as_str) == Some("fold") {
             let fctx = ProjectionCtx {
@@ -406,13 +581,14 @@ pub async fn context_recall(
                 self_id: agent_id,
                 kernel,
                 client_id: client_id.unwrap_or(""),
+                anchors: &anchors,
             };
-            let (r, _, f) = fold_down(&rows, &fctx, body_budget).await?;
+            let (r, _, f, _) = fold_down(&rows, &fctx, body_budget).await?;
             rows = r;
             folded = f;
         }
     }
-    let view: Vec<Value> = fold_render(&rows)
+    let view: Vec<Value> = fold_render(&rows, &anchors)
         .into_iter()
         .filter(|r| row_id(r).is_some())
         .collect();

@@ -419,6 +419,77 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
     assert_eq!(listed["monitors"], json!([]), "{listed}");
 }
 
+/// python `test_the_end_is_delivered_when_nothing_waits_any_more` (issue 64): every
+/// line lands in ONE burst, the first delivery takes them all, nothing waits when
+/// the job ends — the end is delivered anyway, once, as the header alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_end_is_delivered_when_nothing_waits_any_more() {
+    let tmp = TempDir::new().unwrap();
+    let (k, ear) = setup(&tmp).await;
+    let (rn, en) = ids(&tmp);
+    let jid = printer(&k, &rn, 0, 0.0, "", 30.0).await;
+    let r = call(
+        &k,
+        &rn,
+        json!({"type": "monitor", "job_id": jid, "notify": en, "every": 30}),
+    )
+    .await;
+    let mid = r["monitor_id"].as_i64().unwrap_or_else(|| panic!("{r}"));
+    let owner = AgentId::from(rn.as_str());
+    for n in 0..3 {
+        crate::monitor::feed_line(&owner, TaskId(jid), &format!("INFO step {n}"));
+    }
+    until(|| ear.texts().len() == 1, 5.0, "the first delivery").await;
+    assert!(ear.texts()[0].contains("INFO step 2"), "{:?}", ear.texts());
+    stop_all(&k, &rn).await;
+    until(
+        || ear.texts().iter().any(|t| t.contains("job ended")),
+        5.0,
+        "the final delivery at job end",
+    )
+    .await;
+    until(|| true, 0.2, "").await;
+    let texts = ear.texts();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        texts[1].starts_with(&format!("[monitor {mid} · job {jid} · "))
+            && texts[1].ends_with(" · job ended]"),
+        "{texts:?}"
+    );
+}
+
+/// python `test_a_monitor_is_refused_once_its_jobs_end_went_out`: the end was handed
+/// to the job's monitors while its process still reads alive — a monitor filed then
+/// would never be told, so `monitor` refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_monitor_is_refused_once_its_jobs_end_went_out() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _ear) = setup(&tmp).await;
+    let (rn, en) = ids(&tmp);
+    let jid = printer(&k, &rn, 0, 0.0, "", 30.0).await;
+    let key = (AgentId::from(rn.as_str()), TaskId(jid));
+    // the pump's own mark, made while the process is still alive (not reaped yet)
+    crate::jobs::jobs()
+        .get_mut(&key)
+        .expect("the job row")
+        .monitors_closed = true;
+    assert!(crate::jobs::alive(&crate::jobs::jobs()[&key]));
+    let r = call(
+        &k,
+        &rn,
+        json!({"type": "monitor", "job_id": jid, "notify": en, "every": 30}),
+    )
+    .await;
+    assert_eq!(
+        (r["reason"].as_str(), r["arg"].as_str()),
+        (Some("bad_arg"), Some("job_id")),
+        "{r}"
+    );
+    let listed = call(&k, &rn, json!({"type": "monitors"})).await;
+    assert_eq!(listed["monitors"], json!([]), "{listed}");
+    stop_all(&k, &rn).await;
+}
+
 /// python `test_a_refused_delivery_ends_the_monitor_and_monitors_says_why`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_delivery_ends_the_monitor_and_monitors_says_why() {

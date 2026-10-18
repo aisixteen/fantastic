@@ -18,7 +18,8 @@ this agent's key. Reply BODIES are never stored — a reply row keeps its one-li
 the budget (calibrated by the endpoint's reported prompt size when it reports one)
 with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) and a
 `[context-notice]`; `context_status`, `context_recall`, `history {fold?}`, `grep` and
-`context_clear` (a boundary, nothing deleted) inspect and page it. `watch {body?}` /
+`context_clear` (a boundary, nothing deleted) inspect and page it; `context_forget`
+drops the rows folds already summarise. `watch {body?}` /
 `unwatch` subscribe to this agent's row events (a digest; with `body` the content too).
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
