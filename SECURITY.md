@@ -7,7 +7,7 @@ land on the **latest release line only**; older tags are not maintained.
 
 | Version            | Supported          |
 | ------------------ | ------------------ |
-| latest `v0.5.x`    | :white_check_mark: |
+| the latest release | :white_check_mark: |
 | any earlier tag    | :x:                |
 
 ## Reporting a vulnerability
@@ -22,7 +22,7 @@ disclosure with you.
 Helpful to include, where you can:
 
 - the affected **runtime(s)** — `python/`, `rust/`, `swift/`, or the `ts/`
-  frontend — and a version, commit SHA, or image tag (`:vX.Y.Z-<arch>`);
+  frontend — and a version or commit SHA;
 - a description, impact, and a **minimal reproduction**;
 - whether it touches the **protocol surface** (the HTTP/WS/REST wire shapes,
   system verbs, the `reflect` contract, or the on-disk `.fantastic/` format) —

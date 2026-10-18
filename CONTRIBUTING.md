@@ -1,10 +1,15 @@
 # Contributing to Aisixteen Fantastic (`fantastic-canvas`)
 
-Thanks for your interest. This repo is the **open core** of Aisixteen Fantastic —
-the host kernels (`python/`, `swift/`, `rust/`) plus the browser frontend
-(`ts/`). It is **AGPL-3.0-or-later** and part of one product family with the
-Apple client ([`fantastic_app`](https://github.com/Alexadar/fantastic_app)),
-same author.
+This repo is the **open core** of Aisixteen Fantastic — the host kernels
+(`python/`, `swift/`, `rust/`) plus the browser frontend (`ts/`). It is
+**AGPL-3.0-or-later** and part of one product family with the Apple client (in
+development), same author.
+
+> **Outside contributions are not accepted.** Pull requests from outside the
+> project are closed unmerged. **Bug reports are welcome** as issues, and
+> security problems go through private reporting ([`SECURITY.md`](SECURITY.md)).
+> The rest of this guide is the development reference: building, testing and the
+> cross-runtime rules.
 
 > **Alpha.** Interfaces, the wire protocol, and the on-disk `.fantastic/` format
 > still change between releases. Open an issue before a large change.
@@ -65,8 +70,8 @@ locally, before opening a PR.
 ## Commits & pushes
 
 **Commits and pushes to this repo require the maintainer's explicit consent**
-(project convention). Open a PR from a fork/branch; the maintainer reviews and
-merges. Keep PRs focused — one concern each.
+(project convention). Work lands from the maintainer's branches; outside pull
+requests are not accepted. Keep each change focused — one concern each.
 
 ## Reporting
 
