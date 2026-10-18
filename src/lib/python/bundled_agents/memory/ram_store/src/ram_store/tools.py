@@ -7,8 +7,8 @@ leg relays for a caller on another kernel, and `<guid>|kernel` for the operator
 (`sender=None`). So a caller writes ONLY under its own key, by construction.
 
 THE TOPOLOGY IS SQLITE'S. The tables below are the ones a durable `sqlite_store`
-keeps, with the same keys, the same uniqueness, the same indexes and the same
-foreign-key cascades; only the query language is missing. A caller cannot tell the
+keeps (`memory/sqlite_store`), with the same keys, the same uniqueness, the same
+indexes and the same foreign-key cascades; only the query language is missing. A caller cannot tell the
 two apart, and the durable port is a 1:1 mirror under the same verbs:
 
   rows       PRIMARY KEY (owner, id)            the row dict, minus `refs`

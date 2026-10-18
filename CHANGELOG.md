@@ -9,6 +9,12 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 - The `fantastic-home` crate: the fantastic manager's model and ViewModel, pure
   (no OS, no I/O, no clock), the base of `fantastic home`.
+- Python kernel: `sqlite_store`, a durable memory store. It answers exactly what
+  `ram_store` answers, from one SQLite file, so an AI agent's conversation and
+  folds, the execution ledger, dead letters and named-call dedup survive a
+  restart with no dump and inject. Same schema as the CLI's rust store.
+- `contract/memory_store/cases.json`: shared memory-store cases that python and
+  rust replay against both of their stores.
 
 ### Changed
 

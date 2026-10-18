@@ -34,7 +34,8 @@ into it; the running artifact is a function of its *descriptance*, not its code.
   bootstrap composes a stdout renderer child when stdin is a tty.
 - **memory store** — the kernel keeps NO conversation: every message is a
   row in a MEMORY STORE agent (`ram_store` ships here — in RAM, gone with the
-  process; a durable store answers the same verbs). The root names it in
+  process; `sqlite_store` answers the same verbs from one SQLite file and
+  survives a restart). The root names it in
   `memory_store_id`, and `kernel_start` refuses to run without one; the kernel
   flushes its execution rows (`call`/`settle`/`ack`/`flush`) there, and
   `ledger`, dead letters (`on_deadletter`, `ack_deadletter`) and named-call

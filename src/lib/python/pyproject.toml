@@ -29,6 +29,7 @@ dependencies = [
   "fantastic-ai-core",
   "fantastic-static-loader",
   "fantastic-ram-store",
+  "fantastic-sqlite-store",
   "fantastic-credential-store",
   "pyyaml>=6",
 ]
@@ -80,6 +81,7 @@ testpaths = [
   "bundled_agents/io/py_agent/tests",
   "bundled_agents/io/mcp_client/tests",
   "bundled_agents/memory/ram_store/tests",
+  "bundled_agents/memory/sqlite_store/tests",
   "bundled_agents/security/credential_store/tests",
 ]
 # `-n auto` — xdist across every core BY DEFAULT, so a bare `pytest` never runs the
@@ -109,6 +111,7 @@ members = [
   "bundled_agents/loader/kernel_state",
   "bundled_agents/loader/static_loader",
   "bundled_agents/memory/ram_store",
+  "bundled_agents/memory/sqlite_store",
   "bundled_agents/security/credential_store",
   "installed_agents/*",
 ]
@@ -134,4 +137,5 @@ fantastic-ai-core = { workspace = true }
 fantastic-kernel-state = { workspace = true }
 fantastic-static-loader = { workspace = true }
 fantastic-ram-store = { workspace = true }
+fantastic-sqlite-store = { workspace = true }
 fantastic-credential-store = { workspace = true }

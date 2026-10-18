@@ -19,4 +19,5 @@ writes and reads its OWN rows; there is no `owner` field to forge.
 `inject`/`dump` included — is the kernel's call gate alone.
 
 **Same tables as sqlite:** rows `(owner, id)`, fold_refs (FK cascade on their
-rows), a text index. A durable store answers the same verbs.
+rows), a text index. `sqlite_store` answers the same verbs from one SQLite file
+and survives a restart — use it when the memory must outlive the process.

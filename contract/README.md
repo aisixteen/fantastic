@@ -9,6 +9,8 @@ contract/
   requirements.yaml        the canonical registry — every id this suite can pin
   conformance/
     cases.json             C21: one envelope, many transports, many runtimes
+  memory_store/
+    cases.json             one answer from every memory store (ram, sqlite) in every runtime
   agentic/
     configs/*.yaml         DEPLOYABLE kernel shapes — no test metadata, ever
     specs/*.yaml           what each config must prove, as ordered steps
