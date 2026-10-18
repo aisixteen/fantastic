@@ -464,6 +464,10 @@ struct FoldAnchorsTests {
     @Test func foldsSurviveAProjectionOverTheViewArray() async throws {
         let model = AnchorModel()
         let (k, id, _) = await bootAgent("anc_fv", window: 4000, model: model)
+        // The boot owes a recall, which would fold and write the view before the
+        // turn's projection does; python's fixture creates the agent unbooted, so
+        // the first view is the projection's. Settle the owed recall the same way.
+        #expect(liveBackend(k)?.takeRecallDue(id.value) == true, "the boot owes a recall")
         try await seed(k, id, [goalRow(k)] + "abcdef".flatMap { closed(k, String($0), big: 2000) })
         _ = await turn(k, id)
         var rows = try await store(k, id)
