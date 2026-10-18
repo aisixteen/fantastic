@@ -57,8 +57,8 @@ LEG's own `guid` on a `relay_connector` record).
 
 The kernel keeps no conversation and writes no message log. Every message lives in a
 MEMORY STORE agent (`ram_store` in this lib: in RAM, the topology of a SQL store —
-rows, fold refs, grants with a cascade, a text index; a persistent store is the same
-verbs over a real database). A store is multi-tenant: every row sits under an OWNER
+rows, fold refs, grants with a cascade, a text index; `sqlite_store` is the same
+verbs over one SQLite file, so the tables survive a restart). A store is multi-tenant: every row sits under an OWNER
 key `<kernel guid>|<agent id>` (the operator is `kernel`; a caller from another kernel
 arrives already qualified with its own guid).
 

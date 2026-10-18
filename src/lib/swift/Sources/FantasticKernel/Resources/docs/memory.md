@@ -35,7 +35,8 @@ path is refused.
 The kernel keeps NO conversation. Every message — an AI agent's turns, folds and
 views, and the kernel's own execution rows (`call`, `settle`, `ack`, `flush`) — is
 a ROW in a MEMORY STORE agent (`ram_store` ships with every kernel: in RAM, gone
-with the process; a durable store answers the same verbs). A store is
+with the process; `sqlite_store` answers the same verbs from one SQLite file and
+survives a restart). A store is
 multi-tenant: every row sits under its owner's key `<kernel guid>|<agent id>`;
 a caller reads and writes only its own key.
 
