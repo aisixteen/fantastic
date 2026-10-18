@@ -15,6 +15,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - CI: a failed unit suite stops the run before the e2e. The e2e runs only once
   every unit job passed and every binary built; the builds still run alongside
   the unit tests (`build.yml`'s `binaries` call, then its `e2e` call).
+- CI runs the unit suites only by default (a bug fix, titled `ci · units`). The
+  release binaries and the e2e run on request (`-f e2e=true`, titled
+  `ci · full`): for a completed phase or a release. `release.yml` publishes only
+  a green full run.
 
 ## [0.0.6] - 2026-10-18
 
