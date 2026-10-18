@@ -2,15 +2,18 @@
 #
 #   profile    debug | release — what every job builds
 #   units      the unit tests of every runtime, per OS
-#   e2e        build the shipping binaries + the kernels under test, then run the
-#              model-free e2e (`e2e/run.py --only-free`) on EXACTLY those
-#              (`E2E_ARTIFACTS`) — the e2e runs what ships — each OS's suite as
-#              three parallel jobs (`--shard i/3`)
-#   artifacts  the shipping archives of every release target, as artifacts
-#              (`release-<target>`); `release.yml` publishes the ones a green
-#              run of `ci.yml` kept for the tagged commit
+#   binaries   the shipping archive of every release target (`release-<target>`;
+#              `release.yml` publishes the ones a green run of `ci.yml` kept for
+#              the tagged commit), and per OS the kernels and rig the e2e runs
+#              (`e2e-<os>`)
+#   e2e        the model-free e2e (`e2e/run.py --only-free`) on EXACTLY the
+#              binaries this run built (`E2E_ARTIFACTS`) — the e2e runs what
+#              ships — each OS's suite as three parallel jobs (`--shard i/3`).
+#              Its own call may come after the `binaries` call and the units
+#              (`ci.yml`): it takes the `e2e-<os>` artifacts of the same run.
 #
-# Callers: `ci.yml` ({debug, units} and {release, e2e, artifacts}). FREE:
+# Callers: `ci.yml` ({debug, units}, {release, binaries}, then {release, e2e}).
+# FREE:
 # standard GitHub-hosted runners only
 # (ubuntu-latest, ubuntu-24.04-arm, xcode-27, windows-latest) — a `-large` /
 # `-xlarge` label is billed even on a public repo; never name one here.
@@ -31,10 +34,10 @@ on:
       units:
         type: boolean
         default: false
-      e2e:
+      binaries:
         type: boolean
         default: false
-      artifacts:
+      e2e:
         type: boolean
         default: false
 
@@ -182,7 +185,7 @@ jobs:
 
   # ── the shipping binaries (+ the e2e's) ──────────────────────────────────
   binaries:
-    if: inputs.e2e || inputs.artifacts
+    if: inputs.binaries
     name: build · ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -217,12 +220,12 @@ jobs:
             src
           key: ${{ matrix.target }}-${{ inputs.profile }}
       - uses: astral-sh/setup-uv@v10.3.0
-        if: inputs.e2e && matrix.e2e != ''
+        if: matrix.e2e != ''
         with:
           enable-cache: true
           cache-dependency-glob: src/lib/python/uv.lock
       - name: the CLI + the e2e's kernels and rig
-        if: inputs.e2e && matrix.e2e != ''
+        if: matrix.e2e != ''
         working-directory: src/lib/python
         run: |
           uv run python ../../../e2e/build.py --out ../../../dist/e2e \
@@ -231,10 +234,9 @@ jobs:
           # one tar: upload-artifact drops the executable bit
           tar -cf ../../../dist/e2e.tar -C ../../../dist/e2e .
       - name: the CLI
-        if: ${{ !(inputs.e2e && matrix.e2e != '') }}
+        if: matrix.e2e == ''
         run: sh scripts/build/cli.sh --profile ${{ inputs.profile }} --target ${{ matrix.target }}
       - name: keep the shipping archive
-        if: inputs.artifacts
         uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
@@ -243,7 +245,7 @@ jobs:
           # a release publishes these up to a month after the green run
           retention-days: 30
       - name: keep the e2e's binaries
-        if: inputs.e2e && matrix.e2e != ''
+        if: matrix.e2e != ''
         uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ matrix.e2e }}
@@ -253,7 +255,7 @@ jobs:
 
   # ── the release targets no e2e runs on (shipped, not tested here) ───────
   cross:
-    if: inputs.artifacts
+    if: inputs.binaries
     name: build · ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -294,8 +296,10 @@ jobs:
   # ── the model-free e2e, on the binaries just built ───────────────────────
   # Each OS's suite runs as three jobs side by side (`--shard i/3`): the wall
   # time is a third, and parallel jobs cost nothing on a public repo.
+  # `needs: binaries` orders a call that builds AND tests; in a call that only
+  # tests, `binaries` is skipped, and only a failed or cancelled run stops this.
   e2e:
-    if: inputs.e2e
+    if: inputs.e2e && !cancelled() && !failure()
     needs: binaries
     name: e2e (free) · ${{ matrix.os }} · ${{ matrix.shard }}/3
     strategy:

@@ -1,12 +1,16 @@
 # CI — run BY HAND only (`gh workflow run ci.yml --ref <branch>`, or the
 # Actions tab's "Run workflow"); nothing starts it on a push or a PR. The
-# reusable BUILD (`build.yml`) twice, side by side —
+# reusable BUILD (`build.yml`) three times —
 #
-#   units   debug    every runtime's unit tests on Linux, macOS and Windows
-#   e2e     release  the shipping binaries built per OS, then the model-free e2e
-#                    (`e2e/run.py --only-free`, no model turns) on exactly those;
-#                    every release target's archive is kept (`release-<target>`)
-#                    — a green run is what `release.yml` publishes for its commit
+#   units     debug    every runtime's unit tests on Linux, macOS and Windows
+#   binaries  release  every release target's archive (`release-<target>`) and
+#                      per OS the binaries the e2e runs — side by side with units
+#   e2e       release  the model-free e2e (`e2e/run.py --only-free`, no model
+#                      turns) on exactly those binaries — ONLY once every unit
+#                      suite passed and every binary built: a red unit test stops
+#                      the run before the e2e starts
+#
+# A green run is what `release.yml` publishes for its commit.
 #
 # Free: standard GitHub-hosted runners on a public repo (see `build.yml`).
 
@@ -29,9 +33,15 @@ jobs:
       profile: debug
       units: true
 
+  binaries:
+    uses: ./.github/workflows/build.yml
+    with:
+      profile: release
+      binaries: true
+
   e2e:
+    needs: [units, binaries]
     uses: ./.github/workflows/build.yml
     with:
       profile: release
       e2e: true
-      artifacts: true

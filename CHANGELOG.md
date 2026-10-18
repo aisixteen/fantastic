@@ -10,6 +10,12 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - The `fantastic-home` crate: the fantastic manager's model and ViewModel, pure
   (no OS, no I/O, no clock), the base of `fantastic home`.
 
+### Changed
+
+- CI: a failed unit suite stops the run before the e2e. The e2e runs only once
+  every unit job passed and every binary built; the builds still run alongside
+  the unit tests (`build.yml`'s `binaries` call, then its `e2e` call).
+
 ## [0.0.6] - 2026-10-18
 
 The model-free e2e is green on Linux, macOS and Windows CI runners — 0.0.5's
