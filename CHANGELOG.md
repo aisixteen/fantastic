@@ -5,6 +5,19 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-10-18
+
+The model-free e2e is green on Linux, macOS and Windows CI runners — 0.0.5's
+known issue is closed. The AI cell's pill staying on "thinking" after a stop
+(the other 0.0.5 known issue) was the test mock's race, not the cell.
+
+### Changed
+
+- README: release, crates.io, platform and roadmap badges, and a Roadmap section
+  (the public board and its four milestones); no links to private repositories.
+- CONTRIBUTING: outside contributions are not accepted; bug reports are welcome
+  as issues, security problems through private vulnerability reporting.
+
 ### Fixed
 
 - canvas terminal: a ▶ start no longer drops what the program wrote before
@@ -30,14 +43,14 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - e2e: the reference dev surface serves with its own `serve.py` (`-m
   http.server` reverse-resolves its address before it says it listens — a
   macOS runner stalled there); a TUI shot waits for a settled screen (300 ms
-  unchanged, at most 3 s — ConPTY hands a redraw over in pieces); a click waits for its target to be SHOWN,
-  not only present (a stopped terminal's ▶ is in the DOM hidden until its
-  attach); the AI-cell
-  mock answers the runtime's no-call reminder `done` at once, so it never takes
-  the next step's reply (S4, S5, S11); prompt_file checks the turn that answers
-  its message; a cell deleted between a listing and its read is skipped; the
-  Swift scheduler-batch test waits for its fires to be recorded before its
-  directory is removed (it left `fantastic-schedbatch-*` behind).
+  unchanged, at most 3 s — ConPTY hands a redraw over in pieces); a click
+  waits for its target to be SHOWN, not only present (a stopped terminal's ▶
+  is in the DOM hidden until its attach); the AI-cell mock answers the
+  runtime's no-call reminder `done` at once, so it never takes the next step's
+  reply (S4, S5, S11); prompt_file checks the turn that answers its message; a
+  cell deleted between a listing and its read is skipped; the Swift
+  scheduler-batch test waits for its fires to be recorded before its directory
+  is removed (it left `fantastic-schedbatch-*` behind).
 - e2e: a cold Chrome is given 30 s to attach; the reference surface's log
   panels keep each job's lines (a first line could land before the job was
   named to them) and its status follows the run's own job (a build's late
