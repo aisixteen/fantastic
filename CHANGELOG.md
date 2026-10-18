@@ -7,12 +7,20 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The `fantastic-home` crate: the fantastic manager's model and ViewModel, pure
+  (no OS, no I/O, no clock), the base of `fantastic home`.
 - Python kernel: `sqlite_store`, a durable memory store. It answers exactly what
   `ram_store` answers, from one SQLite file, so an AI agent's conversation and
   folds, the execution ledger, dead letters and named-call dedup survive a
   restart with no dump and inject. Same schema as the CLI's rust store.
 - `contract/memory_store/cases.json`: shared memory-store cases that python and
   rust replay against both of their stores.
+
+### Changed
+
+- CI: a failed unit suite stops the run before the e2e. The e2e runs only once
+  every unit job passed and every binary built; the builds still run alongside
+  the unit tests (`build.yml`'s `binaries` call, then its `e2e` call).
 
 ## [0.0.6] - 2026-10-18
 
