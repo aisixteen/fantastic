@@ -109,7 +109,7 @@ impl From<crate::assembly::BlockFail> for GenFailure {
 
 /// Project the message list to what the model actually reads — its role and its
 /// text; every other key is stripped.
-fn render_for_model(messages: &[Value]) -> Vec<Value> {
+pub(crate) fn render_for_model(messages: &[Value]) -> Vec<Value> {
     messages
         .iter()
         .map(|m| {

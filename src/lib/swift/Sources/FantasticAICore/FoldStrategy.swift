@@ -201,8 +201,11 @@ public enum AIFoldStrategy {
     /// just a member — that is how folds nest: the next fold over this stretch of
     /// the view takes the earlier fold as one of its rows, and its level is one
     /// above the deepest member. Python `write_fold`.
-    static func writeFold(_ ctx: ProjectionCtx, _ rows: [JSON], _ idxs: [Int]) async throws -> JSON {
+    static func writeFold(
+        _ ctx: ProjectionCtx, _ rows: [JSON], _ idxs: [Int], _ anchors: [Int64: Int64]
+    ) async throws -> JSON {
         let ids = idxs.compactMap { rowId(rows[$0]) }
+        let anchor = try AIFolds.memberAnchor(rows, idxs, anchors)
         let lvl = 1 + (idxs.filter { isFold(rows[$0]) }.map { AIFolds.level(rows, rows[$0]) }.max() ?? 0)
         // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
         let index = mechanicalIndex(rows, idxs)
@@ -213,7 +216,7 @@ public enum AIFoldStrategy {
         }
         let fr = AIFolds.makeFold(
             refs: ids, title: title, body: text, degraded: degraded,
-            id: kernel.mintId(), lvl: lvl,
+            id: kernel.mintId(), anchor: anchor, lvl: lvl,
             parent: idxs.first.flatMap { rowParent(rows[$0]) })
         // A fold is a MARK that must persist — written whoever the projection is for
         // (a turn's caller, or a `context_recall` with none).
@@ -265,14 +268,21 @@ public enum AIFoldStrategy {
     /// ONE fold takes the oldest rows, by tokens, down to `LOW` of it; then tidy the
     /// head (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or
     /// no budget. Returns `(rows + the fold rows
-    /// written, the view, folded)`. The turn's `fold` projection and
+    /// written, the view, folded, unanchored)`. The turn's `fold` projection and
     /// `context_recall` (a store longer than the window, e.g. written under a
     /// larger one) share it. Python `fold_down`.
+    ///
+    /// Folds are placed by `ctx.anchors` (computed over the HEAD by the caller), so
+    /// a body rebuilt from the view array, which holds folds without their members,
+    /// keeps every fold in place.
     static func foldDown(
         _ rowsIn: [JSON], _ ctx: ProjectionCtx, budget: Int64
-    ) async throws -> (rows: [JSON], view: [JSON], folded: Int) {
+    ) async throws -> (rows: [JSON], view: [JSON], folded: Int, unanchored: Int) {
+        guard var anchors = ctx.anchors else {
+            throw PyError("ValueError", "fold: no anchors — the caller computes them over the head")
+        }
         var rows = rowsIn
-        var view = AIFolds.render(rows)
+        var view = AIFolds.render(rows, anchors)
         var folded = 0
         if AIContext.estimateTokens(view) > Int64(Double(budget) * AIConstants.FOLD_AT)
             && rows.count > 2
@@ -285,9 +295,11 @@ public enum AIFoldStrategy {
                 let need = AIContext.estimateTokens(view) - target + AIConstants.SUMMARY_BUDGET
                 let span = nextSpan(rows, view, need: need)
                 if span.isEmpty { break }
-                rows.append(try await writeFold(ctx, rows, span))
+                let fr = try await writeFold(ctx, rows, span, anchors)
+                if let id = rowId(fr), let a = fr["anchor"].asInt { anchors[id] = a }
+                rows.append(fr)
                 folded += 1
-                view = AIFolds.render(rows)
+                view = AIFolds.render(rows, anchors)
             }
         }
         // TIDY THE HEAD, budget or no budget. Coalescing only while the view is OVER
@@ -302,11 +314,13 @@ public enum AIFoldStrategy {
         while true {
             let span = nextSpan(rows, view, need: 0)  // only a FOLD_RUN of folds qualifies here
             if span.isEmpty || !span.allSatisfy({ isFold(rows[$0]) }) { break }
-            rows.append(try await writeFold(ctx, rows, span))
+            let fr = try await writeFold(ctx, rows, span, anchors)
+            if let id = rowId(fr), let a = fr["anchor"].asInt { anchors[id] = a }
+            rows.append(fr)
             folded += 1
-            view = AIFolds.render(rows)
+            view = AIFolds.render(rows, anchors)
         }
-        return (rows, view, folded)
+        return (rows, view, folded, AIFolds.unanchored(rows, anchors))
     }
 
     /// Fold the oldest stretches of the view down to the low watermark, tidy the
@@ -321,7 +335,8 @@ public enum AIFoldStrategy {
         let out = try await AIStripStrategy.strip(down.view, systemBlock, rec, ctx)
         return AIProjection(
             body: out.body, omittedMarker: out.omittedMarker,
-            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: down.folded)
+            stripped: out.stripped, strippedBytes: out.strippedBytes, folded: down.folded,
+            unanchored: down.unanchored)
     }
 }
 

@@ -25,7 +25,9 @@ from ai_core.folds import (
     is_fold,
     level,
     make_fold,
+    member_anchor,
     render,
+    unanchored,
 )
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE, Projection
 from ai_core.strategies.strip import LOW, strip
@@ -195,7 +197,9 @@ async def _summarize(
     return parts[0], parts[1], False
 
 
-async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> dict:
+async def write_fold(
+    ctx: ProjectionCtx, rows: list[dict], idxs: list[int], anchors: dict[int, int]
+) -> dict:
     """Summarize `idxs` and append ONE fold row for them (a summary that will not fit
     raises `FoldSummaryError`). A fold row in `idxs` is just a member —
     that is how folds nest: the next fold over this stretch of the view takes the
@@ -203,6 +207,7 @@ async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> d
     from ai_core.core import _save_history  # lazy: core imports this package
 
     ids = [rows[i].get("id") for i in idxs]
+    anchor = member_anchor(rows, idxs, anchors)
     lvl = 1 + max((level(rows, rows[i]) for i in idxs if is_fold(rows[i])), default=0)
     # THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
     index = mechanical_index(rows, idxs)
@@ -220,6 +225,7 @@ async def write_fold(ctx: ProjectionCtx, rows: list[dict], idxs: list[int]) -> d
         text,
         degraded,
         id=_ctx(ctx.kernel).mint_id(),
+        anchor=anchor,
         lvl=lvl,
         parent=rows[idxs[0]].get("parent"),
     )
@@ -266,15 +272,22 @@ def next_span(
 
 async def fold_down(
     rows: list[dict], ctx: ProjectionCtx, budget: int
-) -> tuple[list[dict], list[dict], int]:
+) -> tuple[list[dict], list[dict], int, int]:
     """FOLD WHEN NEAR FULL: once the rendered view passes `FOLD_AT` of `budget`, ONE
     fold takes the oldest rows, by tokens, down to `LOW` of it; then tidy the head
     (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or no budget.
-    Returns `(rows + the fold rows written, the view, folded)`. The turn's `fold`
-    projection and `context_recall` (a store longer than the window, e.g. written
-    under a larger one) share it."""
+    Returns `(rows + the fold rows written, the view, folded, unanchored)`. The turn's
+    `fold` projection and `context_recall` (a store longer than the window, e.g. written
+    under a larger one) share it.
+
+    Folds are placed by `ctx.anchors` (computed over the HEAD by the caller), so a body
+    rebuilt from the view array, which holds folds without their members, keeps every
+    fold in place."""
+    if ctx.anchors is None:
+        raise ValueError("fold: no anchors — the caller computes them over the head")
+    anchors = dict(ctx.anchors)
     rows = list(rows)
-    view = render(rows)
+    view = render(rows, anchors)
     folded = 0
     if estimate_tokens(view) > int(budget * FOLD_AT) and len(rows) > 2:
         target = int(budget * LOW)
@@ -286,9 +299,11 @@ async def fold_down(
             span = next_span(rows, view, need=need)
             if not span:
                 break
-            rows.append(await write_fold(ctx, rows, span))
+            fr = await write_fold(ctx, rows, span, anchors)
+            anchors[fr["id"]] = fr["anchor"]
+            rows.append(fr)
             folded += 1
-            view = render(rows)
+            view = render(rows, anchors)
     # TIDY THE HEAD, budget or no budget. Coalescing only while the view is OVER
     # the watermark would leave a projection that dropped under it with its
     # adjacent folds standing — and they would stay standing, because the next
@@ -303,16 +318,20 @@ async def fold_down(
         span = next_span(rows, view, need=0)  # only a FOLD_RUN of folds qualifies here
         if not span or not all(is_fold(rows[i]) for i in span):
             break
-        rows.append(await write_fold(ctx, rows, span))
+        fr = await write_fold(ctx, rows, span, anchors)
+        anchors[fr["id"]] = fr["anchor"]
+        rows.append(fr)
         folded += 1
-        view = render(rows)
-    return rows, view, folded
+        view = render(rows, anchors)
+    return rows, view, folded, unanchored(rows, anchors)
 
 
 async def fold(
     body: list[dict], system_block: list[dict], rec: dict, ctx: ProjectionCtx
 ) -> Projection:
-    _, view, folded = await fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE)
+    _, view, folded, lost = await fold_down(
+        body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE
+    )
     # Stage two and three: strip bodies in what is left, then cut — strip's own logic.
     out = await strip(view, system_block, rec, ctx)
     return Projection(
@@ -321,4 +340,5 @@ async def fold(
         stripped=out.stripped,
         stripped_bytes=out.stripped_bytes,
         folded=folded,
+        unanchored=lost,
     )

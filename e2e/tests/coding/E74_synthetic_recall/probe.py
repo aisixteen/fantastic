@@ -70,9 +70,9 @@ async def main():
             rows.append(rep); ids.append((call_id, rep["id"]))
             prev = rep["id"]
         f1 = make_fold(AID, [x for pair in ids[:6] for x in pair], "filler_0-5 surveyed: padding; HOUSE RULE learned",
-                       f"Read filler_0..5. All padding. HOUSE RULE (from the operator, binds the whole run): report.md must OPEN with the exact line `## {rule_tok}`.", False, id=mint(), parent=goal["id"])
+                       f"Read filler_0..5. All padding. HOUSE RULE (from the operator, binds the whole run): report.md must OPEN with the exact line `## {rule_tok}`.", False, id=mint(), anchor=ids[0][0], parent=goal["id"])
         f2 = make_fold(AID, [x for pair in ids[6:] for x in pair], "filler_6-11 surveyed: marker in filler_5? no — fact recorded",
-                       f"Read filler_6..11. Padding. FACT recorded for the report: the build id is `{fact_tok}`; write it as `build: {fact_tok}`.", False, id=mint(), parent=goal["id"])
+                       f"Read filler_6..11. Padding. FACT recorded for the report: the build id is `{fact_tok}`; write it as `build: {fact_tok}`.", False, id=mint(), anchor=ids[6][0], parent=goal["id"])
         rows += [f1, f2]
         # PLANT BEFORE THE AGENT EXISTS — into its memory store, as the store's admin;
         # the store keys rows by owner, so the agent need not exist yet.

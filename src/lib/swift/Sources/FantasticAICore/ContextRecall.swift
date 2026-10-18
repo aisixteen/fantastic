@@ -190,10 +190,10 @@ extension AIBackend {
     /// args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one
     /// row whose members are every row since the previous clear (no summary) — and
     /// the model's view begins at its `[cleared <id> · N rows]` line. Nothing is
-    /// deleted or forgotten: grep, recall and `history {fold: <id>}` reach every
-    /// member. Empties the persisted view and drops RAM scratch (projection, fold
-    /// counters, pending recall). Returns {cleared:id, rows:N}. Python
-    /// `_context_clear`.
+    /// deleted: grep, recall and `history {fold: <id>}` reach every member
+    /// (`context_forget` is the verb that deletes). Empties the persisted view and
+    /// drops RAM scratch (projection, fold counters, pending recall). Returns
+    /// {cleared:id, rows:N}. Python `_context_clear`.
     func contextClear(agent: Agent, payload: JSON, kernel: Kernel) async throws -> JSON {
         let key = agent.id.value
         let head = try await loadHead(key, kernel).filter {
@@ -232,6 +232,131 @@ extension AIBackend {
         dropScratch(key, kernel)
         forgetClearState(key)
         return .object(["cleared": .integer(rid), "rows": .integer(Int64(members.count))])
+    }
+
+    // MARK: - the forget
+
+    /// args: include_cleared:bool? (default false). Compacts this agent's OWN
+    /// store: drops the rows the model can no longer see and keeps every fold. See
+    /// the verb's doc (`VERBS["context_forget"]`). Returns {pruned, kept_folds,
+    /// unanchored}. Python `_context_forget`.
+    func contextForget(agent: Agent, payload: JSON, kernel: Kernel) async throws -> JSON {
+        let includeCleared: Bool
+        switch payload.asObject?["include_cleared"] {
+        case nil: includeCleared = false
+        case .some(.bool(let b)): includeCleared = b
+        default: return Refusal.bad("context_forget", "include_cleared", "a bool")
+        }
+        let st = runState(kernel, agent.id.value)
+        await st.fifo.acquire()
+        do {
+            let out = try await forgetLocked(agent.id.value, kernel, includeCleared: includeCleared)
+            await st.fifo.release()
+            return out
+        } catch {
+            await st.fifo.release()
+            throw error
+        }
+    }
+
+    /// The body of `context_forget`, run under the agent's turn lock.
+    private func forgetLocked(_ key: String, _ kernel: Kernel, includeCleared: Bool) async throws -> JSON {
+        let head = try await refreshHead(key, kernel)
+        let everything = try await storeCall(key, kernel, ["type": .string("read")])["rows"].asArray ?? []
+        let anchors = AIFolds.anchorsOf(head)
+        var byId: [Int64: JSON] = [:]
+        for r in head {
+            if let id = rowId(r) { byId[id] = r }
+        }
+        let headFolds = head.filter(isFold)
+        let turns = head.filter { r in
+            if BOOKKEEPING.contains(r["kind"].asString ?? "") { return false }
+            guard let role = r["role"].asString else { return false }
+            return TURN_ROLES.contains(role)
+        }
+        var openIds: Set<Int64> = []
+        for chain in AIFolds.chains(turns) where AIFolds.isOpen(turns, chain) {
+            for i in chain {
+                if let id = rowId(turns[i]) { openIds.insert(id) }
+            }
+        }
+        var doomed: Set<Int64> = []
+        // 1. the rows folds already summarise — under a fold whose place is known
+        for f in headFolds {
+            guard let fid = rowId(f), anchors[fid] != nil else { continue }
+            var stack = refsOf(f)
+            var seen: Set<Int64> = []
+            while let x = stack.popLast() {
+                if seen.contains(x) { continue }
+                seen.insert(x)
+                guard let r = byId[x] else { continue }
+                if isFold(r) {
+                    stack.append(contentsOf: refsOf(r))
+                } else if !openIds.contains(x) {
+                    doomed.insert(x)
+                }
+            }
+        }
+        // 2. every view row but the one in force
+        let current = head.last { $0["kind"].asString == "view" }.flatMap(rowId)
+        for r in everything where r["kind"].asString == "view" {
+            if let id = rowId(r), id != current { doomed.insert(id) }
+        }
+        // 3. behind the last clear, on request; the clear row itself stays
+        if includeCleared, let last = everything.lastIndex(where: { $0["kind"].asString == "clear" }) {
+            for r in everything[..<last] {
+                if let id = rowId(r) { doomed.insert(id) }
+            }
+        }
+        // A fold written before folds carried `anchor` is placed by deriving from
+        // its members — about to go. Its place is recorded first, in ONE `anchors`
+        // row; an older `anchors` row is superseded by the newest one that holds it
+        // all.
+        var want: [Int64: Int64] = [:]
+        for f in headFolds {
+            if case .integer = f["anchor"] { continue }
+            if let fid = rowId(f), let a = anchors[fid] { want[fid] = a }
+        }
+        let rowsOfAnchors = head.filter { $0["kind"].asString == "anchors" }
+        let newest = rowsOfAnchors.last
+        let holds =
+            newest.map { n in
+                let rec = AIFolds.recordedAnchors([n])
+                return want.allSatisfy { rec[$0.key] == $0.value }
+            } ?? false
+        if !want.isEmpty && !holds {
+            var recorded = OrderedDictionary<String, JSON>()
+            for k in want.keys.sorted() { recorded[String(k)] = .integer(want[k]!) }
+            try await saveHistory(
+                key, kernel,
+                [.object(["kind": .string("anchors"), "v": .integer(1), "anchors": .object(recorded)])])
+            for r in rowsOfAnchors {
+                if let id = rowId(r) { doomed.insert(id) }
+            }
+        } else {
+            let keep = !want.isEmpty ? newest.flatMap(rowId) : nil
+            for r in rowsOfAnchors {
+                if let id = rowId(r), id != keep { doomed.insert(id) }
+            }
+        }
+        var pruned: Int64 = 0
+        if !doomed.isEmpty {
+            let res = try await storeCall(
+                key, kernel,
+                ["type": .string("prune"), "ids": .array(doomed.sorted().map(JSON.integer))])
+            pruned = res["pruned"].asInt ?? 0
+        }
+        // THE STORE IS THE TRUTH: the prune cascaded each pruned member out of
+        // every fold's refs, so the head cache is read again, not patched.
+        forgetHead(key, kernel)
+        let fresh = try await loadHead(key, kernel)
+        let left = fresh.filter(isFold)
+        let after = AIFolds.anchorsOf(fresh)
+        return .object([
+            "pruned": .integer(pruned),
+            "kept_folds": .integer(Int64(left.count)),
+            "unanchored": .integer(Int64(left.filter { f in rowId(f).map { after[$0] == nil } ?? true }.count)),
+        ])
     }
 
     // MARK: - the model call
@@ -296,16 +421,17 @@ extension AIBackend {
         // rows, folds of folds as they pile up. Folding takes the model (a summary per span), so a
         // `dry` recall does not fold.
         var folded = 0
+        let anchors = AIFolds.anchorsOf(try await loadHead(key, kernel))
         if let provider, !dry, AIContext.strategy(agent).asString == "fold" {
             let fctx = ProjectionCtx(
                 budget: bodyBudget, recentN: AIContext.recentN(agent),
                 summarize: AIStrategies.makeSummarizer(provider),
-                selfId: agent.id, kernel: kernel, clientId: clientId)
+                selfId: agent.id, kernel: kernel, clientId: clientId, anchors: anchors)
             let down = try await AIFoldStrategy.foldDown(rows, fctx, budget: bodyBudget)
             rows = down.rows
             folded = down.folded
         }
-        let view = AIFolds.render(rows).filter { rowId($0).map { $0 != 0 } ?? false }
+        let view = AIFolds.render(rows, anchors).filter { rowId($0).map { $0 != 0 } ?? false }
         if view.isEmpty {
             return .object([
                 "kept": .integer(0), "expanded": .integer(0), "dropped": .integer(0),
