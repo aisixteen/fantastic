@@ -60,6 +60,8 @@ getrandom = "0.2"
 fantastic-canvas-page = { path = "bundles/fantastic-canvas-page" }
 # THE BROWSER VIEW: the kernel's HTTP host, and the socket leg built HERE.
 fantastic-web = { path = "../lib/rust/crates/bundles/fantastic-web" }
+# THE MANAGER'S MODEL: its run file's path is defined there, once (`kern/web.rs`).
+fantastic-home = { path = "crates/fantastic-home" }
 # The terminal pane's screen: a real vt100 emulator, so a full-screen CLI
 # (an AI coder, an editor) draws correctly instead of as a line log.
 vt100 = "0.15"

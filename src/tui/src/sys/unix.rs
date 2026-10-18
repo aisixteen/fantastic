@@ -88,6 +88,12 @@ pub(crate) fn interrupt() -> io::Result<Interrupt> {
     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
 }
 
+/// `fantastic __ctrl_break <pid>`: the stop helper exists on Windows only.
+pub(crate) fn ctrl_break_main(_argv: &[String]) -> ! {
+    eprintln!("fantastic: ctrl-break: Windows only");
+    std::process::exit(2)
+}
+
 /// Every process, one `pid ppid pgid tpgid args` row each
 /// (`ps -A -o pid=,ppid=,pgid=,tpgid=,args=`): where a shell's foreground
 /// command is read from (`kern/term_watch`).

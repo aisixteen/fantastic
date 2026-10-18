@@ -173,7 +173,7 @@ pub struct Urls {
 /// removed at a clean exit. Under the project dir. A killed process leaves it
 /// behind: the lock (`.fantastic/lock.yaml`, flocked while the kernel runs) says
 /// whether it is live.
-pub const RUN_FILE: &str = ".fantastic/cli/canvas.yaml";
+pub const RUN_FILE: &str = fantastic_home::RUN_FILE;
 
 /// Write `dir`'s [`RUN_FILE`] for this process.
 pub fn write_run_file(dir: &std::path::Path, urls: &Urls) -> Result<(), String> {

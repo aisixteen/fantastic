@@ -1,0 +1,164 @@
+<!doctype html>
+<!--
+  THE HOME'S MINIMAL LIST PAGE (Phase 2), served by `canvas_page` as `home.html`
+  until the Home UI (Phase 3) replaces it. One file: no framework, no build step.
+
+  Two sockets, both to the host that served this page:
+    ws://<host>/home/ws   the state stream: every payload on `home`, as {type:"event", payload}
+    ws://<host>/user/ws   the calls: {type:"call", target:"user", payload:{type:"forward", target:"home", payload}, id}
+
+  It watches first and lists second, then ignores any `state` whose `seq` is not
+  above the last one drawn. It draws only `state` payloads; every other type (a
+  mirrored call, `focus`) is skipped.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aisixteen Fantastic · home</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; --muted: #888; --bad: #c33; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; }
+  td.path { color: var(--muted); word-break: break-all; }
+  button { margin-right: 4px; }
+  .problem { border: 1px solid var(--bad); padding: 8px; margin: 0 0 12px; display: flex; gap: 8px; align-items: center; }
+  .problem[hidden] { display: none; }
+  .refused { color: var(--bad); }
+  .empty { color: var(--muted); padding: 12px 8px; }
+  form { margin: 12px 0; display: flex; gap: 8px; }
+  form input { flex: 1; min-width: 0; }
+  #status { color: var(--muted); font-size: 12px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Your fantastics</h1>
+<div class="problem" id="problem" hidden><span id="problem-text"></span><button id="dismiss" type="button">Dismiss</button></div>
+<div class="refused" id="refused"></div>
+<table>
+  <thead><tr><th>Name</th><th>Path</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<form id="open-form">
+  <input id="open-path" type="text" placeholder="/absolute/path/to/a/folder" autocomplete="off" spellcheck="false">
+  <button type="submit">Open folder</button>
+</form>
+<div id="status">connecting…</div>
+<script>
+"use strict";
+(() => {
+  const host = location.host;
+  let drawnSeq = 0;
+  const pending = new Map();
+  const $ = (id) => document.getElementById(id);
+
+  function say(text) { $("status").textContent = text; }
+  function refused(text) { $("refused").textContent = text || ""; }
+
+  // ── the calls ─────────────────────────────────────────────────────────────
+  const calls = new WebSocket(`ws://${host}/user/ws`);
+  const callsOpen = new Promise((resolve, reject) => {
+    calls.addEventListener("open", resolve, { once: true });
+    calls.addEventListener("error", reject, { once: true });
+  });
+  calls.addEventListener("message", (ev) => {
+    let frame;
+    try { frame = JSON.parse(ev.data); } catch { return; }
+    if (frame.type !== "reply" && frame.type !== "error") return;
+    const done = pending.get(frame.id);
+    if (!done) return; // an error frame naming no call: the refused auto-watch
+    pending.delete(frame.id);
+    if (frame.type === "error") { done(frame); return; }
+    done(frame.data);
+  });
+  calls.addEventListener("close", () => say("disconnected — reload to reconnect"));
+
+  async function call(payload) {
+    await callsOpen;
+    const id = crypto.randomUUID();
+    const reply = new Promise((resolve) => pending.set(id, resolve));
+    calls.send(JSON.stringify({ type: "call", target: "user", id,
+      payload: { type: "forward", target: "home", payload } }));
+    const data = await reply;
+    if (data && typeof data.error === "string") {
+      refused(data.hint ? `${data.error} — ${data.hint}` : data.error);
+      return null;
+    }
+    refused("");
+    if (data && data.type === "state") draw(data);
+    return data;
+  }
+
+  // ── drawing ───────────────────────────────────────────────────────────────
+  function cell(text, cls) {
+    const td = document.createElement("td");
+    if (cls) td.className = cls;
+    td.textContent = text;
+    return td;
+  }
+
+  function draw(state) {
+    if (typeof state.seq !== "number" || state.seq <= drawnSeq) return;
+    drawnSeq = state.seq;
+    const rows = $("rows");
+    rows.replaceChildren();
+    if (state.listed && state.rows.length === 0) {
+      const tr = document.createElement("tr");
+      const td = cell("No fantastics yet. Open a folder below.", "empty");
+      td.colSpan = 5;
+      tr.append(td);
+      rows.append(tr);
+    }
+    for (const row of state.rows) {
+      const tr = document.createElement("tr");
+      tr.append(cell(row.name), cell(row.path, "path"), cell(row.status.replace("_", " ")),
+        cell(row.last_seen == null ? "" : new Date(row.last_seen * 1000).toLocaleString()));
+      const actions = document.createElement("td");
+      for (const verb of row.actions) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = verb;
+        b.addEventListener("click", () => call({ type: verb, id: row.id }));
+        actions.append(b);
+      }
+      if (row.canvas) {
+        const a = document.createElement("a");
+        a.href = row.canvas.url;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.textContent = "canvas";
+        actions.append(a);
+      }
+      tr.append(actions);
+      rows.append(tr);
+    }
+    $("problem").hidden = state.problem == null;
+    $("problem-text").textContent = state.problem || "";
+    say(state.listed ? "" : "looking…");
+  }
+
+  $("dismiss").addEventListener("click", () => call({ type: "dismiss" }));
+  $("open-form").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const value = $("open-path").value.trim();
+    if (!value) return;
+    call({ type: "open", paths: [value] }).then((r) => { if (r) $("open-path").value = ""; });
+  });
+
+  // ── the state stream: watched first, listed second ────────────────────────
+  const events = new WebSocket(`ws://${host}/home/ws`);
+  events.addEventListener("message", (ev) => {
+    let frame;
+    try { frame = JSON.parse(ev.data); } catch { return; }
+    if (frame.type !== "event" || !frame.payload || frame.payload.type !== "state") return;
+    draw(frame.payload);
+  });
+  events.addEventListener("open", () => { call({ type: "list" }); }, { once: true });
+  events.addEventListener("close", () => say("disconnected — reload to reconnect"));
+})();
+</script>
+</body>
+</html>

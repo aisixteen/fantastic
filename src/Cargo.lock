@@ -921,6 +921,7 @@ dependencies = [
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-foundation-models-backend",
+ "fantastic-home",
  "fantastic-kernel",
  "fantastic-mcp-client",
  "fantastic-ollama-backend",
