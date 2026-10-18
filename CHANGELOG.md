@@ -35,6 +35,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- exec_bridge (python, rust, swift): a monitor always ends with one delivery
+  headed `job ended`, even when nothing waited any more, and `monitor` refuses a
+  job whose end already went out (flaky on Windows, #64).
 - The lockfile no longer pins the yanked `yoke-derive 0.8.3` (now 0.8.4).
 - AI agents: fold summaries no longer leave the view once the next prompt is
   rebuilt from the view array. Each new fold records its place (`anchor`), so it

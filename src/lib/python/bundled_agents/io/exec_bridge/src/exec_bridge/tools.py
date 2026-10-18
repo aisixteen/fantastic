@@ -156,7 +156,7 @@ async def _pump(owner, ready, process, kernel):
     try:
         await _pipe_body(job, job_id, owner, process, kernel)
     finally:
-        _monitor.job_ended(job_id)
+        _monitor.job_ended(job, job_id)
 
 
 async def _pipe_body(job, job_id, owner, process, kernel):
@@ -617,7 +617,7 @@ async def _pty_pump(owner, ready, process, kernel):
     try:
         await _pty_body(job, job_id, owner, process, kernel)
     finally:
-        _monitor.job_ended(job_id)
+        _monitor.job_ended(job, job_id)
 
 
 async def _pty_body(job, job_id, owner, process, kernel):
@@ -1113,7 +1113,9 @@ async def _monitor_verb(id, payload, kernel):
     `[monitor <id> · job <id> · from your call <pid> · "<label>"]` with the matched
     lines below. The first match goes at once; with `every`, later ones are gathered
     and delivered at most once per window, and a timer runs only while something
-    waits. A monitor is a kernel task: `ps` lists it, `monitors` lists this agent's."""
+    waits. When the job ends, one last delivery headed `job ended` carries what
+    still waited (the header alone when nothing did). A monitor is a kernel task:
+    `ps` lists it, `monitors` lists this agent's."""
     from kernel import current_origin, current_task
 
     jid, err = _job_arg("monitor", payload, required=True)
@@ -1122,7 +1124,9 @@ async def _monitor_verb(id, payload, kernel):
     job = _jobs.get(jid)
     if job is None or job.get("owner") != id:
         return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
-    if not _alive(job):
+    # `monitors_closed`: the pump already told this job's monitors it ended — its
+    # process may still be unreaped (a cancel), but a monitor filed now would never end
+    if not _alive(job) or job.get("monitors_closed"):
         return bad("monitor", "job_id", "a RUNNING job — this one has exited")
     notify = payload.get("notify")
     if notify is None:
