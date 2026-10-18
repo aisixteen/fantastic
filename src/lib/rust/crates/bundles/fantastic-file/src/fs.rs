@@ -96,6 +96,13 @@ pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
         realpath(&root_p.join(path))?
     };
     if !target.starts_with(&root_p) {
+        // the two paths said, LOUD: python's text names neither
+        eprintln!(
+            "  [fs] {} resolved to {} — not under {}",
+            py_repr(path),
+            target.display(),
+            root_p.display()
+        );
         return Err(format!("fs: path {} escapes root", py_repr(path)));
     }
     Ok(target)

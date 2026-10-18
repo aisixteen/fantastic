@@ -156,7 +156,7 @@ pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
         std::path::absolute(p)
             .map_err(|e| errno_of(&e).map_or_else(|| e.to_string(), |n| os_error_str(n, None)))?
     };
-    let path = match std::fs::canonicalize(&path) {
+    let path = match final_path(&path) {
         Ok(real) => real,
         Err(_) => final_path_nonstrict(path),
     };
@@ -170,11 +170,35 @@ pub(crate) fn realpath(p: &Path) -> Result<PathBuf, String> {
     // the `\\?\` left on then put the path outside its root (`escapes root`,
     // python's one-threaded kernel never sees it). The input had no prefix, so
     // the stripped form is what it named: kept unless it resolves elsewhere.
-    let strip = match std::fs::canonicalize(&stripped) {
+    let strip = match final_path(&stripped) {
         Ok(again) => again == path,
         Err(_) => true,
     };
     Ok(if strip { stripped } else { path })
+}
+
+/// The OS's final path for `p` (`GetFinalPathNameByHandleW`, through
+/// `std::fs::canonicalize`) — refused, as not found, while the name has none: a file
+/// deleted or replaced while another handle holds it open is moved under the
+/// volume's `\$Extend\$Deleted\` (NTFS POSIX delete), and its final path is that.
+/// An atomic save over `agent.yaml`, or a folder deleted, at the moment of the
+/// look resolved there — outside every root (`escapes root`). The name is then
+/// as good as missing: the walk resolves its parent and joins it on.
+fn final_path(p: &Path) -> std::io::Result<PathBuf> {
+    let real = std::fs::canonicalize(p)?;
+    if deleted(&real) {
+        return Err(std::io::Error::from_raw_os_error(2)); // ERROR_FILE_NOT_FOUND
+    }
+    Ok(real)
+}
+
+/// Is `p` under its volume's `\$Extend\$Deleted\` (a deleted file still open)?
+fn deleted(p: &Path) -> bool {
+    let mut names = p.components().filter_map(|c| match c {
+        Component::Normal(n) => Some(n.to_string_lossy().to_ascii_lowercase()),
+        _ => None,
+    });
+    names.next().as_deref() == Some("$extend") && names.next().as_deref() == Some("$deleted")
 }
 
 /// python `ntpath._getfinalpathname_nonstrict`: walk up until the OS can
@@ -183,7 +207,7 @@ fn final_path_nonstrict(mut path: PathBuf) -> PathBuf {
     let mut tail: Vec<OsString> = Vec::new();
     let mut seen: Vec<PathBuf> = Vec::new();
     loop {
-        if let Ok(real) = std::fs::canonicalize(&path) {
+        if let Ok(real) = final_path(&path) {
             return join_tail(real, &tail);
         }
         // A dangling link: followed by hand, and its TARGET resolved the same way
@@ -269,4 +293,20 @@ fn strip_verbatim(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_files_final_path_is_no_path() {
+        assert!(deleted(Path::new(
+            r"\\?\D:\$Extend\$Deleted\001000000000AD6B5B2B8D8B"
+        )));
+        assert!(deleted(Path::new(r"D:\$EXTEND\$DELETED\x")));
+        // only at the volume's root
+        assert!(!deleted(Path::new(r"D:\a\$Extend\$Deleted\x")));
+        assert!(!deleted(Path::new(r"\\?\D:\a\proj\.fantastic\agent.yaml")));
+    }
 }

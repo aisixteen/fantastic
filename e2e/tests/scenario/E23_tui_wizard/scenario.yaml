@@ -150,6 +150,7 @@ runs:
       key enter
       until 20000 enter: a saved one
       until 20000 ✓ saved `vllm-1`
+      until 20000 vllm · mock-y
       shot saved
       type d
       until 20000 no default AI set-up

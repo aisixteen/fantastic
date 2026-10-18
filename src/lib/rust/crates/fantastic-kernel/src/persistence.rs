@@ -585,6 +585,13 @@ pub(crate) fn clamp(root: &Path, rel: &str) -> Result<PathBuf, String> {
         fantastic_bundle::realpath(&root_p.join(rel))?
     };
     if !target.starts_with(&root_p) {
+        // the two paths said, LOUD: python's text names neither
+        eprintln!(
+            "  [fs] {} resolved to {} — not under {}",
+            fantastic_bundle::py_repr(rel),
+            target.display(),
+            root_p.display()
+        );
         return Err(escapes());
     }
     Ok(target)

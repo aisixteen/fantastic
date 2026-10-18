@@ -17,11 +17,13 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   it loads, and its own `added` event reloads nothing — that event, late on
   Windows, restarted the instance the spawn had just made, mid-call. A
   hand-made folder, or one made again after its removal, still loads.
-- Windows realpath: the `\\?\` the OS hands back is dropped unless the path
-  without it resolves ELSEWHERE — another thread's save or delete between the
-  two looks left it on, and a record being saved or forgotten "escaped" its
-  root (`persist_record` / `forget_record … escapes root`, canvas cells under
-  load).
+- Windows realpath: a file replaced or deleted while it is looked at (an
+  atomic save over `agent.yaml`, a cell's folder removed) resolves to the
+  volume's `\\$Extend\\$Deleted\\` — taken as missing now, so its parent is
+  resolved and the name joined on; and the `\\?\` the OS hands back is dropped
+  unless the path without it resolves elsewhere. A record being saved or
+  forgotten "escaped" its root (`persist_record` / `forget_record … escapes
+  root`, canvas cells under load). A refused clamp now prints both paths.
 - `fantastic` key store: storing a key waits for `user`'s grant on a store
   made a moment ago (the first key, its mode just chosen) — a loaded machine
   refused it (`user may not call 'set' on credentials`).
