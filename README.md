@@ -4,6 +4,10 @@
 
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange)
+[![release](https://img.shields.io/github/v/release/aisixteen/fantastic)](https://github.com/aisixteen/fantastic/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/fantastic)](https://crates.io/crates/fantastic)
+![platforms: macOS · Linux · Windows](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey)
+[![roadmap](https://img.shields.io/badge/roadmap-app%20%E2%86%92%20fantastic%20OS-5319e7)](https://github.com/orgs/aisixteen/projects/1)
 
 ![Aisixteen Fantastic](media/hero.gif)
 
@@ -322,8 +326,8 @@ Three interchangeable hosts share one wire protocol and one `.fantastic/` workdi
 
 - [`src/lib/python/`](src/lib/python/): the reference; when runtimes disagree, Python is right
 - [`src/lib/rust/`](src/lib/rust/): server and CLI host
-- [`src/lib/swift/`](src/lib/swift/): Apple platforms, linked in-process by the
-  [Apple client](https://github.com/Alexadar/fantastic_app)
+- [`src/lib/swift/`](src/lib/swift/): Apple platforms (its retirement, keeping the
+  Foundation Models bridge, is [on the roadmap](https://github.com/aisixteen/fantastic/issues/53))
 - [`src/lib/ts/`](src/lib/ts/): the browser frontend kernel, served by any host
 
 A change to the protocol, the on-disk format or `reflect` lands in every host, and
@@ -339,6 +343,18 @@ the shared [`contract/`](contract/) corpus pins identical behaviour across them.
   their memory and wire agents through the real kernels, scored by what they
   produced — not by what they said.
 
+## Roadmap
+
+Public, on [the board](https://github.com/orgs/aisixteen/projects/1) and in
+[#57](https://github.com/aisixteen/fantastic/issues/57): from the app to fantastic OS.
+
+| Milestone | What it brings |
+|---|---|
+| [M1 — App MVP](https://github.com/aisixteen/fantastic/milestone/1) | The manager of your fantastics as a desktop app: Home lists them with live status; open, start and stop them |
+| [M2 — Cross-platform app and the reskin contract](https://github.com/aisixteen/fantastic/milestone/2) | Tauri on macOS, Windows and Linux with signed installers; one UI, many skins, and the contract other projects reskin |
+| [M3 — fantastic OS: kiosk](https://github.com/aisixteen/fantastic/milestone/3) | A Debian headless image that boots straight into fantastic |
+| [M4 — fantastic OS: system agents](https://github.com/aisixteen/fantastic/milestone/4) | Network, audio, power and displays as agents |
+
 ## Read more
 
 - [`src/lib/python/CLAUDE.md`](src/lib/python/CLAUDE.md) — the protocol reference:
@@ -350,9 +366,8 @@ the shared [`contract/`](contract/) corpus pins identical behaviour across them.
 
 ## License & brand
 
-AGPL-3.0-or-later ([`LICENSE`](LICENSE)). This repo, the
-[Apple client](https://github.com/Alexadar/fantastic_app) and the
-[relay](https://github.com/Alexadar/fantastic_relay) are one product family by
+AGPL-3.0-or-later ([`LICENSE`](LICENSE)). This repo, the Apple client and the relay
+(both in development) are one product family by
 Koreniuk Oleksandr (aisixteen, kvazis@gmail.com).
 
 **Trademarks (AGPL §7):** **AISIXTEEN®** (U.S. Reg. No. 7,238,635; Int'l Reg. No.

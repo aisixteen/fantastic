@@ -25,8 +25,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Version / commit / image tag
-      placeholder: "e.g. v0.5.4, commit abc1234, or ghcr.io/.../fantastic:v0.5.4-arm64"
+      label: Version / commit
+      placeholder: "e.g. v0.0.5, or commit abc1234"
     validations:
       required: true
   - type: textarea
