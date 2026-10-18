@@ -49,6 +49,27 @@ fn key_bytes(name: &str) -> Vec<u8> {
     }
 }
 
+/// A shot waits for the screen to hold still this long...
+const SETTLE_MS: u64 = 300;
+/// ...but no longer than this (a clock, a spinner never holds still).
+const SETTLE_MAX_MS: u64 = 3000;
+
+fn settle(parser: &Mutex<vt100::Parser>) {
+    let deadline = std::time::Instant::now() + Duration::from_millis(SETTLE_MAX_MS);
+    let mut last = parser.lock().unwrap().screen().contents();
+    let mut still = std::time::Instant::now();
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        let now = parser.lock().unwrap().screen().contents();
+        if now != last {
+            last = now;
+            still = std::time::Instant::now();
+        } else if still.elapsed() >= Duration::from_millis(SETTLE_MS) {
+            return;
+        }
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let bin = args
@@ -171,7 +192,12 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            "shot" => shot(rest.trim()),
+            // a SETTLED screen: unchanged for SETTLE_MS (at most SETTLE_MAX_MS) — a
+            // redraw arrives in pieces (ConPTY), and a shot mid-way caught half of it
+            "shot" => {
+                settle(&parser);
+                shot(rest.trim());
+            }
             "stream" => {
                 let mut it = rest.split_whitespace();
                 let ms: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(100);

@@ -19,7 +19,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   hand-made folder, or one made again after its removal, still loads.
 - Windows realpath: a file replaced or deleted while it is looked at (an
   atomic save over `agent.yaml`, a cell's folder removed) resolves to the
-  volume's `\\$Extend\\$Deleted\\` — taken as missing now, so its parent is
+  volume's `\$Extend\$Deleted\` — taken as missing now, so its parent is
   resolved and the name joined on; and the `\\?\` the OS hands back is dropped
   unless the path without it resolves elsewhere. A record being saved or
   forgotten "escaped" its root (`persist_record` / `forget_record … escapes
@@ -29,8 +29,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   refused it (`user may not call 'set' on credentials`).
 - e2e: the reference dev surface serves with its own `serve.py` (`-m
   http.server` reverse-resolves its address before it says it listens — a
-  macOS runner stalled there); a TUI shot waits for its page's last row
-  (ConPTY hands a redraw over in pieces); a click waits for its target to be SHOWN,
+  macOS runner stalled there); a TUI shot waits for a settled screen (300 ms
+  unchanged, at most 3 s — ConPTY hands a redraw over in pieces); a click waits for its target to be SHOWN,
   not only present (a stopped terminal's ▶ is in the DOM hidden until its
   attach); the AI-cell
   mock answers the runtime's no-call reminder `done` at once, so it never takes
