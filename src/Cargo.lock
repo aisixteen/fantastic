@@ -774,6 +774,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-home"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "fantastic-io-bridge"
 version = "0.1.0"
 dependencies = [

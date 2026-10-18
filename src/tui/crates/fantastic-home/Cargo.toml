@@ -1,0 +1,13 @@
+[package]
+name = "fantastic-home"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The fantastic manager's model and ViewModel: the registry and run files parsed from text, one fantastic probed one question at a time, and the home as events in, effects out. Pure: no OS, no I/O, no clock."
+
+# Plain data only: no kernel crate, no runtime, no OS crate. `tests/purity.rs`
+# holds the sources to that.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
