@@ -21,6 +21,6 @@ pub mod model;
 pub mod probe;
 pub mod viewmodel;
 
-pub use model::{registered, Canvas, CanvasRun, Registered};
+pub use model::{registered, Canvas, CanvasRun, Registered, RUN_FILE};
 pub use probe::{is_active, Answer, Ask, Mode, Probe, Prober, Status, Target};
 pub use viewmodel::{Config, Effect, Event, Home, Job, Row};

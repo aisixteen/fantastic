@@ -16,6 +16,11 @@
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
+/// A folder's run file, relative to the folder: `{pid, port, url}` while
+/// `fantastic canvas` serves there (see [`CanvasRun`]). The one definition: the
+/// CLI writes it and the home reads it.
+pub const RUN_FILE: &str = ".fantastic/cli/canvas.yaml";
+
 /// The largest pid any of the supported systems hands out (`i32::MAX`).
 const PID_MAX: i64 = 2_147_483_647;
 
