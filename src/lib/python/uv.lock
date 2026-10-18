@@ -20,6 +20,7 @@ members = [
     "fantastic-relay-connector",
     "fantastic-responses-backend",
     "fantastic-scheduler",
+    "fantastic-sqlite-store",
     "fantastic-static-loader",
     "fantastic-vllm-backend",
     "fantastic-web",
@@ -430,6 +431,7 @@ dependencies = [
     { name = "fantastic-relay-connector" },
     { name = "fantastic-responses-backend" },
     { name = "fantastic-scheduler" },
+    { name = "fantastic-sqlite-store" },
     { name = "fantastic-static-loader" },
     { name = "fantastic-vllm-backend" },
     { name = "fantastic-web" },
@@ -465,6 +467,7 @@ requires-dist = [
     { name = "fantastic-relay-connector", editable = "bundled_agents/io/relay_connector" },
     { name = "fantastic-responses-backend", editable = "bundled_agents/ai/responses/responses_backend" },
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
+    { name = "fantastic-sqlite-store", editable = "bundled_agents/memory/sqlite_store" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
     { name = "fantastic-vllm-backend", editable = "bundled_agents/ai/vllm/vllm_backend" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
@@ -587,6 +590,21 @@ dependencies = [
 requires-dist = [
     { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
     { name = "pyyaml", specifier = ">=6" },
+]
+
+[[package]]
+name = "fantastic-sqlite-store"
+version = "0.1.0"
+source = { editable = "bundled_agents/memory/sqlite_store" }
+dependencies = [
+    { name = "fantastic-file-bridge" },
+    { name = "fantastic-ram-store" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
+    { name = "fantastic-ram-store", editable = "bundled_agents/memory/ram_store" },
 ]
 
 [[package]]

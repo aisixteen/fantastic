@@ -1,5 +1,9 @@
 """ram_store: tenancy by caller, fold refs + FK cascade, search, inject/dump.
 
+ONE suite for every memory store: each test runs against `ram_store` AND the
+durable `sqlite_store`, which must answer exactly alike (the `store` fixture is
+parameterized over both handler modules).
+
 Callers act through `as_agent` (the test standing in for the agent's handler — a
 real agent send, gated both ways); the operator is a bare `kernel.send`. The root's guid is set by hand — the root is not
 booted in these tests, and the store keys every row by it."""
@@ -22,16 +26,24 @@ async def _call(kernel, target, payload, *, as_=None):
         ]
 
 
-@pytest.fixture
-async def store(kernel):
+# Every memory store answers this suite; the durable one needs its file.
+STORES = {
+    "ram_store.tools": {},
+    "sqlite_store.tools": {"path": "stores/mem.db"},
+}
+
+
+@pytest.fixture(params=list(STORES))
+async def store(kernel, request):
     kernel.ctx.update(kernel.id, guid="g1")
     for aid in ("alice", "bob", "carol", "leg"):
         rec = kernel.create(None, id=aid, can_call={"mem": "*"})
         assert rec.get("id") == aid, rec
     rec = kernel.create(
-        "ram_store.tools",
+        request.param,
         id="mem",
         callable_by={"alice": "*", "bob": "*", "carol": "*", "leg": "*"},
+        **STORES[request.param],
     )
     assert rec.get("id") == "mem", rec
     return "mem"

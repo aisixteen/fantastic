@@ -5,6 +5,15 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ## [Unreleased]
 
+### Added
+
+- Python kernel: `sqlite_store`, a durable memory store. It answers exactly what
+  `ram_store` answers, from one SQLite file, so an AI agent's conversation and
+  folds, the execution ledger, dead letters and named-call dedup survive a
+  restart with no dump and inject. Same schema as the CLI's rust store.
+- `contract/memory_store/cases.json`: shared memory-store cases that python and
+  rust replay against both of their stores.
+
 ## [0.0.6] - 2026-10-18
 
 The model-free e2e is green on Linux, macOS and Windows CI runners — 0.0.5's

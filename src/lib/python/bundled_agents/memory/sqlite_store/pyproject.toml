@@ -1,0 +1,19 @@
+[project]
+name = "fantastic-sqlite-store"
+version = "0.1.0"
+description = "Durable memory store agent: ram_store's tables, keys, cascades and verbs over one SQLite file per store — a caller cannot tell the two apart, except that this one survives the process."
+requires-python = ">=3.11"
+# The standard library's `sqlite3` only. ram_store supplies the shared row rules
+# (id parsing, the searchable text, the dump validator) so the two answer alike;
+# file_bridge's `fs` clamps the database path to the running dir.
+dependencies = ["fantastic-ram-store", "fantastic-file-bridge"]
+
+[project.entry-points."fantastic.bundles"]
+sqlite_store = "sqlite_store.tools"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sqlite_store"]

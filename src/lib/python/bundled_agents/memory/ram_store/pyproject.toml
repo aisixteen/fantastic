@@ -6,8 +6,8 @@ requires-python = ">=3.11"
 dependencies = []
 
 # Owns no disk. Everything it holds dies with the process — that is what "ram" says.
-# A durable store answers the SAME verbs over the SAME tables (sqlite_store, the CLI
-# project), so a caller never learns which one it is talking to.
+# A durable store answers the SAME verbs over the SAME tables (`sqlite_store`, next to
+# this bundle), so a caller never learns which one it is talking to.
 
 [project.entry-points."fantastic.bundles"]
 ram_store = "ram_store.tools"

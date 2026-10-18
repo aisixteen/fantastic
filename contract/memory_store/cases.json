@@ -1,0 +1,151 @@
+{
+  "_doc": "MEMORY STORES — one answer, any store, any runtime. Every memory store bundle (`ram_store`, `sqlite_store`) in every runtime that ships it replays these scenarios and must answer each step as written. A scenario runs on a FRESH store; its steps run in order. A step sends `send` to the store AS `as` (an agent id, sent from that agent's own dispatch, so the store keys the rows by it) or as the operator when `as` is null. `expect` holds the keys the reply must carry, each value compared EXACTLY (a nested value is compared whole). The ids are always written out, so no reply depends on the kernel's counter. Text naming the store (`ram_store: unknown type`) differs by store, so those steps pin the reason, not the message. JSON, for the same reason as `conformance/cases.json`: every runtime reads it with what it already has.",
+  "_fixture": "Root guid `g1`. Agents `alice` and `bob` with `can_call: {mem: \"*\"}`; the store `mem` with `callable_by: {alice: \"*\", bob: \"*\"}`. The operator's key is `g1|kernel`.",
+  "scenarios": [
+    {
+      "name": "rows-are-keyed-by-caller",
+      "steps": [
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 101, "role": "user", "content": "hi"}]}, "expect": {"ids": [101], "appended": 1}},
+        {"as": "bob", "send": {"type": "append", "rows": [{"id": 101, "content": "bob"}]}, "expect": {"ids": [101], "appended": 1}},
+        {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [{"id": 101, "role": "user", "content": "hi"}], "next": null, "total": 1}},
+        {"as": "bob", "send": {"type": "read"}, "expect": {"rows": [{"id": 101, "content": "bob"}], "next": null, "total": 1}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 102}, {"id": 101}]}, "expect": {"reason": "exists", "id": 101, "error": "append: row 101 already exists for this owner"}},
+        {"as": "alice", "send": {"type": "read"}, "expect": {"total": 1}}
+      ]
+    },
+    {
+      "name": "owner-is-never-a-writable-field",
+      "steps": [
+        {"as": "bob", "send": {"type": "append", "rows": [{"id": 9, "content": "bob's"}]}, "expect": {"ids": [9]}},
+        {"as": "alice", "send": {"type": "append", "owner": "g1|bob", "rows": [{"id": 5}]}, "expect": {"ids": [5]}},
+        {"as": "bob", "send": {"type": "read"}, "expect": {"rows": [{"id": 9, "content": "bob's"}]}},
+        {"as": "alice", "send": {"type": "read", "owner": "g1|bob"}, "expect": {"rows": [{"id": 5}]}}
+      ]
+    },
+    {
+      "name": "the-operator-is-keyed-as-kernel",
+      "steps": [
+        {"as": null, "send": {"type": "append", "rows": [{"id": 7, "kind": "call"}]}, "expect": {"ids": [7], "appended": 1}},
+        {"as": null, "send": {"type": "read", "kinds": ["call"]}, "expect": {"rows": [{"id": 7, "kind": "call"}], "total": 1}},
+        {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [], "next": null, "total": 0}},
+        {"as": null, "send": {"type": "dump"}, "expect": {"tables": {"rows": [{"owner": "g1|kernel", "row": {"id": 7, "kind": "call"}}], "fold_refs": []}}},
+        {"as": null, "send": {"type": "reflect"}, "expect": {"owners": 1, "rows": 1, "optional_verbs": ["search"]}}
+      ]
+    },
+    {
+      "name": "refs-must-name-own-rows",
+      "steps": [
+        {"as": "bob", "send": {"type": "append", "rows": [{"id": 10}]}, "expect": {"ids": [10]}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 20, "kind": "fold", "refs": [10]}]}, "expect": {"reason": "not_found", "arg": "rows", "error": "append: row 20 refs rows that do not exist for this owner: [10]"}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 3, "kind": "fold", "refs": [1, 2]}, {"id": 1}, {"id": 2}]}, "expect": {"ids": [3, 1, 2], "appended": 3}},
+        {"as": "alice", "send": {"type": "read", "ids": [3]}, "expect": {"rows": [{"id": 3, "kind": "fold", "refs": [1, 2]}]}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 30, "refs": "1"}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: row 30 refs must be row ids"}}
+      ]
+    },
+    {
+      "name": "prune-cascades-to-fold-refs",
+      "steps": [
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 1}, {"id": 2}, {"id": 3, "kind": "fold", "refs": [1, 2]}, {"id": 4, "kind": "note"}]}, "expect": {"appended": 4}},
+        {"as": "alice", "send": {"type": "prune", "before_id": 2}, "expect": {"pruned": 1}},
+        {"as": "alice", "send": {"type": "read", "ids": [3]}, "expect": {"rows": [{"id": 3, "kind": "fold", "refs": [2]}]}},
+        {"as": "alice", "send": {"type": "prune", "ids": [2]}, "expect": {"pruned": 1}},
+        {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [{"id": 3, "kind": "fold", "refs": []}, {"id": 4, "kind": "note"}]}},
+        {"as": "alice", "send": {"type": "prune", "before_id": 99, "keep": ["note"]}, "expect": {"pruned": 1}},
+        {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [{"id": 4, "kind": "note"}], "total": 1}},
+        {"as": null, "send": {"type": "dump"}, "expect": {"tables": {"rows": [{"owner": "g1|alice", "row": {"id": 4, "kind": "note"}}], "fold_refs": []}}}
+      ]
+    },
+    {
+      "name": "search-lines-and-fold-descent",
+      "steps": [
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 1, "content": "alpha\nthe audit marker is 7\nomega"}, {"id": 2, "content": "nothing"}, {"id": 3, "kind": "fold", "refs": [1, 2], "content": "[fold] survey"}, {"id": 4, "title": "Audit plan", "content": {"steps": ["audit"]}}]}, "expect": {"appended": 4}},
+        {"as": "alice", "send": {"type": "search", "query": "AUDIT"}, "expect": {"matches": [{"id": 1, "line": 2, "text": "the audit marker is 7"}, {"id": 4, "line": 1, "text": "Audit plan"}, {"id": 4, "line": 2, "text": "{\"steps\": [\"audit\"]}"}], "total": 3, "truncated": false}},
+        {"as": "alice", "send": {"type": "search", "query": "marker", "ids": [3]}, "expect": {"total": 1}},
+        {"as": "alice", "send": {"type": "search", "query": "audit", "limit": 1, "width": 5}, "expect": {"matches": [{"id": 1, "line": 2, "text": "the a"}], "total": 3, "truncated": true}},
+        {"as": "alice", "send": {"type": "search", "query": "[fold]"}, "expect": {"matches": [{"id": 3, "line": 1, "text": "[fold] survey"}]}},
+        {"as": "alice", "send": {"type": "search", "query": "om"}, "expect": {"matches": [{"id": 1, "line": 3, "text": "omega"}], "total": 1}},
+        {"as": "bob", "send": {"type": "search", "query": "audit"}, "expect": {"matches": [], "total": 0, "truncated": false}},
+        {"as": "alice", "send": {"type": "search", "query": "  "}, "expect": {"reason": "missing_arg", "arg": "query", "error": "search: query required"}}
+      ]
+    },
+    {
+      "name": "read-paging-and-selectors",
+      "steps": [
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 1, "kind": "call", "name": "job"}, {"id": 2, "kind": "clear"}, {"id": 3}, {"id": 4, "kind": "view"}, {"id": 5, "kind": "clear"}, {"id": 6, "kind": "view"}]}, "expect": {"appended": 6}},
+        {"as": "alice", "send": {"type": "read", "from_last_kind": "clear"}, "expect": {"rows": [{"id": 5, "kind": "clear"}, {"id": 6, "kind": "view"}], "total": 2}},
+        {"as": "alice", "send": {"type": "read", "from_last_kind": "nothing-of-this-kind"}, "expect": {"total": 6}},
+        {"as": "alice", "send": {"type": "read", "kinds": ["view"], "order": "desc", "limit": 1}, "expect": {"rows": [{"id": 6, "kind": "view"}], "next": 6, "total": 2}},
+        {"as": "alice", "send": {"type": "read", "limit": 2}, "expect": {"rows": [{"id": 1, "kind": "call", "name": "job"}, {"id": 2, "kind": "clear"}], "next": 2, "total": 6}},
+        {"as": "alice", "send": {"type": "read", "after": 2, "limit": 2}, "expect": {"rows": [{"id": 3}, {"id": 4, "kind": "view"}], "next": 4, "total": 4}},
+        {"as": "alice", "send": {"type": "read", "after": 5, "order": "desc"}, "expect": {"rows": [{"id": 4, "kind": "view"}, {"id": 3}, {"id": 2, "kind": "clear"}, {"id": 1, "kind": "call", "name": "job"}], "total": 4}},
+        {"as": "alice", "send": {"type": "read", "before": 3}, "expect": {"total": 2, "next": null}},
+        {"as": "alice", "send": {"type": "read", "after": "1", "before": 4}, "expect": {"rows": [{"id": 2, "kind": "clear"}, {"id": 3}]}},
+        {"as": "alice", "send": {"type": "read", "ids": [4, "2", 99]}, "expect": {"rows": [{"id": 2, "kind": "clear"}, {"id": 4, "kind": "view"}]}},
+        {"as": "alice", "send": {"type": "read", "limit": 0}, "expect": {"total": 6, "next": null}},
+        {"as": "alice", "send": {"type": "read", "kinds": ["clear", "view"], "from_last_kind": "view"}, "expect": {"rows": [{"id": 6, "kind": "view"}]}}
+      ]
+    },
+    {
+      "name": "a-name-match-reads-the-rows-carrying-it",
+      "steps": [
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 1, "kind": "call", "name": "job"}, {"id": 2, "kind": "settle", "name": "job", "parent": 1}, {"id": 3, "kind": "call", "name": "other"}, {"id": 4, "kind": "call", "name": "job", "verb": "x"}, {"id": 5, "kind": "clear"}, {"id": 6, "kind": "call", "name": 7}, {"id": 7, "kind": "settle", "parent": 4}]}, "expect": {"appended": 7}},
+        {"as": "bob", "send": {"type": "append", "rows": [{"id": 1, "kind": "call", "name": "job"}]}, "expect": {"appended": 1}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": "job"}}, "expect": {"total": 3, "rows": [{"id": 1, "kind": "call", "name": "job"}, {"id": 2, "kind": "settle", "name": "job", "parent": 1}, {"id": 4, "kind": "call", "name": "job", "verb": "x"}]}},
+        {"as": "alice", "send": {"type": "read", "kinds": ["call"], "match": {"name": "job"}}, "expect": {"total": 2}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": "job", "verb": "x"}}, "expect": {"rows": [{"id": 4, "kind": "call", "name": "job", "verb": "x"}]}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": "job"}, "order": "desc", "limit": 1}, "expect": {"rows": [{"id": 4, "kind": "call", "name": "job", "verb": "x"}], "next": 4, "total": 3}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": "job"}, "from_last_kind": "clear"}, "expect": {"rows": [], "total": 0}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": "nobody"}}, "expect": {"rows": [], "total": 0}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": 7}}, "expect": {"rows": [{"id": 6, "kind": "call", "name": 7}]}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": "7"}}, "expect": {"rows": []}},
+        {"as": "alice", "send": {"type": "read", "kinds": ["settle"], "match": {"parent": 4}}, "expect": {"rows": [{"id": 7, "kind": "settle", "parent": 4}]}},
+        {"as": "alice", "send": {"type": "read", "match": {"parent": null, "kind": "clear"}}, "expect": {"rows": [{"id": 5, "kind": "clear"}]}},
+        {"as": "alice", "send": {"type": "prune", "before_id": 3}, "expect": {"pruned": 2}},
+        {"as": "alice", "send": {"type": "read", "match": {"name": "job"}}, "expect": {"rows": [{"id": 4, "kind": "call", "name": "job", "verb": "x"}]}}
+      ]
+    },
+    {
+      "name": "dump-inject-roundtrip",
+      "steps": [
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 1, "content": "one"}, {"id": 2}, {"id": 3, "kind": "fold", "refs": [1, 2]}]}, "expect": {"appended": 3}},
+        {"as": "bob", "send": {"type": "append", "rows": [{"id": 1, "kind": "fold", "refs": []}]}, "expect": {"appended": 1}},
+        {"as": null, "send": {"type": "dump"}, "expect": {"tables": {"rows": [{"owner": "g1|alice", "row": {"id": 1, "content": "one"}}, {"owner": "g1|alice", "row": {"id": 2}}, {"owner": "g1|alice", "row": {"id": 3, "kind": "fold"}}, {"owner": "g1|bob", "row": {"id": 1, "kind": "fold"}}], "fold_refs": [{"owner": "g1|alice", "fold": 3, "members": [1, 2]}, {"owner": "g1|bob", "fold": 1, "members": []}]}}},
+        {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|alice", "row": {"id": 1, "content": "one"}}, {"owner": "g1|alice", "row": {"id": 3, "kind": "fold"}}], "fold_refs": [{"owner": "g1|alice", "fold": 3, "members": [1, 2]}]}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: fold 3 refs a missing row"}},
+        {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|alice", "row": {"id": 1}}, {"owner": "g1|alice", "row": {"id": 1}}]}}, "expect": {"reason": "exists", "id": 1, "error": "inject: duplicate row (g1|alice, 1)"}},
+        {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|alice", "row": {"content": "no id"}}]}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: every row needs an int id"}},
+        {"as": null, "send": {"type": "inject", "tables": {"rows": [{"row": {"id": 1}}]}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: every row needs {owner, row}"}},
+        {"as": null, "send": {"type": "inject", "tables": {"rows": {"owner": "x"}}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: tables.rows must be a list"}},
+        {"as": null, "send": {"type": "inject", "tables": [1]}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: `tables` must be a dump dict"}},
+        {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|alice", "row": {"id": 2}}], "fold_refs": [{"owner": "g1|alice", "fold": 9, "members": []}]}}, "expect": {"reason": "bad_arg", "arg": "tables", "error": "inject: fold_refs names no row 9"}},
+        {"as": null, "send": {"type": "dump"}, "expect": {"tables": {"rows": [{"owner": "g1|alice", "row": {"id": 1, "content": "one"}}, {"owner": "g1|alice", "row": {"id": 2}}, {"owner": "g1|alice", "row": {"id": 3, "kind": "fold"}}, {"owner": "g1|bob", "row": {"id": 1, "kind": "fold"}}], "fold_refs": [{"owner": "g1|alice", "fold": 3, "members": [1, 2]}, {"owner": "g1|bob", "fold": 1, "members": []}]}}},
+        {"as": null, "send": {"type": "inject", "tables": {"rows": [{"owner": "g1|bob", "row": {"id": 5, "content": "kept"}}, {"owner": "g1|bob", "row": {"id": 6, "kind": "fold"}}], "fold_refs": [{"owner": "g1|bob", "fold": 6, "members": [5]}]}}, "expect": {"rows": 2}},
+        {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [], "total": 0}},
+        {"as": "bob", "send": {"type": "read"}, "expect": {"rows": [{"id": 5, "content": "kept"}, {"id": 6, "kind": "fold", "refs": [5]}]}},
+        {"as": "bob", "send": {"type": "search", "query": "KEPT", "ids": [6]}, "expect": {"matches": [{"id": 5, "line": 1, "text": "kept"}]}},
+        {"as": "alice", "send": {"type": "dump"}, "expect": {"tables": {"rows": [{"owner": "g1|bob", "row": {"id": 5, "content": "kept"}}, {"owner": "g1|bob", "row": {"id": 6, "kind": "fold"}}], "fold_refs": [{"owner": "g1|bob", "fold": 6, "members": [5]}]}}}
+      ]
+    },
+    {
+      "name": "refusals",
+      "steps": [
+        {"as": "alice", "send": {"type": "no_such_verb"}, "expect": {"reason": "unhandled", "verb": "no_such_verb"}},
+        {"as": "alice", "send": {"type": "append", "rows": []}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: `rows` must be a non-empty list of rows"}},
+        {"as": "alice", "send": {"type": "append", "rows": [1]}, "expect": {"reason": "bad_arg", "arg": "rows"}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": "5"}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got '5'"}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 0}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got 0"}},
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": true}]}, "expect": {"reason": "bad_arg", "arg": "rows", "error": "append: a row id is a kernel int, got True"}},
+        {"as": "alice", "send": {"type": "prune"}, "expect": {"reason": "missing_arg", "arg": "before_id", "error": "prune: before_id required"}},
+        {"as": "alice", "send": {"type": "search"}, "expect": {"reason": "missing_arg", "arg": "query"}},
+        {"as": "alice", "send": {"type": "read"}, "expect": {"rows": [], "total": 0}}
+      ]
+    },
+    {
+      "name": "a-superscript-digit-is-no-id",
+      "steps": [
+        {"as": "alice", "send": {"type": "append", "rows": [{"id": 101, "role": "user", "content": "hi"}]}, "expect": {"ids": [101]}},
+        {"as": "alice", "send": {"type": "read", "ids": ["²", "101"]}, "expect": {"rows": [{"id": 101, "role": "user", "content": "hi"}]}},
+        {"as": "alice", "send": {"type": "read", "after": "²"}, "expect": {"total": 1}}
+      ]
+    }
+  ]
+}
