@@ -1,23 +1,38 @@
 # CI — run BY HAND only (`gh workflow run ci.yml --ref <branch>`, or the
-# Actions tab's "Run workflow"); nothing starts it on a push or a PR. The
-# reusable BUILD (`build.yml`) three times —
+# Actions tab's "Run workflow"); nothing starts it on a push or a PR. Two sizes:
+#
+#   units only (default)   a bug fix: every runtime's unit tests, debug, on
+#                          Linux, macOS and Windows
+#   full (`-f e2e=true`)   a completed phase or a release: the units, plus
+#                          every release target's archive and the model-free
+#                          e2e on those binaries
+#
+# The reusable BUILD (`build.yml`) is called up to three times:
 #
 #   units     debug    every runtime's unit tests on Linux, macOS and Windows
 #   binaries  release  every release target's archive (`release-<target>`) and
 #                      per OS the binaries the e2e runs — side by side with units
+#                      (full runs only)
 #   e2e       release  the model-free e2e (`e2e/run.py --only-free`, no model
 #                      turns) on exactly those binaries — ONLY once every unit
 #                      suite passed and every binary built: a red unit test stops
-#                      the run before the e2e starts
+#                      the run before the e2e starts (full runs only)
 #
-# A green run is what `release.yml` publishes for its commit.
+# The run's title says which it was (`ci · units` / `ci · full`). A green FULL
+# run is what `release.yml` publishes for its commit.
 #
 # Free: standard GitHub-hosted runners on a public repo (see `build.yml`).
 
 name: ci
+run-name: ${{ inputs.e2e && 'ci · full' || 'ci · units' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      e2e:
+        description: "Full run — also build every release binary and run the e2e (a completed phase, a release). Off: the unit suites only (a bug fix)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,12 +49,14 @@ jobs:
       units: true
 
   binaries:
+    if: inputs.e2e
     uses: ./.github/workflows/build.yml
     with:
       profile: release
       binaries: true
 
   e2e:
+    if: inputs.e2e
     needs: [units, binaries]
     uses: ./.github/workflows/build.yml
     with:

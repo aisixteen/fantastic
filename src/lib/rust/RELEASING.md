@@ -32,10 +32,10 @@ All steps run from the repo root, on `main`, with a clean tree.
    ```sh
    git tag -a vX.Y.Z -m vX.Y.Z
    git push origin main vX.Y.Z
-   gh workflow run ci.yml --ref vX.Y.Z        # skip if CI is already green on this commit
-   gh workflow run release.yml --ref vX.Y.Z   # once it is
+   gh workflow run ci.yml --ref vX.Y.Z -f e2e=true   # skip if a full run is already green on this commit
+   gh workflow run release.yml --ref vX.Y.Z          # once it is
    ```
-   The push starts nothing. CI builds the archives below (`scripts/build/cli.sh`)
+   The push starts nothing. A full CI run (`-f e2e=true`, titled `ci · full`) builds the archives below (`scripts/build/cli.sh`)
    for every target, runs the model-free e2e on them and keeps them for 30 days.
    `.github/workflows/release.yml` refuses a ref that is not a tag on `main`, has
    no `## [X.Y.Z]` CHANGELOG section, or has no green CI run on its commit; it
