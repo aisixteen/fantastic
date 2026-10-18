@@ -19,6 +19,7 @@ use fantastic_bundle::{py_str, py_strip};
 use fantastic_kernel::{AgentId, Kernel};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The stub used when a summarizer is unavailable / fails — a degraded
@@ -42,6 +43,8 @@ pub struct Projection {
     pub stripped_bytes: i64,
     /// `fold`: fold rows written this projection.
     pub folded: usize,
+    /// `fold`: folds left out of the view, their anchor unknown.
+    pub unanchored: usize,
 }
 
 /// Everything a strategy needs, WITHOUT importing the seam. `budget` is the
@@ -64,6 +67,9 @@ pub struct ProjectionCtx<'a> {
     pub kernel: &'a Arc<Kernel>,
     /// The conversation this projection is for.
     pub client_id: &'a str,
+    /// fold id → anchor over the agent's HEAD (`folds::anchors_of`), not over the
+    /// body: a body rebuilt from the view array holds folds without their members.
+    pub anchors: &'a HashMap<i64, i64>,
 }
 
 /// Keep the largest SUFFIX of `turns` that fits `budget`, always including
@@ -173,6 +179,7 @@ pub async fn compact(
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
+            unanchored: 0,
         };
     }
     let summary = safe_summary(provider, &overflow).await;
@@ -195,6 +202,7 @@ pub async fn compact(
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
+            unanchored: 0,
         };
     };
     let head_cost = estimate_one(first);
@@ -214,6 +222,7 @@ pub async fn compact(
         stripped: 0,
         stripped_bytes: 0,
         folded: 0,
+        unanchored: 0,
     }
 }
 
@@ -228,6 +237,7 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
             stripped: 0,
             stripped_bytes: 0,
             folded: 0,
+            unanchored: 0,
         };
     }
     let first = body[0].clone();
@@ -243,6 +253,7 @@ pub fn truncate(body: &[Value], budget: i64) -> Projection {
         stripped: 0,
         stripped_bytes: 0,
         folded: 0,
+        unanchored: 0,
     }
 }
 

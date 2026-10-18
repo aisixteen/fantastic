@@ -58,7 +58,8 @@ struct AIBackendTests {
         #expect(
             AIBackend.VERBS.keys.elementsEqual([
                 "reflect", "send", "stop", "rows", "inquiry", "history", "status", "context_status",
-                "recall", "grep", "context_recall", "context_clear", "watch", "unwatch", "boot",
+                "recall", "grep", "context_recall", "context_clear", "context_forget", "watch", "unwatch",
+                "boot",
             ]))
         #expect(
             AIBackend.VERBS["reflect"]?.asString

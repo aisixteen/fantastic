@@ -94,3 +94,7 @@ class ProjectionCtx:
     # The conversation this projection is for. `fold` is the one strategy that WRITES
     # (fold rows are marks that must persist); it needs to know which store.
     client_id: str | None = None
+    # fold id → anchor over the agent's HEAD (`folds.anchors_of`), not over the body:
+    # a body rebuilt from the view array holds folds without their members. `fold`
+    # refuses to run without it.
+    anchors: dict[int, int] | None = None

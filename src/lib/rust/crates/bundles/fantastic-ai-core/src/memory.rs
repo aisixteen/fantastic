@@ -151,7 +151,7 @@ impl Completed for fantastic_kernel::Status {
     }
 }
 
-fn rows_of(res: &Map<String, Value>, self_id: &AgentId) -> Vec<Value> {
+pub(crate) fn rows_of(res: &Map<String, Value>, self_id: &AgentId) -> Vec<Value> {
     res.get("rows")
         .and_then(Value::as_array)
         .map(|a| {
@@ -167,12 +167,12 @@ fn rows_of(res: &Map<String, Value>, self_id: &AgentId) -> Vec<Value> {
 }
 
 /// The store holds this agent's conversation AND its view rows. The CONVERSATION
-/// a reader sees is everything but the view (an allow-list of kinds to HIDE: a
-/// kind forgotten here lands in the model's prompt).
-const BOOKKEEPING: [&str; 1] = ["view"];
+/// a reader sees is everything but the view and the recorded fold anchors (an
+/// allow-list of kinds to HIDE: a kind forgotten here lands in the model's prompt).
+pub const BOOKKEEPING: [&str; 2] = ["view", "anchors"];
 
 /// The chat roles a TURN carries.
-const TURN_ROLES: [&str; 3] = ["user", "assistant", "system"];
+pub const TURN_ROLES: [&str; 3] = ["user", "assistant", "system"];
 
 fn kind_of(r: &Value) -> Option<&str> {
     r.get("kind").and_then(Value::as_str)

@@ -58,7 +58,7 @@ async def main():
         member_ids = [m["id"] for m in rows if m.get("id") and "filler_1" in str(m.get("content", ""))]
         planted = make_fold(aid, member_ids, "read filler_1 — its checksum",
                             f"filler_1.txt was read; its checksum line said >> checksum: {wrong}.", False,
-                            id=root.ctx.mint_id())  # a planted fold is minted by the store like any row
+                            id=root.ctx.mint_id(), anchor=min(member_ids))  # a planted fold is minted by the store like any row
         await inject_row(core, root, aid, planted)
         # THE ROWS ARE THE ONLY TRUTH: with the file still on disk, re-reading it is an
         # honest check that bypasses the fold — gone, only descent

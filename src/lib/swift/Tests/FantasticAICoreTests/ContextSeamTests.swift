@@ -34,7 +34,9 @@ private func ctx(
     summarize: (@Sendable ([JSON]) async throws -> String)? = fakeSummaryS,
     selfId: String = AI
 ) -> ProjectionCtx {
-    ProjectionCtx(budget: bud, recentN: recentN, summarize: summarize.map(summarizer), selfId: AgentId(selfId), kernel: nil)
+    ProjectionCtx(
+        budget: bud, recentN: recentN, summarize: summarize.map(summarizer), selfId: AgentId(selfId), kernel: nil,
+        anchors: [:])  // these bodies hold no fold rows
 }
 
 /// python `_FakeKernel` + the record: a booted kernel whose `ai_c` agent carries

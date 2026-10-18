@@ -214,7 +214,10 @@ extension AIBackend {
         let ctx = ProjectionCtx(
             budget: bodyBudget, recentN: AIContext.recentN(agent),
             summarize: AIStrategies.makeSummarizer(provider),
-            selfId: agent.id, kernel: kernel, clientId: clientId)
+            selfId: agent.id, kernel: kernel, clientId: clientId,
+            // Over the HEAD, not the body: a body rebuilt from the view array holds
+            // the folds without the rows they hide.
+            anchors: AIFolds.anchorsOf(try await loadHead(agent.id.value, kernel)))
         let proj = try await strat(body, systemBlock, .object(agent.meta), ctx)
         let notice = contextNotice(
             strategy: stratName, summary: proj.summary, omittedMarker: proj.omittedMarker,
@@ -279,6 +282,7 @@ extension AIBackend {
                 "stripped": .integer(Int64(proj.stripped)),
                 "stripped_bytes": .integer(Int64(proj.strippedBytes)),
                 "folded": .integer(Int64(proj.folded)),
+                "unanchored": .integer(Int64(proj.unanchored)),
                 // What the model actually sees this turn — so "after reload it sees
                 // only the fold" is measured from the view, never self-reported.
                 "view_ids": .array(viewIds.prefix(200).map(JSON.integer)),
@@ -322,6 +326,7 @@ extension AIBackend {
                     "stripped": .integer(Int64(proj.stripped)),
                     "stripped_bytes": .integer(Int64(proj.strippedBytes)),
                     "folded": .integer(Int64(proj.folded)),
+                    "unanchored": .integer(Int64(proj.unanchored)),
                 ]),
             ])
         return .projected(stable + [notice] + outBody)
