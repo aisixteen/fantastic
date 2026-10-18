@@ -72,6 +72,10 @@ pub struct Job {
     pub line_ring_dropped: u64,
     /// The terminal of a PTY job (`start pty={cols,rows}`); `None` for a pipe job.
     pub pty: Option<Arc<crate::pty::Pty>>,
+    /// Set when the pump told this job's monitors it ended (python
+    /// `monitors_closed`). `monitor` refuses the job from then on, even while its
+    /// process still reads alive — a monitor filed after the end would never end.
+    pub monitors_closed: bool,
 }
 
 /// A job's key: its OWNER and its id (the pump's kernel task id).

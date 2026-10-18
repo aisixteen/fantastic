@@ -307,6 +307,10 @@
             var exitCode: Int32? = nil
             /// The terminal of a PTY job (`start pty={cols,rows}`); nil for a pipe job.
             var pty: PtyJob? = nil
+            /// Set when the pump told this job's monitors it ended (python
+            /// `monitors_closed`): `monitor` refuses the job from then on, even while
+            /// its process still reads alive — a monitor filed then would never end.
+            var monitorsClosed = false
         }
 
         /// Jobs whose TASK is being cancelled, marked by `onCancel` BEFORE it kills.
@@ -469,7 +473,20 @@
             if !job.child.isAlive {
                 return Refusal.bad("monitor", "job_id", "a RUNNING job — this one has exited")
             }
-            return startMonitor(agentId, jobId: jid, child: job.child, payload: payload, kernel: kernel)
+            return startMonitor(agentId, jobId: jid, payload: payload, kernel: kernel)
+        }
+
+        /// Whether a monitor may still be filed on `jobId`: its row is there, its
+        /// process alive, and its end not yet handed to its monitors.
+        func monitorsOpen(_ jobId: TaskId) -> Bool {
+            lock.withLock { jobs[jobId].map { $0.child.isAlive && !$0.monitorsClosed } ?? false }
+        }
+
+        /// The job ended: marked on its row (`monitor` refuses it from here on), THEN
+        /// its monitors told — python `_monitor.job_ended`.
+        func endMonitors(_ agentId: AgentId, _ jobId: TaskId) {
+            lock.withLock { jobs[jobId]?.monitorsClosed = true }
+            monitorTable.jobEnded(agentId, jobId)
         }
 
         /// Any live process of this owner.
@@ -735,7 +752,7 @@
             kernel: Kernel
         ) async {
             // the job's monitors end with it, on every way out
-            defer { monitorTable.jobEnded(agentId, jobId) }
+            defer { endMonitors(agentId, jobId) }
             async let outD = pumpStream(
                 spawned.stdout, stream: "stdout", agentId: agentId, jobId: jobId,
                 counter: counter, kernel: kernel)
@@ -787,7 +804,7 @@
         private func ptyPump(
             agentId: AgentId, jobId: TaskId, pty: PtyJob, child: Child, kernel: Kernel
         ) async {
-            defer { monitorTable.jobEnded(agentId, jobId) }
+            defer { endMonitors(agentId, jobId) }
             let table = monitorTable
             let code = await pty.run(kernel: kernel) { table.feedText(agentId, jobId, $0) }
             relayFor(jobId)?.stop()
@@ -1685,8 +1702,9 @@
               lines below. The listener decides: show them, and stop the job early with kernel `cancel`
               (`task_id` = its `job_id`).
             - A monitor is a kernel task: `ps` lists it, `monitors` lists this agent's, kernel `cancel` (or
-              `unmonitor`) ends it, and it ends with its job after delivering what still waited. Monitors
-              on different jobs, at different cadences, run in parallel.
+              `unmonitor`) ends it, and it ends with its job: one last delivery, headed `job ended`, carries
+              what still waited (the header alone when nothing did). Monitors on different jobs, at
+              different cadences, run in parallel.
 
             Deliveries are this agent's own calls: the listener's `callable_by` must name this agent, and
             this agent's `can_call` the listener. A delivery the listener REFUSES (no grant, no such agent)
