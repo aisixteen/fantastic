@@ -522,3 +522,146 @@ async fn reflect_names_the_protocol_and_version() {
     assert_eq!(r["poll_ms"], json!(2000));
     assert!(r["sentence"].as_str().is_some_and(|s| !s.is_empty()));
 }
+
+/// A home listing two running fantastics, both pages open, the second shown.
+async fn two_pages() -> T {
+    let t = t();
+    t.os.set_registry(vec![
+        entry("g1", "/w/a", Some(11), Some(8101)),
+        entry("g2", "/w/b", Some(12), Some(8102)),
+    ]);
+    t.running("/w/a", 11, 8101, "g1");
+    t.running("/w/b", 12, 8102, "g2");
+    t.boot().await;
+    t.call(json!({"type": "select", "id": "g1"})).await;
+    t.call(json!({"type": "select", "id": "g2"})).await;
+    t
+}
+
+/// Every `menu_spec` payload emitted on `home` until `quiet` passes with none.
+async fn specs_seen(inbox: &mut fantastic_kernel::inbox::InboxReceiver) -> Vec<Value> {
+    let mut out = Vec::new();
+    while let Ok(Some(item)) = tokio::time::timeout(Duration::from_millis(200), inbox.recv()).await
+    {
+        if item.payload["type"] == json!("menu_spec") {
+            out.push(item.payload);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn menu_answers_the_spec_with_the_state_seq() {
+    let t = two_pages().await;
+    let state = t.call(json!({"type": "list"})).await;
+    let r = t.call(json!({"type": "menu"})).await;
+    assert_eq!(r["type"], json!("menu_spec"), "{r}");
+    assert_eq!(r["seq"], state["seq"], "{r}");
+    let msg: fantastic_home::menu::MenuSpecMsg =
+        serde_json::from_value(r.clone()).expect("a MenuSpecMsg");
+    assert_eq!(msg.spec, t.bundle.runner().read(|h| h.menu()));
+    assert_eq!(msg.spec.validate(), Ok(()));
+    let after = t.call(json!({"type": "list"})).await;
+    assert_eq!(after, state, "menu changes nothing");
+    t.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_menu_change_is_emitted_once_as_menu_spec() {
+    let t = two_pages().await;
+    let watcher = AgentId::from("w");
+    let mut inbox = t.kernel.ensure_inbox(&watcher);
+    assert!(t.kernel.watch(&t.id, watcher.clone()).await.is_none());
+    specs_seen(&mut inbox).await;
+    // a state change that leaves the menu as it is emits no spec
+    t.call(json!({"type": "dismiss"})).await;
+    t.os.set_registry(vec![
+        entry("g1", "/w/a", Some(11), Some(8101)),
+        entry("g2", "/w/b", Some(12), Some(8102)),
+    ]);
+    assert!(specs_seen(&mut inbox).await.is_empty());
+    // the selection drives Close Page: one spec, with the state's seq
+    let state = t.call(json!({"type": "select", "id": null})).await;
+    let specs = specs_seen(&mut inbox).await;
+    assert_eq!(specs.len(), 1, "{specs:?}");
+    assert_eq!(specs[0]["seq"], state["seq"]);
+    let msg: fantastic_home::menu::MenuSpecMsg =
+        serde_json::from_value(specs[0].clone()).expect("a MenuSpecMsg");
+    let close = serde_json::to_value(&msg.spec).unwrap()["bar"][1]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == json!("close_page"))
+        .cloned()
+        .expect("close_page");
+    assert_eq!(close["enabled"], json!(false));
+    // the same intent again changes nothing: no spec
+    t.call(json!({"type": "select", "id": null})).await;
+    assert!(specs_seen(&mut inbox).await.is_empty());
+    t.shutdown().await;
+}
+
+fn sends(items: &[fantastic_home::menu::Item], out: &mut Vec<(String, Value, bool)>) {
+    use fantastic_home::menu::Item;
+    for item in items {
+        match item {
+            Item::Action {
+                id,
+                send: Some(send),
+                enabled: true,
+                pick,
+                ..
+            } => out.push((
+                id.clone(),
+                serde_json::to_value(send).expect("an intent"),
+                pick.is_some(),
+            )),
+            Item::Submenu(s) => sends(&s.items, out),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_intent_in_the_default_menu_is_a_verb_home_accepts() {
+    let spec = {
+        let t = two_pages().await;
+        let r = t.call(json!({"type": "menu"})).await;
+        t.shutdown().await;
+        serde_json::from_value::<fantastic_home::menu::MenuSpecMsg>(r)
+            .expect("a MenuSpecMsg")
+            .spec
+    };
+    let mut all = Vec::new();
+    for s in &spec.bar {
+        sends(&s.items, &mut all);
+    }
+    let ids: Vec<&str> = all.iter().map(|(id, _, _)| id.as_str()).collect();
+    for want in [
+        "open_folder",
+        "recent:g1",
+        "close_page",
+        "page:home",
+        "page:1",
+        "page:2",
+    ] {
+        assert!(ids.contains(&want), "{want} in {ids:?}");
+    }
+    for (id, mut send, pick) in all {
+        // each on a fresh home: an intent changes what the next one may do
+        let t = two_pages().await;
+        if pick {
+            // the shell fills the paths the user picked
+            t.os.set_resolve(&format!("{D}/w/new"), Ok(format!("{D}/w/new")));
+            send["paths"] = json!([format!("{D}/w/new")]);
+        }
+        assert!(
+            VERBS.contains(&send["type"].as_str().unwrap()),
+            "{id}: {send}"
+        );
+        let r = t.call(send.clone()).await;
+        assert!(r.get("error").is_none(), "{id}: {send} was refused: {r}");
+        assert_eq!(r["type"], json!("state"), "{id}: {r}");
+        t.shutdown().await;
+    }
+}

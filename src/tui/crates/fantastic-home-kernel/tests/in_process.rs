@@ -237,6 +237,7 @@ fn table() -> Vec<(&'static str, &'static str, Value, Value)> {
         "dismiss",
         "log",
         "focus",
+        "menu",
         "reflect"
     ]);
     let loader = json!(["load_tree", "persist_record", "forget_record"]);
@@ -726,4 +727,18 @@ async fn the_home_never_lists_its_own_folder() {
         before,
         "the home never writes the registry"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn menu_reaches_home_through_user_and_its_spec_validates() {
+    let _one = SERIAL.lock().await;
+    let f = Fixture::new();
+    let hk = f.boot().await;
+    let state = hk.call(json!({"type": "list"})).await.expect("list");
+    let r = hk.call(json!({"type": "menu"})).await.expect("menu");
+    assert_eq!(r["type"], json!("menu_spec"), "{r}");
+    assert!(r["seq"].as_u64() >= state["seq"].as_u64(), "{r}");
+    let msg: fantastic_home::menu::MenuSpecMsg = serde_json::from_value(r).expect("a MenuSpecMsg");
+    assert_eq!(msg.spec.validate(), Ok(()));
+    hk.shutdown().await.expect("a clean stop");
 }

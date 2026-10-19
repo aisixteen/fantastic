@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
-use fantastic_home::{Config as HomeConfig, Event, Row};
+use fantastic_home::{Config as HomeConfig, Event, Intent, Mode, Row};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{missing, refusal, with, BAD_ARG, NOT_FOUND, UNHANDLED};
 use fantastic_kernel::{AgentId, Kernel};
@@ -245,34 +245,9 @@ fn intent(runner: &Arc<Runner>, payload: &Value) -> Result<Option<Event>, Value>
     let (rows, mode) = runner.read(|h| (h.rows(runner.os().now_ms()), h.config().mode));
     match verb {
         "list" => Ok(None),
-        "open" => {
-            let paths = match payload.get("paths") {
-                None | Some(Value::Null) => return Err(missing("home: open", "paths")),
-                Some(Value::Array(items)) if items.is_empty() => {
-                    return Err(missing("home: open", "paths"))
-                }
-                Some(Value::Array(items)) => items,
-                Some(v) => {
-                    return Err(bad(
-                        format!("home: open: paths must be a list of folder paths, got {v}"),
-                        "paths",
-                    ))
-                }
-            };
-            let mut folders = Vec::with_capacity(paths.len());
-            for p in paths {
-                let Some(p) = p.as_str() else {
-                    return Err(bad(
-                        format!("home: open: paths must hold strings, got {p}"),
-                        "paths",
-                    ));
-                };
-                folders.push(folder_of(runner, &rows, "open", "paths", p)?);
-            }
-            Ok(Some(Event::Open {
-                paths: folders,
-                now_ms: 0,
-            }))
+        "open" | "start" | "stop" | "remove" | "select" | "select_page" | "close_page" => {
+            let typed = typed(payload, verb)?;
+            checked(runner, &rows, mode, typed).map(|i| Some(i.event()))
         }
         "register" => {
             let path = string_arg(payload, "register", "path")?;
@@ -288,66 +263,6 @@ fn intent(runner: &Arc<Runner>, payload: &Value) -> Result<Option<Event>, Value>
                 now_ms: 0,
             }))
         }
-        "start" | "stop" | "remove" => {
-            let id = string_arg(payload, verb, "id")?;
-            let row = row_of(&rows, id)?;
-            if !row.actions(mode).contains(&verb) {
-                return Err(bad(
-                    format!(
-                        "home: {} cannot {verb} now — it is {}",
-                        row.name,
-                        status_name(&row.status)
-                    ),
-                    "id",
-                ));
-            }
-            let id = id.to_string();
-            Ok(Some(match verb {
-                "start" => Event::Start { id, now_ms: 0 },
-                "stop" => Event::Stop { id },
-                _ => Event::Forget { id },
-            }))
-        }
-        "select" => match payload.get("id") {
-            None => Err(missing("home: select", "id")),
-            Some(Value::Null) => Ok(Some(Event::Select { id: None })),
-            Some(Value::String(id)) => {
-                row_of(&rows, id)?;
-                Ok(Some(Event::Select {
-                    id: Some(id.clone()),
-                }))
-            }
-            Some(v) => Err(bad(
-                format!("home: select: id must be a string or null, got {v}"),
-                "id",
-            )),
-        },
-        "select_page" => {
-            let index = match payload.get("index") {
-                None | Some(Value::Null) => return Err(missing("home: select_page", "index")),
-                Some(v) => v.as_u64().ok_or_else(|| {
-                    bad(
-                        format!("home: select_page: index must be an integer ≥ 0, got {v}"),
-                        "index",
-                    )
-                })?,
-            };
-            let count = runner.read(|h| h.pages().len());
-            match usize::try_from(index) {
-                Ok(i) if i < count => Ok(Some(Event::SelectPage { index: i })),
-                _ => Err(bad(
-                    format!("home: select_page: no page {index} (there are {count})"),
-                    "index",
-                )),
-            }
-        }
-        "close_page" => {
-            let id = string_arg(payload, "close_page", "id")?;
-            if !runner.read(|h| h.pages().iter().any(|p| p == id)) {
-                return Err(not_found(format!("home: no page \"{id}\" is open"), "id"));
-            }
-            Ok(Some(Event::ClosePage { id: id.to_string() }))
-        }
         "dismiss" => Ok(Some(Event::Dismiss)),
         "log" => {
             let id = string_arg(payload, "log", "id")?;
@@ -362,10 +277,134 @@ fn intent(runner: &Arc<Runner>, payload: &Value) -> Result<Option<Event>, Value>
             Err(json!({"id": id, "file": file, "tail": os.log_tail(&row.path)}))
         }
         "focus" => Err(runner.focus()),
+        "menu" => Err(runner.menu_spec()),
         _ => {
             let mut r = refusal(UNHANDLED, format!("home: unknown type \"{verb}\""));
             with(&mut r, "verb", json!(verb));
             Err(r)
+        }
+    }
+}
+
+/// One of the user's intents, parsed from its verb's payload: every argument
+/// present and of its type (the refusal names the one that is not).
+fn typed(payload: &Value, verb: &str) -> Result<Intent, Value> {
+    let id = || string_arg(payload, verb, "id").map(str::to_string);
+    Ok(match verb {
+        "open" => {
+            let paths = match payload.get("paths") {
+                None | Some(Value::Null) => return Err(missing("home: open", "paths")),
+                Some(Value::Array(items)) if items.is_empty() => {
+                    return Err(missing("home: open", "paths"))
+                }
+                Some(Value::Array(items)) => items,
+                Some(v) => {
+                    return Err(bad(
+                        format!("home: open: paths must be a list of folder paths, got {v}"),
+                        "paths",
+                    ))
+                }
+            };
+            let mut out = Vec::with_capacity(paths.len());
+            for p in paths {
+                let Some(p) = p.as_str() else {
+                    return Err(bad(
+                        format!("home: open: paths must hold strings, got {p}"),
+                        "paths",
+                    ));
+                };
+                out.push(p.to_string());
+            }
+            Intent::Open { paths: out }
+        }
+        "start" => Intent::Start { id: id()? },
+        "stop" => Intent::Stop { id: id()? },
+        "remove" => Intent::Forget { id: id()? },
+        "select" => match payload.get("id") {
+            None => return Err(missing("home: select", "id")),
+            Some(Value::Null) => Intent::Select { id: None },
+            Some(Value::String(id)) => Intent::Select {
+                id: Some(id.clone()),
+            },
+            Some(v) => {
+                return Err(bad(
+                    format!("home: select: id must be a string or null, got {v}"),
+                    "id",
+                ))
+            }
+        },
+        "select_page" => {
+            let index = match payload.get("index") {
+                None | Some(Value::Null) => return Err(missing("home: select_page", "index")),
+                Some(v) => v.as_u64().ok_or_else(|| {
+                    bad(
+                        format!("home: select_page: index must be an integer ≥ 0, got {v}"),
+                        "index",
+                    )
+                })?,
+            };
+            match usize::try_from(index) {
+                Ok(index) => Intent::SelectPage { index },
+                Err(_) => return Err(bad(format!("home: select_page: no page {index}"), "index")),
+            }
+        }
+        "close_page" => Intent::ClosePage { id: id()? },
+        other => unreachable!("`{other}` is not an intent verb"),
+    })
+}
+
+/// `intent` checked against the home now; the intent to reduce (an `open`'s
+/// paths resolved to the folders they name).
+fn checked(
+    runner: &Arc<Runner>,
+    rows: &[Row],
+    mode: Mode,
+    intent: Intent,
+) -> Result<Intent, Value> {
+    match intent {
+        Intent::Open { paths } => {
+            let mut folders = Vec::with_capacity(paths.len());
+            for p in &paths {
+                folders.push(folder_of(runner, rows, "open", "paths", p)?);
+            }
+            Ok(Intent::Open { paths: folders })
+        }
+        Intent::Start { ref id } | Intent::Stop { ref id } | Intent::Forget { ref id } => {
+            let verb = intent.verb();
+            let row = row_of(rows, id)?;
+            if !row.actions(mode).contains(&verb) {
+                return Err(bad(
+                    format!(
+                        "home: {} cannot {verb} now — it is {}",
+                        row.name,
+                        status_name(&row.status)
+                    ),
+                    "id",
+                ));
+            }
+            Ok(intent)
+        }
+        Intent::Select { id: Some(ref id) } => {
+            row_of(rows, id)?;
+            Ok(intent)
+        }
+        Intent::Select { id: None } => Ok(intent),
+        Intent::SelectPage { index } => {
+            let count = runner.read(|h| h.pages().len());
+            if index < count {
+                Ok(intent)
+            } else {
+                Err(bad(
+                    format!("home: select_page: no page {index} (there are {count})"),
+                    "index",
+                ))
+            }
+        }
+        Intent::ClosePage { ref id } => {
+            if !runner.read(|h| h.pages().iter().any(|p| p == id)) {
+                return Err(not_found(format!("home: no page \"{id}\" is open"), "id"));
+            }
+            Ok(intent)
         }
     }
 }
@@ -385,6 +424,7 @@ fn verb_docs_json() -> Value {
         "dismiss": "No args. Clears the problem. Returns the state.",
         "log": "args: id:str (req). Returns {id, file, tail}: the row's launch log file and its last lines.",
         "focus": "No args. Emits {type:\"focus\"} on home for the host shell (raise its window). Returns the state.",
+        "menu": "No args. Returns {type:\"menu_spec\", seq, spec}: the native menus a host shell builds (fantastic_home::menu, version 1), seq the state's. The same payload is emitted on home after every state emit that changed it.",
         "reflect": "No args. Returns {id, sentence, protocol:\"fantastic.home\", version:1, mode, home, poll_ms}.",
         "boot": "Kernel lifecycle. Restores the kept pages and selection from this agent's record, then starts the poll (every 2 s). Idempotent. Refuses a malformed `pages` or `selection`.",
         "shutdown": "Kernel lifecycle — the kernel sends it at a clean stop. Stops the poll; the pages and selection are already on the record. Returns {stopped:true}.",
