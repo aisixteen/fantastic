@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.home_live import HomeRig, canonical, click, os_shell, page_errors, q, verdict  # noqa: E402
+from _lib.home_live import HomeRig, canonical, click, key, os_shell, page_errors, q, verdict  # noqa: E402
 
 # every status a page's state card shows, as it changes (the stopping beat can be short)
 WATCH_CARD = """(()=>{window.__cards=[]; const seen=()=>{const c=document.querySelector('#home .page[data-id="%s"] .state-card');
@@ -92,12 +92,31 @@ def main() -> bool:
         os_name, webview = os_shell()
         flag = (f"window.__FANTASTIC_SHELL__ = Object.freeze({{name: 'probe', os: {json.dumps(os_name)}, webview: {json.dumps(webview)},"
                 f" backdrop: 'web', pickFolder: async () => [{json.dumps(str(delta))}]}});")
+        info["selection_before_tab"] = (await rig.home_call({"type": "list"})).get("selection")
         async with rig.page(before_load=flag) as pg:
+            # beta's page is still the selection (steps 2–3), so this tab opens
+            # slid to it: show the Home first, where Open Folder is
+            await pg.until(f"!!{q('#home button.open-folder')}", 10)
+            before = await pg.rect("#home button.open-folder")
+            info["open_folder_rect_before"] = before
+            # a fresh tab OPENS on the selected page (no slide from the Home)
+            r["opens_on_selection"] = before is not None and before["x"] + before["w"] <= 0
+            await key(pg, "0")
+            r["home_shown"] = bool(await pg.until(f"!!{q('#home nav.nav-pill .nav-home[aria-current=page]')}", 10))
             r["open_folder_shown"] = bool(await pg.until(f"!!{q('#home button.open-folder')} && !{q('#home form.open-path')}", 10))
             r["open_hint"] = bool(await pg.js("document.body.innerText.includes('or drop a folder anywhere')"))
+            info["open_folder_rect"] = await pg.rect("#home button.open-folder")
             r["open_folder_clicked"] = await click(pg, "#home button.open-folder")
             dp = canonical(delta)
-            st = await rig.until_state("delta running", lambda s: row_of(s, dp).get("status") == "running", 30)
+            try:
+                st = await rig.until_state("delta running", lambda s: row_of(s, dp).get("status") == "running", 30)
+            except SystemExit as e:
+                # what the page said (a refused open shows as its notice)
+                info["notice"] = await pg.js(f"{q('#home .notice')}?.textContent ?? ''")
+                info["delta_wait"] = str(e)[:600]
+                r["delta_running"] = False
+                return
+            r["delta_running"] = True
             did = row_of(st, dp)["id"]
             status = q(f'#home .home-row[data-id="{did}"] .status')
             r["delta_row_running"] = bool(await pg.until(f"{status}?.dataset.status === 'running'", 10))

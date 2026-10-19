@@ -42,7 +42,6 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 - The home kernel serves the Home at `home.html` and the list page at
   `list.html`.
-
 - Home layout v2: everything fantastic keeps for a user lives under ONE
   directory, `~/.fantastic/` (`FANTASTIC_HOME` still overrides it), in groups:
   `app/` (the desktop app's home kernel), `fantastics/` (the registry),

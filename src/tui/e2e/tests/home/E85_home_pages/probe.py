@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import http_get  # noqa: E402
 from _lib.home_live import (  # noqa: E402
     HomeRig,
+    StateLog,
     canonical,
     click,
     key,
@@ -97,6 +98,9 @@ def main() -> bool:
             info["born"] = born
             r["two_frames"] = sorted(born) == sorted([aid, bid])
             pg.navigations = []
+            # every state from here on: a frame dropped (not reloaded) would follow
+            # a state where its row was not running at its url
+            log = await StateLog(rig.home_port).__aenter__()
 
             # switch: the pill, then mod+2, then mod+1; mod+0 the Home
             await click(pg, f'#home nav.nav-pill .nav-page[data-id="{aid}"]')
@@ -120,7 +124,17 @@ def main() -> bool:
                 r["tab2_moves_tab1"] = bool(await pg.until(f"{CURRENT} === {json.dumps(aid)}", 10)) and \
                     bool(await pg2.until(f"{CURRENT} === {json.dumps(aid)}", 10))
                 info["page_errors_tab2"] = page_errors(pg2)[:5]
-            r["frames_still_kept"] = json.loads(await pg.js(born_js) or "{}") == born and pg.navigations == []
+            born_after = json.loads(await pg.js(born_js) or "{}")
+            await log.__aexit__()
+            info["born_after_tab2"] = born_after
+            info["navigations_after_tab2"] = list(pg.navigations)
+            info["states_seen"] = len(log.states)
+            # every state in which an open page's row was not running at its first url
+            info["page_rows_not_running"] = [
+                {"seq": st["seq"], **{i: st["rows"].get(i) for i in (aid, bid)}} for st in log.states
+                if any(st["rows"].get(i) != ["running", urls[i]] for i in (aid, bid))
+            ][:10]
+            r["frames_still_kept"] = born_after == born and pg.navigations == []
 
             # mod+W closes the shown page (alpha); alpha keeps running
             await key(pg, "w")
@@ -158,7 +172,7 @@ def main() -> bool:
     ok = bool(r) and all(r.values())
     rig.summary["checks"], rig.summary["info"] = r, info
     note = "switched five times with no reload, two tabs one selection, mod+W closed a page, a restart kept the pages" if ok else \
-        f"failed: {', '.join(k for k, v in r.items() if not v)} · {json.dumps(info)[:1500]}"
+        f"failed: {', '.join(k for k, v in r.items() if not v)} · {json.dumps(info)[:4000]}"
     return verdict(*rig.finish(ok, note))
 
 

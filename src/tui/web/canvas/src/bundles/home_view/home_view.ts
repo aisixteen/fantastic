@@ -175,8 +175,9 @@ export const homeView: ViewBundle = {
     };
 
     const pageEls = new Map<string, { page: HTMLElement; slot: HTMLElement; body: HTMLElement; controls: HTMLElement }>();
-    /** One .page per open page: made when it opens, removed when it closes,
-     *  never moved while its order holds (moving its frame would reload it). */
+    /** One .page per open page: made when it opens (appended), removed when it
+     *  closes, and NEVER moved — moving its frame would reload it. Where a page
+     *  shows is its `--i`; the agent only appends and removes pages. */
     const syncPages = (s: HomeState): void => {
       for (const [id, p] of pageEls) {
         if (!s.pages.includes(id)) {
@@ -198,9 +199,6 @@ export const homeView: ViewBundle = {
         }
         p.page.style.setProperty("--i", String(i + 1));
       });
-      // the DOM in state order — only when the agent reordered them
-      const inDom = [...carousel.querySelectorAll<HTMLElement>(":scope > .page[data-id]")].map((e) => e.dataset["id"]);
-      if (inDom.join("\n") !== s.pages.join("\n")) for (const id of s.pages) carousel.append(pageEls.get(id)!.page);
     };
 
     const drawPage = (s: HomeState, id: string): void => {
@@ -312,7 +310,14 @@ export const homeView: ViewBundle = {
       drawCapsule(s);
       drawProblem(s);
       const at = s.selection === null ? 0 : s.pages.indexOf(s.selection) + 1;
+      const first = carousel.style.transform === "";
+      // the first state places the carousel; only a change of page slides it
+      if (first) carousel.style.transition = "none";
       carousel.style.transform = `translateX(${-Math.max(0, at) * 100}%)`;
+      if (first) {
+        void carousel.offsetWidth; // the position lands before the transition returns
+        carousel.style.transition = "";
+      }
     }
 
     // ── the launch log ──

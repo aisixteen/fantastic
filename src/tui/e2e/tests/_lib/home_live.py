@@ -249,11 +249,19 @@ class HomeRig(Rig):
         pids = [p for p in (lock_pid(f) for f in self.folders.values()) if p is not None]
         for pid in pids:
             oslayer.stop_fantastic(self.binary, pid)
+
+        def gone(pid: int) -> bool:
+            # One this rig started is ITS child: until it is reaped (`poll`) it is
+            # a zombie, which `pid_alive` reports alive and macOS's `killpg`
+            # refuses (EPERM). The home reaps the ones it started itself.
+            mine = next((p for p in self.procs if p.pid == pid), None)
+            return mine.poll() is not None if mine is not None else not oslayer.pid_alive(pid)
+
         deadline = time.time() + 20
-        while time.time() < deadline and any(oslayer.pid_alive(p) for p in pids):
+        while time.time() < deadline and not all(gone(p) for p in pids):
             time.sleep(0.2)
         for pid in pids:
-            if oslayer.pid_alive(pid):
+            if not gone(pid):
                 oslayer.kill_group(pid)
         for proc in self.procs:
             try:
@@ -270,6 +278,41 @@ class HomeRig(Rig):
         if not ok and self.home_log.exists():
             print("home-host.log (tail):\n" + "\n".join(self.home_log.read_text(errors="replace").splitlines()[-40:]))
         return super().finish(ok, note)
+
+
+# ── the state stream ─────────────────────────────────────────────────────────
+class StateLog:
+    """Every `state` the home emits, as a page sees it on `/home/ws`: per state
+    its `seq`, `pages`, `selection`, and each row's `[status, canvas url]`.
+
+        async with StateLog(rig.home_port) as log: …
+        log.states"""
+
+    def __init__(self, port: int):
+        self.port, self.states, self.task, self.ws = port, [], None, None
+
+    async def __aenter__(self) -> StateLog:
+        import websockets
+
+        self.ws = await websockets.connect(f"ws://127.0.0.1:{self.port}/home/ws")
+
+        async def read() -> None:
+            try:
+                async for m in self.ws:
+                    frame = json.loads(m)
+                    p = frame.get("payload") or {}
+                    if frame.get("type") == "event" and p.get("type") == "state":
+                        self.states.append({"seq": p.get("seq"), "pages": p.get("pages"), "selection": p.get("selection"),
+                                            "rows": {r["id"]: [r["status"], (r.get("canvas") or {}).get("url")] for r in p.get("rows", [])}})
+            except Exception:  # noqa: BLE001 — the socket closing ends the log
+                pass
+
+        self.task = asyncio.create_task(read())
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.ws.close()
+        await self.task
 
 
 # ── page helpers ─────────────────────────────────────────────────────────────
