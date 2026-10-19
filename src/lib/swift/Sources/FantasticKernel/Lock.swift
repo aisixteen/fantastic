@@ -37,10 +37,12 @@ public final class WorkdirLock: @unchecked Sendable {
     }
 
     private let lockFile: URL
+    private let workdir: URL
     /// The descriptor whose flock IS the lock; open while it is held.
     private var fileDescriptor: Int32 = -1
 
     public init(workdir: URL) {
+        self.workdir = workdir
         self.lockFile =
             workdir
             .appendingPathComponent(".fantastic")
@@ -51,6 +53,11 @@ public final class WorkdirLock: @unchecked Sendable {
     /// Throws `.alreadyRunning` naming the pid in the file if a live process
     /// holds it; a lock whose holder died is taken over.
     public func acquire() throws {
+        // A `.fantastic` that IS the fantastic home is never a kernel's: refused
+        // before anything is written there.
+        try refuseHomeAsStateDir(
+            workdir: workdir.path, stateDir: lockFile.deletingLastPathComponent().path,
+            home: fantasticHome())
         // Ensure parent dir exists.
         try? FileManager.default.createDirectory(
             at: lockFile.deletingLastPathComponent(),

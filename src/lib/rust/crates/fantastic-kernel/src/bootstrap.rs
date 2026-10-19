@@ -351,6 +351,21 @@ pub fn fantastic_home() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".fantastic"))
 }
 
+/// The home as a path is written — python `kernel._home.home_spelled`:
+/// `FANTASTIC_HOME` made absolute (against the current dir, folded), else
+/// `~/.fantastic` with the `~` kept, for a reader.
+///
+/// # Errors
+/// The current dir cannot be read (a relative `FANTASTIC_HOME` needs it).
+pub fn home_spelled() -> std::io::Result<String> {
+    match std::env::var_os(HOME_VAR).filter(|v| !v.is_empty()) {
+        Some(h) => Ok(fold(&std::env::current_dir()?, Path::new(&h))
+            .to_string_lossy()
+            .into_owned()),
+        None => Ok("~/.fantastic".to_string()),
+    }
+}
+
 /// THE GUARD: a kernel never keeps its own state in the fantastic home. With
 /// the home at `~/.fantastic`, a kernel booted in `~` would otherwise take the
 /// home for its `.fantastic`. Both sides are absolutized against the current

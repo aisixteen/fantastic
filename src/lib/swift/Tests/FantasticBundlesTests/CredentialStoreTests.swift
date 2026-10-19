@@ -482,7 +482,7 @@ struct CredentialStoreTests {
         #expect(k.agent(AgentId("creds"))?.meta["file"] == .string(abs))
         // `~…` passes the write (no disk is touched to judge it)
         let b = CredentialStoreBundle(keychain: MemKeychain())
-        #expect(b.validateMeta(["file": "~/.fantastic/credentials/x.yaml"], record: [:]) == nil)
+        #expect(b.validateMeta(["file": "~/.fantastic/user/credentials/x.yaml"], record: [:]) == nil)
         #expect(
             b.validateMeta(["keychain_namespace": ""], record: [:])
                 == "keychain_namespace must be a non-empty string")
@@ -822,5 +822,21 @@ struct CredentialStoreTests {
             .appendingPathComponent(
                 "python/bundled_agents/security/credential_store/src/credential_store/readme.md")
         #expect(CredentialStoreBundle().readme == (try String(contentsOf: py, encoding: .utf8)))
+    }
+}
+
+@Suite("CredentialStoreDefaultFile")
+struct CredentialStoreDefaultFileTests {
+    /// No `file`: `<home>/user/credentials/<id>.yaml`, `<home>` being
+    /// FANTASTIC_HOME (made absolute), else `~/.fantastic`.
+    @Test func theDefaultFileIsUnderTheHomesUserCredentials() {
+        #expect(defaultCredentialsFile("c2", environment: [:]) == "~/.fantastic/user/credentials/c2.yaml")
+        #expect(
+            defaultCredentialsFile("c2", environment: ["FANTASTIC_HOME": "/h"])
+                == "/h/user/credentials/c2.yaml")
+        let cwd = FileManager.default.currentDirectoryPath
+        #expect(
+            defaultCredentialsFile("c2", environment: ["FANTASTIC_HOME": "rel/./x/.."])
+                == foldPath(cwd + "/rel") + "/user/credentials/c2.yaml")
     }
 }

@@ -511,7 +511,7 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
     // `~…` passes the write (no disk is touched to judge it)
     let b = CredentialStoreBundle::default();
     let v = |m: Value| b.validate_meta(m.as_object().unwrap(), &Map::new());
-    assert_eq!(v(json!({"file": "~/.fantastic/credentials/x.yaml"})), None);
+    assert_eq!(v(json!({"file": "~/.fantastic/user/credentials/x.yaml"})), None);
     assert_eq!(
         v(json!({"keychain_namespace": ""})).as_deref(),
         Some("keychain_namespace must be a non-empty string")
@@ -928,7 +928,7 @@ async fn reflect_is_posture_never_a_value_or_a_ref_name() {
     // with no `file`, the default under the user's home is NAMED, never touched
     assert_eq!(
         CredentialStoreBundle::reflect(&AgentId::from("c2"), &Map::new())["file"],
-        json!("~/.fantastic/credentials/c2.yaml")
+        json!(crate::default_file("c2").unwrap())
     );
 }
 
@@ -1005,4 +1005,19 @@ async fn concurrent_sets_lose_no_ref() {
         (0..16).all(|i| text.contains(&format!("r{i:02}:"))),
         "{text}"
     );
+}
+
+#[test]
+fn the_default_file_is_under_the_homes_user_credentials() {
+    // FANTASTIC_HOME unset in the test process unless a runner set it
+    match std::env::var_os("FANTASTIC_HOME").filter(|v| !v.is_empty()) {
+        None => assert_eq!(
+            crate::default_file("c2").unwrap(),
+            "~/.fantastic/user/credentials/c2.yaml"
+        ),
+        Some(h) => assert_eq!(
+            crate::default_file("c2").unwrap(),
+            format!("{}/user/credentials/c2.yaml", std::path::Path::new(&h).display())
+        ),
+    }
 }

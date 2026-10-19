@@ -172,11 +172,13 @@ public func startKernel(workdir: String) async throws -> Kernel {
     else {
         throw KernelStartupError.workdirInvalid(workdir)
     }
+    let dotFantastic = url.appendingPathComponent(".fantastic")
+    // A `.fantastic` that IS the fantastic home is never a kernel's state.
+    try refuseHomeAsStateDir(workdir: url.path, stateDir: dotFantastic.path, home: fantasticHome())
     let kernel = Kernel(
         storage: .disk(url),
         bundles: defaultBundleRegistry()
     )
-    let dotFantastic = url.appendingPathComponent(".fantastic")
     // A LOCKLESS boot creates nothing: `.fantastic` is made by the seed write
     // (`takeSeed`), under the lock.
     var fantasticIsDir: ObjCBool = false

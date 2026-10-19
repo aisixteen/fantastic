@@ -25,6 +25,7 @@ from file_bridge import fs
 from kernel_state.tools import load_bundles, read_tree, write_record
 
 from kernel import Kernel, _load_dotenv, _sys, dispatch_argv
+from kernel._home import refuse_home_as_state_dir
 
 
 def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
@@ -33,6 +34,8 @@ def _bootstrap(kernel: Kernel, root_dir: Path = Path(".fantastic")) -> None:
     runs the boot pass (which is when the root loader subscribes)."""
     # The running dir is the dir holding the root's `.fantastic` — before any kernel
     # exists that is `root_dir`'s parent; after `load` it is `kernel.workdir`.
+    # A `.fantastic` that IS the fantastic home is never a kernel's state.
+    refuse_home_as_state_dir(root_dir.absolute().parent, root_dir)
     records = read_tree(fs.Root(root_dir.resolve().parent, root_dir))
     # FOLDER BUNDLES before the tree loads, so an instance's handler resolves.
     load_bundles(fs.Root(root_dir.resolve().parent, root_dir))

@@ -60,7 +60,16 @@ import OrderedCollections
 
 let NAME = "credential_store"
 let BACKENDS = ["file", "keychain", "env"]
-let DEFAULT_DIR = "~/.fantastic/credentials"
+let CREDENTIALS_DIR = "user/credentials"
+
+/// The `file` backend's path when the record names none — python
+/// `default_file`: `<home>/user/credentials/<store id>.yaml`, `<home>` being
+/// `FANTASTIC_HOME` (made absolute), else `~/.fantastic`.
+public func defaultCredentialsFile(
+    _ storeId: String, environment: [String: String] = ProcessInfo.processInfo.environment
+) -> String {
+    "\(fantasticHomeSpelled(environment: environment))/\(CREDENTIALS_DIR)/\(storeId).yaml"
+}
 let KEYCHAIN_NAMESPACE = "fantastic"
 
 public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
@@ -473,7 +482,7 @@ private struct FileBackend: CredentialBackend {
 
     /// The record's `file`, or the default under the user's home.
     static func shown(_ ctx: Ctx) -> String {
-        pyTruthy(ctx.meta("file")) ? pyStr(ctx.meta("file")) : "\(DEFAULT_DIR)/\(ctx.id).yaml"
+        pyTruthy(ctx.meta("file")) ? pyStr(ctx.meta("file")) : defaultCredentialsFile(ctx.id)
     }
 
     init(ctx: Ctx) throws(PyError) {

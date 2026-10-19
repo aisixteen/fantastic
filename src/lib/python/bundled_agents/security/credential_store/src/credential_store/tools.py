@@ -7,7 +7,8 @@ other host — so rotating a key is rewriting the ref, and no restart is ever ne
 
 WHERE THE VALUES LIVE — `backend` on the record, one of:
   * `file` (the default): a YAML file at an ABSOLUTE path —
-    `~/.fantastic/credentials/<store id>.yaml` unless `file` names another one
+    `<home>/user/credentials/<store id>.yaml` unless `file` names another one
+    (`<home>` is `FANTASTIC_HOME`, else `~/.fantastic`)
     (`/…` or `~…`; a relative path is refused at the write). It is written 0600
     and READ ONLY IF it is a regular file owned by this user with no group/other
     bits — anything else is refused, loud. It is judged on the ONE open it is read
@@ -52,6 +53,7 @@ from urllib.parse import urlsplit
 
 from file_bridge import fs
 from kernel_state import yaml_io
+from kernel._home import home_spelled
 from kernel._refusal import (
     BAD_ARG,
     NOT_FOUND,
@@ -62,8 +64,14 @@ from kernel._refusal import (
 
 NAME = "credential_store"
 BACKENDS = ("file", "keychain", "env")
-DEFAULT_DIR = "~/.fantastic/credentials"
+CREDENTIALS_DIR = "user/credentials"
 KEYCHAIN_NAMESPACE = "fantastic"
+
+
+def default_file(store_id: str) -> str:
+    """The `file` backend's path when the record names none:
+    `<home>/user/credentials/<store id>.yaml`."""
+    return f"{home_spelled()}/{CREDENTIALS_DIR}/{store_id}.yaml"
 
 
 def _refs(agent) -> dict:
@@ -102,7 +110,7 @@ class _File:
     `{refs: {ref: {host, fields: {field: value}}}}`, at an absolute path."""
 
     def __init__(self, agent):
-        p = agent.record.get("file") or f"{DEFAULT_DIR}/{agent.id}.yaml"
+        p = agent.record.get("file") or default_file(agent.id)
         if why := _relative_file(p):  # a record written past `validate_meta`
             raise ValueError(f"{NAME}: {why}")
         full = Path(p).expanduser()
@@ -251,7 +259,7 @@ async def _reflect(id, payload, agent):
         "refs": len(_refs(agent)),
     }
     if backend == "file":
-        out["file"] = agent.record.get("file") or f"{DEFAULT_DIR}/{id}.yaml"
+        out["file"] = agent.record.get("file") or default_file(id)
     return out
 
 
