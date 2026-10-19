@@ -45,12 +45,14 @@ use crate::probe::{is_active, Mode, Probe, Status, Target};
 /// The prefix of a folder-being-added's entry id.
 const ADDING: &str = "adding:";
 
-/// Missed canvas answers a running row rides out: a probe that finds the SAME
-/// run (holder, canvas) whose canvas did not answer in time keeps the row
-/// running this many polls in a row, then it shows what the probe found. A
-/// loaded machine misses one answer (the canvas check's timeout) and every page
-/// would drop its live canvas for it.
-const MISSES_RIDDEN: u32 = 1;
+/// The missed canvas answer, in a row, at which a running row shows what the
+/// probe found. Before it, a probe that finds the SAME run (holder, canvas)
+/// whose canvas did not answer in time keeps the row running: misses 1 and 2
+/// are ridden out, the 3rd shows — about 6 s at the 2 s poll. A loaded machine
+/// misses answers (the canvas check's timeout), and every page would drop its
+/// live canvas for each. A gone holder, another run or another canvas shows at
+/// once; an answer resets the count.
+const MISS_SHOWN: u32 = 3;
 
 /// Why a folder being added cannot be added while it runs as it does.
 const NO_CANVAS: &str =
@@ -249,7 +251,7 @@ pub struct Home {
     read_once: bool,
     /// A `Restore` that arrived before the first registry read.
     pending_restore: Option<(Vec<String>, Option<String>)>,
-    /// Missed canvas answers in a row, by guid, ridden out (`MISSES_RIDDEN`).
+    /// Missed canvas answers in a row, by guid, ridden out (`MISS_SHOWN`).
     missed: BTreeMap<String, u32>,
     now_ms: u64,
 }
@@ -504,7 +506,7 @@ impl Home {
     }
 
     /// The probe to keep for `guid`: the last one while a running row's run is
-    /// unchanged and only its canvas missed an answer, up to `MISSES_RIDDEN`
+    /// unchanged and only its canvas missed an answer, until the `MISS_SHOWN`th
     /// polls in a row; else `probe`. A stopped holder, another run or another
     /// canvas shows at once.
     fn ride_out_a_miss(&mut self, guid: &str, probe: Probe) -> Probe {
@@ -529,9 +531,9 @@ impl Home {
             && probe.owns_entry
             && probe.canvas == last.canvas
             && !probe.canvas_up;
-        let misses = self.missed.get(guid).copied().unwrap_or(0);
-        if same_run && misses < MISSES_RIDDEN {
-            self.missed.insert(guid.to_string(), misses + 1);
+        let misses = self.missed.get(guid).copied().unwrap_or(0) + 1;
+        if same_run && misses < MISS_SHOWN {
+            self.missed.insert(guid.to_string(), misses);
             return last.clone();
         }
         self.missed.remove(guid);
@@ -1096,34 +1098,38 @@ mod tests {
     }
 
     #[test]
-    fn a_running_row_rides_out_one_missed_canvas_answer() {
+    fn a_running_row_rides_out_two_missed_canvas_answers_and_shows_the_third() {
         let mut h = home(Mode::Lock);
         read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
         probed(&mut h, 0, vec![("g1", running(7, 8100))]);
         let up = Status::Running(canvas(8100));
-        // The same run, its canvas late once: still running.
+        // The same run, its canvas late.
         let mut late = running(7, 8100);
         late.canvas_up = false;
         late.guid_matches = false;
-        probed(&mut h, 1, vec![("g1", late.clone())]);
-        assert_eq!(status(&h, "g1", 1), up);
-        // Late twice in a row: what the probe found.
-        probed(&mut h, 2, vec![("g1", late.clone())]);
-        assert_eq!(status(&h, "g1", 2), Status::Unverified);
-        // An answer resets the count: one late answer is ridden out again.
-        probed(&mut h, 3, vec![("g1", running(7, 8100))]);
-        probed(&mut h, 4, vec![("g1", late)]);
-        assert_eq!(status(&h, "g1", 4), up);
-        // A stopped holder, or another canvas, shows at once.
-        probed(&mut h, 5, vec![("g1", running(7, 8100))]);
-        probed(&mut h, 6, vec![("g1", stopped())]);
-        assert_eq!(status(&h, "g1", 6), Status::Stopped);
-        probed(&mut h, 7, vec![("g1", running(7, 8100))]);
+        // Misses 1 and 2: still running, on its canvas.
+        probed(&mut h, 2_000, vec![("g1", late.clone())]);
+        assert_eq!(status(&h, "g1", 2_000), up);
+        probed(&mut h, 4_000, vec![("g1", late.clone())]);
+        assert_eq!(status(&h, "g1", 4_000), up);
+        // The 3rd in a row: what the probe found.
+        probed(&mut h, 6_000, vec![("g1", late.clone())]);
+        assert_eq!(status(&h, "g1", 6_000), Status::Unverified);
+        // An answer resets the count: two misses are ridden out again.
+        probed(&mut h, 8_000, vec![("g1", running(7, 8100))]);
+        probed(&mut h, 10_000, vec![("g1", late.clone())]);
+        probed(&mut h, 12_000, vec![("g1", late)]);
+        assert_eq!(status(&h, "g1", 12_000), up);
+        // A gone holder, or another canvas, shows at once.
+        probed(&mut h, 14_000, vec![("g1", running(7, 8100))]);
+        probed(&mut h, 16_000, vec![("g1", stopped())]);
+        assert_eq!(status(&h, "g1", 16_000), Status::Stopped);
+        probed(&mut h, 18_000, vec![("g1", running(7, 8100))]);
         let mut moved = running(7, 8200);
         moved.canvas_up = false;
         moved.guid_matches = false;
-        probed(&mut h, 8, vec![("g1", moved)]);
-        assert_eq!(status(&h, "g1", 8), Status::Unverified);
+        probed(&mut h, 20_000, vec![("g1", moved)]);
+        assert_eq!(status(&h, "g1", 20_000), Status::Unverified);
     }
 
     #[test]
