@@ -89,13 +89,13 @@ runs:
       lock_released: true
       files_exist:
         - .fantastic/agents/user/agents/vllm-1/agent.yaml
-        - home/agents/ai_agent/saved/vllm-1.yaml
-        - home/agents/ai_agent/saved/.preferred
-        - home/agents/ai_agent/keys/credentials.yaml
+        - home/user/setups/ai_agent/vllm-1.yaml
+        - home/user/setups/ai_agent/.preferred
+        - home/user/keys/credentials.yaml
       file_contains:
-        home/agents/ai_agent/saved/vllm-1.yaml: ["vllm_backend.tools", "mock-x", "evict"]
-        home/agents/ai_agent/saved/.preferred: ["vllm-1"]
-        home/agents/ai_agent/keys/credentials.yaml: ["sk-e2e-1"]
+        home/user/setups/ai_agent/vllm-1.yaml: ["vllm_backend.tools", "mock-x", "evict"]
+        home/user/setups/ai_agent/.preferred: ["vllm-1"]
+        home/user/keys/credentials.yaml: ["sk-e2e-1"]
 
   - name: from_saved
     script: |
@@ -168,4 +168,4 @@ runs:
       exit_code: 0
       lock_released: true
       file_contains:
-        home/agents/ai_agent/saved/vllm-1.yaml: ["mock-y"]
+        home/user/setups/ai_agent/vllm-1.yaml: ["mock-y"]

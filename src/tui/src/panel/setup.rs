@@ -631,7 +631,7 @@ mod tests {
                 })
                 .collect(),
             preferred: preferred.map(str::to_string),
-            dir: "/h/agents/ai_agent/saved".into(),
+            dir: "/h/user/setups/ai_agent".into(),
         }
     }
 

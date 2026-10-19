@@ -1,7 +1,7 @@
 //! THE AI AGENT'S SAVED SET-UPS, through the one agent that holds them.
 //!
 //! `user_home` is a `user_home_store` agent under the root. The binary fixes
-//! where its files live (`FANTASTIC_HOME`, else `~/.config/fantastic`) and that
+//! where its files live (`FANTASTIC_HOME`, else `~/.fantastic`) and that
 //! it serves only the human (`kern/host` registry); this module makes sure the
 //! agent exists and that the grants between it and the human are exactly the
 //! verbs used here — RE-SET on every boot, so a record on disk that widened them

@@ -1,16 +1,16 @@
 //! user_home_store — the user's SAVED SET-UP store (`user_home_store.tools`).
 //!
-//! Named agent-record blueprints in the user's home config dir, one plain-text
-//! file per name:
+//! Named agent-record blueprints in the user's home dir, one plain-text file
+//! per name:
 //!
 //! ```text
-//!   <home>/                        0700   FANTASTIC_HOME, else ~/.config/fantastic
-//!   ├── agents/                    0700   per-agent-kind state (owner 2026-10-12)
-//!   │   └── ai_agent/              0700
-//!   │       ├── saved set-ups/         0700
-//!   │       │   ├── opus.yaml      0600   handler_module + that bundle's config
-//!   │       │   └── .preferred     0600   the owner's explicit default (a name)
-//!   │       └── keys/              0700   the key mode + refs (`secrets`)
+//!   <home>/                        0700   FANTASTIC_HOME, else ~/.fantastic
+//!   ├── user/                      0700   what the user keeps (owner 2026-10-19)
+//!   │   ├── setups/                0700
+//!   │   │   └── ai_agent/          0700   saved set-ups, per agent kind
+//!   │   │       ├── opus.yaml      0600   handler_module + that bundle's config
+//!   │   │       └── .preferred     0600   the owner's explicit default (a name)
+//!   │   └── keys/                  0700   the key mode + refs (`secrets`)
 //!   └── fantastics/                0700   the stored locations (`user_store`)
 //! ```
 //!
@@ -54,7 +54,7 @@ pub const HANDLER_MODULE: &str = "user_home_store.tools";
 /// The short orientation readme.
 pub const README: &str = include_str!("readme.md");
 
-/// The environment variable that names the home dir; unset → `~/.config/fantastic`.
+/// The environment variable that names the home dir; unset → `~/.fantastic`.
 pub const HOME_VAR: &str = "FANTASTIC_HOME";
 
 /// Fields a saved set-up may never carry: identity, per-project wiring, authority.
@@ -73,14 +73,14 @@ pub const NOT_SAVED: [&str; 10] = [
 
 const PREFERRED: &str = ".preferred";
 
-/// The AI agent's dir under the home: `agents/ai_agent`.
-pub fn ai_agent_dir(home: &Path) -> PathBuf {
-    home.join("agents").join("ai_agent")
+/// The user's group under the home: `user`.
+pub fn user_dir(home: &Path) -> PathBuf {
+    home.join("user")
 }
 
-/// The saved set-ups dir under the home.
+/// The AI agent's saved set-ups dir under the home: `user/setups/ai_agent`.
 pub fn saved_dir(home: &Path) -> PathBuf {
-    ai_agent_dir(home).join("saved")
+    user_dir(home).join("setups").join("ai_agent")
 }
 
 /// Create `dir` and every missing level up from `home`, each `0700`; refuse any
@@ -105,14 +105,14 @@ pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
 }
 
 /// Where the saved set-ups live, resolved ONCE by the binary: `FANTASTIC_HOME`, else
-/// `$HOME/.config/fantastic` (`%USERPROFILE%` on Windows). `Err` names what is
+/// `$HOME/.fantastic` (`%USERPROFILE%\.fantastic` on Windows). `Err` names what is
 /// missing — never guessed.
 pub fn home_dir_from_env() -> Result<PathBuf, String> {
     if let Some(h) = std::env::var_os(HOME_VAR).filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(h));
     }
     match std::env::var_os(sys::USER_HOME).filter(|v| !v.is_empty()) {
-        Some(h) => Ok(PathBuf::from(h).join(".config").join("fantastic")),
+        Some(h) => Ok(PathBuf::from(h).join(".fantastic")),
         None => Err(format!("neither {HOME_VAR} nor {} is set — no home dir for saved set-ups", sys::USER_HOME)),
     }
 }

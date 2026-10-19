@@ -3,8 +3,8 @@
 //!
 //! ```text
 //!   <home>/
-//!   ├── agents/ai_agent/keys/      the stored keys (refs + hosts shown, never values)
-//!   ├── agents/ai_agent/saved/     the saved set-ups (names shown)
+//!   ├── user/keys/                 the stored keys (refs + hosts shown, never values)
+//!   ├── user/setups/ai_agent/      the saved set-ups (names shown)
 //!   └── fantastics/                0700   one FOLDER per registered fantastic
 //!       └── <guid | name>/         0700   the kernel's guid, or the name given it
 //!           └── fantastic.yaml     0600   {guid, name, path, pid, canvas, stored_at, last_seen}
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_and_saved_setups_are_listed_from_the_ai_agent_dir() {
+    fn keys_and_saved_setups_are_listed_from_the_user_dir() {
         let h = home();
         let s = Secrets::new(Ok(h.clone()));
         s.set_mode(crate::secrets::Mode::Plain).unwrap();
@@ -831,6 +831,6 @@ mod tests {
         let me = Me { guid: Some("g".into()), on: false, name: None };
         let l = st.list(&me).unwrap();
         assert_eq!(l["keys"], json!([{"ref": "vllm/box:8000", "host": "box:8000"}]));
-        assert!(h.join("agents/ai_agent/keys/refs.json").exists());
+        assert!(h.join("user/keys/refs.json").exists());
     }
 }
