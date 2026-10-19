@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: home_byo
+group: home
+title: "bring your own UI: the example client list.html, served by the home, shows a running and a stopped fantastic and drives Start and Stop; a native client finds the port in <home>/app/home.yaml and is admitted with no Origin header, a foreign Origin gets 403, and the socket cannot add an allowed origin"
+runner: probe.py
+costs: free
+limits:
+  seconds: 180
+env: {}

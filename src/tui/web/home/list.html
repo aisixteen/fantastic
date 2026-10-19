@@ -1,15 +1,28 @@
 <!doctype html>
 <!--
-  THE HOME'S MINIMAL LIST PAGE (Phase 2), served by `canvas_page` as `list.html`
-  (the Home itself is `home.html`, Phase 3). One file: no framework, no build step.
+  THE EXAMPLE CLIENT of the `home` protocol v1 (fantastic-home-kernel/docs/home.md).
+  This one file is the whole protocol: read it to write a client. No framework,
+  no build step, no import.
 
-  Two sockets, both to the host that served this page:
-    ws://<host>/home/ws   the state stream: every payload on `home`, as {type:"event", payload}
-    ws://<host>/user/ws   the calls: {type:"call", target:"user", payload:{type:"forward", target:"home", payload}, id}
+  The home serves it at http://127.0.0.1:<port>/canvas_page/file/list.html (the
+  Home itself is home.html). A native client speaks the same frames over the
+  same two sockets, sending no Origin header. A copy opened in a browser from
+  file:// or another origin is refused by the host's Origin rule (home.md,
+  section 6, "Bring your own UI").
 
-  It watches first and lists second, then ignores any `state` whose `seq` is not
-  above the last one drawn. It draws only `state` payloads; every other type (a
-  mirrored call, `focus`) is skipped.
+    ws://<host>/user/ws   the calls: {type:"call", target:"user", id,
+                          payload:{type:"forward", target:"home", payload:{type, version:1, …}}}
+    ws://<host>/home/ws   the events: {type:"event", payload}; this page keeps `state` only
+
+  1. `reflect` first: run only against protocol "fantastic.home", version 1.
+  2. Watch /home/ws, then call `list`; draw a state only when its seq is above
+     the last one drawn.
+  3. Every call carries version 1 and a fresh id (crypto.randomUUID()).
+
+  The look is ONE `:root` block of the skin schema's custom properties
+  (src/tui/docs/skins.md), its values the dark skin's
+  (skin/stock/dark.tokens.json); everything below paints with var(--fc-…) only.
+  Swapping that block is the whole reskin of this page.
 -->
 <html lang="en">
 <head>
@@ -17,21 +30,58 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Aisixteen Fantastic · home</title>
 <style>
-  :root { color-scheme: light dark; --line: #8884; --muted: #888; --bad: #c33; }
-  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
-  h1 { font-size: 18px; margin: 0 0 12px; }
+  :root {
+    --fc-color-page-bg: rgb(6 6 12);
+    --fc-color-text-primary: rgb(236 233 245);
+    --fc-color-text-bright: rgb(255 255 255);
+    --fc-color-text-muted: rgb(163 156 186);
+    --fc-color-text-subtle: rgb(143 136 166);
+    --fc-color-text-faint: rgb(111 104 134);
+    --fc-color-accent-base: rgb(183 140 255);
+    --fc-color-status-ok: rgb(126 226 168);
+    --fc-color-status-warn: rgb(255 209 102);
+    --fc-color-status-error: rgb(255 138 138);
+    --fc-color-status-error-text: rgb(255 179 179);
+    --fc-color-status-info: rgb(154 208 255);
+    --fc-color-side-host: rgb(255 190 90);
+    --fc-color-surface-panel: rgb(15 14 22);
+    --fc-color-surface-field: rgb(26 24 36);
+    --fc-color-surface-button: rgb(36 31 53);
+    --fc-color-surface-toast: rgb(40 20 26 / 0.9);
+    --fc-color-line-button: rgb(49 44 64);
+    --fc-color-line-strong: rgb(74 74 77);
+    --fc-color-line-faint: rgb(29 29 31);
+    --fc-radius-control: 6px;
+    --fc-radius-card: 8px;
+    --fc-font-family-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --fc-font-family-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  body { font: 14px/1.4 var(--fc-font-family-sans); margin: 16px; background: var(--fc-color-page-bg); color: var(--fc-color-text-primary); }
+  h1 { font-size: 18px; margin: 0 0 12px; color: var(--fc-color-text-bright); }
   table { border-collapse: collapse; width: 100%; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-weight: 600; }
-  td.path { color: var(--muted); word-break: break-all; }
-  button { margin-right: 4px; }
-  .problem { border: 1px solid var(--bad); padding: 8px; margin: 0 0 12px; display: flex; gap: 8px; align-items: center; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--fc-color-line-faint); vertical-align: top; }
+  th { font-weight: 600; color: var(--fc-color-text-muted); }
+  td.path { color: var(--fc-color-text-subtle); font-family: var(--fc-font-family-mono); font-size: 12px; word-break: break-all; }
+  td.seen { color: var(--fc-color-text-subtle); }
+  td.status { color: var(--fc-color-text-subtle); }
+  td.status[data-status="running"] { color: var(--fc-color-status-ok); }
+  td.status[data-status="starting"], td.status[data-status="stopping"] { color: var(--fc-color-side-host); }
+  td.status[data-status="no_canvas"] { color: var(--fc-color-status-info); }
+  td.status[data-status="unverified"] { color: var(--fc-color-status-warn); }
+  td.status[data-status="missing"] { color: var(--fc-color-status-error); }
+  button, input { font: inherit; color: var(--fc-color-text-primary); border: 1px solid var(--fc-color-line-button); border-radius: var(--fc-radius-control); }
+  button { background: var(--fc-color-surface-button); padding: 3px 10px; margin-right: 4px; cursor: pointer; }
+  button:hover { border-color: var(--fc-color-line-strong); color: var(--fc-color-text-bright); }
+  input { background: var(--fc-color-surface-field); padding: 4px 8px; }
+  a { color: var(--fc-color-accent-base); }
+  .problem { background: var(--fc-color-surface-toast); color: var(--fc-color-status-error-text); border-radius: var(--fc-radius-card); padding: 8px; margin: 0 0 12px; display: flex; gap: 8px; align-items: center; }
+  .problem span { flex: 1; }
   .problem[hidden] { display: none; }
-  .refused { color: var(--bad); }
-  .empty { color: var(--muted); padding: 12px 8px; }
-  form { margin: 12px 0; display: flex; gap: 8px; }
+  .refused { color: var(--fc-color-status-error); min-height: 1.4em; }
+  .empty { color: var(--fc-color-text-faint); padding: 12px 8px; }
+  form { margin: 12px 0; display: flex; gap: 8px; background: var(--fc-color-surface-panel); border-radius: var(--fc-radius-card); padding: 8px; }
   form input { flex: 1; min-width: 0; }
-  #status { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  #status { color: var(--fc-color-text-faint); font-size: 12px; margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -50,6 +100,8 @@
 <script>
 "use strict";
 (() => {
+  const PROTOCOL = "fantastic.home";
+  const VERSION = 1;
   const host = location.host;
   let drawnSeq = 0;
   const pending = new Map();
@@ -58,7 +110,7 @@
   function say(text) { $("status").textContent = text; }
   function refused(text) { $("refused").textContent = text || ""; }
 
-  // ── the calls ─────────────────────────────────────────────────────────────
+  // ── the calls: user.forward to home, a fresh id each, version 1 ───────────
   const calls = new WebSocket(`ws://${host}/user/ws`);
   const callsOpen = new Promise((resolve, reject) => {
     calls.addEventListener("open", resolve, { once: true });
@@ -69,19 +121,19 @@
     try { frame = JSON.parse(ev.data); } catch { return; }
     if (frame.type !== "reply" && frame.type !== "error") return;
     const done = pending.get(frame.id);
-    if (!done) return; // an error frame naming no call: the refused auto-watch
+    if (!done) return; // a frame naming no call of ours: the refused auto-watch
     pending.delete(frame.id);
-    if (frame.type === "error") { done(frame); return; }
-    done(frame.data);
+    done(frame.type === "error" ? frame : frame.data);
   });
   calls.addEventListener("close", () => say("disconnected — reload to reconnect"));
 
+  /** Send `payload` to home; the reply's data, or null when it was refused. */
   async function call(payload) {
     await callsOpen;
     const id = crypto.randomUUID();
     const reply = new Promise((resolve) => pending.set(id, resolve));
     calls.send(JSON.stringify({ type: "call", target: "user", id,
-      payload: { type: "forward", target: "home", payload } }));
+      payload: { type: "forward", target: "home", payload: { ...payload, version: VERSION } } }));
     const data = await reply;
     if (data && typeof data.error === "string") {
       refused(data.hint ? `${data.error} — ${data.hint}` : data.error);
@@ -92,12 +144,20 @@
     return data;
   }
 
-  // ── drawing ───────────────────────────────────────────────────────────────
+  // ── drawing: only the state ───────────────────────────────────────────────
   function cell(text, cls) {
     const td = document.createElement("td");
     if (cls) td.className = cls;
     td.textContent = text;
     return td;
+  }
+
+  function button(label, onClick) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    return b;
   }
 
   function draw(state) {
@@ -114,17 +174,20 @@
     }
     for (const row of state.rows) {
       const tr = document.createElement("tr");
-      tr.append(cell(row.name), cell(row.path, "path"), cell(row.status.replace("_", " ")),
-        cell(row.last_seen == null ? "" : new Date(row.last_seen * 1000).toLocaleString()));
+      tr.dataset.id = row.id;
+      const status = cell(row.status.replace("_", " "), "status");
+      status.dataset.status = row.status;
+      tr.append(cell(row.name), cell(row.path, "path"), status,
+        cell(row.last_seen ? new Date(row.last_seen * 1000).toLocaleString() : "", "seen"));
       const actions = document.createElement("td");
       for (const verb of row.actions) {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.textContent = verb;
-        b.addEventListener("click", () => call({ type: verb, id: row.id }));
+        // `open` takes the folder; start, stop and remove take the row's id
+        const payload = verb === "open" ? { type: "open", paths: [row.path] } : { type: verb, id: row.id };
+        const b = button(verb, () => call(payload));
+        b.dataset.intent = verb;
         actions.append(b);
       }
-      if (row.canvas) {
+      if (row.status === "running" && row.canvas) {
         const a = document.createElement("a");
         a.href = row.canvas.url;
         a.target = "_blank";
@@ -148,16 +211,26 @@
     call({ type: "open", paths: [value] }).then((r) => { if (r) $("open-path").value = ""; });
   });
 
-  // ── the state stream: watched first, listed second ────────────────────────
-  const events = new WebSocket(`ws://${host}/home/ws`);
-  events.addEventListener("message", (ev) => {
-    let frame;
-    try { frame = JSON.parse(ev.data); } catch { return; }
-    if (frame.type !== "event" || !frame.payload || frame.payload.type !== "state") return;
-    draw(frame.payload);
-  });
-  events.addEventListener("open", () => { call({ type: "list" }); }, { once: true });
-  events.addEventListener("close", () => say("disconnected — reload to reconnect"));
+  // ── start: the protocol checked, then watched first and listed second ─────
+  async function start() {
+    const me = await call({ type: "reflect" });
+    if (!me || me.protocol !== PROTOCOL || me.version !== VERSION) {
+      const spoke = me ? `${me.protocol} v${me.version}` : "nothing";
+      say(`this page speaks ${PROTOCOL} v${VERSION}; the host speaks ${spoke} — not started`);
+      return;
+    }
+    const events = new WebSocket(`ws://${host}/home/ws`);
+    events.addEventListener("message", (ev) => {
+      let frame;
+      try { frame = JSON.parse(ev.data); } catch { return; }
+      // every other payload (a mirrored call, focus, menu_spec) is not ours
+      if (frame.type !== "event" || !frame.payload || frame.payload.type !== "state") return;
+      draw(frame.payload);
+    });
+    events.addEventListener("open", () => { call({ type: "list" }); }, { once: true });
+    events.addEventListener("close", () => say("disconnected — reload to reconnect"));
+  }
+  start().catch((e) => say(`cannot reach the home: ${e && e.message ? e.message : e}`));
 })();
 </script>
 </body>

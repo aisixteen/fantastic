@@ -4,7 +4,7 @@
 //! It serves the canvas app from the binary itself: `canvas.zip` (packed by
 //! `build.rs`, embedded byte-for-byte) plus a one-tag `index.html` that loads the
 //! zip's `bundle.min.js`, `home.html` (the same bundle, booting the Home) and
-//! `list.html` (the home's minimal list page). The host's generic
+//! `list.html` (the example client of the `home` protocol). The host's generic
 //! `GET /<id>/file/<path>` route pipes it, because this agent answers the SOURCE
 //! verb `read_stream` and declares it on its record (`verbs`). Read-only: there
 //! is nothing to write.
@@ -37,8 +37,8 @@ pub const INDEX_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"
 /// the Home (`src/tui/web/canvas/src/home.ts`) instead of the canvas.
 pub const HOME_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Aisixteen Fantastic · home</title></head>\n<body data-page=\"home\"><script type=\"module\" src=\"bundle.min.js\"></script></body></html>\n";
 
-/// The home's minimal list page (`src/tui/web/home/list.html`, Phase 2), served
-/// as `list.html`.
+/// The example client of the `home` protocol (`src/tui/web/home/list.html`),
+/// served as `list.html`.
 pub const LIST_HTML: &str = include_str!("../../../web/home/list.html");
 
 /// What `read_stream` declares on the record, so the host serves it.

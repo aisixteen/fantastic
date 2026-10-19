@@ -47,9 +47,16 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   per open fantastic, kept across restarts; a nav pill and the shortcuts mod+0,
   mod+1–9 and mod+W; Open Folder through the shell or a path field. The Home page
   keeps its own records in `<home>/app/`.
+- The reskin contract: the `home` protocol v1, documented in
+  `fantastic-home-kernel/docs/home.md` and served by `docs of=home`;
+  `contract/home/v1/cases.json`, replayed by the Rust agent and the TS client;
+  READMEs for Rust shells of `fantastic-home` and `fantastic-home-kernel`; a
+  one-file example client at `list.html`. A non-Rust shell talks to a running
+  app's port.
 
 ### Changed
 
+- `home` refuses a client asking for a protocol version other than 1.
 - The home kernel serves the Home at `home.html` and the list page at
   `list.html`.
 - On Windows, canvases start in a hidden console of their own and stop through

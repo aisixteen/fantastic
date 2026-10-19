@@ -55,6 +55,7 @@ on its `home.html`.
 | E83 `home_list` | scripted: a running, a stopped and a missing fantastic listed in registry order with their names, folders, statuses, last seen and buttons; a path field in a plain tab; the page's root stored through `web_loader` | phase 3 (#47): the Home lists | scripted |
 | E84 `home_start_stop` | scripted: Start reaches running (the registry names pid and canvas), a row click opens a live canvas frame, the page's Stop shows stopping then stopped (the registry cleared), Open Folder through a native shell's `pickFolder` | phase 3 (#47): start, stop, open | scripted |
 | E85 `home_pages` | scripted: the pill and mod+0/1/2 switch two live canvases with no frame reload, a second tab shows (and moves) the same selection, mod+W closes the shown page and its fantastic runs on, a host restart brings the pages and selection back | phase 3 (#47): pages kept | scripted |
+| E86 `home_byo` | scripted: the example client `list.html`, served by the home, lists a running and a stopped fantastic and drives Start and Stop (the registry cleared); `<home>/app/home.yaml` names the host and its port, a native client with no `Origin` header is admitted, a foreign `Origin` gets 403, and the socket cannot add an allowed origin | phase 5 (#50): the reskin contract | scripted |
 
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 
