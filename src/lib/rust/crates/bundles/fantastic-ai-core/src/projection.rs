@@ -206,6 +206,9 @@ pub async fn project_context(
     };
     let strat_name = strat_name.to_string();
     let recent = cfg_recent_n(&meta);
+    // Over the HEAD, not the body: a body rebuilt from the view array holds the
+    // folds without the rows they hide.
+    let anchors = crate::folds::anchors_of(&crate::memory::head(self_id, kernel).await?);
     let pctx = ProjectionCtx {
         budget: body_budget,
         recent_n: recent,
@@ -213,6 +216,7 @@ pub async fn project_context(
         self_id,
         kernel,
         client_id,
+        anchors: &anchors,
     };
     let proj = match strat_name.as_str() {
         "truncate" => truncate(&body, body_budget),
@@ -274,6 +278,7 @@ pub async fn project_context(
         "stripped": proj.stripped,
         "stripped_bytes": proj.stripped_bytes,
         "folded": proj.folded,
+        "unanchored": proj.unanchored,
         // What the model actually sees this turn — so "after reload it sees only
         // the fold" is measured from the view, never self-reported.
         "view_ids": out_body.iter().filter_map(|m| m.get("id").and_then(Value::as_i64))
@@ -333,6 +338,7 @@ pub async fn project_context(
                 "stripped": proj.stripped,
                 "stripped_bytes": proj.stripped_bytes,
                 "folded": proj.folded,
+                "unanchored": proj.unanchored,
             },
         }),
     )

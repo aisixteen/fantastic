@@ -37,9 +37,12 @@ public struct AIProjection: Sendable {
     public var strippedBytes: Int
     /// `fold`: fold rows written this projection.
     public var folded: Int
+    /// `fold`: folds left out of the view, their anchor unknown.
+    public var unanchored: Int
     public init(
         body: [JSON], summary: String? = nil, omittedMarker: Bool = false,
-        pinned: [String] = [], stripped: Int = 0, strippedBytes: Int = 0, folded: Int = 0
+        pinned: [String] = [], stripped: Int = 0, strippedBytes: Int = 0, folded: Int = 0,
+        unanchored: Int = 0
     ) {
         self.body = body
         self.summary = summary
@@ -48,6 +51,7 @@ public struct AIProjection: Sendable {
         self.stripped = stripped
         self.strippedBytes = strippedBytes
         self.folded = folded
+        self.unanchored = unanchored
     }
 }
 
@@ -77,9 +81,14 @@ public struct ProjectionCtx: Sendable {
     /// `kernel=None`): `strip` then starts unseeded and `fold` refuses to write.
     public var kernel: Kernel?
     public var clientId: String?
+    /// fold id → anchor over the agent's HEAD (`AIFolds.anchorsOf`), not over the
+    /// body: a body rebuilt from the view array holds folds without their members.
+    /// `fold` refuses to run without it.
+    public var anchors: [Int64: Int64]?
     public init(
         budget: Int64, recentN: Int, summarize: AISummarizer?,
-        selfId: AgentId, kernel: Kernel?, clientId: String? = nil
+        selfId: AgentId, kernel: Kernel?, clientId: String? = nil,
+        anchors: [Int64: Int64]? = nil
     ) {
         self.budget = budget
         self.recentN = recentN
@@ -87,6 +96,7 @@ public struct ProjectionCtx: Sendable {
         self.selfId = selfId
         self.kernel = kernel
         self.clientId = clientId
+        self.anchors = anchors
     }
 }
 

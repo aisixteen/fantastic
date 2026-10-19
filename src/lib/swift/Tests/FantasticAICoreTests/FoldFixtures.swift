@@ -1,5 +1,5 @@
 // The fold/strip/view fixtures — python `test_folds.py`'s `_K`, `_id`, `_row`,
-// `_chain`, `_fold`, `_interleave` and `_fake_summary`, shared by `FoldsTests`,
+// `_chain`, `_fold`, `_render`, `_interleave` and `_fake_summary`, shared by `FoldsTests`,
 // `ViewRecallTests` and `ContextSeamTests` exactly as python's three files share
 // them.
 
@@ -137,15 +137,71 @@ final class FoldFixture: @unchecked Sendable {
         return rows
     }
 
+    /// The anchor of every fold this fixture made, by fold id.
+    private var foldAnchors: [Int64: Int64] = [:]
+
     /// `make_fold` for tests: the store mints in the product; here a fixture id
-    /// unless the test names one. python `_fold`.
+    /// unless the test names one. The anchor is what the product writes — the
+    /// smallest leaf id, a member fold made here contributing its own anchor; a
+    /// fold with no refs names its anchor. python `_fold`.
     func fold(
         _ refs: [Int64], _ title: String, _ body: String, _ degraded: Bool,
-        parent: Int64? = nil, id: Int64? = nil
+        parent: Int64? = nil, id: Int64? = nil, anchor: Int64? = nil
     ) -> JSON {
-        AIFolds.makeFold(
+        lock.lock()
+        let derived = refs.map { foldAnchors[$0] ?? $0 }.min()
+        lock.unlock()
+        guard let a = anchor ?? derived else {
+            preconditionFailure("fold: a fold with no refs names its anchor")
+        }
+        let fd = AIFolds.makeFold(
             refs: refs, title: title, body: body, degraded: degraded,
-            id: id ?? kernel.mintId(), parent: parent)
+            id: id ?? kernel.mintId(), anchor: a, parent: parent)
+        if let fid = rowId(fd) {
+            lock.lock()
+            foldAnchors[fid] = a
+            lock.unlock()
+        }
+        return fd
+    }
+
+    /// The anchor this fixture gave the fold `id` (nil: not a fixture fold).
+    func anchorOf(_ id: Int64) -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return foldAnchors[id]
+    }
+
+    /// python `_render`: `render` over rows that are the whole head — anchors
+    /// from the same rows.
+    func render(_ rows: [JSON]) -> [JSON] {
+        AIFolds.render(rows, AIFolds.anchorsOf(rows))
+    }
+
+    /// python `_interleave`: the chains merged in a fixed pseudo-random order,
+    /// then — ARRIVAL ORDER IS ID ORDER — every row minted again, in place, in
+    /// the order it arrives (its tag follows), as the kernel's counter would have
+    /// numbered it. `chains` is rewritten with the new ids, so a test that reads
+    /// a chain afterwards sees the ids the merged rows carry.
+    func interleave(_ chains: inout [[JSON]]) -> [JSON] {
+        let order = interleaveOrder(chains.map(\.count))
+        var fresh: [Int64: Int64] = [:]
+        for (c, j) in order {
+            if let old = rowId(chains[c][j]) { fresh[old] = kernel.mintId() }
+        }
+        lock.lock()
+        for (tag, old) in tags {
+            if let n = fresh[old] { tags[tag] = n }
+        }
+        lock.unlock()
+        func remint(_ r: JSON) -> JSON {
+            guard case .object(var o) = r else { return r }
+            if let old = rowId(r), let n = fresh[old] { o["id"] = .integer(n) }
+            if let p = rowParent(r), let n = fresh[p] { o["parent"] = .integer(n) }
+            return .object(o)
+        }
+        chains = chains.map { $0.map(remint) }
+        return order.map { chains[$0.0][$0.1] }
     }
 
     /// The ids of a chain's rows (every row of a fixture chain carries one).
@@ -178,26 +234,27 @@ final class FoldFixture: @unchecked Sendable {
     /// self_id the fixture agent, client_id "c" (so `fold` PERSISTS).
     func ctx(
         _ budget: Int64, summarize: (@Sendable ([JSON]) async throws -> String)? = fakeSummary,
-        recentN: Int = 4, clientId: String? = "c"
+        recentN: Int = 4, clientId: String? = "c", anchors: [Int64: Int64]? = nil
     ) -> ProjectionCtx {
         ProjectionCtx(
             budget: budget, recentN: recentN, summarize: summarize.map(summarizer), selfId: agent,
-            kernel: kernel, clientId: clientId)
+            kernel: kernel, clientId: clientId, anchors: anchors)
     }
 }
 
-/// python `_interleave` — `random.Random(7)` picks a chain per step. The exact
-/// sequence is not the claim; determinism is, so a fixed LCG stands in.
-func interleave(_ chains: [[JSON]]) -> [JSON] {
-    var ptr = [Int](repeating: 0, count: chains.count)
+/// The order python `_interleave` merges chains in — `random.Random(7)` picks a
+/// chain per step. The exact sequence is not the claim; determinism is, so a
+/// fixed LCG stands in. Returns (chain, index in chain) per merged row.
+func interleaveOrder(_ counts: [Int]) -> [(Int, Int)] {
+    var ptr = [Int](repeating: 0, count: counts.count)
     var state: UInt64 = 7
-    var out: [JSON] = []
+    var out: [(Int, Int)] = []
     while true {
-        let live = chains.indices.filter { ptr[$0] < chains[$0].count }
+        let live = counts.indices.filter { ptr[$0] < counts[$0] }
         if live.isEmpty { break }
         state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
         let i = live[Int((state >> 33) % UInt64(live.count))]
-        out.append(chains[i][ptr[i]])
+        out.append((i, ptr[i]))
         ptr[i] += 1
     }
     return out

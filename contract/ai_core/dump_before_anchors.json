@@ -1,0 +1,480 @@
+{
+ "guid": "test-guid",
+ "agent": "fa",
+ "render_ids": [
+  15,
+  52,
+  61,
+  64,
+  65,
+  66,
+  74,
+  75
+ ],
+ "prompt_ids": [
+  15,
+  52,
+  61,
+  64,
+  65,
+  66,
+  74,
+  75
+ ],
+ "tables": {
+  "rows": [
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 1,
+     "parent": null,
+     "content": "task p: read the p notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 2,
+     "parent": 1,
+     "content": "reading p <call name=\"send\"><target_id>notes</target_id><type>read</type></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 3,
+     "parent": 2,
+     "content": "[reply to notes · read · \"p\"]\nthe p notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 4,
+     "parent": 3,
+     "content": "p is done <call name=\"done\"></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 7,
+     "parent": null,
+     "kind": "fold",
+     "title": "the p work",
+     "body": "summary of the p work",
+     "level": 1,
+     "content": "[fold 7 · 4 refs · L1] \"the p work\"\nsummary of the p work"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "kind": "view",
+     "v": 1,
+     "ts": 1792358495.1879435,
+     "budget": 9000,
+     "why": "projection: fold",
+     "ids": [
+      {
+       "id": 7,
+       "res": "full"
+      }
+     ],
+     "id": 10
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 15,
+     "parent": null,
+     "kind": "clear",
+     "title": "new topic",
+     "content": "[cleared 15 · 5 rows] new topic — a new thread; the rows before it are this clear's members, reachable by id (grep, recall, history fold=15)."
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "kind": "view",
+     "v": 1,
+     "ts": 1792358495.1884556,
+     "budget": 31744,
+     "why": "cleared",
+     "ids": [],
+     "id": 18
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 29,
+     "parent": null,
+     "content": "task a: read the a notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 30,
+     "parent": null,
+     "content": "task b: read the b notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 31,
+     "parent": 29,
+     "content": "reading a <call name=\"send\"><target_id>notes</target_id><type>read</type></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 32,
+     "parent": 30,
+     "content": "reading b <call name=\"send\"><target_id>notes</target_id><type>read</type></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 33,
+     "parent": 31,
+     "content": "[reply to notes · read · \"a\"]\nthe a notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 34,
+     "parent": 32,
+     "content": "[reply to notes · read · \"b\"]\nthe b notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 35,
+     "parent": 33,
+     "content": "a is done <call name=\"done\"></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 36,
+     "parent": 34,
+     "content": "b is done <call name=\"done\"></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 39,
+     "parent": null,
+     "kind": "fold",
+     "title": "the a work",
+     "body": "summary of the a work",
+     "level": 1,
+     "content": "[fold 39 · 4 refs · L1] \"the a work\"\nsummary of the a work"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 40,
+     "parent": null,
+     "kind": "fold",
+     "title": "the b work",
+     "body": "summary of the b work",
+     "level": 1,
+     "content": "[fold 40 · 4 refs · L1] \"the b work\"\nsummary of the b work"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 43,
+     "parent": null,
+     "content": "task c: read the c notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 44,
+     "parent": 43,
+     "content": "reading c <call name=\"send\"><target_id>notes</target_id><type>read</type></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 45,
+     "parent": 44,
+     "content": "[reply to notes · read · \"c\"]\nthe c notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 46,
+     "parent": 45,
+     "content": "c is done <call name=\"done\"></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 49,
+     "parent": null,
+     "kind": "fold",
+     "title": "the c work",
+     "body": "summary of the c work",
+     "level": 1,
+     "content": "[fold 49 · 4 refs · L1] \"the c work\"\nsummary of the c work"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 52,
+     "parent": null,
+     "kind": "fold",
+     "title": "a, b and c",
+     "body": "summary of a, b and c",
+     "level": 2,
+     "content": "[fold 52 · 3 refs · L2] \"a, b and c\"\nsummary of a, b and c"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 55,
+     "parent": null,
+     "content": "task g: read the g notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 56,
+     "parent": 55,
+     "content": "reading g <call name=\"send\"><target_id>notes</target_id><type>read</type></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 57,
+     "parent": 56,
+     "content": "[reply to notes · read · \"g\"]\nthe g notes"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 58,
+     "parent": 57,
+     "content": "g is done <call name=\"done\"></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 61,
+     "parent": null,
+     "kind": "fold",
+     "title": "the g work",
+     "body": "summary of the g work",
+     "level": 1,
+     "content": "[fold 61 · 4 refs · L1] \"the g work\"\nsummary of the g work"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 64,
+     "parent": null,
+     "content": "what next?"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 65,
+     "parent": 64,
+     "content": "checking <call name=\"send\"><target_id>notes</target_id><type>read</type></call>"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 66,
+     "parent": 65,
+     "content": "[reply to notes · read · \"d\"]\nnothing left"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "kind": "view",
+     "v": 1,
+     "ts": 1792358495.1901817,
+     "budget": 9000,
+     "why": "projection: fold",
+     "ids": [
+      {
+       "id": 15,
+       "res": "full"
+      },
+      {
+       "id": 52,
+       "res": "full"
+      },
+      {
+       "id": 61,
+       "res": "full"
+      },
+      {
+       "id": 64,
+       "res": "full"
+      },
+      {
+       "id": 65,
+       "res": "full"
+      },
+      {
+       "id": 66,
+       "res": "full"
+      }
+     ],
+     "id": 71
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "user",
+     "id": 74,
+     "parent": null,
+     "content": "and the e notes?"
+    }
+   },
+   {
+    "owner": "test-guid|fa",
+    "row": {
+     "role": "assistant",
+     "id": 75,
+     "parent": 74,
+     "content": "reading e <call name=\"send\"><target_id>notes</target_id><type>read</type></call>"
+    }
+   }
+  ],
+  "fold_refs": [
+   {
+    "owner": "test-guid|fa",
+    "fold": 7,
+    "members": [
+     1,
+     2,
+     3,
+     4
+    ]
+   },
+   {
+    "owner": "test-guid|fa",
+    "fold": 15,
+    "members": [
+     1,
+     2,
+     3,
+     4,
+     7
+    ]
+   },
+   {
+    "owner": "test-guid|fa",
+    "fold": 39,
+    "members": [
+     29,
+     31,
+     33,
+     35
+    ]
+   },
+   {
+    "owner": "test-guid|fa",
+    "fold": 40,
+    "members": [
+     30,
+     32,
+     34,
+     36
+    ]
+   },
+   {
+    "owner": "test-guid|fa",
+    "fold": 49,
+    "members": [
+     43,
+     44,
+     45,
+     46
+    ]
+   },
+   {
+    "owner": "test-guid|fa",
+    "fold": 52,
+    "members": [
+     39,
+     40,
+     49
+    ]
+   },
+   {
+    "owner": "test-guid|fa",
+    "fold": 61,
+    "members": [
+     55,
+     56,
+     57,
+     58
+    ]
+   }
+  ]
+ }
+}

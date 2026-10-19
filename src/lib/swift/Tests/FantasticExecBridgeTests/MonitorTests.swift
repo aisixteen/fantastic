@@ -57,9 +57,16 @@
     /// A kernel with a `runner` (exec_bridge, open, any command) that may `send` to an
     /// `ear` that admits it.
     private func setup() async -> (Kernel, Ear) {
+        let (k, ear, _) = await setupWithBridge()
+        return (k, ear)
+    }
+
+    /// `setup`, also handing back the bridge instance (its monitor table).
+    private func setupWithBridge() async -> (Kernel, Ear, ExecBridgeBundle) {
         let ear = Ear()
+        let bridge = ExecBridgeBundle()
         let registry = BundleRegistry()
-        registry.register("exec_bridge.tools", ExecBridgeBundle())
+        registry.register("exec_bridge.tools", bridge)
         registry.registerUnlisted("monitor_ear.tools", ear)
         let k = Kernel(storage: .inMemory, bundles: registry)
         let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
@@ -83,7 +90,7 @@
                 "can_call": .object(["ear": .array([.string("send")])]),
             ])
         #expect(r["id"].asString == "runner", "\(r)")
-        return (k, ear)
+        return (k, ear, bridge)
     }
 
     private func printer(
@@ -130,7 +137,7 @@
         try? await Task.sleep(nanoseconds: 200_000_000)
     }
 
-    // MARK: - the five cases
+    // MARK: - the cases
 
     @Suite("exec_bridge monitors")
     struct MonitorTests {
@@ -295,6 +302,50 @@
             }
             #expect(ear.texts.joined(separator: "\n").contains("FATAL step 1"))
             _ = await until("monitor gone") { await liveMonitors(k).isEmpty }
+        }
+
+        /// Issue 64: every line lands in ONE burst, the first delivery takes them all,
+        /// nothing waits when the job ends — the end is delivered anyway, once, as the
+        /// header alone.
+        @Test("the end is delivered when nothing waits any more")
+        func endDeliveredWhenNothingWaits() async throws {
+            guard let py = py3() else { return }
+            let (k, ear, bridge) = await setupWithBridge()
+            let jid = await printer(k, py, n: 0, gap: 0, hold: 30)
+            let r = await monitor(
+                k, ["job_id": .integer(jid), "notify": .string("ear"), "every": .integer(30)])
+            let mid = r["monitor_id"].asInt ?? -1
+            for n in 0..<3 {
+                bridge.monitorTable.feedLine(AgentId("runner"), TaskId(jid), "INFO step \(n)")
+            }
+            _ = await until("the first delivery") { ear.texts.count == 1 }
+            #expect(ear.texts.first?.contains("INFO step 2") == true, "\(ear.texts)")
+            await stopAll(k)
+            _ = await until("the final delivery at job end", secs: 5) {
+                ear.texts.contains { $0.contains("job ended") }
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            let texts = ear.texts
+            #expect(texts.count == 2, "\(texts)")
+            #expect(
+                texts.last?.hasPrefix("[monitor \(mid) · job \(jid) · ") == true
+                    && texts.last?.hasSuffix(" · job ended]") == true, "\(texts)")
+        }
+
+        /// The end was handed to the job's monitors while its process still reads
+        /// alive — a monitor filed then would never be told, so `monitor` refuses it.
+        @Test("a monitor is refused once its job's end went out")
+        func refusedOnceEndWentOut() async throws {
+            guard let py = py3() else { return }
+            let (k, _, bridge) = await setupWithBridge()
+            let jid = await printer(k, py, n: 0, gap: 0, hold: 30)
+            // the pump's own end step, taken while the process is still alive
+            bridge.endMonitors(AgentId("runner"), TaskId(jid))
+            let r = await monitor(
+                k, ["job_id": .integer(jid), "notify": .string("ear"), "every": .integer(30)])
+            #expect(r["reason"].asString == "bad_arg" && r["arg"].asString == "job_id", "\(r)")
+            #expect(await liveMonitors(k).isEmpty)
+            await stopAll(k)
         }
 
         @Test("a refused delivery ends the monitor, and monitors says why")

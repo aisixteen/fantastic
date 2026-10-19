@@ -24,7 +24,8 @@ use super::{Projection, ProjectionCtx};
 use crate::constants::NOTICE_ENVELOPE_RESERVE;
 use crate::context::{estimate_one, estimate_tokens};
 use crate::folds::{
-    chain_text, is_fold, level, make_fold, quoted_title, render, row_id, row_parent, row_role,
+    chain_text, is_fold, level, make_fold, member_anchor, own_anchor, quoted_title, render, row_id,
+    row_parent, row_role, unanchored,
 };
 use crate::memory::{save_history, MemoryStoreError};
 use crate::provider::Provider;
@@ -323,8 +324,10 @@ pub async fn write_fold(
     ctx: &ProjectionCtx<'_>,
     rows: &[Value],
     idxs: &[usize],
+    anchors: &HashMap<i64, i64>,
 ) -> Result<Value, FoldFail> {
     let ids: Vec<i64> = idxs.iter().filter_map(|&i| row_id(&rows[i])).collect();
+    let anchor = member_anchor(rows, idxs, anchors);
     let lvl = 1 + idxs
         .iter()
         .filter(|&&i| is_fold(&rows[i]))
@@ -341,7 +344,7 @@ pub async fn write_fold(
     }
     let id = ctx.kernel.mint_id();
     let parent = idxs.first().and_then(|&i| row_parent(&rows[i]));
-    let fr = make_fold(&ids, &title, &text, degraded, id, lvl, parent);
+    let fr = make_fold(&ids, &title, &text, degraded, id, anchor, lvl, parent);
     save_history(ctx.self_id, ctx.kernel, std::slice::from_ref(&fr)).await?;
     Ok(fr)
 }
@@ -404,9 +407,13 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) ->
 /// fold takes the oldest rows, by tokens, down to `LOW` of it; then tidy the head
 /// (`FOLD_RUN` adjacent folds become one parent — the fold tree), budget or no
 /// budget. Returns `(rows + the fold rows written, the
-/// view, folded)`. The turn's `fold` projection and `context_recall` (a
-/// store longer than the window, e.g. written under a larger one) share it.
+/// view, folded, unanchored)`. The turn's `fold` projection and `context_recall`
+/// (a store longer than the window, e.g. written under a larger one) share it.
 /// Python `fold_down`.
+///
+/// Folds are placed by `ctx.anchors` (computed over the HEAD by the caller), so
+/// a body rebuilt from the view array, which holds folds without their members,
+/// keeps every fold in place.
 ///
 /// # Errors
 /// The memory store refused a fold row, or a summary would not fit.
@@ -414,9 +421,10 @@ pub async fn fold_down(
     rows: &[Value],
     ctx: &ProjectionCtx<'_>,
     budget: i64,
-) -> Result<(Vec<Value>, Vec<Value>, usize), FoldFail> {
+) -> Result<(Vec<Value>, Vec<Value>, usize, usize), FoldFail> {
+    let mut anchors = ctx.anchors.clone();
     let mut rows: Vec<Value> = rows.to_vec();
-    let mut view = render(&rows);
+    let mut view = render(&rows, &anchors);
     let mut folded = 0usize;
     if estimate_tokens(&view) > (budget as f64 * FOLD_AT) as i64 && rows.len() > 2 {
         let target = (budget as f64 * LOW) as i64;
@@ -429,10 +437,11 @@ pub async fn fold_down(
             if span.is_empty() {
                 break;
             }
-            let fr = write_fold(ctx, &rows, &span).await?;
+            let fr = write_fold(ctx, &rows, &span, &anchors).await?;
+            remember(&mut anchors, &fr);
             rows.push(fr);
             folded += 1;
-            view = render(&rows);
+            view = render(&rows, &anchors);
         }
     }
     // TIDY THE HEAD, budget or no budget. Coalescing only while the view is OVER
@@ -448,18 +457,28 @@ pub async fn fold_down(
         if span.is_empty() || !span.iter().all(|&i| is_fold(&rows[i])) {
             break;
         }
-        let fr = write_fold(ctx, &rows, &span).await?;
+        let fr = write_fold(ctx, &rows, &span, &anchors).await?;
+        remember(&mut anchors, &fr);
         rows.push(fr);
         folded += 1;
-        view = render(&rows);
+        view = render(&rows, &anchors);
     }
-    Ok((rows, view, folded))
+    let lost = unanchored(&rows, &anchors);
+    Ok((rows, view, folded, lost))
+}
+
+/// A fold just written places by its own anchor from here on.
+fn remember(anchors: &mut HashMap<i64, i64>, fold: &Value) {
+    if let (Some(id), Some(a)) = (row_id(fold), own_anchor(fold)) {
+        anchors.insert(id, a);
+    }
 }
 
 /// Fold the oldest stretches of the view down to the low watermark, tidy the
 /// head, then hand what is left to `strip`.
 pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection, FoldFail> {
-    let (_, view, folded) = fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE).await?;
+    let (_, view, folded, lost) =
+        fold_down(body, ctx, ctx.budget - NOTICE_ENVELOPE_RESERVE).await?;
     // Stage two and three: strip bodies in what is left, then cut — strip's own
     // logic.
     let out = strip(&view, ctx).await?;
@@ -470,6 +489,7 @@ pub async fn fold(body: &[Value], ctx: &ProjectionCtx<'_>) -> Result<Projection,
         stripped: out.stripped,
         stripped_bytes: out.stripped_bytes,
         folded,
+        unanchored: lost,
     })
 }
 

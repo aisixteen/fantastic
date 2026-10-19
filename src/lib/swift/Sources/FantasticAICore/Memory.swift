@@ -89,9 +89,10 @@ enum AIMemory {
 }
 
 /// The store holds this agent's conversation AND its view rows. The CONVERSATION a
-/// reader sees is everything but the view (an allow-list of kinds to HIDE: a kind
-/// forgotten here lands in the model's prompt). Python `_BOOKKEEPING`.
-let BOOKKEEPING: Set<String> = ["view"]
+/// reader sees is everything but the view and the recorded fold anchors (an
+/// allow-list of kinds to HIDE: a kind forgotten here lands in the model's prompt).
+/// Python `_BOOKKEEPING`.
+let BOOKKEEPING: Set<String> = ["view", "anchors"]
 
 /// The conversation = rows with a chat `role`. Python `_TURN_ROLES`.
 let TURN_ROLES: Set<String> = ["user", "assistant", "system"]

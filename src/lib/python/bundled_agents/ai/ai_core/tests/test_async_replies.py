@@ -147,7 +147,13 @@ async def test_grep_scoped_to_a_fold_searches_its_members_bodies():
     )
     await _store_reply("ai", k, pid, "chunk 1\n>> audit marker: cafebabe\nchunk 1")
     fold = make_fold(
-        "ai", [call, reply], "read filler_1", "plain filler", False, id=k.mint_id()
+        "ai",
+        [call, reply],
+        "read filler_1",
+        "plain filler",
+        False,
+        id=k.mint_id(),
+        anchor=call,
     )
     k.rows_put("ai", fold)
     r = await _grep("ai", {"query": "audit marker", "ids": [fold["id"]]}, k)

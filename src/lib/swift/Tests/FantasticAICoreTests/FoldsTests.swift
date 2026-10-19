@@ -17,11 +17,16 @@ private let AI = "ai_f"
 /// The body a projection folds is the agent's conversation, so it lives in the
 /// agent's memory store — seeded there first (the store refuses a fold whose
 /// refs name rows it does not hold, as sqlite's FK would).
-private func fold(_ body: [JSON], _ c: ProjectionCtx) async throws -> AIProjection {
+/// The `fold` projection as a turn runs it, `body` being the whole head — so
+/// the anchors are the body's own (python `_fold_over_head`).
+private func fold(_ body: [JSON], _ c0: ProjectionCtx) async throws -> AIProjection {
+    var c = c0
+    if c.anchors == nil { c.anchors = AIFolds.anchorsOf(body) }
     if let k = c.kernel { appendRows(c.selfId, kernel: k, body.filter { rowId($0) != nil }) }
     // the projection runs in the agent's own turn: its store calls are the agent's
-    return try await KernelTaskLocals.$sender.withValue(c.selfId) {
-        try await AIStrategies.getStrategy("fold")!(body, [], .object([:]), c)
+    let ctx = c
+    return try await KernelTaskLocals.$sender.withValue(ctx.selfId) {
+        try await AIStrategies.getStrategy("fold")!(body, [], .object([:]), ctx)
     }
 }
 
@@ -41,7 +46,8 @@ struct FoldsTests {
             f.chain("a", 2, big: false), f.chain("b", 3, big: false),
             f.chain("c", 1, big: false, openEnd: true)
         )
-        let rows = interleave([a, b, c])
+        var chs = [a, b, c]
+        let rows = f.interleave(&chs)
         let got = AIFolds.chains(rows)
         #expect(got.count == 3)
         let roots = Set(got.compactMap { rowId(rows[$0[0]]) })
@@ -73,7 +79,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let rows = f.chain("a", 2, big: false) + [f.row("user", "later", "user:l")]
         let fd = f.fold(f.ids(Array(rows.prefix(5))), "done a", "body a", false)
-        let view = AIFolds.render(rows + [fd])
+        let view = f.render(rows + [fd])
         let ids = viewIds(view)
         #expect(ids[0] == rowId(fd), "the fold renders at the first ref's position")
         let refs = Set(refsOf(fd))
@@ -88,7 +94,7 @@ struct FoldsTests {
         let rows = f.chain("a", 1, big: false)
         let inner = f.fold(f.ids(rows), "inner", "b", false)
         let outer = f.fold([rowId(inner)!], "outer", "b", false)
-        let view = AIFolds.render(rows + [inner, outer])
+        let view = f.render(rows + [inner, outer])
         #expect(viewIds(view) == [rowId(outer)])
     }
 
@@ -106,7 +112,8 @@ struct FoldsTests {
     @Test func foldCollapsesTheOldestStretchFirstAndPersistsIt() async throws {
         let f = FoldFixture(agent: AI)
         let (a, b, c) = (f.chain("a", 3), f.chain("b", 3), f.chain("c", 2, openEnd: true))
-        let mid = interleave([a, b, c])
+        var chs = [a, b, c]
+        let mid = f.interleave(&chs)
         let body = [f.row("user", "GOAL", "user:goal")] + mid + [f.row("user", "now?", nil)]
         let full = AIContext.estimateTokens(body)
         let bud = Int64(Double(full) * 0.45)
@@ -200,7 +207,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let ch = f.chain("a", 12, openEnd: true)  // 25 rows, still awaiting a reply
         let body = [f.row("user", "GOAL", "user:goal")] + ch + [f.row("user", "now?", nil)]
-        let span = AIFoldStrategy.nextSpan(body, AIFolds.render(body), need: .max)
+        let span = AIFoldStrategy.nextSpan(body, f.render(body), need: .max)
         #expect(span.count >= 2 && !span.contains(0))
         let tailIds = Set(ch.suffix(5).compactMap(rowId))
         #expect(!span.contains { rowId(body[$0]).map { tailIds.contains($0) } ?? false }, "the live tail never folds")
@@ -212,15 +219,23 @@ struct FoldsTests {
 
     @Test func foldsAreOrdinaryMembersSoNestingNeedsNoSecondStage() async throws {
         let f = FoldFixture(agent: AI)
-        let chs = "abcdefghijklmnop".map { f.chain(String($0), 1, big: false) }  // 16: the 6-row tail is protected
-        var rows = [f.row("user", "GOAL", "user:goal")] + interleave(chs)
+        var chs = "abcdefghijklmnop".map { f.chain(String($0), 1, big: false) }  // 16: the 6-row tail is protected
+        let goal = f.row("user", "GOAL", "user:goal")
+        var rows = [goal] + f.interleave(&chs)
         for c in chs {  // pre-folded with LARGE bodies, so the view is mostly folds
             rows.append(f.fold(f.ids(c), "done \(rowId(c[0])!)", String(repeating: "S", count: 1500), false))
         }
         rows.append(f.row("user", "now?", nil))
-        let proj = try await fold(rows, f.ctx(1200))
-        let top = proj.body.filter { isFold($0) && ($0["level"].asInt ?? 1) >= 2 }
+        _ = try await fold(rows, f.ctx(1200))
+        // The store, not the cut view: a fold of folds sits where its oldest member
+        // sat, at the front of the body, which is what an absurdly small budget cuts first.
+        let top = f.foldsOf().filter { ($0["level"].asInt ?? 1) >= 2 }
         #expect(!top.isEmpty, "a fold whose members were folds was written by the SAME path")
+        #expect(
+            top.allSatisfy { t in
+                t["anchor"].asInt == refsOf(t).compactMap { f.anchorOf($0) }.min()
+                    && refsOf(t).allSatisfy { f.anchorOf($0) != nil }
+            }, "a fold of folds is anchored at its oldest member's anchor")
         #expect(
             top.allSatisfy { !($0["body"].asString ?? "").isEmpty && !($0["title"].asString ?? "").isEmpty },
             "every level carries a summary")
@@ -270,7 +285,7 @@ struct FoldsTests {
         let a = f.chain("a", 2, big: false)
         let f1 = f.fold(f.ids(Array(a.prefix(3))), "part", "b", false)
         let f2 = f.fold(f.ids(a), "whole", "b", false)
-        let view = AIFolds.render(a + [f1, f2])
+        let view = f.render(a + [f1, f2])
         let ids = view.compactMap(rowId)
         #expect(ids.count == Set(ids).count)
         let members = Set(f.ids(a))
@@ -281,7 +296,7 @@ struct FoldsTests {
         let f = FoldFixture(agent: AI)
         let a = f.chain("a", 1, big: false)
         let fd = f.fold(f.ids(a) + [f.id("gone:0000")], "done", "b", false)
-        let view = AIFolds.render(a + [fd])
+        let view = f.render(a + [fd])
         #expect(viewIds(view) == [rowId(fd)])
         #expect(AIFolds.expandIds(a + [fd], [rowId(fd)!]).contains(f.id("gone:0000")))
     }
@@ -291,7 +306,7 @@ struct FoldsTests {
         let a = f.chain("a", 1, big: false)
         let fd = f.fold(f.ids(a), "done", "b", false)
         let late = f.row("user", "[reply to notes:late · notes read · ↑ai:a0]\nlate reply", "ai:late", "ai:a0")
-        let view = AIFolds.render(a + [fd, late])
+        let view = f.render(a + [fd, late])
         #expect(viewIds(view) == [rowId(fd), f.id("ai:late")])
         // attached by parent, not orphaned
         #expect(AIFolds.chains(a + [fd, late])[0].contains(a.count + 1))
@@ -333,7 +348,7 @@ struct FoldsTests {
     @Test func threeAdjacentFoldsAtTheHeadFoldAsAGroup() {
         let f = FoldFixture(agent: AI)
         let goal = f.row("user", "GOAL", "user:goal")
-        let heads = (0..<3).map { f.fold([], "fold \($0)", "body", false, parent: nil, id: 1000 + Int64($0)) }
+        let heads = (0..<3).map { f.fold([], "fold \($0)", "body", false, parent: nil, id: 1000 + Int64($0), anchor: Int64($0) + 1) }
         let tail = (0..<(AIConstants.KEEP_TAIL + 1)).map { f.row("user", "t\($0)", "user:t\($0)") }
         let rows = [goal] + heads + tail
         let span = AIFoldStrategy.nextSpan(rows, rows, need: 0)
@@ -413,7 +428,7 @@ struct FoldsTests {
         for i in 2...40 {
             rows.append(f.row("user", "row \(i) " + String(repeating: "x", count: 400), "user:r\(i)"))
         }
-        let view = AIFolds.render(rows)
+        let view = f.render(rows)
         let one = AIContext.estimateTokens([rows[1]])
         #expect(AIFoldStrategy.nextSpan(rows, view, need: one * 3).count == 3)
         #expect(

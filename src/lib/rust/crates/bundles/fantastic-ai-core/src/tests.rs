@@ -3877,7 +3877,16 @@ async fn a_fold_id_in_grep_scope_descends_to_its_members() {
     put_row(
         &kernel,
         &backend,
-        crate::folds::make_fold(&[a, b], "old work", "a summary", false, fid, 1, None),
+        crate::folds::make_fold(
+            &[a, b],
+            "old work",
+            "a summary",
+            false,
+            fid,
+            a.min(b),
+            1,
+            None,
+        ),
     )
     .await;
     let r = kernel
@@ -4340,7 +4349,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
             .collect();
         levels.sort_unstable();
         levels.dedup();
-        let view = crate::folds::render(&rows);
+        let view = crate::folds::render(&rows, &crate::folds::anchors_of(&rows));
         let shape: String = view
             .iter()
             .map(|r| {
@@ -4399,6 +4408,7 @@ fn verb_docs_match_python_docstrings() {
             "grep",
             "context_recall",
             "context_clear",
+            "context_forget",
             "watch",
             "unwatch",
             "boot",
@@ -5725,6 +5735,10 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
 /// The memory-store features (python `test_memory_features.py`), on this harness.
 #[path = "tests_memory.rs"]
 mod memory_features;
+
+/// A fold carries its own place (python `test_fold_anchors.py`), on this harness.
+#[path = "tests_fold_anchors.rs"]
+mod fold_anchors;
 
 /// Per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the

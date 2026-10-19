@@ -15,8 +15,11 @@ Each delivery is a call, made by this bridge AS ITSELF (its `can_call` must name
     FATAL w5: loss diverged (code 1a2b3c4d)
 
 A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
-`cancel` (or `unmonitor`) ends it, and it ends with its job — after delivering what
-was still waiting. RAM only, like the job it watches.
+`cancel` (or `unmonitor`) ends it, and it ends with its job: ONE last delivery, headed
+`job ended`, carries what was still waiting (the header alone when nothing was). The
+end is marked on the job row before its monitors are told, and `monitor` refuses a
+job so marked, so no monitor is ever filed after its job's end went out. RAM only,
+like the job it watches.
 
 A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
 `unknown_agent`) ENDS the monitor — never a silent drop (an AI whose `callable_by`
@@ -73,8 +76,10 @@ def feed_text(job_id: int, text: str) -> None:
                 m["queue"].put_nowait(line)
 
 
-def job_ended(job_id: int) -> None:
-    """The job is gone: each of its monitors delivers what waits, then ends."""
+def job_ended(job: dict, job_id: int) -> None:
+    """The job is gone: marked so (`monitor` refuses it from here on), then each of
+    its monitors delivers what waits, then ends."""
+    job["monitors_closed"] = True
     for m in by_job(job_id):
         if m["carry"]:
             line = m["carry"].rstrip("\r")
@@ -149,8 +154,10 @@ async def run(m: dict, kernel) -> None:
                             pending.append(x)
                 m["pending"] = len(pending)
             now = time.monotonic()
-            if pending and (
-                ended or m["every"] is None or last is None or now - last >= m["every"]
+            # the job's end is ALWAYS delivered, even with nothing left waiting
+            if ended or (
+                pending
+                and (m["every"] is None or last is None or now - last >= m["every"])
             ):
                 _deliver(m, pending, ended, kernel)
                 last = now
@@ -180,7 +187,7 @@ def _deliver(m: dict, lines: list[str], ended: bool, kernel) -> None:
     if dropped:
         body += f"\n(+{dropped} earlier lines dropped)"
     m["delivered"] += 1
-    text = header(m, ended) + "\n" + body
+    text = header(m, ended) + ("\n" + body if lines else "")
 
     async def send():
         out = await kernel.send(

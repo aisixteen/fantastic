@@ -1162,6 +1162,7 @@ async fn start_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
             line_ring_bytes: 0,
             line_ring_dropped: 0,
             pty: pty_state.clone(),
+            monitors_closed: false,
         },
     );
     // The row exists: the pump may look for it now. It cannot have gone away —

@@ -314,6 +314,77 @@ async def test_a_monitor_ends_with_its_job_delivering_what_waited(seeded_kernel)
     )
 
 
+def _mon():
+    return __import__("exec_bridge._monitor", fromlist=["x"])
+
+
+async def _monitor_of(k, jid, **extra):
+    return await _call(
+        k, "runner", {"type": "monitor", "job_id": jid, "notify": "ear", **extra}
+    )
+
+
+async def test_the_end_is_delivered_when_nothing_waits_any_more(seeded_kernel):
+    """Issue 64: every line arrives in ONE burst (a pipe read handing over several
+    lines at once — common on Windows), so the first delivery takes them all and
+    nothing waits when the job ends. The end is delivered anyway: exactly one
+    delivery headed `job ended`, here with no lines under it."""
+    k = seeded_kernel
+    await _setup(k)
+    jid = await _printer(k, 0, 0, hold=30.0)  # prints nothing; ended by `stop`
+    mid = (await _monitor_of(k, jid, every=30))["monitor_id"]
+    for n in range(3):  # the burst: queued before the monitor's task wakes
+        _mon().feed_line(jid, f"INFO step {n}")
+    await _until(lambda: len(_heard()) == 1, what="the first delivery")
+    assert "INFO step 2" in _heard()[0] and "job ended" not in _heard()[0], _heard()
+    await _call(k, "runner", {"type": "stop", "job_id": jid})
+    await _until(lambda: mid not in _mon()._MONITORS, what="monitor gone")
+    await asyncio.sleep(0.2)  # the final delivery is its own task: let it land
+    ended = [t for t in _heard() if "job ended" in t]
+    assert len(ended) == 1 and len(_heard()) == 2, _heard()
+    assert ended[0] == (
+        f"[monitor {mid} · job {jid} · from the operator's call "
+        f"{ended[0].split(' call ')[1].split(' · ')[0]} · job ended]"
+    ), ended[0]
+
+
+async def test_the_end_carries_what_waited_exactly_once(seeded_kernel):
+    """The ordering pinned the other way: a line waits on the throttle when the job
+    ends — the one final delivery carries it, and nothing follows."""
+    k = seeded_kernel
+    await _setup(k)
+    jid = await _printer(k, 0, 0, hold=30.0)
+    mid = (await _monitor_of(k, jid, every=30))["monitor_id"]
+    _mon().feed_line(jid, "INFO first")
+    await _until(lambda: len(_heard()) == 1, what="the first delivery")
+    _mon().feed_line(jid, "FATAL held")
+    await _until(lambda: _mon()._MONITORS[mid]["pending"] == 1, what="one waiting")
+    await _call(k, "runner", {"type": "stop", "job_id": jid})
+    await _until(lambda: mid not in _mon()._MONITORS, what="monitor gone")
+    await asyncio.sleep(0.2)
+    assert len(_heard()) == 2, _heard()
+    assert "job ended" in _heard()[1] and _heard()[1].endswith("\nFATAL held"), _heard()
+
+
+async def test_a_monitor_is_refused_once_its_jobs_end_went_out(
+    seeded_kernel, monkeypatch
+):
+    """The job's end was already handed to its monitors while its process still
+    reads alive (a cancel kills it, the pump ends, the OS has not reaped it yet):
+    a monitor filed then would never be told — so `monitor` refuses it."""
+    k = seeded_kernel
+    await _setup(k)
+    jid = await _printer(k, 0, 0, hold=30.0)
+    tools = __import__("exec_bridge.tools", fromlist=["x"])
+    job = tools._jobs[jid]
+    await _call(k, "runner", {"type": "stop", "job_id": jid})
+    await _until(lambda: job.get("monitors_closed"), what="the end handed out")
+    monkeypatch.setattr(tools, "_alive", lambda j: True)  # not reaped yet
+    r = await _monitor_of(k, jid, every=30)
+    assert r.get("reason") == "bad_arg" and r.get("arg") == "job_id", r
+    assert not [m for m in _mon()._MONITORS.values() if m["job_id"] == jid]
+
+
 async def test_a_refused_delivery_ends_the_monitor_and_monitors_says_why(
     seeded_kernel, caplog
 ):

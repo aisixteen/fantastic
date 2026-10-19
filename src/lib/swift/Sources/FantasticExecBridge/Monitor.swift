@@ -13,8 +13,11 @@
 // Each delivery is a call made by this bridge AS ITSELF (its `can_call` must name
 // `notify`, and `notify`'s `callable_by` this bridge), fire-and-forget as its own
 // task. A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
-// `cancel` (or `unmonitor`) ends it, and it ends with its job — after delivering what
-// still waited. RAM only, like the job it watches.
+// `cancel` (or `unmonitor`) ends it, and it ends with its job: ONE last delivery,
+// headed `job ended`, carries what still waited (the header alone when nothing did).
+// The end is marked on the job row before its monitors are told, and `monitor` checks
+// that mark and files the monitor under the one table lock, so no monitor is ever
+// filed after its job's end went out. RAM only, like the job it watches.
 //
 // A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
 // `unknown_agent`) ENDS the monitor — never a silent drop. The refusal is LOUD
@@ -290,7 +293,8 @@
                     if end { ended = true }
                     setPending(pending.count)
                 }
-                if !pending.isEmpty && (ended || windowOpen()) {
+                // the job's end is ALWAYS delivered, even with nothing left waiting
+                if ended || (!pending.isEmpty && windowOpen()) {
                     deliver(pending, ended: ended, kernel: kernel)
                     last = clock.now
                     pending = []
@@ -323,7 +327,7 @@
                 return false
             }
             if dead { return }
-            let text = header(ended: ended) + "\n" + body
+            let text = lines.isEmpty ? header(ended: ended) : header(ended: ended) + "\n" + body
             let target = AgentId(args.notify)
             kernel.spawnTask(agent: owner, verb: "monitor_notify") { [self] in
                 let out = await kernel.send([
@@ -384,12 +388,13 @@
         private let lock = NSLock()
         private var all: [Monitor] = []
 
-        /// File `m` unless its job has already exited. Under the same lock `jobEnded`
-        /// reads, so a job that ends right after the check still finds it: a job ends
-        /// only after its process has (`alive` false from then on).
-        func add(_ m: Monitor, ifAlive alive: () -> Bool) -> Bool {
+        /// File `m` unless its job's end already went out (`open` false: the process
+        /// exited, or the pump marked the row `monitorsClosed`). Under the same lock
+        /// `jobEnded` reads, and the pump marks the row BEFORE it calls `jobEnded`, so
+        /// a job that ends right after the check still finds the monitor.
+        func add(_ m: Monitor, ifOpen open: () -> Bool) -> Bool {
             lock.withLock {
-                guard alive() else { return false }
+                guard open() else { return false }
                 all.append(m)
                 return true
             }
@@ -430,7 +435,7 @@
         /// `monitor` past its job lookup: the args, the fork, the filing — python
         /// `_monitor_verb`.
         func startMonitor(
-            _ agentId: AgentId, jobId: TaskId, child: Child, payload: JSON, kernel: Kernel
+            _ agentId: AgentId, jobId: TaskId, payload: JSON, kernel: Kernel
         ) -> JSON {
             let args: MonitorArgs
             switch MonitorArgs.parse(payload, kernel: kernel) {
@@ -441,7 +446,7 @@
                 owner: agentId, jobId: jobId, args: args,
                 caller: KernelTaskLocals.currentOrigin?.value,
                 call: KernelTaskLocals.currentTask?.value)
-            guard monitorTable.add(m, ifAlive: { child.isAlive }) else {
+            guard monitorTable.add(m, ifOpen: { monitorsOpen(jobId) }) else {
                 return Refusal.bad("monitor", "job_id", "a RUNNING job — this one has exited")
             }
             let table = monitorTable

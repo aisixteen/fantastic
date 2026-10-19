@@ -13,8 +13,11 @@
 //! Each delivery is a call made by this bridge AS ITSELF (its `can_call` must name
 //! `notify`, and `notify`'s `callable_by` this bridge), fire-and-forget as its own
 //! task. A monitor IS a kernel task (its id is the `monitor_id`): `ps` lists it, kernel
-//! `cancel` (or `unmonitor`) ends it, and it ends with its job — after delivering what
-//! still waited. RAM only, like the job it watches.
+//! `cancel` (or `unmonitor`) ends it, and it ends with its job: ONE last delivery,
+//! headed `job ended`, carries what still waited (the header alone when nothing did).
+//! The end is marked on the job row before its monitors are told, and `monitor` checks
+//! that mark and files the monitor under the one monitors lock, so no monitor is ever
+//! filed after its job's end went out. RAM only, like the job it watches.
 //!
 //! A DELIVERY THE TARGET REFUSES (the call gate: `unauthorized`; no such agent:
 //! `unknown_agent`) ENDS the monitor — never a silent drop. The refusal is LOUD
@@ -123,8 +126,12 @@ pub(crate) fn feed_text(owner: &AgentId, job_id: TaskId, text: &str) {
     }
 }
 
-/// The job is gone: each of its monitors delivers what waits, then ends.
+/// The job is gone: marked so (`monitor` refuses it from here on), then each of its
+/// monitors delivers what waits, then ends.
 pub(crate) fn job_ended(owner: &AgentId, job_id: TaskId) {
+    if let Some(j) = crate::jobs::jobs().get_mut(&(owner.clone(), job_id)) {
+        j.monitors_closed = true;
+    }
     for m in monitors().values_mut() {
         if &m.owner != owner || m.job_id != job_id || m.error.is_some() {
             continue;
@@ -241,7 +248,8 @@ async fn run(
             }
             set_pending(&key, pending.len());
         }
-        if !pending.is_empty() && (ended || window_open(last)) {
+        // the job's end is ALWAYS delivered, even with nothing left waiting
+        if ended || (!pending.is_empty() && window_open(last)) {
             deliver(&cfg, &key, std::mem::take(&mut pending), ended, &kernel);
             last = Some(Instant::now());
             set_pending(&key, 0);
@@ -265,7 +273,12 @@ fn deliver(cfg: &Cfg, key: &Key, lines: Vec<String>, ended: bool, kernel: &Arc<K
         Some(m) => m.delivered += 1,
         None => {}
     }
-    let text = format!("{}\n{body}", header(cfg, id, ended));
+    let head = header(cfg, id, ended);
+    let text = if lines.is_empty() {
+        head
+    } else {
+        format!("{head}\n{body}")
+    };
     let k = Arc::clone(kernel);
     let target = AgentId::from(cfg.notify.as_str());
     let key = key.clone();
@@ -430,8 +443,19 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
         caller: fantastic_kernel::send::current_origin().map(|a| a.0),
         call: fantastic_kernel::current_task().map(|t| t.get()),
     };
+    // Checked again and filed under the ONE monitors lock `job_ended` fans out under:
+    // a job whose end went out between the check above and here (its pump runs on
+    // another worker) is refused, never handed a monitor that would never end.
+    let mut table = monitors();
+    {
+        let g = crate::jobs::jobs();
+        match g.get(&(owner.clone(), job_id)) {
+            Some(j) if crate::jobs::alive(j) && !j.monitors_closed => {}
+            _ => return bad("monitor", "job_id", "a RUNNING job — this one has exited"),
+        }
+    }
     let mid = kernel.spawn_task(owner, "monitor", run(cfg, id_rx, rx, Arc::clone(kernel)));
-    monitors().insert(
+    table.insert(
         (owner.0.clone(), mid.get()),
         Mon {
             owner: owner.clone(),
@@ -449,6 +473,7 @@ pub(crate) async fn monitor_reply(owner: &AgentId, payload: &Value, kernel: &Arc
             error: None,
         },
     );
+    drop(table);
     let _ = id_tx.send(mid);
     json!({
         "monitor_id": mid.get(),

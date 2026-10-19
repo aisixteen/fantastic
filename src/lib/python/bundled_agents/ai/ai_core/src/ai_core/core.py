@@ -55,6 +55,7 @@ from ai_core.context import (
     resolve_context_window,
 )
 from ai_core import prompt_file
+from ai_core.folds import anchors_of
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
@@ -77,6 +78,7 @@ from ai_core.tool_parse import (
 )
 from kernel import current_origin, current_task
 from kernel._refusal import UNHANDLED, refusal
+from kernel._refusal import bad as bad_arg
 from ai_core.constants import (  # noqa: F401 — re-exported seams
     DEFAULT_CLIENT_ID,
     MAX_CALL_DEPTH,
@@ -472,9 +474,9 @@ async def _store_call(self_id: str, kernel, payload: dict) -> dict:
 
 
 # The store holds this agent's conversation AND its view rows. The CONVERSATION a
-# reader sees is everything but the view (an allow-list of kinds to HIDE: a kind
-# forgotten here lands in the model's prompt).
-_BOOKKEEPING = frozenset({"view"})
+# reader sees is everything but the view and the recorded fold anchors (an allow-list
+# of kinds to HIDE: a kind forgotten here lands in the model's prompt).
+_BOOKKEEPING = frozenset({"view", "anchors"})
 
 
 async def _head(self_id: str, kernel) -> list[dict]:
@@ -2601,6 +2603,9 @@ async def _project_context(
         self_id=self_id,
         kernel=kernel,
         client_id=client_id,
+        # Over the HEAD, not the body: a body rebuilt from the view array holds the
+        # folds without the rows they hide.
+        anchors=anchors_of(await _head(self_id, kernel)),
     )
     proj = await strat(body, system_block, rec, ctx)
     notice = _context_notice(
@@ -2662,6 +2667,7 @@ async def _project_context(
         "stripped": proj.stripped,
         "stripped_bytes": proj.stripped_bytes,
         "folded": proj.folded,
+        "unanchored": proj.unanchored,
         # What the model actually sees this turn — so "after reload it sees only the
         # fold" is measured from the view, never self-reported.
         "view_ids": [m.get("id") for m in out_body if m.get("id")][:200],
@@ -2713,6 +2719,7 @@ async def _project_context(
                 "stripped": proj.stripped,
                 "stripped_bytes": proj.stripped_bytes,
                 "folded": proj.folded,
+                "unanchored": proj.unanchored,
             },
         },
     )
@@ -3780,6 +3787,7 @@ async def _context_recall(
     # dropped the oldest rows that still did not fit — no fold, no summary. Folding
     # takes the model (a summary per span), so a `dry` recall does not fold.
     folded = 0
+    anchors = anchors_of(await _head(id, kernel))
     if provider is not None and rec.get("context_strategy", DEFAULT_STRATEGY) == "fold":
         from ai_core.strategies.fold import fold_down
 
@@ -3790,9 +3798,10 @@ async def _context_recall(
             self_id=id,
             kernel=kernel,
             client_id=client_id,
+            anchors=anchors,
         )
-        rows, _, folded = await fold_down(rows, fctx, body_budget)
-    view = [r for r in fold_render(rows) if r.get("id")]
+        rows, _, folded, _ = await fold_down(rows, fctx, body_budget)
+    view = [r for r in fold_render(rows, anchors) if r.get("id")]
     if not view:
         return {
             "kept": 0,
@@ -3979,7 +3988,7 @@ async def _context_recall(
 
 
 async def _context_clear(id, payload, kernel):
-    """args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or forgotten: grep, recall and `history {fold: <id>}` reach every member. Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}."""
+    """args: why:str? — start a NEW THREAD on the same store: a CLEAR-FOLD — one row whose members are every row since the previous clear (no summary) — and the model's view begins at its `[cleared <id> · N rows]` line. Nothing is deleted: grep, recall and `history {fold: <id>}` reach every member (`context_forget` is the verb that deletes). Empties the persisted view and drops RAM scratch (projection, fold counters, pending recall). Returns {cleared:id, rows:N}."""
     rec = kernel.get(id) or {}
     head = [r for r in await _head(id, kernel) if r.get("kind") not in _BOOKKEEPING]
     members = [r["id"] for r in head if r.get("id") is not None]
@@ -4013,6 +4022,112 @@ async def _context_clear(id, payload, kernel):
     _recall_due.discard(id)
     _view_source.pop(id, None)
     return {"cleared": rid, "rows": len(members)}
+
+
+async def _context_forget(id, payload, kernel):
+    """args: include_cleared:bool? (default false). Compacts this agent's OWN store: drops the rows the model can no longer see and keeps every fold. In ONE `prune` it removes every non-fold row covered by a fold whose place is known, every `view` row but the newest one after the last clear, and with `include_cleared` every row before the last `clear` (the clear row stays). Kept: every fold at every level, every row of an open chain, every row no fold covers, the members of a fold whose place cannot be known, and the newest `anchors` row a kept fold needs — a fold written without an `anchor` has its place recorded first, in one appended `anchors` row. Waits for a running turn. The next prompt is the same before and after. Afterwards `recall`, `grep` and `history {fold}` do not find a pruned id; `history {fold}` still returns the fold's title and summary. Returns {pruned, kept_folds, unanchored}."""
+    from ai_core.folds import chains, is_fold, is_open, recorded_anchors
+
+    include_cleared = payload.get("include_cleared", False)
+    if not isinstance(include_cleared, bool):
+        return bad_arg("context_forget", "include_cleared", "a bool")
+    async with _lock_for(id):
+        head = list(await _refresh_head(id, kernel))
+        everything = (await _store_call(id, kernel, {"type": "read"})).get("rows") or []
+        anchors = anchors_of(head)
+        by_id = {r.get("id"): r for r in head if r.get("id") is not None}
+        head_folds = [r for r in head if is_fold(r)]
+        turns = [
+            r
+            for r in head
+            if r.get("kind") not in _BOOKKEEPING and r.get("role") in _TURN_ROLES
+        ]
+        open_ids = {
+            turns[i].get("id")
+            for chain in chains(turns)
+            if is_open(turns, chain)
+            for i in chain
+        }
+        doomed: set[int] = set()
+        # 1. the rows folds already summarise — under a fold whose place is known
+        for f in head_folds:
+            if f.get("id") not in anchors:
+                continue
+            stack, seen = list(f.get("refs") or ()), set()
+            while stack:
+                x = stack.pop()
+                if x in seen:
+                    continue
+                seen.add(x)
+                r = by_id.get(x)
+                if r is None:
+                    continue
+                if is_fold(r):
+                    stack.extend(r.get("refs") or ())
+                elif x not in open_ids:
+                    doomed.add(x)
+        # 2. every view row but the one in force
+        views = [r for r in head if r.get("kind") == "view"]
+        current = views[-1].get("id") if views else None
+        doomed |= {
+            r["id"]
+            for r in everything
+            if r.get("kind") == "view" and r.get("id") != current
+        }
+        # 3. behind the last clear, on request; the clear row itself stays
+        if include_cleared:
+            last = max(
+                (i for i, r in enumerate(everything) if r.get("kind") == "clear"),
+                default=None,
+            )
+            if last is not None:
+                doomed |= {r["id"] for r in everything[:last]}
+        # A fold written before folds carried `anchor` is placed by deriving from its
+        # members — about to go. Its place is recorded first, in ONE `anchors` row;
+        # an older `anchors` row is superseded by the newest one that holds it all.
+        want = {
+            f["id"]: anchors[f["id"]]
+            for f in head_folds
+            if not isinstance(f.get("anchor"), int) and f["id"] in anchors
+        }
+        rows_of_anchors = [r for r in head if r.get("kind") == "anchors"]
+        newest = rows_of_anchors[-1] if rows_of_anchors else None
+        holds = newest is not None and all(
+            recorded_anchors([newest]).get(k) == v for k, v in want.items()
+        )
+        if want and not holds:
+            await _save_history(
+                id,
+                kernel,
+                [
+                    {
+                        "kind": "anchors",
+                        "v": 1,
+                        "anchors": {str(k): v for k, v in sorted(want.items())},
+                    }
+                ],
+            )
+            doomed |= {r["id"] for r in rows_of_anchors}
+        else:
+            keep = newest.get("id") if want and newest is not None else None
+            doomed |= {r["id"] for r in rows_of_anchors if r["id"] != keep}
+        pruned = 0
+        if doomed:
+            res = await _store_call(
+                id, kernel, {"type": "prune", "ids": sorted(doomed)}
+            )
+            pruned = int(res.get("pruned") or 0)
+        # THE STORE IS THE TRUTH: the prune cascaded each pruned member out of every
+        # fold's refs, so the head cache is read again, not patched.
+        _mem(kernel)["heads"].pop(id, None)
+        head = await _head(id, kernel)
+        left = [r for r in head if is_fold(r)]
+        after = anchors_of(head)
+        return {
+            "pruned": pruned,
+            "kept_folds": len(left),
+            "unanchored": sum(1 for f in left if f.get("id") not in after),
+        }
 
 
 def _strip_state_pop(id: str) -> None:
@@ -4213,6 +4328,8 @@ def build(
         "context_recall": _make_context_recall(cfg),
         # A new thread on the same store: the view starts here, nothing is deleted.
         "context_clear": _context_clear,
+        # Compact the store: drop the rows the folds already summarise.
+        "context_forget": _context_forget,
         # THE ROW EVENT: this agent announces its own rows to its watchers.
         "watch": _watch,
         "unwatch": _unwatch,

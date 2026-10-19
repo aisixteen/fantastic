@@ -7,7 +7,7 @@
 //! exists to prevent.
 
 use crate::folds::{
-    chains, clean_title, expand_ids, is_open, make_fold, quoted_title, render, row_id,
+    anchors_of, chains, clean_title, expand_ids, is_open, make_fold, quoted_title, render, row_id,
     SUMMARY_INPUT_CAP,
 };
 use crate::strategies::fold::{next_span, FOLD_RUN, KEEP_TAIL};
@@ -28,6 +28,11 @@ fn turn(id: i64, role: &str, parent: Option<i64>, content: &str) -> Value {
     json!({"role": role, "id": id, "parent": parent, "content": content})
 }
 
+/// `render` over rows that are the whole head: anchors from the same rows.
+fn view_of(rows: &[Value]) -> Vec<Value> {
+    render(rows, &anchors_of(rows))
+}
+
 // ─── folds: the mark ────────────────────────────────────────────
 
 #[test]
@@ -46,11 +51,12 @@ fn a_fold_hides_its_members_and_sits_where_the_first_one_was() {
             "it went fine",
             false,
             5,
+            2,
             1,
             Some(1),
         ),
     ];
-    let view = render(&rows);
+    let view = view_of(&rows);
     let ids: Vec<i64> = view.iter().filter_map(row_id).collect();
     assert_eq!(
         ids,
@@ -64,8 +70,8 @@ fn a_fold_of_folds_hides_the_folds_it_wraps() {
     // HOW DEPTH WORKS. A fold is an ordinary member, so the next fold over the
     // same stretch takes it — and the inner ones must leave the view, or the
     // head carries every level at once.
-    let inner_a = make_fold(&[2, 3], "a", "aa", false, 10, 1, Some(1));
-    let inner_b = make_fold(&[4, 5], "b", "bb", false, 11, 1, Some(1));
+    let inner_a = make_fold(&[2, 3], "a", "aa", false, 10, 2, 1, Some(1));
+    let inner_b = make_fold(&[4, 5], "b", "bb", false, 11, 4, 1, Some(1));
     let rows = vec![
         turn(1, "user", None, "the goal"),
         turn(2, "user", Some(1), "x"),
@@ -74,9 +80,9 @@ fn a_fold_of_folds_hides_the_folds_it_wraps() {
         turn(5, "user", Some(1), "w"),
         inner_a,
         inner_b,
-        make_fold(&[10, 11], "both", "everything", false, 12, 2, Some(1)),
+        make_fold(&[10, 11], "both", "everything", false, 12, 2, 2, Some(1)),
     ];
-    let ids: Vec<i64> = render(&rows).iter().filter_map(row_id).collect();
+    let ids: Vec<i64> = view_of(&rows).iter().filter_map(row_id).collect();
     assert_eq!(
         ids,
         vec![1, 12],
@@ -89,8 +95,8 @@ fn a_fold_id_descends_to_the_rows_it_collapsed() {
     // THE DESCENT PATH, recursive. `grep <fold id>` is worthless if it resolves
     // to the fold and stops — the caller asked to look INSIDE.
     let rows = vec![
-        make_fold(&[2, 3], "a", "aa", false, 10, 1, None),
-        make_fold(&[10, 4], "b", "bb", false, 11, 2, None),
+        make_fold(&[2, 3], "a", "aa", false, 10, 2, 1, None),
+        make_fold(&[10, 4], "b", "bb", false, 11, 2, 2, None),
     ];
     let mut got = expand_ids(&rows, &[11]);
     got.sort_unstable();
@@ -162,7 +168,7 @@ fn a_rendered_rows_title_is_read_back_off_its_reply_tag() {
     assert_eq!(quoted_title("no marks here"), None);
     // A FOLD HEAD IS NOT IN THAT GRAMMAR — it reads `] "title"`, so the title
     // comes off the row's own field, never scraped back out of the text.
-    let f = make_fold(&[1, 2], "what happened", "body", false, 7, 1, None);
+    let f = make_fold(&[1, 2], "what happened", "body", false, 7, 1, 1, None);
     assert_eq!(
         f.get("title").and_then(Value::as_str),
         Some("what happened")
@@ -180,7 +186,7 @@ fn a_span_never_takes_the_goal_turn_or_the_live_tail() {
     for i in 2..=20 {
         rows.push(turn(i, "user", Some(1), &format!("row {i}")));
     }
-    let view = render(&rows);
+    let view = view_of(&rows);
     let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
     assert!(!span.is_empty(), "a 20-row view has something to fold");
     assert!(
@@ -204,7 +210,7 @@ fn a_span_never_ends_between_a_call_and_its_answer() {
         rows.push(turn(id, "assistant", Some(1), "asking"));
         rows.push(reply(id + 1, id, Some(id), "answered"));
     }
-    let view = render(&rows);
+    let view = view_of(&rows);
     let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
     assert!(!span.is_empty());
     let last = *span.last().unwrap();
@@ -232,6 +238,7 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
             "body",
             false,
             100 + k as i64,
+            900 + k as i64,
             1,
             Some(1),
         ));
@@ -239,7 +246,7 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
     for i in 0..14 {
         rows.push(turn(200 + i, "user", Some(1), &format!("row {i}")));
     }
-    let view = render(&rows);
+    let view = view_of(&rows);
     let span = next_span(&rows, &view, KEEP_TAIL, i64::MAX);
     assert!(
         span.iter().all(|&i| !crate::folds::is_fold(&rows[i])),
@@ -258,6 +265,7 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
             "body",
             false,
             100 + k as i64,
+            900 + k as i64,
             1,
             Some(1),
         ));
@@ -265,7 +273,7 @@ fn folds_at_the_head_are_skipped_until_there_are_fold_run_of_them() {
     for i in 0..10 {
         rows2.push(turn(200 + i, "user", Some(1), &format!("row {i}")));
     }
-    let view2 = render(&rows2);
+    let view2 = view_of(&rows2);
     let span2 = next_span(&rows2, &view2, KEEP_TAIL, i64::MAX);
     assert_eq!(span2.len(), FOLD_RUN, "{span2:?}");
     assert!(
@@ -279,7 +287,7 @@ fn a_view_with_nothing_foldable_yields_no_span() {
     // TERMINATION. The fold loop runs `while over budget`; an empty span is the
     // only thing that stops it.
     let rows = vec![turn(1, "user", None, "goal"), turn(2, "user", None, "one")];
-    let view = render(&rows);
+    let view = view_of(&rows);
     assert!(next_span(&rows, &view, KEEP_TAIL, i64::MAX).is_empty());
 }
 
@@ -388,7 +396,7 @@ fn a_span_is_sized_by_tokens_not_rows() {
             &format!("row {i} {}", "x".repeat(400)),
         ));
     }
-    let view = render(&rows);
+    let view = view_of(&rows);
     let one = crate::context::estimate_tokens(std::slice::from_ref(&rows[1]));
     let small = next_span(&rows, &view, KEEP_TAIL, one * 3);
     assert_eq!(small.len(), 3, "need of ~3 rows takes 3 rows: {small:?}");

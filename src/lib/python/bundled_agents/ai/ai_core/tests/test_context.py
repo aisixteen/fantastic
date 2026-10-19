@@ -55,6 +55,7 @@ def _ctx(
         summarize=summarize,
         self_id="ai",
         kernel=kernel if kernel is not None else _NoLegKernel(),
+        anchors={},  # these bodies hold no fold rows
     )
 
 
