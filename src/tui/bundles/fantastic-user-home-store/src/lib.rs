@@ -392,7 +392,7 @@ impl UserHomeStore {
     fn reflect(&self) -> Value {
         json!({
             "handler_module": HANDLER_MODULE,
-            "sentence": "The user's saved set-ups: named agent-record blueprints in the home config dir, applied by the CLI when it creates an agent.",
+            "sentence": "The user's saved set-ups: named agent-record blueprints in the home dir (~/.fantastic), applied by the CLI when it creates an agent.",
             "dir": self.home.as_ref().map(|h| saved_dir(h).display().to_string()).ok(),
         })
     }

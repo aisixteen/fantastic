@@ -250,6 +250,7 @@ fantastic [canvas] ai BACKEND     # the root AI `ai`: vllm -p PORT | ollama -p P
 fantastic [canvas] run CMD [ARGS] # your own program from $PATH in a terminal (with canvas: a terminal cell)
 fantastic mcp                     # MCP over stdio (tools `reflect`, `send`); attaches to a running kernel, or runs it
 fantastic send '<item json>'      # one call into the running kernel; `$env:NAME` values come from this shell, marked secret
+fantastic migrate-home [--dry-run] # move an older layout's files into ~/.fantastic
 fantastic readme [key]            # the docs
 ```
 
@@ -301,12 +302,52 @@ content (`html`, `gl`).
 - **Keys** live in the `credentials` agent, under a ref `<provider>/<host>` that
   is bound to that host. Storage is the human's choice: plain (one 0600 file) or
   secure (the keychain). Your home is `FANTASTIC_HOME`, or
-  `~/.config/fantastic`, and holds saved set-ups, key refs and the list of your
-  fantastics.
+  `~/.fantastic`, and holds saved set-ups, key refs and the list of your
+  fantastics (see [Where fantastic keeps your files](#where-fantastic-keeps-your-files)).
 - **Coding CLIs** connect through `.fantastic/.mcp.json`, which every start
   writes (`claude --mcp-config .fantastic/.mcp.json`). The client is the `mcp`
   agent, and each tool call is a kernel task that `ps` lists and MCP
   cancellation stops.
+
+### Where fantastic keeps your files
+
+Everything fantastic keeps for you lives under ONE directory, the home:
+`FANTASTIC_HOME`, else `~/.fantastic` (`%USERPROFILE%\.fantastic` on Windows).
+Each project keeps its own state in its own `.fantastic/`.
+
+```
+~/.fantastic/                    <home>: FANTASTIC_HOME, else ~/.fantastic
+├─ app/                          the desktop app's home kernel, its state dir
+│   ├─ lock.yaml  agent.yaml     one host per home; guid, next_id
+│   ├─ home.db                   its sqlite store
+│   ├─ home.yaml                 run file {pid, port, url}
+│   ├─ agents/…                  host records (the home agent's pages + selection)
+│   └─ web/…                     the Home page's records
+├─ fantastics/<guid>/fantastic.yaml   the registry of your fantastics
+├─ user/
+│   ├─ setups/ai_agent/…         saved AI set-ups
+│   ├─ keys/…                    key mode + refs
+│   └─ credentials/<id>.yaml     a credential_store's `file` backend default
+└─ logs/<folder>-<hash8>.log     canvas launch logs, every OS
+
+<project>/.fantastic/            each fantastic's own state
+```
+
+No `.fantastic` is nested in the home, so a fantastic is never run in `~`
+itself: its `.fantastic` would be the home, and every runtime refuses that.
+
+**Moving from an older layout.** Earlier versions kept these files in
+`~/.config/fantastic/` (the registry, `agents/ai_agent/saved/` and
+`agents/ai_agent/keys/`) and `~/.fantastic/credentials/`. Nothing moves by
+itself; stop every fantastic and the app, then:
+
+```sh
+fantastic migrate-home --dry-run   # print every move
+fantastic migrate-home             # move them
+```
+
+It refuses, and moves nothing, when a target already exists, a fantastic is
+running, or the app is open. Each file keeps its permissions.
 
 ### How the CLI is tested
 
