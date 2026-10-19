@@ -8,6 +8,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from _testkit import as_agent, memory_meta, wire
 
 from ai_core import core, folds
@@ -175,6 +177,64 @@ async def test_new_folds_carry_an_anchor():
     assert l2["anchor"] == min(f["anchor"] for f in l1), "an L2's is its members' least"
     stored = {r["id"]: r for r in k.rows_of()}
     assert all(stored[f["id"]]["anchor"] == f["anchor"] for f in l1 + [l2])
+
+
+def test_a_new_folds_anchor_is_its_least_leaf():
+    rows = [
+        {"role": "user", "id": 7, "content": "a"},
+        {
+            "role": "user",
+            "id": 30,
+            "kind": "fold",
+            "refs": [3, 4],
+            "anchor": 3,
+            "content": "f",
+        },
+        {"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"},
+    ]
+    # a member fold places by its own anchor, a legacy one by the head's anchors
+    anchors = {31: 1}
+    assert folds.member_anchor(rows, [0], anchors) == 7
+    assert folds.member_anchor(rows, [0, 1], anchors) == 3
+    assert folds.member_anchor(rows, [0, 1, 2], anchors) == 1
+
+
+def test_a_fold_that_cannot_be_placed_is_an_error():
+    rows = [
+        {"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"},
+        {"role": "user", "id": "x", "content": "a row with no int id"},
+        {"role": "user", "content": "a row with no id"},
+    ]
+    cases = [
+        ([0], "fold: member fold 31 has no anchor"),
+        ([1], "fold: member row 'x' has no int id"),
+        ([2], "fold: member row None has no int id"),
+        ([], "fold: a fold needs at least one member"),
+    ]
+    for idxs, msg in cases:
+        with pytest.raises(ValueError) as e:
+            folds.member_anchor(rows, idxs, {})
+        assert str(e.value) == msg
+
+
+async def test_write_fold_reports_an_unplaceable_span_before_it_summarizes():
+    """No silent turn: a span with a member that has no known place raises — the
+    turn's error — and nothing is asked or written."""
+    k = _K()
+    asked: list = []
+
+    async def summary(msgs, max_tokens=None):
+        asked.append(msgs)
+        return "TITLE\n\nbody"
+
+    rows = [
+        {"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"},
+        {"role": "user", "id": 32, "content": "a"},
+    ]
+    with pytest.raises(ValueError, match="member fold 31 has no anchor"):
+        await write_fold(_ctx(10**6, k, summarize=summary), rows, [0, 1], {})
+    assert asked == [], "no summary was asked for"
+    assert not any(folds.is_fold(r) for r in k.rows_of()), "no fold row was written"
 
 
 # ── a fold without its members ──────────────────────────────────────

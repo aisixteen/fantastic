@@ -20,7 +20,7 @@
   S10 ASKS THE PERSON: an `inquiry` to `user` (a single choice) shows as a card in
      its chat; a click answers it, and the agent continues with that answer.
   S8 FOLDS ONCE: an agent at a small window, a few long turns → one fold — the
-     chat says the context was compacted, and the next turn still answers."""
+     chat says the context was folded, and the next turn still answers."""
 
 from __future__ import annotations
 
@@ -431,10 +431,17 @@ def main() -> bool:
                     return
                 # S8 one fold at a small window
                 long = "lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 120  # ~2.5k tokens a reply
-                # the fold's SUMMARY side call (ai_core's fold prompt), answered in its own shape
-                small.responder = lambda body: (
-                    "Filler turns about lorem ipsum\n\nASKED: filler turns\nDONE: answered each\nBINDING: none\nERRORS: none\nOPEN: none"
-                    if "FOLD this finished piece of work" in json.dumps(body) else None)
+                # the model's SIDE calls, each answered in its own shape so neither takes a
+                # turn's queued reply: the fold's SUMMARY (ai_core's fold prompt), and the
+                # `context_recall` a fold batch makes due (its rebuild prompt, JSON only)
+                def side_call(body):
+                    if "FOLD this finished piece of work" in json.dumps(body):
+                        return "Filler turns about lorem ipsum\n\nASKED: filler turns\nDONE: answered each\nBINDING: none\nERRORS: none\nOPEN: none"
+                    if last_text(body).startswith("You are rebuilding your own working context"):
+                        return '{"expand": [], "why": "the filler is folded"}'
+                    return None
+
+                small.responder = side_call
                 # an AI on the `small` set-up: the default's cell, then its ⚙ →
                 # `‹ other set-ups` → the saved `small` rebinds it (no menu tile)
                 await spot(pg, 300, 700, "AI agent")
@@ -449,10 +456,10 @@ def main() -> bool:
                     small.reply(f"S8-turn-{k} " + long)
                     await send(pg, c, f"turn {k} " + long[:300])
                     await pg.until(f"{dialog(c)}.includes('S8-turn-{k}')", 10)
-                    if await pg.js(f"{dialog(c)}.includes('context compacted')"):
+                    if await pg.js(f"{dialog(c)}.includes('context folded')"):
                         break
                 info["S8_turns_sent"] = k + 1
-                folded = await pg.js(f"{dialog(c)}.includes('context compacted')")
+                folded = await pg.js(f"{dialog(c)}.includes('context folded')")
                 small.reply("S8-after-fold")
                 await send(pg, c, "still there?")
                 r["S8 folds once and still answers"] = bool(folded) and bool(await pg.until(f"{dialog(c)}.includes('S8-after-fold')", 10))

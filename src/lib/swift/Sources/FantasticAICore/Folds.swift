@@ -248,12 +248,12 @@ enum AIFolds {
             let a: Int64
             if isFold(r) {
                 guard let x = asAnchorInt(r["anchor"]) ?? rowId(r).flatMap({ anchors[$0] }) else {
-                    throw PyError("ValueError", "fold: member fold \(rowId(r).map(String.init) ?? "None") has no anchor")
+                    throw PyError("ValueError", "fold: member fold \(pyStr(r["id"])) has no anchor")
                 }
                 a = x
             } else {
                 guard let x = asAnchorInt(r["id"]) else {
-                    throw PyError("ValueError", "fold: member row \(r["id"].serialize()) has no int id")
+                    throw PyError("ValueError", "fold: member row \(pyRepr(r["id"])) has no int id")
                 }
                 a = x
             }

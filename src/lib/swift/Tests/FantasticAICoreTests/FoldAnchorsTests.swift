@@ -697,6 +697,50 @@ struct FoldAnchorsTests {
         _ = await watcher.value
         #expect((out["pruned"].asInt ?? -1) >= 0, "\(out.serialize())")
     }
+
+    // ── a new fold's anchor: known for every member, or the fold fails loud ──
+
+    @Test func aNewFoldsAnchorIsItsLeastLeaf() throws {
+        let rows: [JSON] = [
+            .object(["role": .string("user"), "id": .integer(7), "content": .string("a")]),
+            .object([
+                "role": .string("user"), "id": .integer(30), "kind": .string("fold"),
+                "refs": .array([.integer(3), .integer(4)]), "anchor": .integer(3),
+                "content": .string("f"),
+            ]),
+            .object([
+                "role": .string("user"), "id": .integer(31), "kind": .string("fold"),
+                "refs": .array([.integer(1)]), "content": .string("legacy"),
+            ]),
+        ]
+        // a member fold places by its own anchor, a legacy one by the head's anchors
+        let anchors: [Int64: Int64] = [31: 1]
+        #expect(try AIFolds.memberAnchor(rows, [0], anchors) == 7)
+        #expect(try AIFolds.memberAnchor(rows, [0, 1], anchors) == 3)
+        #expect(try AIFolds.memberAnchor(rows, [0, 1, 2], anchors) == 1)
+    }
+
+    @Test func aFoldThatCannotBePlacedIsAnError() {
+        let rows: [JSON] = [
+            .object([
+                "role": .string("user"), "id": .integer(31), "kind": .string("fold"),
+                "refs": .array([.integer(1)]), "content": .string("legacy"),
+            ]),
+            .object(["role": .string("user"), "id": .string("x"), "content": .string("a row with no int id")]),
+            .object(["role": .string("user"), "content": .string("a row with no id")]),
+        ]
+        let cases: [([Int], String)] = [
+            ([0], "fold: member fold 31 has no anchor"),
+            ([1], "fold: member row 'x' has no int id"),
+            ([2], "fold: member row None has no int id"),
+            ([], "fold: a fold needs at least one member"),
+        ]
+        for (idxs, msg) in cases {
+            #expect(throws: PyError("ValueError", msg)) {
+                _ = try AIFolds.memberAnchor(rows, idxs, [:])
+            }
+        }
+    }
 }
 
 /// A flag a `@Sendable` task may raise.

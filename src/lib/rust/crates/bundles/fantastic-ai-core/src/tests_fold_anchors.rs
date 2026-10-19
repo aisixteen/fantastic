@@ -8,7 +8,8 @@
 
 use super::*;
 use crate::folds::{
-    anchors_of, covered, expand_ids, is_fold, make_fold, refs_of, render, row_id, unanchored,
+    anchors_of, covered, expand_ids, is_fold, make_fold, member_anchor, refs_of, render, row_id,
+    unanchored,
 };
 use fantastic_kernel::test_support::as_agent;
 use std::collections::{HashMap, HashSet};
@@ -910,4 +911,186 @@ async fn context_forget_waits_for_a_running_turn() {
         .remove(0);
     assert_eq!(out.status.as_str(), "completed", "{:?}", out.result);
     assert!(out.result["pruned"].as_i64().is_some());
+}
+
+// ── the canvas AI cell's S8: folds at a small window, and every turn answers ──
+
+/// What the fold's summary side call answers (e2e `ai_cell` S8's responder).
+const S8_SUMMARY: &str =
+    "Filler turns about lorem ipsum\n\nASKED: filler turns\nDONE: answered each\n\
+                          BINDING: none\nERRORS: none\nOPEN: none";
+
+/// e2e `canvas.ai_cell` S8 as full turns: an AI at a 12000 window on the fold
+/// strategy (async + titled), eight long answers, each followed by the runtime's
+/// no-call reminder answered `done`. The model's two SIDE calls are answered in
+/// their own shapes — the fold's summary, and the `context_recall` a fold batch
+/// makes due — so neither takes a turn's queued answer. Every turn answers, the
+/// folds land, and the turn after them answers too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn folds_at_a_small_window_and_every_turn_answers() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "s8").await;
+    set(
+        &kernel,
+        &backend,
+        json!({"context_strategy": "fold", "context_window": 12000, "max_tokens": 12000,
+               "context_async": true, "context_titles": true}),
+    )
+    .await;
+    let s = script(&backend, Vec::new(), Duration::ZERO);
+    let recalls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&recalls);
+    *s.responder.lock().unwrap() = Some(Box::new(move |msgs: &[Value]| {
+        let all = Value::Array(msgs.to_vec()).to_string();
+        let last = msgs
+            .last()
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .trim_start()
+            .to_string();
+        if all.contains("FOLD this finished piece of work") {
+            Some(S8_SUMMARY.to_string())
+        } else if last.starts_with("You are rebuilding your own working context") {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Some(r#"{"expand": [], "why": "the filler is folded"}"#.to_string())
+        } else if last.starts_with("[no call was dispatched]") || last.starts_with("[no answer]") {
+            Some(DONE.to_string())
+        } else {
+            None
+        }
+    }));
+    let long = "lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(120);
+    let answered = |want: String| {
+        let kernel = Arc::clone(&kernel);
+        let backend = backend.clone();
+        async move {
+            for _ in 0..100 {
+                let rows = store(&kernel, &backend).await;
+                if rows.iter().any(|r| {
+                    r["role"] == "assistant"
+                        && r["content"].as_str().is_some_and(|c| c.starts_with(&want))
+                }) {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            false
+        }
+    };
+    let turn = |text: String, reply: String| {
+        let kernel = Arc::clone(&kernel);
+        let backend = backend.clone();
+        let s = Arc::clone(&s);
+        async move {
+            s.passes.lock().unwrap().push_back(pass(reply));
+            let _ = kernel
+                .send(vec![Item::new(
+                    backend,
+                    json!({"type": "send", "text": text, "client_id": "cell"}),
+                )])
+                .await;
+        }
+    };
+    for k in 0..8 {
+        turn(
+            format!("turn {k} {}", &long[..300]),
+            format!("S8-turn-{k} {long}"),
+        )
+        .await;
+        assert!(
+            answered(format!("S8-turn-{k}")).await,
+            "turn {k} was never answered"
+        );
+    }
+    let rows = store(&kernel, &backend).await;
+    assert!(
+        rows.iter().any(is_fold),
+        "eight long turns at a 12000 window fold"
+    );
+    assert!(
+        recalls.load(Ordering::SeqCst) >= 1,
+        "the folds made a context_recall due, and it ran inside a turn"
+    );
+    turn("still there?".to_string(), "S8-after-fold".to_string()).await;
+    assert!(
+        answered("S8-after-fold".to_string()).await,
+        "the turn after the folds was never answered"
+    );
+}
+
+// ── a new fold's anchor: known for every member, or the fold fails loud ──
+
+#[test]
+fn a_new_folds_anchor_is_its_least_leaf() {
+    let rows = vec![
+        json!({"role": "user", "id": 7, "content": "a"}),
+        json!({"role": "user", "id": 30, "kind": "fold", "refs": [3, 4], "anchor": 3, "content": "f"}),
+        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"}),
+    ];
+    // a member fold places by its own anchor, a legacy one by the head's anchors
+    let anchors = HashMap::from([(31, 1)]);
+    assert_eq!(member_anchor(&rows, &[0], &anchors).unwrap(), 7);
+    assert_eq!(member_anchor(&rows, &[0, 1], &anchors).unwrap(), 3);
+    assert_eq!(member_anchor(&rows, &[0, 1, 2], &anchors).unwrap(), 1);
+}
+
+#[test]
+fn a_fold_that_cannot_be_placed_is_an_error_not_a_panic() {
+    let rows = vec![
+        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"}),
+        json!({"role": "user", "id": "x", "content": "a row with no int id"}),
+        json!({"role": "user", "content": "a row with no id"}),
+    ];
+    let none = HashMap::new();
+    let err = |idxs: &[usize]| member_anchor(&rows, idxs, &none).unwrap_err().to_string();
+    assert_eq!(err(&[0]), "ValueError: fold: member fold 31 has no anchor");
+    assert_eq!(err(&[1]), "ValueError: fold: member row 'x' has no int id");
+    assert_eq!(err(&[2]), "ValueError: fold: member row None has no int id");
+    assert_eq!(
+        err(&[]),
+        "ValueError: fold: a fold needs at least one member"
+    );
+}
+
+#[tokio::test]
+async fn write_fold_reports_an_unplaceable_span_before_it_summarizes() {
+    // NO PANIC IN A TURN: a span with a member that has no known place is
+    // `FoldFail::Anchor` — the turn's error — and nothing is asked or written.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "fa").await;
+    let s = script(&backend, Vec::new(), Duration::ZERO);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider {
+        script: Arc::clone(&s),
+    });
+    let rows = vec![
+        json!({"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"}),
+        json!({"role": "user", "id": 32, "content": "a"}),
+    ];
+    let anchors = HashMap::new();
+    let ctx = crate::strategies::ProjectionCtx {
+        budget: 4000,
+        recent_n: 6,
+        provider: &provider,
+        self_id: &backend,
+        kernel: &kernel,
+        client_id: "cli",
+        anchors: &anchors,
+    };
+    let out = as_agent(
+        backend.clone(),
+        crate::strategies::fold::write_fold(&ctx, &rows, &[0, 1], &anchors),
+    )
+    .await;
+    match out {
+        Err(crate::strategies::fold::FoldFail::Anchor(e)) => {
+            assert_eq!(e.0, "fold: member fold 31 has no anchor");
+        }
+        other => panic!("expected FoldFail::Anchor, got {other:?}"),
+    }
+    assert_eq!(s.passes_served(), 0, "no summary was asked for");
+    assert!(
+        !store(&kernel, &backend).await.iter().any(is_fold),
+        "no fold row was written"
+    );
 }

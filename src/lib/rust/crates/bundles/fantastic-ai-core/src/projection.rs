@@ -44,6 +44,9 @@ pub enum ProjectFail {
     /// A fold's summary would not fit its budget after every re-summarise — the
     /// turn fails loud (python `FoldSummaryError`).
     FoldSummary(crate::strategies::fold::FoldSummaryError),
+    /// A fold's anchor cannot be known — the turn fails loud (python
+    /// `member_anchor`'s `ValueError`).
+    FoldAnchor(crate::folds::FoldAnchorError),
 }
 
 impl From<MemoryStoreError> for ProjectFail {
@@ -57,6 +60,7 @@ impl From<crate::strategies::fold::FoldFail> for ProjectFail {
         match e {
             crate::strategies::fold::FoldFail::Store(e) => Self::Store(e),
             crate::strategies::fold::FoldFail::Summary(e) => Self::FoldSummary(e),
+            crate::strategies::fold::FoldFail::Anchor(e) => Self::FoldAnchor(e),
         }
     }
 }

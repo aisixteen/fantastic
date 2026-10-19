@@ -1079,6 +1079,21 @@ pub async fn send(
             .await;
             json!({"error": e.0, "reason": "fold_summary", "client_id": client_id})
         }
+        // A FOLD THAT CANNOT BE PLACED (python `member_anchor`'s `ValueError`,
+        // through `_send`'s `except Exception`): the turn fails, reported on
+        // `status(done, reason='error')`, then raised — a FAILED execution, never
+        // a turn that dies in silence.
+        Ok(Err(GenFailure::FoldAnchor(e))) => {
+            emit_status(kernel, &state, agent_id, &client_id, "done", {
+                let mut m = Map::new();
+                m.insert("reason".to_string(), json!("error"));
+                m.insert("error".to_string(), json!(e.0.clone()));
+                m
+            })
+            .await;
+            raise = Some(("ValueError", e.0));
+            Value::Null
+        }
         // PROVIDER FAILURE (python `core.py`'s `except Exception`):
         // `status(done, reason='error', error=str(e))` announces it, then python
         // re-raises, and a raise is a FAILED execution — which is what makes
