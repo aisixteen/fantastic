@@ -122,6 +122,12 @@ def main() -> bool:
                 info["9_click"] = bool(await pg.until(f"{SKIN} === 'probe-red' && {BEZEL} === 'rgba(51, 0, 0, 0.9)'", 5))
                 await call({"type": "use", "name": "dark"})
                 await pg.until(f"{SKIN} === 'dark'", 5)
+                # The page's loader writes records after a 150 ms coalesce window
+                # (proxy_loader `debounceMs`). Navigating away before that write
+                # lands drops it, and the reload below would boot (and step 12
+                # read) the panel click's `probe-red` instead of `dark`. Wait for
+                # the write itself on disk, not for time.
+                info["9_disk"] = ((await disk_until(skin_yaml, lambda d: (d.get("skins") or {}).get("web") == "dark")).get("skins") or {}).get("web")
                 info["console_plain"] = [x for x in pg.logs if "WebGL" not in x][:6]
 
                 # ── 10-12: the same canvas, hosted by an (emulated) native shell ──
