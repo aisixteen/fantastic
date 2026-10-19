@@ -32,8 +32,16 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   agent picks the skin per backdrop and takes skins an AI writes (`schema`,
   `get`, `add`, `use`). Two stock skins, `dark` (today's look) and `glass` (for a
   native vibrancy backdrop). `fantastic readme skins` documents the schema.
+- The Home screen the home kernel serves, as a canvas view bundle (`home_view`):
+  your fantastics with live status, start, stop, open and remove; one live page
+  per open fantastic, kept across restarts; a nav pill and the shortcuts mod+0,
+  mod+1–9 and mod+W; Open Folder through the shell or a path field. The Home page
+  keeps its own records in `<home>/app/`.
 
 ### Changed
+
+- The home kernel serves the Home at `home.html` and the list page at
+  `list.html`.
 
 - Home layout v2: everything fantastic keeps for a user lives under ONE
   directory, `~/.fantastic/` (`FANTASTIC_HOME` still overrides it), in groups:

@@ -109,7 +109,7 @@ test("every tok() and tint() path is in SKIN_SCHEMA and every tinted path is opa
   // importing every module runs its CSS template strings: a bad path throws, and
   // TINTED fills with every tinted one
   for (const { rel } of sources()) {
-    if (rel === "main.ts" || rel === "bundle.ts") continue; // the page's entry: it boots
+    if (rel === "main.ts" || rel === "home.ts" || rel === "bundle.ts") continue; // a page's entry: it boots
     // a file:// URL, not a path: Windows' ESM loader takes no `D:\…` path
     await import(pathToFileURL(join(SRC, rel)).href);
   }

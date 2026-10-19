@@ -24,6 +24,10 @@ bundles, seeds an empty tree with the canvas root, and mounts.
   through the kernel (`ps` → `cancel`).
 - **html_agent** / **gl_agent** — frontend CONTENT agents (a mutable HTML body in
   a sandboxed frame; a WebGL shader). Content, not host clients.
+- **home_view** — the Home (`home.html`, served by the home kernel): the view of
+  the host's `home` agent. It renders the agent's `state` (your fantastics, the
+  open pages, the selection) and sends every click and key as a `home` verb; one
+  live canvas frame per open page, never reloaded while you switch.
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
   drawn with, per backdrop; it takes skins an AI writes (`fantastic readme skins`).
 
@@ -35,9 +39,12 @@ the host's capability readme.
 
 ```
 src/main.ts            the page: boot (the library) → register → seed → mountCanvas
-src/bundle.ts          the esbuild entry: inlines xterm.css, then loads main.ts
+src/home.ts            the Home page (home.html): boot → its records via web_loader → mount home_view
+src/bundle.ts          the esbuild entry: inlines xterm.css, then loads main.ts, or home.ts on <body data-page="home">
 src/lib.ts             the ONE seam to the library's public entry (src/lib/ts/src/index.ts)
-src/bundles/           canvas/, view.ts, terminal_view/, ai_view/, html_agent/, gl_agent/
+src/bundles/           canvas/, view.ts, terminal_view/, ai_view/, html_agent/, gl_agent/, skin/, shell.ts
+src/bundles/home_view/ the Home: home_view.ts (the view), home_model.ts (pure: state, labels, cards, shortcuts),
+                       pages.ts (the canvas-frame pool), home_css.ts (its style, every colour one --home-* property)
 src/vendor/            three, xterm, addon-fit, xterm.css (hermetic, no CDN — VENDOR.md)
 tests/                 node --test "tests/**/*.test.ts"   (no build step)
 scripts/pack.sh        → dist/canvas.zip

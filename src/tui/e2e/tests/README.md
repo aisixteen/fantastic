@@ -46,6 +46,16 @@ with `src/tui/e2e/wipe.sh`.
 | E64 `mcp_config` | scripted: a `.fantastic/.mcp.json` with another server (nothing created outside `.fantastic`); after boot it also holds `fantastic` → this binary + `[mcp]`, the other server and key order kept, a reboot leaves it byte-identical, no `mcp_config_error` | owner 2026-10-08: the mcp leg keeps .mcp.json |
 | E78 `fit` | scripted: the view's `fit` sizes an html cell to what it draws — a 640×360 box (sandboxed and trusted) and a paragraph wrapped at `max_width: 400` — the frame that size, nothing overflowing, the layout holding it; an unknown id refused | owner 2026-10-13: fit to content, a verb an AI can call | scripted |
 
+The `home` group drives the HOME (`_lib/home_live.py`, `HomeRig`): the test-only
+host `fantastic-home-host`, the `fantastic canvas` processes it lists, and Chrome
+on its `home.html`.
+
+| id | capability | inferred from | kind |
+|---|---|---|---|
+| E83 `home_list` | scripted: a running, a stopped and a missing fantastic listed in registry order with their names, folders, statuses, last seen and buttons; a path field in a plain tab; the page's root stored through `web_loader` | phase 3 (#47): the Home lists | scripted |
+| E84 `home_start_stop` | scripted: Start reaches running (the registry names pid and canvas), a row click opens a live canvas frame, the page's Stop shows stopping then stopped (the registry cleared), Open Folder through a native shell's `pickFolder` | phase 3 (#47): start, stop, open | scripted |
+| E85 `home_pages` | scripted: the pill and mod+0/1/2 switch two live canvases with no frame reload, a second tab shows (and moves) the same selection, mod+W closes the shown page and its fantastic runs on, a host restart brings the pages and selection back | phase 3 (#47): pages kept | scripted |
+
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 
 PASS 16 / 18: E40–E48, E50–E54, E56, E57 (E47 by its record: the PDF's own bytes

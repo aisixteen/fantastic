@@ -3,9 +3,11 @@
 //! A `canvas_page` agent is a child of a `web` host.
 //! It serves the canvas app from the binary itself: `canvas.zip` (packed by
 //! `build.rs`, embedded byte-for-byte) plus a one-tag `index.html` that loads the
-//! zip's `bundle.min.js`. The host's generic `GET /<id>/file/<path>` route pipes
-//! it, because this agent answers the SOURCE verb `read_stream` and declares it
-//! on its record (`verbs`). Read-only: there is nothing to write.
+//! zip's `bundle.min.js`, `home.html` (the same bundle, booting the Home) and
+//! `list.html` (the home's minimal list page). The host's generic
+//! `GET /<id>/file/<path>` route pipes it, because this agent answers the SOURCE
+//! verb `read_stream` and declares it on its record (`verbs`). Read-only: there
+//! is nothing to write.
 //!
 //! Its verbs: `reflect`, `boot` (no-op), `read_stream {path, offset?, length?}`
 //! (a BINARY reply: the bytes as the body, `{path, offset, next_offset, eof,
@@ -31,14 +33,19 @@ pub static CANVAS_ZIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/canvas.
 /// agent was given.
 pub const INDEX_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Aisixteen Fantastic · canvas</title></head>\n<body><script type=\"module\" src=\"bundle.min.js\"></script></body></html>\n";
 
-/// The home's minimal list page (`src/tui/web/home/list.html`), served as
-/// `home.html` until the Home UI replaces it.
-pub const HOME_HTML: &str = include_str!("../../../web/home/list.html");
+/// The Home's mount page: the same bundle, told by `data-page="home"` to boot
+/// the Home (`src/tui/web/canvas/src/home.ts`) instead of the canvas.
+pub const HOME_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Aisixteen Fantastic · home</title></head>\n<body data-page=\"home\"><script type=\"module\" src=\"bundle.min.js\"></script></body></html>\n";
+
+/// The home's minimal list page (`src/tui/web/home/list.html`, Phase 2), served
+/// as `list.html`.
+pub const LIST_HTML: &str = include_str!("../../../web/home/list.html");
 
 /// What `read_stream` declares on the record, so the host serves it.
 pub const READ_STREAM_DOC: &str = "args: path:str (req), offset:int?, length:int?. A file of the embedded canvas page as a BINARY reply — the bytes as the body, {path, offset, next_offset, eof, size} as the head.";
 
-/// Every served file, inflated once: the zip's entries plus `index.html`.
+/// Every served file, inflated once: the zip's entries plus `index.html`,
+/// `home.html` and `list.html`.
 fn files() -> &'static BTreeMap<String, Vec<u8>> {
     static FILES: OnceLock<BTreeMap<String, Vec<u8>>> = OnceLock::new();
     FILES.get_or_init(|| {
@@ -55,6 +62,7 @@ fn files() -> &'static BTreeMap<String, Vec<u8>> {
         }
         out.insert("index.html".into(), INDEX_HTML.as_bytes().to_vec());
         out.insert("home.html".into(), HOME_HTML.as_bytes().to_vec());
+        out.insert("list.html".into(), LIST_HTML.as_bytes().to_vec());
         out
     })
 }
@@ -149,6 +157,23 @@ mod tests {
         // the readme stamps the sha256 of the bundle it ships (verify-before-serve)
         let readme = String::from_utf8_lossy(&f["readme.md"]);
         assert!(readme.contains("expected: "), "the pack stamped the readme");
+    }
+
+    #[test]
+    fn home_html_mounts_the_bundle_as_the_home_and_list_html_is_the_list_page() {
+        let f = files();
+        let home = String::from_utf8_lossy(&f["home.html"]);
+        assert!(home.contains("<body data-page=\"home\">"), "{home}");
+        assert!(home.contains("src=\"bundle.min.js\""), "{home}");
+        let list = String::from_utf8_lossy(&f["list.html"]);
+        assert_eq!(list, LIST_HTML);
+        assert!(list.contains("/home/ws"), "the list page watches home");
+        let (head, body) = read_stream(&json!({"path": "home.html"}));
+        assert_eq!(head["eof"], json!(true));
+        assert_eq!(body.unwrap(), HOME_HTML.as_bytes());
+        let (head, body) = read_stream(&json!({"path": "list.html"}));
+        assert_eq!(head["size"], json!(LIST_HTML.len()));
+        assert_eq!(body.unwrap(), LIST_HTML.as_bytes());
     }
 
     #[test]
