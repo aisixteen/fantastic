@@ -72,9 +72,12 @@ async fn a_saved_setup_saves_lists_and_forgets_as_a_private_file() {
     let rec = json!({"handler_module": "demo_backend.tools", "model": "m-1", "endpoint": "http://127.0.0.1:9"});
     let saved = call(&k, "user", json!({"type": "persist_record", "name": "opus", "record": rec})).await;
     assert!(saved.get("version").is_some(), "{saved}");
-    let file = home.join("agents/ai_agent/saved/opus.yaml");
+    let file = home.join("user/setups/ai_agent/opus.yaml");
     assert_eq!(crate::sys::mode_of(&file).unwrap(), 0o600);
-    assert_eq!(crate::sys::mode_of(&home.join("agents/ai_agent/saved")).unwrap(), 0o700);
+    for d in ["user", "user/setups", "user/setups/ai_agent"] {
+        assert_eq!(crate::sys::mode_of(&home.join(d)).unwrap(), 0o700, "{d}");
+    }
+    assert!(!home.join("agents").exists(), "nothing at the old place");
     let tree = call(&k, "user", json!({"type": "load_tree"})).await;
     assert_eq!(tree["saved"][0]["name"], "opus");
     assert_eq!(tree["saved"][0]["record"]["model"], "m-1");

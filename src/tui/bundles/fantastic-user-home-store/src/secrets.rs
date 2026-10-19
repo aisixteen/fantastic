@@ -2,7 +2,7 @@
 //! (there is no default: nothing is stored until a mode is chosen).
 //!
 //! ```text
-//!   <home>/agents/ai_agent/keys/   0700
+//!   <home>/user/keys/              0700
 //!   ├── mode                       0600   "plain" | "secure"
 //!   ├── refs.json                  0600   {ref: host} — the keys stored, NO values
 //!   └── credentials.yaml           0600   the PLAIN mode's values
@@ -24,11 +24,11 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::{ai_agent_dir, private, private_dirs, read_private, write_private};
+use crate::{private, private_dirs, read_private, user_dir, write_private};
 
-/// The keys dir under the home: `agents/ai_agent/keys`.
+/// The keys dir under the home: `user/keys`.
 pub fn keys_dir(home: &std::path::Path) -> PathBuf {
-    ai_agent_dir(home).join("keys")
+    user_dir(home).join("keys")
 }
 
 /// The keychain namespace the SECURE mode's items live under.
@@ -194,22 +194,23 @@ mod tests {
     }
 
     #[test]
-    fn keys_live_under_agents_ai_agent_keys_every_level_private() {
+    fn keys_live_under_user_keys_every_level_private() {
         let h = home();
         Secrets::new(Ok(h.clone())).set_mode(Mode::Plain).unwrap();
-        for d in ["", "agents", "agents/ai_agent", "agents/ai_agent/keys"] {
+        for d in ["", "user", "user/keys"] {
             assert_eq!(crate::sys::mode_of(&h.join(d)).unwrap(), 0o700, "{d}");
         }
-        assert!(h.join("agents/ai_agent/keys/mode").is_file());
+        assert!(h.join("user/keys/mode").is_file());
         assert!(!h.join("secrets").exists(), "nothing at the old place");
+        assert!(!h.join("agents").exists(), "nothing at the old place");
         let _ = fs::remove_dir_all(&h);
     }
 
     #[test]
     fn each_mode_names_its_credential_store_backend() {
         let h = PathBuf::from("/h");
-        // `/h/agents/ai_agent/keys/credentials.yaml`, in this OS's separators
-        let file = ["agents", "ai_agent", "keys", CREDENTIALS].iter().fold(h.clone(), |p, c| p.join(c));
+        // `/h/user/keys/credentials.yaml`, in this OS's separators
+        let file = ["user", "keys", CREDENTIALS].iter().fold(h.clone(), |p, c| p.join(c));
         assert_eq!(Mode::Plain.store(&h), json!({"backend": "file", "file": file.display().to_string()}));
         assert_eq!(Mode::Secure.store(&h)["backend"], "keychain");
     }

@@ -45,7 +45,7 @@ from e2e_build import build_lock, variant_name  # noqa: E402
 from helpers import oslayer, verdict  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
-# else ~/.config/fantastic. A test must never read or write the owner's real
+# else ~/.fantastic. A test must never read or write the owner's real
 # home: every binary this runner launches inherits a throwaway one.
 _HOME = Path(tempfile.mkdtemp(prefix="fc-e2e-home-"))
 oslayer.make_private(_HOME)  # the store refuses a home that is not owner-only

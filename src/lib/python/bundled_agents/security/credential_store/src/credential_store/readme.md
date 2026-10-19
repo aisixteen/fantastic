@@ -13,7 +13,8 @@ the next read picks it up, with no restart.
 | `forget {ref}` | drop the VALUE; the declaration stays |
 
 **Backends** (`backend` on the record): `file` (default) — one YAML file at an
-ABSOLUTE path, `~/.fantastic/credentials/<id>.yaml` unless `file` names another
+ABSOLUTE path, `<home>/user/credentials/<id>.yaml` (`<home>` is `FANTASTIC_HOME`,
+else `~/.fantastic`) unless `file` names another
 (`/…` or `~…`; a relative path is refused at the write: "file='creds.yaml' must be
 an absolute path (starting with / or ~) — a relative path is refused"), written
 0600 and read only if it is a regular file owned by this user with no group/other

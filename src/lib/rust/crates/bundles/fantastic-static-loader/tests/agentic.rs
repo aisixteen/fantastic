@@ -160,7 +160,7 @@ fn mk_kernel() -> Arc<Kernel> {
     // agent's root_path from `storage.workdir()`, so an in-memory kernel hands
     // every agent an empty path and `find_store` can never match a declared
     // provider again — the tree comes back but its STORE does not.
-    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::Disk(
+    let mut kernel = Kernel::with_storage(fantastic_kernel::StorageMode::disk(
         std::env::current_dir().unwrap(),
     ));
     kernel.bundles.register(HANDLER_MODULE, StaticLoaderBundle);

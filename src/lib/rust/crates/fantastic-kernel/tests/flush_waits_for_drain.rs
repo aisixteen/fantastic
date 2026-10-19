@@ -86,7 +86,7 @@ impl Bundle for GatedStore {
 }
 
 fn kernel_at(store: &Path, gate: &Arc<Semaphore>, entered: &Arc<Notify>) -> Arc<Kernel> {
-    let mut kernel = Kernel::with_storage(StorageMode::Disk(store.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::disk(store.to_path_buf()));
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
     reg.register("readme_bundle.tools", ReadmeBundle);

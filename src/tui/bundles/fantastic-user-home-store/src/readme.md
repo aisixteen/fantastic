@@ -1,8 +1,8 @@
 # user_home_store — the user's saved set-ups
 
-Named agent-record BLUEPRINTS kept in the user's home config dir
-(`FANTASTIC_HOME`, else `~/.config/fantastic`), one plain-text file per name
-under `agents/ai_agent/saved/`. The CLI owns it: the binary fixes its directory when it
+Named agent-record BLUEPRINTS kept in the user's home dir
+(`FANTASTIC_HOME`, else `~/.fantastic`), one plain-text file per name
+under `user/setups/ai_agent/`. The CLI owns it: the binary fixes its directory when it
 registers it — a record cannot move it. Who reaches it is its grants.
 
 A saved set-up is `handler_module` plus that bundle's config (endpoint, model,

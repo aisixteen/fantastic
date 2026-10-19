@@ -65,6 +65,14 @@ impl Paths {
             cwd: cwd.to_path_buf(),
         }
     }
+    /// The kernel's guard, asked BEFORE this shell writes anything into the
+    /// store (the seed, its log): a `.fantastic` that IS the fantastic home is
+    /// never a kernel's (`fantastic_kernel::bootstrap::refuse_home_as_state_dir`).
+    pub fn refuse_the_home(&self) -> Result<(), String> {
+        use fantastic_kernel::bootstrap::{fantastic_home, refuse_home_as_state_dir};
+        refuse_home_as_state_dir(&self.cwd, &self.store, fantastic_home().as_deref()).map_err(|e| e.to_string())
+    }
+
     /// TRUE when this directory has never been used: a run here seeds it.
     pub fn is_fresh(&self) -> bool {
         !self.store.exists()
@@ -114,5 +122,15 @@ mod tests {
         assert!(id.starts_with("tui-"));
         assert_ne!(id, "cli", "`cli` is ai_core's own internal caller id");
         assert_eq!(id.len(), 10);
+    }
+
+    #[test]
+    fn the_homes_parent_is_refused_before_anything_is_written() {
+        let p = Paths::at(Path::new("/u"));
+        let home = Path::new("/u/.fantastic");
+        let e = fantastic_kernel::bootstrap::refuse_home_as_state_dir(&p.cwd, &p.store, Some(home)).unwrap_err();
+        assert!(e.to_string().contains("its .fantastic is the fantastic home"), "{e}");
+        let q = Paths::at(Path::new("/u/proj"));
+        assert!(fantastic_kernel::bootstrap::refuse_home_as_state_dir(&q.cwd, &q.store, Some(home)).is_ok());
     }
 }

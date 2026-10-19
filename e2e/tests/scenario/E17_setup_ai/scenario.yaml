@@ -159,7 +159,7 @@ runs:
       lock_released: true
       files_exist:
         - .fantastic/agents/user/agents/vllm-1/agent.yaml
-        - home/agents/ai_agent/saved/vllm-1.yaml
+        - home/user/setups/ai_agent/vllm-1.yaml
       # the key the page stored IS the configured one (compared, never printed)
       key_stored_is: VLLM_API_KEY
 

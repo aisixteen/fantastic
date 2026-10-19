@@ -524,7 +524,7 @@ async def test_the_file_is_an_absolute_path_a_relative_one_is_refused(
     # `~…` passes the write (no disk is touched to judge it)
     from credential_store.tools import validate_meta
 
-    assert validate_meta({"file": "~/.fantastic/credentials/x.yaml"}, {}) is None
+    assert validate_meta({"file": "~/.fantastic/user/credentials/x.yaml"}, {}) is None
     assert validate_meta({"keychain_namespace": ""}, {}) == (
         "keychain_namespace must be a non-empty string"
     )
@@ -665,3 +665,17 @@ async def test_a_stored_value_without_a_host_is_refused(
     out = await _call(k, {"type": "get", "ref": "openai/main"}, as_="alice")
     assert out["result"] == _NO_HOST, out
     assert KEY not in repr(out), out
+
+
+def test_the_default_file_is_under_the_homes_user_credentials(monkeypatch, tmp_path):
+    """No `file`: `<home>/user/credentials/<id>.yaml`, `<home>` being
+    FANTASTIC_HOME (made absolute), else `~/.fantastic`."""
+    from credential_store.tools import default_file
+
+    monkeypatch.delenv("FANTASTIC_HOME", raising=False)
+    assert default_file("c2") == "~/.fantastic/user/credentials/c2.yaml"
+    monkeypatch.setenv("FANTASTIC_HOME", str(tmp_path / "h"))
+    assert default_file("c2") == f"{tmp_path / 'h'}/user/credentials/c2.yaml"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FANTASTIC_HOME", "rel")
+    assert default_file("c2") == f"{tmp_path / 'rel'}/user/credentials/c2.yaml"

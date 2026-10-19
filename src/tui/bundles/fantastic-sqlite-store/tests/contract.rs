@@ -40,7 +40,7 @@ fn agent(id: &str, hm: Option<&str>, meta: Value) -> Arc<Agent> {
 /// The cases' fixture: guid `g1`, `alice` and `bob` granted onto the store `mem`.
 fn store(handler: &str, tag: &str) -> Arc<Kernel> {
     let dir = work();
-    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::Disk(dir.clone()));
+    let mut k = Kernel::with_storage(fantastic_kernel::StorageMode::disk(dir.clone()));
     k.bundles.register(RAM, fantastic_ram_store::RamStoreBundle::default());
     k.bundles.register(SQL, fantastic_sqlite_store::SqliteStoreBundle::default());
     let k = Arc::new(k);

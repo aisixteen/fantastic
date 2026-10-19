@@ -35,6 +35,28 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- Home layout v2: everything fantastic keeps for a user lives under ONE
+  directory, `~/.fantastic/` (`FANTASTIC_HOME` still overrides it), in groups:
+  `app/` (the desktop app's home kernel), `fantastics/` (the registry),
+  `user/setups/ai_agent/` (saved AI set-ups, was
+  `~/.config/fantastic/agents/ai_agent/saved/`), `user/keys/` (was
+  `~/.config/fantastic/agents/ai_agent/keys/`), `user/credentials/` (the
+  credential_store `file` default in python, rust and swift, was
+  `~/.fantastic/credentials/`) and `logs/` (canvas launch logs on every OS, was
+  `~/Library/Logs/Fantastic`, `$XDG_STATE_HOME/fantastic/logs` or
+  `%LOCALAPPDATA%\fantastic\logs`). The home kernel's folder is `<home>/app`,
+  its workdir and its state dir (was `<home>/.fantastic/app`, with its state
+  in `<home>/.fantastic/app/.fantastic`). The home was `~/.config/fantastic`.
+  Nothing moves by itself: `fantastic migrate-home` moves an older layout's
+  files (`--dry-run` prints the moves), and refuses while a fantastic or the app
+  runs or a target exists.
+- Every runtime's disk bootstrap refuses a workdir whose `.fantastic` is the
+  fantastic home: `<dir>: its .fantastic is the fantastic home (<home>) — run
+  fantastic in a project folder`.
+- Rust kernel: the state dir is a boot option, `StorageMode::Disk { workdir,
+  state_dir }`. `BootstrapOptions::daemon` and `one_shot` keep
+  `<workdir>/.fantastic`; `daemon_at(workdir, state_dir)` names another. The
+  on-disk format is unchanged.
 - The canvas theme panel uses the canvas palette and gains a Skins section. AI
   agents made before this release call the skin agent once their cell is
   reopened.

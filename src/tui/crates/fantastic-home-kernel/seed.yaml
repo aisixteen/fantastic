@@ -1,11 +1,11 @@
-# The home kernel's base records, written once, when W has no .fantastic/agent.yaml.
+# The home kernel's base records, written once, when W (its state dir) has no agent.yaml.
 agents:
   - id: home_memory            # the kernel's own store, named by the root's memory_store_id
     handler_module: sqlite_store.tools
-    path: .fantastic/home.db
+    path: home.db
     admins: [kernel]
   - id: store                  # the root loader's provider: every host record persists through it
     handler_module: file_bridge.tools
-    root: .fantastic
+    root: .
     allow: ["."]
     ingress_rule: allow_all_ingress

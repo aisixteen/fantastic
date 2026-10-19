@@ -53,8 +53,8 @@ fantastic-web-mcp = { path = "bundles/fantastic-web-mcp" }
 fantastic-user = { path = "bundles/fantastic-user" }
 fantastic-sqlite-store = { path = "bundles/fantastic-sqlite-store" }
 fantastic-ram-store = { path = "../lib/rust/crates/bundles/fantastic-ram-store" }
-# THE AI AGENT'S SAVED SET-UPS: named agent blueprints in the home config dir (FANTASTIC_HOME
-# or ~/.config/fantastic), owned by this binary — see kern/saved.
+# THE AI AGENT'S SAVED SET-UPS: named agent blueprints in the home dir (FANTASTIC_HOME
+# or ~/.fantastic), owned by this binary — see kern/saved.
 fantastic-user-home-store = { path = "bundles/fantastic-user-home-store" }
 getrandom = "0.2"
 fantastic-canvas-page = { path = "bundles/fantastic-canvas-page" }

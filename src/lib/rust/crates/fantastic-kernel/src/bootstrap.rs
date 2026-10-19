@@ -68,7 +68,21 @@ impl BootstrapOptions {
     /// Disk-backed daemon bootstrap (acquires lock; root id `"kernel_state"`).
     pub fn daemon(workdir: impl Into<PathBuf>) -> Self {
         Self {
-            storage: StorageMode::Disk(workdir.into()),
+            storage: StorageMode::disk(workdir.into()),
+            acquire_lock: true,
+            root_id: DEFAULT_ROOT_ID.to_string(),
+        }
+    }
+
+    /// Disk-backed daemon bootstrap whose state lives in `state_dir`, not in
+    /// `<workdir>/.fantastic` (acquires lock; root id `"kernel_state"`). The
+    /// on-disk format is the same; only its place is the host's choice.
+    pub fn daemon_at(workdir: impl Into<PathBuf>, state_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            storage: StorageMode::Disk {
+                workdir: workdir.into(),
+                state_dir: state_dir.into(),
+            },
             acquire_lock: true,
             root_id: DEFAULT_ROOT_ID.to_string(),
         }
@@ -77,7 +91,7 @@ impl BootstrapOptions {
     /// Disk-backed one-shot read (no lock).
     pub fn one_shot(workdir: impl Into<PathBuf>) -> Self {
         Self {
-            storage: StorageMode::Disk(workdir.into()),
+            storage: StorageMode::disk(workdir.into()),
             acquire_lock: false,
             root_id: DEFAULT_ROOT_ID.to_string(),
         }
@@ -130,7 +144,7 @@ pub fn bootstrap(bundles: BundleRegistry, opts: BootstrapOptions) -> KernelResul
     let kernel = Arc::new(kernel);
 
     match &opts.storage {
-        StorageMode::Disk(workdir) => boot_disk(&kernel, workdir, &opts),
+        StorageMode::Disk { workdir, state_dir } => boot_disk(&kernel, workdir, state_dir, &opts),
         StorageMode::InMemory => boot_in_memory(&kernel, &opts.root_id),
     }
 }
@@ -138,9 +152,11 @@ pub fn bootstrap(bundles: BundleRegistry, opts: BootstrapOptions) -> KernelResul
 fn boot_disk(
     kernel: &Arc<Kernel>,
     workdir: &Path,
+    state_dir: &Path,
     opts: &BootstrapOptions,
 ) -> KernelResult<BootedKernel> {
-    let fantastic_dir = workdir.join(".fantastic");
+    refuse_home_as_state_dir(workdir, state_dir, fantastic_home().as_deref())?;
+    let fantastic_dir = state_dir.to_path_buf();
     // A LOCKLESS boot (`--help`, `reflect`) creates nothing on disk; the lock
     // lives in `.fantastic`, so a locked one makes the dir first.
     if opts.acquire_lock {
@@ -148,7 +164,7 @@ fn boot_disk(
             path: fantastic_dir.clone(),
             source: e,
         })?;
-        lock::acquire(workdir)?;
+        lock::acquire_at(state_dir)?;
     }
 
     // THE TREE, python `_bootstrap`: `records = read_tree(.fantastic)`. A
@@ -308,6 +324,92 @@ fn boot_in_memory(kernel: &Arc<Kernel>, root_id: &str) -> KernelResult<BootedKer
 /// No-op on a workdir that was never used in Disk mode.
 pub fn shutdown(workdir: &Path) -> KernelResult<()> {
     lock::release(workdir)
+}
+
+/// [`shutdown`] for a kernel booted with [`BootstrapOptions::daemon_at`]:
+/// releases the lock in its `state_dir`.
+///
+/// # Errors
+/// As [`shutdown`].
+pub fn shutdown_at(state_dir: &Path) -> KernelResult<()> {
+    lock::release_at(state_dir)
+}
+
+/// The variable naming the fantastic home.
+pub const HOME_VAR: &str = "FANTASTIC_HOME";
+
+/// The fantastic home: `FANTASTIC_HOME`, else `~/.fantastic` (`$HOME`, or
+/// `%USERPROFILE%` on Windows). `None` when neither names a dir.
+#[must_use]
+pub fn fantastic_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os(HOME_VAR).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(h));
+    }
+    let user = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(user)
+        .filter(|v| !v.is_empty())
+        .map(|h| PathBuf::from(h).join(".fantastic"))
+}
+
+/// The home as a path is written — python `kernel._home.home_spelled`:
+/// `FANTASTIC_HOME` made absolute (against the current dir, folded), else
+/// `~/.fantastic` with the `~` kept, for a reader.
+///
+/// # Errors
+/// The current dir cannot be read (a relative `FANTASTIC_HOME` needs it).
+pub fn home_spelled() -> std::io::Result<String> {
+    match std::env::var_os(HOME_VAR).filter(|v| !v.is_empty()) {
+        Some(h) => Ok(fold(&std::env::current_dir()?, Path::new(&h))
+            .to_string_lossy()
+            .into_owned()),
+        None => Ok("~/.fantastic".to_string()),
+    }
+}
+
+/// THE GUARD: a kernel never keeps its own state in the fantastic home. With
+/// the home at `~/.fantastic`, a kernel booted in `~` would otherwise take the
+/// home for its `.fantastic`. Both sides are absolutized against the current
+/// dir and folded lexically (`.`/`..`), so the rule is the same in every
+/// runtime and needs no dir to exist.
+///
+/// # Errors
+/// [`KernelError::HomeAsStateDir`] when `state_dir` is `home`.
+pub fn refuse_home_as_state_dir(
+    workdir: &Path,
+    state_dir: &Path,
+    home: Option<&Path>,
+) -> KernelResult<()> {
+    let Some(home) = home else {
+        return Ok(());
+    };
+    let cwd = std::env::current_dir().map_err(|e| KernelError::Persistence {
+        path: workdir.to_path_buf(),
+        source: e,
+    })?;
+    if fold(&cwd, state_dir) == fold(&cwd, home) {
+        return Err(KernelError::HomeAsStateDir {
+            dir: workdir.to_path_buf(),
+            home: home.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// `p` absolutized against `base`, `.`/`..` folded, with no filesystem access.
+fn fold(base: &Path, p: &Path) -> PathBuf {
+    use std::path::Component;
+    let joined = base.join(p);
+    let mut out: Vec<Component> = Vec::new();
+    for c in joined.components() {
+        match c {
+            Component::ParentDir if matches!(out.last(), Some(Component::Normal(_))) => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out.iter().collect()
 }
 
 #[cfg(test)]

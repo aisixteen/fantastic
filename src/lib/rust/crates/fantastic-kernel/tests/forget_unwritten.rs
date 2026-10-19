@@ -69,7 +69,7 @@ impl Bundle for Plain {
 }
 
 fn kernel_at(store: &Path, deletes: &Arc<Mutex<Vec<String>>>) -> Arc<Kernel> {
-    let mut kernel = Kernel::with_storage(StorageMode::Disk(store.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::disk(store.to_path_buf()));
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
     reg.register("plain.tools", Plain);

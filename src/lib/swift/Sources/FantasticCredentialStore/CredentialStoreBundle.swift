@@ -60,7 +60,16 @@ import OrderedCollections
 
 let NAME = "credential_store"
 let BACKENDS = ["file", "keychain", "env"]
-let DEFAULT_DIR = "~/.fantastic/credentials"
+let CREDENTIALS_DIR = "user/credentials"
+
+/// The `file` backend's path when the record names none — python
+/// `default_file`: `<home>/user/credentials/<store id>.yaml`, `<home>` being
+/// `FANTASTIC_HOME` (made absolute), else `~/.fantastic`.
+public func defaultCredentialsFile(
+    _ storeId: String, environment: [String: String] = ProcessInfo.processInfo.environment
+) -> String {
+    "\(fantasticHomeSpelled(environment: environment))/\(CREDENTIALS_DIR)/\(storeId).yaml"
+}
 let KEYCHAIN_NAMESPACE = "fantastic"
 
 public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
@@ -206,7 +215,8 @@ public final class CredentialStoreBundle: AgentBundle, @unchecked Sendable {
         | `forget {ref}` | drop the VALUE; the declaration stays |
 
         **Backends** (`backend` on the record): `file` (default) — one YAML file at an
-        ABSOLUTE path, `~/.fantastic/credentials/<id>.yaml` unless `file` names another
+        ABSOLUTE path, `<home>/user/credentials/<id>.yaml` (`<home>` is `FANTASTIC_HOME`,
+        else `~/.fantastic`) unless `file` names another
         (`/…` or `~…`; a relative path is refused at the write: "file='creds.yaml' must be
         an absolute path (starting with / or ~) — a relative path is refused"), written
         0600 and read only if it is a regular file owned by this user with no group/other
@@ -473,7 +483,7 @@ private struct FileBackend: CredentialBackend {
 
     /// The record's `file`, or the default under the user's home.
     static func shown(_ ctx: Ctx) -> String {
-        pyTruthy(ctx.meta("file")) ? pyStr(ctx.meta("file")) : "\(DEFAULT_DIR)/\(ctx.id).yaml"
+        pyTruthy(ctx.meta("file")) ? pyStr(ctx.meta("file")) : defaultCredentialsFile(ctx.id)
     }
 
     init(ctx: Ctx) throws(PyError) {

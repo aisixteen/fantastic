@@ -602,3 +602,39 @@ private func makeTempDir() -> URL {
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
+
+@Suite("HomeGuard")
+struct HomeGuardTests {
+    /// A kernel never keeps its state in the fantastic home.
+    @Test func theRuleRefusesTheHomeAndNothingElse() throws {
+        let tmp = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dir = foldPath(tmp.path)
+        let home = dir + "/.fantastic"
+        #expect(throws: HomeAsStateDir.self) {
+            try refuseHomeAsStateDir(workdir: dir, stateDir: home, home: home)
+        }
+        do {
+            try refuseHomeAsStateDir(workdir: dir, stateDir: home, home: home)
+        } catch {
+            #expect(
+                "\(error)"
+                    == "\(dir): its .fantastic is the fantastic home (\(home)) — run fantastic in a project folder")
+        }
+        // folded lexically
+        #expect(throws: HomeAsStateDir.self) {
+            try refuseHomeAsStateDir(workdir: dir, stateDir: dir + "/x/../.fantastic", home: home)
+        }
+        // the home kernel's own state dir, a project's, and no home at all
+        try refuseHomeAsStateDir(workdir: home + "/app", stateDir: home + "/app", home: home)
+        try refuseHomeAsStateDir(workdir: dir + "/p", stateDir: dir + "/p/.fantastic", home: home)
+        try refuseHomeAsStateDir(workdir: dir, stateDir: home, home: nil)
+    }
+
+    @Test func theDefaultHomeIsDotFantasticInTheUsersHome() {
+        #expect(fantasticHome(environment: ["HOME": "/u"]) == "/u/.fantastic")
+        #expect(fantasticHome(environment: ["HOME": "/u", "FANTASTIC_HOME": "/h"]) == "/h")
+        #expect(fantasticHome(environment: [:]) == nil)
+        #expect(fantasticHomeSpelled(environment: [:]) == "~/.fantastic")
+    }
+}

@@ -449,3 +449,77 @@ fn the_root_records_children_dir_places_the_whole_tree() {
         Some(fantastic.join("host_agents/web/host_agents/leaf"))
     );
 }
+
+#[test]
+fn daemon_at_keeps_the_lock_the_root_agents_and_the_store_in_state_dir() {
+    let tmp = TempDir::new().unwrap();
+    let w = tmp.path().join("app");
+    std::fs::create_dir_all(&w).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut reg = with_loader(BundleRegistry::new());
+    reg.register("noop.tools", Noop);
+    crate::test_support::register_fake_store(&mut reg, &w);
+    let booted = bootstrap(reg, BootstrapOptions::daemon_at(&w, &w)).expect("boot");
+    let kernel = Arc::clone(&booted.kernel);
+    assert_eq!(kernel.workdir().unwrap(), w);
+    assert_eq!(kernel.root().unwrap().root_path, w);
+    rt.block_on(async {
+        boot_root(&kernel).await;
+        // a RELATIVE store root resolves against the workdir: `.` IS the state dir
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel_state"),
+                json!({
+                    "type": "create_agent", "parent_id": "kernel",
+                    "handler_module": "file_bridge.tools", "allow": ["."],
+                    "id": "store", "root": ".", "ingress_rule": "allow_all_ingress",
+                }),
+            )])
+            .await;
+        assert_eq!(
+            crate::persistence::find_store(&kernel),
+            Some(AgentId::from("store"))
+        );
+        let _ = kernel
+            .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
+            .await;
+        settle().await;
+    });
+    assert!(w.join("lock.yaml").is_file());
+    assert!(w.join("agent.yaml").is_file());
+    assert!(w.join("agents/child_a/agent.yaml").is_file());
+    assert!(w.join("agents/store/agent.yaml").is_file());
+    assert!(
+        !w.join(".fantastic").exists(),
+        "no .fantastic inside the state dir"
+    );
+    assert!(!tmp.path().join(".fantastic").exists());
+    assert_eq!(lock::held_at(&w).unwrap(), Some(std::process::id()));
+    shutdown_at(&w).unwrap();
+    assert!(!w.join("lock.yaml").exists());
+}
+
+#[test]
+fn the_guard_refuses_a_state_dir_that_is_the_home() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join(".fantastic");
+    let err = refuse_home_as_state_dir(tmp.path(), &home, Some(&home)).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "{}: its .fantastic is the fantastic home ({}) — run fantastic in a project folder",
+            tmp.path().display(),
+            home.display()
+        )
+    );
+    // folded lexically: `<home>/../.fantastic` is the home too
+    let odd = tmp.path().join("x/../.fantastic");
+    assert!(refuse_home_as_state_dir(tmp.path(), &odd, Some(&home)).is_err());
+    // the home kernel's own state dir is `<home>/app`, never the home
+    let app = home.join("app");
+    refuse_home_as_state_dir(&app, &app, Some(&home)).unwrap();
+    // a project folder, and no home at all
+    let proj = tmp.path().join("proj");
+    refuse_home_as_state_dir(&proj, &proj.join(".fantastic"), Some(&home)).unwrap();
+    refuse_home_as_state_dir(tmp.path(), &home, None).unwrap();
+}

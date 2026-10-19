@@ -1,9 +1,10 @@
 //! THE HOME KERNEL, booted in this process on the caller's runtime.
 //!
-//! Its workdir is `W = <home>/.fantastic/app`, an ordinary fantastic folder:
-//! everything it writes is under it, in the kernel's standard layout —
-//! `W/.fantastic/{lock.yaml, agent.yaml, agents/…, home.db, web/…}` and the run
-//! file `W/home.yaml` `{pid, port, url}` while it serves.
+//! Its folder is `W = <home>/app`, both its workdir and its state dir
+//! (`BootstrapOptions::daemon_at(W, W)`: no `.fantastic` inside): everything it
+//! writes is under it, in the kernel's standard format —
+//! `W/{lock.yaml, agent.yaml, agents/…, home.db, web/…}` and the run file
+//! `W/home.yaml` `{pid, port, url}` while it serves.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -31,9 +32,9 @@ const EVENTS_BOUND: usize = 256;
 /// The base records a new home needs before its root boots.
 const SEED: &str = include_str!("../seed.yaml");
 
-/// The home kernel's workdir under `home`.
+/// The home kernel's folder under `home`: its workdir and its state dir.
 pub fn workdir(home: &Path) -> PathBuf {
-    home.join(".fantastic").join("app")
+    home.join("app")
 }
 
 /// The URL of the home page on `port`.
@@ -151,10 +152,10 @@ pub(crate) fn registry(cfg: &Config, own: String) -> BundleRegistry {
     reg
 }
 
-/// A new home's base records (`seed.yaml`), written once: while `W` has no root record.
+/// A new home's base records (`seed.yaml`), written once: while `W` (the state
+/// dir) has no root record.
 fn seed(w: &Path) -> Result<(), String> {
-    let fantastic = w.join(".fantastic");
-    if sys::exists(&fantastic.join("agent.yaml")) {
+    if sys::exists(&w.join("agent.yaml")) {
         return Ok(());
     }
     let doc: serde_yaml::Value =
@@ -170,7 +171,7 @@ fn seed(w: &Path) -> Result<(), String> {
             .ok_or("seed.yaml: a record has no `id`")?;
         let text = serde_yaml::to_string(record).map_err(|e| format!("seed.yaml: {id}: {e}"))?;
         sys::write_atomic(
-            &fantastic.join("agents").join(id).join("agent.yaml"),
+            &w.join("agents").join(id).join("agent.yaml"),
             text.as_bytes(),
         )?;
     }
@@ -191,11 +192,13 @@ impl HomeKernel {
         check(&cfg)?;
         let w = workdir(&cfg.home);
         fantastic_user_home_store::ensure_private_dir(&cfg.home, &w)?;
+        // The home's own folder, never listed: `<home>` itself, the parent of `W`.
         let own = sys::folder(
-            w.to_str()
-                .ok_or_else(|| format!("{} is not UTF-8", w.display()))?,
+            cfg.home
+                .to_str()
+                .ok_or_else(|| format!("{} is not UTF-8", cfg.home.display()))?,
         )?;
-        match lock::held(&w) {
+        match lock::held_at(&w) {
             Ok(Some(pid)) => {
                 return Err(format!(
                     "{}: already running (pid {pid})",
@@ -206,7 +209,7 @@ impl HomeKernel {
             Err(e) => return Err(e.to_string()),
         }
         seed(&w)?;
-        let booted = bootstrap::bootstrap(registry(&cfg, own), BootstrapOptions::daemon(&w))
+        let booted = bootstrap::bootstrap(registry(&cfg, own), BootstrapOptions::daemon_at(&w, &w))
             .map_err(|e| e.to_string())?;
         let kernel = booted.kernel;
         match Self::start(&kernel, &cfg, &w).await {
@@ -216,7 +219,7 @@ impl HomeKernel {
                 for line in fantastic_sqlite_store::close_all(&kernel) {
                     tracing::warn!("home: a failed boot: {line}");
                 }
-                if let Err(le) = bootstrap::shutdown(&w) {
+                if let Err(le) = bootstrap::shutdown_at(&w) {
                     tracing::warn!("home: a failed boot: {le}");
                 }
                 Err(e)
@@ -380,7 +383,7 @@ impl HomeKernel {
         if let Err(e) = sys::remove_file(&self.workdir.join("home.yaml")) {
             errors.push(e);
         }
-        if let Err(e) = bootstrap::shutdown(&self.workdir) {
+        if let Err(e) = bootstrap::shutdown_at(&self.workdir) {
             errors.push(e.to_string());
         }
         if errors.is_empty() {

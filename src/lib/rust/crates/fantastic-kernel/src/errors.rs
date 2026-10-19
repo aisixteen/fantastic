@@ -64,6 +64,20 @@ pub enum KernelError {
         source: std::io::Error,
     },
 
+    /// A disk bootstrap was asked to keep the kernel's state in the
+    /// fantastic home ([`crate::bootstrap::refuse_home_as_state_dir`]).
+    #[error(
+        "{}: its .fantastic is the fantastic home ({}) — run fantastic in a project folder",
+        dir.display(),
+        home.display()
+    )]
+    HomeAsStateDir {
+        /// The workdir the kernel was booted in.
+        dir: PathBuf,
+        /// The fantastic home.
+        home: PathBuf,
+    },
+
     /// A delete was refused because the record carries `delete_lock: true`.
     /// The substrate surfaces this as a JSON reply, not an error, but
     /// callers that want the typed variant get it here.

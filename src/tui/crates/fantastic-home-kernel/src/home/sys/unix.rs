@@ -1,10 +1,10 @@
-//! The Unix side of the OS layer: the logs dir, the canonical folder, the login
+//! The Unix side of the OS layer: the canonical folder, the login
 //! shell's environment, spawning a canvas in its own session, SIGTERM, and the
 //! host's stop signals.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -14,46 +14,6 @@ use std::time::Duration;
 const MARKER: &str = "__FANTASTIC_LOGIN_ENV__";
 /// How long the login shell has to print its environment.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn home_var() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| "no folder for launch logs: HOME is not set".to_string())
-}
-
-/// Where launch logs go, created `0700`: `~/Library/Logs/Fantastic` on macOS;
-/// elsewhere `$XDG_STATE_HOME/fantastic/logs` when that is set and absolute,
-/// else `~/.local/state/fantastic/logs`.
-pub fn logs_dir() -> Result<PathBuf, String> {
-    let dir = logs_dir_path()?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-#[cfg(target_os = "macos")]
-fn logs_dir_path() -> Result<PathBuf, String> {
-    Ok(home_var()?.join("Library").join("Logs").join("Fantastic"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn logs_dir_path() -> Result<PathBuf, String> {
-    if let Some(state) = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-    {
-        return Ok(state.join("fantastic").join("logs"));
-    }
-    Ok(home_var()?
-        .join(".local")
-        .join("state")
-        .join("fantastic")
-        .join("logs"))
-}
 
 /// `path` as a kernel running there names its folder: canonical (links
 /// resolved), a directory, UTF-8.
@@ -71,11 +31,11 @@ pub fn folder(path: &str) -> Result<String, String> {
 /// winning: `$SHELL -ilc "printf '%s' MARKER; /usr/bin/env -0"`, its stdout a
 /// private file (a daemon the profile starts would hold a pipe open), 5 s.
 /// `SHELL` unset, a timeout or no `PATH` is an `Err` naming which.
-pub async fn login_env() -> Result<Vec<(OsString, OsString)>, String> {
+pub async fn login_env(home: &Path) -> Result<Vec<(OsString, OsString)>, String> {
     let shell = std::env::var_os("SHELL")
         .filter(|s| !s.is_empty())
         .ok_or("no login environment: SHELL is not set")?;
-    let file = logs_dir()?.join(format!("login-env-{}.txt", super::pid()));
+    let file = super::logs_dir(home)?.join(format!("login-env-{}.txt", super::pid()));
     let out = std::fs::OpenOptions::new()
         .write(true)
         .create(true)

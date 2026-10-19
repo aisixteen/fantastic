@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "The user's SAVED SET-UP store (`user_home_store.tools`): named agent-record blueprints in the user's home config dir, owned by the CLI — never pluggable into an agent, never located by a record."
+description = "The user's SAVED SET-UP store (`user_home_store.tools`): named agent-record blueprints in the user's home dir (~/.fantastic), owned by the CLI — never pluggable into an agent, never located by a record."
 
 # CLI-project scope, not the lib: an ordinary agent bundle built against the
 # kernel's public API. `src/lib` is not edited.

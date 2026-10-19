@@ -13,7 +13,8 @@
 //!
 //! WHERE THE VALUES LIVE — `backend` on the record, one of:
 //!   * `file` (the default): a YAML file at an ABSOLUTE path —
-//!     `~/.fantastic/credentials/<store id>.yaml` unless `file` names another one
+//!     `<home>/user/credentials/<store id>.yaml` unless `file` names another one
+//!     (`<home>` is `FANTASTIC_HOME`, else `~/.fantastic`)
 //!     (`/…` or `~…`; a relative path is refused at the write, and at use when a
 //!     record carries one past the write). It is written 0600 and READ ONLY IF it
 //!     is a regular file owned by this user with no group/other bits — anything
@@ -85,7 +86,7 @@ pub const README: &str = include_str!("readme.md");
 
 const NAME: &str = "credential_store";
 const BACKENDS: [&str; 3] = ["file", "keychain", "env"];
-const DEFAULT_DIR: &str = "~/.fantastic/credentials";
+const CREDENTIALS_DIR: &str = "user/credentials";
 const KEYCHAIN_NAMESPACE: &str = "fantastic";
 
 /// What `reflect` says this agent IS — python's `sentence`, verbatim.
@@ -233,6 +234,17 @@ fn backend_kind(rec: &Map<String, Value>) -> String {
 
 // ─── where the values live ───────────────────────────────────────
 
+/// The `file` backend's path when the record names none — python
+/// `default_file`: `<home>/user/credentials/<store id>.yaml`.
+///
+/// # Errors
+/// A relative `FANTASTIC_HOME` with no readable current dir.
+pub fn default_file(store_id: &str) -> Result<String, BundleError> {
+    let home =
+        fantastic_kernel::bootstrap::home_spelled().map_err(|e| raise("OSError", e.to_string()))?;
+    Ok(format!("{home}/{CREDENTIALS_DIR}/{store_id}.yaml"))
+}
+
 /// python `Path.expanduser`: a leading `~` or `~user` expanded by the OS's
 /// `os.path.expanduser` ([`sys::expanduser`]).
 fn expanduser(p: &str) -> Result<String, BundleError> {
@@ -314,7 +326,7 @@ impl FileBackend {
     fn new(id: &AgentId, rec: &Map<String, Value>) -> Result<Self, BundleError> {
         let p = match rec.get("file") {
             Some(v) if py_truthy(v) => py_str(v),
-            _ => format!("{DEFAULT_DIR}/{}.yaml", id.0),
+            _ => default_file(&id.0)?,
         };
         if let Some(why) = relative_file(&p) {
             // a record written past `validate_meta`
@@ -601,7 +613,8 @@ impl CredentialStoreBundle {
         if backend == "file" {
             let file = match rec.get("file") {
                 Some(v) if py_truthy(v) => v.clone(),
-                _ => json!(format!("{DEFAULT_DIR}/{}.yaml", id.0)),
+                // python's `default_file`, which raises where this cannot be read
+                _ => json!(default_file(&id.0).unwrap_or_else(|e| e.to_string())),
             };
             out.insert("file".into(), file);
         }

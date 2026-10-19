@@ -91,7 +91,7 @@ async fn create_then_delete_unregisters_and_calls_hook() {
     // agent.yaml files (the assertions below rely on that).
     let kernel = mk_kernel_with_storage(
         Arc::clone(&deletes),
-        crate::storage::StorageMode::Disk(tmp.path().to_path_buf()),
+        crate::storage::StorageMode::disk(tmp.path().to_path_buf()),
     );
     // Stand up a root pointing at the tempdir.
     let root = Agent::new(

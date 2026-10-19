@@ -75,8 +75,11 @@ impl HomeOs for SysOs {
     /// The login environment, the logs dir and the log file are resolved first;
     /// any failure is the spawn's.
     async fn spawn(&self, path: &str) -> Result<(), String> {
-        let env = self.env.get_or_try_init(sys::login_env).await?;
-        let log = sys::log_path(path)?;
+        let env = self
+            .env
+            .get_or_try_init(|| sys::login_env(&self.home))
+            .await?;
+        let log = sys::log_path(&self.home, path)?;
         sys::spawn(&self.fantastic_bin, path, env, &self.home, &log).await
     }
 
@@ -102,10 +105,10 @@ impl HomeOs for SysOs {
     }
 
     fn log_file(&self, path: &str) -> Option<String> {
-        sys::log_file(path)
+        sys::log_file(&self.home, path)
     }
 
     fn log_tail(&self, path: &str) -> Option<String> {
-        sys::log_tail(path)
+        sys::log_tail(&self.home, path)
     }
 }

@@ -100,13 +100,13 @@ def seed_key(home: Path, record: dict) -> dict:
 
 
 def saved_dir(home: Path) -> Path:
-    """The home's AI saved set-ups: `agents/ai_agent/saved`."""
-    return home / "agents" / "ai_agent" / "saved"
+    """The home's AI saved set-ups: `user/setups/ai_agent`."""
+    return home / "user" / "setups" / "ai_agent"
 
 
 def keys_dir(home: Path) -> Path:
-    """The home's keys (mode, refs, the plain file): `agents/ai_agent/keys`."""
-    return home / "agents" / "ai_agent" / "keys"
+    """The home's keys (mode, refs, the plain file): `user/keys`."""
+    return home / "user" / "keys"
 
 
 def private_dirs(d: Path) -> None:

@@ -26,17 +26,26 @@ its targets and `memory`), grants both sides, boots and flushes it.
 
 - Kept in the kernel's credential store, the `credentials` agent
   (`reflect credentials`). Where it keeps them is the human's choice, with no
-  default: **plain** — one 0600 file, `<home>/agents/ai_agent/keys/credentials.yaml` (not secured);
+  default: **plain** — one 0600 file, `<home>/user/keys/credentials.yaml` (not secured);
   **secure** — the keychain. `<home>` is `FANTASTIC_HOME`, else
-  `~/.config/fantastic`. Until a choice is made there is no `credentials`
+  `~/.fantastic`. Until a choice is made there is no `credentials`
   agent.
 - The home, laid out:
 
   ```
   <home>/
-  ├── agents/ai_agent/saved/       saved set-ups (+ .preferred, the default)
-  ├── agents/ai_agent/keys/        mode, refs.json (refs, no values), credentials.yaml (plain mode)
+  ├── user/setups/ai_agent/        saved set-ups (+ .preferred, the default)
+  ├── user/keys/                   mode, refs.json (refs, no values), credentials.yaml (plain mode)
+  ├── user/credentials/            a credential_store's default file, <store id>.yaml
   └── fantastics/                  stored fantastic locations (the user store)
+  ```
+
+  A home from an older layout (`~/.config/fantastic`, `~/.fantastic/credentials`)
+  is moved here by hand: `fantastic migrate-home` (`--dry-run` prints the moves).
+  A fantastic never runs with the home as its `.fantastic`: `fantastic` in `~` is
+  refused.
+
+  ```
   ```
 - A key is a REF `<provider>/<host>` (`responses/api.openai.com`) bound to its
   endpoint's host; the store refuses to hand it to any other host.
@@ -57,7 +66,7 @@ its targets and `memory`), grants both sides, boots and flushes it.
 ## Saved set-ups
 
 The AI agent's own data in its user folder: a record saved under a name
-(`<home>/agents/ai_agent/saved/<name>.yaml` — an AI backend's `handler_module`
+(`<home>/user/setups/ai_agent/<name>.yaml` — an AI backend's `handler_module`
 and its config, no id, key value or grants), loaded back into a set-up page, and
 one marked the default (`.preferred`). The double-click's `AI agent` makes a new
 AI agent from the default; another one is the AI cell's ⚙ settings → `‹ other

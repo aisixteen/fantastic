@@ -330,7 +330,7 @@ pick the *medium*:
 
 | mode | what it does | when |
 |---|---|---|
-| `StorageMode::Disk(workdir)` | Adapter mirrors each agent record onto `<workdir>/.fantastic/agents/<id>/agent.yaml`. **Dirty binding**: persistence merges kernel-managed fields into the existing JSON — never wholesale-overwrites, never touches sidecar files. Bundles reconcile their own slices when they next touch them. | The standalone CLI; the workspace-kernel embed (Pro Mac, anyone holding a folder). |
+| `StorageMode::Disk { workdir, state_dir }` (`StorageMode::disk(workdir)`: `state_dir = <workdir>/.fantastic`) | Adapter mirrors each agent record onto `<state_dir>/agents/<id>/agent.yaml`. **Dirty binding**: persistence merges kernel-managed fields into the existing JSON — never wholesale-overwrites, never touches sidecar files. Bundles reconcile their own slices when they next touch them. | The standalone CLI; the workspace-kernel embed (Pro Mac, anyone holding a folder). |
 | `StorageMode::InMemory` | No filesystem I/O ever. State lives only in `kernel.agents`. The consumer extracts a snapshot via `kernel.save() -> KernelState` and restores via `kernel.load(state)`. | An embedding app's in-RAM "brain" kernel — always running, never touches disk, snapshot persists externally. |
 
 Both modes share the same save/load API. The only difference is

@@ -25,16 +25,20 @@ struct T {
     id: AgentId,
 }
 
-/// A kernel holding a root (running dir `/h/.fantastic/app`) and `home`, whose
-/// record is `meta`.
+/// A kernel holding a root (its workdir and state dir `/h/app`, as the home
+/// kernel's) and `home`, whose record is `meta`.
 fn t_with(meta: Value, config: HomeConfig) -> T {
-    let kernel = Arc::new(Kernel::new());
+    let w = PathBuf::from(&format!("{D}/h/app"));
+    let kernel = Arc::new(Kernel::with_storage(fantastic_kernel::StorageMode::Disk {
+        workdir: w.clone(),
+        state_dir: w.clone(),
+    }));
     let root = Agent::new(
         AgentId::from("kernel_state"),
         None,
         None,
         Default::default(),
-        PathBuf::from(&format!("{D}/h/.fantastic/app/.fantastic")),
+        w,
         false,
     );
     kernel.register(Arc::clone(&root));
@@ -145,7 +149,7 @@ async fn list_answers_the_state_shape() {
     t.running("/home/a/notes", 4242, 8123, "g-1");
     t.os.set_log(
         "/home/a/notes",
-        "/home/a/.local/state/fantastic/logs/notes-1a2b3c4d.log",
+        "/home/a/.fantastic/logs/notes-1a2b3c4d.log",
         "listening",
     );
     t.boot().await;
@@ -156,7 +160,7 @@ async fn list_answers_the_state_shape() {
     let golden = json!({"type":"state","protocol":"fantastic.home","version":1,"seq":7,"mode":"lock","listed":true,
         "rows":[{"id":"g-1","guid":"g-1","name":"notes","path":"/home/a/notes","last_seen":1760800000,
                  "status":"running","canvas":{"url":"http://127.0.0.1:8123/canvas_page/file/index.html","port":8123},
-                 "pid":4242,"actions":["stop","open","remove"],"log":"/home/a/.local/state/fantastic/logs/notes-1a2b3c4d.log"}],
+                 "pid":4242,"actions":["stop","open","remove"],"log":"/home/a/.fantastic/logs/notes-1a2b3c4d.log"}],
         "pages":["g-1"],"selection":"g-1","problem":null});
     assert_eq!(got, golden);
     // the keys in the documented order
@@ -273,34 +277,26 @@ async fn open_refuses_a_relative_path_or_a_file_and_opens_nothing() {
 async fn open_and_register_refuse_the_homes_own_folder() {
     let t = t_with(
         json!({}),
-        HomeConfig::new(Mode::Lock).own_folder(format!("{D}/h/.fantastic/app")),
+        HomeConfig::new(Mode::Lock).own_folder(format!("{D}/h")),
     );
-    t.os.set_resolve(
-        &format!("{D}/h/.fantastic/app"),
-        Ok(format!("{D}/h/.fantastic/app")),
-    );
-    t.os.set_resolve(
-        &format!("{D}/h/.fantastic/app/"),
-        Ok(format!("{D}/h/.fantastic/app")),
-    );
+    t.os.set_resolve(&format!("{D}/h"), Ok(format!("{D}/h")));
+    t.os.set_resolve(&format!("{D}/h/"), Ok(format!("{D}/h")));
     t.boot().await;
     let r = t
-        .call(json!({"type": "open", "paths": [&format!("{D}/h/.fantastic/app/")]}))
+        .call(json!({"type": "open", "paths": [&format!("{D}/h/")]}))
         .await;
     refused(
         &r,
         "bad_arg",
-        &format!(
-            "home: open: \"{D}/h/.fantastic/app/\" is the home's own folder — it is never listed"
-        ),
+        &format!("home: open: \"{D}/h/\" is the home's own folder — it is never listed"),
     );
     let r = t
-        .call(json!({"type": "register", "path": &format!("{D}/h/.fantastic/app")}))
+        .call(json!({"type": "register", "path": &format!("{D}/h")}))
         .await;
     refused(
         &r,
         "bad_arg",
-        &format!("home: register: \"{D}/h/.fantastic/app\" is the home's own folder — it is never listed"),
+        &format!("home: register: \"{D}/h\" is the home's own folder — it is never listed"),
     );
     assert_eq!(r["arg"], json!("path"));
     t.bundle.runner().settle().await;

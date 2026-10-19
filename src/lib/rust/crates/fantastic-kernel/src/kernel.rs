@@ -691,10 +691,25 @@ impl Kernel {
     /// The kernel's RUNNING DIR — the dir holding its root's `.fantastic`
     /// (python `Kernel.workdir`). The ONE source of the disk clamp base; a
     /// relative root address is resolved the way any relative path is.
+    /// A disk kernel's running dir is its storage mode's `workdir`, which a
+    /// host with its own state dir ([`crate::bootstrap::BootstrapOptions::daemon_at`])
+    /// names; for a project it is the root's parent, as before.
     ///
     /// # Errors
     /// No root ⇒ no running dir to clamp disk to.
     pub fn workdir(&self) -> Result<PathBuf, String> {
+        if let StorageMode::Disk { workdir, .. } = &self.storage {
+            if self.root().is_none() {
+                return Err("kernel has no root — no running dir to clamp disk to".to_string());
+            }
+            return Ok(if workdir.is_absolute() {
+                workdir.clone()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| e.to_string())?
+                    .join(workdir)
+            });
+        }
         let root = self
             .root()
             .ok_or_else(|| "kernel has no root — no running dir to clamp disk to".to_string())?;
@@ -895,10 +910,11 @@ impl Kernel {
         self.inboxes.clear();
         self.root.store(None);
 
-        // Compute the per-agent on-disk root_path. Disk mode roots at
-        // `<workdir>/.fantastic/`; children nest under `agents/<id>/`.
-        // InMemory mode uses an empty PathBuf (never read).
-        let disk_root: Option<PathBuf> = self.storage.workdir().map(|w| w.join(".fantastic"));
+        // Compute the per-agent on-disk root_path. Disk mode roots at the
+        // storage mode's state dir (`<workdir>/.fantastic/` for a project);
+        // children nest under `agents/<id>/`. InMemory mode uses an empty
+        // PathBuf (never read).
+        let disk_root: Option<PathBuf> = self.storage.state_dir().map(Path::to_path_buf);
 
         // Two-pass: build all Agent structs first (parent_id strings
         // only), then wire parent/child Arc references. The
