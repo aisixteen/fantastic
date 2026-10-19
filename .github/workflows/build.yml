@@ -148,6 +148,7 @@ jobs:
         # its own workspace (src/app); tauri-build needs the canvas sidecar staged
         # under the host's triple, so the CLI just built stands in for it
         working-directory: src/app
+        shell: bash # the job's defaults set no shell, so Windows would take pwsh
         run: |
           X=${{ runner.os == 'Windows' && '.exe' || '' }}
           t=$(rustc --print host-tuple)
