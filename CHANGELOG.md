@@ -7,6 +7,14 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The desktop app (`src/app`, Tauri 2): it hosts the home kernel in-process and
+  shows its Home page in one window, with a native backdrop (Liquid Glass or
+  vibrancy on macOS, Mica on Windows 11), native menus and shortcuts from the
+  home's menu spec, and Open Folder, drops and Finder/Dock opens as intents. One
+  app per home; quitting shuts the kernel down in order and leaves the canvases
+  it started running. `--kiosk` runs it fullscreen with no decorations, for the
+  kiosk.
+- The `home` agent's `menu` and `focus` verbs and its `menu_spec` stream.
 - The `fantastic-home` crate: the fantastic manager's model and ViewModel, pure
   (no OS, no I/O, no clock), the base of `fantastic home`.
 - `fantastic-home-kernel`: the manager of your fantastics as a library the
@@ -44,6 +52,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 - The home kernel serves the Home at `home.html` and the list page at
   `list.html`.
+- On Windows, canvases start in a hidden console of their own and stop through
+  a short-lived helper, so no console window flashes and a canvas from an
+  earlier session stops too.
 - Home layout v2: everything fantastic keeps for a user lives under ONE
   directory, `~/.fantastic/` (`FANTASTIC_HOME` still overrides it), in groups:
   `app/` (the desktop app's home kernel), `fantastics/` (the registry),

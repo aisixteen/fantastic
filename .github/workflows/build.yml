@@ -6,11 +6,14 @@
 #              `release.yml` publishes the ones a green run of `ci.yml` kept for
 #              the tagged commit), and per OS the kernels and rig the e2e runs
 #              (`e2e-<os>`)
+#              and the desktop app per OS (`app-<triple>`, built from those CLIs)
 #   e2e        the model-free e2e (`e2e/run.py --only-free`) on EXACTLY the
 #              binaries this run built (`E2E_ARTIFACTS`) — the e2e runs what
 #              ships — each OS's suite as three parallel jobs (`--shard i/3`).
 #              Its own call may come after the `binaries` call and the units
 #              (`ci.yml`): it takes the `e2e-<os>` artifacts of the same run.
+#              And the desktop app's e2e (`src/app/e2e/run.py`) on the `app-*`
+#              and `release-*` artifacts of the same run.
 #
 # Callers: `ci.yml` ({debug, units}, {release, binaries}, then {release, e2e}).
 # FREE:
@@ -130,12 +133,27 @@ jobs:
         run: choco install zip --no-progress -y
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src
+          workspaces: |
+            src
+            src/app
           key: ${{ inputs.profile }}
       - name: build
         run: cargo build --locked $CARGO_PROFILE
       - name: unit tests
         run: cargo test --locked --no-fail-fast $CARGO_PROFILE
+      - name: the desktop app's libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
+      - name: unit tests (desktop app)
+        # its own workspace (src/app); tauri-build needs the canvas sidecar staged
+        # under the host's triple, so the CLI just built stands in for it
+        working-directory: src/app
+        run: |
+          X=${{ runner.os == 'Windows' && '.exe' || '' }}
+          t=$(rustc --print host-tuple)
+          mkdir -p binaries
+          cp ../target/${{ inputs.profile }}/fantastic$X binaries/fantastic-$t$X
+          cargo test --locked --no-fail-fast
 
   swift:
     if: inputs.units
@@ -292,6 +310,170 @@ jobs:
           path: dist/fantastic-${{ matrix.target }}.*
           if-no-files-found: error
           retention-days: 30
+
+  # ── the desktop app (src/app), on the CLI just built ─────────────────────
+  # `scripts/build/app.sh` is the one build path: it stages the target's CLI as
+  # the canvas sidecar and runs `tauri build --no-bundle`. The installers (Phase
+  # 6b) take `app-<triple>`. Linux is `ubuntu-24.04`, NOT `ubuntu-latest`: the
+  # app links glibc, and the kiosk (Debian trixie) has glibc 2.41.
+  app:
+    if: inputs.binaries
+    needs: binaries
+    name: app · ${{ matrix.app }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: xcode-27, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # app.sh reads the version from the last tag
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.app }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: zip (the canvas packer's; not on the Windows image)
+        if: runner.os == 'Windows'
+        run: choco install zip --no-progress -y
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: src/app/package-lock.json
+      - name: the desktop app's libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/app
+          key: ${{ matrix.app }}-${{ inputs.profile }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/release
+      - name: the CLI, where cli.sh leaves it
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p src/target/${{ matrix.target }}/${{ inputs.profile }}
+          tar -xzf dist/release/fantastic-${{ matrix.target }}.tar.gz -C src/target/${{ matrix.target }}/${{ inputs.profile }}
+      - name: the CLI, where cli.sh leaves it (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive dist/release/fantastic-${{ matrix.target }}.zip -DestinationPath src/target/${{ matrix.target }}/${{ inputs.profile }}
+      - name: the app
+        run: sh scripts/build/app.sh --profile ${{ inputs.profile }} --target ${{ matrix.target }}
+      - name: the glibc floor (Debian trixie, 2.41)
+        if: runner.os == 'Linux'
+        run: |
+          bin=src/app/target/${{ matrix.app }}/${{ inputs.profile }}/fantastic-app
+          need=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "the app needs $need"
+          top=$(printf '%s\nGLIBC_2.41\n' "$need" | sort -V | tail -1)
+          [ "$top" = GLIBC_2.41 ] || { echo "::error::the app needs $need, above the kiosk's GLIBC_2.41"; exit 1; }
+      - name: keep the app
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-${{ matrix.app }}
+          path: dist/fantastic-app-${{ matrix.app }}.tar
+          if-no-files-found: error
+          retention-days: 30
+
+  # The app's e2e (`src/app/e2e/run.py`) on exactly the app and CLI just built.
+  # Linux and Windows drive the window through tauri-driver (WebKitWebDriver,
+  # msedgedriver); macOS has no WKWebView driver, so there the app is launched
+  # and asked through the home's socket.
+  app-e2e:
+    if: inputs.e2e && !cancelled() && !failure()
+    needs: [binaries, app]
+    name: app e2e · ${{ matrix.app }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: xcode-27, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - name: the e2e's python (websockets)
+        run: (cd src/lib/python && uv sync --locked)
+      - uses: actions/download-artifact@v7
+        with:
+          name: app-${{ matrix.app }}
+          path: dist/app-artifact
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/release
+      - name: the app and the CLI, side by side
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist/app
+          tar -xf dist/app-artifact/fantastic-app-${{ matrix.app }}.tar -C dist/app
+          tar -xzf dist/release/fantastic-${{ matrix.target }}.tar.gz -C dist/app
+          ls -l dist/app
+      - name: the app and the CLI, side by side (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/app | Out-Null
+          tar -xf dist/app-artifact/fantastic-app-${{ matrix.app }}.tar -C dist/app
+          Expand-Archive dist/release/fantastic-${{ matrix.target }}.zip -DestinationPath dist/app
+          Get-ChildItem dist/app
+      - name: no real-time scan (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+      - name: the desktop app's libraries, its WebDriver and a display (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev webkit2gtk-driver xvfb
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os != 'macOS'
+      - name: tauri-driver
+        if: runner.os != 'macOS'
+        run: cargo install tauri-driver --version 2.1.0 --locked
+      - name: msedgedriver at exactly the WebView2 runtime's version (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $v = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}').pv
+          if (-not $v) { throw "no WebView2 runtime version in the registry" }
+          Write-Host "WebView2 runtime $v"
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" -OutFile edgedriver.zip
+          Expand-Archive edgedriver.zip -DestinationPath edgedriver
+      - name: app e2e (Linux)
+        if: runner.os == 'Linux'
+        working-directory: src/lib/python
+        run: xvfb-run -a -s "-screen 0 1280x800x24" uv run python ../../app/e2e/run.py --app ../../../dist/app/fantastic-app
+      - name: app e2e (macOS)
+        if: runner.os == 'macOS'
+        working-directory: src/lib/python
+        run: uv run python ../../app/e2e/run.py --app ../../../dist/app/fantastic-app
+      - name: app e2e (Windows)
+        if: runner.os == 'Windows'
+        working-directory: src/lib/python
+        run: uv run python ../../app/e2e/run.py --app ../../../dist/app/fantastic-app.exe --native-driver "$GITHUB_WORKSPACE/edgedriver/msedgedriver.exe"
+      - name: keep the run
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-e2e-runs-${{ matrix.app }}
+          path: src/app/e2e/runs/
+          retention-days: 14
 
   # ── the model-free e2e, on the binaries just built ───────────────────────
   # Each OS's suite runs as three jobs side by side (`--shard i/3`): the wall

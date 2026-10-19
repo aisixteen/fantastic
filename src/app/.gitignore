@@ -3,3 +3,4 @@ node_modules/
 gen/
 binaries/
 e2e/runs/
+__pycache__/
