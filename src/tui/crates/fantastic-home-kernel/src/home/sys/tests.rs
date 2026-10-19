@@ -272,6 +272,29 @@ fn log_file_name_is_folder_and_hash() {
 }
 
 #[test]
+fn logs_dir_is_home_logs() {
+    let (_d, root) = temp();
+    let home = root.join("home");
+    fantastic_user_home_store::ensure_private_dir(&home, &home).expect("a private home");
+    let dir = logs_dir(&home).expect("the logs dir");
+    assert_eq!(dir, home.join("logs"));
+    assert!(dir.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+    assert_eq!(
+        log_path(&home, "/home/a/notes").unwrap(),
+        home.join("logs").join(log_file_name("/home/a/notes"))
+    );
+    assert_eq!(log_file(&home, "/home/a/notes"), None, "no log written yet");
+    std::fs::write(log_path(&home, "/home/a/notes").unwrap(), "a\nb\n").unwrap();
+    assert_eq!(log_tail(&home, "/home/a/notes").as_deref(), Some("a\nb"));
+}
+
+#[test]
 fn the_tail_is_the_last_lines_cut_to_the_last_characters() {
     assert_eq!(tail_of("1\n2\n3\n4\n5\n6\n"), "3\n4\n5\n6");
     assert_eq!(tail_of("only"), "only");

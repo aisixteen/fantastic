@@ -2,8 +2,11 @@
 
 The manager of your fantastics: every fantastic folder the registry
 (`<home>/fantastics/<folder>/fantastic.yaml`) lists, with its status, and the
-folders you open. It lives in the home kernel (`<home>/.fantastic/app`), which
-only the desktop app hosts.
+folders you open. It lives in the home kernel, whose folder is `<home>/app`
+(its workdir and its state dir: `lock.yaml`, `agent.yaml`, `agents/…`,
+`home.db`, `web/…` and the run file `home.yaml`, with no `.fantastic` inside),
+which only the desktop app hosts. Each fantastic's launch log is
+`<home>/logs/<folder>-<hash8>.log`, on every OS.
 
 ## Calling it
 
@@ -22,7 +25,7 @@ payloads.
 | `select_page` | `index: int` | show the open page at `index` |
 | `close_page` | `id: str` | close an open page |
 | `dismiss` | — | clear the problem |
-| `log` | `id: str` | `{id, file, tail}`: the launch log |
+| `log` | `id: str` | `{id, file, tail}`: the launch log, in `<home>/logs/` |
 | `focus` | — | emits `{"type":"focus"}` for the host shell |
 | `reflect` | — | `{id, sentence, protocol, version, mode, home, poll_ms}` |
 
@@ -38,4 +41,4 @@ were sent, so it keeps only the payload `type` it wants. Watch first, then call
 
 `pages` and `selection` are fields of this agent's own record, written once
 the home has listed the registry, and restored at `boot`. A page reopens only
-while its registry entry still exists. The home's own folder is never a row.
+while its registry entry still exists. The home's own folder, `<home>` itself, is never a row.

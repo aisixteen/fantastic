@@ -41,7 +41,8 @@ from helpers.verdict import verdict  # noqa: E402
 #: on the CI runner; one the kernel creates carries the owner and DACL it judges.
 HOME = _HOME / "home"
 os.environ["FANTASTIC_HOME"] = str(HOME)
-W = HOME / ".fantastic" / "app"
+#: The home kernel's folder: its workdir and its state dir (no `.fantastic` inside).
+W = HOME / "app"
 ANNOUNCE = "fantastic-home-host: the home: "
 CANVAS_ANNOUNCE = "fantastic: the canvas: "
 
@@ -246,8 +247,10 @@ class Run:
         want = {"pid": self.host.proc.pid, "port": self.port, "url": self.host.url}
         if run != want:
             bad.append(f"home.yaml {run} != {want}")
-        if not (W / ".fantastic" / "home.db").is_file():
-            bad.append("no .fantastic/app/.fantastic/home.db")
+        if not (W / "home.db").is_file():
+            bad.append("no app/home.db")
+        if (W / ".fantastic").exists():
+            bad.append("a .fantastic is nested in app/")
 
     async def second_host_refused(self, bad: list[str]) -> None:
         r = subprocess.run([str(self.host_bin), "--fantastic", str(self.bin)], capture_output=True, text=True, timeout=60)
@@ -280,6 +283,8 @@ class Run:
                 bad.append(f"the registry folder {entry['_file'].parent.name} is not the guid {row['guid']}")
         if not row.get("log") or not Path(row["log"]).is_file():
             bad.append(f"no launch log: {row.get('log')}")
+        elif Path(row["log"]).parent != HOME / "logs":
+            bad.append(f"the launch log is not in <home>/logs: {row['log']}")
         if state["pages"] != [self.a_id] or state["selection"] != self.a_id:
             bad.append(f"pages {state['pages']} selection {state['selection']}")
 
@@ -352,10 +357,11 @@ class Run:
             bad.append("B did not stop when asked")
 
     async def own_folder(self, bad: list[str]) -> None:
-        r = await self.call({"type": "open", "paths": [str(W)]})
+        # the home's own folder is <home> itself, the parent of app/
+        r = await self.call({"type": "open", "paths": [str(HOME)]})
         if r.get("reason") != "bad_arg":
             bad.append(f"opening the home's own folder: {r}")
-        own = canonical(W)
+        own = canonical(HOME)
         named = [f for f in registry_files() if yaml_of(f).get("path") == own]
         if named:
             bad.append(f"the registry names the home's own folder: {named}")
@@ -371,7 +377,7 @@ class Run:
             bad.append(f"the host exited {code}")
         if (W / "home.yaml").exists():
             bad.append("the run file is still there")
-        if (W / ".fantastic" / "lock.yaml").exists():
+        if (W / "lock.yaml").exists():
             bad.append("the home's lock is still held")
         if lock_pid(self.a) is None:
             bad.append("A stopped with the host")

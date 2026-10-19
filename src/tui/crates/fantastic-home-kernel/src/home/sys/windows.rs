@@ -24,17 +24,6 @@ use windows_sys::Win32::System::Threading::{
 /// How long the stop helper has to finish.
 const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Where launch logs go: `%LOCALAPPDATA%\fantastic\logs`, created.
-pub fn logs_dir() -> Result<PathBuf, String> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .ok_or("no folder for launch logs: LOCALAPPDATA is not set")?;
-    let dir = base.join("fantastic").join("logs");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
 /// `path` as a kernel running there names its folder (`current_dir()`):
 /// absolute, no `\\?\` prefix, no trailing separator, a directory, UTF-8.
 pub fn folder(path: &str) -> Result<String, String> {
@@ -56,7 +45,7 @@ pub fn folder(path: &str) -> Result<String, String> {
 
 /// This process's own environment: Windows has no login shell (a session is
 /// already the user's, as the exec bridge's empty `LOGIN_ARGS` says).
-pub async fn login_env() -> Result<Vec<(OsString, OsString)>, String> {
+pub async fn login_env(_home: &Path) -> Result<Vec<(OsString, OsString)>, String> {
     Ok(std::env::vars_os().collect())
 }
 

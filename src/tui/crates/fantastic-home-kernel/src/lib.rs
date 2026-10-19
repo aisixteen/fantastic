@@ -1,7 +1,8 @@
 //! THE HOME KERNEL: the manager of your fantastics, as a library the desktop
 //! app hosts in-process.
 //!
-//! A minimal kernel in the fantastic home dir, `<home>/.fantastic/app`, whose
+//! A minimal kernel in the fantastic home dir, `<home>/app` (its workdir and
+//! its state dir; launch logs in `<home>/logs`), whose
 //! only job is managing fantastics: its own sqlite store, a loopback web host
 //! that serves the home page, and the `home` agent, which binds the pure
 //! ViewModel (`fantastic_home::Home`) to the kernel protocol. No exec, no file
@@ -55,10 +56,10 @@ pub struct Running {
 }
 
 /// The host that serves `home` now, if any: the home kernel's lock, and its run
-/// file `<home>/.fantastic/app/home.yaml`, which must name the lock's holder.
+/// file `<home>/app/home.yaml`, which must name the lock's holder.
 pub async fn running(home: &Path) -> Result<Option<Running>, String> {
     let w = kernel::workdir(home);
-    match fantastic_kernel::lock::held(&w) {
+    match fantastic_kernel::lock::held_at(&w) {
         Err(e) => Err(e.to_string()),
         Ok(None) => Ok(None),
         Ok(Some(pid)) => match sys::read_host_run_file(home) {

@@ -113,12 +113,11 @@ impl HomeBundle {
     }
 
     fn reflect(&self, agent_id: &AgentId, kernel: &Kernel) -> Value {
-        // The home kernel's running dir is always `<home>/.fantastic/app`.
-        let home = kernel.workdir().ok().and_then(|w| {
-            w.parent()
-                .and_then(Path::parent)
-                .map(|h| h.display().to_string())
-        });
+        // The home kernel's running dir is always `<home>/app`.
+        let home = kernel
+            .workdir()
+            .ok()
+            .and_then(|w| w.parent().map(|h| h.display().to_string()));
         let mode = self.runner.read(|h| h.config().mode);
         json!({
             "id": agent_id.as_str(),

@@ -1827,12 +1827,12 @@ mod tests {
 
     #[test]
     fn the_own_folder_is_never_a_row() {
-        let mut h = Home::new(Config::new(Mode::Lock).own_folder("/h/.fantastic/app".into()));
+        let mut h = Home::new(Config::new(Mode::Lock).own_folder("/h".into()));
         let jobs = read(
             &mut h,
             0,
             vec![
-                entry("own", "/h/.fantastic/app", Some(7), Some(8100), 0),
+                entry("own", "/h", Some(7), Some(8100), 0),
                 entry("g1", "/w/a", None, None, 1),
             ],
         );

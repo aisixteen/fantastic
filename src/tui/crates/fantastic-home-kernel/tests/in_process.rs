@@ -8,7 +8,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use fantastic_home_kernel::home::sys;
@@ -20,13 +19,6 @@ use tokio_tungstenite::tungstenite::Message;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Launch logs go to a temp dir, never the real user's.
-fn quiet_logs() {
-    static LOGS: OnceLock<PathBuf> = OnceLock::new();
-    let dir = LOGS.get_or_init(|| tempfile::tempdir().expect("a temp dir").keep());
-    std::env::set_var("XDG_STATE_HOME", dir);
-}
-
 struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -36,7 +28,6 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Fixture {
-        quiet_logs();
         let dir = tempfile::tempdir().expect("a temp dir");
         let root = std::fs::canonicalize(dir.path()).expect("the temp dir resolves");
         let bin = root.join("fantastic");
@@ -53,7 +44,7 @@ impl Fixture {
     }
 
     fn workdir(&self) -> PathBuf {
-        self.home.join(".fantastic").join("app")
+        self.home.join("app")
     }
 
     fn config(&self, port: Option<u16>) -> Config {
@@ -250,7 +241,7 @@ fn table() -> Vec<(&'static str, &'static str, Value, Value)> {
     ]);
     let loader = json!(["load_tree", "persist_record", "forget_record"]);
     vec![
-        // (record path under W/.fantastic, id, can_call, callable_by)
+        // (record path under W, id, can_call, callable_by)
         (
             "agent.yaml",
             "kernel_state",
@@ -305,7 +296,7 @@ fn table() -> Vec<(&'static str, &'static str, Value, Value)> {
 
 fn check_grants(w: &Path) {
     for (rel, id, can_call, callable_by) in table() {
-        let rec = yaml(&w.join(".fantastic").join(rel));
+        let rec = yaml(&w.join(rel));
         assert_eq!(rec["id"], json!(id), "{rel}");
         assert_eq!(rec["can_call"], can_call, "{id}.can_call");
         assert_eq!(rec["callable_by"], callable_by, "{id}.callable_by");
@@ -322,9 +313,7 @@ async fn boot_builds_the_tree_and_writes_the_grants_whole() {
     check_grants(&f.workdir());
 
     // A stray grant written into a record is gone after the next boot.
-    let home_rec = f
-        .workdir()
-        .join(".fantastic/agents/user/agents/home/agent.yaml");
+    let home_rec = f.workdir().join("agents/user/agents/home/agent.yaml");
     let mut rec = yaml(&home_rec);
     rec["callable_by"]["stranger"] = json!("*");
     rec["can_call"]["store"] = json!("*");
@@ -341,7 +330,7 @@ async fn records_land_where_the_layout_table_says() {
     let hk = f.boot().await;
     let w = f.workdir();
     assert!(
-        w.join(".fantastic/lock.yaml").is_file(),
+        w.join("lock.yaml").is_file(),
         "the lock is held for the host's life"
     );
     let run = yaml(&w.join("home.yaml"));
@@ -354,29 +343,38 @@ async fn records_land_where_the_layout_table_says() {
         format!("http://127.0.0.1:{}/canvas_page/file/home.html", hk.port())
     );
     hk.shutdown().await.expect("a clean stop");
-    let root = yaml(&w.join(".fantastic/agent.yaml"));
+    let root = yaml(&w.join("agent.yaml"));
     assert!(
         root["guid"].as_str().is_some_and(|g| !g.is_empty()),
         "{root}"
     );
     assert!(root["next_id"].is_u64(), "{root}");
     assert_eq!(root["memory_store_id"], json!("home_memory"));
-    assert!(w.join(".fantastic/home.db").is_file());
-    assert!(w
-        .join(".fantastic/agents/user/agents/home/agent.yaml")
-        .is_file());
-    // Nothing is written under <home> outside W.
-    let outside: Vec<String> = files(&f.home)
-        .into_iter()
-        .filter(|p| !Path::new(p).starts_with(Path::new(".fantastic").join("app")))
+    assert!(w.join("home.db").is_file());
+    assert!(w.join("agents/user/agents/home/agent.yaml").is_file());
+    // Nothing is written under <home> outside W, and no `.fantastic` is nested
+    // anywhere under it.
+    let all = files(&f.home);
+    let outside: Vec<&String> = all
+        .iter()
+        .filter(|p| !Path::new(p).starts_with("app"))
         .collect();
     assert!(outside.is_empty(), "{outside:?}");
+    let nested: Vec<&String> = all
+        .iter()
+        .filter(|p| {
+            Path::new(p)
+                .components()
+                .any(|c| c.as_os_str() == ".fantastic")
+        })
+        .collect();
+    assert!(nested.is_empty(), "{nested:?}");
     let levels: Vec<String> = std::fs::read_dir(&f.home)
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(levels, [".fantastic"]);
+    assert_eq!(levels, ["app"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -510,12 +508,12 @@ async fn boot_then_shutdown_releases_the_lock_and_removes_the_run_file() {
     let hk = f.boot().await;
     let w = f.workdir();
     assert_eq!(
-        fantastic_kernel::lock::held(&w).unwrap(),
+        fantastic_kernel::lock::held_at(&w).unwrap(),
         Some(std::process::id())
     );
     assert!(w.join("home.yaml").is_file());
     hk.shutdown().await.expect("a clean stop");
-    assert_eq!(fantastic_kernel::lock::held(&w).unwrap(), None);
+    assert_eq!(fantastic_kernel::lock::held_at(&w).unwrap(), None);
     assert!(!w.join("home.yaml").exists());
     // A stopped home boots again.
     let hk = f.boot().await;
@@ -537,7 +535,7 @@ async fn running_is_none_without_a_live_lock_holder_and_names_the_host_with_one(
     assert_eq!(running(&f.home).await.unwrap(), None);
     // A lock held with no run file naming its holder is not a home host.
     let w = f.workdir();
-    fantastic_kernel::lock::acquire(&w).unwrap();
+    fantastic_kernel::lock::acquire_at(&w).unwrap();
     let e = running(&f.home).await.unwrap_err();
     assert_eq!(
         e,
@@ -547,7 +545,7 @@ async fn running_is_none_without_a_live_lock_holder_and_names_the_host_with_one(
             std::process::id()
         )
     );
-    fantastic_kernel::lock::release(&w).unwrap();
+    fantastic_kernel::lock::release_at(&w).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -665,10 +663,7 @@ async fn pages_and_selection_survive_a_restart() {
         (json!(["g-notes"]), json!("g-notes"))
     );
     hk.shutdown().await.expect("a clean stop");
-    let rec = yaml(
-        &f.workdir()
-            .join(".fantastic/agents/user/agents/home/agent.yaml"),
-    );
+    let rec = yaml(&f.workdir().join("agents/user/agents/home/agent.yaml"));
     assert_eq!(
         (rec["pages"].clone(), rec["selection"].clone()),
         (json!(["g-notes"]), json!("g-notes"))
@@ -688,10 +683,12 @@ async fn the_home_never_lists_its_own_folder() {
     let _one = SERIAL.lock().await;
     let f = Fixture::new();
     let other = f.fantastic_folder("other");
-    // W itself, before the first boot made it: made here, as canonical as the home will name it
-    let w = f.workdir();
-    fantastic_user_home_store::ensure_private_dir(&f.home, &w).unwrap();
-    let own = std::fs::canonicalize(&w).unwrap().display().to_string();
+    // The home's own folder is `<home>` itself, the parent of W, as canonical as
+    // the home names it.
+    let own = std::fs::canonicalize(&f.home)
+        .unwrap()
+        .display()
+        .to_string();
     f.register("g-own", &own);
     f.register("g-other", &other);
     let before = files(&f.home.join("fantastics"));

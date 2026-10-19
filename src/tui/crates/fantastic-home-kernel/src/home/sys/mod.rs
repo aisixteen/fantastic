@@ -166,12 +166,12 @@ pub struct HostRun {
     pub url: String,
 }
 
-/// The home host's run file path: `<home>/.fantastic/app/home.yaml`.
+/// The home host's run file path: `<home>/app/home.yaml`.
 pub fn host_run_file(home: &Path) -> PathBuf {
-    home.join(".fantastic").join("app").join("home.yaml")
+    home.join("app").join("home.yaml")
 }
 
-/// Read `<home>/.fantastic/app/home.yaml`: `pid` a u32, `port` in 1..=65535 and
+/// Read `<home>/app/home.yaml`: `pid` a u32, `port` in 1..=65535 and
 /// `url` an `http://127.0.0.1:<port>/…` string. Anything else is `None`.
 pub fn read_host_run_file(home: &Path) -> Option<HostRun> {
     let text = std::fs::read_to_string(host_run_file(home)).ok()?;
@@ -370,21 +370,29 @@ pub fn log_file_name(path: &str) -> String {
     format!("{last}-{hex}.log")
 }
 
+/// Where launch logs go, on every OS: `<home>/logs`, created private as the
+/// home store makes its dirs (`0700`; on Windows a DACL that protects only the user).
+pub fn logs_dir(home: &Path) -> Result<PathBuf, String> {
+    let dir = home.join("logs");
+    fantastic_user_home_store::ensure_private_dir(home, &dir)?;
+    Ok(dir)
+}
+
 /// Where the launch log of the fantastic in `path` goes.
-pub fn log_path(path: &str) -> Result<PathBuf, String> {
-    Ok(logs_dir()?.join(log_file_name(path)))
+pub fn log_path(home: &Path, path: &str) -> Result<PathBuf, String> {
+    Ok(logs_dir(home)?.join(log_file_name(path)))
 }
 
 /// The launch log of the fantastic in `path`, when it exists.
-pub fn log_file(path: &str) -> Option<String> {
-    let file = log_path(path).ok()?;
+pub fn log_file(home: &Path, path: &str) -> Option<String> {
+    let file = log_path(home, path).ok()?;
     file.is_file().then(|| file.display().to_string())
 }
 
 /// The last 4 lines of the launch log of the fantastic in `path`, cut to its
 /// last 600 characters.
-pub fn log_tail(path: &str) -> Option<String> {
-    let bytes = std::fs::read(log_path(path).ok()?).ok()?;
+pub fn log_tail(home: &Path, path: &str) -> Option<String> {
+    let bytes = std::fs::read(log_path(home, path).ok()?).ok()?;
     Some(tail_of(&String::from_utf8_lossy(&bytes)))
 }
 

@@ -37,7 +37,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   `~/.config/fantastic/agents/ai_agent/saved/`), `user/keys/` (was
   `~/.config/fantastic/agents/ai_agent/keys/`), `user/credentials/` (the
   credential_store `file` default in python, rust and swift, was
-  `~/.fantastic/credentials/`) and `logs/`. The home was `~/.config/fantastic`.
+  `~/.fantastic/credentials/`) and `logs/` (canvas launch logs on every OS, was
+  `~/Library/Logs/Fantastic`, `$XDG_STATE_HOME/fantastic/logs` or
+  `%LOCALAPPDATA%\fantastic\logs`). The home kernel's folder is `<home>/app`,
+  its workdir and its state dir (was `<home>/.fantastic/app`, with its state
+  in `<home>/.fantastic/app/.fantastic`). The home was `~/.config/fantastic`.
   Nothing moves by itself: `fantastic migrate-home` moves an older layout's
   files (`--dry-run` prints the moves), and refuses while a fantastic or the app
   runs or a target exists.
