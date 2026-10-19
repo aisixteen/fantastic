@@ -156,15 +156,22 @@ def audit_processes() -> None:
 
 
 def app_processes() -> str:
-    """The audit log's starts and exits of `fantastic-app.exe`, newest first."""
+    """The audit log's starts and exits of `fantastic-app.exe`, newest first.
+    The log is written after the fact, so this waits up to 10 s for an exit."""
     q = "*[System[(EventID=4688 or EventID=4689)]]"
-    out = subprocess.run(
-        ["wevtutil", "qe", "Security", f"/q:{q}", "/f:text", "/rd:true", "/c:500"], capture_output=True, text=True
-    )
-    if out.returncode != 0:
-        return f"wevtutil failed: {out.stderr.strip()}"
-    found = ["Event[" + b for b in out.stdout.split("Event[") if "fantastic-app" in b]
-    return "\n".join(found) or "no fantastic-app process in the audit log"
+    end = time.monotonic() + 10
+    while True:
+        out = subprocess.run(
+            ["wevtutil", "qe", "Security", f"/q:{q}", "/f:text", "/rd:true", "/c:5000"], capture_output=True, text=True
+        )
+        if out.returncode != 0:
+            return f"wevtutil failed: {out.stderr.strip()}"
+        events = out.stdout.split("Event[")[1:]
+        found = ["Event[" + b for b in events if "fantastic-app" in b]
+        if any("4689" in b for b in found) or time.monotonic() > end:
+            break
+        time.sleep(1)
+    return "\n".join(found) or f"no fantastic-app process among the audit log's {len(events)} process events"
 
 
 def http_ok(url: str) -> bool:
@@ -380,9 +387,10 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
     try:
         await sessions(run, wd)
     except BaseException:
-        # the app's stderr goes where its driver's does: into this log
+        # the app's stderr goes where its driver's does: into this log (not on
+        # Windows, where a release build has no console: the audit log shows it)
         log.flush()
-        say("the driver's log (the app's stderr with it), last 80 lines:")
+        say("the driver's log (the app's stderr with it, but on Windows), last 80 lines:")
         print("\n".join((run.root / "tauri-driver.log").read_text(errors="replace").splitlines()[-80:]), flush=True)
         if WINDOWS:
             text = app_processes()
