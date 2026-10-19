@@ -140,6 +140,7 @@ fn setup(app: &mut App, home: PathBuf, args: Args, canvas_bin: PathBuf, backdrop
 
 /// The one window, on the boot page until the kernel serves.
 fn window(app: &AppHandle, args: &Args, backdrop: Backdrop) -> Result<(), String> {
+    let shell = home::shell(app);
     let mut b = WebviewWindowBuilder::new(app, home::WINDOW, WebviewUrl::App("index.html".into()))
         .title(home::TITLE)
         .inner_size(1280.0, 800.0)
@@ -151,7 +152,7 @@ fn window(app: &AppHandle, args: &Args, backdrop: Backdrop) -> Result<(), String
             backdrop.flag(),
             !args.kiosk,
         ))
-        .on_navigation(page::allowed);
+        .on_navigation(move |url| page::allowed(url, shell.port()));
     if args.kiosk {
         b = b.fullscreen(true).decorations(false);
     } else {

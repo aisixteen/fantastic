@@ -11,7 +11,7 @@
 //! quit during the boot waits for the boot to finish, then shuts it down.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fantastic_home::Intent;
@@ -36,6 +36,9 @@ pub struct Shell {
     pub kiosk: bool,
     pub backdrop: Backdrop,
     kernel: Arc<RwLock<Option<HomeKernel>>>,
+    /// The kernel's port once it serves (0 before): the one loopback origin the
+    /// window may show.
+    port: AtomicU16,
     /// The kernel is down (shut down, or it never booted): an exit passes through.
     down: AtomicBool,
     quitting: AtomicBool,
@@ -51,11 +54,20 @@ impl Shell {
             kiosk,
             backdrop,
             kernel: Arc::new(RwLock::new(None)),
+            port: AtomicU16::new(0),
             down: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
             failed: AtomicBool::new(false),
             queue: Mutex::new(Some(Vec::new())),
             menu: menu::Applied::default(),
+        }
+    }
+
+    /// The home kernel's port, once it serves.
+    pub fn port(&self) -> Option<u16> {
+        match self.port.load(Ordering::SeqCst) {
+            0 => None,
+            p => Some(p),
         }
     }
 
@@ -128,6 +140,7 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     let events = k.events();
     *guard = Some(k);
     drop(guard);
+    shell.port.store(port, Ordering::SeqCst);
 
     if !shell.kiosk {
         let grant = tauri::ipc::CapabilityBuilder::new("home-page")

@@ -140,6 +140,33 @@ def quit_app(pid: int) -> None:
         u32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
 
 
+def audit_processes() -> None:
+    """Windows: log every process start with its command line (event 4688) and
+    every exit with its status (4689) in the Security log, so a failure shows the
+    argv msedgedriver gave the app and how it ended. Nothing about the launch
+    changes. Needs an administrator (the CI runner is one)."""
+    for sub in ("Process Creation", "Process Termination"):
+        subprocess.run(["auditpol", "/set", f"/subcategory:{sub}", "/success:enable"], check=True, capture_output=True)
+    key = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
+    subprocess.run(
+        ["reg", "add", key, "/v", "ProcessCreationIncludeCmdLine_Enabled", "/t", "REG_DWORD", "/d", "1", "/f"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def app_processes() -> str:
+    """The audit log's starts and exits of `fantastic-app.exe`, newest first."""
+    q = "*[System[(EventID=4688 or EventID=4689)]]"
+    out = subprocess.run(
+        ["wevtutil", "qe", "Security", f"/q:{q}", "/f:text", "/rd:true", "/c:500"], capture_output=True, text=True
+    )
+    if out.returncode != 0:
+        return f"wevtutil failed: {out.stderr.strip()}"
+    found = ["Event[" + b for b in out.stdout.split("Event[") if "fantastic-app" in b]
+    return "\n".join(found) or "no fantastic-app process in the audit log"
+
+
 def http_ok(url: str) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=5) as r:
@@ -341,84 +368,24 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
     cmd = ["tauri-driver", "--port", "4444"]
     if args.native_driver:
         cmd += ["--native-driver", args.native_driver]
+    if WINDOWS:
+        audit_processes()
     log = open(run.root / "tauri-driver.log", "w")
     driver = subprocess.Popen(cmd, env=run.env, stdout=log, stderr=subprocess.STDOUT)
     wd = WebDriver("http://127.0.0.1:4444")
     try:
-        await until("tauri-driver up", lambda: _status(wd), 30)
-        alpha = canonical(run.alpha)
-
-        say("1. a session with alpha: the window shows the Home page")
-        wd.start(run.app, [str(run.alpha)])
-        host = await on_page(wd, run)
-        app_pid = int(host["pid"])
-
-        say("2. the shell's flag")
-        flag = wd.js(SHELL_JS)
-        backdrop = "native" if WINDOWS and windows_build() >= 22000 else "web"
-        need(flag == {"name": "tauri", "os": OS, "webview": WEBVIEW, "backdrop": backdrop, "pickFolder": "function", "frozen": True}, f"the flag: {flag}")
-
-        say("3. the argv intent: alpha runs")
-        p = await run.running_canvas(run.alpha)
-
-        say("4. through the page: stop, start, select")
-        row = (await run.row(alpha))["id"]
-        sel = f'.home-row[data-id="{row}"]'
-        await show_home(wd, run)
-        await until("alpha's row on the page", lambda: wd.find(sel), 30)
-        wd.click(f'{sel} button[data-intent="stop"]')
-        await run.row_status(alpha, "stopped", 30)
-        await until("alpha's run file gone", lambda: run.canvas_run(run.alpha) is None, 30)
-        await until("alpha's start button", lambda: wd.find(f'{sel} button[data-intent="start"]'), 15)
-        wd.click(f'{sel} button[data-intent="start"]')
-        p = await run.running_canvas(run.alpha, 30)
-        await until("alpha's row again", lambda: wd.find(f"{sel} .path"), 15)
-        wd.click(f"{sel} .path")
-        await until("alpha selected", lambda: _selected(run, row), 30)
-        frame = f'.page[data-id="{row}"] iframe.canvas-frame'
-        src = await until("alpha's canvas frame", lambda: wd.js("const f = document.querySelector(arguments[0]); return f && f.src;", frame), 30)
-        need(src == p["url"], f"the frame shows {src}, not {p['url']}")
-
-        say("5. the hand-over: a second launch with beta")
-        await run.hand_over()
-        need(len(wd.handles()) == 1, f"a second window: {wd.handles()}")
-
-        say("6. the orderly quit: the OS's own (SIGTERM on Linux, WM_CLOSE on Windows)")
-        quit_app(app_pid)
-        await until("the app gone", lambda: not pid_alive(app_pid), 20)
-        need(not run.run_file.exists(), "the run file outlived the quit: no orderly shutdown")
-        await run.canvas_survives(p)
-        wd.end()
-
-        say("7. a second session, no args: alpha is adopted, and stops")
-        wd.start(run.app, [])
-        await on_page(wd, run)
-        await run.row_status(alpha, "running", 60)
-        await show_home(wd, run)
-        await until("alpha's row on the page", lambda: wd.find(sel), 30)
-        wd.click(f'{sel} button[data-intent="stop"]')
-        await run.row_status(alpha, "stopped", 30)
-        await until(f"the canvas {p['pid']} gone", lambda: not pid_alive(p["pid"]), 30)
-        app_pid = int(run.host()["pid"])
-        quit_app(app_pid)
-        await until("the app gone", lambda: not pid_alive(app_pid), 20)
-        need(not run.run_file.exists(), "the run file outlived the quit")
-        wd.end()
-
-        if LINUX:
-            say("8. kiosk: fullscreen, no folder dialog")
-            wd.start(run.app, ["--kiosk"])
-            await on_page(wd, run)
-            rect = await until("a fullscreen window", lambda: _fullscreen(wd), 20)
-            need(rect, f"the kiosk window: {wd.rect()}")
-            flag = wd.js(SHELL_JS)
-            need(flag and flag["pickFolder"] == "undefined", f"the kiosk's flag: {flag}")
-            await until("the Home page loads", lambda: wd.js("return document.body && document.body.dataset.page"), 30)
-            app_pid = int(run.host()["pid"])
-            quit_app(app_pid)
-            await until("the app gone", lambda: not pid_alive(app_pid), 20)
-            need(not run.run_file.exists(), "the kiosk's run file outlived the quit")
-            wd.end()
+        await sessions(run, wd)
+    except BaseException:
+        # the app's stderr goes where its driver's does: into this log
+        log.flush()
+        say("the driver's log (the app's stderr with it), last 80 lines:")
+        print("\n".join((run.root / "tauri-driver.log").read_text(errors="replace").splitlines()[-80:]), flush=True)
+        if WINDOWS:
+            text = app_processes()
+            (run.root / "app-processes.txt").write_text(text)
+            say("fantastic-app.exe as the audit log saw it (argv, exit status):")
+            print(text, flush=True)
+        raise
     finally:
         wd.end()
         driver.terminate()
@@ -427,6 +394,84 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
         except subprocess.TimeoutExpired:
             driver.kill()
         log.close()
+
+
+async def sessions(run: Run, wd: WebDriver) -> None:
+    """Steps 1–8 (8: Linux only), on one driver."""
+    await until("tauri-driver up", lambda: _status(wd), 30)
+    alpha = canonical(run.alpha)
+
+    say("1. a session with alpha: the window shows the Home page")
+    wd.start(run.app, [str(run.alpha)])
+    host = await on_page(wd, run)
+    app_pid = int(host["pid"])
+
+    say("2. the shell's flag")
+    flag = wd.js(SHELL_JS)
+    backdrop = "native" if WINDOWS and windows_build() >= 22000 else "web"
+    need(flag == {"name": "tauri", "os": OS, "webview": WEBVIEW, "backdrop": backdrop, "pickFolder": "function", "frozen": True}, f"the flag: {flag}")
+
+    say("3. the argv intent: alpha runs")
+    p = await run.running_canvas(run.alpha)
+
+    say("4. through the page: stop, start, select")
+    row = (await run.row(alpha))["id"]
+    sel = f'.home-row[data-id="{row}"]'
+    await show_home(wd, run)
+    await until("alpha's row on the page", lambda: wd.find(sel), 30)
+    wd.click(f'{sel} button[data-intent="stop"]')
+    await run.row_status(alpha, "stopped", 30)
+    await until("alpha's run file gone", lambda: run.canvas_run(run.alpha) is None, 30)
+    await until("alpha's start button", lambda: wd.find(f'{sel} button[data-intent="start"]'), 15)
+    wd.click(f'{sel} button[data-intent="start"]')
+    p = await run.running_canvas(run.alpha, 30)
+    await until("alpha's row again", lambda: wd.find(f"{sel} .path"), 15)
+    wd.click(f"{sel} .path")
+    await until("alpha selected", lambda: _selected(run, row), 30)
+    frame = f'.page[data-id="{row}"] iframe.canvas-frame'
+    src = await until("alpha's canvas frame", lambda: wd.js("const f = document.querySelector(arguments[0]); return f && f.src;", frame), 30)
+    need(src == p["url"], f"the frame shows {src}, not {p['url']}")
+
+    say("5. the hand-over: a second launch with beta")
+    await run.hand_over()
+    need(len(wd.handles()) == 1, f"a second window: {wd.handles()}")
+
+    say("6. the orderly quit: the OS's own (SIGTERM on Linux, WM_CLOSE on Windows)")
+    quit_app(app_pid)
+    await until("the app gone", lambda: not pid_alive(app_pid), 20)
+    need(not run.run_file.exists(), "the run file outlived the quit: no orderly shutdown")
+    await run.canvas_survives(p)
+    wd.end()
+
+    say("7. a second session, no args: alpha is adopted, and stops")
+    wd.start(run.app, [])
+    await on_page(wd, run)
+    await run.row_status(alpha, "running", 60)
+    await show_home(wd, run)
+    await until("alpha's row on the page", lambda: wd.find(sel), 30)
+    wd.click(f'{sel} button[data-intent="stop"]')
+    await run.row_status(alpha, "stopped", 30)
+    await until(f"the canvas {p['pid']} gone", lambda: not pid_alive(p["pid"]), 30)
+    app_pid = int(run.host()["pid"])
+    quit_app(app_pid)
+    await until("the app gone", lambda: not pid_alive(app_pid), 20)
+    need(not run.run_file.exists(), "the run file outlived the quit")
+    wd.end()
+
+    if LINUX:
+        say("8. kiosk: fullscreen, no folder dialog")
+        wd.start(run.app, ["--kiosk"])
+        await on_page(wd, run)
+        rect = await until("a fullscreen window", lambda: _fullscreen(wd), 20)
+        need(rect, f"the kiosk window: {wd.rect()}")
+        flag = wd.js(SHELL_JS)
+        need(flag and flag["pickFolder"] == "undefined", f"the kiosk's flag: {flag}")
+        await until("the Home page loads", lambda: wd.js("return document.body && document.body.dataset.page"), 30)
+        app_pid = int(run.host()["pid"])
+        quit_app(app_pid)
+        await until("the app gone", lambda: not pid_alive(app_pid), 20)
+        need(not run.run_file.exists(), "the kiosk's run file outlived the quit")
+        wd.end()
 
 
 def _status(wd: WebDriver) -> bool:
