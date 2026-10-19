@@ -12,6 +12,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import FOLDER, Rig, html_cell, spot, verdict  # noqa: E402
+from helpers import oslayer  # noqa: E402
 
 TERM_VERBS = ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]
 CELL, BACKEND = "cell_skin0000", "exec_bridge_skin0000"
@@ -55,10 +56,23 @@ def main() -> bool:
     bg_yaml = web / "view_root" / "agents" / "background" / "agent.yaml"
 
     def on_disk(p: Path) -> dict:
+        # the page's loader replaces the record atomically: on Windows an open
+        # that meets the rename is a sharing violation, which oslayer.read_text
+        # opens again (a missing record is simply not there yet)
         try:
-            return yaml.safe_load(p.read_text()) or {}
-        except (OSError, yaml.YAMLError):
+            return yaml.safe_load(oslayer.read_text(p)) or {}
+        except FileNotFoundError:
             return {}
+
+    async def disk_until(p: Path, ok, timeout: float = 10.0) -> dict:
+        """The record once `ok(record)` holds — the loader's write landed — or
+        the last one read when it never does."""
+        deadline = time.time() + timeout
+        d = on_disk(p)
+        while not ok(d) and time.time() < deadline:
+            await asyncio.sleep(0.1)
+            d = on_disk(p)
+        return d
 
     try:
         cell, host = terminal_pair()
@@ -96,12 +110,8 @@ def main() -> bool:
                 info["7_use"] = await call({"type": "use", "name": "dark"})
                 info["7_dark"] = bool(await pg.until(f"{BEZEL} === 'rgba(15, 15, 25, 0.88)' && {ACCENT} === 'rgb(183 140 255)' && {SKIN} === 'dark'", 3))
                 # 8: on disk
-                for _ in range(40):
-                    d = on_disk(skin_yaml)
-                    if (d.get("skins") or {}).get("web") == "dark" and any(u.get("name") == "probe-red" for u in d.get("user_skins") or []):
-                        break
-                    await asyncio.sleep(0.25)
-                d = on_disk(skin_yaml)
+                d = await disk_until(skin_yaml, lambda d: (d.get("skins") or {}).get("web") == "dark"
+                                     and any(u.get("name") == "probe-red" for u in d.get("user_skins") or []))
                 info["8_disk"] = {"skins": d.get("skins"), "user_skins": [u.get("name") for u in d.get("user_skins") or []]}
                 # 9: the panel's Skins section
                 await spot(pg, 900, 600, "canvas theme")
@@ -133,8 +143,9 @@ def main() -> bool:
                 info["11_use_glass"] = await call({"type": "use", "name": "glass", "backdrop": "native"})
                 info["11_glass"] = bool(await pg.until(f"{BODY} === 'rgba(0, 0, 0, 0)' && {DRAWN} === 'none' && {TERM_FG} === '#ececec'", 5))
                 info["11_no_reload"] = await pg.js("window.__skinProbe === 2")
-                await asyncio.sleep(1.0)
-                info["12_disk"] = on_disk(skin_yaml).get("skins")
+                # 12: once step 11's last write (native: glass) is on disk, the web
+                # slot there is still dark
+                info["12_disk"] = (await disk_until(skin_yaml, lambda d: (d.get("skins") or {}).get("native") == "glass")).get("skins")
                 info["console_native"] = [x for x in pg.logs if "WebGL" not in x][:6]
 
         asyncio.run(run())
