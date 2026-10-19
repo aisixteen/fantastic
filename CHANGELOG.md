@@ -81,6 +81,16 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   rebuilt from the view array. Each new fold records its place (`anchor`), so it
   is placed even when its members are not in the rows being rendered; a store
   written before the field renders as it did.
+- AI agents (rust): a fold whose place cannot be known no longer panics inside
+  the turn. It fails the turn loud, as python does: `status done` with
+  `reason: error` and the message, then a raised `ValueError`. Swift and rust
+  now print the offending id the way python does.
+- e2e `canvas.ai_cell` S8 (#74): the step waits for the cell's fold notice
+  (`context folded`) and answers the `context_recall` side call in its own shape.
+  It used to wait for `context compacted`, which only showed because a fold
+  dropped out of the next view (the bug above). With that fixed, every S8
+  compaction is a fold, and a recall made due by the folds took a turn's queued
+  mock reply.
 
 ## [0.0.6] - 2026-10-18
 

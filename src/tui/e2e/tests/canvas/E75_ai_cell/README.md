@@ -8,4 +8,4 @@ Free: the vLLM mock from `e2e/mocks` (no model); the AI's replies are scripted. 
 - S5 a turn stopped while the model thinks settles idle, unanswered; the next answers;
 - S6 `keep` survives a page reload with its history; S7 the kept dialog reopened from the popup's chats tile shows it;
 - S9 an exec agent: start a ticker, monitor it, status, tail, stop — the process is gone. The monitor's delivery is its own check: KNOWN failing (2026-10-11) — the canvas AI's `callable_by` does not list the exec agent and `exec_bridge` drops the refusal silently;
-- S8 at the kernel's fold window (`E2E_WINDOW`, default 12000; fold strategy, async + titled), long turns fold once: the chat says the context was compacted and the next turn answers.
+- S8 at the kernel's fold window (`E2E_WINDOW`, default 12000; fold strategy, async + titled), long turns fold once: the chat says the context was folded (`context folded · …`) and the next turn answers; the fold's summary and the `context_recall` side calls are answered in their own shapes.

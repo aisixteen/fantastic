@@ -313,28 +313,60 @@ pub fn anchors_of(rows: &[Value]) -> HashMap<i64, i64> {
     out
 }
 
+/// A new fold's anchor cannot be known: a member fold with no anchor, a member
+/// row without an int id, or no member at all. Python's `ValueError` out of
+/// `member_anchor` — the turn fails, loud and reported, never a panic.
+#[derive(Debug, Clone)]
+pub struct FoldAnchorError(pub String);
+
+impl std::fmt::Display for FoldAnchorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ValueError: {}", self.0)
+    }
+}
+
+impl std::error::Error for FoldAnchorError {}
+
 /// The anchor a new fold over `rows[i] for i in idxs` carries: the smallest leaf
 /// id, a member fold contributing its anchor. A member fold with no known anchor
 /// cannot be in the view, so it cannot be a member.
 ///
-/// # Panics
+/// # Errors
 /// A member fold without an anchor, a member row without an int id, or no
-/// member: each is a programming error.
-#[must_use]
-pub fn member_anchor(rows: &[Value], idxs: &[usize], anchors: &HashMap<i64, i64>) -> i64 {
+/// member — the fold cannot be written, and the turn says so.
+pub fn member_anchor(
+    rows: &[Value],
+    idxs: &[usize],
+    anchors: &HashMap<i64, i64>,
+) -> Result<i64, FoldAnchorError> {
     let mut best: Option<i64> = None;
     for &i in idxs {
         let r = &rows[i];
         let a = if is_fold(r) {
             own_anchor(r)
                 .or_else(|| row_id(r).and_then(|f| anchors.get(&f).copied()))
-                .unwrap_or_else(|| panic!("fold: member fold {:?} has no anchor", row_id(r)))
+                .ok_or_else(|| {
+                    FoldAnchorError(format!(
+                        "fold: member fold {} has no anchor",
+                        r.get("id")
+                            .map_or_else(|| "None".to_string(), fantastic_bundle::py_str)
+                    ))
+                })?
         } else {
-            row_id(r).unwrap_or_else(|| panic!("fold: member row {i} has no int id"))
+            // python `_int(r.get("id"))`: an integer, or a string of ASCII digits
+            r.get("id").and_then(as_int).ok_or_else(|| {
+                FoldAnchorError(format!("fold: member row {} has no int id", py_repr_id(r)))
+            })?
         };
         best = Some(best.map_or(a, |b| b.min(a)));
     }
-    best.expect("fold: a fold needs at least one member")
+    best.ok_or_else(|| FoldAnchorError("fold: a fold needs at least one member".to_string()))
+}
+
+/// A row's `id` as python's `{r.get('id')!r}` prints it.
+fn py_repr_id(r: &Value) -> String {
+    r.get("id")
+        .map_or_else(|| "None".to_string(), fantastic_bundle::py_repr_value)
 }
 
 /// Row index → the folds placed before that row, each with its anchor.

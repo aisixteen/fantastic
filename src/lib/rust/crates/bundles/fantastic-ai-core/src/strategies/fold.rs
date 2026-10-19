@@ -25,7 +25,7 @@ use crate::constants::NOTICE_ENVELOPE_RESERVE;
 use crate::context::{estimate_one, estimate_tokens};
 use crate::folds::{
     chain_text, is_fold, level, make_fold, member_anchor, own_anchor, quoted_title, render, row_id,
-    row_parent, row_role, unanchored,
+    row_parent, row_role, unanchored, FoldAnchorError,
 };
 use crate::memory::{save_history, MemoryStoreError};
 use crate::provider::Provider;
@@ -194,14 +194,17 @@ impl std::fmt::Display for FoldSummaryError {
 
 impl std::error::Error for FoldSummaryError {}
 
-/// Why a fold wrote nothing: the store refused the row, or the summary would not
-/// fit.
+/// Why a fold wrote nothing: the store refused the row, the summary would not
+/// fit, or the fold's anchor cannot be known.
 #[derive(Debug)]
 pub enum FoldFail {
     /// The memory store refused a fold row.
     Store(MemoryStoreError),
     /// The summary stayed over its budget after every re-summarise.
     Summary(FoldSummaryError),
+    /// A member of the span has no known place (python `member_anchor`'s
+    /// `ValueError`).
+    Anchor(FoldAnchorError),
 }
 
 impl From<MemoryStoreError> for FoldFail {
@@ -316,7 +319,8 @@ pub async fn summarize(
 }
 
 /// Summarize `idxs` and append ONE fold row for them (a summary that will not fit
-/// is [`FoldFail::Summary`]). A fold row in `idxs` is just a
+/// is [`FoldFail::Summary`], a member with no known place [`FoldFail::Anchor`]).
+/// A fold row in `idxs` is just a
 /// member — that is how folds nest: the next fold over this stretch of the view
 /// takes the earlier fold as one of its rows, and its level is one above the
 /// deepest member.
@@ -327,7 +331,7 @@ pub async fn write_fold(
     anchors: &HashMap<i64, i64>,
 ) -> Result<Value, FoldFail> {
     let ids: Vec<i64> = idxs.iter().filter_map(|&i| row_id(&rows[i])).collect();
-    let anchor = member_anchor(rows, idxs, anchors);
+    let anchor = member_anchor(rows, idxs, anchors).map_err(FoldFail::Anchor)?;
     let lvl = 1 + idxs
         .iter()
         .filter(|&&i| is_fold(&rows[i]))
@@ -416,7 +420,8 @@ pub fn next_span(rows: &[Value], view: &[Value], keep_tail: usize, need: i64) ->
 /// keeps every fold in place.
 ///
 /// # Errors
-/// The memory store refused a fold row, or a summary would not fit.
+/// The memory store refused a fold row, a summary would not fit, or a span
+/// member has no known place.
 pub async fn fold_down(
     rows: &[Value],
     ctx: &ProjectionCtx<'_>,

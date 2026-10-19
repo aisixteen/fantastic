@@ -445,6 +445,8 @@ pub enum BlockFail {
     PromptFile(PromptFileError),
     /// A fold's summary would not fit its budget (a `context_recall` fold).
     FoldSummary(crate::strategies::fold::FoldSummaryError),
+    /// A fold's anchor cannot be known (a `context_recall` fold).
+    FoldAnchor(crate::folds::FoldAnchorError),
 }
 
 impl From<crate::strategies::fold::FoldFail> for BlockFail {
@@ -452,6 +454,7 @@ impl From<crate::strategies::fold::FoldFail> for BlockFail {
         match e {
             crate::strategies::fold::FoldFail::Store(e) => Self::Store(e),
             crate::strategies::fold::FoldFail::Summary(e) => Self::FoldSummary(e),
+            crate::strategies::fold::FoldFail::Anchor(e) => Self::FoldAnchor(e),
         }
     }
 }
@@ -474,6 +477,7 @@ impl From<BlockFail> for fantastic_kernel::bundle::BundleError {
             BlockFail::Store(e) => e.into(),
             BlockFail::PromptFile(e) => e.into(),
             BlockFail::FoldSummary(e) => e.into(),
+            BlockFail::FoldAnchor(e) => e.into(),
         }
     }
 }

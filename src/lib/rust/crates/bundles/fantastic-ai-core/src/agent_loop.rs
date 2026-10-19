@@ -62,6 +62,9 @@ pub enum GenFailure {
     /// LOUD, no turn on an unfolded view (python `FoldSummaryError`, caught by
     /// `_send`).
     FoldSummary(crate::strategies::fold::FoldSummaryError),
+    /// A fold's anchor cannot be known — python's `ValueError` out of
+    /// `member_anchor`, which `_send`'s `except Exception` reports and re-raises.
+    FoldAnchor(crate::folds::FoldAnchorError),
 }
 
 /// What one generation produced.
@@ -103,6 +106,7 @@ impl From<crate::assembly::BlockFail> for GenFailure {
             crate::assembly::BlockFail::Store(e) => Self::Store(e),
             crate::assembly::BlockFail::PromptFile(e) => Self::PromptFile(e),
             crate::assembly::BlockFail::FoldSummary(e) => Self::FoldSummary(e),
+            crate::assembly::BlockFail::FoldAnchor(e) => Self::FoldAnchor(e),
         }
     }
 }
@@ -221,6 +225,9 @@ pub async fn run_generation(
         Err(crate::projection::ProjectFail::Store(e)) => return Err(GenFailure::Store(e)),
         Err(crate::projection::ProjectFail::FoldSummary(e)) => {
             return Err(GenFailure::FoldSummary(e))
+        }
+        Err(crate::projection::ProjectFail::FoldAnchor(e)) => {
+            return Err(GenFailure::FoldAnchor(e))
         }
     };
 

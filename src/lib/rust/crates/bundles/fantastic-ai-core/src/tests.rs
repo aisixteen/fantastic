@@ -43,7 +43,13 @@ struct MockScript {
     /// handed. Turn 2's entry is how a test proves a reply actually came back.
     requests: std::sync::Mutex<Vec<Vec<Value>>>,
     delay: Duration,
+    /// Answers a request before the queue does when it returns `Some` — python's
+    /// mock `responder` (a fold's summary side call, answered in its own shape).
+    responder: std::sync::Mutex<Option<Responder>>,
 }
+
+/// A request's messages → the completion for it, or `None` to serve the queue.
+type Responder = Box<dyn Fn(&[Value]) -> Option<String> + Send + Sync>;
 
 impl MockScript {
     /// How many provider passes have been served. python's `.calls`.
@@ -90,13 +96,23 @@ impl Provider for MockProvider {
         if !self.script.delay.is_zero() {
             tokio::time::sleep(self.script.delay).await;
         }
-        let pass = self
+        let answered = self
             .script
-            .passes
+            .responder
             .lock()
             .unwrap()
-            .pop_front()
-            .unwrap_or_default();
+            .as_ref()
+            .and_then(|f| f(messages));
+        let pass = match answered {
+            Some(text) => pass(text),
+            None => self
+                .script
+                .passes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default(),
+        };
         let evs: Vec<Result<ProviderEvent, ProviderError>> = pass
             .into_iter()
             .map(|e| match e {
@@ -133,6 +149,7 @@ fn script(agent: &AgentId, passes: Vec<Vec<ScriptEvent>>, delay: Duration) -> Ar
         passes: std::sync::Mutex::new(passes.into_iter().collect()),
         requests: std::sync::Mutex::new(Vec::new()),
         delay,
+        responder: std::sync::Mutex::new(None),
     });
     scripts().insert(agent.as_str().to_string(), Arc::clone(&s));
     s
@@ -147,6 +164,7 @@ fn script_for(agent: &AgentId) -> Arc<MockScript> {
             passes: std::sync::Mutex::new(std::collections::VecDeque::new()),
             requests: std::sync::Mutex::new(Vec::new()),
             delay: Duration::ZERO,
+            responder: std::sync::Mutex::new(None),
         })
     }))
 }
