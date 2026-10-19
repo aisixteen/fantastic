@@ -83,6 +83,7 @@ def main() -> bool:
                 await asyncio.sleep(0.2)
             info["registry_stopped"] = reg
             r["registry_cleared"] = cleared
+            info["clicks_tab1"] = pg.click_log
             r["no_page_errors"] = not page_errors(pg)
             info["page_errors"] = page_errors(pg)[:5]
         # 4. Open Folder through a native shell's pickFolder
@@ -107,6 +108,7 @@ def main() -> bool:
             r["open_hint"] = bool(await pg.js("document.body.innerText.includes('or drop a folder anywhere')"))
             info["open_folder_rect"] = await pg.rect("#home button.open-folder")
             r["open_folder_clicked"] = await click(pg, "#home button.open-folder")
+            info["keys_tab2"], info["clicks_tab2"] = pg.key_log, pg.click_log
             dp = canonical(delta)
             try:
                 st = await rig.until_state("delta running", lambda s: row_of(s, dp).get("status") == "running", 30)
@@ -129,8 +131,12 @@ def main() -> bool:
         rig.stop_all()
     ok = bool(r) and all(r.values())
     rig.summary["checks"], rig.summary["info"] = r, info
+    if not ok:
+        # the input's own evidence, whole: what held the focus, what the window
+        # saw, what each missed click hit
+        print("input: " + json.dumps({k: v for k, v in info.items() if k.startswith(("keys", "clicks"))}))
     note = f"start → running, a live frame, stop → {' → '.join(info.get('cards', []))}, Open Folder through pickFolder" if ok else \
-        f"failed: {', '.join(k for k, v in r.items() if not v)} · {json.dumps(info)[:1500]}"
+        f"failed: {', '.join(k for k, v in r.items() if not v)} · {json.dumps(info)[:4000]}"
     return verdict(*rig.finish(ok, note))
 
 

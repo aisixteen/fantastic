@@ -220,7 +220,14 @@ class HomeRig(Rig):
                 self.misses = pg.misses
                 await pg.cdp("Runtime.enable")
                 await pg.cdp("Page.enable")
+                # the page behaves as the focused window's, as it is for a user: a
+                # CI runner's Chrome window is not the OS's key window (macOS),
+                # and an unfocused page takes no key events
+                await pg.cdp("Emulation.setFocusEmulationEnabled", enabled=True)
                 await pg.viewport(width, height)
+                # every keydown the Home's window sees, for `key`'s log
+                await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source=KEY_RECORDER)
+                pg.key_log, pg.click_log = [], []
                 if before_load is not None:
                     await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source=before_load)
                 await self.open_home(pg)
@@ -321,22 +328,42 @@ def q(sel: str) -> str:
     return f"document.querySelector({json.dumps(sel)})"
 
 
+#: Records every keydown the top window sees (`window.__keys`).
+KEY_RECORDER = ("if (window.top === window) { window.__keys = []; window.addEventListener('keydown', (e) =>"
+                " window.__keys.push(e.key + (e.metaKey ? '+meta' : '') + (e.ctrlKey ? '+ctrl' : '')), true); }")
+
+#: Give the Home's document the focus: a canvas frame that holds it keeps the
+#: keys (shortcuts inside a frame are out of scope, #47). What was focused, and
+#: whether the document has the focus now.
+FOCUS_HOME = ("(()=>{const a=document.activeElement; const was=a?a.tagName+(a.className?'.'+a.className:''):null;"
+              " if(a&&a.tagName==='IFRAME') a.blur(); window.focus();"
+              " return {was, has_focus: document.hasFocus(), active: document.activeElement?.tagName ?? null,"
+              " seen: (window.__keys||[]).length};})()")
+
+
 async def click(pg: Page, sel: str, timeout: float = 10) -> bool:
-    """A real mouse click at the middle of `sel`, once it is shown and STILL —
-    the carousel slides a page in, and a click mid-slide lands beside it."""
-    shown = (f"(()=>{{const e={q(sel)}; if(!e) return false; const r=e.getBoundingClientRect();"
-             " return r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth;})()")
+    """A real mouse click at the middle of `sel`, once it is shown, STILL (the
+    carousel slides a page in, and a click mid-slide lands beside it) and the
+    top element at that point is `sel` itself (nothing covers it). A miss is
+    logged with what the point hit (`pg.click_log`)."""
+    probe = (f"(()=>{{const e={q(sel)}; if(!e) return null; const r=e.getBoundingClientRect();"
+             " const shown=r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth;"
+             " const h=shown?document.elementFromPoint(r.x+r.width/2, r.y+r.height/2):null;"
+             " return {x:r.x, y:r.y, w:r.width, h:r.height, shown, hits: !!h&&(h===e||e.contains(h)),"
+             " hit: h ? h.tagName+(h.className&&typeof h.className==='string'?'.'+h.className.split(' ').join('.'):'') : null};})()")
     deadline = asyncio.get_running_loop().time() + timeout
     r, last = None, None
     while asyncio.get_running_loop().time() < deadline:
-        if await pg.js(shown):
-            r = await pg.rect(sel)
-            if r is not None and r == last:
-                break
-            last = r
+        r = await pg.js(probe)
+        if r is not None and r["shown"] and r["hits"] and last is not None and \
+                (r["x"], r["y"], r["w"], r["h"]) == (last["x"], last["y"], last["w"], last["h"]):
+            break
+        last = r
         await asyncio.sleep(0.1)
     else:
-        pg.misses.append(f"click {sel}: not shown and still within {timeout:g}s")
+        miss = {"click": sel, "last": r}
+        getattr(pg, "click_log", []).append(miss)
+        pg.misses.append(f"click {sel}: not shown, still and on top within {timeout:g}s — {json.dumps(r)}")
         return False
     x, y = r["x"] + r["w"] / 2, r["y"] + r["h"] / 2
     await pg.mouse("mousePressed", x, y)
@@ -345,11 +372,16 @@ async def click(pg: Page, sel: str, timeout: float = 10) -> bool:
 
 
 async def key(pg: Page, k: str, modifiers: int = MOD) -> None:
-    """A key with the Home's mod held (`Input.dispatchKeyEvent`)."""
+    """A key with the Home's mod held (`Input.dispatchKeyEvent`), sent once the
+    Home's document has the focus; logged (`pg.key_log`) with what held the
+    focus before and whether the Home's window saw the keydown."""
+    focus = await pg.js(FOCUS_HOME) or {}
     code = f"Digit{k}" if k.isdigit() else f"Key{k.upper()}"
     vk = ord(k.upper())
     for t in ("keyDown", "keyUp"):
         await pg.cdp("Input.dispatchKeyEvent", type=t, key=k, code=code, windowsVirtualKeyCode=vk, modifiers=modifiers)
+    keys = await pg.js("window.__keys || []") or []
+    getattr(pg, "key_log", []).append({"key": k, **focus, "seen_now": keys[focus.get("seen", 0):]})
 
 
 def page_errors(pg: Page) -> list[str]:

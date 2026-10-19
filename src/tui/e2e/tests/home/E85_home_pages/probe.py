@@ -124,6 +124,7 @@ def main() -> bool:
                 r["tab2_moves_tab1"] = bool(await pg.until(f"{CURRENT} === {json.dumps(aid)}", 10)) and \
                     bool(await pg2.until(f"{CURRENT} === {json.dumps(aid)}", 10))
                 info["page_errors_tab2"] = page_errors(pg2)[:5]
+                info["keys_tab2"] = pg2.key_log
             born_after = json.loads(await pg.js(born_js) or "{}")
             await log.__aexit__()
             info["born_after_tab2"] = born_after
@@ -164,6 +165,7 @@ def main() -> bool:
             r["alpha_still_runs"] = lock_pid(alpha) is not None and http_get(urls[aid])[0] == 200
             info["page_errors_after_restart"] = page_errors(pg)[:5]
             r["no_page_errors_after_restart"] = not info["page_errors_after_restart"]
+            info["keys_tab1"], info["clicks_tab1"] = pg.key_log, pg.click_log
 
     try:
         asyncio.run(drive())
@@ -171,6 +173,10 @@ def main() -> bool:
         rig.stop_all()
     ok = bool(r) and all(r.values())
     rig.summary["checks"], rig.summary["info"] = r, info
+    if not ok:
+        # the input's own evidence, whole: what held the focus, what the window
+        # saw, what each missed click hit
+        print("input: " + json.dumps({k: v for k, v in info.items() if k.startswith(("keys", "clicks"))}))
     note = "switched five times with no reload, two tabs one selection, mod+W closed a page, a restart kept the pages" if ok else \
         f"failed: {', '.join(k for k, v in r.items() if not v)} · {json.dumps(info)[:4000]}"
     return verdict(*rig.finish(ok, note))
