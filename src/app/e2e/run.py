@@ -293,11 +293,20 @@ class WebDriver:
     def req(self, method: str, path: str, body: dict | None = None, timeout: float = 120):
         data = None if body is None else json.dumps(body).encode()
         rq = urllib.request.Request(self.base + path, data=data, method=method, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(rq, timeout=timeout) as r:
-                return json.loads(r.read() or b"{}").get("value")
-        except urllib.error.HTTPError as e:
-            raise Fail(f"WebDriver {method} {path}: {e.code} {e.read()[:400]!r}") from None
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(rq, timeout=timeout) as r:
+                    return json.loads(r.read() or b"{}").get("value")
+            except urllib.error.HTTPError as e:
+                raise Fail(f"WebDriver {method} {path}: {e.code} {e.read()[:400]!r}") from None
+            except ConnectionResetError as e:
+                # tauri-driver now and then fails to send a request on its pooled
+                # connection to the native driver (about 1 in 40 back to back, on
+                # Linux) and drops ours unanswered: the request never reached the
+                # driver, so it is sent once more
+                if attempt == 2:
+                    raise
+                say(f"WebDriver {method} {path}: {e!r}; once more")
 
     def s(self, path: str) -> str:
         return f"/session/{self.sid}{path}"
@@ -454,7 +463,8 @@ async def sessions(run: Run, wd: WebDriver) -> None:
 
     say("5. the hand-over: a second launch with beta")
     await run.hand_over()
-    need(len(wd.handles()) == 1, f"a second window: {wd.handles()}")
+    handles = wd.handles()
+    need(len(handles) == 1, f"a second window: {handles}")
 
     say("6. the orderly quit: the OS's own (SIGTERM on Linux, WM_CLOSE on Windows)")
     quit_app(app_pid)
@@ -483,7 +493,7 @@ async def sessions(run: Run, wd: WebDriver) -> None:
         wd.start(run.app, ["--kiosk"])
         await on_page(wd, run)
         rect = await until("a fullscreen window", lambda: _fullscreen(wd), 20)
-        need(rect, f"the kiosk window: {wd.rect()}")
+        need(rect, f"the kiosk window: {rect}")
         flag = wd.js(SHELL_JS)
         need(flag and flag["pickFolder"] == "undefined", f"the kiosk's flag: {flag}")
         await until("the Home page loads", lambda: wd.js("return document.body && document.body.dataset.page"), 30)
