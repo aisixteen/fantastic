@@ -150,17 +150,31 @@ def exit_status(code: int | None) -> str:
     return f"with {code}" + (f" (0x{code & 0xFFFFFFFF:08X})" if WINDOWS and not 0 <= code < 256 else "")
 
 
+def listing(root: Path, depth: int) -> str:
+    """`root`'s entries `depth` levels down, or that it is missing."""
+    if not root.exists():
+        return f"({root}: missing)"
+    out = []
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root)
+        if len(rel.parts) <= depth:
+            out.append(f"{rel}{'/' if p.is_dir() else ''}")
+    return "\n".join(out) or "(empty)"
+
+
 def tail(p: Path, n: int = 80) -> str:
     return "\n".join(p.read_text(errors="replace").splitlines()[-n:]) if p.exists() else f"({p.name}: none)"
 
 
-# WebView2's browser processes (the ones without a --type) and what each listens on
+# Every msedgewebview2.exe with its parent and command line (a browser
+# process has no --type), and what each browser process listens on
 WEBVIEW2_PS = (
-    "$ps = Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | Where-Object { $_.CommandLine -notmatch '--type=' }; "
-    "if (-not $ps) { 'no msedgewebview2.exe browser process' }; "
+    "$ps = @(Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\"); "
+    "if ($ps.Count -eq 0) { 'no msedgewebview2.exe process' }; "
     "foreach ($p in $ps) { \"pid $($p.ProcessId), parent $($p.ParentProcessId): $($p.CommandLine)\"; "
+    "if ($p.CommandLine -notmatch '--type=') { "
     "Get-NetTCPConnection -State Listen -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue | "
-    "ForEach-Object { \"  listens on $($_.LocalAddress):$($_.LocalPort)\" } }"
+    "ForEach-Object { \"  listens on $($_.LocalAddress):$($_.LocalPort)\" } } }"
 )
 
 
@@ -304,6 +318,7 @@ class WebDriver:
         self.sid: str | None = None
         # Windows: the app this run launched, and where its output goes
         self.proc: subprocess.Popen | None = None
+        self.app_env: dict[str, str] = {}
 
     def req(self, method: str, path: str, body: dict | None = None, timeout: float = 120):
         data = None if body is None else json.dumps(body).encode()
@@ -345,6 +360,7 @@ class WebDriver:
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": f"--remote-debugging-port={port} --enable-logging",
             "TAURI_WEBVIEW_AUTOMATION": "true",
         }
+        self.app_env = {k: v for k, v in env.items() if k.upper().startswith(("WEBVIEW2_", "TAURI_"))}
         out = open(self.run.root / "app.out", "a")
         self.proc = subprocess.Popen([str(app), *args], env=env, stdout=out, stderr=subprocess.STDOUT)
         self.run.pids.add(self.proc.pid)
@@ -424,12 +440,16 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
         say("the driver's log, last 80 lines (on Linux the app's stderr is in it):")
         print(tail(run.root / "tauri-driver.log"), flush=True)
         if WINDOWS and wd.proc is not None:
-            say(f"the app, launched by this run: {exit_status(wd.proc.poll())}")
+            say(f"the app, launched by this run (pid {wd.proc.pid}): {exit_status(wd.proc.poll())}")
             print(tail(run.root / "app.out"), flush=True)
-            webview_log = Path(os.environ["LOCALAPPDATA"]) / APP_ID / "EBWebView" / "chrome_debug.log"
+            say(f"the app's WEBVIEW2_* and TAURI_* environment: {wd.app_env}")
+            data = Path(os.environ["LOCALAPPDATA"]) / APP_ID
+            say(f"the app's data dir ({data}), two levels:")
+            print(listing(data, 2), flush=True)
+            webview_log = data / "EBWebView" / "chrome_debug.log"
             say(f"WebView2's log ({webview_log}), last 80 lines:")
             print(tail(webview_log), flush=True)
-            say("WebView2's browser processes (command line: the debugger port, the user-data dir) and their listening ports:")
+            say("every msedgewebview2.exe (parent, command line) and the browser processes' listening ports:")
             print(webview2_processes(), flush=True)
         raise
     finally:
