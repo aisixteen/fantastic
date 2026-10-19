@@ -782,6 +782,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-home-kernel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-canvas-page",
+ "fantastic-core",
+ "fantastic-file",
+ "fantastic-home",
+ "fantastic-kernel",
+ "fantastic-sqlite-store",
+ "fantastic-user",
+ "fantastic-user-home-store",
+ "fantastic-web",
+ "fantastic-web-ws",
+ "futures-util",
+ "libc",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "fantastic-io-bridge"
 version = "0.1.0"
 dependencies = [
@@ -921,6 +949,7 @@ dependencies = [
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-foundation-models-backend",
+ "fantastic-home",
  "fantastic-kernel",
  "fantastic-mcp-client",
  "fantastic-ollama-backend",

@@ -1,0 +1,50 @@
+[package]
+name = "fantastic-home-kernel"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The home kernel, in-process: a minimal kernel in the fantastic home dir whose `home` agent manages your fantastics. Every OS call is in src/home/sys."
+
+# Like `src/tui/Cargo.toml`, the kernel crates are path dependencies outside this
+# workspace. Linking `fantastic-canvas-page` runs its build.rs, which packs the
+# canvas app: building this crate needs Go (and `zip` on Windows).
+[dependencies]
+fantastic-home = { path = "../fantastic-home" }
+fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
+fantastic-core = { path = "../../../lib/rust/crates/bundles/fantastic-core" }
+fantastic-file = { path = "../../../lib/rust/crates/bundles/fantastic-file" }
+fantastic-web = { path = "../../../lib/rust/crates/bundles/fantastic-web" }
+fantastic-web-ws = { path = "../../../lib/rust/crates/bundles/fantastic-web-ws" }
+fantastic-sqlite-store = { path = "../../bundles/fantastic-sqlite-store" }
+fantastic-user = { path = "../../bundles/fantastic-user" }
+fantastic-user-home-store = { path = "../../bundles/fantastic-user-home-store" }
+fantastic-canvas-page = { path = "../../bundles/fantastic-canvas-page" }
+tokio = { version = "1.40", features = ["rt", "macros", "time", "sync", "process", "net", "io-util", "signal"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+async-trait = "0.1"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }   # the creation-flag constants
+
+[features]
+host = ["dep:tracing-subscriber", "tokio/rt-multi-thread"]   # the test-only host binary, never the app
+
+[[bin]]
+name = "fantastic-home-host"
+path = "src/bin/fantastic-home-host.rs"
+required-features = ["host"]
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

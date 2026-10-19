@@ -1,0 +1,32 @@
+# THE HOME, end to end. No model, no browser. The runner builds the CLI and the
+# home kernel's test-only host (`fantastic-home-host`, the library hosted
+# in-process), boots the home on a throwaway home dir, and drives it through its
+# own page socket while real `fantastic canvas` processes come and go. Every
+# fantastic of the run shares that one home dir, so they all write the registry
+# the home reads. Each run builds on the one before it.
+
+id: home
+title: the home kernel — list, open, stop, start, an outside fantastic, remove, pages kept, canvases left running
+runtimes: [home]
+costs: free
+
+runs:
+  # the host serves the list page and writes its run file; nothing is listed yet
+  - name: boot
+  # one host per home dir: a second exits 2, naming the first's pid
+  - name: second-host-refused
+  # opening a fresh folder starts `fantastic canvas` there and registers it
+  - name: open-adds
+  # a stop: stopping, then stopped; the registry entry says stopped; the lock and run file are gone
+  - name: stop
+  - name: start
+  # a fantastic started outside the home, in the runner's console, is listed and stopped from the home
+  - name: outside
+  # removed from the list through its own kernel: its registry folder goes, it keeps running
+  - name: remove
+  # the home's own folder is never a row
+  - name: own-folder
+  # the open page and the selection come back after the host restarts; A is adopted
+  - name: restart-keeps-pages
+  # the fantastics the home started outlive it
+  - name: host-leaves-them-running

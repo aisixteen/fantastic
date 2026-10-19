@@ -9,6 +9,14 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 - The `fantastic-home` crate: the fantastic manager's model and ViewModel, pure
   (no OS, no I/O, no clock), the base of `fantastic home`.
+- `fantastic-home-kernel`: the manager of your fantastics as a library the
+  desktop app hosts in-process. A minimal kernel in the fantastic home dir (its
+  own sqlite store, a loopback web host, no exec, files or AI) whose `home`
+  agent lists, opens, starts, stops, registers and removes fantastics, keeps its
+  open pages and selection across restarts, never lists its own folder, emits
+  its state and serves a list page. Every OS call is in `home/sys`.
+- `fantastic __ctrl_break <pid>` (Windows): a hidden helper that stops a canvas
+  running in another console.
 - Python kernel: `sqlite_store`, a durable memory store. It answers exactly what
   `ram_store` answers, from one SQLite file, so an AI agent's conversation and
   folds, the execution ledger, dead letters and named-call dedup survive a
