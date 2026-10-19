@@ -352,6 +352,10 @@ SHELL_JS = """const f = globalThis.__FANTASTIC_SHELL__;
 return f === undefined ? null : {name: f.name, os: f.os, webview: f.webview, backdrop: f.backdrop,
   pickFolder: typeof f.pickFolder, frozen: Object.isFrozen(f)};"""
 
+# The Home's carousel at rest on the Home: no slide running, at x 0.
+CAROUSEL_STILL_JS = """const c = document.querySelector('#home .carousel');
+return c !== null && c.getAnimations().length === 0 && new DOMMatrix(getComputedStyle(c).transform).m41 === 0;"""
+
 
 def windows_build() -> int:
     return sys.getwindowsversion().build if WINDOWS else 0
@@ -488,6 +492,8 @@ async def show_home(wd: WebDriver, run: Run) -> None:
     await until("the nav pill's Home", lambda: wd.find("nav.nav-pill .nav-home"), 30)
     wd.click("nav.nav-pill .nav-home")
     await until("the Home shown", lambda: _selected(run, None), 30)
+    # the carousel slides to the Home; a click before it lands is off-screen
+    await until("the Home slid in", lambda: wd.js(CAROUSEL_STILL_JS), 15)
 
 
 async def _selected(run: Run, row: str | None) -> bool:
