@@ -3,7 +3,7 @@ import type { Json, Payload } from "../../lib.ts";
 import { readShell } from "../shell.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { HOME_CSS, HOME_STYLE_ID } from "./home_css.ts";
-import { cardVerbs, colourVar, decodeState, label, lastSeen, shortcut, stateCard, verbLabel } from "./home_model.ts";
+import { cardVerbs, colourVar, decodeState, isMacPlatform, label, lastSeen, shortcut, stateCard, verbLabel } from "./home_model.ts";
 import type { HomeRow, HomeState } from "./home_model.ts";
 import { FramePool, plan } from "./pages.ts";
 
@@ -341,7 +341,7 @@ export const homeView: ViewBundle = {
     }
 
     // ── keys and the shell's hook ──
-    const isMac = /Mac/.test((navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
+    const isMac = isMacPlatform((navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
     const onKey = (e: KeyboardEvent): void => {
       if (shown === null || broken) return;
       if (e.key === "Escape" && shown.problem !== null && logDialog === null) {

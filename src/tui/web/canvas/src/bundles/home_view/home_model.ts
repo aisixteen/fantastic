@@ -196,6 +196,11 @@ export interface KeyLike {
   shiftKey: boolean;
 }
 
+/** Is this platform a Mac (⌘ is the mod)? `navigator.userAgentData.platform`
+ *  says "macOS" (Chrome), `navigator.platform` "MacIntel" (WebKit, older
+ *  browsers): either case. */
+export const isMacPlatform = (platform: string): boolean => /mac/i.test(platform);
+
 /** The intent a key asks for, or null: mod+0 the Home, mod+1…9 a page in
  *  range, mod+w the shown page. The mod is ⌘ on a Mac and Ctrl elsewhere; the
  *  other one, Alt and Shift must be up. */

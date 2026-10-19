@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STATUSES, cardVerbs, colourVar, decodeState, label, lastSeen, shortcut, stateCard } from "../src/bundles/home_view/home_model.ts";
+import { STATUSES, cardVerbs, colourVar, decodeState, isMacPlatform, label, lastSeen, shortcut, stateCard } from "../src/bundles/home_view/home_model.ts";
 import type { HomeRow, HomeState, KeyLike, Status } from "../src/bundles/home_view/home_model.ts";
 import { HOME_CSS } from "../src/bundles/home_view/home_css.ts";
 
@@ -99,4 +99,9 @@ test("shortcuts: mod+0 home, mod+1..9 a page in range, mod+w the shown page; oth
     assert.equal(shortcut(k("x", m), isMac, state), null);
     assert.equal(shortcut(k("Escape", m), isMac, state), null);
   }
+});
+
+test("a Mac is a Mac whichever API names it: macOS (userAgentData), MacIntel (navigator.platform)", () => {
+  for (const p of ["macOS", "MacIntel", "Macintosh"]) assert.equal(isMacPlatform(p), true, p);
+  for (const p of ["Windows", "Win32", "Linux", "Linux x86_64", ""]) assert.equal(isMacPlatform(p), false, p);
 });
