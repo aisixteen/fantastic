@@ -104,6 +104,16 @@ pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
     Ok(())
 }
 
+/// [`private_dirs`] for another crate: `dir` and every missing level up from
+/// `home` created `0700` (on Windows, a DACL that protects only the user), and
+/// any level others can read refused. `Err` is the refusal's text.
+pub fn ensure_private_dir(home: &Path, dir: &Path) -> Result<(), String> {
+    private_dirs(home, dir).map_err(|r| match r.get("error").and_then(Value::as_str) {
+        Some(e) => e.to_string(),
+        None => r.to_string(),
+    })
+}
+
 /// Where the saved set-ups live, resolved ONCE by the binary: `FANTASTIC_HOME`, else
 /// `$HOME/.config/fantastic` (`%USERPROFILE%` on Windows). `Err` names what is
 /// missing — never guessed.

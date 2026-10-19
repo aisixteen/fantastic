@@ -62,6 +62,11 @@ fn main() -> Result<()> {
     if args.first().map(String::as_str) == Some("send") {
         send::main(&args[1..])
     }
+    // THE STOP HELPER (Windows): a hidden mode the home kernel runs to stop a
+    // canvas in another console. Not in `fantastic readme`.
+    if args.first().map(String::as_str) == Some("__ctrl_break") {
+        sys::ctrl_break_main(&args[1..])
+    }
     match recipe::parse(&args) {
         // THE UI NEEDS A TERMINAL (it draws on `/dev/tty`, `sys::TTY`): without
         // one, say so here — before fds 1 and 2 are pointed at the log file — and stop

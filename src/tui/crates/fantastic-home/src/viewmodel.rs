@@ -49,12 +49,15 @@ const ADDING: &str = "adding:";
 const NO_CANVAS: &str =
     "it runs without a canvas (a terminal, or headless). Stop it there, then add it again.";
 
-/// What the home may do, and how long a start may take.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the home may do, how long a start may take, and which folder is its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub mode: Mode,
     /// How long a started fantastic has to open its canvas.
     pub launch_grace_ms: u64,
+    /// The home's own folder, as a kernel running there names it: a registry
+    /// entry with this `path` is never listed.
+    pub own_folder: Option<String>,
 }
 
 impl Config {
@@ -66,6 +69,15 @@ impl Config {
         Config {
             mode,
             launch_grace_ms: Self::DEFAULT_LAUNCH_GRACE_MS,
+            own_folder: None,
+        }
+    }
+
+    /// This config, with `path` as the home's own folder.
+    pub fn own_folder(self, path: String) -> Config {
+        Config {
+            own_folder: Some(path),
+            ..self
         }
     }
 }
@@ -124,6 +136,18 @@ pub enum Event {
     SelectPage { index: usize },
     /// Close this entry's page.
     ClosePage { id: String },
+    /// The user has read the problem.
+    Dismiss,
+    /// A `ReadRegistry` failed.
+    RegistryFailed { error: String },
+    /// A `Terminate` could not ask the fantastic in `path` to stop.
+    StopFailed { path: String, error: String },
+    /// The pages and selection kept from an earlier run. Held until the first
+    /// `RegistryRead`, the first moment a page's id can be checked.
+    Restore {
+        pages: Vec<String>,
+        selection: Option<String>,
+    },
 }
 
 /// What the OS layer is asked to do. All data.
@@ -159,6 +183,29 @@ pub struct Row {
     pub pid: Option<u32>,
 }
 
+impl Row {
+    /// What the user may do with this row in `mode`, in this order: `start` (Lock,
+    /// stopped) or else `stop` (Lock, a process holds it, not already stopping);
+    /// then `open` (always in Lock; in Canvas unless it is a stopped entry); then
+    /// `remove` for a registry entry.
+    pub fn actions(&self, mode: Mode) -> Vec<&'static str> {
+        let lock = mode == Mode::Lock;
+        let mut out = Vec::new();
+        if lock && self.status == Status::Stopped {
+            out.push("start");
+        } else if lock && self.pid.is_some() && self.status != Status::Stopping {
+            out.push("stop");
+        }
+        if lock || self.status != Status::Stopped || self.guid.is_none() {
+            out.push("open");
+        }
+        if self.guid.is_some() {
+            out.push("remove");
+        }
+        out
+    }
+}
+
 /// A folder being added.
 #[derive(Debug, Clone)]
 struct Adding {
@@ -191,6 +238,10 @@ pub struct Home {
     problem: Option<String>,
     listed: bool,
     pending_opens: Vec<String>,
+    /// The registry has been read at least once.
+    read_once: bool,
+    /// A `Restore` that arrived before the first registry read.
+    pending_restore: Option<(Vec<String>, Option<String>)>,
     now_ms: u64,
 }
 
@@ -211,6 +262,8 @@ impl Home {
             problem: None,
             listed: false,
             pending_opens: Vec::new(),
+            read_once: false,
+            pending_restore: None,
             now_ms: 0,
         }
     }
@@ -327,6 +380,29 @@ impl Home {
                 self.close_page(&id);
                 Vec::new()
             }
+            Event::Dismiss => {
+                self.problem = None;
+                Vec::new()
+            }
+            Event::RegistryFailed { error } => {
+                self.problem = Some(format!("Could not read your fantastics: {error}"));
+                Vec::new()
+            }
+            Event::StopFailed { path, error } => {
+                self.problem = Some(format!(
+                    "Could not stop {}: {error}",
+                    self.name_of_path(&path)
+                ));
+                Vec::new()
+            }
+            Event::Restore { pages, selection } => {
+                if self.read_once {
+                    self.restore(pages, selection);
+                } else {
+                    self.pending_restore = Some((pages, selection));
+                }
+                Vec::new()
+            }
         };
         self.close_orphan_pages();
         effects
@@ -363,7 +439,21 @@ impl Home {
     }
 
     fn registry_read(&mut self, entries: Vec<(String, String)>) -> Vec<Effect> {
+        // The home's own folder is dropped before anything else reads the entries.
+        let entries = match &self.config.own_folder {
+            None => entries,
+            Some(own) => entries
+                .into_iter()
+                .filter(|(folder, yaml)| {
+                    Registered::parse(folder, yaml).is_none_or(|reg| &reg.path != own)
+                })
+                .collect(),
+        };
         self.entries = registered(entries);
+        self.read_once = true;
+        if let Some((pages, selection)) = self.pending_restore.take() {
+            self.restore(pages, selection);
+        }
         let guids: BTreeSet<&str> = self.entries.iter().map(|r| r.guid.as_str()).collect();
         self.probes.retain(|guid, _| guids.contains(guid.as_str()));
 
@@ -619,6 +709,20 @@ impl Home {
 
     // ── pages ───────────────────────────────────────────────────────────────
 
+    /// The kept pages that still name a registry entry, in order; the selection
+    /// only when it is one of them.
+    fn restore(&mut self, pages: Vec<String>, selection: Option<String>) {
+        let mut kept: Vec<String> = Vec::new();
+        for id in pages {
+            let listed = !id.starts_with(ADDING) && self.entries.iter().any(|r| r.guid == id);
+            if listed && !kept.contains(&id) {
+                kept.push(id);
+            }
+        }
+        self.selection = selection.filter(|s| kept.contains(s));
+        self.pages = kept;
+    }
+
     fn open_page(&mut self, id: &str) {
         if !self.pages.iter().any(|p| p == id) {
             self.pages.push(id.to_string());
@@ -736,6 +840,7 @@ mod tests {
         Home::new(Config {
             mode,
             launch_grace_ms: GRACE,
+            own_folder: None,
         })
     }
 
@@ -1445,5 +1550,304 @@ mod tests {
                 ("adding:/w/z/", "z", None)
             ]
         );
+    }
+
+    #[test]
+    fn dismiss_clears_the_problem() {
+        let mut h = home(Mode::Lock);
+        h.reduce(Event::RegistryFailed {
+            error: "denied".into(),
+        });
+        assert!(h.problem().is_some());
+        assert_eq!(h.reduce(Event::Dismiss), vec![]);
+        assert_eq!(h.problem(), None);
+        // Nothing to dismiss is still nothing.
+        assert_eq!(h.reduce(Event::Dismiss), vec![]);
+        assert_eq!(h.problem(), None);
+    }
+
+    #[test]
+    fn a_registry_that_cannot_be_read_is_a_problem() {
+        let mut h = home(Mode::Lock);
+        assert_eq!(
+            h.reduce(Event::RegistryFailed {
+                error: "/h/fantastics: permission denied".into()
+            }),
+            vec![]
+        );
+        assert_eq!(
+            h.problem(),
+            Some("Could not read your fantastics: /h/fantastics: permission denied")
+        );
+        assert!(!h.listed());
+    }
+
+    #[test]
+    fn a_stop_that_cannot_be_sent_is_a_problem() {
+        let mut h = home(Mode::Lock);
+        let mut notes = entry("g1", "/w/a", Some(7), Some(8100), 0);
+        notes.1.push_str("name: Notes\n");
+        read(&mut h, 0, vec![notes]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        h.reduce(Event::Stop { id: "g1".into() });
+        assert_eq!(
+            h.reduce(Event::StopFailed {
+                path: "/w/a".into(),
+                error: "not yours to stop".into()
+            }),
+            vec![]
+        );
+        assert_eq!(h.problem(), Some("Could not stop Notes: not yours to stop"));
+        assert_eq!(status(&h, "g1", 1), Status::Running(canvas(8100)));
+        // A folder the registry does not list is named by its last component.
+        h.reduce(Event::StopFailed {
+            path: "/w/other/".into(),
+            error: "e".into(),
+        });
+        assert_eq!(h.problem(), Some("Could not stop other: e"));
+    }
+
+    #[test]
+    fn row_actions_by_status_and_mode() {
+        let row = |status: Status, pid: Option<u32>, guid: bool| Row {
+            id: "x".into(),
+            guid: guid.then(|| "g".to_string()),
+            name: "x".into(),
+            path: "/w/x".into(),
+            last_seen: None,
+            status,
+            pid,
+        };
+        let up = Status::Running(canvas(8100));
+        let table: Vec<(Row, Vec<&str>, Vec<&str>)> = vec![
+            // (row, Lock, Canvas)
+            (
+                row(Status::Stopped, None, true),
+                vec!["start", "open", "remove"],
+                vec!["remove"],
+            ),
+            (
+                row(Status::Stopped, None, false),
+                vec!["start", "open"],
+                vec!["open"],
+            ),
+            (
+                row(Status::Starting, None, true),
+                vec!["open", "remove"],
+                vec!["open", "remove"],
+            ),
+            (
+                row(Status::Starting, Some(7), true),
+                vec!["stop", "open", "remove"],
+                vec!["open", "remove"],
+            ),
+            (
+                row(Status::Starting, None, false),
+                vec!["open"],
+                vec!["open"],
+            ),
+            (
+                row(Status::Starting, Some(7), false),
+                vec!["stop", "open"],
+                vec!["open"],
+            ),
+            (
+                row(Status::Stopping, Some(7), true),
+                vec!["open", "remove"],
+                vec!["open", "remove"],
+            ),
+            (
+                row(up, Some(7), true),
+                vec!["stop", "open", "remove"],
+                vec!["open", "remove"],
+            ),
+            (
+                row(Status::NoCanvas, Some(7), true),
+                vec!["stop", "open", "remove"],
+                vec!["open", "remove"],
+            ),
+            (
+                row(Status::Unverified, Some(7), true),
+                vec!["stop", "open", "remove"],
+                vec!["open", "remove"],
+            ),
+            (
+                row(Status::Missing, None, true),
+                vec!["open", "remove"],
+                vec!["open", "remove"],
+            ),
+        ];
+        for (r, lock, canvas_mode) in table {
+            assert_eq!(
+                r.actions(Mode::Lock),
+                lock,
+                "{:?} pid {:?} guid {:?} in Lock",
+                r.status,
+                r.pid,
+                r.guid
+            );
+            assert_eq!(
+                r.actions(Mode::Canvas),
+                canvas_mode,
+                "{:?} pid {:?} guid {:?} in Canvas",
+                r.status,
+                r.pid,
+                r.guid
+            );
+        }
+    }
+
+    #[test]
+    fn restore_waits_for_the_first_registry_read_and_keeps_only_listed_pages() {
+        let mut h = home(Mode::Lock);
+        let restore = Event::Restore {
+            pages: vec![
+                "g2".into(),
+                "gone".into(),
+                "adding:/w/c".into(),
+                "g1".into(),
+            ],
+            selection: Some("g1".into()),
+        };
+        assert_eq!(h.reduce(restore), vec![]);
+        // Held: no entry can be checked yet, so nothing is open.
+        assert!(h.pages().is_empty());
+        assert_eq!(h.selection(), None);
+        h.reduce(Event::Tick { now_ms: 1 });
+        assert!(h.pages().is_empty());
+        read(
+            &mut h,
+            1,
+            vec![
+                entry("g1", "/w/a", None, None, 0),
+                entry("g2", "/w/b", None, None, 1),
+            ],
+        );
+        assert_eq!(h.pages(), ["g2", "g1"]);
+        assert_eq!(h.selection(), Some("g1"));
+        // Applied once: a later read does not bring back what was dropped.
+        h.reduce(Event::ClosePage { id: "g2".into() });
+        read(
+            &mut h,
+            2,
+            vec![
+                entry("g1", "/w/a", None, None, 0),
+                entry("g2", "/w/b", None, None, 1),
+            ],
+        );
+        assert_eq!(h.pages(), ["g1"]);
+    }
+
+    #[test]
+    fn restore_after_the_first_read_applies_at_once() {
+        let mut h = home(Mode::Lock);
+        read(
+            &mut h,
+            0,
+            vec![
+                entry("g1", "/w/a", None, None, 0),
+                entry("g2", "/w/b", None, None, 1),
+            ],
+        );
+        h.reduce(Event::Select {
+            id: Some("g1".into()),
+        });
+        h.reduce(Event::Restore {
+            pages: vec!["g2".into(), "nope".into()],
+            selection: Some("g2".into()),
+        });
+        assert_eq!(h.pages(), ["g2"]);
+        assert_eq!(h.selection(), Some("g2"));
+    }
+
+    #[test]
+    fn a_restored_selection_that_is_not_a_kept_page_is_the_home() {
+        let mut h = home(Mode::Lock);
+        h.reduce(Event::Restore {
+            pages: vec!["g1".into()],
+            selection: Some("gone".into()),
+        });
+        read(&mut h, 0, vec![entry("g1", "/w/a", None, None, 0)]);
+        assert_eq!(h.pages(), ["g1"]);
+        assert_eq!(h.selection(), None);
+
+        // A selection of an entry that is listed but not among the kept pages.
+        let mut h = home(Mode::Lock);
+        h.reduce(Event::Restore {
+            pages: vec!["g1".into()],
+            selection: Some("g2".into()),
+        });
+        read(
+            &mut h,
+            0,
+            vec![
+                entry("g1", "/w/a", None, None, 0),
+                entry("g2", "/w/b", None, None, 1),
+            ],
+        );
+        assert_eq!(h.pages(), ["g1"]);
+        assert_eq!(h.selection(), None);
+
+        // No selection kept is the home too.
+        let mut h = home(Mode::Lock);
+        h.reduce(Event::Restore {
+            pages: vec!["g1".into()],
+            selection: None,
+        });
+        read(&mut h, 0, vec![entry("g1", "/w/a", None, None, 0)]);
+        assert_eq!(h.selection(), None);
+    }
+
+    #[test]
+    fn an_open_queued_before_the_first_look_wins_the_selection_over_a_restore() {
+        let mut h = home(Mode::Lock);
+        h.reduce(Event::Restore {
+            pages: vec!["g1".into()],
+            selection: Some("g1".into()),
+        });
+        h.reduce(Event::Open {
+            paths: vec!["/w/b".into()],
+            now_ms: 0,
+        });
+        read(
+            &mut h,
+            1,
+            vec![
+                entry("g1", "/w/a", None, None, 0),
+                entry("g2", "/w/b", None, None, 1),
+            ],
+        );
+        // The restore is in; the open waits for the first look to finish.
+        assert_eq!(h.pages(), ["g1"]);
+        assert_eq!(h.selection(), Some("g1"));
+        probed(&mut h, 1, vec![("g1", stopped()), ("g2", running(7, 8100))]);
+        assert_eq!(h.pages(), ["g1", "g2"]);
+        assert_eq!(h.selection(), Some("g2"));
+    }
+
+    #[test]
+    fn the_own_folder_is_never_a_row() {
+        let mut h = Home::new(Config::new(Mode::Lock).own_folder("/h/.fantastic/app".into()));
+        let jobs = read(
+            &mut h,
+            0,
+            vec![
+                entry("own", "/h/.fantastic/app", Some(7), Some(8100), 0),
+                entry("g1", "/w/a", None, None, 1),
+            ],
+        );
+        assert_eq!(
+            jobs.iter().map(|j| j.key.as_str()).collect::<Vec<_>>(),
+            ["g1"]
+        );
+        probed(&mut h, 0, vec![("g1", stopped())]);
+        assert_eq!(ids(&h), ["g1"]);
+        // A page of it cannot be restored either.
+        h.reduce(Event::Restore {
+            pages: vec!["own".into()],
+            selection: Some("own".into()),
+        });
+        assert!(h.pages().is_empty());
+        assert_eq!(h.selection(), None);
     }
 }
