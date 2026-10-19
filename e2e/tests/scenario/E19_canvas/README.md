@@ -21,7 +21,7 @@ whose backend is gone is marked `backend_lost` and waits for ⟳.
 | `spawn-terminal` | a double click creates an `exec_bridge` agent (`shell: "login"`) running the child's own `$SHELL -l` as a PTY job, as a CHILD OF THE LEG (`canvas_ws`, the loader's parent), carrying its view's id and its canvas's (`view_id`, `canvas_id`), and a `terminal_view` member whose own `can_call` grants exactly that backend (the view sends as itself); `echo hi-$((6*7))` prints `hi-42`; the member is a folder UNDER the canvas and nowhere else |
 | `page-reload` | the page leaves and comes back with the host up: the same backend, its shell state intact (`export FC_MARK=7`, confirmed before leaving → `mark-77` after) — the leg lives its own life |
 | `move` | a drag updates the member's `x`/`y` in the same folder; nothing is duplicated |
-| `restart` | the host stops (lock released) and restarts; `load_tree` returns canvas + member (parent `canvas`); the reloaded page rehydrates the member, typing reaches the rehydrated PTY (`again-42`), the position is kept |
+| `restart` | the host stops (lock released) and restarts; `load_tree` returns canvas + member (parent `canvas`), beside the page's singletons (`background` under the root view, `skin` under the page root); the reloaded page rehydrates the member, typing reaches the rehydrated PTY (`again-42`), the position is kept |
 | `lost-backend` | the backend's record is removed while the host is down: on load the view is marked `backend_lost` and says so; nothing is respawned |
 | `respawn` | ⟳ on the lost view spawns a fresh backend under the leg, bound to the same view (`back-42`) |
 | `close` | the close button removes the member's folder and the backend it owns; the canvas stays |

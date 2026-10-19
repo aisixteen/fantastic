@@ -2,6 +2,8 @@ import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { BACKGROUNDS } from "./backgrounds_agent.ts";
 import { DEFAULT_THEME } from "../canvas/layout.ts";
+import { tint, tok } from "../skin/css.ts";
+import { SKIN_ID } from "../skin/skin_agent.ts";
 
 // THE CANVAS THEME PANEL (owner 2026-10-12) — two sections: BACKGROUNDS and
 // THEMES. Themes: each row uses it on a click; ✎ edits it (name, layout, its
@@ -14,45 +16,50 @@ import { DEFAULT_THEME } from "../canvas/layout.ts";
 // them back) and YOUR list (× deletes), with the hint how an AI fills it. Every
 // button is a verb on the agent, so a panel click and an AI's call are the same
 // act; the panel redraws on the agent's `updated` events.
+//
+// THE SKINS SECTION (phase 4, #49) — the page's `skin` agent: stock then your
+// skins, a click `use`s one for this tab's backdrop, × deletes one of yours; a
+// new one is your AI agent's to write (`add`). Redrawn on the skin's `updated`.
 
 const CSS = `
-  .bgs { height: 100%; overflow: auto; box-sizing: border-box; padding: 12px 14px; color: #ededeb;
-    font: 13px/1.35 system-ui, sans-serif; }
-  .bgs h1 { margin: 12px 0 6px; font: 500 11px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; text-transform: uppercase; color: #8a8884;
+  .bgs { height: 100%; overflow: auto; box-sizing: border-box; padding: 12px 14px; color: ${tok("color.text.primary")};
+    font: 13px/1.35 ${tok("font.family.sans")}; }
+  .bgs h1 { margin: 12px 0 6px; font: 500 11px ${tok("font.family.mono")}; letter-spacing: .12em; text-transform: uppercase; color: ${tok("color.text.subtle")};
     display: flex; justify-content: space-between; align-items: baseline; }
   .bgs h1:first-child { margin-top: 0; }
   .bgs .bar { display: flex; flex-wrap: wrap; gap: 6px; }
   .bgs button { all: unset; cursor: pointer; }
-  .bgs .btn { padding: 5px 10px; border-radius: 6px; border: 1px solid #2a2a2c; font: 12px ui-monospace, SFMono-Regular, monospace; color: #cfcdc8; }
-  .bgs .btn:hover { border-color: #4a4a4d; background: #141416; }
-  .bgs .btn.on { border-color: #7ee2a8; color: #7ee2a8; }
-  .bgs .link { font: 11px ui-monospace, monospace; color: #b78cff; text-transform: none; letter-spacing: 0; }
-  .bgs .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid #1d1d1f; }
-  .bgs .name { flex: 1; min-width: 0; padding: 5px 9px; border-radius: 6px; border: 1px solid #2a2a2c; }
-  .bgs .name:hover { border-color: #4a4a4d; background: #141416; }
-  .bgs .name.on { border-color: #ededeb55; }
+  .bgs .btn { padding: 5px 10px; border-radius: ${tok("radius.control")}; border: 1px solid ${tok("color.line.button")}; font: 12px ${tok("font.family.mono")}; color: ${tok("color.text.muted")}; }
+  .bgs .btn:hover { border-color: ${tok("color.line.strong")}; background: ${tok("color.surface.panel")}; }
+  .bgs .btn.on { border-color: ${tok("color.status.ok")}; color: ${tok("color.status.ok")}; }
+  .bgs .link { font: 11px ${tok("font.family.mono")}; color: ${tok("color.accent.base")}; text-transform: none; letter-spacing: 0; }
+  .bgs .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid ${tok("color.line.faint")}; }
+  .bgs .name { flex: 1; min-width: 0; padding: 5px 9px; border-radius: ${tok("radius.control")}; border: 1px solid ${tok("color.line.button")}; }
+  .bgs .name:hover { border-color: ${tok("color.line.strong")}; background: ${tok("color.surface.panel")}; }
+  .bgs .name.on { border-color: ${tint("color.ink", 33)}; }
   .bgs .name b { display: block; font-weight: 500; }
-  .bgs .name small { display: block; color: #77757a; font: 10.5px ui-monospace, SFMono-Regular, monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bgs .name small { display: block; color: ${tok("color.text.faint")}; font: 10.5px ${tok("font.family.mono")}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .bgs .sets { display: flex; gap: 4px; }
-  .bgs .set { display: grid; grid-template-columns: 1fr 1fr; width: 22px; height: 22px; border-radius: 5px; overflow: hidden; outline: 1px solid #ffffff14; outline-offset: 1px; }
-  .bgs .set:hover { outline-color: #ffffff55; }
-  .bgs .set.on { outline: 2px solid #ededeb; }
-  .bgs .x { width: 20px; text-align: center; color: #77757a; font-size: 14px; }
-  .bgs .x:hover { color: #ff8a8a; }
-  .bgs .hint { margin: 6px 0 2px; padding: 9px 10px; border-radius: 8px; border: 1px dashed #3a3a3e; color: #a9a7a2; font-size: 12px; }
-  .bgs .hint b { color: #ededeb; font-weight: 500; }
-  .bgs .hint code { font: 11px ui-monospace, SFMono-Regular, monospace; color: #b78cff; }
-  .bgs h2 { margin: 18px 0 8px; font: 650 15px system-ui, sans-serif; color: #ededeb; display: flex; align-items: baseline; justify-content: space-between; }
+  .bgs .set { display: grid; grid-template-columns: 1fr 1fr; width: 22px; height: 22px; border-radius: ${tok("radius.key")}; overflow: hidden; outline: 1px solid ${tint("color.ink", 8)}; outline-offset: 1px; }
+  .bgs .set:hover { outline-color: ${tint("color.ink", 33)}; }
+  .bgs .set.on { outline: 2px solid ${tok("color.text.primary")}; }
+  .bgs .x { width: 20px; text-align: center; color: ${tok("color.text.faint")}; font-size: 14px; }
+  .bgs .x:hover { color: ${tok("color.status.error")}; }
+  .bgs .hint { margin: 6px 0 2px; padding: 9px 10px; border-radius: ${tok("radius.card")}; border: 1px dashed ${tok("color.line.button")}; color: ${tok("color.text.muted")}; font-size: 12px; }
+  .bgs .hint b { color: ${tok("color.text.primary")}; font-weight: 500; }
+  .bgs .hint code { font: 11px ${tok("font.family.mono")}; color: ${tok("color.accent.base")}; }
+  .bgs h2 { margin: 18px 0 8px; font: 650 15px ${tok("font.family.sans")}; color: ${tok("color.text.primary")}; display: flex; align-items: baseline; justify-content: space-between; }
   .bgs h2:first-child { margin-top: 0; }
-  .bgs .tform { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 6px 10px; align-items: center; padding: 10px; margin: 6px 0; border-radius: 8px; border: 1px solid #3a3a3e; background: #101012; }
-  .bgs .tform input, .bgs .tform select { font: 12px ui-monospace, SFMono-Regular, monospace; color: #ededeb; background: #18181b; border: 1px solid #2a2a2c; border-radius: 6px; padding: 5px 7px; min-width: 0; width: 100%; box-sizing: border-box; }
+  .bgs .tform { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 6px 10px; align-items: center; padding: 10px; margin: 6px 0; border-radius: ${tok("radius.card")}; border: 1px solid ${tok("color.line.button")}; background: ${tok("color.surface.panel")}; }
+  .bgs .tform input, .bgs .tform select { font: 12px ${tok("font.family.mono")}; color: ${tok("color.text.primary")}; background: ${tok("color.surface.field")}; border: 1px solid ${tok("color.line.button")}; border-radius: ${tok("radius.control")}; padding: 5px 7px; min-width: 0; width: 100%; box-sizing: border-box; }
   .bgs .tform .trig select { flex: 1; width: auto; }
   .bgs .tform .trig input { flex: 0 0 72px; }
-  .bgs .tform .trig span { flex: 0 0 auto; color: #8a8884; font-size: 12px; }
-  .bgs .tform label { color: #8a8884; font-size: 12px; }
+  .bgs .tform .trig span { flex: 0 0 auto; color: ${tok("color.text.subtle")}; font-size: 12px; }
+  .bgs .tform label { color: ${tok("color.text.subtle")}; font-size: 12px; }
   .bgs .tform .trig { display: flex; gap: 6px; align-items: center; }
   .bgs .tform .row2 { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
-  .bgs .st { margin-top: 8px; min-height: 16px; color: #77757a; font: 11px ui-monospace, SFMono-Regular, monospace; }
+  .bgs .note { margin: 0 0 8px; color: ${tok("color.text.faint")}; font-size: 12px; }
+  .bgs .st { margin-top: 8px; min-height: 16px; color: ${tok("color.text.faint")}; font: 11px ${tok("font.family.mono")}; }
 `;
 
 function ensureStyle(): void {
@@ -66,6 +73,7 @@ function ensureStyle(): void {
 type Dict = Record<string, unknown>;
 interface SetRow { name: string; colors: string[] }
 interface Item { name: string; note: string; sets: SetRow[] }
+interface SkinRow { name: string; note: string; backdrop: "web" | "native" | null; base?: string; error?: string }
 interface ThemeRow { name: string; layout: "free" | "column"; trigger: { max_width?: number; min_width?: number } | null; note?: string; from: "stock" | "user" }
 /** A trigger in words. */
 const triggerText = (t: ThemeRow["trigger"]): string =>
@@ -130,9 +138,18 @@ export const backgroundsView: ViewBundle = {
     // one go — a redraw overtaken by a newer one (an update event while it
     // waited) draws nothing, or two halves of the panel stacked (two Themes)
     let drawing = 0;
+    // the page's skin agent — an operator send, like the panel's own
+    const skinCall = async (p: Dict): Promise<Dict> =>
+      (((await ctx.kernel.send([{ target: SKIN_ID, payload: p as Payload }]))[0]?.result ?? {}) as Dict);
+    const skinAct = async (p: Dict, doing: string): Promise<void> => {
+      st.textContent = doing;
+      const r = await skinCall(p);
+      st.textContent = typeof r["error"] === "string" ? `✕ ${r["error"]}` : "";
+      await render();
+    };
     const render = async (): Promise<void> => {
       const mine = ++drawing;
-      const [l, th] = await Promise.all([call({ type: "list" }), call({ type: "themes" })]);
+      const [l, th, sk] = await Promise.all([call({ type: "list" }), call({ type: "themes" }), skinCall({ type: "list" })]);
       if (mine !== drawing) return;
       const cur = (l["current"] ?? null) as Dict | null;
       const rot = (l["rotate"] ?? {}) as Dict;
@@ -140,6 +157,13 @@ export const backgroundsView: ViewBundle = {
       const user = (l["user"] ?? []) as Item[];
       const hidden = (l["hidden_stock"] ?? []) as string[];
       root.replaceChildren(el("h2", "", "Backgrounds"));
+      // the skin in use paints no background under a native backdrop
+      const skinsStock = (sk["stock"] ?? []) as SkinRow[];
+      const skinsUser = (sk["user"] ?? []) as SkinRow[];
+      const inUse = String(sk["in_use"] ?? "");
+      if ([...skinsStock, ...skinsUser].find((x) => x.name === inUse)?.backdrop === "native") {
+        root.append(el("p", "note", "The skin in use shows the window's own backdrop; backgrounds show under a web skin."));
+      }
       // the bar
       const bar = el("div", "bar");
       const btn = (label: string, title: string, p: Dict, doing: string, on = false): HTMLElement => {
@@ -217,6 +241,36 @@ export const backgroundsView: ViewBundle = {
         `it adds it here with <code>add_theme</code> on this agent (<code class="self"></code>).`;
       (thint.querySelector("code.self") as HTMLElement).textContent = ctx.selfId;
       root.append(thint);
+      // ── SKINS ──
+      if (typeof sk["error"] !== "string") {
+        root.append(el("h2", "", "Skins"));
+        const skinRow = (s: SkinRow, from: "stock" | "user"): HTMLElement => {
+          const r = el("div", "row");
+          const b = el("button", "name");
+          b.dataset["skin"] = s.name;
+          b.append(el("b", "", s.name), el("small", "", [s.backdrop ?? "✕ does not compile", from === "user" ? "yours" : "stock", s.note].filter((x) => x).join(" · ")));
+          if (s.name === inUse) b.classList.add("on");
+          b.title = s.error ?? `use ${s.name}`;
+          b.onclick = () => void skinAct({ type: "use", name: s.name }, `switching to ${s.name}…`);
+          r.append(b);
+          if (from === "user") {
+            const x = el("button", "x", "×");
+            x.title = "delete it";
+            x.onclick = () => void skinAct({ type: "delete", name: s.name }, `deleting ${s.name}…`);
+            r.append(x);
+          }
+          return r;
+        };
+        for (const s of skinsStock) root.append(skinRow(s, "stock"));
+        for (const s of skinsUser) root.append(skinRow(s, "user"));
+        const shint = el("div", "hint");
+        shint.innerHTML =
+          "<b>To make a new skin, ask your AI agent.</b><br>" +
+          "Open an AI cell (double-click → <b>AI agent</b>) and say e.g. <i>“make a skin with a sea-green accent”</i> — " +
+          `it adds it here with <code>add</code> on the skin agent (<code class="self"></code>).`;
+        (shint.querySelector("code.self") as HTMLElement).textContent = SKIN_ID;
+        root.append(shint);
+      }
       root.append(st);
     };
     // a theme's form: name, layout, its width trigger, a note — saved as yours
@@ -262,7 +316,8 @@ export const backgroundsView: ViewBundle = {
     const off = ctx.kernel.addStateSubscriber((e) => {
       // …or its view's theme moved (use_theme, the view's `theme` verb)
       const who = (e as Dict)["agent_id"];
-      if ((who === ctx.selfId || who === ctx.kernel.get(ctx.selfId)?.parentId) && (e as Dict)["kind"] === "updated") void render();
+      // …or the page's skin (a use, an add, another tab)
+      if ((who === ctx.selfId || who === SKIN_ID || who === ctx.kernel.get(ctx.selfId)?.parentId) && (e as Dict)["kind"] === "updated") void render();
     });
     return {
       unmount(): void {

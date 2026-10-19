@@ -1,5 +1,6 @@
 import { Host } from "../../lib.ts";
 import type { Json, Payload } from "../../lib.ts";
+import { tint, tok } from "../skin/css.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { PROVIDERS, autoName, nameOk, providerOf, savedKeyFor } from "./wizard.ts";
 
@@ -49,47 +50,47 @@ const VERBS = ["backends", "keys", "ai_settings", "configure_ai", "key_mode", "s
 const MAIN = new Set(["endpoint", "model"]);
 
 const CSS = `
-  .wiz { height: 100%; box-sizing: border-box; overflow: auto; padding: 22px 24px 18px; background: #0f0e16; color: #ece9f5;
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; display: flex; flex-direction: column; }
+  .wiz { height: 100%; box-sizing: border-box; overflow: auto; padding: 22px 24px 18px; background: ${tok("color.surface.panel")}; color: ${tok("color.text.primary")};
+    font: 14px/1.5 ${tok("font.family.sans")}; display: flex; flex-direction: column; }
   .wiz .top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
   .wiz h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -0.2px; }
-  .wiz .step { color: #8f88a6; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .12em; }
-  .wiz .lead { color: #a39cba; margin: 8px 0 18px; }
-  .wiz .tip { margin: -6px 0 18px; padding: 10px 14px; border-radius: 10px; background: rgba(183, 140, 255, 0.12);
-    box-shadow: inset 0 0 0 1px rgba(183, 140, 255, 0.4); color: #ece9f5; }
-  .wiz .tip b { color: #d7c2ff; }
-  .wiz .tip code { font: 600 12.5px ui-monospace, SFMono-Regular, monospace; color: #e6dcff; padding: 1px 6px; border-radius: 5px; background: rgba(183, 140, 255, 0.2); }
-  .wiz h2 { margin: 18px 0 8px; color: #8f88a6; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .14em; }
+  .wiz .step { color: ${tok("color.text.subtle")}; font: 600 11px ${tok("font.family.mono")}; letter-spacing: .12em; }
+  .wiz .lead { color: ${tok("color.text.muted")}; margin: 8px 0 18px; }
+  .wiz .tip { margin: -6px 0 18px; padding: 10px 14px; border-radius: ${tok("radius.panel")}; background: ${tint("color.accent.base", 12)};
+    box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 40)}; color: ${tok("color.text.primary")}; }
+  .wiz .tip b { color: ${tok("color.accent.soft")}; }
+  .wiz .tip code { font: 600 12.5px ${tok("font.family.mono")}; color: ${tok("color.accent.text")}; padding: 1px 6px; border-radius: ${tok("radius.key")}; background: ${tint("color.accent.base", 20)}; }
+  .wiz h2 { margin: 18px 0 8px; color: ${tok("color.text.subtle")}; font: 600 11px ${tok("font.family.mono")}; letter-spacing: .14em; }
   .wiz .saved { display: flex; flex-direction: column; gap: 6px; }
   .wiz .saved-row { display: flex; gap: 6px; }
   .wiz .saved-row > button:first-child { flex: 1; min-width: 0; }
   .wiz .saved button { display: flex; align-items: baseline; gap: 10px; text-align: left; width: 100%; padding: 10px 12px; }
-  .wiz .saved button.edit { width: auto; flex: 0 0 auto; align-items: center; color: #a39cba; }
+  .wiz .saved button.edit { width: auto; flex: 0 0 auto; align-items: center; color: ${tok("color.text.muted")}; }
   .wiz .saved .name { font-weight: 650; }
-  .wiz .saved .star { color: #ffd166; font-size: 12px; }
-  .wiz .saved .desc { color: #8f88a6; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .wiz .none { color: #6f6886; font-size: 13px; }
+  .wiz .saved .star { color: ${tok("color.status.warn")}; font-size: 12px; }
+  .wiz .saved .desc { color: ${tok("color.text.subtle")}; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wiz .none { color: ${tok("color.text.faint")}; font-size: 13px; }
   .wiz .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
   .wiz .tiles button { padding: 16px 10px; font-weight: 650; font-size: 14px; }
   .wiz .tiles button:disabled { opacity: .4; cursor: default; }
-  .wiz .tiles button small { display: block; font-weight: 400; color: #8f88a6; font-size: 11.5px; margin-top: 2px; }
+  .wiz .tiles button small { display: block; font-weight: 400; color: ${tok("color.text.subtle")}; font-size: 11.5px; margin-top: 2px; }
   .wiz label { display: grid; grid-template-columns: 92px 1fr; gap: 12px; align-items: start; margin: 10px 0; }
-  .wiz label > span { color: #a39cba; padding-top: 8px; font-size: 13px; }
-  .wiz .hint { color: #6f6886; font-size: 12px; margin-top: 3px; }
-  .wiz input, .wiz select, .wiz button { font: inherit; color: inherit; background: #1a1824; border: 1px solid #312c40; border-radius: 8px; padding: 8px 11px; }
+  .wiz label > span { color: ${tok("color.text.muted")}; padding-top: 8px; font-size: 13px; }
+  .wiz .hint { color: ${tok("color.text.faint")}; font-size: 12px; margin-top: 3px; }
+  .wiz input, .wiz select, .wiz button { font: inherit; color: inherit; background: ${tok("color.surface.field")}; border: 1px solid ${tok("color.line.button")}; border-radius: ${tok("radius.card")}; padding: 8px 11px; }
   .wiz input, .wiz select { width: 100%; box-sizing: border-box; }
-  .wiz input:focus, .wiz select:focus { outline: 2px solid rgba(183, 140, 255, 0.55); outline-offset: -1px; }
-  .wiz button { cursor: pointer; background: #241f35; }
-  .wiz button:hover:not(:disabled) { border-color: #b78cff; }
-  .wiz button.primary { background: #b78cff; border-color: #b78cff; color: #16121f; font-weight: 700; }
+  .wiz input:focus, .wiz select:focus { outline: 2px solid ${tint("color.accent.base", 55)}; outline-offset: -1px; }
+  .wiz button { cursor: pointer; background: ${tok("color.surface.button")}; }
+  .wiz button:hover:not(:disabled) { border-color: ${tok("color.accent.base")}; }
+  .wiz button.primary { background: ${tok("color.accent.base")}; border-color: ${tok("color.accent.base")}; color: ${tok("color.accent.on")}; font-weight: 700; }
   .wiz .row { display: flex; gap: 8px; align-items: center; }
   .wiz .grow { flex: 1; }
   .wiz details { margin-top: 12px; }
-  .wiz summary { cursor: pointer; color: #a39cba; font-size: 13px; }
+  .wiz summary { cursor: pointer; color: ${tok("color.text.muted")}; font-size: 13px; }
   .wiz .foot { margin-top: auto; padding-top: 18px; display: flex; gap: 8px; align-items: center; }
   .wiz .say { min-height: 20px; font-size: 13px; margin-top: 10px; }
-  .wiz .ok { color: #7ee2a8; } .wiz .err { color: #ff8a8a; }
-  .wiz .warn { color: #ffd166; font-size: 12px; margin-top: 4px; }
+  .wiz .ok { color: ${tok("color.status.ok")}; } .wiz .err { color: ${tok("color.status.error")}; }
+  .wiz .warn { color: ${tok("color.status.warn")}; font-size: 12px; margin-top: 4px; }
 `;
 
 function ensureStyle(): void {

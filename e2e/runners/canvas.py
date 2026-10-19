@@ -589,7 +589,10 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             bad.append(f"load_tree has no canvas with its root view: {state.get('tree')}")
         if "canvas" in want and tree.get("background") != "view_root":
             bad.append(f"load_tree has no background singleton under the root view: {state.get('tree')}")
-        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background") and i not in state.get("tree_layouts", [])]
+        # the page's skin (phase 4, #49): a delete-locked singleton under the page root
+        if "canvas" in want and tree.get("skin") != "canvas":
+            bad.append(f"load_tree has no skin singleton under the page root: {state.get('tree')}")
+        others = [i for i in tree if i not in ("canvas", "view_root", "web_loader", "background", "skin") and i not in state.get("tree_layouts", [])]
         if "member_parent" in want:
             if len(others) != 1 or tree[others[0]] != want["member_parent"]:
                 bad.append(f"load_tree members {[(i, tree[i]) for i in others]}, want one under {want['member_parent']}")

@@ -102,11 +102,11 @@ test("the theme panel has no `+ new theme`: a new theme is the AI agent's to add
   assert.match(src, /t\.name === DEFAULT_THEME && t\.from === "stock"\) r\.append\(b, ed\)/, "no × on the default theme");
 });
 
-test("the theme panel draws once per redraw: both lists read first, an overtaken redraw dropped (no two Themes)", async () => {
+test("the theme panel draws once per redraw: every list (backgrounds, themes, skins) read first, an overtaken redraw dropped (no two Themes)", async () => {
   const src = await import("node:fs").then((fs) => fs.readFileSync(new URL("../src/bundles/backgrounds/backgrounds_view.ts", import.meta.url), "utf8"));
   const body = src.slice(src.indexOf("const render = async"), src.indexOf("const themeForm"));
   assert.equal((body.match(/await /g) ?? []).length, 1, "one wait, before anything is drawn");
-  assert.match(body, /const \[l, th\] = await Promise\.all\(\[call\(\{ type: "list" \}\), call\(\{ type: "themes" \}\)\]\);\s*if \(mine !== drawing\) return;/);
+  assert.match(body, /const \[l, th, sk\] = await Promise\.all\(\[call\(\{ type: "list" \}\), call\(\{ type: "themes" \}\), skinCall\(\{ type: "list" \}\)\]\);\s*if \(mine !== drawing\) return;/);
 });
 
 test("background none costs no GPU: with no GL view the frame loop stops, and a new view wakes it", async () => {
