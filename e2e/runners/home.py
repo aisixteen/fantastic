@@ -5,9 +5,11 @@ managing real `fantastic canvas` processes. No model, no browser.
 
 The host is `fantastic-home-host --fantastic <bin> --port P` (test-only: the
 desktop app is the home's only real host). Every fantastic of the run — the ones
-the home starts, and the one this runner starts itself — shares ONE home dir:
-the throwaway `FANTASTIC_HOME` importing `runners/canvas.py` sets, so they all
-write the registry the home reads.
+the home starts, and the one this runner starts itself — shares ONE home dir,
+so they all write the registry the home reads. It is `HOME`, a level under the
+throwaway dir importing `runners/canvas.py` makes, that does not exist yet: the
+home kernel creates it private itself (`ensure_private_dir`), so the strict
+check it then makes judges a dir the kernel made, never one the harness did.
 
 Every step is checked through the home's own page socket (`user.forward` to
 `home` over `/user/ws`), on the state stream (`/home/ws`), and on disk.
@@ -34,7 +36,12 @@ from canvas import _HOME, build_bin, build_home_host, free_port, host_call  # no
 from helpers import oslayer  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
-W = _HOME / ".fantastic" / "app"
+#: The run's home dir (see the module docs). A Windows dir the harness makes
+#: private with `icacls` was read as "readable by others" by the kernel's check
+#: on the CI runner; one the kernel creates carries the owner and DACL it judges.
+HOME = _HOME / "home"
+os.environ["FANTASTIC_HOME"] = str(HOME)
+W = HOME / ".fantastic" / "app"
 ANNOUNCE = "fantastic-home-host: the home: "
 CANVAS_ANNOUNCE = "fantastic: the canvas: "
 
@@ -62,7 +69,7 @@ def lock_pid(folder: Path) -> int | None:
 
 
 def registry_files() -> list[Path]:
-    return sorted((_HOME / "fantastics").glob("*/fantastic.yaml"))
+    return sorted((HOME / "fantastics").glob("*/fantastic.yaml"))
 
 
 def entry_of(path: str) -> dict | None:
@@ -99,7 +106,12 @@ class HomeHost:
         deadline = time.time() + 60
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                raise SystemExit(f"the home host exited {self.proc.returncode}:\n{self.log.read_text()[-2000:]}")
+                # a refused home names its dir's access: print how the OS sees it
+                access = "\n".join(oslayer.describe_access(p) for p in (_HOME, HOME, W) if p.exists())
+                raise SystemExit(
+                    f"the home host exited {self.proc.returncode}:\n{self.log.read_text()[-2000:]}\n"
+                    f"── access of the home's levels:\n{access}"
+                )
             for line in self.log.read_text().split("=== start")[-1].splitlines():
                 if line.startswith(ANNOUNCE):
                     self.url = line[len(ANNOUNCE):].strip()

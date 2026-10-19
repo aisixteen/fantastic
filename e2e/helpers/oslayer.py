@@ -189,6 +189,20 @@ def make_private(path: Path) -> None:
     )
 
 
+def describe_access(path: Path) -> str:
+    """Who may reach `path`, as the OS says it, for a failure's report: its mode on
+    POSIX; on Windows `icacls` (owner-only means its one grant is the user's) and
+    the owner (`Get-Acl`), which `icacls` does not show."""
+    if not WINDOWS:
+        return f"{path}: mode {oct(path.stat().st_mode & 0o777)}"
+    acl = subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout.strip()
+    owner = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", f"(Get-Acl -LiteralPath '{path}').Owner"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return f"{acl}\n  owner: {owner}"
+
+
 def fake_command(directory: Path, name: str, mark: str) -> Path:
     """A stand-in program `name` in `directory` that prints `mark`, then echoes its
     input back line by line until EOF — found on PATH like the real one (a `sh`
