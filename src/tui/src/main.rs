@@ -18,6 +18,7 @@ mod ev;
 mod kern;
 mod keys;
 mod mcp;
+mod migrate;
 mod panel;
 mod presence;
 mod readme;
@@ -61,6 +62,9 @@ fn main() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("send") {
         send::main(&args[1..])
+    }
+    if args.first().map(String::as_str) == Some("migrate-home") {
+        migrate::main(&args[1..])
     }
     match recipe::parse(&args) {
         // THE UI NEEDS A TERMINAL (it draws on `/dev/tty`, `sys::TTY`): without

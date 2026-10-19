@@ -240,8 +240,8 @@ fn backend_kind(rec: &Map<String, Value>) -> String {
 /// # Errors
 /// A relative `FANTASTIC_HOME` with no readable current dir.
 pub fn default_file(store_id: &str) -> Result<String, BundleError> {
-    let home = fantastic_kernel::bootstrap::home_spelled()
-        .map_err(|e| raise("OSError", e.to_string()))?;
+    let home =
+        fantastic_kernel::bootstrap::home_spelled().map_err(|e| raise("OSError", e.to_string()))?;
     Ok(format!("{home}/{CREDENTIALS_DIR}/{store_id}.yaml"))
 }
 

@@ -511,7 +511,10 @@ async fn the_file_is_an_absolute_path_a_relative_one_is_refused() {
     // `~…` passes the write (no disk is touched to judge it)
     let b = CredentialStoreBundle::default();
     let v = |m: Value| b.validate_meta(m.as_object().unwrap(), &Map::new());
-    assert_eq!(v(json!({"file": "~/.fantastic/user/credentials/x.yaml"})), None);
+    assert_eq!(
+        v(json!({"file": "~/.fantastic/user/credentials/x.yaml"})),
+        None
+    );
     assert_eq!(
         v(json!({"keychain_namespace": ""})).as_deref(),
         Some("keychain_namespace must be a non-empty string")
@@ -1017,7 +1020,10 @@ fn the_default_file_is_under_the_homes_user_credentials() {
         ),
         Some(h) => assert_eq!(
             crate::default_file("c2").unwrap(),
-            format!("{}/user/credentials/c2.yaml", std::path::Path::new(&h).display())
+            format!(
+                "{}/user/credentials/c2.yaml",
+                std::path::Path::new(&h).display()
+            )
         ),
     }
 }

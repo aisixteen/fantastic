@@ -489,7 +489,10 @@ fn daemon_at_keeps_the_lock_the_root_agents_and_the_store_in_state_dir() {
     assert!(w.join("agent.yaml").is_file());
     assert!(w.join("agents/child_a/agent.yaml").is_file());
     assert!(w.join("agents/store/agent.yaml").is_file());
-    assert!(!w.join(".fantastic").exists(), "no .fantastic inside the state dir");
+    assert!(
+        !w.join(".fantastic").exists(),
+        "no .fantastic inside the state dir"
+    );
     assert!(!tmp.path().join(".fantastic").exists());
     assert_eq!(lock::held_at(&w).unwrap(), Some(std::process::id()));
     shutdown_at(&w).unwrap();

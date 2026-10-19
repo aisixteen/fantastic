@@ -14,6 +14,10 @@ use crate::vm::{self, VmIn};
 
 pub async fn main_loop(opts: Opts) -> Result<()> {
     let paths = Paths::here()?;
+    if let Err(e) = paths.refuse_the_home() {
+        eprintln!("fantastic: {e}");
+        std::process::exit(2);
+    }
     // A KERNEL ALREADY RUNS HERE: this is a THIN CLIENT of its shell (`share`)
     // — the owner drives recipes, so a thin client takes none.
     if let Ok(Some(pid)) = fantastic_kernel::lock::held(&paths.cwd) {

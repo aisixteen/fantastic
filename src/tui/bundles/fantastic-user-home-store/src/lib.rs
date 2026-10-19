@@ -104,6 +104,28 @@ pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
     Ok(())
 }
 
+/// [`private_dirs`] for a caller outside this crate (`fantastic migrate-home`):
+/// `dir` and every missing level up from `home`, each made private as this store
+/// makes its own (`0700`; a protected DACL on Windows). `Err` is the refusal's text.
+pub fn ensure_private_dirs(home: &Path, dir: &Path) -> Result<(), String> {
+    private_dirs(home, dir).map_err(|v| {
+        let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        match s("hint") {
+            h if h.is_empty() => s("error"),
+            h => format!("{} — {h}", s("error")),
+        }
+    })
+}
+
+/// The user's own home dir: `$HOME` (`%USERPROFILE%` on Windows). `Err` names
+/// the variable when it is not set.
+pub fn user_home_from_env() -> Result<PathBuf, String> {
+    std::env::var_os(sys::USER_HOME)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{} is not set", sys::USER_HOME))
+}
+
 /// Where the saved set-ups live, resolved ONCE by the binary: `FANTASTIC_HOME`, else
 /// `$HOME/.fantastic` (`%USERPROFILE%\.fantastic` on Windows). `Err` names what is
 /// missing — never guessed.
