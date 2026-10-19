@@ -154,7 +154,7 @@ fn fresh_workdir() -> TempDir {
 /// noop + FakeStore bundles registered. The store is NOT wired yet — callers
 /// wire it through the real `create_agent` verb when they want persistence.
 fn kernel_at(store_root: &Path) -> Arc<Kernel> {
-    let mut kernel = Kernel::with_storage(StorageMode::Disk(store_root.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
     let mut reg = BundleRegistry::new();
     reg.register("noop.tools", NoopBundle);
     reg.register("readme_bundle.tools", ReadmeBundle);
@@ -589,7 +589,7 @@ impl Bundle for TruncatingStore {
 async fn record_merge_reads_one_chunk_like_python() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
-    let mut kernel = Kernel::with_storage(StorageMode::Disk(store_root.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
     let mut reg = BundleRegistry::new();
     reg.register("noop.tools", NoopBundle);
     let store = Arc::new(TruncatingStore {
@@ -804,7 +804,7 @@ impl Bundle for RefusingStore {
 async fn a_failed_record_write_seeds_no_readme() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
-    let mut kernel = Kernel::with_storage(StorageMode::Disk(store_root.to_path_buf()));
+    let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
     let mut reg = BundleRegistry::new();
     reg.register("readme_bundle.tools", ReadmeBundle);
     reg.register("file_bridge.tools", RefusingStore);

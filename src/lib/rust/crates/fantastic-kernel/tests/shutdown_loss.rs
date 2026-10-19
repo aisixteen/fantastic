@@ -17,7 +17,7 @@ use tempfile::TempDir;
 async fn root_with_store(dir: &Path) -> Arc<Kernel> {
     let store = dir.join(".fantastic");
     std::fs::create_dir_all(&store).unwrap();
-    let mut kernel = Kernel::with_storage(StorageMode::Disk(store.clone()));
+    let mut kernel = Kernel::with_storage(StorageMode::disk(store.clone()));
     let mut reg = BundleRegistry::new();
     register_root_loader(&mut reg);
     register_fake_store(&mut reg, &store);

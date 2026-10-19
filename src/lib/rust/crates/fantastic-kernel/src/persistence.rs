@@ -808,6 +808,9 @@ pub fn read_record_at(path: &Path) -> KernelResult<Option<AgentRecord>> {
     Ok(Some(rec))
 }
 
+/// The daemon lock's file name inside a kernel's state dir.
+pub const LOCK_FILE: &str = "lock.yaml";
+
 /// Standard relative path of the daemon lock from a workdir.
 pub const LOCK_PATH: &str = ".fantastic/lock.yaml";
 
