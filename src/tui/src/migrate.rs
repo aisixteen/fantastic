@@ -263,6 +263,9 @@ mod tests {
     /// An old tree: one registered fantastic, a saved set-up, the keys, a credential file.
     fn old_tree(t: &Path, project: &Path) -> Layout {
         let l = layout(t);
+        // the home and its old credentials dir private, as the credential store and the home
+        // store make them (0700; a protected DACL on Windows)
+        fantastic_user_home_store::ensure_private_dirs(&l.home, &l.old_credentials).unwrap();
         write(
             &l.old_home.join("fantastics/g1/fantastic.yaml"),
             &format!("guid: g1\npath: {}\n", project.display()),
@@ -273,17 +276,7 @@ mod tests {
         );
         write(&l.old_home.join("agents/ai_agent/keys/mode"), "plain");
         write(&l.old_credentials.join("credentials.yaml"), "refs: {}\n");
-        private(&l.home);
         l
-    }
-
-    /// `0700`, as the credential store and the home store make their dirs.
-    fn private(_d: &Path) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(_d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
     }
 
     #[test]
