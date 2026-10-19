@@ -96,6 +96,25 @@ def stop_group(pid: int) -> None:
         pass
 
 
+def stop_fantastic(binary: Path, pid: int) -> None:
+    """Ask the fantastic `pid` to stop, the way the home does: SIGTERM to the group
+    it leads on POSIX; on Windows `<binary> __ctrl_break <pid>` with no console of
+    its own (`DETACHED_PROCESS`), which attaches to the fantastic's console. A
+    canvas the home started runs in a hidden console of its own, which
+    `os.kill(pid, CTRL_BREAK_EVENT)` from this console cannot reach."""
+    if not WINDOWS:
+        stop_group(pid)
+        return
+    subprocess.run(
+        [str(binary), "__ctrl_break", str(pid)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.DETACHED_PROCESS,
+        timeout=10,
+    )
+
+
 def kill_group(pid: int) -> None:
     """Kill the group `pid` leads — and every process under it — now."""
     if WINDOWS:
@@ -168,6 +187,20 @@ def make_private(path: Path) -> None:
         capture_output=True,
         check=True,
     )
+
+
+def describe_access(path: Path) -> str:
+    """Who may reach `path`, as the OS says it, for a failure's report: its mode on
+    POSIX; on Windows `icacls` (owner-only means its one grant is the user's) and
+    the owner (`Get-Acl`), which `icacls` does not show."""
+    if not WINDOWS:
+        return f"{path}: mode {oct(path.stat().st_mode & 0o777)}"
+    acl = subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout.strip()
+    owner = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", f"(Get-Acl -LiteralPath '{path}').Owner"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return f"{acl}\n  owner: {owner}"
 
 
 def fake_command(directory: Path, name: str, mark: str) -> Path:

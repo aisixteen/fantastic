@@ -104,15 +104,17 @@ pub(crate) fn private_dirs(home: &Path, dir: &Path) -> Result<(), Value> {
     Ok(())
 }
 
-/// [`private_dirs`] for a caller outside this crate (`fantastic migrate-home`):
-/// `dir` and every missing level up from `home`, each made private as this store
-/// makes its own (`0700`; a protected DACL on Windows). `Err` is the refusal's text.
-pub fn ensure_private_dirs(home: &Path, dir: &Path) -> Result<(), String> {
-    private_dirs(home, dir).map_err(|v| {
-        let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-        match s("hint") {
-            h if h.is_empty() => s("error"),
-            h => format!("{} — {h}", s("error")),
+/// [`private_dirs`] for another crate: `dir` and every missing level up from
+/// `home` created `0700` (on Windows, a DACL that protects only the user), and
+/// any level others can read refused. `Err` is the refusal's text, with its hint
+/// (the `chmod` or `icacls` that fixes it) when it has one.
+pub fn ensure_private_dir(home: &Path, dir: &Path) -> Result<(), String> {
+    private_dirs(home, dir).map_err(|r| {
+        let s = |k: &str| r.get(k).and_then(Value::as_str).map(str::to_string);
+        match (s("error"), s("hint")) {
+            (Some(e), Some(h)) if !h.is_empty() => format!("{e} — {h}"),
+            (Some(e), _) => e,
+            (None, _) => r.to_string(),
         }
     })
 }

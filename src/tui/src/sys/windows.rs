@@ -167,6 +167,43 @@ pub(crate) fn interrupt() -> io::Result<Interrupt> {
     tokio::signal::windows::ctrl_c()
 }
 
+/// `fantastic __ctrl_break <pid>` — THE STOP HELPER. A host with no console
+/// (the desktop app) cannot reach a canvas's process group:
+/// `GenerateConsoleCtrlEvent` reaches a group only through a console the caller
+/// shares. This helper is started with no console of its own, attaches to the
+/// canvas's (`AttachConsole(pid)`) and sends it Ctrl-Break, every fantastic's
+/// SIGTERM. Exit 0 sent; 1 a step failed (named on stderr); 2 a bad argument.
+pub(crate) fn ctrl_break_main(argv: &[String]) -> ! {
+    use windows_sys::Win32::System::Console::{AttachConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+    let pid: u32 = match argv {
+        [one] => match one.parse() {
+            Ok(p) => p,
+            Err(_) => usage(),
+        },
+        _ => usage(),
+    };
+    // SAFETY: no pointers; it attaches this process to `pid`'s console.
+    if unsafe { AttachConsole(pid) } == 0 {
+        failed(pid, "AttachConsole");
+    }
+    // SAFETY: no pointers; it signals the process group `pid` leads on the
+    // console now shared.
+    if unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } == 0 {
+        failed(pid, "GenerateConsoleCtrlEvent");
+    }
+    std::process::exit(0)
+}
+
+fn usage() -> ! {
+    eprintln!("fantastic: ctrl-break: usage: fantastic __ctrl_break <pid>");
+    std::process::exit(2)
+}
+
+fn failed(pid: u32, step: &str) -> ! {
+    eprintln!("fantastic: ctrl-break {pid}: {step}: {}", io::Error::last_os_error());
+    std::process::exit(1)
+}
+
 /// None: a Windows console (a ConPTY too) has no foreground process group — no
 /// job control — so there is no row that says which command a shell launched,
 /// and the last-command watch (`kern/term_watch`) sees none.

@@ -147,7 +147,7 @@ pub fn run(l: &Layout, dry: bool, say: &mut dyn FnMut(String)) -> Result<usize, 
     refusal(l, &moves)?;
     if !dry && !moves.is_empty() {
         // the home itself private (or made so) before the first move
-        fantastic_user_home_store::ensure_private_dirs(&l.home, &l.home)?;
+        fantastic_user_home_store::ensure_private_dir(&l.home, &l.home)?;
     }
     for m in &moves {
         say(format!(
@@ -160,7 +160,7 @@ pub fn run(l: &Layout, dry: bool, say: &mut dyn FnMut(String)) -> Result<usize, 
             continue;
         }
         let parent = m.to.parent().expect("a target has a parent");
-        fantastic_user_home_store::ensure_private_dirs(&l.home, parent)?;
+        fantastic_user_home_store::ensure_private_dir(&l.home, parent)?;
         std::fs::rename(&m.from, &m.to)
             .map_err(|e| format!("move {} → {}: {e}", m.from.display(), m.to.display()))?;
     }
@@ -265,7 +265,7 @@ mod tests {
         let l = layout(t);
         // the home and its old credentials dir private, as the credential store and the home
         // store make them (0700; a protected DACL on Windows)
-        fantastic_user_home_store::ensure_private_dirs(&l.home, &l.old_credentials).unwrap();
+        fantastic_user_home_store::ensure_private_dir(&l.home, &l.old_credentials).unwrap();
         write(
             &l.old_home.join("fantastics/g1/fantastic.yaml"),
             &format!("guid: g1\npath: {}\n", project.display()),
