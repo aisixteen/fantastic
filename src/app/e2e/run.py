@@ -154,6 +154,21 @@ def tail(p: Path, n: int = 80) -> str:
     return "\n".join(p.read_text(errors="replace").splitlines()[-n:]) if p.exists() else f"({p.name}: none)"
 
 
+# WebView2's browser processes (the ones without a --type) and what each listens on
+WEBVIEW2_PS = (
+    "$ps = Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | Where-Object { $_.CommandLine -notmatch '--type=' }; "
+    "if (-not $ps) { 'no msedgewebview2.exe browser process' }; "
+    "foreach ($p in $ps) { \"pid $($p.ProcessId), parent $($p.ParentProcessId): $($p.CommandLine)\"; "
+    "Get-NetTCPConnection -State Listen -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue | "
+    "ForEach-Object { \"  listens on $($_.LocalAddress):$($_.LocalPort)\" } }"
+)
+
+
+def webview2_processes() -> str:
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", WEBVIEW2_PS], capture_output=True, text=True, timeout=60)
+    return (out.stdout + out.stderr).strip()
+
+
 def http_ok(url: str) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=5) as r:
@@ -414,6 +429,8 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
             webview_log = Path(os.environ["LOCALAPPDATA"]) / APP_ID / "EBWebView" / "chrome_debug.log"
             say(f"WebView2's log ({webview_log}), last 80 lines:")
             print(tail(webview_log), flush=True)
+            say("WebView2's browser processes (command line: the debugger port, the user-data dir) and their listening ports:")
+            print(webview2_processes(), flush=True)
         raise
     finally:
         wd.end()
