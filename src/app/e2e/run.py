@@ -25,6 +25,7 @@ import platform
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -38,6 +39,8 @@ MACOS = sys.platform == "darwin"
 LINUX = sys.platform.startswith("linux")
 EXE = ".exe" if WINDOWS else ""
 HERE = Path(__file__).resolve().parent
+# the app's identifier: WebView2 keeps its user data in %LOCALAPPDATA%/<it>/EBWebView
+APP_ID = json.loads((HERE.parent / "tauri.conf.json").read_text())["identifier"]
 
 OS, WEBVIEW = (
     ("windows", "webview2") if WINDOWS else ("macos", "wkwebview") if MACOS else ("linux", "webkitgtk")
@@ -140,38 +143,15 @@ def quit_app(pid: int) -> None:
         u32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
 
 
-def audit_processes() -> None:
-    """Windows: log every process start with its command line (event 4688) and
-    every exit with its status (4689) in the Security log, so a failure shows the
-    argv msedgedriver gave the app and how it ended. Nothing about the launch
-    changes. Needs an administrator (the CI runner is one)."""
-    for sub in ("Process Creation", "Process Termination"):
-        subprocess.run(["auditpol", "/set", f"/subcategory:{sub}", "/success:enable"], check=True, capture_output=True)
-    key = r"HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
-    subprocess.run(
-        ["reg", "add", key, "/v", "ProcessCreationIncludeCmdLine_Enabled", "/t", "REG_DWORD", "/d", "1", "/f"],
-        check=True,
-        capture_output=True,
-    )
+def exit_status(code: int | None) -> str:
+    """How a process ended, as a person reads it (a Windows NTSTATUS in hex)."""
+    if code is None:
+        return "still running"
+    return f"with {code}" + (f" (0x{code & 0xFFFFFFFF:08X})" if WINDOWS and not 0 <= code < 256 else "")
 
 
-def app_processes() -> str:
-    """The audit log's starts and exits of `fantastic-app.exe`, newest first.
-    The log is written after the fact, so this waits up to 10 s for an exit."""
-    q = "*[System[(EventID=4688 or EventID=4689)]]"
-    end = time.monotonic() + 10
-    while True:
-        out = subprocess.run(
-            ["wevtutil", "qe", "Security", f"/q:{q}", "/f:text", "/rd:true", "/c:5000"], capture_output=True, text=True
-        )
-        if out.returncode != 0:
-            return f"wevtutil failed: {out.stderr.strip()}"
-        events = out.stdout.split("Event[")[1:]
-        found = ["Event[" + b for b in events if "fantastic-app" in b]
-        if any("4689" in b for b in found) or time.monotonic() > end:
-            break
-        time.sleep(1)
-    return "\n".join(found) or f"no fantastic-app process among the audit log's {len(events)} process events"
+def tail(p: Path, n: int = 80) -> str:
+    return "\n".join(p.read_text(errors="replace").splitlines()[-n:]) if p.exists() else f"({p.name}: none)"
 
 
 def http_ok(url: str) -> bool:
@@ -303,9 +283,12 @@ ELEMENT = "element-6066-11e4-a52f-4f8afdd6aa18"
 class WebDriver:
     """A WebDriver client over urllib: just the commands this run uses."""
 
-    def __init__(self, base: str):
+    def __init__(self, base: str, run: Run):
         self.base = base
+        self.run = run
         self.sid: str | None = None
+        # Windows: the app this run launched, and where its output goes
+        self.proc: subprocess.Popen | None = None
 
     def req(self, method: str, path: str, body: dict | None = None, timeout: float = 120):
         data = None if body is None else json.dumps(body).encode()
@@ -320,8 +303,34 @@ class WebDriver:
         return f"/session/{self.sid}{path}"
 
     def start(self, app: Path, args: list[str]) -> None:
-        caps = {"capabilities": {"alwaysMatch": {"tauri:options": {"application": str(app), "args": args}}}}
-        self.sid = self.req("POST", "/session", caps)["sessionId"]
+        if WINDOWS:
+            caps = {"browserName": "webview2", "ms:edgeChromium": True, "ms:edgeOptions": {"debuggerAddress": self.launch(app, args)}}
+        else:
+            caps = {"tauri:options": {"application": str(app), "args": args}}
+        self.sid = self.req("POST", "/session", {"capabilities": {"alwaysMatch": caps}})["sessionId"]
+
+    def launch(self, app: Path, args: list[str]) -> str:
+        """Windows: start the app with exactly `args`, its WebView2 on a debugger
+        port, and return that port's address for msedgedriver to attach to:
+        msedgedriver then launches nothing and adds no argv of its own."""
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = {
+            **self.run.env,
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": f"--remote-debugging-port={port} --enable-logging",
+            "TAURI_WEBVIEW_AUTOMATION": "true",
+        }
+        out = open(self.run.root / "app.out", "a")
+        self.proc = subprocess.Popen([str(app), *args], env=env, stdout=out, stderr=subprocess.STDOUT)
+        self.run.pids.add(self.proc.pid)
+        end = time.monotonic() + 60
+        while not http_ok(f"http://127.0.0.1:{port}/json/version"):
+            code = self.proc.poll()
+            need(code is None, f"the app exited {exit_status(code)} before its WebView2 served port {port}; argv {args}")
+            need(time.monotonic() < end, f"no WebView2 on port {port} within 60 s; argv {args}")
+            time.sleep(0.25)
+        return f"127.0.0.1:{port}"
 
     def url(self) -> str:
         return self.req("GET", self.s("/url"))
@@ -346,13 +355,15 @@ class WebDriver:
         return self.req("GET", self.s("/window/rect"))
 
     def end(self) -> None:
-        if self.sid is None:
-            return
-        try:
-            self.req("DELETE", self.s(""), timeout=30)
-        except (Fail, OSError) as e:
-            say(f"end session: {e}")
-        self.sid = None
+        if self.sid is not None:
+            try:
+                self.req("DELETE", self.s(""), timeout=30)
+            except (Fail, OSError) as e:
+                say(f"end session: {e}")
+            self.sid = None
+        # an attached driver leaves the app running: the run that launched it ends it
+        if self.proc is not None and self.proc.poll() is None:
+            kill(self.proc.pid)
 
 
 SHELL_JS = """const f = globalThis.__FANTASTIC_SHELL__;
@@ -379,24 +390,21 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
     cmd = ["tauri-driver", "--port", "4444"]
     if args.native_driver:
         cmd += ["--native-driver", args.native_driver]
-    if WINDOWS:
-        audit_processes()
     log = open(run.root / "tauri-driver.log", "w")
     driver = subprocess.Popen(cmd, env=run.env, stdout=log, stderr=subprocess.STDOUT)
-    wd = WebDriver("http://127.0.0.1:4444")
+    wd = WebDriver("http://127.0.0.1:4444", run)
     try:
         await sessions(run, wd)
     except BaseException:
-        # the app's stderr goes where its driver's does: into this log (not on
-        # Windows, where a release build has no console: the audit log shows it)
         log.flush()
-        say("the driver's log (the app's stderr with it, but on Windows), last 80 lines:")
-        print("\n".join((run.root / "tauri-driver.log").read_text(errors="replace").splitlines()[-80:]), flush=True)
-        if WINDOWS:
-            text = app_processes()
-            (run.root / "app-processes.txt").write_text(text)
-            say("fantastic-app.exe as the audit log saw it (argv, exit status):")
-            print(text, flush=True)
+        say("the driver's log, last 80 lines (on Linux the app's stderr is in it):")
+        print(tail(run.root / "tauri-driver.log"), flush=True)
+        if WINDOWS and wd.proc is not None:
+            say(f"the app, launched by this run: {exit_status(wd.proc.poll())}")
+            print(tail(run.root / "app.out"), flush=True)
+            webview_log = Path(os.environ["LOCALAPPDATA"]) / APP_ID / "EBWebView" / "chrome_debug.log"
+            say(f"WebView2's log ({webview_log}), last 80 lines:")
+            print(tail(webview_log), flush=True)
         raise
     finally:
         wd.end()
