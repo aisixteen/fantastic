@@ -1,5 +1,7 @@
 import { Host } from "../../lib.ts";
 import type { Kernel, Payload } from "../../lib.ts";
+import { onSkin, skinNow } from "../skin/apply.ts";
+import type { ColorValue } from "../skin/tokens.ts";
 
 // The canvas WebGL host — ported from canvas_webapp/index.html's GL scaffolding.
 // A shared THREE renderer/scene/camera (locked to the canvas pan/zoom) hosting
@@ -60,9 +62,15 @@ export async function createGlHost(opts: {
     Group: new () => any;
   };
 
-  const renderer = new THREE.WebGLRenderer({ canvas: bg, antialias: false, alpha: false });
+  // ALPHA ON, for every skin (a context attribute, set once): under a native
+  // backdrop the page's colour is transparent and the window's material shows
+  const renderer = new THREE.WebGLRenderer({ canvas: bg, antialias: false, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setClearColor(0x06060c, 1);
+  const clearFromSkin = (): void => {
+    const c = skinNow().skin.values.get("color.page.bg") as ColorValue;
+    renderer.setClearColor(c.hex, c.alpha);
+  };
+  clearFromSkin();
   renderer.setSize(window.innerWidth, window.innerHeight, false);
 
   const scene = new THREE.Scene();
@@ -85,6 +93,12 @@ export async function createGlHost(opts: {
   function wake(): void {
     if (raf === 0) raf = requestAnimationFrame(frame);
   }
+  // the skin changes: the clear colour follows, drawn on the next frame
+  const offSkin = onSkin(() => {
+    clearFromSkin();
+    dirty = true;
+    wake();
+  });
 
   // a minimal transport shim for GL sources (call/emit/subscribeState + a
   // local bus). The old `t.on`/`t.watch` global-dispatch isn't used by the
@@ -297,6 +311,7 @@ export async function createGlHost(opts: {
       applyCamera(); // marks the frame dirty
     },
     dispose() {
+      offSkin();
       cancelAnimationFrame(raf);
       for (const id of [...views.keys()]) teardown(id);
       try {

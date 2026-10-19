@@ -28,6 +28,7 @@ const CLI_DOCS: &[(&str, &str)] = &[
     ("mcp", include_str!("../docs/mcp.md")),
     ("setup", include_str!("../docs/setup.md")),
     ("bundles", include_str!("../docs/bundles.md")),
+    ("skins", include_str!("../docs/skins.md")),
 ];
 
 /// Every doc, the CLI's first: `(key, text)`.

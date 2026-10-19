@@ -1,3 +1,4 @@
+import { tint, tok } from "../skin/css.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 
 // THE MESSAGE STREAM, as a cell — what `fantastic --headless` prints: every
@@ -12,12 +13,12 @@ const KEEP = 400;
 
 const CSS = `
   .stream-view { height: 100%; overflow: auto; box-sizing: border-box; padding: 8px 10px;
-    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfd3e3; background: rgba(8,8,14,0.6); }
+    font: 11px/1.45 ${tok("font.family.mono")}; color: ${tok("color.text.cool")}; background: ${tok("color.surface.well")}; }
   .stream-view .ln { white-space: pre-wrap; word-break: break-word; }
-  .stream-view .who { color: #b78cff; }
-  .stream-view .verb { color: #7ee2a8; }
-  .stream-view .sum { color: rgba(220,230,245,0.55); }
-  .stream-view .bad { color: #ff8a8a; }
+  .stream-view .who { color: ${tok("color.accent.base")}; }
+  .stream-view .verb { color: ${tok("color.status.ok")}; }
+  .stream-view .sum { color: ${tint("color.text.cool", 55)}; }
+  .stream-view .bad { color: ${tok("color.status.error")}; }
 `;
 
 function ensureStyle(): void {

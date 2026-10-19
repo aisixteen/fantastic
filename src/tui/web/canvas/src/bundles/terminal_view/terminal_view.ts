@@ -4,6 +4,19 @@ import { Host } from "../../lib.ts";
 import { hostRecordFresh } from "../canvas/host_views.ts";
 import { attach as attachTo, launched, pressed, runLine, savedCmd, shortCmd, stoppedText } from "./last_cmd.ts";
 import type { TermState } from "./last_cmd.ts";
+import { onSkin, skinNow } from "../skin/apply.ts";
+import { xtermColor } from "../skin/tokens.ts";
+import type { ColorValue, CompiledSkin } from "../skin/tokens.ts";
+
+/** A skin's xterm theme and font: `color.terminal.*` (#rrggbb, or #rrggbbaa
+ *  below alpha 1 — the background stays `#00000000`) and `font.family.terminal`. */
+export function termLook(skin: CompiledSkin): { theme: { background: string; foreground: string; cursor: string }; fontFamily: string } {
+  const c = (p: string): string => xtermColor(skin.values.get(p) as ColorValue);
+  return {
+    theme: { background: c("color.terminal.bg"), foreground: c("color.terminal.fg"), cursor: c("color.terminal.cursor") },
+    fontFamily: skin.css.get("font.family.terminal")!,
+  };
+}
 
 // terminal_view — inline xterm.js view-agent, rendered INLINE into a canvas
 // frame body (no iframe), drawing ONE PTY job of its exec_bridge backend over
@@ -45,6 +58,7 @@ interface XTerm {
   refresh(start: number, end: number): void;
   scrollToBottom(): void;
   dispose(): void;
+  options: { theme?: unknown; fontFamily?: string };
 }
 
 interface Job {
@@ -87,13 +101,15 @@ export const terminalView: ViewBundle = {
     const FitAddonCtor = g.FitAddon?.FitAddon;
     if (typeof TerminalCtor !== "function") throw new Error("terminal_view: the vendored xterm set no globalThis.Terminal");
     if (typeof FitAddonCtor !== "function") throw new Error("terminal_view: the vendored addon-fit set no globalThis.FitAddon.FitAddon");
+    // its theme and font are the skin's (`termLook`), and follow it live
+    const look = termLook(skinNow().skin);
     const term = new TerminalCtor({
       cursorBlink: true,
       fontSize: 13,
-      fontFamily: "'SF Mono', 'Menlo', monospace",
+      fontFamily: look.fontFamily,
       allowTransparency: true,
       reflowOnResize: false, // freeze old lines; new output wraps at current width
-      theme: { background: "#00000000", foreground: "#e5e5e5", cursor: "#e5e5e5" },
+      theme: look.theme,
     });
     const fit = new FitAddonCtor() as { fit(): void };
     term.loadAddon(fit);
@@ -354,6 +370,14 @@ export const terminalView: ViewBundle = {
       }, 80);
     });
     ro.observe(mount);
+    // THE SKIN CHANGES: the theme and font follow; a font can change the cell
+    // metrics, so the grid is fitted again
+    const offSkin = onSkin((_name, skin) => {
+      const l = termLook(skin);
+      term.options.theme = l.theme;
+      if (term.options.fontFamily !== l.fontFamily) term.options.fontFamily = l.fontFamily;
+      tightFit();
+    });
 
     // init order: fit (cols/rows) → a live job is resized to them, then its
     // ring replays (vim/tmux must replay against the right dimensions); none
@@ -486,6 +510,7 @@ export const terminalView: ViewBundle = {
         },
       ],
       unmount(): void {
+        offSkin();
         io.disconnect();
         offLifecycle();
         offOutput();

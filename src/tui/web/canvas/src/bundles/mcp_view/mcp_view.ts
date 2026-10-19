@@ -1,6 +1,7 @@
 import { Host } from "../../lib.ts";
 import { canvasNode } from "../canvas/host_views.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
+import { tint, tok } from "../skin/css.ts";
 
 // MCP SERVERS on the canvas (owner 2026-10-08): ONE remote MCP server is ONE
 // host agent (`mcp_client.tools`, the lib) — its TOOLS ARE ITS VERBS, so an AI
@@ -31,30 +32,30 @@ export function setMcpDeps(d: McpDeps): void {
 
 const CSS = `
   .mcp-view { padding: 12px 16px; height: 100%; overflow: auto; box-sizing: border-box;
-    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #d9dcea; }
-  .mcp-view .url { color: #fff; font-size: 13px; word-break: break-all; }
-  .mcp-view .srv { color: #b78cff; margin: 2px 0 8px; }
-  .mcp-view .err { color: #ff8a8a; margin: 4px 0; white-space: pre-wrap; }
-  .mcp-view h4 { margin: 10px 0 4px; font-size: 11px; letter-spacing: .1em; color: rgba(220,230,245,0.5); display: flex; justify-content: space-between; }
-  .mcp-view h4 button { background: transparent; border: 1px solid rgba(183,140,255,0.4); color: #b78cff; border-radius: 6px; font: inherit; cursor: pointer; padding: 0 6px; }
+    font: 12px/1.5 ${tok("font.family.mono")}; color: ${tok("color.text.cool")}; }
+  .mcp-view .url { color: ${tok("color.text.bright")}; font-size: 13px; word-break: break-all; }
+  .mcp-view .srv { color: ${tok("color.accent.base")}; margin: 2px 0 8px; }
+  .mcp-view .err { color: ${tok("color.status.error")}; margin: 4px 0; white-space: pre-wrap; }
+  .mcp-view h4 { margin: 10px 0 4px; font-size: 11px; letter-spacing: .1em; color: ${tint("color.text.cool", 50)}; display: flex; justify-content: space-between; }
+  .mcp-view h4 button { background: transparent; border: 1px solid ${tint("color.accent.base", 40)}; color: ${tok("color.accent.base")}; border-radius: ${tok("radius.control")}; font: inherit; cursor: pointer; padding: 0 6px; }
   .mcp-view .tool { margin: 3px 0; }
-  .mcp-view .mcp-set { margin: 8px 0 10px; padding: 10px 12px; border-radius: 8px; background: rgba(183,140,255,0.08); box-shadow: inset 0 0 0 1px rgba(183,140,255,0.3);
-    display: flex; flex-direction: column; gap: 8px; font: 13px system-ui, sans-serif; }
-  .mcp-view .mcp-set label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: rgba(220,230,245,0.65); }
-  .mcp-view .mcp-set input { background: rgba(0,0,0,0.3); border: 1px solid rgba(183,140,255,0.35); color: #fff; font: 13px ui-monospace, monospace; padding: 6px 8px; border-radius: 6px; }
+  .mcp-view .mcp-set { margin: 8px 0 10px; padding: 10px 12px; border-radius: ${tok("radius.card")}; background: ${tint("color.accent.base", 8)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 30)};
+    display: flex; flex-direction: column; gap: 8px; font: 13px ${tok("font.family.sans")}; }
+  .mcp-view .mcp-set label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: ${tint("color.text.cool", 65)}; }
+  .mcp-view .mcp-set input { background: ${tint("color.shade", 30)}; border: 1px solid ${tint("color.accent.base", 35)}; color: ${tok("color.text.bright")}; font: 13px ${tok("font.family.mono")}; padding: 6px 8px; border-radius: ${tok("radius.control")}; }
   .mcp-view .mcp-set .row { display: flex; gap: 8px; }
-  .mcp-view .mcp-set button { background: rgba(183,140,255,0.25); border: 1px solid rgba(183,140,255,0.5); color: #fff; border-radius: 8px; padding: 6px 14px; cursor: pointer; font: inherit; }
-  .mcp-view .mcp-set button.save { background: #b78cff; color: #16121f; font-weight: 700; }
-  .mcp-view .mcp-set .say { font-size: 12px; color: #d9c99a; min-height: 1em; }
-  .mcp-view .tool b { color: #7ee2a8; font-weight: 600; }
-  .mcp-view .skip { color: rgba(220,230,245,0.45); }
-  .mcp-add { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; font: 13px system-ui, sans-serif; color: #e5e1ee; }
+  .mcp-view .mcp-set button { background: ${tint("color.accent.base", 25)}; border: 1px solid ${tint("color.accent.base", 50)}; color: ${tok("color.text.bright")}; border-radius: ${tok("radius.card")}; padding: 6px 14px; cursor: pointer; font: inherit; }
+  .mcp-view .mcp-set button.save { background: ${tok("color.accent.base")}; color: ${tok("color.accent.on")}; font-weight: 700; }
+  .mcp-view .mcp-set .say { font-size: 12px; color: ${tok("color.status.warn-muted")}; min-height: 1em; }
+  .mcp-view .tool b { color: ${tok("color.status.ok")}; font-weight: 600; }
+  .mcp-view .skip { color: ${tint("color.text.cool", 45)}; }
+  .mcp-add { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; font: 13px ${tok("font.family.sans")}; color: ${tok("color.text.primary")}; }
   .mcp-add h3 { margin: 0; font-size: 14px; }
-  .mcp-add label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: rgba(220,230,245,0.6); }
-  .mcp-add input { background: rgba(0,0,0,0.3); border: 1px solid rgba(183,140,255,0.35); color: #fff; font: 13px ui-monospace, monospace; padding: 6px 8px; border-radius: 6px; }
-  .mcp-add button { align-self: flex-start; background: rgba(183,140,255,0.25); border: 1px solid rgba(183,140,255,0.5); color: #fff; border-radius: 8px; padding: 6px 14px; cursor: pointer; }
-  .mcp-add .note { font-size: 11px; color: rgba(220,230,245,0.5); }
-  .mcp-add .err { color: #ff8a8a; font-size: 12px; white-space: pre-wrap; }
+  .mcp-add label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: ${tint("color.text.cool", 60)}; }
+  .mcp-add input { background: ${tint("color.shade", 30)}; border: 1px solid ${tint("color.accent.base", 35)}; color: ${tok("color.text.bright")}; font: 13px ${tok("font.family.mono")}; padding: 6px 8px; border-radius: ${tok("radius.control")}; }
+  .mcp-add button { align-self: flex-start; background: ${tint("color.accent.base", 25)}; border: 1px solid ${tint("color.accent.base", 50)}; color: ${tok("color.text.bright")}; border-radius: ${tok("radius.card")}; padding: 6px 14px; cursor: pointer; }
+  .mcp-add .note { font-size: 11px; color: ${tint("color.text.cool", 50)}; }
+  .mcp-add .err { color: ${tok("color.status.error")}; font-size: 12px; white-space: pre-wrap; }
 `;
 
 function ensureStyle(): void {

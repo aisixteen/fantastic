@@ -81,6 +81,14 @@ the triggers choose (yours first). A NEW theme (or background) is your AI
 agent's to make: ask an AI cell — it calls `add` / `add_theme` on the manager,
 and they stay.
 
+SKINS: how the canvas looks — every colour, corner radius, font family,
+shadow and motion value — is a SKIN: W3C design tokens plus a backdrop, held by
+the page agent `skin`. Stock `dark` (a browser tab) and `glass` (the app's
+window, over its native material); the canvas theme panel's third section,
+Skins, switches them live. A new skin is your AI agent's to write (`schema`,
+`get`, `add`, `use` on `skin`). A skin is not a theme: it never moves a cell.
+`fantastic readme skins`.
+
 THE DOUBLE-CLICK: `AI agent` — the ONE way to make an AI: your default (★)
 set-up, typed text its first turn; with none set up, the set-up wizard. Your
 saved set-ups are not tiles: another one is the AI cell's ⚙ settings →
@@ -149,6 +157,27 @@ both sides; the human narrows them with `update_agent`).
 
 `update {id: <the view>, fields: {…}}` sets the view's own fields. Every cell answers `reflect`, `get_html`,
 `set_html`, `emit`.
+
+## Hosted by a shell
+
+A native shell (the app's window) tells the page what hosts it with one frozen
+global, set before any page script runs:
+
+```
+window.__FANTASTIC_SHELL__ = Object.freeze({name, os, webview, backdrop, pickFolder?})
+```
+
+- `name` — the shell (`tauri`).
+- `os` — `macos` | `windows` | `linux`.
+- `webview` — `wkwebview` | `webview2` | `webkitgtk`: read by the terminal's
+  renderer.
+- `backdrop` — `native` (the window draws a material behind a transparent
+  page) | `web` (the page paints its own): read by the skin — the slot in use
+  (`fantastic readme skins`).
+- `pickFolder` (optional) — the shell's folder dialog: read by the Home.
+
+A plain browser tab has no flag: its backdrop is `web`. A malformed flag is the
+shell's bug: the page says it in place of the canvas and stops.
 
 ## Themes — where the cells sit
 

@@ -18,6 +18,9 @@ import { ROOT_VIEW, VIEW, VIEW_VERBS, hostViewCell } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
 import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_agent.ts";
+import { SKIN_ID, SKIN_VERBS, ensureSkin } from "../skin/skin_agent.ts";
+import { onSkin, skinNow, watchSkin } from "../skin/apply.ts";
+import { EMPTY_HTML } from "../html_agent/empty_html.ts";
 
 /** What a host agent (a cell's AI) may ask ANY cell: look at it, read and
  *  write a panel's html, emit to it. */
@@ -868,10 +871,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       // the view's control plane over its cells
       [`${kernel.guid}|${view}`]: [...VIEW_VERBS],
       ...(bg !== undefined ? { [`${kernel.guid}|${bg}`]: [...BG_VERBS] } : {}),
+      // the page's skin (`skin_agent.ts`): an AI writes a skin and switches to it
+      [`${kernel.guid}|${SKIN_ID}`]: [...SKIN_VERBS],
       // any cell — and the view verbs, since the cells are their OPERANDS
       // (`move {id}`, `wire {sender, receiver}`): the host's egress gate checks
       // the agents a call names, not only its target
-      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS, ...BACKGROUNDS_VERBS])],
+      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS, ...BACKGROUNDS_VERBS, ...SKIN_VERBS])],
     };
   };
   const spawnAi = async (cellId: string, saved: string | null, view?: string): Promise<Rec | null> => {
@@ -1127,7 +1132,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // agent's `bg_source`, mounted as a GL view under its id, behind every member,
     // swapped in place — BEFORE the cells mount, so leaving a full view (Esc) never
     // shows the cells over the old background while they mount.
-    const bgSource = bgRec !== undefined && typeof bgRec["bg_source"] === "string" ? (bgRec["bg_source"] as string) : "";
+    // ONLY UNDER A WEB SKIN: a native backdrop shows the window's own material,
+    // so the view's background is not drawn (its record untouched — a web skin
+    // brings it back); `#bg[data-background]` says which, for probes
+    const drawBg = skinNow().skin.backdrop === "web";
+    bg.dataset["background"] = drawBg ? "drawn" : "none";
+    const bgSource = drawBg && bgRec !== undefined && typeof bgRec["bg_source"] === "string" ? (bgRec["bg_source"] as string) : "";
     if (bgSource !== "" && bgRec !== undefined) {
       const gh = await ensureGlHost();
       if (bgSource !== bgShown) {
@@ -1664,7 +1674,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
           y: Math.round(w.y),
           width: 360,
           height: 240,
-          html: "<p style='font:14px system-ui;color:#cde;padding:14px'>an empty html panel</p>",
+          html: EMPTY_HTML,
         },
       }),
     );
@@ -1763,6 +1773,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   kernel.addStateSubscriber(() => documentPage(kernel));
   ensureBackground(ROOT_VIEW);
   if (isContainer(look, viewed)) ensureBackground(viewed);
+  // THE SKIN (`skin_agent.ts`): made once, then the one in use applied — and
+  // again, live, whenever its record changes; a change draws the view again (a
+  // native backdrop hides the background)
+  ensureSkin(kernel);
+  watchSkin(kernel, toast);
+  onSkin(() => void refresh());
   window.addEventListener("hashchange", () => {
     const want = viewFromHash(location.hash);
     if (want !== null && want !== viewed && kernel.get(want) !== undefined) setViewed(want, false);

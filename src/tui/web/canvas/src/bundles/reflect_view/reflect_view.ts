@@ -1,4 +1,5 @@
 import { Host } from "../../lib.ts";
+import { tint, tok } from "../skin/css.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 
 // THE REFLECT CARD — any agent, as a cell: what it says it is (its reflect).
@@ -9,15 +10,15 @@ type Dict = Record<string, unknown>;
 
 const CSS = `
   .reflect-view { padding: 12px 16px; height: 100%; overflow: auto; box-sizing: border-box;
-    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #d9dcea; }
-  .reflect-view h3 { margin: 0 0 4px; font-size: 14px; color: #fff; }
-  .reflect-view .hm { color: #b78cff; margin-bottom: 8px; }
-  .reflect-view .sentence { color: #aab; margin-bottom: 10px; white-space: pre-wrap; }
-  .reflect-view h4 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .1em; color: rgba(220,230,245,0.5); }
+    font: 12px/1.5 ${tok("font.family.mono")}; color: ${tok("color.text.cool")}; }
+  .reflect-view h3 { margin: 0 0 4px; font-size: 14px; color: ${tok("color.text.bright")}; }
+  .reflect-view .hm { color: ${tok("color.accent.base")}; margin-bottom: 8px; }
+  .reflect-view .sentence { color: ${tok("color.text.code")}; margin-bottom: 10px; white-space: pre-wrap; }
+  .reflect-view h4 { margin: 12px 0 4px; font-size: 11px; letter-spacing: .1em; color: ${tint("color.text.cool", 50)}; }
   .reflect-view .verb { margin: 2px 0; }
-  .reflect-view .verb b { color: #7ee2a8; font-weight: 600; }
-  .reflect-view pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: #aab; }
-  .reflect-view .err { color: #ff8a8a; }
+  .reflect-view .verb b { color: ${tok("color.status.ok")}; font-weight: 600; }
+  .reflect-view pre { margin: 0; white-space: pre-wrap; word-break: break-word; color: ${tok("color.text.code")}; }
+  .reflect-view .err { color: ${tok("color.status.error")}; }
 `;
 
 function ensureStyle(): void {

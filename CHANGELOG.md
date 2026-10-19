@@ -27,6 +27,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   its folds already summarise and every superseded `view` row (with
   `include_cleared`, everything before the last `clear` as well), keeps every
   fold, and leaves the next prompt unchanged.
+- Skins: the canvas draws every colour, radius, font family, shadow and motion
+  value from design tokens (W3C 2025.10), compiled in the page. A `skin` page
+  agent picks the skin per backdrop and takes skins an AI writes (`schema`,
+  `get`, `add`, `use`). Two stock skins, `dark` (today's look) and `glass` (for a
+  native vibrancy backdrop). `fantastic readme skins` documents the schema.
 
 ### Changed
 
@@ -52,6 +57,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   state_dir }`. `BootstrapOptions::daemon` and `one_shot` keep
   `<workdir>/.fantastic`; `daemon_at(workdir, state_dir)` names another. The
   on-disk format is unchanged.
+- The canvas theme panel uses the canvas palette and gains a Skins section. AI
+  agents made before this release call the skin agent once their cell is
+  reopened.
 - CI: a failed unit suite stops the run before the e2e. The e2e runs only once
   every unit job passed and every binary built; the builds still run alongside
   the unit tests (`build.yml`'s `binaries` call, then its `e2e` call).
