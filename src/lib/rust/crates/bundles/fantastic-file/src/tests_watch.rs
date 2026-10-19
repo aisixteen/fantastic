@@ -171,6 +171,13 @@ async fn what_is_not_exposed_or_not_there_is_refused() {
 
 /// `allow` is read live: narrowed after the watch was armed, the path's changes
 /// stop reaching watchers.
+///
+/// THE FIRST WRITE CAN BE REPORTED LATE. macOS FSEvents may deliver the event of a
+/// write made before the watch was armed (its stream latency), and that event
+/// lands in the inbox before `allow` is narrowed, so the assertion below read
+/// it. Write a marker after arming and drain the inbox up to the marker's own
+/// event: a stream delivers its events in event-id order, so nothing older can
+/// arrive after it, and the watch is known live.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_path_the_bridge_stops_exposing_reports_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -179,7 +186,11 @@ async fn a_path_the_bridge_stops_exposing_reports_nothing() {
     std::fs::write(served(&tmp).join("notes/a.md"), "x").unwrap();
     let mut rx = inbox(&k).await;
     call(&k, json!({"type": "watch_path", "path": "notes"})).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(served(&tmp).join("notes/marker.md"), "m").unwrap();
+    assert!(
+        next_changed(&mut rx, "notes/marker.md", 10).await.is_some(),
+        "the armed watch reports the marker"
+    );
     let mut patch = serde_json::Map::new();
     patch.insert("allow".into(), json!(["other.md"]));
     k.update(&AgentId::from("fb"), patch);
