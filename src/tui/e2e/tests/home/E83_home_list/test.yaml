@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: home_list
+group: home
+title: "the Home (home.html, the home_view bundle) lists a running, a stopped and a missing fantastic in registry order — name, folder, status, last seen, their buttons — offers a path field in a plain tab, and keeps its own root record through web_loader"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

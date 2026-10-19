@@ -228,6 +228,12 @@ class Page:
                 way = self.ws_frames["in" if m["method"].endswith("Received") else "out"]
                 way[0] += 1
                 way[1] += len(m["params"]["response"].get("payloadData", ""))
+            elif m.get("method") == "Page.frameNavigated" and hasattr(self, "navigations"):
+                # a CHILD frame's navigation (a probe asserting none reloaded):
+                # its url, as `ws_frames` counts frames
+                fr = m["params"].get("frame") or {}
+                if fr.get("parentId"):
+                    self.navigations.append(fr.get("url", ""))
             elif m.get("method") == "Runtime.consoleAPICalled" and m["params"]["type"] == "error":
                 self.logs.append("ERR " + " ".join(str(a.get("value", a.get("description", ""))) for a in m["params"]["args"]))
             if m.get("id") == me:

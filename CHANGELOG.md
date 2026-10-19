@@ -14,7 +14,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   own sqlite store, a loopback web host, no exec, files or AI) whose `home`
   agent lists, opens, starts, stops, registers and removes fantastics, keeps its
   open pages and selection across restarts, never lists its own folder, emits
-  its state and serves a list page. Every OS call is in `home/sys`.
+  its state and serves a list page. Every OS call is in `home/sys`. A running
+  row stays running through missed canvas answers until the 3rd in a row
+  (about 6 s), so a loaded machine does not drop every open page's canvas.
 - `fantastic __ctrl_break <pid>` (Windows): a hidden helper that stops a canvas
   running in another console.
 - Python kernel: `sqlite_store`, a durable memory store. It answers exactly what
@@ -32,9 +34,16 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   agent picks the skin per backdrop and takes skins an AI writes (`schema`,
   `get`, `add`, `use`). Two stock skins, `dark` (today's look) and `glass` (for a
   native vibrancy backdrop). `fantastic readme skins` documents the schema.
+- The Home screen the home kernel serves, as a canvas view bundle (`home_view`):
+  your fantastics with live status, start, stop, open and remove; one live page
+  per open fantastic, kept across restarts; a nav pill and the shortcuts mod+0,
+  mod+1–9 and mod+W; Open Folder through the shell or a path field. The Home page
+  keeps its own records in `<home>/app/`.
 
 ### Changed
 
+- The home kernel serves the Home at `home.html` and the list page at
+  `list.html`.
 - Home layout v2: everything fantastic keeps for a user lives under ONE
   directory, `~/.fantastic/` (`FANTASTIC_HOME` still overrides it), in groups:
   `app/` (the desktop app's home kernel), `fantastics/` (the registry),

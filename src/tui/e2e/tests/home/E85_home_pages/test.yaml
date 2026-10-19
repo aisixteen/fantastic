@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: home_pages
+group: home
+title: "the Home's pages: two live canvases switched by the nav pill and mod+0/1/2 never reload (no child-frame navigation, the same frames), the selection is the home agent's (a second tab shows it), mod+W closes the shown page and its fantastic keeps running, and after the host restarts the pages and selection come back"
+runner: probe.py
+costs: free
+limits:
+  seconds: 240
+env: {}

@@ -37,6 +37,16 @@ watcher also sees the calls other clients send to `home`, mirrored as they
 were sent, so it keeps only the payload `type` it wants. Watch first, then call
 `list`, and ignore any `state` whose `seq` is not above the `list` reply's.
 
+## A row's status
+
+A row is `running` while the process holding its folder is the run its
+registry entry names and its canvas answers as it. A running row rides out
+missed canvas answers (a loaded machine misses the check's timeout): while the
+same process serves the same canvas, misses 1 and 2 in a row keep it
+`running`, and the 3rd shows what the check found, about 6 s at the 2 s poll.
+A gone process, another run or another canvas shows at once; an answer resets
+the count.
+
 ## What it keeps
 
 `pages` and `selection` are fields of this agent's own record, written once

@@ -11,7 +11,7 @@ runtimes: [home]
 costs: free
 
 runs:
-  # the host serves the list page and writes its run file; nothing is listed yet
+  # the host serves the Home page and writes its run file; nothing is listed yet
   - name: boot
   # one host per home dir: a second exits 2, naming the first's pid
   - name: second-host-refused
