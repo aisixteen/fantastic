@@ -69,7 +69,8 @@ class Watch:
         self.ready = threading.Event()
         self.error: BaseException | None = None
         self.cond = threading.Condition()
-        threading.Thread(target=lambda: asyncio.run(self._run(port, aid)), daemon=True).start()
+        self.thread = threading.Thread(target=lambda: asyncio.run(self._run(port, aid)), daemon=True)
+        self.thread.start()
 
     def _fail(self, e: BaseException) -> None:
         with self.cond:
@@ -80,7 +81,7 @@ class Watch:
         w = WSWatcher(port, aid)
         try:
             await w.connect()
-        except BaseException as e:
+        except Exception as e:
             self._fail(e)
             return
         finally:
@@ -90,7 +91,7 @@ class Watch:
                 with self.cond:
                     self.seen.append(ev)
                     self.cond.notify_all()
-        except BaseException as e:
+        except Exception as e:
             self._fail(e)
             return
         self._fail(ConnectionError(f"ws watch of {aid} ended: the socket closed"))
@@ -115,10 +116,17 @@ class Watch:
     def wait_for(self, pred, timeout: float = 30.0) -> bool:
         """True once an event matches `pred`, False when the bound passes first. A failed
         watch raises its error here instead of waiting out the bound."""
+        return self.wait_count(pred, 1, timeout)
+
+    def wait_count(self, pred, n: int, timeout: float = 30.0) -> bool:
+        """True once `n` events match `pred`, False when the bound passes first. A failed
+        watch raises its error here instead of waiting out the bound."""
+        def matched() -> int:
+            return sum(1 for e in self.seen if pred(e))
+
         with self.cond:
-            self.cond.wait_for(
-                lambda: self.error is not None or any(pred(e) for e in self.seen), timeout)
-            if any(pred(e) for e in self.seen):
+            self.cond.wait_for(lambda: self.error is not None or matched() >= n, timeout)
+            if matched() >= n:
                 return True
             if self.error is not None:
                 raise self.error
@@ -230,11 +238,12 @@ def main() -> int:
 
         # 5 · live, over the ws face: each watch is subscribed before its one edit, and one
         # edit gives one event, so two opens of one path share one relay with no duplicate.
-        # A count is taken only AFTER a marker the same bridge emits later: the bridge's watch
-        # loop yields its batches in order, so a second event for an earlier edit lands before
-        # the marker does. The file view relays only its own path, so its marker is the
-        # folder view's `added` for a sibling written after the edit. LIMIT: a duplicate the
-        # disk reports after the marker's batch is not seen; no sleep bounds that window.
+        # A count is taken only AFTER a marker on the SAME stream: events of one view arrive
+        # in order on its one relay and socket, so a second event for an earlier edit lands
+        # before the marker does. The file view's marker is a second edit of its own file
+        # (two `changed` in all); the folder view's is an `added` for a sibling written after
+        # the entry. Another view's stream orders nothing here. LIMIT: a duplicate the disk
+        # reports after the marker is not seen; no sleep bounds that window.
         fw = Watch(hk.port, fid)
         dw = Watch(hk.port, did)
         fw.ready_or_raise()
@@ -243,10 +252,10 @@ def main() -> int:
         entry = lambda kind, name: lambda e: e.get("type") == kind and e.get("name") == name  # noqa: E731
         (box / "docs/a.md").write_text("live\n")
         need(fw.wait_for(changed), "a file view emits `changed` after an on-disk edit")
-        (box / "docs/marker_a.md").write_text("m\n")
-        need(dw.wait_for(entry("added", "marker_a.md")), "the folder view's marker follows the file edit")
+        (box / "docs/a.md").write_text("live again\n")
+        need(fw.wait_count(changed, 2), "the file view's second edit is its own marker")
         n = fw.count(changed)
-        need(n == 1, f"a file view emits one `changed` after one on-disk edit (got {n}): {fw.events()[:2]}")
+        need(n == 2, f"a file view emits one `changed` per on-disk edit (got {n} for two): {fw.events()[:3]}")
         (box / "docs/live.md").write_text("new\n")
         need(dw.wait_for(entry("added", "live.md")), "a folder view emits `added` for a new entry")
         (box / "docs/marker_b.md").write_text("m\n")
