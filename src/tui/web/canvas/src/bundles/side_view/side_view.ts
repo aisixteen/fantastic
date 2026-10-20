@@ -1,19 +1,16 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
-import { createSidebar } from "../canvas/sidebar.ts";
-import type { SidebarDeps } from "../canvas/sidebar.ts";
 
-// THE PAGE'S OWN CELLS that show the canvas itself (owner 2026-10-08): nothing
-// floats — a canvas opens as its background alone, and these are placed from
-// the double-click like any cell (moved, resized, closed; as many as you like).
+// THE CANVAS-LIST CELL (owner 2026-10-08): nothing floats — a canvas opens as its
+// background alone, and this is placed from the double-click like any cell
+// (moved, resized, closed; as many as you like).
 //
-//   sidebar_view.ts   the agent tree (`sidebar.ts`)
 //   canvases_view.ts  every canvas on the host — flat peers; a click opens one,
 //                     `+ new canvas` makes a peer (a list, for now)
 //
-// Page content: no backend, no grants. What they read is the canvas's (set at
+// The agent tree it used to sit beside is the file tree now (`files/files_view.ts`).
+// Page content: no backend, no grants. What it reads is the canvas's (set at
 // mount by `canvas.ts`).
 
-export const SIDEBAR_VIEW = "sidebar_view.ts";
 export const CANVASES_VIEW = "canvases_view.ts";
 
 export interface CanvasEntry {
@@ -31,37 +28,12 @@ export interface CanvasesDeps {
   newCanvas(name: string): Promise<string | null>;
 }
 
-let sideDeps: Omit<SidebarDeps, "mount"> | null = null;
 let canvasDeps: CanvasesDeps | null = null;
-const shown = new Set<{ render(): Promise<void> }>();
 
-/** The canvas hands its sidebar and canvas-list wiring over, at mount. */
-export function setSideDeps(side: Omit<SidebarDeps, "mount">, canvases: CanvasesDeps): void {
-  sideDeps = side;
+/** The canvas hands its canvas-list wiring over, at mount. */
+export function setCanvasesDeps(canvases: CanvasesDeps): void {
   canvasDeps = canvases;
 }
-
-/** Render every sidebar cell again (the canvas says something changed). */
-export async function renderSidebars(): Promise<void> {
-  await Promise.all([...shown].map((s) => s.render()));
-}
-
-export const sidebarView: ViewBundle = {
-  handles: [SIDEBAR_VIEW],
-  grants: () => ({}),
-  mount(ctx: ViewContext): ViewHandle {
-    if (sideDeps === null) throw new Error("sidebar_view: the canvas is not mounted");
-    const s = createSidebar({ ...sideDeps, mount: ctx.mount });
-    shown.add(s);
-    void s.render();
-    return {
-      unmount(): void {
-        shown.delete(s);
-        s.el.remove();
-      },
-    };
-  },
-};
 
 export const canvasesView: ViewBundle = {
   handles: [CANVASES_VIEW],

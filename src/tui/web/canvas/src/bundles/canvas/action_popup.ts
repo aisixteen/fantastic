@@ -2,7 +2,7 @@
 // canvas, or ⌘K / Ctrl-K at the pointer), macOS-Launchpad style: a text field on
 // top, and below it a GRID of icon tiles in two groups (backend-owned views):
 //
-//   page    html · stream · tree view · backgrounds · tips — page content (FE)
+//   page    html · stream · file tree · preview · backgrounds · tips — page content (FE)
 //   host    ask (the default AI) · terminal · agent (set-up) · python agent —
 //           a HOST agent made, then a cell views it (BE)
 //   host · bundles  this project's own bundles — one more instance of each
@@ -24,7 +24,8 @@ export type Pick =
   | { kind: "html" }
   | { kind: "stream" }
   | { kind: "setup" }
-  | { kind: "tree" }
+  | { kind: "files" }
+  | { kind: "preview" }
   | { kind: "backgrounds" }
   | { kind: "tips" }
   | { kind: "mcp" }
@@ -68,7 +69,7 @@ export function exactLine(argv: string[]): string {
 }
 
 export type Section = "page" | "host" | "coding" | "bundles" | "page_bundles" | "chats";
-export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "bundle" | "chat" | "tree" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp" | "store";
+export type Icon = "ask" | "terminal" | "html" | "stream" | "agent" | "bundle" | "chat" | "tree" | "preview" | "backgrounds" | "tips" | "claude" | "codex" | "aider" | "opencode" | "fantastic" | "mcp" | "store";
 
 export interface Tile {
   icon: Icon;
@@ -92,8 +93,10 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["user store", { kind: "user_store" }, "store", "host"],
   ["html", { kind: "html" }, "html", "page"],
   ["stream", { kind: "stream" }, "stream", "page"],
-  // the agent tree of both kernels (a `sidebar_view.ts` cell)
-  ["tree view", { kind: "tree" }, "tree", "page"],
+  // the project's files, live — every agent is a folder in it (a `files_view.ts` cell)
+  ["file tree", { kind: "files" }, "tree", "page"],
+  // a file or the live agent: highlighted, rendered, editable (a `preview_view.ts` cell)
+  ["preview", { kind: "preview" }, "preview", "page"],
   // the view's backgrounds AND themes (owner 2026-10-12: "backgrounds" renamed)
   ["canvas theme", { kind: "backgrounds" }, "backgrounds", "page"],
   ["tips", { kind: "tips" }, "tips", "page"],
@@ -208,6 +211,7 @@ const PATH: Record<Icon, string> = {
   agent: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   bundle: '<path d="M12 3l1.8 4.7L18.5 9.5l-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><rect x="15" y="15" width="6" height="6" rx="1.5"/>',
   tree: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 4v16M12 9h5M12 13h5"/>',
+  preview: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>',
   tips: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2h5c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>',
   store: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
   backgrounds: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/>',

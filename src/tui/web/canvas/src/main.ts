@@ -11,6 +11,8 @@ import { onHostStopping, registerCanvas } from "./bundles/canvas/canvas_agent.ts
 import { registerBackground } from "./bundles/canvas/background_agent.ts";
 import { registerSelector } from "./bundles/canvas/selector_agent.ts";
 import { registerLayout } from "./bundles/canvas/layout.ts";
+import { registerFilesView } from "./bundles/files/files_controller.ts";
+import { registerPreviewView } from "./bundles/preview/preview_controller.ts";
 import { registerSkin } from "./bundles/skin/skin_agent.ts";
 import { bootSkin, installSkin } from "./bundles/skin/apply.ts";
 import { tok } from "./bundles/skin/css.ts";
@@ -54,7 +56,8 @@ function register(kernel: Kernel): void {
   kernel.registerBundle("reflect_view.ts", () => null);
   kernel.registerBundle("setup_view.ts", () => null);
   kernel.registerBundle("stream_view.ts", () => null);
-  kernel.registerBundle("sidebar_view.ts", () => null); // the chats + agent tree cell
+  registerFilesView(kernel); // the file tree cell (and its old name, sidebar_view.ts): a page agent with verbs
+  registerPreviewView(kernel); // the previewer / editor cell: a page agent with verbs
   kernel.registerBundle("canvases_view.ts", () => null); // the canvas-list cell
   kernel.registerBundle("mcp_view.ts", () => null); // an MCP server agent's view
   kernel.registerBundle("mcp_add_view.ts", () => null); // the add-an-MCP-server form
@@ -71,10 +74,6 @@ function register(kernel: Kernel): void {
   kernel.setBundleReadme(
     "agent_view.ts",
     "A HOST agent's own view: the cell shows `backend_id`, drawn as that agent's record declares (`view: {kind: html, bytes | bytes_file, calls}`). The cell holds no content — the body is the host agent's; its grant onto the agent is the record's `calls`. Show a host agent: place {backend_id, x, y} on the view (no kind).",
-  );
-  kernel.setBundleReadme(
-    "sidebar_view.ts",
-    "A sidebar cell: the agent tree of both kernels. Page content, no backend; as many as you like.",
   );
   kernel.setBundleReadme(
     "canvases_view.ts",

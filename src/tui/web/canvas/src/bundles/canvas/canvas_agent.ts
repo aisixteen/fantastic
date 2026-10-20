@@ -5,6 +5,7 @@ import { terminalView } from "../terminal_view/terminal_view.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
+import { fileGrant } from "../files/file_bridge.ts";
 import { grantHint } from "../html_agent/grant_hint.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { cellGrant, hostRecordFresh, viewOf } from "./host_views.ts";
@@ -199,6 +200,8 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       // the view's OWN declared grant onto the agent it shows
       if (kind === "terminal") meta["can_call"] = { ...terminalView.grants(backend) };
       if (kind === "chat") meta["can_call"] = { ...aiView.grants(backend) };
+      // the file tree and the previewer reach the project's file bridge
+      if (["files_view.ts", "preview_view.ts", "sidebar_view.ts"].includes(hm) && meta["can_call"] === undefined) meta["can_call"] = fileGrant();
       kernel.register(new Agent({ id: aid, parentId: id, handlerModule: hm, meta: meta as Payload }));
       // grants the body needs and the cell lacks are SAID (the panel's refused
       // call never reaches the AI)
