@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,24 @@ from helpers import oslayer, verdict  # noqa: E402
 
 SC = E2E / "tests" / "scenario" / "E21_canvas_user" / "scenario.yaml"
 FRAMES = "document.querySelectorAll('#world .agent-frame, .agent-frame').length"
+CHROME_TAIL = 40  # the lines of Chrome's own output a dead debugging port's error quotes
+
+
+def chrome_evidence(rc: int | None, cmd: list[str], udd: Path, out: Path) -> str:
+    """Why a Chrome never opened its debugging port: its exit status (or that it
+    is still running), how it was launched, and the tail of its own output."""
+    try:
+        tail = out.read_text(errors="replace").splitlines()[-CHROME_TAIL:]
+    except OSError as e:
+        tail = [f"(output unreadable: {e})"]
+    status = "still running" if rc is None else f"exited with status {rc}"
+    return "\n".join([
+        f"Chrome never opened its debugging port — {status}",
+        f"  command: {shlex.join(cmd)}",
+        f"  user-data-dir: {udd}",
+        f"  output: {out} (last {len(tail)} lines)",
+        *(f"    {line}" for line in tail),
+    ])
 
 
 class Browser:
@@ -40,9 +59,13 @@ class Browser:
         chrome = os.environ.get("CHROME") or MAC_CHROME
         if not Path(chrome).exists():
             raise SystemExit(f"no Chrome at {chrome}: set CHROME")
-        self.proc = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
-                                      f"--remote-debugging-port={self.port}", f"--user-data-dir={tmp / ('chrome-' + name)}",
-                                      "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.udd = tmp / ("chrome-" + name)
+        self.out = tmp / f"chrome-{name}.log"  # Chrome's stdout and stderr, kept for a failure's evidence
+        self.cmd = [chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
+                    f"--remote-debugging-port={self.port}", f"--user-data-dir={self.udd}",
+                    "--no-first-run", "about:blank"]
+        with self.out.open("wb") as fh:  # the child keeps its own copy of the descriptor
+            self.proc = subprocess.Popen(self.cmd, stdout=fh, stderr=subprocess.STDOUT)
         self.used_first = False
         self.size = (w["width"], w["height"])
 
@@ -58,7 +81,7 @@ class Browser:
                 return t["webSocketDebuggerUrl"]
             except Exception:
                 if time.time() > deadline:
-                    raise SystemExit("Chrome never opened its debugging port")
+                    raise SystemExit(chrome_evidence(self.proc.poll(), self.cmd, self.udd, self.out))
                 time.sleep(0.2)
 
     def close(self) -> None:
@@ -177,6 +200,10 @@ def main() -> int:
     try:
         ok = asyncio.run(run(sc, tmp))
     finally:
+        # Chrome's output is the run's evidence: kept beside the run's log, whether or not Chrome failed.
+        if run_dir := os.environ.get("E2E_RUN_DIR"):
+            for log in tmp.glob("chrome-*.log"):
+                shutil.copy(log, Path(run_dir) / f"canvas_user.{log.name}")
         if not os.environ.get("E2E_KEEP"):
             shutil.rmtree(tmp, ignore_errors=True)
         else:
