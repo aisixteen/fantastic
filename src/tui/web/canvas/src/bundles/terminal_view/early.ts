@@ -20,3 +20,12 @@ export function earlyPlan(frames: Frame[], covered: number, jobId: number | unde
     return { op: "draw", frame };
   });
 }
+
+/** Runs a plan: a drawn frame goes to `draw` (the view's draw acks what it
+ *  writes), a skipped one goes nowhere (so it is not acked), a `job_done` to `end`. */
+export function runEarly(plan: EarlyStep[], draw: (frame: Frame) => void, end: (frame: Frame) => void): void {
+  for (const s of plan) {
+    if (s.op === "end") end(s.frame);
+    else if (s.op === "draw") draw(s.frame);
+  }
+}
