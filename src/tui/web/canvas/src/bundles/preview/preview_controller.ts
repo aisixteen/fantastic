@@ -66,6 +66,8 @@ export class PreviewController {
   isAgent = false;
   private held: string | null = null;
   private seq = 0;
+  /** counts the pages asked for: only the latest one's reply is applied */
+  private pageAsk = 0;
   /** counts the text reads of a followed file: only the latest one is applied */
   private reads = 0;
   private listener: (() => void) | null = null;
@@ -220,6 +222,8 @@ export class PreviewController {
 
   /** Follow `path` live; a refusal is said, not hidden. */
   private async holdOn(path: string, my: number): Promise<void> {
+    // a look still in flight when the cell is disposed takes no hold: nothing would ever let it go
+    if (this.disposed) return;
     if (this.held !== path) {
       this.releaseHold();
       this.held = path;
@@ -292,8 +296,10 @@ export class PreviewController {
     if (this.path === null) return;
     const pages = Math.max(1, Math.ceil(this.size / PAGE));
     const at = Math.max(0, Math.min(pages - 1, n));
+    // the latest page asked for decides: a reply that comes back after a newer page was asked for is dropped
+    const mine = ++this.pageAsk;
     const r = (await this.o.bridge.call({ type: "read_stream", path: wire(this.path), offset: at * PAGE, length: PAGE + 3 })) as Record<string, unknown>;
-    if (my !== this.seq) return;
+    if (my !== this.seq || mine !== this.pageAsk) return;
     if (isRefusal(r)) this.content = { k: "error", error: said(r) };
     else {
       // a file over the text limit with an unlisted extension may still be binary: sniffed here, so it gets the size card, not garbage

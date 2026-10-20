@@ -38,6 +38,8 @@ export function linkKind(href: string): "web" | "mail" | "file" | "anchor" | nul
 /** A relative `href` from the markdown file in folder `dir`, as a project path; null when it leaves the project. */
 export function resolveRel(dir: string, href: string): string | null {
   const bare = href.split(/[?#]/)[0]!;
+  // no path at all (a query or an anchor alone) is not the folder: nothing to open
+  if (bare.split("/").every((seg) => seg === "" || seg === ".")) return null;
   const parts = (dir === "" ? [] : dir.split("/")).slice();
   for (const seg of bare.split("/")) {
     if (seg === "" || seg === ".") continue;

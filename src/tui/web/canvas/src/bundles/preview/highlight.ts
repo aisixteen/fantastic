@@ -84,6 +84,15 @@ export function tokens(src: string, lang: Lang): Token[] {
       i = stop;
       continue;
     }
+    // python's triple-quoted strings come first: the single-quote rule below would read `""` as an empty string
+    if (lang === "py" && (src.startsWith('"""', i) || src.startsWith("'''", i))) {
+      const q = src.slice(i, i + 3);
+      const end = src.indexOf(q, i + 3);
+      const stop = end < 0 ? n : end + 3;
+      push("str", src.slice(i, stop));
+      i = stop;
+      continue;
+    }
     // strings: to the closing quote on the same line, else to the end of the line
     // (prose has apostrophes: markdown takes none, html only double quotes)
     const quoted = lang === "md" ? false : lang === "html" ? c === '"' : c === '"' || c === "'" || (c === "`" && (lang === "ts" || lang === "sh"));
@@ -99,14 +108,6 @@ export function tokens(src: string, lang: Lang): Token[] {
       }
       push("str", src.slice(i, j));
       i = j;
-      continue;
-    }
-    if (lang === "py" && (src.startsWith('"""', i) || src.startsWith("'''", i))) {
-      const q = src.slice(i, i + 3);
-      const end = src.indexOf(q, i + 3);
-      const stop = end < 0 ? n : end + 3;
-      push("str", src.slice(i, stop));
-      i = stop;
       continue;
     }
     const sp = at(SPACE, src, i);
