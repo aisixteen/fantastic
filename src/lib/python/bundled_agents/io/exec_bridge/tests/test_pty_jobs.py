@@ -179,8 +179,11 @@ async def test_flow_control_pauses_the_reader_until_acked(term, monkeypatch):
     # what the terminal said before the pause (the program's first line — or, on
     # Windows, the console's own opening sequences) is already the viewer's
     q = term.ctx.inboxes["viewer"]
-    while not q.empty():
-        q.get_nowait()
+    # drain until quiet: ConPTY's opening sequences can arrive after one drain
+    for _ in range(10):
+        await asyncio.sleep(0.05)
+        while not q.empty():
+            q.get_nowait()
     # typed while paused: the program answers, but nothing reaches the viewer
     await _call(term, {"type": "write", "job_id": jid, "data": "hello" + ENTER})
     await asyncio.sleep(0.4)
