@@ -43,6 +43,10 @@ from mocks import DONE  # noqa: E402
 from mocks.vllm import VllmMock  # noqa: E402
 
 CHATS = "[...document.querySelectorAll('.chat-view')].map(v=>v.closest('.agent-frame').dataset.id)"
+# a point on empty canvas (no cell, no floating UI under it), scanned on a grid
+EMPTY_POINT = ("(()=>{for (let y=120; y<innerHeight-40; y+=40) for (let x=60; x<innerWidth-60; x+=40) {"
+               "const e=document.elementFromPoint(x,y); if (e && !e.closest('.agent-frame, .action-popup, .side, button, input')) return [x,y];}"
+               " return [300,700];})()")
 
 
 def last_text(req: dict) -> str:
@@ -444,7 +448,10 @@ def main() -> bool:
                 small.responder = side_call
                 # an AI on the `small` set-up: the default's cell, then its ⚙ →
                 # `‹ other set-ups` → the saved `small` rebinds it (no menu tile)
-                await spot(pg, 300, 700, "AI agent")
+                # on EMPTY canvas: the reopened cell is the kept dialog's own, back at its
+                # old place (#133), which may cover a fixed point
+                ex, ey = await pg.js(EMPTY_POINT)
+                await spot(pg, ex, ey, "AI agent")
                 await pg.until(f"{CHATS}.length === 2", 15)
                 c = [x for x in await pg.js(CHATS) if x != b][0]
                 await ready(pg, c)
