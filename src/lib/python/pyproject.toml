@@ -10,6 +10,7 @@ license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
   "fantastic-cli",
+  "fantastic-cabinet",
   "fantastic-web",
   "fantastic-web-ws",
   "fantastic-web-rest",
@@ -70,6 +71,7 @@ testpaths = [
   "bundled_agents/loader/kernel_state/tests",
   "bundled_agents/loader/static_loader/tests",
   "bundled_agents/ai/ai_core/tests",
+  "bundled_agents/ai/cabinet/tests",
   "bundled_agents/ai/ollama/ollama_backend/tests",
   "bundled_agents/ai/responses/responses_backend/tests",
   "bundled_agents/ai/anthropic/anthropic_backend/tests",
@@ -98,6 +100,7 @@ members = [
   "bundled_agents/scheduler",
   "bundled_agents/io/file_bridge",
   "bundled_agents/ai/ai_core",
+  "bundled_agents/ai/cabinet",
   "bundled_agents/ai/ollama/ollama_backend",
   "bundled_agents/ai/responses/responses_backend",
   "bundled_agents/ai/anthropic/anthropic_backend",
@@ -134,6 +137,7 @@ fantastic-exec-bridge = { workspace = true }
 fantastic-py-agent = { workspace = true }
 fantastic-mcp-client = { workspace = true }
 fantastic-ai-core = { workspace = true }
+fantastic-cabinet = { workspace = true }
 fantastic-kernel-state = { workspace = true }
 fantastic-static-loader = { workspace = true }
 fantastic-ram-store = { workspace = true }

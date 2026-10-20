@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 members = [
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
+    "fantastic-cabinet",
     "fantastic-cli",
     "fantastic-credential-store",
     "fantastic-exec-bridge",
@@ -355,6 +356,11 @@ requires-dist = [
 ]
 
 [[package]]
+name = "fantastic-cabinet"
+version = "0.1.0"
+source = { editable = "bundled_agents/ai/cabinet" }
+
+[[package]]
 name = "fantastic-cli"
 version = "0.1.0"
 source = { editable = "bundled_agents/cli" }
@@ -418,6 +424,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
+    { name = "fantastic-cabinet" },
     { name = "fantastic-cli" },
     { name = "fantastic-credential-store" },
     { name = "fantastic-exec-bridge" },
@@ -454,6 +461,7 @@ dev = [
 requires-dist = [
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
+    { name = "fantastic-cabinet", editable = "bundled_agents/ai/cabinet" },
     { name = "fantastic-cli", editable = "bundled_agents/cli" },
     { name = "fantastic-credential-store", editable = "bundled_agents/security/credential_store" },
     { name = "fantastic-exec-bridge", editable = "bundled_agents/io/exec_bridge" },
