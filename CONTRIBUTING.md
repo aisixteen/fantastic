@@ -69,6 +69,28 @@ started by hand, never on a PR: a bug fix gets the units
 full run (`gh workflow run ci.yml --ref <branch> -f e2e=true`). Lint is not in CI: run the lint commands above for every runtime you touched,
 locally, before opening a PR.
 
+## How issues and PRs run
+
+- **Specs live in GitHub issues**, not in markdown files in the repo. The
+  roadmap is epic #57; the project board is
+  <https://github.com/orgs/aisixteen/projects/1>.
+- **The `aiagent` label** marks an issue an AI agent may implement. Only the
+  maintainer adds or removes it. An agent implements only `aiagent` issues and
+  never changes the label.
+- **Open the PR early and watch it.** Open it as soon as the first working
+  commit is pushed (a draft is fine). Read every comment on it and act on it:
+  review notes and CI results arrive there. Reply on the PR with what you
+  changed.
+- **CI is started by the maintainer** (see *Build, test, lint* above). A push to
+  a `fix/**` or `feat/**` branch runs the unit suites by itself. Don't start
+  workflows yourself.
+- **Signing is manual.** All release signing (macOS codesign and notarization,
+  Windows signing, Linux GPG) and crates.io publishing happen by hand on the
+  maintainer's machine; no signing secrets go into GitHub. `installers.yml`
+  builds and verifies unsigned installers only. Steps:
+  [`src/lib/rust/RELEASING.md`](src/lib/rust/RELEASING.md).
+- **No wider timeouts to hide a race, and no silent fallbacks.** Fix the cause.
+
 ## Commits & pushes
 
 **Commits and pushes to this repo require the maintainer's explicit consent**
