@@ -751,10 +751,13 @@ jobs:
         with:
           name: deb-${{ matrix.app }}
           path: dist/deb
+      # as root (os.sh says why), then the runner owns the output again
       - name: the image
         run: |
-          echo "FANTASTIC_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')" >> "$GITHUB_ENV"
-          sh scripts/build/os.sh --arch ${{ matrix.arch }} --profile ci
+          version=$(git describe --tags --abbrev=0 | sed 's/^v//')
+          echo "FANTASTIC_VERSION=$version" >> "$GITHUB_ENV"
+          sudo FANTASTIC_VERSION="$version" sh scripts/build/os.sh --arch ${{ matrix.arch }} --profile ci
+          sudo chown -R "$(id -u):$(id -g)" dist/os
           ls -l dist/os
       - name: qemu
         run: sudo apt-get update -q && sudo apt-get install -y -q ${{ matrix.qemu }}

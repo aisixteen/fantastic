@@ -52,6 +52,10 @@ for pkg in "fantastic-app-*.deb" "fantastic-session_${VERSION}_all.deb"; do
   set -- "$REPO"/dist/deb/$pkg
   [ -f "$1" ] || { echo "os.sh: no $REPO/dist/deb/$pkg: build the packages first: sh scripts/build/deb.sh --target <CLI triple>" >&2; exit 1; }
 done
+# As root. Unprivileged, mkosi v27.1 without systemd-nsresourced maps a single uid
+# (it writes /proc/self/uid_map itself), so every file not owned by root lands
+# owned by root: the kiosk's home among them, and the kiosk can't enter it.
+[ "$(id -u)" -eq 0 ] || { echo "os.sh: run as root (sudo FANTASTIC_VERSION=<version> sh scripts/build/os.sh ...): unprivileged, mkosi maps one uid and the image's files lose their owners" >&2; exit 1; }
 command -v mkosi >/dev/null || { echo "os.sh: mkosi is not installed (v27.1: https://github.com/systemd/mkosi/tree/v27.1)" >&2; exit 1; }
 
 # every path is absolute: -C changes directory

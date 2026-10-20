@@ -330,6 +330,32 @@ class Channels(unittest.TestCase):
         spawn = [m for m in guest.seen if m["execute"] == "guest-exec"][-1]
         self.assertEqual(spawn["arguments"]["capture-output"], False)
 
+    def test_guest_agent_after_a_slow_boot(self):
+        # qemu-ga starts late (arm64 on TCG): until then nothing reads the socket,
+        # and the syncs fill its buffer (on CI after about 150 s). A small send
+        # buffer fills it here within the 2 s; the wait must hold off rather than
+        # block on the full socket.
+        started = threading.Event()
+        real_socket = socket.socket
+
+        def small_socket(*args, **kwargs):
+            s = real_socket(*args, **kwargs)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            return s
+
+        def late_agent(conn, seen):
+            started.wait(10)
+            agent(conn, seen)
+
+        guest = FakeGuest(self.dir / "qga.sock", late_agent)
+        self.addCleanup(guest.close)
+        vm = self.vm()
+        threading.Timer(2.0, started.set).start()
+        with mock.patch.object(bc, "SYNC_EVERY", 0.005), mock.patch.object(bc.socket, "socket", small_socket):
+            vm.wait_agent(10)
+        self.assertTrue(started.is_set())
+        self.assertEqual(vm.ga_run(["/bin/true"])[0], 3)
+
     def test_sh_fails_with_the_output(self):
         guest = FakeGuest(self.dir / "qga.sock", agent)
         self.addCleanup(guest.close)

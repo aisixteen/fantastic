@@ -38,6 +38,7 @@ import itertools
 import json
 import re
 import secrets
+import select
 import shutil
 import socket
 import subprocess
@@ -54,6 +55,8 @@ RUN_FILE = f"{KIOSK_HOME}/.fantastic/app/home.yaml"
 CANVAS_DIR = f"{KIOSK_HOME}/boot-check"
 # the first screen of a canvas-less kiosk differs from a canvas page by at least this
 MIN_CHANGED = 0.01
+# how often wait_agent() offers the guest agent a new guest-sync, in s
+SYNC_EVERY = 2.0
 
 
 class Fail(Exception):
@@ -294,7 +297,15 @@ class Chan:
         self.sock = s
 
     def send(self, obj: dict) -> None:
+        # its own bound: recv() leaves the socket with whatever timeout it last set
+        self.sock.settimeout(30)
         self.sock.sendall(json.dumps(obj).encode() + b"\n")
+
+    def writable(self) -> bool:
+        """Whether the socket takes a short write now. QEMU reads the guest agent's
+        socket only while the guest has its port open, so before qemu-ga starts the
+        writes queue up until the socket's buffer is full."""
+        return bool(select.select([], [self.sock], [], 0)[1])
 
     def recv(self, timeout: float) -> dict | None:
         """The next JSON line, or None after `timeout` s."""
@@ -402,14 +413,19 @@ class Vm:
 
     # -- the guest agent --
     def wait_agent(self, timeout: float) -> None:
-        """`guest-sync` every 2 s until the reply carries our id."""
+        """`guest-sync` every SYNC_EVERY s until the reply carries our id. A sync is
+        sent only while the socket takes it: a slow boot (arm64 on TCG) would
+        otherwise fill the unread socket and block the send. The queued syncs reach
+        qemu-ga once it starts; it answers each, and only the newest id counts."""
         ch = Chan(self.out / "qga.sock", timeout, self.alive)
         end = time.monotonic() + timeout
+        n = None  # the newest sync's id
         while time.monotonic() < end:
             self.alive()
-            n = secrets.randbelow(2**31)
-            ch.send({"execute": "guest-sync", "arguments": {"id": n}})
-            end_try = time.monotonic() + 2
+            if ch.writable():
+                n = secrets.randbelow(2**31)
+                ch.send({"execute": "guest-sync", "arguments": {"id": n}})
+            end_try = time.monotonic() + SYNC_EVERY
             while time.monotonic() < end_try:
                 m = ch.recv(max(0.1, end_try - time.monotonic()))
                 if m is not None and m.get("return") == n:

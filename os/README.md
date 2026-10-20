@@ -58,12 +58,13 @@ hand (`src/lib/rust/RELEASING.md`). `fantastic-session` depends on
 
 Needs [mkosi](https://github.com/systemd/mkosi) **v27.1** (Ubuntu 24.04's own
 package is 20.2, too old; CI uses the `systemd/mkosi@v27.1` action) and the
-packages in `dist/deb/`:
+packages in `dist/deb/`. It runs as root: unprivileged, mkosi maps a single uid,
+so the image's files would all be owned by root (the kiosk's home too).
 
 ```sh
-sh scripts/build/os.sh --arch x86-64          # dist/os/fantastic-os_<version>.raw
-sh scripts/build/os.sh --arch arm64
-sh scripts/build/os.sh --arch x86-64 --profile ci   # + a serial console, socat, the guest agent
+sudo sh scripts/build/os.sh --arch x86-64          # dist/os/fantastic-os_<version>.raw
+sudo sh scripts/build/os.sh --arch arm64
+sudo sh scripts/build/os.sh --arch x86-64 --profile ci   # + a serial console, socat, the guest agent
 ```
 
 The image is a UEFI disk (systemd-boot), x86_64 first, then arm64 (UEFI arm64:
