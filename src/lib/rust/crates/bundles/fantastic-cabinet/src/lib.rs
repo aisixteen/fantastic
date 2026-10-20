@@ -1215,8 +1215,9 @@ pub struct CabinetBundle;
 
 #[async_trait]
 impl Bundle for CabinetBundle {
+    /// The kind, as the catalog lists it (`<kind>.tools` is its handler module).
     fn name(&self) -> &str {
-        HANDLER_MODULE
+        "cabinet"
     }
 
     async fn handle(

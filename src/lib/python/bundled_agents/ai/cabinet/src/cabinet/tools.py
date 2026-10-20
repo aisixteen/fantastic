@@ -809,6 +809,9 @@ CABINET_VERBS = {
     "status": _status,
     "view": _view,
 }
+# every verb of the kind, for `docs` (a manager answers MANAGER_VERBS, a cabinet
+# CABINET_VERBS; `reflect` is both's)
+VERBS = {**MANAGER_VERBS, **CABINET_VERBS}
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:
