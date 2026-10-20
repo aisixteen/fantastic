@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Canvas, CanvasRun, Registered};
 
 /// What is known of one fantastic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Probe {
     /// Its folder has a `.fantastic/` directory.
     pub is_fantastic: bool,

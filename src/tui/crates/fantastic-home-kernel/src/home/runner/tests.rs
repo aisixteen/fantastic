@@ -449,3 +449,63 @@ async fn pages_and_selection_are_kept_only_once_listed_and_on_change() {
         ]
     );
 }
+
+#[tokio::test]
+async fn a_demotion_is_emitted_as_diagnostics_with_the_probe_that_caused_it() {
+    let t = t();
+    let diagnostics = |t: &T| -> Vec<Value> {
+        t.emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == json!("diagnostics"))
+            .cloned()
+            .collect()
+    };
+    t.os.set_registry(vec![entry("g2", "/w/b", Some(7), Some(8100))]);
+    t.running("/w/b", 7, 8100, "g2");
+    let s = t.look().await;
+    assert_eq!(status(&s, "g2"), "running");
+    assert!(
+        diagnostics(&t).is_empty(),
+        "a row that starts demotes nothing"
+    );
+    // its canvas misses two answers: ridden out, nothing recorded
+    t.os.set_canvas_up(8100, false);
+    t.look().await;
+    let s = t.look().await;
+    assert_eq!(status(&s, "g2"), "running");
+    assert!(diagnostics(&t).is_empty());
+    // the 3rd miss demotes it: one event, after the state, with the probe
+    let s = t.look().await;
+    assert_eq!(status(&s, "g2"), "unverified");
+    let events = diagnostics(&t);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["seq"], s["seq"]);
+    assert_eq!(
+        events[0]["demotions"],
+        json!([{
+            "at_ms": 0,
+            "guid": "g2",
+            "path": "/w/b",
+            "probe": {
+                "is_fantastic": true,
+                "holder": 7,
+                "owns_entry": true,
+                "canvas": {"url": "http://127.0.0.1:8100/canvas_page/file/index.html", "port": 8100},
+                "canvas_up": false,
+                "guid_matches": false,
+            },
+        }])
+    );
+    let all = t.emitted.lock().unwrap().clone();
+    let at = all
+        .iter()
+        .rposition(|e| e["type"] == json!("diagnostics"))
+        .unwrap();
+    assert_eq!(all[at - 1]["type"], json!("state"), "the state it follows");
+    // a row that comes back demotes nothing more
+    t.os.set_canvas_up(8100, true);
+    t.look().await;
+    assert_eq!(diagnostics(&t).len(), 1);
+}

@@ -248,6 +248,27 @@ they survive a restart, and every client sees the same. A page reopens only
 while its registry entry still exists. The home's own folder, `<home>` itself,
 is never a row.
 
+**Diagnostics.** Not part of the state, and not in the v1 contract's event list
+(`contract/home/v1/cases.json`): a `diagnostics` payload on `home`, emitted
+right after the state of the same poll, only when a running row stops showing
+as running (a demotion). Its `demotions` are that poll's, one per row, each with the probe
+that demoted it, the raw answer and not the kept one (so a ridden-out miss
+shows nothing, and the 3rd miss shows what was found):
+
+```json
+{"type": "diagnostics", "seq": 13, "demotions": [
+  {"at_ms": 1760800012000, "guid": "g-1", "path": "/home/me/notes",
+   "probe": {"is_fantastic": true, "holder": 4242, "owns_entry": true,
+             "canvas": {"url": "http://127.0.0.1:8123/canvas_page/file/index.html", "port": 8123},
+             "canvas_up": false, "guid_matches": false}}]}
+```
+
+`probe` holds every field the probe asked: `is_fantastic`, `holder` (the pid,
+or null), `owns_entry`, `canvas` (or null), `canvas_up`, `guid_matches`. An
+unreadable run or lock file reads as the absent answer, so it shows here as
+null or false, with no error text. Watchers that want only the state ignore
+it, as they ignore `focus` and `menu_spec` payloads they do not show.
+
 ## 5. Versioning
 
 This is protocol v1. Every verb takes an optional `version`; absent means 1,

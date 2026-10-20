@@ -293,12 +293,14 @@ class HomeRig(Rig):
 class StateLog:
     """Every `state` the home emits, as a page sees it on `/home/ws`: per state
     its `seq`, `pages`, `selection`, and each row's `[status, canvas url]`.
+    Every `diagnostics` the home emits (a running row's demotion, with the
+    probe that caused it) lands in `log.demotions`.
 
         async with StateLog(rig.home_port) as log: …
-        log.states"""
+        log.states, log.demotions"""
 
     def __init__(self, port: int):
-        self.port, self.states, self.task, self.ws = port, [], None, None
+        self.port, self.states, self.demotions, self.task, self.ws = port, [], [], None, None
 
     async def __aenter__(self) -> StateLog:
         import websockets
@@ -313,6 +315,8 @@ class StateLog:
                     if frame.get("type") == "event" and p.get("type") == "state":
                         self.states.append({"seq": p.get("seq"), "pages": p.get("pages"), "selection": p.get("selection"),
                                             "rows": {r["id"]: [r["status"], (r.get("canvas") or {}).get("url")] for r in p.get("rows", [])}})
+                    elif frame.get("type") == "event" and p.get("type") == "diagnostics":
+                        self.demotions.append({"seq": p.get("seq"), "demotions": p.get("demotions")})
             except Exception:  # noqa: BLE001 — the socket closing ends the log
                 pass
 

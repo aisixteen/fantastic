@@ -28,7 +28,7 @@ pub mod viewmodel;
 pub use intent::Intent;
 pub use model::{registered, Canvas, CanvasRun, Registered, RUN_FILE};
 pub use probe::{is_active, Answer, Ask, Mode, Probe, Prober, Status, Target};
-pub use viewmodel::{Config, Effect, Event, Home, Job, Row};
+pub use viewmodel::{Config, Demotion, Effect, Event, Home, Job, Row};
 
 /// The README's example, compiled and run as a doctest.
 #[doc = include_str!("../README.md")]
