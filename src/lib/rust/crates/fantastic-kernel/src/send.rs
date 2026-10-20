@@ -1709,6 +1709,16 @@ impl Kernel {
         }
     }
 
+    /// Whether anything still mirrors `src_id`'s traffic: a watcher that has
+    /// registered and not yet detached. An agent that is gone has none.
+    pub async fn has_watchers(&self, src_id: &AgentId) -> bool {
+        let Some(src) = self.agents.get(src_id).map(|e| Arc::clone(&e)) else {
+            return false;
+        };
+        let watched = !src.watcher_ids.read().await.is_empty();
+        watched
+    }
+
     /// Python's `Agent._fanout` — the ONE place a payload reaches an inbox.
     ///
     /// The target's OWN inbox first (a reader that registered one sees what was

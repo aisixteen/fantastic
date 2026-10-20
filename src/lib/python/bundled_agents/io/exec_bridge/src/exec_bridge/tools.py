@@ -599,7 +599,12 @@ def _pty_output(owner: str, job_id: int, kernel, data: bytes) -> None:
         kernel.emit(owner, {"type": "output", "job_id": job_id, "data": text})
     )
     pt["unacked"] += len(text)
-    if pt["unacked"] > HIGH_WATERMARK:
+    if pt["unacked"] > HIGH_WATERMARK and pt["reattach"]:
+        # the grace belongs to the replaying viewer's stream: once nothing mirrors the
+        # job any more, that stream has ended and the backlog pauses as usual
+        if not kernel.has_watchers(owner):
+            pt["reattach"] = False
+    if pt["unacked"] > HIGH_WATERMARK and not pt["reattach"]:
         pt["term"].stop_reading()
         pt["paused"] = True
         pt["wake"].set()
@@ -1020,6 +1025,9 @@ async def _start(id, payload, kernel):
             "decoder": codecs.getincrementaldecoder("utf-8")(errors="replace"),
             "unacked": 0,
             "paused": False,
+            # a viewer's replay opened a re-attach grace: until its first ack or its
+            # stream's end, the backlog does not pause the reader
+            "reattach": False,
             "eof": False,
             "wake": asyncio.Event(),
             "write_lock": asyncio.Lock(),
@@ -1347,7 +1355,7 @@ async def _resize(id, payload, kernel):
 
 
 async def _ack(id, payload, kernel):
-    """args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."""
+    """args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. After an `output` replay the reader does not pause for the backlog until this viewer's first ack or its stream ends. Returns {unacked:int, paused:bool}."""
     job, err = _pty_job("ack", id, payload)
     if err:
         return err
@@ -1355,6 +1363,8 @@ async def _ack(id, payload, kernel):
     if isinstance(chars, bool) or not isinstance(chars, int) or chars < 0:
         return bad("ack", "chars", "a non-negative integer")
     pt = job["pty"]
+    # the re-attach grace ends at the viewer's first ack after its replay
+    pt["reattach"] = False
     pt["unacked"] = max(0, pt["unacked"] - chars)
     if pt["paused"] and pt["unacked"] < LOW_WATERMARK:
         pt["paused"] = False
@@ -1363,7 +1373,7 @@ async def _ack(id, payload, kernel):
 
 
 async def _output(id, payload, kernel):
-    """args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer). Returns {job_id, output:str}."""
+    """args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer) and opens a re-attach grace: the reader does not pause for the backlog until this viewer's first `ack` or its stream ends. Returns {job_id, output:str}."""
     jid, err = _job_arg("output", payload, required=True)
     if err:
         return err
@@ -1377,6 +1387,7 @@ async def _output(id, payload, kernel):
     # The replay hands this viewer everything so far: what a gone viewer streamed
     # but never acked is owed to no one, so the backlog clears and the reader resumes.
     pt["unacked"] = 0
+    pt["reattach"] = True
     if pt["paused"]:
         pt["paused"] = False
         pt["wake"].set()  # the pump re-attaches the reader in the job's own context

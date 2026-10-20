@@ -55,6 +55,10 @@ struct PtyInner {
     ring_bytes: usize,
     unacked: usize,
     paused: bool,
+    /// A viewer's replay opened a re-attach grace: until its first ack or its stream's
+    /// end, the backlog does not pause the reader (the replay's own counts are not its
+    /// to ack yet).
+    reattach: bool,
     eof: bool,
     decoder: encoding_rs::Decoder,
     paste_dir: Option<PathBuf>,
@@ -72,6 +76,7 @@ impl Pty {
                 ring_bytes: 0,
                 unacked: 0,
                 paused: false,
+                reattach: false,
                 eof: false,
                 decoder: encoding_rs::UTF_8.new_decoder_without_bom_handling(),
                 paste_dir: None,
@@ -141,7 +146,7 @@ pub async fn pump(
             }
             Ok(n) => n,
         };
-        let text = {
+        let (text, past_high) = {
             let mut g = pty.lock();
             let mut out =
                 String::with_capacity(g.decoder.max_utf8_buffer_length(n).unwrap_or(n * 3 + 4));
@@ -151,11 +156,19 @@ pub async fn pump(
             }
             ring_add(&mut g, &out);
             g.unacked += out.chars().count();
-            if g.unacked > HIGH_WATERMARK {
+            (out, g.unacked > HIGH_WATERMARK && g.reattach)
+        };
+        // The grace belongs to the replaying viewer's stream: once nothing mirrors
+        // the job any more, that stream has ended and the backlog pauses as usual.
+        if past_high && !kernel.has_watchers(&owner).await {
+            pty.lock().reattach = false;
+        }
+        {
+            let mut g = pty.lock();
+            if g.unacked > HIGH_WATERMARK && !g.reattach {
                 g.paused = true;
             }
-            out
-        };
+        }
         crate::monitor::feed_text(&owner, job_id, &text);
         kernel
             .emit(
@@ -324,6 +337,8 @@ pub fn ack_reply(owner: &AgentId, payload: &Value) -> Value {
     };
     let (unacked, paused) = {
         let mut g = pty.lock();
+        // the re-attach grace ends at the viewer's first ack after its replay
+        g.reattach = false;
         g.unacked = g
             .unacked
             .saturating_sub(usize::try_from(chars).unwrap_or(usize::MAX));
@@ -361,6 +376,7 @@ pub fn output_reply(owner: &AgentId, payload: &Value) -> Value {
         // streamed but never acked is owed to no one, so the backlog clears and
         // the reader resumes.
         g.unacked = 0;
+        g.reattach = true;
         if g.paused {
             g.paused = false;
             // the pump re-reads in the job's own context

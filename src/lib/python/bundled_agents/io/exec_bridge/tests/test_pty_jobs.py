@@ -372,3 +372,81 @@ async def test_a_replay_clears_the_backlog_a_gone_viewer_left(term):
     # the rest of the flood (under HIGH) arrives with no further ack
     await _until(term, lambda t: "DONE" in t)
     await _call(term, {"type": "write", "job_id": jid, "data": ENTER})
+
+
+# Waits for a typed line, floods past HIGH, waits for a line, floods again, then
+# waits — each flood is started by a line the test types, so the test decides when
+# it lands.
+_GATED_FLOOD = (
+    "import sys\n"
+    "sys.stdin.readline()\n"
+    "sys.stdout.write('x' * 150000 + '\\nDONE1\\n')\n"
+    "sys.stdout.flush()\n"
+    "sys.stdin.readline()\n"
+    "sys.stdout.write('x' * 150000 + '\\nDONE2\\n')\n"
+    "sys.stdout.flush()\n"
+    "sys.stdin.readline()\n"
+)
+
+
+async def test_a_flood_during_a_re_attach_grace_does_not_pause_the_reader(term):
+    """A re-attaching viewer's replay opens a grace: a flood past HIGH during it does
+    not pause the reader, and the first ack reports the backlog as it stands."""
+    jid = await _start(term, program=_GATED_FLOOD)
+    await _call(term, {"type": "output", "job_id": jid})
+    await _call(term, {"type": "write", "job_id": jid, "data": "go" + ENTER})
+    await _until(term, lambda t: "DONE1" in t)
+    r = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+    assert r["paused"] is False and r["unacked"] > ebt.HIGH_WATERMARK, r
+
+
+async def _printed(k, jid):
+    """The job's printed lines, joined: what `tail` reads from the ring, with no ack."""
+    r = await _call(k, {"type": "tail", "job_id": jid, "lines": 500})
+    return "\n".join(row["line"] for row in r["lines"])
+
+
+async def test_a_flood_after_the_viewer_stream_ends_pauses_the_reader(term):
+    """A replay opens a grace, then the viewer's stream ends before any ack: the grace
+    is over, so a flood past HIGH pauses the reader. The program prints DONE1 after its
+    flood, and a paused reader never reads that far."""
+    jid = await _start(term, program=_GATED_FLOOD)
+    await _call(term, {"type": "output", "job_id": jid})
+    term.unwatch("term", "viewer")
+    await _call(term, {"type": "write", "job_id": jid, "data": "go" + ENTER})
+    text = ""
+    end = asyncio.get_running_loop().time() + 2.0
+    while asyncio.get_running_loop().time() < end and "DONE1" not in text:
+        text = await _printed(term, jid)
+        await asyncio.sleep(0.02)
+    assert "DONE1" not in text, "the reader ran past the flood"
+    r = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+    assert r["paused"] and r["unacked"] > ebt.HIGH_WATERMARK, r
+
+
+async def test_a_flood_after_the_first_ack_pauses_the_reader(term):
+    """Once the re-attaching viewer has acked, the grace is over: a flood past HIGH
+    pauses the reader again."""
+    jid = await _start(term, program=_GATED_FLOOD)
+    await _call(term, {"type": "output", "job_id": jid})
+    r = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+    assert r == {"unacked": 0, "paused": False}, r
+    await _call(term, {"type": "write", "job_id": jid, "data": "go" + ENTER})
+    for _ in range(250):
+        r = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+        if r["paused"]:
+            break
+        await asyncio.sleep(0.02)
+    assert r["paused"] and r["unacked"] > ebt.HIGH_WATERMARK, r
+
+
+async def test_with_no_attach_a_flood_pauses_the_reader(term):
+    """With no attach there is no grace: a flood past HIGH pauses the reader as before."""
+    jid = await _start(term, program=_GATED_FLOOD)
+    await _call(term, {"type": "write", "job_id": jid, "data": "go" + ENTER})
+    for _ in range(250):
+        r = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+        if r["paused"]:
+            break
+        await asyncio.sleep(0.02)
+    assert r["paused"] and r["unacked"] > ebt.HIGH_WATERMARK, r

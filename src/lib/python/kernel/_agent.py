@@ -1798,6 +1798,12 @@ class Agent:
         if src is not None:
             src._watcher_ids.discard(tgt_id)
 
+    def has_watchers(self, src_id: str) -> bool:
+        """Whether anything still mirrors src_id's traffic: a watcher that has
+        registered and not yet detached. An agent that is gone has none."""
+        src = self.ctx.agents.get(src_id)
+        return src is not None and bool(src._watcher_ids)
+
     # ─── public API: record CRUD ───────────────────────────────
 
     def get(self, agent_id: str) -> dict | None:

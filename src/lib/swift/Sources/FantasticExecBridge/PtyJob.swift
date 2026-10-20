@@ -181,6 +181,12 @@
         private var ringBytes = 0
         private var unacked = 0
         private var paused = false
+        /// A viewer's replay opened a re-attach grace: until its first ack or its
+        /// stream's end, the backlog does not pause the reader.
+        private var reattach = false
+        /// Whether anything still mirrors the job's output; set by `run`, read by the
+        /// read loop, which has no kernel of its own.
+        private var streamLive: () -> Bool = { false }
         private var eof = false
         private var pendingBytes: [UInt8] = []
         private var pasteDir: String?
@@ -206,6 +212,7 @@
         /// return its exit code — the caller writes the row and emits `job_done`.
         /// `onText` sees each chunk first (the job's monitors).
         func run(kernel: Kernel, onText: (String) -> Void) async -> Int32 {
+            streamLive = { [weak kernel, owner] in kernel?.hasWatchers(src: owner) ?? false }
             readQueue.async { [weak self] in self?.readLoop() }
             for await event in stream {
                 if let text = event["data"].asString { onText(text) }
@@ -247,7 +254,18 @@
                     ringBytes -= ring.removeFirst().utf8.count
                 }
                 unacked += text.unicodeScalars.count
-                if unacked > PTY_HIGH_WATERMARK { paused = true }
+                let pastHigh = unacked > PTY_HIGH_WATERMARK && reattach
+                state.unlock()
+                // The grace belongs to the replaying viewer's stream: once nothing
+                // mirrors the job any more, that stream has ended and the backlog
+                // pauses as usual.
+                if pastHigh && !streamLive() {
+                    state.lock()
+                    reattach = false
+                    state.unlock()
+                }
+                state.lock()
+                if unacked > PTY_HIGH_WATERMARK && !reattach { paused = true }
                 state.unlock()
                 events.yield(
                     .object([
@@ -308,6 +326,8 @@
         /// `ack` — flow control.
         func ack(_ chars: Int) -> (Int, Bool) {
             state.lock()
+            // the re-attach grace ends at the viewer's first ack after its replay
+            reattach = false
             unacked = max(0, unacked - chars)
             if paused && unacked < PTY_LOW_WATERMARK {
                 paused = false
@@ -325,6 +345,7 @@
             state.lock()
             defer { state.unlock() }
             unacked = 0
+            reattach = true
             if paused {
                 paused = false
                 state.broadcast()

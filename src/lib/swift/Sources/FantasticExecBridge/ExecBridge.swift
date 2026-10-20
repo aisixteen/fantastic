@@ -266,8 +266,8 @@
             "clear": .string("args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM"),
             "write": .string("args: job_id:int (req), data:str or bytes:bytes (exactly one). Keystrokes/paste into a PTY job, written IN FULL and serialized per job (a bracketed paste is never truncated or interleaved). `bytes` is written VERBATIM — a trailing newline (Enter) survives; a `<call>` strips a scalar value like `data`, so send keys that end in Enter as `bytes`. Returns {written:int}."),
             "resize": .string("args: job_id:int (req), cols:int (req), rows:int (req). Sets a PTY job's window size (the tty sends SIGWINCH, so a TUI redraws). Returns {resized:true, cols, rows}."),
-            "ack": .string("args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."),
-            "output": .string("args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer). Returns {job_id, output:str}."),
+            "ack": .string("args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. After an `output` replay the reader does not pause for the backlog until this viewer's first ack or its stream ends. Returns {unacked:int, paused:bool}."),
+            "output": .string("args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer) and opens a re-attach grace: the reader does not pause for the backlog until this viewer's first `ack` or its stream ends. Returns {job_id, output:str}."),
             "tail": .string("args: job_id:int (req), lines:int? (default 20, max 500), stream:str? (stdout|stderr|both, default both — a PTY job has one). The last lines a job has printed SO FAR — running or ended, pipe or PTY. Returns {job_id, status, lines:[{n, stream, line}], printed, dropped}."),
             "grep": .string("args: job_id:int (req), match:str (req — a regex, searched in each line), lines:int? (most matches returned, default 50, max 500 — the LAST ones), stream:str? (stdout|stderr|both, default both). Searches what a job has printed SO FAR — running or ended, pipe or PTY; lines older than the 256 KiB ring are gone (`dropped` says how many). Returns {job_id, status, matches:[{n, stream, line}], total, scanned, dropped}."),
             "paste_image": .string("args: job_id:int (req), data:bytes (req), mime:str (req — image/png|jpeg|gif|webp). Saves a pasted image to a per-job scratch file and types its path into the PTY (a drag-drop — a program like claude in a browser xterm cannot reach the browser clipboard). Returns {path:str, bytes:int}."),
@@ -1584,11 +1584,13 @@
               `job_started` and `status` report the resolved `command`. It streams `output {job_id, data}`
               chunks and ends with `job_done {job_id, exit_code, ok}`. Drive it with
               `write(job_id, data)` (keystrokes, written in full, serialized), `resize(job_id, cols,
-              rows)`, `ack(job_id, chars)` (flow control — the reader pauses past 100K unacked chars,
-              resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
-              re-attach; the replay clears the unacked backlog, so flow control restarts at 0 for
-              the new viewer. A watcher also sees each `output` CALL as an event with no `data`:
-              draw only `output` events that carry `data`) and `paste_image(job_id, data, mime)` (saves the image, types its path).
+              rows)`, `ack(job_id, chars)` (flow control — the reader pauses past 100K unacked
+              chars, resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it
+              when you re-attach; the replay clears the unacked backlog, so flow control restarts at
+              0 for the new viewer, and the reader does not pause for the backlog until that
+              viewer's first `ack` or its stream ends. A watcher also sees each `output` CALL as an
+              event with no `data`: draw only `output` events that carry `data`) and
+              `paste_image(job_id, data, mime)` (saves the image, types its path).
               Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
               Any caller the gate admits drives any job of this agent. A running
               program's `on_message` never gets a drive verb whose `job_id` names another job —
