@@ -253,6 +253,25 @@ async fn forward_round_trips_skipping_other_frames() {
 }
 
 #[test]
+fn a_spawn_failure_is_appended_to_the_log_and_returned() {
+    let (_d, dir) = temp();
+    let log = dir.join("a.log");
+    assert_eq!(record_spawn_failure(&log, "first".into()), "first");
+    assert_eq!(record_spawn_failure(&log, "second".into()), "second");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "first\nsecond\n");
+    // a log that cannot be opened does not hide the error, and says so
+    let blocked = dir.join("missing-dir").join("a.log");
+    let said = record_spawn_failure(&blocked, "why".into());
+    assert!(said.starts_with("why (and its launch log "), "{said}");
+    assert!(said.contains("could not be written"), "{said}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&log).unwrap().mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
 fn log_file_name_is_folder_and_hash() {
     let hash = Sha256::digest(b"/home/a/notes");
     let want = format!(
@@ -385,6 +404,42 @@ mod unix_only {
         assert!(log.is_file(), "stderr goes to the log");
         use std::os::unix::fs::MetadataExt;
         assert_eq!(std::fs::metadata(&log).unwrap().mode() & 0o777, 0o600);
+    }
+
+    fn sys_os(dir: &Path, bin: &str) -> crate::home::os::SysOs {
+        let env = vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))];
+        crate::home::os::SysOs::with_env(dir.join("home"), dir.join(bin), env)
+    }
+
+    #[tokio::test]
+    async fn a_failed_spawn_is_in_the_error_and_the_launch_log() {
+        use crate::home::os::HomeOs;
+        let (_d, dir) = temp();
+        let folder = dir.join("alpha");
+        std::fs::create_dir(&folder).unwrap();
+        let os = sys_os(&dir, "no-such-binary");
+        let path = folder.to_str().unwrap();
+        let error = os.spawn(path).await.expect_err("the binary is missing");
+        assert!(error.contains("no-such-binary"), "{error}");
+        let log = log_path(&dir.join("home"), path).unwrap();
+        assert_eq!(std::fs::read_to_string(log).unwrap(), format!("{error}\n"));
+        assert_eq!(os.log_tail(path), Some(error));
+    }
+
+    #[tokio::test]
+    async fn a_spawn_that_starts_leaves_no_error_in_the_log() {
+        use crate::home::os::HomeOs;
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, dir) = temp();
+        let folder = dir.join("alpha");
+        std::fs::create_dir(&folder).unwrap();
+        let bin = dir.join("fantastic");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let os = sys_os(&dir, "fantastic");
+        let path = folder.to_str().unwrap();
+        os.spawn(path).await.expect("it starts");
+        assert_eq!(os.log_tail(path).as_deref(), Some(""));
     }
 
     #[test]

@@ -181,11 +181,13 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     eprintln!("fantastic-app: the backdrop: {}", shell.backdrop.name());
 }
 
-/// The events task: `menu_spec` (applied, outside the kiosk) and `focus`;
-/// every other payload is a state or a mirrored call, and is dropped.
+/// The events task: `menu_spec` (applied, outside the kiosk), `focus`, and the
+/// home's problems (to stderr in the kiosk); every other payload is dropped.
 async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     let shell = shell(&app);
+    let mut problem = None;
     while let Some(payload) = events.recv().await {
+        announce(shell.kiosk, &payload, &mut problem, &mut std::io::stderr());
         match payload.get("type").and_then(Value::as_str) {
             Some(fantastic_home::menu::MENU_SPEC) if !shell.kiosk => {
                 if let Err(e) = menu::apply(&app, payload).await {
@@ -199,6 +201,29 @@ async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     if !shell.quitting() {
         fatal(&app, "the home kernel stopped");
     }
+}
+
+/// In the kiosk, a `state` payload whose problem is new (not the one `last`
+/// holds) is written to `out` as `fantastic-app: <problem>`: nobody sees a toast
+/// there, so the session journal holds it. A cleared problem is forgotten, so
+/// the same failure after it is new again.
+fn announce(
+    kiosk: bool,
+    payload: &Value,
+    last: &mut Option<String>,
+    out: &mut impl std::io::Write,
+) {
+    if !kiosk || payload.get("type").and_then(Value::as_str) != Some("state") {
+        return;
+    }
+    let problem = payload
+        .get("problem")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(text) = problem.as_ref().filter(|p| Some(*p) != last.as_ref()) {
+        let _ = writeln!(out, "fantastic-app: {text}");
+    }
+    *last = problem;
 }
 
 /// Bring the window forward.
@@ -269,4 +294,54 @@ pub fn exit_requested(app: &AppHandle, event: &RunEvent) {
         };
         app.exit(code);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(problem: Value) -> Value {
+        json!({"type": "state", "problem": problem})
+    }
+
+    fn said(kiosk: bool, payloads: &[Value]) -> String {
+        let mut last = None;
+        let mut out = Vec::new();
+        for p in payloads {
+            announce(kiosk, p, &mut last, &mut out);
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_new_problem_is_one_stderr_line_in_the_kiosk() {
+        let why = "Could not add alpha: it did not start — no login environment: SHELL is not set";
+        assert_eq!(
+            said(
+                true,
+                &[state(Value::Null), state(json!(why)), state(json!(why))]
+            ),
+            format!("fantastic-app: {why}\n")
+        );
+    }
+
+    #[test]
+    fn outside_the_kiosk_stderr_stays_quiet() {
+        assert_eq!(said(false, &[state(json!("a"))]), "");
+    }
+
+    #[test]
+    fn a_problem_after_a_cleared_one_is_new_again() {
+        let out = said(
+            true,
+            &[state(json!("a")), state(Value::Null), state(json!("a"))],
+        );
+        assert_eq!(out, "fantastic-app: a\nfantastic-app: a\n");
+    }
+
+    #[test]
+    fn no_problem_and_other_payloads_say_nothing() {
+        assert_eq!(said(true, &[state(Value::Null)]), "");
+        assert_eq!(said(true, &[json!({"type": "focus", "problem": "x"})]), "");
+    }
 }
