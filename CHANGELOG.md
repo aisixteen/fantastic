@@ -7,6 +7,21 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- A live file tree, a previewer and an editor on the canvas, replacing the agent
+  tree. The `file tree` cell shows the project folder (`.fantastic` highlighted;
+  `.git`, `node_modules`, `target`, `dist`, `__pycache__` hidden), lists a folder
+  when it opens and watches it while open, so files made, changed or removed on
+  disk show without a reload; every agent is a folder in it, with its badge, status
+  and name, and everything the old agent tree did is still there. The `preview`
+  cell follows the tree's selection or is pinned to a path: highlighted text
+  (followed live), rendered Markdown, images, PDF, a size card for a binary file,
+  paged `read_stream` for a large one, and an agent's own live view. Text files up
+  to 1 MiB can be edited and saved with ⌘S / Ctrl-S against the version read; a
+  change on disk under unsaved edits is a loud conflict (reload, keep mine,
+  compare), never merged, never overwritten silently. Both are page agents with
+  verbs an AI drives them by (`select`, `expand`, `collapse`, `reveal`; `open`,
+  `pin`, `unpin`, `mode`, `edit`, `save`, `revert`). New skin tokens
+  `color.syntax.*` and `color.tree.fantastic`. (#106)
 - Installers for the desktop app, built and verified by CI (`installers.yml`,
   from the binaries a green CI run tested) and signed by hand by the
   maintainer: a notarized DMG (macOS, Apple silicon), a signed NSIS installer

@@ -49,9 +49,30 @@ now.
 A canvas shows only its own subtree and the agents under no canvas; another
 canvas's agents never appear on it. `canvases` (any canvas node) lists them.
 NOTHING FLOATS: a canvas opens as its background alone. Everything is a cell
-placed from the double-click — among them a `tree view` (the agent tree), as
-many as you like, moved, resized and closed like any cell. There is
-no main chat: a chat cell goes wherever you place one.
+placed from the double-click — among them a `file tree` (the project's files,
+live) and a `preview` (a file or the live agent, editable), as many as you like,
+moved, resized and closed like any cell. There is no main chat: a chat cell
+goes wherever you place one.
+
+THE FILE TREE AND THE PREVIEW (page agents `files_view.ts`, `preview_view.ts`;
+they call the project's `files` bridge). The tree is the project folder:
+`.fantastic` shows highlighted, `.git`, `node_modules`, `target`, `dist` and
+`__pycache__` are hidden, and every agent is a folder in it (a badge, its live
+status, its name). Folders list when opened and are watched while open, so a
+file made, changed or removed on disk shows without a reload. Click selects;
+double-click, ↗ or Shift+Enter opens an agent's cell; ⌘-click (Ctrl-click off
+macOS) focuses it; ⌫ deletes the agent. Arrows and Enter walk the tree; the
+field filters what is loaded. An AI drives the tree with `select`, `expand`,
+`collapse` and `reveal` (each takes `path` or `agent`), and a preview with
+`open {path}`, `pin`, `unpin`, `mode {file|agent}`, `edit`, `save` and `revert`
+(`<guid>|<cell id>`). A preview follows the tree's selection or is pinned to
+a path: text is highlighted and followed live, Markdown rendered, images and
+PDF drawn, a binary or large file shows its size (large ones page). An agent's
+folder shows its `agent.yaml`; agent mode shows the agent itself. Text up to
+1 MiB can be edited (⌘S / Ctrl-S saves, against the version read). If the file
+changes on disk under unsaved edits the preview says so — reload, keep mine or
+compare; edits are never merged and never overwritten silently. Their colours are
+the skin's `color.syntax.*` and `color.tree.fantastic` tokens.
 
 THE SYSTEM BLOCK: `.fantastic/prompt.md` is every AI's system block. It starts
 as the default (`{tree}`, `{self}`, `{howto}` — the agent tree, who the AI is,
@@ -201,7 +222,7 @@ view's `theme` verb.
 A cell is a VIEW of a host agent: the agent's record says how it is drawn
 (`view: {kind, bytes, calls}`, else terminal for an exec agent, chat for an AI,
 else its reflect card). `place {backend_id, x, y}` shows one; ✕ closes the view
-and the agent lives on (the tree view lists it; ⌫ there deletes it). A cell whose
+and the agent lives on (the file tree lists it; ⌫ there deletes it). A cell whose
 agent is gone disappears.
 
 ## The background
@@ -214,8 +235,8 @@ view, delete-locked): one GL source,
 ## The viewer
 
 The page views ONE page agent at a time: a view (its cells on its world) or
-any other agent full-page. A click in the tree view views an agent;
-⌘-click (Ctrl-click off macOS) focuses it on its view. `#view=<id>` in the
+any other agent full-page. A double-click on an agent in the file tree views
+it; ⌘-click (Ctrl-click off macOS) focuses it on its view. `#view=<id>` in the
 URL is the viewed agent.
 
 ## Cells
