@@ -39,8 +39,9 @@ bundles, seeds an empty tree with the canvas root, and mounts.
   answer (the stream reads, undo, the tree's own file operations) stays with the
   bridge. A cell saved before this is bound to the view of its path when it mounts
   (`bindCellToView`): its view is named on the cell, and the page waits for its grant
-  on the view before the first read (`awaitGrant`, the host grants it after `open_view`
-  answers). A refusal is said in the cell, which stays open. A cell holds the path it
+  on the view before the first read (`awaitGrant`: the host grants it after `open_view`
+  answers, and says so on the state stream as `granted`, or `grant_refused` with why; no
+  timeout and no probe loop). A refusal is said in the cell, which stays open. A cell holds the path it
   serves: when it unmounts the path is released, and a view the state stream reports
   removed releases every path it serves (`release`, `onStateFrame`).
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is

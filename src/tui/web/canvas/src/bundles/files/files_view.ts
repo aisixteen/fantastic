@@ -399,7 +399,7 @@ export const filesView: ViewBundle = {
     // refusal is said on the tree, which stays open.
     const bound = bindCellToView(ctx.kernel, "folder", root, folderAgent, (view) => {
       ctx.kernel.updateMeta(ctx.selfId, { view_agent: view } as unknown as Payload);
-    }, undefined, ctx.selfId).then((b) => {
+    }, ctx.selfId).then((b) => {
       if (!b.ok) {
         note.hidden = false;
         note.textContent = `${said(b.refusal)} — this tree is not its folder's view`;

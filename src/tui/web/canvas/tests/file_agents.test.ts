@@ -27,6 +27,7 @@ function bridgeKernel(b: FakeBridge): Kernel {
   const k = new Kernel();
   k.bridge = {
     forward: async (t: string, p: Payload) => (await (t.startsWith("view:") ? b.viewCall(t, p as Dict) : b.call(p as Dict))) as never,
+    subscribeState: b.subscribeState,
   } as unknown as Kernel["bridge"];
   return k;
 }
@@ -264,42 +265,25 @@ test("a view the host has not granted the page yet is waited for, then reached",
   const k = bridgeKernel(b);
   const first = await openViewAgent(k, "file", "docs/a.md");
   assert.ok(!isRefusal(first));
-  b.pendingGrants = 2; // the grant lands after two of the page's calls
-  const bound = await bindCellToView(bridgeKernel(b), "file", "docs/a.md", first.view, () => {}, 5_000);
+  b.pendingGrants = 1; // the page's probe is refused; the host's grant lands after it, on the state stream
+  const bound = await bindCellToView(k, "file", "docs/a.md", first.view, () => {});
   assert.deepEqual(bound, { ok: true, view: first.view });
-  assert.equal(b.pendingGrants, 0, "both refusals were waited out, not skipped");
+  assert.equal(b.pendingGrants, 0, "the refusal was waited out, not skipped");
+  assert.equal(b.calls.filter((c) => c["type"] === "open_view").length, 1, "the view is opened once");
 });
 
-test("a grant that never lands is refused as it is, once the wait is over", async () => {
-  const b = new FakeBridge();
-  project(b);
-  const first = await openViewAgent(bridgeKernel(b), "file", "docs/a.md");
-  assert.ok(!isRefusal(first));
-  b.pendingGrants = 1_000_000;
-  const bound = await bindCellToView(bridgeKernel(b), "file", "docs/a.md", first.view, () => {}, 40);
-  assert.equal(bound.ok, false);
-  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unauthorized");
-  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["side"], "egress");
-});
-
-test("a refusal that is not a missing grant is returned at once, not waited for", async () => {
-  const b = new FakeBridge();
-  project(b);
-  const k = bridgeKernel(b);
-  const started = Date.now();
-  const bound = await bindCellToView(k, "file", "docs/a.md", "view:file:gone", () => {}, 5_000);
-  assert.equal(bound.ok, false);
-  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unknown_agent");
-  assert.ok(Date.now() - started < 1_000, "no wait for a refusal that will not change");
-});
-
-test("awaitGrant says nothing once the view answers, and returns null straight away", async () => {
+test("a grant the host refuses is the page's refusal, and says why", async () => {
   const b = new FakeBridge();
   project(b);
   const k = bridgeKernel(b);
   const first = await openViewAgent(k, "file", "docs/a.md");
   assert.ok(!isRefusal(first));
-  assert.equal(await awaitGrant(k, first.view, 40), null);
+  b.pendingGrants = 1;
+  b.grantRefusal = "reach: `user`.can_call: refused";
+  const bound = await bindCellToView(k, "file", "docs/a.md", first.view, () => {});
+  assert.equal(bound.ok, false);
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "grant_refused");
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["error"], "reach: `user`.can_call: refused");
 });
 
 test("a file dropped while its view is refused makes no cell, and the refusal is the answer", async () => {
@@ -321,8 +305,8 @@ test("a served path is released when its last cell lets go, and not before", asy
   assert.ok(!isRefusal(first));
   const cellA = "cell-a";
   const cellB = "cell-b";
-  const bindA = await bindCellToView(k, "file", "docs/a.md", first.view, () => {}, 5_000, cellA);
-  const bindB = await bindCellToView(k, "file", "docs/a.md", first.view, () => {}, 5_000, cellB);
+  const bindA = await bindCellToView(k, "file", "docs/a.md", first.view, () => {}, cellA);
+  const bindB = await bindCellToView(k, "file", "docs/a.md", first.view, () => {}, cellB);
   assert.ok(bindA.ok && bindB.ok);
   assert.ok(payloadOf(routeOf(servedOf(k), { type: "read", path: "docs/a.md" })) !== undefined);
   release(k, "docs/a.md", cellA);
@@ -340,8 +324,8 @@ test("a view the state stream reports removed releases every path it serves", as
   const file = await openViewAgent(k, "file", "docs/a.md");
   const folder = await openViewAgent(k, "folder", "docs");
   assert.ok(!isRefusal(file) && !isRefusal(folder));
-  assert.ok((await bindCellToView(k, "file", "docs/a.md", file.view, () => {}, 5_000, "c1")).ok);
-  assert.ok((await bindCellToView(k, "folder", "docs", folder.view, () => {}, 5_000, "c2")).ok);
+  assert.ok((await bindCellToView(k, "file", "docs/a.md", file.view, () => {}, "c1")).ok);
+  assert.ok((await bindCellToView(k, "folder", "docs", folder.view, () => {}, "c2")).ok);
   onStateFrame(k, { kind: "removed", agent_id: file.view });
   assert.equal(routeOf(servedOf(k), { type: "read", path: "docs/a.md" }), null, "the removed view's path is released");
   assert.ok(routeOf(servedOf(k), { type: "list", path: "docs" }) !== null, "another view's path is still served");

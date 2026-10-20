@@ -22,7 +22,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   reads, saves and live changes go through the agent); the file tree rooted at a
   folder is the folder agent's view. Two views of one file share one agent and one
   watch. A cell saved before this is bound to its view when it mounts, and waits for
-  the page's grant on that view first; a refusal is shown in the cell, which stays open.
+  the page's grant on that view first, which the host announces on the state stream
+  (`granted`, or `grant_refused` with why) once it writes the grant; a refusal is shown
+  in the cell, which stays open.
 - CLI (TUI): the file panel shows the agent it selects by what the agent is. A file
   agent is a viewer and editor (`e` edits, Ctrl-S saves against the version read, Esc
   leaves and discards unsaved edits); a folder agent is a live tree (it re-lists when

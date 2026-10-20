@@ -482,7 +482,7 @@ export const previewView: ViewBundle = {
       typeof pinnedPath === "string"
         ? bindCellToView(ctx.kernel, "file", pinnedPath, typeof fileAgent === "string" ? fileAgent : undefined, (view) => {
             ctx.kernel.updateMeta(ctx.selfId, { view_agent: view } as unknown as Payload);
-          }, undefined, ctx.selfId).then((b) => {
+          }, ctx.selfId).then((b) => {
             if (!b.ok) say(`${said(b.refusal)} — this preview is not its file's view`);
           })
         : Promise.resolve();

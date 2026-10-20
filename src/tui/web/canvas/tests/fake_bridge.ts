@@ -25,8 +25,12 @@ export class FakeBridge implements FileBridge {
   readonly views = new Map<string, { kind: "file" | "folder"; path: string }>();
   private listener: ((ev: Dict) => void) | null = null;
   /** how many of the page's calls to a new view the host still refuses, as an egress
-   *  `unauthorized`, before its grant lands (the race `awaitGrant` waits out) */
+   *  `unauthorized`, before its grant lands: the host announces the grant on the state
+   *  stream just after the first such refusal (the race `awaitGrant` waits out) */
   pendingGrants = 0;
+  /** when set, the host refuses the grant and announces that, rather than granting */
+  grantRefusal: string | null = null;
+  private stateListener: ((frame: Dict) => void) | null = null;
   /** what `open_view` refuses with, when set (a path the bridge does not expose, say) */
   openViewRefusal: Dict | null = null;
 
@@ -36,6 +40,19 @@ export class FakeBridge implements FileBridge {
       this.listener = null;
     };
   };
+
+  /** The host's state stream, as the page taps it (`subscribeState`). */
+  readonly subscribeState = (fn: (frame: Dict) => void): (() => void) => {
+    this.stateListener = fn;
+    return () => {
+      this.stateListener = null;
+    };
+  };
+
+  /** One state-stream frame, as the host sends it. */
+  emitState(frame: Dict): void {
+    this.stateListener?.(frame);
+  }
 
   get subscribed(): boolean {
     return this.listener !== null;
@@ -170,6 +187,8 @@ export class FakeBridge implements FileBridge {
     if (v === undefined) return { error: `no agent ${view}`, reason: "unknown_agent" };
     if (this.pendingGrants > 0) {
       this.pendingGrants -= 1;
+      // the host answers after its reply, as it does: a macrotask later
+      setTimeout(() => this.emitState(this.grantRefusal === null ? { kind: "granted", agent_id: view } : { kind: "grant_refused", agent_id: view, error: this.grantRefusal }), 0);
       return { error: `page may not call ${String(p["type"])} on ${view}`, reason: "unauthorized", side: "egress" };
     }
     const own = v.path;

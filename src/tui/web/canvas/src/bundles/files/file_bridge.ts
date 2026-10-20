@@ -436,28 +436,52 @@ function unlisten(s: ViewSet, src: string): void {
   s.host.unwatch(src);
 }
 
-/** How long the page waits for the host to grant it a view it has just been given: the
- *  host's own grant wait (`reach.rs` GRANT_WAIT). */
-export const GRANT_WAIT_MS = 10_000;
-/** The pause between the page's probes of a view it is still refused. */
-const GRANT_STEP_MS = 25;
+/** What the host's grant watch has said about each agent, on the state stream
+ *  (`reach.rs` `announce`): `granted` once the page's grant is written, `grant_refused`
+ *  with why it was not. The waiters are the page's calls still held for one. */
+interface GrantBoard {
+  readonly waiting: Map<string, Array<(r: Refusal | null) => void>>;
+}
 
-/** The page's grant on a view is written by the host when it hears the view `added`
- *  (`reach.rs` `start`), after `open_view` has already answered. A call from the page in
- *  that gap is refused as an egress `unauthorized`. So the page waits for the grant: a
- *  `reflect` of the view is re-sent while it is refused so, for at most `waitMs`. Any
- *  other refusal, and the refusal that is still there at the end, are returned as they
- *  are. Null once the page may reach the view. (A handler's own call is judged by its
- *  own grant instead, so this is the page's wait, not a handler's.) */
-export async function awaitGrant(kernel: Kernel, view: string, waitMs = GRANT_WAIT_MS): Promise<Refusal | null> {
-  const end = Date.now() + waitMs;
-  for (;;) {
-    const r = (await kernel.callHost(view, { type: "reflect" } as Payload)) as Record<string, unknown>;
-    if (!isRefusal(r)) return null;
-    const granting = r["reason"] === "unauthorized" && r["side"] === "egress";
-    if (!granting || Date.now() >= end) return r;
-    await new Promise<void>((done) => setTimeout(done, GRANT_STEP_MS));
-  }
+const boards = new WeakMap<Kernel, GrantBoard>();
+
+/** The page's grant board, listening on the state stream from its first use. A refusal
+ *  is only ever seen before its grant is written, so the event that settles a waiter is
+ *  always one that arrives after the refused reply. */
+function grantBoard(kernel: Kernel): GrantBoard {
+  const had = boards.get(kernel);
+  if (had !== undefined) return had;
+  const board: GrantBoard = { waiting: new Map() };
+  boards.set(kernel, board);
+  kernel.subscribeState((frame) => {
+    const id = frame["agent_id"];
+    if (typeof id !== "string") return;
+    const kind = frame["kind"];
+    if (kind !== "granted" && kind !== "grant_refused") return;
+    const why = frame["error"];
+    const verdict: Refusal | null =
+      kind === "granted" ? null : { error: typeof why === "string" ? why : `the host refused the grant on ${id}`, reason: "grant_refused" };
+    const waiters = board.waiting.get(id) ?? [];
+    board.waiting.delete(id);
+    for (const w of waiters) w(verdict);
+  });
+  return board;
+}
+
+/** The page waits for its grant on a view it has just been given: `reflect` once, and
+ *  when the host refuses it as a missing egress grant, the host's `granted` or
+ *  `grant_refused` for that view, whichever comes. Any other refusal is returned at once.
+ *  Null once the page may reach the view. The host grants on the view's `added`
+ *  (`reach.rs` `start`), so the event arrives after `open_view` has answered; there is
+ *  no timeout, because the host always answers for a view it made. */
+export async function awaitGrant(kernel: Kernel, view: string): Promise<Refusal | null> {
+  const board = grantBoard(kernel);
+  const r = (await kernel.callHost(view, { type: "reflect" } as Payload)) as Record<string, unknown>;
+  if (!isRefusal(r)) return null;
+  if (!(r["reason"] === "unauthorized" && r["side"] === "egress")) return r;
+  return new Promise<Refusal | null>((done) => {
+    board.waiting.set(view, [...(board.waiting.get(view) ?? []), done]);
+  });
 }
 
 /** `open_view` on the bridge: the view agent of `path` — reused when one exists, made
@@ -489,7 +513,6 @@ export async function bindCellToView(
   path: string,
   saved: string | undefined,
   record: (view: string) => void,
-  waitMs = GRANT_WAIT_MS,
   holder = "",
 ): Promise<{ ok: true; view: string } | { ok: false; refusal: Refusal }> {
   let view: string;
@@ -503,7 +526,7 @@ export async function bindCellToView(
     serve(kernel, kind, path, r.view, holder);
     view = r.view;
   }
-  const ungranted = await awaitGrant(kernel, view, waitMs);
+  const ungranted = await awaitGrant(kernel, view);
   return ungranted === null ? { ok: true, view } : { ok: false, refusal: ungranted };
 }
 
