@@ -399,6 +399,8 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
         log = logdir / log_name(name)
         # The knobs a test owns, rendered into the env its runner already reads.
         env = {**os.environ, **limit_env(t)}
+        # THE RUN'S DIR: a runner that writes evidence (a browser's own output) keeps it here.
+        env["E2E_RUN_DIR"] = str(logdir)
         # THE METER (E2E_METER=1): this test's model traffic goes through the
         # run's forwarder under the test's own name — see helpers/meter.py.
         if meter := os.environ.get("E2E_METER_URL"):
