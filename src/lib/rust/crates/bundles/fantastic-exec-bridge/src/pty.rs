@@ -55,8 +55,9 @@ struct PtyInner {
     ring_bytes: usize,
     unacked: usize,
     paused: bool,
-    /// A viewer's replay opened a re-attach grace: until its first ack, the backlog
-    /// does not pause the reader (the replay's own counts are not its to ack yet).
+    /// A viewer's replay opened a re-attach grace: until its first ack or its stream's
+    /// end, the backlog does not pause the reader (the replay's own counts are not its
+    /// to ack yet).
     reattach: bool,
     eof: bool,
     decoder: encoding_rs::Decoder,
@@ -145,7 +146,7 @@ pub async fn pump(
             }
             Ok(n) => n,
         };
-        let text = {
+        let (text, past_high) = {
             let mut g = pty.lock();
             let mut out =
                 String::with_capacity(g.decoder.max_utf8_buffer_length(n).unwrap_or(n * 3 + 4));
@@ -155,11 +156,19 @@ pub async fn pump(
             }
             ring_add(&mut g, &out);
             g.unacked += out.chars().count();
+            (out, g.unacked > HIGH_WATERMARK && g.reattach)
+        };
+        // The grace belongs to the replaying viewer's stream: once nothing mirrors
+        // the job any more, that stream has ended and the backlog pauses as usual.
+        if past_high && !kernel.has_watchers(&owner).await {
+            pty.lock().reattach = false;
+        }
+        {
+            let mut g = pty.lock();
             if g.unacked > HIGH_WATERMARK && !g.reattach {
                 g.paused = true;
             }
-            out
-        };
+        }
         crate::monitor::feed_text(&owner, job_id, &text);
         kernel
             .emit(

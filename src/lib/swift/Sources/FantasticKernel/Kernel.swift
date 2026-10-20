@@ -508,6 +508,13 @@ public final class Kernel: @unchecked Sendable {
         }
     }
 
+    /// Whether anything still mirrors `src`'s traffic: a watcher that has registered
+    /// and not yet detached. An agent that is gone has none.
+    public func hasWatchers(src: AgentId) -> Bool {
+        guard let src = agent(src) else { return false }
+        return !src.watcherIds().isEmpty
+    }
+
     /// THE ONE FANOUT — python's `Agent._fanout`, run BEFORE the handler and
     /// once per attempt.
     ///

@@ -400,6 +400,30 @@ async def test_a_flood_during_a_re_attach_grace_does_not_pause_the_reader(term):
     assert r["paused"] is False and r["unacked"] > ebt.HIGH_WATERMARK, r
 
 
+async def _printed(k, jid):
+    """The job's printed lines, joined: what `tail` reads from the ring, with no ack."""
+    r = await _call(k, {"type": "tail", "job_id": jid, "lines": 500})
+    return "\n".join(row["line"] for row in r["lines"])
+
+
+async def test_a_flood_after_the_viewer_stream_ends_pauses_the_reader(term):
+    """A replay opens a grace, then the viewer's stream ends before any ack: the grace
+    is over, so a flood past HIGH pauses the reader. The program prints DONE1 after its
+    flood, and a paused reader never reads that far."""
+    jid = await _start(term, program=_GATED_FLOOD)
+    await _call(term, {"type": "output", "job_id": jid})
+    term.unwatch("term", "viewer")
+    await _call(term, {"type": "write", "job_id": jid, "data": "go" + ENTER})
+    text = ""
+    end = asyncio.get_running_loop().time() + 2.0
+    while asyncio.get_running_loop().time() < end and "DONE1" not in text:
+        text = await _printed(term, jid)
+        await asyncio.sleep(0.02)
+    assert "DONE1" not in text, "the reader ran past the flood"
+    r = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
+    assert r["paused"] and r["unacked"] > ebt.HIGH_WATERMARK, r
+
+
 async def test_a_flood_after_the_first_ack_pauses_the_reader(term):
     """Once the re-attaching viewer has acked, the grace is over: a flood past HIGH
     pauses the reader again."""
