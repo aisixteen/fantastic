@@ -193,7 +193,7 @@ runs:
     dblclick: {x: 500, y: 350, kind: file tree}
     pick: hidden
     type: {posix: "echo shown-$((5*5))", nt: "set /a z=5*5>nul & call echo shown-%z%"}
-    # the pick VIEWS the cell (a double-click on a row views its cell), so the terminal
+    # the pick VIEWS the cell (a row's ↗ views its cell), so the terminal
     # is the one frame on the page; the typed output is the live stream
     expect:
       canvas_members: 2

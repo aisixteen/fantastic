@@ -482,7 +482,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     await page.open(url)
 
 
-async def click(page: Page, sel: str, bad: list[str], shift: bool = False, double: bool = False) -> None:
+async def click(page: Page, sel: str, bad: list[str], shift: bool = False) -> None:
     # a target SHOWN a moment after the page: a stopped terminal's ▶ is in the
     # DOM from the start, hidden (0×0 at the corner) until its attach finds the
     # program stopped — a click at that rect lands on nothing
@@ -493,9 +493,8 @@ async def click(page: Page, sel: str, bad: list[str], shift: bool = False, doubl
         bad.append(f"nothing shown to click at {sel}")
         return
     mods = 8 if shift else 0  # CDP modifier bit 8: Shift
-    for c in (1, 2) if double else (1,):
-        await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, c, modifiers=mods)
-        await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, c, modifiers=mods)
+    await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
+    await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
 
 
 async def head_menu(page: Page, intent: str, bad: list[str]) -> None:
@@ -576,7 +575,14 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         # the tree shows the agent's folder through its own verb (`<guid>|<tree>`);
         # the agent folders are read from disk after the tree mounts, so a first
         # `not_found` is asked again for at most 10 s
-        tree = next((m.get("id") or m["_dir"] for m in members(cwd) if m.get("handler_module") == "files_view.ts"), None)
+        # the placed tree's record lands on disk a moment after its frame shows
+        def tree_cell() -> str | None:
+            return next((m.get("id") or m["_dir"] for m in members(cwd) if m.get("handler_module") == "files_view.ts"), None)
+
+        wait_disk(lambda: tree_cell() is not None)
+        tree = tree_cell()
+        if tree is None:
+            bad.append(f"no file tree cell on disk among the members: {[m.get('handler_module') for m in members(cwd)]}")
         guid = yaml_of(cwd / ".fantastic/web/agents/canvas/agent.yaml").get("guid")
         port = urllib.parse.urlsplit(url).port
         answer: dict = {}
@@ -590,8 +596,12 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             bad.append(f"the file tree ({tree}) did not reveal {bid}: {answer}")
         elif not await page.until(f"!!document.querySelector({json.dumps(row + '.hidden')})", 5):
             bad.append(f"the file tree's row for {bid} is not marked hidden")
-        # a click selects a row; a double-click views its cell, showing a hidden one
-        await click(page, row, bad, double=True)
+        # the row's ↗ views its cell, showing a hidden one (a click only selects a
+        # row, and a double-click inside a cell also reaches the canvas's spot popup);
+        # the ↗ shows on hover only, so it is clicked in the page
+        go = row + " .go"
+        if not await page.js(f"(()=>{{const g=document.querySelector({json.dumps(go)}); g?.click(); return !!g;}})()"):
+            bad.append(f"no ↗ on the file tree's row for {bid}")
         # the shown terminal takes the keys (the row's click moved the focus off it)
         await click(page, ".agent-frame .xterm-screen", bad)
     if "type" in run:
