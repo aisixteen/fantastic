@@ -6,7 +6,7 @@ import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
 import {
-  COLUMN, GAP, MOBILE_MAX_WIDTH, assign, columnSpot, stack, freeSpot, layoutId, pinnedOf, placeMissing, prune, rectsOf, registerLayout, resolveTheme, setPinned, setRect,
+  COLUMN, GAP, MOBILE_MAX_WIDTH, assign, framesToRemove, columnSpot, stack, freeSpot, layoutId, pinnedOf, placeMissing, prune, rectsOf, registerLayout, resolveTheme, setPinned, setRect,
 } from "../src/bundles/canvas/layout.ts";
 import type { Rect } from "../src/bundles/canvas/layout.ts";
 
@@ -173,4 +173,17 @@ test("themes are data: stock canvas (free) + mobile (column, under 768px); the u
   assert.equal(resolveTheme("gone", 1400, defs), "canvas", "an unknown name falls to auto");
   assert.equal(themeDefOf({ name: "bad name", layout: "free" }), null);
   assert.equal(themeDefOf({ name: "x", layout: "grid" }), null);
+});
+
+// A DROP OF TWO CELLS (#134): the first cell's mount is still awaiting when the second is shown,
+// so the first refresh ends after the second mounted its frame. Its member list (A alone) is
+// older: it must not take the second cell's frame down.
+test("a refresh a newer one overtook takes no frame down", () => {
+  const exists = (): boolean => true;
+  // the newest refresh drew A and B: nothing to remove
+  assert.deepEqual(framesToRemove(["a", "b"], new Set(["a", "b"]), exists, true), []);
+  // the newest refresh sweeps what it did not draw, and what is gone
+  assert.deepEqual(framesToRemove(["a", "b", "c"], new Set(["a"]), (id) => id !== "a", true), ["a", "b", "c"]);
+  // the stale one drew A alone; B's frame (mounted by the newer) stays
+  assert.deepEqual(framesToRemove(["a", "b"], new Set(["a"]), exists, false), []);
 });

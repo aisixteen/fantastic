@@ -14,7 +14,7 @@ import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
 import { CODING_AGENTS, exactLine, openActionPopup, tiles } from "./action_popup.ts";
 import { SELECTOR, SELECTOR_PREFIX, setSelectorHost } from "./selector_agent.ts";
-import { ROOT_VIEW, VIEW, VIEW_VERBS, hostViewCell } from "./canvas_agent.ts";
+import { ROOT_VIEW, VIEW, VIEW_VERBS, grantViewLists, hostViewCell } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
 import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_agent.ts";
@@ -32,6 +32,7 @@ import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
 import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
+import { DRAG_MIME, decodeDrag, layoutAround } from "../files/drag.ts";
 import { fileGrant } from "../files/file_bridge.ts";
 import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
 import { previewView } from "../preview/preview_view.ts";
@@ -40,7 +41,7 @@ import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
 import { headTitle, hostRecordFresh, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
-import { COLUMN, LAYOUT, hiddenCellFor, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
+import { COLUMN, LAYOUT, framesToRemove, hiddenCellFor, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
 import { CELL_MENU, closeIntent } from "./cell_menu.ts";
 import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
@@ -69,6 +70,10 @@ function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined
 // view's own declaration (`fronts`), looked up by that exact name in the host
 // catalog — never matched, never guessed.
 const DEFAULT_VIEW = terminalView;
+
+// THE SLOT a dropped item takes around the drop point (#134): the largest cell the
+// tree opens (a preview, a folder), so no two dropped cells overlap.
+const DROP_SLOT = { width: 520, height: 560 };
 
 
 export interface MountOptions {
@@ -118,6 +123,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   if (kernel.get(ROOT_VIEW) === undefined && kernel.rootId !== null) {
     kernel.register(new Agent({ id: ROOT_VIEW, parentId: kernel.rootId, handlerModule: VIEW, sentence: "The root view: the canvas's first view." }));
   }
+  // the views may list the project to `open` what a drop names (#134, #135): granted from above, here —
+  // every view, the root and each nested one, and each one placed later (an added agent)
+  grantViewLists(kernel);
+  kernel.addStateSubscriber((e) => {
+    if (e.kind === "added") grantViewLists(kernel);
+  });
 
   // THE PAIR: a cell the canvas spawned a backend for, and that backend. The
   // backend is a direct child of `canvas_root` on the host, carrying the
@@ -1315,7 +1326,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         seenGl.add(mid);
       }
     }
-    for (const aid of [...frames.keys()]) if (!seenDom.has(aid) || kernel.get(aid) === undefined) removeFrame(aid);
+    // only the NEWEST refresh sweeps: this one's members are a snapshot, and a frame a newer
+    // refresh mounted meanwhile (a second cell shown by one drop) is not in them
+    for (const aid of framesToRemove(frames.keys(), seenDom, (id) => kernel.get(id) !== undefined, my === refreshSeq)) removeFrame(aid);
     // MOBILE'S PIN: the pinned cell is held on the screen's bottom
     canvas.classList.toggle("theme-mobile", column && !full);
     applyView();
@@ -1924,6 +1937,41 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }));
     void kernel.send([{ target: id, payload: { type: "boot" } as unknown as Payload }]);
   };
+  // THE DROP (#134, #135): tree rows dragged onto the canvas open where they land — an
+  // agent shown (moved if it is on the view, never duplicated), a file as a preview
+  // pinned to it, a folder as a tree rooted at it. Each one is the view's `open` verb.
+  canvas.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    canvas.classList.add("drop-target");
+  });
+  canvas.addEventListener("dragleave", (e) => {
+    if (!canvas.contains(e.relatedTarget as Node | null)) canvas.classList.remove("drop-target");
+  });
+  canvas.addEventListener("drop", (e) => {
+    canvas.classList.remove("drop-target");
+    if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+    e.preventDefault();
+    const got = decodeDrag(e.dataTransfer.getData(DRAG_MIME));
+    if ("error" in got) return toast(`✕ ${got.error}`);
+    // several items sit around the drop point, one slot each (no two overlap)
+    const spots = layoutAround(screenToWorld(e.clientX, e.clientY), got.items.length, DROP_SLOT);
+    void (async (): Promise<void> => {
+      for (const [i, it] of got.items.entries()) {
+        const at = spots[i]!;
+        const what = it.kind === "agent" ? { agent: it.id } : { path: it.path };
+        try {
+          const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x: at.x, y: at.y } as unknown as Payload }]))[0]?.result as Rec | null;
+          const err = r?.["error"];
+          if (typeof err === "string") toast(`✕ ${err}`);
+        } catch (err) {
+          // the send itself failed: say so, and go on with the rest of the drop
+          toast(`✕ ${(err as Error).message}`);
+        }
+      }
+    })();
+  });
   canvas.addEventListener("dblclick", (e) => {
     if ((e.target as Element).closest(".agent-frame")) return;
     openSelector(e.clientX, e.clientY);

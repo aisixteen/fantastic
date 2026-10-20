@@ -17,6 +17,8 @@ const CSS = `
   .files-view .ft-row { display: flex; align-items: center; gap: 6px; padding: 2px 10px; cursor: pointer; white-space: nowrap; }
   .files-view .ft-row:hover { background: ${tint("color.accent.base", 16)}; }
   .files-view .ft-row.sel { background: ${tint("color.accent.base", 22)}; }
+  /* the rows marked for a drag (#134, #135): Shift-click a range, ⌘/Ctrl-click one */
+  .files-view .ft-row.marked { background: ${tint("color.accent.base", 16)}; box-shadow: inset 2px 0 0 ${tok("color.accent.base")}; }
   .files-view ul.ft-tree:focus-visible .ft-row.cur { box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 55)}; }
   .files-view .ft-row .tw { width: 10px; cursor: pointer; color: ${tint("color.text.cool", 50)}; }
   .files-view .ft-row .gl { width: 14px; text-align: center; color: ${tint("color.text.cool", 50)}; }

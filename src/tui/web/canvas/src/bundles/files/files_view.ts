@@ -6,7 +6,9 @@ import { fileGrant, kernelBridge, sharedHub } from "./file_bridge.ts";
 import { FilesController, controllers } from "./files_controller.ts";
 import { agentIndex, allHidden, ensureWalker, filesDeps, getWalker, onRender, rootOf, select } from "./files_deps.ts";
 import type { Rec } from "./files_deps.ts";
-import { FANTASTIC } from "./paths.ts";
+import { DRAG_MIME, encodeDrag, rangeOf, toggled } from "./drag.ts";
+import type { DragItem } from "./drag.ts";
+import { FANTASTIC, inRoot, norm } from "./paths.ts";
 import { ensureFilesStyle } from "./styles.ts";
 
 // THE FILE TREE, as a cell (#106): the project's folder, live. It replaces the
@@ -27,6 +29,10 @@ export const filesView: ViewBundle = {
     ensureFilesStyle();
     const bridge = kernelBridge(ctx.kernel);
     ensureWalker(bridge);
+    // the folder this tree starts at (#135: a folder dropped on the canvas); the project when none
+    const saved = ctx.record ?? {};
+    const root = norm(str(saved, "root") ?? "");
+    if (!inRoot(root)) throw new Error(`files_view: its root '${root}' is outside the project`);
     const el = document.createElement("div");
     el.className = "side files-view";
     el.innerHTML =
@@ -50,16 +56,16 @@ export const filesView: ViewBundle = {
       index: agentIndex,
       walk: () => void getWalker()?.request(),
       publish: (s) => select(s, ctx.selfId),
+      root,
     });
     controllers.set(ctx.selfId, ctl);
 
-    // several cells on one thing: each ⌘-click moves to the next one
-    const cycle = new Map<string, number>();
-    const moveNext = (key: string, cells: string[]): void => {
-      const i = (cycle.get(key) ?? -1) + 1;
-      cycle.set(key, i);
-      d.moveTo(cells[i % cells.length]!);
-    };
+    // THE MARKED ROWS (#134, #135): several rows at once, by Shift (a range) or ⌘/Ctrl
+    // (a toggle). A drag takes the marked rows, or the one it starts on.
+    let marks: string[] = [];
+    let anchor: string | null = null;
+    /** a row's key: its path, or `agent:<id>` for an agent with no folder on disk */
+    const keyOf = (path: string | null, agent: string | undefined): string => path ?? `agent:${agent ?? ""}`;
 
     // what the page knows of an agent, for its row
     interface Deco {
@@ -106,14 +112,12 @@ export const filesView: ViewBundle = {
     };
 
     /** What a plain click used to do: view a page agent, show a host agent's cell, or open one. */
-    const activate = (a: Deco, focus: boolean): void => {
+    const activate = (a: Deco): void => {
       if (a.elsewhere || !a.loaded) return;
-      if (a.side === "page") return d.view(a.id, focus);
+      if (a.side === "page") return d.view(a.id, false);
       const now = d.cellsFor(a.id);
-      if (now.length > 0) {
-        if (focus) moveNext(a.id, now);
-        else d.view(now[0]!, false);
-      } else if (a.handler !== "" && !focus) d.open(a.id);
+      if (now.length > 0) d.view(now[0]!, false);
+      else if (a.handler !== "") d.open(a.id);
     };
 
     const row = (path: string | null, depth: number, a: Deco | null, o: { type: "dir" | "file"; open: boolean; name: string; count: string; status: string; err?: string }): HTMLElement => {
@@ -126,6 +130,20 @@ export const filesView: ViewBundle = {
         if (path === ctl.model.selected) li.classList.add("sel");
         if (path === ctl.model.cursor) li.classList.add("cur");
         if (o.type === "dir") li.setAttribute("aria-expanded", String(o.open));
+      }
+      // a drag source (#134, #135): a host agent loaded here, a file, a folder. A page
+      // agent (or one on another canvas) is not dragged: the canvas cannot show it.
+      const key = keyOf(path, a?.id);
+      li.dataset["key"] = key;
+      if (marks.includes(key)) li.classList.add("marked");
+      if (a !== null) {
+        if (a.side === "host" && a.loaded && !a.elsewhere) {
+          li.dataset["kind"] = "agent";
+          li.draggable = true;
+        }
+      } else if (path !== null) {
+        li.dataset["kind"] = o.type;
+        li.draggable = true;
       }
       li.style.paddingLeft = `${10 + depth * 12}px`;
       li.innerHTML = `<span class="tw"></span><span class="gl"></span><span class="nm"></span><span class="ct"></span><span class="st"></span>`;
@@ -165,12 +183,13 @@ export const filesView: ViewBundle = {
             : !a.loaded
               ? " · not loaded"
               : a.side === "page"
-                ? ` · double-click: view it · ${fkey}-click: focus it on its canvas`
+                ? " · double-click: view it"
                 : a.hidden
-                  ? ` · hidden: double-click shows its cell and views it · ${fkey}-click: show it on its view`
+                  ? " · hidden: double-click shows its cell and views it"
                   : a.cells.length > 0
-                    ? ` · double-click: view its cell · ${fkey}-click: move to it`
+                    ? " · double-click: view its cell"
                     : " · double-click: open it in a cell") +
+          (li.draggable ? ` · drag onto the canvas · ${fkey}-click: select more` : "") +
           (path !== null ? ` · ${path}` : "") +
           (o.err !== undefined ? ` — ${o.err}` : "");
         if (!a.elsewhere && a.loaded) {
@@ -220,7 +239,7 @@ export const filesView: ViewBundle = {
         );
       }
       // agents the page runs that have no folder on disk
-      if (getWalker()?.done === true && filter.value.trim() === "") {
+      if (root === "" && getWalker()?.done === true && filter.value.trim() === "") {
         const onDisk = new Set(agentIndex.ids());
         const loose = [...hostRecs.keys(), ...pageRecs.keys()].filter((id) => !onDisk.has(id));
         if (loose.length > 0) {
@@ -263,6 +282,19 @@ export const filesView: ViewBundle = {
       if (r.agent === undefined) return null;
       return deco(r.agent, r.path ?? undefined);
     };
+    /** the rows as shown, by key (a Shift-click's range runs over them) */
+    const visibleKeys = (): string[] => ctl.model.rows(filter.value).map((r) => r.path);
+    /** the marks, drawn on the rows already on screen (no redraw: a drag's source must stay in the DOM) */
+    const paintMarks = (): void => {
+      for (const li of list.querySelectorAll<HTMLElement>(".ft-row")) li.classList.toggle("marked", marks.includes(li.dataset["key"] ?? ""));
+    };
+    /** a drag source row as the item it drags (`row()` sets the row's kind) */
+    const itemOf = (li: HTMLElement): DragItem | null => {
+      const kind = li.dataset["kind"];
+      if (kind === "agent" && li.dataset["agent"] !== undefined) return { kind: "agent", id: li.dataset["agent"] };
+      if ((kind === "file" || kind === "dir") && li.dataset["path"] !== undefined) return { kind, path: li.dataset["path"] };
+      return null;
+    };
 
     list.addEventListener("click", (e) => {
       const t = e.target as Element;
@@ -270,21 +302,54 @@ export const filesView: ViewBundle = {
       if (r === null) return;
       const a = decoOf(r);
       if (t.closest(".del") !== null && a !== null) return d.deleteAgent(a.id);
-      if (t.closest(".go") !== null && a !== null) return activate(a, false);
+      if (t.closest(".go") !== null && a !== null) return activate(a);
       list.focus();
       if (r.path !== null && t.closest(".tw") !== null) {
         void ctl.toggle(r.path);
         return;
       }
+      // Shift: the range from the anchor row; ⌘/Ctrl: this row in or out of the marks (#134, #135)
+      const key = r.li.dataset["key"] ?? "";
+      if (e.shiftKey && anchor !== null) {
+        marks = rangeOf(visibleKeys(), anchor, key);
+        return paintMarks();
+      }
+      if (isFocusClick(e, d.mac)) {
+        marks = toggled(marks, key);
+        anchor = key;
+        return paintMarks();
+      }
+      marks = [key];
+      anchor = key;
+      paintMarks();
       if (r.path !== null) ctl.select(r.path);
       else if (a !== null) ctl.selectAgent(a.id);
-      if (a !== null && isFocusClick(e, d.mac)) activate(a, true);
+    });
+    // a drag takes the marked rows that can be dragged, or the row it starts on (#134, #135)
+    list.addEventListener("dragstart", (e) => {
+      const r = rowOf(e);
+      if (r === null || !r.li.draggable) return e.preventDefault();
+      const key = r.li.dataset["key"] ?? "";
+      if (!marks.includes(key)) {
+        marks = [key];
+        anchor = key;
+        paintMarks();
+      }
+      const items: DragItem[] = [];
+      for (const li of list.querySelectorAll<HTMLElement>(".ft-row[draggable='true']")) {
+        const it = itemOf(li);
+        if (it !== null && marks.includes(li.dataset["key"] ?? "")) items.push(it);
+      }
+      if (items.length === 0 || e.dataTransfer === null) return e.preventDefault();
+      e.dataTransfer.setData(DRAG_MIME, encodeDrag(items));
+      e.dataTransfer.setData("text/plain", items.map((it) => (it.kind === "agent" ? it.id : it.path)).join("\n"));
+      e.dataTransfer.effectAllowed = "copy";
     });
     list.addEventListener("dblclick", (e) => {
       const r = rowOf(e);
       if (r === null) return;
       const a = decoOf(r);
-      if (a !== null) return activate(a, false);
+      if (a !== null) return activate(a);
       if (r.path !== null) void ctl.toggle(r.path);
     });
 
@@ -304,7 +369,7 @@ export const filesView: ViewBundle = {
         // Shift+Enter: the old plain click on an agent
         ctl.select(fx.path);
         const ag = agentIndex.agentAt(fx.path);
-        if (ag !== undefined) activate(deco(ag.id, fx.path), false);
+        if (ag !== undefined) activate(deco(ag.id, fx.path));
       }
     });
     // ↓ from the filter goes into the tree; Esc clears it
@@ -325,7 +390,6 @@ export const filesView: ViewBundle = {
       if (folder !== undefined) void ctl.reveal(folder).then(() => ctl.setCursor(folder));
     });
 
-    const saved = ctx.record ?? {};
     void ctl
       .start({
         expanded: Array.isArray(saved["expanded"]) ? (saved["expanded"] as string[]) : [],

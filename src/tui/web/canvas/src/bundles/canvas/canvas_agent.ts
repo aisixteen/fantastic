@@ -7,7 +7,11 @@ import { readShell } from "../shell.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
-import { fileGrant } from "../files/file_bridge.ts";
+import { fileGrant, isRefusal, kernelBridge, said } from "../files/file_bridge.ts";
+import { agentIndex } from "../files/files_deps.ts";
+import { isRefusalOf, resolveTarget } from "../files/drag.ts";
+import type { Look, Opened, Refusal, Target } from "../files/drag.ts";
+import { nameOf, norm, parentOf, wire } from "../files/paths.ts";
 import { grantHint } from "../html_agent/grant_hint.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { cellGrant, hostRecordFresh, viewOf } from "./host_views.ts";
@@ -73,7 +77,7 @@ export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme
 export const GEOMETRY = ["x", "y", "width", "height"] as const;
 
 /** Every view verb, for the grants that admit a caller. */
-export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "theme", "terminal_renderer", "reflect"] as const;
+export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "open", "theme", "terminal_renderer", "reflect"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -132,7 +136,7 @@ export const CANVAS_README =
 
 export const VIEW_README =
   
-  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · fit {id, max_width?, max_height?} (an html cell sized to what it draws — {width, height, overflowed}; a cell keeps its size otherwise, 480×320 when place names none: after you place or update an html cell, call fit) · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto | a theme's name} (which theme the cells sit in — stock: canvas = the free 2D canvas, mobile = one column; the canvas theme agent lists, adds and edits themes (`themes`, `add_theme`); auto = the first theme whose width trigger matches the tab (stock mobile: under 768px wide); x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · terminal_renderer {name?: auto | webgl | dom} (the terminals' renderer — auto: DOM in WebKitGTK, else the shared WebGL; no name: what it is and why) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id} (DELETES the cell from the view: its agent is untouched) · hide {id} (takes the cell OFF the view, its agent keeps running and its rect is kept; hiding a hidden cell changes nothing) · show {id, x?, y?} (puts a hidden cell back where it was — or at x, y in the theme in use — and it re-attaches live; a shown cell keeps its place). hide, show and remove stay distinct: hide and show never touch the agent. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
+  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · fit {id, max_width?, max_height?} (an html cell sized to what it draws — {width, height, overflowed}; a cell keeps its size otherwise, 480×320 when place names none: after you place or update an html cell, call fit) · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto | a theme's name} (which theme the cells sit in — stock: canvas = the free 2D canvas, mobile = one column; the canvas theme agent lists, adds and edits themes (`themes`, `add_theme`); auto = the first theme whose width trigger matches the tab (stock mobile: under 768px wide); x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · terminal_renderer {name?: auto | webgl | dom} (the terminals' renderer — auto: DOM in WebKitGTK, else the shared WebGL; no name: what it is and why) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id} (DELETES the cell from the view: its agent is untouched) · hide {id} (takes the cell OFF the view, its agent keeps running and its rect is kept; hiding a hidden cell changes nothing) · show {id, x?, y?} (puts a hidden cell back where it was — or at x, y in the theme in use — and it re-attaches live; a shown cell keeps its place). open {path | agent, x?, y?} (what a drop on the canvas does: a FILE opens as a preview pinned to it, a FOLDER as a file tree rooted at it, an agent — or an agent's folder — as its cell: a cell already on the view is moved to x, y when given (never a second one), and without x, y keeps its place; a hidden one is shown (where it was, or at x, y), else the agent is placed at x, y or 0, 0; refused: bad_arg, outside_root, not_found, or the file bridge's refusal). hide, show and remove stay distinct: hide and show never touch the agent. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
 
 /** What the page does when its host stops (`main.ts` sets it): its last
  *  records flushed, nothing written after. */
@@ -325,6 +329,8 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       setHidden(kernel, id, target, false);
       return { shown: target, theme, ...(rect ?? {}), hidden_cells: [...hiddenOf(kernel, id)] } as unknown as Json;
     }
+    case "open":
+      return openView(id, payload, kernel);
     case "theme": {
       // THE THEME: which layout the cells sit in (canvas | mobile), or `auto` —
       // per tab, mobile under 768px wide. No name: what it is.
@@ -363,6 +369,132 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       return { error: `view: unknown verb '${str(payload, "type")}'`, reason: "unhandled", verb: str(payload, "type") };
   }
 };
+
+// ─── `open`: WHAT A DROP ON THE CANVAS DOES (#134, #135) ─────────────────────
+// A file opens as a preview pinned to it, a folder as a file tree rooted at it,
+// an agent (or an agent's folder) as its cell. The canvas's drop and an AI's `open`
+// both come here, so they cannot disagree. Resolution is `files/drag.ts`.
+
+const freshId = (prefix: string): string => `${prefix}_${Math.random().toString(16).slice(2, 10)}`;
+
+/** The file bridge verbs the VIEW asks: `list`, to tell a file from a folder by its parent's listing. A handler's host call is its own grant, and an agent never raises its own: the canvas writes this onto the root view at mount (`grantViewLists`). */
+export const VIEW_LISTS = { files: ["list"] } as const;
+
+/** Grant every view (the root and each nested one) the listings `open` needs: the canvas is the view's parent, so its grants come from above. Idempotent: a view already granted is left alone. */
+export function grantViewLists(kernel: Kernel): void {
+  const walk = (a: Agent | undefined): void => {
+    if (a === undefined) return;
+    if (a.record()["handler_module"] === VIEW) {
+      const had = (a.meta["can_call"] ?? {}) as Record<string, unknown>;
+      const lists = Array.isArray(had["files"]) ? (had["files"] as unknown[]) : [];
+      if (!VIEW_LISTS.files.every((v) => lists.includes(v))) kernel.updateMeta(a.id, { can_call: { ...had, files: [...lists, ...VIEW_LISTS.files] } } as unknown as Payload);
+    }
+    for (const c of a.children.values()) walk(c);
+  };
+  walk(kernel.rootId === null ? undefined : kernel.get(kernel.rootId));
+}
+
+/** The disk and the host, as `open` looks at them: a path's kind through the file bridge (its listing), the agent folders, the host's agents. */
+function viewLook(kernel: Kernel): Look {
+  const bridge = kernelBridge(kernel);
+  return {
+    kindOf: async (p) => {
+      const r = (await bridge.call({ type: "list", path: wire(parentOf(p)) })) as Record<string, unknown>;
+      // a folder that is not there is a path not in the project; any other refusal is said loudly
+      if (isRefusal(r)) {
+        if (r["reason"] === "not_found") return undefined;
+        throw new Error(said(r));
+      }
+      const files = Array.isArray(r["files"]) ? (r["files"] as Array<Record<string, unknown>>) : [];
+      const hit = files.find((f) => norm(String(f["path"])) === p);
+      return hit === undefined ? undefined : hit["type"] === "dir" ? "dir" : "file";
+    },
+    agentAt: (p) => agentIndex.agentAt(p)?.id,
+    hasAgent: async (id) => (await hostRecordFresh(id)) !== undefined,
+  };
+}
+
+/** The cells of this view that show host agent `agent`. */
+function cellsOfAgent(kernel: Kernel, view: string, agent: string): string[] {
+  const v = kernel.get(view);
+  if (v === undefined) return [];
+  return [...v.children.values()].filter((c) => c.record()["backend_id"] === agent).map((c) => c.id);
+}
+
+/** `open {path | agent, x?, y?}`: resolve what it names, then open it where it lands. */
+async function openView(view: string, payload: Payload, kernel: Kernel): Promise<Json> {
+  const agent = str(payload, "agent");
+  const path = payload["path"];
+  if ((agent !== "") === (typeof path === "string")) {
+    return { error: "view: open needs path (a project path) or agent (an agent id): one of them", reason: "bad_arg", arg: "path" };
+  }
+  const x = payload["x"];
+  const y = payload["y"];
+  if (x !== undefined || y !== undefined) {
+    if (!num(x) || !num(y)) return { error: "view: open — x and y are numbers (the cell's corner in the view), given together", reason: "bad_arg", arg: "x" };
+  }
+  // x, y: where the cell goes. Absent, a cell already on the view keeps its place (the same as `show`).
+  const at = num(x) && num(y) ? { x, y } : undefined;
+  const target: Target = agent !== "" ? { kind: "agent", id: agent } : { kind: "any", path: path as string };
+  let r: Opened | Refusal;
+  try {
+    r = await resolveTarget(target, viewLook(kernel));
+  } catch (err) {
+    // the file bridge refused the listing: the path is not one it can look at
+    return { error: `view: open — ${(err as Error).message}`, reason: "refused", arg: "path", hint: "the file bridge would not list it" };
+  }
+  if (isRefusalOf(r)) return r as unknown as Json;
+  if (r.kind === "agent") return openAgent(view, r.agent, at, kernel);
+  // a new file or folder cell lands at x, y, or the corner
+  if (r.kind === "file") return openFile(view, r.path, at ?? ORIGIN, kernel);
+  return openDir(view, r.path, at ?? ORIGIN, kernel);
+}
+
+/** The corner a new cell lands at when `open` names no x, y. */
+const ORIGIN = { x: 0, y: 0 };
+
+/** An agent's cell: one already on the view is MOVED to x, y when they are given (a hidden one shown, there or where it was), else placed there. Never a second cell. */
+async function openAgent(view: string, agent: string, at: { x: number; y: number } | undefined, kernel: Kernel): Promise<Json> {
+  const mine = cellsOfAgent(kernel, view, agent);
+  if (mine.length > 0) {
+    const cell = mine[0]!;
+    const wasHidden = hiddenOf(kernel, view).has(cell);
+    // no x, y: the rect stays as it is (`show` keeps a cell's place too)
+    if (at !== undefined) setRect(kernel, view, themeOf(kernel, view, tabWidth()), cell, { x: at.x, y: at.y });
+    if (wasHidden) setHidden(kernel, view, cell, false);
+    return { opened: agent, kind: "agent", cell, moved: at !== undefined, shown: wasHidden } as Json;
+  }
+  const spot = at ?? ORIGIN;
+  const got = (await viewAgent(view, { type: "place", backend_id: agent, x: spot.x, y: spot.y } as unknown as Payload, kernel)) as Record<string, unknown>;
+  if (typeof got["placed"] !== "string") return got as Json;
+  return { opened: agent, kind: "agent", cell: got["placed"], placed: true } as Json;
+}
+
+/** A file: a preview cell pinned to it (it shows the file live, and does not follow the tree). */
+function openFile(view: string, path: string, at: { x: number; y: number }, kernel: Kernel): Json {
+  const aid = freshId("preview");
+  setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 520, height: 360 });
+  kernel.register(new Agent({
+    id: aid,
+    parentId: view,
+    handlerModule: "preview_view.ts",
+    meta: { display_name: nameOf(path), pinned: path, follow: false, can_call: fileGrant() } as unknown as Payload,
+  }));
+  return { opened: path, kind: "file", cell: aid } as Json;
+}
+
+/** A folder: a file tree cell rooted at it (nothing above it is shown). */
+function openDir(view: string, path: string, at: { x: number; y: number }, kernel: Kernel): Json {
+  const aid = freshId("files");
+  setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 320, height: 560 });
+  kernel.register(new Agent({
+    id: aid,
+    parentId: view,
+    handlerModule: "files_view.ts",
+    meta: { display_name: path === "" ? "project" : nameOf(path), root: path, can_call: fileGrant() } as unknown as Payload,
+  }));
+  return { opened: path, kind: "dir", cell: aid } as Json;
+}
 
 /** `update` on the view itself: any fields. */
 function updateSelf(id: string, payload: Payload, kernel: Parameters<Handler>[2]): Json {

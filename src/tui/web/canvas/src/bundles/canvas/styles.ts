@@ -12,6 +12,8 @@ export const CANVAS_CSS = `
   /* its own layer only while it pans / zooms (canvas.ts moving) */
   #canvas.moving .canvas-world { will-change: transform; }
   #canvas.panning { cursor: grabbing; }
+  /* a tree drag over the canvas: the drop highlight (#134, #135) */
+  #canvas.drop-target { box-shadow: inset 0 0 0 2px ${tint("color.accent.base", 55)}; }
   #canvas.panning .agent-frame iframe,
   body.dragging-frame .agent-frame iframe { pointer-events: none; }
 
