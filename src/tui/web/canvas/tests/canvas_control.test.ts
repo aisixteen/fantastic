@@ -3,7 +3,7 @@ import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
 import assert from "node:assert/strict";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
-import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
+import { registerCanvas, VIEW_VERBS } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import { registerLayout, rectsOf } from "../src/bundles/canvas/layout.ts";
 
@@ -147,4 +147,37 @@ test("update with a new body tells the cell to re-render at once — whatever th
   await call(k, { type: "update", id: "p", fields: { display_name: "P" } });
   off2();
   assert.equal(got.length, 1);
+});
+
+test("the view's terminal_renderer: no name answers auto and what is in use; a name is stored on the view; a bad name is refused", async () => {
+  const k = page();
+  // node's user agent is no WebKitGTK, and there is no shell flag: auto is webgl
+  assert.deepEqual(await call(k, { type: "terminal_renderer" }), { terminal_renderer: "auto", in_use: "webgl", why: "auto: not WebKitGTK", choices: ["auto", "webgl", "dom"] });
+  const d = await call(k, { type: "terminal_renderer", name: "dom" });
+  assert.equal(d["terminal_renderer"], "dom");
+  assert.equal(d["in_use"], "dom");
+  assert.equal(d["why"], "set: dom");
+  assert.equal(k.get("view_root")?.meta["terminal_renderer"], "dom", "stored on the view");
+  const bad = await call(k, { type: "terminal_renderer", name: "canvas" });
+  assert.equal(bad["reason"], "bad_arg");
+  assert.equal(bad["arg"], "name");
+  assert.equal(k.get("view_root")?.meta["terminal_renderer"], "dom", "a bad name changes nothing");
+  assert.equal((await call(k, { type: "terminal_renderer", name: "auto" }))["in_use"], "webgl");
+  assert.equal(k.get("view_root")?.meta["terminal_renderer"], "auto");
+});
+
+test("VIEW_VERBS lists terminal_renderer", () => {
+  assert.ok((VIEW_VERBS as readonly string[]).includes("terminal_renderer"));
+});
+
+test("the view's terminal_renderer: a bad stored value is refused, naming it; a name sets it right again", async () => {
+  const k = page();
+  // a hand-edited record
+  k.updateMeta("view_root", { terminal_renderer: "canvas" } as unknown as Payload);
+  const r = await call(k, { type: "terminal_renderer" });
+  assert.equal(r["reason"], "bad_arg");
+  assert.equal(r["arg"], "terminal_renderer");
+  assert.equal(r["stored"], "canvas");
+  assert.match(String(r["error"]), /terminal_renderer: canvas is not auto, webgl or dom/);
+  assert.equal((await call(k, { type: "terminal_renderer", name: "auto" }))["in_use"], "webgl");
 });

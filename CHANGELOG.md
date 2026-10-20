@@ -7,6 +7,12 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The view's `terminal_renderer {name?: auto | webgl | dom}`: `auto` draws
+  terminals with xterm's DOM renderer in WebKitGTK (the app on Linux, GNOME
+  Web) — known by the shell's flag or the user agent — and with the shared
+  WebGL renderer everywhere else; switching is live. The e2e probe E88
+  measures keystroke → render latency per renderer, in Chrome and, on Linux,
+  in WebKitGTK.
 - Installers for the desktop app, built and verified by CI (`installers.yml`,
   from the binaries a green CI run tested) and signed by hand by the
   maintainer: a notarized DMG (macOS, Apple silicon), a signed NSIS installer
@@ -108,6 +114,14 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- S4: the desktop app's shell flag (`__FANTASTIC_SHELL__`) reaches the canvas
+  on macOS and Linux too: it is set in every frame, so the canvas (a frame of
+  the Home page) knows its webview and backdrop; only the top frame gets
+  `pickFolder`. Before, Tauri's main-frame script reached subframes on Windows
+  alone.
+- S3: the desktop app's opaque window (Linux; Windows without Mica) no longer
+  flashes light on open: the window and webview start in the dark skin's page
+  colour, so the boot page's transparent body is never the webview's white.
 - exec_bridge (python, rust, swift): a monitor always ends with one delivery
   headed `job ended`, even when nothing waited any more, and `monitor` refuses a
   job whose end already went out (flaky on Windows, #64).
