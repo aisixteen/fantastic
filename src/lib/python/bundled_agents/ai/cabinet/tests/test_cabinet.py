@@ -18,6 +18,9 @@ MANAGER = "cabinet_manager"
 MASTER = "master"
 VERBS = ["create_agent", "update_agent", "delete_agent"]
 MESSAGES = ["send", "reflect"]
+STATUS = "status"
+EQUIP = "equip"
+ROLE = "cabinet_role"
 
 
 @pytest.fixture
@@ -125,11 +128,13 @@ async def test_open_wires_every_worker_to_every_peer_and_the_master(world):
     assert k.get(MASTER)["can_call"][workers[0]] == "*"
     assert k.get(MASTER)["callable_by"][workers[2]] == MESSAGES
     assert k.get(MANAGER)["can_call"][workers[1]] == "*"
-    # the root takes exactly one verb from each worker: create_agent, to make equipment
+    # the worker holds NOTHING on the root; its cabinet makes its equipment there
     root = k.ctx.root.id
-    for w in workers:
-        assert k.get(w)["can_call"][root] == ["create_agent"]
-        assert k.get(root)["callable_by"][w] == ["create_agent"]
+    for cab, w in zip(cabs, workers):
+        assert root not in k.get(w)["can_call"]
+        assert w not in k.get(root)["callable_by"]
+        assert k.get(cab)["can_call"][root] == ["create_agent"]
+        assert k.get(root)["callable_by"][cab] == ["create_agent"]
 
 
 async def test_close_unwires_the_peers_and_leaves_nothing_behind(world):
@@ -150,6 +155,12 @@ async def test_close_unwires_the_peers_and_leaves_nothing_behind(world):
         assert len(rec["cabinet_peers"]) == 1
     assert gone_worker not in k.get(MASTER)["can_call"]
     assert gone_worker not in k.get(MASTER)["callable_by"]
+    # the root's grant for the closed cabinet goes with it (the kernel prunes it)
+    root = k.ctx.root.id
+    assert gone_cab not in k.get(root)["callable_by"]
+    assert (
+        cabs[0] in k.get(root)["callable_by"] and cabs[2] in k.get(root)["callable_by"]
+    )
 
 
 async def test_close_refuses_an_agent_that_is_not_a_cabinet_of_this_manager(world):
@@ -279,25 +290,27 @@ async def test_a_worker_reaches_its_master_only_with_messages(world):
     assert not (await as_(k, MASTER, w, {"type": "reflect"})).get("error")
 
 
+async def equip(k, cab: str, sender: str, **payload) -> dict:
+    """The worker's `equip` to its own cabinet (as the worker)."""
+    return await as_(k, sender, cab, {"type": "equip", **payload})
+
+
 async def test_equipment_is_made_under_the_worker_and_reached_by_it_alone(world):
     k = world
-    a = worker_of(k, (await open_cabinet(k, "a", name="a"))["id"])
+    cab_a = (await open_cabinet(k, "a", name="a"))["id"]
+    a = worker_of(k, cab_a)
     b = worker_of(k, (await open_cabinet(k, "b", name="b"))["id"])
-    # the worker sends create_agent to the root, naming ITSELF as the parent
-    made = await as_(
+    made = await equip(
         k,
+        cab_a,
         a,
-        k.id,
-        {
-            "type": "create_agent",
-            "parent_id": a,
-            "id": "a_exec",
-            "handler_module": "file_bridge.tools",
-            "allow": ["."],
-            "callable_by": {a: "*"},
-        },
+        handler_module="file_bridge.tools",
+        id="a_exec",
+        setup={"allow": ["."]},
+        callable_by={a: "*"},
     )
     assert not made.get("error"), made
+    assert made == {"id": "a_exec", "parent": a, "handler_module": "file_bridge.tools"}
     assert k.ctx.agents["a_exec"].parent.id == a
     # the worker reaches its equipment through its `$subtree` grant
     assert not (await as_(k, a, "a_exec", {"type": "reflect"})).get("error")
@@ -306,13 +319,42 @@ async def test_equipment_is_made_under_the_worker_and_reached_by_it_alone(world)
     assert refused.get("reason") == "unauthorized", refused
 
 
-async def test_a_worker_on_the_root_may_only_create(world):
+async def test_a_worker_no_longer_creates_on_the_root(world):
     k = world
     a = worker_of(k, (await open_cabinet(k, "a", name="a"))["id"])
-    # the root's one grant to a worker is create_agent: no update, no delete
-    for verb in ("update_agent", "delete_agent"):
+    # the direct route is closed: the worker's own create_agent on the root is refused
+    refused = await as_(
+        k,
+        a,
+        k.id,
+        {
+            "type": "create_agent",
+            "parent_id": a,
+            "id": "sneak",
+            "handler_module": "file_bridge.tools",
+        },
+    )
+    assert (
+        refused.get("reason") == "unauthorized" and refused.get("side") == "egress"
+    ), refused
+    assert "sneak" not in k.ctx.agents
+
+
+async def test_a_worker_holds_no_verb_on_the_root(world):
+    k = world
+    a = worker_of(k, (await open_cabinet(k, "a", name="a"))["id"])
+    for verb in ("create_agent", "update_agent", "delete_agent"):
         refused = await as_(
-            k, a, k.id, {"type": verb, "id": MASTER, "description": "x"}
+            k,
+            a,
+            k.id,
+            {
+                "type": verb,
+                "id": MASTER,
+                "description": "x",
+                "parent_id": a,
+                "handler_module": "file_bridge.tools",
+            },
         )
         assert refused.get("reason") == "unauthorized", (verb, refused)
     assert k.get(MASTER) is not None
@@ -507,18 +549,14 @@ async def test_conclude_removes_every_cabinet_worker_and_equipment(world):
     k = world
     cabs = [(await open_cabinet(k, f"t{i}", name=f"n{i}"))["id"] for i in range(2)]
     workers = [worker_of(k, c) for c in cabs]
-    made = await as_(
+    made = await equip(
         k,
+        cabs[0],
         workers[0],
-        k.id,
-        {
-            "type": "create_agent",
-            "parent_id": workers[0],
-            "id": "n0_exec",
-            "handler_module": "file_bridge.tools",
-            "allow": ["."],
-            "callable_by": {workers[0]: "*"},
-        },
+        handler_module="file_bridge.tools",
+        id="n0_exec",
+        setup={"allow": ["."]},
+        callable_by={workers[0]: "*"},
     )
     assert not made.get("error"), made
     res = await as_(k, MASTER, MANAGER, {"type": "conclude"})
@@ -577,3 +615,142 @@ async def test_each_cabinet_is_a_live_html_panel_of_its_own_id(world):
     assert "__CABINET_ID__" not in view["bytes"]
     assert "fantastic.watch(ID" in view["bytes"]
     assert set(view["calls"]) == {"view", "watch"}
+
+
+# ─── concurrency: one manager, several opens in one batch ────────
+
+
+async def test_three_opens_in_one_batch_keep_every_grant(world):
+    k = world
+    names = ["alpha", "beta", "gamma"]
+    master = k.ctx.agents[MASTER]
+    # the AI's tool calls of one turn go out as one concurrent batch
+    with master._as_self():
+        outs = await master.send(
+            [
+                {
+                    "target": MANAGER,
+                    "payload": {"type": "open_cabinet", "task": f"task {n}", "name": n},
+                }
+                for n in names
+            ]
+        )
+    results = [out.get("result") or {} for out in outs]
+    for res in results:
+        assert not res.get("error"), res
+    cabs = [r["id"] for r in results]
+    workers = [r["worker"] for r in results]
+    root = k.ctx.root.id
+    for cab, w in zip(cabs, workers):
+        peers = [x for x in workers if x != w]
+        # every worker: its own grants, its peers, the master
+        assert k.get(w)["can_call"][MASTER] == MESSAGES
+        assert k.get(w)["callable_by"][MASTER] == "*"
+        for p in peers:
+            assert k.get(w)["can_call"][p] == MESSAGES
+            assert k.get(w)["callable_by"][p] == MESSAGES
+        assert {d["worker"] for d in k.get(w)["cabinet_peers"]} == set(peers)
+        # the master, the manager, the memory store and the root: each named the worker
+        assert k.get(MASTER)["can_call"][w] == "*"
+        assert k.get(MASTER)["callable_by"][w] == MESSAGES
+        assert k.get(MANAGER)["can_call"][w] == "*"
+        assert k.get("memory")["callable_by"][w] == "*"
+        assert k.get(root)["callable_by"][cab] == ["create_agent"]
+        assert k.get(cab)["callable_by"][w] == [STATUS, EQUIP]
+
+
+# ─── equipment: placed under the worker, granted inside the cabinet ──
+
+
+async def test_equip_refuses_a_grant_or_a_parent_outside_the_cabinet(world):
+    k = world
+    cab = (await open_cabinet(k, "a", name="a"))["id"]
+    w = worker_of(k, cab)
+    b = worker_of(k, (await open_cabinet(k, "b", name="b"))["id"])
+    before = set(k.ctx.agents)
+    refusals = [
+        {"can_call": {k.id: "*"}},
+        {"can_call": {MASTER: "*"}},
+        {"callable_by": {MASTER: "*"}},
+        {"callable_by": {b: "*"}},
+        {"callable_by": {"$self": "*", "*": "*"}},
+    ]
+    for grants in refusals:
+        res = await equip(
+            k, cab, w, handler_module="file_bridge.tools", id="eq", **grants
+        )
+        assert res["reason"] == "bad_arg" and res["arg"] in (
+            "can_call",
+            "callable_by",
+        ), (grants, res)
+    res = await equip(k, cab, w, handler_module="file_bridge.tools", parent_id=k.id)
+    assert res["reason"] == "bad_arg" and res["arg"] == "parent_id", res
+    assert set(k.ctx.agents) == before
+
+
+async def test_equip_grants_inside_the_cabinet_are_accepted(world):
+    k = world
+    cab = (await open_cabinet(k, "a", name="a"))["id"]
+    w = worker_of(k, cab)
+    res = await equip(
+        k,
+        cab,
+        w,
+        handler_module="file_bridge.tools",
+        id="eq_in",
+        can_call={"$parent": "*", w: "*"},
+        callable_by={"$subtree": "*", w: "*"},
+    )
+    assert not res.get("error"), res
+    rec = k.get("eq_in")
+    assert rec["callable_by"][w] == "*" and rec["can_call"]["$parent"] == "*"
+
+
+async def test_equip_refuses_wiring_keys_in_its_setup(world):
+    k = world
+    cab = (await open_cabinet(k, "a", name="a"))["id"]
+    w = worker_of(k, cab)
+    before = set(k.ctx.agents)
+    for setup in (
+        {"parent_id": k.id},
+        {"callable_by": {"*": "*"}},
+        {"handler_module": "x"},
+        {"root": "/"},
+        {ROLE: "manager"},
+    ):
+        res = await equip(k, cab, w, handler_module="file_bridge.tools", setup=setup)
+        assert res["reason"] == "bad_arg" and res["arg"] == "setup", (setup, res)
+    assert set(k.ctx.agents) == before
+
+
+async def test_equip_needs_a_handler_and_is_not_reached_by_a_peer(world):
+    k = world
+    cab = (await open_cabinet(k, "a", name="a"))["id"]
+    w = worker_of(k, cab)
+    b = worker_of(k, (await open_cabinet(k, "b", name="b"))["id"])
+    assert (await equip(k, cab, w)).get("reason") == "missing_arg"
+    # a peer may not equip into another worker's cabinet
+    refused = await as_(
+        k, b, cab, {"type": "equip", "handler_module": "file_bridge.tools"}
+    )
+    assert refused.get("reason") == "unauthorized", refused
+    assert (
+        await equip(k, cab, w, handler_module="file_bridge.tools", id="eq_default")
+    ).get("error") is None
+    rec = k.get("eq_default")
+    assert rec["callable_by"] == {"$self": "*", "$parent": "*"}
+    assert (await as_(k, b, "eq_default", {"type": "reflect"})).get(
+        "reason"
+    ) == "unauthorized"
+
+
+async def test_equipment_of_a_closed_cabinet_is_removed_with_it(world):
+    k = world
+    cab = (await open_cabinet(k, "a", name="a"))["id"]
+    w = worker_of(k, cab)
+    res = await equip(k, cab, w, handler_module="file_bridge.tools", id="eq_gone")
+    assert not res.get("error"), res
+    closed = await as_(k, MASTER, MANAGER, {"type": "close_cabinet", "id": cab})
+    assert not closed.get("error"), closed
+    assert {"eq_gone", w, cab} <= set(closed["deleted"])
+    assert "eq_gone" not in k.ctx.agents

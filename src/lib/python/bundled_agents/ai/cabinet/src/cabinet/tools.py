@@ -9,13 +9,17 @@ and is reached through the worker's `$subtree` grant and nothing else.
 
 Roles, on the record (`cabinet_role`):
   manager   open_cabinet · close_cabinet · cabinets · conclude · reflect
-  cabinet   status · view · reflect   (`status` is the worker's report up)
+  cabinet   status · equip · view · reflect   (`status` is the worker's report up;
+            `equip` places the worker's equipment under the worker, inside the cabinet)
 
 NOTHING IS MADE OR CHANGED BEHIND A GRANT. The manager makes and edits every record
 by a gated send to the ROOT (`create_agent`, `update_agent`, `delete_agent`), as itself:
 the operator must grant the manager those three verbs on the root, and the root must
 name the manager in its `callable_by`. Each record's grants are restated whole, because
 `update_agent` replaces a dict field (a grant map included), never merges it.
+The cabinet makes its worker's equipment the same way: it holds `create_agent` on the
+root (granted by the manager at open), and it forces the parent to its worker, so the
+worker holds no grant on the root at all.
 
 THE MASTER is the AI that sent `open_cabinet` (the dispatch origin). Its WORKER is an
 existing AI backend's record, copied: default the master itself (`backend=` names
@@ -30,9 +34,18 @@ cabinet's id, worker and task) and the instructions (`post_system_prompt`) of ev
 live worker, and grants. A worker and each peer worker, and a worker and the master,
 may exchange MESSAGES only (`MESSAGE_VERBS`: `send`, `reflect`). The master and the
 manager may call each worker in full (monitor, re-task, stop). A worker may call its
-own cabinet's `status`, its own equipment (`$subtree`) and itself (`$self`), and the
-root's `create_agent` alone, which is how it makes its equipment. The close deletes the
-cabinet with its whole subtree; the kernel prunes every grant that names a deleted id.
+own cabinet's `status` and `equip`, its own equipment (`$subtree`) and itself (`$self`).
+Nothing else: the worker holds no grant on the root. The close deletes the cabinet with
+its whole subtree; the kernel prunes every grant that names a deleted id.
+
+EQUIPMENT. `equip` on the worker's cabinet makes one agent UNDER THE WORKER. The parent
+is forced, the callable_by defaults to the worker and its own equipment, and every grant
+key must be `$self`, `$parent`, `$subtree`, the worker or an agent already under it, so
+equipment is granted inside its cabinet only and the close removes it with the worker.
+
+SERIAL WRITES. open_cabinet, close_cabinet and conclude run ONE AT A TIME per manager
+(`_lock_of`). Each one reads whole grant maps and writes them back, so two in flight
+would overwrite each other's entries; the lock covers the whole read-wire-refresh.
 
 THE CEILING. An optional `max_cabinets` on the manager refuses an open loudly when
 that many cabinets are live (`reason: "ceiling"`). None: the LLM decides the count.
@@ -40,9 +53,11 @@ that many cabinets are live (`reason: "ceiling"`). None: the LLM decides the cou
 
 from __future__ import annotations
 
+import asyncio
 import re
 import secrets
 import time
+import weakref
 from importlib import resources
 
 from kernel._kernel import current_origin
@@ -64,6 +79,17 @@ CABINET = "cabinet"
 
 #: The worker's own report up: the only verb a worker sends its cabinet.
 STATUS_VERB = "status"
+
+#: The worker's equipment, placed under it: the one other verb a worker sends its cabinet.
+EQUIP_VERB = "equip"
+
+#: The manager's verbs that wire or unwire: each runs under the manager's lock.
+_SERIAL_VERBS = frozenset({"open_cabinet", "close_cabinet", "conclude"})
+
+#: The grant keys an equipment agent may name without naming an agent: itself, its
+#: parent (the worker) and its own subtree. Any other key must be an agent already under
+#: the worker.
+_RELATIVE_KEYS = ("$self", "$parent", "$subtree")
 
 #: What one worker may send another worker, or the master: messages, and nothing
 #: else. A peer that may only message cannot stop, clear or re-task the other.
@@ -104,6 +130,8 @@ _NOT_COPIED = frozenset(
 _WIRING = _NOT_COPIED - {"system_prompt", "pre_system_prompt", "system_prompt_file"}
 
 _SLUG = re.compile(r"[^a-z0-9]+")
+#: One lock per manager, keyed by the manager's agent: a dead manager's lock goes with it.
+_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _EMPTY_STATUS = {"line": "", "progress": None, "result": None, "at": None}
 _NEW_BACKEND_WARNING = (
     "a NEW backend: its endpoint, key or handler is not the existing one's. Creating a "
@@ -163,6 +191,14 @@ async def _wire(
     return (await _tree(kernel, upd)).get("error")
 
 
+def _lock_of(manager) -> asyncio.Lock:
+    """The manager's one lock (`_SERIAL_VERBS`): created on first use, per manager."""
+    lock = _LOCKS.get(manager)
+    if lock is None:
+        lock = _LOCKS[manager] = asyncio.Lock()
+    return lock
+
+
 # ─── reading the cabinets ────────────────────────────────────────
 
 
@@ -194,7 +230,7 @@ def _is_ai(rec: dict) -> bool:
     )
 
 
-def _instructions(cab: dict, peers: list[dict], master: str | None, root: str) -> str:
+def _instructions(cab: dict, peers: list[dict], master: str | None) -> str:
     """The worker's post-system block: its role, its directory and how to work. It
     rides AFTER the prompt in force (`post_system_prompt`), so the backend's own prompt
     is never replaced."""
@@ -220,10 +256,12 @@ def _instructions(cab: dict, peers: list[dict], master: str | None, root: str) -
         f"- Report your state up to your cabinet, every time it changes: "
         f'`send {{target: "{cab["id"]}", payload: {{type: "status", line: "...", '
         "progress: 0-100, result: ...}}`. Put your final answer in `result`.",
-        f"- Equipment: send `create_agent` to the root `{root}` with "
-        f'`parent_id: "{worker}"`, so the new agent is your child. Grant each one to '
-        f"your cabinet only: its `callable_by` names `{worker}` or your own equipment, "
-        f"nothing else. The root takes only your `create_agent`; nothing else of it is yours.",
+        f"- Equipment: send `equip` to your cabinet `{cab['id']}` with `handler_module` "
+        "(and optionally `id`, `setup`, `can_call`, `callable_by`): "
+        f'`send {{target: "{cab["id"]}", payload: {{type: "equip", handler_module: "..."}}}}`. '
+        f"The new agent is placed under you, inside this cabinet, and granted within it only. "
+        f"A grant may name `$self`, `$parent`, `$subtree`, `{worker}` or an agent already "
+        "under you, nothing else.",
     ]
     return "\n".join(lines)
 
@@ -237,7 +275,7 @@ async def _refresh_directories(kernel) -> str | None:
             for c in live
             if c["id"] != cab["id"]
         ]
-        text = _instructions(cab, peers, cab.get("master"), _root(kernel))
+        text = _instructions(cab, peers, cab.get("master"))
         err = await _wire(
             kernel, cab["worker"], cabinet_peers=peers, post_system_prompt=text
         )
@@ -350,11 +388,12 @@ async def _open(manager: str, payload: dict, kernel):
                 "bytes": _view_bytes(cab_id),
                 "calls": ["view", "watch"],
             },
-            "can_call": {"$self": "*"},
+            # the cabinet makes its worker's equipment on the root, under the worker only
+            "can_call": {"$self": "*", root: ["create_agent"]},
             "callable_by": {
                 "$self": "*",
                 "$parent": "*",
-                worker_id: [STATUS_VERB],
+                worker_id: [STATUS_VERB, EQUIP_VERB],
                 # the master reads its cabinet directly; the canvas (`user`) draws its panel
                 master: ["view", "reflect"],
                 "user": ["view", "watch", "reflect"],
@@ -373,13 +412,12 @@ async def _open(manager: str, payload: dict, kernel):
             "id": worker_id,
             "handler_module": handler,
             "description": f"Worker of cabinet {cab_id}: {task.strip()[:200]}",
-            # creating on the root (its equipment: `create_agent` only), its equipment
-            # (`$subtree`), itself, and the cabinet's status channel
+            # its equipment (`$subtree`), itself, and its cabinet's channels: `status`
+            # up, and `equip` to place equipment under itself. Nothing on the root.
             "can_call": {
                 "$self": "*",
-                "$parent": [STATUS_VERB],
+                "$parent": [STATUS_VERB, EQUIP_VERB],
                 "$subtree": "*",
-                root: ["create_agent"],
             },
             "callable_by": {"$self": "*", kernel.id: "*", master: "*"},
             **worker_rec,
@@ -393,7 +431,8 @@ async def _open(manager: str, payload: dict, kernel):
     # live worker to it. Every step runs (no short-circuit); the first failure deletes
     # the cabinet it half-made.
     steps = [
-        _wire(kernel, root, callable_by={worker_id: ["create_agent"]}),
+        # the cabinet (not the worker) is the one that creates on the root
+        _wire(kernel, root, callable_by={cab_id: ["create_agent"]}),
         # the master calls the worker in full, and the worker only messages the master
         _wire(
             kernel,
@@ -565,6 +604,75 @@ async def _view(cab_id: str, payload: dict, kernel):
     }
 
 
+async def _equip(cab_id: str, payload: dict, kernel):
+    """args: handler_module:str (req), id:str?, setup:dict? (record fields, no wiring keys), can_call:dict?, callable_by:dict? (keys: $self, $parent, $subtree, the worker or an agent already under it). Places ONE agent under this cabinet's worker, granted inside the cabinet only. Returns {id, parent, handler_module}."""
+    worker = (kernel.get(cab_id) or {}).get("worker", "")
+    if "parent_id" in payload:
+        return bad(
+            EQUIP_VERB,
+            "parent_id",
+            "absent: equipment is always placed under its worker",
+        )
+    handler_module = payload.get("handler_module")
+    if not isinstance(handler_module, str) or not handler_module.strip():
+        return missing(
+            EQUIP_VERB,
+            "handler_module",
+            hint='equip {handler_module: "file_bridge.tools", ...}',
+        )
+    eq_id = payload.get("id")
+    if eq_id is None:
+        eq_id = f"{worker}_eq_{secrets.token_hex(3)}"
+    elif not isinstance(eq_id, str) or not eq_id.strip():
+        return bad(EQUIP_VERB, "id", "a non-empty string")
+    setup = payload.get("setup") or {}
+    if not isinstance(setup, dict) or not all(isinstance(k, str) for k in setup):
+        return bad(EQUIP_VERB, "setup", "a map of record fields")
+    wiring = sorted(
+        k
+        for k in setup
+        if k in _WIRING or k in RESERVED_RECORD_KEYS or k == "handler_module"
+    )
+    if wiring:
+        return bad(EQUIP_VERB, "setup", f"a map without wiring keys (got {wiring})")
+    # the grants stay inside the cabinet: every key names the equipment's own relatives or
+    # an agent already under the worker (the worker and its equipment, nothing outside)
+    inside = set(_subtree(kernel, worker))
+    grants = {}
+    for field in ("can_call", "callable_by"):
+        grant = payload.get(field)
+        if grant is None:
+            continue
+        if not isinstance(grant, dict):
+            return bad(EQUIP_VERB, field, "a grant map")
+        outside = sorted(
+            k for k in grant if k not in _RELATIVE_KEYS and k not in inside
+        )
+        if outside:
+            return bad(
+                EQUIP_VERB,
+                field,
+                f"a grant inside this cabinet only (got {outside})",
+            )
+        grants[field] = grant
+    # callable_by defaults to the worker and the equipment's own subtree: reached by its worker alone
+    grants.setdefault("callable_by", {"$self": "*", "$parent": "*"})
+    made = await _tree(
+        kernel,
+        {
+            "type": "create_agent",
+            "parent_id": worker,
+            "id": eq_id,
+            "handler_module": handler_module.strip(),
+            **setup,
+            **grants,
+        },
+    )
+    if made.get("error"):
+        return made
+    return {"id": eq_id, "parent": worker, "handler_module": handler_module.strip()}
+
+
 # ─── reflect and dispatch ────────────────────────────────────────
 
 
@@ -594,7 +702,12 @@ MANAGER_VERBS = {
     "cabinets": _cabinets_verb,
     "conclude": _conclude,
 }
-CABINET_VERBS = {"reflect": _reflect, "status": _status, "view": _view}
+CABINET_VERBS = {
+    "reflect": _reflect,
+    "status": _status,
+    "equip": _equip,
+    "view": _view,
+}
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:
@@ -610,4 +723,7 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
     fn = table.get(t)
     if fn is None:
         return refusal(UNHANDLED, f"cabinet: unknown type {t!r} for a {role}", verb=t)
+    if role == MANAGER and t in _SERIAL_VERBS:
+        async with _lock_of(kernel):
+            return await fn(id, payload, kernel)
     return await fn(id, payload, kernel)

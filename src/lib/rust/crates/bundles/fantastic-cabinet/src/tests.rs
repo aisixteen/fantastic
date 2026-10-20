@@ -234,9 +234,14 @@ async fn open_wires_every_worker_to_every_peer_and_the_master() {
         for p in &peers {
             assert!(text.contains(p.as_str()), "{text}");
         }
-        // the root takes exactly one verb from each worker: create_agent
-        assert_eq!(can_call_root(&k, w), json!(["create_agent"]));
-        assert_eq!(root_callable[w.as_str()], json!(["create_agent"]));
+        // the worker holds nothing on the root; its cabinet makes its equipment there
+        assert!(can_call_root(&k, w).is_null());
+        assert!(root_callable.get(w.as_str()).is_none());
+        assert_eq!(
+            meta(&k, cabs[i].as_str(), "can_call")[ROOT],
+            json!(["create_agent"])
+        );
+        assert_eq!(root_callable[cabs[i].as_str()], json!(["create_agent"]));
     }
     // the master reaches each worker in full, and the manager monitors them
     assert_eq!(
@@ -255,6 +260,15 @@ async fn open_wires_every_worker_to_every_peer_and_the_master() {
 
 fn can_call_root(k: &Kernel, w: &str) -> Value {
     meta(k, w, "can_call")[ROOT].clone()
+}
+
+/// The worker's `equip` to its own cabinet, as the sender (the worker, or another agent).
+async fn equip(kernel: &Arc<Kernel>, cab: &str, sender: &str, extra: Value) -> Value {
+    let mut payload = json!({"type": "equip"});
+    if let (Some(p), Value::Object(e)) = (payload.as_object_mut(), extra) {
+        p.extend(e);
+    }
+    as_(kernel, sender, cab, payload).await
 }
 
 #[tokio::test]
@@ -283,6 +297,10 @@ async fn close_unwires_the_peers_and_leaves_nothing_behind() {
         .collect();
     assert!(deleted.contains(&gone_cab.as_str()) && deleted.contains(&gone_worker.as_str()));
     assert!(!exists(&k, &gone_cab) && !exists(&k, &gone_worker));
+    // the root's grant for the closed cabinet goes with it (the kernel prunes it)
+    let root_callable = meta(&k, ROOT, "callable_by");
+    assert!(root_callable.get(&gone_cab).is_none());
+    assert!(root_callable.get(&cabs[0]).is_some() && root_callable.get(&cabs[2]).is_some());
     for w in [&workers[0], &workers[2]] {
         let can_call = meta(&k, w, "can_call");
         let callable_by = meta(&k, w, "callable_by");
@@ -626,18 +644,22 @@ async fn a_worker_reaches_its_master_only_with_messages() {
 async fn equipment_is_made_under_the_worker_and_reached_by_it_alone() {
     let tmp = TempDir::new().unwrap();
     let (k, _) = world(&tmp).await;
-    let a = worker_of(&k, &open_ok(&k, "a").await);
+    let cab_a = open_ok(&k, "a").await;
+    let a = worker_of(&k, &cab_a);
     let b = worker_of(&k, &open_ok(&k, "b").await);
-    // the worker sends create_agent to the root, naming ITSELF as the parent
-    let made = as_(
+    // the worker sends `equip` to its own cabinet: the agent lands under the worker
+    let made = equip(
         &k,
+        &cab_a,
         &a,
-        ROOT,
-        json!({"type": "create_agent", "parent_id": a, "id": "a_exec",
-               "handler_module": FAKE, "callable_by": {a.clone(): "*"}}),
+        json!({"handler_module": FAKE, "id": "a_exec", "callable_by": {a.clone(): "*"}}),
     )
     .await;
     no_error(&made);
+    assert_eq!(
+        made,
+        json!({"id": "a_exec", "parent": a, "handler_module": FAKE})
+    );
     assert_eq!(
         k.agents
             .get(&AgentId::from("a_exec"))
@@ -656,22 +678,249 @@ async fn equipment_is_made_under_the_worker_and_reached_by_it_alone() {
 }
 
 #[tokio::test]
-async fn a_worker_on_the_root_may_only_create() {
+async fn a_worker_no_longer_creates_on_the_root() {
     let tmp = TempDir::new().unwrap();
     let (k, _) = world(&tmp).await;
     let a = worker_of(&k, &open_ok(&k, "a").await);
-    // the root's one grant to a worker is create_agent: no update, no delete
-    for verb in ["update_agent", "delete_agent"] {
+    // the direct route is closed: the worker's own create_agent on the root is refused
+    let refused = as_(
+        &k,
+        &a,
+        ROOT,
+        json!({"type": "create_agent", "parent_id": a, "id": "sneak", "handler_module": FAKE}),
+    )
+    .await;
+    assert_eq!(reason_of(&refused), "unauthorized", "{refused}");
+    assert_eq!(refused["side"], json!("egress"));
+    assert!(!exists(&k, "sneak"));
+}
+
+#[tokio::test]
+async fn a_worker_holds_no_verb_on_the_root() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let a = worker_of(&k, &open_ok(&k, "a").await);
+    for verb in ["create_agent", "update_agent", "delete_agent"] {
         let refused = as_(
             &k,
             &a,
             ROOT,
-            json!({"type": verb, "id": MASTER, "description": "x"}),
+            json!({"type": verb, "id": MASTER, "parent_id": a, "handler_module": FAKE,
+                   "description": "x"}),
         )
         .await;
         assert_eq!(reason_of(&refused), "unauthorized", "{verb}: {refused}");
     }
     assert!(exists(&k, MASTER));
+}
+
+#[tokio::test]
+async fn three_opens_in_one_batch_keep_every_grant() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let names = ["alpha", "beta", "gamma"];
+    // the AI's tool calls of one turn go out as one concurrent batch
+    let items: Vec<Item> = names
+        .iter()
+        .map(|n| {
+            Item::new(
+                AgentId::from(MANAGER),
+                json!({"type": "open_cabinet", "task": format!("task {n}"), "name": n}),
+            )
+        })
+        .collect();
+    let batch = Arc::clone(&k);
+    let outs = as_agent(MASTER, async move { batch.send(items).await }).await;
+    let results: Vec<Value> = outs.into_iter().map(|o| o.result).collect();
+    for res in &results {
+        no_error(res);
+    }
+    let cabs: Vec<String> = results
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    let workers: Vec<String> = results
+        .iter()
+        .map(|r| r["worker"].as_str().unwrap().to_string())
+        .collect();
+    for (cab, w) in cabs.iter().zip(&workers) {
+        let peers: Vec<&String> = workers.iter().filter(|x| *x != w).collect();
+        // every worker: its own grants, its peers, the master
+        let can_call = meta(&k, w, "can_call");
+        let callable_by = meta(&k, w, "callable_by");
+        assert_eq!(can_call[MASTER], json!(MESSAGE_VERBS), "{w}");
+        assert_eq!(callable_by[MASTER], json!("*"), "{w}");
+        for p in &peers {
+            assert_eq!(can_call[p.as_str()], json!(MESSAGE_VERBS), "{w}");
+            assert_eq!(callable_by[p.as_str()], json!(MESSAGE_VERBS), "{w}");
+        }
+        assert_eq!(meta(&k, w, "cabinet_peers").as_array().unwrap().len(), 2);
+        // the master, the manager, the memory store and the root: each named the worker
+        assert_eq!(meta(&k, MASTER, "can_call")[w.as_str()], json!("*"), "{w}");
+        assert_eq!(
+            meta(&k, MASTER, "callable_by")[w.as_str()],
+            json!(MESSAGE_VERBS)
+        );
+        assert_eq!(meta(&k, MANAGER, "can_call")[w.as_str()], json!("*"));
+        assert_eq!(meta(&k, STORE, "callable_by")[w.as_str()], json!("*"));
+        assert_eq!(
+            meta(&k, ROOT, "callable_by")[cab.as_str()],
+            json!(["create_agent"])
+        );
+        assert_eq!(
+            meta(&k, cab, "callable_by")[w.as_str()],
+            json!([STATUS_VERB, EQUIP_VERB])
+        );
+    }
+}
+
+// ─── equipment: placed under the worker, granted inside the cabinet ─
+
+#[tokio::test]
+async fn equip_refuses_a_grant_or_a_parent_outside_the_cabinet() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let cab = open_ok(&k, "a").await;
+    let w = worker_of(&k, &cab);
+    let b = worker_of(&k, &open_ok(&k, "b").await);
+    let before = agent_ids(&k);
+    let refusals = [
+        ("can_call", json!({ROOT: ["create_agent"]})),
+        ("can_call", json!({MASTER: "*"})),
+        ("callable_by", json!({MASTER: "*"})),
+        ("callable_by", json!({b.clone(): "*"})),
+        ("callable_by", json!({"$self": "*", "*": "*"})),
+    ];
+    for (field, grant) in refusals {
+        let res = equip(
+            &k,
+            &cab,
+            &w,
+            json!({"handler_module": FAKE, "id": "eq", field: grant}),
+        )
+        .await;
+        assert_eq!(reason_of(&res), "bad_arg", "{field}: {res}");
+        assert_eq!(res["arg"], json!(field), "{res}");
+    }
+    let res = equip(
+        &k,
+        &cab,
+        &w,
+        json!({"handler_module": FAKE, "parent_id": ROOT}),
+    )
+    .await;
+    assert_eq!(reason_of(&res), "bad_arg", "{res}");
+    assert_eq!(res["arg"], json!("parent_id"));
+    assert_eq!(agent_ids(&k), before);
+}
+
+#[tokio::test]
+async fn equip_grants_inside_the_cabinet_are_accepted() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let cab = open_ok(&k, "a").await;
+    let w = worker_of(&k, &cab);
+    let res = equip(
+        &k,
+        &cab,
+        &w,
+        json!({"handler_module": FAKE, "id": "eq_in",
+               "can_call": {"$parent": "*", w.clone(): "*"},
+               "callable_by": {"$subtree": "*", w.clone(): "*"}}),
+    )
+    .await;
+    no_error(&res);
+    assert_eq!(meta(&k, "eq_in", "callable_by")[w.as_str()], json!("*"));
+    assert_eq!(meta(&k, "eq_in", "can_call")["$parent"], json!("*"));
+}
+
+#[tokio::test]
+async fn equip_refuses_wiring_keys_in_its_setup() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let cab = open_ok(&k, "a").await;
+    let w = worker_of(&k, &cab);
+    let before = agent_ids(&k);
+    for setup in [
+        json!({"parent_id": ROOT}),
+        json!({"callable_by": {"*": "*"}}),
+        json!({"handler_module": FAKE}),
+        json!({"root": "/"}),
+        json!({ROLE: MANAGER}),
+    ] {
+        let res = equip(
+            &k,
+            &cab,
+            &w,
+            json!({"handler_module": FAKE, "setup": setup.clone()}),
+        )
+        .await;
+        assert_eq!(reason_of(&res), "bad_arg", "{setup}: {res}");
+        assert_eq!(res["arg"], json!("setup"), "{res}");
+    }
+    assert_eq!(agent_ids(&k), before);
+}
+
+#[tokio::test]
+async fn equip_needs_a_handler_and_is_not_reached_by_a_peer() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let cab = open_ok(&k, "a").await;
+    let w = worker_of(&k, &cab);
+    let b = worker_of(&k, &open_ok(&k, "b").await);
+    assert_eq!(
+        reason_of(&equip(&k, &cab, &w, json!({})).await),
+        "missing_arg"
+    );
+    // a peer may not equip into another worker's cabinet
+    assert_eq!(
+        reason_of(&equip(&k, &cab, &b, json!({"handler_module": FAKE})).await),
+        "unauthorized"
+    );
+    // by default the equipment is granted to its worker and its own subtree only
+    no_error(
+        &equip(
+            &k,
+            &cab,
+            &w,
+            json!({"handler_module": FAKE, "id": "eq_default"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        meta(&k, "eq_default", "callable_by"),
+        json!({"$self": "*", "$parent": "*"})
+    );
+    assert_eq!(
+        reason_of(&as_(&k, &b, "eq_default", json!({"type": "reflect"})).await),
+        "unauthorized"
+    );
+}
+
+#[tokio::test]
+async fn equipment_of_a_closed_cabinet_is_removed_with_it() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let cab = open_ok(&k, "a").await;
+    let w = worker_of(&k, &cab);
+    no_error(
+        &equip(
+            &k,
+            &cab,
+            &w,
+            json!({"handler_module": FAKE, "id": "eq_gone"}),
+        )
+        .await,
+    );
+    let closed = as_(
+        &k,
+        MASTER,
+        MANAGER,
+        json!({"type": "close_cabinet", "id": cab}),
+    )
+    .await;
+    no_error(&closed);
+    assert!(!exists(&k, "eq_gone") && !exists(&k, &w) && !exists(&k, &cab));
 }
 
 #[tokio::test]
@@ -804,12 +1053,12 @@ async fn conclude_removes_every_cabinet_worker_and_equipment() {
     let cabs = vec![open_ok(&k, "n0").await, open_ok(&k, "n1").await];
     let workers: Vec<String> = cabs.iter().map(|c| worker_of(&k, c)).collect();
     no_error(
-        &as_(
+        &equip(
             &k,
+            &cabs[0],
             &workers[0],
-            ROOT,
-            json!({"type": "create_agent", "parent_id": workers[0], "id": "n0_exec",
-                   "handler_module": FAKE, "callable_by": {workers[0].clone(): "*"}}),
+            json!({"handler_module": FAKE, "id": "n0_exec",
+                   "callable_by": {workers[0].clone(): "*"}}),
         )
         .await,
     );

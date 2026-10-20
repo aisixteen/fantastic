@@ -11,7 +11,12 @@
 //!
 //! NOTHING IS MADE OR CHANGED BEHIND A GRANT. The manager makes and edits every record
 //! by a gated send to the ROOT (`create_agent`, `update_agent`, `delete_agent`), as
-//! itself. The operator grants the manager those verbs on the root.
+//! itself. The operator grants the manager those verbs on the root. The cabinet makes
+//! its worker's equipment on the root (`create_agent`, granted by the manager at open),
+//! forcing the parent to the worker; the worker holds nothing on the root.
+//!
+//! SERIAL WRITES. `open_cabinet`, `close_cabinet` and `conclude` run ONE AT A TIME per
+//! manager ([`manager_lock`]): each reads whole grant maps and writes them back.
 
 #![deny(missing_docs)]
 
@@ -24,7 +29,8 @@ use fantastic_kernel::refusal::{
 };
 use fantastic_kernel::{current_origin, AgentId, Item, Kernel, RESERVED_RECORD_KEYS};
 use serde_json::{json, Map, Value};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `handler_module` key under which this bundle registers.
@@ -42,6 +48,21 @@ const CABINET: &str = "cabinet";
 
 /// The worker's own report up: the only verb a worker sends its cabinet.
 const STATUS_VERB: &str = "status";
+
+/// The worker's equipment, placed under it: the one other verb a worker sends its cabinet.
+const EQUIP_VERB: &str = "equip";
+
+/// The manager's verbs that wire or unwire: each runs under the manager's lock.
+const SERIAL_VERBS: [&str; 3] = ["open_cabinet", "close_cabinet", "conclude"];
+
+/// The grant keys an equipment agent may name without naming an agent: itself, its
+/// parent (the worker) and its own subtree. Any other key must be an agent already
+/// under the worker.
+const RELATIVE_KEYS: [&str; 3] = ["$self", "$parent", "$subtree"];
+
+/// One lock per manager id (python `_LOCKS`): see [`manager_lock`].
+static MANAGER_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// What one worker may send another worker, or the master: messages, and nothing else.
 const MESSAGE_VERBS: [&str; 2] = ["send", "reflect"];
@@ -141,6 +162,14 @@ fn slug_of(name: &str) -> String {
         }
     }
     out.trim_matches('_').to_string()
+}
+
+/// The lock of `manager`: held for the whole read-wire-refresh of a serial verb.
+fn manager_lock(manager: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = MANAGER_LOCKS
+        .lock()
+        .expect("cabinet manager locks poisoned");
+    Arc::clone(locks.entry(manager.to_string()).or_default())
 }
 
 /// Python's `repr(list_of_str)`.
@@ -282,7 +311,7 @@ fn peer_of(rec: &Rec) -> Value {
 /// The worker's post-system block: its role, its directory and how to work. It rides
 /// AFTER the prompt in force (`post_system_prompt`), so the backend's own prompt is
 /// never replaced.
-fn instructions(cab: &Rec, peers: &[Value], master: &str, root: &str) -> String {
+fn instructions(cab: &Rec, peers: &[Value], master: &str) -> String {
     let worker = str_of(cab, "worker");
     let task = str_of(cab, "task");
     let id = str_of(cab, "id");
@@ -318,10 +347,12 @@ fn instructions(cab: &Rec, peers: &[Value], master: &str, root: &str) -> String 
          progress: 0-100, result: ...}}}}`. Put your final answer in `result`."
     ));
     lines.push(format!(
-        "- Equipment: send `create_agent` to the root `{root}` with \
-         `parent_id: \"{worker}\"`, so the new agent is your child. Grant each one to \
-         your cabinet only: its `callable_by` names `{worker}` or your own equipment, \
-         nothing else. The root takes only your `create_agent`; nothing else of it is yours."
+        "- Equipment: send `equip` to your cabinet `{id}` with `handler_module` \
+         (and optionally `id`, `setup`, `can_call`, `callable_by`): \
+         `send {{target: \"{id}\", payload: {{type: \"equip\", handler_module: \"...\"}}}}`. \
+         The new agent is placed under you, inside this cabinet, and granted within it only. \
+         A grant may name `$self`, `$parent`, `$subtree`, `{worker}` or an agent already \
+         under you, nothing else."
     ));
     lines.join("\n")
 }
@@ -329,14 +360,13 @@ fn instructions(cab: &Rec, peers: &[Value], master: &str, root: &str) -> String 
 /// Rewrite the directory and instructions of every live worker, from the live cabinets.
 async fn refresh_directories(kernel: &Arc<Kernel>, manager: &str) -> Option<String> {
     let live = cabinets(kernel, manager);
-    let root = root_id(kernel);
     for cab in &live {
         let peers: Vec<Value> = live
             .iter()
             .filter(|c| str_of(c, "id") != str_of(cab, "id"))
             .map(peer_of)
             .collect();
-        let text = instructions(cab, &peers, str_of(cab, "master"), &root);
+        let text = instructions(cab, &peers, str_of(cab, "master"));
         if let Some(err) = wire(
             kernel,
             str_of(cab, "worker"),
@@ -524,11 +554,12 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
                 "bytes": VIEW_HTML.replace("__CABINET_ID__", &cab_id),
                 "calls": ["view", "watch"],
             },
-            "can_call": {"$self": "*"},
+            // the cabinet makes its worker's equipment on the root, under the worker only
+            "can_call": {"$self": "*", root.clone(): ["create_agent"]},
             "callable_by": {
                 "$self": "*",
                 "$parent": "*",
-                worker_id.clone(): [STATUS_VERB],
+                worker_id.clone(): [STATUS_VERB, EQUIP_VERB],
                 // the master reads its cabinet directly; the canvas (`user`) draws its panel
                 master.clone(): ["view", "reflect"],
                 "user": ["view", "watch", "reflect"],
@@ -550,15 +581,14 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         "description".into(),
         json!(format!("Worker of cabinet {cab_id}: {}", head(&task, 200))),
     );
-    // creating on the root (its equipment: `create_agent` only), its equipment
-    // (`$subtree`), itself, and the cabinet's status channel
+    // its equipment (`$subtree`), itself, and its cabinet's channels: `status` up, and
+    // `equip` to place equipment under itself. Nothing on the root.
     worker_payload.insert(
         "can_call".into(),
         json!({
             "$self": "*",
-            "$parent": [STATUS_VERB],
+            "$parent": [STATUS_VERB, EQUIP_VERB],
             "$subtree": "*",
-            root.clone(): ["create_agent"],
         }),
     );
     worker_payload.insert(
@@ -581,12 +611,13 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
             failure = err;
         }
     };
+    // the cabinet (not the worker) is the one that creates on the root
     step(
         wire(
             kernel,
             &root,
             &[],
-            &grants(&[(worker_id.as_str(), json!(["create_agent"]))]),
+            &grants(&[(cab_id.as_str(), json!(["create_agent"]))]),
             &[],
         )
         .await,
@@ -815,6 +846,97 @@ async fn conclude(manager: &str, kernel: &Arc<Kernel>) -> Value {
     json!({"concluded": concluded, "deleted": deleted, "count": count})
 }
 
+/// args: handler_module:str (req), id:str?, setup:dict? (record fields, no wiring keys), can_call:dict?, callable_by:dict? (keys: $self, $parent, $subtree, the worker or an agent already under it). Places ONE agent under this cabinet's worker, granted inside the cabinet only. Returns {id, parent, handler_module}.
+async fn equip(cab_id: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    if payload.get("parent_id").is_some() {
+        return bad(
+            EQUIP_VERB,
+            "parent_id",
+            "absent: equipment is always placed under its worker",
+        );
+    }
+    let rec = record(kernel, cab_id).unwrap_or_default();
+    let worker = str_of(&rec, "worker").to_string();
+    let handler_module = match payload.get("handler_module").and_then(Value::as_str) {
+        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ => {
+            return missing_hint(
+                EQUIP_VERB,
+                "handler_module",
+                "equip {handler_module: \"file_bridge.tools\", ...}",
+            )
+        }
+    };
+    let eq_id = match payload.get("id").filter(|v| !v.is_null()) {
+        None => format!("{worker}_eq_{}", token_hex(3)),
+        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(_) => return bad(EQUIP_VERB, "id", "a non-empty string"),
+    };
+    let setup = match payload.get("setup").filter(|v| py_truthy(v)) {
+        None => Map::new(),
+        Some(Value::Object(m)) => m.clone(),
+        Some(_) => return bad(EQUIP_VERB, "setup", "a map of record fields"),
+    };
+    let mut wiring: Vec<&str> = setup
+        .keys()
+        .map(String::as_str)
+        .filter(|k| is_wiring(k) || RESERVED_RECORD_KEYS.contains(k) || *k == "handler_module")
+        .collect();
+    if !wiring.is_empty() {
+        wiring.sort_unstable();
+        return bad(
+            EQUIP_VERB,
+            "setup",
+            &format!("a map without wiring keys (got {})", py_list(&wiring)),
+        );
+    }
+    // the grants stay inside the cabinet: every key names the equipment's own relatives
+    // or an agent already under the worker (the worker and its equipment, nothing outside)
+    let inside = subtree(kernel, &worker);
+    let mut grants = Map::new();
+    for field in ["can_call", "callable_by"] {
+        let Some(grant) = payload.get(field).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let Value::Object(map) = grant else {
+            return bad(EQUIP_VERB, field, "a grant map");
+        };
+        let mut outside: Vec<&str> = map
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !RELATIVE_KEYS.contains(k) && !inside.iter().any(|i| i == k))
+            .collect();
+        if !outside.is_empty() {
+            outside.sort_unstable();
+            return bad(
+                EQUIP_VERB,
+                field,
+                &format!(
+                    "a grant inside this cabinet only (got {})",
+                    py_list(&outside)
+                ),
+            );
+        }
+        grants.insert(field.to_string(), grant.clone());
+    }
+    // callable_by defaults to the worker and the equipment's own subtree: reached by its worker alone
+    grants
+        .entry("callable_by")
+        .or_insert_with(|| json!({"$self": "*", "$parent": "*"}));
+    let mut create = Map::new();
+    create.insert("type".into(), json!("create_agent"));
+    create.insert("parent_id".into(), json!(worker));
+    create.insert("id".into(), json!(eq_id));
+    create.insert("handler_module".into(), json!(handler_module));
+    create.extend(setup);
+    create.extend(grants);
+    let made = tree(kernel, Value::Object(create)).await;
+    if error_of(&made).is_some() {
+        return made;
+    }
+    json!({"id": eq_id, "parent": worker, "handler_module": handler_module})
+}
+
 // ─── verbs: a cabinet ────────────────────────────────────────────
 
 /// args: line:str (req), progress:number 0-100?, result:any?. The worker's report up:
@@ -896,6 +1018,7 @@ fn reflect(id: &str, kernel: &Kernel) -> Value {
 fn verb_docs_json() -> Value {
     json!({
         "reflect": "No args. The agent's role and what it holds.",
+        "equip": "args: handler_module:str (req), id:str?, setup:dict? (record fields, no wiring keys), can_call:dict?, callable_by:dict? (keys: $self, $parent, $subtree, the worker or an agent already under it). Places ONE agent under this cabinet's worker, granted inside the cabinet only. Returns {id, parent, handler_module}.",
         "open_cabinet": "args: task:str (req), name:str?, backend:str? (an existing AI agent id; default the master), setup:dict? (fields over the backend's copy; a new backend is flagged). Opens one cabinet: a subcanvas with its worker AI, wired to every live worker and to the master. The worker is NOT started — send it its first message (the task). Returns {id, worker, master, backend, new_backend, peers}.",
         "close_cabinet": "args: id:str (req) — a cabinet of this manager. Deletes the cabinet with its worker and ALL its equipment, then rewrites the live workers' directories. Returns {closed, deleted}.",
         "cabinets": "No args. Every live cabinet: its task, worker, live status and equipment. The master's monitor.",
@@ -926,6 +1049,13 @@ impl Bundle for CabinetBundle {
         let verb = t.as_str().unwrap_or("");
         let role = record(kernel, id)
             .and_then(|r| r.get(ROLE).and_then(Value::as_str).map(str::to_string));
+        // a serial verb of a manager holds the manager's lock for its whole run
+        let _held = match role.as_deref() {
+            Some(MANAGER) if SERIAL_VERBS.contains(&verb) => {
+                Some(manager_lock(id).lock_owned().await)
+            }
+            _ => None,
+        };
         let reply = match role.as_deref() {
             Some(MANAGER) => match verb {
                 "reflect" => reflect(id, kernel),
@@ -938,6 +1068,7 @@ impl Bundle for CabinetBundle {
             Some(CABINET) => match verb {
                 "reflect" => reflect(id, kernel),
                 "status" => status(id, payload, kernel).await,
+                "equip" => equip(id, payload, kernel).await,
                 "view" => view(id, kernel),
                 _ => unknown_verb(&t, CABINET),
             },

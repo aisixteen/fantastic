@@ -698,6 +698,7 @@ dependencies = [
  "fantastic-bundle",
  "fantastic-kernel",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -13,6 +13,8 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-kernel = { path = "../../fantastic-kernel" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+# the manager's lock: serial verbs hold it across their awaits
+tokio = { workspace = true }
 
 [dev-dependencies]
 # Every test drives a real kernel: the root's loader, a ram store for the

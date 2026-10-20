@@ -23,6 +23,14 @@
 //! boot's own grant writes ([`start`], called by the launcher once its legs are
 //! set up) — grant records are read, changed and written whole, so a watch
 //! writing while the boot writes loses one side's entries.
+//!
+//! CABINETS ARE NOT REACHED. A cabinet, its worker and the worker's equipment
+//! ([`cabinet_owned`]) keep the grants `fantastic_cabinet` writes: messages between
+//! workers, and equipment granted inside its cabinet. This reach would otherwise
+//! name every AI on both edges of a worker, which is god mode for the worker. The one
+//! grant it still writes for them is the human's own egress (`user` draws the cabinet's
+//! panel and calls its `view`/`watch`), so `user` may call a cabinet, and nothing else
+//! of this reach touches it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -56,13 +64,43 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
 }
 
 
+/// The ids of every cabinet, its worker and the worker's equipment: an agent whose own
+/// record or one of whose ancestors carries `cabinet_role: cabinet`. Computed from one
+/// snapshot of the records, so it never reads the tree while the tree is iterated.
+pub fn cabinet_owned(kernel: &fantastic_kernel::Kernel) -> std::collections::HashSet<String> {
+    let rows: std::collections::HashMap<String, (Option<String>, bool)> = kernel
+        .agents
+        .iter()
+        .map(|e| {
+            let r = e.value().record();
+            let cabinet = r.meta.get("cabinet_role").and_then(Value::as_str) == Some("cabinet");
+            (e.key().0.clone(), (r.parent_id, cabinet))
+        })
+        .collect();
+    let mut owned = std::collections::HashSet::new();
+    for id in rows.keys() {
+        let mut cur = Some(id.clone());
+        while let Some(c) = cur {
+            let Some((parent, cabinet)) = rows.get(&c) else { break };
+            if *cabinet {
+                owned.insert(id.clone());
+                break;
+            }
+            cur = parent.clone();
+        }
+    }
+    owned
+}
+
 /// The HOLDERS of the reach (strictly single-user dev tool, owner 2026-10-04):
 /// each present holding leg, `user`, every AI agent (a non-root agent naming a
 /// memory store), and the host-side helpers that act for the human —
-/// `canvas_root` and every canvas set-up agent.
+/// `canvas_root` and every canvas set-up agent. A cabinet's agents are never holders
+/// ([`cabinet_owned`]).
 fn holders(h: &Host) -> Vec<String> {
     let root = h.kernel.root().map(|r| r.id.0.clone());
     let helper = [crate::kern::backend::HANDLER_MODULE, crate::kern::setup_agent::HANDLER_MODULE];
+    let owned = cabinet_owned(&h.kernel);
     let mut v: Vec<String> = HOLDING_LEGS.into_iter().filter(|l| exists(h, l)).map(String::from).collect();
     if exists(h, crate::env::HUMAN) {
         v.push(crate::env::HUMAN.to_string());
@@ -71,7 +109,7 @@ fn holders(h: &Host) -> Vec<String> {
         h.kernel
             .agents
             .iter()
-            .filter(|e| Some(&e.key().0) != root.as_ref())
+            .filter(|e| Some(&e.key().0) != root.as_ref() && !owned.contains(&e.key().0))
             .filter(|e| {
                 let r = e.value().record();
                 r.meta.get("memory_store_id").and_then(Value::as_str).is_some()
@@ -120,9 +158,11 @@ const NARROWED: [&str; 2] = [crate::kern::saved::HOME_ID, crate::kern::user_stor
 pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
     let all = json!(verbs());
     let holders = holders(h);
+    let owned = cabinet_owned(&h.kernel);
     let leg = exists(h, CANVAS_LEG);
     for id in ids {
-        if !exists(h, id) {
+        // a cabinet's agents: the cabinet's own grants (`fantastic_cabinet`), not the reach's
+        if !exists(h, id) || owned.contains(id) {
             continue;
         }
         let mut cb = field(h, id, "callable_by");
@@ -160,6 +200,10 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             if id == holder || (id != "kernel" && !exists(h, id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
                 continue;
             }
+            // a cabinet's agents: only the human's own calls reach them (its panel is `user`'s)
+            if id != "kernel" && owned.contains(id) && holder != crate::env::HUMAN {
+                continue;
+            }
             // the leg's own: MERGED into what it holds (its calls to `user`)
             let want = if full { all.clone() } else { union(cc.get(id), &leg_verbs(h, id)) };
             if cc.get(id) != Some(&want) {
@@ -187,8 +231,9 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
     let send = json!(["send"]);
     let holders = holders(h);
     let root = h.kernel.root().map(|r| r.id.0.clone());
+    let owned = cabinet_owned(&h.kernel);
     // the agents that may START a call back: not a store (a store only answers),
-    // not another holder (holders already reach each other with `*`)
+    // not another holder (holders already reach each other with `*`), not a cabinet's
     let held: std::collections::HashSet<&str> = holders.iter().map(String::as_str).collect();
     let everyone: Vec<String> = h
         .kernel
@@ -196,7 +241,7 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
         .iter()
         .filter(|e| {
             let id = e.key().0.as_str();
-            Some(&e.key().0) != root.as_ref() && id != CANVAS_LEG && !held.contains(id)
+            Some(&e.key().0) != root.as_ref() && id != CANVAS_LEG && !held.contains(id) && !owned.contains(id)
                 && !e.value().record().handler_module.as_deref().is_some_and(|m| m.contains("store"))
         })
         .map(|e| e.key().0.clone())
@@ -378,3 +423,45 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::cabinet_owned;
+    use fantastic_kernel::{Agent, AgentId, Kernel};
+    use serde_json::{json, Map, Value};
+    use std::path::PathBuf;
+
+    /// An agent with the given parent and meta, registered on `kernel`.
+    fn put(kernel: &Kernel, id: &str, parent: Option<&str>, meta: Value) {
+        let meta: Map<String, Value> = meta.as_object().cloned().unwrap_or_default();
+        kernel.register(Agent::new(
+            AgentId::from(id),
+            Some("probe.tools".to_string()),
+            parent.map(AgentId::from),
+            meta,
+            PathBuf::from("/nonexistent"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn a_cabinet_its_worker_and_the_equipment_are_owned_and_nothing_else() {
+        let kernel = Kernel::new();
+        put(&kernel, "manager", None, json!({"cabinet_role": "manager", "memory_store_id": "m"}));
+        put(&kernel, "cabinet_a", Some("manager"), json!({"cabinet_role": "cabinet"}));
+        put(&kernel, "cabinet_a_worker", Some("cabinet_a"), json!({"memory_store_id": "m"}));
+        put(&kernel, "a_exec", Some("cabinet_a_worker"), json!({}));
+        put(&kernel, "a_exec_sub", Some("a_exec"), json!({}));
+        put(&kernel, "master", None, json!({"memory_store_id": "m"}));
+        put(&kernel, "m", Some("manager"), json!({}));
+        let owned = cabinet_owned(&kernel);
+        for id in ["cabinet_a", "cabinet_a_worker", "a_exec", "a_exec_sub"] {
+            assert!(owned.contains(id), "{id} is a cabinet's: {owned:?}");
+        }
+        // the manager, the master (an ordinary AI) and the store are not
+        for id in ["manager", "master", "m"] {
+            assert!(!owned.contains(id), "{id} is not a cabinet's: {owned:?}");
+        }
+    }
+}
+
