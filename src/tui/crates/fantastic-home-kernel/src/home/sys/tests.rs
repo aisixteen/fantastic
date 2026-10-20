@@ -442,6 +442,22 @@ mod unix_only {
         assert_eq!(os.log_tail(path).as_deref(), Some(""));
     }
 
+    #[tokio::test]
+    async fn a_login_env_failure_is_in_the_error_and_the_launch_log() {
+        use crate::home::os::HomeOs;
+        let (_d, dir) = temp();
+        let folder = dir.join("alpha");
+        std::fs::create_dir(&folder).unwrap();
+        // SHELL unset: the spawn fails in the login step, before any process starts
+        let os = crate::home::os::SysOs::with_shell(dir.join("home"), dir.join("fantastic"), None);
+        let path = folder.to_str().unwrap();
+        let error = os.spawn(path).await.expect_err("SHELL is not set");
+        assert_eq!(error, "no login environment: SHELL is not set");
+        let log = log_path(&dir.join("home"), path).unwrap();
+        assert_eq!(std::fs::read_to_string(log).unwrap(), format!("{error}\n"));
+        assert_eq!(os.log_tail(path), Some(error));
+    }
+
     #[test]
     fn folder_is_canonical_and_a_directory() {
         let (_d, dir) = temp();
