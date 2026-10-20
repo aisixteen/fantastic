@@ -1,15 +1,28 @@
 """THE APP E2E: the built desktop app, on a throwaway home, end to end.
 
-    cd src/lib/python && uv run python ../../app/e2e/run.py --app <fantastic-app[.exe]> \\
-        [--native-driver <msedgedriver.exe>]
+    cd src/lib/python && uv run python ../../app/e2e/run.py --app <fantastic-app[.exe]>
 
 `fantastic[.exe]` (the canvas sidecar) must sit beside the app. Stdlib plus
 `websockets`. Prints `E2E-VERDICT: PASS|FAIL`; the run's files are in
 `src/app/e2e/runs/<stamp>/`.
 
-Linux and Windows drive the window with WebDriver (`tauri-driver`, which runs
-WebKitWebDriver or msedgedriver). macOS has no WKWebView driver: there the app is
-launched as a plain process, read on stderr and asked through the home's socket.
+Linux drives the window with WebDriver (`tauri-driver` over WebKitWebDriver).
+macOS and Windows run without WebDriver: the app is launched as a plain process,
+read on stderr and asked through the home's socket (`plain`).
+
+- macOS has no WKWebView driver.
+- On Windows, msedgedriver can't reach the app's WebView2. Launched by msedgedriver,
+  the app refuses the argv it adds (exit 2; `args::parse` stays strict). Attached to,
+  it has no debugger: WebView2's browser process never got `--remote-debugging-port`,
+  from `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` (run 39330272032) or from the
+  `HKCU\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments`
+  override (run 39365531873). Its command line carried only wry's arguments, and
+  the app has no test-only path.
+
+So on macOS and Windows the page itself isn't driven: step 2 (the shell's
+`__FANTASTIC_SHELL__` flag) and step 4's clicks go through the home's API
+instead, and step 8 (kiosk) is Linux's. The Home page's DOM is driven by the CLI
+e2e (E83–E85) in Chrome.
 
 Every call to `home` is the page's own path: `user.forward` over
 `ws://127.0.0.1:<port>/user/ws`, on the port of the host's run file.
@@ -25,7 +38,6 @@ import platform
 import secrets
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -39,8 +51,6 @@ MACOS = sys.platform == "darwin"
 LINUX = sys.platform.startswith("linux")
 EXE = ".exe" if WINDOWS else ""
 HERE = Path(__file__).resolve().parent
-# the app's identifier: WebView2 keeps its user data in %LOCALAPPDATA%/<it>/EBWebView
-APP_ID = json.loads((HERE.parent / "tauri.conf.json").read_text())["identifier"]
 
 OS, WEBVIEW = (
     ("windows", "webview2") if WINDOWS else ("macos", "wkwebview") if MACOS else ("linux", "webkitgtk")
@@ -143,44 +153,6 @@ def quit_app(pid: int) -> None:
         u32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
 
 
-# WebView2's per-app override of its browser arguments, read when its browser
-# process starts (CreateCoreWebView2EnvironmentWithOptions): value name the
-# exe's file name, data the arguments, appended to the app's own.
-WEBVIEW2_POLICY = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
-_POLICY_KEYS = ("Software\\Policies\\Microsoft", "Software\\Policies\\Microsoft\\Edge", "Software\\Policies\\Microsoft\\Edge\\WebView2", WEBVIEW2_POLICY)
-_policy_created: list[str] = []
-
-
-def policy_set(exe: str, browser_args: str) -> None:
-    """HKCU's WebView2 override for `exe`, remembering each key this run creates."""
-    import winreg
-
-    for key in _POLICY_KEYS:
-        try:
-            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, key))
-        except FileNotFoundError:
-            winreg.CloseKey(winreg.CreateKey(winreg.HKEY_CURRENT_USER, key))
-            _policy_created.append(key)
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WEBVIEW2_POLICY, 0, winreg.KEY_SET_VALUE) as k:
-        winreg.SetValueEx(k, exe, 0, winreg.REG_SZ, browser_args)
-
-
-def policy_clear(exe: str) -> None:
-    """Remove `exe`'s override and the keys this run created (deepest first)."""
-    import winreg
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WEBVIEW2_POLICY, 0, winreg.KEY_SET_VALUE) as k:
-            winreg.DeleteValue(k, exe)
-    except FileNotFoundError:
-        pass
-    while _policy_created:
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _policy_created.pop())
-        except OSError:
-            break
-
-
 def exit_status(code: int | None) -> str:
     """How a process ended, as a person reads it (a Windows NTSTATUS in hex)."""
     if code is None:
@@ -188,37 +160,8 @@ def exit_status(code: int | None) -> str:
     return f"with {code}" + (f" (0x{code & 0xFFFFFFFF:08X})" if WINDOWS and not 0 <= code < 256 else "")
 
 
-def listing(root: Path, depth: int) -> str:
-    """`root`'s entries `depth` levels down, or that it is missing."""
-    if not root.exists():
-        return f"({root}: missing)"
-    out = []
-    for p in sorted(root.rglob("*")):
-        rel = p.relative_to(root)
-        if len(rel.parts) <= depth:
-            out.append(f"{rel}{'/' if p.is_dir() else ''}")
-    return "\n".join(out) or "(empty)"
-
-
 def tail(p: Path, n: int = 80) -> str:
     return "\n".join(p.read_text(errors="replace").splitlines()[-n:]) if p.exists() else f"({p.name}: none)"
-
-
-# Every msedgewebview2.exe with its parent and command line (a browser
-# process has no --type), and what each browser process listens on
-WEBVIEW2_PS = (
-    "$ps = @(Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\"); "
-    "if ($ps.Count -eq 0) { 'no msedgewebview2.exe process' }; "
-    "foreach ($p in $ps) { \"pid $($p.ProcessId), parent $($p.ParentProcessId): $($p.CommandLine)\"; "
-    "if ($p.CommandLine -notmatch '--type=') { "
-    "Get-NetTCPConnection -State Listen -OwningProcess $p.ProcessId -ErrorAction SilentlyContinue | "
-    "ForEach-Object { \"  listens on $($_.LocalAddress):$($_.LocalPort)\" } } }"
-)
-
-
-def webview2_processes() -> str:
-    out = subprocess.run(["powershell", "-NoProfile", "-Command", WEBVIEW2_PS], capture_output=True, text=True, timeout=60)
-    return (out.stdout + out.stderr).strip()
 
 
 def http_ok(url: str) -> bool:
@@ -350,14 +293,9 @@ ELEMENT = "element-6066-11e4-a52f-4f8afdd6aa18"
 class WebDriver:
     """A WebDriver client over urllib: just the commands this run uses."""
 
-    def __init__(self, base: str, run: Run):
+    def __init__(self, base: str):
         self.base = base
-        self.run = run
         self.sid: str | None = None
-        # Windows: the app this run launched, and where its output goes
-        self.proc: subprocess.Popen | None = None
-        self.app_env: dict[str, str] = {}
-        self.browser_args = ""
 
     def req(self, method: str, path: str, body: dict | None = None, timeout: float = 120):
         data = None if body is None else json.dumps(body).encode()
@@ -381,45 +319,8 @@ class WebDriver:
         return f"/session/{self.sid}{path}"
 
     def start(self, app: Path, args: list[str]) -> None:
-        if WINDOWS:
-            caps = {"browserName": "webview2", "ms:edgeChromium": True, "ms:edgeOptions": {"debuggerAddress": self.launch(app, args)}}
-        else:
-            caps = {"tauri:options": {"application": str(app), "args": args}}
+        caps = {"tauri:options": {"application": str(app), "args": args}}
         self.sid = self.req("POST", "/session", {"capabilities": {"alwaysMatch": caps}})["sessionId"]
-
-    def launch(self, app: Path, args: list[str]) -> str:
-        """Windows: start the app with exactly `args`, its WebView2 on a debugger
-        port, and return that port's address for msedgedriver to attach to:
-        msedgedriver then launches nothing and adds no argv of its own.
-
-        The port reaches WebView2 through the per-app registry override
-        (WEBVIEW2_POLICY): the WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS variable
-        never reached the browser process through Tauri (run 39330272032: its
-        command line had wry's arguments and not ours). WebView2 reads the
-        registry only when no WEBVIEW2_* override variable is set, so the app
-        gets none. The value is removed once the browser has started (it is
-        read only then) and again in `end()`."""
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-        env = {k: v for k, v in self.run.env.items() if not k.upper().startswith("WEBVIEW2_")}
-        env["TAURI_WEBVIEW_AUTOMATION"] = "true"
-        self.browser_args = f"--remote-debugging-port={port} --enable-logging"
-        self.app_env = {k: v for k, v in env.items() if k.upper().startswith(("WEBVIEW2_", "TAURI_"))}
-        policy_set(app.name, self.browser_args)
-        try:
-            out = open(self.run.root / "app.out", "a")
-            self.proc = subprocess.Popen([str(app), *args], env=env, stdout=out, stderr=subprocess.STDOUT)
-            self.run.pids.add(self.proc.pid)
-            end = time.monotonic() + 60
-            while not http_ok(f"http://127.0.0.1:{port}/json/version"):
-                code = self.proc.poll()
-                need(code is None, f"the app exited {exit_status(code)} before its WebView2 served port {port}; argv {args}")
-                need(time.monotonic() < end, f"no WebView2 on port {port} within 60 s; argv {args}")
-                time.sleep(0.25)
-        finally:
-            policy_clear(app.name)
-        return f"127.0.0.1:{port}"
 
     def url(self) -> str:
         return self.req("GET", self.s("/url"))
@@ -450,11 +351,6 @@ class WebDriver:
             except (Fail, OSError) as e:
                 say(f"end session: {e}")
             self.sid = None
-        # an attached driver leaves the app running: the run that launched it ends it
-        if self.proc is not None and self.proc.poll() is None:
-            kill(self.proc.pid)
-        if WINDOWS:
-            policy_clear(self.run.app.name)
 
 
 SHELL_JS = """const f = globalThis.__FANTASTIC_SHELL__;
@@ -477,32 +373,17 @@ async def on_page(wd: WebDriver, run: Run) -> dict:
     return host
 
 
-async def webdriver(run: Run, args: argparse.Namespace) -> None:
-    cmd = ["tauri-driver", "--port", "4444"]
-    if args.native_driver:
-        cmd += ["--native-driver", args.native_driver]
+async def webdriver(run: Run) -> None:
+    """Linux: steps 1–8 through tauri-driver over WebKitWebDriver."""
     log = open(run.root / "tauri-driver.log", "w")
-    driver = subprocess.Popen(cmd, env=run.env, stdout=log, stderr=subprocess.STDOUT)
-    wd = WebDriver("http://127.0.0.1:4444", run)
+    driver = subprocess.Popen(["tauri-driver", "--port", "4444"], env=run.env, stdout=log, stderr=subprocess.STDOUT)
+    wd = WebDriver("http://127.0.0.1:4444")
     try:
         await sessions(run, wd)
     except BaseException:
         log.flush()
-        say("the driver's log, last 80 lines (on Linux the app's stderr is in it):")
+        say("the driver's log, last 80 lines (the app's stderr is in it):")
         print(tail(run.root / "tauri-driver.log"), flush=True)
-        if WINDOWS and wd.proc is not None:
-            say(f"the app, launched by this run (pid {wd.proc.pid}): {exit_status(wd.proc.poll())}")
-            print(tail(run.root / "app.out"), flush=True)
-            say(f"the app's WEBVIEW2_* and TAURI_* environment: {wd.app_env}")
-            say(f"the WebView2 registry override it was launched with: {WEBVIEW2_POLICY}\\{wd.run.app.name} = {wd.browser_args!r}")
-            data = Path(os.environ["LOCALAPPDATA"]) / APP_ID
-            say(f"the app's data dir ({data}), two levels:")
-            print(listing(data, 2), flush=True)
-            webview_log = data / "EBWebView" / "chrome_debug.log"
-            say(f"WebView2's log ({webview_log}), last 80 lines:")
-            print(tail(webview_log), flush=True)
-            say("every msedgewebview2.exe (parent, command line) and the browser processes' listening ports:")
-            print(webview2_processes(), flush=True)
         raise
     finally:
         wd.end()
@@ -515,7 +396,7 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
 
 
 async def sessions(run: Run, wd: WebDriver) -> None:
-    """Steps 1–8 (8: Linux only), on one driver."""
+    """Steps 1–8, on one driver."""
     await until("tauri-driver up", lambda: _status(wd), 30)
     alpha = canonical(run.alpha)
 
@@ -526,7 +407,7 @@ async def sessions(run: Run, wd: WebDriver) -> None:
 
     say("2. the shell's flag")
     flag = wd.js(SHELL_JS)
-    backdrop = "native" if WINDOWS and windows_build() >= 22000 else "web"
+    backdrop = "web"
     need(flag == {"name": "tauri", "os": OS, "webview": WEBVIEW, "backdrop": backdrop, "pickFolder": "function", "frozen": True}, f"the flag: {flag}")
 
     say("3. the argv intent: alpha runs")
@@ -555,7 +436,7 @@ async def sessions(run: Run, wd: WebDriver) -> None:
     handles = wd.handles()
     need(len(handles) == 1, f"a second window: {handles}")
 
-    say("6. the orderly quit: the OS's own (SIGTERM on Linux, WM_CLOSE on Windows)")
+    say("6. the orderly quit: SIGTERM")
     quit_app(app_pid)
     await until("the app gone", lambda: not pid_alive(app_pid), 20)
     need(not run.run_file.exists(), "the run file outlived the quit: no orderly shutdown")
@@ -577,20 +458,19 @@ async def sessions(run: Run, wd: WebDriver) -> None:
     need(not run.run_file.exists(), "the run file outlived the quit")
     wd.end()
 
-    if LINUX:
-        say("8. kiosk: fullscreen, no folder dialog")
-        wd.start(run.app, ["--kiosk"])
-        await on_page(wd, run)
-        rect = await until("a fullscreen window", lambda: _fullscreen(wd), 20)
-        need(rect, f"the kiosk window: {rect}")
-        flag = wd.js(SHELL_JS)
-        need(flag and flag["pickFolder"] == "undefined", f"the kiosk's flag: {flag}")
-        await until("the Home page loads", lambda: wd.js("return document.body && document.body.dataset.page"), 30)
-        app_pid = int(run.host()["pid"])
-        quit_app(app_pid)
-        await until("the app gone", lambda: not pid_alive(app_pid), 20)
-        need(not run.run_file.exists(), "the kiosk's run file outlived the quit")
-        wd.end()
+    say("8. kiosk: fullscreen, no folder dialog")
+    wd.start(run.app, ["--kiosk"])
+    await on_page(wd, run)
+    rect = await until("a fullscreen window", lambda: _fullscreen(wd), 20)
+    need(rect, f"the kiosk window: {rect}")
+    flag = wd.js(SHELL_JS)
+    need(flag and flag["pickFolder"] == "undefined", f"the kiosk's flag: {flag}")
+    await until("the Home page loads", lambda: wd.js("return document.body && document.body.dataset.page"), 30)
+    app_pid = int(run.host()["pid"])
+    quit_app(app_pid)
+    await until("the app gone", lambda: not pid_alive(app_pid), 20)
+    need(not run.run_file.exists(), "the kiosk's run file outlived the quit")
+    wd.end()
 
 
 def _status(wd: WebDriver) -> bool:
@@ -644,7 +524,24 @@ async def announced(p: subprocess.Popen, err: Path) -> dict:
     return await until("the app's announcements", lines, 60)
 
 
-async def macos(run: Run) -> None:
+def backdrop_wanted() -> str:
+    """The backdrop the app announces on this OS (`sys::backdrop`)."""
+    if MACOS:
+        return "liquid-glass" if int(platform.mac_ver()[0].split(".")[0]) >= 26 else "vibrancy"
+    return "mica" if windows_build() >= 22000 else "none"
+
+
+def quit_plain(app: subprocess.Popen) -> None:
+    """The orderly quit the OS sends: SIGTERM on macOS, WM_CLOSE on Windows."""
+    if WINDOWS:
+        quit_app(app.pid)
+    else:
+        app.send_signal(signal.SIGTERM)
+
+
+async def plain(run: Run) -> None:
+    """macOS and Windows: steps 1, 3–7 without WebDriver (see the module docs):
+    argv, the app's stderr announcements, the run file and the home's API."""
     alpha = canonical(run.alpha)
 
     say("1. launch with alpha: the home and the backdrop on stderr")
@@ -653,7 +550,7 @@ async def macos(run: Run) -> None:
         got = await announced(app, err)
         host = await until("the host's run file", run.host, 10)
         need(got["home"] == host["url"], f"announced {got['home']}, the run file says {host['url']}")
-        want = "liquid-glass" if int(platform.mac_ver()[0].split(".")[0]) >= 26 else "vibrancy"
+        want = backdrop_wanted()
         need(got["backdrop"] == want, f"the backdrop: {got['backdrop']}, want {want}")
 
         say("3. the argv intent: alpha runs")
@@ -671,17 +568,17 @@ async def macos(run: Run) -> None:
         say("5. the hand-over")
         await run.hand_over()
 
-        say("6. the orderly quit: SIGTERM")
-        app.send_signal(signal.SIGTERM)
+        say("6. the orderly quit: the OS's own (SIGTERM on macOS, WM_CLOSE on Windows)")
+        quit_plain(app)
         code = await asyncio.to_thread(app.wait, 20)
-        need(code == 0, f"the app exited {code} on SIGTERM: {err.read_text()}")
-        need(not run.run_file.exists(), "the run file outlived SIGTERM: no orderly shutdown")
+        need(code == 0, f"the app exited {exit_status(code)} on the quit: {err.read_text()}")
+        need(not run.run_file.exists(), "the run file outlived the quit: no orderly shutdown")
         await run.canvas_survives(p)
     finally:
         if app.poll() is None:
             app.kill()
 
-    say("7. the crash path: relaunch, SIGKILL; the next launch boots and adopts")
+    say("7. the crash path: relaunch, kill (SIGKILL, TerminateProcess); the next launch boots and adopts")
     app, err = launch(run, [], "crashed")
     try:
         await announced(app, err)
@@ -699,7 +596,7 @@ async def macos(run: Run) -> None:
         await run.home({"type": "stop", "id": row})
         await run.row_status(alpha, "stopped", 30)
         await until(f"the canvas {p['pid']} gone", lambda: not pid_alive(p["pid"]), 30)
-        app.send_signal(signal.SIGTERM)
+        quit_plain(app)
         await asyncio.to_thread(app.wait, 20)
     finally:
         if app.poll() is None:
@@ -712,12 +609,11 @@ async def macos(run: Run) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--app", required=True, type=Path)
-    ap.add_argument("--native-driver", help="msedgedriver.exe (Windows)")
     args = ap.parse_args()
     app = args.app.resolve()
     need(app.is_file(), f"no app at {app}")
     need((app.parent / f"fantastic{EXE}").is_file(), f"no fantastic{EXE} beside {app}")
-    if not MACOS:
+    if LINUX:
         need(shutil.which("tauri-driver"), "tauri-driver is not on PATH")
     root = HERE / "runs" / time.strftime("%Y%m%d-%H%M%S")
     root.mkdir(parents=True)
@@ -725,7 +621,7 @@ def main() -> int:
     say(f"app {app}; run {root}")
     ok = False
     try:
-        asyncio.run(macos(run) if MACOS else webdriver(run, args))
+        asyncio.run(webdriver(run) if LINUX else plain(run))
         ok = True
     except Exception as e:  # noqa: BLE001 — every failure is the verdict's
         say("FAILED:", e)

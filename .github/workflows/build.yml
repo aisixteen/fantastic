@@ -388,9 +388,9 @@ jobs:
           retention-days: 30
 
   # The app's e2e (`src/app/e2e/run.py`) on exactly the app and CLI just built.
-  # Linux and Windows drive the window through tauri-driver (WebKitWebDriver,
-  # msedgedriver); macOS has no WKWebView driver, so there the app is launched
-  # and asked through the home's socket.
+  # Linux drives the window through tauri-driver (WebKitWebDriver). macOS and
+  # Windows launch the app and ask it through the home's socket: macOS has no
+  # WKWebView driver, and msedgedriver can't reach the app's WebView2.
   app-e2e:
     if: inputs.e2e && !cancelled() && !failure()
     needs: [binaries, app]
@@ -442,20 +442,13 @@ jobs:
       - name: the desktop app's libraries, its WebDriver and a display (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev webkit2gtk-driver xvfb
+      # WebDriver on Linux only: macOS has no WKWebView driver, and msedgedriver
+      # can't reach the app's WebView2 (src/app/e2e/run.py's module docs)
       - uses: dtolnay/rust-toolchain@stable
-        if: runner.os != 'macOS'
+        if: runner.os == 'Linux'
       - name: tauri-driver
-        if: runner.os != 'macOS'
+        if: runner.os == 'Linux'
         run: cargo install tauri-driver --version 2.1.0 --locked
-      - name: msedgedriver at exactly the WebView2 runtime's version (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $v = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}').pv
-          if (-not $v) { throw "no WebView2 runtime version in the registry" }
-          Write-Host "WebView2 runtime $v"
-          Invoke-WebRequest "https://msedgedriver.microsoft.com/$v/edgedriver_win64.zip" -OutFile edgedriver.zip
-          Expand-Archive edgedriver.zip -DestinationPath edgedriver
       - name: app e2e (Linux)
         if: runner.os == 'Linux'
         working-directory: src/lib/python
@@ -467,7 +460,7 @@ jobs:
       - name: app e2e (Windows)
         if: runner.os == 'Windows'
         working-directory: src/lib/python
-        run: uv run python ../../app/e2e/run.py --app ../../../dist/app/fantastic-app.exe --native-driver "$GITHUB_WORKSPACE/edgedriver/msedgedriver.exe"
+        run: uv run python ../../app/e2e/run.py --app ../../../dist/app/fantastic-app.exe
       - name: keep the run
         if: failure()
         uses: actions/upload-artifact@v7
