@@ -588,6 +588,54 @@ async fn a_view_caller_is_held_to_its_path_at_the_bridge() {
     );
 }
 
+/// The bridge's binary channel, called AS `caller` (the kernel's dispatch identity).
+async fn binary_as(
+    k: &Arc<Kernel>,
+    caller: &AgentId,
+    header: Value,
+    blob: &[u8],
+) -> (Value, Option<Vec<u8>>) {
+    let out = fantastic_kernel::test_support::as_agent(
+        caller.clone(),
+        k.send(vec![
+            Item::new(AgentId::from("fb"), header).with_binary_key("bytes", blob.to_vec())
+        ]),
+    )
+    .await
+    .remove(0);
+    (out.result, out.body.map(|b| b.bytes))
+}
+
+#[tokio::test]
+async fn a_view_caller_is_held_to_its_path_on_the_binary_channel() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("a.txt"), "one\n").unwrap();
+    std::fs::write(served(&tmp).join("b.txt"), "two\n").unwrap();
+    let fv = AgentId::from(open(&k, "file", "a.txt").await["id"].as_str().unwrap());
+    // a read or write of another path, as a binary frame, is refused as on the text channel
+    let (r, body) = binary_as(&k, &fv, json!({"type": "read", "path": "b.txt"}), b"").await;
+    assert_eq!(r["reason"], "unauthorized", "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap()
+            .contains("outside this file view"),
+        "{r}"
+    );
+    assert_eq!(body, None);
+    let (w, body) = binary_as(&k, &fv, json!({"type": "write", "path": "b.txt"}), b"x").await;
+    assert_eq!(w["reason"], "unauthorized", "{w}");
+    assert_eq!(body, None);
+    assert_eq!(
+        std::fs::read_to_string(served(&tmp).join("b.txt")).unwrap(),
+        "two\n"
+    );
+    // its own path is still reached on the binary channel
+    let (r, _) = binary_as(&k, &fv, json!({"type": "read", "path": "a.txt"}), b"").await;
+    assert_eq!(r["lines"][0]["text"], "one", "{r}");
+}
+
 #[test]
 fn a_relay_event_without_a_known_kind_is_dropped() {
     for ev in [

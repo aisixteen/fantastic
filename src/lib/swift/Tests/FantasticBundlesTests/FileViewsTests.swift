@@ -4,7 +4,7 @@
 
 @testable import FantasticFile
 import FantasticJSON
-import FantasticKernel
+@testable import FantasticKernel
 import Foundation
 import OrderedCollections
 import Testing
@@ -296,6 +296,29 @@ struct FileViewsTests {
         #expect(viewPathGate(k, bridge: "fs", origin: nil, verb: "read", payload: read("b.md")) == nil)
         let bad = viewPathGate(k, bridge: "fs", origin: fv, verb: "read", payload: .object(["path": .bool(true)]))
         #expect(bad?["reason"].asString == "bad_arg")
+    }
+
+    @Test func aViewCallerIsHeldToItsPathOnTheBinaryChannel() async {
+        let (k, dir) = await bridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.md", "one\n")
+        write(dir, "b.md", "two\n")
+        let fv = AgentId((await open(k, "file", "a.md"))["id"].asString ?? "")
+        // the view calls its bridge AS ITSELF, a document riding the binary body
+        func asView(_ header: OrderedDictionary<String, JSON>, _ body: Data) async -> (JSON, Data?) {
+            let item = Item(AgentId("fs"), .object(header), binary: Blob("bytes", body))
+            let out = await KernelTaskLocals.$sender.withValue(fv) { await k.send([item])[0] }
+            return (out.result, out.body?.bytes)
+        }
+        let refused = await asView(["type": "write", "path": "b.md"], Data("x\n".utf8))
+        #expect(refused.0["reason"].asString == "unauthorized", "\(refused.0)")
+        #expect(refused.0["error"].asString?.contains("outside this file view") == true)
+        #expect(refused.1 == nil)
+        #expect(
+            (try? String(contentsOf: dir.appendingPathComponent("b.md"), encoding: .utf8)) == "two\n")
+        // its own path is still reached on the binary channel
+        let inside = await asView(["type": "read", "path": "a.md"], Data())
+        #expect(inside.0["lines"][0]["text"].asString == "one", "\(inside.0)")
     }
 
     @Test func theBridgeHoldsAViewToTheScopeInItsCallableBy() async {
