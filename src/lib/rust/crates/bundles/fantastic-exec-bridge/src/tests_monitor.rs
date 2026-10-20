@@ -419,9 +419,11 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
     assert_eq!(listed["monitors"], json!([]), "{listed}");
 }
 
-/// python `test_the_end_is_delivered_when_nothing_waits_any_more` (issue 64): every
-/// line lands in ONE burst, the first delivery takes them all, nothing waits when
-/// the job ends — the end is delivered anyway, once, as the header alone.
+/// python `test_the_end_is_delivered_when_nothing_waits_any_more` (issue 64): the
+/// first match goes at once and nothing waits behind it, so the job's end is still
+/// delivered — once, as the header alone. Lines fed "at once" are NO burst here:
+/// on a multi-threaded runtime the monitor's task may drain after the first line
+/// (python's single-threaded loop cannot), so this feeds one line and waits for it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_end_is_delivered_when_nothing_waits_any_more() {
     let tmp = TempDir::new().unwrap();
@@ -436,11 +438,9 @@ async fn the_end_is_delivered_when_nothing_waits_any_more() {
     .await;
     let mid = r["monitor_id"].as_i64().unwrap_or_else(|| panic!("{r}"));
     let owner = AgentId::from(rn.as_str());
-    for n in 0..3 {
-        crate::monitor::feed_line(&owner, TaskId(jid), &format!("INFO step {n}"));
-    }
+    crate::monitor::feed_line(&owner, TaskId(jid), "INFO step 0");
     until(|| ear.texts().len() == 1, 5.0, "the first delivery").await;
-    assert!(ear.texts()[0].contains("INFO step 2"), "{:?}", ear.texts());
+    assert!(ear.texts()[0].contains("INFO step 0"), "{:?}", ear.texts());
     stop_all(&k, &rn).await;
     until(
         || ear.texts().iter().any(|t| t.contains("job ended")),
