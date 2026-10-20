@@ -52,9 +52,17 @@ FOLDER_VIEW = "e123-folder"
 
 
 class Watch:
-    """`aid`'s events over the ws face, collected in a daemon thread. `ready` is set once
-    the subscription is sent (or the connect failed), so the caller edits only after it;
-    a connect failure is kept in `error` and raised by `ready_or_raise`, not swallowed."""
+    """`aid`'s events over the ws face, collected in a daemon thread.
+
+    `ready` is set once the connect attempt is over, which is after the `watch` frame is
+    WRITTEN, not after the server has registered it: the ws face acks a successful watch
+    with nothing (only a refusal comes back, as an `error` frame). So an edit made right
+    after `ready` can still race the registration; a watch that registers too late misses
+    the edit and the probe fails it as a missing event, it never passes on a count of zero.
+
+    Any failure is kept in `error` under `cond`, and `wait_for` and `events` raise it: a
+    connect failure, an exception from the event stream, or the stream ending while the
+    probe still watches (a dropped socket reads as end-of-stream, not as an exception)."""
 
     def __init__(self, port: int, aid: str):
         self.seen: list = []
@@ -63,33 +71,58 @@ class Watch:
         self.cond = threading.Condition()
         threading.Thread(target=lambda: asyncio.run(self._run(port, aid)), daemon=True).start()
 
+    def _fail(self, e: BaseException) -> None:
+        with self.cond:
+            self.error = e
+            self.cond.notify_all()
+
     async def _run(self, port: int, aid: str) -> None:
         w = WSWatcher(port, aid)
         try:
             await w.connect()
         except BaseException as e:
-            self.error = e
+            self._fail(e)
             return
         finally:
             self.ready.set()
-        async for ev in w.events():
-            with self.cond:
-                self.seen.append(ev)
-                self.cond.notify_all()
+        try:
+            async for ev in w.events():
+                with self.cond:
+                    self.seen.append(ev)
+                    self.cond.notify_all()
+        except BaseException as e:
+            self._fail(e)
+            return
+        self._fail(ConnectionError(f"ws watch of {aid} ended: the socket closed"))
 
     def ready_or_raise(self) -> None:
         self.ready.wait()
-        if self.error is not None:
-            raise self.error
+        with self.cond:
+            if self.error is not None:
+                raise self.error
 
     def events(self) -> list:
         with self.cond:
+            if self.error is not None:
+                raise self.error
             return list(self.seen)
 
-    def wait_for(self, pred, timeout: float = 30.0) -> bool:
-        """Block until an event matches `pred`, or the bound passes."""
+    def count(self, pred) -> int:
+        """How many events so far match `pred`."""
         with self.cond:
-            return self.cond.wait_for(lambda: any(pred(e) for e in self.seen), timeout)
+            return sum(1 for e in self.seen if pred(e))
+
+    def wait_for(self, pred, timeout: float = 30.0) -> bool:
+        """True once an event matches `pred`, False when the bound passes first. A failed
+        watch raises its error here instead of waiting out the bound."""
+        with self.cond:
+            self.cond.wait_for(
+                lambda: self.error is not None or any(pred(e) for e in self.seen), timeout)
+            if any(pred(e) for e in self.seen):
+                return True
+            if self.error is not None:
+                raise self.error
+            return False
 
 
 def main() -> int:
@@ -196,25 +229,35 @@ def main() -> int:
              f"the folder view's watch arms its own relay: {str(wd)[:120]}")
 
         # 5 · live, over the ws face: each watch is subscribed before its one edit, and one
-        # edit gives one event, so two opens of one path share one relay with no duplicate
+        # edit gives one event, so two opens of one path share one relay with no duplicate.
+        # A count is taken only AFTER a marker the same bridge emits later: the bridge's watch
+        # loop yields its batches in order, so a second event for an earlier edit lands before
+        # the marker does. The file view relays only its own path, so its marker is the
+        # folder view's `added` for a sibling written after the edit. LIMIT: a duplicate the
+        # disk reports after the marker's batch is not seen; no sleep bounds that window.
         fw = Watch(hk.port, fid)
         dw = Watch(hk.port, did)
         fw.ready_or_raise()
         dw.ready_or_raise()
         changed = lambda e: e.get("type") == "changed" and e.get("path") == "docs/a.md"  # noqa: E731
+        entry = lambda kind, name: lambda e: e.get("type") == kind and e.get("name") == name  # noqa: E731
         (box / "docs/a.md").write_text("live\n")
-        fw.wait_for(changed)
-        n = sum(1 for e in fw.events() if changed(e))
+        need(fw.wait_for(changed), "a file view emits `changed` after an on-disk edit")
+        (box / "docs/marker_a.md").write_text("m\n")
+        need(dw.wait_for(entry("added", "marker_a.md")), "the folder view's marker follows the file edit")
+        n = fw.count(changed)
         need(n == 1, f"a file view emits one `changed` after one on-disk edit (got {n}): {fw.events()[:2]}")
-        added = lambda e: e.get("type") == "added" and e.get("name") == "live.md"  # noqa: E731
-        removed = lambda e: e.get("type") == "removed" and e.get("name") == "live.md"  # noqa: E731
         (box / "docs/live.md").write_text("new\n")
-        dw.wait_for(added)
-        n = sum(1 for e in dw.events() if added(e))
+        need(dw.wait_for(entry("added", "live.md")), "a folder view emits `added` for a new entry")
+        (box / "docs/marker_b.md").write_text("m\n")
+        need(dw.wait_for(entry("added", "marker_b.md")), "the folder view's second marker follows the entry")
+        n = dw.count(entry("added", "live.md"))
         need(n == 1, f"a folder view emits one `added` for one new entry (got {n}): {dw.events()[:3]}")
         (box / "docs/live.md").unlink()
-        dw.wait_for(removed)
-        n = sum(1 for e in dw.events() if removed(e))
+        need(dw.wait_for(entry("removed", "live.md")), "a folder view emits `removed` for a deleted entry")
+        (box / "docs/marker_b.md").unlink()
+        need(dw.wait_for(entry("removed", "marker_b.md")), "the folder view's marker follows the removal")
+        n = dw.count(entry("removed", "live.md"))
         need(n == 1, f"a folder view emits one `removed` for one deleted entry (got {n}): {dw.events()[-3:]}")
         need(all(e.get("path", "").startswith("docs") for e in dw.events()),
              "a folder view's events name only its folder's entries")
