@@ -221,4 +221,31 @@ struct FileViewsTests {
         #expect(viewBridgePath(VIEW_FOLDER, own: "docs", rel: "../x") == nil)
         #expect(viewBridgePath(VIEW_FOLDER, own: ".", rel: "a") == "a")
     }
+
+    /// python `test_docs_of_a_view_lists_only_the_views_own_verbs`: a view documents its
+    /// own table, and the bridge keeps the whole one.
+    @Test func docsOfAViewListTheViewsOwnVerbsOnly() async {
+        let (k, dir) = await bridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.txt", "one\n")
+        let f = await open(k, "file", "a.txt")["id"].asString ?? ""
+        let fv = await call(k, "kernel", ["type": "docs", "of": .string(f)])
+        let names = (fv["verbs"].asObject ?? [:]).keys.sorted()
+        #expect(names == ["read", "reflect", "watch", "write"], "\(fv)")
+        let whole = await call(k, "kernel", ["type": "docs", "of": "fs"])
+        #expect((whole["verbs"].asObject ?? [:])["delete"] != nil)
+    }
+
+    /// python `test_read_reports_whether_the_file_ends_in_a_newline`.
+    @Test func readReportsWhetherTheFileEndsInANewline() async {
+        let (k, dir) = await bridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "with.txt", "a\nb\n")
+        write(dir, "without.txt", "a\nb")
+        write(dir, "empty.txt", "")
+        for (name, want) in [("with.txt", true), ("without.txt", false), ("empty.txt", false)] {
+            let r = await call(k, "fs", ["type": "read", "path": .string(name)])
+            #expect(r["newline"].asBool == want, "\(name): \(r)")
+        }
+    }
 }

@@ -237,3 +237,254 @@ fn a_caller_with_no_verb_the_view_answers_is_not_admitted() {
     let got = crate::views::view_callers(g.as_object().unwrap(), None, crate::views::FILE);
     assert_eq!(Value::Object(got), json!({}));
 }
+
+/// Every event a watcher's inbox holds within `secs` (the full window: a count is the point).
+async fn events_for(rx: &mut fantastic_kernel::inbox::InboxReceiver, secs: u64) -> Vec<Value> {
+    let mut out = Vec::new();
+    let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    while let Ok(Some(item)) = tokio::time::timeout_at(end, rx.recv()).await {
+        out.push(item.payload);
+    }
+    out
+}
+
+/// The verbs `docs of=<agent>` names, sorted.
+async fn docs_verbs(k: &Arc<Kernel>, of: &str) -> Vec<String> {
+    let r = k
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type": "docs", "of": of}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let mut names: Vec<String> = r["verbs"].as_object().unwrap().keys().cloned().collect();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_view_relays_added_changed_removed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::create_dir_all(served(&tmp).join("box")).unwrap();
+    let v = open(&k, "folder", "box").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let w = AgentId::from("_t_folder");
+    let mut rx = k.ensure_inbox(&w);
+    assert!(k.watch(&AgentId::from(v.as_str()), w).await.is_none());
+    call(&k, &v, json!({"type": "watch"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await; // the disk watcher is up
+    std::fs::write(served(&tmp).join("box/n.md"), "n").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let first = loop {
+        let left = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("no entry event for box/n.md within 5s");
+        let item = tokio::time::timeout(left, rx.recv())
+            .await
+            .expect("timed out")
+            .expect("inbox open");
+        if matches!(item.payload["type"].as_str(), Some("added" | "changed")) {
+            break item.payload;
+        }
+    };
+    assert_eq!(first["path"], "box/n.md", "{first}");
+    assert_eq!(first["name"], "n.md", "{first}");
+    std::fs::remove_file(served(&tmp).join("box/n.md")).unwrap();
+    let gone = loop {
+        let left = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("no removed event within 5s");
+        let item = tokio::time::timeout(left, rx.recv())
+            .await
+            .expect("timed out")
+            .expect("inbox open");
+        if item.payload["type"] == "removed" {
+            break item.payload;
+        }
+    };
+    assert_eq!(gone["path"], "box/n.md", "{gone}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_opens_of_one_file_share_one_relay() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("shared.txt"), "s\n").unwrap();
+    let v = open(&k, "file", "shared.txt").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let w = AgentId::from("_t_shared");
+    let mut rx = k.ensure_inbox(&w);
+    assert!(k.watch(&AgentId::from(v.as_str()), w).await.is_none());
+    let reflect = call(&k, &v, json!({"type": "reflect"})).await;
+    assert_eq!(reflect["watching"], false, "{reflect}");
+    let first = call(&k, &v, json!({"type": "watch"})).await;
+    assert_eq!(first["relayed"], false, "{first}");
+    // the second open is the same agent, and its watch reuses the relay
+    let again = open(&k, "file", "shared.txt").await;
+    assert_eq!(again["id"], v.as_str(), "{again}");
+    assert_eq!(again["created"], false);
+    let second = call(&k, &v, json!({"type": "watch"})).await;
+    assert_eq!(second["relayed"], true, "{second}");
+    let reflect = call(&k, &v, json!({"type": "reflect"})).await;
+    assert_eq!(reflect["watching"], true, "{reflect}");
+    tokio::time::sleep(Duration::from_millis(300)).await; // the disk watcher is up
+    std::fs::write(served(&tmp).join("shared.txt"), "t\n").unwrap();
+    // one relay: one event per change, not one per watch
+    let events = events_for(&mut rx, 1).await;
+    let changed: Vec<&Value> = events.iter().filter(|e| e["type"] == "changed").collect();
+    assert_eq!(changed.len(), 1, "{events:?}");
+    assert_eq!(changed[0]["path"], "shared.txt");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_a_view_ends_its_relay() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("gone.txt"), "g\n").unwrap();
+    let v = open(&k, "file", "gone.txt").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // the bridge's own watcher: it sees a change while a view holds the path
+    let w = AgentId::from("_t_bridge_watch");
+    let mut rx = k.ensure_inbox(&w);
+    assert!(k.watch(&AgentId::from("fb"), w).await.is_none());
+    call(&k, &v, json!({"type": "watch"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await; // the disk watcher is up
+    std::fs::write(served(&tmp).join("gone.txt"), "h\n").unwrap();
+    let before = events_for(&mut rx, 1).await;
+    assert!(
+        before.iter().any(|e| e["type"] == "changed"),
+        "the bridge sees the change while the view watches: {before:?}"
+    );
+    let del = k
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "delete_agent", "id": v}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(del["deleted"], true, "{del}");
+    std::fs::write(served(&tmp).join("gone.txt"), "i\n").unwrap();
+    // the relay let go of the bridge's watch: no `changed` reaches the bridge's watchers
+    // (they also hear the calls made to it, so only `changed` is judged)
+    let after = events_for(&mut rx, 1).await;
+    let changed: Vec<&Value> = after.iter().filter(|e| e["type"] == "changed").collect();
+    assert!(
+        changed.is_empty(),
+        "the relay ended with the view: {after:?}"
+    );
+}
+
+#[tokio::test]
+async fn open_view_refuses_a_path_the_bridge_does_not_expose() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::create_dir_all(served(&tmp).join("docs")).unwrap();
+    std::fs::create_dir_all(served(&tmp).join("secret")).unwrap();
+    std::fs::write(served(&tmp).join("secret/s.txt"), "s").unwrap();
+    // a second bridge exposing only `docs`
+    let made = k
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE,
+                   "id": "fb_docs", "root": served(&tmp).display().to_string(),
+                   "ingress_rule": "allow_all_ingress", "allow": ["docs"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], "fb_docs", "{made}");
+    let open_on = |kind: &str, path: &str| json!({"type": "open_view", "kind": kind, "path": path});
+    let folder = call(&k, "fb_docs", open_on("folder", "secret")).await;
+    assert!(
+        folder.get("error").is_some() && folder.get("id").is_none(),
+        "{folder}"
+    );
+    let file = call(&k, "fb_docs", open_on("file", "secret/s.txt")).await;
+    assert!(
+        file.get("error").is_some() && file.get("id").is_none(),
+        "{file}"
+    );
+    // an exposed path is granted as usual
+    let ok = call(&k, "fb_docs", open_on("folder", "docs")).await;
+    assert_eq!(ok["created"], true, "{ok}");
+}
+
+#[test]
+fn a_folder_view_relays_only_its_entries() {
+    let at = |p: &str| json!({"path": p, "kind": "added"});
+    // the folder's own entries: an added/changed/removed event, named
+    let got = crate::views::relay_event(crate::views::FOLDER, "box", &at("box/n.md")).unwrap();
+    assert_eq!(
+        got,
+        json!({"type": "added", "path": "box/n.md", "name": "n.md"})
+    );
+    let removed = json!({"path": "box/m.md", "kind": "deleted"});
+    let got = crate::views::relay_event(crate::views::FOLDER, "box", &removed).unwrap();
+    assert_eq!(got["type"], "removed");
+    let modified = json!({"path": "box/m.md", "kind": "modified"});
+    let got = crate::views::relay_event(crate::views::FOLDER, "box", &modified).unwrap();
+    assert_eq!(got["type"], "changed");
+    // the folder itself, something deeper, and another folder are not its events
+    assert!(crate::views::relay_event(crate::views::FOLDER, "box", &at("box")).is_none());
+    assert!(crate::views::relay_event(crate::views::FOLDER, "box", &at("box/a/deep.md")).is_none());
+    assert!(crate::views::relay_event(crate::views::FOLDER, "box", &at("other/n.md")).is_none());
+    // the root folder's entries are the top level only
+    assert!(crate::views::relay_event(crate::views::FOLDER, ".", &at("top.md")).is_some());
+    assert!(crate::views::relay_event(crate::views::FOLDER, ".", &at("a/top.md")).is_none());
+}
+
+#[test]
+fn a_file_view_relays_only_its_own_path() {
+    let ev = json!({"path": "live.txt", "kind": "modified"});
+    let got = crate::views::relay_event(crate::views::FILE, "live.txt", &ev).unwrap();
+    assert_eq!(
+        got,
+        json!({"type": "changed", "path": "live.txt", "kind": "modified"})
+    );
+    let other = json!({"path": "other.txt", "kind": "modified"});
+    assert!(crate::views::relay_event(crate::views::FILE, "live.txt", &other).is_none());
+    assert!(crate::views::relay_event(
+        crate::views::FILE,
+        "live.txt",
+        &json!({"kind": "modified"})
+    )
+    .is_none());
+}
+
+#[tokio::test]
+async fn a_view_documents_only_its_own_verbs() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("a.txt"), "one\n").unwrap();
+    std::fs::create_dir_all(served(&tmp).join("box")).unwrap();
+    let f = open(&k, "file", "a.txt").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let d = open(&k, "folder", "box").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        docs_verbs(&k, &f).await,
+        ["read", "reflect", "watch", "write"]
+    );
+    assert_eq!(
+        docs_verbs(&k, &d).await,
+        ["list", "reflect", "reveal", "watch"]
+    );
+    // the bridge still answers its whole table
+    assert!(docs_verbs(&k, "fb").await.contains(&"delete".to_string()));
+    // and a verb a view does not answer is not in its docs, nor its advertisement
+    let r = call(&k, &f, json!({"type": "delete", "path": "a.txt"})).await;
+    assert_eq!(r["reason"], "unhandled", "{r}");
+}

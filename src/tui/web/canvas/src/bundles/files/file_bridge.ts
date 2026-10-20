@@ -371,8 +371,34 @@ export function serve(kernel: Kernel, kind: ViewKind, path: string, view: string
   if (s.listeners.size > 0) listenTo(s, view);
 }
 
+/** How long the page waits for the host to grant it a view it has just been given: the
+ *  host's own grant wait (`reach.rs` GRANT_WAIT). */
+export const GRANT_WAIT_MS = 10_000;
+/** The pause between the page's probes of a view it is still refused. */
+const GRANT_STEP_MS = 25;
+
+/** The page's grant on a view is written by the host when it hears the view `added`
+ *  (`reach.rs` `start`), after `open_view` has already answered. A call from the page in
+ *  that gap is refused as an egress `unauthorized`. So the page waits for the grant: a
+ *  `reflect` of the view is re-sent while it is refused so, for at most `waitMs`. Any
+ *  other refusal, and the refusal that is still there at the end, are returned as they
+ *  are. Null once the page may reach the view. (A handler's own call is judged by its
+ *  own grant instead, so this is the page's wait, not a handler's.) */
+export async function awaitGrant(kernel: Kernel, view: string, waitMs = GRANT_WAIT_MS): Promise<Refusal | null> {
+  const end = Date.now() + waitMs;
+  for (;;) {
+    const r = (await kernel.callHost(view, { type: "reflect" } as Payload)) as Record<string, unknown>;
+    if (!isRefusal(r)) return null;
+    const granting = r["reason"] === "unauthorized" && r["side"] === "egress";
+    if (!granting || Date.now() >= end) return r;
+    await new Promise<void>((done) => setTimeout(done, GRANT_STEP_MS));
+  }
+}
+
 /** `open_view` on the bridge: the view agent of `path` — reused when one exists, made
- *  otherwise — served on this page. A refusal (the path is not exposed, say) is returned as it is. */
+ *  otherwise — served on this page. A refusal (the path is not exposed, say) is returned
+ *  as it is. The page's grant on the view is awaited by the cell that reads it
+ *  (`bindCellToView`), not here: this runs inside a handler, whose own grant decides. */
 export async function openViewAgent(
   kernel: Kernel,
   kind: ViewKind,
@@ -384,6 +410,34 @@ export async function openViewAgent(
   if (typeof id !== "string") return { error: `open_view ${path}: the reply names no view`, reason: "bad_reply" };
   serve(kernel, kind, path, id);
   return { view: id, created: r["created"] === true };
+}
+
+/** A cell's binding to the view of its path, at mount. A cell saved as a view carries its
+ *  `view_agent`: that agent serves it again, as it did. A cell saved before views (none)
+ *  gets the view of its path, made or reused, and `record` names it on the cell. Either
+ *  way the page waits for its grant on the view (`awaitGrant`), so the cell's first reads
+ *  are not refused in the gap. A refusal is returned for the cell to show; the cell itself
+ *  stays open, and its reads are the view's, so they are refused and shown too. */
+export async function bindCellToView(
+  kernel: Kernel,
+  kind: ViewKind,
+  path: string,
+  saved: string | undefined,
+  record: (view: string) => void,
+  waitMs = GRANT_WAIT_MS,
+): Promise<{ ok: true; view: string } | { ok: false; refusal: Refusal }> {
+  let view: string;
+  if (saved !== undefined) {
+    serve(kernel, kind, path, saved);
+    view = saved;
+  } else {
+    const r = await openViewAgent(kernel, kind, path);
+    if (isRefusal(r)) return { ok: false, refusal: r };
+    record(r.view);
+    view = r.view;
+  }
+  const ungranted = await awaitGrant(kernel, view, waitMs);
+  return ungranted === null ? { ok: true, view } : { ok: false, refusal: ungranted };
 }
 
 const hubs = new WeakMap<Kernel, WatchHub>();

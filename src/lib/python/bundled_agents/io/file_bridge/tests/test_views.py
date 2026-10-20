@@ -234,3 +234,55 @@ async def test_deleting_a_view_ends_its_relay(seeded_kernel, file_bridge):
     assert v in views.RELAYS
     await k.delete(v)
     assert v not in views.RELAYS
+
+
+async def _docs(k, **args):
+    return await _call(k, "kernel", {"type": "docs", **args})
+
+
+async def test_docs_of_a_view_lists_only_the_views_own_verbs(
+    seeded_kernel, file_bridge
+):
+    """A view answers its own table, so `docs of=<view>` (and `advertises`) name
+    only what it answers: never the bridge's delete or rename, which it refuses."""
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("one\n")
+    Path("box").mkdir()
+    f = (await _open(k, fb, "file", "a.txt"))["id"]
+    d = (await _open(k, fb, "folder", "box"))["id"]
+    assert sorted((await _docs(k, of=f))["verbs"]) == [
+        "read",
+        "reflect",
+        "watch",
+        "write",
+    ]
+    assert sorted((await _docs(k, of=d))["verbs"]) == [
+        "list",
+        "reflect",
+        "reveal",
+        "watch",
+    ]
+    assert (await _docs(k, of=f, verb="delete"))["reason"] == "bad_arg"
+    assert k.get(f) and k.ctx.agents[f].advertises("read")
+    assert not k.ctx.agents[f].advertises("delete")
+    # the bridge itself still answers the whole table
+    assert "delete" in (await _docs(k, of=fb))["verbs"]
+    assert k.ctx.agents[fb].advertises("delete")
+
+
+async def test_read_reports_whether_the_file_ends_in_a_newline(
+    seeded_kernel, file_bridge
+):
+    """`newline` is what a whole-document save must keep: a file with no final newline
+    is not given one by the editor."""
+    k, fb = seeded_kernel, file_bridge
+    Path("with.txt").write_text("a\nb\n")
+    Path("without.txt").write_text("a\nb")
+    Path("empty.txt").write_text("")
+    for name, want in (
+        ("with.txt", True),
+        ("without.txt", False),
+        ("empty.txt", False),
+    ):
+        r = await _call(k, fb, {"type": "read", "path": name})
+        assert r["newline"] is want, (name, r)

@@ -24,6 +24,11 @@ export class FakeBridge implements FileBridge {
   /** the view agents made by `open_view`: id → what it views (one per path) */
   readonly views = new Map<string, { kind: "file" | "folder"; path: string }>();
   private listener: ((ev: Dict) => void) | null = null;
+  /** how many of the page's calls to a new view the host still refuses, as an egress
+   *  `unauthorized`, before its grant lands (the race `awaitGrant` waits out) */
+  pendingGrants = 0;
+  /** what `open_view` refuses with, when set (a path the bridge does not expose, say) */
+  openViewRefusal: Dict | null = null;
 
   readonly subscribe: Subscribe = (fn) => {
     this.listener = fn;
@@ -145,6 +150,7 @@ export class FakeBridge implements FileBridge {
       }
       case "open_view": {
         const kind = p["kind"];
+        if (this.openViewRefusal !== null) return this.openViewRefusal;
         if (kind !== "file" && kind !== "folder") return refuse("open_view: kind must be `file` or `folder`", "bad_arg", { arg: "kind" });
         if (kind === "file" ? !this.files.has(path) : !this.dirs.has(path)) return refuse(`open_view: '${path}' is not there`, "not_found", { path });
         const id = `view:${kind}:${path}`;
@@ -162,6 +168,10 @@ export class FakeBridge implements FileBridge {
   async viewCall(view: string, p: Dict): Promise<Dict> {
     const v = this.views.get(view);
     if (v === undefined) return { error: `no agent ${view}`, reason: "unknown_agent" };
+    if (this.pendingGrants > 0) {
+      this.pendingGrants -= 1;
+      return { error: `page may not call ${String(p["type"])} on ${view}`, reason: "unauthorized", side: "egress" };
+    }
     const own = v.path;
     const refuse = (error: string, reason: string): Dict => ({ error, reason });
     const rel = typeof p["path"] === "string" ? norm(p["path"]) : "";
@@ -180,6 +190,8 @@ export class FakeBridge implements FileBridge {
         if (target === null) return refuse(`list: '${rel}' is outside this agent's folder '${own}'`, "unauthorized");
         return this.call({ type: "list", path: target });
       }
+      case "reflect":
+        return { id: view, kind: v.kind, path: own, bridge: "files", watching: false };
       case "watch": {
         this.watched.add(own === "" ? "." : own);
         return { watching: own === "" ? "." : own, agent: view, relayed: false };

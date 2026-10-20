@@ -37,7 +37,10 @@ bundles, seeds an empty tree with the canvas root, and mounts.
   a folder is its folder agent's view. Its reads, saves and live changes go through
   the agent (its `read`/`write`, or its `list` and `watch`); what the agent does not
   answer (the stream reads, undo, the tree's own file operations) stays with the
-  bridge. Cells saved before this open unbound, as they did.
+  bridge. A cell saved before this is bound to the view of its path when it mounts
+  (`bindCellToView`): its view is named on the cell, and the page waits for its grant
+  on the view before the first read (`awaitGrant`, the host grants it after `open_view`
+  answers). A refusal is said in the cell, which stays open.
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
   drawn with, per backdrop; it takes skins an AI writes (`fantastic readme skins`).
 

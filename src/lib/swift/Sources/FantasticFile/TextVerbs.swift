@@ -251,6 +251,8 @@ extension FileBundle {
         out["lines"] = .array(lines)
         out["total"] = .integer(Int64(all.count))
         out["eof"] = .bool(off >= total || limit >= total - off)
+        // whether the file ends in a newline: a whole-document save keeps it as it was
+        out["newline"] = .bool(data.last == 0x0A)
         out["version"] = .string(ver)
         // HOW TO GET THIS BODY AGAIN — one line; a reader that keeps no body keeps this.
         out["origin"] = .string(

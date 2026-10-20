@@ -212,6 +212,12 @@ impl Bundle for FileBundle {
         Value::Object(verbs)
     }
 
+    /// A VIEW answers its own verbs, so `docs of=<view>` serves its table (python
+    /// `instance_verbs`); every other record keeps the bridge's.
+    fn instance_verb_docs(&self, agent: &fantastic_kernel::Agent) -> Option<Value> {
+        views::verb_docs_of(&agent.record().meta)
+    }
+
     fn readme(&self) -> Option<&'static str> {
         Some(README)
     }

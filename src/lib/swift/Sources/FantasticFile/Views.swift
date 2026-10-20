@@ -32,6 +32,31 @@ func viewGrants(_ kind: String) -> [String] {
 private let fileAnswers = ["read", "write", "watch", "reflect"]
 private let folderAnswers = ["list", "reveal", "watch", "reflect"]
 
+/// python `file_agent.VERBS` docs — what `docs of=<file view>` serves: the view's own
+/// table, never the bridge's (a view refuses a delete it is not granted).
+let fileViewVerbDocs: JSON = [
+    "reflect":
+        "Identity, the file it views, its bridge, and whether its change relay is on. No args.",
+    "read":
+        "args: path? (this file only), offset:int=0 (line), limit:int=200 — the file's text page {path, lines:[{n,text}], total, eof, version}; refuses binary.",
+    "write":
+        "args: bytes (req — the whole document), if_match:str? (the version you read; a changed document is refused) — atomic whole-document write; {path, size, version}.",
+    "watch":
+        "args: none — start relaying this file's changes onto this agent: `{type: changed, path, kind: added|modified|deleted}`; WATCH this agent to receive them. Idempotent.",
+]
+
+/// python `folder_agent.VERBS` docs — the folder view's own table, as `fileViewVerbDocs`.
+let folderViewVerbDocs: JSON = [
+    "reflect":
+        "Identity, the folder it views, its bridge, and whether its change relay is on. No args.",
+    "list":
+        "args: path? (a folder inside this one, relative to it; empty = this folder) — the folder's entries {files: [{name, path, type, size?}]}.",
+    "reveal":
+        "args: path (req — a file or folder inside this one, relative to it) — shows where it sits: {revealed, folder_path, dirs} where dirs are the folders to open on the way down; not_found when nothing is there.",
+    "watch":
+        "args: none — start relaying this folder's entry changes onto this agent: `{type: added|changed|removed, path, name}` (path relative to the folder's bridge); WATCH this agent to receive them. Idempotent.",
+]
+
 /// python `views.view_callers` — who may reach a view: whoever may reach its bridge, for
 /// the verbs it answers. A bridge grant of `*` is all of them; a list keeps the verbs the
 /// view answers. The bridge's `$parent` is named literally; its `$self` is skipped.
@@ -287,6 +312,16 @@ extension FileBundle {
     }
 
     /// python `reflect` of a view: what it IS — its kind, path, bridge, relay state.
+    /// A VIEW answers its own verbs, so `docs of=<view>` serves its table (python
+    /// `instance_verbs`); every other record keeps the bridge's.
+    public func instanceVerbDocs(_ agent: Agent) -> JSON? {
+        switch agent.metaValue(forKey: "view")?.asString {
+        case VIEW_FILE: return fileViewVerbDocs
+        case VIEW_FOLDER: return folderViewVerbDocs
+        default: return nil
+        }
+    }
+
     private func viewReflect(agent: Agent) -> JSON {
         let kind = agent.metaValue(forKey: "view")?.asString ?? ""
         let sentence =

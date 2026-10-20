@@ -67,8 +67,20 @@ pub struct FilesPanel {
     pub scroll: u16,
     /// A file agent's own path (its reflect's `path`): what it views and writes.
     view_path: String,
+    /// A folder agent's folder, inside its bridge (its reflect's `path`; `.` = the root).
+    view_root: String,
+    /// The bridge a folder agent views through (its reflect's `bridge`): where a file
+    /// in it is opened as a view.
+    bridge: Option<AgentId>,
+    /// Whether the view's change relay is armed (its `watch` reply said so).
+    armed: bool,
     /// The version of the file as it was last read: a save names it (`if_match`).
     version: Option<String>,
+    /// Whether the last read reached the end of the file (its `eof`). Editing needs
+    /// the whole file: a save writes the document, so a page would cut the rest off.
+    eof: Option<bool>,
+    /// Whether the file ends in a newline (its `newline`), which a save keeps.
+    newline: Option<bool>,
     /// The lines the human is typing, while editing.
     editing: bool,
     buf: Vec<String>,
@@ -94,7 +106,12 @@ impl FilesPanel {
             open: None,
             scroll: 0,
             view_path: String::new(),
+            view_root: ".".into(),
+            bridge: None,
+            armed: false,
             version: None,
+            eof: None,
+            newline: None,
             editing: false,
             buf: Vec::new(),
             row: 0,
@@ -110,7 +127,8 @@ impl FilesPanel {
     }
 
     /// The reflect says what the agent is: a folder or a file view, or a bridge. Makes
-    /// the first call the mode needs, and returns it.
+    /// the first calls the mode needs (the read or the listing, and the view's `watch`
+    /// that arms its relay), and returns them.
     fn decide(&mut self, reflect: &Value) -> Vec<Cmd> {
         match reflect.get("kind").and_then(Value::as_str) {
             Some("file") => {
@@ -120,12 +138,21 @@ impl FilesPanel {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                vec![self.read_cmd()]
+                vec![self.read_cmd(), self.watch_cmd()]
             }
             Some("folder") => {
                 self.mode = Mode::Folder;
                 self.path = ".".into();
-                vec![self.list_cmd()]
+                self.view_root = reflect
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or(".")
+                    .to_string();
+                self.bridge = reflect
+                    .get("bridge")
+                    .and_then(Value::as_str)
+                    .map(AgentId::from);
+                vec![self.list_cmd(), self.watch_cmd()]
             }
             _ => {
                 self.mode = Mode::Bridge;
@@ -185,6 +212,8 @@ impl FilesPanel {
             .unwrap_or("?")
             .to_string();
         self.version = reply.get("version").and_then(Value::as_str).map(str::to_string);
+        self.eof = reply.get("eof").and_then(Value::as_bool);
+        self.newline = reply.get("newline").and_then(Value::as_bool);
         self.open = Some((name, text));
         self.scroll = 0;
         true
@@ -205,14 +234,54 @@ impl FilesPanel {
         }
     }
 
-    /// The save: the whole document, against the version it was read at.
+    /// The view's `watch`: arms its change relay, so its changes come as events.
+    fn watch_cmd(&self) -> Cmd {
+        Cmd::Send {
+            target: self.agent.clone(),
+            payload: json!({"type":"watch"}),
+        }
+    }
+
+    /// The save: the whole document, against the version it was read at. It ends in a
+    /// newline exactly when the file did.
     fn save_cmd(&self) -> Cmd {
         let mut text = self.buf.join("\n");
-        text.push('\n');
+        if self.newline == Some(true) {
+            text.push('\n');
+        }
         Cmd::Send {
             target: self.agent.clone(),
             payload: json!({"type":"write","path":self.view_path,"bytes":text,"if_match":self.version}),
         }
+    }
+
+    /// The path, inside the bridge, of an entry of the listed folder: what `open_view`
+    /// names. A folder agent's folder is at its own path; a bridge's root is the bridge.
+    fn in_bridge(&self, name: &str) -> String {
+        let within = self.join(name);
+        match self.mode {
+            Mode::Folder if !matches!(self.view_root.as_str(), "." | "") => {
+                format!("{}/{}", self.view_root, within)
+            }
+            _ => within,
+        }
+    }
+
+    /// Open the file as its own view agent: `open_view` on the bridge it is served by.
+    /// A folder agent with no bridge in its reflect cannot open a file, and says so.
+    fn open_file_cmd(&self, name: &str) -> Result<Cmd, String> {
+        let bridge = match self.mode {
+            Mode::Folder => self.bridge.clone().ok_or_else(|| {
+                format!("{}: this folder's reflect names no bridge, so the file cannot be opened", self.agent)
+            })?,
+            _ => self.agent.clone(),
+        };
+        Ok(Cmd::OpenView {
+            bridge,
+            from: self.agent.clone(),
+            kind: "file".into(),
+            path: self.in_bridge(name),
+        })
     }
 
     /// Join, without ever producing an absolute path or escaping above the root:
@@ -233,6 +302,20 @@ impl FilesPanel {
     }
 
     // ─── the file agent's editor ─────────────────────────────────────────
+
+    /// Whether the file may be opened for editing: the whole of it was read. A save
+    /// writes the whole document, so a file longer than the page is refused here, with
+    /// the reason, rather than saved without its last lines.
+    fn editable(&self) -> Result<(), String> {
+        match (self.eof, self.newline) {
+            (Some(true), Some(_)) => Ok(()),
+            (Some(false), _) => Err(format!(
+                "{} is longer than one page: editing it would drop the lines after the page, so it is not opened for editing",
+                self.view_path
+            )),
+            _ => Err(format!("{} has not been read in full yet: press r, then e", self.view_path)),
+        }
+    }
 
     /// The line the cursor is on, as its characters.
     fn line_len(&self) -> usize {
@@ -340,6 +423,10 @@ impl FilesPanel {
         }
         match k.code {
             K::Char('e') => {
+                if let Err(n) = self.editable() {
+                    self.note = Some(n);
+                    return Handled::Yes;
+                }
                 let lines = self.open.as_ref().map(|(_, l)| l.clone()).unwrap_or_default();
                 self.buf = if lines.is_empty() { vec![String::new()] } else { lines };
                 self.row = 0;
@@ -464,18 +551,12 @@ impl Panel for FilesPanel {
                     self.path = self.join(&e.name);
                     self.cursor = 0;
                     out.push(self.list_cmd());
-                } else if self.mode == Mode::Folder {
-                    // a folder agent lists; a file in it is its own agent (a child of
-                    // the bridge), which the agent tree selects
-                    self.note = Some(format!(
-                        "{} is a file: select its agent in the tree to view and edit it",
-                        e.name
-                    ));
                 } else {
-                    out.push(Cmd::Send {
-                        target: self.agent.clone(),
-                        payload: json!({"type":"read","path":self.join(&e.name),"limit":2000}),
-                    });
+                    // a file is opened as its own view agent, which the shell selects
+                    match self.open_file_cmd(&e.name) {
+                        Ok(cmd) => out.push(cmd),
+                        Err(n) => self.note = Some(n),
+                    }
                 }
                 Handled::Yes
             }
@@ -538,6 +619,11 @@ impl Panel for FilesPanel {
             // a refused save is still the save's answer: the document stays as edited
             self.saving = false;
             self.note = Some(e.to_string());
+            return true;
+        }
+        // the view's `watch`: its relay is armed, so its changes arrive as events
+        if reply.get("watching").is_some() && reply.get("relayed").is_some() {
+            self.armed = true;
             return true;
         }
         if self.saving && reply.get("version").is_some() && reply.get("lines").is_none() {
@@ -706,8 +792,14 @@ mod tests {
         let r = json!({"id":"fv","kind":"file","path":"docs/a.md","bridge":"files"});
         let _ = f.decide(&r);
         let lines: Vec<Value> = text.lines().enumerate().map(|(i, t)| json!({"n": i + 1, "text": t})).collect();
-        f.absorb_read(&json!({"path":"docs/a.md","lines":lines,"version":v,"eof":true}));
+        let newline = text.ends_with('\n');
+        f.absorb_read(&json!({"path":"docs/a.md","lines":lines,"version":v,"eof":true,"newline":newline}));
         f
+    }
+
+    /// A key, with the reflect the panel was given.
+    fn press_in(f: &mut FilesPanel, k: KeyEvent) -> Vec<Cmd> {
+        press(f, k).1
     }
 
     #[test]
@@ -776,7 +868,7 @@ mod tests {
         let mut folder = p();
         let cmds = folder.decide(&json!({"id":"fo","kind":"folder","path":"docs"}));
         assert_eq!(folder.mode(), Mode::Folder);
-        assert_eq!(cmds.len(), 1, "one list, to start");
+        assert_eq!(cmds.len(), 2, "one list, and the view's watch, to start");
 
         let mut file = p();
         let cmds = file.decide(&json!({"id":"fv","kind":"file","path":"docs/a.md"}));
@@ -829,7 +921,7 @@ mod tests {
 
     #[test]
     fn a_file_view_edits_and_a_save_names_the_version_it_read() {
-        let mut f = file_view("ab\ncd", "v1");
+        let mut f = file_view("ab\ncd\n", "v1");
         press(&mut f, key(KeyCode::Char('e')));
         assert!(f.text_input(), "editing takes the typed keys");
         press(&mut f, key(KeyCode::End));
@@ -909,5 +1001,135 @@ mod tests {
         assert_eq!(f.view_path, "docs/a.md");
         let cmd = f.read_cmd();
         assert!(matches!(cmd, Cmd::Send { payload, .. } if payload["path"] == "docs/a.md"));
+    }
+
+    // ─── #150 review: the CLI watches its views, never cuts a file short, and opens
+    // the files it lists as their own views ──────────────────────────────────────
+
+    #[test]
+    fn deciding_a_view_arms_its_relay_as_well_as_reading_it() {
+        let mut file = FilesPanel::new("fv".into());
+        let cmds = file.decide(&json!({"id":"fv","kind":"file","path":"docs/a.md","bridge":"files"}));
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::Send { target, payload } if target == "fv" && payload["type"] == "watch")),
+            "a file view sends its own watch: {cmds:?}"
+        );
+        let mut folder = FilesPanel::new("fo".into());
+        let cmds = folder.decide(&json!({"id":"fo","kind":"folder","path":"docs","bridge":"files"}));
+        assert!(
+            cmds.iter().any(|c| matches!(c, Cmd::Send { target, payload } if target == "fo" && payload["type"] == "watch")),
+            "a folder view sends its own watch: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn a_watch_reply_says_the_relay_is_armed() {
+        let mut f = file_view("x", "v");
+        assert!(!f.armed);
+        let mut out = Vec::new();
+        assert!(f.on_reply(&json!({"watching":"docs/a.md","agent":"fv","relayed":false}), &mut out));
+        assert!(f.armed, "the view's watch reply arms the panel");
+        assert!(out.is_empty());
+        assert!(f.note.is_none(), "an armed relay is not a note");
+        // a refused watch is shown, and does not arm
+        let mut g = file_view("x", "v");
+        assert!(g.on_reply(&json!({"error":"watch docs/a.md: refused"}), &mut Vec::new()));
+        assert!(!g.armed);
+        assert_eq!(g.note.as_deref(), Some("watch docs/a.md: refused"));
+    }
+
+    #[test]
+    fn a_file_longer_than_a_page_is_not_opened_for_editing() {
+        let mut f = FilesPanel::new("fv".into());
+        f.decide(&json!({"id":"fv","kind":"file","path":"big.txt","bridge":"files"}));
+        let lines: Vec<Value> = (1..=3).map(|n| json!({"n": n, "text": "x"})).collect();
+        f.absorb_read(&json!({"path":"big.txt","lines":lines,"version":"v","eof":false,"newline":true}));
+        let out = press_in(&mut f, key(KeyCode::Char('e')));
+        assert!(out.is_empty());
+        assert!(!f.text_input(), "a page is not edited: a save would cut the rest off");
+        assert!(f.note.unwrap().contains("longer than one page"));
+    }
+
+    #[test]
+    fn a_file_whose_read_does_not_say_where_it_ends_is_not_opened_for_editing() {
+        let mut f = FilesPanel::new("fv".into());
+        f.decide(&json!({"id":"fv","kind":"file","path":"a.md","bridge":"files"}));
+        f.absorb_read(&json!({"path":"a.md","lines":[{"n":1,"text":"x"}],"version":"v","eof":true}));
+        press_in(&mut f, key(KeyCode::Char('e')));
+        assert!(!f.text_input(), "no `newline` in the reply: nothing is saved over a guess");
+        assert!(f.note.unwrap().contains("not been read in full"));
+    }
+
+    #[test]
+    fn a_save_keeps_the_trailing_newline_the_file_had() {
+        // no final newline: the save writes none
+        let mut f = file_view("ab", "v1");
+        press(&mut f, key(KeyCode::Char('e')));
+        press(&mut f, key(KeyCode::Char('!')));
+        let (_, out) = press(&mut f, ctrl('s'));
+        assert!(matches!(&out[0], Cmd::Send { payload, .. } if payload["bytes"] == "!ab"));
+        // a final newline: the save keeps it
+        let mut g = file_view("ab\n", "v1");
+        press(&mut g, key(KeyCode::Char('e')));
+        press(&mut g, key(KeyCode::Char('!')));
+        let (_, out) = press(&mut g, ctrl('s'));
+        assert!(matches!(&out[0], Cmd::Send { payload, .. } if payload["bytes"] == "!ab\n"));
+    }
+
+    #[test]
+    fn an_empty_file_saves_as_it_was_empty() {
+        let mut f = file_view("", "v1");
+        press(&mut f, key(KeyCode::Char('e')));
+        press(&mut f, key(KeyCode::Char('x')));
+        let (_, out) = press(&mut f, ctrl('s'));
+        assert!(matches!(&out[0], Cmd::Send { payload, .. } if payload["bytes"] == "x"));
+    }
+
+    #[test]
+    fn enter_on_a_file_in_a_folder_opens_it_as_a_view_on_its_bridge() {
+        let mut f = FilesPanel::new("fo".into());
+        f.decide(&json!({"id":"fo","kind":"folder","path":"docs","bridge":"files"}));
+        f.absorb_list(&json!({"files":[{"name":"a.md","type":"file","size":3}]}));
+        let out = press_in(&mut f, key(KeyCode::Enter));
+        assert!(
+            matches!(&out[0], Cmd::OpenView { bridge, from, kind, path }
+                if bridge == "files" && from == "fo" && kind == "file" && path == "docs/a.md"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_file_at_the_bridge_opens_it_as_a_view_at_its_bridge_path() {
+        let mut f = FilesPanel::new("files".into());
+        f.decide(&json!({"id":"files","root":"."}));
+        f.absorb_list(&json!({"files":[{"name":"docs","type":"dir"}]}));
+        let out = press_in(&mut f, key(KeyCode::Enter));
+        assert!(matches!(&out[0], Cmd::Send { payload, .. } if payload["type"] == "list" && payload["path"] == "docs"));
+        f.absorb_list(&json!({"files":[{"name":"a.md","type":"file"}]}));
+        let out = press_in(&mut f, key(KeyCode::Enter));
+        assert!(
+            matches!(&out[0], Cmd::OpenView { bridge, path, .. } if bridge == "files" && path == "docs/a.md"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_in_a_folder_below_the_root_is_named_from_the_bridge_root() {
+        let mut f = FilesPanel::new("fo".into());
+        f.decide(&json!({"id":"fo","kind":"folder","path":"docs","bridge":"files"}));
+        f.path = "sub".into();
+        assert_eq!(f.in_bridge("x.md"), "docs/sub/x.md");
+        f.path = ".".into();
+        assert_eq!(f.in_bridge("x.md"), "docs/x.md");
+    }
+
+    #[test]
+    fn a_folder_with_no_bridge_says_so_rather_than_opening_nothing() {
+        let mut f = FilesPanel::new("fo".into());
+        f.decide(&json!({"id":"fo","kind":"folder","path":"docs"}));
+        f.absorb_list(&json!({"files":[{"name":"a.md","type":"file"}]}));
+        let out = press_in(&mut f, key(KeyCode::Enter));
+        assert!(out.is_empty(), "no open without a bridge");
+        assert!(f.note.unwrap().contains("names no bridge"));
     }
 }

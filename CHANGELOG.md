@@ -21,11 +21,20 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   or reuses its agent and places its view. The preview is the file agent's view (its
   reads, saves and live changes go through the agent); the file tree rooted at a
   folder is the folder agent's view. Two views of one file share one agent and one
-  watch. Cells saved before this still open, unbound, as they did.
+  watch. A cell saved before this is bound to its view when it mounts, and waits for
+  the page's grant on that view first; a refusal is shown in the cell, which stays open.
 - CLI (TUI): the file panel shows the agent it selects by what the agent is. A file
   agent is a viewer and editor (`e` edits, Ctrl-S saves against the version read, Esc
   leaves and discards unsaved edits); a folder agent is a live tree (it re-lists when
-  its entries change). A `file_bridge` itself browses its root as before.
+  its entries change). Both arm their view's relay with the view's own `watch`. Picking
+  a file in a folder, or at a `file_bridge`, opens it as its view (`open_view`) and
+  selects that agent, as the canvas does. A file longer than one page is not opened
+  for editing (a save writes the whole document), and a save keeps the file's final
+  newline as it was. A `file_bridge` itself browses its root as before.
+- A view answers its own verbs: `docs of=<view>` lists the view's table (file: read,
+  write, watch, reflect; folder: list, reveal, watch, reflect), not the bridge's. A
+  view's `reflect` says whether its relay is `watching`. The bridge's `read` reply
+  carries `newline`.
 - E123 `file_agents`: the kernel contract the views stand on, over the packaged
   python, rust and swift kernels: one agent per path, refusals that make no agent,
   a file view's versioned write, a folder view's scope and reveal, and a view's

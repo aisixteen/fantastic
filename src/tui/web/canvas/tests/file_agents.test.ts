@@ -5,7 +5,7 @@ import type { Payload } from "../src/lib.ts";
 import { grantViewLists, registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerLayout } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
-import { changeOf, isRefusal, openViewAgent, routeOf, routedBridge } from "../src/bundles/files/file_bridge.ts";
+import { awaitGrant, bindCellToView, changeOf, isRefusal, openViewAgent, routeOf, routedBridge } from "../src/bundles/files/file_bridge.ts";
 import type { Served } from "../src/bundles/files/file_bridge.ts";
 import { FakeBridge } from "./fake_bridge.ts";
 import { project } from "./rig.ts";
@@ -202,3 +202,114 @@ test("a folder dropped on the canvas makes its agent, and its tree is that agent
   assert.equal(again["agent"], r["agent"]);
   assert.equal(again["created"], false);
 });
+
+// ─── THE CELL'S BINDING, at mount, and the page's wait for its grant (#150 review) ──
+
+/** Every call the page makes to a view, by the view's id, in order. */
+function spyViews(b: FakeBridge): string[] {
+  const seen: string[] = [];
+  const real = b.viewCall.bind(b);
+  b.viewCall = (view: string, p: Dict) => {
+    seen.push(view);
+    return real(view, p);
+  };
+  return seen;
+}
+
+test("a reloaded cell that carries its view_agent is served by that agent again", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const first = await openViewAgent(bridgeKernel(b), "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  // a fresh page: nothing is served until the cell mounts and binds to its saved agent
+  const reloaded = bridgeKernel(b);
+  const seen = spyViews(b);
+  const bound = await bindCellToView(reloaded, "file", "docs/a.md", first.view, () => assert.fail("a saved agent is not named again"));
+  assert.deepEqual(bound, { ok: true, view: first.view });
+  const read = (await routedBridge(reloaded).call({ type: "read", path: "docs/a.md", offset: 0, limit: 200 })) as { lines: Array<{ text: string }> };
+  assert.equal(read.lines[0]!.text, "# Hello");
+  assert.ok(seen.includes(first.view), "the reloaded cell reads through its agent");
+});
+
+test("a cell saved before views, with no view_agent, is bound to the view of its path and names it", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const named: string[] = [];
+  const bound = await bindCellToView(k, "folder", "src", undefined, (view) => named.push(view));
+  assert.ok(bound.ok, "it opens");
+  assert.equal(named.length, 1, "the cell is told its view");
+  assert.equal(bound.ok ? bound.view : "", named[0]);
+  assert.equal(b.views.get(named[0]!)?.kind, "folder");
+  const seen = spyViews(b);
+  await routedBridge(k).call({ type: "list", path: "src" });
+  assert.ok(seen.includes(named[0]!), "its listing is the view's");
+});
+
+test("a cell whose view is refused stays open unbound, and the refusal is returned for it to show", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  b.openViewRefusal = { error: "open_view: docs/a.md is not exposed", reason: "unauthorized" };
+  const named: string[] = [];
+  const bound = await bindCellToView(k, "file", "docs/a.md", undefined, (view) => named.push(view));
+  assert.equal(bound.ok, false);
+  assert.equal(bound.ok ? "" : bound.refusal.error, "open_view: docs/a.md is not exposed", "the refusal, as it is");
+  assert.equal(named.length, 0, "nothing is named: there is no view to name");
+});
+
+test("a view the host has not granted the page yet is waited for, then reached", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.pendingGrants = 2; // the grant lands after two of the page's calls
+  const bound = await bindCellToView(bridgeKernel(b), "file", "docs/a.md", first.view, () => {}, 5_000);
+  assert.deepEqual(bound, { ok: true, view: first.view });
+  assert.equal(b.pendingGrants, 0, "both refusals were waited out, not skipped");
+});
+
+test("a grant that never lands is refused as it is, once the wait is over", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const first = await openViewAgent(bridgeKernel(b), "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.pendingGrants = 1_000_000;
+  const bound = await bindCellToView(bridgeKernel(b), "file", "docs/a.md", first.view, () => {}, 40);
+  assert.equal(bound.ok, false);
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unauthorized");
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["side"], "egress");
+});
+
+test("a refusal that is not a missing grant is returned at once, not waited for", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const started = Date.now();
+  const bound = await bindCellToView(k, "file", "docs/a.md", "view:file:gone", () => {}, 5_000);
+  assert.equal(bound.ok, false);
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unknown_agent");
+  assert.ok(Date.now() - started < 1_000, "no wait for a refusal that will not change");
+});
+
+test("awaitGrant says nothing once the view answers, and returns null straight away", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  assert.equal(await awaitGrant(k, first.view, 40), null);
+});
+
+test("a file dropped while its view is refused makes no cell, and the refusal is the answer", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = page(b);
+  const before = k.get("view_root")!.children.size;
+  b.openViewRefusal = { error: "open_view: docs/a.md is not exposed", reason: "unauthorized" };
+  const r = await call(k, { type: "open", path: "docs/a.md", x: 10, y: 20 });
+  assert.equal(r["error"], "open_view: docs/a.md is not exposed", JSON.stringify(r));
+  assert.equal(k.get("view_root")!.children.size, before, "no cell was placed");
+});
+

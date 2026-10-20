@@ -14,7 +14,7 @@ every verb resolves `root/path` and refuses if the result escapes `root`.
 Verbs:
   reflect            -> {sentence, root, readonly, allow_count, edit_grammar, compose, ingress_rule, egress_rule, sealed, …}
   list   path?       -> {files: [{name, path, type, size?}, ...]}
-  read   path offset? limit?   -> {lines:[{n,text}], total, eof, version}   (text)
+  read   path offset? limit?   -> {lines:[{n,text}], total, eof, newline, version}   (text)
   write  path bytes if_match?  -> {path, size, version}   (atomic, whole document)
   edit   edits bytes dry_run?  -> {edited, edits:[…]}     (SEARCH/REPLACE transaction)
   append path bytes            -> {path, size, version}
@@ -675,7 +675,7 @@ def _text_gate(verb: str, kernel, rec: dict, path: str, mutate: bool):
 
 
 async def _read(id, payload, kernel):
-    """args: path:str (req), offset:int=0 (line), limit:int=200 — a text page {path, lines:[{n,text}], total, eof, version, origin}; refuses binary."""
+    """args: path:str (req), offset:int=0 (line), limit:int=200 — a text page {path, lines:[{n,text}], total, eof, newline, version, origin}; refuses binary."""
     rec = kernel.get(id) or {}
     path, err = _path_arg("read", payload)
     if err:
@@ -713,6 +713,8 @@ async def _read(id, payload, kernel):
         "lines": [{"n": off + i + 1, "text": t} for i, t in enumerate(page)],
         "total": len(all_lines),
         "eof": off + limit >= len(all_lines),
+        # whether the file ends in a newline: a whole-document save keeps it as it was
+        "newline": text.endswith("\n"),
         "version": ver,
         # HOW TO GET THIS BODY AGAIN — one line; a reader that keeps no body keeps this.
         "origin": f"{id} {path} lines {off + 1}-{off + len(page)} version {ver} — "
@@ -1233,6 +1235,18 @@ def _password_refusal(meta: dict, edge: str) -> str | None:
 #: A view record (`view: file|folder`) is answered by its own verbs, not the bridge's.
 #: A view is not sealed: its gate is its grant on the bridge (`views.py`).
 VIEW_HANDLERS = {views.FILE: file_agent.handler, views.FOLDER: folder_agent.handler}
+VIEW_MODULES = {views.FILE: file_agent, views.FOLDER: folder_agent}
+
+
+def instance_verbs(agent) -> dict[str, str] | None:
+    """The verbs THIS agent answers, for `docs` and `advertises` (kernel `_agent.py`).
+    A view answers its own table (`file_agent.VERBS` / `folder_agent.VERBS`), not the
+    bridge's: `docs of=<view>` must not offer a delete the view refuses. None keeps the
+    bundle's table for every other record."""
+    view = agent._meta.get("view")
+    if view is None:
+        return None
+    return {n: f.__doc__ or "" for n, f in VIEW_MODULES[view].VERBS.items()}
 
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:

@@ -2,7 +2,7 @@ import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { isFocusClick } from "../canvas/viewer.ts";
 import { badge, badgeOf, side } from "./agent_index.ts";
-import { fileGrant, routedBridge, serve, sharedHub } from "./file_bridge.ts";
+import { bindCellToView, fileGrant, routedBridge, said, sharedHub } from "./file_bridge.ts";
 import { FilesController, controllers } from "./files_controller.ts";
 import { agentIndex, allHidden, ensureWalker, filesDeps, getWalker, onRender, rootOf, select } from "./files_deps.ts";
 import type { Rec } from "./files_deps.ts";
@@ -35,14 +35,15 @@ export const filesView: ViewBundle = {
     if (!inRoot(root)) throw new Error(`files_view: its root '${root}' is outside the project`);
     // a tree opened on a folder agent (#150) is that agent's view: its folder is served by it
     const folderAgent = str(saved, "view_agent");
-    if (folderAgent !== undefined) serve(ctx.kernel, "folder", root, folderAgent);
     const el = document.createElement("div");
     el.className = "side files-view";
     el.innerHTML =
       `<div class="ft-head"><span class="ft-kernel host"></span><span class="ft-kernel page"></span><span class="ft-new" hidden></span>` +
       `<input class="ft-filter" placeholder="filter loaded" spellcheck="false" aria-label="filter the loaded tree"></div>` +
+      `<div class="ft-note" role="status" hidden></div>` +
       `<ul class="ft-tree" tabindex="0" role="tree"></ul>`;
     ctx.mount.appendChild(el);
+    const note = el.querySelector(".ft-note") as HTMLElement;
     const list = el.querySelector(".ft-tree") as HTMLElement;
     const filter = el.querySelector(".ft-filter") as HTMLInputElement;
     const hostLabel = el.querySelector(".ft-kernel.host") as HTMLElement;
@@ -393,11 +394,24 @@ export const filesView: ViewBundle = {
       if (folder !== undefined) void ctl.reveal(folder).then(() => ctl.setCursor(folder));
     });
 
-    void ctl
-      .start({
-        expanded: Array.isArray(saved["expanded"]) ? (saved["expanded"] as string[]) : [],
-        ...(typeof saved["selected"] === "string" ? { selected: saved["selected"] } : {}),
-      })
+    // A tree is its folder's view: bound now (a saved `view_agent` serves it again; one saved
+    // before views gets the view of its folder). Its first listing waits for that, and a
+    // refusal is said on the tree, which stays open.
+    const bound = bindCellToView(ctx.kernel, "folder", root, folderAgent, (view) => {
+      ctx.kernel.updateMeta(ctx.selfId, { view_agent: view } as unknown as Payload);
+    }).then((b) => {
+      if (!b.ok) {
+        note.hidden = false;
+        note.textContent = `${said(b.refusal)} — this tree is not its folder's view`;
+      }
+    });
+    void bound
+      .then(() =>
+        ctl.start({
+          expanded: Array.isArray(saved["expanded"]) ? (saved["expanded"] as string[]) : [],
+          ...(typeof saved["selected"] === "string" ? { selected: saved["selected"] } : {}),
+        }),
+      )
       .then(draw);
     draw();
 

@@ -31,6 +31,39 @@ const RELAY_VERB: &str = "watch";
 const FILE_ANSWERS: [&str; 4] = ["read", "write", "watch", "reflect"];
 const FOLDER_ANSWERS: [&str; 4] = ["list", "reveal", "watch", "reflect"];
 
+/// python `file_agent.VERBS` docs — what `docs of=<file view>` serves: the view's own
+/// table, never the bridge's (a view refuses a delete it is not granted).
+const FILE_VERB_DOCS: [(&str, &str); 4] = [
+    ("reflect", "Identity, the file it views, its bridge, and whether its change relay is on. No args."),
+    ("read", "args: path? (this file only), offset:int=0 (line), limit:int=200 — the file's text page {path, lines:[{n,text}], total, eof, version}; refuses binary."),
+    ("write", "args: bytes (req — the whole document), if_match:str? (the version you read; a changed document is refused) — atomic whole-document write; {path, size, version}."),
+    ("watch", "args: none — start relaying this file's changes onto this agent: `{type: changed, path, kind: added|modified|deleted}`; WATCH this agent to receive them. Idempotent."),
+];
+
+/// python `folder_agent.VERBS` docs — the folder view's own table, as `FILE_VERB_DOCS`.
+const FOLDER_VERB_DOCS: [(&str, &str); 4] = [
+    ("reflect", "Identity, the folder it views, its bridge, and whether its change relay is on. No args."),
+    ("list", "args: path? (a folder inside this one, relative to it; empty = this folder) — the folder's entries {files: [{name, path, type, size?}]}."),
+    ("reveal", "args: path (req — a file or folder inside this one, relative to it) — shows where it sits: {revealed, folder_path, dirs} where dirs are the folders to open on the way down; not_found when nothing is there."),
+    ("watch", "args: none — start relaying this folder's entry changes onto this agent: `{type: added|changed|removed, path, name}` (path relative to the folder's bridge); WATCH this agent to receive them. Idempotent."),
+];
+
+/// The verb docs a view record answers (python `instance_verbs(agent)`): its own
+/// table for `view: file|folder`, None for any other record (the bridge's table).
+pub(crate) fn verb_docs_of(meta: &Map<String, Value>) -> Option<Value> {
+    let table: &[(&str, &str)] = match meta.get("view").and_then(Value::as_str)? {
+        FILE => &FILE_VERB_DOCS,
+        FOLDER => &FOLDER_VERB_DOCS,
+        _ => return None,
+    };
+    Some(Value::Object(
+        table
+            .iter()
+            .map(|(n, d)| (n.to_string(), json!(d)))
+            .collect(),
+    ))
+}
+
 /// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type.
 fn folder_event(raw: &str) -> &'static str {
     match raw {
@@ -289,7 +322,7 @@ struct Relay {
 }
 
 /// python `_relay_rule`: one bridge `changed` → the view's event, or nothing.
-fn relay_event(kind: &str, own: &str, ev: &Value) -> Option<Value> {
+pub(crate) fn relay_event(kind: &str, own: &str, ev: &Value) -> Option<Value> {
     let p = ev.get("path").and_then(Value::as_str)?;
     let raw = ev.get("kind").and_then(Value::as_str).unwrap_or("modified");
     if kind == FILE {
@@ -416,7 +449,10 @@ pub(crate) async fn dispatch(
         .unwrap_or("")
         .to_string();
     match (kind, verb) {
-        (_, "reflect") => reflect(kind, id, &meta),
+        (_, "reflect") => {
+            let watching = relays.held.lock().expect("relays").contains_key(&id.0);
+            reflect(kind, id, &meta, watching)
+        }
         (FILE, "read" | "write") => match scope(verb, FILE, &own, payload.get("path")) {
             Err(e) => e,
             Ok(target) => {
@@ -445,8 +481,9 @@ pub(crate) async fn dispatch(
     }
 }
 
-/// python `reflect` of a view: what it IS — its kind, path, bridge, relay state.
-fn reflect(kind: &str, id: &AgentId, meta: &Map<String, Value>) -> Value {
+/// python `reflect` of a view: what it IS — its kind, path, bridge, and whether its
+/// change relay is on (`watching`: the relay is held, as python's `RELAYS` has it).
+fn reflect(kind: &str, id: &AgentId, meta: &Map<String, Value>, watching: bool) -> Value {
     let sentence = if kind == FILE {
         "A file on a file_bridge — one live object per path: its text, its writes and its changes."
     } else {
@@ -458,6 +495,7 @@ fn reflect(kind: &str, id: &AgentId, meta: &Map<String, Value>) -> Value {
         "kind": kind,
         "path": meta.get("path").cloned().unwrap_or(Value::Null),
         "bridge": meta.get("bridge").cloned().unwrap_or(Value::Null),
+        "watching": watching,
     })
 }
 
