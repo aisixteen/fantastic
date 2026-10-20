@@ -299,6 +299,8 @@ jobs:
           printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
       # APPLE_API_KEY_PATH is the name Tauri reads. Never APPLE_ID, APPLE_PASSWORD
       # or APPLE_TEAM_ID: the bundler would prefer the Apple ID route.
+      # `app,dmg`: the DMG packs the .app built (and in release, signed, notarized
+      # and stapled) once; with `dmg` alone the bundler deletes that .app after.
       - name: bundle, signed; the .app notarized and stapled (release)
         if: inputs.mode == 'release'
         env:
@@ -309,12 +311,12 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
-          cd src/app && npx tauri bundle --ci --bundles dmg --target "$APP_TARGET" --no-binary-patching \
+          cd src/app && npx tauri bundle --ci --bundles app,dmg --target "$APP_TARGET" --no-binary-patching \
             --config "{\"version\":\"$VERSION\"}"
       - name: bundle, unsigned (rehearsal)
         if: inputs.mode == 'rehearsal'
         run: |
-          cd src/app && npx tauri bundle --ci --bundles dmg --target "$APP_TARGET" --no-binary-patching --no-sign \
+          cd src/app && npx tauri bundle --ci --bundles app,dmg --target "$APP_TARGET" --no-binary-patching --no-sign \
             --config "{\"version\":\"$VERSION\"}"
       - id: out
         name: exactly one DMG and one .app
