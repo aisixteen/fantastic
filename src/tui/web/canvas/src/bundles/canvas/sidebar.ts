@@ -141,7 +141,7 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HT
     li.title = n.handler.endsWith(".ts")
       ? `${n.id} · ${n.handler} · click: view it · ${fkey}-click: focus it on its canvas`
       : hidden
-        ? `${n.id} · ${n.handler} · hidden: click shows its cell where it was`
+        ? `${n.id} · ${n.handler} · hidden: click shows its cell and views it · ${fkey}-click: show it on its view`
         : `${n.id} · ${n.handler}${cells.length > 0 ? ` · click: view its cell · ${fkey}-click: move to it` : " · open it in a cell"}`;
     li.addEventListener("click", (e) => {
       const focus = isFocusClick(e, d.mac);

@@ -825,9 +825,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     };
   };
 
-  // REMOVE a page-only cell (no agent behind it, #133: deleting a cell with a
-  // backend deletes the agent instead). A delete_lock refuses (the kernel's
-  // `remove` is the gate).
+  // REMOVE a cell from its view; the agent behind it, if any, is untouched. It is
+  // every mounted bundle's `close` (a terminal whose job ended), the wizard's, and
+  // ✕'s delete for a page-only cell (#133: Shift+✕ on a cell with a backend
+  // deletes the agent instead). A delete_lock refuses (the kernel's `remove` is
+  // the gate).
   const closeView = (cellId: string): void => {
     const out = kernel.remove(cellId) as unknown as Rec;
     if (out["deleted"] !== true) toast(`✕ ${typeof out["error"] === "string" ? out["error"] : `could not close ${cellId}`}`);
