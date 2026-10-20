@@ -67,14 +67,6 @@ export const filesView: ViewBundle = {
     /** a row's key: its path, or `agent:<id>` for an agent with no folder on disk */
     const keyOf = (path: string | null, agent: string | undefined): string => path ?? `agent:${agent ?? ""}`;
 
-    // several cells on one thing: each ⌘-click moves to the next one
-    const cycle = new Map<string, number>();
-    const moveNext = (key: string, cells: string[]): void => {
-      const i = (cycle.get(key) ?? -1) + 1;
-      cycle.set(key, i);
-      d.moveTo(cells[i % cells.length]!);
-    };
-
     // what the page knows of an agent, for its row
     interface Deco {
       id: string;
@@ -120,14 +112,12 @@ export const filesView: ViewBundle = {
     };
 
     /** What a plain click used to do: view a page agent, show a host agent's cell, or open one. */
-    const activate = (a: Deco, focus: boolean): void => {
+    const activate = (a: Deco): void => {
       if (a.elsewhere || !a.loaded) return;
-      if (a.side === "page") return d.view(a.id, focus);
+      if (a.side === "page") return d.view(a.id, false);
       const now = d.cellsFor(a.id);
-      if (now.length > 0) {
-        if (focus) moveNext(a.id, now);
-        else d.view(now[0]!, false);
-      } else if (a.handler !== "" && !focus) d.open(a.id);
+      if (now.length > 0) d.view(now[0]!, false);
+      else if (a.handler !== "") d.open(a.id);
     };
 
     const row = (path: string | null, depth: number, a: Deco | null, o: { type: "dir" | "file"; open: boolean; name: string; count: string; status: string; err?: string }): HTMLElement => {
@@ -312,7 +302,7 @@ export const filesView: ViewBundle = {
       if (r === null) return;
       const a = decoOf(r);
       if (t.closest(".del") !== null && a !== null) return d.deleteAgent(a.id);
-      if (t.closest(".go") !== null && a !== null) return activate(a, false);
+      if (t.closest(".go") !== null && a !== null) return activate(a);
       list.focus();
       if (r.path !== null && t.closest(".tw") !== null) {
         void ctl.toggle(r.path);
@@ -359,7 +349,7 @@ export const filesView: ViewBundle = {
       const r = rowOf(e);
       if (r === null) return;
       const a = decoOf(r);
-      if (a !== null) return activate(a, false);
+      if (a !== null) return activate(a);
       if (r.path !== null) void ctl.toggle(r.path);
     });
 
@@ -379,7 +369,7 @@ export const filesView: ViewBundle = {
         // Shift+Enter: the old plain click on an agent
         ctl.select(fx.path);
         const ag = agentIndex.agentAt(fx.path);
-        if (ag !== undefined) activate(deco(ag.id, fx.path), false);
+        if (ag !== undefined) activate(deco(ag.id, fx.path));
       }
     });
     // ↓ from the filter goes into the tree; Esc clears it

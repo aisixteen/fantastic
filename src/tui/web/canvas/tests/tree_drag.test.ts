@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
 import { grantViewLists, registerCanvas, VIEW_VERBS } from "../src/bundles/canvas/canvas_agent.ts";
-import { hiddenOf, registerLayout } from "../src/bundles/canvas/layout.ts";
+import { hiddenOf, rectsOf, registerLayout, tabWidth, themeOf } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode, setHostRecords, setHostSync } from "../src/bundles/canvas/host_views.ts";
 import { DRAG_MIME, decodeDrag, encodeDrag, layoutAround, rangeOf, resolveTarget, toggled } from "../src/bundles/files/drag.ts";
 import type { Look } from "../src/bundles/files/drag.ts";
 import { agentIndex } from "../src/bundles/files/files_deps.ts";
+import { FilesController } from "../src/bundles/files/files_controller.ts";
+import { TreeModel } from "../src/bundles/files/tree_model.ts";
 import { FakeBridge } from "./fake_bridge.ts";
 import { project, rig } from "./rig.ts";
 
@@ -108,7 +110,7 @@ test("an agent id is that agent; an agent with no host record is refused, never 
   assert.deepEqual(await resolveTarget({ kind: "agent", id: "ghost" }, look), {
     error: "no host agent 'ghost'",
     reason: "not_found",
-    arg: "id",
+    arg: "agent",
     hint: "the agents are the host's: drag one from the tree",
   });
 });
@@ -117,6 +119,18 @@ test("an agent's folder is the agent, whatever the item says it is", async () =>
   const folder = ".fantastic/agents/user/agents/ea";
   assert.deepEqual(await resolveTarget({ kind: "dir", path: folder }, look), { kind: "agent", agent: "ea" });
   assert.deepEqual(await resolveTarget({ kind: "any", path: folder }, look), { kind: "agent", agent: "ea" });
+});
+
+test("a file item on an agent's folder is a file, never the agent: a folder on disk is refused as a file", async () => {
+  const folder = ".fantastic/agents/user/agents/ea";
+  // the folder is on disk as a folder: a file item there is refused, and the agent is not read into it
+  const asFolder = lookAt([], [folder], { [folder]: "ea" }, ["ea"]);
+  const r = await resolveTarget({ kind: "file", path: folder }, asFolder);
+  assert.equal("error" in r && r.reason, "bad_arg");
+  assert.equal("error" in r && r.arg, "path");
+  // a file on disk under that path is a file, whatever the agent folder map says
+  const asFile = lookAt([folder], [], { [folder]: "ea" }, ["ea"]);
+  assert.deepEqual(await resolveTarget({ kind: "file", path: folder }, asFile), { kind: "file", path: folder });
 });
 
 test("a folder that is an agent's folder but not a host agent is refused loudly", async () => {
@@ -297,6 +311,51 @@ test("open is refused, not run, when the view was never granted the listing", as
   assert.match(String(r["error"]), /may not call 'list'/);
 });
 
+test("open with no x, y: a new cell lands at the corner; an agent's cell keeps its place, and a hidden one comes back where it was", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = page(b);
+  setHostRecords((id) => HOST[id]);
+  setHostSync(async () => {});
+  const rect = (cell: string) => rectsOf(k, "view_root", themeOf(k, "view_root", tabWidth()))[cell];
+  // a new folder cell with no x, y: the corner
+  const dir = String((await call(k, { type: "open", path: "docs" }))["cell"]);
+  assert.deepEqual({ x: rect(dir)?.x, y: rect(dir)?.y }, { x: 0, y: 0 });
+  // an agent placed at a spot, then opened again with no spot: it stays put, and is not moved
+  const cell = String((await call(k, { type: "open", agent: "ea", x: 300, y: 40 }))["cell"]);
+  const before = rect(cell);
+  assert.deepEqual({ x: before?.x, y: before?.y }, { x: 300, y: 40 });
+  const kept = await call(k, { type: "open", agent: "ea" });
+  assert.equal(kept["moved"], false);
+  assert.equal(kept["cell"], cell, "the same cell");
+  assert.deepEqual(rect(cell), before, "no x, y: the rect is kept");
+  // hidden, then opened with no spot: shown where it was
+  await call(k, { type: "hide", id: cell });
+  const back = await call(k, { type: "open", agent: "ea" });
+  assert.equal(back["shown"], true);
+  assert.equal(hiddenOf(k, "view_root").has(cell), false);
+  assert.deepEqual(rect(cell), before, "a hidden cell comes back where it was, not at 0, 0");
+});
+
+test("open on a nested view: a view is granted the listing when it is placed, so a drop there opens what it names", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = page(b);
+  k.register(new Agent({ id: "nested", parentId: "view_root", handlerModule: "view.ts" }));
+  const nested = async (payload: Record<string, unknown>): Promise<Record<string, unknown>> =>
+    (await k.send([{ target: "nested", payload: payload as Payload }]))[0]!.result as Record<string, unknown>;
+  // not granted yet: refused, as the root view was before its grant
+  assert.match(String((await nested({ type: "open", path: "docs/a.md" }))["error"]), /may not call 'list'/);
+  grantViewLists(k); // what the canvas does when the view is added
+  const r = await nested({ type: "open", path: "docs/a.md", x: 10, y: 20 });
+  assert.equal(r["kind"], "file");
+  assert.equal(k.get(String(r["cell"]))?.parentId, "nested", "the cell is the nested view's");
+  // the grant is written once: a second pass leaves the view's grants as they are
+  const before = k.get("nested")!.meta["can_call"];
+  grantViewLists(k);
+  assert.deepEqual(k.get("nested")!.meta["can_call"], before);
+});
+
 // ─── A TREE ROOTED AT A FOLDER (#135) ───────────────────────────────────────
 
 test("a tree rooted at a folder starts there: only what is under it is rows", async () => {
@@ -313,4 +372,40 @@ test("a rooted tree answers for what is under its root, and refuses the rest", a
   await r.mountTree("tree_root", "docs");
   assert.equal((await r.call("tree_root", { type: "select", path: "top.txt" }))["reason"], "outside_root");
   assert.deepEqual(await r.call("tree_root", { type: "select", path: "docs/a.md" }), { selected: "docs/a.md", kind: "file" });
+});
+
+test("a rooted tree restores only what is under its root: a saved path above it is not opened or selected", async () => {
+  const r = rig();
+  project(r.bridge);
+  const ctl = new FilesController({ bridge: r.bridge, hub: r.hub, selfId: "t_rooted_restore", persist: () => {}, index: r.index, walk: () => {}, publish: (s) => r.published.push(s), root: "docs" });
+  await ctl.start({ expanded: ["docs", "src", "../escape", ""], selected: "src/one.txt" });
+  assert.equal(ctl.model.isOpen("src"), false, "above the root: not opened");
+  assert.equal(ctl.model.isOpen("docs"), true, "the root is open from the start");
+  assert.equal(ctl.model.selected, null, "a selection above the root is not restored");
+  assert.equal(r.published.length, 0);
+  ctl.dispose();
+});
+
+test("a rooted tree's watch events: a change re-lists the folder it is in, the root is never a child, a removed folder is forgotten and the root stays", () => {
+  const m = new TreeModel("docs");
+  m.expand("docs");
+  m.listed("docs", [
+    { name: "sub", path: "docs/sub", type: "dir" },
+    { name: "a.md", path: "docs/a.md", type: "file" },
+  ]);
+  m.expand("docs/sub");
+  m.listed("docs/sub", [{ name: "x.txt", path: "docs/sub/x.txt", type: "file" }]);
+  // a file added under the root lists the folder it is in
+  assert.deepEqual(m.changed({ path: "docs/sub/y.txt", kind: "added" }), [{ kind: "list", path: "docs/sub" }]);
+  // the root itself is never listed as somebody's child
+  assert.deepEqual(m.changed({ path: "docs", kind: "modified" }), []);
+  // a folder deleted: its watch ends, and the root's listing is asked again
+  assert.deepEqual(m.changed({ path: "docs/sub", kind: "deleted" }), [{ kind: "unwatch", path: "docs/sub" }, { kind: "list", path: "docs" }]);
+  // the listing without it forgets it and what is below it; the root is kept
+  m.listed("docs", [{ name: "a.md", path: "docs/a.md", type: "file" }]);
+  assert.equal(m.nodes.has("docs/sub"), false);
+  assert.equal(m.nodes.has("docs"), true);
+  assert.deepEqual(m.rows().map((x) => x.path), ["docs", "docs/a.md"]);
+  // the root deleted: its own watch ends
+  assert.deepEqual(m.changed({ path: "docs", kind: "deleted" }), [{ kind: "unwatch", path: "docs" }]);
 });

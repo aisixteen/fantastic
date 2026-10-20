@@ -74,6 +74,9 @@ it). Several dropped items sit around the drop point, one slot each, none over
 another; the canvas highlights its edge while a tree drag is over it. A drop
 is the view's `open` verb: `open {path | agent, x?, y?}` does the same from an
 AI (a path's kind is read from its listing; an agent folder opens its agent).
+Given x and y, an agent's cell moves there; without them its cell keeps its
+place, and a hidden one comes back where it was (a new cell lands at x, y, or
+0, 0).
 A drop on an html cell's body does not reach the canvas (the iframe takes it).
 An AI drives the tree with `select`, `expand`,
 `collapse` and `reveal` (each takes `path` or `agent`), and a preview with

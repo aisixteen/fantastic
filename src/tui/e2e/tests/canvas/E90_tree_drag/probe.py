@@ -158,7 +158,8 @@ def main() -> bool:
             r["d3 both reattach live: their ticks advance"] = (await last_tick(CELL_A)) > t_a and (await last_tick(CELL_B)) > t_b
             r["d4 nothing is duplicated"] = (await frames()) == start_frames
             # e) a file: a preview pinned to it, following its changes
-            await pg.js(f"{row(TREE, '.ft-row[data-path=\"src\"] .tw')}.click()")
+            src_tw = row(TREE, '.ft-row[data-path="src"] .tw')
+            await pg.js(f"{src_tw}.click()")
             r["e1 src lists its file"] = bool(await pg.until(f"!!{file_row('src/one.txt')}", 15))
             await pg.js(drag_drop(file_row("src/one.txt"), 760, 60))
             # the new preview: the one cell that shows `one` (the drop made it; nothing else pins it)
@@ -175,7 +176,8 @@ def main() -> bool:
             r["f1 a file tree rooted at docs lists its file"] = bool(await pg.until(f"!!({by_file})", 20))
             tree_root = str(await pg.js(f"({by_file})"))
             info["f_tree"] = tree_root
-            r["f2 it shows nothing above docs"] = not await pg.js(f"!!{row(tree_root, '.ft-row[data-path=\"src\"]')}")
+            src_row = row(tree_root, '.ft-row[data-path="src"]')
+            r["f2 it shows nothing above docs"] = not await pg.js(f"!!{src_row}")
             # g) the cells this probe made are removed; no page error
             made = await pg.js("[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"], .agent-frame[data-id^=\"files_\"]')].map(f=>f.dataset.id)")
             for cid in [TREE, CELL_A, CELL_B, *made]:

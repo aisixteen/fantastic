@@ -123,8 +123,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   if (kernel.get(ROOT_VIEW) === undefined && kernel.rootId !== null) {
     kernel.register(new Agent({ id: ROOT_VIEW, parentId: kernel.rootId, handlerModule: VIEW, sentence: "The root view: the canvas's first view." }));
   }
-  // the view may list the project to `open` what a drop names (#134, #135): granted from above, here
-  if (kernel.get(ROOT_VIEW) !== undefined) grantViewLists(kernel);
+  // the views may list the project to `open` what a drop names (#134, #135): granted from above, here —
+  // every view, the root and each nested one, and each one placed later (an added agent)
+  grantViewLists(kernel);
+  kernel.addStateSubscriber((e) => {
+    if (e.kind === "added") grantViewLists(kernel);
+  });
 
   // THE PAIR: a cell the canvas spawned a backend for, and that backend. The
   // backend is a direct child of `canvas_root` on the host, carrying the
@@ -1955,9 +1959,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       for (const [i, it] of got.items.entries()) {
         const at = spots[i]!;
         const what = it.kind === "agent" ? { agent: it.id } : { path: it.path };
-        const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x: at.x, y: at.y } as unknown as Payload }]))[0]?.result as Rec | null;
-        const err = r?.["error"];
-        if (typeof err === "string") toast(`✕ ${err}`);
+        try {
+          const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x: at.x, y: at.y } as unknown as Payload }]))[0]?.result as Rec | null;
+          const err = r?.["error"];
+          if (typeof err === "string") toast(`✕ ${err}`);
+        } catch (err) {
+          // the send itself failed: say so, and go on with the rest of the drop
+          toast(`✕ ${(err as Error).message}`);
+        }
       }
     })();
   });

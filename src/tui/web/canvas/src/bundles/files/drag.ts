@@ -107,7 +107,7 @@ const refusal = (error: string, reason: Refusal["reason"], arg: string, hint?: s
  */
 export async function resolveTarget(t: Target, look: Look): Promise<Opened | Refusal> {
   if (t.kind === "agent") {
-    return (await look.hasAgent(t.id)) ? { kind: "agent", agent: t.id } : refusal(`no host agent '${t.id}'`, "not_found", "id", "the agents are the host's: drag one from the tree");
+    return (await look.hasAgent(t.id)) ? { kind: "agent", agent: t.id } : refusal(`no host agent '${t.id}'`, "not_found", "agent", "the agents are the host's: drag one from the tree");
   }
   if (!inRoot(t.path)) return refusal(`'${t.path}' is outside the project`, "outside_root", "path", "paths are relative to the project folder, with no leading / and no ..");
   const p = norm(t.path);
