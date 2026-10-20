@@ -69,7 +69,7 @@ REPLY_S = 30
 #: and the first characters of the expression it sent and of each line
 CONSOLE_KEPT, EXPR_SHOWN = 8, 120
 # a terminal's text, from its BUFFER (the WebGL renderer leaves no text in the DOM)
-XTERM_TEXT = "((()=>{const t=document.querySelector('.agent-frame .frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
+XTERM_TEXT = "((()=>{const t=[...document.querySelectorAll('.agent-frame .frame-body')].map(b=>b.xterm).find(Boolean); if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
 
 
 
@@ -349,8 +349,8 @@ class Page:
         if [w, h] != have:
             await self.cdp("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=0, mobile=False)
 
-    async def mouse(self, typ: str, x: float, y: float, clicks: int = 1) -> None:
-        await self.cdp("Input.dispatchMouseEvent", type=typ, x=x, y=y, button="left", clickCount=clicks)
+    async def mouse(self, typ: str, x: float, y: float, clicks: int = 1, modifiers: int = 0) -> None:
+        await self.cdp("Input.dispatchMouseEvent", type=typ, x=x, y=y, button="left", clickCount=clicks, modifiers=modifiers)
 
     async def type(self, text: str) -> None:
         await self.js("document.querySelector('.xterm-helper-textarea')?.focus()")
@@ -482,7 +482,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     await page.open(url)
 
 
-async def click(page: Page, sel: str, bad: list[str]) -> None:
+async def click(page: Page, sel: str, bad: list[str], shift: bool = False) -> None:
     # a target SHOWN a moment after the page: a stopped terminal's ▶ is in the
     # DOM from the start, hidden (0×0 at the corner) until its attach finds the
     # program stopped — a click at that rect lands on nothing
@@ -492,17 +492,37 @@ async def click(page: Page, sel: str, bad: list[str]) -> None:
     if r is None or not (r["w"] > 0 and r["h"] > 0):
         bad.append(f"nothing shown to click at {sel}")
         return
-    await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
-    await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
+    mods = 8 if shift else 0  # CDP modifier bit 8: Shift
+    await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
+    await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
+
+
+async def head_menu(page: Page, intent: str, bad: list[str]) -> None:
+    """Right-click a cell's head, then pick `intent` (`hide` | `delete`) from the menu it opens."""
+    r = await page.rect(".agent-frame .frame-head")
+    if r is None or not (r["w"] > 0 and r["h"] > 0):
+        bad.append("no frame head to right-click")
+        return
+    x, y = r["x"] + r["w"] / 2, r["y"] + r["h"] / 2
+    await page.cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="right", clickCount=1)
+    await page.cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button="right", clickCount=1)
+    await click(page, f'.cell-menu button[data-intent="{intent}"]', bad)
 
 
 async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: dict) -> list[str]:
     bad: list[str] = []
     exp = run.get("expect") or {}
+    # `pick: hidden` — the sidebar's row for the agent of the hidden cell, read
+    # before anything else is placed (a placed tree view is a member too) (#133)
+    if run.get("pick") == "hidden":
+        state["pick_bid"] = (members(cwd) or [{}])[0].get("backend_id")
     if run.get("restart"):
         await restart(run["restart"], page, host, cwd, url, state, exp, bad)
     if "dblclick" in run:
-        before = await page.js("document.querySelectorAll('.xterm-helper-textarea').length")
+        # the kind placed from the popup: a terminal (default) or the tree view
+        kind = run["dblclick"].get("kind", "terminal")
+        shown_sel = ".xterm-helper-textarea" if kind == "terminal" else ".side .agents-tree li.agent.host"
+        before = await page.js(f"document.querySelectorAll({json.dumps(shown_sel)}).length")
         x, y = run["dblclick"]["x"], run["dblclick"]["y"]
         for c in (1, 2):
             await page.mouse("mousePressed", x, y, c)
@@ -514,15 +534,15 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         if not await page.until("document.activeElement === document.querySelector('.action-popup input')", 10):
             bad.append("no action popup after the double click")
             return bad
-        await page.cdp("Input.insertText", text="terminal")
+        await page.cdp("Input.insertText", text=kind)
         if not await page.until("(()=>{const t=[...document.querySelectorAll('.action-popup .tile')];"
-                                "return t.length === 1 && t[0].querySelector('.lb').textContent === 'terminal';})()", 5):
-            bad.append("the action popup drew no single `terminal` tile")
+                                f"return t.length === 1 && t[0].querySelector('.lb').textContent === {json.dumps(kind)};}})()", 5):
+            bad.append(f"the action popup drew no single `{kind}` tile")
         else:
             await page.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
             await page.cdp("Input.dispatchKeyEvent", type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13)
-        if not await page.until(f"document.querySelectorAll('.xterm-helper-textarea').length > {before}", 10):
-            bad.append("no terminal appeared after the double click")
+        if not await page.until(f"document.querySelectorAll({json.dumps(shown_sel)}).length > {before}", 10):
+            bad.append(f"no {kind} appeared after the double click")
         wait_disk(lambda: len(members(cwd)) > 0)
     if "drag" in run:
         r = await page.rect(".agent-frame .frame-head")
@@ -541,11 +561,25 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
                 await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x0 + run["drag"]["dx"] * i / 8,
                                y=y0 + run["drag"]["dy"] * i / 8, button="left")
             await page.mouse("mouseReleased", x0 + run["drag"]["dx"], y0 + run["drag"]["dy"])
+    # ✕ HIDES the cell (the agent lives on); "delete" is Shift+✕ (the agent goes too)
     if run.get("close"):
-        await click(page, ".agent-frame .close", bad)
+        await click(page, ".agent-frame .close", bad, shift=run["close"] == "delete")
+    if "contextmenu" in run:
+        await head_menu(page, run["contextmenu"], bad)
     if "click" in run:
         state["prev_backend"] = (members(cwd) or [{}])[0].get("backend_id")
         await click(page, run["click"], bad)
+    if run.get("pick") == "hidden":
+        row = f'.side .agents-tree li.agent[data-id="{state.get("pick_bid")}"]'
+        # the tree opens one level (and the viewed agent's path): fold the closed
+        # rows down until the hidden agent's row is drawn
+        for _ in range(12):
+            if await page.until(f"!!document.querySelector({json.dumps(row)})", 2):
+                break
+            await page.js("(()=>{const t=[...document.querySelectorAll('.side .agents-tree li .tw')].find(e=>e.textContent==='▸'); t?.click();})()")
+        await click(page, row, bad)
+        # the shown terminal takes the keys (the row's click moved the focus off it)
+        await click(page, ".agent-frame .xterm-screen", bad)
     if "type" in run:
         if not await page.until("!!document.querySelector('.xterm-helper-textarea')", 10):
             bad.append("no terminal to type into")

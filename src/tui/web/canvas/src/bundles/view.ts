@@ -18,7 +18,7 @@ export interface ViewContext {
   backend: string;
   /** this view-agent's own record — read fields like `mode` (multi-mode views) */
   record?: Record<string, unknown>;
-  /** remove this view — and the backend it owns — exactly as its ✕ does */
+  /** remove this cell from its view (its agent untouched); ✕ only hides it */
   close(): void;
   /** what a view may ask of the canvas around it (the AI set-up wizard, an AI cell) */
   actions?: CanvasActions;

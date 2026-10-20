@@ -80,7 +80,8 @@ grants the socket leg onto each host agent it seeds, both halves.
 - `canvas_terminal.browser.itest.ts` — the canvas pair: a dblclick spawns the
   backend the terminal view DECLARES it fronts (`exec_bridge.tools`) as a
   child of the socket leg carrying `view_id` + `canvas_id`, binds the view to it
-  (and grants exactly it), then closing the frame removes both.
+  (and grants exactly it), then Shift+closing the frame removes both (a plain
+  × hides the cell and keeps both).
 - `scheduler_ai_html.browser.itest.ts` — the deep cross-kernel cascade
   (scheduler ⇄ python ⇄ AI ⇄ JS panels); `A` + `G` are deterministic, `B–J` are
   live (PAID — real tokens on the active backend).

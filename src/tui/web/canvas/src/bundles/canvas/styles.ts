@@ -190,6 +190,9 @@ export const CANVAS_CSS = `
   .side .agents-tree li.agent { opacity: 0.6; }
   .side .agents-tree li.has-cell { opacity: 1; cursor: pointer; }
   .side .agents-tree li.has-cell .gl { color: ${tok("color.accent.base")}; }
+  /* HIDDEN (#133): its agent runs, its cells are off their views — a pick shows it */
+  .side .agents-tree li.hidden .nm { font-style: italic; }
+  .side .agents-tree li.hidden .ct { color: ${tint("color.text.cool", 45)}; font-style: italic; }
   /* FE (page) and BE (host) in the frames' two colors; a NEW host agent stands out */
   .side .agents-tree li.agent.page .nm { color: ${tok("color.side.page-text")}; }
   .side .agents-tree li.agent.host .nm { color: ${tok("color.side.host-text")}; }
@@ -228,4 +231,12 @@ export const CANVAS_CSS = `
   .full-hint kbd { font: 600 11px ${tok("font.family.mono")}; color: ${tok("color.accent.text")};
     padding: 2px 6px; margin: 0 1px; border-radius: ${tok("radius.key")}; background: ${tint("color.accent.base", 16)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 40)}; }
   .side .agent.viewed { background: ${tint("color.accent.base", 18)}; }
+  /* A CELL'S HEAD MENU (right-click on the head, #133): Hide, Delete */
+  .cell-menu { position: fixed; z-index: 1200; display: flex; flex-direction: column; min-width: 120px; padding: 4px;
+    border-radius: ${tok("radius.control")}; background: ${tok("color.surface.raised")}; border: 1px solid ${tint("color.ink", 10)};
+    box-shadow: ${tok("shadow.toast")}; }
+  .cell-menu button { font: 12.5px ${tok("font.family.sans")}; text-align: left; color: ${tok("color.text.primary")}; background: transparent;
+    border: 0; border-radius: ${tok("radius.control")}; padding: 5px 10px; cursor: pointer; }
+  .cell-menu button:hover { background: ${tint("color.accent.base", 16)}; }
+  .cell-menu button[data-intent="delete"] { color: ${tok("color.status.error-text")}; }
 `;

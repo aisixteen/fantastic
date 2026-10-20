@@ -27,6 +27,7 @@ def main() -> bool:
             await pg.js("document.querySelector('.chat-view .c-keep').click()")
             await asyncio.sleep(2)
             kept = await pg.js("document.querySelector('.chat-view .c-badge')?.textContent")
+            # ✕ HIDES the cell; the kept dialog's agent lives on (Shift+✕ would delete it)
             await pg.js("[...document.querySelectorAll('.agent-frame')].find(f=>f.querySelector('.chat-view')).querySelector('.close').click()")
             await asyncio.sleep(2)
             return kept

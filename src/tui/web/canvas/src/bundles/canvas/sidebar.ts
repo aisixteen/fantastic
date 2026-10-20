@@ -30,6 +30,8 @@ export interface SidebarDeps {
   pageTree(): TreeNode | null;
   /** the cells showing agent `id` (the cell itself, or cells fronting it) */
   cellsFor(id: string): string[];
+  /** whether cell `id` is hidden from its view (#133: its agent runs on) */
+  isHidden(cell: string): boolean;
   moveTo(viewId: string): void;
   /** VIEW a page agent (`focus`: ⌘-click — focus it on its view instead) */
   view(id: string, focus: boolean): void;
@@ -41,7 +43,7 @@ export interface SidebarDeps {
   open(id: string): void;
   /** a host agent added in the background and not shown yet (NEW) */
   fresh(id: string): boolean;
-  /** delete host agent `id` (its own act: ✕ on a cell only closes the view) */
+  /** delete host agent `id` (its own act: ✕ on a cell only hides it) */
   deleteAgent(id: string): void;
 }
 
@@ -74,6 +76,12 @@ export function forest(recs: Rec[]): TreeNode[] {
   return roots;
 }
 
+/** Whether an agent's cells are ALL hidden (#133): it runs, and no cell shows it.
+ *  A row with no cell at all is not hidden — it is simply not shown. Pure, testable. */
+export function allHidden(cells: string[], isHidden: (cell: string) => boolean): boolean {
+  return cells.length > 0 && cells.every(isHidden);
+}
+
 /** The glyph for an agent, by what its record says it is. An AI agent is a
  *  NON-ROOT agent naming a memory store (the root names the project's). */
 export function glyph(n: TreeNode): string {
@@ -104,6 +112,9 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HT
 
   const node = (n: TreeNode, depth: number, out: HTMLElement[]): void => {
     const cells = d.cellsFor(n.id);
+    // hidden (#133): every cell of it is off its view — shown, it is not "has-cell"
+    const hidden = allHidden(cells, d.isHidden);
+    const shown = hidden ? [] : cells;
     const kids = n.children.length > 0;
     // the path to the VIEWED agent is always unfolded: you see where you are
     const isOpen = open.get(n.id) ?? (depth < 1 || n.id === d.viewed() || holds(n, d.viewed()));
@@ -112,8 +123,9 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HT
     // a host agent added in the background and not shown yet is NEW
     const side = n.handler.endsWith(".ts") ? "page" : "host";
     const isNew = side === "host" && d.fresh(n.id);
-    li.className = "agent " + side + (cells.length > 0 ? " has-cell" : "") + (n.id === d.viewed() ? " viewed" : "") + (isNew ? " fresh" : "");
+    li.className = "agent " + side + (shown.length > 0 ? " has-cell" : "") + (hidden ? " hidden" : "") + (n.id === d.viewed() ? " viewed" : "") + (isNew ? " fresh" : "");
     li.style.paddingLeft = `${10 + depth * 12}px`;
+    li.dataset.id = n.id;
     li.innerHTML = `<span class="tw"></span><span class="gl"></span><span class="nm"></span><span class="ct"></span>`;
     const tw = li.children[0] as HTMLElement;
     tw.textContent = kids ? (isOpen ? "▾" : "▸") : "";
@@ -124,11 +136,13 @@ export function createSidebar(d: SidebarDeps): { render(): Promise<void>; el: HT
     });
     (li.children[1] as HTMLElement).textContent = glyph(n);
     (li.children[2] as HTMLElement).textContent = n.id;
-    (li.children[3] as HTMLElement).textContent = isNew ? "new" : cells.length > 1 ? String(cells.length) : "";
+    (li.children[3] as HTMLElement).textContent = hidden ? "hidden" : isNew ? "new" : cells.length > 1 ? String(cells.length) : "";
     const fkey = d.mac ? "⌘" : "Ctrl";
     li.title = n.handler.endsWith(".ts")
       ? `${n.id} · ${n.handler} · click: view it · ${fkey}-click: focus it on its canvas`
-      : `${n.id} · ${n.handler}${cells.length > 0 ? ` · click: view its cell · ${fkey}-click: move to it` : " · open it in a cell"}`;
+      : hidden
+        ? `${n.id} · ${n.handler} · hidden: click shows its cell and views it · ${fkey}-click: show it on its view`
+        : `${n.id} · ${n.handler}${cells.length > 0 ? ` · click: view its cell · ${fkey}-click: move to it` : " · open it in a cell"}`;
     li.addEventListener("click", (e) => {
       const focus = isFocusClick(e, d.mac);
       if (n.handler.endsWith(".ts")) return d.view(n.id, focus); // a page agent

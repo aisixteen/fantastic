@@ -11,7 +11,8 @@ import { grantHint } from "../html_agent/grant_hint.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { cellGrant, hostRecordFresh, viewOf } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
-import { setRect, tabWidth, themeOf, themesOf } from "./layout.ts";
+import { hiddenOf, setHidden, setRect, tabWidth, themeOf, themesOf } from "./layout.ts";
+import { isCellHandler } from "./cell_menu.ts";
 import { chromeOf, FIT_MAX, fitSize, nextSize, sizeOf } from "./fit.ts";
 import type { Rect } from "./layout.ts";
 
@@ -71,7 +72,7 @@ export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme
 export const GEOMETRY = ["x", "y", "width", "height"] as const;
 
 /** Every view verb, for the grants that admit a caller. */
-export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "theme", "terminal_renderer", "reflect"] as const;
+export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "theme", "terminal_renderer", "reflect"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -130,7 +131,7 @@ export const CANVAS_README =
 
 export const VIEW_README =
   
-  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · fit {id, max_width?, max_height?} (an html cell sized to what it draws — {width, height, overflowed}; a cell keeps its size otherwise, 480×320 when place names none: after you place or update an html cell, call fit) · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto | a theme's name} (which theme the cells sit in — stock: canvas = the free 2D canvas, mobile = one column; the canvas theme agent lists, adds and edits themes (`themes`, `add_theme`); auto = the first theme whose width trigger matches the tab (stock mobile: under 768px wide); x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · terminal_renderer {name?: auto | webgl | dom} (the terminals' renderer — auto: DOM in WebKitGTK, else the shared WebGL; no name: what it is and why) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id}. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
+  "THE VIEW — the canvas's one view (frontend). Its cells are its children: you place and change them HERE. VERBS: place {kind: html|gl|terminal|chat (or handler_module) — or only backend_id: a VIEW of that host agent, drawn as its record says — x, y, id?, width?, height?, display_name?, bytes? (the body, verbatim), trusted?, can_call?, callable_by?, backend_id? (terminal/chat: the host agent shown)} · move {id, x?, y?, width?, height?} · fit {id, max_width?, max_height?} (an html cell sized to what it draws — {width, height, overflowed}; a cell keeps its size otherwise, 480×320 when place names none: after you place or update an html cell, call fit) · update {id, bytes? (a new body reloads it), fields?: {display_name|trusted|readme|x|y|width|height|can_call|callable_by}} (on the view itself: any field) · theme {name?: auto | a theme's name} (which theme the cells sit in — stock: canvas = the free 2D canvas, mobile = one column; the canvas theme agent lists, adds and edits themes (`themes`, `add_theme`); auto = the first theme whose width trigger matches the tab (stock mobile: under 768px wide); x/y/width/height are per theme, kept in the view's layout_<theme> child, never on a cell — a cell new to a theme is placed by it) · terminal_renderer {name?: auto | webgl | dom} (the terminals' renderer — auto: DOM in WebKitGTK, else the shared WebGL; no name: what it is and why) · wire {sender, receiver, verbs} (a grant, written on each side that is a cell; not from/to) · remove {id} (DELETES the cell from the view: its agent is untouched) · hide {id} (takes the cell OFF the view, its agent keeps running and its rect is kept; hiding a hidden cell changes nothing) · show {id, x?, y?} (puts a hidden cell back where it was — or at x, y in the theme in use — and it re-attaches live; a shown cell keeps its place). hide, show and remove stay distinct: hide and show never touch the agent. A PANEL'S JS (an html cell's body) has `fantastic`: `await fantastic.send(id, payload)` → the reply · `fantastic.watch(id, ev => …)` → events (returns off) · `fantastic.emit(id, payload)` · `fantastic.onMessage(p => …)`. Its calls are judged by the CELL's can_call — grant what it calls (`{<id>: [verbs…, watch]}`); a reply's `grants_missing` names any it lacks. On the host they arrive as `user`: a host agent you create for a panel needs `callable_by: {user: [<the verbs the panel calls>, watch]}` in its create_agent (a new agent admits no one); never drop `user` from an existing agent's callable_by. Example — a button that runs a command on a host exec agent `runner` and shows its output live: place {kind: html, x: 700, y: 60, can_call: {runner: [start, watch]}, bytes: <button onclick=\"fantastic.send('runner',{type:'start',command:'ls'}).then(r=>job=r.job_id)\">Run</button><pre id=o></pre><script>let job;fantastic.watch('runner',e=>{if(e.job_id===job&&e.type==='progress')o.textContent+=e.line+'\\n'})</script>} A LIVE HOST CELL — the agent pushes, its panel redraws (no polling): a bundle agent (start from `spawn {bundle: python_agent}` on the canvas's host node) whose record has `view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}` and `callable_by: {user: [get_html, watch]}`; its `agent.py` sends `fa.emit({'type': 'update', 'html': …})` on each change; its `panel.html` does `fantastic.send(id,{type:'get_html'})` once, then `fantastic.watch(id, e => { if (e.type==='update') root.innerHTML = e.html })`; show it with place {backend_id: id}. innerHTML runs no <script>: keep the panel's script in panel.html and send data (or script-free HTML) in the events. A live URL or a file: an html cell whose body is <iframe src=URL> (trusted: true for GET /static_files/file/<path>). The background is the child `background` (set_bg / default_bg / clear_bg / get_bg). ";
 
 /** What the page does when its host stops (`main.ts` sets it): its last
  *  records flushed, nothing written after. */
@@ -292,7 +293,34 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       const target = str(payload, "id");
       if (kernel.get(target)?.parentId !== id) return { error: `view: remove — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
       const out = kernel.remove(target) as unknown as Json;
+      // a hidden cell removed is no longer hidden (its id is gone with it)
+      if (hiddenOf(kernel, id).has(target)) setHidden(kernel, id, target, false);
       return out;
+    }
+    case "hide": {
+      // OFF the view, the agent running on (#133): its record and its rect stay;
+      // the page draws the view without it (its frame goes, its stream with it)
+      const target = str(payload, "id");
+      const cell = kernel.get(target);
+      if (cell?.parentId !== id) return { error: `view: hide — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
+      if (!isCellHandler(String(cell.record().handler_module ?? ""))) return { error: `view: hide — ${JSON.stringify(target)} is not a cell (the view's own background or layout)`, reason: "bad_arg", arg: "id" };
+      setHidden(kernel, id, target, true);
+      return { hidden: target, hidden_cells: [...hiddenOf(kernel, id)] };
+    }
+    case "show": {
+      // BACK on the view, where it was (or at x, y in the theme in use): the page
+      // mounts it again, live — the agent's stream re-attaches
+      const target = str(payload, "id");
+      const cell = kernel.get(target);
+      if (cell?.parentId !== id) return { error: `view: show — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
+      if (!isCellHandler(String(cell.record().handler_module ?? ""))) return { error: `view: show — ${JSON.stringify(target)} is not a cell (the view's own background or layout)`, reason: "bad_arg", arg: "id" };
+      // a shown cell keeps its place: x, y place a HIDDEN cell only (`move` moves one)
+      const wasHidden = hiddenOf(kernel, id).has(target);
+      const at = wasHidden ? geometryOf({ x: payload["x"], y: payload["y"] }) : {};
+      const theme = themeOf(kernel, id, tabWidth());
+      const rect = Object.keys(at).length > 0 ? setRect(kernel, id, theme, target, at) : undefined;
+      setHidden(kernel, id, target, false);
+      return { shown: target, theme, ...(rect ?? {}), hidden_cells: [...hiddenOf(kernel, id)] } as unknown as Json;
     }
     case "theme": {
       // THE THEME: which layout the cells sit in (canvas | mobile), or `auto` —

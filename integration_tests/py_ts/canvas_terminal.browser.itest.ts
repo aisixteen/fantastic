@@ -2,13 +2,14 @@
 // backend the terminal view DECLARES it fronts (`exec_bridge.tools`, looked
 // up by that exact name in the host catalog) as a CHILD OF THE SOCKET LEG,
 // carrying its view's and canvas's ids; the view is bound to it and granted
-// exactly it. Closing the frame removes BOTH — the view and the backend.
+// exactly it. Shift+closing the frame removes BOTH — the view and the backend
+// (a plain × hides the cell and keeps both).
 //
 // Proof points, on the page AND on the host's disk:
 //   create: dblclick -> a terminal frame renders  +  an exec_bridge terminal record
 //           appears under the leg (`…/<web_ws>/agents/<id>/agent.yaml`) with
 //           `view_id` + `canvas_id`, and the view's folder under the canvas.
-//   delete: close (×)  -> the frame disappears     +  both folders are GONE.
+//   delete: Shift+close (×) -> the frame disappears +  both folders are GONE.
 //
 // Run: cd integration_tests/py_ts && node --test --test-force-exit canvas_terminal.browser.itest.ts
 
@@ -75,7 +76,7 @@ async function until(cond: () => boolean, ms: number): Promise<boolean> {
   return cond();
 }
 
-test("canvas dblclick spawns a paired terminal under the leg + close removes both", async (t) => {
+test("canvas dblclick spawns a paired terminal under the leg + Shift+close removes both", async (t) => {
   if (!chromeAvailable()) return t.skip("system Chrome not found");
   let host: Host | null = null;
   let browser: Browser | null = null;
@@ -107,9 +108,9 @@ test("canvas dblclick spawns a paired terminal under the leg + close removes bot
     const backendId = b!.file.split("/").slice(-2, -1)[0]!;
     assert.equal(recordField(view, "backend_id"), backendId, "the view is bound to that backend");
 
-    // ── DELETE: click the frame's close (×) ──
+    // ── DELETE: Shift+click the frame's close (×); a plain × only hides the cell ──
     await browser.evaluate(
-      "(() => { const x = document.querySelector('.agent-frame .close'); if (!x) return false; x.click(); return true; })()",
+      "(() => { const x = document.querySelector('.agent-frame .close'); if (!x) return false; x.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true })); return true; })()",
     );
     await browser.waitFor("document.querySelectorAll('.agent-frame').length === 0", 20000);
     assert.ok(await until(() => backends(host!.tmp).length === 0, 15000), "the owned backend is deleted with its view");
