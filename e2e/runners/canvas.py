@@ -89,7 +89,7 @@ async def attach(chrome: Chrome, timeout: float = 30.0):
     import websockets
     from websockets.exceptions import WebSocketException
     deadline = time.time() + timeout
-    why = "its debugging port never answered"
+    why = "no poll yet"
     while True:
         chrome.check(why)
         try:
