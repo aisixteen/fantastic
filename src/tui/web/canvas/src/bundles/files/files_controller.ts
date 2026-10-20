@@ -278,6 +278,7 @@ export function registerFilesView(kernel: {
   registerBundle(hm: string, h: Handler, verbs?: Record<string, string>): void;
   setBundleReadme(hm: string, readme: string): void;
 }): void {
+  // sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree
   for (const hm of ["files_view.ts", "sidebar_view.ts"]) {
     kernel.registerBundle(hm, filesAgent, FILES_VERB_DOCS);
     kernel.setBundleReadme(hm, hm === "files_view.ts" ? FILES_README : "legacy name of files_view.ts: it opens as the file tree. " + FILES_README);

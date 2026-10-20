@@ -241,3 +241,77 @@ test("a watch refused is said on the preview, and the file still shows", async (
   assert.equal(p.editor.text(), "one");
   assert.equal(p.isLive(), false);
 });
+
+test("a revert redraws the text: the editor's generation moves though its version does not", async () => {
+  const r = rig();
+  project(r.bridge);
+  const p = await r.mountPreview("pv", { pinned: "src/one.txt", follow: false });
+  await r.call("pv", { type: "edit" });
+  const g = p.editor.generation;
+  p.edit("changed");
+  assert.equal(p.editor.generation, g, "typing is not a replacement of the text");
+  const v = p.editor.version();
+  await r.call("pv", { type: "revert" });
+  assert.equal(p.editor.version(), v, "the version is the same after the revert");
+  assert.notEqual(p.editor.generation, g, "so the generation is what tells the view to draw again");
+});
+
+test("a save refused as a mismatch on a file deleted meanwhile returns to dirty, said; saving waits for the file", async () => {
+  const r = rig();
+  project(r.bridge);
+  const p = await r.mountPreview("pv", { pinned: "src/one.txt", follow: false });
+  await r.call("pv", { type: "edit" });
+  p.edit("mine");
+  r.bridge.files.delete("src/one.txt"); // gone before the write, with no event yet
+  await p.save();
+  assert.equal(p.editor.state.k, "dirty", "not stuck in saving");
+  assert.equal(p.gone, true);
+  assert.match(String(p.editor.error), /deleted/);
+  assert.equal(p.editor.text(), "mine", "the edits are kept");
+  assert.equal((await r.call("pv", { type: "save" }))["reason"], "file_deleted");
+  r.bridge.put("src/one.txt", "back");
+  await settle();
+  assert.equal(p.editor.state.k, "conflict", "back with other text: the person resolves it");
+});
+
+test("a large file that is binary shows the size card; a large text file pages without splitting characters", async () => {
+  const r = rig();
+  project(r.bridge);
+  r.bridge.put("big.bin", "a\u0000b" + "x".repeat(1024 * 1024));
+  r.bridge.put("big.txt", "é".repeat(40000) + "x".repeat(1024 * 1024)); // pages fall inside a two-byte character
+  const p = await r.mountPreview("pv");
+  await r.call("pv", { type: "open", path: "big.bin" });
+  assert.equal(p.mode, "binary");
+  assert.equal(p.content.k, "binary");
+  await r.call("pv", { type: "open", path: "big.txt" });
+  assert.equal(p.content.k, "large");
+  const seen: string[] = [];
+  for (let i = 0; i < 3; i++) {
+    await p.page(i);
+    assert.equal(p.content.k, "large");
+    if (p.content.k === "large") seen.push(p.content.text);
+  }
+  assert.ok(!seen.join("").includes("�"), "no replacement characters");
+  assert.equal(seen.join(""), ("é".repeat(40000) + "x".repeat(1024 * 1024)).slice(0, seen.join("").length), "pages join without loss");
+});
+
+test("mode is refused with unsaved edits, and the mode stays", async () => {
+  const r = rig();
+  project(r.bridge);
+  const p = await r.mountPreview("pv", { pinned: "src/one.txt", follow: false });
+  await r.call("pv", { type: "edit" });
+  p.edit("changed");
+  assert.equal(await p.setFileMode("agent"), "unsaved edits: save or revert first");
+  assert.equal(p.fileMode, "file");
+});
+
+test("a followed file that grows past the text limit is shown as large, not read in full", async () => {
+  const r = rig();
+  project(r.bridge);
+  const p = await r.mountPreview("pv", { pinned: "src/one.txt", follow: false });
+  r.bridge.put("src/one.txt", "y".repeat(1024 * 1024 + 5));
+  await settle();
+  await settle();
+  assert.equal(p.mode, "large");
+  assert.equal(p.content.k, "large");
+});

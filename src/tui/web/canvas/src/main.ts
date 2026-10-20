@@ -56,7 +56,7 @@ function register(kernel: Kernel): void {
   kernel.registerBundle("reflect_view.ts", () => null);
   kernel.registerBundle("setup_view.ts", () => null);
   kernel.registerBundle("stream_view.ts", () => null);
-  registerFilesView(kernel); // the file tree cell (and its old name, sidebar_view.ts): a page agent with verbs
+  registerFilesView(kernel); // the file tree cell, a page agent with verbs (sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree)
   registerPreviewView(kernel); // the previewer / editor cell: a page agent with verbs
   kernel.registerBundle("canvases_view.ts", () => null); // the canvas-list cell
   kernel.registerBundle("mcp_view.ts", () => null); // an MCP server agent's view

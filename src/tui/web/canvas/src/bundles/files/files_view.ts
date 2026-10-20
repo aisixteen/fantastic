@@ -1,11 +1,10 @@
 import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { isFocusClick } from "../canvas/viewer.ts";
-import { AgentWalker } from "./agent_walk.ts";
 import { badge, badgeOf, side } from "./agent_index.ts";
 import { fileGrant, kernelBridge, sharedHub } from "./file_bridge.ts";
 import { FilesController, controllers } from "./files_controller.ts";
-import { agentIndex, drawAll, filesDeps, getWalker, onRender, rootOf, select, setWalker } from "./files_deps.ts";
+import { agentIndex, ensureWalker, filesDeps, getWalker, onRender, rootOf, select } from "./files_deps.ts";
 import type { Rec } from "./files_deps.ts";
 import { FANTASTIC } from "./paths.ts";
 import { ensureFilesStyle } from "./styles.ts";
@@ -27,11 +26,7 @@ export const filesView: ViewBundle = {
     const d = filesDeps("files_view");
     ensureFilesStyle();
     const bridge = kernelBridge(ctx.kernel);
-    if (getWalker() === null) {
-      const w = new AgentWalker(bridge, agentIndex, drawAll);
-      setWalker(w);
-      void w.request();
-    }
+    ensureWalker(bridge);
     const el = document.createElement("div");
     el.className = "side files-view";
     el.innerHTML =

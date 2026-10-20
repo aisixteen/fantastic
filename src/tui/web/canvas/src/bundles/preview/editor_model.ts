@@ -21,10 +21,13 @@ export class EditorModel {
   lastSaved: string | null = null;
   /** a refusal of the last save, for the editor to show */
   error: string | null = null;
+  /** counts the times the text on screen was replaced under the person (a load, a revert, a reload): the view draws the textarea again when it moves, since the version alone does not change on a revert */
+  generation = 0;
 
   /** A file loaded fresh (a new path): nothing is remembered. */
   load(text: string, version: string): void {
     this.state = { k: "viewing", text, version };
+    this.generation++;
     this.lastSaved = null;
     this.error = null;
   }
@@ -88,6 +91,14 @@ export class EditorModel {
     return [];
   }
 
+  /** The read that follows a refused save failed (the file is gone, or unreadable): the edits stay, back to dirty with the reason said, so the person can save again once it reads. */
+  readFailed(why: string): void {
+    const s = this.state;
+    if (s.k !== "saving" || !s.awaitingTheirs) return;
+    this.error = why;
+    this.state = { k: "dirty", base: s.base, baseVersion: s.baseVersion, mine: s.mine };
+  }
+
   /** The disk reported a change: read it again. */
   diskChanged(): EditorEffect[] {
     return [{ kind: "read" }];
@@ -119,6 +130,7 @@ export class EditorModel {
     const s = this.state;
     if (s.k !== "conflict" && s.k !== "comparing") return;
     this.state = { k: "viewing", text: s.theirs, version: s.theirsVersion };
+    this.generation++;
   }
 
   /** Conflict: overwrite — against the version just seen, so a third writer is a fresh conflict, never a blind write. */
@@ -140,6 +152,7 @@ export class EditorModel {
     if (s.k === "dirty") {
       this.error = null;
       this.state = { k: "viewing", text: s.base, version: s.baseVersion };
+      this.generation++;
       return { ok: true, what: "edits", effects: [] };
     }
     if (s.k === "viewing" && this.lastSaved !== null && s.version === this.lastSaved) {

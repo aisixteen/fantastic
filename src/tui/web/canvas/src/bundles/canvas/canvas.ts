@@ -1658,14 +1658,16 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       return null;
     },
   });
-  let sidebarTimer: ReturnType<typeof setTimeout> | null = null;
-  const renderChats = async (): Promise<void> => {
-    if (sidebarTimer !== null) clearTimeout(sidebarTimer);
-    sidebarTimer = null;
+  // The trees draw again from the agents' state. Changes arrive in bursts (a spawn
+  // touches several records), so one redraw 300 ms after the first of a burst.
+  let treeTimer: ReturnType<typeof setTimeout> | null = null;
+  const renderTrees = (): void => {
+    if (treeTimer !== null) clearTimeout(treeTimer);
+    treeTimer = null;
     renderFileTrees();
   };
   const renderSoon = (): void => {
-    if (sidebarTimer === null) sidebarTimer = setTimeout(() => void renderChats(), 300);
+    if (treeTimer === null) treeTimer = setTimeout(renderTrees, 300);
   };
 
   // A FILE TREE, a PREVIEW or the CANVAS LIST at the spot: page-only cells (no
@@ -1847,5 +1849,5 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   });
   await reconcile();
   await refresh();
-  await renderChats();
+  renderTrees();
 }

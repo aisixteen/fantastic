@@ -12,7 +12,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   `.git`, `node_modules`, `target`, `dist`, `__pycache__` hidden), lists a folder
   when it opens and watches it while open, so files made, changed or removed on
   disk show without a reload; every agent is a folder in it, with its badge, status
-  and name, and everything the old agent tree did is still there. The `preview`
+  and name. What the old agent tree did on a plain click (view a page agent, show or
+  open a host agent's cell) is now a double-click, ↗ or Shift+Enter; a click selects. The `preview`
   cell follows the tree's selection or is pinned to a path: highlighted text
   (followed live), rendered Markdown, images, PDF, a size card for a binary file,
   paged `read_stream` for a large one, and an agent's own live view. Text files up

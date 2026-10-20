@@ -1,7 +1,6 @@
 import type { Handler, Json } from "../../lib.ts";
 import { str } from "../../lib.ts";
-import { bodyText } from "../body_text.ts";
-import { isRefusal, readAll, readBytes, said } from "../files/file_bridge.ts";
+import { bytesOf, isRefusal, readAll, readBytes, said } from "../files/file_bridge.ts";
 import type { Change, FileBridge, Refusal, WatchHub } from "../files/file_bridge.ts";
 import type { AgentIndex } from "../files/agent_index.ts";
 import type { Selection } from "../files/files_deps.ts";
@@ -9,7 +8,7 @@ import { inRoot, nameOf, norm, parentOf, wire } from "../files/paths.ts";
 import type { Entry } from "../files/tree_model.ts";
 import { EditorModel } from "./editor_model.ts";
 import type { EditorEffect } from "./editor_model.ts";
-import { IMAGE_MAX, PAGE, PDF_MAX, agentTarget, editable, modeFor, refine, targetOf, why } from "./preview_model.ts";
+import { IMAGE_MAX, PAGE, PDF_MAX, agentTarget, modeFor, pageText, refine, targetOf, why } from "./preview_model.ts";
 import type { Binding, Mode } from "./preview_model.ts";
 
 // THE PREVIEWER'S CONTROLLER — what the preview cell does that is not drawing:
@@ -67,6 +66,8 @@ export class PreviewController {
   isAgent = false;
   private held: string | null = null;
   private seq = 0;
+  /** counts the text reads of a followed file: only the latest one is applied */
+  private reads = 0;
   private listener: (() => void) | null = null;
   private disposed = false;
   /** the last bridge refusal of a save, undo or read, for the verbs to pass on */
@@ -291,9 +292,18 @@ export class PreviewController {
     if (this.path === null) return;
     const pages = Math.max(1, Math.ceil(this.size / PAGE));
     const at = Math.max(0, Math.min(pages - 1, n));
-    const r = (await this.o.bridge.call({ type: "read_stream", path: wire(this.path), offset: at * PAGE, length: PAGE })) as Record<string, unknown>;
+    const r = (await this.o.bridge.call({ type: "read_stream", path: wire(this.path), offset: at * PAGE, length: PAGE + 3 })) as Record<string, unknown>;
     if (my !== this.seq) return;
-    this.content = isRefusal(r) ? { k: "error", error: said(r) } : { k: "large", size: this.size, page: at, text: bodyText(r["bytes"]) ?? "" };
+    if (isRefusal(r)) this.content = { k: "error", error: said(r) };
+    else {
+      // a file over the text limit with an unlisted extension may still be binary: sniffed here, so it gets the size card, not garbage
+      const raw = bytesOf(r["bytes"]);
+      const text = raw === null ? null : pageText(raw, at === 0);
+      if (text === null) {
+        this.mode = "binary";
+        this.content = { k: "binary", size: this.size };
+      } else this.content = { k: "large", size: this.size, page: at, text };
+    }
     this.changed();
   }
 
@@ -312,8 +322,33 @@ export class PreviewController {
       return;
     }
     this.gone = false;
-    if (this.content.k === "text") void this.exec(this.editor.diskChanged());
+    if (this.content.k === "text") void this.followed();
     else void this.refresh();
+  }
+
+  /** A followed text file changed on disk. Unless edits are open, look at what it is
+   *  now first — a file that grew past the text limit or turned binary is shown as
+   *  that, not read as text — then read it. */
+  private async followed(): Promise<void> {
+    const path = this.path;
+    if (path === null) return;
+    if (!this.dirty) {
+      const my = this.seq;
+      const st = await this.stat(path);
+      if (my !== this.seq || this.disposed || this.path !== path) return;
+      if ("refusal" in st) {
+        // gone between the event and the look; the deleted event says so
+        this.lastRefusal = st.refusal;
+        return;
+      }
+      const e = st.entry;
+      const mode = modeFor({ type: e.type, name: e.name, ...(e.size !== undefined ? { size: e.size } : {}) });
+      if (mode !== this.mode && !(this.mode === "binary" && mode === "text")) {
+        await this.refresh();
+        return;
+      }
+    }
+    await this.exec(this.editor.diskChanged());
   }
 
   // ─── the editor's effects ─────────────────────────────────────────────
@@ -341,16 +376,23 @@ export class PreviewController {
         }
         this.lastRefusal = null;
       } else {
+        const mine = ++this.reads;
         const r = await readAll(this.o.bridge, path);
+        // a newer read, or another file, decides what is shown
+        if (mine !== this.reads || this.path !== path) continue;
         if (r.ok) {
           this.gone = false;
           this.editor.reread(r);
         } else if (r.refusal["reason"] === "not_found") {
           this.gone = true;
           if (!this.editor.isDirty()) this.content = { k: "deleted" };
+          this.editor.readFailed("the file was deleted on disk; saving waits until it is back");
+        } else if (!this.editor.isDirty() && r.refusal["reason"] === "bad_arg" && r.refusal["arg"] === "path") {
+          await this.refresh(); // it turned binary: shown as that
         } else {
           this.lastRefusal = r.refusal;
           this.notice = said(r.refusal);
+          this.editor.readFailed(said(r.refusal));
         }
       }
     }
@@ -378,7 +420,11 @@ export class PreviewController {
   }
 
   async save(): Promise<void> {
-    if (this.editor.state.k === "dirty") await this.exec(this.editor.save());
+    if (this.gone) {
+      // an absent file never matches the version the edits are based on
+      this.notice = "the file was deleted on disk: saving waits until it is back";
+      this.changed();
+    } else if (this.editor.state.k === "dirty") await this.exec(this.editor.save());
     else this.changed();
   }
 
@@ -417,9 +463,12 @@ export class PreviewController {
     await this.refresh();
   }
 
-  async setFileMode(m: "file" | "agent"): Promise<void> {
+  /** Switch an agent folder between its files and the live agent. Refused (the reason) with unsaved edits: the refresh would not show it. */
+  async setFileMode(m: "file" | "agent"): Promise<string | null> {
+    if (this.dirty) return "unsaved edits: save or revert first";
     this.fileMode = m;
     await this.refresh();
+    return null;
   }
 
   dispose(): void {
@@ -500,7 +549,8 @@ export const previewAgent: Handler = async (id, payload): Promise<Json> => {
       const m = str(payload, "mode");
       if (m !== "file" && m !== "agent") return refusal("preview: mode must be file or agent", "bad_arg", { arg: "mode" });
       if (!ctl.isAgent) return refusal("preview: what is shown is not an agent's folder", "not_an_agent", { hint: "select an agent folder first" });
-      await ctl.setFileMode(m);
+      const unsaved = await ctl.setFileMode(m);
+      if (unsaved !== null) return refusal(`preview: unsaved edits in ${ctl.path}`, "unsaved_edits", { hint: "save or revert first" });
       return { mode: m };
     }
     case "edit": {
@@ -519,6 +569,7 @@ export const previewAgent: Handler = async (id, payload): Promise<Json> => {
     }
     case "save": {
       if (!ctl.editing) return refusal("preview: not editing", "not_editing", { hint: "edit first" });
+      if (ctl.gone) return refusal("preview: the file was deleted on disk", "file_deleted", { hint: "saving waits until the file is back; revert drops the edits" });
       const s = ctl.editor.state;
       if (s.k === "conflict" || s.k === "comparing") return refusal("preview: the file changed on disk under your edits", "conflict", { expected: s.baseVersion, actual: s.theirsVersion, hint: "reload, keep mine or compare in the cell" });
       await ctl.save();

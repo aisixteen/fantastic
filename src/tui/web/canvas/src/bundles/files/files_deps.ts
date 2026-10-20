@@ -1,6 +1,7 @@
 import type { ViewHandle } from "../view.ts";
 import { AgentIndex } from "./agent_index.ts";
-import type { AgentWalker } from "./agent_walk.ts";
+import { AgentWalker } from "./agent_walk.ts";
+import type { FileBridge } from "./file_bridge.ts";
 
 // WHAT THE FILE TREE AND THE PREVIEWER NEED FROM THE CANVAS (handed over at
 // mount by `canvas.ts`, like the canvas-list's deps), and what the cells share
@@ -59,9 +60,16 @@ export const agentIndex = new AgentIndex();
 
 let walker: AgentWalker | null = null;
 export const getWalker = (): AgentWalker | null => walker;
-export const setWalker = (w: AgentWalker): void => {
-  walker = w;
-};
+
+/** The page's one agent walker, started by whichever cell mounts first (a tree, or a
+ *  preview with no tree: its agent mode and ⇄ chip need the index too). */
+export function ensureWalker(bridge: FileBridge): AgentWalker {
+  if (walker === null) {
+    walker = new AgentWalker(bridge, agentIndex, drawAll);
+    void walker.request();
+  }
+  return walker;
+}
 
 /** Ask for the agent folders to be read again (coalesced; a no-op before any tree is up). */
 export function walkAgain(): void {

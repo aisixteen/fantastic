@@ -35,13 +35,21 @@ export class AgentWalker {
       return this.running;
     }
     this.running = (async (): Promise<void> => {
-      do {
-        this.again = false;
-        await this.walk();
-        this.done = true;
-        this.after();
-      } while (this.again);
-      this.running = null;
+      try {
+        do {
+          this.again = false;
+          try {
+            await this.walk();
+          } catch (err) {
+            // a bridge call that throws: said on the `.fantastic` row, and the next request walks again
+            this.errors.set(FANTASTIC, `the agent folders could not be read: ${(err as Error).message}`);
+          }
+          this.done = true;
+          this.after();
+        } while (this.again);
+      } finally {
+        this.running = null;
+      }
     })();
     return this.running;
   }
@@ -55,7 +63,8 @@ export class AgentWalker {
       for (const dir of level) {
         const r = (await this.bridge.call({ type: "list", path: wire(dir) })) as Record<string, unknown>;
         if (isRefusal(r)) {
-          if (r["reason"] !== "not_found") errors.set(dir, said(r)); // no `.fantastic` yet is no error
+          // no `.fantastic` yet is no error; a bridge that does not expose it (its allow list) is said
+          if (r["reason"] !== "not_found" || /allow/i.test(String(r["hint"] ?? ""))) errors.set(dir, said(r));
           continue;
         }
         const files = Array.isArray(r["files"]) ? (r["files"] as Array<Record<string, unknown>>) : [];

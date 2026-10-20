@@ -14,7 +14,10 @@ g) edit and save (⌘S / Ctrl-S): the disk has the new text, another preview of 
    file follows it;
 h) the file changed on disk under unsaved edits: the conflict is shown, NOTHING is
    overwritten, `save` is refused as a conflict, and Reload takes the disk's text;
-i) once the cells close, the file bridge holds no watch of theirs."""
+   Compare shows `.pv-diff`; Keep mine overwrites the disk with the editor's text;
+i) the filter narrows the loaded tree, and ↓ from it goes into the tree;
+j) collapsing `src` drops its watch from the bridge;
+k) once the cells close, the file bridge holds no watch of theirs; no page error."""
 
 from __future__ import annotations
 
@@ -75,6 +78,11 @@ def main() -> bool:
                         return True
                     await asyncio.sleep(0.1)
                 return False
+
+            async def held_paths() -> list:
+                """The paths the bridge holds, read through an `unwatch_path` of a path nobody holds."""
+                u = await host_call(rig.port, "files", {"type": "unwatch_path", "path": "e89_sentinel"})
+                return u.get("paths") or []
 
             async def type_at_end(cid: str, text: str) -> None:
                 await pg.js(f"(()=>{{const t={frame(cid)}.querySelector('.pv-input'); t.focus(); t.setSelectionRange(t.value.length, t.value.length);}})()")
@@ -142,6 +150,36 @@ def main() -> bool:
             await pg.js(f"[...{frame(PIN)}.querySelectorAll('.pv-conflict .pv-chip')].find(b=>b.textContent==='Reload')?.click()")
             r["9 Reload takes the disk's text and clears the banner"] = bool(await pg.until(
                 f"{frame(PIN)}?.querySelector('.pv-input')?.value === 'disk wins' && {frame(PIN)}.querySelector('.pv-conflict').hidden", 15))
+            # 9f Compare, 9g Keep mine
+            await type_at_end(PIN, " five")
+            r["9f unsaved before the next conflict"] = bool(await pg.until(f"!!{frame(PIN)}?.querySelector('.pv-unsaved')", 10))
+            (src / "one.txt").write_text("disk two")
+            r["9g the conflict is shown again"] = bool(await pg.until(f"{frame(PIN)}?.querySelector('.pv-conflict') && !{frame(PIN)}.querySelector('.pv-conflict').hidden", 15))
+            await pg.js(f"[...{frame(PIN)}.querySelectorAll('.pv-conflict .pv-chip')].find(b=>b.textContent==='Compare')?.click()")
+            r["9h Compare shows mine and the disk's side by side"] = bool(await pg.until(f"!!{frame(PIN)}?.querySelector('.pv-diff')", 15))
+            r["9i Compare overwrote nothing"] = (src / "one.txt").read_text() == "disk two"
+            await pg.js(f"[...{frame(PIN)}.querySelectorAll('.pv-conflict .pv-chip')].find(b=>b.textContent==='Keep mine')?.click()")
+            r["9j Keep mine overwrites the disk with the editor's text"] = await disk_is(src / "one.txt", "disk wins five")
+            # i) the filter and the keyboard
+            await pg.js(f"(()=>{{const f={frame(TREE)}.querySelector('.ft-filter'); f.value='one.txt'; f.dispatchEvent(new Event('input',{{bubbles:true}}));}})()")
+            r["i1 the filter narrows the loaded tree"] = bool(await pg.until(f"!!{row('src/one.txt')} && !{row('.fantastic')}", 10))
+            await pg.js(f"{frame(TREE)}.querySelector('.ft-filter').dispatchEvent(new KeyboardEvent('keydown',{{key:'ArrowDown',bubbles:true}}))")
+            r["i2 ArrowDown from the filter goes into the tree"] = bool(await pg.until(f"document.activeElement === {frame(TREE)}.querySelector('.ft-tree')", 10))
+            await pg.js(f"{frame(TREE)}.querySelector('.ft-tree').dispatchEvent(new KeyboardEvent('keydown',{{key:'ArrowDown',bubbles:true}}))")
+            r["i3 an arrow key moves the cursor row"] = bool(await pg.until(f"!!{frame(TREE)}.querySelector('.ft-row.cur')", 10))
+            await pg.js(f"(()=>{{const f={frame(TREE)}.querySelector('.ft-filter'); f.value=''; f.dispatchEvent(new Event('input',{{bubbles:true}}));}})()")
+            r["i4 clearing the filter shows the tree again"] = bool(await pg.until(f"!!{row('.fantastic')}", 10))
+            # j) collapsing src drops its watch
+            r["j1 src is held while open"] = "src" in await held_paths()
+            await pg.js(f"{row('src')}.querySelector('.tw').click()")
+            gone_src = False
+            end = time.time() + 10  # the unwatch is asynchronous
+            while time.time() < end:
+                if "src" not in await held_paths():
+                    gone_src = True
+                    break
+                await asyncio.sleep(0.25)
+            r["j2 collapsing src unwatches it"] = gone_src
             # 10 close the cells: no watch of theirs is left on the bridge
             for cid in (TREE, PIN, FOLLOW):
                 await call("view_root", {"type": "remove", "id": cid})
@@ -149,14 +187,14 @@ def main() -> bool:
             held: list = []
             end = time.time() + 10  # unmount runs asynchronously
             while time.time() < end:
-                u = await host_call(rig.port, "files", {"type": "unwatch_path", "path": "e89_sentinel"})
-                held = u.get("paths") or []
+                held = await held_paths()
                 if not set(LEAKS) & set(held):
                     break
                 await asyncio.sleep(0.25)
             info["10_paths"] = held
             r["10 no watch of the cells' is left"] = not set(LEAKS) & set(held)
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
+            r["11 no page errors"] = not info["page_errors"]
 
     try:
         asyncio.run(run())

@@ -2,7 +2,7 @@ import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { onMac } from "../canvas/viewer.ts";
 import { fileGrant, kernelBridge, readBytes, sharedHub } from "../files/file_bridge.ts";
-import { agentIndex, filesDeps, onRender, onSelection, selection } from "../files/files_deps.ts";
+import { agentIndex, ensureWalker, filesDeps, onRender, onSelection, selection } from "../files/files_deps.ts";
 import { extOf, HIGHLIGHT_MAX, human, PAGE } from "./preview_model.ts";
 import { lineDiff } from "./diff.ts";
 import { langOf, tokens } from "./highlight.ts";
@@ -55,6 +55,7 @@ export const previewView: ViewBundle = {
     const d = filesDeps("preview_view");
     ensurePreviewStyle();
     const bridge = kernelBridge(ctx.kernel);
+    ensureWalker(bridge);
     const mac = onMac();
     const ctl = new PreviewController({
       bridge,
@@ -134,7 +135,7 @@ export const previewView: ViewBundle = {
       for (const c of [...bar.querySelectorAll(".pv-chip")]) c.remove();
       const agentOnly = ctl.path === null && ctl.agent !== null;
       if (ctl.isAgent && !agentOnly) {
-        button(bar, ctl.content.k === "agent" ? "⇄ agent" : "⇄ file", ctl.content.k === "agent" ? "show the agent's files" : "show the live agent", () => void ctl.setFileMode(ctl.fileMode === "agent" ? "file" : "agent"));
+        button(bar, ctl.content.k === "agent" ? "⇄ agent" : "⇄ file", ctl.content.k === "agent" ? "show the agent's files" : "show the live agent", () => void ctl.setFileMode(ctl.fileMode === "agent" ? "file" : "agent").then(say));
       }
       const pinned = "pinned" in ctl.binding;
       button(
@@ -164,7 +165,8 @@ export const previewView: ViewBundle = {
       ).setAttribute("aria-disabled", String(!can));
       if (ctl.editing) {
         const blocked = ctl.editor.state.k !== "dirty" || ctl.gone;
-        button(bar, "💾 save", `save (${mac ? "⌘" : "Ctrl"}+S)`, () => void ctl.save(), blocked ? "off" : "");
+        const save = button(bar, "💾 save", ctl.gone ? "the file was deleted on disk: saving waits until it is back" : `save (${mac ? "⌘" : "Ctrl"}+S)`, () => void ctl.save(), blocked ? "off" : "");
+        save.disabled = blocked;
         button(bar, "↺ revert", "drop the unsaved edits, or undo the last save", () => void ctl.revert());
       }
     };
@@ -451,7 +453,7 @@ export const previewView: ViewBundle = {
     const keyOf = (): string => {
       const s = ctl.editor.state;
       const c = ctl.content;
-      const sub = c.k === "text" ? `${ctl.editor.version()}:${s.k === "comparing" ? "cmp" : "txt"}:${ctl.source}:${ctl.editing}` : c.k === "large" ? `${c.page}` : c.k === "dir" ? c.entries.map((e) => e.name + e.size).join("|") : c.k === "agent" ? c.agent : c.k === "error" ? c.error : "";
+      const sub = c.k === "text" ? `${ctl.editor.version()}:${ctl.editor.generation}:${s.k === "comparing" ? "cmp" : "txt"}:${ctl.source}:${ctl.editing}` : c.k === "large" ? `${c.page}` : c.k === "dir" ? c.entries.map((e) => e.name + e.size).join("|") : c.k === "agent" ? c.agent : c.k === "error" ? c.error : "";
       return `${ctl.path}:${ctl.mode}:${c.k}:${sub}`;
     };
 

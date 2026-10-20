@@ -59,9 +59,11 @@ they call the project's `files` bridge). The tree is the project folder:
 `.fantastic` shows highlighted, `.git`, `node_modules`, `target`, `dist` and
 `__pycache__` are hidden, and every agent is a folder in it (a badge, its live
 status, its name). Folders list when opened and are watched while open, so a
-file made, changed or removed on disk shows without a reload. Click selects;
-double-click, ↗ or Shift+Enter opens an agent's cell; ⌘-click (Ctrl-click off
-macOS) focuses it; ⌫ deletes the agent. Arrows and Enter walk the tree; the
+file made, changed or removed on disk shows without a reload. A click
+selects. On an agent, double-click, ↗ or Shift+Enter views a page agent, or
+shows a host agent's cell (opening one when it has none); ⌘-click (Ctrl-click off
+macOS) focuses a page agent on its view, or moves through a host agent's cells;
+⌫ deletes the agent. Arrows and Enter walk the tree; the
 field filters what is loaded. An AI drives the tree with `select`, `expand`,
 `collapse` and `reveal` (each takes `path` or `agent`), and a preview with
 `open {path}`, `pin`, `unpin`, `mode {file|agent}`, `edit`, `save` and `revert`
@@ -235,8 +237,9 @@ view, delete-locked): one GL source,
 ## The viewer
 
 The page views ONE page agent at a time: a view (its cells on its world) or
-any other agent full-page. A double-click on an agent in the file tree views
-it; ⌘-click (Ctrl-click off macOS) focuses it on its view. `#view=<id>` in the
+any other agent full-page. In the file tree, a double-click on a page agent
+views it (on a host agent it shows its cell); ⌘-click (Ctrl-click off macOS)
+focuses a page agent on its view. `#view=<id>` in the
 URL is the viewed agent.
 
 ## Cells

@@ -91,6 +91,25 @@ export function agentTarget(path: string, mode: "file" | "agent", index: { agent
   return mode === "agent" ? { path, agent: a.id } : { path: `${path}/agent.yaml`, agent: a.id };
 }
 
+/** The text of one page of a large file, or null when the page is not text (a NUL
+ *  byte, or not UTF-8). `read_stream` is asked for `PAGE + 3` bytes at the page's
+ *  offset: the page drops the continuation bytes that finish the previous page's
+ *  last character, and ends after the last character it starts, so no character
+ *  is split between pages. */
+export function pageText(raw: Uint8Array, first: boolean): string | null {
+  let from = 0;
+  if (!first) while (from < 3 && from < raw.length && (raw[from]! & 0xc0) === 0x80) from++;
+  let to = Math.min(PAGE, raw.length);
+  while (to < raw.length && (raw[to]! & 0xc0) === 0x80) to++;
+  const b = raw.subarray(from, to);
+  if (b.includes(0)) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(b);
+  } catch {
+    return null;
+  }
+}
+
 export function human(n: number): string {
   if (n < 0) return "unknown size";
   if (n < 1024) return `${n} B`;

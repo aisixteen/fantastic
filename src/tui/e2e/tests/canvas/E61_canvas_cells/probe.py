@@ -66,10 +66,12 @@ def main() -> bool:
         await asyncio.sleep(1.0)  # the coding agents come with the presets
         return bool(await pg.js(f"(()=>{{const t=[...document.querySelectorAll('.action-popup .tile')].find(e=>(e.querySelector('.lb')||{{}}).textContent==={label!r}); if(!t) return false; t.dispatchEvent(new MouseEvent('mousedown',{{bubbles:true}})); return true}})()"))
 
-    async def reveal(guid: str, cell: str, agent: str, secs_: float = 15) -> bool:
+    async def reveal(guid: str, cell: str, agent: str, secs_: float = 10) -> bool:
         """Show agent `agent`'s folder in the tree cell `cell`, through the cell's own
-        verb (`<guid>|<cell>`) — the agent folders are read from disk a moment after
-        the tree mounts, so a first `not_found` is asked again."""
+        verb (`<guid>|<cell>`). The agent folders are read from disk by a handful of
+        bridge `list` calls after the tree mounts, so a first `not_found` is asked
+        again for at most `secs_` (10 s: a slower walk is a failure); any other
+        refusal ends it."""
         from canvas import host_call
 
         end = asyncio.get_event_loop().time() + secs_
@@ -77,6 +79,8 @@ def main() -> bool:
             a = await host_call(rig.port, f"{guid}|{cell}", {"type": "reveal", "agent": agent})
             if "revealed" in a:
                 return True
+            if a.get("reason") != "not_found":
+                return False
             await asyncio.sleep(0.5)
         return False
 
@@ -116,9 +120,9 @@ def main() -> bool:
             r["coding_exact"] = literal and re.sub(r"\\(.)", r"\1", pats[0]) == line
             # d) a file tree cell from the double-click: the backend is a folder in it
             tree = await open_tree(pg, 1250, 80)
-            r["sidebar_cell"] = tree is not None
+            r["tree_cell"] = tree is not None
             guid1 = rig.page_guid()
-            r["sidebar_lists_backend"] = bool(tree) and await reveal(guid1, tree, backend) and bool(await pg.until(
+            r["tree_lists_backend"] = bool(tree) and await reveal(guid1, tree, backend) and bool(await pg.until(
                 f"!!document.querySelector('.files-view .ft-row.agent[data-agent={backend!r}]')", 10))
             info["main_backend"] = backend
             # e) a peer canvas — the canvas node's `new_canvas`, opened by its URL
@@ -135,10 +139,11 @@ def main() -> bool:
             guid2 = (yaml.safe_load(peer_yaml.read_text()) or {}).get("guid") if peer_yaml.exists() else None
             # the whole project shows (a superset); the first canvas's agents are on another canvas
             shown = bool(tree2 and guid2) and await reveal(guid2, tree2, backend) and await reveal(guid2, tree2, PEER)
-            elsewhere = shown and bool(await pg.until(
-                f"!!document.querySelector('.files-view .ft-row.agent.elsewhere[data-agent={backend!r}]')", 10))
+            row = f"document.querySelector('.files-view .ft-row.agent[data-agent={backend!r}]')"
+            # marked as another canvas's, and not a live row: no ↗ to open it
+            elsewhere = shown and bool(await pg.until(f"!!{row}?.classList.contains('elsewhere') && !{row}.querySelector('.go')", 10))
             info["peer_tree"] = await pg.js("[...document.querySelectorAll('.files-view .ft-row.agent')].map(e=>e.dataset.agent+(e.classList.contains('elsewhere')?' (elsewhere)':''))")
-            r["peer_isolated"] = elsewhere
+            r["peer_marks_elsewhere"] = elsewhere
 
     info: dict = {}
     info["headless_canvas"] = (both.stderr or both.stdout).strip()[-200:]
