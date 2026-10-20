@@ -182,7 +182,11 @@ window.__FANTASTIC_SHELL__ = Object.freeze({name, os, webview, backdrop, pickFol
 - `backdrop` — `native` (the window draws a material behind a transparent
   page) | `web` (the page paints its own): read by the skin — the slot in use
   (`fantastic readme skins`).
-- `pickFolder` (optional) — the shell's folder dialog: read by the Home.
+- `pickFolder` (optional) — the shell's folder dialog: read by the Home. Only
+  the top frame has it.
+
+The app sets the flag in every frame of its window: the Home page and each
+canvas shown in it (a frame on the canvas's own port) read the same one.
 
 A plain browser tab has no flag: its backdrop is `web`. A malformed flag is the
 shell's bug: the page says it in place of the canvas and stops.

@@ -2,16 +2,20 @@
 //! `globalThis.__FANTASTIC_SHELL__` before any page script runs (read by the
 //! page's `shell.ts`, `readShell()`). Pure.
 //!
-//! `initialization_script` runs in the main frame only, on every navigation:
-//! canvas frames get no flag.
+//! It runs in EVERY frame (`initialization_script_for_all_frames`): the canvas
+//! is a frame of the Home page, on its own port, and reads the flag too (its
+//! terminals' renderer and its skin's backdrop, #52). Tauri's main-frame-only
+//! script reached subframes on Windows alone, so a canvas on macOS and Linux
+//! had no flag. `pickFolder` is the Home's, so only the top frame has it.
 
 /// The script for `os`, `webview` and `backdrop` (`native` | `web`); with
-/// `folder_dialog`, `pickFolder` invokes the shell's `pick_folders`.
+/// `folder_dialog`, the top frame's `pickFolder` invokes the shell's
+/// `pick_folders` (a subframe has none).
 pub fn script(os: &str, webview: &str, backdrop: &str, folder_dialog: bool) -> String {
     let j = |s: &str| serde_json::to_string(s).expect("a string serializes");
     let pick = if folder_dialog {
         format!(
-            "\n    pickFolder: () => globalThis.__TAURI_INTERNALS__.invoke({}),",
+            "\n    ...(globalThis === globalThis.top ? {{ pickFolder: () => globalThis.__TAURI_INTERNALS__.invoke({}) }} : {{}}),",
             j("pick_folders")
         )
     } else {
@@ -59,9 +63,9 @@ mod tests {
         let s = script("macos", "wkwebview", "native", true);
         assert!(
             s.contains(
-                "pickFolder: () => globalThis.__TAURI_INTERNALS__.invoke(\"pick_folders\"),"
+                "...(globalThis === globalThis.top ? { pickFolder: () => globalThis.__TAURI_INTERNALS__.invoke(\"pick_folders\") } : {}),"
             ),
-            "{s}"
+            "the top frame only: {s}"
         );
     }
 

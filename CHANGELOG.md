@@ -114,6 +114,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- S4: the desktop app's shell flag (`__FANTASTIC_SHELL__`) reaches the canvas
+  on macOS and Linux too: it is set in every frame, so the canvas (a frame of
+  the Home page) knows its webview and backdrop; only the top frame gets
+  `pickFolder`. Before, Tauri's main-frame script reached subframes on Windows
+  alone.
 - S3: the desktop app's opaque window (Linux; Windows without Mica) no longer
   flashes light on open: the window and webview start in the dark skin's page
   colour, so the boot page's transparent body is never the webview's white.

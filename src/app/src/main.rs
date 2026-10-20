@@ -146,7 +146,7 @@ fn window(app: &AppHandle, args: &Args, backdrop: Backdrop) -> Result<(), String
         .inner_size(1280.0, 800.0)
         .min_inner_size(720.0, 480.0)
         .transparent(backdrop != Backdrop::None)
-        .initialization_script(flag::script(
+        .initialization_script_for_all_frames(flag::script(
             sys::OS,
             sys::WEBVIEW,
             backdrop.flag(),
