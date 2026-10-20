@@ -36,7 +36,8 @@ running and its stream is torn down until it is shown again (the view's `show`
 puts it back where it was, or at `x`, `y`). **Shift+✕** and the head's
 right-click menu (`cell_menu.ts`) **delete** the agent, through the sidebar's
 delete path (a locked cell or agent refuses). The hidden set is on the view
-(`hidden: [<cell id>…]`), so a reload keeps the cells hidden.
+(`hidden: [<cell id>…]`), so a reload keeps the cells hidden. Picking a hidden
+agent in the sidebar shows its cell where it was.
 
 The view↔backend pairing is **never hardcoded** — each view's reflect names the
 host capability + verb surface it fronts; an LLM weaves the binding from that plus

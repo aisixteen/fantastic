@@ -314,7 +314,9 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
       const cell = kernel.get(target);
       if (cell?.parentId !== id) return { error: `view: show — ${JSON.stringify(target)} is not a cell of this view`, reason: "not_found", arg: "id" };
       if (!isCellHandler(String(cell.record().handler_module ?? ""))) return { error: `view: show — ${JSON.stringify(target)} is not a cell (the view's own background or layout)`, reason: "bad_arg", arg: "id" };
-      const at = geometryOf({ x: payload["x"], y: payload["y"] });
+      // a shown cell keeps its place: x, y place a HIDDEN cell only (`move` moves one)
+      const wasHidden = hiddenOf(kernel, id).has(target);
+      const at = wasHidden ? geometryOf({ x: payload["x"], y: payload["y"] }) : {};
       const theme = themeOf(kernel, id, tabWidth());
       const rect = Object.keys(at).length > 0 ? setRect(kernel, id, theme, target, at) : undefined;
       setHidden(kernel, id, target, false);

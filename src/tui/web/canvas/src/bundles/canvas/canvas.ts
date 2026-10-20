@@ -35,7 +35,7 @@ import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
 import { headTitle, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
-import { COLUMN, LAYOUT, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, stack, themeOf, themesOf, writeRects } from "./layout.ts";
+import { COLUMN, LAYOUT, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
 import { CELL_MENU, closeIntent } from "./cell_menu.ts";
 import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
@@ -158,8 +158,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return created.id;
   };
 
-  // DELETING a host agent is its own act (backend-owned views: ✕ only closes a
-  // view) — the kernel's `delete_agent`, whose delete-lock gate refuses what is
+  // DELETING a host agent is its own act (backend-owned views: ✕ only hides a
+  // cell) — the kernel's `delete_agent`, whose delete-lock gate refuses what is
   // locked; its cells are cleaned when the registry sees it `removed`.
   const deleteAgent = (id: string): void => {
     void host.callHost("kernel", { type: "delete_agent", id } as unknown as Payload).then((r) => {
@@ -825,9 +825,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     };
   };
 
-  // CLOSE a cell = close the VIEW (backend-owned views): the host agent lives
-  // on, listed in the sidebar; deleting an agent is its own act. A delete_lock
-  // refuses (the kernel's `remove` is the gate).
+  // REMOVE a page-only cell (no agent behind it, #133: deleting a cell with a
+  // backend deletes the agent instead). A delete_lock refuses (the kernel's
+  // `remove` is the gate).
   const closeView = (cellId: string): void => {
     const out = kernel.remove(cellId) as unknown as Rec;
     if (out["deleted"] !== true) toast(`✕ ${typeof out["error"] === "string" ? out["error"] : `could not close ${cellId}`}`);
@@ -841,6 +841,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if (viewed === cellId) setViewed(view);
     setHidden(kernel, view, cellId, true);
     renderSoon();
+  };
+
+  // A PICK of a hidden cell (the sidebar's, #133) shows it where it was first, so
+  // the pick views it live rather than bouncing back to its view
+  const showPicked = (cellId: string): void => {
+    if (showHidden(kernel, cellId)) renderSoon();
   };
 
   // DELETE a cell's agent (#133: Shift+✕ and the head's menu): a host-backed
@@ -1355,7 +1361,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     backendFields: Record<string, unknown> = {},
   ): Promise<void> => {
     // HOST-FIRST (backend-owned views): the host agent is made, then a cell
-    // VIEWS it. The cell owns nothing: ✕ closes the view, the agent lives on.
+    // VIEWS it. The cell owns nothing: ✕ hides the cell, the agent lives on.
     const cellId = `cell_${crypto.randomUUID().slice(0, 8)}`;
     const backendId = await spawnBackend(bundle, cellId, backendFields);
     if (backendId === null) return;
@@ -1381,6 +1387,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
   // MOVE TO a cell: centre it in the viewport (zoom kept) and flash it.
   const moveTo = (cellId: string): void => {
+    // a hidden cell comes back first; the frame is drawn by the next render
+    if (showHidden(kernel, cellId)) {
+      void refresh().then(() => moveTo(cellId));
+      return;
+    }
     // FOCUS: a cell on another view (or viewed full) — view its view first
     const hc = hostCanvasOf(cellId);
     if (hc !== null && (hc !== viewed || fullNow())) {
@@ -1636,7 +1647,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         .map((r) => String(r["id"]));
     },
     moveTo,
-    view: (id, focus) => (focus && id !== rootOr() ? moveTo(id) : setViewed(id)),
+    view: (id, focus) => {
+      // a focus pick goes through `moveTo`, which shows a hidden cell itself
+      if (focus && id !== rootOr()) return moveTo(id);
+      showPicked(id);
+      return setViewed(id);
+    },
     viewed: () => viewed,
     mac: onMac(),
     // an agent no cell shows: an AI opens in a chat cell, anything else as its

@@ -41,7 +41,7 @@ export interface SidebarDeps {
   open(id: string): void;
   /** a host agent added in the background and not shown yet (NEW) */
   fresh(id: string): boolean;
-  /** delete host agent `id` (its own act: ✕ on a cell only closes the view) */
+  /** delete host agent `id` (its own act: ✕ on a cell only hides it) */
   deleteAgent(id: string): void;
 }
 

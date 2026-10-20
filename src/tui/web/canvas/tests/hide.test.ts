@@ -4,7 +4,7 @@ import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
 import { registerCanvas, VIEW_VERBS } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
-import { hiddenOf, registerLayout, rectsOf, setHidden } from "../src/bundles/canvas/layout.ts";
+import { hiddenOf, prune, registerLayout, rectsOf, setHidden, showHidden } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
 
 // #133: `hide` takes a cell off its view and keeps its agent; `show` puts it back
@@ -107,4 +107,39 @@ test("a removed cell leaves the hidden set with its rects", async () => {
   await call(k, { type: "hide", id: "a" });
   assert.equal((await call(k, { type: "remove", id: "a" }))["deleted"], true);
   assert.deepEqual([...hiddenOf(k, "view_root")], [], "a hidden cell removed is dropped from the set");
+});
+
+test("show of a cell that is not hidden keeps its place: x, y do not move it", async () => {
+  const k = page();
+  await call(k, { type: "place", kind: "html", id: "a", x: 10, y: 20, html: "<p>a</p>" });
+  assert.deepEqual(await call(k, { type: "show", id: "a", x: 300, y: 40 }), {
+    shown: "a",
+    theme: "canvas",
+    hidden_cells: [],
+  });
+  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 10, y: 20, width: 480, height: 320 }, "the rect is not moved");
+});
+
+test("prune clears a hidden id whose cell is no longer live, and keeps a live one hidden", async () => {
+  const k = page();
+  await call(k, { type: "place", kind: "html", id: "a", x: 0, y: 0 });
+  await call(k, { type: "place", kind: "html", id: "b", x: 0, y: 0 });
+  await call(k, { type: "hide", id: "a" });
+  await call(k, { type: "hide", id: "b" });
+  // removed straight from the kernel: no view verb drops it from the hidden set
+  k.remove("a");
+  assert.deepEqual([...hiddenOf(k, "view_root")].sort(), ["a", "b"], "the stale id is still listed");
+  prune(k, "view_root", new Set(["b"]));
+  assert.deepEqual([...hiddenOf(k, "view_root")], ["b"], "only the removed cell's id goes");
+});
+
+test("showHidden brings a hidden cell back (its rect kept) and reports whether it was hidden", async () => {
+  const k = page();
+  await call(k, { type: "place", kind: "html", id: "a", x: 10, y: 20, html: "<p>a</p>" });
+  assert.equal(showHidden(k, "a"), false, "a shown cell is left as it is");
+  await call(k, { type: "hide", id: "a" });
+  assert.equal(showHidden(k, "a"), true);
+  assert.deepEqual([...hiddenOf(k, "view_root")], []);
+  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 10, y: 20, width: 480, height: 320 });
+  assert.equal(showHidden(k, "ghost"), false, "an unknown id is not a hidden cell");
 });

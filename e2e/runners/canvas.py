@@ -343,8 +343,8 @@ class Page:
         if [w, h] != have:
             await self.cdp("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=0, mobile=False)
 
-    async def mouse(self, typ: str, x: float, y: float, clicks: int = 1) -> None:
-        await self.cdp("Input.dispatchMouseEvent", type=typ, x=x, y=y, button="left", clickCount=clicks)
+    async def mouse(self, typ: str, x: float, y: float, clicks: int = 1, modifiers: int = 0) -> None:
+        await self.cdp("Input.dispatchMouseEvent", type=typ, x=x, y=y, button="left", clickCount=clicks, modifiers=modifiers)
 
     async def type(self, text: str) -> None:
         await self.js("document.querySelector('.xterm-helper-textarea')?.focus()")
@@ -476,7 +476,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     await page.open(url)
 
 
-async def click(page: Page, sel: str, bad: list[str]) -> None:
+async def click(page: Page, sel: str, bad: list[str], shift: bool = False) -> None:
     # a target SHOWN a moment after the page: a stopped terminal's ▶ is in the
     # DOM from the start, hidden (0×0 at the corner) until its attach finds the
     # program stopped — a click at that rect lands on nothing
@@ -486,8 +486,21 @@ async def click(page: Page, sel: str, bad: list[str]) -> None:
     if r is None or not (r["w"] > 0 and r["h"] > 0):
         bad.append(f"nothing shown to click at {sel}")
         return
-    await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
-    await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
+    mods = 8 if shift else 0  # CDP modifier bit 8: Shift
+    await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
+    await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
+
+
+async def head_menu(page: Page, intent: str, bad: list[str]) -> None:
+    """Right-click a cell's head, then pick `intent` (`hide` | `delete`) from the menu it opens."""
+    r = await page.rect(".agent-frame .frame-head")
+    if r is None or not (r["w"] > 0 and r["h"] > 0):
+        bad.append("no frame head to right-click")
+        return
+    x, y = r["x"] + r["w"] / 2, r["y"] + r["h"] / 2
+    await page.cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="right", clickCount=1)
+    await page.cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button="right", clickCount=1)
+    await click(page, f'.cell-menu button[data-intent="{intent}"]', bad)
 
 
 async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: dict) -> list[str]:
@@ -535,8 +548,11 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
                 await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x0 + run["drag"]["dx"] * i / 8,
                                y=y0 + run["drag"]["dy"] * i / 8, button="left")
             await page.mouse("mouseReleased", x0 + run["drag"]["dx"], y0 + run["drag"]["dy"])
+    # ✕ HIDES the cell (the agent lives on); "delete" is Shift+✕ (the agent goes too)
     if run.get("close"):
-        await click(page, ".agent-frame .close", bad)
+        await click(page, ".agent-frame .close", bad, shift=run["close"] == "delete")
+    if "contextmenu" in run:
+        await head_menu(page, run["contextmenu"], bad)
     if "click" in run:
         state["prev_backend"] = (members(cwd) or [{}])[0].get("backend_id")
         await click(page, run["click"], bad)

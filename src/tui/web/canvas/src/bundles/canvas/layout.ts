@@ -286,6 +286,15 @@ export function setHidden(kernel: Kernel, view: string, cell: string, on: boolea
   kernel.updateMeta(view, { hidden: [...h] } as unknown as Payload);
 }
 
+/** Show `cell` again if its view hides it (#133): a pick of a hidden cell (the
+ *  sidebar's) brings it back where it was. True when it was hidden. */
+export function showHidden(kernel: Kernel, cell: string): boolean {
+  const view = kernel.get(cell)?.parentId ?? null;
+  if (view === null || !hiddenOf(kernel, view).has(cell)) return false;
+  setHidden(kernel, view, cell, false);
+  return true;
+}
+
 /** Drop every rect of cells no longer in `view` (all themes). */
 export function prune(kernel: Kernel, view: string, live: Set<string>): void {
   for (const h of hiddenOf(kernel, view)) if (!live.has(h)) setHidden(kernel, view, h, false);
