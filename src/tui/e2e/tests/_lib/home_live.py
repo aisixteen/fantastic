@@ -86,6 +86,7 @@ class HomeRig(Rig):
         self.folders: dict[str, Path] = {}
         self.procs: list[subprocess.Popen] = []
         self.tabs = 0
+        self.click_logs: list[list] = []  # each tab's missed clicks, kept past the tab
 
     # ── the binaries ────────────────────────────────────────────────────────
     def build(self, *features: str) -> None:
@@ -228,6 +229,7 @@ class HomeRig(Rig):
                 # every keydown the Home's window sees, for `key`'s log
                 await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source=KEY_RECORDER)
                 pg.key_log, pg.click_log = [], []
+                self.click_logs.append(pg.click_log)
                 if before_load is not None:
                     await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source=before_load)
                 await self.open_home(pg)
@@ -345,23 +347,25 @@ async def click(pg: Page, sel: str, timeout: float = 10) -> bool:
     """A real mouse click at the middle of `sel`, once it is shown, STILL (the
     carousel slides a page in, and a click mid-slide lands beside it) and the
     top element at that point is `sel` itself (nothing covers it). A miss is
-    logged with what the point hit (`pg.click_log`)."""
+    logged with EVERY sample taken (rect, what the point hit, shown), not
+    just the last (`pg.click_log`)."""
     probe = (f"(()=>{{const e={q(sel)}; if(!e) return null; const r=e.getBoundingClientRect();"
              " const shown=r.width>0&&r.height>0&&r.left>=0&&r.right<=innerWidth;"
              " const h=shown?document.elementFromPoint(r.x+r.width/2, r.y+r.height/2):null;"
              " return {x:r.x, y:r.y, w:r.width, h:r.height, shown, hits: !!h&&(h===e||e.contains(h)),"
              " hit: h ? h.tagName+(h.className&&typeof h.className==='string'?'.'+h.className.split(' ').join('.'):'') : null};})()")
     deadline = asyncio.get_running_loop().time() + timeout
-    r, last = None, None
+    r, last, samples = None, None, []
     while asyncio.get_running_loop().time() < deadline:
         r = await pg.js(probe)
+        samples.append(r)
         if r is not None and r["shown"] and r["hits"] and last is not None and \
                 (r["x"], r["y"], r["w"], r["h"]) == (last["x"], last["y"], last["w"], last["h"]):
             break
         last = r
         await asyncio.sleep(0.1)
     else:
-        miss = {"click": sel, "last": r}
+        miss = {"click": sel, "last": r, "samples": samples}
         getattr(pg, "click_log", []).append(miss)
         pg.misses.append(f"click {sel}: not shown, still and on top within {timeout:g}s — {json.dumps(r)}")
         return False
