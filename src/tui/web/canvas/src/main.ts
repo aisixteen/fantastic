@@ -206,7 +206,10 @@ loader.start();
 // THE HOST STOPS (its shutdown calls `<guid>|canvas` `host_stopping` before it
 // drains): the last records flushed, the loader stopped — no write lands mid-drain
 let stopping: Promise<void> | null = null;
-onHostStopping(() => (stopping ??= loader.stop()));
+onHostStopping(() => {
+  inner.beginStop(); // the socket's close that follows is the stop: its cut-off calls settle quietly
+  return (stopping ??= loader.stop());
+});
 
 // THE ROOT'S BOOT MINTS THE GUID (once; it persists with the root record) — the
 // canvas's identity as a PEER kernel: the bridge says `hello {guid}` with it, and
