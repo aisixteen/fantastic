@@ -495,6 +495,7 @@ async fn a_demotion_is_emitted_as_diagnostics_with_the_probe_that_caused_it() {
                 "canvas": {"url": "http://127.0.0.1:8100/canvas_page/file/index.html", "port": 8100},
                 "canvas_up": false,
                 "guid_matches": false,
+                "errors": [],
             },
         }])
     );
@@ -508,4 +509,48 @@ async fn a_demotion_is_emitted_as_diagnostics_with_the_probe_that_caused_it() {
     t.os.set_canvas_up(8100, true);
     t.look().await;
     assert_eq!(diagnostics(&t).len(), 1);
+}
+
+#[tokio::test]
+async fn a_demotion_carries_the_read_error_that_came_with_its_probe() {
+    let t = t();
+    let diagnostics = |t: &T| -> Vec<Value> {
+        t.emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == json!("diagnostics"))
+            .cloned()
+            .collect()
+    };
+    t.os.set_registry(vec![entry("g3", "/w/c", Some(7), Some(8100))]);
+    t.running("/w/c", 7, 8100, "g3");
+    assert_eq!(status(&t.look().await, "g3"), "running");
+    // its lock cannot be read: no holder is seen, so the row shows stopped at once
+    t.os.set_folder(
+        "/w/c",
+        Folder {
+            is_fantastic: true,
+            holder: None,
+            run: None,
+        },
+    );
+    t.os.set_read_error(
+        "/w/c",
+        "lock_holder",
+        "/w/c: the lock: Access is denied (os error 5)",
+    );
+    let s = t.look().await;
+    assert_eq!(status(&s, "g3"), "stopped");
+    let events = diagnostics(&t);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0]["demotions"][0]["probe"]["errors"],
+        json!([{
+            "what": "lock_holder",
+            "error": "/w/c: the lock: Access is denied (os error 5)",
+        }])
+    );
+    // the state carries no error: it is diagnostics only
+    assert!(!s.to_string().contains("Access is denied"), "{s}");
 }

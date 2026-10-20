@@ -42,6 +42,9 @@ struct State {
     asked: BTreeMap<&'static str, usize>,
     /// `folder()`: a path → the folder it names, or why it is not one.
     resolve: BTreeMap<String, Result<String, String>>,
+    /// An `answer` that fails: (a path, or a port for the canvas and guid
+    /// questions; the question's name) → the error it reports.
+    read_errors: BTreeMap<(String, &'static str), String>,
     logs: BTreeMap<String, (String, String)>,
     /// While set, `read_registry` waits for `release` before it answers.
     hold_registry: bool,
@@ -70,6 +73,7 @@ impl FakeOs {
                 terminated: Vec::new(),
                 asked: BTreeMap::new(),
                 resolve: BTreeMap::new(),
+                read_errors: BTreeMap::new(),
                 logs: BTreeMap::new(),
                 hold_registry: false,
             }),
@@ -227,6 +231,12 @@ impl FakeOs {
     pub fn set_folder(&self, path: &str, folder: Folder) {
         self.s().folders.insert(path.to_string(), folder);
     }
+    /// Make the question `what` on `key` (a path, or a port) fail with `error`.
+    pub fn set_read_error(&self, key: &str, what: &'static str, error: &str) {
+        self.s()
+            .read_errors
+            .insert((key.to_string(), what), error.to_string());
+    }
     pub fn set_canvas_up(&self, port: u16, up: bool) {
         self.s().canvases.insert(port, up);
     }
@@ -279,6 +289,10 @@ impl FakeOs {
         self.s().asked.get(kind).copied().unwrap_or(0)
     }
 
+    fn folder_of(&self, path: &str) -> Folder {
+        self.s().folders.get(path).cloned().unwrap_or_default()
+    }
+
     fn count(&self, kind: &'static str) {
         *self.s().asked.entry(kind).or_insert(0) += 1;
     }
@@ -304,31 +318,41 @@ impl HomeOs for FakeOs {
         self.s().registry.clone()
     }
 
-    async fn answer(&self, ask: &Ask) -> Answer {
-        let folder = |path: &str| self.s().folders.get(path).cloned().unwrap_or_default();
-        match ask {
+    async fn answer(&self, ask: &Ask) -> (Answer, Option<String>) {
+        // One lock at a time: each question takes what it needs, then the error.
+        let (answer, key) = match ask {
             Ask::IsFantastic { path } => {
                 self.count("is_fantastic");
-                Answer::IsFantastic(folder(path).is_fantastic)
+                let folder = self.folder_of(path);
+                (Answer::IsFantastic(folder.is_fantastic), path.clone())
             }
             Ask::LockHolder { path } => {
                 self.count("holder");
-                Answer::LockHolder(folder(path).holder)
+                (
+                    Answer::LockHolder(self.folder_of(path).holder),
+                    path.clone(),
+                )
             }
             Ask::RunFile { path } => {
                 self.count("run_file");
-                Answer::RunFile(folder(path).run)
+                (Answer::RunFile(self.folder_of(path).run), path.clone())
             }
             Ask::CanvasUp { canvas } => {
                 self.count("canvas_up");
                 let Canvas { port, .. } = canvas;
-                Answer::CanvasUp(self.s().canvases.get(port).copied().unwrap_or(false))
+                let up = self.s().canvases.get(port).copied().unwrap_or(false);
+                (Answer::CanvasUp(up), port.to_string())
             }
             Ask::Guid { port } => {
                 self.count("guid");
-                Answer::Guid(self.s().guids.get(port).cloned())
+                (
+                    Answer::Guid(self.s().guids.get(port).cloned()),
+                    port.to_string(),
+                )
             }
-        }
+        };
+        let error = self.s().read_errors.get(&(key, ask.name())).cloned();
+        (answer, error)
     }
 
     async fn spawn(&self, path: &str) -> Result<(), String> {

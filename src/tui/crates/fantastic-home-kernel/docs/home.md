@@ -260,14 +260,21 @@ shows nothing, and the 3rd miss shows what was found):
   {"at_ms": 1760800012000, "guid": "g-1", "path": "/home/me/notes",
    "probe": {"is_fantastic": true, "holder": 4242, "owns_entry": true,
              "canvas": {"url": "http://127.0.0.1:8123/canvas_page/file/index.html", "port": 8123},
-             "canvas_up": false, "guid_matches": false}}]}
+             "canvas_up": false, "guid_matches": false, "errors": []}}]}
 ```
 
 `probe` holds every field the probe asked: `is_fantastic`, `holder` (the pid,
-or null), `owns_entry`, `canvas` (or null), `canvas_up`, `guid_matches`. An
-unreadable run or lock file reads as the absent answer, so it shows here as
-null or false, with no error text. Watchers that want only the state ignore
-it, as they ignore `focus` and `menu_spec` payloads they do not show.
+or null), `owns_entry`, `canvas` (or null), `canvas_up`, `guid_matches`, and
+`errors`. Each `errors` entry is a question the machine could not answer
+cleanly, as `{"what": <question>, "error": <text>}`; `what` is one of
+`is_fantastic`, `lock_holder`, `run_file`, `canvas_up`, `guid`. The answer
+still counts as the probe's answer: an unreadable run or lock file reads as
+the absent answer (null or false), and its error text shows here beside it,
+so a dead holder and a file that could not be read tell apart. The errors
+never change a status. The `errors` of a ridden-out miss are not recorded
+(see above), and a demotion's `errors` are those of the poll that demoted it.
+Watchers that want only the state ignore it, as they ignore `focus` and
+`menu_spec` payloads they do not show.
 
 ## 5. Versioning
 

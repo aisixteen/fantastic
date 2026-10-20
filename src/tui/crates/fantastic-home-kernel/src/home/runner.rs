@@ -315,8 +315,11 @@ impl Runner {
                     async move {
                         let mut prober = Prober::new(job.target, job.mode);
                         while let Some(ask) = prober.next() {
-                            let answer = os.answer(&ask).await;
+                            let (answer, error) = os.answer(&ask).await;
                             prober.answer(answer);
+                            if let Some(error) = error {
+                                prober.note_error(&ask, error);
+                            }
                         }
                         (job.key, prober.probe().clone())
                     }

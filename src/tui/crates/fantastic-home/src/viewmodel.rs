@@ -931,7 +931,7 @@ fn adding_id(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::{Answer, Ask, Prober};
+    use crate::probe::{Answer, Ask, ProbeError, Prober};
 
     const GRACE: u64 = 30_000;
 
@@ -976,6 +976,7 @@ mod tests {
             canvas: None,
             canvas_up: false,
             guid_matches: false,
+            errors: vec![],
         }
     }
 
@@ -987,6 +988,7 @@ mod tests {
             canvas: Some(canvas(port)),
             canvas_up: true,
             guid_matches: true,
+            errors: vec![],
         }
     }
 
@@ -999,6 +1001,7 @@ mod tests {
             canvas: port.map(canvas),
             canvas_up: port.is_some(),
             guid_matches: true,
+            errors: vec![],
         }
     }
 
@@ -1264,10 +1267,56 @@ mod tests {
             canvas: None,
             canvas_up: false,
             guid_matches: false,
+            errors: vec![],
         };
         probed(&mut h, 2_000, vec![("g1", other)]);
         probed(&mut h, 4_000, vec![("g1", stopped())]);
         assert_eq!(h.take_demotions(), vec![]);
+    }
+
+    #[test]
+    fn a_demotion_records_the_read_error_that_came_with_its_probe() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        // its run file could not be read: no canvas is known, so it shows at once
+        let unread = Probe {
+            holder: Some(7),
+            owns_entry: true,
+            errors: vec![ProbeError {
+                what: "run_file",
+                error: "/w/a/.fantastic/run.yaml: Access is denied".into(),
+            }],
+            ..stopped()
+        };
+        probed(&mut h, 2_000, vec![("g1", unread.clone())]);
+        assert_eq!(status(&h, "g1", 2_000), Status::NoCanvas);
+        assert_eq!(
+            h.take_demotions(),
+            vec![Demotion {
+                at_ms: 2_000,
+                guid: "g1".into(),
+                path: "/w/a".into(),
+                probe: unread,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_ridden_out_miss_with_an_error_changes_no_status() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        let mut missed = running(7, 8100);
+        missed.canvas_up = false;
+        missed.guid_matches = false;
+        missed.errors.push(ProbeError {
+            what: "canvas_up",
+            error: "127.0.0.1:8100: connection refused".into(),
+        });
+        probed(&mut h, 2_000, vec![("g1", missed)]);
+        assert_eq!(status(&h, "g1", 2_000), Status::Running(canvas(8100)));
+        assert_eq!(h.take_demotions(), vec![], "ridden out: nothing recorded");
     }
 
     #[test]

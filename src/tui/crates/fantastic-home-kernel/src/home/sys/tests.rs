@@ -35,7 +35,7 @@ fn lock_holder_none_without_a_lock_and_self_with_one() {
 fn run_file_parses_only_a_valid_file() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();
-    assert_eq!(run_file(&path), None, "no file");
+    assert_eq!(run_file(&path), Ok(None), "no file");
     let file = dir.join(RUN_FILE);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(
@@ -43,12 +43,34 @@ fn run_file_parses_only_a_valid_file() {
         "pid: 77\nport: 8123\nurl: http://127.0.0.1:8123/canvas_page/file/index.html\n",
     )
     .unwrap();
-    let run = run_file(&path).expect("a valid run file");
+    let run = run_file(&path).unwrap().expect("a valid run file");
     assert_eq!((run.pid, run.port), (77, 8123));
     std::fs::write(&file, "pid: 77\nport: 8124\nurl: http://127.0.0.1:8123/\n").unwrap();
-    assert_eq!(run_file(&path), None, "a url on another port");
+    let err = run_file(&path).expect_err("a url on another port");
+    assert!(err.contains("not a run file"), "{err}");
     std::fs::write(&file, [0xff, 0xfe]).unwrap();
-    assert_eq!(run_file(&path), None, "not text");
+    let err = run_file(&path).expect_err("not text");
+    assert!(err.contains(RUN_FILE), "the error names the file: {err}");
+}
+
+#[test]
+fn is_fantastic_names_a_look_that_failed() {
+    let (_d, dir) = temp();
+    let path = dir.display().to_string();
+    assert_eq!(is_fantastic(&path), Ok(false), "no .fantastic");
+    std::fs::write(dir.join(".fantastic"), "").unwrap();
+    assert_eq!(is_fantastic(&path), Ok(false), "a file is not a folder");
+    std::fs::remove_file(dir.join(".fantastic")).unwrap();
+    std::fs::create_dir(dir.join(".fantastic")).unwrap();
+    assert_eq!(is_fantastic(&path), Ok(true));
+    // a folder under a regular file cannot be looked into: not "absent"
+    #[cfg(unix)]
+    {
+        let blocked = dir.join("plain.txt");
+        std::fs::write(&blocked, "").unwrap();
+        let err = is_fantastic(&blocked.display().to_string()).expect_err("a file has no children");
+        assert!(err.contains("plain.txt"), "{err}");
+    }
 }
 
 #[test]
@@ -122,31 +144,40 @@ fn canvas(port: u16) -> Canvas {
 #[tokio::test]
 async fn canvas_up_reads_the_status_line() {
     let ok = http_stub(Some("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")).await;
-    assert!(canvas_up(&canvas(ok)).await);
+    assert_eq!(canvas_up(&canvas(ok)).await, Ok(true));
     let moved = http_stub(Some("HTTP/1.0 302 Found\r\nLocation: /\r\n\r\n")).await;
-    assert!(canvas_up(&canvas(moved)).await);
+    assert_eq!(canvas_up(&canvas(moved)).await, Ok(true));
+    // an answer of another status is an answer, not an error
     let broken = http_stub(Some("HTTP/1.1 500 Internal Server Error\r\n\r\n")).await;
-    assert!(!canvas_up(&canvas(broken)).await);
+    assert_eq!(canvas_up(&canvas(broken)).await, Ok(false));
     let garbage = http_stub(Some("SSH-2.0-OpenSSH\r\n")).await;
-    assert!(!canvas_up(&canvas(garbage)).await);
+    assert_eq!(canvas_up(&canvas(garbage)).await, Ok(false));
     let closed = http_stub(None).await;
-    assert!(!canvas_up(&canvas(closed)).await);
+    let err = canvas_up(&canvas(closed))
+        .await
+        .expect_err("closed unanswered");
+    assert!(err.contains("closed before a status line"), "{err}");
     let silent = http_stub(Some("")).await;
     let t0 = std::time::Instant::now();
-    assert!(!canvas_up(&canvas(silent)).await);
+    let err = canvas_up(&canvas(silent))
+        .await
+        .expect_err("no status line");
+    assert!(err.contains("no status line within"), "{err}");
     assert!(
         t0.elapsed() < Duration::from_secs(3),
         "the timeout is 1.5 s"
     );
-    // nothing listens
+    // nothing listens: the refusal is the error
     let free = free_port().unwrap();
-    assert!(!canvas_up(&canvas(free)).await);
-    assert!(
+    let err = canvas_up(&canvas(free)).await.expect_err("refused");
+    assert!(err.contains(&free.to_string()), "{err}");
+    assert_eq!(
         canvas_up(&Canvas {
             url: format!("http://localhost:{ok}/x?y=1#z"),
             port: ok
         })
-        .await
+        .await,
+        Ok(true)
     );
 }
 
