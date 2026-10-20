@@ -1,0 +1,36 @@
+<style>
+  body { margin: 0; padding: 12px 14px; font: 13px/1.45 ui-sans-serif, -apple-system, system-ui, sans-serif; color: #d8d8e4; background: transparent; }
+  .task { font-weight: 600; margin-bottom: 4px; }
+  .dim { color: rgba(255,255,255,.45); font-size: 11px; }
+  .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin: 8px 0; }
+  .bar > i { display: block; height: 100%; background: #b78cff; }
+  .line { white-space: pre-wrap; word-break: break-word; }
+  pre { margin: 8px 0 0; font: 11px/1.4 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; color: rgba(255,255,255,.7); }
+  .err { color: #f7768e; }
+</style>
+<div id="task" class="task"></div>
+<div id="worker" class="dim"></div>
+<div class="bar"><i id="fill" style="width:0%"></i></div>
+<div id="line" class="line">not reported yet</div>
+<pre id="result"></pre>
+<div id="err" class="err"></div>
+<script>
+const ID = "__CABINET_ID__";
+const $ = (id) => document.getElementById(id);
+function paint(v) {
+  $("task").textContent = v.task ?? "";
+  $("worker").textContent = `worker ${v.worker ?? "?"}` + (v.equipment && v.equipment.length ? ` · ${v.equipment.length} equipment` : "");
+  const st = v.status || {};
+  $("fill").style.width = `${Math.max(0, Math.min(100, Number(st.progress) || 0))}%`;
+  $("line").textContent = st.line ? st.line : "not reported yet";
+  $("result").textContent = st.result === undefined || st.result === null ? "" : JSON.stringify(st.result, null, 2);
+  $("err").textContent = v.error ?? "";
+}
+async function refresh() {
+  const r = await fantastic.send(ID, { type: "view" });
+  if (r && !r.error) paint(r); else $("err").textContent = (r && r.error) || "no answer";
+}
+// LIVE: every status the cabinet reports is emitted on its own id; re-read the view.
+fantastic.watch(ID, (ev) => { if (ev && ev.type === "update") refresh(); });
+refresh();
+</script>

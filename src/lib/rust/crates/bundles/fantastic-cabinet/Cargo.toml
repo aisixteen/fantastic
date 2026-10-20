@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "fantastic-cabinet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cabinets — a master AI opens cabinets: subcanvases, each with one worker AI that builds its own equipment and talks to its peers."
+
+[dependencies]
+# python-format helpers: the one spelling of `repr` the refusals and the
+# instructions text use.
+fantastic-bundle = { path = "../../fantastic-bundle" }
+fantastic-kernel = { path = "../../fantastic-kernel" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Every test drives a real kernel: the root's loader, a ram store for the
+# master's memory, and a scripted AI standing in for the backend.
+fantastic-core = { path = "../fantastic-core" }
+fantastic-ram-store = { path = "../fantastic-ram-store" }
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "macros"] }

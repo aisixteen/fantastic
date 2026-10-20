@@ -27,11 +27,12 @@ because a new backend is the thing the docs advise against.
 
 WIRING. Every open and close rewrites the directory (`cabinet_peers`: each live
 cabinet's id, worker and task) and the instructions (`post_system_prompt`) of every
-live worker, and grants: each worker can message and be messaged by each peer worker
-and by the master; the master can call each worker; the manager can call each worker
-(monitor, nudge, stop); a worker may create agents on the root (equipment) and
-call its own cabinet's `status`. The close deletes the cabinet with its whole subtree;
-the kernel prunes every grant that names a deleted id.
+live worker, and grants. A worker and each peer worker, and a worker and the master,
+may exchange MESSAGES only (`MESSAGE_VERBS`: `send`, `reflect`). The master and the
+manager may call each worker in full (monitor, re-task, stop). A worker may call its
+own cabinet's `status`, its own equipment (`$subtree`) and itself (`$self`), and the
+root's `create_agent` alone, which is how it makes its equipment. The close deletes the
+cabinet with its whole subtree; the kernel prunes every grant that names a deleted id.
 
 THE CEILING. An optional `max_cabinets` on the manager refuses an open loudly when
 that many cabinets are live (`reason: "ceiling"`). None: the LLM decides the count.
@@ -63,6 +64,10 @@ CABINET = "cabinet"
 
 #: The worker's own report up: the only verb a worker sends its cabinet.
 STATUS_VERB = "status"
+
+#: What one worker may send another worker, or the master: messages, and nothing
+#: else. A peer that may only message cannot stop, clear or re-task the other.
+MESSAGE_VERBS = ["send", "reflect"]
 
 #: Record keys a worker does NOT copy from its backend: identity, wiring and the
 #: backend's own prompt and view. Everything else (handler, endpoint, model, window,
@@ -211,14 +216,14 @@ def _instructions(cab: dict, peers: list[dict], master: str | None, root: str) -
         "How to work with each other:",
         f"- Message a peer, or your master `{master}`, by sending `send` with a `text`: "
         '`send {target: <worker id>, payload: {type: "send", text: "..."}}`. '
-        "They can message you the same way.",
+        "They can message you the same way; messages are all you may send them.",
         f"- Report your state up to your cabinet, every time it changes: "
         f'`send {{target: "{cab["id"]}", payload: {{type: "status", line: "...", '
         "progress: 0-100, result: ...}}`. Put your final answer in `result`.",
-        f"- Equipment: create the neighbour agents your task needs as YOUR children "
-        f'(`create_agent` with `parent_id: "{worker}"`). Grant each one to your cabinet '
-        f"only: its `callable_by` names `{worker}` or your own equipment, nothing else. "
-        f"Root `{root}` takes your `create_agent`; nothing else of the root is yours.",
+        f"- Equipment: send `create_agent` to the root `{root}` with "
+        f'`parent_id: "{worker}"`, so the new agent is your child. Grant each one to '
+        f"your cabinet only: its `callable_by` names `{worker}` or your own equipment, "
+        f"nothing else. The root takes only your `create_agent`; nothing else of it is yours.",
     ]
     return "\n".join(lines)
 
@@ -368,7 +373,8 @@ async def _open(manager: str, payload: dict, kernel):
             "id": worker_id,
             "handler_module": handler,
             "description": f"Worker of cabinet {cab_id}: {task.strip()[:200]}",
-            # its equipment (`$subtree`), the cabinet's status channel, and creating on the root
+            # creating on the root (its equipment: `create_agent` only), its equipment
+            # (`$subtree`), itself, and the cabinet's status channel
             "can_call": {
                 "$self": "*",
                 "$parent": [STATUS_VERB],
@@ -388,35 +394,41 @@ async def _open(manager: str, payload: dict, kernel):
     # the cabinet it half-made.
     steps = [
         _wire(kernel, root, callable_by={worker_id: ["create_agent"]}),
+        # the master calls the worker in full, and the worker only messages the master
         _wire(
             kernel,
             master,
             can_call={worker_id: "*", cab_id: ["view", "reflect"]},
-            callable_by={worker_id: "*"},
+            callable_by={worker_id: MESSAGE_VERBS},
         ),
         _wire(kernel, kernel.id, can_call={worker_id: "*"}),
         _wire(kernel, store, callable_by={worker_id: "*"}),
-        _wire(kernel, worker_id, can_call={master: "*", store: "*"}),
+        _wire(
+            kernel,
+            worker_id,
+            can_call={master: MESSAGE_VERBS, store: "*"},
+        ),
     ]
     if isinstance(cred, dict):
         steps.append(_wire(kernel, cred["store"], callable_by={worker_id: "*"}))
         steps.append(_wire(kernel, worker_id, can_call={cred["store"]: "*"}))
     for other in _cabinets(kernel):
         if other["worker"] != worker_id:
+            # messages both ways between this worker and each peer, nothing more
             steps.append(
                 _wire(
                     kernel,
                     other["worker"],
-                    can_call={worker_id: "*"},
-                    callable_by={worker_id: "*"},
+                    can_call={worker_id: MESSAGE_VERBS},
+                    callable_by={worker_id: MESSAGE_VERBS},
                 )
             )
             steps.append(
                 _wire(
                     kernel,
                     worker_id,
-                    can_call={other["worker"]: "*"},
-                    callable_by={other["worker"]: "*"},
+                    can_call={other["worker"]: MESSAGE_VERBS},
+                    callable_by={other["worker"]: MESSAGE_VERBS},
                 )
             )
     failure = None

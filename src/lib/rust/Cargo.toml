@@ -21,6 +21,7 @@ members = [
     "crates/bundles/fantastic-credential-store",
     "crates/bundles/fantastic-static-loader",
     "crates/bundles/fantastic-scheduler",
+    "crates/bundles/fantastic-cabinet",
     "crates/bundles/fantastic-ai-core",
     "crates/bundles/fantastic-ollama-backend",
     "crates/bundles/fantastic-bridge",

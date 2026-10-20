@@ -37,26 +37,35 @@ On every open and close, each live worker is rewritten with:
   how to message a peer or the master, how to report `status`, and how to create its
   equipment. The post prompt rides AFTER the backend's own prompt, so the backend's
   prompt is never replaced;
-- **grants**, both ways: every peer worker and the master can call it, and it can call
-  them (`send` for messages, `status` on its own cabinet, `create_agent` on the root for
-  its equipment, and its own `$subtree` for the equipment it made).
+- **grants**, both ways, for MESSAGES only (`send`, `reflect`): each peer worker and
+  the master can message it, and it can message them. Nothing else passes between
+  workers, so a peer cannot stop, clear or re-task another worker.
+- **a worker's own grants**: `status` on its own cabinet, `create_agent` on the root (its
+  equipment), and its own `$subtree` (the equipment it made) and itself.
 
-The master can call each worker and read each cabinet (`view`, `reflect`). The manager
-can call each worker (monitor, nudge, stop). A close removes the cabinet's ids from every
-grant (the kernel prunes grants that name a deleted id) and rewrites the directories.
+The master calls each worker in full (monitor, re-task, stop) and reads each cabinet
+(`view`, `reflect`). The manager calls each worker in full (monitor, nudge, stop). A
+close removes the cabinet's ids from every grant (the kernel prunes grants that name a
+deleted id) and rewrites the directories.
 
 ## Equipment
 
-A worker creates its equipment as its own children: `create_agent` with
-`parent_id: <its worker id>`. The equipment is then reached through the worker's
-`$subtree` grant. Its `callable_by` should name its worker (or its own equipment) and
-nothing else. The kernel's baseline is deny-all, so an equipment agent that names no
-other caller is reached by no peer. Deleting the cabinet deletes the equipment with it.
+A worker creates its equipment by sending `create_agent` to the ROOT, with
+`parent_id: <its worker id>`. The kernel answers `create_agent` on the root only (a
+kernel verb sent to any other agent is refused `not_here`), so the root grant
+`create_agent` is the one each worker holds. The equipment is then reached through the
+worker's `$subtree` grant. Its `callable_by` should name its worker (or its own
+equipment) and nothing else. The kernel's baseline is deny-all, so an equipment agent
+that names no other caller is reached by no peer. Deleting the cabinet deletes the
+equipment placed under the worker with it.
 
-**Limit, stated plainly:** the kernel gates `create_agent` by verb on the root, not by
-parent. A worker holding `create_agent` on the root could name another cabinet's agent
-as `parent_id`. The worker's instructions say to create under itself only. Refusing it
-in the kernel would be a new rule on the create verb, not in this bundle.
+**Limit, stated plainly (spec item NOT met):** the root's `create_agent` takes any
+`parent_id`. A worker can place equipment under the root or under another cabinet, and
+the close does not delete it, so conclude can leave it behind. The gate judges the verb
+on the root, never the placement, and the kernel keeps no record of who created an
+agent. The worker's instructions say to place under itself only. Closing that gap needs
+a kernel rule on `create_agent` (a parent must be the caller or its subtree), or a
+record of each worker's creations. Neither is in this bundle.
 
 ## Connect to an existing backend (recommended)
 
@@ -100,11 +109,19 @@ beyond that. The manager wires the rest as cabinets open.
 **The ceiling.** With `max_cabinets` set, an open that would exceed it is refused loudly:
 `{error, reason: "ceiling", ceiling, open}`, and nothing is made.
 
+## Runtimes
+
+Python is the reference (this bundle). The Rust port is `fantastic-cabinet`
+(`src/lib/rust/crates/bundles/fantastic-cabinet`): the same verbs, refusals, grants and
+wiring, linked into the `fantastic` binary and the canvas app. The Swift runtime has no
+port yet: a Swift host has no `cabinet.tools` bundle, so a cabinet cannot be opened
+there. The parity rule in CONTRIBUTING is met for Python and Rust only; the Swift port
+is a separate change.
+
 ## What it does not do yet
 
-- **No Rust or Swift port.** This bundle is Python, the reference runtime. The verbs
-  (`open_cabinet`, `close_cabinet`, `cabinets`, `conclude`, `status`, `view`) are new, so
-  the parity rule in CONTRIBUTING applies. A port is a separate change.
+- **Equipment placement is not scoped** (see Equipment): equipment a worker places outside
+  its own subtree survives the close.
 - **No end-to-end test here.** The three-cabinet run is tracked as #136.
 - **The canvas panel** is a plain html view (`view.html`) of the cabinet's id. The
   canvas draws the cabinets as cells the master places.

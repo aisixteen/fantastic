@@ -691,6 +691,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-cabinet"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-kernel",
+ "serde_json",
+]
+
+[[package]]
 name = "fantastic-canvas-page"
 version = "0.1.0"
 dependencies = [
@@ -944,6 +954,7 @@ dependencies = [
  "async-trait",
  "crossterm 0.29.0",
  "fantastic-anthropic-backend",
+ "fantastic-cabinet",
  "fantastic-canvas-page",
  "fantastic-core",
  "fantastic-credential-store",
