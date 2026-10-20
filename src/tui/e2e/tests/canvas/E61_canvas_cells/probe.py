@@ -19,6 +19,7 @@ g) `--headless canvas` is refused (`canvas` is headless already) and leaves the
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shlex
@@ -35,6 +36,11 @@ from helpers import oslayer  # noqa: E402
 FAKE = "claude"
 MARK = "FAKE-CODER-READY"
 PEER = "canvas_second"
+
+
+def agent_row(agent: str) -> str:
+    """The JS that finds `agent`'s row in a file tree. The selector goes in a JSON string: its own quotes would end a JS string literal."""
+    return "document.querySelector(" + json.dumps('.files-view .ft-row.agent[data-agent="' + agent + '"]') + ")"
 
 
 def main() -> bool:
@@ -55,6 +61,7 @@ def main() -> bool:
     from _lib.dev_surface import frame_eval
 
     r: dict = {"headless_canvas_refused": refused}
+    reveal_log: list = []
     secs = rig.limits["seconds"]
     frames = "[...document.querySelectorAll('.agent-frame')]"
 
@@ -77,6 +84,7 @@ def main() -> bool:
         end = asyncio.get_event_loop().time() + secs_
         while asyncio.get_event_loop().time() < end:
             a = await host_call(rig.port, f"{guid}|{cell}", {"type": "reveal", "agent": agent})
+            reveal_log.append({"agent": agent, "reply": a})  # every answer, for the run's summary
             if "revealed" in a:
                 return True
             if a.get("reason") != "not_found":
@@ -123,7 +131,7 @@ def main() -> bool:
             r["tree_cell"] = tree is not None
             guid1 = rig.page_guid()
             r["tree_lists_backend"] = bool(tree) and await reveal(guid1, tree, backend) and bool(await pg.until(
-                f"!!document.querySelector('.files-view .ft-row.agent[data-agent={backend!r}]')", 10))
+                f"!!{agent_row(backend)}", 10))
             info["main_backend"] = backend
             # e) a peer canvas — the canvas node's `new_canvas`, opened by its URL
             from canvas import host_call
@@ -139,7 +147,7 @@ def main() -> bool:
             guid2 = (yaml.safe_load(peer_yaml.read_text()) or {}).get("guid") if peer_yaml.exists() else None
             # the whole project shows (a superset); the first canvas's agents are on another canvas
             shown = bool(tree2 and guid2) and await reveal(guid2, tree2, backend) and await reveal(guid2, tree2, PEER)
-            row = f"document.querySelector('.files-view .ft-row.agent[data-agent={backend!r}]')"
+            row = agent_row(backend)
             # marked as another canvas's, and not a live row: no ↗ to open it
             elsewhere = shown and bool(await pg.until(f"!!{row}?.classList.contains('elsewhere') && !{row}.querySelector('.go')", 10))
             info["peer_tree"] = await pg.js("[...document.querySelectorAll('.files-view .ft-row.agent')].map(e=>e.dataset.agent+(e.classList.contains('elsewhere')?' (elsewhere)':''))")
@@ -147,6 +155,7 @@ def main() -> bool:
 
     info: dict = {}
     info["headless_canvas"] = (both.stderr or both.stdout).strip()[-200:]
+    info["reveal_log"] = reveal_log
     try:
         asyncio.run(first())
         main_rec = rig.proj / ".fantastic/web/agents/canvas/agent.yaml"
