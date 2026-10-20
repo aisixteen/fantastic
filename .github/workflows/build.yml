@@ -532,10 +532,10 @@ jobs:
       - uses: browser-actions/setup-chrome@v2
         if: runner.os == 'Windows'
         id: cft
-      - name: ffmpeg (the media test makes its clips with it)
+      - name: apt packages (ffmpeg; WebKitGTK for E88)
         run: |
           case "$RUNNER_OS" in
-            Linux) sudo apt-get update -q && sudo apt-get install -y -q ffmpeg ;;
+            Linux) sudo apt-get update -q && sudo apt-get install -y -q ffmpeg python3-gi gir1.2-webkit2-4.1 xvfb ;;
             macOS) brew install ffmpeg ;;
             Windows) choco install ffmpeg --no-progress -y ;;
           esac

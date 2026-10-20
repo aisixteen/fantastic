@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: terminal_renderer
+group: canvas
+title: "terminal renderer: auto is WebGL in Chrome and DOM in WebKitGTK (the shell's flag or the user agent); the view's terminal_renderer switches it live; keystroke → render latency per renderer, in Chrome and (Linux) WebKitGTK"
+runner: probe.py
+costs: free
+solo: true        # measures latency: runs alone
+limits:
+  seconds: 420
+env:
+  LATENCY_P95_MS: "250"

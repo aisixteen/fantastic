@@ -24,9 +24,10 @@ import type { FantasticShell } from "../shell.ts";
 export type TerminalRenderer = "webgl" | "dom";
 export const RENDERER_CHOICES = ["auto", "webgl", "dom"] as const;
 
-/** WebKit on Linux that is not Chromium, Firefox or Android: WebKitGTK (or WPE). */
+/** WebKit on Linux that is not Chromium, Firefox or Android: WebKitGTK (or WPE).
+ *  Headless Chrome says `HeadlessChrome/…`, which `\bChrome\b` does not match. */
 export function isWebKitGtkUa(ua: string): boolean {
-  return /\bLinux\b/.test(ua) && /\bAppleWebKit\//.test(ua) && !/\b(Chrome|Chromium|CriOS|Edg|OPR|Firefox|FxiOS|Android)\b/.test(ua);
+  return /\bLinux\b/.test(ua) && /\bAppleWebKit\//.test(ua) && !/\b(Chrome|HeadlessChrome|Chromium|CriOS|Edg|OPR|Firefox|FxiOS|Android)\b/.test(ua);
 }
 
 /** The renderer a view's choice means in this tab, and why. Throws on a value
