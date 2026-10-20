@@ -230,12 +230,6 @@ pub async fn boot_root(kernel: &Arc<Kernel>) {
         .await;
 }
 
-/// The record writer is DEBOUNCED (150 ms, python's rhythm), so a test that
-/// asserts on disk waits for a pass.
-pub async fn settle_records() {
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-}
-
 /// Register the fake `file_bridge` provider (rooted at `store_root`) into a
 /// registry before boot. Call on EVERY boot of a kernel that should persist.
 pub fn register_fake_store(reg: &mut BundleRegistry, store_root: &Path) {
