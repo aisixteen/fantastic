@@ -694,8 +694,8 @@ def check_restart(vm: Vm, run: dict, canvas_pid: int, step: float) -> None:
         raise Fail(f"the new pid {new['pid']}'s comm is {c!r}, not fantastic-app")
     log(f"step 9: the kiosk came back: pid {new['pid']}, NRestarts {n1}")
 
-    vm.forward(new["port"])
     at("9, after the restart: 4")
+    vm.forward(new["port"])
     wait_page(vm, new, step)
     at("9, after the restart: 5")
     check_kernel(vm, new, step)
@@ -732,6 +732,7 @@ def diagnostics(vm: Vm) -> None:
 
 
 def run_check(vm: Vm, timeout: float, step: float) -> None:
+    at("1")
     log("step 1: starting QEMU")
     vm.start()
     at("2")
@@ -742,11 +743,10 @@ def run_check(vm: Vm, timeout: float, step: float) -> None:
     at("3")
     run = until(vm, f"the run file {RUN_FILE}", lambda: read_run_file(vm), timeout)
     log(f"step 3: run file: {run}")
-    at("3")
     check_session_and_app(vm, run, step)
 
-    vm.forward(run["port"])
     at("4")
+    vm.forward(run["port"])
     wait_page(vm, run, step)
     log("step 4: the Home document is served through the forward")
     at("5")
