@@ -33,15 +33,21 @@ while True:
 CELL, BACKEND = "cell_tick", "exec_bridge_tick"
 VERBS = ["watch", "status", "start", "write", "ack", "resize", "output"]
 RELOADS = 30
+TICK_CHARS = 4012  # one ticker line: "TICK n " + 4000 x + CRLF, n of 3-4 digits
+HIGH_WATERMARK = 100_000  # the host's pause threshold (pty.rs HIGH_WATERMARK)
+# REPAINT_WAIT_MS (terminal_view.ts): the longest a re-attach holds live frames waiting for the program
+REPAINT_WAIT_MS = 300
 # The peak is the first count read after a reload: a re-attach holds live frames unacked until it
 # finishes (terminal_view.ts attach/drainEarly), so right after the reload the count carries the old
-# page's unacked output plus what the ticker wrote during the attach (~80 KB/s). CI failures of the
-# earlier 40 000 bound (issue #89) showed peaks of 40k-72k with the job never paused, so that bound
-# measured the mechanism's normal range, not a leak. The regression this guards is the count drifting
-# to the host's pause threshold (pty.rs HIGH_WATERMARK, 100 000), where the program blocks: the bound
-# sits 8k over the worst peak seen (72k) and 20k under the threshold, about five ticks of headroom
-# each way. Reaching 80k is a real drift; `never_paused` is the hard stop at 100k.
-BOUND = 80_000
+# page's unacked output plus what the ticker wrote during the attach. CI failures of the earlier
+# 40 000 bound (issue #89) showed peaks of 40k-72k with the job never paused, so that bound measured
+# the mechanism's normal range, not a leak; a loaded runner stretches the attach round trips and
+# the normal range has no sharp ceiling below the threshold. What the test must catch is the count
+# drifting toward HIGH_WATERMARK, where the program blocks. So the bound is set from the threshold:
+# one attach hold of ticker output under it (REPAINT_WAIT_MS / 50 ms = 6 ticks of TICK_CHARS, ~24k).
+# A peak inside that margin means one more slow attach pauses the job, and the failure shows up here
+# before `never_paused` (the hard stop) can. It is not fitted to the worst peak seen (72k).
+BOUND = HIGH_WATERMARK - (REPAINT_WAIT_MS // 50) * TICK_CHARS
 # once the attach finishes the count must fall to about one ack batch (5 000) plus frames in flight
 SETTLED = 20_000
 SETTLE_S = 10.0  # drain deadline; a stuck backlog never meets it and FAILS "backlog_settles". Neither bound is widened.
