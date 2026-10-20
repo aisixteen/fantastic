@@ -743,6 +743,11 @@ def diagnostics(vm: Vm) -> None:
         # but cage up and no restart, with nothing in the journal to say why
         "processes.txt": "ps -eo pid,ppid,stat,wchan:32,etime,args --forest",
         "cgroups.txt": "systemd-cgls --no-pager; loginctl session-status --no-pager",
+        # who still holds a connection to cage (its Wayland socket's peers)
+        "sockets.txt": (
+            "ss -xp; for p in $(pgrep -f 'cage|fantastic'); do [ \"$p\" = $$ ] && continue;"
+            " echo \"== $p $(tr '\\0' ' ' < /proc/$p/cmdline)\"; ls -l /proc/$p/fd; done"
+        ),
         "stacks.txt": (
             "for p in $(pgrep -f 'fantastic-app|WebKit|cage'); do [ \"$p\" = $$ ] && continue;"
             " echo \"== $p $(tr '\\0' ' ' < /proc/$p/cmdline)\";"
