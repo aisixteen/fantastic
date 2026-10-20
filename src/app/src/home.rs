@@ -22,6 +22,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::sync::{mpsc, OwnedRwLockWriteGuard, RwLock};
 
 use crate::fatal::fatal;
+use crate::page;
 use crate::sys::{self, Backdrop};
 use crate::{intents, menu};
 
@@ -36,9 +37,12 @@ pub struct Shell {
     pub kiosk: bool,
     pub backdrop: Backdrop,
     kernel: Arc<RwLock<Option<HomeKernel>>>,
-    /// The kernel's port once it serves (0 before): the one loopback origin the
-    /// window may show.
+    /// The kernel's port once it serves (0 before): the home's own loopback
+    /// origin, which the window may show.
     port: AtomicU16,
+    /// The ports of the canvases the home runs, from its latest state: the other
+    /// loopback origins the window may show (the Home page's canvas frames).
+    canvas_ports: Mutex<Vec<u16>>,
     /// The kernel is down (shut down, or it never booted): an exit passes through.
     down: AtomicBool,
     quitting: AtomicBool,
@@ -55,6 +59,7 @@ impl Shell {
             backdrop,
             kernel: Arc::new(RwLock::new(None)),
             port: AtomicU16::new(0),
+            canvas_ports: Mutex::new(Vec::new()),
             down: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
             failed: AtomicBool::new(false),
@@ -71,6 +76,14 @@ impl Shell {
         }
     }
 
+    /// The ports of the canvases the home runs, as its latest state named them.
+    pub fn canvas_ports(&self) -> Vec<u16> {
+        self.canvas_ports
+            .lock()
+            .expect("the canvas ports are poisoned")
+            .clone()
+    }
+
     pub fn quitting(&self) -> bool {
         self.quitting.load(Ordering::SeqCst)
     }
@@ -78,6 +91,14 @@ impl Shell {
     /// The first failure: true once, false after.
     pub(crate) fn fail(&self) -> bool {
         !self.failed.swap(true, Ordering::SeqCst)
+    }
+
+    /// Replace the running canvases' ports with a state's.
+    pub(crate) fn set_canvas_ports(&self, ports: Vec<u16>) {
+        *self
+            .canvas_ports
+            .lock()
+            .expect("the canvas ports are poisoned") = ports;
     }
 
     /// No kernel will run: a quit passes straight through.
@@ -181,17 +202,21 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     eprintln!("fantastic-app: the backdrop: {}", shell.backdrop.name());
 }
 
-/// The events task: `menu_spec` (applied, outside the kiosk) and `focus`;
-/// every other payload is a state or a mirrored call, and is dropped.
+/// The events task: `menu_spec` (applied, outside the kiosk), `state` (the
+/// running canvases' ports; the home's problems to stderr in the kiosk) and
+/// `focus`; every other payload is a mirrored call, and is dropped.
 async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     let shell = shell(&app);
+    let mut problem = None;
     while let Some(payload) = events.recv().await {
+        announce(shell.kiosk, &payload, &mut problem, &mut std::io::stderr());
         match payload.get("type").and_then(Value::as_str) {
             Some(fantastic_home::menu::MENU_SPEC) if !shell.kiosk => {
                 if let Err(e) = menu::apply(&app, payload).await {
                     fatal(&app, &format!("the home's menu: {e}"));
                 }
             }
+            Some("state") => shell.set_canvas_ports(page::running_canvas_ports(&payload)),
             Some("focus") => focus(&app),
             _ => {}
         }
@@ -199,6 +224,29 @@ async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     if !shell.quitting() {
         fatal(&app, "the home kernel stopped");
     }
+}
+
+/// In the kiosk, a `state` payload whose problem is new (not the one `last`
+/// holds) is written to `out` as `fantastic-app: <problem>`: nobody sees a toast
+/// there, so the session journal holds it. A cleared problem is forgotten, so
+/// the same failure after it is new again.
+fn announce(
+    kiosk: bool,
+    payload: &Value,
+    last: &mut Option<String>,
+    out: &mut impl std::io::Write,
+) {
+    if !kiosk || payload.get("type").and_then(Value::as_str) != Some("state") {
+        return;
+    }
+    let problem = payload
+        .get("problem")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(text) = problem.as_ref().filter(|p| Some(*p) != last.as_ref()) {
+        let _ = writeln!(out, "fantastic-app: {text}");
+    }
+    *last = problem;
 }
 
 /// Bring the window forward.
@@ -269,4 +317,54 @@ pub fn exit_requested(app: &AppHandle, event: &RunEvent) {
         };
         app.exit(code);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(problem: Value) -> Value {
+        json!({"type": "state", "problem": problem})
+    }
+
+    fn said(kiosk: bool, payloads: &[Value]) -> String {
+        let mut last = None;
+        let mut out = Vec::new();
+        for p in payloads {
+            announce(kiosk, p, &mut last, &mut out);
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_new_problem_is_one_stderr_line_in_the_kiosk() {
+        let why = "Could not add alpha: it did not start — no login environment: SHELL is not set";
+        assert_eq!(
+            said(
+                true,
+                &[state(Value::Null), state(json!(why)), state(json!(why))]
+            ),
+            format!("fantastic-app: {why}\n")
+        );
+    }
+
+    #[test]
+    fn outside_the_kiosk_stderr_stays_quiet() {
+        assert_eq!(said(false, &[state(json!("a"))]), "");
+    }
+
+    #[test]
+    fn a_problem_after_a_cleared_one_is_new_again() {
+        let out = said(
+            true,
+            &[state(json!("a")), state(Value::Null), state(json!("a"))],
+        );
+        assert_eq!(out, "fantastic-app: a\nfantastic-app: a\n");
+    }
+
+    #[test]
+    fn no_problem_and_other_payloads_say_nothing() {
+        assert_eq!(said(true, &[state(Value::Null)]), "");
+        assert_eq!(said(true, &[json!({"type": "focus", "problem": "x"})]), "");
+    }
 }

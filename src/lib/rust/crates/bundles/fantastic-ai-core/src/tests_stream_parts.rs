@@ -519,6 +519,19 @@ async fn rows_is_a_view_of_what_the_agent_holds() {
     let fp = slow(&ai, &["hello there", DONE], Duration::ZERO);
     call(&kernel, ai.as_str(), json!({"type": "send", "text": "hi"})).await;
     until_requests(&fp, 2).await;
+    // pass 2 (the nudge's answer) appends its rows AFTER its request starts: wait
+    // until the head holds the whole turn — hi, hello there, the nudge, done — so
+    // the two reads below page one settled head (each `rows` call is atomic; two
+    // calls are not one snapshot)
+    let mut settled = Value::Null;
+    for _ in 0..250 {
+        settled = rows(json!({"type": "rows"})).await;
+        if settled["total"] == json!(4) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(settled["total"], json!(4), "{settled}");
     let page = rows(json!({"type": "rows", "limit": 1})).await;
     let rest = rows(json!({"type": "rows", "after": page["next"]})).await;
     assert_eq!(page["loaded"], json!(true), "{page}");

@@ -127,6 +127,11 @@ def main() -> bool:
 
     try:
         asyncio.run(drive())
+    except SystemExit:
+        # a missed click ends a wait with SystemExit before the input evidence
+        # below is reached: print the samples of every missed click first
+        print("input: " + json.dumps({"clicks": rig.click_logs}))
+        raise
     finally:
         rig.stop_all()
     ok = bool(r) and all(r.values())

@@ -227,8 +227,8 @@ async fn persist_through_provider_writes_record() {
         .remove(0)
         .result;
 
-    // DEBOUNCED (python's 150 ms `_FlushLoop` rhythm).
-    fantastic_kernel::test_support::settle_records().await;
+    // The flush barrier: every write dirty at call time has landed.
+    kernel.flush_records().await;
     let rec =
         fantastic_kernel::persistence::read_record_at(&store_root.join("agents/test_1/agent.yaml"))
             .expect("read ok")
@@ -261,7 +261,7 @@ async fn persist_with_no_provider_is_ram_noop() {
         .remove(0)
         .result;
 
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
     // No provider ⇒ nothing written (RAM). NO FALLBACK to direct fs.
     assert!(
         !store_root.join("agents/test_1/agent.yaml").exists(),
@@ -283,7 +283,7 @@ async fn delete_removes_record_through_provider() {
     let _ = kernel
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "create_agent", "parent_id": "kernel", "handler_module": "noop.tools", "id": "doomed"}))])
         .await.remove(0).result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
     assert!(store_root.join("agents/doomed/agent.yaml").exists());
     let _ = kernel
         .send(vec![Item::new(
@@ -293,7 +293,7 @@ async fn delete_removes_record_through_provider() {
         .await
         .remove(0)
         .result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
     // The provider's recursive delete removed the dir.
     assert!(
         !store_root.join("agents/doomed").exists(),
@@ -407,12 +407,11 @@ async fn records_created_before_the_store_persist_once_it_is_wired() {
     let _ = kernel
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"early"}))])
         .await.remove(0).result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
     assert!(!store_root.join("agents/early/agent.yaml").exists());
 
-    // Wire one — the queued record drains on the next pass.
+    // Wire one — the queued record drains on the flush barrier.
     wire_store(&kernel, store_root).await;
-    fantastic_kernel::test_support::settle_records().await;
     kernel.flush_records().await;
     assert!(
         store_root.join("agents/early/agent.yaml").exists(),
@@ -443,7 +442,7 @@ async fn persisted_record_bytes_are_python_yaml_dump() {
         .await
         .remove(0)
         .result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
 
     let bytes = std::fs::read(store_root.join("agents/readings/agent.yaml")).expect("on disk");
     let text = String::from_utf8(bytes).expect("utf-8");
@@ -480,7 +479,7 @@ async fn a_record_commits_via_tmp_and_rename() {
         .await
         .remove(0)
         .result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
 
     let dir = store_root.join("agents/committed");
     assert!(dir.join("agent.yaml").exists(), "the final name exists");
@@ -642,7 +641,7 @@ async fn record_merge_reads_one_chunk_like_python() {
         .await
         .remove(0)
         .result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await; // a barrier: every dirty write has landed
 
     let text = std::fs::read_to_string(dir.join("agent.yaml")).expect("on disk");
     assert!(
@@ -712,7 +711,7 @@ async fn a_record_write_copies_no_readme() {
         let _ = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
             .await;
-        fantastic_kernel::test_support::settle_records().await;
+        kernel.flush_records().await;
         let dir = store_root.join("agents/documented");
         assert!(dir.join("agent.yaml").exists());
         assert!(!dir.join("readme.md").exists() && !dir.join("docs").exists());
@@ -753,7 +752,7 @@ async fn store_calls_have_python_shape() {
                    "handler_module": "noop.tools", "id": "shaped"}),
         )])
         .await;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await; // a barrier: every dirty write has landed
     let store_calls: Vec<Value> = seen.lock().unwrap().clone();
     let keys = |p: &Value| -> Vec<String> { p.as_object().unwrap().keys().cloned().collect() };
     let read = store_calls
@@ -831,7 +830,7 @@ async fn a_failed_record_write_seeds_no_readme() {
                    "handler_module": "readme_bundle.tools", "id": "doc"}),
         )])
         .await;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
     let paths: Vec<String> = seen
         .lock()
         .unwrap()

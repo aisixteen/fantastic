@@ -5,6 +5,7 @@ import { Host } from "../../lib.ts";
 import { hostRecordFresh } from "../canvas/host_views.ts";
 import { attach as attachTo, launched, pressed, runLine, savedCmd, shortCmd, stoppedText } from "./last_cmd.ts";
 import type { TermState } from "./last_cmd.ts";
+import { earlyPlan } from "./early.ts";
 import { onSkin, skinNow } from "../skin/apply.ts";
 import { xtermColor } from "../skin/tokens.ts";
 import type { ColorValue, CompiledSkin } from "../skin/tokens.ts";
@@ -466,12 +467,10 @@ export const terminalView: ViewBundle = {
     // the frames held while the job was unknown (or an attach ran), in order;
     // the first `covered` are in a ring replay already
     const drainEarly = (covered: number): void => {
-      early.splice(0).forEach((e, i) => {
-        if (e["type"] === "job_done") return ended(e);
-        // in the replay already: not drawn again, acked once (it was sent once)
-        if (i < covered && e["job_id"] === jobId) return ackChars(typeof e["data"] === "string" ? (e["data"] as string).length : 0);
-        draw(e);
-      });
+      for (const s of earlyPlan(early.splice(0), covered, jobId)) {
+        if (s.op === "end") ended(s.frame);
+        else if (s.op === "draw") draw(s.frame);
+      }
     };
     // START the cell's program (its first placement, or the human's ▶): once
     // started, the cell records it — later it waits for ▶ instead
