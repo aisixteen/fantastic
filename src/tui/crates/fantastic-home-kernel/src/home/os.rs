@@ -40,6 +40,10 @@ pub struct SysOs {
     fantastic_bin: PathBuf,
     /// The login environment, resolved once it has been read successfully.
     env: tokio::sync::OnceCell<Vec<(OsString, OsString)>>,
+    /// A test's `SHELL` for the login environment (`Some(None)`: unset); `None`
+    /// reads the process's own, as the app does.
+    #[cfg(all(test, unix))]
+    shell: Option<Option<OsString>>,
 }
 
 impl SysOs {
@@ -48,6 +52,8 @@ impl SysOs {
             home,
             fantastic_bin,
             env: tokio::sync::OnceCell::new(),
+            #[cfg(all(test, unix))]
+            shell: None,
         }
     }
 
@@ -61,6 +67,29 @@ impl SysOs {
         let os = SysOs::new(home, fantastic_bin);
         os.env.set(env).expect("a new SysOs has no environment");
         os
+    }
+
+    /// A `SysOs` whose login environment is read with `shell` as its `SHELL`
+    /// (`None`: unset), so a spawn runs the login step without touching the
+    /// process's environment.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_shell(
+        home: PathBuf,
+        fantastic_bin: PathBuf,
+        shell: Option<OsString>,
+    ) -> SysOs {
+        let mut os = SysOs::new(home, fantastic_bin);
+        os.shell = Some(shell);
+        os
+    }
+
+    /// The login environment: the process's own `SHELL`, or a test's.
+    async fn login_env(&self) -> Result<Vec<(OsString, OsString)>, String> {
+        #[cfg(all(test, unix))]
+        if let Some(shell) = &self.shell {
+            return sys::login_env_with(&self.home, shell.clone()).await;
+        }
+        sys::login_env(&self.home).await
     }
 }
 
@@ -89,10 +118,7 @@ impl HomeOs for SysOs {
     async fn spawn(&self, path: &str) -> Result<(), String> {
         let log = sys::log_path(&self.home, path)?;
         let started = async {
-            let env = self
-                .env
-                .get_or_try_init(|| sys::login_env(&self.home))
-                .await?;
+            let env = self.env.get_or_try_init(|| self.login_env()).await?;
             sys::spawn(&self.fantastic_bin, path, env, &self.home, &log).await
         };
         started

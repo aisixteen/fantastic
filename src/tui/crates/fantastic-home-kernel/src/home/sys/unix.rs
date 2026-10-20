@@ -32,7 +32,15 @@ pub fn folder(path: &str) -> Result<String, String> {
 /// private file (a daemon the profile starts would hold a pipe open), 5 s.
 /// `SHELL` unset, a timeout or no `PATH` is an `Err` naming which.
 pub async fn login_env(home: &Path) -> Result<Vec<(OsString, OsString)>, String> {
-    let shell = std::env::var_os("SHELL")
+    login_env_with(home, std::env::var_os("SHELL")).await
+}
+
+/// `login_env` with `shell` as the `SHELL` it runs (`None`: unset).
+pub async fn login_env_with(
+    home: &Path,
+    shell: Option<OsString>,
+) -> Result<Vec<(OsString, OsString)>, String> {
+    let shell = shell
         .filter(|s| !s.is_empty())
         .ok_or("no login environment: SHELL is not set")?;
     let file = super::logs_dir(home)?.join(format!("login-env-{}.txt", super::pid()));

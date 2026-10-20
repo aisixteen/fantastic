@@ -321,10 +321,44 @@ pub fn exit_requested(app: &AppHandle, event: &RunEvent) {
 
 #[cfg(test)]
 mod tests {
+    use fantastic_home_kernel::home::wire;
+
     use super::*;
 
-    fn state(problem: Value) -> Value {
-        json!({"type": "state", "problem": problem})
+    /// The home's `state` payload, built by the kernel's own `wire::state`, with
+    /// `problem` as its problem (`None`: none). A renamed field breaks these tests.
+    fn state(problem: Option<&str>) -> Value {
+        let mut home =
+            fantastic_home::Home::new(fantastic_home::Config::new(fantastic_home::Mode::Lock));
+        if let Some(error) = problem {
+            home.reduce(fantastic_home::Event::RegistryFailed {
+                error: error.into(),
+            });
+        }
+        wire::state(&home, 0, 1, &|_| None)
+    }
+
+    /// The home's `state` payload after a spawn that failed for want of `SHELL`.
+    fn spawn_failed_state() -> Value {
+        let mut home =
+            fantastic_home::Home::new(fantastic_home::Config::new(fantastic_home::Mode::Lock));
+        home.reduce(fantastic_home::Event::RegistryRead {
+            now_ms: 0,
+            entries: vec![],
+        });
+        home.reduce(fantastic_home::Event::Probed {
+            now_ms: 0,
+            results: vec![],
+        });
+        home.reduce(fantastic_home::Event::Open {
+            paths: vec!["/w/alpha".into()],
+            now_ms: 0,
+        });
+        home.reduce(fantastic_home::Event::Spawned {
+            path: "/w/alpha".into(),
+            result: Err("no login environment: SHELL is not set".into()),
+        });
+        wire::state(&home, 0, 1, &|_| None)
     }
 
     fn said(kiosk: bool, payloads: &[Value]) -> String {
@@ -342,7 +376,7 @@ mod tests {
         assert_eq!(
             said(
                 true,
-                &[state(Value::Null), state(json!(why)), state(json!(why))]
+                &[state(None), spawn_failed_state(), spawn_failed_state()]
             ),
             format!("fantastic-app: {why}\n")
         );
@@ -350,21 +384,22 @@ mod tests {
 
     #[test]
     fn outside_the_kiosk_stderr_stays_quiet() {
-        assert_eq!(said(false, &[state(json!("a"))]), "");
+        assert_eq!(said(false, &[state(Some("a"))]), "");
     }
 
     #[test]
     fn a_problem_after_a_cleared_one_is_new_again() {
-        let out = said(
-            true,
-            &[state(json!("a")), state(Value::Null), state(json!("a"))],
+        let out = said(true, &[state(Some("a")), state(None), state(Some("a"))]);
+        assert_eq!(
+            out,
+            "fantastic-app: Could not read your fantastics: a\n\
+             fantastic-app: Could not read your fantastics: a\n"
         );
-        assert_eq!(out, "fantastic-app: a\nfantastic-app: a\n");
     }
 
     #[test]
     fn no_problem_and_other_payloads_say_nothing() {
-        assert_eq!(said(true, &[state(Value::Null)]), "");
+        assert_eq!(said(true, &[state(None)]), "");
         assert_eq!(said(true, &[json!({"type": "focus", "problem": "x"})]), "");
     }
 }
