@@ -17,6 +17,8 @@ import { registerSkin } from "./bundles/skin/skin_agent.ts";
 import { bootSkin, installSkin } from "./bundles/skin/apply.ts";
 import { tok } from "./bundles/skin/css.ts";
 import { readShell } from "./bundles/shell.ts";
+import { canvasesOf } from "./canvas_list.ts";
+import type { CanvasEntry } from "./canvas_list.ts";
 
 // The canvas page. The frontend kernel boots as a PEER of the host: it dials the host's `web_loader` (by id) over the bridge (a host-side
 // `kernel_state` rooted at `.fantastic/web/`, which the operator created — no
@@ -29,8 +31,6 @@ import { readShell } from "./bundles/shell.ts";
 // `canvas_page` with its OWN page records (its `kernel_state` child) — so its own
 // page kernel, its own guid. `?canvas=<node>` picks one; without it, the main
 // one (`main: true`, declarative), else the first.
-const CANVAS_NODE = "canvas.tools";
-const LOADER_HM = "kernel_state.tools";
 const origin =
   (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 
@@ -225,9 +225,8 @@ await mountCanvas({
   canvases,
 });
 
-/** Every canvas on the host: `canvas.tools` children of `canvas_page`, each with
- *  its page loader (its `kernel_state` child). */
-async function listCanvases(): Promise<Array<{ id: string; loader: string; root: string; main: boolean; name: string }>> {
+/** Every canvas on the host, at any depth under `canvas_page` (`canvasesOf`). */
+async function listCanvases(): Promise<CanvasEntry[]> {
   const all: Array<Record<string, unknown>> = [];
   let after: unknown = null;
   for (;;) {
@@ -239,16 +238,7 @@ async function listCanvases(): Promise<Array<{ id: string; loader: string; root:
     if (page?.next === null || page?.next === undefined) break;
     after = page.next;
   }
-  const out: Array<{ id: string; loader: string; root: string; main: boolean; name: string }> = [];
-  for (const n of all) {
-    if (n["handler_module"] !== CANVAS_NODE || n["parent_id"] !== "canvas_page" || typeof n["id"] !== "string") continue;
-    const l = all.find((a) => a["parent_id"] === n["id"] && a["handler_module"] === LOADER_HM);
-    if (typeof l?.["id"] !== "string") continue;
-    const name = typeof n["display_name"] === "string" && n["display_name"] !== "" ? n["display_name"] : n["id"].replace(/^canvas_/, "");
-    if (typeof l["root"] !== "string" || l["root"] === "") throw new Error(`canvas ${n["id"]}: its page loader ${l["id"]} names no root`);
-    out.push({ id: n["id"], loader: l["id"], root: l["root"], main: n["main"] === true, name });
-  }
-  return out.sort((a, b) => Number(b.main) - Number(a.main) || (a.id < b.id ? -1 : 1));
+  return canvasesOf(all);
 }
 
 /** The page's folders, as its loader reads them — a refusal is LOUD. */

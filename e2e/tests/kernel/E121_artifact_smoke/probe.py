@@ -53,6 +53,7 @@ RUNTIME_ONLY = {
     "foundation_models_backend": {"rust", "swift"},
     "apple_kvs": {"swift"},
     "sqlite_store": {"python"},
+    "cabinet": {"python", "rust"},  # Swift not ported (its readme says so)
 }
 
 #: The distilled root reflect (kernel_state readme + CLAUDE.md "Universal patterns").

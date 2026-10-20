@@ -24,7 +24,7 @@ canvas once first (its view must exist).
   `<page guid>|view_root` its root view. Reflect each kernel (`reflect` on
   `kernel`, and on `<page guid>|canvas`) to see what each holds.
 
-## The tree — flat peer canvases
+## The tree — nested canvases
 
 ```
 user
@@ -37,15 +37,22 @@ user
         │   ├── static_files    the files the cells load
         │   └── web_loader      its page records (.fantastic/web)
         │       └── canvas      (page side) → view_root → background · <its cells>
-        └── canvas_<name>       a PEER canvas: new_canvas {name} on any canvas node
-            ├── <backends>
-            └── canvas_<name>_loader   its page records (.fantastic/web/canvas_<name>)
+            └── canvas_<name>       a CHILD canvas: new_canvas {name} sent to canvas_root
+                ├── <backends>
+                ├── canvas_<name>_loader   its page records (.fantastic/web/canvas_<name>)
+                └── canvas_<sub>           a canvas it spawned, the same way
+                    └── canvas_<sub>_loader  (.fantastic/web/canvas_<name>/canvas_<sub>)
 ```
 
-Canvases are FLAT peers: each its own page kernel (own guid), own cells' host
-backends. Open one at the page URL with `?canvas=<node id>`
-(none: the main one). The canvas-list cell is off the double-click menu for
-now.
+A canvas made by `new_canvas` is a CHILD of the canvas that received it: its page
+records nest under that canvas's records dir, and deleting a canvas deletes the
+canvases it spawned with its cells. A flat peer canvas made before nesting (under
+`canvas_page`, its records at `.fantastic/web/canvas_<name>`) loads as it always did.
+Each canvas has its own page kernel (own guid) and its own cells' host backends.
+Open one at the page URL with `?canvas=<node id>` (none: the main one). The
+canvas-list cell is off the double-click menu for now. A panel opens a canvas by id with
+`fantastic.openCanvas(<node id>)`: the page switches to it. A cabinet's status cell does
+this for its cabinet's canvas (the `cabinet` bundle makes that canvas with `new_canvas`).
 A canvas shows only its own subtree and the agents under no canvas; another
 canvas's agents never appear on it. `canvases` (any canvas node) lists them.
 NOTHING FLOATS: a canvas opens as its background alone. Everything is a cell

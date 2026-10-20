@@ -13,6 +13,7 @@
 //   fantastic.emit("panel2", { type:"value", value });                     // → another agent
 //   const off = fantastic.watch("exec_bridge_x", (ev) => …);            // ← agent events
 //   fantastic.onMessage((p) => …);                                         // ← messages sent to ME
+//   fantastic.openCanvas("canvas_cabinet_a");                              // → the page switches to that canvas
 
 import { MEASURE_SRC } from "../canvas/fit.ts";
 
@@ -52,5 +53,6 @@ export const CONNECTOR_SRC = `(() => {
       return () => { s.delete(cb); if (s.size === 0) { watchers.delete(src); post({ op: "unwatch", src: src }); } };
     },
     onMessage(cb) { inboxCbs.add(cb); return () => inboxCbs.delete(cb); },
+    openCanvas(id) { post({ op: "open_canvas", target: String(id) }); },
   };
 })();`;

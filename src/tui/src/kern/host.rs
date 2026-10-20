@@ -125,6 +125,8 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // with `base: py_agent` runs its program as the agent's implementation
     // (`kern/bundle_watch` reloads it when its folder changes).
     reg.register(fantastic_py_agent::HANDLER_MODULE, fantastic_py_agent::PyAgentBundle);
+    // CABINETS: a master AI opens subcanvases, each with one worker AI (the crate's bundle).
+    reg.register(fantastic_cabinet::HANDLER_MODULE, fantastic_cabinet::CabinetBundle);
     reg.register(fantastic_mcp_client::HANDLER_MODULE, fantastic_mcp_client::McpClientBundle::default());
     // The vLLM backend: linked by `--features vllm`.
     #[cfg(feature = "vllm")]

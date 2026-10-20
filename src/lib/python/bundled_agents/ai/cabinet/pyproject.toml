@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-cabinet"
+version = "0.1.0"
+description = "Fantastic cabinet — a master AI opens cabinets: subcanvases, each with one worker AI that builds its own equipment and talks to its peers."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."fantastic.bundles"]
+cabinet = "cabinet.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cabinet"]

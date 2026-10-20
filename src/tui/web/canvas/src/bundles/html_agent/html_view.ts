@@ -26,6 +26,14 @@ export const htmlView: ViewBundle = {
   },
 };
 
+/** The page URL that loads canvas `id` (`?canvas=<id>`), from the page's own URL. */
+export function canvasUrl(pageHref: string, id: string): string {
+  const u = new URL(pageHref);
+  u.searchParams.set("canvas", id);
+  u.hash = "";
+  return u.toString();
+}
+
 /** THE PANEL: a sandboxed iframe running `body` with the `fantastic` connector,
  *  relayed AS the cell's own agent. Shared by `html_view` (page content) and
  *  `agent_view` (a host agent's own view, `agent_view.ts`). `body` is read at
@@ -103,6 +111,11 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
           );
           break;
         }
+        case "open_canvas":
+          // THE PAGE SWITCHES CANVAS (the same `?canvas=` load the canvas list makes). A
+          // panel names a canvas by id; an id this host does not hold fails to load, loudly.
+          if (typeof m.target === "string" && m.target !== "") location.href = canvasUrl(location.href, m.target);
+          break;
         case "emit":
           // AS THIS AGENT (`panel_relay.ts`): gated like a send — the emitter's
           // `can_call` and the receiver's `callable_by` must both name `emit`

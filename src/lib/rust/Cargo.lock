@@ -418,12 +418,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fantastic-cabinet"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "fantastic-bundle",
+ "fantastic-core",
+ "fantastic-kernel",
+ "fantastic-ram-store",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fantastic-cli"
 version = "0.1.0"
 dependencies = [
  "fantastic-anthropic-backend",
  "fantastic-bridge",
  "fantastic-bundle",
+ "fantastic-cabinet",
  "fantastic-cli-bundle",
  "fantastic-core",
  "fantastic-credential-store",
