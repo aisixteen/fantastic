@@ -118,3 +118,82 @@ def test_a_relay_event_without_a_known_kind_is_dropped_and_logged(caplog):
                 assert rule(ev) is None, ev
     assert "dropped event with kind" in caplog.text
     assert "'moved'" in caplog.text
+
+
+class _Ctx:
+    def __init__(self):
+        self.inboxes = {}
+
+
+class _Kernel:
+    """Just what the bridge scope reads: records by id and the inboxes."""
+
+    def __init__(self, recs):
+        self.recs = recs
+        self.ctx = _Ctx()
+
+    def get(self, id):
+        return self.recs.get(id)
+
+
+def test_an_empty_path_admits_nothing():
+    assert views.inside("file", "", "") is False
+    assert views.inside("folder", "", "x") is False
+    assert views.inside("folder", ".", "x") is True  # the root is a real path
+
+
+def test_a_scope_token_names_the_kind_and_the_path():
+    assert views.scope_token("file", "a/b.md") == "file:a/b.md"
+    assert views.scope_token("folder", ".") == "folder:."
+
+
+def test_the_caller_scope_is_the_bridge_entry_for_the_caller():
+    k = _Kernel(
+        {
+            "fb": {
+                "callable_by": {
+                    "fv": ["read", "file:a.md"],
+                    "fd": ["list", "folder:docs"],
+                    "two": ["file:a", "folder:b"],
+                    "bare": ["read"],
+                    "$self": "*",
+                },
+            },
+            "fv": {"view": "file", "bridge": "fb", "path": "a.md"},
+            "fd": {"view": "folder", "bridge": "fb", "path": "docs"},
+            "two": {"view": "file", "bridge": "fb", "path": "a"},
+            "bare": {"view": "file", "bridge": "fb", "path": "a"},
+            "plain": {},
+        }
+    )
+    assert views.caller_scope(k, "fb", "fv") == ("file", "a.md")
+    assert views.caller_scope(k, "fb", "fd") == ("folder", "docs")
+    # a view with two scope tokens, or none, is refused in full (an empty path)
+    assert views.caller_scope(k, "fb", "two") == ("file", "")
+    assert views.caller_scope(k, "fb", "bare") == ("file", "")
+    # a view of ANOTHER bridge has no standing here
+    k.recs["fv"]["bridge"] = "other"
+    assert views.caller_scope(k, "fb", "fv") == ("file", "")
+    # an operator is not path-scoped, nor is a plain agent with no token
+    assert views.caller_scope(k, "fb", None) is None
+    assert views.caller_scope(k, "fb", "plain") is None
+
+
+def test_a_change_for_a_view_with_no_relay_inbox_is_dropped_and_logged(caplog):
+    k = _Kernel({})
+    with caplog.at_level("WARNING", logger="file_bridge.views"):
+        assert views.deliver(k, "gone", {"type": "changed"}) is False
+    assert "no relay inbox" in caplog.text
+    assert "gone" not in k.ctx.inboxes
+
+
+def test_deliver_puts_the_change_and_drops_the_oldest_when_full():
+    import asyncio
+
+    k = _Kernel({})
+    q = asyncio.Queue(maxsize=2)
+    k.ctx.inboxes[views.relay_inbox("v")] = q
+    assert views.deliver(k, "v", {"n": 1}) is True
+    assert views.deliver(k, "v", {"n": 2}) is True
+    assert views.deliver(k, "v", {"n": 3}) is True  # full: the oldest goes
+    assert [q.get_nowait(), q.get_nowait()] == [{"n": 2}, {"n": 3}]

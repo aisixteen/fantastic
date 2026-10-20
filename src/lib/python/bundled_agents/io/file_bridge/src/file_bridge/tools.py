@@ -1124,6 +1124,22 @@ async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, st
         for rel, kind in seen.items():
             if _exposed(allow, rel):
                 await kernel.emit(id, {"type": "changed", "path": rel, "kind": kind})
+                _relay_to_views(id, kernel, rel, kind)
+
+
+def _relay_to_views(id: str, kernel, rel: str, kind: str) -> None:
+    """Push one change to each VIEW caller whose watch covers it, and only where its scope
+    on this bridge admits it: the scope is its `callable_by` entry here (`views.caller_scope`),
+    so a view's relay gets no change outside its path. The kernel's own watch would mirror
+    every change to a watcher, so a view is never a kernel watcher of its bridge."""
+    ev = {"type": "changed", "path": rel, "kind": kind}
+    for norm, holders in (_WATCH.get(id) or {"paths": {}})["paths"].items():
+        if rel != norm and (posixpath.dirname(rel) or ".") != norm:
+            continue
+        for caller in holders:
+            scope = views.caller_scope(kernel, id, caller)
+            if scope is not None and views.inside(scope[0], scope[1], rel):
+                views.deliver(kernel, caller, ev)
 
 
 # ─── view agents ────────────────────────────────────────────────
@@ -1264,8 +1280,10 @@ SCOPED_VERBS = {"read", "write", "list", "watch_path", "unwatch_path"}
 def _view_scope(bridge: str, verb: str, payload: dict, kernel) -> dict | None:
     """THE PATH GATE FOR A VIEW CALLER. A view that calls this bridge reaches only inside
     its own path (a file: that file; a folder: itself and what is under it), whatever its
-    grant names. The view's scope is its own record (`views.caller_scope`), so there is no
-    second copy of it to drift. An operator or a plain agent is not path-scoped here."""
+    grant names. The path is carried by the view's `callable_by` entry on THIS bridge
+    (`views.caller_scope`: the scope token), so the bridge holds the caller to it; a view
+    with no single token is refused in full. An operator or a plain agent is not
+    path-scoped here."""
     scope = views.caller_scope(kernel, bridge, current_origin())
     if scope is None:
         return None

@@ -49,18 +49,13 @@ async def test_open_view_makes_a_file_view_and_reuses_it(seeded_kernel, file_bri
     assert rec["handler_module"] == "file_bridge.tools" and rec["view"] == "file"
     assert rec["bridge"] == fb and rec["path"] == "notes.md"
     assert rec["parent_id"] == fb  # the view is the bridge's child
-    # its grant on the bridge: its own verbs only, and the bridge admits exactly those
-    assert rec["can_call"][fb] == [
-        "read",
-        "write",
-        "watch_path",
-        "unwatch_path",
-        "watch",
-    ]
+    # its grant on the bridge: its own verbs only, and the bridge admits exactly those,
+    # held to its path by the scope token its entry carries
+    assert rec["can_call"][fb] == ["read", "write", "watch_path", "unwatch_path"]
     assert k.get(fb)["callable_by"][first["id"]] == [
+        "file:notes.md",
         "read",
         "unwatch_path",
-        "watch",
         "watch_path",
         "write",
     ]
@@ -192,6 +187,79 @@ async def test_a_file_view_relays_its_changes(seeded_kernel, file_bridge):
     ev = await _next(q, lambda e: e.get("type") == "changed")
     assert ev == {"type": "changed", "path": "live.txt", "kind": ev["kind"]}, ev
     assert ev["kind"] in ("modified", "added"), ev
+
+
+async def test_the_bridge_holds_a_view_to_the_scope_in_its_callable_by(
+    seeded_kernel, file_bridge
+):
+    """The path lives on the BRIDGE's entry for the view. The bridge refuses a view that
+    names a path outside that entry, even when the view's own record would admit it."""
+    k, fb = seeded_kernel, file_bridge
+    Path("dir/sub").mkdir(parents=True)
+    Path("dir/x.txt").write_text("x\n")
+    Path("dir/sub/y.txt").write_text("y\n")
+    dv = (await _open(k, fb, "folder", "dir"))["id"]
+    assert k.get(fb)["callable_by"][dv][0] == "folder:dir"
+    token = _current_origin.set(dv)
+    try:
+        listed = await tools.handler(fb, {"type": "list", "path": "dir"}, k)
+        assert {f["name"] for f in listed["files"]} == {"x.txt", "sub"}, listed
+        # the bridge's entry narrows the view to `dir/sub`: `dir/x.txt` is now refused
+        # at the bridge, although the view's own record still says `dir`
+        cb = dict(k.get(fb)["callable_by"])
+        cb[dv] = ["folder:dir/sub", "list", "watch_path", "unwatch_path"]
+        k.ctx.agents[fb].update(fb, callable_by=cb)
+        r = await tools.handler(fb, {"type": "read", "path": "dir/x.txt"}, k)
+        assert r["reason"] == "unauthorized", r
+        r = await tools.handler(fb, {"type": "watch_path", "path": "dir"}, k)
+        assert r["reason"] == "unauthorized", r
+        assert "files" in await tools.handler(
+            fb, {"type": "list", "path": "dir/sub"}, k
+        )
+        # an entry with no scope token (or two) is a view refused in full, never a
+        # view left unscoped
+        cb[dv] = ["list", "watch_path", "unwatch_path"]
+        k.ctx.agents[fb].update(fb, callable_by=cb)
+        r = await tools.handler(fb, {"type": "list"}, k)
+        assert r["reason"] == "unauthorized", r
+    finally:
+        _current_origin.reset(token)
+
+
+async def test_the_bridge_relays_a_view_only_the_changes_in_its_scope(
+    seeded_kernel, file_bridge
+):
+    """The bridge's watch delivery: a view's relay inbox gets the changes under the scope
+    its bridge entry carries, and nothing else. Set up with a real watch, then the
+    changes are fed through the bridge's own delivery."""
+    k, fb = seeded_kernel, file_bridge
+    Path("dir").mkdir()
+    Path("other.txt").write_text("o\n")
+    dv = (await _open(k, fb, "folder", "dir"))["id"]
+    await _call(k, dv, {"type": "watch"})
+    q = k.ctx.inboxes[f"{dv}#relay"]
+    assert q.empty()
+    tools._relay_to_views(fb, k, "dir/a.md", "added")
+    assert q.get_nowait() == {"type": "changed", "path": "dir/a.md", "kind": "added"}
+    tools._relay_to_views(fb, k, "other.txt", "modified")  # outside the view's folder
+    assert q.empty()
+    # the bridge's entry narrows the view to `dir/sub`: `dir/a.md` is no longer relayed
+    cb = dict(k.get(fb)["callable_by"])
+    cb[dv] = ["folder:dir/sub", "list", "watch_path", "unwatch_path"]
+    k.ctx.agents[fb].update(fb, callable_by=cb)
+    tools._relay_to_views(fb, k, "dir/a.md", "added")
+    assert q.empty()
+    # no single scope token: the view gets nothing (fail closed)
+    cb[dv] = ["list", "watch_path", "unwatch_path"]
+    k.ctx.agents[fb].update(fb, callable_by=cb)
+    tools._relay_to_views(fb, k, "dir/a.md", "added")
+    assert q.empty()
+    # the view stops: its path is let go, and nothing more is pushed to it
+    cb[dv] = ["folder:dir", "list", "watch_path", "unwatch_path"]
+    k.ctx.agents[fb].update(fb, callable_by=cb)
+    await k.delete(dv)
+    tools._relay_to_views(fb, k, "dir/a.md", "added")
+    assert q.empty()
 
 
 async def test_a_folder_view_relays_added_changed_removed(seeded_kernel, file_bridge):

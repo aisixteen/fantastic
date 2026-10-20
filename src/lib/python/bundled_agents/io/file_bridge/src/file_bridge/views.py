@@ -4,9 +4,13 @@ A view is thin. Every disk operation is a verb it sends to its bridge, AS ITSELF
 with its own path, so the bridge stays the one gate to the disk. Two grants make
 the scope: the view's `can_call` on the bridge names the verbs it may send (its
 GRANTS, nothing else), and the bridge's `callable_by` names the view as a caller of
-exactly those verbs. The path is the view's own: a verb naming another path is
-refused here, before the bridge is asked. The bridge's `allow` list still decides
-what is exposed at all, so a view of an unexposed path reaches nothing.
+exactly those verbs AND carries the view's path: a scope token `file:<path>` or
+`folder:<prefix>` in that entry. The bridge's path gate (`tools._view_scope`) holds
+the caller to that path, and its watch relay delivers to the view only the events
+under it. The kernel's gate matches verb names and ignores the token. The view
+refuses a verb naming another path as well, before the bridge is asked. The bridge's
+`allow` list still decides what is exposed at all, so a view of an unexposed path
+reaches nothing.
 
 ONE VIEW PER PATH: `open_view` on the bridge hands back the view that already
 exists for a path, or makes it. Every view of one path shares one disk watch.
@@ -15,7 +19,9 @@ Who reaches a view: whoever reaches its bridge, for the verbs the view answers
 (`view_callers`). A view admits no one the bridge does not.
 
 Watching: a view's `watch` arms the bridge's disk watch for its path and relays the
-bridge's `changed` events onto its OWN inbox, filtered to its path. A file emits
+bridge's changes onto its OWN inbox (`relay_inbox`). The bridge pushes each change
+only to the view callers whose scope covers it, so the view is never a kernel
+watcher of the bridge (the kernel would mirror every change to it). A file emits
 `changed`; a folder emits `added` / `changed` / `removed`. Watch a view to receive them.
 """
 
@@ -43,8 +49,8 @@ GRANTS = {
     FILE: ["read", "write", "watch_path", "unwatch_path"],
     FOLDER: ["list", "watch_path", "unwatch_path"],
 }
-#: A view's relay watches its bridge: the one verb it needs beyond its GRANTS.
-RELAY_VERB = "watch"
+#: The kinds a scope token names (`file:<path>`, `folder:<prefix>`).
+SCOPE_KINDS = (FILE, FOLDER)
 
 #: The verbs each view answers (its handler's table): what a caller may be granted on it.
 ANSWERS = {
@@ -122,23 +128,43 @@ def forward_args(payload: dict) -> dict:
 
 def inside(kind: str, own: str, target: str) -> bool:
     """Is the bridge path `target` inside the view's own path `own`? A file is its own
-    path only; a folder is itself and everything under it (`.` is the whole root)."""
+    path only; a folder is itself and everything under it (`.` is the whole root). An
+    empty `own` is no path at all, so it admits nothing."""
+    if not own:
+        return False
     if kind == FILE:
         return target == own
     return own == "." or target == own or target.startswith(own + "/")
 
 
+def scope_token(kind: str, path: str) -> str:
+    """The token a bridge's `callable_by` entry for a view carries: its kind and path."""
+    return f"{kind}:{path}"
+
+
 def caller_scope(kernel, bridge: str, caller: str | None) -> tuple[str, str] | None:
-    """The path a VIEW caller is scoped to on this bridge: `(kind, path)`, or None for a
-    caller that is not a view (an agent granted on the bridge is not path-scoped). A view
-    of ANOTHER bridge has no standing here, so the caller is refused in full (`bridge`
-    is returned as `""`, which matches no path)."""
-    rec = kernel.get(caller) if caller else None
-    if not rec or rec.get("view") not in ANSWERS:
+    """The path a caller is scoped to on this bridge, read from the bridge's own
+    `callable_by` entry for it: `(kind, path)` from its scope token. None when the caller
+    is not path-scoped (an operator, or a plain agent granted on the bridge).
+
+    Fail closed: a VIEW caller whose entry has no single scope token (or two) is refused
+    in full, returned with an empty path, which matches nothing. So is a view of ANOTHER
+    bridge: it has no standing here."""
+    if not caller:
         return None
-    if rec.get("bridge") != bridge:
+    rec = kernel.get(caller) or {}
+    grant = ((kernel.get(bridge) or {}).get("callable_by") or {}).get(caller)
+    tokens = [
+        v
+        for v in (grant if isinstance(grant, list) else [])
+        if isinstance(v, str) and ":" in v and v.partition(":")[0] in SCOPE_KINDS
+    ]
+    if rec.get("view") in ANSWERS and (rec.get("bridge") != bridge or len(tokens) != 1):
         return rec["view"], ""
-    return rec["view"], rec.get("path") or "."
+    if len(tokens) == 1:
+        kind, _, path = tokens[0].partition(":")
+        return kind, path
+    return None
 
 
 def view_callers(bridge_agent, kind: str) -> dict[str, list[str]]:
@@ -177,7 +203,7 @@ def open_view(
     kernel, bridge_agent, kind: str, path: str, chosen: str | None = None
 ) -> dict:
     """Reuse the view of `path` on this bridge, or make it. The bridge grants the new
-    view exactly its GRANTS (and the relay's `watch`) in its `callable_by`.
+    view exactly its GRANTS in its `callable_by`, with the view's scope token.
 
     `chosen` is a caller-picked id for the new view (so a caller can declare it up
     front). It is taken only when it is free; a `chosen` that is already another agent,
@@ -203,7 +229,7 @@ def open_view(
             )
     if existing is not None:
         return {"id": existing, "kind": kind, "path": path, "created": False}
-    grants = list(GRANTS[kind]) + [RELAY_VERB]
+    grants = list(GRANTS[kind])
     made = bridge_agent.create(
         BRIDGE_HANDLER,
         id=chosen,
@@ -218,7 +244,8 @@ def open_view(
         return made
     vid = made["id"]
     cb = dict(bridge_agent._meta.get("callable_by") or {})
-    cb[vid] = sorted(set(cb.get(vid, [])) | set(grants))
+    entry = grants + [scope_token(kind, path)]
+    cb[vid] = sorted(set(cb.get(vid, [])) | set(entry))
     bridge_agent.update(bridge_agent.id, callable_by=cb)
     return {"id": vid, "kind": kind, "path": path, "created": True}
 
@@ -276,20 +303,39 @@ async def _relay(view: str, kernel, q: asyncio.Queue, rule) -> None:
             await kernel.emit(view, out)
 
 
+def relay_inbox(view: str) -> str:
+    """The inbox a view's relay reads: the bridge pushes the changes its scope covers
+    onto it (`tools._relay_to_views`)."""
+    return f"{view}#relay"
+
+
+def deliver(kernel, view: str, payload: dict) -> bool:
+    """Put one change on a view's relay inbox, dropping the oldest when full. False (and
+    logged) when the view has no relay inbox, so nothing is relayed to nobody."""
+    q = kernel.ctx.inboxes.get(relay_inbox(view))
+    if q is None:
+        logger.warning("view relay: %r has no relay inbox; change dropped", view)
+        return False
+    try:
+        q.put_nowait(payload)
+    except asyncio.QueueFull:
+        q.get_nowait()
+        q.put_nowait(payload)
+    return True
+
+
 async def watch(view: str, kind: str, rec: dict, kernel) -> dict:
-    """Arm the bridge's disk watch for this view's path (once) and relay its changes."""
+    """Arm the bridge's disk watch for this view's path (once) and relay its changes.
+    The relay inbox is registered first, so the bridge's first push has a reader."""
     bridge, own = rec["bridge"], rec["path"]
     if view in RELAYS:
         return {"watching": own, "agent": view, "relayed": True}
+    inbox = relay_inbox(view)
+    q = kernel.ctx.ensure_inbox(inbox)
     r = await send_bridge(kernel, bridge, {"type": "watch_path", "path": own})
     if "error" in r:
+        kernel.ctx.inboxes.pop(inbox, None)
         return r
-    inbox = f"{view}#relay"
-    q = kernel.ctx.ensure_inbox(inbox)
-    gate = kernel.watch(bridge, inbox)
-    if gate is not None:
-        await send_bridge(kernel, bridge, {"type": "unwatch_path", "path": own})
-        return gate
     tid = kernel.ctx.spawn_task(
         view, "watch", _relay(view, kernel, q, _relay_rule(kind, own))
     )
@@ -303,10 +349,11 @@ async def watch(view: str, kind: str, rec: dict, kernel) -> dict:
 
 
 async def stop(view: str, agent) -> None:
-    """The view is going away: its relay ends, and the bridge's watch is let go."""
+    """The view is going away: its relay ends, and the bridge stops pushing it changes
+    (its path is let go)."""
     st = RELAYS.pop(view, None)
     if st is None:
         return
     st["task"].cancel()
-    agent.unwatch(st["bridge"], st["inbox"])
+    agent.ctx.inboxes.pop(st["inbox"], None)
     await send_bridge(agent, st["bridge"], {"type": "unwatch_path", "path": st["path"]})

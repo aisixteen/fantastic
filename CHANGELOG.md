@@ -14,9 +14,12 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   same agent, `created: false`). A file view reads, writes (`if_match`) and watches
   its file (`changed`); a folder view lists, reveals a path inside it and watches its
   entries (`added`, `changed`, `removed`). A view reaches its bridge as itself, for
-  its own path only: its grant names the bridge's verbs it needs, and a path outside
-  its scope is refused before the bridge is asked. Python is the reference; the Rust
-  `fantastic-file` and the Swift `FantasticFile` ports match it.
+  its own path only: its entry in the bridge's `callable_by` names the bridge's verbs
+  it needs and carries its path (`file:<path>`, `folder:<prefix>`), and the bridge
+  refuses a path outside it, as well as the view. The bridge pushes a view only the
+  changes under its path, so the view is never a kernel watcher of its bridge. An
+  entry with no single scope token refuses that caller in full. Python is the
+  reference; the Rust `fantastic-file` and the Swift `FantasticFile` ports match it.
 - Canvas: a file or folder dropped on the canvas (and the view's `open` verb) makes
   or reuses its agent and places its view. The preview is the file agent's view (its
   reads, saves and live changes go through the agent); the file tree rooted at a

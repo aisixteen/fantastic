@@ -3,10 +3,11 @@
 //! view reads, writes and refuses another path; a folder view lists inside itself and
 //! refuses an escape; `reveal` shows the way down; a view's watch relays its changes.
 
-use super::views::{relay_event, FILE, FOLDER};
+use super::views::{deliver, relay_event, relay_inbox, FILE, FOLDER};
 use super::*;
 use fantastic_kernel::{Agent, Item};
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 async fn kernel(tmp: &tempfile::TempDir) -> Arc<Kernel> {
@@ -84,7 +85,13 @@ async fn open_view_makes_one_view_per_path() {
     let fb = k.agents.get(&AgentId::from("fb")).unwrap().record();
     assert_eq!(
         fb.meta["callable_by"][first["id"].as_str().unwrap()],
-        json!(["read", "unwatch_path", "watch", "watch_path", "write"])
+        json!([
+            "file:notes.md",
+            "read",
+            "unwatch_path",
+            "watch_path",
+            "write"
+        ])
     );
 }
 
@@ -601,4 +608,101 @@ fn a_relay_event_without_a_known_kind_is_dropped() {
         relay_event(FOLDER, "docs", &changed).unwrap()["type"],
         "changed"
     );
+}
+
+/// Replace one caller's entry in the bridge's `callable_by` (the scope a view is held to).
+fn set_callable_by(k: &Arc<Kernel>, bridge: &str, caller: &str, entry: Value) {
+    let b = k.agents.get(&AgentId::from(bridge)).unwrap();
+    let mut cb = b
+        .record()
+        .meta
+        .get("callable_by")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    cb.insert(caller.to_string(), entry);
+    b.update_meta(Map::from_iter([(
+        "callable_by".to_string(),
+        Value::Object(cb),
+    )]));
+}
+
+#[tokio::test]
+async fn the_bridge_holds_a_view_to_the_scope_in_its_callable_by() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::create_dir_all(served(&tmp).join("dir/sub")).unwrap();
+    std::fs::write(served(&tmp).join("dir/x.txt"), "x\n").unwrap();
+    let dv = open(&k, "folder", "dir").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fb = AgentId::from("fb");
+    let read = |p: &str| json!({"type": "read", "path": p});
+    assert!(view_scope(
+        &k,
+        &fb,
+        Some(&AgentId::from(dv.as_str())),
+        "read",
+        &read("dir/x.txt")
+    )
+    .is_none());
+    // the bridge's entry narrows the view to `dir/sub`: `dir/x.txt` is refused at the
+    // bridge, although the view's own record still says `dir`
+    set_callable_by(
+        &k,
+        "fb",
+        &dv,
+        json!(["folder:dir/sub", "list", "watch_path", "unwatch_path"]),
+    );
+    let dv_id = AgentId::from(dv.as_str());
+    let refused = view_scope(&k, &fb, Some(&dv_id), "read", &read("dir/x.txt")).expect("refused");
+    assert_eq!(refused["reason"], "unauthorized", "{refused}");
+    assert!(view_scope(&k, &fb, Some(&dv_id), "list", &json!({"path": "dir/sub"})).is_none());
+    // an entry with no single scope token is a view refused in full
+    set_callable_by(&k, "fb", &dv, json!(["list", "watch_path", "unwatch_path"]));
+    let refused =
+        view_scope(&k, &fb, Some(&dv_id), "list", &json!({"path": "dir/sub"})).expect("refused");
+    assert_eq!(refused["reason"], "unauthorized", "{refused}");
+}
+
+#[tokio::test]
+async fn the_bridge_relays_a_view_only_the_changes_in_its_scope() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::create_dir(served(&tmp).join("dir")).unwrap();
+    std::fs::write(served(&tmp).join("other.txt"), "o\n").unwrap();
+    let dv = open(&k, "folder", "dir").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fb = AgentId::from("fb");
+    // the view's relay inbox, and the holder of `dir` the bridge pushes to
+    let mut rx = k.ensure_inbox(&relay_inbox(&dv));
+    let holders: BTreeMap<String, BTreeSet<String>> =
+        BTreeMap::from([("dir".to_string(), BTreeSet::from([dv.clone()]))]);
+    let none = |rx: &mut fantastic_kernel::inbox::InboxReceiver| rx.try_recv().is_none();
+    crate::watch::relay_to_views(&k, &fb, &holders, "dir/a.md", "added");
+    let got = rx.try_recv().expect("in scope").payload;
+    assert_eq!(
+        got,
+        json!({"type": "changed", "path": "dir/a.md", "kind": "added"})
+    );
+    crate::watch::relay_to_views(&k, &fb, &holders, "other.txt", "modified");
+    assert!(none(&mut rx), "outside the view's folder");
+    // the entry narrows the view to `dir/sub`: `dir/a.md` is no longer relayed
+    set_callable_by(
+        &k,
+        "fb",
+        &dv,
+        json!(["folder:dir/sub", "list", "watch_path"]),
+    );
+    crate::watch::relay_to_views(&k, &fb, &holders, "dir/a.md", "added");
+    assert!(none(&mut rx), "narrowed scope");
+    // no single scope token: fail closed, nothing relayed
+    set_callable_by(&k, "fb", &dv, json!(["list", "watch_path"]));
+    crate::watch::relay_to_views(&k, &fb, &holders, "dir/a.md", "added");
+    assert!(none(&mut rx), "no scope token");
+    // a view with no relay inbox gets nothing, and the drop is reported
+    assert!(!deliver(&k, "gone", json!({"type": "changed"})));
 }

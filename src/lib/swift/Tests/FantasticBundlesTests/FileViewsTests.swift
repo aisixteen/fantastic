@@ -72,12 +72,14 @@ struct FileViewsTests {
         #expect(rec?.metaValue(forKey: "view")?.asString == "file")
         #expect(rec?.metaValue(forKey: "path")?.asString == "notes.md")
         #expect(rec?.parentId?.value == "fs")
-        // Its grant on the bridge is its own verbs (and the relay's `watch`) only, and
-        // the bridge's `callable_by` names it for exactly those.
-        let grant = ["read", "write", "watch_path", "unwatch_path", "watch"]
+        // Its grant on the bridge is its own verbs only, and the bridge's `callable_by`
+        // names it for exactly those, plus the scope token that holds it to its path.
+        let grant = ["read", "write", "watch_path", "unwatch_path"]
         #expect(rec?.metaValue(forKey: "can_call")?["fs"].asArray?.compactMap(\.asString) == grant)
         let callable = k.agent(AgentId("fs"))?.metaValue(forKey: "callable_by")?[vid]
-        #expect(callable?.asArray?.compactMap(\.asString) == grant.sorted())
+        #expect(
+            callable?.asArray?.compactMap(\.asString)
+                == ["file:notes.md", "read", "unwatch_path", "watch_path", "write"])
     }
 
     @Test func aNewViewAdmitsTheCallersOfItsBridgeForTheVerbsItAnswers() async {
@@ -294,6 +296,64 @@ struct FileViewsTests {
         #expect(viewPathGate(k, bridge: "fs", origin: nil, verb: "read", payload: read("b.md")) == nil)
         let bad = viewPathGate(k, bridge: "fs", origin: fv, verb: "read", payload: .object(["path": .bool(true)]))
         #expect(bad?["reason"].asString == "bad_arg")
+    }
+
+    @Test func theBridgeHoldsAViewToTheScopeInItsCallableBy() async {
+        let (k, dir) = await bridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "dir/sub/y.md", "y\n")
+        write(dir, "dir/x.md", "x\n")
+        let dv = AgentId((await open(k, "folder", "dir"))["id"].asString ?? "")
+        func read(_ path: String) -> JSON { .object(["path": .string(path)]) }
+        #expect(viewPathGate(k, bridge: "fs", origin: dv, verb: "read", payload: read("dir/x.md")) == nil)
+        // The bridge's entry narrows the view to `dir/sub`: `dir/x.md` is refused at the
+        // bridge, although the view's own record still says `dir`.
+        setCallableBy(k, dv, .array([
+            .string("folder:dir/sub"), .string("list"), .string("watch_path"), .string("unwatch_path"),
+        ]))
+        let narrowed = viewPathGate(k, bridge: "fs", origin: dv, verb: "read", payload: read("dir/x.md"))
+        #expect(narrowed?["reason"].asString == "unauthorized", "\(String(describing: narrowed))")
+        #expect(
+            viewPathGate(k, bridge: "fs", origin: dv, verb: "list", payload: read("dir/sub")) == nil)
+        // An entry with no single scope token is a view refused in full.
+        setCallableBy(k, dv, .array([.string("list"), .string("watch_path")]))
+        let none = viewPathGate(k, bridge: "fs", origin: dv, verb: "list", payload: read("dir/sub"))
+        #expect(none?["reason"].asString == "unauthorized", "\(String(describing: none))")
+    }
+
+    @Test func theBridgeRelaysAViewOnlyTheChangesInItsScope() async {
+        let (k, dir) = await bridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "dir/x.md", "x\n")
+        write(dir, "other.md", "o\n")
+        let dv = AgentId((await open(k, "folder", "dir"))["id"].asString ?? "")
+        // The view's relay inbox, and the holder of `dir` the bridge pushes to. The view
+        // is not armed here, so this inbox has no other reader.
+        let inbox = k.ensureInbox(viewRelayInbox(dv.value))
+        let holders: [String: Set<String>] = ["dir": [dv.value]]
+        viewRelayToViews(k, bridge: "fs", holders: holders, rel: "dir/a.md", kind: "added")
+        let got = inbox.tryTake()?.payload
+        #expect(got?["path"].asString == "dir/a.md" && got?["kind"].asString == "added", "\(String(describing: got))")
+        viewRelayToViews(k, bridge: "fs", holders: holders, rel: "other.md", kind: "modified")
+        #expect(inbox.tryTake() == nil, "outside the view's folder")
+        // The entry narrows the view to `dir/sub`: `dir/a.md` is no longer relayed.
+        setCallableBy(k, dv, .array([.string("folder:dir/sub"), .string("list")]))
+        viewRelayToViews(k, bridge: "fs", holders: holders, rel: "dir/a.md", kind: "added")
+        #expect(inbox.tryTake() == nil, "narrowed scope")
+        // No single scope token: fail closed, nothing relayed.
+        setCallableBy(k, dv, .array([.string("list")]))
+        viewRelayToViews(k, bridge: "fs", holders: holders, rel: "dir/a.md", kind: "added")
+        #expect(inbox.tryTake() == nil, "no scope token")
+        // No relay inbox: the change is dropped, and the drop is reported.
+        #expect(viewDeliver(k, view: "gone", payload: .object([:])) == false)
+        k.removeInbox(viewRelayInbox(dv.value))
+    }
+
+    /// Replace one caller's entry in the bridge's `callable_by` (the scope a view is held to).
+    private func setCallableBy(_ k: Kernel, _ caller: AgentId, _ entry: JSON) {
+        var cb = k.agent(AgentId("fs"))?.metaValue(forKey: "callable_by")?.asObject ?? [:]
+        cb[caller.value] = entry
+        k.update(AgentId("fs"), ["callable_by": .object(cb)])
     }
 
     @Test func aRelayEventWithoutAKnownKindIsDropped() {

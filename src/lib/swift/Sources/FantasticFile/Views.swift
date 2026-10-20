@@ -3,9 +3,11 @@
 //
 // A view is a record of this bundle carrying `view: file|folder`, a child of its
 // bridge. This bundle answers it before the bridge's own gate: a view is not
-// sealed, its gate is its grant on the bridge (`viewGrants`). Every disk operation
-// is a send to the bridge AS THE VIEW, for the view's own path; a verb naming
-// another path is refused here, before the bridge is asked.
+// sealed, its gate is its grant on the bridge (`viewGrants`, and the scope token its
+// bridge entry carries). Every disk operation is a send to the bridge AS THE VIEW, for
+// the view's own path; a verb naming another path is refused here, before the bridge
+// is asked. The bridge pushes a view its watch changes (`viewRelayToViews`), so the
+// view is never a kernel watcher of its bridge.
 
 import FantasticJSON
 import FantasticKernel
@@ -20,12 +22,22 @@ let VIEW_HANDLER_MODULE = "file_bridge.tools"
 /// python `views.GRANTS` — the verbs a view may send its bridge, nothing else.
 private let fileGrants = ["read", "write", "watch_path", "unwatch_path"]
 private let folderGrants = ["list", "watch_path", "unwatch_path"]
-/// python `RELAY_VERB` — a view's relay watches its bridge.
-private let relayVerb = "watch"
 
-/// A view's grant on its bridge: its GRANTS, and the relay's `watch`.
+/// A view's grant on its bridge: its GRANTS.
 func viewGrants(_ kind: String) -> [String] {
-    (kind == VIEW_FILE ? fileGrants : folderGrants) + [relayVerb]
+    kind == VIEW_FILE ? fileGrants : folderGrants
+}
+
+/// python `views.scope_token`: the token a bridge's `callable_by` entry for a view
+/// carries — its kind and path, `file:<path>` or `folder:<prefix>`.
+func viewScopeToken(_ kind: String, path: String) -> String { "\(kind):\(path)" }
+
+/// The (kind, path) a scope token names, or nil for any other grant value.
+func viewScopeOf(_ token: String) -> (kind: String, own: String)? {
+    guard let cut = token.firstIndex(of: ":") else { return nil }
+    let kind = String(token[..<cut])
+    guard kind == VIEW_FILE || kind == VIEW_FOLDER else { return nil }
+    return (kind, String(token[token.index(after: cut)...]))
 }
 
 /// python `views.ANSWERS` — the verbs each view answers: what a caller may be granted on it.
@@ -97,6 +109,7 @@ func folderEvent(_ raw: String) -> String? {
 /// python `views.inside`: is the bridge path `target` inside the view's own path `own`?
 /// A file is its own path only; a folder is itself and everything under it.
 func viewInside(_ kind: String, own: String, target: String) -> Bool {
+    if own.isEmpty { return false }
     if kind == VIEW_FILE { return target == own }
     return own == "." || target == own || target.hasPrefix(own + "/")
 }
@@ -128,16 +141,24 @@ func viewPathGate(
         extra: [("path", .string(rel))])
 }
 
-/// python `views.caller_scope`: the (kind, path) a VIEW caller is scoped to on this
-/// bridge, or nil for a caller that is not a view. A view of ANOTHER bridge has no
-/// standing here: its path is empty, which matches nothing.
+/// python `views.caller_scope`: the (kind, path) a caller is scoped to on this bridge,
+/// read from the bridge's own `callable_by` entry for it (its scope token). Nil for a
+/// caller that is not path-scoped (an operator, or a plain agent granted on the bridge).
+/// Fail closed: a VIEW caller whose entry has no single scope token, or a view of
+/// ANOTHER bridge, is returned with an empty path, which matches nothing.
 func viewCallerScope(_ kernel: Kernel, bridge: String, origin: AgentId?) -> (kind: String, own: String)? {
-    guard let origin, let caller = kernel.agent(origin) else { return nil }
-    guard let kind = caller.metaValue(forKey: "view")?.asString,
+    guard let origin else { return nil }
+    let grant = kernel.agent(AgentId(bridge))?.metaValue(forKey: "callable_by")?[origin.value]
+    let tokens = (grant?.asArray ?? []).compactMap { $0.asString }.compactMap(viewScopeOf)
+    if let caller = kernel.agent(origin),
+        let kind = caller.metaValue(forKey: "view")?.asString,
         kind == VIEW_FILE || kind == VIEW_FOLDER
-    else { return nil }
-    if caller.metaValue(forKey: "bridge")?.asString != bridge { return (kind, "") }
-    return (kind, caller.metaValue(forKey: "path")?.asString ?? ".")
+    {
+        if caller.metaValue(forKey: "bridge")?.asString != bridge || tokens.count != 1 {
+            return (kind, "")
+        }
+    }
+    return tokens.count == 1 ? tokens[0] : nil
 }
 
 /// python `views.bridge_path`: the bridge path a view's relative `rel` names. A file
@@ -261,11 +282,49 @@ func viewOpen(
     var cb = bridge.metaValue(forKey: "callable_by")?.asObject ?? [:]
     var grants = Set(cb[vid]?.asArray?.compactMap { $0.asString } ?? [])
     grants.formUnion(own)
+    grants.insert(viewScopeToken(kind, path: path))
     cb[vid] = .array(grants.sorted().map { .string($0) })
     kernel.update(bridge.id, ["callable_by": .object(cb)])
     return .object([
         "id": .string(vid), "kind": .string(kind), "path": .string(path), "created": .bool(true),
     ])
+}
+
+/// python `views.relay_inbox`: the inbox a view's relay reads.
+func viewRelayInbox(_ view: String) -> AgentId { AgentId("\(view)#relay") }
+
+/// python `views.deliver`: put one change on a view's relay inbox (the inbox drops its
+/// oldest when full). False, and logged, when the view has no relay inbox.
+@discardableResult
+func viewDeliver(_ kernel: Kernel, view: String, payload: JSON) -> Bool {
+    let inbox = viewRelayInbox(view)
+    guard kernel.hasInbox(inbox) else {
+        FileHandle.standardError.write(
+            Data("  [file_bridge] view relay: \(pyRepr(view)) has no relay inbox; change dropped\n".utf8))
+        return false
+    }
+    kernel.deliverToInbox(inbox, .text(payload))
+    return true
+}
+
+/// python `tools._relay_to_views`: push one change to each VIEW caller whose watch covers
+/// it, and only where its scope on this bridge admits it (its `callable_by` entry here).
+func viewRelayToViews(
+    _ kernel: Kernel, bridge: String, holders: [String: Set<String>], rel: String, kind: String
+) {
+    let ev: JSON = .object(["type": .string("changed"), "path": .string(rel), "kind": .string(kind)])
+    let parent = rel.lastIndex(of: "/").map { String(rel[..<$0]) } ?? "."
+    for (norm, callers) in holders {
+        if rel != norm && parent != norm { continue }
+        for caller in callers {
+            guard let scope = viewCallerScope(kernel, bridge: bridge, origin: AgentId(caller)) else {
+                continue
+            }
+            if viewInside(scope.kind, own: scope.own, target: rel) {
+                viewDeliver(kernel, view: caller, payload: ev)
+            }
+        }
+    }
 }
 
 /// The views this bundle is running: each view's relay, by view id. RAM, per bundle.
@@ -326,16 +385,14 @@ func viewWatch(
             "watching": .string(own), "agent": .string(view.value), "relayed": .bool(true),
         ])
     }
+    // The relay inbox is registered first, so the bridge's first push has a reader.
+    let inbox = viewRelayInbox(view.value)
+    let rx = kernel.ensureInbox(inbox)
     let armed = await viewSendBridge(
         kernel, bridge, .object(["type": .string("watch_path"), "path": .string(own)]))
-    if armed.asObject?["error"] != nil { return armed }
-    let inbox = AgentId("\(view.value)#relay")
-    let rx = kernel.ensureInbox(inbox)
-    if let gate = kernel.watch(src: AgentId(bridge), watcher: inbox) {
+    if armed.asObject?["error"] != nil {
         kernel.removeInbox(inbox)
-        _ = await viewSendBridge(
-            kernel, bridge, .object(["type": .string("unwatch_path"), "path": .string(own)]))
-        return gate
+        return armed
     }
     kernel.spawnTask(agent: view, verb: "watch") {
         while let item = await rx.next() {
@@ -355,7 +412,6 @@ func viewWatch(
 /// watch is let go. Runs AS the view (the kernel's `onDelete` context).
 func viewStop(_ kernel: Kernel, relays: ViewRelays, view: AgentId) async {
     guard let st = relays.take(view.value) else { return }
-    kernel.unwatch(src: AgentId(st.bridge), watcher: st.inbox)
     kernel.removeInbox(st.inbox)
     _ = await viewSendBridge(
         kernel, st.bridge, .object(["type": .string("unwatch_path"), "path": .string(st.path)]))

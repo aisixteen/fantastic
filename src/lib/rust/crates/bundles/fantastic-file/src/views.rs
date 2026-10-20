@@ -3,15 +3,17 @@
 //!
 //! A view is a record of this bundle carrying `view: file|folder`, a child of its
 //! bridge. This bundle's handler answers it before the bridge's own gate: a view is
-//! not sealed, its gate is its grant on the bridge (`GRANTS`). Every disk operation
-//! is a send to the bridge AS THE VIEW, for the view's own path; a verb naming
-//! another path is refused here, before the bridge is asked.
+//! not sealed, its gate is its grant on the bridge (`GRANTS`, and the scope token its
+//! bridge entry carries). Every disk operation is a send to the bridge AS THE VIEW, for
+//! the view's own path; a verb naming another path is refused here, before the bridge
+//! is asked. The bridge pushes a view its watch changes (`watch::relay_to_views`), so
+//! the view is never a kernel watcher of its bridge.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use fantastic_bundle::py_repr;
-use fantastic_kernel::inbox::InboxReceiver;
+use fantastic_kernel::inbox::{InboxItem, InboxReceiver};
 use fantastic_kernel::lifecycle::create_from_payload;
 use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
@@ -25,8 +27,6 @@ pub(crate) const FOLDER: &str = "folder";
 /// python `views.GRANTS` — the verbs a view may send its bridge, nothing else.
 const FILE_GRANTS: [&str; 4] = ["read", "write", "watch_path", "unwatch_path"];
 const FOLDER_GRANTS: [&str; 3] = ["list", "watch_path", "unwatch_path"];
-/// python `RELAY_VERB` — a view's relay watches its bridge.
-const RELAY_VERB: &str = "watch";
 /// python `views.ANSWERS` — the verbs each view answers: what a caller may be granted on it.
 const FILE_ANSWERS: [&str; 4] = ["read", "write", "watch", "reflect"];
 const FOLDER_ANSWERS: [&str; 4] = ["list", "reveal", "watch", "reflect"];
@@ -75,15 +75,25 @@ fn folder_event(raw: &str) -> Option<&'static str> {
     }
 }
 
-/// A view's grant on its bridge: its GRANTS, and the relay's `watch`.
+/// A view's grant on its bridge: its GRANTS.
 fn grants(kind: &str) -> Vec<&'static str> {
-    let mut g: Vec<&'static str> = if kind == FILE {
+    if kind == FILE {
         FILE_GRANTS.to_vec()
     } else {
         FOLDER_GRANTS.to_vec()
-    };
-    g.push(RELAY_VERB);
-    g
+    }
+}
+
+/// python `views.scope_token`: the token a bridge's `callable_by` entry for a view
+/// carries — its kind and path, `file:<path>` or `folder:<prefix>`.
+fn scope_token(kind: &str, path: &str) -> String {
+    format!("{kind}:{path}")
+}
+
+/// The `(kind, path)` a scope token names, or None for any other grant value.
+fn scope_of_token(token: &str) -> Option<(&str, &str)> {
+    let (kind, path) = token.split_once(':')?;
+    (kind == FILE || kind == FOLDER).then_some((kind, path))
 }
 
 /// python `views.view_callers`: who may reach a view — whoever may reach its bridge, for
@@ -134,32 +144,59 @@ pub(crate) fn view_callers(
 }
 
 /// python `views.inside`: is the bridge path `target` inside the view's own path `own`?
-/// A file is its own path only; a folder is itself and everything under it.
+/// A file is its own path only; a folder is itself and everything under it. An empty
+/// `own` is no path at all, so it admits nothing.
 pub(crate) fn inside(kind: &str, own: &str, target: &str) -> bool {
+    if own.is_empty() {
+        return false;
+    }
     if kind == FILE {
         return target == own;
     }
     own == "." || target == own || target.starts_with(&format!("{own}/"))
 }
 
-/// python `views.caller_scope`: the `(kind, path)` a VIEW caller is scoped to on this
-/// bridge, or None for a caller that is not a view. A view of ANOTHER bridge has no
-/// standing here: its path is returned empty, which matches nothing.
+/// python `views.caller_scope`: the `(kind, path)` a caller is scoped to on this bridge,
+/// read from the bridge's own `callable_by` entry for it (its scope token). None for a
+/// caller that is not path-scoped (an operator, or a plain agent granted on the bridge).
+///
+/// Fail closed: a VIEW caller whose entry has no single scope token (or two), or a view
+/// of ANOTHER bridge, is returned with an empty path, which matches nothing.
 pub(crate) fn caller_scope(
     kernel: &Arc<Kernel>,
     bridge: &str,
     caller: Option<&AgentId>,
 ) -> Option<(String, String)> {
-    let meta = kernel.agents.get(caller?)?.record().meta;
-    let kind = meta.get("view").and_then(Value::as_str)?;
-    if kind != FILE && kind != FOLDER {
-        return None;
+    let caller = caller?;
+    let meta = kernel.agents.get(caller)?.record().meta;
+    let grant = kernel.agents.get(&AgentId::from(bridge)).and_then(|b| {
+        b.record()
+            .meta
+            .get("callable_by")
+            .and_then(Value::as_object)
+            .and_then(|cb| cb.get(&caller.0).cloned())
+    });
+    let tokens: Vec<(&str, &str)> = grant
+        .as_ref()
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(scope_of_token)
+        .collect();
+    let view = meta
+        .get("view")
+        .and_then(Value::as_str)
+        .filter(|k| *k == FILE || *k == FOLDER);
+    if let Some(kind) = view {
+        if meta.get("bridge").and_then(Value::as_str) != Some(bridge) || tokens.len() != 1 {
+            return Some((kind.to_string(), String::new()));
+        }
     }
-    if meta.get("bridge").and_then(Value::as_str) != Some(bridge) {
-        return Some((kind.to_string(), String::new()));
+    match tokens.as_slice() {
+        [(kind, path)] => Some((kind.to_string(), path.to_string())),
+        _ => None,
     }
-    let path = meta.get("path").and_then(Value::as_str).unwrap_or(".");
-    Some((kind.to_string(), path.to_string()))
 }
 
 /// python `views.bridge_path`: the bridge path a view's relative `rel` names. A file
@@ -314,6 +351,7 @@ pub(crate) async fn open_view(
     };
     let own_grants = grants(kind);
     let base = bridge_name(path);
+    let scope = scope_token(kind, path);
     let bridge_grants = bridge
         .record()
         .meta
@@ -359,6 +397,7 @@ pub(crate) async fn open_view(
         .filter_map(|v| v.as_str().map(str::to_string))
         .collect();
     set.extend(own_grants.iter().map(|s| s.to_string()));
+    set.insert(scope);
     cb.insert(vid.clone(), json!(set.into_iter().collect::<Vec<_>>()));
     bridge.update_meta(Map::from_iter([(
         "callable_by".to_string(),
@@ -394,6 +433,27 @@ struct Relay {
     inbox: AgentId,
     bridge: String,
     path: String,
+}
+
+/// python `views.relay_inbox`: the inbox a view's relay reads.
+pub(crate) fn relay_inbox(view: &str) -> AgentId {
+    AgentId::from(format!("{view}#relay"))
+}
+
+/// python `views.deliver`: put one change on a view's relay inbox (the inbox drops its
+/// oldest when full). False, and logged, when the view has no relay inbox.
+pub(crate) fn deliver(kernel: &Arc<Kernel>, view: &str, payload: Value) -> bool {
+    let inbox = relay_inbox(view);
+    match kernel.inboxes.get(&inbox) {
+        Some(tx) => {
+            tx.send(InboxItem::text(payload));
+            true
+        }
+        None => {
+            eprintln!("  [file_bridge] view relay: {view:?} has no relay inbox; change dropped");
+            false
+        }
+    }
 }
 
 /// python `_relay_rule`: one bridge `changed` → the view's event, or nothing.
@@ -443,7 +503,8 @@ async fn relay(
 }
 
 /// python `views.watch`: arm the bridge's disk watch for this view's path once, and
-/// relay its changes onto the view.
+/// relay its changes onto the view. The relay inbox is registered first, so the bridge's
+/// first push has a reader.
 async fn watch(
     kernel: &Arc<Kernel>,
     relays: &Relays,
@@ -455,15 +516,12 @@ async fn watch(
     if relays.held.lock().expect("relays").contains_key(&view.0) {
         return json!({"watching": own, "agent": view.0, "relayed": true});
     }
+    let inbox = relay_inbox(&view.0);
+    let rx = kernel.ensure_inbox(&inbox);
     let r = send_bridge(kernel, bridge, json!({"type": "watch_path", "path": own})).await;
     if r.get("error").is_some() {
+        kernel.remove_inbox(&inbox);
         return r;
-    }
-    let inbox = AgentId::from(format!("{}#relay", view.0));
-    let rx = kernel.ensure_inbox(&inbox);
-    if let Some(gate) = kernel.watch(&AgentId::from(bridge), inbox.clone()).await {
-        send_bridge(kernel, bridge, json!({"type": "unwatch_path", "path": own})).await;
-        return gate;
     }
     kernel.spawn_task(
         view,
@@ -487,14 +545,11 @@ async fn watch(
     json!({"watching": own, "agent": view.0, "relayed": false})
 }
 
-/// python `views.stop`: the view is going away — its relay ends and the bridge's
-/// watch is let go.
+/// python `views.stop`: the view is going away — its relay ends, and the bridge stops
+/// pushing it changes (its path is let go).
 pub(crate) async fn stop(kernel: &Arc<Kernel>, relays: &Relays, view: &AgentId) {
     let st = relays.held.lock().expect("relays").remove(&view.0);
     let Some(st) = st else { return };
-    kernel
-        .unwatch(&AgentId::from(st.bridge.as_str()), &st.inbox)
-        .await;
     kernel.remove_inbox(&st.inbox);
     send_bridge(
         kernel,
