@@ -287,7 +287,11 @@ def main() -> bool:
     rig.summary["checks"] = r
     rig.summary["info"] = info
     failed = [k for k, v in r.items() if not v]
-    return verdict(*rig.finish(bool(r) and not failed, f"{len(r) - len(failed)}/{len(r)} pass" + ("" if not failed else f" — failed: {'; '.join(failed)}")))
+    # the latency table in the verdict line: a CI log keeps it, pass or fail
+    lat = " · ".join(f"{lane} {k} p50/p95 {m['p50']}/{m['p95']} ms {m['fps']} fps"
+                     for lane, rows in table.items() for k, m in rows.items() if k != "auto")
+    note = f"{len(r) - len(failed)}/{len(r)} pass" + ("" if not failed else f" — failed: {'; '.join(failed)}") + (f" — {lat}" if lat else "")
+    return verdict(*rig.finish(bool(r) and not failed, note))
 
 
 if __name__ == "__main__":
