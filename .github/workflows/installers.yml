@@ -722,6 +722,7 @@ jobs:
       # excludelist), and WebKit opens libGLESv2 at run time. The runner image
       # is no desktop; Ubuntu Desktop ships all of these.
       - name: a display, and a desktop's libraries
+        id: desktop
         run: sudo apt-get update -q && sudo apt-get install -y -q xvfb libgtk-3-0t64 libegl1 libgles2 libgl1-mesa-dri
       - name: launch smoke — the AppImage
         env:
@@ -730,13 +731,18 @@ jobs:
           chmod +x "$APPIMAGE"
           python3 src/app/e2e/smoke.py --root "$RUNNER_TEMP/appimage" -- xvfb-run -a "$PWD/$APPIMAGE"
       - name: install the .deb
+        # the .deb is checked whatever the AppImage did
+        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
+        id: deb
         run: |
           sudo apt-get install -y -q "./$DEB"
           dpkg -s aisixteen-fantastic | grep -E '^(Package|Version|Depends|Recommends):'
           ls -l /usr/bin/fantastic-app /usr/bin/fantastic
       - name: launch smoke — the .deb
+        if: ${{ !cancelled() && steps.deb.outcome == 'success' }}
         run: python3 src/app/e2e/smoke.py --root "$RUNNER_TEMP/deb" -- xvfb-run -a /usr/bin/fantastic-app
       - name: remove the .deb
+        if: ${{ !cancelled() && steps.deb.outcome == 'success' }}
         run: |
           sudo apt-get remove -y -q aisixteen-fantastic
           [ ! -e /usr/bin/fantastic-app ] || { echo "::error::removing the package left /usr/bin/fantastic-app"; exit 1; }
