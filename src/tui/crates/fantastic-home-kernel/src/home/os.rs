@@ -50,6 +50,18 @@ impl SysOs {
             env: tokio::sync::OnceCell::new(),
         }
     }
+
+    /// A `SysOs` whose login environment is already resolved to `env`.
+    #[cfg(test)]
+    pub(crate) fn with_env(
+        home: PathBuf,
+        fantastic_bin: PathBuf,
+        env: Vec<(OsString, OsString)>,
+    ) -> SysOs {
+        let os = SysOs::new(home, fantastic_bin);
+        os.env.set(env).expect("a new SysOs has no environment");
+        os
+    }
 }
 
 #[async_trait::async_trait]
@@ -72,15 +84,20 @@ impl HomeOs for SysOs {
         }
     }
 
-    /// The login environment, the logs dir and the log file are resolved first;
-    /// any failure is the spawn's.
+    /// The logs dir and the log file, then the login environment, are resolved
+    /// first; any failure is the spawn's, and it is written to the launch log.
     async fn spawn(&self, path: &str) -> Result<(), String> {
-        let env = self
-            .env
-            .get_or_try_init(|| sys::login_env(&self.home))
-            .await?;
         let log = sys::log_path(&self.home, path)?;
-        sys::spawn(&self.fantastic_bin, path, env, &self.home, &log).await
+        let started = async {
+            let env = self
+                .env
+                .get_or_try_init(|| sys::login_env(&self.home))
+                .await?;
+            sys::spawn(&self.fantastic_bin, path, env, &self.home, &log).await
+        };
+        started
+            .await
+            .map_err(|error| sys::record_spawn_failure(&log, error))
     }
 
     async fn terminate(&self, path: &str) -> Result<bool, String> {

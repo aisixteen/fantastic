@@ -383,6 +383,22 @@ pub fn log_path(home: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(logs_dir(home)?.join(log_file_name(path)))
 }
 
+/// A spawn that failed says why in its launch log too: `error` is appended as a
+/// line (the log is created `0600` when the spawn never got as far as opening
+/// it). Returns `error`, so a failed spawn can pass it on.
+pub fn record_spawn_failure(log: &Path, error: String) -> String {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // The log is a courtesy: when it cannot be written the error still travels.
+    if let Ok(mut file) = options.open(log) {
+        let _ = writeln!(file, "{error}");
+    }
+    error
+}
+
 /// The launch log of the fantastic in `path`, when it exists.
 pub fn log_file(home: &Path, path: &str) -> Option<String> {
     let file = log_path(home, path).ok()?;

@@ -334,10 +334,15 @@ impl Home {
             Event::Spawned { path, result } => {
                 if let Err(error) = result {
                     self.launches.remove(&path);
-                    self.problem = Some(format!(
-                        "Could not start {}: {error}",
-                        self.name_of_path(&path)
-                    ));
+                    if self.adding.iter().any(|a| a.path == path) {
+                        // The spawn is strict: the add ends now, with the cause.
+                        self.fail_adding(&path, &format!("it did not start — {error}"));
+                    } else {
+                        self.problem = Some(format!(
+                            "Could not start {}: {error}",
+                            self.name_of_path(&path)
+                        ));
+                    }
                 }
                 Vec::new()
             }
@@ -630,15 +635,14 @@ impl Home {
             }
         }
         for path in expired {
-            let Some(index) = self.adding.iter().position(|a| a.path == path) else {
-                continue;
-            };
-            let adding = self.adding.remove(index);
-            self.launches.remove(&path);
-            let reason = adding
-                .error
-                .unwrap_or_else(|| "it did not start.".to_string());
-            self.problem = Some(format!("Could not add {}: {reason}", last_component(&path)));
+            let reason = self.adding.iter().find(|a| a.path == path).map(|a| {
+                a.error
+                    .clone()
+                    .unwrap_or_else(|| "it did not start.".to_string())
+            });
+            if let Some(reason) = reason {
+                self.fail_adding(&path, &reason);
+            }
         }
 
         if !self.listed {
@@ -717,6 +721,13 @@ impl Home {
             }
         }
         effects
+    }
+
+    /// The add of `path` ends: its launch is dropped and `reason` is the problem.
+    fn fail_adding(&mut self, path: &str, reason: &str) {
+        self.adding.retain(|a| a.path != path);
+        self.launches.remove(path);
+        self.problem = Some(format!("Could not add {}: {reason}", last_component(path)));
     }
 
     fn begin_adding(&mut self, path: &str, now_ms: u64, started: bool) {
@@ -1059,6 +1070,26 @@ mod tests {
         probed(&mut h, 3_000, vec![("g1", stopped())]);
         assert_eq!(status(&h, "g1", 3_000), Status::Stopped);
         assert_eq!(h.problem(), None);
+    }
+
+    #[test]
+    fn a_failed_spawn_of_an_add_says_why_at_once() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![]);
+        probed(&mut h, 0, vec![]);
+        h.reduce(Event::Open {
+            paths: vec!["/w/alpha".into()],
+            now_ms: 0,
+        });
+        h.reduce(Event::Spawned {
+            path: "/w/alpha".into(),
+            result: Err("no login environment: SHELL is not set".into()),
+        });
+        assert_eq!(
+            h.problem(),
+            Some("Could not add alpha: it did not start — no login environment: SHELL is not set")
+        );
+        assert!(ids(&h).is_empty());
     }
 
     #[test]
