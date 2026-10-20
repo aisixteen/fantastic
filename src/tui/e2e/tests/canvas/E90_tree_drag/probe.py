@@ -113,6 +113,7 @@ def main() -> bool:
             "x": 40, "y": 60, "width": 320, "height": 640}
     r: dict = {}
     info: dict = {}
+    reveal_log: list = []
     rig.init(
         cells=[tree, cell(CELL_A, BACKEND_A, 420, 60), cell(CELL_B, BACKEND_B, 420, 340)],
         host_agents=[(FOLDER, host(BACKEND_A, CELL_A)), (FOLDER, host(BACKEND_B, CELL_B))],
@@ -127,6 +128,23 @@ def main() -> bool:
             agent_row = lambda b: row(TREE, f'.ft-row[data-agent="{b}"]')  # noqa: E731
             file_row = lambda p: row(TREE, f'.ft-row[data-path="{p}"]')  # noqa: E731
 
+            async def reveal(cell: str, agent: str, secs_: float = 10) -> bool:
+                """Show `agent`'s folder in the tree cell `cell` through its `reveal` verb, the way E61 does:
+                a first `not_found` (the bridge's `list` is still walking the disk) is asked again for
+                at most `secs_`; any other refusal ends it."""
+                from canvas import host_call
+
+                end = asyncio.get_event_loop().time() + secs_
+                while asyncio.get_event_loop().time() < end:
+                    a = await host_call(rig.port, f"{rig.page_guid()}|{cell}", {"type": "reveal", "agent": agent})
+                    reveal_log.append({"agent": agent, "reply": a})
+                    if "revealed" in a:
+                        return True
+                    if a.get("reason") != "not_found":
+                        return False
+                    await asyncio.sleep(0.5)
+                return False
+
             async def last_tick(cid: str) -> int:
                 text = await pg.js(f"({term_text(cid)})")
                 m = TICK.findall(text or "")
@@ -136,7 +154,8 @@ def main() -> bool:
                 return int(await pg.js("document.querySelectorAll('.agent-frame').length") or 0)
 
             # a) the tree lists both agents; both cells draw
-            r["a1 the tree lists both agents"] = bool(await pg.until(f"!!{agent_row(BACKEND_A)} && !!{agent_row(BACKEND_B)}", 30))
+            # the agent folders are collapsed until revealed: each is shown through the tree cell's own verb
+            r["a1 the tree lists both agents"] = bool(await reveal(TREE, BACKEND_A) and await reveal(TREE, BACKEND_B)) and bool(await pg.until(f"!!{agent_row(BACKEND_A)} && !!{agent_row(BACKEND_B)}", 30))
             r["a2 both cells draw their ticks"] = bool(await pg.until(f"/TICK \\d+/.test({term_text(CELL_A)}) && /TICK \\d+/.test({term_text(CELL_B)})", 30))
             start_frames = await frames()
             info["start_frames"] = start_frames
@@ -191,6 +210,7 @@ def main() -> bool:
     finally:
         rig.stop()
     rig.summary["checks"] = r
+    info["reveal_log"] = reveal_log
     rig.summary["info"] = info
     print(json.dumps(info, indent=1, default=str)[:3000])
     failed = [k for k, v in r.items() if not v]
