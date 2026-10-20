@@ -27,6 +27,7 @@ payloads.
 | `dismiss` | — | clear the problem |
 | `log` | `id: str` | `{id, file, tail}`: the launch log, in `<home>/logs/` |
 | `focus` | — | emits `{"type":"focus"}` for the host shell |
+| `menu` | — | `{"type":"menu_spec", seq, spec}`: the native menus a host shell builds |
 | `reflect` | — | `{id, sentence, protocol, version, mode, home, poll_ms}` |
 
 ## The state stream
@@ -46,6 +47,16 @@ same process serves the same canvas, misses 1 and 2 in a row keep it
 `running`, and the 3rd shows what the check found, about 6 s at the 2 s poll.
 A gone process, another run or another canvas shows at once; an answer resets
 the count.
+
+## The menu spec
+
+A host shell builds its native menus from `spec` (`fantastic_home::menu::Menu`,
+version 1): the bar's menus, each item an `action` (a click sends its intent,
+one of this agent's verbs; `pick: "folders"` asks the OS for folders first and
+sends them as `open`'s `paths`), a native `role`, a `separator` or a nested
+`submenu`, each marked for the systems that show it. The `menu` verb answers
+it with the state's `seq`; after every state emit that changes it, the same
+`menu_spec` payload is emitted on `home`. A page keeps only `state` payloads.
 
 ## What it keeps
 

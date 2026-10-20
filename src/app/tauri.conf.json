@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Aisixteen Fantastic",
+  "identifier": "oleksandr.aisixteen.fantastic.desktop",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": { "csp": "default-src 'self'; style-src 'self'" }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis", "deb", "appimage"],
+    "externalBin": ["binaries/fantastic"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "category": "DeveloperTool",
+    "shortDescription": "A live canvas for every folder",
+    "license": "AGPL-3.0-or-later",
+    "publisher": "aisixteen",
+    "macOS": { "minimumSystemVersion": "14.0" }
+  }
+}

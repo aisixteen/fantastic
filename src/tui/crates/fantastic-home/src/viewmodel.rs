@@ -299,6 +299,11 @@ impl Home {
         self.problem.as_deref()
     }
 
+    /// The registry's entries, as last read.
+    pub(crate) fn entries(&self) -> &[Registered] {
+        &self.entries
+    }
+
     /// The registry has been probed at least once.
     pub fn listed(&self) -> bool {
         self.listed
@@ -862,7 +867,8 @@ impl Home {
         }
     }
 
-    fn name_of_id(&self, id: &str) -> String {
+    /// An entry's name by its id; an unknown id is itself.
+    pub(crate) fn name_of_id(&self, id: &str) -> String {
         match id.strip_prefix(ADDING) {
             Some(path) => last_component(path).to_string(),
             None => match self.entries.iter().find(|r| r.guid == id) {

@@ -3,7 +3,8 @@
 //! ```text
 //!   Event ──apply──▶ Home::reduce ──Effects──▶ one task each ──HomeOs──▶ Event ──apply──▶ …
 //!                         │
-//!                         └─ the state changed? emit it (seq + 1); pages or selection changed? keep them
+//!                         └─ the state changed? emit it (seq + 1), and the menu spec if it changed;
+//!                            pages or selection changed? keep them
 //! ```
 //!
 //! `apply` reduces under the lock, emits and keeps, spawns the effects and
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
+use fantastic_home::menu::{Menu, MENU_SPEC};
 use fantastic_home::{Config as HomeConfig, Effect, Event, Home, Prober};
 use serde_json::{json, Value};
 use tokio::sync::Notify;
@@ -42,6 +44,8 @@ struct Inner {
     seq: u64,
     /// The last state emitted, its `seq` zeroed for comparing.
     last: Option<Value>,
+    /// The last menu spec emitted.
+    last_menu: Option<Menu>,
     /// The last pages and selection kept.
     kept: (Vec<String>, Option<String>),
     looking: bool,
@@ -68,6 +72,7 @@ impl Runner {
                 home: Home::new(config),
                 seq: 0,
                 last: None,
+                last_menu: None,
                 kept: (Vec::new(), None),
                 looking: false,
                 look_again: false,
@@ -109,6 +114,14 @@ impl Runner {
     pub fn focus(&self) -> Value {
         (self.emit)(json!({"type": "focus"}));
         self.state()
+    }
+
+    /// `{"type":"menu_spec","seq":…,"spec":…}`: the menu spec now, `seq` the
+    /// state's (the state emitted first if it changed).
+    pub fn menu_spec(&self) -> Value {
+        let mut g = self.lock();
+        self.publish(&mut g);
+        spec_payload(g.seq, &g.home.menu())
     }
 
     /// Apply one event (see the module docs). The state right after its reduce.
@@ -241,6 +254,11 @@ impl Runner {
             g.seq += 1;
             state["seq"] = json!(g.seq);
             (self.emit)(state.clone());
+            let menu = g.home.menu();
+            if g.last_menu.as_ref() != Some(&menu) {
+                (self.emit)(spec_payload(g.seq, &menu));
+                g.last_menu = Some(menu);
+            }
         } else {
             state["seq"] = json!(g.seq);
         }
@@ -332,6 +350,11 @@ impl Runner {
             ),
         }
     }
+}
+
+/// The wire form of a menu spec (`fantastic_home::menu::MenuSpecMsg` plus its `type`).
+fn spec_payload(seq: u64, menu: &Menu) -> Value {
+    json!({"type": MENU_SPEC, "seq": seq, "spec": menu})
 }
 
 #[cfg(test)]

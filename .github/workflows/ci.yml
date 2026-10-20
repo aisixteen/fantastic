@@ -12,11 +12,12 @@
 # The reusable BUILD (`build.yml`) is called up to three times:
 #
 #   units     debug    every runtime's unit tests on Linux, macOS and Windows
-#   binaries  release  every release target's archive (`release-<target>`) and
-#                      per OS the binaries the e2e runs — side by side with units
-#                      (full runs only)
+#   binaries  release  every release target's archive (`release-<target>`),
+#                      per OS the binaries the e2e runs, and the desktop app
+#                      (`app-<triple>`) — side by side with units (full runs only)
 #   e2e       release  the model-free e2e (`e2e/run.py --only-free`, no model
-#                      turns) on exactly those binaries — ONLY once every unit
+#                      turns), and the desktop app's e2e, on exactly those
+#                      binaries — ONLY once every unit
 #                      suite passed and every binary built: a red unit test stops
 #                      the run before the e2e starts (full runs only)
 #

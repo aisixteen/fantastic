@@ -5,6 +5,8 @@
 //!   model      the registry entries and a folder's run file, parsed from text
 //!   probe      what one fantastic looks like, asked one question at a time
 //!   viewmodel  the home: events in, effects out, rows to draw
+//!   intent     the user's intents, typed: the home's verbs on the wire
+//!   menu       the menu spec a host shell builds its native menus from
 //! ```
 //!
 //! PURE. Nothing here reads a file, a socket, a process, the clock or the
@@ -17,10 +19,13 @@
 //! it must be is not read as something else, and a refusal is a `problem` that
 //! says what and why.
 
+pub mod intent;
+pub mod menu;
 pub mod model;
 pub mod probe;
 pub mod viewmodel;
 
+pub use intent::Intent;
 pub use model::{registered, Canvas, CanvasRun, Registered, RUN_FILE};
 pub use probe::{is_active, Answer, Ask, Mode, Probe, Prober, Status, Target};
 pub use viewmodel::{Config, Effect, Event, Home, Job, Row};

@@ -29,7 +29,7 @@ pub const ID: &str = "home";
 pub const HANDLER_MODULE: &str = "home.tools";
 
 /// Every verb of the agent except the lifecycle (`boot`, `shutdown`): what a
-/// page reaches through `user`. Phase 6 adds `menu` here, and the grant follows.
+/// page reaches through `user` (the grant follows this list).
 pub const VERBS: &[&str] = &[
     "list",
     "open",
@@ -43,5 +43,6 @@ pub const VERBS: &[&str] = &[
     "dismiss",
     "log",
     "focus",
+    "menu",
     "reflect",
 ];

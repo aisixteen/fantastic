@@ -347,25 +347,60 @@ async fn a_verified_run_is_not_asked_its_guid_twice() {
 #[tokio::test]
 async fn the_state_is_emitted_only_on_change_with_a_rising_seq() {
     let t = t();
+    let states = |t: &T| -> Vec<Value> {
+        t.emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == json!("state"))
+            .cloned()
+            .collect()
+    };
+    let specs = |t: &T| -> Vec<Value> {
+        t.emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == json!("menu_spec"))
+            .cloned()
+            .collect()
+    };
     t.os.set_registry(vec![entry("g1", "/w/a", None, None)]);
     t.stopped("/w/a");
     t.look().await;
-    let n = t.emitted.lock().unwrap().len();
+    let n = states(&t).len();
     assert!(n > 0);
+    let m = specs(&t).len();
+    assert!(m > 0, "the first state brings the first menu spec");
     // nothing changes: nothing is emitted, the seq stays
     let s = t.look().await;
     t.runner.state();
-    assert_eq!(t.emitted.lock().unwrap().len(), n);
+    assert_eq!(states(&t).len(), n);
+    assert_eq!(specs(&t).len(), m);
     assert_eq!(s["seq"], json!(n));
-    // a change is emitted, one higher
+    // a change is emitted, one higher; it opens a page, so the menu changes too
     t.runner.apply(Event::Select {
         id: Some("g1".into()),
     });
-    let emitted = t.emitted.lock().unwrap().clone();
+    let emitted = states(&t);
     assert_eq!(emitted.len(), n + 1);
     let seqs: Vec<u64> = emitted.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
     assert_eq!(seqs, (1..=(n as u64 + 1)).collect::<Vec<_>>());
-    assert!(emitted.iter().all(|e| e["type"] == json!("state")));
+    let specs = specs(&t);
+    assert_eq!(specs.len(), m + 1);
+    assert_eq!(
+        specs[m]["seq"],
+        json!(n + 1),
+        "a spec carries its state's seq"
+    );
+    // every emit is a state or a menu spec, and each spec follows its state
+    let all = t.emitted.lock().unwrap().clone();
+    assert!(all
+        .iter()
+        .all(|e| e["type"] == json!("state") || e["type"] == json!("menu_spec")));
+    let last = all.len() - 1;
+    assert_eq!(all[last]["type"], json!("menu_spec"));
+    assert_eq!(all[last - 1]["type"], json!("state"));
 }
 
 #[tokio::test]
