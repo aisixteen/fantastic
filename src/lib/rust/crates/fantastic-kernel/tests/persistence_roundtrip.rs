@@ -642,7 +642,7 @@ async fn record_merge_reads_one_chunk_like_python() {
         .await
         .remove(0)
         .result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await; // a barrier: every dirty write has landed
 
     let text = std::fs::read_to_string(dir.join("agent.yaml")).expect("on disk");
     assert!(
@@ -753,7 +753,7 @@ async fn store_calls_have_python_shape() {
                    "handler_module": "noop.tools", "id": "shaped"}),
         )])
         .await;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await; // a barrier: every dirty write has landed
     let store_calls: Vec<Value> = seen.lock().unwrap().clone();
     let keys = |p: &Value| -> Vec<String> { p.as_object().unwrap().keys().cloned().collect() };
     let read = store_calls
