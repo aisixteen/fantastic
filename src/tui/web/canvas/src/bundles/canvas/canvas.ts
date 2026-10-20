@@ -35,7 +35,7 @@ import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
 import { headTitle, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
-import { COLUMN, LAYOUT, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
+import { COLUMN, LAYOUT, hiddenCellFor, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
 import { CELL_MENU, closeIntent } from "./cell_menu.ts";
 import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
@@ -1545,16 +1545,22 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // A KEPT dialog in a new cell: the live AI when another cell has it open (one
   // dialog, several cells), else a fresh one on SQLite with its history.
   const reopenAt = async (w: { x: number; y: number }, dialog: { id: string; name: string }): Promise<void> => {
-    const viewId = `ai_view_${crypto.randomUUID().slice(0, 8)}`;
-    registerCell(
-      new Agent({
-        id: viewId,
-        parentId: containerNow(),
-        handlerModule: aiView.handles[0]!,
-        meta: { owns_backend: false, kept: true, dialog_name: dialog.name, x: Math.round(w.x), y: Math.round(w.y), width: 440, height: 520 },
-      }),
-    );
-    await flush();
+    // a HIDDEN cell already on this dialog (#133) is the dialog's cell again: it
+    // is re-bound (the host re-makes the AI if it is gone) and shown where it was,
+    // rather than a second cell beside it
+    const hiddenCell = hiddenCellFor(kernel, dialog.id, everyAgent());
+    const viewId = hiddenCell ?? `ai_view_${crypto.randomUUID().slice(0, 8)}`;
+    if (hiddenCell === undefined) {
+      registerCell(
+        new Agent({
+          id: viewId,
+          parentId: containerNow(),
+          handlerModule: aiView.handles[0]!,
+          meta: { owns_backend: false, kept: true, dialog_name: dialog.name, x: Math.round(w.x), y: Math.round(w.y), width: 440, height: 520 },
+        }),
+      );
+      await flush();
+    }
     const r = (await host.callHost(BACKEND, {
       type: "reopen",
       id: dialog.id,
@@ -1563,10 +1569,12 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     } as unknown as Payload)) as Rec;
     if (typeof r["error"] === "string") {
       toast(`✕ ${r["error"]}`);
-      kernel.remove(viewId);
+      // a new cell is withdrawn; the hidden one stays hidden
+      if (hiddenCell === undefined) kernel.remove(viewId);
       return;
     }
     bindAi(viewId, r);
+    if (hiddenCell !== undefined) showPicked(viewId);
   };
 
   // VIEW an agent: a view (its world, its camera, its background) or any
@@ -1645,6 +1653,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         .map((a) => kernel.get(a)!.record() as Rec)
         .filter((r) => r["backend_id"] === id || r["backend_root"] === id)
         .map((r) => String(r["id"]));
+    },
+    // whether a cell is off its view (#133): its agent runs, its frame is not drawn
+    isHidden: (cell) => {
+      const view = kernel.get(cell)?.parentId;
+      return typeof view === "string" && hiddenOf(kernel, view).has(cell);
     },
     moveTo,
     view: (id, focus) => {

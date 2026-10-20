@@ -4,7 +4,7 @@ import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
 import { registerCanvas, VIEW_VERBS } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
-import { hiddenOf, prune, registerLayout, rectsOf, setHidden, showHidden } from "../src/bundles/canvas/layout.ts";
+import { hiddenCellFor, hiddenOf, prune, registerLayout, rectsOf, setHidden, showHidden } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
 
 // #133: `hide` takes a cell off its view and keeps its agent; `show` puts it back
@@ -142,4 +142,31 @@ test("showHidden brings a hidden cell back (its rect kept) and reports whether i
   assert.deepEqual([...hiddenOf(k, "view_root")], []);
   assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 10, y: 20, width: 480, height: 320 });
   assert.equal(showHidden(k, "ghost"), false, "an unknown id is not a hidden cell");
+});
+
+test("a reopened dialog finds its HIDDEN cell (one cell per dialog), not a shown one or another dialog's", async () => {
+  const k = page();
+  await call(k, { type: "place", kind: "html", id: "shown", x: 0, y: 0, html: "<p>s</p>" });
+  await call(k, { type: "place", kind: "html", id: "hid", x: 10, y: 20, html: "<p>h</p>" });
+  await call(k, { type: "place", kind: "html", id: "other", x: 30, y: 40, html: "<p>o</p>" });
+  k.updateMeta("shown", { backend_id: "ai_1" } as unknown as Payload);
+  k.updateMeta("hid", { backend_id: "ai_1" } as unknown as Payload);
+  k.updateMeta("other", { backend_id: "ai_2" } as unknown as Payload);
+  const cells = ["shown", "hid", "other"];
+  assert.equal(hiddenCellFor(k, "ai_1", cells), undefined, "nothing hidden yet: a reopen makes a cell");
+  await call(k, { type: "hide", id: "hid" });
+  await call(k, { type: "hide", id: "other" });
+  assert.equal(hiddenCellFor(k, "ai_1", cells), "hid", "the hidden cell of that dialog");
+  assert.equal(hiddenCellFor(k, "ai_3", cells), undefined, "no cell of an unknown dialog");
+  assert.equal(hiddenCellFor(k, "ai_1", ["shown", "ghost"]), undefined, "a shown cell is not hidden; a gone one is no cell");
+});
+
+test("the reopened hidden cell comes back where it was, and is then no hidden match", async () => {
+  const k = page();
+  await call(k, { type: "place", kind: "html", id: "hid", x: 10, y: 20, html: "<p>h</p>" });
+  k.updateMeta("hid", { backend_id: "ai_1" } as unknown as Payload);
+  await call(k, { type: "hide", id: "hid" });
+  assert.equal(showHidden(k, "hid"), true);
+  assert.deepEqual(rectsOf(k, "view_root", "canvas")["hid"], { x: 10, y: 20, width: 480, height: 320 });
+  assert.equal(hiddenCellFor(k, "ai_1", ["hid"]), undefined, "shown now");
 });

@@ -190,6 +190,9 @@ export const CANVAS_CSS = `
   .side .agents-tree li.agent { opacity: 0.6; }
   .side .agents-tree li.has-cell { opacity: 1; cursor: pointer; }
   .side .agents-tree li.has-cell .gl { color: ${tok("color.accent.base")}; }
+  /* HIDDEN (#133): its agent runs, its cells are off their views — a pick shows it */
+  .side .agents-tree li.hidden .nm { font-style: italic; }
+  .side .agents-tree li.hidden .ct { color: ${tint("color.text.cool", 45)}; font-style: italic; }
   /* FE (page) and BE (host) in the frames' two colors; a NEW host agent stands out */
   .side .agents-tree li.agent.page .nm { color: ${tok("color.side.page-text")}; }
   .side .agents-tree li.agent.host .nm { color: ${tok("color.side.host-text")}; }

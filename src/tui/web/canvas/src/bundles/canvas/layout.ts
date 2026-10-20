@@ -295,6 +295,16 @@ export function showHidden(kernel: Kernel, cell: string): boolean {
   return true;
 }
 
+/** The HIDDEN cell (#133) among `cells` that shows agent `backendId`, if any: a
+ *  kept dialog reopened comes back to its hidden cell, not a second one beside it. */
+export function hiddenCellFor(kernel: Kernel, backendId: string, cells: string[]): string | undefined {
+  return cells.find((id) => {
+    const a = kernel.get(id);
+    const view = a?.parentId;
+    return a !== undefined && typeof view === "string" && a.record()["backend_id"] === backendId && hiddenOf(kernel, view).has(id);
+  });
+}
+
 /** Drop every rect of cells no longer in `view` (all themes). */
 export function prune(kernel: Kernel, view: string, live: Set<string>): void {
   for (const h of hiddenOf(kernel, view)) if (!live.has(h)) setHidden(kernel, view, h, false);

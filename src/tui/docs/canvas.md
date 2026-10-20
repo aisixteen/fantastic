@@ -160,7 +160,9 @@ both sides; the human narrows them with `update_agent`).
 | (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
 | (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
 | (html check) | an html body that is empty, a placeholder (no element) or truncated (an unclosed script, a cut tag) is refused, saying why |
-| `remove {id}` | delete a cell (refused for a delete-locked agent) |
+| `hide {id}` | take a cell OFF the view: its agent keeps running and its rect is kept; a reload keeps it hidden (the hidden set is on the view). Hiding a hidden cell changes nothing |
+| `show {id, x?, y?}` | put a hidden cell back where it was, or at `x`, `y` in the theme in use; it re-attaches live. A shown cell keeps its place |
+| `remove {id}` | delete the CELL from the view (refused for a delete-locked agent); its agent is untouched — Shift+✕ and right-click → Delete delete the agent |
 
 `update {id: <the view>, fields: {…}}` sets the view's own fields. Every cell answers `reflect`, `get_html`,
 `set_html`, `emit`.
@@ -212,9 +214,12 @@ view's `theme` verb.
 
 A cell is a VIEW of a host agent: the agent's record says how it is drawn
 (`view: {kind, bytes, calls}`, else terminal for an exec agent, chat for an AI,
-else its reflect card). `place {backend_id, x, y}` shows one; ✕ closes the view
-and the agent lives on (the tree view lists it; ⌫ there deletes it). A cell whose
-agent is gone disappears.
+else its reflect card). `place {backend_id, x, y}` shows one. ✕ HIDES the cell
+(#133): it leaves the view, its agent keeps running, its rect is kept, and a
+reload keeps it hidden. Shift+✕ and the head's right-click → Delete DELETE the
+agent. A sidebar pick of a hidden agent, or `show {id, x?, y?}`, brings its cell
+back where it was (or at `x`, `y`); the tree marks a hidden agent `hidden`, and
+⌫ there deletes it. A cell whose agent is gone disappears.
 
 ## The background
 
