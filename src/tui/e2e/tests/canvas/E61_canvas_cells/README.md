@@ -11,7 +11,7 @@ real coding agent (it prints a marker, then echoes what is typed).
 | coding_listed | the double-click's `host · coding agents` lists the fake, its full path as the hint (`user path`) |
 | coding_clicked · coding_runs · coding_echoes | its tile starts it in a terminal cell; it prints its marker and echoes a typed line |
 | coding_cell · coding_exact | the cell's `command` is the full path; its exec agent allows exactly that line |
-| sidebar_cell · sidebar_lists_backend | a `sidebar` cell from the double-click; its tree lists the terminal's host agent |
+| tree_cell · tree_lists_backend | a `file tree` cell from the double-click; the terminal's host agent is a folder in it |
 | canvases_cell | a `canvases` cell marks the open canvas |
-| peer_opened · peer_empty · peer_isolated · peer_own_records | `+ new canvas` opens `canvas_second`: empty, its sidebar lists it but not the first canvas's agent, its own records and guid |
+| peer_opened · peer_empty · peer_marks_elsewhere · peer_own_records | `+ new canvas` opens `canvas_second`: empty, its file tree shows the whole project and marks the first canvas's agent `.elsewhere`, with no ↗ to open it; its own records and guid |
 | bundle_runs · bundle_reloads | a page bundle (`base: html_agent`, `html: \|`) in the peer's own `bundles/` runs its seeded instance; an edit of its bundle.yaml re-renders it |

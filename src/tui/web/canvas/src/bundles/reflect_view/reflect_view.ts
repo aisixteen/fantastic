@@ -4,7 +4,7 @@ import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 
 // THE REFLECT CARD — any agent, as a cell: what it says it is (its reflect).
 // Opened from the sidebar for an agent no other cell shows. A weak peer: it
-// fronts the agent, never owns it (✕ removes the card only).
+// fronts the agent, never owns it (✕ hides the card; Shift+✕ deletes the agent).
 
 type Dict = Record<string, unknown>;
 

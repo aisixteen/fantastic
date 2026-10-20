@@ -28,7 +28,7 @@ export function termLook(skin: CompiledSkin): { theme: { background: string; for
 // attach is this view's: `status` finds a live PTY job and re-attaches (its
 // `output` ring replays), else `start {pty}` — no command, no args: the record's
 // own shell line (`$SHELL -l`; the kernel knows the OS's login flag, if any).
-// When the job ends the frame closes — view and exec agent together, as ✕ does. xterm is the
+// When the job ends the cell is removed (close()); its exec agent lives on. xterm is the
 // vendored UMD bundle (sets globalThis.Terminal / globalThis.FitAddon), lazily
 // imported only when a terminal actually mounts. Preserves VSCode-style flow
 // control (ack), binary image paste, no-reflow resize, and explicit autoscroll.

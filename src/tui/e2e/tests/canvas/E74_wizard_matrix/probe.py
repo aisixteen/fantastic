@@ -188,7 +188,8 @@ def main() -> bool:
                         await pg.js(f"{BTN}('skip')?.click()")  # leave the wizard
                         await asyncio.sleep(1)
                         for f in await pg.js("[...document.querySelectorAll('.ai-not-set-up')].map(x=>x.closest('.agent-frame').dataset.id)"):
-                            await pg.js(f"document.querySelector('.agent-frame[data-id=\"{f}\"] > .frame-head .close')?.click()")
+                            # Shift+✕ deletes the cell (✕ alone only hides it)
+                            await pg.js(f"document.querySelector('.agent-frame[data-id=\"{f}\"] > .frame-head .close')?.dispatchEvent(new MouseEvent('click',{{bubbles:true,shiftKey:true}}))")
                     else:
                         p["C_answers"] = await turn(pg, c, open_, "hi", f"answer-C-{provider}")
                         p["C_keys"] = [k for k in open_.keys()]
@@ -237,9 +238,9 @@ def main() -> bool:
                     lap(f"{provider}.F")
                     p["keyed_keys_seen"] = sorted({str(k) for k in keyed.keys()})
                     p["E_next_turn_model"] = next((q["body"].get("model") for q in reversed(keyed.requests) if q.get("kind") == "turn" and isinstance(q.get("body"), dict)), None)
-                    # tidy the canvas for the next provider
+                    # tidy the canvas for the next provider: Shift+✕ deletes each cell (✕ would only hide it, agent running)
                     for fid in await pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id)"):
-                        await pg.js(f"document.querySelector('.agent-frame[data-id=\"{fid}\"] > .frame-head .close')?.click()")
+                        await pg.js(f"document.querySelector('.agent-frame[data-id=\"{fid}\"] > .frame-head .close')?.dispatchEvent(new MouseEvent('click',{{bubbles:true,shiftKey:true}}))")
                     await asyncio.sleep(0.5)
                 info["console"] = [x for x in pg.logs if "WebGL" not in x][:8]
 

@@ -12,6 +12,8 @@ export const PAGE_VERB_DOCS: { [handlerModule: string]: { [verb: string]: string
     update: "args: id:str (req — a cell, or this view), bytes:str? (a new body, verbatim), fields:dict? (display_name|trusted|readme|x|y|width|height|can_call|callable_by; on the view any field). {updated, fields, grants_missing?, hint?}.",
     wire: "args: sender:str, receiver:str, verbs:[str] (req). A grant: merged into each side that is a cell of this view (sender's can_call, receiver's callable_by); e.g. verbs [emit] lets a panel emit to another. Not from/to. {wired}.",
     remove: "args: id:str (req). Removes a cell; refused on a delete_lock (the background). {deleted}.",
+    hide: "args: id:str (req). Takes the cell OFF the view: its agent keeps running, its rect is kept, a reload keeps it hidden; idempotent. {hidden, hidden_cells}.",
+    show: "args: id:str (req), x:num?, y:num?. Puts a hidden cell back on the view, live (its agent's stream re-attaches): where it was, or at x, y. A shown cell keeps its place (x, y apply to a hidden cell only; `move` moves one). {shown, theme, x?, y?, width?, height?, hidden_cells}.",
     reflect: "No args. This view, its members and its readme.",
   },
   "html_agent.ts": {

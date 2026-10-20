@@ -28,8 +28,19 @@ bundles, seeds an empty tree with the canvas root, and mounts.
   the host's `home` agent. It renders the agent's `state` (your fantastics, the
   open pages, the selection) and sends every click and key as a `home` verb; one
   live canvas frame per open page, never reloaded while you switch.
+- **files_view** / **preview_view** — the file tree (the project's folder, live: every
+  agent is a folder in it) and the previewer/editor (a file or the live agent). Page
+  agents over the project's `files` bridge, with verbs an AI drives them by.
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
   drawn with, per backdrop; it takes skins an AI writes (`fantastic readme skins`).
+
+A cell's head: **✕ hides** it — the view lets go of the cell, its agent keeps
+running and its stream is torn down until it is shown again (the view's `show`
+puts it back where it was, or at `x`, `y`). **Shift+✕** and the head's
+right-click menu (`cell_menu.ts`) **delete** the agent, through the sidebar's
+delete path (a locked cell or agent refuses). The hidden set is on the view
+(`hidden: [<cell id>…]`), so a reload keeps the cells hidden. Picking a hidden
+agent in the sidebar shows its cell where it was.
 
 The view↔backend pairing is **never hardcoded** — each view's reflect names the
 host capability + verb surface it fronts; an LLM weaves the binding from that plus

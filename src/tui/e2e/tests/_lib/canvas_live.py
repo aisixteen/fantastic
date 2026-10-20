@@ -40,6 +40,7 @@ import websockets  # noqa: E402
 from canvas import DESKTOP_POINTER, MAC_CHROME, Page, attach, free_port  # noqa: E402
 from e2e_build import build_lock  # noqa: E402
 from helpers import oslayer  # noqa: E402
+from helpers.chrome import Chrome  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
 SRC = REPO / "src"
@@ -390,12 +391,11 @@ class Rig:
         # rate is the GPU's, not the software rasterizer's)
         # headless: software WebGL (SwiftShader) — the terminals draw with WebGL
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-        chrome = subprocess.Popen([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
-                                   f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
-                                   "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        chrome = Chrome([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
+                         f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
+                         "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"], self.art / f"chrome-{cdp}.log", cdp)
         try:
-            async with await attach(cdp) as ws:
+            async with await attach(chrome) as ws:
                 pg = Page(ws)
                 pg.mark = self.log_at
                 self.misses = pg.misses
@@ -419,7 +419,7 @@ class Rig:
                 if hasattr(pg, "ws_log"):
                     (self.art / "ws_frames.log").write_text("\n".join(pg.ws_log))
         finally:
-            chrome.terminate()
+            chrome.proc.terminate()
 
     def left(self, reserve: float = 0.0) -> float:
         """Seconds still usable under the runner's 15-minute hard stop, keeping
@@ -495,15 +495,19 @@ async def new_ai_wizard(pg: Page, x: int, y: int) -> str | None:
     return cell
 
 
-async def open_sidebar(pg: Page, x: int, y: int) -> bool:
-    """Place a TREE VIEW cell (the agent tree; a `sidebar_view.ts` cell) at empty
-    canvas (x, y) — nothing floats: it is a cell from the double-click."""
-    before = await pg.js("document.querySelectorAll('.agent-frame .side .agents-tree').length")
-    await spot(pg, x, y, "tree view")
-    if not await pg.until(f"document.querySelectorAll('.agent-frame .side .agents-tree').length > {before}", 10):
-        return False
-    # its host tree is read from the host (async): ready once a host row shows
-    return bool(await pg.until("document.querySelectorAll('.side .agents-tree li.agent.host').length > 0", 10))
+async def open_tree(pg: Page, x: int, y: int) -> str | None:
+    """Place a FILE TREE cell (a `files_view.ts` cell) at empty canvas (x, y) —
+    nothing floats: it is a cell from the double-click. Returns the cell's id once
+    the project's folder is listed (`.fantastic` shows), else None."""
+    frames = "[...document.querySelectorAll('.agent-frame')].filter(f=>f.querySelector('.files-view'))"
+    before = await pg.js(f"{frames}.length")
+    await spot(pg, x, y, "file tree")
+    if not await pg.until(f"{frames}.length > {before}", 10):
+        return None
+    # its root is listed from the host (async): ready once `.fantastic` shows
+    if not await pg.until("!!document.querySelector('.files-view .ft-row[data-path=\".fantastic\"]')", 15):
+        return None
+    return await pg.js(f"{frames}.pop().dataset.id")
 
 
 async def say(pg: Page, text: str, cell: int = 0) -> None:

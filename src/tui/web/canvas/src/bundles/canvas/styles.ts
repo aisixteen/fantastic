@@ -170,7 +170,7 @@ export const CANVAS_CSS = `
     border-radius: ${tok("radius.control")}; padding: 5px 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .term-stopped button:hover { background: ${tok("color.status.ok-hover")}; }
   .term-stopped button[hidden] { display: none; }
-  /* THE SIDEBAR and CANVAS-LIST cells (side_view.ts): a cell's body, scrolling */
+  /* THE CANVAS-LIST cell (side_view.ts), and the base of the file tree (files/styles.ts): a cell's body, scrolling */
   .side { height: 100%; overflow-y: auto; box-sizing: border-box; padding: 8px 0 6px; display: flex; flex-direction: column;
     color: ${tint("color.text.cool", 85)}; font: 12px ${tok("font.family.mono")}; }
   .side .chats-head { display: flex; justify-content: space-between; align-items: center; padding: 0 10px 6px 14px; color: ${tint("color.text.cool", 55)}; }
@@ -182,22 +182,6 @@ export const CANVAS_CSS = `
   .side li.canvas .dot { color: ${tok("color.status.gold")}; } .side li.canvas.here { background: ${tint("color.accent.base", 22)}; cursor: default; }
   .side .canvas-new { padding: 6px 14px 8px; color: ${tok("color.accent.base")}; cursor: pointer; }
   .side .canvas-new input { width: 100%; box-sizing: border-box; background: ${tint("color.shade", 30)}; border: 1px solid ${tint("color.accent.base", 40)}; color: inherit; font: inherit; padding: 3px 6px; border-radius: ${tok("radius.control")}; }
-  .side .agents-tree li.agent { cursor: pointer; }
-  .side .agents-tree li { gap: 6px; padding: 2px 10px; cursor: default; }
-  .side .agents-tree li.kernel { color: ${tint("color.text.cool", 55)}; padding: 6px 10px 2px; }
-  .side .agents-tree li .tw { width: 10px; cursor: pointer; color: ${tint("color.text.cool", 50)}; }
-  .side .agents-tree li .gl { width: 12px; color: ${tint("color.text.cool", 50)}; }
-  .side .agents-tree li.agent { opacity: 0.6; }
-  .side .agents-tree li.has-cell { opacity: 1; cursor: pointer; }
-  .side .agents-tree li.has-cell .gl { color: ${tok("color.accent.base")}; }
-  /* FE (page) and BE (host) in the frames' two colors; a NEW host agent stands out */
-  .side .agents-tree li.agent.page .nm { color: ${tok("color.side.page-text")}; }
-  .side .agents-tree li.agent.host .nm { color: ${tok("color.side.host-text")}; }
-  .side .agents-tree li.fresh { opacity: 1; }
-  .side .agents-tree li .del { display: none; margin-left: auto; padding: 0 4px; color: ${tint("color.status.error", 80)}; cursor: pointer; }
-  .side .agents-tree li:hover .del { display: inline; }
-  .side .agents-tree li.fresh .ct { color: ${tok("color.status.warn")}; font-weight: 600; }
-  .side .agents-tree li.kernel:hover, .side .agents-tree li.agent:not(.has-cell):hover { background: transparent; }
   .agent-frame.flash { box-shadow: ${tok("shadow.flash")} !important; }
   .canvas-toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 1100;
     background: ${tok("color.surface.toast")}; color: ${tok("color.status.error-text")}; padding: 8px 14px; border-radius: ${tok("radius.panel")};
@@ -228,4 +212,12 @@ export const CANVAS_CSS = `
   .full-hint kbd { font: 600 11px ${tok("font.family.mono")}; color: ${tok("color.accent.text")};
     padding: 2px 6px; margin: 0 1px; border-radius: ${tok("radius.key")}; background: ${tint("color.accent.base", 16)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 40)}; }
   .side .agent.viewed { background: ${tint("color.accent.base", 18)}; }
+  /* A CELL'S HEAD MENU (right-click on the head, #133): Hide, Delete */
+  .cell-menu { position: fixed; z-index: 1200; display: flex; flex-direction: column; min-width: 120px; padding: 4px;
+    border-radius: ${tok("radius.control")}; background: ${tok("color.surface.raised")}; border: 1px solid ${tint("color.ink", 10)};
+    box-shadow: ${tok("shadow.toast")}; }
+  .cell-menu button { font: 12.5px ${tok("font.family.sans")}; text-align: left; color: ${tok("color.text.primary")}; background: transparent;
+    border: 0; border-radius: ${tok("radius.control")}; padding: 5px 10px; cursor: pointer; }
+  .cell-menu button:hover { background: ${tint("color.accent.base", 16)}; }
+  .cell-menu button[data-intent="delete"] { color: ${tok("color.status.error-text")}; }
 `;

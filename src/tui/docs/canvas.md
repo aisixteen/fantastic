@@ -56,9 +56,32 @@ this for its cabinet's canvas (the `cabinet` bundle makes that canvas with `new_
 A canvas shows only its own subtree and the agents under no canvas; another
 canvas's agents never appear on it. `canvases` (any canvas node) lists them.
 NOTHING FLOATS: a canvas opens as its background alone. Everything is a cell
-placed from the double-click — among them a `tree view` (the agent tree), as
-many as you like, moved, resized and closed like any cell. There is
-no main chat: a chat cell goes wherever you place one.
+placed from the double-click — among them a `file tree` (the project's files,
+live) and a `preview` (a file or the live agent, editable), as many as you like,
+moved, resized and closed like any cell. There is no main chat: a chat cell
+goes wherever you place one.
+
+THE FILE TREE AND THE PREVIEW (page agents `files_view.ts`, `preview_view.ts`;
+they call the project's `files` bridge). The tree is the project folder:
+`.fantastic` shows highlighted, `.git`, `node_modules`, `target`, `dist` and
+`__pycache__` are hidden, and every agent is a folder in it (a badge, its live
+status, its name). Folders list when opened and are watched while open, so a
+file made, changed or removed on disk shows without a reload. A click
+selects. On an agent, double-click, ↗ or Shift+Enter views a page agent, or
+shows a host agent's cell (opening one when it has none); ⌘-click (Ctrl-click off
+macOS) focuses a page agent on its view, or moves through a host agent's cells;
+⌫ deletes the agent. Arrows and Enter walk the tree; the
+field filters what is loaded. An AI drives the tree with `select`, `expand`,
+`collapse` and `reveal` (each takes `path` or `agent`), and a preview with
+`open {path}`, `pin`, `unpin`, `mode {file|agent}`, `edit`, `save` and `revert`
+(`<guid>|<cell id>`). A preview follows the tree's selection or is pinned to
+a path: text is highlighted and followed live, Markdown rendered, images and
+PDF drawn, a binary or large file shows its size (large ones page). An agent's
+folder shows its `agent.yaml`; agent mode shows the agent itself. Text up to
+1 MiB can be edited (⌘S / Ctrl-S saves, against the version read). If the file
+changes on disk under unsaved edits the preview says so — reload, keep mine or
+compare; edits are never merged and never overwritten silently. Their colours are
+the skin's `color.syntax.*` and `color.tree.fantastic` tokens.
 
 THE SYSTEM BLOCK: `.fantastic/prompt.md` is every AI's system block. It starts
 as the default (`{tree}`, `{self}`, `{howto}` — the agent tree, who the AI is,
@@ -167,7 +190,9 @@ both sides; the human narrows them with `update_agent`).
 | (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
 | (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
 | (html check) | an html body that is empty, a placeholder (no element) or truncated (an unclosed script, a cut tag) is refused, saying why |
-| `remove {id}` | delete a cell (refused for a delete-locked agent) |
+| `hide {id}` | take a cell OFF the view: its agent keeps running and its rect is kept; a reload keeps it hidden (the hidden set is on the view). Hiding a hidden cell changes nothing |
+| `show {id, x?, y?}` | put a hidden cell back where it was, or at `x`, `y` in the theme in use; it re-attaches live. A shown cell keeps its place |
+| `remove {id}` | delete the CELL from the view (refused for a delete-locked agent); its agent is untouched — Shift+✕ and right-click → Delete delete the agent |
 
 `update {id: <the view>, fields: {…}}` sets the view's own fields. Every cell answers `reflect`, `get_html`,
 `set_html`, `emit`.
@@ -219,9 +244,12 @@ view's `theme` verb.
 
 A cell is a VIEW of a host agent: the agent's record says how it is drawn
 (`view: {kind, bytes, calls}`, else terminal for an exec agent, chat for an AI,
-else its reflect card). `place {backend_id, x, y}` shows one; ✕ closes the view
-and the agent lives on (the tree view lists it; ⌫ there deletes it). A cell whose
-agent is gone disappears.
+else its reflect card). `place {backend_id, x, y}` shows one. ✕ HIDES the cell
+(#133): it leaves the view, its agent keeps running, its rect is kept, and a
+reload keeps it hidden. Shift+✕ and the head's right-click → Delete DELETE the
+agent. Picking a hidden agent in the file tree, or `show {id, x?, y?}`, brings its
+cell back where it was (or at `x`, `y`); the tree marks a hidden agent `hidden`,
+and ⌫ there deletes it. A cell whose agent is gone disappears.
 
 ## The background
 
@@ -233,8 +261,9 @@ view, delete-locked): one GL source,
 ## The viewer
 
 The page views ONE page agent at a time: a view (its cells on its world) or
-any other agent full-page. A click in the tree view views an agent;
-⌘-click (Ctrl-click off macOS) focuses it on its view. `#view=<id>` in the
+any other agent full-page. In the file tree, a double-click on a page agent
+views it (on a host agent it shows its cell); ⌘-click (Ctrl-click off macOS)
+focuses a page agent on its view. `#view=<id>` in the
 URL is the viewed agent.
 
 ## Cells

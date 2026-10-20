@@ -306,7 +306,7 @@ content (`html`, `gl`).
 - **Double-click** opens the selector, which lists everything that can be placed
   there: `AI agent`, a terminal, coding agents found on your `PATH` (`claude`,
   `codex`, `aider`, `opencode`, `fantastic`), `python agent`, `mcp connector`,
-  `tree view`, `canvas theme`, `user store`, `tips`, and your bundles. Nothing
+  `file tree`, `preview`, `canvas theme`, `user store`, `tips`, and your bundles. Nothing
   floats on the canvas; every surface is a cell.
 - **AI agents** are set up in a two-page wizard: the provider (responses,
   anthropic, ollama or vllm), then its name, URL, model and key. Saved set-ups
