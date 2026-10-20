@@ -40,6 +40,7 @@ import websockets  # noqa: E402
 from canvas import DESKTOP_POINTER, MAC_CHROME, Page, attach, free_port  # noqa: E402
 from e2e_build import build_lock  # noqa: E402
 from helpers import oslayer  # noqa: E402
+from helpers.chrome import Chrome  # noqa: E402
 from helpers.verdict import verdict  # noqa: E402
 
 SRC = REPO / "src"
@@ -390,12 +391,11 @@ class Rig:
         # rate is the GPU's, not the software rasterizer's)
         # headless: software WebGL (SwiftShader) — the terminals draw with WebGL
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-        chrome = subprocess.Popen([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
-                                   f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
-                                   "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        chrome = Chrome([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}", f"--remote-debugging-port={cdp}",
+                         f"--user-data-dir={self.art / 'chrome'}", "--no-first-run",
+                         "--autoplay-policy=no-user-gesture-required", *(extra or []), "about:blank"], self.art / f"chrome-{cdp}.log", cdp)
         try:
-            async with await attach(cdp) as ws:
+            async with await attach(chrome) as ws:
                 pg = Page(ws)
                 pg.mark = self.log_at
                 self.misses = pg.misses
@@ -419,7 +419,7 @@ class Rig:
                 if hasattr(pg, "ws_log"):
                     (self.art / "ws_frames.log").write_text("\n".join(pg.ws_log))
         finally:
-            chrome.terminate()
+            chrome.proc.terminate()
 
     def left(self, reserve: float = 0.0) -> float:
         """Seconds still usable under the runner's 15-minute hard stop, keeping
