@@ -60,11 +60,22 @@ they call the project's `files` bridge). The tree is the project folder:
 `__pycache__` are hidden, and every agent is a folder in it (a badge, its live
 status, its name). Folders list when opened and are watched while open, so a
 file made, changed or removed on disk shows without a reload. A click
-selects. On an agent, double-click, ↗ or Shift+Enter views a page agent, or
-shows a host agent's cell (opening one when it has none); ⌘-click (Ctrl-click off
-macOS) focuses a page agent on its view, or moves through a host agent's cells;
-⌫ deletes the agent. Arrows and Enter walk the tree; the
-field filters what is loaded. An AI drives the tree with `select`, `expand`,
+selects. Shift-click selects a range of rows, and ⌘-click (Ctrl-click off
+macOS) adds or drops one row from the selection. On an agent, double-click,
+↗ or Shift+Enter views a page agent, or shows a host agent's cell (opening one
+when it has none); ⌫ deletes the agent. Arrows and Enter walk the tree; the
+field filters what is loaded.
+
+DRAG FROM THE TREE TO THE CANVAS (#134, #135). The selected rows drag together:
+a host agent (its cell is shown again, or moved if it is on the view, never a
+second one), a file (a preview pinned to it, which follows its changes on
+disk) or a folder (a file tree rooted at that folder, which shows nothing above
+it). Several dropped items sit around the drop point, one slot each, none over
+another; the canvas highlights its edge while a tree drag is over it. A drop
+is the view's `open` verb: `open {path | agent, x?, y?}` does the same from an
+AI (a path's kind is read from its listing; an agent folder opens its agent).
+A drop on an html cell's body does not reach the canvas (the iframe takes it).
+An AI drives the tree with `select`, `expand`,
 `collapse` and `reveal` (each takes `path` or `agent`), and a preview with
 `open {path}`, `pin`, `unpin`, `mode {file|agent}`, `edit`, `save` and `revert`
 (`<guid>|<cell id>`). A preview follows the tree's selection or is pinned to

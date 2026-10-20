@@ -19,7 +19,7 @@ export interface Rig {
   index: AgentIndex;
   published: Selection[];
   saved: Dict[];
-  mountTree(id: string): Promise<FilesController>;
+  mountTree(id: string, root?: string): Promise<FilesController>;
   mountPreview(id: string, meta?: Dict): Promise<PreviewController>;
   /** the tree selects: every following preview refreshes, as the bus tells them */
   select(s: Selection | null): Promise<void>;
@@ -38,7 +38,7 @@ export function rig(): Rig {
   const published: Selection[] = [];
   const saved: Dict[] = [];
   let sel: Selection | null = null;
-  const mountTree = async (id: string): Promise<FilesController> => {
+  const mountTree = async (id: string, root?: string): Promise<FilesController> => {
     k.register(new Agent({ id, parentId: "canvas", handlerModule: "files_view.ts" }));
     const ctl = new FilesController({
       bridge,
@@ -48,6 +48,7 @@ export function rig(): Rig {
       index,
       walk: () => {},
       publish: (s) => published.push(s),
+      ...(root !== undefined ? { root } : {}),
     });
     controllers.set(id, ctl);
     await ctl.start({});

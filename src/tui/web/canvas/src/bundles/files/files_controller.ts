@@ -4,7 +4,7 @@ import { isRefusal, said } from "./file_bridge.ts";
 import type { Change, FileBridge, Refusal, WatchHub } from "./file_bridge.ts";
 import type { AgentIndex } from "./agent_index.ts";
 import type { Selection } from "./files_deps.ts";
-import { ancestors, inRoot, norm, parentOf, wire } from "./paths.ts";
+import { ancestors, inRoot, norm, parentOf, under, wire } from "./paths.ts";
 import { TreeModel } from "./tree_model.ts";
 import type { Effect, Entry } from "./tree_model.ts";
 
@@ -28,12 +28,16 @@ export interface FilesCtlOptions {
   walk(): void;
   /** the selection moved: the previews follow */
   publish(s: Selection): void;
+  /** the folder the tree starts at ("" the project; a folder dropped on the canvas is its own tree (#135)) */
+  root?: string;
 }
 
 const FANTASTIC_PREFIX = ".fantastic/";
 
 export class FilesController {
-  readonly model = new TreeModel();
+  readonly model: TreeModel;
+  /** the folder the tree starts at: nothing above it is shown */
+  readonly root: string;
   /** refusals of listings, by folder (the row's title; a verb passes it through) */
   readonly errors = new Map<string, Refusal>();
   private listener: (() => void) | null = null;
@@ -43,6 +47,8 @@ export class FilesController {
 
   constructor(o: FilesCtlOptions) {
     this.o = o;
+    this.root = o.root ?? "";
+    this.model = new TreeModel(this.root);
   }
 
   /** The cell draws from here whenever the tree changed. */
@@ -56,15 +62,15 @@ export class FilesController {
 
   /** Open the root, then bring back what the record remembered. */
   async start(saved: Partial<FilesState>): Promise<void> {
-    await this.expand("");
-    const open = (saved.expanded ?? []).filter((p) => typeof p === "string" && inRoot(p) && p !== "");
+    await this.expand(this.root);
+    const open = (saved.expanded ?? []).filter((p) => typeof p === "string" && inRoot(p) && under(p, this.root) && p !== this.root);
     for (const p of open.sort((a, b) => a.split("/").length - b.split("/").length)) {
       if (this.disposed) return;
       const parent = parentOf(p);
       if (!this.model.isOpen(parent) || !this.model.nodes.has(p)) continue; // a folder that went away
       await this.expand(p);
     }
-    if (typeof saved.selected === "string" && inRoot(saved.selected) && this.model.nodes.has(saved.selected)) {
+    if (typeof saved.selected === "string" && inRoot(saved.selected) && under(saved.selected, this.root) && this.model.nodes.has(saved.selected)) {
       this.model.selected = saved.selected;
       this.model.cursor = saved.selected;
       this.o.publish({ path: saved.selected, agent: this.o.index.agentAt(saved.selected)?.id ?? null });
@@ -132,7 +138,7 @@ export class FilesController {
   // ─── what the cell and the verbs do ───────────────────────────────────
 
   private persist(): void {
-    this.o.persist({ expanded: [...this.model.expanded].filter((p) => p !== "").sort(), selected: this.model.selected });
+    this.o.persist({ expanded: [...this.model.expanded].filter((p) => p !== this.root).sort(), selected: this.model.selected });
   }
 
   async expand(p: string): Promise<void> {
@@ -155,6 +161,7 @@ export class FilesController {
   /** Open every folder above `p`, waiting for each listing. False when a folder on the way is not there. */
   async reveal(p: string): Promise<boolean> {
     for (const a of ancestors(p)) {
+      if (!under(a, this.root)) continue; // above the root: not in this tree
       if (!this.model.nodes.has(a)) return false;
       await this.expand(a);
       if (this.model.nodes.get(a)!.status === "error") return false;
@@ -208,21 +215,26 @@ export const FILES_VERB_DOCS: Record<string, string> = {
 };
 
 export const FILES_README =
-  "A FILE TREE cell: the project's folder, live. `.fantastic` is highlighted, and every agent is a folder in it (marked with a badge, its status and its name). Folders list when opened and are watched while open, so a file made, changed or removed on disk shows without a reload. Click selects (the previews that follow the tree show it); double-click, Shift+Enter or ↗ opens an agent's cell. VERBS: select {path | agent}, expand, collapse, reveal. Page content: it calls the project's file bridge `files` as its cell grant allows.";
+  "A FILE TREE cell: the project's folder, live (or, dropped from the tree, a folder as its own tree: its root is that folder). `.fantastic` is highlighted, and every agent is a folder in it (marked with a badge, its status and its name). Folders list when opened and are watched while open, so a file made, changed or removed on disk shows without a reload. Click selects (the previews that follow the tree show it); Shift-click selects a range, ⌘/Ctrl-click toggles one, and the selected rows drag onto the canvas (agents show their cells, files open as previews, folders as trees). Double-click, Shift+Enter or ↗ opens an agent's cell. VERBS: select {path | agent}, expand, collapse, reveal. Page content: it calls the project's file bridge `files` as its cell grant allows.";
 
 const refusal = (error: string, reason: string, extra: Record<string, unknown> = {}): Json => ({ error, reason, ...extra }) as Json;
 
 /** `path` or `agent` → a project path; or the refusal. */
 function target(p: Payload, ctl: FilesController): { path: string } | { refused: Json } {
   const agent = str(p, "agent");
+  let path: string;
   if (agent !== "") {
     const folder = ctl.o.index.folderOf(agent);
     if (folder === undefined) return { refused: refusal(`files: no folder on disk for agent '${agent}'`, "not_found", { arg: "agent", hint: "the agent folders are read from .fantastic; an agent with no folder is not on disk" }) };
-    return { path: folder };
+    path = folder;
+  } else {
+    if (typeof p["path"] !== "string") return { refused: refusal("files: path (a root-relative project path) or agent (an agent id) is required", "bad_arg", { arg: "path" }) };
+    if (!inRoot(p["path"])) return { refused: refusal(`files: '${p["path"]}' is outside the project`, "outside_root", { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
+    path = norm(p["path"]);
   }
-  if (typeof p["path"] !== "string") return { refused: refusal("files: path (a root-relative project path) or agent (an agent id) is required", "bad_arg", { arg: "path" }) };
-  if (!inRoot(p["path"])) return { refused: refusal(`files: '${p["path"]}' is outside the project`, "outside_root", { arg: "path", hint: "paths are relative to the project folder, with no leading / and no .." }) };
-  return { path: norm(p["path"]) };
+  // a tree rooted at a folder (#135) shows nothing above it
+  if (!under(path, ctl.root)) return { refused: refusal(`files: '${path}' is outside this tree (its root is ${ctl.root === "" ? "the project" : ctl.root})`, "outside_root", { arg: agent !== "" ? "agent" : "path" }) };
+  return { path };
 }
 
 export const filesAgent: Handler = async (id, payload): Promise<Json> => {

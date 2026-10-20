@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: tree_drag
+group: canvas
+title: "drag from the file tree onto the canvas: agents come back live without duplicates, a file opens as a preview, a folder as a tree"
+runner: probe.py
+costs: free
+limits:
+  seconds: 300
+env: {}

@@ -14,7 +14,7 @@ import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
 import { CODING_AGENTS, exactLine, openActionPopup, tiles } from "./action_popup.ts";
 import { SELECTOR, SELECTOR_PREFIX, setSelectorHost } from "./selector_agent.ts";
-import { ROOT_VIEW, VIEW, VIEW_VERBS, hostViewCell } from "./canvas_agent.ts";
+import { ROOT_VIEW, VIEW, VIEW_VERBS, grantViewLists, hostViewCell } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
 import type { Lookup } from "./viewer.ts";
 import { BACKGROUND, BACKGROUND_ID, bgCallableBy, viewToBg } from "./background_agent.ts";
@@ -32,6 +32,7 @@ import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
 import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
+import { DRAG_MIME, decodeDrag, layoutAround } from "../files/drag.ts";
 import { fileGrant } from "../files/file_bridge.ts";
 import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
 import { previewView } from "../preview/preview_view.ts";
@@ -69,6 +70,10 @@ function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined
 // view's own declaration (`fronts`), looked up by that exact name in the host
 // catalog — never matched, never guessed.
 const DEFAULT_VIEW = terminalView;
+
+// THE SLOT a dropped item takes around the drop point (#134): the largest cell the
+// tree opens (a preview, a folder), so no two dropped cells overlap.
+const DROP_SLOT = { width: 520, height: 560 };
 
 
 export interface MountOptions {
@@ -118,6 +123,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   if (kernel.get(ROOT_VIEW) === undefined && kernel.rootId !== null) {
     kernel.register(new Agent({ id: ROOT_VIEW, parentId: kernel.rootId, handlerModule: VIEW, sentence: "The root view: the canvas's first view." }));
   }
+  // the view may list the project to `open` what a drop names (#134, #135): granted from above, here
+  if (kernel.get(ROOT_VIEW) !== undefined) grantViewLists(kernel);
 
   // THE PAIR: a cell the canvas spawned a backend for, and that backend. The
   // backend is a direct child of `canvas_root` on the host, carrying the
@@ -1924,6 +1931,36 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     }));
     void kernel.send([{ target: id, payload: { type: "boot" } as unknown as Payload }]);
   };
+  // THE DROP (#134, #135): tree rows dragged onto the canvas open where they land — an
+  // agent shown (moved if it is on the view, never duplicated), a file as a preview
+  // pinned to it, a folder as a tree rooted at it. Each one is the view's `open` verb.
+  canvas.addEventListener("dragover", (e) => {
+    if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    canvas.classList.add("drop-target");
+  });
+  canvas.addEventListener("dragleave", (e) => {
+    if (!canvas.contains(e.relatedTarget as Node | null)) canvas.classList.remove("drop-target");
+  });
+  canvas.addEventListener("drop", (e) => {
+    canvas.classList.remove("drop-target");
+    if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+    e.preventDefault();
+    const got = decodeDrag(e.dataTransfer.getData(DRAG_MIME));
+    if ("error" in got) return toast(`✕ ${got.error}`);
+    // several items sit around the drop point, one slot each (no two overlap)
+    const spots = layoutAround(screenToWorld(e.clientX, e.clientY), got.items.length, DROP_SLOT);
+    void (async (): Promise<void> => {
+      for (const [i, it] of got.items.entries()) {
+        const at = spots[i]!;
+        const what = it.kind === "agent" ? { agent: it.id } : { path: it.path };
+        const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x: at.x, y: at.y } as unknown as Payload }]))[0]?.result as Rec | null;
+        const err = r?.["error"];
+        if (typeof err === "string") toast(`✕ ${err}`);
+      }
+    })();
+  });
   canvas.addEventListener("dblclick", (e) => {
     if ((e.target as Element).closest(".agent-frame")) return;
     openSelector(e.clientX, e.clientY);

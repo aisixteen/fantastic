@@ -1,4 +1,4 @@
-import { ignored, norm, parentOf, under } from "./paths.ts";
+import { ignored, nameOf, norm, parentOf, under } from "./paths.ts";
 
 // THE TREE'S STATE and its transitions — pure, no DOM, no bridge. Every
 // transition returns EFFECTS (`list`, `watch`, `unwatch`) for the controller to
@@ -45,8 +45,12 @@ export class TreeModel {
   cursor: string | null = null;
   showIgnored = false;
 
-  constructor() {
-    this.nodes.set("", { path: "", name: "", type: "dir", status: "unloaded", stale: false });
+  /** The folder the tree starts at: "" is the project; a folder dropped on the canvas is its own tree (#135). */
+  readonly root: string;
+
+  constructor(root = "") {
+    this.root = root;
+    this.nodes.set(root, { path: root, name: nameOf(root), type: "dir", status: "unloaded", stale: false });
   }
 
   isOpen(p: string): boolean {
@@ -132,7 +136,7 @@ export class TreeModel {
     if (ev.kind === "modified" && this.nodes.get(p)?.type === "file") return out; // the previews follow it
     if (ev.kind === "deleted" && this.expanded.has(p)) out.push(...this.collapse(p));
     const parent = parentOf(p);
-    if (p !== "" && this.expanded.has(parent)) {
+    if (p !== this.root && this.expanded.has(parent)) {
       const n = this.nodes.get(parent)!;
       if (n.status === "loading") n.stale = true;
       else {
@@ -152,7 +156,7 @@ export class TreeModel {
 
   /** Drop a node and everything below it (its watches are the caller's: see `collapse`). */
   private forget(p: string): void {
-    for (const k of [...this.nodes.keys()]) if (k !== "" && under(k, p)) this.nodes.delete(k);
+    for (const k of [...this.nodes.keys()]) if (k !== this.root && under(k, p)) this.nodes.delete(k);
   }
 
   /** Whether a name shows: an ignored folder hides unless asked for. */
@@ -177,7 +181,7 @@ export class TreeModel {
       out.push({ path: n.path, depth, type: n.type, open: n.type === "dir" && open, name: n.name });
       if (n.type === "dir" && open) for (const c of this.kids(n)) if (f === "" || matches(c)) walk(c, depth + 1);
     };
-    walk(this.nodes.get("")!, 0);
+    walk(this.nodes.get(this.root)!, 0);
     return out;
   }
 

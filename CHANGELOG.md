@@ -7,6 +7,17 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- Drag from the file tree onto the canvas (#134, #135). The tree's rows drag
+  together: Shift-click selects a range, ⌘-click (Ctrl-click off macOS) adds or
+  drops one row. An agent row drops its cell back on the canvas (shown again, or
+  moved when it is already on the view, never duplicated); a file drops a
+  `preview` pinned to it; a folder drops a file tree rooted at it. Several items
+  land around the drop point, one slot each. The view's new `open {path | agent,
+  x?, y?}` verb does the same for an AI. The drop highlight is the skin's accent
+  tint. A tree can start at any folder (`root` on its cell). E90 `tree_drag`
+  drives a drop with a DataTransfer (CDP drags are not reliable). Clicking a
+  row with ⌘/Ctrl no longer focuses the agent on its canvas: it toggles the
+  selection.
 - A live file tree, a previewer and an editor on the canvas, replacing the agent
   tree. The `file tree` cell shows the project folder (`.fantastic` highlighted;
   `.git`, `node_modules`, `target`, `dist`, `__pycache__` hidden), lists a folder
