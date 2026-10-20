@@ -32,7 +32,6 @@ import shutil
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
@@ -52,32 +51,45 @@ FILE_VIEW = "e123-file"
 FOLDER_VIEW = "e123-folder"
 
 
-def watch(port: int, aid: str) -> list:
-    """Collect `aid`'s events over the ws face, in a daemon thread, for the run."""
-    seen: list = []
+class Watch:
+    """`aid`'s events over the ws face, collected in a daemon thread. `ready` is set once
+    the subscription is sent (or the connect failed), so the caller edits only after it;
+    a connect failure is kept in `error` and raised by `ready_or_raise`, not swallowed."""
 
-    async def run():
+    def __init__(self, port: int, aid: str):
+        self.seen: list = []
+        self.ready = threading.Event()
+        self.error: BaseException | None = None
+        self.cond = threading.Condition()
+        threading.Thread(target=lambda: asyncio.run(self._run(port, aid)), daemon=True).start()
+
+    async def _run(self, port: int, aid: str) -> None:
         w = WSWatcher(port, aid)
-        await w.connect()
+        try:
+            await w.connect()
+        except BaseException as e:
+            self.error = e
+            return
+        finally:
+            self.ready.set()
         async for ev in w.events():
-            seen.append(ev)
+            with self.cond:
+                self.seen.append(ev)
+                self.cond.notify_all()
 
-    threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
-    return seen
+    def ready_or_raise(self) -> None:
+        self.ready.wait()
+        if self.error is not None:
+            raise self.error
 
+    def events(self) -> list:
+        with self.cond:
+            return list(self.seen)
 
-def until(step, done, timeout: float = 30.0) -> bool:
-    """Run `step(i)` and check `done()`, until it holds or the bound passes. The step is
-    repeated because the disk watch may not be armed on the first edit."""
-    end = time.monotonic() + timeout
-    i = 0
-    while not done():
-        if time.monotonic() > end:
-            return False
-        step(i)
-        i += 1
-        time.sleep(0.2)
-    return True
+    def wait_for(self, pred, timeout: float = 30.0) -> bool:
+        """Block until an event matches `pred`, or the bound passes."""
+        with self.cond:
+            return self.cond.wait_for(lambda: any(pred(e) for e in self.seen), timeout)
 
 
 def main() -> int:
@@ -183,22 +195,28 @@ def main() -> int:
         need(wd.get("relayed") is False and wd.get("watching") == "docs",
              f"the folder view's watch arms its own relay: {str(wd)[:120]}")
 
-        # 5 · live, over the ws face: the events the armed relays emit
-        fseen = watch(hk.port, fid)
-        dseen = watch(hk.port, did)
+        # 5 · live, over the ws face: each watch is subscribed before its one edit, and one
+        # edit gives one event, so two opens of one path share one relay with no duplicate
+        fw = Watch(hk.port, fid)
+        dw = Watch(hk.port, did)
+        fw.ready_or_raise()
+        dw.ready_or_raise()
         changed = lambda e: e.get("type") == "changed" and e.get("path") == "docs/a.md"  # noqa: E731
-        until(lambda i: (box / "docs/a.md").write_text(f"live {i}\n"),
-              lambda: any(changed(e) for e in fseen))
-        need(any(changed(e) for e in fseen),
-             f"a file view emits `changed` after an on-disk edit: {fseen[:2]}")
+        (box / "docs/a.md").write_text("live\n")
+        fw.wait_for(changed)
+        n = sum(1 for e in fw.events() if changed(e))
+        need(n == 1, f"a file view emits one `changed` after one on-disk edit (got {n}): {fw.events()[:2]}")
         added = lambda e: e.get("type") == "added" and e.get("name") == "live.md"  # noqa: E731
         removed = lambda e: e.get("type") == "removed" and e.get("name") == "live.md"  # noqa: E731
-        until(lambda i: (box / "docs/live.md").write_text(f"{i}\n"), lambda: any(added(e) for e in dseen))
-        need(any(added(e) for e in dseen), f"a folder view emits `added` for a new entry: {dseen[:3]}")
-        until(lambda i: (box / "docs/live.md").unlink(missing_ok=True),
-              lambda: any(removed(e) for e in dseen))
-        need(any(removed(e) for e in dseen), f"a folder view emits `removed` for a deleted entry: {dseen[-3:]}")
-        need(all(e.get("path", "").startswith("docs") for e in dseen),
+        (box / "docs/live.md").write_text("new\n")
+        dw.wait_for(added)
+        n = sum(1 for e in dw.events() if added(e))
+        need(n == 1, f"a folder view emits one `added` for one new entry (got {n}): {dw.events()[:3]}")
+        (box / "docs/live.md").unlink()
+        dw.wait_for(removed)
+        n = sum(1 for e in dw.events() if removed(e))
+        need(n == 1, f"a folder view emits one `removed` for one deleted entry (got {n}): {dw.events()[-3:]}")
+        need(all(e.get("path", "").startswith("docs") for e in dw.events()),
              "a folder view's events name only its folder's entries")
     finally:
         hk.close()
