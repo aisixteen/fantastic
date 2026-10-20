@@ -271,8 +271,24 @@ export function setMinimized(kernel: Kernel, view: string, theme: Theme, cell: s
   kernel.updateMeta(layoutId(theme), { minimized: [...m] } as unknown as Payload);
 }
 
+/** The cells of `view` HIDDEN (#133): out of the view, their agents running. Per
+ *  view, not per theme — it is on the view's own record. */
+export function hiddenOf(kernel: Kernel, view: string): Set<string> {
+  const m = kernel.get(view)?.meta["hidden"];
+  return new Set(Array.isArray(m) ? m.filter((x): x is string => typeof x === "string") : []);
+}
+
+/** Hide `cell` in `view` (`on` false: show it again — its rect kept). */
+export function setHidden(kernel: Kernel, view: string, cell: string, on: boolean): void {
+  const h = hiddenOf(kernel, view);
+  if (on) h.add(cell);
+  else h.delete(cell);
+  kernel.updateMeta(view, { hidden: [...h] } as unknown as Payload);
+}
+
 /** Drop every rect of cells no longer in `view` (all themes). */
 export function prune(kernel: Kernel, view: string, live: Set<string>): void {
+  for (const h of hiddenOf(kernel, view)) if (!live.has(h)) setHidden(kernel, view, h, false);
   // every layout the view holds (a deleted theme's too)
   const themes = [...(kernel.get(view)?.children.values() ?? [])]
     .filter((a) => a.record().handler_module === LAYOUT)
@@ -317,7 +333,8 @@ export const LAYOUT_README =
   "Themes are listed, added and edited on the canvas theme agent (`themes`, `add_theme`…). " +
   "Move cells with the view's `move`; a cell with no rect in a theme is placed by its layout (free: free space near the centre; column: the column's bottom). " +
   "`minimized: [<cell id>…]`: those cells show their head bar alone (a double click on the head toggles it). " +
-  "`pinned: <cell id>` (a column theme): that cell is held on the screen's bottom while the column scrolls (the 📌 on its head).";
+  "`pinned: <cell id>` (a column theme): that cell is held on the screen's bottom while the column scrolls (the 📌 on its head). " +
+  "The view's `hidden: [<cell id>…]` (on the view, all themes) are the cells not shown: their agents run on and their rects are kept, so `show` puts them back where they were.";
 
 /** A layout holds state only: it answers reflect (the kernel's) and nothing else. */
 export const layoutAgent: Handler = (_id, payload): Json => {
