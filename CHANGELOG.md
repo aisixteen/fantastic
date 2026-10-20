@@ -114,6 +114,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- S3: the desktop app's opaque window (Linux; Windows without Mica) no longer
+  flashes light on open: the window and webview start in the dark skin's page
+  colour, so the boot page's transparent body is never the webview's white.
 - exec_bridge (python, rust, swift): a monitor always ends with one delivery
   headed `job ended`, even when nothing waited any more, and `monitor` refuses a
   job whose end already went out (flaky on Windows, #64).

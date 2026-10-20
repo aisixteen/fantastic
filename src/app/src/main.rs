@@ -153,6 +153,9 @@ fn window(app: &AppHandle, args: &Args, backdrop: Backdrop) -> Result<(), String
             !args.kiosk,
         ))
         .on_navigation(move |url| page::allowed(url, shell.port()));
+    if let Some([r, g, bl]) = backdrop.window_color() {
+        b = b.background_color(tauri::window::Color(r, g, bl, 255));
+    }
     if args.kiosk {
         b = b.fullscreen(true).decorations(false);
     } else {
