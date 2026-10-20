@@ -603,3 +603,159 @@ test("a binary path through an own key named constructor / __proto__ round-trips
     assert.equal(Object.getPrototypeOf(dec["payload"]), Object.prototype, key);
   }
 });
+
+// ─── the stop grace (#94) ──────────────────────────────────────────────────
+
+/** How many call frames a fake socket has been sent. */
+function callsSent(sock: FakeSocket): number {
+  return sock.sent.filter((f) => f["type"] === "call").length;
+}
+
+/** Capture console.error for the length of `fn`; returns what was logged. */
+async function captureErrors(fn: () => Promise<void>): Promise<string[]> {
+  const logged: string[] = [];
+  const orig = console.error;
+  console.error = (m: unknown) => void logged.push(String(m));
+  try {
+    await fn();
+  } finally {
+    console.error = orig;
+  }
+  return logged;
+}
+
+test("during a stop, a close cuts off in-flight calls in-band, with no console error", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+    maxReconnectDelay: 5,
+    stopGraceMs: 60_000,
+  });
+  const logged = await captureErrors(async () => {
+    const ping = bridge.forward("kernel_state", { type: "ping" }); // the page is connected
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    const sock = fk.forEndpoint("kernel_state")[0]!;
+    sock.deliver({ type: "reply", id: sock.lastCall()!["id"], data: null });
+    await ping;
+    bridge.beginStop(); // host_stopping
+    const a = bridge.forward("user", { type: "forward", target: "agent_x", payload: { type: "go" } });
+    const b = bridge.forward("user", { type: "forward", target: "agent_y", payload: { type: "go" } });
+    await until(() => callsSent(sock) === 3);
+    sock.drop(); // the host closes the socket
+    // settled quietly: resolved (never rejected), in the refusal shape
+    const ra = (await a) as Record<string, unknown>;
+    const rb = (await b) as Record<string, unknown>;
+    assert.equal(ra["reason"], "transport_closed");
+    assert.match(String(ra["error"]), /host stopping: user forward cut off/);
+    assert.equal(rb["reason"], "transport_closed");
+  });
+  bridge.close();
+  assert.deepEqual(logged, []);
+});
+
+test("during a stop, a send on a closing socket settles in-band too", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+    stopGraceMs: 60_000,
+  });
+  const logged = await captureErrors(async () => {
+    const p = bridge.forward("kernel_state", { type: "ping" }); // lets the socket open
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    const sock = fk.forEndpoint("kernel_state")[0]!;
+    sock.deliver({ type: "reply", id: sock.lastCall()!["id"], data: null });
+    await p;
+    bridge.beginStop();
+    sock.send = () => {
+      throw new Error("CLOSING");
+    };
+    const r = (await bridge.forward("kernel_state", { type: "ping" })) as Record<string, unknown>;
+    assert.equal(r["reason"], "transport_closed");
+  });
+  bridge.close();
+  assert.deepEqual(logged, []);
+});
+
+test("outside a stop, a close under calls in flight stays loud: logged and rejected", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+    maxReconnectDelay: 5,
+    stopGraceMs: 60_000,
+  });
+  const logged = await captureErrors(async () => {
+    const a = bridge.forward("kernel_state", { type: "slow" });
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    fk.forEndpoint("kernel_state")[0]!.drop(); // no host_stopping before it
+    await assert.rejects(a, /disconnected/);
+  });
+  bridge.close();
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /socket closed with 1 call\(s\) in flight: kernel_state slow/);
+});
+
+test("after the stop grace has run out, a close stays loud", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+    maxReconnectDelay: 5,
+    stopGraceMs: 5,
+  });
+  const logged = await captureErrors(async () => {
+    bridge.beginStop();
+    await new Promise((r) => setTimeout(r, 20)); // the grace has passed
+    const a = bridge.forward("kernel_state", { type: "slow" });
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    fk.forEndpoint("kernel_state")[0]!.drop();
+    await assert.rejects(a, /disconnected/);
+  });
+  bridge.close();
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /kernel_state slow/);
+});
+
+test("a reconnect ends the stop grace: a later close is loud again", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+    maxReconnectDelay: 5,
+    stopGraceMs: 60_000,
+  });
+  const logged = await captureErrors(async () => {
+    const ping = bridge.forward("kernel_state", { type: "ping" }); // the page is connected
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    const first = fk.forEndpoint("kernel_state")[0]!;
+    first.deliver({ type: "reply", id: first.lastCall()!["id"], data: null });
+    await ping;
+    bridge.beginStop();
+    const a = bridge.forward("kernel_state", { type: "slow" });
+    await until(() => callsSent(first) === 2);
+    first.drop(); // quiet: inside the grace
+    assert.equal(((await a) as Record<string, unknown>)["reason"], "transport_closed");
+    // the page reconnects (a new host), after its first backoff
+    await until(() => fk.forEndpoint("kernel_state").length === 2, 3000);
+    const second = fk.forEndpoint("kernel_state")[1]!;
+    const b = bridge.forward("kernel_state", { type: "slow" });
+    await until(() => callsSent(second) === 1);
+    second.drop();
+    await assert.rejects(b, /disconnected/);
+  });
+  bridge.close();
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /kernel_state slow/);
+});

@@ -1,7 +1,7 @@
 import type { Bridge, Kernel } from "../kernel/kernel.ts";
 import type { Json, Payload } from "../kernel/json.ts";
 import type { Item } from "../kernel/outcome.ts";
-import { unknown } from "../kernel/refusal.ts";
+import { TRANSPORT_CLOSED, refusal, unknown } from "../kernel/refusal.ts";
 import { encodeFrame, sendable, decodeFrame } from "./frame.ts";
 import type { Envelope } from "./frame.ts";
 
@@ -44,6 +44,45 @@ export interface BridgeOptions {
   makeSocket?: SocketFactory;
   /** Reconnect backoff ceiling, ms (default 16000). */
   maxReconnectDelay?: number;
+  /** How long a stop's grace lasts from `beginStop`, ms (default 5000). */
+  stopGraceMs?: number;
+}
+
+/** The host's page-stop window (`src/tui/src/kern/host.rs` PAGE_STOP_GRACE). */
+export const STOP_GRACE_MS = 5000;
+
+/**
+ * THE STOP GRACE: a page whose host is stopping (`host_stopping`) has this long
+ * to lose its socket. A call the close cuts off inside it settles in-band, as a
+ * refusal, with no console error: the close is the host's stop, not a fault.
+ * A reconnect ends the grace at once; outside it a drop stays loud.
+ */
+class StopGrace {
+  private readonly ms: number;
+  private until = 0;
+
+  constructor(ms: number) {
+    this.ms = ms;
+  }
+
+  begin(): void {
+    this.until = Date.now() + this.ms;
+  }
+
+  end(): void {
+    this.until = 0;
+  }
+
+  active(): boolean {
+    return Date.now() < this.until;
+  }
+}
+
+/** The in-band answer a call gets when a stopping host's socket cuts it off. */
+function stoppedReply(target: string, verb: string): Json {
+  return refusal(TRANSPORT_CLOSED, `host stopping: ${target} ${verb} cut off`, {
+    hint: "the host is shutting down; the call may or may not have run",
+  }) as Json;
 }
 
 interface Pending {
@@ -61,6 +100,7 @@ class Conn {
   private readonly make: SocketFactory;
   private readonly maxDelay: number;
   private readonly onEvent: (src: string, payload: Payload) => void;
+  private readonly grace: StopGrace;
 
   private ws: WebSocketLike | null = null;
   private connected = false;
@@ -106,12 +146,14 @@ class Conn {
     url: string,
     make: SocketFactory,
     maxDelay: number,
+    grace: StopGrace,
     onEvent: (src: string, payload: Payload) => void,
   ) {
     this.endpoint = endpoint;
     this.url = url;
     this.make = make;
     this.maxDelay = maxDelay;
+    this.grace = grace;
     this.onEvent = onEvent;
     this.arm();
     this.connect();
@@ -131,6 +173,7 @@ class Conn {
     ws.onopen = () => {
       this.connected = true;
       this.delay = 1000;
+      this.grace.end(); // a new connection is a new host: the stop is over
       // `/<endpoint>/ws` auto-watches `endpoint`; replay the state stream
       // subscription so a reconnect resyncs (a fresh snapshot follows).
       if (this.wantsState) this.sendFrame({ type: "state_subscribe" });
@@ -153,8 +196,7 @@ class Conn {
     };
     ws.onclose = () => {
       this.connected = false;
-      this.reportInFlight();
-      this.rejectAll(new Error("disconnected"));
+      this.cutOff();
       for (const l of this.lifecycle) {
         try {
           l("disconnected");
@@ -212,29 +254,44 @@ class Conn {
     }
   }
 
-  /** A socket closing under calls in flight: say which ones (target and verb,
-   *  never the payload), once, so a page's console shows what the drop cut off. */
-  private reportInFlight(): void {
-    if (this.pending.size === 0) return;
-    const calls = [...this.pending.values()].map((p) => `${p.target} ${p.verb}`);
-    error(`bridge ${this.endpoint}: socket closed with ${calls.length} call(s) in flight: ${calls.join(", ")}`);
+  /** A socket closing under calls in flight. Outside a stop: say which ones
+   *  (target and verb, never the payload), once, so a page's console shows what
+   *  the drop cut off, and reject them. Inside the stop grace: settle them
+   *  in-band, quietly. */
+  private cutOff(): void {
+    if (this.grace.active()) {
+      this.failAll((p) => p.resolve(stoppedReply(p.target, p.verb)));
+      return;
+    }
+    if (this.pending.size > 0) {
+      const calls = [...this.pending.values()].map((p) => `${p.target} ${p.verb}`);
+      error(`bridge ${this.endpoint}: socket closed with ${calls.length} call(s) in flight: ${calls.join(", ")}`);
+    }
+    this.failAll((p) => p.reject(new Error("disconnected")));
   }
 
   private rejectAll(err: Error): void {
+    this.failAll((p) => p.reject(err));
+  }
+
+  private failAll(settle: (p: Pending) => void): void {
     const snapshot = [...this.pending.values()];
     this.pending.clear();
     for (const p of snapshot) {
       try {
-        p.reject(err);
+        settle(p);
       } catch {
-        /* listener threw; keep rejecting the rest */
+        /* listener threw; keep settling the rest */
       }
     }
   }
 
   async call(envelopePayload: Envelope, target: string, secret: readonly string[] = []): Promise<Json> {
     await this.ready;
-    if (!this.connected || this.ws === null) throw new Error("disconnected");
+    if (!this.connected || this.ws === null) {
+      if (this.grace.active()) return stoppedReply(target, String(envelopePayload["type"] ?? "?"));
+      throw new Error("disconnected");
+    }
     const id = `${this.idPrefix}-${this.nextId++}`;
     const env: Envelope = { type: "call", target, payload: envelopePayload, id };
     if (secret.length > 0) env["secret"] = [...secret]; // paths into `payload`
@@ -246,7 +303,8 @@ class Conn {
         this.ws!.send(frame.data);
       } catch (e) {
         this.pending.delete(id);
-        reject(e instanceof Error ? e : new Error(String(e)));
+        if (this.grace.active()) resolve(stoppedReply(target, typeof verb === "string" ? verb : "?"));
+        else reject(e instanceof Error ? e : new Error(String(e)));
       }
     });
   }
@@ -362,12 +420,14 @@ export class WsBridge implements Bridge {
   private readonly maxDelay: number;
   private readonly conns = new Map<string, Conn>();
   private readonly stateHandlers = new Set<(frame: Envelope) => void>();
+  private readonly grace: StopGrace;
 
   constructor(kernel: Kernel, opts: BridgeOptions) {
     this.kernel = kernel;
     this.origin = opts.origin.replace(/\/+$/, "");
     this.controlEndpoint = opts.controlEndpoint;
     this.maxDelay = opts.maxReconnectDelay ?? 16000;
+    this.grace = new StopGrace(opts.stopGraceMs ?? STOP_GRACE_MS);
     this.make = opts.makeSocket ?? defaultSocketFactory();
     kernel.bridge = this;
     // The guid appears when the root boots — possibly after the control socket
@@ -388,6 +448,7 @@ export class WsBridge implements Bridge {
         `${this.origin}/${endpoint}/ws`,
         this.make,
         this.maxDelay,
+        this.grace,
         (src, payload) => this.kernel.emit(src, payload),
       );
       this.conns.set(endpoint, c);
@@ -472,6 +533,12 @@ export class WsBridge implements Bridge {
     const id = this.kernel.resolveId(target);
     if (!this.kernel.agents.has(id)) return;
     this.kernel.emit(id, payload as Payload);
+  }
+
+  /** The host is stopping (`host_stopping`): begin the stop grace. Calls the
+   *  socket's close cuts off during it settle quietly, in-band. */
+  beginStop(): void {
+    this.grace.begin();
   }
 
   /** Make this kernel addressable from the host now: open the control socket
