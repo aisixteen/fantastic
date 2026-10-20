@@ -87,7 +87,7 @@ All steps run from the repo root, on `main`, with a clean tree.
    | `to-sign-aarch64-apple-darwin` | `fantastic-app-aarch64-apple-darwin.app.tar`: the unsigned `Aisixteen Fantastic.app` |
    | `installer-x86_64-pc-windows-msvc` | the unsigned setup it verified |
    | `to-sign-x86_64-pc-windows-msvc` | `fantastic-app-x86_64-pc-windows-msvc.stage.tar`: `fantastic-app.exe` and the sidecar, at the paths the bundler takes them |
-   | `installer-x86_64-unknown-linux-gnu` | the `.deb` and the AppImage — these ARE the release packages |
+   | `installer-x86_64-unknown-linux-gnu` | the `.deb` — it IS the release package |
 
    Its guard refuses, listing every problem at once, a tag not on `main`, a
    Release that is missing or names no CI run, a failed or mismatched run, and
@@ -164,15 +164,18 @@ All steps run from the repo root, on `main`, with a clean tree.
    confirms every signature on Windows.
 
    **Linux** (the GPG key whose fingerprint `SECURITY.md` lists). The CI's
-   packages are the release packages:
+   `.deb` is the release package:
    ```sh
    FPR=<40 hex>
    gh run download "$RUN" -n installer-x86_64-unknown-linux-gnu -D out
-   for f in out/fantastic-app-x86_64-unknown-linux-gnu.deb out/fantastic-app-x86_64-unknown-linux-gnu.AppImage; do
-     gpg --local-user "$FPR" --armor --detach-sign "$f"                 # → $f.asc
-   done
+   gpg --local-user "$FPR" --armor --detach-sign out/fantastic-app-x86_64-unknown-linux-gnu.deb   # → .deb.asc
    gpg --armor --export "$FPR" > out/fantastic-app-linux-signing-key.asc
    ```
+   Linux ships as a `.deb` only. There is no AppImage: the distributions'
+   WebKitGTK starts its helper processes from a path compiled into the library
+   (`WEBKIT_EXEC_PATH` works only in developer builds), so an AppImage works
+   only by patching that library, as Tauri's linuxdeploy route does (evidence
+   in PR #81). The cross-distribution package is a Flatpak (#82).
 8. **Upload** — never `--clobber`: an existing name fails, so a published
    installer is never silently replaced.
    ```sh
@@ -184,9 +187,8 @@ All steps run from the repo root, on `main`, with a clean tree.
    |---|---|
    | `fantastic-app-aarch64-apple-darwin.dmg` | macOS 14+, Apple silicon: Developer ID, the app and the DMG notarized and stapled |
    | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` | Windows 10/11 x64: NSIS, per user, Authenticode-signed and timestamped |
-   | `fantastic-app-x86_64-unknown-linux-gnu.deb` (+ `.asc`) | x86_64 Linux with glibc 2.39+ (Ubuntu 24.04+, Debian 13+) |
-   | `fantastic-app-x86_64-unknown-linux-gnu.AppImage` (+ `.asc`) | the same systems, no install |
-   | `fantastic-app-linux-signing-key.asc` | the public key of the `.asc` signatures |
+   | `fantastic-app-x86_64-unknown-linux-gnu.deb` (+ `.asc`) | x86_64 Linux: Ubuntu 24.04+, Debian 13+ (the kiosk, #54) |
+   | `fantastic-app-linux-signing-key.asc` | the public key of the `.asc` signature |
    | `SHA256SUMS-app` | the sums of all of the above |
 9. **Check the Release** (on `main`, so it reads `SHA256SUMS-app` against
    `SECURITY.md`'s current fingerprint):

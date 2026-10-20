@@ -7,10 +7,10 @@
 #   It packs EXACTLY the binaries a full `ci.yml` run built — the app from its
 #   `app-<triple>` artifact, the `fantastic` CLI (the app's canvas sidecar) from
 #   its `release-<target>` archive — with `tauri bundle --no-sign
-#   --no-binary-patching` (and `NO_STRIP=1` on Linux), installs and launches
+#   --no-binary-patching`, installs and launches
 #   each installer on a fresh runner, and keeps, 7 days, per OS:
 #     installer-<triple>  the unsigned installer this run verified
-#                         (the Linux ones ARE the release packages, to GPG-sign)
+#                         (the Linux .deb IS the release package, to GPG-sign)
 #     to-sign-<triple>    what is signed before the installer is made: the
 #                         unsigned .app (macOS); fantastic-app.exe and the
 #                         sidecar, staged as the bundler takes them (Windows)
@@ -33,9 +33,10 @@
 #   guard          refuses before anything runs, listing EVERY problem
 #   macos          the .app and the DMG (Apple silicon)
 #   windows        the NSIS setup (x64, per user)
-#   linux          the .deb and the AppImage (x86_64, built on ubuntu-24.04:
-#                  glibc 2.39)
-#   linux-bytes    each binary in them must be the CI run's, byte for byte
+#   linux          the .deb (x86_64; Ubuntu 24.04+, Debian 13+). No AppImage:
+#                  distro WebKitGTK can't be relocated without patching it
+#                  (PR #81); the cross-distro package is a Flatpak (#82)
+#   linux-bytes    the .deb's two binaries must be the CI run's, byte for byte
 #   verify-*       a FRESH runner per OS: install and launch — the app boots its
 #                  kernel and its bundled sidecar starts a canvas
 #                  (src/app/e2e/smoke.py); verify-trixie installs the .deb on a
@@ -102,7 +103,6 @@ jobs:
           # the assets a signed Release carries (RELEASING.md, step 7)
           ASSETS="fantastic-app-aarch64-apple-darwin.dmg fantastic-app-x86_64-pc-windows-msvc-setup.exe
                   fantastic-app-x86_64-unknown-linux-gnu.deb fantastic-app-x86_64-unknown-linux-gnu.deb.asc
-                  fantastic-app-x86_64-unknown-linux-gnu.AppImage fantastic-app-x86_64-unknown-linux-gnu.AppImage.asc
                   fantastic-app-linux-signing-key.asc SHA256SUMS-app"
           artifacts_present() {
             list=$(gh api --paginate "repos/$R/actions/runs/$1/artifacts?per_page=100" \
@@ -414,10 +414,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ── Linux: the .deb and the AppImage ─────────────────────────────────────
-  # ubuntu-24.04, the label the CI builds the app on: linuxdeploy copies the
-  # build host's GTK and WebKit into the AppImage, so the host fixes its glibc
-  # floor (2.39; the kiosk's Debian trixie has 2.41).
+  # ── Linux: the .deb ──────────────────────────────────────────────────────
+  # The .deb copies the two binaries in and adds the control file; its glibc
+  # floor is the app's (built on ubuntu-24.04, below the kiosk's 2.41).
   linux:
     needs: guard
     if: needs.guard.outputs.check == ''
@@ -441,8 +440,6 @@ jobs:
           cache-dependency-path: src/app/package-lock.json
       - name: the tauri CLI
         run: npm ci --prefix src/app --no-audit --no-fund
-      - name: the libraries linuxdeploy packs into the AppImage
-        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev file
       - uses: actions/download-artifact@v7
         with:
           name: release-${{ env.CLI_TARGET }}
@@ -469,27 +466,24 @@ jobs:
           mv "$RUNNER_TEMP/cli/fantastic" "src/app/binaries/fantastic-$APP_TARGET"
           tar -xf "dist/fantastic-app-$APP_TARGET.tar" -C "src/app/target/$APP_TARGET/release"
           ls -l src/app/binaries "src/app/target/$APP_TARGET/release"
-      - name: bundle, unsigned (NO_STRIP — linuxdeploy keeps the tested binaries as they are)
-        env:
-          NO_STRIP: "1"
+      - name: bundle, unsigned
         run: |
-          cd src/app && npx tauri bundle --ci --bundles deb,appimage --target "$APP_TARGET" --no-binary-patching --no-sign \
+          cd src/app && npx tauri bundle --ci --bundles deb --target "$APP_TARGET" --no-binary-patching --no-sign \
             --config "{\"version\":\"$VERSION\"}"
-      - name: exactly one .deb and one AppImage
+      - name: exactly one .deb
         run: |
           shopt -s nullglob
           B="src/app/target/$APP_TARGET/release/bundle"
           mkdir -p dist/installers
-          for pair in "deb/*.deb:fantastic-app-$APP_TARGET.deb" "appimage/*.AppImage:fantastic-app-$APP_TARGET.AppImage"; do
-            g="${pair%%:*}"
-            set -- "$B"/$g
-            [ "$#" -eq 1 ] || { echo "::error::$B/$g matched $# files, not 1: $*"; exit 1; }
-            cp "$1" "dist/installers/${pair#*:}"
-          done
+          set -- "$B"/deb/*.deb
+          [ "$#" -eq 1 ] || { echo "::error::$B/deb/*.deb matched $# files, not 1: $*"; exit 1; }
+          cp "$1" "dist/installers/fantastic-app-$APP_TARGET.deb"
           dpkg-deb --field "dist/installers/fantastic-app-$APP_TARGET.deb" Package Version Depends Recommends
           ls -l dist/installers
-      - name: the glibc floor of these installers
-        run: echo "Linux installers built on $(ldd --version | head -1)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: the glibc floor of the .deb
+        run: |
+          need=$(objdump -T "src/app/target/$APP_TARGET/release/fantastic-app" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "fantastic-app needs $need" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ env.APP_TARGET }}
@@ -527,11 +521,8 @@ jobs:
           tar -xzf dist/ci/fantastic-x86_64-unknown-linux-musl.tar.gz -C ci
           tar -xf "dist/ci/fantastic-app-$T.tar" -C ci
           dpkg-deb -x "dist/installers/fantastic-app-$T.deb" deb
-          chmod +x "dist/installers/fantastic-app-$T.AppImage"
-          "dist/installers/fantastic-app-$T.AppImage" --appimage-extract > /dev/null
           bad=0
-          for packed in deb/usr/bin/fantastic-app deb/usr/bin/fantastic \
-                        squashfs-root/usr/bin/fantastic-app squashfs-root/usr/bin/fantastic; do
+          for packed in deb/usr/bin/fantastic-app deb/usr/bin/fantastic; do
             if cmp -s "$packed" "ci/$(basename "$packed")"; then
               echo "same bytes: $packed"
             else
@@ -684,7 +675,6 @@ jobs:
       CHECK: ${{ needs.guard.outputs.check }}
       GH_TOKEN: ${{ github.token }}
       DEB: dist/installers/fantastic-app-x86_64-unknown-linux-gnu.deb
-      APPIMAGE: dist/installers/fantastic-app-x86_64-unknown-linux-gnu.AppImage
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
@@ -692,16 +682,13 @@ jobs:
         with:
           name: installer-x86_64-unknown-linux-gnu
           path: dist/installers
-      - name: the Release's packages, against SHA256SUMS-app (check)
+      - name: the Release's .deb, against SHA256SUMS-app (check)
         if: env.CHECK != ''
         run: |
           gh release download "$CHECK" -R "$GITHUB_REPOSITORY" -D dist/installers \
-            -p 'fantastic-app-x86_64-unknown-linux-gnu.*' -p fantastic-app-linux-signing-key.asc -p SHA256SUMS-app
-          cd dist/installers
-          for f in fantastic-app-x86_64-unknown-linux-gnu.deb fantastic-app-x86_64-unknown-linux-gnu.AppImage; do
-            grep "  $f\$" SHA256SUMS-app | sha256sum -c -
-          done
-      - name: good GPG signatures, by SECURITY.md's key (check)
+            -p 'fantastic-app-x86_64-unknown-linux-gnu.deb*' -p fantastic-app-linux-signing-key.asc -p SHA256SUMS-app
+          cd dist/installers && grep '  fantastic-app-x86_64-unknown-linux-gnu.deb$' SHA256SUMS-app | sha256sum -c -
+      - name: a good GPG signature, by SECURITY.md's key (check)
         if: env.CHECK != ''
         env:
           FPR: ${{ needs.guard.outputs.linux_fpr }}
@@ -711,38 +698,19 @@ jobs:
           gpg --batch --import dist/installers/fantastic-app-linux-signing-key.asc
           got=$(gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
           [ "$got" = "$FPR" ] || { echo "::error::the published key is $got, SECURITY.md lists $FPR"; exit 1; }
-          for f in "$DEB" "$APPIMAGE"; do
-            gpg --batch --status-fd 1 --verify "$f.asc" "$f" | tee "$RUNNER_TEMP/v"
-            # VALIDSIG names the signing (sub)key and, last, the primary key
-            grep '^\[GNUPG:\] VALIDSIG ' "$RUNNER_TEMP/v" | grep -qw "$FPR" \
-              || { echo "::error::$f: no good signature by $FPR"; exit 1; }
-          done
-      # A desktop's own libraries: an AppImage leaves the host's GL, EGL,
-      # fontconfig, harfbuzz, fribidi and Wayland out on purpose (linuxdeploy's
-      # excludelist), and WebKit opens libGLESv2 at run time. The runner image
-      # is no desktop; Ubuntu Desktop ships all of these.
-      - name: a display, and a desktop's libraries
-        id: desktop
-        run: sudo apt-get update -q && sudo apt-get install -y -q xvfb libgtk-3-0t64 libegl1 libgles2 libgl1-mesa-dri
-      - name: launch smoke — the AppImage
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
+          gpg --batch --status-fd 1 --verify "$DEB.asc" "$DEB" | tee "$RUNNER_TEMP/v"
+          # VALIDSIG names the signing (sub)key and, last, the primary key
+          grep '^\[GNUPG:\] VALIDSIG ' "$RUNNER_TEMP/v" | grep -qw "$FPR" \
+            || { echo "::error::$DEB: no good signature by $FPR"; exit 1; }
+      - name: install the .deb, and a display
         run: |
-          chmod +x "$APPIMAGE"
-          python3 src/app/e2e/smoke.py --root "$RUNNER_TEMP/appimage" -- xvfb-run -a "$PWD/$APPIMAGE"
-      - name: install the .deb
-        # the .deb is checked whatever the AppImage did
-        if: ${{ !cancelled() && steps.desktop.outcome == 'success' }}
-        id: deb
-        run: |
-          sudo apt-get install -y -q "./$DEB"
+          sudo apt-get update -q
+          sudo apt-get install -y -q "./$DEB" xvfb
           dpkg -s aisixteen-fantastic | grep -E '^(Package|Version|Depends|Recommends):'
           ls -l /usr/bin/fantastic-app /usr/bin/fantastic
-      - name: launch smoke — the .deb
-        if: ${{ !cancelled() && steps.deb.outcome == 'success' }}
+      - name: launch smoke
         run: python3 src/app/e2e/smoke.py --root "$RUNNER_TEMP/deb" -- xvfb-run -a /usr/bin/fantastic-app
       - name: remove the .deb
-        if: ${{ !cancelled() && steps.deb.outcome == 'success' }}
         run: |
           sudo apt-get remove -y -q aisixteen-fantastic
           [ ! -e /usr/bin/fantastic-app ] || { echo "::error::removing the package left /usr/bin/fantastic-app"; exit 1; }

@@ -179,7 +179,7 @@ beside `SHA256SUMS-app`:
 |---|---|
 | macOS 14+, Apple silicon | `fantastic-app-aarch64-apple-darwin.dmg` (notarized) |
 | Windows 10/11 x64 | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` (per user, no admin) |
-| x86_64 Linux, glibc 2.39+ (Ubuntu 24.04+, Debian 13+) | `fantastic-app-x86_64-unknown-linux-gnu.deb`, or the `.AppImage` (`chmod +x` and run) |
+| x86_64 Linux: Ubuntu 24.04+, Debian 13+ | `fantastic-app-x86_64-unknown-linux-gnu.deb` (`sudo apt install ./…deb`) |
 
 The `.deb` installs `/usr/bin/fantastic-app` and `/usr/bin/fantastic`, with
 `Depends: libwebkit2gtk-4.1-0, libgtk-3-0` and `Recommends: fonts-dejavu-core`.
@@ -188,9 +188,10 @@ On a minimal system installed with `--no-install-recommends` (the kiosk), add
 fullscreen, with no desktop environment. The session must set `SHELL`, as a
 login does: the app starts each canvas in the login environment `$SHELL` prints.
 
-The AppImage carries GTK and WebKit but, like every AppImage, takes the
-graphics and text stack from the host: a desktop has it; on a bare system
-install `libgtk-3-0t64 libegl1 libgles2 libgl1-mesa-dri` (Ubuntu 24.04 names).
+Other Linux distributions: a Flatpak is planned
+([#82](https://github.com/aisixteen/fantastic/issues/82)). There is no AppImage:
+the distributions' WebKitGTK finds its helper processes at a path compiled into
+the library, so an AppImage works only by patching that library.
 
 Verify before you install:
 

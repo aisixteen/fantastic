@@ -46,8 +46,8 @@ signing key is stored on GitHub. They are signed:
   timestamped Authenticode signature:
   `Get-AuthenticodeSignature .\fantastic-app-x86_64-pc-windows-msvc-setup.exe`
   must report `Valid`.
-- **Linux** — each installer has a detached, armored GPG signature (`<file>.asc`):
-  `gpg --import fantastic-app-linux-signing-key.asc && gpg --verify <file>.asc <file>`
+- **Linux** — the `.deb` has a detached, armored GPG signature (`<file>.asc`):
+  `gpg --import fantastic-app-linux-signing-key.asc && gpg --verify fantastic-app-x86_64-unknown-linux-gnu.deb.asc fantastic-app-x86_64-unknown-linux-gnu.deb`
   must report a good signature by the key whose fingerprint is listed here:
 
   - Linux signing key fingerprint: *(added by the maintainer when the key

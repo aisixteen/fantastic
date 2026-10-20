@@ -5,8 +5,8 @@ every OS, on a fresh runner (and in `debian:trixie-slim` for the kiosk).
     python3 smoke.py --root <empty dir> -- <command that starts the app> [args…]
 
 The folder `<root>/alpha` is appended to the command, and the app runs with
-`FANTASTIC_HOME=<root>/home`. The command may wrap the app (`xvfb-run -a`, an
-AppImage's runtime): the host's run file must then name a descendant of it.
+`FANTASTIC_HOME=<root>/home`. The command may wrap the app (`xvfb-run -a`): the
+host's run file must then name a descendant of it.
 
 1. Within 60 s the host's run file (`<home>/app/home.yaml`) names the app's pid,
    and its `url` answers HTTP 200.
