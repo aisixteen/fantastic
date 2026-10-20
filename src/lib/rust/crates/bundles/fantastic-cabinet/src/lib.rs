@@ -1,19 +1,21 @@
-//! Cabinets — a master AI opens cabinets: subcanvases, each with one worker AI.
+//! Cabinets — a master AI opens cabinets: canvases, each with one worker AI.
 //!
 //! Port of python `cabinet/tools.py` (the reference runtime): verb for verb, with
 //! the same refusals, the same grants and the same wiring. See `readme.md`.
 //!
 //! THE SHAPE. One MANAGER (a `cabinet.tools` agent the operator makes once) owns the
-//! CABINETS as its children. A cabinet is a subcanvas: its record carries a live html
-//! view (`view.html`) that watches it, and it owns ONE WORKER AI as its child. The
-//! worker's EQUIPMENT is the worker's own child, reached through its `$subtree`
-//! grant and nothing else.
+//! CABINETS as its children, and names the CANVAS that spawns them (`canvas_id`). A
+//! cabinet is a CANVAS of its own: `open` asks that canvas (`new_canvas`) to make it,
+//! so the cabinet's canvas is a CHILD of the spawning canvas, nested in the hierarchy.
+//! The cabinet's record is the live status cell (`view.html`) that the main canvas
+//! shows and that opens the cabinet's canvas. The cabinet owns ONE WORKER AI as its
+//! child. The worker's EQUIPMENT is placed on the cabinet's canvas with `create` and
+//! `place`, and reached through the canvas's grants and nothing else.
 //!
 //! NOTHING IS MADE OR CHANGED BEHIND A GRANT. The manager makes and edits every record
 //! by a gated send to the ROOT (`create_agent`, `update_agent`, `delete_agent`), as
-//! itself. The operator grants the manager those verbs on the root. The cabinet makes
-//! its worker's equipment on the root (`create_agent`, granted by the manager at open),
-//! forcing the parent to the worker; the worker holds nothing on the root.
+//! itself. The operator grants the manager those verbs on the root. Each record's
+//! grants are restated whole, because `update_agent` replaces them.
 //!
 //! SERIAL WRITES. `open_cabinet`, `close_cabinet` and `conclude` run ONE AT A TIME per
 //! manager ([`manager_lock`]): each reads whole grant maps and writes them back.
@@ -29,7 +31,7 @@ use fantastic_kernel::refusal::{
 };
 use fantastic_kernel::{current_origin, AgentId, Item, Kernel, RESERVED_RECORD_KEYS};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -49,28 +51,21 @@ const CABINET: &str = "cabinet";
 /// The worker's own report up: the only verb a worker sends its cabinet.
 const STATUS_VERB: &str = "status";
 
-/// The worker's equipment, placed under it: the one other verb a worker sends its cabinet.
-const EQUIP_VERB: &str = "equip";
+/// The canvas verb that makes a child canvas: the manager asks the spawning canvas for it.
+const NEW_CANVAS_VERB: &str = "new_canvas";
+
+/// What a worker may do on its cabinet's canvas: place equipment (`create`) and place
+/// views (`place`). Nothing else on the canvas.
+const CANVAS_VERBS: [&str; 2] = ["create", "place"];
 
 /// The manager's verbs that wire or unwire: each runs under the manager's lock.
 const SERIAL_VERBS: [&str; 3] = ["open_cabinet", "close_cabinet", "conclude"];
-
-/// The grant keys an equipment agent may name without naming an agent: itself, its
-/// parent (the worker) and its own subtree. Any other key must be an agent already
-/// under the worker.
-const RELATIVE_KEYS: [&str; 3] = ["$self", "$parent", "$subtree"];
-
-/// One lock per manager id (python `_LOCKS`, keyed by the manager): see [`manager_lock`].
-/// An entry leaves the table when its last holder lets go, so a deleted manager leaves
-/// nothing behind.
-static MANAGER_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// What one worker may send another worker, or the master: messages, and nothing else.
 const MESSAGE_VERBS: [&str; 2] = ["send", "reflect"];
 
 /// Record keys a worker does NOT copy from its backend (python `_NOT_COPIED`).
-const NOT_COPIED: [&str; 24] = [
+const NOT_COPIED: &[&str] = &[
     "id",
     "parent_id",
     "can_call",
@@ -92,10 +87,18 @@ const NOT_COPIED: [&str; 24] = [
     "task",
     "worker",
     "master",
+    "canvas",
     "status",
     "cabinet_peers",
     "max_cabinets",
+    "canvas_id",
 ];
+
+/// One lock per manager id (python `_LOCKS`, keyed by the manager): see [`manager_lock`].
+/// An entry leaves the table when its last holder lets go, so a deleted manager leaves
+/// nothing behind.
+static MANAGER_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The keys a `setup=` may NOT carry: wiring the manager writes itself.
 fn is_wiring(key: &str) -> bool {
@@ -216,6 +219,11 @@ fn error_of(res: &Value) -> Option<String> {
         .map(|e| e.as_str().map_or_else(|| py_repr_value(e), str::to_string))
 }
 
+/// Whether a reply says a delete went through.
+fn deleted_ok(res: &Value) -> bool {
+    res.get("deleted").is_some_and(py_truthy)
+}
+
 // ─── the one gated write path ────────────────────────────────────
 
 /// One send as the calling agent (the dispatch identity). A failed or refused send
@@ -284,6 +292,17 @@ fn grants(pairs: &[(&str, Value)]) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// Delete a half-made cabinet and its canvas (`""` names none). The canvas's subtree
+/// goes with it.
+async fn unmake(kernel: &Arc<Kernel>, cab_id: &str, canvas_id: &str) {
+    if !cab_id.is_empty() && record(kernel, cab_id).is_some() {
+        tree(kernel, json!({"type": "delete_agent", "id": cab_id})).await;
+    }
+    if !canvas_id.is_empty() && record(kernel, canvas_id).is_some() {
+        tree(kernel, json!({"type": "delete_agent", "id": canvas_id})).await;
+    }
+}
+
 // ─── reading the cabinets ────────────────────────────────────────
 
 /// The manager's live cabinets' records, in creation order.
@@ -316,11 +335,16 @@ fn subtree(kernel: &Kernel, agent_id: &str) -> Vec<String> {
     out
 }
 
-/// The ids of a worker's direct children: its equipment.
-fn equipment(kernel: &Kernel, worker: &str) -> Vec<String> {
+/// Every agent under `agent_id` (strictly), at any depth.
+fn descendants(kernel: &Kernel, agent_id: &str) -> Vec<String> {
+    subtree(kernel, agent_id).into_iter().skip(1).collect()
+}
+
+/// The ids placed on a cabinet's canvas: its children (equipment, nested canvases).
+fn equipment(kernel: &Kernel, canvas: &str) -> Vec<String> {
     kernel
         .agents
-        .get(&AgentId::from(worker))
+        .get(&AgentId::from(canvas))
         .map(|a| a.child_ids().into_iter().map(|c| c.0).collect())
         .unwrap_or_default()
 }
@@ -346,6 +370,7 @@ fn instructions(cab: &Rec, peers: &[Value], master: &str) -> String {
     let worker = str_of(cab, "worker");
     let task = str_of(cab, "task");
     let id = str_of(cab, "id");
+    let canvas = str_of(cab, "canvas");
     let mut lines: Vec<String> = vec![
         format!("You are the worker AI of cabinet `{id}`. Your task: {task}"),
         format!(
@@ -378,12 +403,9 @@ fn instructions(cab: &Rec, peers: &[Value], master: &str) -> String {
          progress: 0-100, result: ...}}}}`. Put your final answer in `result`."
     ));
     lines.push(format!(
-        "- Equipment: send `equip` to your cabinet `{id}` with `handler_module` \
-         (and optionally `id`, `setup`, `can_call`, `callable_by`): \
-         `send {{target: \"{id}\", payload: {{type: \"equip\", handler_module: \"...\"}}}}`. \
-         The new agent is placed under you, inside this cabinet, and granted within it only. \
-         A grant may name `$self`, `$parent`, `$subtree`, `{worker}` or an agent already \
-         under you, nothing else."
+        "- Equipment: your cabinet is the canvas `{canvas}`. Build on it with `create` \
+         (`send {{target: \"{canvas}\", payload: {{type: \"create\", record: {{handler_module: \"...\"}}}}}}`) \
+         and show views with `place`. Those are the only verbs you hold on it."
     ));
     lines.join("\n")
 }
@@ -420,9 +442,10 @@ async fn refresh_directories(kernel: &Arc<Kernel>, manager: &str) -> Option<Stri
 
 /// args: task:str (req), name:str?, backend:str? (an existing AI agent id; default the
 /// master), setup:dict? (fields over the backend's copy; a new backend is flagged).
-/// Opens one cabinet: a subcanvas with its worker AI, wired to every live worker and to
-/// the master. The worker is NOT started — send it its first message (the task).
-/// Returns {id, worker, master, backend, new_backend, peers}.
+/// Opens one cabinet: a canvas of its own, a child of the canvas that spawns it (the
+/// manager's `canvas_id`), with its worker AI, wired to every live worker and to the
+/// master. The worker is NOT started — send it its first message (the task). Returns
+/// {id, canvas, worker, master, backend, new_backend, peers}.
 async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let task = match payload.get("task").and_then(Value::as_str) {
         Some(t) if !t.trim().is_empty() => t.trim().to_string(),
@@ -448,6 +471,26 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         with(&mut r, "arg", json!("master"));
         return r;
     };
+    let canvas_id = match record(kernel, manager).and_then(|m| m.get("canvas_id").cloned()) {
+        Some(Value::String(s)) if !s.is_empty() => s,
+        _ => {
+            let mut r = refusal_hint(
+                MISSING_ARG,
+                "open_cabinet: the manager names no canvas — its cabinets are canvases made by the canvas that spawns them",
+                format!("name the spawning canvas on the manager: update_agent {{id: {manager}, canvas_id: <canvas node>}}"),
+            );
+            with(&mut r, "arg", json!("canvas_id"));
+            return r;
+        }
+    };
+    if record(kernel, &canvas_id).is_none() {
+        let mut r = refusal(
+            UNKNOWN_AGENT,
+            format!("open_cabinet: canvas `{canvas_id}` does not exist"),
+        );
+        with(&mut r, "id", json!(canvas_id));
+        return r;
+    }
     let backend_id = match payload.get("backend").filter(|v| py_truthy(v)) {
         None => master.clone(),
         Some(Value::String(s)) if !s.is_empty() => s.clone(),
@@ -564,8 +607,62 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         format!("cabinet_{slug}")
     };
     let worker_id = format!("{cab_id}_worker");
-    let root = root_id(kernel);
+    if record(kernel, &cab_id).is_some() {
+        let mut r = refusal(
+            "exists",
+            format!("open_cabinet: `{cab_id}` already exists — name the cabinet another name"),
+        );
+        with(&mut r, "id", json!(cab_id));
+        return r;
+    }
     let display = name.clone().unwrap_or_else(|| head(&task, 60));
+
+    // the manager may ask the spawning canvas for a child canvas, and nothing else
+    let grant_err = wire(
+        kernel,
+        manager,
+        &grants(&[(canvas_id.as_str(), json!([NEW_CANVAS_VERB]))]),
+        &[],
+        &[],
+    )
+    .await
+    .or(wire(
+        kernel,
+        &canvas_id,
+        &[],
+        &grants(&[(manager, json!([NEW_CANVAS_VERB]))]),
+        &[],
+    )
+    .await);
+    if let Some(err) = grant_err {
+        return json!({"error": format!("open_cabinet: could not grant the canvas: {err}")});
+    }
+    // THE CABINET'S CANVAS: the spawning canvas makes it, a child of its own
+    let made_canvas = call(
+        kernel,
+        &canvas_id,
+        json!({"type": NEW_CANVAS_VERB, "name": cab_id}),
+    )
+    .await;
+    if let Some(err) = error_of(&made_canvas) {
+        let mut out = made_canvas.clone();
+        with(
+            &mut out,
+            "error",
+            json!(format!(
+                "open_cabinet: the canvas `{canvas_id}` did not make the cabinet's canvas: {err}"
+            )),
+        );
+        return out;
+    }
+    let cab_canvas = match made_canvas.get("id").and_then(Value::as_str) {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            return json!({
+                "error": format!("open_cabinet: the canvas `{canvas_id}` answered no id for the cabinet's canvas")
+            })
+        }
+    };
     let made = tree(
         kernel,
         json!({
@@ -577,20 +674,21 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
             "task": task,
             "master": master,
             "worker": worker_id,
+            "canvas": cab_canvas,
             "status": {"line": "", "progress": null, "result": null, "at": null},
             "display_name": display,
             "description": format!("Cabinet: {}", head(&task, 200)),
+            // the live status cell on the main canvas: it opens the cabinet's canvas
             "view": {
                 "kind": "html",
                 "bytes": VIEW_HTML.replace("__CABINET_ID__", &cab_id),
                 "calls": ["view", "watch"],
             },
-            // the cabinet makes its worker's equipment on the root, under the worker only
-            "can_call": {"$self": "*", root.clone(): ["create_agent"]},
+            "can_call": {"$self": "*"},
             "callable_by": {
                 "$self": "*",
                 "$parent": "*",
-                worker_id.clone(): [STATUS_VERB, EQUIP_VERB],
+                worker_id.clone(): [STATUS_VERB],
                 // the master reads its cabinet directly; the canvas (`user`) draws its panel
                 master.clone(): ["view", "reflect"],
                 "user": ["view", "watch", "reflect"],
@@ -599,6 +697,7 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     )
     .await;
     if error_of(&made).is_some() {
+        unmake(kernel, "", &cab_canvas).await;
         return made;
     }
 
@@ -612,14 +711,14 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         "description".into(),
         json!(format!("Worker of cabinet {cab_id}: {}", head(&task, 200))),
     );
-    // its equipment (`$subtree`), itself, and its cabinet's channels: `status` up, and
-    // `equip` to place equipment under itself. Nothing on the root.
+    // itself, its cabinet's `status` up, and its cabinet canvas (`create` and `place`
+    // on it, nothing else). Nothing on the root.
     worker_payload.insert(
         "can_call".into(),
         json!({
             "$self": "*",
-            "$parent": [STATUS_VERB, EQUIP_VERB],
-            "$subtree": "*",
+            "$parent": [STATUS_VERB],
+            cab_canvas.clone(): CANVAS_VERBS,
         }),
     );
     worker_payload.insert(
@@ -629,26 +728,25 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     worker_payload.extend(worker_rec.clone());
     let made_worker = tree(kernel, Value::Object(worker_payload)).await;
     if error_of(&made_worker).is_some() {
-        tree(kernel, json!({"type": "delete_agent", "id": cab_id})).await;
+        unmake(kernel, &cab_id, &cab_canvas).await;
         return made_worker;
     }
 
-    // Wire the NEW worker to the master, the stores and every live worker, and every
-    // live worker to it. Every step runs (no short-circuit); the first failure deletes
-    // the cabinet it half-made.
+    // Wire the NEW worker to its canvas, the master, the stores and every live worker,
+    // and every live worker to it. Every step runs (no short-circuit); the first failure
+    // deletes the cabinet it half-made.
     let mut failure: Option<String> = None;
     let mut step = |err: Option<String>| {
         if failure.is_none() {
             failure = err;
         }
     };
-    // the cabinet (not the worker) is the one that creates on the root
     step(
         wire(
             kernel,
-            &root,
+            &cab_canvas,
             &[],
-            &grants(&[(cab_id.as_str(), json!(["create_agent"]))]),
+            &grants(&[(worker_id.as_str(), json!(CANVAS_VERBS))]),
             &[],
         )
         .await,
@@ -757,7 +855,7 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         failure = refresh_directories(kernel, manager).await;
     }
     if let Some(failure) = failure {
-        tree(kernel, json!({"type": "delete_agent", "id": cab_id})).await;
+        unmake(kernel, &cab_id, &cab_canvas).await;
         return json!({
             "error": format!("open_cabinet: wiring failed and the cabinet was removed: {failure}")
         });
@@ -773,6 +871,7 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         .collect();
     let mut out = json!({
         "id": cab_id,
+        "canvas": cab_canvas,
         "worker": worker_id,
         "master": master,
         "backend": backend_id,
@@ -786,10 +885,44 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     out
 }
 
-/// args: id:str (req) — a cabinet of this manager. Deletes the cabinet with its worker
-/// and ALL its equipment, then rewrites the live workers' directories. Returns
-/// {closed, deleted}.
-async fn close(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+/// Every agent this cabinet holds that is not kept and holds no kept agent is deleted
+/// (python `_prune`): the kept agents stay with their path up to `node`. Returns the
+/// deleted ids and the error, if one stopped it.
+async fn prune(kernel: &Arc<Kernel>, node: &str, keep: &[String]) -> (Vec<String>, Option<String>) {
+    let mut deleted = Vec::new();
+    let children: Vec<String> = kernel
+        .agents
+        .get(&AgentId::from(node))
+        .map(|a| a.child_ids().into_iter().map(|c| c.0).collect())
+        .unwrap_or_default();
+    for child in children {
+        if keep.contains(&child) {
+            continue;
+        }
+        let sub = subtree(kernel, &child);
+        if sub.iter().any(|s| keep.contains(s)) {
+            let (more, err) = Box::pin(prune(kernel, &child, keep)).await;
+            deleted.extend(more);
+            if err.is_some() {
+                return (deleted, err);
+            }
+            continue;
+        }
+        let res = tree(kernel, json!({"type": "delete_agent", "id": child})).await;
+        if !deleted_ok(&res) {
+            let err = error_of(&res).unwrap_or_else(|| format!("`{child}` was not deleted"));
+            return (deleted, Some(err));
+        }
+        deleted.extend(sub);
+    }
+    (deleted, None)
+}
+
+/// args: id:str (req) — a cabinet of this manager. Deletes the cabinet with its worker,
+/// and its canvas with ALL its equipment, then rewrites the live workers' directories.
+/// `keep` names results on this canvas to keep (from `conclude`): the canvas stays with
+/// them and everything else on it goes. Returns {closed, deleted, kept}.
+async fn close(manager: &str, payload: &Value, kernel: &Arc<Kernel>, keep: &[String]) -> Value {
     let cab_id = match payload.get("id").and_then(Value::as_str) {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
@@ -812,14 +945,45 @@ async fn close(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         with(&mut r, "id", json!(cab_id));
         return r;
     }
-    let gone = subtree(kernel, &cab_id);
+    let rec = record(kernel, &cab_id).unwrap_or_default();
+    let canvas = str_of(&rec, "canvas").to_string();
+    let has_canvas = !canvas.is_empty() && record(kernel, &canvas).is_some();
+    let kept_here: Vec<String> = if has_canvas {
+        let below = descendants(kernel, &canvas);
+        keep.iter().filter(|k| below.contains(k)).cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let mut gone = subtree(kernel, &cab_id);
     let res = tree(kernel, json!({"type": "delete_agent", "id": cab_id})).await;
-    if !res.get("deleted").is_some_and(py_truthy) {
+    if !deleted_ok(&res) {
         let mut out = res.clone();
         let error =
             error_of(&res).unwrap_or_else(|| format!("close_cabinet: `{cab_id}` was not deleted"));
         with(&mut out, "error", json!(error));
         return out;
+    }
+    if has_canvas && !kept_here.is_empty() {
+        let (pruned, err) = prune(kernel, &canvas, keep).await;
+        gone.extend(pruned);
+        if let Some(err) = err {
+            return json!({
+                "error": format!("close_cabinet: `{cab_id}` was deleted, but its canvas `{canvas}` was not pruned: {err}"),
+                "deleted": gone,
+            });
+        }
+    } else if has_canvas {
+        gone.extend(subtree(kernel, &canvas));
+        let res = tree(kernel, json!({"type": "delete_agent", "id": canvas})).await;
+        if !deleted_ok(&res) {
+            let mut out = res.clone();
+            let error = error_of(&res).unwrap_or_else(|| {
+                format!("close_cabinet: `{cab_id}` was deleted, but its canvas `{canvas}` was not")
+            });
+            with(&mut out, "error", json!(error));
+            with(&mut out, "deleted", json!(gone));
+            return out;
+        }
     }
     if let Some(err) = refresh_directories(kernel, manager).await {
         return json!({
@@ -827,11 +991,13 @@ async fn close(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
             "deleted": gone,
         });
     }
-    json!({"closed": cab_id, "deleted": gone})
+    let mut kept_sorted = kept_here;
+    kept_sorted.sort();
+    json!({"closed": cab_id, "deleted": gone, "kept": kept_sorted})
 }
 
-/// No args. Every live cabinet: its task, worker, live status and equipment. The
-/// master's monitor.
+/// No args. Every live cabinet: its task, worker, canvas, live status and equipment.
+/// The master's monitor.
 fn cabinets_verb(manager: &str, kernel: &Kernel) -> Value {
     let rows: Vec<Value> = cabinets(kernel, manager)
         .iter()
@@ -841,8 +1007,9 @@ fn cabinets_verb(manager: &str, kernel: &Kernel) -> Value {
                 "name": c.get("display_name").cloned().unwrap_or(Value::Null),
                 "task": c.get("task").cloned().unwrap_or(Value::Null),
                 "worker": c.get("worker").cloned().unwrap_or(Value::Null),
+                "canvas": c.get("canvas").cloned().unwrap_or(Value::Null),
                 "status": c.get("status").cloned().unwrap_or(Value::Null),
-                "equipment": equipment(kernel, str_of(c, "worker")),
+                "equipment": equipment(kernel, str_of(c, "canvas")),
             })
         })
         .collect();
@@ -854,17 +1021,60 @@ fn cabinets_verb(manager: &str, kernel: &Kernel) -> Value {
     })
 }
 
-/// No args. Closes EVERY cabinet this manager opened, deleting each subcanvas with its
-/// worker and equipment. The manager stays. Returns {concluded, deleted}.
-async fn conclude(manager: &str, kernel: &Arc<Kernel>) -> Value {
+/// args: keep:[str]? — the ids to KEEP: live cabinets of this manager (kept whole), or
+/// results on a cabinet's canvas (the canvas and the path to them stay). Every other
+/// cabinet is closed. A keep id that is neither is refused before anything is deleted.
+/// The manager stays. Returns {concluded, kept, deleted, count}.
+async fn conclude(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let keep: Vec<String> = match payload.get("keep") {
+        None => Vec::new(),
+        Some(Value::Array(items))
+            if items
+                .iter()
+                .all(|k| k.as_str().is_some_and(|s| !s.is_empty())) =>
+        {
+            items
+                .iter()
+                .filter_map(|k| k.as_str().map(str::to_string))
+                .collect()
+        }
+        Some(_) => return bad("conclude", "keep", "a list of cabinet or result ids"),
+    };
+    let live = cabinets(kernel, manager);
+    let cab_ids: BTreeSet<String> = live.iter().map(|c| str_of(c, "id").to_string()).collect();
+    let results: BTreeSet<String> = live
+        .iter()
+        .filter(|c| !str_of(c, "canvas").is_empty())
+        .flat_map(|c| descendants(kernel, str_of(c, "canvas")))
+        .collect();
+    let unknown: Vec<&str> = keep
+        .iter()
+        .map(String::as_str)
+        .filter(|k| !cab_ids.contains(*k) && !results.contains(*k))
+        .collect::<BTreeSet<&str>>()
+        .into_iter()
+        .collect();
+    if !unknown.is_empty() {
+        return json!({
+            "error": format!("conclude: keep names no live cabinet or result of this manager: {}", py_list(&unknown)),
+            "reason": "unknown_keep",
+            "unknown": unknown,
+        });
+    }
+    let mut kept_sorted = keep.clone();
+    kept_sorted.sort();
     let mut concluded: Vec<Value> = Vec::new();
     let mut deleted: Vec<Value> = Vec::new();
-    for cab in cabinets(kernel, manager) {
-        let cab_id = str_of(&cab, "id").to_string();
-        let res = close(manager, &json!({"id": cab_id}), kernel).await;
+    for cab in &live {
+        let cab_id = str_of(cab, "id").to_string();
+        if keep.contains(&cab_id) {
+            continue;
+        }
+        let res = close(manager, &json!({"id": cab_id}), kernel, &keep).await;
         if error_of(&res).is_some() {
             let mut out = res.clone();
             with(&mut out, "concluded", Value::Array(concluded));
+            with(&mut out, "kept", json!(kept_sorted));
             with(&mut out, "deleted", Value::Array(deleted));
             return out;
         }
@@ -874,98 +1084,7 @@ async fn conclude(manager: &str, kernel: &Arc<Kernel>) -> Value {
         }
     }
     let count = concluded.len();
-    json!({"concluded": concluded, "deleted": deleted, "count": count})
-}
-
-/// args: handler_module:str (req), id:str?, setup:dict? (record fields, no wiring keys), can_call:dict?, callable_by:dict? (keys: $self, $parent, $subtree, the worker or an agent already under it). Places ONE agent under this cabinet's worker, granted inside the cabinet only. Returns {id, parent, handler_module}.
-async fn equip(cab_id: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
-    if payload.get("parent_id").is_some() {
-        return bad(
-            EQUIP_VERB,
-            "parent_id",
-            "absent: equipment is always placed under its worker",
-        );
-    }
-    let rec = record(kernel, cab_id).unwrap_or_default();
-    let worker = str_of(&rec, "worker").to_string();
-    let handler_module = match payload.get("handler_module").and_then(Value::as_str) {
-        Some(h) if !h.trim().is_empty() => h.trim().to_string(),
-        _ => {
-            return missing_hint(
-                EQUIP_VERB,
-                "handler_module",
-                "equip {handler_module: \"file_bridge.tools\", ...}",
-            )
-        }
-    };
-    let eq_id = match payload.get("id").filter(|v| !v.is_null()) {
-        None => format!("{worker}_eq_{}", token_hex(3)),
-        Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
-        Some(_) => return bad(EQUIP_VERB, "id", "a non-empty string"),
-    };
-    let setup = match payload.get("setup").filter(|v| py_truthy(v)) {
-        None => Map::new(),
-        Some(Value::Object(m)) => m.clone(),
-        Some(_) => return bad(EQUIP_VERB, "setup", "a map of record fields"),
-    };
-    let mut wiring: Vec<&str> = setup
-        .keys()
-        .map(String::as_str)
-        .filter(|k| is_wiring(k) || RESERVED_RECORD_KEYS.contains(k) || *k == "handler_module")
-        .collect();
-    if !wiring.is_empty() {
-        wiring.sort_unstable();
-        return bad(
-            EQUIP_VERB,
-            "setup",
-            &format!("a map without wiring keys (got {})", py_list(&wiring)),
-        );
-    }
-    // the grants stay inside the cabinet: every key names the equipment's own relatives
-    // or an agent already under the worker (the worker and its equipment, nothing outside)
-    let inside = subtree(kernel, &worker);
-    let mut grants = Map::new();
-    for field in ["can_call", "callable_by"] {
-        let Some(grant) = payload.get(field).filter(|v| !v.is_null()) else {
-            continue;
-        };
-        let Value::Object(map) = grant else {
-            return bad(EQUIP_VERB, field, "a grant map");
-        };
-        let mut outside: Vec<&str> = map
-            .keys()
-            .map(String::as_str)
-            .filter(|k| !RELATIVE_KEYS.contains(k) && !inside.iter().any(|i| i == k))
-            .collect();
-        if !outside.is_empty() {
-            outside.sort_unstable();
-            return bad(
-                EQUIP_VERB,
-                field,
-                &format!(
-                    "a grant inside this cabinet only (got {})",
-                    py_list(&outside)
-                ),
-            );
-        }
-        grants.insert(field.to_string(), grant.clone());
-    }
-    // callable_by defaults to the worker and the equipment's own subtree: reached by its worker alone
-    grants
-        .entry("callable_by")
-        .or_insert_with(|| json!({"$self": "*", "$parent": "*"}));
-    let mut create = Map::new();
-    create.insert("type".into(), json!("create_agent"));
-    create.insert("parent_id".into(), json!(worker));
-    create.insert("id".into(), json!(eq_id));
-    create.insert("handler_module".into(), json!(handler_module));
-    create.extend(setup);
-    create.extend(grants);
-    let made = tree(kernel, Value::Object(create)).await;
-    if error_of(&made).is_some() {
-        return made;
-    }
-    json!({"id": eq_id, "parent": worker, "handler_module": handler_module})
+    json!({"concluded": concluded, "kept": kept_sorted, "deleted": deleted, "count": count})
 }
 
 // ─── verbs: a cabinet ────────────────────────────────────────────
@@ -1009,15 +1128,16 @@ async fn status(cab_id: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     json!({"ok": true, "cabinet": cab_id})
 }
 
-/// No args. The cabinet's panel: its task, worker, live status and equipment.
+/// No args. The cabinet's panel: its task, worker, canvas, live status and equipment.
 fn view(cab_id: &str, kernel: &Kernel) -> Value {
     let rec = record(kernel, cab_id).unwrap_or_default();
     json!({
         "id": cab_id,
         "task": rec.get("task").cloned().unwrap_or(Value::Null),
         "worker": rec.get("worker").cloned().unwrap_or(Value::Null),
+        "canvas": rec.get("canvas").cloned().unwrap_or(Value::Null),
         "status": rec.get("status").cloned().unwrap_or(Value::Null),
-        "equipment": equipment(kernel, str_of(&rec, "worker")),
+        "equipment": equipment(kernel, str_of(&rec, "canvas")),
     })
 }
 
@@ -1028,19 +1148,21 @@ fn reflect(id: &str, kernel: &Kernel) -> Value {
     let rec = record(kernel, id).unwrap_or_default();
     if rec.get(ROLE).and_then(Value::as_str) == Some(MANAGER) {
         return json!({
-            "sentence": "A cabinet manager: opens cabinets (a subcanvas with one worker AI each), monitors them, closes them, concludes.",
+            "sentence": "A cabinet manager: opens cabinets (a canvas of its own, a child of the spawning canvas, with one worker AI each), monitors them, closes them, concludes.",
             "role": MANAGER,
+            "canvas_id": rec.get("canvas_id").cloned().unwrap_or(Value::Null),
             "max_cabinets": rec.get("max_cabinets").cloned().unwrap_or(Value::Null),
             "open": cabinets(kernel, id).len(),
         });
     }
     let task = str_of(&rec, "task");
-    let sentence = format!("A cabinet: the subcanvas of one worker AI — {task}");
+    let sentence = format!("A cabinet: the status cell of one worker AI and its canvas — {task}");
     json!({
         "sentence": sentence.trim_end(),
         "role": CABINET,
         "task": rec.get("task").cloned().unwrap_or(Value::Null),
         "worker": rec.get("worker").cloned().unwrap_or(Value::Null),
+        "canvas": rec.get("canvas").cloned().unwrap_or(Value::Null),
         "status": rec.get("status").cloned().unwrap_or(Value::Null),
     })
 }
@@ -1049,13 +1171,12 @@ fn reflect(id: &str, kernel: &Kernel) -> Value {
 fn verb_docs_json() -> Value {
     json!({
         "reflect": "No args. The agent's role and what it holds.",
-        "equip": "args: handler_module:str (req), id:str?, setup:dict? (record fields, no wiring keys), can_call:dict?, callable_by:dict? (keys: $self, $parent, $subtree, the worker or an agent already under it). Places ONE agent under this cabinet's worker, granted inside the cabinet only. Returns {id, parent, handler_module}.",
-        "open_cabinet": "args: task:str (req), name:str?, backend:str? (an existing AI agent id; default the master), setup:dict? (fields over the backend's copy; a new backend is flagged). Opens one cabinet: a subcanvas with its worker AI, wired to every live worker and to the master. The worker is NOT started — send it its first message (the task). Returns {id, worker, master, backend, new_backend, peers}.",
-        "close_cabinet": "args: id:str (req) — a cabinet of this manager. Deletes the cabinet with its worker and ALL its equipment, then rewrites the live workers' directories. Returns {closed, deleted}.",
-        "cabinets": "No args. Every live cabinet: its task, worker, live status and equipment. The master's monitor.",
-        "conclude": "No args. Closes EVERY cabinet this manager opened, deleting each subcanvas with its worker and equipment. The manager stays. Returns {concluded, deleted}.",
+        "open_cabinet": "args: task:str (req), name:str?, backend:str? (an existing AI agent id; default the master), setup:dict? (fields over the backend's copy; a new backend is flagged). Opens one cabinet: a canvas of its own, a child of the canvas that spawns it (the manager's `canvas_id`), with its worker AI, wired to every live worker and to the master. The worker is NOT started — send it its first message (the task). Returns {id, canvas, worker, master, backend, new_backend, peers}.",
+        "close_cabinet": "args: id:str (req) — a cabinet of this manager. Deletes the cabinet with its worker, and its canvas with ALL the equipment on it, then rewrites the live workers' directories. Returns {closed, deleted, kept}.",
+        "cabinets": "No args. Every live cabinet: its task, worker, canvas, live status and equipment. The master's monitor.",
+        "conclude": "args: keep:[str]? — the ids to KEEP: live cabinets of this manager (kept whole), or results on a cabinet's canvas (the canvas and the path to them stay). Every other cabinet is closed: its canvas, worker and equipment deleted. A keep id that is neither is refused before anything is deleted. The manager stays. Returns {concluded, kept, deleted, count}.",
         "status": "args: line:str (req), progress:number 0-100?, result:any?. The worker's report up: stored on the cabinet and emitted on its own id, so its view and every watcher see it live.",
-        "view": "No args. The cabinet's panel: its task, worker, live status and equipment.",
+        "view": "No args. The cabinet's panel: its task, worker, canvas, live status and equipment.",
     })
 }
 
@@ -1089,15 +1210,14 @@ impl Bundle for CabinetBundle {
             Some(MANAGER) => match verb {
                 "reflect" => reflect(id, kernel),
                 "open_cabinet" => open(id, payload, kernel).await,
-                "close_cabinet" => close(id, payload, kernel).await,
+                "close_cabinet" => close(id, payload, kernel, &[]).await,
                 "cabinets" => cabinets_verb(id, kernel),
-                "conclude" => conclude(id, kernel).await,
+                "conclude" => conclude(id, payload, kernel).await,
                 _ => unknown_verb(&t, MANAGER),
             },
             Some(CABINET) => match verb {
                 "reflect" => reflect(id, kernel),
                 "status" => status(id, payload, kernel).await,
-                "equip" => equip(id, payload, kernel).await,
                 "view" => view(id, kernel),
                 _ => unknown_verb(&t, CABINET),
             },

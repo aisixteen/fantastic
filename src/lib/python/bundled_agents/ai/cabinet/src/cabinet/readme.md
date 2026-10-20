@@ -12,7 +12,7 @@ equipment.
 
 ```
 canvas_root                  THE MAIN canvas (the spawner; the manager's canvas_id)
-├── cabinet_alpha            cabinet.tools, cabinet_role: cabinet   THE STATUS CELL (live html view)
+├── cabinet_alpha            cabinet.tools, cabinet_role: cabinet   THE STATUS CELL (live html view; its button opens the canvas below)
 ├── cabinet_beta             …same shape…
 ├── canvas_cabinet_alpha     canvas.tools  THE CABINET'S CANVAS (made by canvas_root's new_canvas)
 │   ├── <equipment>          exec runners, file bridges, helper AIs, panels (placed by `create`)
@@ -31,9 +31,10 @@ cabinet_manager              cabinet.tools, cabinet_role: manager   (made once, 
 - **close_cabinet** `{id}` deletes one cabinet with its worker, and its canvas with all
   the equipment on it.
 - **cabinets** lists the live cabinets with their status, canvas and equipment.
-- **conclude** `{keep?: [ids]}` closes every cabinet not named in `keep`. The manager
-  stays. A `keep` id that is not a live cabinet of this manager is refused before anything
-  is deleted (`reason: "unknown_keep"`).
+- **conclude** `{keep?: [ids]}` closes every cabinet not named in `keep`. A `keep` id is a
+  live cabinet of this manager (kept whole) or a result on a cabinet's canvas (kept with
+  its canvas). The manager stays. Any other `keep` id is refused before anything is
+  deleted (`reason: "unknown_keep"`).
 - **status** `{line, progress?, result?}` (the worker's report, sent to its own cabinet):
   stored on the cabinet, emitted live, and drawn by the cabinet's status cell.
 - **create** `{record: {handler_module, id?, …}}` and **place** (the worker's verbs on its
@@ -92,11 +93,24 @@ removes it with the canvas. The worker cannot grant itself anything (no `update_
 on the root), and it cannot place a child canvas on its own canvas (`new_canvas` is not
 on its grant).
 
-## Keeping some cabinets
+## The status cell opens the canvas
 
-`conclude {keep: [cabinet_a, ...]}` keeps the named cabinets whole: their canvas, worker
-and equipment stay. Every other cabinet is closed, and its canvas goes with it. An id
-that is not a live cabinet of this manager is refused loudly and nothing is deleted.
+The cabinet's record is a live html cell on the main canvas. It carries `canvas` (the
+node id of the cabinet's canvas), and its button opens that canvas: the cell calls
+`fantastic.openCanvas(canvas)`, and the page switches to `?canvas=<node>`. The cell is
+disabled while no canvas is named. `view` returns `canvas` for it.
+
+## Keeping some cabinets and results
+
+`conclude {keep: [ids]}` takes two kinds of id, and refuses any other loudly before it
+deletes anything:
+
+- **a cabinet** (`cabinet_<name>`): kept whole. Its canvas, worker and equipment stay.
+- **a result**: an agent placed on a cabinet's canvas, at any depth. Its canvas stays,
+  with the path from the canvas to the result. The cabinet's record and worker are
+  closed, and every other piece of equipment on the canvas goes with them.
+
+Every other cabinet is closed, and its canvas goes with it.
 
 ## Ceiling
 
@@ -116,9 +130,10 @@ discouraged, and the docs say why.
 
 - **The Rust host's canvas** (`new_canvas`, nested records, delete cascade) is
   `src/tui/src/kern/web.rs`. In the Python tests the canvas is a stub that makes child
-  canvases and children for `create` and `place`.
-- **Equipment reach is not granted automatically.** A canvas's `create` does not yet give
-  its worker a grant on what it made; the worker reaches equipment once its own
+  canvases, children for `create` (and admits an AI to the store it names, as the host's
+  `make_ai` does), and acknowledges `place`.
+- **Equipment reach is not granted automatically.** A canvas's `create` gives a helper AI
+  its memory store and nothing else; the worker reaches other equipment once its own
   `can_call` (or a peer's) names it.
 - **`place` addressing** on a cabinet canvas is taken as the canvas node id; the view
   path is verified only by the e2e (#136).

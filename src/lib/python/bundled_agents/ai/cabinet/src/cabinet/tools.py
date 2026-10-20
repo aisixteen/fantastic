@@ -49,9 +49,12 @@ would overwrite each other's entries; the lock covers the whole read-wire-refres
 THE CEILING. An optional `max_cabinets` on the manager refuses an open loudly when
 that many cabinets are live (`reason: "ceiling"`). None: the LLM decides the count.
 
-CONCLUDE KEEPS. `conclude {keep: [ids]}` closes every cabinet not named in `keep`;
-a `keep` id that is not a live cabinet of this manager is refused before anything
-is deleted.
+CONCLUDE KEEPS. `conclude {keep: [ids]}` closes every cabinet not named in `keep`.
+A `keep` id is a live cabinet of this manager (the whole cabinet stays: its canvas,
+worker and equipment), or a RESULT: an agent placed on a cabinet's canvas, at any depth.
+Keeping a result keeps the cabinet's canvas and the path from it to the result, and
+closes the cabinet's worker, its record and every other piece of equipment. Any other
+`keep` id is refused before anything is deleted.
 """
 
 from __future__ import annotations
@@ -559,8 +562,29 @@ async def _open(manager: str, payload: dict, kernel):
     )
 
 
-async def _close(manager: str, payload: dict, kernel):
-    """args: id:str (req) — a cabinet of this manager. Deletes the cabinet with its worker, and its canvas with ALL the equipment on it, then rewrites the live workers' directories. Returns {closed, deleted}."""
+async def _prune(kernel, node: str, keep: frozenset) -> tuple[list[str], str | None]:
+    """Delete, under `node`, every agent that is not kept and holds no kept agent. A kept
+    agent stays with its path up to `node`. Returns (deleted ids, the error or None)."""
+    deleted: list[str] = []
+    for child in list(kernel.ctx.agents[node].child_ids()):
+        if child in keep:
+            continue
+        sub = _subtree(kernel, child)
+        if any(k in keep for k in sub):
+            more, err = await _prune(kernel, child, keep)
+            deleted += more
+            if err:
+                return deleted, err
+            continue
+        res = await _tree(kernel, {"type": "delete_agent", "id": child})
+        if not res.get("deleted"):
+            return deleted, res.get("error") or f"`{child}` was not deleted"
+        deleted += sub
+    return deleted, None
+
+
+async def _close(manager: str, payload: dict, kernel, keep: frozenset = frozenset()):
+    """args: id:str (req) — a cabinet of this manager. Deletes the cabinet with its worker, and its canvas with ALL the equipment on it, then rewrites the live workers' directories. `keep` (from `conclude`) names results on this canvas to keep: the canvas stays with them, and everything else on it goes. Returns {closed, deleted}."""
     cab_id = payload.get("id")
     if not isinstance(cab_id, str) or not cab_id:
         return missing(
@@ -574,16 +598,27 @@ async def _close(manager: str, payload: dict, kernel):
             id=cab_id,
         )
     canvas = rec.get("canvas")
+    has_canvas = canvas is not None and kernel.get(canvas) is not None
+    kept_here = (
+        [k for k in keep if k in _subtree(kernel, canvas)[1:]] if has_canvas else []
+    )
     gone = _subtree(kernel, cab_id)
-    if canvas is not None and kernel.get(canvas) is not None:
-        gone += _subtree(kernel, canvas)
     res = await _tree(kernel, {"type": "delete_agent", "id": cab_id})
     if not res.get("deleted"):
         return {
             **res,
             "error": res.get("error") or f"close_cabinet: `{cab_id}` was not deleted",
         }
-    if canvas is not None and kernel.get(canvas) is not None:
+    if has_canvas and kept_here:
+        pruned, err = await _prune(kernel, canvas, keep)
+        gone += pruned
+        if err:
+            return {
+                "error": f"close_cabinet: `{cab_id}` was deleted, but its canvas `{canvas}` was not pruned: {err}",
+                "deleted": gone,
+            }
+    elif has_canvas:
+        gone += _subtree(kernel, canvas)
         res = await _tree(kernel, {"type": "delete_agent", "id": canvas})
         if not res.get("deleted"):
             return {
@@ -597,7 +632,7 @@ async def _close(manager: str, payload: dict, kernel):
             "error": f"close_cabinet: deleted `{cab_id}`, but a worker's directory did not update: {err}",
             "deleted": gone,
         }
-    return {"closed": cab_id, "deleted": gone}
+    return {"closed": cab_id, "deleted": gone, "kept": sorted(kept_here)}
 
 
 async def _cabinets_verb(manager: str, payload: dict, kernel):
@@ -622,23 +657,31 @@ async def _cabinets_verb(manager: str, payload: dict, kernel):
 
 
 async def _conclude(manager: str, payload: dict, kernel):
-    """args: keep:[str]? — the ids of live cabinets of this manager to KEEP. Every other cabinet is closed: its canvas, worker and equipment deleted. A keep id that is not a live cabinet is refused before anything is deleted. The manager stays. Returns {concluded, kept, deleted}."""
+    """args: keep:[str]? — the ids to KEEP: live cabinets of this manager (kept whole), or results on a cabinet's canvas (the canvas and the path to them stay). Every other cabinet is closed. A keep id that is neither is refused before anything is deleted. The manager stays. Returns {concluded, kept, deleted}."""
     keep = payload.get("keep", [])
     if not isinstance(keep, list) or not all(isinstance(k, str) and k for k in keep):
-        return bad("conclude", "keep", "a list of cabinet ids")
-    live = {c["id"] for c in _cabinets(kernel)}
-    unknown = sorted(set(keep) - live)
+        return bad("conclude", "keep", "a list of cabinet or result ids")
+    live = _cabinets(kernel)
+    cab_ids = {c["id"] for c in live}
+    results = {
+        e
+        for c in live
+        if c.get("canvas") in kernel.ctx.agents
+        for e in _subtree(kernel, c["canvas"])[1:]
+    }
+    unknown = sorted(set(keep) - cab_ids - results)
     if unknown:
         return {
-            "error": f"conclude: keep names no live cabinet of this manager: {unknown}",
+            "error": f"conclude: keep names no live cabinet or result of this manager: {unknown}",
             "reason": "unknown_keep",
             "unknown": unknown,
         }
+    kept = frozenset(keep)
     concluded, deleted = [], []
-    for cab in _cabinets(kernel):
-        if cab["id"] in keep:
+    for cab in live:
+        if cab["id"] in kept:
             continue
-        res = await _close(manager, {"id": cab["id"]}, kernel)
+        res = await _close(manager, {"id": cab["id"]}, kernel, keep=kept)
         if res.get("error"):
             return {
                 **res,

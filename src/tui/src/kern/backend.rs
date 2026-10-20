@@ -307,29 +307,7 @@ impl BackendBundle {
         };
         let handler = spec.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
         crate::kern::keys::attach(host, &handler, &mut spec)?;
-        spec.insert("type".into(), json!("create_agent"));
-        spec.insert("parent_id".into(), json!(me.0));
-        spec.insert("id".into(), json!(ai));
-        spec.insert("memory_store_id".into(), json!(store));
-        // the defaults MERGED with the caller's grants (stamp, peer_grants) —
-        // the caller's keys win on a clash; nothing the caller passed is dropped
-        let caller = |spec: &mut Map<String, Value>, f: &str| match spec.remove(f) {
-            Some(Value::Object(m)) => m,
-            _ => Map::new(),
-        };
-        let (caller_cc, caller_cb) = (caller(&mut spec, "can_call"), caller(&mut spec, "callable_by"));
-        let mut cb = Map::new();
-        cb.insert(CHAT_USER.into(), json!(CHAT_VERBS));
-        cb.extend(caller_cb);
-        spec.insert("callable_by".into(), Value::Object(cb));
-        let mut cc = Map::new();
-        cc.insert(store, json!("*"));
-        spec.insert("can_call".into(), Value::Object(cc));
-        crate::kern::keys::grant_on_create(&mut spec);
-        if let Some(Value::Object(cc)) = spec.get_mut("can_call") {
-            cc.extend(peer);
-            cc.extend(caller_cc);
-        }
+        let spec = Self::ai_create_spec(me, ai, &store, spec, peer);
         let named = spec.clone();
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
@@ -342,6 +320,34 @@ impl BackendBundle {
         // the cell calls it through `user` and watches it through the leg the
         // moment this answers: both grants first
         crate::kern::reach::granted(host, ai).await
+    }
+
+    /// The `create_agent` spec of AI `ai` under `me`, on memory `store` (pure): the
+    /// store's grant on the AI's `can_call`, the human's chat verbs on its `callable_by`,
+    /// and the caller's own grants MERGED over both (the caller's keys win on a clash).
+    fn ai_create_spec(me: &AgentId, ai: &str, store: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Map<String, Value> {
+        spec.insert("type".into(), json!("create_agent"));
+        spec.insert("parent_id".into(), json!(me.0));
+        spec.insert("id".into(), json!(ai));
+        spec.insert("memory_store_id".into(), json!(store));
+        let caller = |spec: &mut Map<String, Value>, f: &str| match spec.remove(f) {
+            Some(Value::Object(m)) => m,
+            _ => Map::new(),
+        };
+        let (caller_cc, caller_cb) = (caller(&mut spec, "can_call"), caller(&mut spec, "callable_by"));
+        let mut cb = Map::new();
+        cb.insert(CHAT_USER.into(), json!(CHAT_VERBS));
+        cb.extend(caller_cb);
+        spec.insert("callable_by".into(), Value::Object(cb));
+        let mut cc = Map::new();
+        cc.insert(store.to_string(), json!("*"));
+        spec.insert("can_call".into(), Value::Object(cc));
+        crate::kern::keys::grant_on_create(&mut spec);
+        if let Some(Value::Object(cc)) = spec.get_mut("can_call") {
+            cc.extend(peer);
+            cc.extend(caller_cc);
+        }
+        spec
     }
 
     /// Whether `id` sits under `me` (strictly).
@@ -382,6 +388,19 @@ impl BackendBundle {
                 }
                 return refuse("exists", format!("create: `{id}` already exists elsewhere"), "");
             }
+        }
+        // an AI is made the way every AI is (`make_ai`): on the project's memory store from
+        // its first turn, granted its store and the human's chat verbs. Equipment that is
+        // an AI reaches its memory store through this, as a canvas's AI always has.
+        if Self::is_ai_handler(host, handler) {
+            let ai = match rec.get("id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => format!("ai_{}", hex8()),
+            };
+            return match Self::make_ai(host, me, &ai, rec.clone(), Map::new()).await {
+                Ok(()) => json!({"id": ai}),
+                Err(e) => refuse("bad_arg", format!("create: {e}"), ""),
+            };
         }
         let mut spec = rec.clone();
         spec.insert("type".into(), json!("create_agent"));
@@ -638,7 +657,7 @@ impl Bundle for BackendBundle {
     /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
     fn verb_docs(&self) -> Value {
         json!({
-                    "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. {id, …}.",
+                    "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. An AI (its handler names a memory store) is made as every AI is: on the project's memory store, granted that store and the human's chat verbs. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
                     "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles)}.",
                     "spawn": "args: saved:str? (else the default) | bundle:str (a NEW project bundle from that starter — only when the user asks for a bundle) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, saved, handler_module, model}.",
@@ -691,3 +710,143 @@ impl Bundle for BackendBundle {
         }
     }
 }
+
+/// The canvas's `create` of an AI record, on a real kernel (the memory store the AI names,
+/// its grants, and the spec it is made from).
+#[cfg(test)]
+mod create_tests {
+    use super::*;
+    use fantastic_kernel::{Agent, Kernel};
+    use std::path::PathBuf;
+
+    /// A registered AI handler: its bundle's record names a memory store.
+    struct FakeAi;
+
+    #[async_trait]
+    impl Bundle for FakeAi {
+        fn name(&self) -> &str {
+            "fake_ai.tools"
+        }
+
+        fn record_schema(&self) -> Option<Value> {
+            Some(json!({"fields": [{"name": "memory_store_id"}]}))
+        }
+
+        async fn handle(&self, _id: &AgentId, _p: &Value, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
+            Ok(None)
+        }
+    }
+
+    /// A host on a kernel whose root is `kernel`, the human `user` (its can_call names
+    /// the AI the test creates: the reach's grant, already in place), a canvas `canvas_root`
+    /// and the memory store `memory`.
+    async fn host(name: &str, ai_ids: &[&str]) -> (Host, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fc-create-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut kernel = Kernel::new();
+        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        kernel.bundles.register(HANDLER_MODULE, BackendBundle);
+        kernel.bundles.register("fake_ai.tools", FakeAi);
+        let kernel = Arc::new(kernel);
+        let root = Agent::new(
+            AgentId::from("kernel"),
+            Some(fantastic_core::HANDLER_MODULE.to_string()),
+            None,
+            Map::new(),
+            dir.join(".fantastic"),
+            false,
+        );
+        kernel.register(Arc::clone(&root));
+        kernel.set_root(root);
+        let h = Host { kernel, cfg: ClientCfg::here(), root: "kernel".to_string() };
+        let mut human_cc = Map::new();
+        for ai in ai_ids {
+            human_cc.insert(ai.to_string(), json!("*"));
+        }
+        for spec in [
+            json!({"parent_id": "kernel", "id": "memory", "handler_module": fantastic_core::HANDLER_MODULE,
+                   "callable_by": {"$self": "*"}}),
+            json!({"parent_id": "kernel", "id": crate::env::HUMAN, "handler_module": "user.tools",
+                   "can_call": Value::Object(human_cc)}),
+            json!({"parent_id": "kernel", "id": "canvas_root", "handler_module": HANDLER_MODULE}),
+        ] {
+            let mut payload = spec.as_object().unwrap().clone();
+            payload.insert("type".into(), json!("create_agent"));
+            let out = h.operator("kernel", Value::Object(payload)).await;
+            assert!(out.result.get("error").is_none(), "{:?}", out.result);
+        }
+        (h, dir)
+    }
+
+    fn record_of(h: &Host, id: &str) -> Map<String, Value> {
+        h.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta.clone()).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn an_ai_made_on_a_canvas_reaches_the_store_it_names_and_the_store_admits_it() {
+        let (h, dir) = host("ai", &["helper"]).await;
+        let me = AgentId::from("canvas_root");
+        let out = BackendBundle::create(
+            &h,
+            &me,
+            &json!({"record": {"handler_module": "fake_ai.tools", "id": "helper", "memory_store_id": "memory"}}),
+        )
+        .await;
+        assert_eq!(out, json!({"id": "helper"}), "{out}");
+        let rec = h.kernel.agents.get(&AgentId::from("helper")).unwrap().value().record();
+        assert_eq!(rec.parent_id.as_deref(), Some("canvas_root"), "a child of the canvas");
+        let meta = record_of(&h, "helper");
+        assert_eq!(meta["memory_store_id"], json!("memory"));
+        // the AI reads its store (its own side), and the human's chat verbs reach it
+        assert_eq!(meta["can_call"]["memory"], json!("*"));
+        assert_eq!(meta["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_plain_agent_made_on_a_canvas_names_no_store() {
+        let (h, dir) = host("plain", &["plain_exec"]).await;
+        let out = BackendBundle::create(
+            &h,
+            &AgentId::from("canvas_root"),
+            &json!({"record": {"handler_module": "file_bridge.tools", "id": "plain_exec"}}),
+        )
+        .await;
+        assert_eq!(out.get("id"), Some(&json!("plain_exec")), "{out}");
+        let meta = record_of(&h, "plain_exec");
+        assert!(meta.get("memory_store_id").is_none());
+        assert!(meta.get("can_call").and_then(|c| c.get("memory")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_ai_create_spec_grants_its_store_and_merges_the_callers_grants_over_the_defaults() {
+        let me = AgentId::from("canvas_root");
+        let spec = json!({
+            "handler_module": "fake_ai.tools",
+            "can_call": {"tool_a": "*", "memory": ["send"]},
+            "callable_by": {"ops": ["send"]},
+        });
+        let spec = BackendBundle::ai_create_spec(
+            &me,
+            "helper",
+            "memory",
+            spec.as_object().unwrap().clone(),
+            Map::from_iter([("peer_b".to_string(), json!(["send"]))]),
+        );
+        assert_eq!(spec["type"], json!("create_agent"));
+        assert_eq!(spec["parent_id"], json!("canvas_root"));
+        assert_eq!(spec["id"], json!("helper"));
+        assert_eq!(spec["memory_store_id"], json!("memory"));
+        // the caller's own `memory` grant wins a clash; the store is named either way
+        assert_eq!(spec["can_call"]["memory"], json!(["send"]));
+        assert_eq!(spec["can_call"]["tool_a"], json!("*"));
+        assert_eq!(spec["can_call"]["peer_b"], json!(["send"]));
+        // the human's chat verbs and the caller's callers, merged
+        assert_eq!(spec["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
+        assert_eq!(spec["callable_by"]["ops"], json!(["send"]));
+        assert!(spec.get("can_call").and_then(|c| c.as_object()).is_some());
+    }
+}
+

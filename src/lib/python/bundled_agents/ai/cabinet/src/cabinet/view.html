@@ -7,6 +7,8 @@
   .line { white-space: pre-wrap; word-break: break-word; }
   pre { margin: 8px 0 0; font: 11px/1.4 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; color: rgba(255,255,255,.7); }
   .err { color: #f7768e; }
+  button { margin-top: 8px; font: inherit; color: inherit; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.18); border-radius: 4px; padding: 3px 9px; cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
 </style>
 <div id="task" class="task"></div>
 <div id="worker" class="dim"></div>
@@ -14,10 +16,15 @@
 <div id="line" class="line">not reported yet</div>
 <pre id="result"></pre>
 <div id="err" class="err"></div>
+<button id="open" type="button" disabled>open the cabinet's canvas</button>
 <script>
 const ID = "__CABINET_ID__";
 const $ = (id) => document.getElementById(id);
+// the cabinet's own canvas (`canvas`, a node id on the page's host): the button opens it
+let canvas = null;
 function paint(v) {
+  canvas = v.canvas ?? null;
+  $("open").disabled = !canvas;
   $("task").textContent = v.task ?? "";
   $("worker").textContent = `worker ${v.worker ?? "?"}` + (v.equipment && v.equipment.length ? ` · ${v.equipment.length} equipment` : "");
   const st = v.status || {};
@@ -30,6 +37,7 @@ async function refresh() {
   const r = await fantastic.send(ID, { type: "view" });
   if (r && !r.error) paint(r); else $("err").textContent = (r && r.error) || "no answer";
 }
+$("open").onclick = () => { if (canvas) fantastic.openCanvas(canvas); };
 // LIVE: every status the cabinet reports is emitted on its own id; re-read the view.
 fantastic.watch(ID, (ev) => { if (ev && ev.type === "update") refresh(); });
 refresh();

@@ -50,7 +50,9 @@ canvases it spawned with its cells. A flat peer canvas made before nesting (unde
 `canvas_page`, its records at `.fantastic/web/canvas_<name>`) loads as it always did.
 Each canvas has its own page kernel (own guid) and its own cells' host backends.
 Open one at the page URL with `?canvas=<node id>` (none: the main one). The
-canvas-list cell is off the double-click menu for now.
+canvas-list cell is off the double-click menu for now. A panel opens a canvas by id with
+`fantastic.openCanvas(<node id>)`: the page switches to it. A cabinet's status cell does
+this for its cabinet's canvas (the `cabinet` bundle makes that canvas with `new_canvas`).
 A canvas shows only its own subtree and the agents under no canvas; another
 canvas's agents never appear on it. `canvases` (any canvas node) lists them.
 NOTHING FLOATS: a canvas opens as its background alone. Everything is a cell

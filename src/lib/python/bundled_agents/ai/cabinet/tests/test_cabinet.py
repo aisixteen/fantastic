@@ -96,6 +96,11 @@ async def _canvas_handler(id, payload, kernel):
         return {"id": node}
     if verb == "create":
         record = dict(payload["record"])
+        store = record.get("memory_store_id")
+        if store is not None:
+            # an AI made on the canvas reaches its store, and the store admits it: the
+            # host's `make_ai` path (backend.rs), which every AI create takes
+            record["can_call"] = {**(record.get("can_call") or {}), store: "*"}
         (out,) = await kernel.send(
             [
                 {
@@ -104,10 +109,31 @@ async def _canvas_handler(id, payload, kernel):
                 }
             ]
         )
+        if store is not None and not out["result"].get("error"):
+            await _admit_to_store(kernel, store, record["id"])
         return out["result"]
     if verb == "place":
         return {"placed": True}
     return {"error": f"canvas stub: unknown type {verb!r}"}
+
+
+async def _admit_to_store(kernel, store: str, ai: str) -> None:
+    """The store's side of the gate: its `callable_by` names the new AI (`admit_to_memory`).
+    Made as the root, the store's parent (the host makes it as `user`, its parent too):
+    grants come from above, never from the canvas that made the AI."""
+    root = kernel.ctx.root
+    cb = dict(kernel.get(store).get("callable_by") or {})
+    cb[ai] = "*"
+    with root._as_self():
+        (out,) = await root.send(
+            [
+                {
+                    "target": root.id,
+                    "payload": {"type": "update_agent", "id": store, "callable_by": cb},
+                }
+            ]
+        )
+    assert not out["result"].get("error"), out
 
 
 _canvas.handler = _canvas_handler
@@ -688,6 +714,56 @@ async def test_each_cabinet_is_a_live_html_panel_of_its_own_id(world):
     assert set(view["calls"]) == {"view", "watch"}
 
 
+async def test_the_status_cell_opens_its_own_canvas(world):
+    """The cell's button opens the cabinet's canvas: the view names it, and the cell's
+    script hands that id to the page (`fantastic.openCanvas`), never a guessed URL."""
+    k = world
+    cab = (await open_cabinet(k, "open", name="open"))["id"]
+    canvas = k.get(cab)["canvas"]
+    view = await as_(k, MASTER, cab, {"type": "view"})
+    assert view["canvas"] == canvas, view
+    html = k.get(cab)["view"]["bytes"]
+    assert 'id="open"' in html
+    assert (
+        '$("open").onclick = () => { if (canvas) fantastic.openCanvas(canvas); };'
+        in html
+    )
+    assert "canvas = v.canvas ?? null" in html
+    # with no canvas named, the button is disabled rather than pointing nowhere
+    assert '$("open").disabled = !canvas;' in html
+
+
+async def test_a_helper_ai_made_as_equipment_reaches_its_memory_store(world):
+    """A helper AI the worker makes on its canvas (`create` with a memory store) reaches
+    that store, and the store admits it, as every AI create does."""
+    k = world
+    store = k.get(MASTER)["memory_store_id"]
+    cab = (await open_cabinet(k, "helpers", name="helpers"))["id"]
+    w, canvas = worker_of(k, cab), k.get(cab)["canvas"]
+    made = await create_on(
+        k,
+        canvas,
+        w,
+        handler_module="ollama_backend.tools",
+        id="helper",
+        setup={
+            "memory_store_id": store,
+            "endpoint": "http://ollama.test",
+            "model": "model-a",
+            "context_window": 8000,
+        },
+    )
+    assert not made.get("error"), made
+    assert k.get("helper")["can_call"][store] == "*"
+    assert k.get(store)["callable_by"]["helper"] == "*"
+    # a helper made with no store names none, and reaches none
+    plain = await create_on(
+        k, canvas, w, handler_module="file_bridge.tools", id="plain"
+    )
+    assert not plain.get("error"), plain
+    assert store not in k.get("plain").get("can_call", {})
+
+
 # ─── concurrency: one manager, several opens in one batch ────────
 
 
@@ -885,4 +961,56 @@ async def test_conclude_removes_every_cabinet_worker_canvas_and_equipment(world)
         w in k.get(MASTER)["can_call"] or w in k.get(MASTER)["callable_by"]
         for w in workers
     )
+    assert (await as_(k, MASTER, MANAGER, {"type": "cabinets"}))["count"] == 0
+
+
+async def test_conclude_keeps_a_result_with_its_canvas_path_and_closes_the_rest(world):
+    """A kept RESULT (an agent under a cabinet's canvas, at any depth) keeps that canvas
+    and the path from it to the result. The cabinet's record and worker go, and every
+    other piece of equipment with them. The canvas, the worker and a bogus id are not
+    results: refused before anything is deleted."""
+    k = world
+    cab = (await open_cabinet(k, "res", name="res"))["id"]
+    other = (await open_cabinet(k, "oth", name="oth"))["id"]
+    w, canvas = worker_of(k, cab), k.get(cab)["canvas"]
+    for id_ in ("keep_me", "drop_me"):
+        made = await create_on(k, canvas, w, handler_module="file_bridge.tools", id=id_)
+        assert not made.get("error"), made
+    # a canvas under the cabinet's canvas holds a result one level deeper (made by the host)
+    await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": canvas,
+                    "id": "deep",
+                    "handler_module": "canvas_stub.tools",
+                },
+            },
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": "deep",
+                    "id": "deep_keep",
+                    "handler_module": "file_bridge.tools",
+                },
+            },
+        ]
+    )
+    assert "deep_keep" in k.ctx.agents
+    before = set(k.ctx.agents)
+    for bad_id in (canvas, w, "nope"):
+        res = await as_(k, MASTER, MANAGER, {"type": "conclude", "keep": [bad_id]})
+        assert res.get("reason") == "unknown_keep" and res["unknown"] == [bad_id], res
+    assert set(k.ctx.agents) == before
+    res = await as_(k, MASTER, MANAGER, {"type": "conclude", "keep": ["deep_keep"]})
+    assert not res.get("error"), res
+    assert res["kept"] == ["deep_keep"] and res["concluded"] == [cab, other]
+    # the result, the canvas and the path to it (`deep`) stay; the rest goes
+    assert {"deep_keep", "deep", canvas} <= set(k.ctx.agents)
+    assert {cab, w, "keep_me", "drop_me", other}.isdisjoint(k.ctx.agents)
+    assert {cab, w, "keep_me", "drop_me", other} <= set(res["deleted"])
+    assert not {"deep_keep", "deep", canvas} & set(res["deleted"])
     assert (await as_(k, MASTER, MANAGER, {"type": "cabinets"}))["count"] == 0

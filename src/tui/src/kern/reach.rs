@@ -64,9 +64,10 @@ fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
 }
 
 
-/// The ids of every cabinet, its worker and the worker's equipment: an agent whose own
-/// record or one of whose ancestors carries `cabinet_role: cabinet`. Computed from one
-/// snapshot of the records, so it never reads the tree while the tree is iterated.
+/// The ids of every cabinet, its worker, its canvas and everything on that canvas (its
+/// equipment, and any canvas nested under it): an agent whose own record or one of whose
+/// ancestors is a cabinet (`cabinet_role: cabinet`) or a cabinet's `canvas`. Computed from
+/// one snapshot of the records, so it never reads the tree while the tree is iterated.
 pub fn cabinet_owned(kernel: &fantastic_kernel::Kernel) -> std::collections::HashSet<String> {
     let rows: std::collections::HashMap<String, (Option<String>, bool)> = kernel
         .agents
@@ -77,12 +78,20 @@ pub fn cabinet_owned(kernel: &fantastic_kernel::Kernel) -> std::collections::Has
             (e.key().0.clone(), (r.parent_id, cabinet))
         })
         .collect();
+    // a cabinet's canvas roots its own owned subtree, though it is a child of the canvas
+    // that spawned it, not of the cabinet
+    let canvases: std::collections::HashSet<String> = kernel
+        .agents
+        .iter()
+        .filter(|e| e.value().record().meta.get("cabinet_role").and_then(Value::as_str) == Some("cabinet"))
+        .filter_map(|e| e.value().record().meta.get("canvas").and_then(Value::as_str).map(str::to_string))
+        .collect();
     let mut owned = std::collections::HashSet::new();
     for id in rows.keys() {
         let mut cur = Some(id.clone());
         while let Some(c) = cur {
             let Some((parent, cabinet)) = rows.get(&c) else { break };
-            if *cabinet {
+            if *cabinet || canvases.contains(&c) {
                 owned.insert(id.clone());
                 break;
             }
@@ -460,6 +469,30 @@ mod tests {
         }
         // the manager, the master (an ordinary AI) and the store are not
         for id in ["manager", "master", "m"] {
+            assert!(!owned.contains(id), "{id} is not a cabinet's: {owned:?}");
+        }
+    }
+
+    #[test]
+    fn a_cabinets_canvas_and_what_is_placed_on_it_are_owned_but_not_the_canvas_that_spawned_it() {
+        // the spawning canvas is an ordinary canvas (a holder); its child canvas is the cabinet's
+        let kernel = Kernel::new();
+        put(&kernel, "canvas_root", None, json!({}));
+        put(&kernel, "manager", Some("canvas_root"), json!({"cabinet_role": "manager", "canvas_id": "canvas_root"}));
+        put(&kernel, "cabinet_a", Some("manager"), json!({"cabinet_role": "cabinet", "canvas": "canvas_cabinet_a"}));
+        put(&kernel, "cabinet_a_worker", Some("cabinet_a"), json!({"memory_store_id": "m"}));
+        put(&kernel, "canvas_cabinet_a", Some("canvas_root"), json!({}));
+        put(&kernel, "helper", Some("canvas_cabinet_a"), json!({"memory_store_id": "m"}));
+        put(&kernel, "canvas_deeper", Some("canvas_cabinet_a"), json!({}));
+        put(&kernel, "deep_exec", Some("canvas_deeper"), json!({}));
+        put(&kernel, "canvas_root_helper", Some("canvas_root"), json!({"memory_store_id": "m"}));
+        put(&kernel, "m", Some("canvas_root"), json!({}));
+        let owned = cabinet_owned(&kernel);
+        for id in ["canvas_cabinet_a", "helper", "canvas_deeper", "deep_exec"] {
+            assert!(owned.contains(id), "{id} is on a cabinet's canvas: {owned:?}");
+        }
+        // the spawning canvas, its own AI, and the store stay holders of the reach
+        for id in ["canvas_root", "canvas_root_helper", "m", "manager"] {
             assert!(!owned.contains(id), "{id} is not a cabinet's: {owned:?}");
         }
     }
