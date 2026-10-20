@@ -1,0 +1,34 @@
+# INSTALLERS — run BY HAND (Phase 6b, #51). A placeholder: a workflow must be on
+# `main` before it can be dispatched, so this lands first with its final
+# trigger and inputs; the real jobs come with the Phase 6b PR (branch
+# `phase-6b/installers`), dispatched with `--ref phase-6b/installers`.
+
+name: installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "release: sign, notarize and attach to the tag's GitHub Release. rehearsal: build, install and launch unsigned, publish nothing (any ref)."
+        type: choice
+        options: [release, rehearsal]
+        default: release
+      ci_run:
+        description: "rehearsal only: a full ci.yml run id whose binaries jobs (build · and app ·) succeeded; its e2e may have failed. Empty: the newest green `ci · full` run on this commit. release refuses it."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "not yet"
