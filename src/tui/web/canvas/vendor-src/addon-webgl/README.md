@@ -4,8 +4,10 @@
 built into `../../src/vendor/addon-webgl.js` by `build.sh` (the library's vendored
 esbuild; no npm). A **pure xterm addon** — same API as upstream (`new WebglAddon()`,
 `onContextLoss`, `clearTextureAtlas`), no knowledge of the canvas. The canvas uses it
-through `src/bundles/terminal_view/renderer.ts`, for every terminal (the default; no
-switcher yet).
+through `src/bundles/terminal_view/renderer.ts`, for every terminal whose view's
+`terminal_renderer` resolves to `webgl` (`auto`: everywhere but WebKitGTK, where
+xterm's DOM renderer draws). Switching to `dom` disposes the addon; its dispose
+restores xterm's own DomRenderer — no change to the patch.
 
 ## What the patch changes (owner 2026-10-09, E65 / E66)
 

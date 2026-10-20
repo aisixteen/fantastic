@@ -59,7 +59,13 @@ how to call agents); edit it and every AI uses your text from its next turn.
 Keep the placeholders you still want.
 
 TERMINALS draw with WebGL, through one shared GPU context for the whole page —
-a canvas of a few hundred live terminals stays smooth. A terminal's scrollbar
+except in WebKitGTK (the app on Linux, GNOME Web), where `auto` uses xterm's
+DOM renderer: WebKitGTK can back WebGL with a slow path that reports no error.
+The view's `terminal_renderer {name?: auto | webgl | dom}` switches the view's
+terminals at once; no name answers what is in use and why. The DOM renderer is
+slower with many streaming terminals on screen — keep `auto` unless you
+measured otherwise. With WebGL a canvas of a few hundred live terminals stays
+smooth. A terminal's scrollbar
 appears while the pointer is on it (the wheel scrolls either way). macOS allows
 511 terminals (PTYs) at once by default (`kern.tty.ptmx_max`).
 
@@ -149,6 +155,7 @@ both sides; the human narrows them with `update_agent`).
 | `fit {id, max_width?, max_height?}` | size an html cell to what it draws (its width, then its height at that width) — `overflowed` when it still does not fit; a cell keeps its size otherwise, so call it after placing or updating an html cell |
 | `update {id, bytes?, fields?}` | a cell's new body (`bytes`, verbatim) or fields (display_name, trusted, readme, geometry, can_call, callable_by) |
 | `theme {name?}` | which layout the cells sit in: `canvas` (the free 2D canvas), `mobile` (one column), `auto` (default — mobile in a tab under 768px wide); no name: what it is |
+| `terminal_renderer {name?}` | the view's terminals' renderer: `auto` (default — xterm's DOM renderer in WebKitGTK, the shared WebGL elsewhere; resolved in each tab), `webgl`, `dom`; switches every terminal of the view live; no name: what it is, `in_use` here and `why` |
 | `wire {sender, receiver, verbs}` | a grant, written on each side that is a cell of the view (a host agent receiver: the sender's side only) |
 | (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
 | (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
@@ -169,8 +176,9 @@ window.__FANTASTIC_SHELL__ = Object.freeze({name, os, webview, backdrop, pickFol
 
 - `name` — the shell (`tauri`).
 - `os` — `macos` | `windows` | `linux`.
-- `webview` — `wkwebview` | `webview2` | `webkitgtk`: read by the terminal's
-  renderer.
+- `webview` — `wkwebview` | `webview2` | `webkitgtk`: decides the terminals'
+  `auto` renderer — `webkitgtk` is DOM, the others WebGL. Without a flag the
+  user agent decides (WebKit on Linux that is not Chromium: DOM).
 - `backdrop` — `native` (the window draws a material behind a transparent
   page) | `web` (the page paints its own): read by the skin — the slot in use
   (`fantastic readme skins`).

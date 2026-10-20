@@ -7,6 +7,12 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The view's `terminal_renderer {name?: auto | webgl | dom}`: `auto` draws
+  terminals with xterm's DOM renderer in WebKitGTK (the app on Linux, GNOME
+  Web) — known by the shell's flag or the user agent — and with the shared
+  WebGL renderer everywhere else; switching is live. The e2e probe E88
+  measures keystroke → render latency per renderer, in Chrome and, on Linux,
+  in WebKitGTK.
 - Installers for the desktop app, built and verified by CI (`installers.yml`,
   from the binaries a green CI run tested) and signed by hand by the
   maintainer: a notarized DMG (macOS, Apple silicon), a signed NSIS installer
