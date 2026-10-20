@@ -739,6 +739,17 @@ def diagnostics(vm: Vm) -> None:
         "sessions.txt": "loginctl list-sessions --no-pager",
         "home.txt": f"ls -laR {KIOSK_HOME}/.fantastic/app",
         "canvas-logs.txt": f"tail -n +1 {KIOSK_HOME}/.fantastic/logs/* {CANVAS_DIR}/.fantastic/logs/*",
+        # what is still alive, and where it waits: step 9 found the run file gone
+        # but cage up and no restart, with nothing in the journal to say why
+        "processes.txt": "ps -eo pid,ppid,stat,wchan:32,etime,args --forest",
+        "cgroups.txt": "systemd-cgls --no-pager; loginctl session-status --no-pager",
+        "stacks.txt": (
+            "for p in $(pgrep -f 'fantastic-app|WebKit|cage'); do [ \"$p\" = $$ ] && continue;"
+            " echo \"== $p $(tr '\\0' ' ' < /proc/$p/cmdline)\";"
+            " grep -E '^(State|Threads|SigCgt|SigBlk|SigPnd|ShdPnd):' /proc/$p/status;"
+            " for t in /proc/$p/task/*; do echo \"-- $t $(cat $t/comm) $(cat $t/wchan)\"; done;"
+            " done"
+        ),
     }.items():
         try:
             _, out, err = vm.ga_run(["/bin/sh", "-c", script])
