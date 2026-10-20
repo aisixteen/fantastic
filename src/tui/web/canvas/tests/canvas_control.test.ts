@@ -169,3 +169,15 @@ test("the view's terminal_renderer: no name answers auto and what is in use; a n
 test("VIEW_VERBS lists terminal_renderer", () => {
   assert.ok((VIEW_VERBS as readonly string[]).includes("terminal_renderer"));
 });
+
+test("the view's terminal_renderer: a bad stored value is refused, naming it; a name sets it right again", async () => {
+  const k = page();
+  // a hand-edited record
+  k.updateMeta("view_root", { terminal_renderer: "canvas" } as unknown as Payload);
+  const r = await call(k, { type: "terminal_renderer" });
+  assert.equal(r["reason"], "bad_arg");
+  assert.equal(r["arg"], "terminal_renderer");
+  assert.equal(r["stored"], "canvas");
+  assert.match(String(r["error"]), /terminal_renderer: canvas is not auto, webgl or dom/);
+  assert.equal((await call(k, { type: "terminal_renderer", name: "auto" }))["in_use"], "webgl");
+});

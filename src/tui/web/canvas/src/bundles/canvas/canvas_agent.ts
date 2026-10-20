@@ -316,7 +316,13 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
         kernel.updateMeta(id, { terminal_renderer: name } as unknown as Payload);
       }
       const choice = kernel.get(id)?.meta["terminal_renderer"] ?? "auto";
-      const r = resolveRenderer(choice, { shell: readShell(), ua: navigator.userAgent });
+      let r: ReturnType<typeof resolveRenderer>;
+      try {
+        r = resolveRenderer(choice, { shell: readShell(), ua: navigator.userAgent });
+      } catch (err) {
+        // a hand-edited record: refused loud, naming the stored value
+        return { error: `view: ${(err as Error).message} (the view's stored value)`, reason: "bad_arg", arg: "terminal_renderer", stored: choice as Json, hint: "set it: terminal_renderer {name: auto | webgl | dom}" };
+      }
       return { terminal_renderer: choice as Json, in_use: r.in_use, why: r.why, choices: [...RENDERER_CHOICES] };
     }
     case "boot":
