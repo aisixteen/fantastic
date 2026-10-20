@@ -118,7 +118,7 @@ def main() -> bool:
         r["fps_holds"] = min(f[1:] or [0]) >= 0.7 * f[0] and info.get("fps_idle_after", 0) >= 0.7 * f[0]
         # the phone's always-shown chrome costs no backdrop blur (it did: 658% vs 185%)
         cb = info.get("chrome_backdrop") or []
-        r["no_blur_cost"] = len(cb) >= 3 and all(v in (None, "", "none") for v in cb)
+        r["no_blur_cost"] = len(cb) >= 3 and all(v == "none" for v in cb)  # only an explicit none: an unread style must not pass
         r["host_quiet_at_rest"] = info.get("idle_host_lines_per_s", 999) < 5
     finally:
         rig.stop()
