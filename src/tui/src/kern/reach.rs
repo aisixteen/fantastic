@@ -24,13 +24,14 @@
 //! set up) — grant records are read, changed and written whole, so a watch
 //! writing while the boot writes loses one side's entries.
 //!
-//! CABINETS ARE NOT REACHED. A cabinet, its worker and the worker's equipment
-//! ([`cabinet_owned`]) keep the grants `fantastic_cabinet` writes: messages between
-//! workers, and equipment granted inside its cabinet. This reach would otherwise
-//! name every AI on both edges of a worker, which is god mode for the worker. The one
-//! grant it still writes for them is the human's own egress (`user` draws the cabinet's
-//! panel and calls its `view`/`watch`), so `user` may call a cabinet, and nothing else
-//! of this reach touches it.
+//! CABINETS ARE NOT REACHED BY EVERY HOLDER. A cabinet, its worker, its canvas and
+//! everything on that canvas ([`cabinet_owned`]) keep the grants `fantastic_cabinet`
+//! writes: messages between workers, and equipment granted inside its cabinet. This reach
+//! would otherwise name every AI on both edges of a worker, which is god mode for the
+//! worker. The grants it still writes for them are the human's own egress (`user` draws
+//! the cabinet's panel, calls its `view`/`watch`, and calls the equipment on its canvas)
+//! and the canvas leg's frames (`watch`/`emit`, [`leg_verbs`]): a cabinet's canvas is
+//! served and openable like a peer canvas. No other holder reaches them.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -163,21 +164,22 @@ const NARROWED: [&str; 2] = [crate::kern::saved::HOME_ID, crate::kern::user_stor
 /// Grant every holder every verb on `ids` — both edges, BY ID (no subtree
 /// keys): each target's `callable_by` names each holder, and each holder's
 /// `can_call` names the target (and `kernel`); the canvas leg, both edges, its
-/// [`leg_verbs`]. One write per changed record.
+/// [`leg_verbs`]. A cabinet's agents ([`cabinet_owned`]) take only the human's
+/// and the canvas leg's grants. One write per changed record.
 pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
     let all = json!(verbs());
     let holders = holders(h);
     let owned = cabinet_owned(&h.kernel);
     let leg = exists(h, CANVAS_LEG);
     for id in ids {
-        // a cabinet's agents: the cabinet's own grants (`fantastic_cabinet`), not the reach's
-        if !exists(h, id) || owned.contains(id) {
+        if !exists(h, id) {
             continue;
         }
         let mut cb = field(h, id, "callable_by");
         let mut changed = false;
         let narrowed = NARROWED.contains(&id.as_str());
-        for holder in holders.iter().filter(|x| *x != id && !narrowed) {
+        let cabinet = owned.contains(id);
+        for holder in holders.iter().filter(|x| *x != id && !narrowed && (!cabinet || *x == crate::env::HUMAN)) {
             if cb.get(holder) != Some(&all) {
                 cb.insert(holder.clone(), all.clone());
                 changed = true;
@@ -209,8 +211,9 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             if id == holder || (id != "kernel" && !exists(h, id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
                 continue;
             }
-            // a cabinet's agents: only the human's own calls reach them (its panel is `user`'s)
-            if id != "kernel" && owned.contains(id) && holder != crate::env::HUMAN {
+            // a cabinet's agents: only the human's own calls and the canvas leg's frames
+            // reach them (its panel and its canvas are `user`'s and the leg's)
+            if id != "kernel" && owned.contains(id) && holder != crate::env::HUMAN && holder != CANVAS_LEG {
                 continue;
             }
             // the leg's own: MERGED into what it holds (its calls to `user`)
@@ -435,7 +438,8 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::cabinet_owned;
+    use super::{cabinet_owned, grant, leg_verbs, CANVAS_LEG};
+    use crate::kern::host::Host;
     use fantastic_kernel::{Agent, AgentId, Kernel};
     use serde_json::{json, Map, Value};
     use std::path::PathBuf;
@@ -496,5 +500,59 @@ mod tests {
             assert!(!owned.contains(id), "{id} is not a cabinet's: {owned:?}");
         }
     }
-}
 
+    /// A host on a kernel rooted at `kernel` (the root is the kernel-state handler, so the
+    /// reach's operator writes land), with the human `user` and the canvas leg registered.
+    async fn host_with_leg(name: &str) -> Host {
+        let dir = std::env::temp_dir().join(format!("fc-reach-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut kernel = Kernel::new();
+        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        let kernel = std::sync::Arc::new(kernel);
+        let root = Agent::new(
+            AgentId::from("kernel"),
+            Some(fantastic_core::HANDLER_MODULE.to_string()),
+            None,
+            Map::new(),
+            dir.join(".fantastic"),
+            false,
+        );
+        kernel.register(std::sync::Arc::clone(&root));
+        kernel.set_root(root);
+        let h = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        for (id, parent) in [(crate::env::HUMAN, "kernel"), (CANVAS_LEG, "kernel")] {
+            put(&h.kernel, id, Some(parent), json!({}));
+        }
+        h
+    }
+
+    #[tokio::test]
+    async fn grant_on_a_cabinets_equipment_gives_the_human_and_the_canvas_leg_their_edges_only() {
+        let h = host_with_leg("owned-grant").await;
+        let k = &h.kernel;
+        // a cabinet on the canvas that spawns it; the equipment (a helper AI) is on the cabinet's canvas
+        put(k, "canvas_root", Some("kernel"), json!({}));
+        put(k, "manager", Some("canvas_root"), json!({"cabinet_role": "manager", "canvas_id": "canvas_root"}));
+        put(k, "cabinet_a", Some("manager"), json!({"cabinet_role": "cabinet", "canvas": "canvas_cabinet_a"}));
+        put(k, "canvas_cabinet_a", Some("canvas_root"), json!({}));
+        put(k, "helper", Some("canvas_cabinet_a"), json!({"memory_store_id": "m"}));
+        // an ordinary AI, which must not reach the cabinet's equipment (no god mode)
+        put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
+        put(k, "m", Some("kernel"), json!({}));
+        grant(&h, &["helper".to_string(), "canvas_cabinet_a".to_string()]).await.unwrap();
+        let field = |id: &str, f: &str| -> Value {
+            k.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get(f).cloned().unwrap_or(Value::Null)
+        };
+        // the human calls the equipment and the canvas; the leg watches and emits on them
+        assert_eq!(field("helper", "callable_by")[crate::env::HUMAN], json!(["*"]));
+        assert_eq!(field("helper", "callable_by")[CANVAS_LEG], leg_verbs(&h, "helper"));
+        assert_eq!(field("canvas_cabinet_a", "callable_by")[CANVAS_LEG], leg_verbs(&h, "canvas_cabinet_a"));
+        assert_eq!(field(CANVAS_LEG, "can_call")["helper"], leg_verbs(&h, "helper"));
+        assert_eq!(field(CANVAS_LEG, "can_call")["canvas_cabinet_a"], leg_verbs(&h, "canvas_cabinet_a"));
+        assert_eq!(field(crate::env::HUMAN, "can_call")["helper"], json!(["*"]));
+        // no other holder is granted the cabinet's equipment
+        assert!(field("helper", "callable_by").get("master").is_none(), "{:?}", field("helper", "callable_by"));
+        assert!(field("master", "can_call").get("helper").is_none(), "{:?}", field("master", "can_call"));
+    }
+}

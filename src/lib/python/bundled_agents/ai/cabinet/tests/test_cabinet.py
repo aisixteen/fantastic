@@ -1000,17 +1000,37 @@ async def test_conclude_keeps_a_result_with_its_canvas_path_and_closes_the_rest(
         ]
     )
     assert "deep_keep" in k.ctx.agents
+    # every canvas has its page loader (the host's `<canvas>_loader`, a kernel_state child)
+    loaders = [f"{canvas}_loader", "deep_loader"]
+    for loader, node in zip(loaders, [canvas, "deep"]):
+        made = await k.send(
+            [
+                {
+                    "target": k.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": node,
+                        "id": loader,
+                        "handler_module": "kernel_state.tools",
+                    },
+                }
+            ]
+        )
+        assert not made[0]["result"].get("error"), made
     before = set(k.ctx.agents)
-    for bad_id in (canvas, w, "nope"):
+    # a page loader is not a result: naming it is refused like any unknown id
+    for bad_id in (canvas, w, "nope", *loaders):
         res = await as_(k, MASTER, MANAGER, {"type": "conclude", "keep": [bad_id]})
         assert res.get("reason") == "unknown_keep" and res["unknown"] == [bad_id], res
     assert set(k.ctx.agents) == before
     res = await as_(k, MASTER, MANAGER, {"type": "conclude", "keep": ["deep_keep"]})
     assert not res.get("error"), res
     assert res["kept"] == ["deep_keep"] and res["concluded"] == [cab, other]
-    # the result, the canvas and the path to it (`deep`) stay; the rest goes
-    assert {"deep_keep", "deep", canvas} <= set(k.ctx.agents)
+    # the result, the canvas and the path to it (`deep`) stay, with their page loaders;
+    # the rest goes
+    kept = {"deep_keep", "deep", canvas, *loaders}
+    assert kept <= set(k.ctx.agents)
     assert {cab, w, "keep_me", "drop_me", other}.isdisjoint(k.ctx.agents)
     assert {cab, w, "keep_me", "drop_me", other} <= set(res["deleted"])
-    assert not {"deep_keep", "deep", canvas} & set(res["deleted"])
+    assert not kept & set(res["deleted"])
     assert (await as_(k, MASTER, MANAGER, {"type": "cabinets"}))["count"] == 0

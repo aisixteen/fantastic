@@ -335,18 +335,48 @@ fn subtree(kernel: &Kernel, agent_id: &str) -> Vec<String> {
     out
 }
 
-/// Every agent under `agent_id` (strictly), at any depth.
-fn descendants(kernel: &Kernel, agent_id: &str) -> Vec<String> {
-    subtree(kernel, agent_id).into_iter().skip(1).collect()
+/// The children of `node`, in tree order.
+fn children(kernel: &Kernel, node: &str) -> Vec<String> {
+    kernel
+        .agents
+        .get(&AgentId::from(node))
+        .map(|a| a.child_ids().into_iter().map(|c| c.0).collect())
+        .unwrap_or_default()
+}
+
+/// The `kernel_state` handler: a canvas's page loader is one of its children (the host's
+/// `<canvas>_loader`).
+const LOADER_HANDLER: &str = "kernel_state.tools";
+
+/// Whether `child` is `node`'s page loader: the page's own records, not equipment and never
+/// a result. Pruning keeps it, so a kept result's canvas stays openable.
+fn is_loader(kernel: &Kernel, node: &str, child: &str) -> bool {
+    child == format!("{node}_loader")
+        || record(kernel, child).is_some_and(|r| {
+            r.get("handler_module").and_then(Value::as_str) == Some(LOADER_HANDLER)
+        })
+}
+
+/// Every agent on `canvas` at any depth (equipment and nested canvases), without the canvas
+/// itself and without any page loader.
+fn canvas_items(kernel: &Kernel, canvas: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for child in children(kernel, canvas) {
+        if is_loader(kernel, canvas, &child) {
+            continue;
+        }
+        out.push(child.clone());
+        out.extend(canvas_items(kernel, &child));
+    }
+    out
 }
 
 /// The ids placed on a cabinet's canvas: its children (equipment, nested canvases).
 fn equipment(kernel: &Kernel, canvas: &str) -> Vec<String> {
-    kernel
-        .agents
-        .get(&AgentId::from(canvas))
-        .map(|a| a.child_ids().into_iter().map(|c| c.0).collect())
-        .unwrap_or_default()
+    children(kernel, canvas)
+        .into_iter()
+        .filter(|c| !is_loader(kernel, canvas, c))
+        .collect()
 }
 
 fn is_ai(rec: &Rec) -> bool {
@@ -886,17 +916,13 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
 }
 
 /// Every agent this cabinet holds that is not kept and holds no kept agent is deleted
-/// (python `_prune`): the kept agents stay with their path up to `node`. Returns the
+/// (python `_prune`): the kept agents stay with their path up to `node`. A page loader is
+/// never deleted here (it is the canvas's own records). Returns the
 /// deleted ids and the error, if one stopped it.
 async fn prune(kernel: &Arc<Kernel>, node: &str, keep: &[String]) -> (Vec<String>, Option<String>) {
     let mut deleted = Vec::new();
-    let children: Vec<String> = kernel
-        .agents
-        .get(&AgentId::from(node))
-        .map(|a| a.child_ids().into_iter().map(|c| c.0).collect())
-        .unwrap_or_default();
-    for child in children {
-        if keep.contains(&child) {
+    for child in children(kernel, node) {
+        if keep.contains(&child) || is_loader(kernel, node, &child) {
             continue;
         }
         let sub = subtree(kernel, &child);
@@ -949,7 +975,7 @@ async fn close(manager: &str, payload: &Value, kernel: &Arc<Kernel>, keep: &[Str
     let canvas = str_of(&rec, "canvas").to_string();
     let has_canvas = !canvas.is_empty() && record(kernel, &canvas).is_some();
     let kept_here: Vec<String> = if has_canvas {
-        let below = descendants(kernel, &canvas);
+        let below = canvas_items(kernel, &canvas);
         keep.iter().filter(|k| below.contains(k)).cloned().collect()
     } else {
         Vec::new()
@@ -1045,7 +1071,7 @@ async fn conclude(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value
     let results: BTreeSet<String> = live
         .iter()
         .filter(|c| !str_of(c, "canvas").is_empty())
-        .flat_map(|c| descendants(kernel, str_of(c, "canvas")))
+        .flat_map(|c| canvas_items(kernel, str_of(c, "canvas")))
         .collect();
     let unknown: Vec<&str> = keep
         .iter()

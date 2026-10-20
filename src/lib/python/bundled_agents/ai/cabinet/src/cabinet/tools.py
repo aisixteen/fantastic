@@ -234,10 +234,41 @@ def _subtree(kernel, agent_id: str) -> list[str]:
     ]
 
 
+# the `kernel_state` handler: a canvas's page loader is one of its children (the host's `<canvas>_loader`)
+LOADER_HANDLER = "kernel_state.tools"
+
+
+def _is_loader(kernel, node: str, child: str) -> bool:
+    """Whether `child` is `node`'s page loader: the page's own records, not equipment and
+    never a result. Pruning keeps it, so a kept result's canvas stays openable."""
+    if child == f"{node}_loader":
+        return True
+    return (kernel.get(child) or {}).get("handler_module") == LOADER_HANDLER
+
+
+def _canvas_items(kernel, canvas: str) -> list[str]:
+    """Every agent on `canvas` at any depth (equipment and nested canvases), without the
+    canvas itself and without any page loader."""
+    out: list[str] = []
+
+    def walk(node: str) -> None:
+        for child in kernel.ctx.agents[node].child_ids():
+            if _is_loader(kernel, node, child):
+                continue
+            out.append(child)
+            walk(child)
+
+    walk(canvas)
+    return out
+
+
 def _equipment(kernel, cab: dict) -> list[str]:
     """The ids placed on the cabinet's canvas: its children (equipment, nested canvases)."""
-    agent = kernel.ctx.agents.get(cab.get("canvas", ""))
-    return agent.child_ids() if agent is not None else []
+    canvas = cab.get("canvas", "")
+    agent = kernel.ctx.agents.get(canvas)
+    if agent is None:
+        return []
+    return [c for c in agent.child_ids() if not _is_loader(kernel, canvas, c)]
 
 
 def _is_ai(rec: dict) -> bool:
@@ -564,10 +595,11 @@ async def _open(manager: str, payload: dict, kernel):
 
 async def _prune(kernel, node: str, keep: frozenset) -> tuple[list[str], str | None]:
     """Delete, under `node`, every agent that is not kept and holds no kept agent. A kept
-    agent stays with its path up to `node`. Returns (deleted ids, the error or None)."""
+    agent stays with its path up to `node`, and a page loader is never deleted (it is the
+    canvas's own records). Returns (deleted ids, the error or None)."""
     deleted: list[str] = []
     for child in list(kernel.ctx.agents[node].child_ids()):
-        if child in keep:
+        if child in keep or _is_loader(kernel, node, child):
             continue
         sub = _subtree(kernel, child)
         if any(k in keep for k in sub):
@@ -600,7 +632,7 @@ async def _close(manager: str, payload: dict, kernel, keep: frozenset = frozense
     canvas = rec.get("canvas")
     has_canvas = canvas is not None and kernel.get(canvas) is not None
     kept_here = (
-        [k for k in keep if k in _subtree(kernel, canvas)[1:]] if has_canvas else []
+        [k for k in keep if k in _canvas_items(kernel, canvas)] if has_canvas else []
     )
     gone = _subtree(kernel, cab_id)
     res = await _tree(kernel, {"type": "delete_agent", "id": cab_id})
@@ -667,7 +699,7 @@ async def _conclude(manager: str, payload: dict, kernel):
         e
         for c in live
         if c.get("canvas") in kernel.ctx.agents
-        for e in _subtree(kernel, c["canvas"])[1:]
+        for e in _canvas_items(kernel, c["canvas"])
     }
     unknown = sorted(set(keep) - cab_ids - results)
     if unknown:

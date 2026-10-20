@@ -109,6 +109,8 @@ deletes anything:
 - **a result**: an agent placed on a cabinet's canvas, at any depth. Its canvas stays,
   with the path from the canvas to the result. The cabinet's record and worker are
   closed, and every other piece of equipment on the canvas goes with them.
+  A canvas's page loader (its `kernel_state` child, `<canvas>_loader`) is its own records:
+  it is never deleted, and it is never a result, so `keep` refuses it.
 
 Every other cabinet is closed, and its canvas goes with it.
 

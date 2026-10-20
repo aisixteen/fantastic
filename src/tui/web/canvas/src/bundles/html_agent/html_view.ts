@@ -26,10 +26,6 @@ export const htmlView: ViewBundle = {
   },
 };
 
-/** THE PANEL: a sandboxed iframe running `body` with the `fantastic` connector,
- *  relayed AS the cell's own agent. Shared by `html_view` (page content) and
- *  `agent_view` (a host agent's own view, `agent_view.ts`). `body` is read at
- *  every render; `reload_html` on the cell's inbox renders again. */
 /** The page URL that loads canvas `id` (`?canvas=<id>`), from the page's own URL. */
 export function canvasUrl(pageHref: string, id: string): string {
   const u = new URL(pageHref);
@@ -38,6 +34,10 @@ export function canvasUrl(pageHref: string, id: string): string {
   return u.toString();
 }
 
+/** THE PANEL: a sandboxed iframe running `body` with the `fantastic` connector,
+ *  relayed AS the cell's own agent. Shared by `html_view` (page content) and
+ *  `agent_view` (a host agent's own view, `agent_view.ts`). `body` is read at
+ *  every render; `reload_html` on the cell's inbox renders again. */
 export function mountPanel(ctx: ViewContext, body: () => string | Promise<string>): ViewHandle {
   {
     const { kernel, mount, selfId } = ctx;

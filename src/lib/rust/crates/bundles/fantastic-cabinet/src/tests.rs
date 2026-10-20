@@ -1222,8 +1222,26 @@ async fn conclude_keeps_a_result_with_its_canvas_path_and_closes_the_rest() {
     )
     .await;
     assert!(made.get("error").is_none(), "{made}");
+    // every canvas has its page loader (the host's `<canvas>_loader`, a kernel_state child)
+    let loaders = [format!("{canvas}_loader"), "deep_loader".to_string()];
+    for (loader, node) in loaders.iter().zip([canvas.as_str(), "deep"]) {
+        let made = op(
+            &k,
+            ROOT,
+            json!({"type": "create_agent", "parent_id": node, "id": loader, "handler_module": "kernel_state.tools"}),
+        )
+        .await;
+        assert!(made.get("error").is_none(), "{made}");
+    }
     let before = agent_ids(&k);
-    for bad in [canvas.clone(), w.clone(), "nope".to_string()] {
+    // a page loader is not a result: naming it is refused like any unknown id
+    for bad in [
+        canvas.clone(),
+        w.clone(),
+        "nope".to_string(),
+        loaders[0].clone(),
+        loaders[1].clone(),
+    ] {
         let res = as_(
             &k,
             MASTER,
@@ -1244,8 +1262,10 @@ async fn conclude_keeps_a_result_with_its_canvas_path_and_closes_the_rest() {
     no_error(&res);
     assert_eq!(res["kept"], json!(["deep_keep"]));
     assert_eq!(res["concluded"], json!([cab, other]));
-    // the result, the canvas and the path to it (`deep`) stay; the rest goes
+    // the result, the canvas and the path to it (`deep`) stay, with their page loaders;
+    // the rest goes
     assert!(exists(&k, "deep_keep") && exists(&k, "deep") && exists(&k, &canvas));
+    assert!(loaders.iter().all(|l| exists(&k, l)), "page loaders stay");
     for gone in [
         &cab,
         &w,
@@ -1259,6 +1279,7 @@ async fn conclude_keeps_a_result_with_its_canvas_path_and_closes_the_rest() {
     assert!(!["deep_keep", "deep", canvas.as_str()]
         .iter()
         .any(|k| deleted.iter().any(|d| d == k)));
+    assert!(!loaders.iter().any(|l| deleted.contains(l)), "{deleted:?}");
     assert!(
         deleted.contains(&cab) && deleted.contains(&w) && deleted.contains(&"drop_me".to_string())
     );
