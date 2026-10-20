@@ -17,6 +17,8 @@
     "shortDescription": "A live canvas for every folder",
     "license": "AGPL-3.0-or-later",
     "publisher": "aisixteen",
-    "macOS": { "minimumSystemVersion": "14.0" }
+    "macOS": { "minimumSystemVersion": "14.0", "hardenedRuntime": true },
+    "windows": { "nsis": { "installMode": "currentUser" } },
+    "linux": { "deb": { "recommends": ["fonts-dejavu-core"] } }
   }
 }

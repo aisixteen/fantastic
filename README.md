@@ -168,6 +168,38 @@ The archives are `fantastic-<target>.tar.gz` for `aarch64-apple-darwin`,
 `x86_64-unknown-linux-musl` (static Linux binaries), plus
 `fantastic-x86_64-pc-windows-msvc.zip`, with `SHA256SUMS` beside them.
 
+### Desktop app
+
+The desktop app (`fantastic-app`) hosts the home kernel and shows your
+fantastics in one window; the `fantastic` CLI ships inside it. Its installers are
+on the same [release](https://github.com/aisixteen/fantastic/releases/latest),
+beside `SHA256SUMS-app`:
+
+| system | installer |
+|---|---|
+| macOS 14+, Apple silicon | `fantastic-app-aarch64-apple-darwin.dmg` (notarized) |
+| Windows 10/11 x64 | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` (per user, no admin) |
+| x86_64 Linux, glibc 2.39+ (Ubuntu 24.04+, Debian 13+) | `fantastic-app-x86_64-unknown-linux-gnu.deb`, or the `.AppImage` (`chmod +x` and run) |
+
+The `.deb` installs `/usr/bin/fantastic-app` and `/usr/bin/fantastic`, with
+`Depends: libwebkit2gtk-4.1-0, libgtk-3-0` and `Recommends: fonts-dejavu-core`.
+On a minimal system installed with `--no-install-recommends` (the kiosk), add
+`fonts-dejavu-core` and `libgl1-mesa-dri`; `fantastic-app --kiosk` then runs it
+fullscreen, with no desktop environment.
+
+Verify before you install:
+
+```sh
+spctl -a -vvv -t open --context context:primary-signature fantastic-app-aarch64-apple-darwin.dmg   # macOS: source=Notarized Developer ID
+gpg --import fantastic-app-linux-signing-key.asc && gpg --verify fantastic-app-x86_64-unknown-linux-gnu.deb.asc fantastic-app-x86_64-unknown-linux-gnu.deb
+```
+
+```powershell
+Get-AuthenticodeSignature .\fantastic-app-x86_64-pc-windows-msvc-setup.exe   # Status: Valid
+```
+
+The Linux key's fingerprint is the one in [`SECURITY.md`](SECURITY.md#verifying-downloads).
+
 ### With cargo
 
 From crates.io:

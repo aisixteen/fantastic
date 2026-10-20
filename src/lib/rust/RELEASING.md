@@ -67,6 +67,49 @@ All steps run from the repo root, on `main`, with a clean tree.
    The Linux builds are musl-static, so they run without a matching glibc. The AI
    backends built in are vLLM, Ollama, the OpenAI Responses API and Anthropic.
 
+   The notes end with `CI run: <url>`, the run whose archives were published. The
+   installers (step 6) read it.
+6. **Installers** (needs the `signing` environment; refuses loud without it):
+   ```sh
+   gh workflow run installers.yml --ref vX.Y.Z
+   ```
+   `.github/workflows/installers.yml` builds nothing either: it bundles the app
+   (`app-<triple>`) and the CLI (`release-<target>`, checked against the
+   Release's `SHA256SUMS`) of the CI run the Release names, signs them, installs
+   and launches each installer on a fresh runner, and attaches them to the same
+   GitHub Release with `SHA256SUMS-app`. It never replaces an asset: to redo it,
+   `gh release delete-asset vX.Y.Z <name>` first. Its guard refuses, listing
+   every problem at once, a ref that is not a tag on `main`, a Release that is
+   missing or names no CI run, a failed or mismatched run, expired artifacts,
+   installer assets already present, and any missing secret or variable.
+
+   | asset | for |
+   |---|---|
+   | `fantastic-app-aarch64-apple-darwin.dmg` | macOS 14+, Apple silicon: signed with Developer ID, the app and the DMG notarized and stapled |
+   | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` | Windows 10/11 x64: NSIS, per user, Authenticode-signed and timestamped |
+   | `fantastic-app-x86_64-unknown-linux-gnu.deb` (+ `.asc`) | x86_64 Linux with glibc 2.39+ (Ubuntu 24.04+, Debian 13+) |
+   | `fantastic-app-x86_64-unknown-linux-gnu.AppImage` (+ `.asc`) | the same systems, no install |
+   | `fantastic-app-linux-signing-key.asc` | the public key of the `.asc` signatures |
+   | `SHA256SUMS-app` | the sums of all of the above |
+
+   **Rehearsal** (no certificates, any branch, publishes nothing):
+   ```sh
+   gh workflow run installers.yml --ref <branch> -f mode=rehearsal                 # a green full CI run on that commit
+   gh workflow run installers.yml --ref <branch> -f mode=rehearsal -f ci_run=<id>  # or a full run whose binaries jobs succeeded
+   ```
+   It builds the same installers unsigned, installs and launches each on a fresh
+   runner (and the `.deb` on `debian:trixie-slim`), and keeps them 7 days as run
+   artifacts. It proves the pipeline; it never stands in for a release.
+
+   **The `signing` environment.** Create it with the deployment rule "Selected
+   branches and tags", tag pattern `v*.*.*`, before adding any secret.
+
+   | OS | secrets | variables |
+   |---|---|---|
+   | macOS | `APPLE_CERTIFICATE` (base64 of the Developer ID Application `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_PRIVATE_KEY` (the `.p8` text) | — |
+   | Windows | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` | `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` |
+   | Linux | `LINUX_GPG_PRIVATE_KEY`, `LINUX_GPG_PASSPHRASE` | `LINUX_SIGNING_KEY_FINGERPRINT` (40 hex, no spaces) |
+
 ## Notes
 
 - A tag that is pushed and published to crates.io is permanent: crates.io allows

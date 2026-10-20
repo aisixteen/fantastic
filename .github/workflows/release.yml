@@ -98,6 +98,7 @@ jobs:
             on && /^## \[/ { exit }
             on { print }
           ' CHANGELOG.md > notes.md
+          printf '\n\nCI run: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "${{ needs.guard.outputs.ci_run }}" >> notes.md
           cat notes.md
       - name: the GitHub Release
         env:
