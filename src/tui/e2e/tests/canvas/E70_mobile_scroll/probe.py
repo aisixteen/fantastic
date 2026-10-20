@@ -29,6 +29,26 @@ WIDTH = int(os.environ.get("E70_WIDTH", "390"))  # 390: a phone (mobile); 1500: 
 VERBS = ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]
 # frames per second over a 3 s window, divided by the measured elapsed time: a 1 s count at ~20 fps is quantised and noisy
 FPS = "new Promise(res=>{let n=0;const t=performance.now();const f=()=>{n++; const e=performance.now()-t; if(e<3000) requestAnimationFrame(f); else res(n*1000/e)}; requestAnimationFrame(f)})"
+# the same window, started before a burst is dispatched and awaited after it: it samples the wheel work itself
+FPS_START = "(window.__fps = " + FPS + ", null)"
+FPS_AWAIT = "window.__fps"
+# every rendered element under #canvas, pseudo-elements included; the one exemption is .term-stopped (styles.ts:162),
+# the STOPPED veil that blurs a dead terminal on purpose and is never on screen while the terminal runs
+BLUR_WALK = """(()=>{
+  const out = {n: 0, heads: 0, exempt: 0, bad: []};
+  const root = document.getElementById('canvas');
+  for (const el of [root, ...root.querySelectorAll('*')]) {
+    if (!el.getClientRects().length) continue;
+    if (el.closest('.term-stopped')) { out.exempt++; continue; }
+    if (el.matches('.frame-head')) out.heads++;
+    for (const p of ['', '::before', '::after']) {
+      out.n++;
+      const bf = getComputedStyle(el, p || null).backdropFilter;
+      if (bf !== 'none') out.bad.push(`${el.tagName.toLowerCase()}.${el.getAttribute('class') || ''}${p}=${bf}`);
+    }
+  }
+  return out;
+})()"""
 
 
 def seeds() -> tuple[list[dict], list[tuple[str, dict]]]:
@@ -92,18 +112,19 @@ def main() -> bool:
                     body = await pg.rect(".agent-frame[data-id=term] .frame-body")
                     await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=body["x"] + 20, y=body["y"] + 20)
                 await sample("shipped")
-                # the chrome carries no backdrop blur (styles.ts:35-37, 67): assert it from computed style, not a timing control
-                info["chrome_backdrop"] = await pg.js("(()=>{const v=[]; document.querySelectorAll('.agent-frame').forEach(f=>{v.push(getComputedStyle(f,'::before').backdropFilter); const h=f.querySelector(':scope > .frame-head'); if(h) v.push(getComputedStyle(h).backdropFilter)}); return v;})()")
+                # the chrome carries no backdrop blur (styles.ts:35-37, 67): every rendered element is read from computed style, not a timing control
+                info["blur_walk"] = await pg.js(BLUR_WALK)
                 cw = (await pg.js("document.getElementById('canvas').clientWidth")) or 500
                 # two 3 s windows, averaged: one window is too noisy to gate on
                 base = [await pg.js(FPS), await pg.js(FPS)]
                 fps, calls = [sum(base) / 2], []
                 for burst in range(8):
                     l0, t0 = len(rig.log.read_text().splitlines()), time.time()
+                    await pg.js(FPS_START)
                     for k in range(30):
                         dy = 120 if (burst + k // 15) % 2 == 0 else -120
                         await pg.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=4, y=400, deltaX=0, deltaY=dy)
-                    fps.append(await pg.js(FPS))
+                    fps.append(await pg.js(FPS_AWAIT))
                     calls.append(round((len(rig.log.read_text().splitlines()) - l0) / (time.time() - t0)))
                 info["fps"], info["host_lines_per_s"] = fps, calls
                 await asyncio.sleep(2.0)
@@ -115,10 +136,19 @@ def main() -> bool:
 
         asyncio.run(run())
         f = info.get("fps") or [0]
-        r["fps_holds"] = min(f[1:] or [0]) >= 0.7 * f[0] and info.get("fps_idle_after", 0) >= 0.7 * f[0]
+        # the regression is a trend: the mean of the last 3 bursts against the baseline, not one order statistic
+        last3 = f[-3:]
+        mean3 = sum(last3) / len(last3)
+        idle_after = info.get("fps_idle_after", 0)
+        print(f"e70 fps: baseline={f[0]:.1f} bursts={[round(x, 1) for x in f[1:]]} "
+              f"last3_mean={mean3:.1f} threshold={0.8 * f[0]:.1f} fps_idle_after={idle_after:.1f} "
+              f"host_lines_per_s={info.get('host_lines_per_s')} idle_host_lines_per_s={info.get('idle_host_lines_per_s')}")
+        r["fps_holds"] = mean3 >= 0.8 * f[0] and idle_after >= 0.8 * f[0]
         # the phone's always-shown chrome costs no backdrop blur (it did: 658% vs 185%)
-        cb = info.get("chrome_backdrop") or []
-        r["no_blur_cost"] = len(cb) >= 3 and all(v == "none" for v in cb)  # only an explicit none: an unread style must not pass
+        bw = info.get("blur_walk") or {}
+        print(f"e70 blur walk: elements={bw.get('n')} frame_heads={bw.get('heads')} exempt={bw.get('exempt')} bad={(bw.get('bad') or [])[:10]}")
+        # only an explicit none on every rendered element, and at least one .frame-head actually read
+        r["no_blur_cost"] = bw.get("n", 0) >= 1 and bw.get("heads", 0) >= 1 and not bw.get("bad")
         r["host_quiet_at_rest"] = info.get("idle_host_lines_per_s", 999) < 5
     finally:
         rig.stop()
