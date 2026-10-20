@@ -418,16 +418,6 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     await page.open(url)
 
 
-def shown_at_centre(sel: str) -> str:
-    """JS: `sel` is SHOWN and takes the pointer at its centre — present, with a
-    nonzero rect, and the element at that point is it or inside it. The popup's
-    input is ready for a key only then; before it, a key goes nowhere (or to the
-    page behind the popup)."""
-    return (f"(()=>{{const e=document.querySelector({json.dumps(sel)}); if(!e) return false;"
-            "const r=e.getBoundingClientRect(); if(!(r.width>0&&r.height>0)) return false;"
-            "const h=document.elementFromPoint(r.x+r.width/2, r.y+r.height/2); return !!h&&e.contains(h);})()")
-
-
 async def click(page: Page, sel: str, bad: list[str]) -> None:
     # a target SHOWN a moment after the page: a stopped terminal's ▶ is in the
     # DOM from the start, hidden (0×0 at the corner) until its attach finds the
@@ -454,12 +444,15 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
             await page.mouse("mousePressed", x, y, c)
             await page.mouse("mouseReleased", x, y, c)
         # the double click opens the SPOT INPUT (after the presets' host call):
-        # pick `terminal` in it once the input is SHOWN and is the hit target at
-        # its centre, and Enter only once its one `terminal` tile is drawn
-        if not await page.until(shown_at_centre(".action-popup input"), 10):
+        # pick `terminal` in it once the popup's input HAS FOCUS (Input.insertText
+        # goes to the focused element), and Enter only once its one `terminal`
+        # tile is drawn; with no popup there is nothing to type into
+        if not await page.until("document.activeElement === document.querySelector('.action-popup input')", 10):
             bad.append("no action popup after the double click")
+            return bad
         await page.cdp("Input.insertText", text="terminal")
-        if not await page.until("[...document.querySelectorAll('.action-popup .tile')].length === 1", 5):
+        if not await page.until("(()=>{const t=[...document.querySelectorAll('.action-popup .tile')];"
+                                "return t.length === 1 && t[0].querySelector('.lb').textContent === 'terminal';})()", 5):
             bad.append("the action popup drew no single `terminal` tile")
         else:
             await page.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
