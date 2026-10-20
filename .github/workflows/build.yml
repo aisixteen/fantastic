@@ -580,4 +580,5 @@ jobs:
             src/tui/e2e/runs/**/*.log
             src/tui/e2e/runs/**/*.txt
             src/tui/e2e/runs/**/*.json
+            src/tui/e2e/runs/**/*.html
           retention-days: 14
