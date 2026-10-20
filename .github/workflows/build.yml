@@ -14,8 +14,15 @@
 #              (`ci.yml`): it takes the `e2e-<os>` artifacts of the same run.
 #              And the desktop app's e2e (`src/app/e2e/run.py`) on the `app-*`
 #              and `release-*` artifacts of the same run.
+#   os         fantastic OS (Phase 9, `os/`): the app's `.deb` and
+#              `fantastic-session` from `scripts/build/deb.sh` on the Linux
+#              `app-*` and `release-*` artifacts of the same run (`debs`,
+#              installed on stock Debian 13 in a container), the mkosi image of
+#              them, and its boot in QEMU (`os/ci/boot_check.py`). Its own call,
+#              after the `binaries` call (`ci.yml`).
 #
-# Callers: `ci.yml` ({debug, units}, {release, binaries}, then {release, e2e}).
+# Callers: `ci.yml` ({debug, units}, {release, binaries}, then {release, e2e}
+# and {release, os}).
 # FREE:
 # standard GitHub-hosted runners only
 # (ubuntu-latest, ubuntu-24.04-arm, xcode-27, windows-latest) — a `-large` /
@@ -43,6 +50,9 @@ on:
       e2e:
         type: boolean
         default: false
+      os:
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -51,6 +61,9 @@ env:
   # (src/lib/ts/scripts/pack.sh); naming it here means no second download.
   GO_VERSION: "1.23.4"
   NODE_VERSION: "24"
+  # debian:trixie-slim, a multi-arch index (both runners pull their own
+  # architecture), pinned by digest: debian:trixie-20260918-slim
+  TRIXIE_SLIM: debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
   # cargo's flag for the profile (`debug` is cargo's default `dev`).
   CARGO_PROFILE: ${{ inputs.profile == 'release' && '--release' || '' }}
 
@@ -316,10 +329,12 @@ jobs:
   # `scripts/build/app.sh` is the one build path: it stages the target's CLI as
   # the canvas sidecar and runs `tauri build --no-bundle`. The installers (Phase
   # 6b) take `app-<triple>`. Linux is `ubuntu-24.04`, NOT `ubuntu-latest`: the
-  # app links glibc, and the kiosk (Debian trixie) has glibc 2.41.
+  # app links glibc, and the kiosk (Debian trixie) has glibc 2.41. The Linux
+  # arm64 app (`ubuntu-24.04-arm`, glibc 2.39) is for the kiosk's arm64 image
+  # (Phase 9) only; its CLI comes from `cross`.
   app:
     if: inputs.binaries
-    needs: binaries
+    needs: [binaries, cross]
     name: app · ${{ matrix.app }}
     strategy:
       fail-fast: false
@@ -328,6 +343,8 @@ jobs:
           - { os: xcode-27, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
+          # for the kiosk image's arm64 build only: no installer, no e2e
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, app: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -582,3 +599,190 @@ jobs:
             src/tui/e2e/runs/**/*.json
             src/tui/e2e/runs/**/*.html
           retention-days: 14
+
+  # ── fantastic OS (Phase 9, os/): the Debian packages, the image, its boot ──
+  # `scripts/build/deb.sh` writes the app's .deb and `fantastic-session` from the
+  # `app-*` and `release-*` artifacts of the `binaries` call (ci.yml's `os` call
+  # follows it). Unsigned: signing is by hand (src/lib/rust/RELEASING.md).
+  debs:
+    if: inputs.os
+    name: debs · ${{ matrix.deb }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu, deb: amd64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, app: aarch64-unknown-linux-gnu, deb: arm64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # deb.sh reads the version from the last tag
+      - uses: dtolnay/rust-toolchain@stable # `tauri bundle` runs `cargo metadata`
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: src/app/package-lock.json
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist
+      - uses: actions/download-artifact@v7
+        with:
+          name: app-${{ matrix.app }}
+          path: dist
+      - name: the binaries, where app.sh leaves them
+        run: |
+          mkdir -p src/app/binaries "$RUNNER_TEMP/cli" src/app/target/${{ matrix.app }}/release
+          tar -xzf dist/fantastic-${{ matrix.target }}.tar.gz -C "$RUNNER_TEMP/cli"
+          mv "$RUNNER_TEMP/cli/fantastic" src/app/binaries/fantastic-${{ matrix.app }}
+          tar -xf dist/fantastic-app-${{ matrix.app }}.tar -C src/app/target/${{ matrix.app }}/release
+          ls -l src/app/binaries src/app/target/${{ matrix.app }}/release
+          # one version for the packages and the checks below: deb.sh's rule
+          echo "FANTASTIC_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')" >> "$GITHUB_ENV"
+      - name: the packages
+        run: sh scripts/build/deb.sh --target ${{ matrix.target }}
+      - name: the packages, checked
+        run: |
+          APP_DEB=dist/deb/fantastic-app-${{ matrix.app }}.deb
+          SESSION_DEB=dist/deb/fantastic-session_${FANTASTIC_VERSION}_all.deb
+          for d in "$APP_DEB" "$SESSION_DEB"; do
+            dpkg-deb --info "$d"
+            dpkg-deb --contents "$d"
+          done
+          field() { dpkg-deb --field "$1" "$2"; }
+          bad=0
+          want() {  # <what> <got> <want>
+            [ "$2" = "$3" ] || { echo "::error::$1 is '$2', wanted '$3'"; bad=1; }
+          }
+          want "the app .deb's Package" "$(field "$APP_DEB" Package)" aisixteen-fantastic
+          want "the app .deb's Architecture" "$(field "$APP_DEB" Architecture)" ${{ matrix.deb }}
+          want "the app .deb's Version" "$(field "$APP_DEB" Version)" "$FANTASTIC_VERSION"
+          for f in ./usr/bin/fantastic-app ./usr/bin/fantastic; do
+            mode=$(dpkg-deb --contents "$APP_DEB" | awk -v f="$f" '$NF == f { print $1 }')
+            want "the app .deb's mode of $f" "$mode" -rwxr-xr-x
+          done
+          # the sidecar is the tested bytes: the release archive's binary
+          packed=$(dpkg-deb --fsys-tarfile "$APP_DEB" | tar -xO ./usr/bin/fantastic | sha256sum | cut -d' ' -f1)
+          archive=$(tar -xzOf dist/fantastic-${{ matrix.target }}.tar.gz fantastic | sha256sum | cut -d' ' -f1)
+          want "the sha256 of the .deb's /usr/bin/fantastic" "$packed" "$archive"
+          want "fantastic-session's Architecture" "$(field "$SESSION_DEB" Architecture)" all
+          depends=$(field "$SESSION_DEB" Depends)
+          case "$depends" in
+            "aisixteen-fantastic (= $FANTASTIC_VERSION), "*) ;;
+            *) echo "::error::fantastic-session's Depends is '$depends', wanted it to start with 'aisixteen-fantastic (= $FANTASTIC_VERSION)'"; bad=1 ;;
+          esac
+          exit $bad
+      - name: lint and unit tests
+        run: |
+          sudo apt-get install -y -q shellcheck
+          shellcheck -s sh os/session/DEBIAN/postinst os/session/DEBIAN/prerm os/session/DEBIAN/postrm
+          python3 -m unittest discover -s os/ci -p 'test_*.py'
+      # the host is not touched: a container. No systemd runs in it, so the
+      # maintainer scripts take their no-systemd branch; the VM covers the live path.
+      - name: install on stock Debian 13, no recommends
+        run: |
+          docker run --rm -v "$PWD/dist/deb:/deb:ro" "$TRIXIE_SLIM" sh -euxc '
+            cat /etc/debian_version
+            apt-get update -q
+            apt-get install -y -q --no-install-recommends /deb/fantastic-app-*.deb /deb/fantastic-session_*_all.deb
+            fantastic readme | grep -q "fantastic canvas"
+            test -x /usr/bin/fantastic-app
+            id fantastic
+            test -L /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
+            systemd-analyze verify /usr/lib/systemd/system/fantastic-kiosk.service
+            apt-get remove -y -q fantastic-session
+            test "$(readlink /etc/systemd/system/fantastic-kiosk.service)" = /dev/null
+            apt-get purge -y -q fantastic-session
+            test ! -e /etc/systemd/system/fantastic-kiosk.service
+            test ! -e /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
+            test ! -e /etc/pam.d/fantastic-kiosk
+            id fantastic'
+      - name: keep the packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-${{ matrix.app }}
+          path: dist/deb/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+  # The image (mkosi v27.1) of exactly those packages, booted in QEMU:
+  # `os/ci/boot_check.py`. x86-64 runs on KVM and is the gate. `ubuntu-24.04-arm`
+  # exposes no /dev/kvm (actions/runner-images#14062), so arm64 boots on TCG, slowly,
+  # and does not fail the run until a green boot has been seen.
+  os:
+    if: inputs.os
+    needs: debs
+    name: os · ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86-64
+            app: x86_64-unknown-linux-gnu
+            qemu: qemu-system-x86 ovmf
+            boot: ""
+            minutes: 90
+            soft: false
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            app: aarch64-unknown-linux-gnu
+            qemu: qemu-system-arm qemu-efi-aarch64
+            boot: --timeout 2400 --step 600
+            minutes: 120
+            # not a gate yet: remove `soft` after a green TCG boot has been seen
+            soft: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.minutes }}
+    continue-on-error: ${{ matrix.soft }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # os.sh reads the version from the last tag
+      # makes /dev/kvm usable, removes AppArmor, links mkosi into /usr/bin.
+      # Not Ubuntu's own `mkosi` package: it is 20.2.
+      - uses: systemd/mkosi@v27.1
+      - uses: actions/download-artifact@v7
+        with:
+          name: deb-${{ matrix.app }}
+          path: dist/deb
+      - name: the image
+        run: |
+          echo "FANTASTIC_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')" >> "$GITHUB_ENV"
+          sh scripts/build/os.sh --arch ${{ matrix.arch }} --profile ci
+          ls -l dist/os
+      - name: qemu
+        run: sudo apt-get update -q && sudo apt-get install -y -q ${{ matrix.qemu }}
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - name: the check's python (websockets)
+        run: (cd src/lib/python && uv sync --locked)
+      - name: boot it, and check the kiosk
+        run: |
+          raw=dist/os/fantastic-os_${FANTASTIC_VERSION}.raw
+          echo "the raw image: $(du -h "$raw" | cut -f1) ($(stat -c %s "$raw") bytes)" | tee -a "$GITHUB_STEP_SUMMARY"
+          uv run --project src/lib/python python os/ci/boot_check.py \
+            --image "$raw" --arch ${{ matrix.arch }} --out os-check ${{ matrix.boot }}
+      - name: keep the check (screenshots, logs)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: os-check-${{ matrix.arch }}
+          path: os-check/
+          retention-days: 14
+      - name: compress the image
+        if: success() && matrix.arch == 'x86-64'
+        run: zstd -T0 -10 "dist/os/fantastic-os_${FANTASTIC_VERSION}.raw" -o dist/os/fantastic-os-x86-64.raw.zst
+      - name: keep the image
+        if: success() && matrix.arch == 'x86-64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: os-image-x86-64
+          path: dist/os/fantastic-os-x86-64.raw.zst
+          if-no-files-found: error
+          retention-days: 7

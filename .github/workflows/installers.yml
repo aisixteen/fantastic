@@ -7,10 +7,11 @@
 #   It packs EXACTLY the binaries a full `ci.yml` run built — the app from its
 #   `app-<triple>` artifact, the `fantastic` CLI (the app's canvas sidecar) from
 #   its `release-<target>` archive — with `tauri bundle --no-sign
-#   --no-binary-patching`, installs and launches
+#   --no-binary-patching` (Linux: `scripts/build/deb.sh`), installs and launches
 #   each installer on a fresh runner, and keeps, 7 days, per OS:
 #     installer-<triple>  the unsigned installer this run verified
-#                         (the Linux .deb IS the release package, to GPG-sign)
+#                         (the Linux .debs ARE the release packages, to GPG-sign:
+#                         the app's, and `fantastic-session`, the kiosk's, #54)
 #     to-sign-<triple>    what is signed before the installer is made: the
 #                         unsigned .app (macOS); fantastic-app.exe and the
 #                         sidecar, staged as the bundler takes them (Windows)
@@ -33,10 +34,12 @@
 #   guard          refuses before anything runs, listing EVERY problem
 #   macos          the .app and the DMG (Apple silicon)
 #   windows        the NSIS setup (x64, per user)
-#   linux          the .deb (x86_64; Ubuntu 24.04+, Debian 13+). No AppImage:
-#                  distro WebKitGTK can't be relocated without patching it
-#                  (PR #81); the cross-distro package is a Flatpak (#82)
-#   linux-bytes    the .deb's two binaries must be the CI run's, byte for byte
+#   linux          the app's .deb (x86_64; Ubuntu 24.04+, Debian 13+) and
+#                  `fantastic-session`, both from `scripts/build/deb.sh`. No
+#                  AppImage: distro WebKitGTK can't be relocated without
+#                  patching it (PR #81); the cross-distro package is a Flatpak (#82)
+#   linux-bytes    the .deb's two binaries must be the CI run's, byte for byte;
+#                  the session depends on exactly that app version
 #   verify-*       a FRESH runner per OS: install and launch — the app boots its
 #                  kernel and its bundled sidecar starts a canvas
 #                  (src/app/e2e/smoke.py); verify-trixie installs the .deb on a
@@ -137,6 +140,8 @@ jobs:
             is_version_tag "$CHECK_INPUT" || fail "check '$CHECK_INPUT' is not a vX.Y.Z tag"
             if rel=$(release_json "$CHECK_INPUT"); then
               names=$(printf '%s' "$rel" | jq -r '.assets[].name')
+              # the kiosk's package carries the version in its name
+              ASSETS="$ASSETS fantastic-session_${CHECK_INPUT#v}_all.deb fantastic-session_${CHECK_INPUT#v}_all.deb.asc"
               for a in $ASSETS; do
                 printf '%s\n' "$names" | grep -qxF "$a" \
                   || fail "the $CHECK_INPUT Release has no $a — upload it first (RELEASING.md, step 7)"
@@ -414,9 +419,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ── Linux: the .deb ──────────────────────────────────────────────────────
-  # The .deb copies the two binaries in and adds the control file; its glibc
-  # floor is the app's (built on ubuntu-24.04, below the kiosk's 2.41).
+  # ── Linux: the .debs ─────────────────────────────────────────────────────
+  # The app's .deb copies the two binaries in and adds the control file; its
+  # glibc floor is the app's (built on ubuntu-24.04, below the kiosk's 2.41).
+  # `fantastic-session` holds no binary: a unit, a PAM file and a logind drop-in.
   linux:
     needs: guard
     if: needs.guard.outputs.check == ''
@@ -466,19 +472,21 @@ jobs:
           mv "$RUNNER_TEMP/cli/fantastic" "src/app/binaries/fantastic-$APP_TARGET"
           tar -xf "dist/fantastic-app-$APP_TARGET.tar" -C "src/app/target/$APP_TARGET/release"
           ls -l src/app/binaries "src/app/target/$APP_TARGET/release"
-      - name: bundle, unsigned
+      # ONE recipe builds the packages (`scripts/build/deb.sh`, as the kiosk image's
+      # CI does): the app's .deb and `fantastic-session`, at this run's version.
+      - name: the packages, unsigned
+        run: FANTASTIC_VERSION="$VERSION" sh scripts/build/deb.sh --target "$CLI_TARGET"
+      - name: exactly the two .debs
         run: |
-          cd src/app && npx tauri bundle --ci --bundles deb --target "$APP_TARGET" --no-binary-patching --no-sign \
-            --config "{\"version\":\"$VERSION\"}"
-      - name: exactly one .deb
-        run: |
-          shopt -s nullglob
-          B="src/app/target/$APP_TARGET/release/bundle"
           mkdir -p dist/installers
-          set -- "$B"/deb/*.deb
-          [ "$#" -eq 1 ] || { echo "::error::$B/deb/*.deb matched $# files, not 1: $*"; exit 1; }
-          cp "$1" "dist/installers/fantastic-app-$APP_TARGET.deb"
+          for d in "dist/deb/fantastic-app-$APP_TARGET.deb" "dist/deb/fantastic-session_${VERSION}_all.deb"; do
+            [ -f "$d" ] || { echo "::error::deb.sh wrote no $d"; ls -l dist/deb; exit 1; }
+            cp "$d" dist/installers/
+          done
+          set -- dist/deb/*
+          [ "$#" -eq 2 ] || { echo "::error::dist/deb holds $# files, not the two .debs: $*"; exit 1; }
           dpkg-deb --field "dist/installers/fantastic-app-$APP_TARGET.deb" Package Version Depends Recommends
+          dpkg-deb --field "dist/installers/fantastic-session_${VERSION}_all.deb" Package Version Architecture Depends
           ls -l dist/installers
       - name: the glibc floor of the .deb
         run: |
@@ -530,6 +538,15 @@ jobs:
               bad=1
             fi
           done
+          # a Release that carries one package without the other is broken: the
+          # session depends on exactly the app .deb's version
+          v=$(dpkg-deb --field "dist/installers/fantastic-app-$T.deb" Version)
+          set -- dist/installers/fantastic-session_*_all.deb
+          [ "$#" -eq 1 ] && [ -f "$1" ] || { echo "::error::expected one fantastic-session_*_all.deb, got: $*"; exit 1; }
+          case "$(dpkg-deb --field "$1" Depends)" in
+            "aisixteen-fantastic (= $v), "*) echo "$1 depends on aisixteen-fantastic (= $v)" ;;
+            *) echo "::error::$1's Depends does not start with 'aisixteen-fantastic (= $v)'"; bad=1 ;;
+          esac
           exit $bad
 
   # ── verify: fresh runners, no secrets ────────────────────────────────────
@@ -686,8 +703,11 @@ jobs:
         if: env.CHECK != ''
         run: |
           gh release download "$CHECK" -R "$GITHUB_REPOSITORY" -D dist/installers \
-            -p 'fantastic-app-x86_64-unknown-linux-gnu.deb*' -p fantastic-app-linux-signing-key.asc -p SHA256SUMS-app
-          cd dist/installers && grep '  fantastic-app-x86_64-unknown-linux-gnu.deb$' SHA256SUMS-app | sha256sum -c -
+            -p 'fantastic-app-x86_64-unknown-linux-gnu.deb*' -p 'fantastic-session_*_all.deb*' \
+            -p fantastic-app-linux-signing-key.asc -p SHA256SUMS-app
+          cd dist/installers
+          grep '  fantastic-app-x86_64-unknown-linux-gnu.deb$' SHA256SUMS-app | sha256sum -c -
+          grep '  fantastic-session_[^ ]*_all.deb$' SHA256SUMS-app | sha256sum -c -
       - name: a good GPG signature, by SECURITY.md's key (check)
         if: env.CHECK != ''
         env:
@@ -698,10 +718,12 @@ jobs:
           gpg --batch --import dist/installers/fantastic-app-linux-signing-key.asc
           got=$(gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
           [ "$got" = "$FPR" ] || { echo "::error::the published key is $got, SECURITY.md lists $FPR"; exit 1; }
-          gpg --batch --status-fd 1 --verify "$DEB.asc" "$DEB" | tee "$RUNNER_TEMP/v"
-          # VALIDSIG names the signing (sub)key and, last, the primary key
-          grep '^\[GNUPG:\] VALIDSIG ' "$RUNNER_TEMP/v" | grep -qw "$FPR" \
-            || { echo "::error::$DEB: no good signature by $FPR"; exit 1; }
+          for deb in "$DEB" dist/installers/fantastic-session_*_all.deb; do
+            gpg --batch --status-fd 1 --verify "$deb.asc" "$deb" | tee "$RUNNER_TEMP/v"
+            # VALIDSIG names the signing (sub)key and, last, the primary key
+            grep '^\[GNUPG:\] VALIDSIG ' "$RUNNER_TEMP/v" | grep -qw "$FPR" \
+              || { echo "::error::$deb: no good signature by $FPR"; exit 1; }
+          done
       - name: install the .deb, and a display
         run: |
           sudo apt-get update -q

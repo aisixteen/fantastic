@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+  # the kiosk user: a normal user (uid >= 1000, so logind and the user manager
+  # treat it as any login), its password locked (useradd's default)
+  if ! getent passwd fantastic >/dev/null; then
+    useradd --create-home --user-group --shell /bin/bash --comment "fantastic kiosk" fantastic
+  fi
+fi
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigure ] || [ "$1" = abort-remove ]; then
+  deb-systemd-helper unmask fantastic-kiosk.service >/dev/null || true
+  if deb-systemd-helper --quiet was-enabled fantastic-kiosk.service; then
+    deb-systemd-helper enable fantastic-kiosk.service >/dev/null || true
+  else
+    deb-systemd-helper update-state fantastic-kiosk.service >/dev/null || true
+  fi
+  if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+    echo "fantastic-session: the kiosk starts on the next boot (or: systemctl start fantastic-kiosk)"
+  fi
+fi
+exit 0

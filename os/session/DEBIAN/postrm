@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+if [ -d /run/systemd/system ] && [ "$1" = remove ]; then
+  systemctl --system daemon-reload >/dev/null || true
+fi
+if [ "$1" = remove ] && [ -x /usr/bin/deb-systemd-helper ]; then
+  deb-systemd-helper mask fantastic-kiosk.service >/dev/null || true
+fi
+if [ "$1" = purge ] && [ -x /usr/bin/deb-systemd-helper ]; then
+  deb-systemd-helper purge fantastic-kiosk.service >/dev/null || true
+  deb-systemd-helper unmask fantastic-kiosk.service >/dev/null || true
+fi
+exit 0

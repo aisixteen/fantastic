@@ -1,0 +1,13 @@
+Package: fantastic-session
+Version: @VERSION@
+Architecture: all
+Maintainer: Koreniuk Oleksandr (aisixteen) <kvazis@gmail.com>
+Section: misc
+Priority: optional
+Depends: aisixteen-fantastic (= @VERSION@), cage, libpam-systemd, libpam-modules, libpam-runtime, systemd, passwd, init-system-helpers, libgl1-mesa-dri, fonts-dejavu-core
+Homepage: https://github.com/aisixteen/fantastic
+Description: boots this machine straight into fantastic
+ A kiosk session: the user `fantastic` is logged in on tty1 automatically,
+ and cage shows the fantastic desktop app (`fantastic-app --kiosk`) full
+ screen, with screen blanking off. Installing it on a headless Debian makes
+ that machine the kiosk from its next boot.

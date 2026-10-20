@@ -87,7 +87,7 @@ All steps run from the repo root, on `main`, with a clean tree.
    | `to-sign-aarch64-apple-darwin` | `fantastic-app-aarch64-apple-darwin.app.tar`: the unsigned `Aisixteen Fantastic.app` |
    | `installer-x86_64-pc-windows-msvc` | the unsigned setup it verified |
    | `to-sign-x86_64-pc-windows-msvc` | `fantastic-app-x86_64-pc-windows-msvc.stage.tar`: `fantastic-app.exe` and the sidecar, at the paths the bundler takes them |
-   | `installer-x86_64-unknown-linux-gnu` | the `.deb` — it IS the release package |
+   | `installer-x86_64-unknown-linux-gnu` | the two `.deb`s, built by `scripts/build/deb.sh` — they ARE the release packages: the app's, and `fantastic-session_<version>_all.deb` (the kiosk, #54) |
 
    Its guard refuses, listing every problem at once, a tag not on `main`, a
    Release that is missing or names no CI run, a failed or mismatched run, and
@@ -168,7 +168,9 @@ All steps run from the repo root, on `main`, with a clean tree.
    ```sh
    FPR=<40 hex>
    gh run download "$RUN" -n installer-x86_64-unknown-linux-gnu -D out
-   gpg --local-user "$FPR" --armor --detach-sign out/fantastic-app-x86_64-unknown-linux-gnu.deb   # → .deb.asc
+   for deb in out/fantastic-app-x86_64-unknown-linux-gnu.deb out/fantastic-session_${V}_all.deb; do
+     gpg --local-user "$FPR" --armor --detach-sign "$deb"   # → .deb.asc
+   done
    gpg --armor --export "$FPR" > out/fantastic-app-linux-signing-key.asc
    ```
    Linux ships as a `.deb` only. There is no AppImage: the distributions'
@@ -179,8 +181,8 @@ All steps run from the repo root, on `main`, with a clean tree.
 8. **Upload** — never `--clobber`: an existing name fails, so a published
    installer is never silently replaced.
    ```sh
-   (cd out && shasum -a 256 fantastic-app-* > SHA256SUMS-app && cat SHA256SUMS-app)
-   gh release upload "v$V" out/fantastic-app-* out/SHA256SUMS-app
+   (cd out && shasum -a 256 fantastic-* > SHA256SUMS-app && cat SHA256SUMS-app)
+   gh release upload "v$V" out/fantastic-* out/SHA256SUMS-app
    ```
 
    | asset | for |
@@ -188,7 +190,8 @@ All steps run from the repo root, on `main`, with a clean tree.
    | `fantastic-app-aarch64-apple-darwin.dmg` | macOS 14+, Apple silicon: Developer ID, the app and the DMG notarized and stapled |
    | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` | Windows 10/11 x64: NSIS, per user, Authenticode-signed and timestamped |
    | `fantastic-app-x86_64-unknown-linux-gnu.deb` (+ `.asc`) | x86_64 Linux: Ubuntu 24.04+, Debian 13+ (the kiosk, #54) |
-   | `fantastic-app-linux-signing-key.asc` | the public key of the `.asc` signature |
+   | `fantastic-session_<version>_all.deb` (+ `.asc`) | turns a headless Debian 13 (amd64) into the kiosk (#54): `sudo apt install ./fantastic-app-x86_64-unknown-linux-gnu.deb ./fantastic-session_<version>_all.deb`, then reboot. It depends on `aisixteen-fantastic (= <version>)` |
+   | `fantastic-app-linux-signing-key.asc` | the public key of the `.asc` signatures |
    | `SHA256SUMS-app` | the sums of all of the above |
 9. **Check the Release** (on `main`, so it reads `SHA256SUMS-app` against
    `SECURITY.md`'s current fingerprint):
@@ -199,8 +202,8 @@ All steps run from the repo root, on `main`, with a clean tree.
    downloads the installers, checks `SHA256SUMS-app`, the notarization, staple
    and Developer ID of the DMG and the app, the Authenticode signatures (with
    timestamps) of the setup and the installed binaries, and the GPG
-   signatures against `SECURITY.md`'s fingerprint, then installs and launches
-   each, as a build does.
+   signatures of both `.deb`s against `SECURITY.md`'s fingerprint, then
+   installs and launches each, as a build does.
 
 ## Notes
 
