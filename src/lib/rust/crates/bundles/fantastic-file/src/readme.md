@@ -1,6 +1,6 @@
 # file_bridge — filesystem edge
 
-Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `watch_path(path)` · `unwatch_path(path)` · `reflect`
+Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `watch_path(path)` · `unwatch_path(path)` · `open_view(kind, path)` · `reflect`
 **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
 - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
 - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
@@ -17,6 +17,12 @@ Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edi
 A consumer (file serving · a pump · kernel_state) is **storage-agnostic** — it pulls/pushes by id, so a `network_bridge` answering the same verbs serves a *remote* file the same way (G1).
 
 **Deny-all at the path level** — the `allow` list on the record names what this bridge EXPOSES, relative to `root`: a file, or everything under a directory (`.` = the whole root). No list, or an empty one, exposes NOTHING. Every path verb sees only exposed paths; anything else is `not_found` whether or not it exists (nothing leaks past the list), and `list` also shows the directories on the way to an exposed path. BOTH ends count: the path as asked AND the file it lands on (symlinks followed) must be inside the list — a link that stays inside serves, a link pointing out of it serves nothing. Set it at create (`allow=["docs/a.pdf", "img"]`) or by `update_agent` (it replaces the list). Writes are still governed by `readonly`. Writing an exposed path creates its missing parent directories, even ones the list does not name (`allow:["a/b/c.txt"]` + `write a/b/c.txt` creates `a/` and `a/b/`); `list` shows them as the way to it, nothing else in them is exposed.
+
+**Views** — files and folders are agents over this bridge, not new bridges. `open_view(kind: file|folder, path)` returns the view of that path, making it if none exists (one agent per path; a second open is the same agent). A view is a `file_bridge.tools` record carrying `view: file|folder`, a child of the bridge, with `bridge` and `path` on it:
+- `file` — `read`, `write` (`if_match` the version you read), `watch` → `{type: changed, path, kind}`, `reflect`. Its `can_call` on the bridge names exactly `read`, `write`, `watch_path`, `unwatch_path`, `watch`; a verb that names another path is refused by the view, before the bridge is asked.
+- `folder` — `list` (a path inside the folder), `reveal` (where a path inside it sits: the folders to open on the way down), `watch` → `{type: added|changed|removed, path, name}`, `reflect`. A path that climbs out of the folder is refused.
+
+A view reaches its bridge as itself, so the bridge's `allow` list still decides what is exposed: a view of an unexposed path reaches nothing. `watch` arms the bridge's disk watch once per path and relays the bridge's `changed` events onto the view's own inbox; deleting a view ends its relay. Views are not sealed: their gate is their grant. Python is the reference; the Rust port (`fantastic-file`) matches it, and Swift has no file_bridge views yet.
 
 **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
 **Running-dir law**: root is clamped inside the kernel's running dir (the dir holding its root's `.fantastic`) — `../`, `~`, absolute paths

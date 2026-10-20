@@ -234,16 +234,59 @@ fn relative(
     })
 }
 
-/// python `watchfiles.Change`'s names: `added`, `modified`, `deleted`. A rename
-/// reads as whichever the path now is; a mere access is no change.
+/// python `watchfiles.Change`'s names: `added`, `modified`, `deleted`. A mere access
+/// is no change. The DISK AS IT IS NOW decides `deleted` (python `_kind`): a batch
+/// can carry one path twice (macOS FSEvents: `deleted` then a spurious `added` for
+/// one unlink), and the last event must not read as the file's state.
 fn kind_of(kind: &EventKind, p: &Path) -> Option<&'static str> {
-    match kind {
-        EventKind::Access(_) => None,
-        EventKind::Create(_) => Some("added"),
-        EventKind::Remove(_) => Some("deleted"),
-        EventKind::Modify(ModifyKind::Name(_)) => {
-            Some(if p.exists() { "added" } else { "deleted" })
-        }
-        _ => Some(if p.exists() { "modified" } else { "deleted" }),
+    if matches!(kind, EventKind::Access(_)) {
+        return None;
+    }
+    if p.symlink_metadata().is_err() {
+        return Some("deleted");
+    }
+    Some(match kind {
+        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => "added",
+        _ => "modified",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{CreateKind, RemoveKind};
+
+    #[test]
+    fn a_change_is_judged_by_the_disk_as_it_is() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
+        let gone = dir.path().join("gone.md");
+        // a spurious `added` after an unlink reads as deleted: the disk says so
+        assert_eq!(
+            kind_of(&EventKind::Create(CreateKind::File), &gone),
+            Some("deleted")
+        );
+        assert_eq!(
+            kind_of(&EventKind::Remove(RemoveKind::File), &gone),
+            Some("deleted")
+        );
+        assert_eq!(
+            kind_of(&EventKind::Create(CreateKind::File), &here),
+            Some("added")
+        );
+        assert_eq!(
+            kind_of(&EventKind::Modify(ModifyKind::Any), &here),
+            Some("modified")
+        );
+        // present now, so a reported removal is not `deleted`
+        assert_eq!(
+            kind_of(&EventKind::Remove(RemoveKind::File), &here),
+            Some("modified")
+        );
+        assert_eq!(
+            kind_of(&EventKind::Access(notify::event::AccessKind::Any), &here),
+            None
+        );
     }
 }

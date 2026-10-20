@@ -7,6 +7,18 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- File and folder agents: thin view agents over the file bridge (#150, Python
+  reference). `open_view {kind: file|folder, path}` on a `file_bridge` returns the
+  view of that path, making it if none exists, so one path is one agent. A file
+  view reads, writes (`if_match`) and watches its file (`changed`); a folder view
+  lists, reveals a path inside it and watches its entries (`added`, `changed`,
+  `removed`). A view reaches its bridge as itself, for its own path only: its
+  grant names the bridge's verbs it needs, and a path outside its scope is refused.
+  The Rust `fantastic-file` port matches it; Swift has none yet. The canvas and
+  CLI views of these agents are not in this entry yet.
+- A file's or folder's disk change is judged by the disk as it is now: a batch that
+  reports a removal and a spurious creation for one unlink reads as `deleted`
+  (Python and Rust `file_bridge` watchers).
 - Drag from the file tree onto the canvas (#134, #135). The tree's rows drag
   together: Shift-click selects a range, ⌘-click (Ctrl-click off macOS) adds or
   drops one row. An agent row drops its cell back on the canvas (shown again, or

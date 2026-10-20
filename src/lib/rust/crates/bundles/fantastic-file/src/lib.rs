@@ -45,6 +45,7 @@ mod sys;
 #[doc(hidden)]
 pub mod test_support;
 mod text;
+mod views;
 mod watch;
 
 use async_trait::async_trait;
@@ -64,7 +65,7 @@ pub const README: &str = include_str!("readme.md");
 
 /// The verb table, in python's `VERBS` order — reflect's `verbs` map, the
 /// unknown-verb refusal and the gate all read it.
-const VERBS: [(&str, &str); 16] = [
+const VERBS: [(&str, &str); 17] = [
     (
         "reflect",
         "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
@@ -126,6 +127,10 @@ const VERBS: [(&str, &str); 16] = [
         "unwatch_path",
         "args: path:str (req). Stop YOUR watch of a path; the disk watch ends when no caller holds a path. Returns {watching:false, paths}.",
     ),
+    (
+        "open_view",
+        "args: kind:str (req — `file` or `folder`), path:str (req — root-relative, exposed by `allow`; `.` = the whole root, folders only). Reuses the view of that path or makes it: {id, kind, path, created}. The new view's grant on THIS bridge is its own verbs only (views.GRANTS).",
+    ),
 ];
 
 /// Discovery must work on a sealed bridge — python's `UNGATED`.
@@ -137,6 +142,7 @@ const UNGATED: [&str; 1] = ["reflect"];
 pub struct FileBundle {
     text: text::TextState,
     watch: watch::Watches,
+    views: views::Relays,
 }
 
 /// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
@@ -169,6 +175,9 @@ impl Bundle for FileBundle {
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
+        if let Some(bad) = views::view_refusal(meta) {
+            return Some(bad);
+        }
         if let Some(a) = meta.get("allow") {
             let ok = a.as_array().is_some_and(|items| {
                 items.iter().all(|x| {
@@ -250,6 +259,7 @@ impl Bundle for FileBundle {
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, &meta, &base),
             "boot" => Value::Null,
+            "open_view" => views::open_view_verb(kernel, &meta, agent_id, payload).await,
             v if text::TEXT_VERBS.contains(&v) => {
                 let root = clamp_root(&meta, &base);
                 text::dispatch(
@@ -343,6 +353,19 @@ impl Bundle for FileBundle {
     ) -> Result<(Reply, Option<Blob>), BundleError> {
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         let chunk = body_at(body.as_ref(), "bytes");
+        // A VIEW is answered by its own verbs, before the bridge's table and gate (python
+        // `file_bridge.tools.handler`): a view is not sealed, its gate is its grant.
+        let view = kernel.agents.get(agent_id).and_then(|a| {
+            a.record()
+                .meta
+                .get("view")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        if let Some(kind) = view {
+            let reply = views::dispatch(kernel, &self.views, agent_id, &kind, verb, &header).await;
+            return Ok((Some(reply), None));
+        }
         if text::TEXT_VERBS.contains(&verb) {
             // THE BODY AT `bytes` IS THE `bytes` ARGUMENT, present even when
             // empty — the bytes-typed carrier a model's `<bytes>` document rides.
@@ -432,12 +455,17 @@ impl Bundle for FileBundle {
         }
     }
 
-    /// The bridge is going away — its undo slots and its disk watch go with it.
-    async fn on_delete(
-        &self,
-        agent_id: &AgentId,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
+    /// The bridge is going away — its undo slots and its disk watch go with it. A
+    /// VIEW going away ends its own relay and lets go of its bridge's watch.
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        let is_view = kernel
+            .agents
+            .get(agent_id)
+            .is_some_and(|a| a.record().meta.get("view").is_some());
+        if is_view {
+            views::stop(kernel, &self.views, agent_id).await;
+            return Ok(());
+        }
         self.text.drop_slots(&agent_id.0);
         self.watch.drop_bridge(agent_id);
         Ok(())
@@ -1237,5 +1265,7 @@ mod tests;
 mod tests_pump_identity;
 #[cfg(test)]
 mod tests_text;
+#[cfg(test)]
+mod tests_views;
 #[cfg(test)]
 mod tests_watch;

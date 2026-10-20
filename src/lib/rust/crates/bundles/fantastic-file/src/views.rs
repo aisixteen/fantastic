@@ -1,0 +1,509 @@
+//! The VIEW AGENTS over the file bridge — python `file_bridge/views.py`,
+//! `file_agent.py` and `folder_agent.py`, ported verb for verb. Read those first.
+//!
+//! A view is a record of this bundle carrying `view: file|folder`, a child of its
+//! bridge. This bundle's handler answers it before the bridge's own gate: a view is
+//! not sealed, its gate is its grant on the bridge (`GRANTS`). Every disk operation
+//! is a send to the bridge AS THE VIEW, for the view's own path; a verb naming
+//! another path is refused here, before the bridge is asked.
+
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
+
+use fantastic_bundle::py_repr;
+use fantastic_kernel::inbox::InboxReceiver;
+use fantastic_kernel::lifecycle::create_from_payload;
+use fantastic_kernel::refusal as rf;
+use fantastic_kernel::{Agent, AgentId, Item, Kernel};
+use serde_json::{json, Map, Value};
+
+use super::{clamp_root, gate_path, norm, path_arg};
+
+pub(crate) const FILE: &str = "file";
+pub(crate) const FOLDER: &str = "folder";
+
+/// python `views.GRANTS` — the verbs a view may send its bridge, nothing else.
+const FILE_GRANTS: [&str; 4] = ["read", "write", "watch_path", "unwatch_path"];
+const FOLDER_GRANTS: [&str; 3] = ["list", "watch_path", "unwatch_path"];
+/// python `RELAY_VERB` — a view's relay watches its bridge.
+const RELAY_VERB: &str = "watch";
+
+/// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type.
+fn folder_event(raw: &str) -> &'static str {
+    match raw {
+        "added" => "added",
+        "deleted" => "removed",
+        _ => "changed",
+    }
+}
+
+/// A view's grant on its bridge: its GRANTS, and the relay's `watch`.
+fn grants(kind: &str) -> Vec<&'static str> {
+    let mut g: Vec<&'static str> = if kind == FILE {
+        FILE_GRANTS.to_vec()
+    } else {
+        FOLDER_GRANTS.to_vec()
+    };
+    g.push(RELAY_VERB);
+    g
+}
+
+/// python `views.bridge_path`: the bridge path a view's relative `rel` names. A file
+/// takes no operand but its own path; a folder's operand is inside the folder.
+fn bridge_path(kind: &str, own: &str, rel: &str) -> Option<String> {
+    if kind == FILE {
+        let sub = if rel.is_empty() {
+            Some(own.to_string())
+        } else {
+            norm(rel)
+        };
+        return (sub.as_deref() == Some(own)).then(|| own.to_string());
+    }
+    let sub = norm(rel)?;
+    if own == "." {
+        return Some(sub);
+    }
+    Some(if sub == "." {
+        own.to_string()
+    } else {
+        format!("{own}/{sub}")
+    })
+}
+
+/// python `views.scope`: the bridge path a verb's `path` names, or the refusal.
+fn scope(verb: &str, kind: &str, own: &str, rel: Option<&Value>) -> Result<String, Value> {
+    let rel = match rel {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Err(rf::bad(verb, "path", "a string")),
+    };
+    bridge_path(kind, own, rel).ok_or_else(|| {
+        let mut v = rf::refusal(
+            rf::UNAUTHORIZED,
+            format!(
+                "{verb}: {} is outside this agent's path {}",
+                py_repr(rel),
+                py_repr(own)
+            ),
+        );
+        rf::with(
+            &mut v,
+            "hint",
+            Value::String(
+                "a view reaches only its own path; open a view of that path (open_view)"
+                    .to_string(),
+            ),
+        );
+        rf::with(&mut v, "path", Value::String(rel.to_string()));
+        v
+    })
+}
+
+/// python `_forward_args`: the verb's own arguments, minus the routing fields.
+fn forward_args(payload: &Value) -> Map<String, Value> {
+    payload
+        .as_object()
+        .map(|o| {
+            o.iter()
+                .filter(|(k, _)| k.as_str() != "type" && k.as_str() != "path")
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// python `send_bridge`: one send to the bridge, as the calling view. A send that
+/// never settled with a reply is a refusal of its own, never a silent empty answer.
+pub(crate) async fn send_bridge(kernel: &Arc<Kernel>, bridge: &str, payload: Value) -> Value {
+    let verb = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let out = kernel
+        .send(vec![Item::new(AgentId::from(bridge), payload)])
+        .await
+        .into_iter()
+        .next();
+    match out {
+        Some(o) if o.result.is_object() => o.result,
+        _ => {
+            let mut v = rf::refusal(
+                rf::TRANSPORT_ERROR,
+                format!("{bridge} {verb}: the send did not settle with a reply"),
+            );
+            rf::with(&mut v, "bridge", Value::String(bridge.to_string()));
+            v
+        }
+    }
+}
+
+/// The view records the kernel holds, by kind and bridge and path.
+fn find_view(kernel: &Arc<Kernel>, bridge: &str, kind: &str, path: &str) -> Option<String> {
+    kernel.agent_ids().into_iter().find_map(|id| {
+        let meta = kernel.agents.get(&id)?.record().meta;
+        let hit = meta.get("view").and_then(Value::as_str) == Some(kind)
+            && meta.get("bridge").and_then(Value::as_str) == Some(bridge)
+            && meta.get("path").and_then(Value::as_str) == Some(path);
+        hit.then_some(id.0)
+    })
+}
+
+/// python `open_view`: reuse the view of `path` on this bridge, or make it. The
+/// bridge grants the new view exactly its grant in its `callable_by`.
+pub(crate) async fn open_view(
+    kernel: &Arc<Kernel>,
+    bridge: &Arc<Agent>,
+    kind: &str,
+    path: &str,
+) -> Value {
+    let bid = bridge.id.0.clone();
+    if let Some(existing) = find_view(kernel, &bid, kind, path) {
+        return json!({"id": existing, "kind": kind, "path": path, "created": false});
+    }
+    let Some(root) = kernel.root() else {
+        return json!({"error": "kernel: no root agent registered"});
+    };
+    let own_grants = grants(kind);
+    let base = bridge_name(path);
+    let payload = json!({
+        "handler_module": super::HANDLER_MODULE,
+        "parent_id": bid,
+        "view": kind,
+        "bridge": bid,
+        "path": path,
+        "display_name": base,
+        "can_call": {bid.clone(): own_grants.clone()},
+    });
+    let made = create_from_payload(kernel, &root, &payload).await;
+    if made.get("error").is_some() {
+        return made;
+    }
+    let vid = made
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut cb = bridge
+        .record()
+        .meta
+        .get("callable_by")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut set: BTreeSet<String> = cb
+        .get(&vid)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    set.extend(own_grants.iter().map(|s| s.to_string()));
+    cb.insert(vid.clone(), json!(set.into_iter().collect::<Vec<_>>()));
+    bridge.update_meta(Map::from_iter([(
+        "callable_by".to_string(),
+        Value::Object(cb),
+    )]));
+    json!({"id": vid, "kind": kind, "path": path, "created": true})
+}
+
+/// python `os.path.basename(path) or "."`.
+fn bridge_name(path: &str) -> String {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    if base.is_empty() {
+        ".".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// The views this bundle is running: each view's relay, by view id.
+#[derive(Default)]
+pub(crate) struct Relays {
+    held: Mutex<HashMap<String, Relay>>,
+}
+
+struct Relay {
+    inbox: AgentId,
+    bridge: String,
+    path: String,
+}
+
+/// python `_relay_rule`: one bridge `changed` → the view's event, or nothing.
+fn relay_event(kind: &str, own: &str, ev: &Value) -> Option<Value> {
+    let p = ev.get("path").and_then(Value::as_str)?;
+    let raw = ev.get("kind").and_then(Value::as_str).unwrap_or("modified");
+    if kind == FILE {
+        if p != own {
+            return None;
+        }
+        return Some(json!({"type": "changed", "path": own, "kind": raw}));
+    }
+    let parent = match p.rsplit_once('/') {
+        Some((d, _)) => d,
+        None => ".",
+    };
+    if p == own || parent != own {
+        return None; // the folder itself, or something deeper than its entries
+    }
+    let name = p.rsplit('/').next().unwrap_or(p);
+    Some(json!({"type": folder_event(raw), "path": p, "name": name}))
+}
+
+/// python `_relay`: the view's inbox, drained — each bridge change it is handed
+/// becomes the view's own event. The loop ends when the inbox is removed.
+async fn relay(
+    kernel: Arc<Kernel>,
+    view: AgentId,
+    mut rx: InboxReceiver,
+    kind: String,
+    own: String,
+) {
+    while let Some(item) = rx.recv().await {
+        if item.payload.get("type").and_then(Value::as_str) != Some("changed") {
+            continue;
+        }
+        if let Some(out) = relay_event(&kind, &own, &item.payload) {
+            kernel.emit(&view, out).await;
+        }
+    }
+}
+
+/// python `views.watch`: arm the bridge's disk watch for this view's path once, and
+/// relay its changes onto the view.
+async fn watch(
+    kernel: &Arc<Kernel>,
+    relays: &Relays,
+    view: &AgentId,
+    kind: &str,
+    own: &str,
+    bridge: &str,
+) -> Value {
+    if relays.held.lock().expect("relays").contains_key(&view.0) {
+        return json!({"watching": own, "agent": view.0, "relayed": true});
+    }
+    let r = send_bridge(kernel, bridge, json!({"type": "watch_path", "path": own})).await;
+    if r.get("error").is_some() {
+        return r;
+    }
+    let inbox = AgentId::from(format!("{}#relay", view.0));
+    let rx = kernel.ensure_inbox(&inbox);
+    if let Some(gate) = kernel.watch(&AgentId::from(bridge), inbox.clone()).await {
+        send_bridge(kernel, bridge, json!({"type": "unwatch_path", "path": own})).await;
+        return gate;
+    }
+    kernel.spawn_task(
+        view,
+        "watch",
+        relay(
+            Arc::clone(kernel),
+            view.clone(),
+            rx,
+            kind.to_string(),
+            own.to_string(),
+        ),
+    );
+    relays.held.lock().expect("relays").insert(
+        view.0.clone(),
+        Relay {
+            inbox,
+            bridge: bridge.to_string(),
+            path: own.to_string(),
+        },
+    );
+    json!({"watching": own, "agent": view.0, "relayed": false})
+}
+
+/// python `views.stop`: the view is going away — its relay ends and the bridge's
+/// watch is let go.
+pub(crate) async fn stop(kernel: &Arc<Kernel>, relays: &Relays, view: &AgentId) {
+    let st = relays.held.lock().expect("relays").remove(&view.0);
+    let Some(st) = st else { return };
+    kernel
+        .unwatch(&AgentId::from(st.bridge.as_str()), &st.inbox)
+        .await;
+    kernel.remove_inbox(&st.inbox);
+    send_bridge(
+        kernel,
+        &st.bridge,
+        json!({"type": "unwatch_path", "path": st.path}),
+    )
+    .await;
+}
+
+/// The view's verb table: `file` answers read, write, watch, reflect; `folder` answers
+/// list, reveal, watch, reflect. Anything else is unhandled by the view.
+pub(crate) async fn dispatch(
+    kernel: &Arc<Kernel>,
+    relays: &Relays,
+    id: &AgentId,
+    kind: &str,
+    verb: &str,
+    payload: &Value,
+) -> Value {
+    let meta = kernel
+        .agents
+        .get(id)
+        .map(|a| a.record().meta)
+        .unwrap_or_default();
+    let own = meta
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let bridge = meta
+        .get("bridge")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    match (kind, verb) {
+        (_, "reflect") => reflect(kind, id, &meta),
+        (FILE, "read" | "write") => match scope(verb, FILE, &own, payload.get("path")) {
+            Err(e) => e,
+            Ok(target) => {
+                let mut body = forward_args(payload);
+                body.insert("type".into(), json!(verb));
+                body.insert("path".into(), json!(target));
+                send_bridge(kernel, &bridge, Value::Object(body)).await
+            }
+        },
+        (FILE | FOLDER, "watch") => watch(kernel, relays, id, kind, &own, &bridge).await,
+        (FOLDER, "list") => match scope("list", FOLDER, &own, payload.get("path")) {
+            Err(e) => e,
+            Ok(target) => {
+                send_bridge(kernel, &bridge, json!({"type": "list", "path": target})).await
+            }
+        },
+        (FOLDER, "reveal") => reveal(kernel, &own, &bridge, payload).await,
+        _ => {
+            let mut v = rf::refusal(
+                rf::UNHANDLED,
+                format!("{kind} agent: unknown type {}", py_repr(verb)),
+            );
+            rf::with(&mut v, "verb", json!(verb));
+            v
+        }
+    }
+}
+
+/// python `reflect` of a view: what it IS — its kind, path, bridge, relay state.
+fn reflect(kind: &str, id: &AgentId, meta: &Map<String, Value>) -> Value {
+    let sentence = if kind == FILE {
+        "A file on a file_bridge — one live object per path: its text, its writes and its changes."
+    } else {
+        "A folder on a file_bridge — one live object per folder: its entries and their changes."
+    };
+    json!({
+        "id": id.0,
+        "sentence": sentence,
+        "kind": kind,
+        "path": meta.get("path").cloned().unwrap_or(Value::Null),
+        "bridge": meta.get("bridge").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// python `_reveal`: where a path inside the folder sits — the folders to open on the
+/// way down. `not_found` when nothing is there.
+async fn reveal(kernel: &Arc<Kernel>, own: &str, bridge: &str, payload: &Value) -> Value {
+    let Some(rel) = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return rf::missing("reveal", "path");
+    };
+    let target = match scope("reveal", FOLDER, own, payload.get("path")) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let parent = match target.rsplit_once('/') {
+        Some((d, _)) => d.to_string(),
+        None => ".".to_string(),
+    };
+    let listed = send_bridge(kernel, bridge, json!({"type": "list", "path": parent})).await;
+    if listed.get("error").is_some() {
+        return listed;
+    }
+    let name = target.rsplit('/').next().unwrap_or(&target);
+    let present = listed
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|f| f.get("name").and_then(Value::as_str) == Some(name));
+    if !present {
+        let mut v = rf::refusal(
+            rf::NOT_FOUND,
+            format!("reveal: {} is not in this folder", py_repr(rel)),
+        );
+        rf::with(&mut v, "path", json!(rel));
+        return v;
+    }
+    // The path inside the folder: python's `posixpath.relpath(target, own)`.
+    let inside = if own == "." {
+        target.clone()
+    } else {
+        target
+            .strip_prefix(own)
+            .map(|s| s.trim_start_matches('/'))
+            .filter(|s| !s.is_empty())
+            .unwrap_or(".")
+            .to_string()
+    };
+    let dirs: Vec<String> = match inside.rsplit_once('/') {
+        Some((d, _)) => {
+            let parts: Vec<&str> = d.split('/').collect();
+            (0..parts.len()).map(|i| parts[..=i].join("/")).collect()
+        }
+        None => Vec::new(),
+    };
+    json!({"revealed": inside, "folder_path": own, "dirs": dirs})
+}
+
+/// The `open_view` verb on a bridge: the arguments checked the way python checks
+/// them, then the view reused or made. The path must be exposed (`allow`), as any
+/// path verb's is.
+pub(crate) async fn open_view_verb(
+    kernel: &Arc<Kernel>,
+    meta: &Map<String, Value>,
+    agent_id: &AgentId,
+    payload: &Value,
+) -> Value {
+    let kind = payload.get("kind").and_then(Value::as_str);
+    let kind = match kind {
+        Some(k @ (FILE | FOLDER)) => k,
+        _ => return rf::bad("open_view", "kind", "`file` or `folder`"),
+    };
+    let path = match path_arg("open_view", payload, "path") {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let Some(norm_path) = norm(path) else {
+        return rf::bad("open_view", "path", "a root-relative path inside the root");
+    };
+    if kind == FILE && norm_path == "." {
+        return rf::bad("open_view", "path", "a file path (the root is a folder)");
+    }
+    let allow = super::allow_list(meta);
+    let root = clamp_root(meta, &kernel.workdir());
+    if let Some(err) = gate_path("open_view", &root, &allow, &norm_path) {
+        return err;
+    }
+    let Some(bridge) = kernel.agents.get(agent_id).map(|a| Arc::clone(a.value())) else {
+        return json!({"error": format!("no agent {}", agent_id.0)});
+    };
+    open_view(kernel, &bridge, kind, &norm_path).await
+}
+
+/// The `validate_meta` judgement on the view field: a view is `file` or `folder`.
+pub(crate) fn view_refusal(meta: &Map<String, Value>) -> Option<String> {
+    match meta.get("view") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s == FILE || s == FOLDER => None,
+        Some(_) => Some(
+            "view must be `file` or `folder` — a view of one path on this bridge; open one \
+             with open_view"
+                .to_string(),
+        ),
+    }
+}

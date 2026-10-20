@@ -48,10 +48,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import posixpath
 from contextlib import asynccontextmanager
 
-from file_bridge import fs
+from file_bridge import file_agent, fs, folder_agent, views
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
 from io_bridge._base import parse_spec
@@ -978,7 +979,11 @@ async def _undo(id, payload, kernel):
 
 
 async def on_delete(agent) -> None:
-    """The bridge is going away — its undo slots and its disk watch go with it."""
+    """The bridge is going away — its undo slots and its disk watch go with it. A view
+    going away ends its own relay and lets go of its bridge's watch."""
+    if (agent.record or {}).get("view") is not None:
+        await views.stop(agent.id, agent)
+        return
     slots = _UNDO
     for k in [k for k in slots if k[0] == agent.id]:
         del slots[k]
@@ -1082,9 +1087,17 @@ def _rewatch(id: str, kernel, root: fs.Root) -> None:
     st["task"] = kernel.ctx.tasks[tid]["_task"]
 
 
-async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, str]):
-    import os
+def _kind(p: str, reported: str) -> str:
+    """The kind of one disk change, judged by the disk as it IS now. A batch can carry
+    a path twice (macOS FSEvents: `deleted` then a spurious `added` for one unlink), and
+    the last report would wrongly read as the file's state. Gone is `deleted`; present
+    is `added` only when the batch says the path was created, else `modified`."""
+    if not os.path.lexists(p):
+        return "deleted"
+    return "added" if reported == "added" else "modified"
 
+
+async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, str]):
     import watchfiles
 
     targets = sorted({os.path.dirname(f) for f in files} | set(dirs))
@@ -1095,18 +1108,40 @@ async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, st
         for change, raw in changes:
             p = os.path.realpath(raw)
             if p in files:
-                seen[files[p]] = change.name
+                seen[files[p]] = _kind(p, change.name)
                 continue
             d = dirs.get(os.path.dirname(p))
             if d is not None:
                 name = os.path.basename(p)
-                seen[name if d == "." else f"{d}/{name}"] = change.name
+                seen[name if d == "." else f"{d}/{name}"] = _kind(p, change.name)
         # `allow` is read LIVE: a path the bridge stopped exposing after the watch
         # was armed reports nothing more.
         allow = _allow(kernel.get(id) or {})
         for rel, kind in seen.items():
             if _exposed(allow, rel):
                 await kernel.emit(id, {"type": "changed", "path": rel, "kind": kind})
+
+
+# ─── view agents ────────────────────────────────────────────────
+
+
+async def _open_view(id, payload, kernel):
+    """args: kind:str (req — `file` or `folder`), path:str (req — root-relative, exposed by `allow`; `.` = the whole root, folders only). Reuses the view of that path or makes it: {id, kind, path, created}. The new view's grant on THIS bridge is its own verbs only (views.GRANTS)."""
+    rec = kernel.get(id) or {}
+    kind = payload.get("kind")
+    if kind not in (views.FILE, views.FOLDER):
+        return bad("open_view", "kind", "`file` or `folder`")
+    path, err = _path_arg("open_view", payload)
+    if err:
+        return err
+    norm = _norm(path)
+    if norm is None:
+        return bad("open_view", "path", "a root-relative path inside the root")
+    if kind == views.FILE and norm == ".":
+        return bad("open_view", "path", "a file path (the root is a folder)")
+    if err := _gate_path("open_view", _root(kernel, rec), _allow(rec), norm):
+        return err
+    return views.open_view(kernel, kernel.ctx.agents[id], kind, norm)
 
 
 # ─── dispatch ───────────────────────────────────────────────────
@@ -1129,6 +1164,7 @@ VERBS = {
     "mkdir": _mkdir,
     "watch_path": _watch_path,
     "unwatch_path": _unwatch_path,
+    "open_view": _open_view,
 }
 
 EMITS = {
@@ -1163,6 +1199,11 @@ def validate_meta(meta: dict, record: dict) -> str | None:
                 "allow must be a list of paths relative to the root (a file, or a "
                 "directory exposing everything under it; `.` = the whole root)"
             )
+    if meta.get("view") not in (None, views.FILE, views.FOLDER):
+        return (
+            "view must be `file` or `folder` — a view of one path on this bridge; "
+            "open one with open_view"
+        )
     if bad := unknown_ingress_refusal(meta, ("allow_all_ingress", "deny_ingress")):
         return bad
     return _password_refusal(meta, "fs edge")
@@ -1189,7 +1230,15 @@ def _password_refusal(meta: dict, edge: str) -> str | None:
     return None
 
 
+#: A view record (`view: file|folder`) is answered by its own verbs, not the bridge's.
+#: A view is not sealed: its gate is its grant on the bridge (`views.py`).
+VIEW_HANDLERS = {views.FILE: file_agent.handler, views.FOLDER: folder_agent.handler}
+
+
 async def handler(id: str, payload: dict, kernel) -> dict | None:
+    view = (kernel.get(id) or {}).get("view")
+    if view is not None:
+        return await VIEW_HANDLERS[view](id, payload, kernel)
     t = payload.get("type")
     fn = VERBS.get(t)
     if fn is None:
