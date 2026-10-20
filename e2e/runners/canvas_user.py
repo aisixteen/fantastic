@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -28,27 +27,10 @@ from canvas import DESKTOP_POINTER, MAC_CHROME, Host, Page, build_bin, free_port
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 from helpers import oslayer, verdict  # noqa: E402
+from helpers.chrome import Chrome  # noqa: E402
 
 SC = E2E / "tests" / "scenario" / "E21_canvas_user" / "scenario.yaml"
 FRAMES = "document.querySelectorAll('#world .agent-frame, .agent-frame').length"
-CHROME_TAIL = 40  # the lines of Chrome's own output a dead debugging port's error quotes
-
-
-def chrome_evidence(rc: int | None, cmd: list[str], udd: Path, out: Path) -> str:
-    """Why a Chrome never opened its debugging port: its exit status (or that it
-    is still running), how it was launched, and the tail of its own output."""
-    try:
-        tail = out.read_text(errors="replace").splitlines()[-CHROME_TAIL:]
-    except OSError as e:
-        tail = [f"(output unreadable: {e})"]
-    status = "still running" if rc is None else f"exited with status {rc}"
-    return "\n".join([
-        f"Chrome never opened its debugging port — {status}",
-        f"  command: {shlex.join(cmd)}",
-        f"  user-data-dir: {udd}",
-        f"  output: {out} (last {len(tail)} lines)",
-        *(f"    {line}" for line in tail),
-    ])
 
 
 class Browser:
@@ -60,36 +42,29 @@ class Browser:
         if not Path(chrome).exists():
             raise SystemExit(f"no Chrome at {chrome}: set CHROME")
         self.udd = tmp / ("chrome-" + name)
-        self.out = tmp / f"chrome-{name}.log"  # Chrome's stdout and stderr, kept for a failure's evidence
-        self.cmd = [chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
-                    f"--remote-debugging-port={self.port}", f"--user-data-dir={self.udd}",
-                    "--no-first-run", "about:blank"]
-        with self.out.open("wb") as fh:  # the child keeps its own copy of the descriptor
-            self.proc = subprocess.Popen(self.cmd, stdout=fh, stderr=subprocess.STDOUT)
+        cmd = [chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
+               f"--remote-debugging-port={self.port}", f"--user-data-dir={self.udd}",
+               "--no-first-run", "about:blank"]
+        self.chrome = Chrome(cmd, tmp / f"chrome-{name}.log", self.port)  # Chrome's stdout and stderr, kept for a failure's evidence
         self.used_first = False
         self.size = (w["width"], w["height"])
 
     def ws_url(self) -> str:
-        deadline = time.time() + 15
-        while True:
-            try:
-                tabs = [t for t in json.loads(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list").read()) if t["type"] == "page"]
-                if not self.used_first and tabs:
-                    self.used_first = True
-                    return tabs[0]["webSocketDebuggerUrl"]
-                t = json.loads(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{self.port}/json/new?about:blank", method="PUT")).read())
-                return t["webSocketDebuggerUrl"]
-            except Exception:
-                if time.time() > deadline:
-                    raise SystemExit(chrome_evidence(self.proc.poll(), self.cmd, self.udd, self.out))
-                time.sleep(0.2)
+        def probe() -> str:
+            tabs = [t for t in json.loads(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list").read()) if t["type"] == "page"]
+            if not self.used_first and tabs:
+                self.used_first = True
+                return tabs[0]["webSocketDebuggerUrl"]
+            t = json.loads(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{self.port}/json/new?about:blank", method="PUT")).read())
+            return t["webSocketDebuggerUrl"]
+        return self.chrome.wait_port(probe, timeout=15)
 
     def close(self) -> None:
-        self.proc.terminate()
+        self.chrome.proc.terminate()
         try:
-            self.proc.wait(10)
+            self.chrome.proc.wait(10)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            self.chrome.proc.kill()
 
 
 async def tab(b: Browser, url: str, *, stack) -> Page:

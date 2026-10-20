@@ -42,6 +42,7 @@ sys.path.insert(0, str(E2E))
 
 from e2e_build import build_lock  # noqa: E402
 from helpers import oslayer, verdict  # noqa: E402
+from helpers.chrome import RETRYABLE, Chrome  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
 # else ~/.fantastic. A test must never read or write the owner's real
@@ -79,26 +80,31 @@ def _scenario_path(scenario_id: str) -> Path:
     raise SystemExit(f"no scenario {scenario_id!r}")
 
 
-async def attach(cdp_port: int, timeout: float = 30.0):
+async def attach(chrome: Chrome, timeout: float = 30.0):
     """Chrome's page target, CONNECTED: a fresh Chrome lists its debugging port
     before its page, and can refuse the page's socket (HTTP 404) for a moment
     after listing it — retry both until `timeout`, then fail saying which. A
-    runner's first Chrome (cold disk) has taken past 10 s to listen."""
+    runner's first Chrome (cold disk) has taken past 10 s to listen. Chrome is
+    checked on every poll (helpers.chrome)."""
     import websockets
+    from websockets.exceptions import WebSocketException
     deadline = time.time() + timeout
-    why = "its debugging port never answered"
-    while time.time() < deadline:
+    why = "no poll yet"
+    while True:
+        chrome.check(why)
         try:
-            tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/list").read())
+            tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{chrome.port}/json/list").read())
             page_ws = next((t["webSocketDebuggerUrl"] for t in tabs if t.get("type") == "page"), None)
             if page_ws is None:
                 why = "it listed no page target"
             else:
                 return await websockets.connect(page_ws, max_size=None, ping_interval=None)
-        except Exception as e:  # noqa: BLE001 — not up yet: retried until the deadline
+        except (*RETRYABLE, WebSocketException) as e:  # not up yet: retried until the deadline
             why = f"{type(e).__name__}: {e}"
+        if time.time() > deadline:
+            chrome.check(why)
+            raise SystemExit(chrome.evidence(f"Chrome on port {chrome.port}: not attached in {timeout:.0f} s", why))
         await asyncio.sleep(0.2)
-    raise SystemExit(f"Chrome on port {cdp_port}: not attached in {timeout:.0f} s — {why}")
 
 
 def free_port() -> int:
@@ -687,20 +693,20 @@ async def run_all(sc: dict, tmp: Path) -> bool:
     cwd.mkdir(parents=True)
     binary = build_bin(tmp)
     port = free_port()
-    chrome = os.environ.get("CHROME") or MAC_CHROME
-    if not Path(chrome).exists():
-        raise SystemExit(f"no Chrome at {chrome}: set CHROME")
+    exe = os.environ.get("CHROME") or MAC_CHROME
+    if not Path(exe).exists():
+        raise SystemExit(f"no Chrome at {exe}: set CHROME")
     cdp_port = free_port()
     w = sc["window"]
-    br = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
-                           f"--remote-debugging-port={cdp_port}", f"--user-data-dir={tmp / 'chrome'}",
-                           "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    br = Chrome([exe, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
+                 f"--remote-debugging-port={cdp_port}", f"--user-data-dir={tmp / 'chrome'}",
+                 "--no-first-run", "about:blank"], tmp / "chrome.log", cdp_port)
     host = Host(binary, cwd, port)
     failures = 0
     try:
         host.start()
         url = host.url
-        async with await attach(cdp_port) as ws:
+        async with await attach(br) as ws:
             page = Page(ws)
             await page.cdp("Runtime.enable")
             await page.cdp("Page.enable")
@@ -716,11 +722,11 @@ async def run_all(sc: dict, tmp: Path) -> bool:
     finally:
         if host.proc is not None:
             host.stop()
-        br.terminate()
+        br.proc.terminate()
         try:
-            br.wait(10)
+            br.proc.wait(10)
         except subprocess.TimeoutExpired:
-            br.kill()
+            br.proc.kill()
     return failures == 0
 
 
