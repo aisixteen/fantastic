@@ -501,13 +501,20 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         for c in (1, 2):
             await page.mouse("mousePressed", x, y, c)
             await page.mouse("mouseReleased", x, y, c)
-        # the double click opens the SPOT INPUT: pick `terminal` in it
-        if not await page.until("!!document.querySelector('.action-popup input')", 10):
+        # the double click opens the SPOT INPUT (after the presets' host call):
+        # pick `terminal` in it once the popup's input HAS FOCUS (Input.insertText
+        # goes to the focused element), and Enter only once its one `terminal`
+        # tile is drawn; with no popup there is nothing to type into
+        if not await page.until("document.activeElement === document.querySelector('.action-popup input')", 10):
             bad.append("no action popup after the double click")
+            return bad
         await page.cdp("Input.insertText", text="terminal")
-        await page.until("[...document.querySelectorAll('.action-popup .tile')].length === 1", 5)
-        await page.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
-        await page.cdp("Input.dispatchKeyEvent", type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+        if not await page.until("(()=>{const t=[...document.querySelectorAll('.action-popup .tile')];"
+                                "return t.length === 1 && t[0].querySelector('.lb').textContent === 'terminal';})()", 5):
+            bad.append("the action popup drew no single `terminal` tile")
+        else:
+            await page.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+            await page.cdp("Input.dispatchKeyEvent", type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13)
         if not await page.until(f"document.querySelectorAll('.xterm-helper-textarea').length > {before}", 10):
             bad.append("no terminal appeared after the double click")
         wait_disk(lambda: len(members(cwd)) > 0)
