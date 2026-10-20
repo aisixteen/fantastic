@@ -34,7 +34,8 @@
 #   macos          the .app and the DMG (Apple silicon)
 #   windows        the NSIS setup (x64, per user)
 #   linux          the .deb and the AppImage (x86_64, built on ubuntu-24.04:
-#                  glibc 2.39); each packed binary must be the CI run's bytes
+#                  glibc 2.39)
+#   linux-bytes    each binary in them must be the CI run's, byte for byte
 #   verify-*       a FRESH runner per OS: install and launch — the app boots its
 #                  kernel and its bundled sidecar starts a canvas
 #                  (src/app/e2e/smoke.py); verify-trixie installs the .deb on a
@@ -487,25 +488,6 @@ jobs:
           done
           dpkg-deb --field "dist/installers/fantastic-app-$APP_TARGET.deb" Package Version Depends Recommends
           ls -l dist/installers
-      # The packages carry the CI run's bytes, unchanged: what was tested ships.
-      - name: each packed binary is the CI run's
-        run: |
-          app="src/app/target/$APP_TARGET/release/fantastic-app"
-          cli="src/app/binaries/fantastic-$APP_TARGET"
-          dpkg-deb -x "dist/installers/fantastic-app-$APP_TARGET.deb" "$RUNNER_TEMP/deb"
-          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/dist/installers/fantastic-app-$APP_TARGET.AppImage" --appimage-extract > /dev/null)
-          bad=0
-          for pair in "$RUNNER_TEMP/deb/usr/bin/fantastic-app:$app" "$RUNNER_TEMP/deb/usr/bin/fantastic:$cli" \
-                      "$RUNNER_TEMP/squashfs-root/usr/bin/fantastic-app:$app" "$RUNNER_TEMP/squashfs-root/usr/bin/fantastic:$cli"; do
-            packed="${pair%%:*}"
-            if cmp -s "$packed" "${pair#*:}"; then
-              echo "same bytes: $packed"
-            else
-              echo "::error::$packed is not the CI run's ${pair#*:} (RUNPATH: $(readelf -d "$packed" | grep -o 'RUNPATH.*' || echo none))"
-              bad=1
-            fi
-          done
-          exit $bad
       - name: the glibc floor of these installers
         run: echo "Linux installers built on $(ldd --version | head -1)" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
@@ -514,6 +496,50 @@ jobs:
           path: dist/installers/
           if-no-files-found: error
           retention-days: 7
+
+  # The packages carry the CI run's bytes, unchanged: what was tested ships. Its
+  # own job, so the verify jobs run on the same build whatever it finds.
+  linux-bytes:
+    needs: [guard, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: installer-x86_64-unknown-linux-gnu
+          path: dist/installers
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-x86_64-unknown-linux-musl
+          path: dist/ci
+          run-id: ${{ needs.guard.outputs.ci_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: app-x86_64-unknown-linux-gnu
+          path: dist/ci
+          run-id: ${{ needs.guard.outputs.ci_run }}
+          github-token: ${{ github.token }}
+      - name: each packed binary is the CI run's
+        run: |
+          T=x86_64-unknown-linux-gnu
+          mkdir -p ci
+          tar -xzf dist/ci/fantastic-x86_64-unknown-linux-musl.tar.gz -C ci
+          tar -xf "dist/ci/fantastic-app-$T.tar" -C ci
+          dpkg-deb -x "dist/installers/fantastic-app-$T.deb" deb
+          chmod +x "dist/installers/fantastic-app-$T.AppImage"
+          "dist/installers/fantastic-app-$T.AppImage" --appimage-extract > /dev/null
+          bad=0
+          for packed in deb/usr/bin/fantastic-app deb/usr/bin/fantastic \
+                        squashfs-root/usr/bin/fantastic-app squashfs-root/usr/bin/fantastic; do
+            if cmp -s "$packed" "ci/$(basename "$packed")"; then
+              echo "same bytes: $packed"
+            else
+              echo "::error::$packed is not the CI run's $(basename "$packed") (RUNPATH: $(readelf -d "$packed" | grep -o 'RUNPATH.*' || echo none))"
+              bad=1
+            fi
+          done
+          exit $bad
 
   # ── verify: fresh runners, no secrets ────────────────────────────────────
   # A build verifies the installers its jobs just made (unsigned); a check
