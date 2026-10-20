@@ -35,6 +35,10 @@ VERBS = ["watch", "status", "start", "write", "ack", "resize", "output"]
 RELOADS = 30
 # a fresh viewer's own count: at most one ack batch (5 000) plus what is in flight
 BOUND = 40_000
+# a re-attach holds live frames unacked until it finishes (terminal_view.ts attach/drainEarly), so the
+# count is read once the attach has settled: it must fall to about one ack batch plus frames in flight
+SETTLED = 20_000
+SETTLE_S = 10.0  # drain deadline; a stuck backlog never meets it and FAILS the "settled" check. BOUND is not widened.
 SCREEN = ("(()=>{const f=document.querySelector('.agent-frame[data-id=\"%s\"] .frame-body'); const t=f&&f.xterm; if(!t) return '';"
           " const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+' ';} return s;})()" % CELL)
 
@@ -68,18 +72,32 @@ def main() -> bool:
             return {"error": "no running job", "status": st}
         return await host_call(rig.port, BACKEND, {"type": "ack", "job_id": job, "chars": 0})
 
+    async def settled() -> tuple[dict, bool]:
+        loop = asyncio.get_running_loop()
+        end = loop.time() + SETTLE_S
+        c = await count()
+        while not (isinstance(c.get("unacked"), int) and c["unacked"] <= SETTLED):
+            if loop.time() >= end:
+                return c, False
+            await asyncio.sleep(0.1)
+            c = await count()
+        return c, True
+
     async def drive() -> None:
         async with rig.page(1400, 900) as pg:
             r["drawing"] = bool(await pg.until(f"/TICK \\d+/.test({SCREEN})", 20))
             paused = False
+            all_settled = True
             for i in range(RELOADS):
                 await pg.open(rig.url)
                 await pg.until(f"/TICK \\d+/.test({SCREEN})", 15)
                 await asyncio.sleep(0.4 + (i % 3) * 0.15)  # a reload lands mid-batch
-                c = await count()
+                c, ok_s = await settled()
+                all_settled = all_settled and ok_s
                 info["counts"].append(c.get("unacked"))
                 paused = paused or bool(c.get("paused"))
             r["never_paused"] = not paused
+            r["backlog_settles"] = all_settled
             counts = [c for c in info["counts"] if isinstance(c, int)]
             info["max_count"] = max(counts, default=None)
             r["count_bounded"] = bool(counts) and max(counts) < BOUND
