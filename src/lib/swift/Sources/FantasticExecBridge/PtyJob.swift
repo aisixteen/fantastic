@@ -181,6 +181,9 @@
         private var ringBytes = 0
         private var unacked = 0
         private var paused = false
+        /// A viewer's replay opened a re-attach grace: until its first ack, the backlog
+        /// does not pause the reader.
+        private var reattach = false
         private var eof = false
         private var pendingBytes: [UInt8] = []
         private var pasteDir: String?
@@ -247,7 +250,7 @@
                     ringBytes -= ring.removeFirst().utf8.count
                 }
                 unacked += text.unicodeScalars.count
-                if unacked > PTY_HIGH_WATERMARK { paused = true }
+                if unacked > PTY_HIGH_WATERMARK && !reattach { paused = true }
                 state.unlock()
                 events.yield(
                     .object([
@@ -308,6 +311,8 @@
         /// `ack` — flow control.
         func ack(_ chars: Int) -> (Int, Bool) {
             state.lock()
+            // the re-attach grace ends at the viewer's first ack after its replay
+            reattach = false
             unacked = max(0, unacked - chars)
             if paused && unacked < PTY_LOW_WATERMARK {
                 paused = false
@@ -325,6 +330,7 @@
             state.lock()
             defer { state.unlock() }
             unacked = 0
+            reattach = true
             if paused {
                 paused = false
                 state.broadcast()

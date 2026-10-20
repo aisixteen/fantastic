@@ -599,7 +599,7 @@ def _pty_output(owner: str, job_id: int, kernel, data: bytes) -> None:
         kernel.emit(owner, {"type": "output", "job_id": job_id, "data": text})
     )
     pt["unacked"] += len(text)
-    if pt["unacked"] > HIGH_WATERMARK:
+    if pt["unacked"] > HIGH_WATERMARK and not pt["reattach"]:
         pt["term"].stop_reading()
         pt["paused"] = True
         pt["wake"].set()
@@ -1020,6 +1020,9 @@ async def _start(id, payload, kernel):
             "decoder": codecs.getincrementaldecoder("utf-8")(errors="replace"),
             "unacked": 0,
             "paused": False,
+            # a viewer's replay opened a re-attach grace: until its first ack, the
+            # backlog does not pause the reader
+            "reattach": False,
             "eof": False,
             "wake": asyncio.Event(),
             "write_lock": asyncio.Lock(),
@@ -1355,6 +1358,8 @@ async def _ack(id, payload, kernel):
     if isinstance(chars, bool) or not isinstance(chars, int) or chars < 0:
         return bad("ack", "chars", "a non-negative integer")
     pt = job["pty"]
+    # the re-attach grace ends at the viewer's first ack after its replay
+    pt["reattach"] = False
     pt["unacked"] = max(0, pt["unacked"] - chars)
     if pt["paused"] and pt["unacked"] < LOW_WATERMARK:
         pt["paused"] = False
@@ -1377,6 +1382,7 @@ async def _output(id, payload, kernel):
     # The replay hands this viewer everything so far: what a gone viewer streamed
     # but never acked is owed to no one, so the backlog clears and the reader resumes.
     pt["unacked"] = 0
+    pt["reattach"] = True
     if pt["paused"]:
         pt["paused"] = False
         pt["wake"].set()  # the pump re-attaches the reader in the job's own context

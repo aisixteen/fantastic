@@ -683,3 +683,133 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
     )
     .await;
 }
+
+/// Waits for a typed line, floods past HIGH, waits for a line, floods again, then
+/// waits — each flood is started by a line the test types, so the test decides when
+/// it lands.
+const GATED_FLOOD: &str = "import sys
+sys.stdin.readline()
+sys.stdout.write('x' * 150000 + '\\nDONE1\\n')
+sys.stdout.flush()
+sys.stdin.readline()
+sys.stdout.write('x' * 150000 + '\\nDONE2\\n')
+sys.stdout.flush()
+sys.stdin.readline()
+";
+
+/// Start `program` as a PTY job of `id`, returning its id.
+async fn start_program(kernel: &Arc<Kernel>, id: &str, py: &Path, program: &str) -> i64 {
+    let r = call(
+        kernel,
+        id,
+        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", program],
+               "pty": {"cols": 80, "rows": 24}}),
+    )
+    .await;
+    r["job_id"].as_i64().unwrap()
+}
+
+/// A re-attaching viewer's replay opens a grace: a flood past HIGH during it does
+/// not pause the reader, and the first ack reports the backlog as it stands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flood_during_a_re_attach_grace_does_not_pause_the_reader() {
+    let Some(py) = python() else { return };
+    let tmp = TempDir::new().unwrap();
+    let k = kernel_with(&tmp, "term_g1", json!({})).await;
+    let mut rx = k.ensure_inbox(&AgentId::from("term_g1"));
+    let jid = start_program(&k, "term_g1", &py, GATED_FLOOD).await;
+    call(&k, "term_g1", json!({"type": "output", "job_id": jid})).await;
+    call(
+        &k,
+        "term_g1",
+        json!({"type": "write", "job_id": jid, "data": format!("go{ENTER}")}),
+    )
+    .await;
+    output_until(&mut rx, |t| t.contains("DONE1")).await;
+    let st = call(
+        &k,
+        "term_g1",
+        json!({"type": "ack", "job_id": jid, "chars": 0}),
+    )
+    .await;
+    assert!(
+        st["paused"] == json!(false)
+            && st["unacked"].as_u64().unwrap() > crate::pty::HIGH_WATERMARK as u64,
+        "{st}"
+    );
+}
+
+/// Once the re-attaching viewer has acked, the grace is over: a flood past HIGH
+/// pauses the reader again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flood_after_the_first_ack_pauses_the_reader() {
+    let Some(py) = python() else { return };
+    let tmp = TempDir::new().unwrap();
+    let k = kernel_with(&tmp, "term_g2", json!({})).await;
+    let jid = start_program(&k, "term_g2", &py, GATED_FLOOD).await;
+    call(&k, "term_g2", json!({"type": "output", "job_id": jid})).await;
+    let st = call(
+        &k,
+        "term_g2",
+        json!({"type": "ack", "job_id": jid, "chars": 0}),
+    )
+    .await;
+    assert_eq!(st, json!({"unacked": 0, "paused": false}), "{st}");
+    call(
+        &k,
+        "term_g2",
+        json!({"type": "write", "job_id": jid, "data": format!("go{ENTER}")}),
+    )
+    .await;
+    let mut st = json!({});
+    for _ in 0..250 {
+        st = call(
+            &k,
+            "term_g2",
+            json!({"type": "ack", "job_id": jid, "chars": 0}),
+        )
+        .await;
+        if st["paused"] == json!(true) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        st["paused"] == json!(true)
+            && st["unacked"].as_u64().unwrap() > crate::pty::HIGH_WATERMARK as u64,
+        "{st}"
+    );
+}
+
+/// With no attach there is no grace: a flood past HIGH pauses the reader as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_attach_a_flood_pauses_the_reader() {
+    let Some(py) = python() else { return };
+    let tmp = TempDir::new().unwrap();
+    let k = kernel_with(&tmp, "term_g3", json!({})).await;
+    let jid = start_program(&k, "term_g3", &py, GATED_FLOOD).await;
+    call(
+        &k,
+        "term_g3",
+        json!({"type": "write", "job_id": jid, "data": format!("go{ENTER}")}),
+    )
+    .await;
+    let mut st = json!({});
+    for _ in 0..250 {
+        st = call(
+            &k,
+            "term_g3",
+            json!({"type": "ack", "job_id": jid, "chars": 0}),
+        )
+        .await;
+        if st["paused"] == json!(true) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        st["paused"] == json!(true)
+            && st["unacked"].as_u64().unwrap() > crate::pty::HIGH_WATERMARK as u64,
+        "{st}"
+    );
+}
