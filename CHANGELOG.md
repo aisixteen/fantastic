@@ -70,6 +70,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- CI runs only by hand: a push to a `fix/**` or `feat/**` branch no longer
+  starts the units. Ready branches are batched into one temporary
+  `ci/batch-<n>` branch and run once.
 - `home` refuses a client asking for a protocol version other than 1.
 - The home kernel serves the Home at `home.html` and the list page at
   `list.html`.
