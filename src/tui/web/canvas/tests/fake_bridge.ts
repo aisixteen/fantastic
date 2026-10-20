@@ -21,6 +21,8 @@ export class FakeBridge implements FileBridge {
   readonly watched = new Set<string>();
   readonly calls: Dict[] = [];
   private readonly slots = new Map<string, string | null>();
+  /** the view agents made by `open_view`: id → what it views (one per path) */
+  readonly views = new Map<string, { kind: "file" | "folder"; path: string }>();
   private listener: ((ev: Dict) => void) | null = null;
 
   readonly subscribe: Subscribe = (fn) => {
@@ -141,8 +143,49 @@ export class FakeBridge implements FileBridge {
         this.watched.delete(path === "" ? "." : path);
         return { watching: false, paths: [...this.watched].sort() };
       }
+      case "open_view": {
+        const kind = p["kind"];
+        if (kind !== "file" && kind !== "folder") return refuse("open_view: kind must be `file` or `folder`", "bad_arg", { arg: "kind" });
+        if (kind === "file" ? !this.files.has(path) : !this.dirs.has(path)) return refuse(`open_view: '${path}' is not there`, "not_found", { path });
+        const id = `view:${kind}:${path}`;
+        const created = !this.views.has(id);
+        this.views.set(id, { kind, path });
+        return { id, kind, path, created };
+      }
     }
     return refuse(`unknown verb '${verb}'`, "unhandled", { verb });
+  }
+
+  /** A VIEW AGENT's verbs, as `file_bridge/views.py` answers them: a file's read and
+   *  write (its own path only), a folder's list (inside it), and watch. Paths the view
+   *  is given are relative to its own; the bridge answers for the disk underneath. */
+  async viewCall(view: string, p: Dict): Promise<Dict> {
+    const v = this.views.get(view);
+    if (v === undefined) return { error: `no agent ${view}`, reason: "unknown_agent" };
+    const own = v.path;
+    const refuse = (error: string, reason: string): Dict => ({ error, reason });
+    const rel = typeof p["path"] === "string" ? norm(p["path"]) : "";
+    const inside = (): string | null => (v.kind === "file" ? (rel === "" || rel === own ? own : null) : own === "" ? rel : rel === "" || rel === "." ? own : `${own}/${rel}`);
+    switch (String(p["type"])) {
+      case "read":
+      case "write": {
+        if (v.kind !== "file") return refuse(`${String(p["type"])}: a folder agent has no text`, "unhandled");
+        const target = inside();
+        if (target === null) return refuse(`${String(p["type"])}: '${rel}' is outside this agent's path '${own}'`, "unauthorized");
+        return this.call({ ...p, path: target });
+      }
+      case "list": {
+        if (v.kind !== "folder") return refuse("list: a file agent has no listing", "unhandled");
+        const target = inside();
+        if (target === null) return refuse(`list: '${rel}' is outside this agent's folder '${own}'`, "unauthorized");
+        return this.call({ type: "list", path: target });
+      }
+      case "watch": {
+        this.watched.add(own === "" ? "." : own);
+        return { watching: own === "" ? "." : own, agent: view, relayed: false };
+      }
+    }
+    return refuse(`unknown type '${String(p["type"])}'`, "unhandled");
   }
 }
 

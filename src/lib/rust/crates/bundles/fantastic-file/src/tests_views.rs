@@ -201,3 +201,39 @@ async fn a_file_view_relays_its_changes_to_its_watchers() {
         }
     }
 }
+
+// python `test_views_units.py` — who may reach a view: the bridge's callers, for the
+// verbs the view answers.
+
+#[test]
+fn a_view_admits_whoever_reaches_its_bridge_for_the_verbs_it_answers() {
+    let grants = json!({"$self": "*", "$parent": "*", "user": ["read", "list", "edit", "pump"]});
+    let g = grants.as_object().unwrap();
+    let file = crate::views::view_callers(g, Some("rest"), crate::views::FILE);
+    assert_eq!(
+        Value::Object(file),
+        json!({"rest": ["read", "reflect", "watch", "write"], "user": ["read"]})
+    );
+    let folder = crate::views::view_callers(g, Some("rest"), crate::views::FOLDER);
+    assert_eq!(
+        Value::Object(folder),
+        json!({"rest": ["list", "reflect", "reveal", "watch"], "user": ["list"]})
+    );
+}
+
+#[test]
+fn the_bridges_self_is_no_caller_and_its_parent_is_named_literally() {
+    let g = json!({"$self": "*", "$parent": ["read"]});
+    let got = crate::views::view_callers(g.as_object().unwrap(), Some("rest"), crate::views::FILE);
+    assert_eq!(Value::Object(got), json!({"rest": ["read"]}));
+    let orphan = json!({"$parent": "*"});
+    let got = crate::views::view_callers(orphan.as_object().unwrap(), None, crate::views::FILE);
+    assert_eq!(Value::Object(got), json!({}), "no parent, no caller named");
+}
+
+#[test]
+fn a_caller_with_no_verb_the_view_answers_is_not_admitted() {
+    let g = json!({"ai": ["edit", "pump"]});
+    let got = crate::views::view_callers(g.as_object().unwrap(), None, crate::views::FILE);
+    assert_eq!(Value::Object(got), json!({}));
+}

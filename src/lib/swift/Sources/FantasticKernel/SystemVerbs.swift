@@ -453,7 +453,9 @@ extension Kernel {
         return nil
     }
 
-    func createFromPayload(payload: JSON) async -> JSON {
+    /// `create_agent`'s body, for a bundle that makes a child as bookkeeping (a
+    /// file_bridge view, `FantasticFile/Views.swift`). The same checks as the verb.
+    public func createFromPayload(payload: JSON) async -> JSON {
         guard let hm = payload["handler_module"].asString, !hm.isEmpty else {
             return Refusal.missing("create_agent", "handler_module")
         }

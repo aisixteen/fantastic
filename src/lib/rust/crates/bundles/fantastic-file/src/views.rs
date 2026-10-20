@@ -27,6 +27,9 @@ const FILE_GRANTS: [&str; 4] = ["read", "write", "watch_path", "unwatch_path"];
 const FOLDER_GRANTS: [&str; 3] = ["list", "watch_path", "unwatch_path"];
 /// python `RELAY_VERB` — a view's relay watches its bridge.
 const RELAY_VERB: &str = "watch";
+/// python `views.ANSWERS` — the verbs each view answers: what a caller may be granted on it.
+const FILE_ANSWERS: [&str; 4] = ["read", "write", "watch", "reflect"];
+const FOLDER_ANSWERS: [&str; 4] = ["list", "reveal", "watch", "reflect"];
 
 /// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type.
 fn folder_event(raw: &str) -> &'static str {
@@ -46,6 +49,53 @@ fn grants(kind: &str) -> Vec<&'static str> {
     };
     g.push(RELAY_VERB);
     g
+}
+
+/// python `views.view_callers`: who may reach a view — whoever may reach its bridge, for
+/// the verbs it answers. A bridge grant of `*` is all of them; a list keeps the verbs
+/// the view answers. The bridge's `$parent` is named literally, its `$self` is skipped.
+pub(crate) fn view_callers(
+    grants: &Map<String, Value>,
+    parent: Option<&str>,
+    kind: &str,
+) -> Map<String, Value> {
+    let own: &[&str] = if kind == FILE {
+        &FILE_ANSWERS
+    } else {
+        &FOLDER_ANSWERS
+    };
+    let mut out: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for (caller, grant) in grants {
+        if caller == "$self" {
+            continue;
+        }
+        let caller = if caller == "$parent" {
+            match parent {
+                Some(p) => p.to_string(),
+                None => continue,
+            }
+        } else {
+            caller.clone()
+        };
+        let verbs: Vec<String> = if grant.as_str() == Some("*") {
+            own.iter().map(|v| v.to_string()).collect()
+        } else {
+            grant
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|v| own.contains(v))
+                .map(str::to_string)
+                .collect()
+        };
+        if !verbs.is_empty() {
+            out.entry(caller).or_default().extend(verbs);
+        }
+    }
+    out.into_iter()
+        .map(|(k, v)| (k, json!(v.into_iter().collect::<Vec<_>>())))
+        .collect()
 }
 
 /// python `views.bridge_path`: the bridge path a view's relative `rel` names. A file
@@ -166,6 +216,14 @@ pub(crate) async fn open_view(
     };
     let own_grants = grants(kind);
     let base = bridge_name(path);
+    let bridge_grants = bridge
+        .record()
+        .meta
+        .get("callable_by")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let bridge_parent = bridge.parent_id.as_ref().map(|p| p.0.clone());
     let payload = json!({
         "handler_module": super::HANDLER_MODULE,
         "parent_id": bid,
@@ -174,6 +232,7 @@ pub(crate) async fn open_view(
         "path": path,
         "display_name": base,
         "can_call": {bid.clone(): own_grants.clone()},
+        "callable_by": Value::Object(view_callers(&bridge_grants, bridge_parent.as_deref(), kind)),
     });
     let made = create_from_payload(kernel, &root, &payload).await;
     if made.get("error").is_some() {

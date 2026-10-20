@@ -1,6 +1,6 @@
 import { Host } from "../../lib.ts";
 import type { Json, Kernel, Payload } from "../../lib.ts";
-import { norm, parentOf, wire } from "./paths.ts";
+import { norm, parentOf, under, wire } from "./paths.ts";
 import { WatchLedger } from "./watch_ledger.ts";
 
 // THE PAGE'S CLIENT of the project's file bridge — the host agent `files`
@@ -233,20 +233,166 @@ export class WatchHub {
   }
 }
 
+// ─── THE FILE AND FOLDER AGENTS (#150) ──────────────────────────────────────
+// A path a VIEW AGENT serves (`file_bridge/views.py`) reaches the disk through that
+// agent: a file's text reads and writes, a folder's listing, and the watch whose
+// changes the agent relays onto this page. Every other verb, and every other path,
+// goes to the bridge as it always did. The routing is per path, so the page keeps
+// ONE hub, one ledger and one arm per path.
+
+export type ViewKind = "file" | "folder";
+
+/** A path a view agent serves on this page. */
+export interface Served {
+  view: string;
+  kind: ViewKind;
+  path: string;
+}
+
+interface ViewSet {
+  served: Map<string, Served>;
+  listeners: Set<(ev: Record<string, unknown>) => void>;
+  /** the sources this page listens to for `changed` */
+  watching: Set<string>;
+  host: Host;
+}
+
+const viewSets = new WeakMap<Kernel, ViewSet>();
+
+function viewSet(kernel: Kernel): ViewSet {
+  let s = viewSets.get(kernel);
+  if (s === undefined) {
+    s = { served: new Map(), listeners: new Set(), watching: new Set(), host: new Host(kernel, "files_hub") };
+    viewSets.set(kernel, s);
+  }
+  return s;
+}
+
+/** What a verb sent to a served path becomes: the view it goes to and the payload it
+ *  sends, or the answer the page gives itself (an unwatch: the view's relay lives with
+ *  the view, and ends when the view is deleted, so there is nothing to tell it). */
+type Route = { view: string; payload: Record<string, unknown> } | { local: Json };
+
+/** The folder view that covers `p` most closely (the innermost), if any. */
+function innermostFolder(served: Map<string, Served>, p: string): Served | undefined {
+  let best: Served | undefined;
+  for (const sv of served.values()) {
+    if (sv.kind !== "folder" || !under(p, sv.path)) continue;
+    if (best === undefined || sv.path.length > best.path.length) best = sv;
+  }
+  return best;
+}
+
+/** A folder view's operand: the path inside its folder (`.` for the folder itself). */
+const insideFolder = (root: string, p: string): string => (p === root ? "." : root === "" ? p : p.slice(root.length + 1));
+
+/** The route of one bridge call, or null when the bridge serves it. Pure: the tests read it. */
+export function routeOf(s: Map<string, Served>, p: Record<string, unknown>): Route | null {
+  const type = String(p["type"]);
+  const raw = typeof p["path"] === "string" ? p["path"] : type === "list" ? "" : null;
+  if (raw === null) return null;
+  const path = norm(raw);
+  switch (type) {
+    case "read":
+    case "write": {
+      const f = s.get(path);
+      return f?.kind === "file" ? { view: f.view, payload: { ...p, path } } : null;
+    }
+    case "list": {
+      const f = innermostFolder(s, path);
+      return f === undefined ? null : { view: f.view, payload: { ...p, path: insideFolder(f.path, path) } };
+    }
+    case "watch_path": {
+      const sv = s.get(path);
+      return sv === undefined ? null : { view: sv.view, payload: { type: "watch" } };
+    }
+    case "unwatch_path": {
+      return s.has(path) ? { local: { watching: false, paths: [] } } : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** The page's bridge client that also knows its view agents: a served path goes to its
+ *  view, everything else to the bridge. */
+export function routedBridge(kernel: Kernel): FileBridge {
+  return {
+    call: async (p) => {
+      const r = routeOf(viewSet(kernel).served, p);
+      if (r === null) return kernelBridge(kernel).call(p);
+      if ("local" in r) return r.local;
+      return kernel.callHost(r.view, r.payload as Payload);
+    },
+  };
+}
+
+/** A view's event as a bridge `changed`: a folder's `added|changed|removed` is the
+ *  bridge's `added|modified|deleted`, so one hub judges both the same way. */
+export function changeOf(ev: Record<string, unknown>): Record<string, unknown> {
+  if (typeof ev["kind"] === "string") return ev;
+  const kind = ev["type"] === "added" ? "added" : ev["type"] === "removed" ? "deleted" : "modified";
+  return { ...ev, kind };
+}
+
+/** Listen to `src`'s `changed` events, once, into the page's listeners. */
+function listenTo(s: ViewSet, src: string): void {
+  if (s.watching.has(src)) return;
+  s.watching.add(src);
+  s.host.on(src, "changed", (p) => {
+    const ev = changeOf(p as Record<string, unknown>);
+    for (const fn of [...s.listeners]) fn(ev);
+  });
+}
+
+/** The `changed` events of the bridge and of every served view, as one subscription. */
+function changesOf(kernel: Kernel): Subscribe {
+  return (fn) => {
+    const s = viewSet(kernel);
+    s.listeners.add(fn);
+    listenTo(s, FILE_BRIDGE);
+    for (const sv of s.served.values()) listenTo(s, sv.view);
+    return () => {
+      s.listeners.delete(fn);
+      if (s.listeners.size === 0) {
+        for (const src of s.watching) s.host.unwatch(src);
+        s.watching.clear();
+      }
+    };
+  };
+}
+
+/** Serve `path` through view `view` on this page: its routes now, its events once
+ *  anything listens. Used by `openViewAgent`, and by a cell that is restored bound to one. */
+export function serve(kernel: Kernel, kind: ViewKind, path: string, view: string): void {
+  const s = viewSet(kernel);
+  const p = norm(path);
+  s.served.set(p, { view, kind, path: p });
+  if (s.listeners.size > 0) listenTo(s, view);
+}
+
+/** `open_view` on the bridge: the view agent of `path` — reused when one exists, made
+ *  otherwise — served on this page. A refusal (the path is not exposed, say) is returned as it is. */
+export async function openViewAgent(
+  kernel: Kernel,
+  kind: ViewKind,
+  path: string,
+): Promise<{ view: string; created: boolean } | Refusal> {
+  const r = (await kernelBridge(kernel).call({ type: "open_view", kind, path: wire(norm(path)) })) as Record<string, unknown>;
+  if (isRefusal(r)) return r;
+  const id = r["id"];
+  if (typeof id !== "string") return { error: `open_view ${path}: the reply names no view`, reason: "bad_reply" };
+  serve(kernel, kind, path, id);
+  return { view: id, created: r["created"] === true };
+}
+
 const hubs = new WeakMap<Kernel, WatchHub>();
 
-/** The page's one hub. */
+/** The page's one hub: the bridge's changes and every served view's. */
 export function sharedHub(kernel: Kernel): WatchHub {
   let h = hubs.get(kernel);
   if (h === undefined) {
-    const host = new Host(kernel, "files_hub");
-    h = new WatchHub(kernelBridge(kernel), (fn) => {
-      const off = host.on(FILE_BRIDGE, "changed", (p) => fn(p as Record<string, unknown>));
-      return () => {
-        off();
-        host.unwatch(FILE_BRIDGE);
-      };
-    });
+    h = new WatchHub(routedBridge(kernel), changesOf(kernel));
     hubs.set(kernel, h);
   }
   return h;

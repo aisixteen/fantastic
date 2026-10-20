@@ -66,3 +66,38 @@ def test_a_change_is_judged_by_the_disk_as_it_is(tmp_path):
     assert tools._kind(str(here), "modified") == "modified"
     assert tools._kind(str(here), "deleted") == "modified"  # present now: not gone
     assert os.path.lexists(str(here))
+
+
+class _Parent:
+    id = "rest"
+
+
+class _Bridge:
+    """Just what `view_callers` reads of a bridge: its grants and its parent."""
+
+    def __init__(self, callable_by, parent=_Parent()):
+        self._meta = {"callable_by": callable_by}
+        self.parent = parent
+
+
+def test_a_view_admits_whoever_reaches_its_bridge_for_the_verbs_it_answers():
+    # `*` is every verb the view answers (reflect too); a list keeps what it answers
+    b = _Bridge(
+        {"$self": "*", "$parent": "*", "user": ["read", "list", "edit", "pump"]}
+    )
+    got = views.view_callers(b, views.FILE)
+    assert got == {"rest": ["read", "reflect", "watch", "write"], "user": ["read"]}
+    folder = views.view_callers(b, views.FOLDER)
+    assert folder == {"rest": ["list", "reflect", "reveal", "watch"], "user": ["list"]}
+
+
+def test_the_bridges_own_self_is_no_caller_and_a_parent_is_named_literally():
+    b = _Bridge({"$self": "*", "$parent": ["read"]}, parent=_Parent())
+    assert views.view_callers(b, views.FILE) == {"rest": ["read"]}
+    orphan = _Bridge({"$parent": "*"}, parent=None)
+    assert views.view_callers(orphan, views.FILE) == {}, "no parent, no caller named"
+
+
+def test_a_caller_with_no_verb_the_view_answers_is_not_admitted():
+    b = _Bridge({"ai": ["edit", "pump"]})
+    assert views.view_callers(b, views.FILE) == {}

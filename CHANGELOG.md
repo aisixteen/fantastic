@@ -7,15 +7,30 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
-- File and folder agents: thin view agents over the file bridge (#150, Python
-  reference). `open_view {kind: file|folder, path}` on a `file_bridge` returns the
-  view of that path, making it if none exists, so one path is one agent. A file
-  view reads, writes (`if_match`) and watches its file (`changed`); a folder view
-  lists, reveals a path inside it and watches its entries (`added`, `changed`,
-  `removed`). A view reaches its bridge as itself, for its own path only: its
-  grant names the bridge's verbs it needs, and a path outside its scope is refused.
-  The Rust `fantastic-file` port matches it; Swift has none yet. The canvas and
-  CLI views of these agents are not in this entry yet.
+- File and folder agents: thin view agents over the file bridge (#150). A file or a
+  folder is an agent shipped in the `file_bridge` bundle, scoped to one path.
+  `open_view {kind: file|folder, path}` on a `file_bridge` returns the view of that
+  path, making it if none exists, so one path is one agent (a second open is the
+  same agent, `created: false`). A file view reads, writes (`if_match`) and watches
+  its file (`changed`); a folder view lists, reveals a path inside it and watches its
+  entries (`added`, `changed`, `removed`). A view reaches its bridge as itself, for
+  its own path only: its grant names the bridge's verbs it needs, and a path outside
+  its scope is refused before the bridge is asked. Python is the reference; the Rust
+  `fantastic-file` and the Swift `FantasticFile` ports match it.
+- Canvas: a file or folder dropped on the canvas (and the view's `open` verb) makes
+  or reuses its agent and places its view. The preview is the file agent's view (its
+  reads, saves and live changes go through the agent); the file tree rooted at a
+  folder is the folder agent's view. Two views of one file share one agent and one
+  watch. Cells saved before this still open, unbound, as they did.
+- CLI (TUI): the file panel shows the agent it selects by what the agent is. A file
+  agent is a viewer and editor (`e` edits, Ctrl-S saves against the version read, Esc
+  leaves and discards unsaved edits); a folder agent is a live tree (it re-lists when
+  its entries change). A `file_bridge` itself browses its root as before.
+- E123 `file_agents`: the kernel contract the views stand on, over the packaged
+  python, rust and swift kernels: one agent per path, refusals that make no agent,
+  a file view's versioned write, a folder view's scope and reveal, and a view's
+  relay armed once. The live relay events are asserted in the unit tests, not over
+  the ws face (the harness's ws leg is granted only the ids declared at boot).
 - A file's or folder's disk change is judged by the disk as it is now: a batch that
   reports a removal and a spurious creation for one unlink reads as `deleted`
   (Python and Rust `file_bridge` watchers).

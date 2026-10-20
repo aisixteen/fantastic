@@ -132,6 +132,8 @@ public struct FileBundle: AgentBundle {
             "args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}.\n\n`kind` is `added`, `modified` or `deleted` as the disk reported it — treat any\n`changed` as \"read it again\". A directory reports its entries (not recursive).\nHeld per caller until `unwatch_path`; RAM only.",
         "unwatch_path":
             "args: path:str (req). Stop YOUR watch of a path; the disk watch ends when no caller holds a path. Returns {watching:false, paths}.",
+        "open_view":
+            "args: kind:str (req — `file` or `folder`), path:str (req — root-relative, exposed by `allow`; `.` = the whole root, folders only). Reuses the view of that path or makes it: {id, kind, path, created}. The new view's grant on THIS bridge is its own verbs only.",
     ] as JSON
 
     /// python's module-level `EMITS`.
@@ -149,6 +151,8 @@ public struct FileBundle: AgentBundle {
     let docLocks = DocumentLocks()
     /// `watch_path`'s disk watchers — RAM, per kernel.
     let watches = Watches()
+    /// The view agents' disk-change relays (`Views.swift`) — RAM, per bundle.
+    let viewRelays = ViewRelays()
 
     public init() {}
 
@@ -162,6 +166,7 @@ public struct FileBundle: AgentBundle {
     public func validateMeta(
         _ meta: OrderedDictionary<String, JSON>, record: OrderedDictionary<String, JSON>
     ) -> String? {
+        if let bad = Self.viewRefusal(meta) { return bad }
         if let a = meta["allow"] {
             let ok = a.asArray.map { items in
                 items.allSatisfy {
@@ -188,7 +193,7 @@ public struct FileBundle: AgentBundle {
     static let verbs: [String] = [
         "reflect", "boot", "list", "read", "write", "edit", "append", "undo",
         "read_stream", "write_stream", "pump", "delete", "rename", "mkdir",
-        "watch_path", "unwatch_path",
+        "watch_path", "unwatch_path", "open_view",
     ]
 
     public func handle(
@@ -201,6 +206,12 @@ public struct FileBundle: AgentBundle {
         }
         let type = payload["type"]
         let verb = type.asString ?? ""
+        // A VIEW (a record carrying `view: file|folder`) is answered by its own verbs,
+        // before this bridge's gate: a view is not sealed, its gate is its grant on
+        // this bridge (`Views.swift`).
+        if agent.metaValue(forKey: "view")?.asString != nil {
+            return await viewHandle(kernel, agent: agent, verb: verb, payload: payload)
+        }
         // UNKNOWN VERB FIRST — before the gate and before any clamp, as python's
         // `VERBS.get(t)` is. A sealed bridge answers `unhandled` for a verb it
         // does not have, not `unauthorized` (`shutdown` is one of those).
@@ -286,6 +297,8 @@ public struct FileBundle: AgentBundle {
             return verb == "watch_path"
                 ? watches.watchPath(agent.id, root: root, path: p, base: base, kernel: kernel)
                 : watches.unwatchPath(agent.id, root: root, path: p, base: base, kernel: kernel)
+        case "open_view":
+            return await openViewVerb(kernel, agent: agent, payload: payload)
         case "pump":
             // The PUMP coordinates a SOURCE→SINK copy over the binary channel
             // (it never touches bytes itself), so it rides the text channel.
@@ -308,6 +321,16 @@ public struct FileBundle: AgentBundle {
     ) async throws -> (JSON?, Blob?) {
         let verb = header["type"].asString ?? ""
         let chunk = bodyAt(body, "bytes")
+        // A VIEW is answered by its own verbs, text on the wire (`handle`): a binary
+        // body names no view verb, so it is refused loudly rather than dropped.
+        if kernel.agent(agentId)?.metaValue(forKey: "view")?.asString != nil {
+            if body != nil {
+                return (
+                    Refusal.bad(verb, "bytes", "text, sent as the `bytes` string (a view takes no binary body)"),
+                    nil)
+            }
+            return (try await handle(agentId: agentId, payload: header, kernel: kernel), nil)
+        }
         guard verb == "read_stream" || verb == "write_stream" || Self.textBodyVerbs.contains(verb)
         else {
             let reply = try await handle(agentId: agentId, payload: header, kernel: kernel)
@@ -546,6 +569,11 @@ public struct FileBundle: AgentBundle {
     /// The bridge is going away — its undo slots and its disk watch go with it
     /// (python `on_delete`).
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        // A view going away ends its own relay and lets go of its bridge's watch.
+        if kernel.agent(agentId)?.metaValue(forKey: "view")?.asString != nil {
+            await viewStop(kernel, relays: viewRelays, view: agentId)
+            return
+        }
         undoSlots.clear(kernel, bridge: agentId.value)
         watches.drop(kernel, agentId)
     }
@@ -863,7 +891,7 @@ public struct FileBundle: AgentBundle {
     static let readmeText = """
         # file_bridge — filesystem edge
 
-        Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `watch_path(path)` · `unwatch_path(path)` · `reflect`
+        Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edits,bytes,dry_run?)` · `append(path,bytes)` · `undo(path)` · `read_stream(path,offset?,length?)` · `write_stream(path,bytes,offset?,truncate?)` · `pump(source_path,sink?,sink_path?)` · `list(path?)` · `delete(path)` · `rename(old,new)` · `mkdir(path)` · `watch_path(path)` · `unwatch_path(path)` · `open_view(kind, path)` · `reflect`
         **Streams** (the SOURCE/SINK protocol — file_bridge is the fs implementor):
         - `read_stream(path, offset=0, length=65536)` → `{bytes, next_offset, eof, size}` — `bytes` is the RAW chunk (rides the transport as raw bytes — web_ws / bridge binary frame, never base64); pull chunks until `eof` (stateless cursor).
         - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
@@ -880,6 +908,12 @@ public struct FileBundle: AgentBundle {
         A consumer (file serving · a pump · kernel_state) is **storage-agnostic** — it pulls/pushes by id, so a `network_bridge` answering the same verbs serves a *remote* file the same way (G1).
 
         **Deny-all at the path level** — the `allow` list on the record names what this bridge EXPOSES, relative to `root`: a file, or everything under a directory (`.` = the whole root). No list, or an empty one, exposes NOTHING. Every path verb sees only exposed paths; anything else is `not_found` whether or not it exists (nothing leaks past the list), and `list` also shows the directories on the way to an exposed path. BOTH ends count: the path as asked AND the file it lands on (symlinks followed) must be inside the list — a link that stays inside serves, a link pointing out of it serves nothing. Set it at create (`allow=["docs/a.pdf", "img"]`) or by `update_agent` (it replaces the list). Writes are still governed by `readonly`. Writing an exposed path creates its missing parent directories, even ones the list does not name (`allow:["a/b/c.txt"]` + `write a/b/c.txt` creates `a/` and `a/b/`); `list` shows them as the way to it, nothing else in them is exposed.
+
+        **Views** — files and folders are agents over this bridge, not new bridges. `open_view(kind: file|folder, path)` returns the view of that path, making it if none exists (one agent per path; a second open is the same agent). A view is a `file_bridge.tools` record carrying `view: file|folder`, a child of the bridge, with `bridge` and `path` on it:
+        - `file` — `read`, `write` (`if_match` the version you read), `watch` → `{type: changed, path, kind}`, `reflect`. Its `can_call` on the bridge names exactly `read`, `write`, `watch_path`, `unwatch_path`, `watch`; a verb that names another path is refused by the view, before the bridge is asked.
+        - `folder` — `list` (a path inside the folder), `reveal` (where a path inside it sits: the folders to open on the way down), `watch` → `{type: added|changed|removed, path, name}`, `reflect`. A path that climbs out of the folder is refused.
+
+        A view reaches its bridge as itself, so the bridge's `allow` list still decides what is exposed: a view of an unexposed path reaches nothing. `watch` arms the bridge's disk watch once per path and relays the bridge's `changed` events onto the view's own inbox; deleting a view ends its relay. Views are not sealed: their gate is their grant. Python is the reference; the Rust port (`fantastic-file`) and the Swift port (`FantasticFile`, `Views.swift`) match it in verbs and posture. The canvas shows them (a preview is a file agent's view, a file tree a folder agent's) and the TUI's file panel shows them too: a file agent edits, a folder agent lists live; `reveal` is the kernel's verb, the panels do not call it.
 
         **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
         **Running-dir law**: root is clamped inside the kernel's running dir (the dir holding its root's `.fantastic`) — `../`, `~`, absolute paths

@@ -2,7 +2,7 @@ import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { isFocusClick } from "../canvas/viewer.ts";
 import { badge, badgeOf, side } from "./agent_index.ts";
-import { fileGrant, kernelBridge, sharedHub } from "./file_bridge.ts";
+import { fileGrant, routedBridge, serve, sharedHub } from "./file_bridge.ts";
 import { FilesController, controllers } from "./files_controller.ts";
 import { agentIndex, allHidden, ensureWalker, filesDeps, getWalker, onRender, rootOf, select } from "./files_deps.ts";
 import type { Rec } from "./files_deps.ts";
@@ -27,12 +27,15 @@ export const filesView: ViewBundle = {
   mount(ctx: ViewContext): ViewHandle {
     const d = filesDeps("files_view");
     ensureFilesStyle();
-    const bridge = kernelBridge(ctx.kernel);
+    const bridge = routedBridge(ctx.kernel);
     ensureWalker(bridge);
     // the folder this tree starts at (#135: a folder dropped on the canvas); the project when none
     const saved = ctx.record ?? {};
     const root = norm(str(saved, "root") ?? "");
     if (!inRoot(root)) throw new Error(`files_view: its root '${root}' is outside the project`);
+    // a tree opened on a folder agent (#150) is that agent's view: its folder is served by it
+    const folderAgent = str(saved, "view_agent");
+    if (folderAgent !== undefined) serve(ctx.kernel, "folder", root, folderAgent);
     const el = document.createElement("div");
     el.className = "side files-view";
     el.innerHTML =

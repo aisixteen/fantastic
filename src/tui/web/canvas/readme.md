@@ -31,6 +31,13 @@ bundles, seeds an empty tree with the canvas root, and mounts.
 - **files_view** / **preview_view** — the file tree (the project's folder, live: every
   agent is a folder in it) and the previewer/editor (a file or the live agent). Page
   agents over the project's `files` bridge, with verbs an AI drives them by.
+  A drop or `open` on the canvas makes (or reuses) the **file agent** or **folder
+  agent** of that path (`open_view` on the bridge, `src/bundles/files/file_bridge.ts`):
+  a preview then carries `view_agent` and is that file agent's view, a tree rooted at
+  a folder is its folder agent's view. Its reads, saves and live changes go through
+  the agent (its `read`/`write`, or its `list` and `watch`); what the agent does not
+  answer (the stream reads, undo, the tree's own file operations) stays with the
+  bridge. Cells saved before this open unbound, as they did.
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
   drawn with, per backdrop; it takes skins an AI writes (`fantastic readme skins`).
 

@@ -11,6 +11,9 @@ what is exposed at all, so a view of an unexposed path reaches nothing.
 ONE VIEW PER PATH: `open_view` on the bridge hands back the view that already
 exists for a path, or makes it. Every view of one path shares one disk watch.
 
+Who reaches a view: whoever reaches its bridge, for the verbs the view answers
+(`view_callers`). A view admits no one the bridge does not.
+
 Watching: a view's `watch` arms the bridge's disk watch for its path and relays the
 bridge's `changed` events onto its OWN inbox, filtered to its path. A file emits
 `changed`; a folder emits `added` / `changed` / `removed`. Watch a view to receive them.
@@ -39,6 +42,12 @@ GRANTS = {
 }
 #: A view's relay watches its bridge: the one verb it needs beyond its GRANTS.
 RELAY_VERB = "watch"
+
+#: The verbs each view answers (its handler's table): what a caller may be granted on it.
+ANSWERS = {
+    FILE: ["read", "write", "watch", "reflect"],
+    FOLDER: ["list", "reveal", "watch", "reflect"],
+}
 
 #: The bridge's disk `kind` → a folder view's event type.
 FOLDER_EVENT = {"added": "added", "modified": "changed", "deleted": "removed"}
@@ -107,6 +116,26 @@ def forward_args(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if k not in ("type", "path")}
 
 
+def view_callers(bridge_agent, kind: str) -> dict[str, list[str]]:
+    """Who may reach a view: whoever may reach its bridge, for the verbs the view answers.
+    A bridge grant of `*` is all of them; a list keeps the verbs the view answers. The
+    bridge's `$parent` is named literally (the view's own `$parent` is the bridge), and
+    its `$self` is not a caller of its view. A view admits no one the bridge does not."""
+    own = ANSWERS[kind]
+    out: dict[str, list[str]] = {}
+    for caller, grant in (bridge_agent._meta.get("callable_by") or {}).items():
+        if caller == "$self":
+            continue
+        if caller == "$parent":
+            if bridge_agent.parent is None:
+                continue
+            caller = bridge_agent.parent.id
+        verbs = own if grant == "*" else [v for v in grant if v in own]
+        if verbs:
+            out[caller] = sorted(set(out.get(caller, [])) | set(verbs))
+    return out
+
+
 def find_view(kernel, bridge: str, kind: str, path: str) -> str | None:
     """The view of `path` of this kind on this bridge, if one exists."""
     for rec in kernel.list():
@@ -133,6 +162,7 @@ def open_view(kernel, bridge_agent, kind: str, path: str) -> dict:
         path=path,
         display_name=posixpath.basename(path) or ".",
         can_call={bridge_agent.id: grants},
+        callable_by=view_callers(bridge_agent, kind),
     )
     if "error" in made:
         return made

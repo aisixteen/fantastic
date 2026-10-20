@@ -182,7 +182,10 @@ function page(files: FakeBridge): Kernel {
   registerCanvas(k);
   registerLayout(k);
   // the file bridge answers the kernel's host calls, as the real one does
-  k.bridge = { forward: async (_t: string, p: Payload) => (await files.call(p as Record<string, unknown>)) as never } as unknown as Kernel["bridge"];
+  // a view agent's target (`view:…`, made by open_view) answers as the view; the bridge the rest
+  k.bridge = {
+    forward: async (t: string, p: Payload) => (await (t.startsWith("view:") ? files.viewCall(t, p as Record<string, unknown>) : files.call(p as Record<string, unknown>))) as never,
+  } as unknown as Kernel["bridge"];
   k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   k.register(new Agent({ id: "view_root", parentId: "canvas", handlerModule: "view.ts" }));
   grantViewLists(k); // what the canvas does at mount
