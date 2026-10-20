@@ -287,7 +287,7 @@ export function setHidden(kernel: Kernel, view: string, cell: string, on: boolea
 }
 
 /** Show `cell` again if its view hides it (#133): a pick of a hidden cell (the
- *  sidebar's) brings it back where it was. True when it was hidden. */
+ *  file tree's) brings it back where it was. True when it was hidden. */
 export function showHidden(kernel: Kernel, cell: string): boolean {
   const view = kernel.get(cell)?.parentId ?? null;
   if (view === null || !hiddenOf(kernel, view).has(cell)) return false;

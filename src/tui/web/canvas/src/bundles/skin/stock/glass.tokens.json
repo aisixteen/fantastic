@@ -285,6 +285,59 @@
         }
       }
     },
+    "syntax": {
+      "keyword": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.8314, 0.6588, 0.9490],
+          "hex": "#d4a8f2"
+        }
+      },
+      "string": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.7059, 0.8784, 0.7137],
+          "hex": "#b4e0b6"
+        }
+      },
+      "comment": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.5569, 0.5765, 0.6588],
+          "hex": "#8e93a8"
+        }
+      },
+      "number": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1.0, 0.7216, 0.4863],
+          "hex": "#ffb87c"
+        }
+      },
+      "type": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.5725, 0.8627, 0.9373],
+          "hex": "#92dcef"
+        }
+      },
+      "punct": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.6157, 0.6353, 0.7294],
+          "hex": "#9da2ba"
+        }
+      }
+    },
+    "tree": {
+      "fantastic": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.4471, 0.8784, 0.7608],
+          "hex": "#72e0c2"
+        }
+      }
+    },
     "side": {
       "page": {
         "$value": {

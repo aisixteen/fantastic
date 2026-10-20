@@ -69,7 +69,10 @@ fn kind_of(hm: &str) -> &str {
         "setup_view.ts" => "setup",
         "stream_view.ts" => "stream",
         "reflect_view.ts" => "reflect",
+        // sidebar_view.ts is the cell's name before the file tree (#106): saved layouts still hold it, and it opens as the tree
         "sidebar_view.ts" => "sidebar",
+        "files_view.ts" => "files",
+        "preview_view.ts" => "preview",
         "canvases_view.ts" => "canvases",
         other => other,
     }

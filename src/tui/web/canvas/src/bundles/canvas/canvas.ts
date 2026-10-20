@@ -28,12 +28,17 @@ const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 /** What a cell's AI may ask the background. */
 const BG_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "reflect"] as const;
 import { MCP_ADD_VIEW, mcpAddView, mcpView, setMcpDeps } from "../mcp_view/mcp_view.ts";
-import { SIDEBAR_VIEW, canvasesView, renderSidebars, setSideDeps, sidebarView } from "../side_view/side_view.ts";
-import type { TreeNode } from "./sidebar.ts";
+import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
+import { FILES_VERBS } from "../files/files_controller.ts";
+import { filesView } from "../files/files_view.ts";
+import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
+import { fileGrant } from "../files/file_bridge.ts";
+import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
+import { previewView } from "../preview/preview_view.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
-import { headTitle, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
+import { headTitle, hostRecordFresh, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
 import { COLUMN, LAYOUT, hiddenCellFor, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
 import { CELL_MENU, closeIntent } from "./cell_menu.ts";
@@ -47,7 +52,7 @@ import type { GlHost, GlView } from "./gl_host.ts";
 // kernel sends. The kernel knows none of this.
 
 // inline view registry — host handler_module → TS view bundle
-const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, sidebarView, canvasesView, mcpView, mcpAddView, backgroundsView];
+const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, filesView, previewView, canvasesView, mcpView, mcpAddView, backgroundsView];
 // A PAGE BUNDLE's instance (handler_module = its folder name) is drawn by its
 // BASE's view (`base: html_agent` → `html_agent.ts`), read off the catalog row.
 function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined {
@@ -258,6 +263,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // agent added in the background is listed NEW, unplaced; a change of an
   // agent's `view` re-renders its cells.
   const registry = new Map<string, Rec>();
+  /** every agent on the host as the last sync saw it (another canvas's too) */
+  const onHostIds = new Set<string>();
   /** host agents added in the background, not shown in any cell yet */
   const fresh = new Set<string>();
   /** host agents THIS page is creating (no NEW badge for them) */
@@ -291,6 +298,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         // shell's own agents under no canvas; another canvas's never
         const byId = new Map<string, Rec>();
         for (const a of all) if (typeof a["id"] === "string") byId.set(a["id"], a as Rec);
+        onHostIds.clear();
+        for (const id of byId.keys()) onHostIds.add(id);
         const parentOf = (id: string): string | undefined => {
           const p = byId.get(id)?.["parent_id"];
           return typeof p === "string" ? p : undefined;
@@ -845,14 +854,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     renderSoon();
   };
 
-  // A PICK of a hidden cell (the sidebar's, #133) shows it where it was first, so
+  // A PICK of a hidden cell (the file tree's, #133) shows it where it was first, so
   // the pick views it live rather than bouncing back to its view
   const showPicked = (cellId: string): void => {
     if (showHidden(kernel, cellId)) renderSoon();
   };
 
   // DELETE a cell's agent (#133: Shift+✕ and the head's menu): a host-backed
-  // cell deletes its host agent through the sidebar's delete path (the host's
+  // cell deletes its host agent through the file tree's delete path (the host's
   // lock gate refuses what is locked); a page-only cell is removed. A cell's own
   // delete_lock refuses both, said.
   const deleteCell = (cellId: string): void => {
@@ -959,7 +968,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       // any cell — and the view verbs, since the cells are their OPERANDS
       // (`move {id}`, `wire {sender, receiver}`): the host's egress gate checks
       // the agents a call names, not only its target
-      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS, ...BACKGROUNDS_VERBS, ...SKIN_VERBS])],
+      // (the file tree's and the previewer's verbs too: an AI shows a file, edits it)
+      [`${kernel.guid}|*`]: [...new Set([...CELL_VERBS, ...VIEW_VERBS, ...BACKGROUNDS_VERBS, ...SKIN_VERBS, ...FILES_VERBS, ...PREVIEW_VERBS])],
     };
   };
   const spawnAi = async (cellId: string, saved: string | null, view?: string): Promise<Rec | null> => {
@@ -1598,18 +1608,15 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     void refresh();
     renderSoon();
   }
-  // ── THE SIDEBAR (`sidebar.ts`): chats + every kernel's agent tree ──────
+  // ── THE FILE TREE (`files/files_view.ts`): the project's files, every agent a folder ──
   const centre = (): { x: number; y: number } => screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
-  const pageRoot = (): Agent | undefined => (kernel.rootId !== null ? kernel.get(kernel.rootId) : undefined);
   // every AI cell on every view of this page
   const aiCells = (): Rec[] =>
     everyAgent()
       .map((id) => kernel.get(id)!.record() as Rec)
       .filter((r) => r["handler_module"] === aiView.handles[0]);
-  const toNode = (a: Agent): TreeNode => {
-    const rec = a.record() as Rec;
-    return { id: a.id, handler: String(rec["handler_module"] ?? ""), rec, children: [...a.children.values()].map(toNode) };
-  };
+  // every agent of the page's own kernel, as a record (the root first)
+  const pageAgents = (): Rec[] => everyAgent().map((id) => kernel.get(id)!.record() as Rec);
   // AN MCP SERVER (`mcp_view.ts`): the form adds it on this canvas's node, then
   // the agent's own view takes the form's place
   setMcpDeps({
@@ -1636,17 +1643,69 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }));
     },
   });
-  // THE SIDEBAR and CANVAS-LIST cells (`side_view.ts`) read the canvas through
-  // this wiring; none is made by default — the double-click places them
-  setSideDeps({
+  // A PAGE AGENT as a card, for the previewer's agent mode: its record, read-only,
+  // its verbs, and the two ways to go to it (what a click and a ⌘-click did in the tree)
+  const pageReflect = (a: Agent, el: HTMLElement): ViewHandle => {
+    const card = document.createElement("div");
+    card.className = "reflect";
+    const h = document.createElement("h3");
+    h.textContent = a.id;
+    const rec = document.createElement("pre");
+    rec.textContent = JSON.stringify(a.record(), null, 2);
+    card.append(h, rec);
+    const verbs = Object.entries(a.verbs ?? {});
+    if (verbs.length > 0) {
+      const v = document.createElement("pre");
+      v.textContent = verbs.map(([k, doc]) => `${k} — ${doc}`).join("\n");
+      card.appendChild(v);
+    }
+    const acts = document.createElement("div");
+    acts.className = "acts";
+    for (const [label, focus] of [["view it", false], ["focus it", true]] as const) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "pv-chip";
+      b.textContent = label;
+      b.addEventListener("click", () => (focus && a.id !== rootOr() ? moveTo(a.id) : setViewed(a.id)));
+      acts.appendChild(b);
+    }
+    card.appendChild(acts);
+    el.appendChild(card);
+    return { unmount: (): void => card.remove() };
+  };
+  // THE FILE TREE and PREVIEW cells (`files_view.ts`, `preview_view.ts`) and the
+  // CANVAS-LIST cell (`side_view.ts`) read the canvas through this wiring; none is
+  // made by default — the double-click places them
+  setFilesDeps({
     // this canvas's host agents (the registry: its subtree + the shell's own)
     hostAgents: async () => {
       await syncRegistry();
       return [...registry.values()];
     },
-    pageTree: () => {
-      const root = pageRoot();
-      return root ? toNode(root) : null;
+    hostRecords: () => [...registry.values()],
+    pageAgents,
+    seenHere: (id) => registry.has(id) || kernel.get(id) !== undefined,
+    onHost: (id) => onHostIds.has(id),
+    freshIds: () => [...fresh],
+    // agent `agentId`'s own live view inside `el`: a host agent through its own
+    // view bundle (as a cell would draw it), a page agent as a reflect card
+    mountAgentView: async (agentId, el, selfCell) => {
+      const local = kernel.get(agentId);
+      if (local !== undefined) return pageReflect(local, el);
+      const rec = registry.get(agentId) ?? (await hostRecordFresh(agentId));
+      if (rec === undefined) throw new Error(`no agent ${agentId}`);
+      const { handler, meta } = hostViewCell(agentId, rec);
+      const bundle = viewFor(handler, kernel);
+      if (bundle === undefined) throw new Error(`no view for ${handler}`);
+      return bundle.mount({
+        kernel,
+        mount: el,
+        selfId: selfCell,
+        backend: agentId,
+        record: { id: selfCell, handler_module: handler, ...meta },
+        close: () => {},
+        actions: canvasActions,
+      });
     },
     // the cell itself, or the cells fronting it (its backend, or its root)
     cellsFor: (id) => {
@@ -1696,7 +1755,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     },
     fresh: (id) => fresh.has(id),
     deleteAgent,
-  }, {
+  });
+  setCanvasesDeps({
     canvases: opts.canvases,
     here: BACKEND,
     switchTo: (id: string) => {
@@ -1712,24 +1772,27 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       return null;
     },
   });
-  let sidebarTimer: ReturnType<typeof setTimeout> | null = null;
-  const renderChats = async (): Promise<void> => {
-    if (sidebarTimer !== null) clearTimeout(sidebarTimer);
-    sidebarTimer = null;
-    await renderSidebars();
+  // The trees draw again from the agents' state. Changes arrive in bursts (a spawn
+  // touches several records), so one redraw 300 ms after the first of a burst.
+  let treeTimer: ReturnType<typeof setTimeout> | null = null;
+  const renderTrees = (): void => {
+    if (treeTimer !== null) clearTimeout(treeTimer);
+    treeTimer = null;
+    renderFileTrees();
   };
   const renderSoon = (): void => {
-    if (sidebarTimer === null) sidebarTimer = setTimeout(() => void renderChats(), 300);
+    if (treeTimer === null) treeTimer = setTimeout(renderTrees, 300);
   };
 
-  // A SIDEBAR or the CANVAS LIST at the spot: page-only cells (no backend).
-  const spawnPageCellAt = (w: { x: number; y: number }, handler: string, prefix: string, width: number, height: number, name?: string): void => {
+  // A FILE TREE, a PREVIEW or the CANVAS LIST at the spot: page-only cells (no
+  // backend); `extra` is more of the cell's record (its grant, how it binds).
+  const spawnPageCellAt = (w: { x: number; y: number }, handler: string, prefix: string, width: number, height: number, name?: string, extra: Record<string, unknown> = {}): void => {
     registerCell(
       new Agent({
         id: `${prefix}_${crypto.randomUUID().slice(0, 8)}`,
         parentId: containerNow(),
         handlerModule: handler,
-        meta: { x: Math.round(w.x), y: Math.round(w.y), width, height, ...(name !== undefined ? { display_name: name } : {}) },
+        meta: { x: Math.round(w.x), y: Math.round(w.y), width, height, ...(name !== undefined ? { display_name: name } : {}), ...extra } as unknown as Payload,
       }),
     );
   };
@@ -1826,7 +1889,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         // (its exec agent runs EXACTLY that program, as `run COMMAND` does)
         else if (p.kind === "coding") void spawnPairAt(DEFAULT_VIEW, w, { width: 760, height: 480 }, { command: [p.path], display_name: p.name }, { allowed: [exactLine([p.path])] });
         else if (p.kind === "mcp") spawnPageCellAt(w, MCP_ADD_VIEW, "mcp_add", 420, 260);
-        else if (p.kind === "tree") spawnPageCellAt(w, SIDEBAR_VIEW, "tree", 320, 520, "tree view");
+        else if (p.kind === "files") spawnPageCellAt(w, filesView.handles[0]!, "files", 320, 560, "file tree", { can_call: fileGrant() });
+        else if (p.kind === "preview") spawnPageCellAt(w, previewView.handles[0]!, "preview", 560, 520, "preview", { can_call: fileGrant(), follow: true });
         else if (p.kind === "backgrounds") spawnBackgroundsAt(w);
         // THE USER STORE: a view of the host's `user_store` agent (its own html view)
         else if (p.kind === "user_store") void kernel.send([{ target: containerNow(), payload: { type: "place", backend_id: "user_store", x: Math.round(w.x), y: Math.round(w.y), width: 440, height: 560 } as unknown as Payload }]).then((r) => {
@@ -1904,5 +1968,5 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   });
   await reconcile();
   await refresh();
-  await renderChats();
+  renderTrees();
 }

@@ -482,7 +482,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     await page.open(url)
 
 
-async def click(page: Page, sel: str, bad: list[str], shift: bool = False) -> None:
+async def click(page: Page, sel: str, bad: list[str], shift: bool = False, double: bool = False) -> None:
     # a target SHOWN a moment after the page: a stopped terminal's ▶ is in the
     # DOM from the start, hidden (0×0 at the corner) until its attach finds the
     # program stopped — a click at that rect lands on nothing
@@ -493,8 +493,9 @@ async def click(page: Page, sel: str, bad: list[str], shift: bool = False) -> No
         bad.append(f"nothing shown to click at {sel}")
         return
     mods = 8 if shift else 0  # CDP modifier bit 8: Shift
-    await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
-    await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, modifiers=mods)
+    for c in (1, 2) if double else (1,):
+        await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, c, modifiers=mods)
+        await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, c, modifiers=mods)
 
 
 async def head_menu(page: Page, intent: str, bad: list[str]) -> None:
@@ -512,16 +513,16 @@ async def head_menu(page: Page, intent: str, bad: list[str]) -> None:
 async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: dict) -> list[str]:
     bad: list[str] = []
     exp = run.get("expect") or {}
-    # `pick: hidden` — the sidebar's row for the agent of the hidden cell, read
-    # before anything else is placed (a placed tree view is a member too) (#133)
+    # `pick: hidden` — the file tree's row for the agent of the hidden cell, read
+    # before anything else is placed (a placed file tree is a member too) (#133)
     if run.get("pick") == "hidden":
         state["pick_bid"] = (members(cwd) or [{}])[0].get("backend_id")
     if run.get("restart"):
         await restart(run["restart"], page, host, cwd, url, state, exp, bad)
     if "dblclick" in run:
-        # the kind placed from the popup: a terminal (default) or the tree view
+        # the kind placed from the popup: a terminal (default) or the file tree
         kind = run["dblclick"].get("kind", "terminal")
-        shown_sel = ".xterm-helper-textarea" if kind == "terminal" else ".side .agents-tree li.agent.host"
+        shown_sel = ".xterm-helper-textarea" if kind == "terminal" else ".files-view"
         before = await page.js(f"document.querySelectorAll({json.dumps(shown_sel)}).length")
         x, y = run["dblclick"]["x"], run["dblclick"]["y"]
         for c in (1, 2):
@@ -570,14 +571,27 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
         state["prev_backend"] = (members(cwd) or [{}])[0].get("backend_id")
         await click(page, run["click"], bad)
     if run.get("pick") == "hidden":
-        row = f'.side .agents-tree li.agent[data-id="{state.get("pick_bid")}"]'
-        # the tree opens one level (and the viewed agent's path): fold the closed
-        # rows down until the hidden agent's row is drawn
-        for _ in range(12):
-            if await page.until(f"!!document.querySelector({json.dumps(row)})", 2):
+        bid = state.get("pick_bid")
+        row = f'.files-view .ft-row.agent[data-agent="{bid}"]'
+        # the tree shows the agent's folder through its own verb (`<guid>|<tree>`);
+        # the agent folders are read from disk after the tree mounts, so a first
+        # `not_found` is asked again for at most 10 s
+        tree = next((m.get("id") or m["_dir"] for m in members(cwd) if m.get("handler_module") == "files_view.ts"), None)
+        guid = yaml_of(cwd / ".fantastic/web/agents/canvas/agent.yaml").get("guid")
+        port = urllib.parse.urlsplit(url).port
+        answer: dict = {}
+        end = time.monotonic() + 10
+        while tree is not None and time.monotonic() < end:
+            answer = await host_call(port, f"{guid}|{tree}", {"type": "reveal", "agent": bid})
+            if "revealed" in answer or answer.get("reason") != "not_found":
                 break
-            await page.js("(()=>{const t=[...document.querySelectorAll('.side .agents-tree li .tw')].find(e=>e.textContent==='▸'); t?.click();})()")
-        await click(page, row, bad)
+            await asyncio.sleep(0.5)
+        if "revealed" not in answer:
+            bad.append(f"the file tree ({tree}) did not reveal {bid}: {answer}")
+        elif not await page.until(f"!!document.querySelector({json.dumps(row + '.hidden')})", 5):
+            bad.append(f"the file tree's row for {bid} is not marked hidden")
+        # a click selects a row; a double-click views its cell, showing a hidden one
+        await click(page, row, bad, double=True)
         # the shown terminal takes the keys (the row's click moved the focus off it)
         await click(page, ".agent-frame .xterm-screen", bad)
     if "type" in run:

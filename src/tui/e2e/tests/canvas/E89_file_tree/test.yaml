@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: file_tree
+group: canvas
+title: "a live file tree and previewer: create, modify and delete on disk, agent mode, AI select, edit and save, loud conflict, no leaked watches"
+runner: probe.py
+costs: free
+limits:
+  seconds: 600
+env: {}
