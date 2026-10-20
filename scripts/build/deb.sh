@@ -8,6 +8,7 @@
 #                                        its sidecar, from `tauri bundle --bundles deb`
 #   fantastic-session_<version>_all.deb  `fantastic-session`: the kiosk (os/session)
 #
+# `--out` is not supported: the packages always go to `dist/deb/`.
 # `--target` is the CLI's triple, as in `app.sh`; the app is built for glibc
 # where the CLI is musl. Both inputs must already be where `app.sh` and
 # `cli.sh` leave them (the `app-<app triple>` and `release-<CLI triple>` CI
@@ -16,6 +17,7 @@
 . "$(dirname "$0")/common.sh"
 parse_args "$@"
 
+[ -z "$OUT" ] || { echo "deb.sh: --out is not supported: the packages go to dist/deb/" >&2; exit 2; }
 [ "$PROFILE" = release ] || { echo "deb.sh: release packages only (--profile $PROFILE)" >&2; exit 2; }
 [ -n "$TARGET" ] || { echo "deb.sh: --target <CLI triple> is required" >&2; usage >&2; exit 2; }
 case "$TARGET" in
@@ -46,7 +48,7 @@ mkdir -p "$DEB_DIR"
 say "npm ci"
 npm ci --prefix "$APP" --no-audit --no-fund
 say "tauri bundle --bundles deb (version $VERSION)"
-( cd "$APP" && npx tauri bundle --ci --bundles deb --target "$APP_TARGET" --no-binary-patching \
+( cd "$APP" && npx tauri bundle --ci --bundles deb --target "$APP_TARGET" --no-sign --no-binary-patching \
     --config "{\"version\":\"$VERSION\"}" )
 BUNDLE_GLOB="$APP/target/$APP_TARGET/release/bundle/deb/*.deb"
 # the file is named "<productName>_<version>_<arch>.deb", space included: only

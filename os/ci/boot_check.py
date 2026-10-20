@@ -548,7 +548,7 @@ def wait_page(vm: Vm, run: dict, step: float) -> None:
     def served() -> bool:
         try:
             status, body = http_get(run["port"], urlsplit(run["url"]).path or "/")
-        except OSError:
+        except (OSError, http.client.HTTPException):
             return False
         return status == 200 and 'data-page="home"' in body
 
@@ -629,7 +629,10 @@ def check_session_and_app(vm: Vm, run: dict, step: float) -> None:
 def check_canvas(vm: Vm, run: dict, home_img, step: float) -> int:
     """Step 8: a canvas opened from the kiosk runs on the sidecar; the screen follows."""
     vm.sh(f"runuser -u {KIOSK_USER} -- mkdir -p {CANVAS_DIR}")
-    opened = asyncio.run(home_call(run["port"], {"type": "open", "paths": [CANVAS_DIR]}))
+    try:
+        opened = asyncio.run(home_call(run["port"], {"type": "open", "paths": [CANVAS_DIR]}))
+    except ws_errors() as e:
+        raise Fail(f"step 8: home open {CANVAS_DIR}: {type(e).__name__}: {e}") from e
     if isinstance(opened, dict) and "error" in opened:
         raise Fail(f"home open refused {CANVAS_DIR}: {opened['error']}")
 
@@ -679,7 +682,10 @@ def check_restart(vm: Vm, run: dict, canvas_pid: int, step: float) -> None:
     wait_page(vm, new, step)
     check_kernel(vm, new, step)
     # the canvas outlived the kiosk (KillUserProcesses=no), and the new app adopted it
-    state = check_state(asyncio.run(home_call(new["port"], {"type": "list"})))
+    try:
+        state = check_state(asyncio.run(home_call(new["port"], {"type": "list"})))
+    except ws_errors() as e:
+        raise Fail(f"step 9: home list after the restart: {type(e).__name__}: {e}") from e
     row = find_row(state, CANVAS_DIR)
     if not row or row.get("status") != "running" or row.get("pid") != canvas_pid:
         raise Fail(f"after the restart {CANVAS_DIR} is {row}, wanted running with pid {canvas_pid}")
