@@ -14,16 +14,21 @@ equipment.
 
 ```
 canvas_root                  THE MAIN canvas (the spawner; the manager's canvas_id)
-├── cabinet_alpha            cabinet.tools, cabinet_role: cabinet   THE STATUS CELL (live html view; its button opens the canvas below)
-├── cabinet_beta             …same shape…
 ├── canvas_cabinet_alpha     canvas.tools  THE CABINET'S CANVAS (made by canvas_root's new_canvas)
-│   ├── <equipment>          exec runners, file bridges, helper AIs, panels (placed by `create`)
+│   ├── <equipment>          exec runners, file bridges, helper AIs, panels (made by `create`)
 │   └── canvas_cabinet_alpha_loader   its page records
 └── canvas_cabinet_beta      …same shape…
 
 cabinet_manager              cabinet.tools, cabinet_role: manager   (made once, by the operator)
-└── cabinet_alpha_worker     the worker AI (a child of its cabinet cell; an AI backend's copy)
+├── cabinet_alpha            cabinet.tools, cabinet_role: cabinet   THE STATUS CELL'S AGENT
+│   │                        (live html view; its button opens canvas_cabinet_alpha)
+│   └── cabinet_alpha_worker the worker AI (an AI backend's copy)
+└── cabinet_beta             …same shape…
 ```
+
+The status cell shows on the spawning canvas once it is PLACED there, like any host
+agent: the master (or a person) calls that canvas view's `place {backend_id:
+<cabinet>, x, y}`. `open_cabinet`'s reply says so (`next`).
 
 - **open_cabinet** `{task, name?, backend?, setup?}` (the master's verb, on the manager):
   asks the manager's `canvas_id` (the spawning canvas) for a child canvas `new_canvas`,

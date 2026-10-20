@@ -582,7 +582,10 @@ async def _open(manager: str, payload: dict, kernel):
         "backend": backend_id,
         "new_backend": new_backend,
         "peers": peers,
-        "next": f'send `{worker_id}` its first message (the task) with {{type: "send", text: ...}}',
+        "next": (
+            f'send `{worker_id}` its first message (the task) with {{type: "send", text: ...}}; '
+            f'show its status cell on the spawning canvas with that canvas view\'s place {{backend_id: "{cab_id}", x, y}}'
+        ),
     }
     if new_backend:
         out["warning"] = _NEW_BACKEND_WARNING

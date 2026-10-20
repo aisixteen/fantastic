@@ -907,7 +907,10 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
         "backend": backend_id,
         "new_backend": new_backend,
         "peers": peers,
-        "next": format!("send `{worker_id}` its first message (the task) with {{type: \"send\", text: ...}}"),
+        "next": format!(
+            "send `{worker_id}` its first message (the task) with {{type: \"send\", text: ...}}; \
+             show its status cell on the spawning canvas with that canvas view's place {{backend_id: \"{cab_id}\", x, y}}"
+        ),
     });
     if new_backend {
         with(&mut out, "warning", json!(NEW_BACKEND_WARNING));

@@ -299,11 +299,13 @@ impl BackendBundle {
     /// verbs, it may call the store, its key and `peer`. `user`'s own side is
     /// `kern/reach`'s.
     pub(crate) async fn make_ai(host: &Host, me: &AgentId, ai: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Result<(), String> {
-        // the caller's own store, when it names one (its grants are the
-        // caller's); else the project's, which admits the AI
-        let store = match spec.get("memory_store_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-            Some(s) => s.to_string(),
-            None => host.admit_to_memory(ai).await?,
+        // the project's store, named or not, admits the AI (a cabinet's helper AI
+        // names it: equipment is not a reach holder, so nothing else would); a
+        // caller's OWN store is the caller's to grant
+        let named = spec.get("memory_store_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+        let store = match named {
+            Some(s) if host.ai_store().ok().as_deref() != Some(s.as_str()) => s,
+            _ => host.admit_to_memory(ai).await?,
         };
         let handler = spec.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
         crate::kern::keys::attach(host, &handler, &mut spec)?;
@@ -748,12 +750,15 @@ mod create_tests {
         kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
         kernel.bundles.register(HANDLER_MODULE, BackendBundle);
         kernel.bundles.register("fake_ai.tools", FakeAi);
+        // `user` is real: the host admits an AI to the store AS `user` (`Host::act`)
+        kernel.bundles.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
         let kernel = Arc::new(kernel);
         let root = Agent::new(
             AgentId::from("kernel"),
             Some(fantastic_core::HANDLER_MODULE.to_string()),
             None,
-            Map::new(),
+            // `user` updates records through the kernel (the reach's grant in a real host)
+            json!({"callable_by": {crate::env::HUMAN: ["update_agent", "create_agent"]}}).as_object().unwrap().clone(),
             dir.join(".fantastic"),
             false,
         );
@@ -761,6 +766,7 @@ mod create_tests {
         kernel.set_root(root);
         let h = Host { kernel, cfg: ClientCfg::here(), root: "kernel".to_string() };
         let mut human_cc = Map::new();
+        human_cc.insert("kernel".into(), json!(["update_agent", "create_agent"]));
         for ai in ai_ids {
             human_cc.insert(ai.to_string(), json!("*"));
         }
@@ -801,6 +807,26 @@ mod create_tests {
         // the AI reads its store (its own side), and the human's chat verbs reach it
         assert_eq!(meta["can_call"]["memory"], json!("*"));
         assert_eq!(meta["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
+        // and the store admits it (its ingress side)
+        assert_eq!(record_of(&h, "memory")["callable_by"]["helper"], json!("*"), "the store admits the helper");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_ai_naming_its_callers_own_store_is_not_admitted_by_the_host() {
+        let (h, dir) = host("own", &["helper2"]).await;
+        h.act("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "own_store", "handler_module": fantastic_core::HANDLER_MODULE}))
+            .await;
+        let out = BackendBundle::create(
+            &h,
+            &AgentId::from("canvas_root"),
+            &json!({"record": {"handler_module": "fake_ai.tools", "id": "helper2", "memory_store_id": "own_store"}}),
+        )
+        .await;
+        assert_eq!(out, json!({"id": "helper2"}), "{out}");
+        assert_eq!(record_of(&h, "helper2")["memory_store_id"], json!("own_store"));
+        assert!(record_of(&h, "own_store").get("callable_by").and_then(|c| c.get("helper2")).is_none(), "a caller's own store is the caller's to grant");
+        assert!(record_of(&h, "memory").get("callable_by").and_then(|c| c.get("helper2")).is_none(), "nor is the project's store opened to it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
