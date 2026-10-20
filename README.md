@@ -199,6 +199,7 @@ Get-AuthenticodeSignature .\fantastic-app-x86_64-pc-windows-msvc-setup.exe   # S
 ```
 
 The Linux key's fingerprint is the one in [`SECURITY.md`](SECURITY.md#verifying-downloads).
+CI builds and tests the installers; the maintainer signs them by hand.
 
 ### With cargo
 

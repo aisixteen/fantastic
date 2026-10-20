@@ -7,11 +7,12 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
-- Installers for the desktop app, built by hand with `installers.yml` from the
-  binaries a green CI run tested: a notarized DMG (macOS, Apple silicon), a
-  signed NSIS installer (Windows x64), and a `.deb` and an AppImage with GPG
-  signatures (Linux x86_64), attached to the GitHub Release. `release.yml` names
-  its CI run in the notes.
+- Installers for the desktop app, built and verified by CI (`installers.yml`,
+  from the binaries a green CI run tested) and signed by hand by the
+  maintainer: a notarized DMG (macOS, Apple silicon), a signed NSIS installer
+  (Windows x64), and a `.deb` and an AppImage with GPG signatures (Linux
+  x86_64), attached to the GitHub Release; `installers.yml -f check=vX.Y.Z`
+  verifies the published ones. `release.yml` names its CI run in the notes.
 - The desktop app (`src/app`, Tauri 2): it hosts the home kernel in-process and
   shows its Home page in one window, with a native backdrop (Liquid Glass or
   vibrancy on macOS, Mica on Windows 11), native menus and shortcuts from the

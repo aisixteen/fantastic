@@ -34,8 +34,9 @@ days and will agree a remediation + disclosure timeline with the reporter.
 ## Verifying downloads
 
 Every GitHub Release carries `SHA256SUMS` (the CLI archives) and, from the
-desktop app's first signed release, `SHA256SUMS-app` (its installers). The
-installers are signed:
+desktop app's first signed release, `SHA256SUMS-app` (its installers). CI
+builds and tests the installers; the maintainer signs them by hand, and no
+signing key is stored on GitHub. They are signed:
 
 - **macOS** — the DMG and the app are signed with a Developer ID Application
   certificate, notarized and stapled:
@@ -49,7 +50,9 @@ installers are signed:
   `gpg --import fantastic-app-linux-signing-key.asc && gpg --verify <file>.asc <file>`
   must report a good signature by the key whose fingerprint is listed here:
 
-  - Linux signing key fingerprint: *(added by the maintainer when the key exists)*
+  - Linux signing key fingerprint: *(added by the maintainer when the key
+    exists, as `` Linux signing key fingerprint: `<40 hex, no spaces>` ``;
+    `installers.yml -f check=vX.Y.Z` reads it from this line)*
 
 ## Threat model & scope (please read before reporting)
 

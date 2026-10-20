@@ -1,55 +1,58 @@
-# INSTALLERS — run BY HAND, after `release.yml` on the same tag
-# (`gh workflow run installers.yml --ref vX.Y.Z`, src/lib/rust/RELEASING.md).
-# It packs EXACTLY the binaries a full `ci.yml` run built and tested — the app
-# from its `app-<triple>` artifact, the `fantastic` CLI (the app's canvas
-# sidecar) from its `release-<target>` archive — into installers; the only
-# change to those bytes is code signatures (`--no-binary-patching`, `NO_STRIP=1`).
+# INSTALLERS — run BY HAND. It builds and verifies UNSIGNED installers; every
+# signature is made by hand on the maintainer's laptop (src/lib/rust/RELEASING.md).
+# No signing secret, certificate or key is on GitHub, and this workflow never
+# writes to a Release.
 #
-#   guard            refuses before anything is built, listing EVERY problem
-#   macos            a DMG (Apple silicon); release: signed, the .app and the DMG
-#                    notarized and stapled
-#   windows          an NSIS setup (x64, per user); release: Authenticode through
-#                    Azure Artifact Signing
-#   linux            a .deb and an AppImage (x86_64, built on ubuntu-24.04: glibc
-#                    2.39); release: a detached GPG signature each
-#   verify-*         a FRESH runner per OS, no secrets: the signatures (release),
-#                    then install and launch — the app boots its kernel and its
-#                    bundled sidecar starts a canvas (src/app/e2e/smoke.py);
-#                    verify-trixie installs the .deb on a minimal Debian 13, the
-#                    kiosk's system (#54), and runs `fantastic-app --kiosk`
-#   publish          release only: the installers, their signatures, the Linux
-#                    key and SHA256SUMS-app onto the tag's GitHub Release (never
-#                    replacing an asset)
+# BUILD (no `check`):  gh workflow run installers.yml --ref <ref> [-f ci_run=<id>]
+#   It packs EXACTLY the binaries a full `ci.yml` run built — the app from its
+#   `app-<triple>` artifact, the `fantastic` CLI (the app's canvas sidecar) from
+#   its `release-<target>` archive — with `tauri bundle --no-sign
+#   --no-binary-patching` (and `NO_STRIP=1` on Linux), installs and launches
+#   each installer on a fresh runner, and keeps, 7 days, per OS:
+#     installer-<triple>  the unsigned installer this run verified
+#                         (the Linux ones ARE the release packages, to GPG-sign)
+#     to-sign-<triple>    what is signed before the installer is made: the
+#                         unsigned .app (macOS); fantastic-app.exe and the
+#                         sidecar, staged as the bundler takes them (Windows)
+#   The CI run:
+#     on a vX.Y.Z tag   the one its GitHub Release names (`CI run: …` in the
+#                       notes, written by release.yml); `ci_run` is refused
+#     any other ref     `-f ci_run=<id>`: a full run whose `binaries / build · …`
+#                       and `binaries / app · …` jobs succeeded, even if its e2e
+#                       failed; or, without it, the newest green `ci · full` run
+#                       on this commit
 #
-# Modes:
-#   release    a `vX.Y.Z` tag on main whose GitHub Release names its CI run
-#              (`CI run: …/actions/runs/<id>`, written by release.yml). Signs
-#              everything; the secrets live in the `signing` environment.
-#   rehearsal  any ref, no secrets: the same installers with `--no-sign`,
-#              installed and launched on fresh runners, kept 7 days as run
-#              artifacts, published nowhere. The CI run is `-f ci_run=<id>` — a
-#              full run whose `binaries / build · …` and `binaries / app · …`
-#              jobs succeeded, even if its e2e failed — or, without it, the
-#              newest green `ci · full` run on this commit. Never a substitute
-#              for release.
+# CHECK (`-f check=vX.Y.Z`):  gh workflow run installers.yml -f check=vX.Y.Z
+#   Builds nothing. On fresh runners it downloads that Release's installers and
+#   verifies them as a user would: `SHA256SUMS-app`; the DMG and the app
+#   notarized, stapled and signed by a Developer ID (macOS); the setup and the
+#   installed binaries Authenticode-valid and timestamped (Windows); a good GPG
+#   signature by the key whose fingerprint SECURITY.md lists (Linux); then the
+#   same install-and-launch smoke. It reads the Release; it never writes to it.
 #
-# The bundler skips signing QUIETLY (no identity, no notarization credentials, no
-# Windows sign command). Here that cannot pass: the guard refuses a release
-# without every secret, and the build and verify jobs fail any installer that is
-# not signed as required.
+#   guard          refuses before anything runs, listing EVERY problem
+#   macos          the .app and the DMG (Apple silicon)
+#   windows        the NSIS setup (x64, per user)
+#   linux          the .deb and the AppImage (x86_64, built on ubuntu-24.04:
+#                  glibc 2.39); each packed binary must be the CI run's bytes
+#   verify-*       a FRESH runner per OS: install and launch — the app boots its
+#                  kernel and its bundled sidecar starts a canvas
+#                  (src/app/e2e/smoke.py); verify-trixie installs the .deb on a
+#                  minimal Debian 13, the kiosk's system (#54), and runs
+#                  `fantastic-app --kiosk`
 
 name: installers
+run-name: ${{ inputs.check != '' && format('installers · check {0}', inputs.check) || 'installers · build' }}
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "release: sign, notarize and attach to the tag's GitHub Release. rehearsal: build, install and launch unsigned, publish nothing (any ref)."
-        type: choice
-        options: [release, rehearsal]
-        default: release
       ci_run:
-        description: "rehearsal only: a full ci.yml run id whose binaries jobs (build · and app ·) succeeded; its e2e may have failed. Empty: the newest green `ci · full` run on this commit. release refuses it."
+        description: "Build: the full ci.yml run whose binaries to pack (its build · and app · jobs green; its e2e may have failed). Empty: the newest green `ci · full` run on this commit. On a vX.Y.Z tag it must be empty: the run its GitHub Release names is used."
+        type: string
+        default: ""
+      check:
+        description: "vX.Y.Z: build nothing; verify that GitHub Release's signed installers (signatures, SHA256SUMS-app, install and launch). Empty: build."
         type: string
         default: ""
 
@@ -58,7 +61,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: installers-${{ github.ref }}
+  group: installers-${{ github.ref }}-${{ inputs.check }}
   cancel-in-progress: false
 
 defaults:
@@ -72,23 +75,22 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: ${{ inputs.mode == 'release' && 'signing' || 'rehearsal' }}
     outputs:
-      mode: ${{ inputs.mode }}
       version: ${{ steps.run.outputs.version }}
       ci_run: ${{ steps.run.outputs.ci_run }}
       tag: ${{ steps.run.outputs.tag }}
-      linux_fpr: ${{ steps.secrets.outputs.linux_fpr }}
+      check: ${{ steps.run.outputs.check }}
+      linux_fpr: ${{ steps.run.outputs.linux_fpr }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: run
-        name: the ref, the Release and the CI run
+        name: what to build or check
         env:
           GH_TOKEN: ${{ github.token }}
-          MODE: ${{ inputs.mode }}
           CI_RUN_INPUT: ${{ inputs.ci_run }}
+          CHECK_INPUT: ${{ inputs.check }}
         run: |
           : > "$RUNNER_TEMP/failures"
           fail() { echo "::error::$*"; echo "$*" >> "$RUNNER_TEMP/failures"; }
@@ -96,6 +98,11 @@ jobs:
           # the six artifacts the installers are made of
           ARTIFACTS="release-aarch64-apple-darwin release-x86_64-pc-windows-msvc release-x86_64-unknown-linux-musl
                      app-aarch64-apple-darwin app-x86_64-pc-windows-msvc app-x86_64-unknown-linux-gnu"
+          # the assets a signed Release carries (RELEASING.md, step 7)
+          ASSETS="fantastic-app-aarch64-apple-darwin.dmg fantastic-app-x86_64-pc-windows-msvc-setup.exe
+                  fantastic-app-x86_64-unknown-linux-gnu.deb fantastic-app-x86_64-unknown-linux-gnu.deb.asc
+                  fantastic-app-x86_64-unknown-linux-gnu.AppImage fantastic-app-x86_64-unknown-linux-gnu.AppImage.asc
+                  fantastic-app-linux-signing-key.asc SHA256SUMS-app"
           artifacts_present() {
             list=$(gh api --paginate "repos/$R/actions/runs/$1/artifacts?per_page=100" \
               --jq '.artifacts[] | [.name, (.expired | tostring), .expires_at] | @tsv') \
@@ -113,44 +120,63 @@ jobs:
             gh api "repos/$R/actions/runs/$1" \
               --jq '[.path, .display_title, .head_sha, (.head_branch // "none"), .status, (.conclusion // "none")] | @tsv'
           }
+          release_json() {  # <tag> → the Release, or a failure naming why not
+            local out
+            out=$(gh api "repos/$R/releases/tags/$1" 2>/dev/null) || { echo "no GitHub Release for '$1'"; return 1; }
+            printf '%s' "$out"
+          }
+          is_version_tag() { [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
           run=""
           tag=""
-          if [ "$MODE" = release ]; then
-            tag="$GITHUB_REF_NAME"
-            { [ "$GITHUB_REF_TYPE" = tag ] && [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; } \
-              || fail "not a vX.Y.Z tag: run it with --ref vX.Y.Z, not $GITHUB_REF_TYPE '$tag'"
-            git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-              || fail "$tag ($GITHUB_SHA) is not on main"
-            [ -z "$CI_RUN_INPUT" ] \
-              || fail "ci_run is for rehearsal only: a release uses the CI run its GitHub Release names"
-            if rel=$(gh api "repos/$R/releases/tags/$tag" 2>&1); then
-              ids=$(printf '%s' "$rel" | jq -r '.body // ""' | grep -oE 'actions/runs/[0-9]+' | sed 's|.*/||' | sort -u || true)
-              case "$(printf '%s' "$ids" | grep -c .)" in
-                0) fail "this release names no CI run — installers start with the first release published by the updated release.yml" ;;
-                1) run="$ids" ;;
-                *) fail "the release names more than one CI run: $(printf "%s" "$ids" | tr "\n" " ")" ;;
-              esac
-              for a in $(printf '%s' "$rel" | jq -r '.assets[].name' | grep -E '^(fantastic-app-|SHA256SUMS-app$)' || true); do
-                fail "the release already has $a — delete them first: gh release delete-asset $tag $a"
+          version=""
+          fpr=""
+          if [ -n "$CHECK_INPUT" ]; then
+            # ── CHECK: a published Release's signed installers ────────────────
+            [ -z "$CI_RUN_INPUT" ] || fail "ci_run is for a build; a check verifies a Release's assets"
+            is_version_tag "$CHECK_INPUT" || fail "check '$CHECK_INPUT' is not a vX.Y.Z tag"
+            if rel=$(release_json "$CHECK_INPUT"); then
+              names=$(printf '%s' "$rel" | jq -r '.assets[].name')
+              for a in $ASSETS; do
+                printf '%s\n' "$names" | grep -qxF "$a" \
+                  || fail "the $CHECK_INPUT Release has no $a — upload it first (RELEASING.md, step 7)"
               done
             else
-              fail "no GitHub Release for '$tag' — run release.yml first ($rel)"
+              fail "$rel"
             fi
-            if [ -n "$run" ]; then
-              if meta=$(run_meta "$run" 2>&1); then
-                IFS=$'\t' read -r path title sha branch status conclusion <<< "$meta"
-                [ "$path" = .github/workflows/ci.yml ] || fail "run $run is $path, not ci.yml"
-                [ "$title" = "ci · full" ] || fail "CI run $run is '$title', not 'ci · full'"
-                [ "$conclusion" = success ] || fail "CI run $run concluded '$conclusion', not success"
-                [ "$sha" = "$GITHUB_SHA" ] || fail "CI run $run built $sha, not $tag's $GITHUB_SHA"
-              else
-                fail "CI run $run: $meta"
-              fi
-              artifacts_present "$run"
-            fi
-            version="${tag#v}"
+            # the fingerprint users are told to trust: SECURITY.md's, at this ref
+            fpr=$(sed -nE 's/.*Linux signing key fingerprint: `([0-9A-F]{40})`.*/\1/p' SECURITY.md | head -1)
+            [ -n "$fpr" ] || fail "SECURITY.md at $GITHUB_REF_NAME lists no Linux signing key fingerprint (\`Linux signing key fingerprint: \`<40 hex>\`\`)"
+            echo "checking the $CHECK_INPUT Release; Linux key $fpr"
           else
-            if [ -n "$CI_RUN_INPUT" ]; then
+            # ── BUILD: which CI run ───────────────────────────────────────────
+            if [ "$GITHUB_REF_TYPE" = tag ] && is_version_tag "$GITHUB_REF_NAME"; then
+              tag="$GITHUB_REF_NAME"
+              version="${tag#v}"
+              [ -z "$CI_RUN_INPUT" ] \
+                || fail "on a release tag the CI run is the one its GitHub Release names; ci_run must be empty"
+              git merge-base --is-ancestor "$GITHUB_SHA" origin/main || fail "$tag ($GITHUB_SHA) is not on main"
+              if rel=$(release_json "$tag"); then
+                ids=$(printf '%s' "$rel" | jq -r '.body // ""' | grep -oE 'actions/runs/[0-9]+' | sed 's|.*/||' | sort -u || true)
+                case "$(printf '%s' "$ids" | grep -c .)" in
+                  0) fail "the $tag Release names no CI run — installers start with the first release published by the updated release.yml" ;;
+                  1) run="$ids" ;;
+                  *) fail "the $tag Release names more than one CI run: $(printf '%s' "$ids" | tr '\n' ' ')" ;;
+                esac
+              else
+                fail "$rel — run release.yml first"
+              fi
+              if [ -n "$run" ]; then
+                if meta=$(run_meta "$run" 2>&1); then
+                  IFS=$'\t' read -r path title sha branch status conclusion <<< "$meta"
+                  [ "$path" = .github/workflows/ci.yml ] || fail "run $run is $path, not ci.yml"
+                  [ "$title" = "ci · full" ] || fail "CI run $run is '$title', not 'ci · full'"
+                  [ "$conclusion" = success ] || fail "CI run $run concluded '$conclusion', not success"
+                  [ "$sha" = "$GITHUB_SHA" ] || fail "CI run $run built $sha, not $tag's $GITHUB_SHA"
+                else
+                  fail "CI run $run: $meta"
+                fi
+              fi
+            elif [ -n "$CI_RUN_INPUT" ]; then
               if [[ "$CI_RUN_INPUT" =~ ^[0-9]+$ ]] && meta=$(run_meta "$CI_RUN_INPUT" 2>&1); then
                 run="$CI_RUN_INPUT"
                 IFS=$'\t' read -r path title sha branch status conclusion <<< "$meta"
@@ -171,7 +197,7 @@ jobs:
           binaries / app · x86_64-pc-windows-msvc
           binaries / app · x86_64-unknown-linux-gnu
           JOBS
-                echo "rehearsal on the given CI run $run: '$title' on $branch @ $sha ($status, $conclusion)"
+                echo "the given CI run $run: '$title' on $branch @ $sha ($status, $conclusion)"
                 [ "$sha" = "$GITHUB_SHA" ] \
                   || echo "::notice::CI run $run built $sha, not this ref's $GITHUB_SHA: the installers pack that commit's binaries"
               else
@@ -186,50 +212,19 @@ jobs:
                 || fail "no green full ci.yml run on $GITHUB_SHA — start one: gh workflow run ci.yml --ref $GITHUB_REF_NAME -f e2e=true (or pass -f ci_run=<id> of a full run whose binaries jobs succeeded)"
             fi
             [ -n "$run" ] && artifacts_present "$run"
-            version=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)
-            [ -n "$version" ] || fail "no tag reachable from $GITHUB_SHA: the rehearsal takes its version from the last tag"
+            if [ -z "$version" ]; then
+              version=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)
+              [ -n "$version" ] || fail "no tag reachable from $GITHUB_SHA: the build takes its version from the last tag"
+            fi
+            [ -n "$run" ] && echo "CI run used: $GITHUB_SERVER_URL/$R/actions/runs/$run"
           fi
-          [ -n "$run" ] && echo "CI run used: $GITHUB_SERVER_URL/$R/actions/runs/$run"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "ci_run=$run" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - id: secrets
-        name: every signing secret and variable (release)
-        if: inputs.mode == 'release'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
-          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
-          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
-          LINUX_SIGNING_KEY_FINGERPRINT: ${{ vars.LINUX_SIGNING_KEY_FINGERPRINT }}
-        run: |
-          missing=""
-          for n in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
-                   APPLE_API_KEY APPLE_API_ISSUER APPLE_API_PRIVATE_KEY \
-                   AZURE_CLIENT_ID AZURE_CLIENT_SECRET AZURE_TENANT_ID \
-                   AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT AZURE_SIGNING_PROFILE \
-                   LINUX_GPG_PRIVATE_KEY LINUX_GPG_PASSPHRASE LINUX_SIGNING_KEY_FINGERPRINT; do
-            [ -n "${!n}" ] || missing="$missing $n"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::the signing environment lacks:$missing"
-            echo "the signing environment lacks:$missing" >> "$RUNNER_TEMP/failures"
-          fi
-          if [ -n "$LINUX_SIGNING_KEY_FINGERPRINT" ] && ! [[ "$LINUX_SIGNING_KEY_FINGERPRINT" =~ ^[0-9A-F]{40}$ ]]; then
-            echo "::error::LINUX_SIGNING_KEY_FINGERPRINT is not 40 upper-case hex digits with no spaces"
-            echo "LINUX_SIGNING_KEY_FINGERPRINT malformed" >> "$RUNNER_TEMP/failures"
-          fi
-          echo "linux_fpr=$LINUX_SIGNING_KEY_FINGERPRINT" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "ci_run=$run"
+            echo "tag=$tag"
+            echo "check=$CHECK_INPUT"
+            echo "linux_fpr=$fpr"
+          } >> "$GITHUB_OUTPUT"
       - name: the verdict
         run: |
           if [ -s "$RUNNER_TEMP/failures" ]; then
@@ -237,15 +232,19 @@ jobs:
             sed 's/^/  - /' "$RUNNER_TEMP/failures"
             exit 1
           fi
-          echo "mode ${{ inputs.mode }}: version ${{ steps.run.outputs.version }}, CI run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/${{ steps.run.outputs.ci_run }}" \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ steps.run.outputs.check }}" ]; then
+            echo "check: the ${{ steps.run.outputs.check }} Release's installers" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build: version ${{ steps.run.outputs.version }}, CI run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/${{ steps.run.outputs.ci_run }}" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
-  # ── macOS: the DMG ───────────────────────────────────────────────────────
+  # ── macOS: the .app and the DMG ──────────────────────────────────────────
   macos:
     needs: guard
+    if: needs.guard.outputs.check == ''
     runs-on: xcode-27
     timeout-minutes: 60
-    environment: ${{ inputs.mode == 'release' && 'signing' || 'rehearsal' }}
     env:
       CLI_TARGET: aarch64-apple-darwin
       APP_TARGET: aarch64-apple-darwin
@@ -276,8 +275,8 @@ jobs:
           path: dist
           run-id: ${{ needs.guard.outputs.ci_run }}
           github-token: ${{ github.token }}
-      - name: the sidecar is the archive the Release ships (release)
-        if: inputs.mode == 'release'
+      - name: the sidecar is the archive the Release ships (a release tag)
+        if: env.TAG != ''
         run: |
           gh release download "$TAG" -p SHA256SUMS -D dist/sums
           line=$(awk -v f="fantastic-$CLI_TARGET.tar.gz" '$2 == f' dist/sums/SHA256SUMS)
@@ -290,103 +289,47 @@ jobs:
           mv "$RUNNER_TEMP/cli/fantastic" "src/app/binaries/fantastic-$APP_TARGET"
           tar -xf "dist/fantastic-app-$APP_TARGET.tar" -C "src/app/target/$APP_TARGET/release"
           ls -l src/app/binaries "src/app/target/$APP_TARGET/release"
-      - name: the App Store Connect API key, for notarytool (release)
-        if: inputs.mode == 'release'
-        env:
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-        run: |
-          umask 077
-          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey.p8"
-      # APPLE_API_KEY_PATH is the name Tauri reads. Never APPLE_ID, APPLE_PASSWORD
-      # or APPLE_TEAM_ID: the bundler would prefer the Apple ID route.
-      # `app,dmg`: the DMG packs the .app built (and in release, signed, notarized
-      # and stapled) once; with `dmg` alone the bundler deletes that .app after.
-      - name: bundle, signed; the .app notarized and stapled (release)
-        if: inputs.mode == 'release'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
-          cd src/app && npx tauri bundle --ci --bundles app,dmg --target "$APP_TARGET" --no-binary-patching \
-            --config "{\"version\":\"$VERSION\"}"
-      - name: bundle, unsigned (rehearsal)
-        if: inputs.mode == 'rehearsal'
+      # `app,dmg`: the DMG packs the .app built once; with `dmg` alone the
+      # bundler deletes that .app afterwards, and it is what gets signed.
+      - name: bundle, unsigned
         run: |
           cd src/app && npx tauri bundle --ci --bundles app,dmg --target "$APP_TARGET" --no-binary-patching --no-sign \
             --config "{\"version\":\"$VERSION\"}"
-      - id: out
-        name: exactly one DMG and one .app
+      - name: the installer, and the .app to sign
         run: |
           shopt -s nullglob
           B="src/app/target/$APP_TARGET/release/bundle"
-          for pair in "dmg:dmg/*.dmg" "app:macos/*.app"; do
-            g="${pair#*:}"
-            set -- "$B"/$g
-            [ "$#" -eq 1 ] || { echo "::error::$B/$g matched $# files, not 1: $*"; exit 1; }
-            echo "${pair%%:*}=$1" >> "$GITHUB_OUTPUT"
-          done
-      - name: notarize and staple the DMG (release)
-        if: inputs.mode == 'release'
-        env:
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          DMG: ${{ steps.out.outputs.dmg }}
-        run: |
-          K="$RUNNER_TEMP/AuthKey.p8"
-          J="$RUNNER_TEMP/notary.json"
-          rc=0
-          xcrun notarytool submit "$DMG" --key "$K" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 30m --output-format json > "$J" || rc=$?
-          cat "$J"
-          id=$(plutil -extract id raw -o - "$J" 2>/dev/null || true)
-          status=$(plutil -extract status raw -o - "$J" 2>/dev/null || true)
-          if [ "$status" != Accepted ]; then
-            echo "::error::the DMG's notarization is '${status:-no answer}' (notarytool exit $rc)"
-            [ -z "$id" ] || xcrun notarytool log "$id" --key "$K" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER"
-            exit 1
-          fi
-          xcrun stapler staple "$DMG"
-      - name: signed by Developer ID, hardened, stapled (release)
-        if: inputs.mode == 'release'
-        env:
-          DMG: ${{ steps.out.outputs.dmg }}
-          APP: ${{ steps.out.outputs.app }}
-        run: |
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          for b in "$APP" "$APP/Contents/MacOS/fantastic"; do
-            info=$(codesign -dv --verbose=4 "$b" 2>&1)
-            printf '%s\n' "$info" | grep -E '^(Authority|TeamIdentifier|CodeDirectory)'
-            printf '%s\n' "$info" | grep -q '^Authority=Developer ID Application:' \
-              || { echo "::error::$b is not signed by a Developer ID Application certificate"; exit 1; }
-            printf '%s\n' "$info" | grep -qF 'flags=0x10000(runtime)' \
-              || { echo "::error::$b has no hardened runtime"; exit 1; }
-          done
-          xcrun stapler validate "$APP"
-          xcrun stapler validate "$DMG"
-      - name: the installer
-        env:
-          DMG: ${{ steps.out.outputs.dmg }}
-        run: |
-          mkdir -p dist/installers
-          cp "$DMG" "dist/installers/fantastic-app-$APP_TARGET.dmg"
-          ls -l dist/installers
+          mkdir -p dist/installers dist/to-sign
+          set -- "$B"/dmg/*.dmg
+          [ "$#" -eq 1 ] || { echo "::error::$B/dmg/*.dmg matched $# files, not 1: $*"; exit 1; }
+          cp "$1" "dist/installers/fantastic-app-$APP_TARGET.dmg"
+          set -- "$B"/macos/*.app
+          [ "$#" -eq 1 ] || { echo "::error::$B/macos/*.app matched $# files, not 1: $*"; exit 1; }
+          [ "$(basename "$1")" = "Aisixteen Fantastic.app" ] || { echo "::error::the app is $1, not Aisixteen Fantastic.app"; exit 1; }
+          cmp "$1/Contents/MacOS/fantastic-app" "src/app/target/$APP_TARGET/release/fantastic-app"
+          cmp "$1/Contents/MacOS/fantastic" "src/app/binaries/fantastic-$APP_TARGET"
+          # one tar: upload-artifact drops the executable bit and symlinks
+          tar -cf "dist/to-sign/fantastic-app-$APP_TARGET.app.tar" -C "$B/macos" "Aisixteen Fantastic.app"
+          ls -l dist/installers dist/to-sign
       - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ env.APP_TARGET }}
           path: dist/installers/
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: to-sign-${{ env.APP_TARGET }}
+          path: dist/to-sign/
+          if-no-files-found: error
+          retention-days: 7
 
   # ── Windows: the NSIS setup ──────────────────────────────────────────────
   windows:
     needs: guard
+    if: needs.guard.outputs.check == ''
     runs-on: windows-latest
     timeout-minutes: 45
-    environment: ${{ inputs.mode == 'release' && 'signing' || 'rehearsal' }}
     env:
       CLI_TARGET: x86_64-pc-windows-msvc
       APP_TARGET: x86_64-pc-windows-msvc
@@ -417,8 +360,8 @@ jobs:
           path: dist
           run-id: ${{ needs.guard.outputs.ci_run }}
           github-token: ${{ github.token }}
-      - name: the sidecar is the archive the Release ships (release)
-        if: inputs.mode == 'release'
+      - name: the sidecar is the archive the Release ships (a release tag)
+        if: env.TAG != ''
         shell: pwsh
         run: |
           gh release download $env:TAG -p SHA256SUMS -D dist/sums
@@ -441,84 +384,32 @@ jobs:
           tar -xf "dist/fantastic-app-$env:APP_TARGET.tar" -C $bin
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem src/app/binaries, $bin
-      - name: artifact-signing-cli and its prerequisites (release)
-        if: inputs.mode == 'release'
-        shell: pwsh
-        run: |
-          cargo install artifact-signing-cli --version 0.11.0 --locked
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          dotnet --list-runtimes
-          az version
-          Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | ForEach-Object { $_.FullName }
-      - name: the sign command, as a config (release)
-        if: inputs.mode == 'release'
-        shell: pwsh
-        env:
-          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
-        run: |
-          $cfg = @{
-            version = $env:VERSION
-            bundle = @{ windows = @{ signCommand = @{
-              cmd = "artifact-signing-cli"
-              args = @("-e", $env:AZURE_SIGNING_ENDPOINT, "-a", $env:AZURE_SIGNING_ACCOUNT,
-                       "-c", $env:AZURE_SIGNING_PROFILE, "-d", "Aisixteen Fantastic", "%1")
-            } } }
-          }
-          $cfg | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM "$env:RUNNER_TEMP/sign.json"
-          Get-Content "$env:RUNNER_TEMP/sign.json"
-      - name: bundle, signed (release)
-        if: inputs.mode == 'release'
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        run: |
-          cd src/app && npx tauri bundle --ci --bundles nsis --target "$APP_TARGET" --no-binary-patching \
-            --config "$RUNNER_TEMP/sign.json"
-      - name: bundle, unsigned (rehearsal)
-        if: inputs.mode == 'rehearsal'
+      - name: bundle, unsigned
         run: |
           cd src/app && npx tauri bundle --ci --bundles nsis --target "$APP_TARGET" --no-binary-patching --no-sign \
             --config "{\"version\":\"$VERSION\"}"
-      - id: out
-        name: exactly one setup
+      - name: the installer, and the binaries to sign
         run: |
           shopt -s nullglob
           B="src/app/target/$APP_TARGET/release/bundle"
+          mkdir -p dist/installers dist/to-sign
           set -- "$B"/nsis/*-setup.exe
           [ "$#" -eq 1 ] || { echo "::error::$B/nsis/*-setup.exe matched $# files, not 1: $*"; exit 1; }
-          echo "setup=$1" >> "$GITHUB_OUTPUT"
-      # The bundler restores target/…/fantastic-app.exe to its unsigned copy after
-      # bundling, so the app inside the setup is checked once installed
-      # (verify-windows). The sidecar is signed in place, in binaries/.
-      - name: signed and timestamped (release)
-        if: inputs.mode == 'release'
-        shell: pwsh
-        env:
-          SETUP: ${{ steps.out.outputs.setup }}
-        run: |
-          $bad = 0
-          foreach ($f in @($env:SETUP, "src/app/binaries/fantastic-$env:APP_TARGET.exe")) {
-            $s = Get-AuthenticodeSignature $f
-            Write-Output "$f : $($s.Status) — $($s.SignerCertificate.Subject)"
-            if ($s.Status -ne 'Valid' -or $null -eq $s.TimeStamperCertificate) {
-              Write-Output "::error::$f is not validly signed and timestamped ($($s.Status) $($s.StatusMessage))"; $bad = 1
-            }
-          }
-          exit $bad
-      - name: the installer
-        env:
-          SETUP: ${{ steps.out.outputs.setup }}
-        run: |
-          mkdir -p dist/installers
-          cp "$SETUP" "dist/installers/fantastic-app-$APP_TARGET-setup.exe"
-          ls -l dist/installers
+          cp "$1" "dist/installers/fantastic-app-$APP_TARGET-setup.exe"
+          # staged as the bundler takes them: untar at the repo root, then bundle
+          tar -cf "dist/to-sign/fantastic-app-$APP_TARGET.stage.tar" \
+            "src/app/target/$APP_TARGET/release/fantastic-app.exe" "src/app/binaries/fantastic-$APP_TARGET.exe"
+          ls -l dist/installers dist/to-sign
       - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ env.APP_TARGET }}
           path: dist/installers/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        with:
+          name: to-sign-${{ env.APP_TARGET }}
+          path: dist/to-sign/
           if-no-files-found: error
           retention-days: 7
 
@@ -528,9 +419,9 @@ jobs:
   # floor (2.39; the kiosk's Debian trixie has 2.41).
   linux:
     needs: guard
+    if: needs.guard.outputs.check == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    environment: ${{ inputs.mode == 'release' && 'signing' || 'rehearsal' }}
     env:
       CLI_TARGET: x86_64-unknown-linux-musl
       APP_TARGET: x86_64-unknown-linux-gnu
@@ -563,8 +454,8 @@ jobs:
           path: dist
           run-id: ${{ needs.guard.outputs.ci_run }}
           github-token: ${{ github.token }}
-      - name: the sidecar is the archive the Release ships (release)
-        if: inputs.mode == 'release'
+      - name: the sidecar is the archive the Release ships (a release tag)
+        if: env.TAG != ''
         run: |
           gh release download "$TAG" -p SHA256SUMS -D dist/sums
           line=$(awk -v f="fantastic-$CLI_TARGET.tar.gz" '$2 == f' dist/sums/SHA256SUMS)
@@ -577,12 +468,11 @@ jobs:
           mv "$RUNNER_TEMP/cli/fantastic" "src/app/binaries/fantastic-$APP_TARGET"
           tar -xf "dist/fantastic-app-$APP_TARGET.tar" -C "src/app/target/$APP_TARGET/release"
           ls -l src/app/binaries "src/app/target/$APP_TARGET/release"
-      - name: bundle (NO_STRIP — linuxdeploy keeps the tested binaries as they are)
+      - name: bundle, unsigned (NO_STRIP — linuxdeploy keeps the tested binaries as they are)
         env:
           NO_STRIP: "1"
-          SIGN_FLAG: ${{ inputs.mode == 'rehearsal' && '--no-sign' || '' }}
         run: |
-          cd src/app && npx tauri bundle --ci --bundles deb,appimage --target "$APP_TARGET" --no-binary-patching $SIGN_FLAG \
+          cd src/app && npx tauri bundle --ci --bundles deb,appimage --target "$APP_TARGET" --no-binary-patching --no-sign \
             --config "{\"version\":\"$VERSION\"}"
       - name: exactly one .deb and one AppImage
         run: |
@@ -596,31 +486,28 @@ jobs:
             cp "$1" "dist/installers/${pair#*:}"
           done
           dpkg-deb --field "dist/installers/fantastic-app-$APP_TARGET.deb" Package Version Depends Recommends
-          dpkg-deb --contents "dist/installers/fantastic-app-$APP_TARGET.deb" | grep usr/bin/
-      - name: a detached GPG signature each (release)
-        if: inputs.mode == 'release'
-        env:
-          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
-          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
-          LINUX_SIGNING_KEY_FINGERPRINT: ${{ vars.LINUX_SIGNING_KEY_FINGERPRINT }}
-        run: |
-          export GNUPGHOME="$RUNNER_TEMP/gnupg"
-          mkdir -m 700 "$GNUPGHOME"
-          printf '%s' "$LINUX_GPG_PRIVATE_KEY" | gpg --batch --import
-          FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
-          [ "$FPR" = "$LINUX_SIGNING_KEY_FINGERPRINT" ] \
-            || { echo "::error::the imported key is $FPR, LINUX_SIGNING_KEY_FINGERPRINT says $LINUX_SIGNING_KEY_FINGERPRINT"; exit 1; }
-          for f in dist/installers/fantastic-app-$APP_TARGET.deb dist/installers/fantastic-app-$APP_TARGET.AppImage; do
-            gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --local-user "$FPR" \
-              --armor --detach-sign --output "$f.asc" "$f" <<< "$LINUX_GPG_PASSPHRASE"
-            gpg --batch --verify "$f.asc" "$f"
-          done
-          gpg --armor --export "$FPR" > dist/installers/fantastic-app-linux-signing-key.asc
-          rm -rf "$GNUPGHOME"
-      - name: the glibc floor of these installers
-        run: |
-          echo "Linux installers built on $(ldd --version | head -1)" | tee -a "$GITHUB_STEP_SUMMARY"
           ls -l dist/installers
+      # The packages carry the CI run's bytes, unchanged: what was tested ships.
+      - name: each packed binary is the CI run's
+        run: |
+          app="src/app/target/$APP_TARGET/release/fantastic-app"
+          cli="src/app/binaries/fantastic-$APP_TARGET"
+          dpkg-deb -x "dist/installers/fantastic-app-$APP_TARGET.deb" "$RUNNER_TEMP/deb"
+          (cd "$RUNNER_TEMP" && "$GITHUB_WORKSPACE/dist/installers/fantastic-app-$APP_TARGET.AppImage" --appimage-extract > /dev/null)
+          bad=0
+          for pair in "$RUNNER_TEMP/deb/usr/bin/fantastic-app:$app" "$RUNNER_TEMP/deb/usr/bin/fantastic:$cli" \
+                      "$RUNNER_TEMP/squashfs-root/usr/bin/fantastic-app:$app" "$RUNNER_TEMP/squashfs-root/usr/bin/fantastic:$cli"; do
+            packed="${pair%%:*}"
+            if cmp -s "$packed" "${pair#*:}"; then
+              echo "same bytes: $packed"
+            else
+              echo "::error::$packed is not the CI run's ${pair#*:} (RUNPATH: $(readelf -d "$packed" | grep -o 'RUNPATH.*' || echo none))"
+              bad=1
+            fi
+          done
+          exit $bad
+      - name: the glibc floor of these installers
+        run: echo "Linux installers built on $(ldd --version | head -1)" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ env.APP_TARGET }}
@@ -628,22 +515,35 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ── verify: fresh runners, no environment, no secrets ────────────────────
+  # ── verify: fresh runners, no secrets ────────────────────────────────────
+  # A build verifies the installers its jobs just made (unsigned); a check
+  # (`-f check=vX.Y.Z`) downloads the Release's, verifies their signatures and
+  # SHA256SUMS-app, then the same install and launch.
   verify-macos:
     needs: [guard, macos]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && needs.guard.outputs.check != '')) }}
     runs-on: xcode-27
     timeout-minutes: 20
     env:
+      CHECK: ${{ needs.guard.outputs.check }}
+      GH_TOKEN: ${{ github.token }}
       DMG: dist/installers/fantastic-app-aarch64-apple-darwin.dmg
       APP: /Applications/Aisixteen Fantastic.app
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
+        if: env.CHECK == ''
         with:
           name: installer-aarch64-apple-darwin
           path: dist/installers
-      - name: Gatekeeper accepts the DMG as downloaded (release)
-        if: inputs.mode == 'release'
+      - name: the Release's DMG, against SHA256SUMS-app (check)
+        if: env.CHECK != ''
+        run: |
+          gh release download "$CHECK" -R "$GITHUB_REPOSITORY" -D dist/installers \
+            -p fantastic-app-aarch64-apple-darwin.dmg -p SHA256SUMS-app
+          cd dist/installers && grep '  fantastic-app-aarch64-apple-darwin.dmg$' SHA256SUMS-app | shasum -a 256 -c -
+      - name: Gatekeeper accepts the DMG as downloaded (check)
+        if: env.CHECK != ''
         run: |
           xattr -w com.apple.quarantine "0081;$(printf %x "$(date +%s)");CI;" "$DMG"
           out=$(spctl -a -vvv -t open --context context:primary-signature "$DMG" 2>&1) || { echo "$out"; exit 1; }
@@ -657,34 +557,60 @@ jobs:
           cp -R "$RUNNER_TEMP/m/Aisixteen Fantastic.app" /Applications/
           hdiutil detach "$RUNNER_TEMP/m"
           ls -l "$APP/Contents/MacOS"
-      - name: Gatekeeper accepts the installed app (release)
-        if: inputs.mode == 'release'
+      - name: the installed app is notarized, stapled and Developer ID-signed, hardened (check)
+        if: env.CHECK != ''
         run: |
           out=$(spctl -a -vvv -t exec "$APP" 2>&1) || { echo "$out"; exit 1; }
           echo "$out"
           printf '%s\n' "$out" | grep -q 'source=Notarized Developer ID' \
             || { echo "::error::the installed app is not a notarized Developer ID one"; exit 1; }
           codesign --verify --deep --strict --verbose=2 "$APP"
+          for b in "$APP" "$APP/Contents/MacOS/fantastic"; do
+            info=$(codesign -dv --verbose=4 "$b" 2>&1)
+            printf '%s\n' "$info" | grep -E '^(Authority|TeamIdentifier|Timestamp|CodeDirectory)'
+            printf '%s\n' "$info" | grep -q '^Authority=Developer ID Application:' \
+              || { echo "::error::$b is not signed by a Developer ID Application certificate"; exit 1; }
+            printf '%s\n' "$info" | grep -qF 'flags=0x10000(runtime)' \
+              || { echo "::error::$b has no hardened runtime"; exit 1; }
+          done
+          xcrun stapler validate "$APP"
       - name: launch smoke
         run: python3 src/app/e2e/smoke.py --root "$RUNNER_TEMP/smoke" -- "$APP/Contents/MacOS/fantastic-app"
 
   verify-windows:
     needs: [guard, windows]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.windows.result == 'success' || (needs.windows.result == 'skipped' && needs.guard.outputs.check != '')) }}
     runs-on: windows-latest
     timeout-minutes: 20
     defaults:
       run:
         shell: pwsh
     env:
+      CHECK: ${{ needs.guard.outputs.check }}
+      GH_TOKEN: ${{ github.token }}
       SETUP: dist/installers/fantastic-app-x86_64-pc-windows-msvc-setup.exe
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
+        if: env.CHECK == ''
         with:
           name: installer-x86_64-pc-windows-msvc
           path: dist/installers
-      - name: the setup is signed and timestamped (release)
-        if: inputs.mode == 'release'
+      - name: the Release's setup, against SHA256SUMS-app (check)
+        if: env.CHECK != ''
+        run: |
+          gh release download $env:CHECK -R $env:GITHUB_REPOSITORY -D dist/installers `
+            -p fantastic-app-x86_64-pc-windows-msvc-setup.exe -p SHA256SUMS-app
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $A = "fantastic-app-x86_64-pc-windows-msvc-setup.exe"
+          $lines = @(Select-String "  $([regex]::Escape($A))$" dist/installers/SHA256SUMS-app)
+          if ($lines.Count -ne 1) { Write-Output "::error::SHA256SUMS-app has no single line for $A"; exit 1 }
+          $want = ($lines[0].Line -split " ")[0]
+          $got = (Get-FileHash $env:SETUP -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { Write-Output "::error::$A is $got, SHA256SUMS-app says $want"; exit 1 }
+          Write-Output "$A matches SHA256SUMS-app"
+      - name: the setup is signed and timestamped (check)
+        if: env.CHECK != ''
         run: |
           $s = Get-AuthenticodeSignature $env:SETUP
           Write-Output "$($s.Status) — $($s.SignerCertificate.Subject)"
@@ -699,12 +625,12 @@ jobs:
           foreach ($n in 'fantastic-app.exe', 'fantastic.exe') {
             if (-not (Test-Path "$d\$n")) { Write-Output "::error::the setup installed no $d\$n"; exit 1 }
           }
-      - name: the installed binaries are signed and timestamped (release)
-        if: inputs.mode == 'release'
+      - name: the installed binaries are signed and timestamped (check)
+        if: env.CHECK != ''
         run: |
           $d = "$env:LOCALAPPDATA\Aisixteen Fantastic"
           $bad = 0
-          foreach ($n in 'fantastic-app.exe', 'fantastic.exe') {
+          foreach ($n in 'fantastic-app.exe', 'fantastic.exe', 'uninstall.exe') {
             $s = Get-AuthenticodeSignature "$d\$n"
             Write-Output "$n : $($s.Status) — $($s.SignerCertificate.Subject)"
             if ($s.Status -ne 'Valid' -or $null -eq $s.TimeStamperCertificate) {
@@ -725,19 +651,32 @@ jobs:
 
   verify-linux:
     needs: [guard, linux]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.linux.result == 'success' || (needs.linux.result == 'skipped' && needs.guard.outputs.check != '')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
+      CHECK: ${{ needs.guard.outputs.check }}
+      GH_TOKEN: ${{ github.token }}
       DEB: dist/installers/fantastic-app-x86_64-unknown-linux-gnu.deb
       APPIMAGE: dist/installers/fantastic-app-x86_64-unknown-linux-gnu.AppImage
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
+        if: env.CHECK == ''
         with:
           name: installer-x86_64-unknown-linux-gnu
           path: dist/installers
-      - name: the GPG signatures, against the pinned fingerprint (release)
-        if: inputs.mode == 'release'
+      - name: the Release's packages, against SHA256SUMS-app (check)
+        if: env.CHECK != ''
+        run: |
+          gh release download "$CHECK" -R "$GITHUB_REPOSITORY" -D dist/installers \
+            -p 'fantastic-app-x86_64-unknown-linux-gnu.*' -p fantastic-app-linux-signing-key.asc -p SHA256SUMS-app
+          cd dist/installers
+          for f in fantastic-app-x86_64-unknown-linux-gnu.deb fantastic-app-x86_64-unknown-linux-gnu.AppImage; do
+            grep "  $f\$" SHA256SUMS-app | sha256sum -c -
+          done
+      - name: good GPG signatures, by SECURITY.md's key (check)
+        if: env.CHECK != ''
         env:
           FPR: ${{ needs.guard.outputs.linux_fpr }}
         run: |
@@ -745,15 +684,19 @@ jobs:
           mkdir -m 700 "$GNUPGHOME"
           gpg --batch --import dist/installers/fantastic-app-linux-signing-key.asc
           got=$(gpg --list-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
-          [ "$got" = "$FPR" ] || { echo "::error::the published key is $got, not the pinned $FPR"; exit 1; }
+          [ "$got" = "$FPR" ] || { echo "::error::the published key is $got, SECURITY.md lists $FPR"; exit 1; }
           for f in "$DEB" "$APPIMAGE"; do
             gpg --batch --status-fd 1 --verify "$f.asc" "$f" | tee "$RUNNER_TEMP/v"
             # VALIDSIG names the signing (sub)key and, last, the primary key
             grep '^\[GNUPG:\] VALIDSIG ' "$RUNNER_TEMP/v" | grep -qw "$FPR" \
               || { echo "::error::$f: no good signature by $FPR"; exit 1; }
           done
-      - name: a display
-        run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
+      # A desktop's own libraries: an AppImage leaves the host's GL, EGL,
+      # fontconfig, harfbuzz, fribidi and Wayland out on purpose (linuxdeploy's
+      # excludelist), and WebKit opens libGLESv2 at run time. The runner image
+      # is no desktop; Ubuntu Desktop ships all of these.
+      - name: a display, and a desktop's libraries
+        run: sudo apt-get update -q && sudo apt-get install -y -q xvfb libgtk-3-0t64 libegl1 libgles2 libgl1-mesa-dri
       - name: launch smoke — the AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -777,17 +720,27 @@ jobs:
   # with no D-Bus session and no desktop environment.
   verify-trixie:
     needs: [guard, linux]
+    if: ${{ !cancelled() && needs.guard.result == 'success' && (needs.linux.result == 'success' || (needs.linux.result == 'skipped' && needs.guard.outputs.check != '')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
+      CHECK: ${{ needs.guard.outputs.check }}
+      GH_TOKEN: ${{ github.token }}
       # debian:trixie-20260918-slim
       IMAGE: debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
+        if: env.CHECK == ''
         with:
           name: installer-x86_64-unknown-linux-gnu
           path: dist/installers
+      - name: the Release's .deb, against SHA256SUMS-app (check)
+        if: env.CHECK != ''
+        run: |
+          gh release download "$CHECK" -R "$GITHUB_REPOSITORY" -D dist/installers \
+            -p fantastic-app-x86_64-unknown-linux-gnu.deb -p SHA256SUMS-app
+          cd dist/installers && grep '  fantastic-app-x86_64-unknown-linux-gnu.deb$' SHA256SUMS-app | sha256sum -c -
       - name: install and launch on debian:trixie-slim
         run: |
           mkdir -p "$RUNNER_TEMP/out"
@@ -808,6 +761,10 @@ jobs:
           dpkg -s aisixteen-fantastic | grep -E '^(Depends|Recommends):' | tee /out/deps.txt
           # the smoke's interpreter, only after the library check
           apt-get install -y -q --no-install-recommends python3
+          # A login session sets SHELL (the kiosk's, under cage, too); a bare
+          # `docker run` does not. The home starts each canvas in the login
+          # environment its SHELL prints.
+          export SHELL=/bin/bash
           python3 /e2e/smoke.py --root /tmp/smoke -- xvfb-run -a fantastic-app --kiosk
           SH
           docker run --rm --init \
@@ -819,48 +776,4 @@ jobs:
             echo '```'
             cat "$RUNNER_TEMP/out/deps.txt"
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # ── publish (release only) ───────────────────────────────────────────────
-  publish:
-    needs: [guard, verify-macos, verify-windows, verify-linux, verify-trixie]
-    if: needs.guard.outputs.mode == 'release'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      actions: read
-    env:
-      TAG: ${{ needs.guard.outputs.tag }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/download-artifact@v7
-        with:
-          pattern: installer-*
-          path: dist/installers
-          merge-multiple: true
-      - name: every installer, signature and the key — and nothing else
-        working-directory: dist/installers
-        run: |
-          want="fantastic-app-aarch64-apple-darwin.dmg
-          fantastic-app-linux-signing-key.asc
-          fantastic-app-x86_64-pc-windows-msvc-setup.exe
-          fantastic-app-x86_64-unknown-linux-gnu.AppImage
-          fantastic-app-x86_64-unknown-linux-gnu.AppImage.asc
-          fantastic-app-x86_64-unknown-linux-gnu.deb
-          fantastic-app-x86_64-unknown-linux-gnu.deb.asc"
-          got=$(ls -1 | LC_ALL=C sort)
-          [ "$got" = "$(printf '%s\n' "$want" | sed 's/^ *//' | LC_ALL=C sort)" ] \
-            || { echo "::error::the installers are not the expected seven:"; echo "$got"; exit 1; }
-          sha256sum * > SHA256SUMS-app
-          cat SHA256SUMS-app
-      - name: attach to the GitHub Release (never --clobber)
-        run: gh release upload "$TAG" dist/installers/* --repo "$GITHUB_REPOSITORY"
-      - name: summary
-        run: |
-          {
-            echo "### Installers attached to $TAG"
-            echo "CI run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/${{ needs.guard.outputs.ci_run }}"
-            echo
-            ls -1 dist/installers | sed 's/^/- /'
           } >> "$GITHUB_STEP_SUMMARY"
