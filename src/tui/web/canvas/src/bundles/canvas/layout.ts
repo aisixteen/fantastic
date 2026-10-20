@@ -305,6 +305,15 @@ export function hiddenCellFor(kernel: Kernel, backendId: string, cells: string[]
   });
 }
 
+/** The frames a finished refresh takes down: those it did not draw, or whose agent is gone. A
+ *  refresh a newer one has overtaken (`current` false) takes down NONE: its member list is a
+ *  snapshot from before the newer one's changes (a cell shown meanwhile is not in it), and the
+ *  newer refresh sweeps with the right list. */
+export function framesToRemove(frames: Iterable<string>, drawn: Set<string>, exists: (id: string) => boolean, current: boolean): string[] {
+  if (!current) return [];
+  return [...frames].filter((id) => !drawn.has(id) || !exists(id));
+}
+
 /** Drop every rect of cells no longer in `view` (all themes). */
 export function prune(kernel: Kernel, view: string, live: Set<string>): void {
   for (const h of hiddenOf(kernel, view)) if (!live.has(h)) setHidden(kernel, view, h, false);

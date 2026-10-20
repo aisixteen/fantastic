@@ -41,7 +41,7 @@ import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
 import { headTitle, hostRecordFresh, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
-import { COLUMN, LAYOUT, hiddenCellFor, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
+import { COLUMN, LAYOUT, framesToRemove, hiddenCellFor, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
 import { CELL_MENU, closeIntent } from "./cell_menu.ts";
 import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
@@ -1326,7 +1326,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         seenGl.add(mid);
       }
     }
-    for (const aid of [...frames.keys()]) if (!seenDom.has(aid) || kernel.get(aid) === undefined) removeFrame(aid);
+    // only the NEWEST refresh sweeps: this one's members are a snapshot, and a frame a newer
+    // refresh mounted meanwhile (a second cell shown by one drop) is not in them
+    for (const aid of framesToRemove(frames.keys(), seenDom, (id) => kernel.get(id) !== undefined, my === refreshSeq)) removeFrame(aid);
     // MOBILE'S PIN: the pinned cell is held on the screen's bottom
     canvas.classList.toggle("theme-mobile", column && !full);
     applyView();
