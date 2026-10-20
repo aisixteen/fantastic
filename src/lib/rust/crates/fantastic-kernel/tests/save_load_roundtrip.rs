@@ -65,7 +65,7 @@ async fn save_is_pure_in_ram_no_state_json_on_disk() {
     let _ = kernel
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"alpha"}))])
         .await.remove(0).result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
 
     // KernelState lives only in RAM. No `state.json` file is ever
     // created — the on-disk medium is the per-agent agent.yaml tree
@@ -231,7 +231,7 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
     let _ = kernel
         .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"merge_test","port":8080}))])
         .await.remove(0).result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
     let agent_json = tmp.path().join(".fantastic/agents/merge_test/agent.yaml");
     assert!(agent_json.exists());
 
@@ -255,7 +255,7 @@ async fn persist_merge_preserves_extra_fields_on_disk() {
         .await
         .remove(0)
         .result;
-    fantastic_kernel::test_support::settle_records().await;
+    kernel.flush_records().await;
 
     let after: Map<String, Value> =
         fantastic_kernel::persistence::parse_record(&std::fs::read_to_string(&agent_json).unwrap())

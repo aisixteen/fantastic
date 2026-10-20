@@ -17,7 +17,7 @@ fn with_loader(mut reg: BundleRegistry) -> BundleRegistry {
     reg
 }
 
-use crate::test_support::{boot_root, settle_records as settle};
+use crate::test_support::boot_root;
 
 struct Noop;
 #[async_trait]
@@ -73,7 +73,7 @@ fn bootstrap_hydrates_persisted_children() {
             let _ = kernel
                 .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
                 .await.remove(0).result;
-            settle().await;
+            kernel.flush_records().await;
         });
         shutdown(tmp.path()).unwrap();
     }
@@ -162,7 +162,7 @@ fn boot_mints_a_32hex_guid_and_persists_it_stably() {
         let g = rt.block_on(async {
             crate::test_support::wire_fake_store(&kernel, &store_root).await;
             boot_root(&kernel).await;
-            settle().await;
+            kernel.flush_records().await;
             root_guid(&booted)
         });
         shutdown(tmp.path()).unwrap();
@@ -183,7 +183,7 @@ fn boot_mints_a_32hex_guid_and_persists_it_stably() {
         let kernel = Arc::clone(&booted.kernel);
         let g = rt.block_on(async {
             boot_root(&kernel).await;
-            settle().await;
+            kernel.flush_records().await;
             root_guid(&booted)
         });
         shutdown(tmp.path()).unwrap();
@@ -258,7 +258,7 @@ fn root_meta_order_is_grants_then_guid() {
     rt.block_on(async {
         crate::test_support::wire_fake_store(&kernel, &store_root).await;
         boot_root(&kernel).await;
-        settle().await;
+        kernel.flush_records().await;
     });
     let meta = kernel.root().unwrap().meta.read().unwrap().clone();
     let keys: Vec<&str> = meta.keys().map(String::as_str).collect();
@@ -483,7 +483,7 @@ fn daemon_at_keeps_the_lock_the_root_agents_and_the_store_in_state_dir() {
         let _ = kernel
             .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_a"}))])
             .await;
-        settle().await;
+        kernel.flush_records().await;
     });
     assert!(w.join("lock.yaml").is_file());
     assert!(w.join("agent.yaml").is_file());
