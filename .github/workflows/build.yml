@@ -677,7 +677,7 @@ jobs:
           exit $bad
       - name: lint and unit tests
         run: |
-          sudo apt-get install -y -q shellcheck
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
           shellcheck -s sh os/session/DEBIAN/postinst os/session/DEBIAN/prerm os/session/DEBIAN/postrm
           python3 -m unittest discover -s os/ci -p 'test_*.py'
       # the host is not touched: a container. No systemd runs in it, so the

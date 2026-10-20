@@ -60,6 +60,15 @@ class Fail(Exception):
     """The first failure ends the run, with one line naming the step."""
 
 
+# the step now running; main() puts it in the one failure line
+STEP = "0"
+
+
+def at(step: str) -> None:
+    global STEP
+    STEP = step
+
+
 # ── pure helpers (unit-tested) ───────────────────────────────────────────────
 
 
@@ -189,6 +198,14 @@ def check_session(props: dict[str, str]) -> None:
     bad = {k: props.get(k) for k, v in want.items() if props.get(k) != v}
     if bad:
         raise Fail(f"the logind session is {bad}, wanted {want}")
+
+
+def check_shell(environ: dict[str, str]) -> str:
+    """The app's SHELL: the home cannot start a canvas without it."""
+    shell = environ.get("SHELL")
+    if shell != "/bin/bash":
+        raise Fail(f"the app's SHELL is {shell!r}, not /bin/bash (the home cannot start a canvas without it)")
+    return shell
 
 
 def parse_environ(raw: bytes) -> dict[str, str]:
@@ -606,9 +623,7 @@ def check_session_and_app(vm: Vm, run: dict, step: float) -> None:
     code, raw, _ = vm.ga_run(["/bin/cat", f"/proc/{pid}/environ"])
     if code != 0:
         raise Fail(f"/proc/{pid}/environ unreadable")
-    shell = parse_environ(raw.encode()).get("SHELL")
-    if shell != "/bin/bash":
-        raise Fail(f"the app's SHELL is {shell!r}, not /bin/bash (the home cannot start a canvas without it)")
+    shell = check_shell(parse_environ(raw.encode()))
     log(f"step 3: pid {pid} is fantastic-app with SHELL={shell}")
 
     sid = vm.sh(f"loginctl show-user {KIOSK_USER} -p Display --value").strip()
@@ -632,7 +647,7 @@ def check_canvas(vm: Vm, run: dict, home_img, step: float) -> int:
     try:
         opened = asyncio.run(home_call(run["port"], {"type": "open", "paths": [CANVAS_DIR]}))
     except ws_errors() as e:
-        raise Fail(f"step 8: home open {CANVAS_DIR}: {type(e).__name__}: {e}") from e
+        raise Fail(f"home open {CANVAS_DIR}: {type(e).__name__}: {e}") from e
     if isinstance(opened, dict) and "error" in opened:
         raise Fail(f"home open refused {CANVAS_DIR}: {opened['error']}")
 
@@ -660,6 +675,7 @@ def check_canvas(vm: Vm, run: dict, home_img, step: float) -> int:
 
 def check_restart(vm: Vm, run: dict, canvas_pid: int, step: float) -> None:
     """Step 9: SIGTERM to the app; the kiosk, the canvas and the page checks come back."""
+    at("9, restart")
     n0 = int(parse_props(vm.sh("systemctl show -p NRestarts fantastic-kiosk.service"))["NRestarts"])
     vm.sh(f"kill -TERM {run['pid']}")
     log(f"step 9: SIGTERM to the app (pid {run['pid']}); NRestarts was {n0}")
@@ -679,18 +695,23 @@ def check_restart(vm: Vm, run: dict, canvas_pid: int, step: float) -> None:
     log(f"step 9: the kiosk came back: pid {new['pid']}, NRestarts {n1}")
 
     vm.forward(new["port"])
+    at("9, after the restart: 4")
     wait_page(vm, new, step)
+    at("9, after the restart: 5")
     check_kernel(vm, new, step)
+    at("9, after the restart: canvas adopted")
     # the canvas outlived the kiosk (KillUserProcesses=no), and the new app adopted it
     try:
         state = check_state(asyncio.run(home_call(new["port"], {"type": "list"})))
     except ws_errors() as e:
-        raise Fail(f"step 9: home list after the restart: {type(e).__name__}: {e}") from e
+        raise Fail(f"home list after the restart: {type(e).__name__}: {e}") from e
     row = find_row(state, CANVAS_DIR)
     if not row or row.get("status") != "running" or row.get("pid") != canvas_pid:
         raise Fail(f"after the restart {CANVAS_DIR} is {row}, wanted running with pid {canvas_pid}")
     log(f"step 9: the canvas still runs as pid {canvas_pid}, adopted by the new app")
+    at("9, after the restart: 6")
     check_keys(vm, new, step)
+    at("9, after the restart: 7")
     check_screen(vm, "screen-restart")
 
 
@@ -713,21 +734,29 @@ def diagnostics(vm: Vm) -> None:
 def run_check(vm: Vm, timeout: float, step: float) -> None:
     log("step 1: starting QEMU")
     vm.start()
+    at("2")
     log("step 2: waiting for the guest agent")
     vm.wait_agent(timeout)
     log("step 2: the guest agent answers")
 
+    at("3")
     run = until(vm, f"the run file {RUN_FILE}", lambda: read_run_file(vm), timeout)
     log(f"step 3: run file: {run}")
+    at("3")
     check_session_and_app(vm, run, step)
 
     vm.forward(run["port"])
+    at("4")
     wait_page(vm, run, step)
     log("step 4: the Home document is served through the forward")
+    at("5")
     check_kernel(vm, run, step)
+    at("6")
     check_keys(vm, run, step)
+    at("7")
     home_img = check_screen(vm, "screen-home")
 
+    at("8")
     canvas_pid = check_canvas(vm, run, home_img, step)
     check_restart(vm, run, canvas_pid, step)
 
@@ -750,11 +779,11 @@ def main() -> int:
     try:
         run_check(vm, a.timeout, a.step)
     except Fail as e:
-        log(f"FAIL: {e}")
+        log(f"FAIL at step {STEP}: {e}")
         diagnostics(vm)
         return 1
     except Exception as e:  # a bug here is a failure too, with its diagnostics
-        log(f"FAIL: {type(e).__name__}: {e}")
+        log(f"FAIL at step {STEP}: {type(e).__name__}: {e}")
         diagnostics(vm)
         return 1
     finally:

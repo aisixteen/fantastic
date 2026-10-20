@@ -11,9 +11,11 @@ against a fake agent on a unix socket.
 import base64
 import json
 import socket
+import http.client
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import boot_check as bc
@@ -363,6 +365,104 @@ class Until(unittest.TestCase):
     def test_fails_naming_the_wait(self):
         with self.assertRaisesRegex(bc.Fail, "never: not within"):
             bc.until(self.Vm(), "never", lambda: None, 0.05, every=0.01)
+
+
+class Shell(unittest.TestCase):
+    def test_bash_passes(self):
+        self.assertEqual(bc.check_shell({"SHELL": "/bin/bash"}), "/bin/bash")
+
+    def test_missing_fails(self):
+        with self.assertRaisesRegex(bc.Fail, "SHELL is None"):
+            bc.check_shell({"HOME": "/home/fantastic"})
+
+    def test_another_shell_fails(self):
+        with self.assertRaisesRegex(bc.Fail, "SHELL is '/bin/sh'"):
+            bc.check_shell({"SHELL": "/bin/sh"})
+
+
+class StubVm:
+    """The Vm calls the steps make, answered without QEMU."""
+
+    def __init__(self, restarts=("0", "1")):
+        self.restarts = list(restarts)
+        self.forwarded = []
+
+    def alive(self):
+        pass
+
+    def sh(self, script, timeout=60):
+        return f"NRestarts={self.restarts.pop(0)}" if "NRestarts" in script else ""
+
+    def ga_run(self, argv, timeout=60):
+        return 0, "", ""
+
+    def forward(self, port):
+        self.forwarded.append(port)
+
+    def screendump(self, name):
+        return 1, 1, b"\0\0\0"
+
+
+RUN = {"pid": 10, "port": 4000, "url": "http://127.0.0.1:4000/"}
+
+
+async def refuses(*_a):
+    raise ConnectionRefusedError("down")
+
+
+class Step(unittest.TestCase):
+    def test_at_sets_the_step_main_names(self):
+        bc.at("9, restart")
+        self.assertEqual(bc.STEP, "9, restart")
+        bc.at("0")
+
+
+class WaitPage(unittest.TestCase):
+    def test_a_protocol_error_is_not_yet_served(self):
+        calls = []
+
+        def get(port, path):
+            calls.append(1)
+            if len(calls) == 1:
+                raise http.client.RemoteDisconnected("closed")
+            return 200, '<body data-page="home">'
+
+        with mock.patch.object(bc, "http_get", get), mock.patch.object(bc.time, "sleep"):
+            bc.wait_page(StubVm(), RUN, 5)
+        self.assertEqual(len(calls), 2)
+
+
+class CanvasAndRestart(unittest.TestCase):
+    def setUp(self):
+        # the websockets package is only on the CI job's pip path, not needed to unit-test the Fail
+        p = mock.patch.object(bc, "ws_errors", lambda: (OSError,))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_open_refused_by_the_transport_names_the_call(self):
+        with mock.patch.object(bc, "home_call", refuses):
+            with self.assertRaisesRegex(bc.Fail, "home open .*ConnectionRefusedError"):
+                bc.check_canvas(StubVm(), RUN, (1, 1, b"\0\0\0"), 5)
+
+    def test_list_after_the_restart_names_the_call(self):
+        new = {"pid": 11, "port": 4001, "url": "http://127.0.0.1:4001/"}
+        vm = StubVm()
+        with (
+            mock.patch.object(bc, "read_run_file", lambda vm: new),
+            mock.patch.object(bc, "comm", lambda vm, pid: "fantastic-app"),
+            mock.patch.object(bc, "wait_page"),
+            mock.patch.object(bc, "check_kernel"),
+            mock.patch.object(bc, "home_call", refuses),
+        ):
+            with self.assertRaisesRegex(bc.Fail, "home list after the restart: ConnectionRefusedError"):
+                bc.check_restart(vm, RUN, 99, 5)
+        self.assertEqual(vm.forwarded, [4001])
+
+    def test_restart_count_must_rise_by_one(self):
+        new = {"pid": 11, "port": 4001, "url": "http://127.0.0.1:4001/"}
+        with mock.patch.object(bc, "read_run_file", lambda vm: new):
+            with self.assertRaisesRegex(bc.Fail, "NRestarts is 0, wanted 1"):
+                bc.check_restart(StubVm(("0", "0")), RUN, 99, 5)
 
 
 if __name__ == "__main__":
