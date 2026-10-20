@@ -6,11 +6,11 @@ b) the double-click's `host · coding agents` group lists a coding agent found o
    first on PATH (no real agent runs);
 c) its tile starts EXACTLY that program in a terminal cell, interactive (it
    echoes what is typed);
-d) `tree view` is a cell placed from the double-click (the canvas-list cell is
-   gone from the menu for now, owner 2026-10-09);
+d) `file tree` is a cell placed from the double-click (the canvas-list cell is
+   gone from the menu for now, owner 2026-10-09); every agent is a folder in it;
 e) `new_canvas` on the canvas node makes a PEER canvas, opened by its URL: its
-   own page records and guid, empty, and its tree view does not list the first
-   canvas's agents;
+   own page records and guid, empty, and its file tree marks the first canvas's
+   agents as on another canvas (`.elsewhere`);
 f) a page bundle in that canvas's own folder runs its instance, and an edit of
    its bundle.yaml re-renders it live;
 g) `--headless canvas` is refused (`canvas` is headless already) and leaves the
@@ -29,7 +29,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from _lib.canvas_live import Rig, verdict, open_sidebar, spot  # noqa: E402
+from _lib.canvas_live import Rig, verdict, open_tree, spot  # noqa: E402
 from helpers import oslayer  # noqa: E402
 
 FAKE = "claude"
@@ -66,14 +66,19 @@ def main() -> bool:
         await asyncio.sleep(1.0)  # the coding agents come with the presets
         return bool(await pg.js(f"(()=>{{const t=[...document.querySelectorAll('.action-popup .tile')].find(e=>(e.querySelector('.lb')||{{}}).textContent==={label!r}); if(!t) return false; t.dispatchEvent(new MouseEvent('mousedown',{{bubbles:true}})); return true}})()"))
 
-    async def tree_names(pg) -> list:
-        """Every agent name in the (last) sidebar's tree, fully unfolded."""
-        for _ in range(8):
-            n = await pg.js("(()=>{const t=[...document.querySelectorAll('.side .agents-tree li .tw')].filter(x=>x.textContent==='▸');t.forEach(x=>x.click());return t.length})()")
-            await asyncio.sleep(0.6)
-            if not n:
-                break
-        return await pg.js("[...document.querySelectorAll('.side .agents-tree li .nm')].map(e=>e.textContent)") or []
+    async def reveal(guid: str, cell: str, agent: str, secs_: float = 15) -> bool:
+        """Show agent `agent`'s folder in the tree cell `cell`, through the cell's own
+        verb (`<guid>|<cell>`) — the agent folders are read from disk a moment after
+        the tree mounts, so a first `not_found` is asked again."""
+        from canvas import host_call
+
+        end = asyncio.get_event_loop().time() + secs_
+        while asyncio.get_event_loop().time() < end:
+            a = await host_call(rig.port, f"{guid}|{cell}", {"type": "reveal", "agent": agent})
+            if "revealed" in a:
+                return True
+            await asyncio.sleep(0.5)
+        return False
 
     async def first() -> None:
         async with rig.page(1600, 1000) as pg:
@@ -109,10 +114,12 @@ def main() -> bool:
             pats = (rig.host_record(backend) or {}).get("allowed") or []
             literal = len(pats) == 1 and not set(re.sub(r"\\.", "", pats[0])) & set(".^$*+?{}[]|()")
             r["coding_exact"] = literal and re.sub(r"\\(.)", r"\1", pats[0]) == line
-            # d) a tree view cell from the double-click
-            r["sidebar_cell"] = await open_sidebar(pg, 1250, 80)
-            r["sidebar_lists_backend"] = bool(await pg.until(
-                f"(()=>{{[...document.querySelectorAll('.side .agents-tree li .tw')].filter(x=>x.textContent==='▸').forEach(x=>x.click()); return [...document.querySelectorAll('.side .agents-tree li .nm')].some(n=>n.textContent==={backend!r})}})()", 10))
+            # d) a file tree cell from the double-click: the backend is a folder in it
+            tree = await open_tree(pg, 1250, 80)
+            r["sidebar_cell"] = tree is not None
+            guid1 = rig.page_guid()
+            r["sidebar_lists_backend"] = bool(tree) and await reveal(guid1, tree, backend) and bool(await pg.until(
+                f"!!document.querySelector('.files-view .ft-row.agent[data-agent={backend!r}]')", 10))
             info["main_backend"] = backend
             # e) a peer canvas — the canvas node's `new_canvas`, opened by its URL
             from canvas import host_call
@@ -123,11 +130,15 @@ def main() -> bool:
             await pg.until("!!document.getElementById('canvas')", 20)
             await asyncio.sleep(2)
             r["peer_empty"] = await pg.js(f"{frames}.length === 0")
-            await open_sidebar(pg, 300, 200)
-            await asyncio.sleep(1.5)
-            names = await tree_names(pg)
-            info["peer_tree"] = names
-            r["peer_isolated"] = PEER in names and backend not in names
+            tree2 = await open_tree(pg, 300, 200)
+            peer_yaml = rig.proj / f".fantastic/web/{PEER}/agents/canvas/agent.yaml"
+            guid2 = (yaml.safe_load(peer_yaml.read_text()) or {}).get("guid") if peer_yaml.exists() else None
+            # the whole project shows (a superset); the first canvas's agents are on another canvas
+            shown = bool(tree2 and guid2) and await reveal(guid2, tree2, backend) and await reveal(guid2, tree2, PEER)
+            elsewhere = shown and bool(await pg.until(
+                f"!!document.querySelector('.files-view .ft-row.agent.elsewhere[data-agent={backend!r}]')", 10))
+            info["peer_tree"] = await pg.js("[...document.querySelectorAll('.files-view .ft-row.agent')].map(e=>e.dataset.agent+(e.classList.contains('elsewhere')?' (elsewhere)':''))")
+            r["peer_isolated"] = elsewhere
 
     info: dict = {}
     info["headless_canvas"] = (both.stderr or both.stdout).strip()[-200:]

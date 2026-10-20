@@ -70,6 +70,8 @@ fn kind_of(hm: &str) -> &str {
         "stream_view.ts" => "stream",
         "reflect_view.ts" => "reflect",
         "sidebar_view.ts" => "sidebar",
+        "files_view.ts" => "files",
+        "preview_view.ts" => "preview",
         "canvases_view.ts" => "canvases",
         other => other,
     }

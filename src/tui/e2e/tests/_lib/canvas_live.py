@@ -495,15 +495,19 @@ async def new_ai_wizard(pg: Page, x: int, y: int) -> str | None:
     return cell
 
 
-async def open_sidebar(pg: Page, x: int, y: int) -> bool:
-    """Place a TREE VIEW cell (the agent tree; a `sidebar_view.ts` cell) at empty
-    canvas (x, y) — nothing floats: it is a cell from the double-click."""
-    before = await pg.js("document.querySelectorAll('.agent-frame .side .agents-tree').length")
-    await spot(pg, x, y, "tree view")
-    if not await pg.until(f"document.querySelectorAll('.agent-frame .side .agents-tree').length > {before}", 10):
-        return False
-    # its host tree is read from the host (async): ready once a host row shows
-    return bool(await pg.until("document.querySelectorAll('.side .agents-tree li.agent.host').length > 0", 10))
+async def open_tree(pg: Page, x: int, y: int) -> str | None:
+    """Place a FILE TREE cell (a `files_view.ts` cell) at empty canvas (x, y) —
+    nothing floats: it is a cell from the double-click. Returns the cell's id once
+    the project's folder is listed (`.fantastic` shows), else None."""
+    frames = "[...document.querySelectorAll('.agent-frame')].filter(f=>f.querySelector('.files-view'))"
+    before = await pg.js(f"{frames}.length")
+    await spot(pg, x, y, "file tree")
+    if not await pg.until(f"{frames}.length > {before}", 10):
+        return None
+    # its root is listed from the host (async): ready once `.fantastic` shows
+    if not await pg.until("!!document.querySelector('.files-view .ft-row[data-path=\".fantastic\"]')", 15):
+        return None
+    return await pg.js(f"{frames}.pop().dataset.id")
 
 
 async def say(pg: Page, text: str, cell: int = 0) -> None:
