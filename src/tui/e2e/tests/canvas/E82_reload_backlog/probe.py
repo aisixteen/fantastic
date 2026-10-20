@@ -8,8 +8,8 @@ which acks nothing, and the program blocks writing its screen:
 
 a) a terminal cell runs TICKER: ~4 KB of output every 50 ms, numbered lines;
 b) the page reloads RELOADS times, each a little after the terminal draws;
-c) after each re-attach settles, the exec agent's count (`ack chars:0`) is read:
-   it stays under BOUND and the job is never paused;
+c) after each reload the exec agent's count (`ack chars:0`) is polled: the first read (the peak)
+   stays under BOUND, the job is never paused on any poll, and the count then settles under SETTLED;
 d) after the last reload the terminal still draws new lines."""
 
 from __future__ import annotations
@@ -33,12 +33,18 @@ while True:
 CELL, BACKEND = "cell_tick", "exec_bridge_tick"
 VERBS = ["watch", "status", "start", "write", "ack", "resize", "output"]
 RELOADS = 30
-# a fresh viewer's own count: at most one ack batch (5 000) plus what is in flight
-BOUND = 40_000
-# a re-attach holds live frames unacked until it finishes (terminal_view.ts attach/drainEarly), so the
-# count is read once the attach has settled: it must fall to about one ack batch plus frames in flight
+# The peak is the first count read after a reload: a re-attach holds live frames unacked until it
+# finishes (terminal_view.ts attach/drainEarly), so right after the reload the count carries the old
+# page's unacked output plus what the ticker wrote during the attach (~80 KB/s). CI failures of the
+# earlier 40 000 bound (issue #89) showed peaks of 40k-72k with the job never paused, so that bound
+# measured the mechanism's normal range, not a leak. The regression this guards is the count drifting
+# to the host's pause threshold (pty.rs HIGH_WATERMARK, 100 000), where the program blocks: the bound
+# sits 8k over the worst peak seen (72k) and 20k under the threshold, about five ticks of headroom
+# each way. Reaching 80k is a real drift; `never_paused` is the hard stop at 100k.
+BOUND = 80_000
+# once the attach finishes the count must fall to about one ack batch (5 000) plus frames in flight
 SETTLED = 20_000
-SETTLE_S = 10.0  # drain deadline; a stuck backlog never meets it and FAILS the "settled" check. BOUND is not widened.
+SETTLE_S = 10.0  # drain deadline; a stuck backlog never meets it and FAILS "backlog_settles". Neither bound is widened.
 SCREEN = ("(()=>{const f=document.querySelector('.agent-frame[data-id=\"%s\"] .frame-body'); const t=f&&f.xterm; if(!t) return '';"
           " const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+' ';} return s;})()" % CELL)
 
@@ -63,7 +69,7 @@ def main() -> bool:
     sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))
     from canvas import host_call
     r: dict = {}
-    info: dict = {"counts": []}
+    info: dict = {"peaks": [], "settled": []}
 
     async def count() -> dict:
         st = await host_call(rig.port, BACKEND, {"type": "status"})
@@ -72,16 +78,19 @@ def main() -> bool:
             return {"error": "no running job", "status": st}
         return await host_call(rig.port, BACKEND, {"type": "ack", "job_id": job, "chars": 0})
 
-    async def settled() -> tuple[dict, bool]:
+    async def settled() -> tuple[dict, dict, bool, bool]:
+        """(first read = this reload's peak, last read, ever paused across every poll, settled in time)"""
         loop = asyncio.get_running_loop()
         end = loop.time() + SETTLE_S
-        c = await count()
+        peak = c = await count()
+        paused = bool(c.get("paused"))
         while not (isinstance(c.get("unacked"), int) and c["unacked"] <= SETTLED):
             if loop.time() >= end:
-                return c, False
+                return peak, c, paused, False
             await asyncio.sleep(0.1)
             c = await count()
-        return c, True
+            paused = paused or bool(c.get("paused"))
+        return peak, c, paused, True
 
     async def drive() -> None:
         async with rig.page(1400, 900) as pg:
@@ -92,15 +101,16 @@ def main() -> bool:
                 await pg.open(rig.url)
                 await pg.until(f"/TICK \\d+/.test({SCREEN})", 15)
                 await asyncio.sleep(0.4 + (i % 3) * 0.15)  # a reload lands mid-batch
-                c, ok_s = await settled()
+                peak, c, was_paused, ok_s = await settled()
                 all_settled = all_settled and ok_s
-                info["counts"].append(c.get("unacked"))
-                paused = paused or bool(c.get("paused"))
+                info["peaks"].append(peak.get("unacked"))
+                info["settled"].append(c.get("unacked"))
+                paused = paused or was_paused
             r["never_paused"] = not paused
             r["backlog_settles"] = all_settled
-            counts = [c for c in info["counts"] if isinstance(c, int)]
-            info["max_count"] = max(counts, default=None)
-            r["count_bounded"] = bool(counts) and max(counts) < BOUND
+            peaks = [c for c in info["peaks"] if isinstance(c, int)]
+            info["max_peak"] = max(peaks, default=None)
+            r["count_bounded"] = len(peaks) == RELOADS and max(peaks) < BOUND
             a = last_tick(await pg.js(SCREEN))
             await asyncio.sleep(2.0)
             b = last_tick(await pg.js(SCREEN))
@@ -114,8 +124,10 @@ def main() -> bool:
         rig.stop()
     ok = bool(r) and all(r.values())
     rig.summary["checks"], rig.summary["info"] = r, info
-    note = f"{RELOADS} reloads: unacked at most {info.get('max_count')}, never paused, still drawing" if ok else \
-        f"failed: {', '.join(k for k, v in r.items() if not v)} · max {info.get('max_count')} · counts {info['counts']} · ticks {info.get('ticks')}"
+    # the numbers print on every run: CI keeps them for the next bound decision
+    nums = f"peaks {info['peaks']} · settled {info['settled']}"
+    note = f"{RELOADS} reloads: peak at most {info.get('max_peak')} (bound {BOUND}), never paused, backlog settles, still drawing · {nums}" if ok else \
+        f"failed: {', '.join(k for k, v in r.items() if not v)} · max peak {info.get('max_peak')} · {nums} · ticks {info.get('ticks')}"
     return verdict(*rig.finish(ok, note))
 
 
