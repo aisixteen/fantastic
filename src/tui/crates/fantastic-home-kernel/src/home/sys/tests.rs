@@ -259,9 +259,11 @@ fn a_spawn_failure_is_appended_to_the_log_and_returned() {
     assert_eq!(record_spawn_failure(&log, "first".into()), "first");
     assert_eq!(record_spawn_failure(&log, "second".into()), "second");
     assert_eq!(std::fs::read_to_string(&log).unwrap(), "first\nsecond\n");
-    // a log that cannot be opened does not hide the error
+    // a log that cannot be opened does not hide the error, and says so
     let blocked = dir.join("missing-dir").join("a.log");
-    assert_eq!(record_spawn_failure(&blocked, "why".into()), "why");
+    let said = record_spawn_failure(&blocked, "why".into());
+    assert!(said.starts_with("why (and its launch log "), "{said}");
+    assert!(said.contains("could not be written"), "{said}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
