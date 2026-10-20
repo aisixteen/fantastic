@@ -126,36 +126,53 @@ pub fn read_registry(home: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-/// Does `path/.fantastic/` exist as a directory.
-pub fn is_fantastic(path: &str) -> bool {
-    Path::new(path).join(".fantastic").is_dir()
-}
-
-/// The live pid holding `path`'s lock. A stale file (its pid dead) is not asked
-/// for its flock: a probe's shared flock on it would refuse a kernel taking it
-/// over at that moment.
-pub fn lock_holder(path: &str) -> Option<u32> {
-    let p = Path::new(path);
-    match lock::current_holder(p) {
-        Ok(Some(pid)) if lock::pid_alive(pid) => match lock::held(p) {
-            Ok(holder) => holder,
-            Err(e) => {
-                tracing::warn!("{path}: the lock: {e}");
-                None
-            }
-        },
-        Ok(_) => None,
-        Err(e) => {
-            tracing::warn!("{path}: the lock: {e}");
-            None
-        }
+/// Does `path/.fantastic/` exist as a directory. Absent is `Ok(false)`; any
+/// other failure to look is an `Err` naming it.
+pub fn is_fantastic(path: &str) -> Result<bool, String> {
+    let dir = Path::new(path).join(".fantastic");
+    match std::fs::metadata(&dir) {
+        Ok(meta) => Ok(meta.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", dir.display())),
     }
 }
 
-/// `path`'s run file, parsed; unreadable or invalid is `None`.
-pub fn run_file(path: &str) -> Option<CanvasRun> {
-    let text = std::fs::read_to_string(Path::new(path).join(RUN_FILE)).ok()?;
-    CanvasRun::parse(&text)
+/// The live pid holding `path`'s lock, or the error that stopped the look. A
+/// stale file (its pid dead) is not asked for its flock: a probe's shared flock
+/// on it would refuse a kernel taking it over at that moment.
+pub fn lock_holder_checked(path: &str) -> Result<Option<u32>, String> {
+    let p = Path::new(path);
+    match lock::current_holder(p) {
+        Ok(Some(pid)) if lock::pid_alive(pid) => {
+            lock::held(p).map_err(|e| format!("{path}: the lock: {e}"))
+        }
+        Ok(_) => Ok(None),
+        Err(e) => Err(format!("{path}: the lock: {e}")),
+    }
+}
+
+/// [`lock_holder_checked`] for the callers that need only the holder: an error
+/// is logged and reads as no holder.
+pub fn lock_holder(path: &str) -> Option<u32> {
+    lock_holder_checked(path).unwrap_or_else(|e| {
+        tracing::warn!("{e}");
+        None
+    })
+}
+
+/// `path`'s run file, parsed. No file is `Ok(None)`; a file that cannot be read,
+/// or does not parse as a run file, is an `Err` naming why.
+pub fn run_file(path: &str) -> Result<Option<CanvasRun>, String> {
+    let file = Path::new(path).join(RUN_FILE);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", file.display())),
+    };
+    match CanvasRun::parse(&text) {
+        Some(run) => Ok(Some(run)),
+        None => Err(format!("{}: not a run file", file.display())),
+    }
 }
 
 /// The home host's run file `W/home.yaml`, as written while it serves.
@@ -194,16 +211,22 @@ pub fn parse_host_run_file(text: &str) -> Option<HostRun> {
 }
 
 /// Does `canvas` answer a GET of its page with a 2xx or 3xx status line, within
-/// 1.5 s. A refused connection, a timeout or a malformed line is `false`.
-pub async fn canvas_up(canvas: &Canvas) -> bool {
+/// 1.5 s. `Ok(false)` is an answer of another status; an `Err` names why no
+/// status line was read: a refused connection, a timeout, a malformed line.
+pub async fn canvas_up(canvas: &Canvas) -> Result<bool, String> {
     tokio::time::timeout(CANVAS_UP_TIMEOUT, get_status(canvas))
         .await
-        .unwrap_or(false)
+        .unwrap_or_else(|_| {
+            Err(format!(
+                "{}: no status line within {CANVAS_UP_TIMEOUT:?}",
+                canvas.url
+            ))
+        })
 }
 
-async fn get_status(canvas: &Canvas) -> bool {
+async fn get_status(canvas: &Canvas) -> Result<bool, String> {
     let Some(rest) = canvas.url.strip_prefix("http://") else {
-        return false;
+        return Err(format!("{}: not an http url", canvas.url));
     };
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..end];
@@ -216,31 +239,41 @@ async fn get_status(canvas: &Canvas) -> bool {
     } else if authority.starts_with("127.0.0.1:") || authority.starts_with("localhost:") {
         std::net::Ipv4Addr::LOCALHOST.into()
     } else {
-        return false;
+        return Err(format!("{}: not a loopback host", canvas.url));
     };
-    let Ok(mut stream) = tokio::net::TcpStream::connect((ip, canvas.port)).await else {
-        return false;
-    };
+    let mut stream = tokio::net::TcpStream::connect((ip, canvas.port))
+        .await
+        .map_err(|e| format!("{}: {e}", canvas.url))?;
     let request =
         format!("GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).await.is_err() {
-        return false;
-    }
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|e| format!("{}: {e}", canvas.url))?;
     let mut head = Vec::new();
     let mut buf = [0u8; 256];
+    // A read error ends the head as EOF does: a status line already read still counts.
+    let mut read_error = None;
     while !head.windows(2).any(|w| w == b"\r\n") && head.len() < 1024 {
         match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(e) => {
+                read_error = Some(e);
+                break;
+            }
             Ok(n) => head.extend_from_slice(&buf[..n]),
         }
     }
     let Some(line_end) = head.windows(2).position(|w| w == b"\r\n") else {
-        return false;
+        return Err(match read_error {
+            Some(e) => format!("{}: {e}", canvas.url),
+            None => format!("{}: closed before a status line", canvas.url),
+        });
     };
     let Ok(line) = std::str::from_utf8(&head[..line_end]) else {
-        return false;
+        return Err(format!("{}: the status line is not text", canvas.url));
     };
-    status_ok(line)
+    Ok(status_ok(line))
 }
 
 /// `HTTP/1.x <code> …` with a code in 200..=399.
@@ -345,20 +378,21 @@ pub fn with_hint(error: &str, refusal: &Value) -> String {
     }
 }
 
-/// The guid of the kernel behind the canvas on `port`, from its `reflect`.
-pub async fn guid(port: u16) -> Option<String> {
+/// The guid of the kernel behind the canvas on `port`, from its `reflect`. An
+/// `Err` is the call that failed; an answer without a guid is `Ok(None)`.
+pub async fn guid(port: u16) -> Result<Option<String>, String> {
     let data = forward(
         port,
         "kernel",
         json!({"type": "reflect", "tree": "none"}),
         GUID_TIMEOUT,
     )
-    .await
-    .ok()?;
-    data.get("guid")
+    .await?;
+    Ok(data
+        .get("guid")
         .and_then(Value::as_str)
         .filter(|g| !g.is_empty())
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// A folder's launch log name: `<last component>-<first 8 hex of sha256(path)>.log`.

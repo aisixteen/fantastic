@@ -215,6 +215,16 @@ impl Row {
     }
 }
 
+/// A running row that stopped showing its run, and the probe that said so:
+/// the answer the home kept (not ridden out) at the poll it changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Demotion {
+    pub at_ms: u64,
+    pub guid: String,
+    pub path: String,
+    pub probe: Probe,
+}
+
 /// A folder being added.
 #[derive(Debug, Clone)]
 struct Adding {
@@ -253,6 +263,8 @@ pub struct Home {
     pending_restore: Option<(Vec<String>, Option<String>)>,
     /// Missed canvas answers in a row, by guid, ridden out (`MISS_SHOWN`).
     missed: BTreeMap<String, u32>,
+    /// The running rows demoted since the last `take_demotions`.
+    demotions: Vec<Demotion>,
     now_ms: u64,
 }
 
@@ -276,6 +288,7 @@ impl Home {
             read_once: false,
             pending_restore: None,
             missed: BTreeMap::new(),
+            demotions: Vec::new(),
             now_ms: 0,
         }
     }
@@ -307,6 +320,12 @@ impl Home {
     /// The registry has been probed at least once.
     pub fn listed(&self) -> bool {
         self.listed
+    }
+
+    /// The running rows demoted since the last call, each with the probe that
+    /// demoted it (diagnostics: not part of the state).
+    pub fn take_demotions(&mut self) -> Vec<Demotion> {
+        std::mem::take(&mut self.demotions)
     }
 
     /// Apply one event; the effects for the OS layer to run.
@@ -557,9 +576,24 @@ impl Home {
                     adding.probe = Some(probe.clone());
                     self.folder_probes.insert(path.to_string(), probe);
                 }
-            } else if self.entries.iter().any(|r| r.guid == key) {
-                let probe = self.ride_out_a_miss(&key, probe);
-                self.probes.insert(key, probe);
+            } else if let Some(path) = self
+                .entries
+                .iter()
+                .find(|r| r.guid == key)
+                .map(|r| r.path.clone())
+            {
+                let was_running = self.probes.get(&key).is_some_and(is_active);
+                let answer = probe.clone();
+                let kept = self.ride_out_a_miss(&key, probe);
+                if was_running && !is_active(&kept) {
+                    self.demotions.push(Demotion {
+                        at_ms: now_ms,
+                        guid: key.clone(),
+                        path,
+                        probe: answer,
+                    });
+                }
+                self.probes.insert(key, kept);
             }
         }
 
@@ -897,7 +931,7 @@ fn adding_id(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::{Answer, Ask, Prober};
+    use crate::probe::{Answer, Ask, ProbeError, Prober};
 
     const GRACE: u64 = 30_000;
 
@@ -942,6 +976,7 @@ mod tests {
             canvas: None,
             canvas_up: false,
             guid_matches: false,
+            errors: vec![],
         }
     }
 
@@ -953,6 +988,7 @@ mod tests {
             canvas: Some(canvas(port)),
             canvas_up: true,
             guid_matches: true,
+            errors: vec![],
         }
     }
 
@@ -965,6 +1001,7 @@ mod tests {
             canvas: port.map(canvas),
             canvas_up: port.is_some(),
             guid_matches: true,
+            errors: vec![],
         }
     }
 
@@ -1167,6 +1204,119 @@ mod tests {
         moved.guid_matches = false;
         probed(&mut h, 20_000, vec![("g1", moved)]);
         assert_eq!(status(&h, "g1", 20_000), Status::Unverified);
+    }
+
+    #[test]
+    fn a_demotion_records_the_probe_that_caused_it() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        assert_eq!(
+            h.take_demotions(),
+            vec![],
+            "a row that starts demotes nothing"
+        );
+        let mut late = running(7, 8100);
+        late.canvas_up = false;
+        late.guid_matches = false;
+        // The ridden-out misses keep the row running, so they record nothing.
+        probed(&mut h, 2_000, vec![("g1", late.clone())]);
+        probed(&mut h, 4_000, vec![("g1", late.clone())]);
+        assert_eq!(h.take_demotions(), vec![]);
+        // The 3rd miss demotes it: the record holds the raw probe, not the kept one.
+        probed(&mut h, 6_000, vec![("g1", late.clone())]);
+        assert_eq!(
+            h.take_demotions(),
+            vec![Demotion {
+                at_ms: 6_000,
+                guid: "g1".into(),
+                path: "/w/a".into(),
+                probe: late,
+            }]
+        );
+        assert_eq!(h.take_demotions(), vec![], "taken once");
+    }
+
+    #[test]
+    fn a_gone_holder_records_its_stopped_probe_at_once() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        probed(&mut h, 2_000, vec![("g1", stopped())]);
+        assert_eq!(
+            h.take_demotions(),
+            vec![Demotion {
+                at_ms: 2_000,
+                guid: "g1".into(),
+                path: "/w/a".into(),
+                probe: stopped(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_row_that_was_not_running_records_no_demotion() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", stopped())]);
+        // Another run holds the folder: unverified, not running.
+        let other = Probe {
+            is_fantastic: true,
+            holder: Some(9),
+            owns_entry: false,
+            canvas: None,
+            canvas_up: false,
+            guid_matches: false,
+            errors: vec![],
+        };
+        probed(&mut h, 2_000, vec![("g1", other)]);
+        probed(&mut h, 4_000, vec![("g1", stopped())]);
+        assert_eq!(h.take_demotions(), vec![]);
+    }
+
+    #[test]
+    fn a_demotion_records_the_read_error_that_came_with_its_probe() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        // its run file could not be read: no canvas is known, so it shows at once
+        let unread = Probe {
+            holder: Some(7),
+            owns_entry: true,
+            errors: vec![ProbeError {
+                what: "run_file",
+                error: "/w/a/.fantastic/run.yaml: Access is denied".into(),
+            }],
+            ..stopped()
+        };
+        probed(&mut h, 2_000, vec![("g1", unread.clone())]);
+        assert_eq!(status(&h, "g1", 2_000), Status::NoCanvas);
+        assert_eq!(
+            h.take_demotions(),
+            vec![Demotion {
+                at_ms: 2_000,
+                guid: "g1".into(),
+                path: "/w/a".into(),
+                probe: unread,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_ridden_out_miss_with_an_error_changes_no_status() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        let mut missed = running(7, 8100);
+        missed.canvas_up = false;
+        missed.guid_matches = false;
+        missed.errors.push(ProbeError {
+            what: "canvas_up",
+            error: "127.0.0.1:8100: connection refused".into(),
+        });
+        probed(&mut h, 2_000, vec![("g1", missed)]);
+        assert_eq!(status(&h, "g1", 2_000), Status::Running(canvas(8100)));
+        assert_eq!(h.take_demotions(), vec![], "ridden out: nothing recorded");
     }
 
     #[test]

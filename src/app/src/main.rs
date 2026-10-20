@@ -146,13 +146,16 @@ fn window(app: &AppHandle, args: &Args, backdrop: Backdrop) -> Result<(), String
         .inner_size(1280.0, 800.0)
         .min_inner_size(720.0, 480.0)
         .transparent(backdrop != Backdrop::None)
-        .initialization_script(flag::script(
+        .initialization_script_for_all_frames(flag::script(
             sys::OS,
             sys::WEBVIEW,
             backdrop.flag(),
             !args.kiosk,
         ))
         .on_navigation(move |url| page::allowed(url, shell.port(), &shell.canvas_ports()));
+    if let Some([r, g, bl]) = backdrop.window_color() {
+        b = b.background_color(tauri::window::Color(r, g, bl, 255));
+    }
     if args.kiosk {
         b = b.fullscreen(true).decorations(false);
     } else {

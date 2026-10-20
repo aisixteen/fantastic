@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { TreeModel } from "../src/bundles/files/tree_model.ts";
 import type { Effect, Entry } from "../src/bundles/files/tree_model.ts";
 import { ancestors, inRoot, isFantastic, norm, parentOf } from "../src/bundles/files/paths.ts";
+import { allHidden } from "../src/bundles/files/files_deps.ts";
 
 const dir = (path: string): Entry => ({ name: path.split("/").pop()!, path, type: "dir" });
 const file = (path: string, size = 1): Entry => ({ name: path.split("/").pop()!, path, type: "file", size });
@@ -181,4 +182,14 @@ test("property: 200 random operations keep watched == expanded, and unmount leav
   }
   apply(m.unmount());
   assert.equal(watched.size, 0);
+});
+
+test("an agent is hidden when ALL its cells are off their views (#133); no cell is not hidden", () => {
+  const hidden = new Set(["c1", "c2"]);
+  const isHidden = (c: string): boolean => hidden.has(c);
+  assert.equal(allHidden([], isHidden), false, "no cell: shown in no view, not hidden");
+  assert.equal(allHidden(["c1"], isHidden), true);
+  assert.equal(allHidden(["c1", "c2"], isHidden), true);
+  assert.equal(allHidden(["c1", "c3"], isHidden), false, "one cell still shows it");
+  assert.equal(allHidden(["c3"], isHidden), false);
 });

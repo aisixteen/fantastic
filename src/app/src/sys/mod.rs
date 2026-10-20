@@ -33,6 +33,10 @@ pub use linux::*;
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 compile_error!("the desktop app supports macOS, Windows and Linux only");
 
+/// The dark skin's `color.page.bg` (`#06060c`), what an opaque window shows
+/// before its page paints.
+pub const PAGE_BG: [u8; 3] = [0x06, 0x06, 0x0c];
+
 /// The material behind the window. Plain data.
 #[allow(dead_code)] // each OS constructs only its own materials
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,18 @@ impl Backdrop {
         match self {
             Backdrop::None => "web",
             _ => "native",
+        }
+    }
+
+    /// The window's own colour, under the page: an opaque window (no material)
+    /// is the dark skin's page colour (`color.page.bg`), so the boot page's
+    /// transparent body — and every frame before a page paints — shows dark,
+    /// not the webview's white (S3, #52: a light flash on open on Linux). A
+    /// material shows through a transparent window: none.
+    pub fn window_color(self) -> Option<[u8; 3]> {
+        match self {
+            Backdrop::None => Some(PAGE_BG),
+            _ => None,
         }
     }
 
@@ -118,5 +134,24 @@ mod tests {
         }
         assert_eq!(Backdrop::None.flag(), "web");
         assert_eq!(Backdrop::LiquidGlass.name(), "liquid-glass");
+    }
+
+    #[test]
+    fn an_opaque_window_is_the_dark_skins_page_colour_and_a_material_has_none() {
+        assert_eq!(Backdrop::None.window_color(), Some(super::PAGE_BG));
+        for b in [Backdrop::LiquidGlass, Backdrop::Vibrancy, Backdrop::Mica] {
+            assert_eq!(b.window_color(), None, "{b:?} shows through");
+        }
+        // the colour IS the stock dark skin's page colour
+        let f = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tui/web/canvas/src/bundles/skin/stock/dark.tokens.json");
+        let tokens: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&f).expect("the dark skin"))
+                .expect("json");
+        let hex = tokens["color"]["page"]["bg"]["$value"]["hex"]
+            .as_str()
+            .expect("color.page.bg has a hex");
+        let [r, g, b] = super::PAGE_BG;
+        assert_eq!(hex.to_ascii_lowercase(), format!("#{r:02x}{g:02x}{b:02x}"));
     }
 }

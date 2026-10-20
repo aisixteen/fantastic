@@ -208,7 +208,7 @@ def main() -> bool:
                 await pg.open(rig.url)
                 await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{a}\"] .chat-view[data-ready]')", 15)
                 r["S6 keep survives a reload with its history"] = bool(kept) and bool(await pg.until(f"{dialog(a)}.includes('S3-answer') && {dialog(a)}.includes('S5-after')", 10))
-                # S7 close the cell, reopen the kept dialog from the popup's chats
+                # S7 close the cell (✕ hides it; the kept dialog's agent lives on), reopen the kept dialog from the popup's chats
                 await pg.js(f"document.querySelector('.agent-frame[data-id=\"{a}\"] > .frame-head .close').click()")
                 await pg.until(f"!document.querySelector('.agent-frame[data-id=\"{a}\"]')", 8)
                 # the popup's CHATS tile for that dialog (Enter would pick the first tile: "ask")

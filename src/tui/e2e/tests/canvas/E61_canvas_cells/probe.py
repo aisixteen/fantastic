@@ -176,7 +176,13 @@ def main() -> bool:
         async def second() -> None:
             async with rig.page(1600, 1000) as pg:
                 await pg.open(rig.url + f"?canvas={PEER}")
-                await pg.until("!!document.getElementById('canvas')", 20)
+                r["peer_mounted"] = bool(await pg.until("!!document.getElementById('canvas')", 20))
+                if not r["peer_mounted"]:
+                    # the peer page never drew: record what it logged and showed, instead of two bundle misses
+                    info["peer_page_logs"] = pg.logs[-20:]
+                    info["peer_page_state"] = await pg.js("document.readyState + ' ' + location.href + ' ' + (document.body ? document.body.innerHTML.slice(0, 600) : 'no body')")
+                    r["bundle_runs"] = r["bundle_reloads"] = False
+                    return
 
                 async def body_has(text: str) -> bool:
                     for _ in range(secs * 2):

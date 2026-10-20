@@ -35,6 +35,7 @@ from _lib.canvas_live import DESKTOP_POINTER, MAC_CHROME, Page, Rig, attach, fre
 
 # `e2e/runners` is on the path once `canvas_live` is imported
 from canvas import build_home_host, host_call  # noqa: E402, I001 — `host_call` for the probes
+from helpers.chrome import Chrome  # noqa: E402
 
 ANNOUNCE = "fantastic-home-host: the home: "
 CANVAS_ANNOUNCE = re.compile(r"^fantastic: the canvas: (\S+)", re.MULTILINE)
@@ -212,11 +213,11 @@ class HomeRig(Rig):
         tab = self.tabs
         cdp = free_port()
         mode = [] if os.environ.get("CANVAS_HEADFUL") == "1" else ["--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-        chrome = subprocess.Popen([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}",
-                                   f"--remote-debugging-port={cdp}", f"--user-data-dir={self.art / f'chrome-{tab}'}", "--no-first-run", "about:blank"],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        chrome = Chrome([os.environ.get("CHROME") or MAC_CHROME, *mode, DESKTOP_POINTER, f"--window-size={width},{height}",
+                         f"--remote-debugging-port={cdp}", f"--user-data-dir={self.art / f'chrome-{tab}'}", "--no-first-run", "about:blank"],
+                        self.art / f"chrome-{tab}.log", cdp)
         try:
-            async with await attach(cdp) as ws:
+            async with await attach(chrome) as ws:
                 pg = Page(ws)
                 self.misses = pg.misses
                 await pg.cdp("Runtime.enable")
@@ -238,11 +239,11 @@ class HomeRig(Rig):
                 (self.art / f"page-{tab}.html").write_text(html or "")
                 (self.art / f"page_errors-{tab}.json").write_text(json.dumps(pg.logs, indent=1))
         finally:
-            chrome.terminate()
+            chrome.proc.terminate()
             try:
-                chrome.wait(10)
+                chrome.proc.wait(10)
             except subprocess.TimeoutExpired:
-                chrome.kill()
+                chrome.proc.kill()
 
     async def open_home(self, pg: Page) -> None:
         """Navigate `pg` to the Home (again) and wait until it is drawn."""
@@ -293,12 +294,14 @@ class HomeRig(Rig):
 class StateLog:
     """Every `state` the home emits, as a page sees it on `/home/ws`: per state
     its `seq`, `pages`, `selection`, and each row's `[status, canvas url]`.
+    Every `diagnostics` the home emits (a running row's demotion, with the
+    probe that caused it) lands in `log.demotions`.
 
         async with StateLog(rig.home_port) as log: …
-        log.states"""
+        log.states, log.demotions"""
 
     def __init__(self, port: int):
-        self.port, self.states, self.task, self.ws = port, [], None, None
+        self.port, self.states, self.demotions, self.task, self.ws = port, [], [], None, None
 
     async def __aenter__(self) -> StateLog:
         import websockets
@@ -313,6 +316,8 @@ class StateLog:
                     if frame.get("type") == "event" and p.get("type") == "state":
                         self.states.append({"seq": p.get("seq"), "pages": p.get("pages"), "selection": p.get("selection"),
                                             "rows": {r["id"]: [r["status"], (r.get("canvas") or {}).get("url")] for r in p.get("rows", [])}})
+                    elif frame.get("type") == "event" and p.get("type") == "diagnostics":
+                        self.demotions.append({"seq": p.get("seq"), "demotions": p.get("demotions")})
             except Exception:  # noqa: BLE001 — the socket closing ends the log
                 pass
 

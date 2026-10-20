@@ -27,6 +27,7 @@ from canvas import DESKTOP_POINTER, MAC_CHROME, Host, Page, build_bin, free_port
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 from helpers import oslayer, verdict  # noqa: E402
+from helpers.chrome import Chrome  # noqa: E402
 
 SC = E2E / "tests" / "scenario" / "E21_canvas_user" / "scenario.yaml"
 FRAMES = "document.querySelectorAll('#world .agent-frame, .agent-frame').length"
@@ -40,33 +41,30 @@ class Browser:
         chrome = os.environ.get("CHROME") or MAC_CHROME
         if not Path(chrome).exists():
             raise SystemExit(f"no Chrome at {chrome}: set CHROME")
-        self.proc = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
-                                      f"--remote-debugging-port={self.port}", f"--user-data-dir={tmp / ('chrome-' + name)}",
-                                      "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.udd = tmp / ("chrome-" + name)
+        cmd = [chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
+               f"--remote-debugging-port={self.port}", f"--user-data-dir={self.udd}",
+               "--no-first-run", "about:blank"]
+        self.chrome = Chrome(cmd, tmp / f"chrome-{name}.log", self.port)  # Chrome's stdout and stderr, kept for a failure's evidence
         self.used_first = False
         self.size = (w["width"], w["height"])
 
     def ws_url(self) -> str:
-        deadline = time.time() + 15
-        while True:
-            try:
-                tabs = [t for t in json.loads(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list").read()) if t["type"] == "page"]
-                if not self.used_first and tabs:
-                    self.used_first = True
-                    return tabs[0]["webSocketDebuggerUrl"]
-                t = json.loads(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{self.port}/json/new?about:blank", method="PUT")).read())
-                return t["webSocketDebuggerUrl"]
-            except Exception:
-                if time.time() > deadline:
-                    raise SystemExit("Chrome never opened its debugging port")
-                time.sleep(0.2)
+        def probe() -> str:
+            tabs = [t for t in json.loads(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list").read()) if t["type"] == "page"]
+            if not self.used_first and tabs:
+                self.used_first = True
+                return tabs[0]["webSocketDebuggerUrl"]
+            t = json.loads(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{self.port}/json/new?about:blank", method="PUT")).read())
+            return t["webSocketDebuggerUrl"]
+        return self.chrome.wait_port(probe, timeout=15)
 
     def close(self) -> None:
-        self.proc.terminate()
+        self.chrome.proc.terminate()
         try:
-            self.proc.wait(10)
+            self.chrome.proc.wait(10)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            self.chrome.proc.kill()
 
 
 async def tab(b: Browser, url: str, *, stack) -> Page:
@@ -177,6 +175,10 @@ def main() -> int:
     try:
         ok = asyncio.run(run(sc, tmp))
     finally:
+        # Chrome's output is the run's evidence: kept beside the run's log, whether or not Chrome failed.
+        if run_dir := os.environ.get("E2E_RUN_DIR"):
+            for log in tmp.glob("chrome-*.log"):
+                shutil.copy(log, Path(run_dir) / f"canvas_user.{log.name}")
         if not os.environ.get("E2E_KEEP"):
             shutil.rmtree(tmp, ignore_errors=True)
         else:

@@ -3,7 +3,8 @@
 # `fantastic canvas --port N` over a fresh dir, and drives a REAL
 # headless Chrome over CDP against the page it announces: a double click opens the action popup, `terminal` there spawns one,
 # keystrokes run in it, a drag moves it, a restart rehydrates it, the close
-# button closes its view (the agent lives on). Every step is checked ON DISK too: the canvas's thin agents
+# button HIDES its cell (the agent lives on), Shift+close and the head's right-click
+# Delete delete the agent (#133). Every step is checked ON DISK too: the canvas's thin agents
 # are folders under its root view in the page loader's store (`.fantastic/web`).
 #
 # The owner's design: the page holds no store and no AI; its thin agents are
@@ -108,14 +109,13 @@ runs:
       group_size: 1
       view_bound: true
 
-  # ── ✕ closes the VIEW: the host agent lives on (listed in the sidebar)
+  # ── Shift+✕ DELETES the cell's agent: its backend and its cell go (✕ alone hides, see below)
   - name: close
-    close: true
+    close: delete
     expect:
       canvas_members: 0
-      backend_record: true
-      group_size: 1
-      files_exist: [.fantastic/web/agents/canvas/agent.yaml]
+      group_size: 0
+      page_frames: 0
 
   # ── a view lost while the host was down: the agent stays, the page shows nothing
   - name: orphan
@@ -123,7 +123,7 @@ runs:
     then_restart: {offline: remove_member}
     expect:
       canvas_members: 0
-      group_size: 2
+      group_size: 1
       page_frames: 0
 
   # ── the shell ending closes its VIEW; its exec agent lives on
@@ -132,7 +132,7 @@ runs:
     type: "exit"
     expect:
       canvas_members: 0
-      group_size: 3
+      group_size: 2
       page_frames: 0
 
   - name: restart-empty
@@ -140,5 +140,63 @@ runs:
     expect:
       load_tree: {canvas: null}
       canvas_members: 0
-      group_size: 3
+      group_size: 2
       page_frames: 0
+
+  # ── ✕ HIDES the cell (#133): it leaves the view, its agent keeps running and its
+  #    record stays under the view (the hidden set lives on the view)
+  - name: hide
+    dblclick: {x: 500, y: 350}
+    close: hide
+    expect:
+      member: {handler_module: terminal_view.ts, owns_backend: false}
+      canvas_members: 1
+      page_frames: 0
+      backend_record: true
+      group_size: 3
+
+  # ── the hidden cell stays hidden across a reload; a new cell shows, the hidden one does not
+  - name: hidden-reload
+    reload_page: true
+    expect:
+      canvas_members: 1
+      page_frames: 0
+      group_size: 3
+
+  - name: shown-after-reload
+    dblclick: {x: 500, y: 350}
+    expect:
+      canvas_members: 2
+      page_frames: 1
+      group_size: 4
+
+  # ── Shift+✕ deletes the shown cell's agent
+  - name: shift-delete
+    close: delete
+    expect:
+      canvas_members: 1
+      page_frames: 0
+      group_size: 3
+
+  # ── right-click on the head → Delete deletes the agent, as Shift+✕ does
+  - name: menu-delete
+    dblclick: {x: 500, y: 350}
+    contextmenu: delete
+    expect:
+      canvas_members: 1
+      page_frames: 0
+      group_size: 3
+
+  # ── a hidden agent's file-tree row is marked hidden; a pick shows its cell again,
+  #    where it was, and the agent's stream re-attaches live (#133): typed output lands
+  - name: show-picked
+    dblclick: {x: 500, y: 350, kind: file tree}
+    pick: hidden
+    type: {posix: "echo shown-$((5*5))", nt: "set /a z=5*5>nul & call echo shown-%z%"}
+    # the pick VIEWS the cell (a double-click on a row views its cell), so the terminal
+    # is the one frame on the page; the typed output is the live stream
+    expect:
+      canvas_members: 2
+      page_frames: 1
+      xterm_contains: ["shown-25"]
+      group_size: 3

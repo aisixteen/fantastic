@@ -34,6 +34,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
@@ -41,6 +42,7 @@ sys.path.insert(0, str(E2E))
 
 from e2e_build import build_lock  # noqa: E402
 from helpers import oslayer, verdict  # noqa: E402
+from helpers.chrome import RETRYABLE, Chrome  # noqa: E402
 
 # The binary's user-home template store (`user_home_store`) reads FANTASTIC_HOME,
 # else ~/.fantastic. A test must never read or write the owner's real
@@ -61,8 +63,13 @@ MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 #: the canvas then rightly shows every cell's chrome, as on a phone.
 DESKTOP_POINTER = ("--blink-settings=primaryHoverType=2,availableHoverTypes=2,"
                    "primaryPointerType=4,availablePointerTypes=4")
+#: how long a CDP call waits for Chrome to send ANYTHING (a reply or an event)
+REPLY_S = 30
+#: what a call that got no reply shows (#88): the page's last console lines,
+#: and the first characters of the expression it sent and of each line
+CONSOLE_KEPT, EXPR_SHOWN = 8, 120
 # a terminal's text, from its BUFFER (the WebGL renderer leaves no text in the DOM)
-XTERM_TEXT = "((()=>{const t=document.querySelector('.agent-frame .frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
+XTERM_TEXT = "((()=>{const t=[...document.querySelectorAll('.agent-frame .frame-body')].map(b=>b.xterm).find(Boolean); if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
 
 
 
@@ -73,26 +80,31 @@ def _scenario_path(scenario_id: str) -> Path:
     raise SystemExit(f"no scenario {scenario_id!r}")
 
 
-async def attach(cdp_port: int, timeout: float = 30.0):
+async def attach(chrome: Chrome, timeout: float = 30.0):
     """Chrome's page target, CONNECTED: a fresh Chrome lists its debugging port
     before its page, and can refuse the page's socket (HTTP 404) for a moment
     after listing it — retry both until `timeout`, then fail saying which. A
-    runner's first Chrome (cold disk) has taken past 10 s to listen."""
+    runner's first Chrome (cold disk) has taken past 10 s to listen. Chrome is
+    checked on every poll (helpers.chrome)."""
     import websockets
+    from websockets.exceptions import WebSocketException
     deadline = time.time() + timeout
-    why = "its debugging port never answered"
-    while time.time() < deadline:
+    why = "no poll yet"
+    while True:
+        chrome.check(why)
         try:
-            tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{cdp_port}/json/list").read())
+            tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{chrome.port}/json/list").read())
             page_ws = next((t["webSocketDebuggerUrl"] for t in tabs if t.get("type") == "page"), None)
             if page_ws is None:
                 why = "it listed no page target"
             else:
                 return await websockets.connect(page_ws, max_size=None, ping_interval=None)
-        except Exception as e:  # noqa: BLE001 — not up yet: retried until the deadline
+        except (*RETRYABLE, WebSocketException) as e:  # not up yet: retried until the deadline
             why = f"{type(e).__name__}: {e}"
+        if time.time() > deadline:
+            chrome.check(why)
+            raise SystemExit(chrome.evidence(f"Chrome on port {chrome.port}: not attached in {timeout:.0f} s", why))
         await asyncio.sleep(0.2)
-    raise SystemExit(f"Chrome on port {cdp_port}: not attached in {timeout:.0f} s — {why}")
 
 
 def free_port() -> int:
@@ -204,13 +216,28 @@ class Page:
         #: seconds since the page opened, the wait, its expression, and `mark()`
         #: (a probe may set it, e.g. to where the host's log stands)
         self.t0, self.misses, self.mark = time.time(), [], None
+        #: what a call that got no reply says about the page (#88): its last
+        #: console lines (every type) and the frames still loading — frame id ->
+        #: when it started — with the main frame's id and url. Read from the
+        #: events a call's receive loop sees: a line the page logs while no call
+        #: is pending is read by the next call, so a call that runs out has read
+        #: everything Chrome sent up to its timeout.
+        self.console: deque[str] = deque(maxlen=CONSOLE_KEPT)
+        self.loading: dict[str, float] = {}
+        self.main_frame: str | None = None
+        self.main_url = ""
 
     async def cdp(self, method: str, **params):
         self.n += 1
         me = self.n
+        sent = time.time()
         await self.ws.send(json.dumps({"id": me, "method": method, "params": params}))
         while True:
-            m = json.loads(await asyncio.wait_for(self.ws.recv(), 30))
+            try:
+                m = json.loads(await asyncio.wait_for(self.ws.recv(), REPLY_S))
+            except asyncio.TimeoutError:
+                raise TimeoutError(self.no_reply(method, params, time.time() - sent)) from None
+            self.observe(m)
             if m.get("method") == "Runtime.exceptionThrown":
                 d = m["params"]["exceptionDetails"]
                 self.logs.append("EXC " + d.get("exception", {}).get("description", d.get("text", "")))
@@ -240,6 +267,43 @@ class Page:
                 if "error" in m:
                     raise RuntimeError(f"{method}: {m['error']}")
                 return m.get("result", {})
+
+    def observe(self, m: dict) -> None:
+        """One event, kept for `no_reply`: a console line or exception, a frame
+        that started or stopped loading, the main frame's navigation."""
+        ev, p = m.get("method"), m.get("params") or {}
+        at = f"+{time.time() - self.t0:.1f}s"
+        if ev == "Runtime.consoleAPICalled":
+            text = " ".join(str(a.get("value", a.get("description", ""))) for a in p.get("args", []))
+            self.console.append(f"{at} {p.get('type')} {' '.join(text.split())[:EXPR_SHOWN]}")
+        elif ev == "Runtime.exceptionThrown":
+            d = p.get("exceptionDetails", {})
+            text = d.get("exception", {}).get("description", d.get("text", ""))
+            self.console.append(f"{at} exception {' '.join(text.split())[:EXPR_SHOWN]}")
+        elif ev == "Page.frameStartedLoading":
+            self.loading[p["frameId"]] = time.time()
+        elif ev == "Page.frameStoppedLoading":
+            self.loading.pop(p["frameId"], None)
+        elif ev == "Page.frameNavigated" and not p["frame"].get("parentId"):
+            self.main_frame, self.main_url = p["frame"]["id"], p["frame"].get("url", "")
+
+    def no_reply(self, method: str, params: dict, waited: float) -> str:
+        """What a call that got no reply says: the call, how long it waited, the
+        main frame's load state and the page's last console lines."""
+        expr = " ".join(str(params.get("expression", "")).split())[:EXPR_SHOWN]
+        if self.main_frame is None:
+            frame = "no main-frame navigation seen"
+        elif self.main_frame in self.loading:
+            frame = (f"main frame STILL LOADING {self.main_url} (since"
+                     f" +{self.loading[self.main_frame] - self.t0:.1f}s)")
+        else:
+            frame = f"main frame loaded {self.main_url}"
+        # the main frame's FIRST load starts before it commits (and is named)
+        others = len(self.loading) - (self.main_frame in self.loading)
+        lines = "\n  ".join(self.console) or "(none)"
+        return (f"CDP {method} got no reply in {waited:.1f} s (nothing from Chrome for"
+                f" {REPLY_S:g} s) at +{time.time() - self.t0:.1f}s{': ' + expr if expr else ''}\n"
+                f"{frame}; {others} other frame(s) loading\nlast console lines:\n  {lines}")
 
     async def js(self, expr: str):
         r = await self.cdp("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
@@ -285,8 +349,8 @@ class Page:
         if [w, h] != have:
             await self.cdp("Emulation.setDeviceMetricsOverride", width=w, height=h, deviceScaleFactor=0, mobile=False)
 
-    async def mouse(self, typ: str, x: float, y: float, clicks: int = 1) -> None:
-        await self.cdp("Input.dispatchMouseEvent", type=typ, x=x, y=y, button="left", clickCount=clicks)
+    async def mouse(self, typ: str, x: float, y: float, clicks: int = 1, modifiers: int = 0) -> None:
+        await self.cdp("Input.dispatchMouseEvent", type=typ, x=x, y=y, button="left", clickCount=clicks, modifiers=modifiers)
 
     async def type(self, text: str) -> None:
         await self.js("document.querySelector('.xterm-helper-textarea')?.focus()")
@@ -418,7 +482,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     await page.open(url)
 
 
-async def click(page: Page, sel: str, bad: list[str]) -> None:
+async def click(page: Page, sel: str, bad: list[str], shift: bool = False, double: bool = False) -> None:
     # a target SHOWN a moment after the page: a stopped terminal's ▶ is in the
     # DOM from the start, hidden (0×0 at the corner) until its attach finds the
     # program stopped — a click at that rect lands on nothing
@@ -428,30 +492,58 @@ async def click(page: Page, sel: str, bad: list[str]) -> None:
     if r is None or not (r["w"] > 0 and r["h"] > 0):
         bad.append(f"nothing shown to click at {sel}")
         return
-    await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
-    await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
+    mods = 8 if shift else 0  # CDP modifier bit 8: Shift
+    for c in (1, 2) if double else (1,):
+        await page.mouse("mousePressed", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, c, modifiers=mods)
+        await page.mouse("mouseReleased", r["x"] + r["w"] / 2, r["y"] + r["h"] / 2, c, modifiers=mods)
+
+
+async def head_menu(page: Page, intent: str, bad: list[str]) -> None:
+    """Right-click a cell's head, then pick `intent` (`hide` | `delete`) from the menu it opens."""
+    r = await page.rect(".agent-frame .frame-head")
+    if r is None or not (r["w"] > 0 and r["h"] > 0):
+        bad.append("no frame head to right-click")
+        return
+    x, y = r["x"] + r["w"] / 2, r["y"] + r["h"] / 2
+    await page.cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="right", clickCount=1)
+    await page.cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button="right", clickCount=1)
+    await click(page, f'.cell-menu button[data-intent="{intent}"]', bad)
 
 
 async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: dict) -> list[str]:
     bad: list[str] = []
     exp = run.get("expect") or {}
+    # `pick: hidden` — the file tree's row for the agent of the hidden cell, read
+    # before anything else is placed (a placed file tree is a member too) (#133)
+    if run.get("pick") == "hidden":
+        state["pick_bid"] = (members(cwd) or [{}])[0].get("backend_id")
     if run.get("restart"):
         await restart(run["restart"], page, host, cwd, url, state, exp, bad)
     if "dblclick" in run:
-        before = await page.js("document.querySelectorAll('.xterm-helper-textarea').length")
+        # the kind placed from the popup: a terminal (default) or the file tree
+        kind = run["dblclick"].get("kind", "terminal")
+        shown_sel = ".xterm-helper-textarea" if kind == "terminal" else ".files-view"
+        before = await page.js(f"document.querySelectorAll({json.dumps(shown_sel)}).length")
         x, y = run["dblclick"]["x"], run["dblclick"]["y"]
         for c in (1, 2):
             await page.mouse("mousePressed", x, y, c)
             await page.mouse("mouseReleased", x, y, c)
-        # the double click opens the SPOT INPUT: pick `terminal` in it
-        if not await page.until("!!document.querySelector('.action-popup input')", 10):
+        # the double click opens the SPOT INPUT (after the presets' host call):
+        # pick `terminal` in it once the popup's input HAS FOCUS (Input.insertText
+        # goes to the focused element), and Enter only once its one `terminal`
+        # tile is drawn; with no popup there is nothing to type into
+        if not await page.until("document.activeElement === document.querySelector('.action-popup input')", 10):
             bad.append("no action popup after the double click")
-        await page.cdp("Input.insertText", text="terminal")
-        await page.until("[...document.querySelectorAll('.action-popup .tile')].length === 1", 5)
-        await page.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
-        await page.cdp("Input.dispatchKeyEvent", type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13)
-        if not await page.until(f"document.querySelectorAll('.xterm-helper-textarea').length > {before}", 10):
-            bad.append("no terminal appeared after the double click")
+            return bad
+        await page.cdp("Input.insertText", text=kind)
+        if not await page.until("(()=>{const t=[...document.querySelectorAll('.action-popup .tile')];"
+                                f"return t.length === 1 && t[0].querySelector('.lb').textContent === {json.dumps(kind)};}})()", 5):
+            bad.append(f"the action popup drew no single `{kind}` tile")
+        else:
+            await page.cdp("Input.dispatchKeyEvent", type="keyDown", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+            await page.cdp("Input.dispatchKeyEvent", type="keyUp", key="Enter", code="Enter", windowsVirtualKeyCode=13)
+        if not await page.until(f"document.querySelectorAll({json.dumps(shown_sel)}).length > {before}", 10):
+            bad.append(f"no {kind} appeared after the double click")
         wait_disk(lambda: len(members(cwd)) > 0)
     if "drag" in run:
         r = await page.rect(".agent-frame .frame-head")
@@ -470,11 +562,38 @@ async def step(run: dict, page: Page, host: Host, cwd: Path, url: str, state: di
                 await page.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=x0 + run["drag"]["dx"] * i / 8,
                                y=y0 + run["drag"]["dy"] * i / 8, button="left")
             await page.mouse("mouseReleased", x0 + run["drag"]["dx"], y0 + run["drag"]["dy"])
+    # ✕ HIDES the cell (the agent lives on); "delete" is Shift+✕ (the agent goes too)
     if run.get("close"):
-        await click(page, ".agent-frame .close", bad)
+        await click(page, ".agent-frame .close", bad, shift=run["close"] == "delete")
+    if "contextmenu" in run:
+        await head_menu(page, run["contextmenu"], bad)
     if "click" in run:
         state["prev_backend"] = (members(cwd) or [{}])[0].get("backend_id")
         await click(page, run["click"], bad)
+    if run.get("pick") == "hidden":
+        bid = state.get("pick_bid")
+        row = f'.files-view .ft-row.agent[data-agent="{bid}"]'
+        # the tree shows the agent's folder through its own verb (`<guid>|<tree>`);
+        # the agent folders are read from disk after the tree mounts, so a first
+        # `not_found` is asked again for at most 10 s
+        tree = next((m.get("id") or m["_dir"] for m in members(cwd) if m.get("handler_module") == "files_view.ts"), None)
+        guid = yaml_of(cwd / ".fantastic/web/agents/canvas/agent.yaml").get("guid")
+        port = urllib.parse.urlsplit(url).port
+        answer: dict = {}
+        end = time.monotonic() + 10
+        while tree is not None and time.monotonic() < end:
+            answer = await host_call(port, f"{guid}|{tree}", {"type": "reveal", "agent": bid})
+            if "revealed" in answer or answer.get("reason") != "not_found":
+                break
+            await asyncio.sleep(0.5)
+        if "revealed" not in answer:
+            bad.append(f"the file tree ({tree}) did not reveal {bid}: {answer}")
+        elif not await page.until(f"!!document.querySelector({json.dumps(row + '.hidden')})", 5):
+            bad.append(f"the file tree's row for {bid} is not marked hidden")
+        # a click selects a row; a double-click views its cell, showing a hidden one
+        await click(page, row, bad, double=True)
+        # the shown terminal takes the keys (the row's click moved the focus off it)
+        await click(page, ".agent-frame .xterm-screen", bad)
     if "type" in run:
         if not await page.until("!!document.querySelector('.xterm-helper-textarea')", 10):
             bad.append("no terminal to type into")
@@ -622,20 +741,20 @@ async def run_all(sc: dict, tmp: Path) -> bool:
     cwd.mkdir(parents=True)
     binary = build_bin(tmp)
     port = free_port()
-    chrome = os.environ.get("CHROME") or MAC_CHROME
-    if not Path(chrome).exists():
-        raise SystemExit(f"no Chrome at {chrome}: set CHROME")
+    exe = os.environ.get("CHROME") or MAC_CHROME
+    if not Path(exe).exists():
+        raise SystemExit(f"no Chrome at {exe}: set CHROME")
     cdp_port = free_port()
     w = sc["window"]
-    br = subprocess.Popen([chrome, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
-                           f"--remote-debugging-port={cdp_port}", f"--user-data-dir={tmp / 'chrome'}",
-                           "--no-first-run", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    br = Chrome([exe, "--headless=new", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", DESKTOP_POINTER, f"--window-size={w['width']},{w['height']}",
+                 f"--remote-debugging-port={cdp_port}", f"--user-data-dir={tmp / 'chrome'}",
+                 "--no-first-run", "about:blank"], tmp / "chrome.log", cdp_port)
     host = Host(binary, cwd, port)
     failures = 0
     try:
         host.start()
         url = host.url
-        async with await attach(cdp_port) as ws:
+        async with await attach(br) as ws:
             page = Page(ws)
             await page.cdp("Runtime.enable")
             await page.cdp("Page.enable")
@@ -651,11 +770,11 @@ async def run_all(sc: dict, tmp: Path) -> bool:
     finally:
         if host.proc is not None:
             host.stop()
-        br.terminate()
+        br.proc.terminate()
         try:
-            br.wait(10)
+            br.proc.wait(10)
         except subprocess.TimeoutExpired:
-            br.kill()
+            br.proc.kill()
     return failures == 0
 
 

@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use fantastic_home::menu::{Menu, MENU_SPEC};
-use fantastic_home::{Config as HomeConfig, Effect, Event, Home, Prober};
+use fantastic_home::{Config as HomeConfig, Demotion, Effect, Event, Home, Prober};
 use serde_json::{json, Value};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -33,6 +33,8 @@ use super::wire;
 pub const POLL: Duration = Duration::from_secs(2);
 /// How long a fantastic's kernel has to answer a switch or an unstore.
 pub const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
+/// The type of the diagnostics event: a running row's demotion and its probe.
+pub const DIAGNOSTICS: &str = "diagnostics";
 
 /// Where the state goes once it changed (and `focus`): in the bundle, `home`'s emits.
 pub type Emit = Box<dyn Fn(Value) + Send + Sync>;
@@ -262,6 +264,10 @@ impl Runner {
         } else {
             state["seq"] = json!(g.seq);
         }
+        let demotions = g.home.take_demotions();
+        if !demotions.is_empty() {
+            (self.emit)(diagnostics_payload(g.seq, &demotions));
+        }
         if g.home.listed() {
             let now = (
                 g.home.pages().to_vec(),
@@ -309,8 +315,11 @@ impl Runner {
                     async move {
                         let mut prober = Prober::new(job.target, job.mode);
                         while let Some(ask) = prober.next() {
-                            let answer = os.answer(&ask).await;
+                            let (answer, error) = os.answer(&ask).await;
                             prober.answer(answer);
+                            if let Some(error) = error {
+                                prober.note_error(&ask, error);
+                            }
                         }
                         (job.key, prober.probe().clone())
                     }
@@ -355,6 +364,12 @@ impl Runner {
 /// The wire form of a menu spec (`fantastic_home::menu::MenuSpecMsg` plus its `type`).
 fn spec_payload(seq: u64, menu: &Menu) -> Value {
     json!({"type": MENU_SPEC, "seq": seq, "spec": menu})
+}
+
+/// The wire form of the running rows demoted since the last emit, each with
+/// the probe that demoted it (`seq` the state's). Diagnostics only: not in the state.
+fn diagnostics_payload(seq: u64, demotions: &[Demotion]) -> Value {
+    json!({"type": DIAGNOSTICS, "seq": seq, "demotions": demotions})
 }
 
 #[cfg(test)]

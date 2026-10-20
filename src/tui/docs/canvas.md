@@ -82,7 +82,13 @@ how to call agents); edit it and every AI uses your text from its next turn.
 Keep the placeholders you still want.
 
 TERMINALS draw with WebGL, through one shared GPU context for the whole page —
-a canvas of a few hundred live terminals stays smooth. A terminal's scrollbar
+except in WebKitGTK (the app on Linux, GNOME Web), where `auto` uses xterm's
+DOM renderer: WebKitGTK can back WebGL with a slow path that reports no error.
+The view's `terminal_renderer {name?: auto | webgl | dom}` switches the view's
+terminals at once; no name answers what is in use and why. The DOM renderer is
+slower with many streaming terminals on screen — keep `auto` unless you
+measured otherwise. With WebGL a canvas of a few hundred live terminals stays
+smooth. A terminal's scrollbar
 appears while the pointer is on it (the wheel scrolls either way). macOS allows
 511 terminals (PTYs) at once by default (`kern.tty.ptmx_max`).
 
@@ -172,11 +178,14 @@ both sides; the human narrows them with `update_agent`).
 | `fit {id, max_width?, max_height?}` | size an html cell to what it draws (its width, then its height at that width) — `overflowed` when it still does not fit; a cell keeps its size otherwise, so call it after placing or updating an html cell |
 | `update {id, bytes?, fields?}` | a cell's new body (`bytes`, verbatim) or fields (display_name, trusted, readme, geometry, can_call, callable_by) |
 | `theme {name?}` | which layout the cells sit in: `canvas` (the free 2D canvas), `mobile` (one column), `auto` (default — mobile in a tab under 768px wide); no name: what it is |
+| `terminal_renderer {name?}` | the view's terminals' renderer: `auto` (default — xterm's DOM renderer in WebKitGTK, the shared WebGL elsewhere; resolved in each tab), `webgl`, `dom`; switches every terminal of the view live; no name: what it is, `in_use` here and `why` |
 | `wire {sender, receiver, verbs}` | a grant, written on each side that is a cell of the view (a host agent receiver: the sender's side only) |
 | (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
 | (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
 | (html check) | an html body that is empty, a placeholder (no element) or truncated (an unclosed script, a cut tag) is refused, saying why |
-| `remove {id}` | delete a cell (refused for a delete-locked agent) |
+| `hide {id}` | take a cell OFF the view: its agent keeps running and its rect is kept; a reload keeps it hidden (the hidden set is on the view). Hiding a hidden cell changes nothing |
+| `show {id, x?, y?}` | put a hidden cell back where it was, or at `x`, `y` in the theme in use; it re-attaches live. A shown cell keeps its place |
+| `remove {id}` | delete the CELL from the view (refused for a delete-locked agent); its agent is untouched — Shift+✕ and right-click → Delete delete the agent |
 
 `update {id: <the view>, fields: {…}}` sets the view's own fields. Every cell answers `reflect`, `get_html`,
 `set_html`, `emit`.
@@ -192,12 +201,17 @@ window.__FANTASTIC_SHELL__ = Object.freeze({name, os, webview, backdrop, pickFol
 
 - `name` — the shell (`tauri`).
 - `os` — `macos` | `windows` | `linux`.
-- `webview` — `wkwebview` | `webview2` | `webkitgtk`: read by the terminal's
-  renderer.
+- `webview` — `wkwebview` | `webview2` | `webkitgtk`: decides the terminals'
+  `auto` renderer — `webkitgtk` is DOM, the others WebGL. Without a flag the
+  user agent decides (WebKit on Linux that is not Chromium: DOM).
 - `backdrop` — `native` (the window draws a material behind a transparent
   page) | `web` (the page paints its own): read by the skin — the slot in use
   (`fantastic readme skins`).
-- `pickFolder` (optional) — the shell's folder dialog: read by the Home.
+- `pickFolder` (optional) — the shell's folder dialog: read by the Home. Only
+  the top frame has it.
+
+The app sets the flag in every frame of its window: the Home page and each
+canvas shown in it (a frame on the canvas's own port) read the same one.
 
 A plain browser tab has no flag: its backdrop is `web`. A malformed flag is the
 shell's bug: the page says it in place of the canvas and stops.
@@ -223,9 +237,12 @@ view's `theme` verb.
 
 A cell is a VIEW of a host agent: the agent's record says how it is drawn
 (`view: {kind, bytes, calls}`, else terminal for an exec agent, chat for an AI,
-else its reflect card). `place {backend_id, x, y}` shows one; ✕ closes the view
-and the agent lives on (the file tree lists it; ⌫ there deletes it). A cell whose
-agent is gone disappears.
+else its reflect card). `place {backend_id, x, y}` shows one. ✕ HIDES the cell
+(#133): it leaves the view, its agent keeps running, its rect is kept, and a
+reload keeps it hidden. Shift+✕ and the head's right-click → Delete DELETE the
+agent. Picking a hidden agent in the file tree, or `show {id, x?, y?}`, brings its
+cell back where it was (or at `x`, `y`); the tree marks a hidden agent `hidden`,
+and ⌫ there deletes it. A cell whose agent is gone disappears.
 
 ## The background
 

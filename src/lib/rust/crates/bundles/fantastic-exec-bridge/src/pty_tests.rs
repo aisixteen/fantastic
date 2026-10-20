@@ -523,6 +523,104 @@ sys.stdout.flush()
 sys.stdin.readline()
 ";
 
+/// Where `text` first shows something a program printed, past the escape
+/// sequences a terminal writes on its own (ConPTY's init preamble): CSI
+/// `ESC [ … final`, OSC `ESC ] … BEL|ESC \` and a two-char `ESC x`.
+fn first_printed(text: &str) -> Option<usize> {
+    let mut it = text.char_indices();
+    while let Some((i, c)) = it.next() {
+        if c != '\x1b' {
+            if !c.is_whitespace() && !c.is_control() {
+                return Some(i);
+            }
+            continue;
+        }
+        match it.next().map(|(_, c)| c) {
+            Some('[') => {
+                for (_, c) in it.by_ref() {
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => loop {
+                match it.next().map(|(_, c)| c) {
+                    None | Some('\x07') => break,
+                    Some('\x1b') => {
+                        it.next();
+                        break;
+                    }
+                    Some(_) => {}
+                }
+            },
+            _ => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn first_printed_skips_what_the_terminal_writes_on_its_own() {
+    assert_eq!(first_printed(""), None);
+    assert_eq!(first_printed(" \r\n\x07"), None);
+    assert_eq!(first_printed("xx"), Some(0));
+    // ConPTY's preamble: modes, clear, home, then the window title
+    let pre = "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H\x1b]0;C:\\py.exe\x07";
+    assert_eq!(first_printed(pre), None);
+    assert_eq!(
+        first_printed(&format!("{pre}\x1b[?25hxx")),
+        Some(pre.len() + 6)
+    );
+    // an OSC ended by ST, a two-char escape, and a sequence cut at the end
+    assert_eq!(first_printed("\x1b]0;t\x1b\\\x1b=x"), Some(9));
+    assert_eq!(first_printed("\x1b]0;title"), None);
+    assert_eq!(first_printed("\x1b[?25"), None);
+    assert_eq!(first_printed("\x1b"), None);
+}
+
+/// What the flood test saw, for its failure messages (#93): when the child's
+/// first printed output and each change of the backlog showed up, from spawn.
+struct FloodEvidence {
+    spawn: tokio::time::Instant,
+    pty: Arc<crate::pty::Pty>,
+    first_printed: Option<Duration>,
+    /// `(since spawn, ring bytes, ack reply)`, one entry per change.
+    states: Vec<(Duration, usize, Value)>,
+}
+
+impl FloodEvidence {
+    fn sample(&mut self, st: &Value) {
+        let at = self.spawn.elapsed();
+        let ring = self.pty.ring_text();
+        if self.first_printed.is_none() && first_printed(&ring).is_some() {
+            self.first_printed = Some(at);
+        }
+        let changed = self
+            .states
+            .last()
+            .is_none_or(|(_, bytes, last)| *bytes != ring.len() || last != st);
+        if changed {
+            self.states.push((at, ring.len(), st.clone()));
+        }
+    }
+}
+
+impl std::fmt::Display for FloodEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "after {:?} the child had produced {} bytes; first printed output seen at {:?}; states:",
+            self.spawn.elapsed(),
+            self.pty.ring_text().len(),
+            self.first_printed,
+        )?;
+        for (at, bytes, st) in &self.states {
+            write!(f, " {at:?} {bytes}B {st};")?;
+        }
+        Ok(())
+    }
+}
+
 /// A viewer that streamed but never acked (a reloaded page) leaves `unacked` past
 /// HIGH and the reader paused. The new viewer's `output` replay hands it everything
 /// so far, so it zeroes the count and resumes the reader — python
@@ -533,6 +631,7 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
     let tmp = TempDir::new().unwrap();
     let k = kernel_with(&tmp, "term_f", json!({})).await;
     let mut rx = k.ensure_inbox(&AgentId::from("term_f"));
+    let spawn = tokio::time::Instant::now();
     let r = call(
         &k,
         "term_f",
@@ -541,10 +640,21 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
     )
     .await;
     let jid = r["job_id"].as_i64().unwrap();
+    let pty = crate::jobs::jobs()
+        .get(&(AgentId::from("term_f"), fantastic_kernel::TaskId(jid)))
+        .and_then(|j| j.pty.clone())
+        .expect("pty job row");
+    let mut ev = FloodEvidence {
+        spawn,
+        pty,
+        first_printed: None,
+        states: Vec::new(),
+    };
     let probe = json!({"type": "ack", "job_id": jid, "chars": 0});
     let mut st = json!({});
     for _ in 0..250 {
         st = call(&k, "term_f", probe.clone()).await;
+        ev.sample(&st);
         if st["paused"] == json!(true) {
             break;
         }
@@ -553,15 +663,16 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
     assert!(
         st["paused"] == json!(true)
             && st["unacked"].as_u64().unwrap() > crate::pty::HIGH_WATERMARK as u64,
-        "{st}"
+        "{st}; {ev}"
     );
     call(&k, "term_f", json!({"type": "output", "job_id": jid})).await;
     let st = call(&k, "term_f", probe).await;
+    ev.sample(&st);
     // the count restarted at 0; the resumed reader may already have counted more
     assert!(
         st["paused"] == json!(false)
             && st["unacked"].as_u64().unwrap() < crate::pty::HIGH_WATERMARK as u64,
-        "{st}"
+        "{st}; {ev}"
     );
     // the rest of the flood (under HIGH) arrives with no further ack
     output_until(&mut rx, |t| t.contains("DONE")).await;

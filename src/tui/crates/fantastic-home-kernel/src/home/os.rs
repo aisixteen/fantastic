@@ -16,7 +16,9 @@ use super::sys;
 pub trait HomeOs: Send + Sync + 'static {
     fn now_ms(&self) -> u64;
     async fn read_registry(&self) -> Result<Vec<(String, String)>, String>;
-    async fn answer(&self, ask: &Ask) -> Answer;
+    /// The answer to `ask`, and the error the machine met giving it, if any: the
+    /// answer then is the one a missing reading gives, and the error is evidence.
+    async fn answer(&self, ask: &Ask) -> (Answer, Option<String>);
     async fn spawn(&self, path: &str) -> Result<(), String>;
     /// Ok(true): asked to stop; Ok(false): nothing holds the folder; Err: could not ask.
     async fn terminate(&self, path: &str) -> Result<bool, String>;
@@ -40,6 +42,10 @@ pub struct SysOs {
     fantastic_bin: PathBuf,
     /// The login environment, resolved once it has been read successfully.
     env: tokio::sync::OnceCell<Vec<(OsString, OsString)>>,
+    /// A test's `SHELL` for the login environment (`Some(None)`: unset); `None`
+    /// reads the process's own, as the app does.
+    #[cfg(all(test, unix))]
+    shell: Option<Option<OsString>>,
 }
 
 impl SysOs {
@@ -48,6 +54,8 @@ impl SysOs {
             home,
             fantastic_bin,
             env: tokio::sync::OnceCell::new(),
+            #[cfg(all(test, unix))]
+            shell: None,
         }
     }
 
@@ -62,6 +70,29 @@ impl SysOs {
         os.env.set(env).expect("a new SysOs has no environment");
         os
     }
+
+    /// A `SysOs` whose login environment is read with `shell` as its `SHELL`
+    /// (`None`: unset), so a spawn runs the login step without touching the
+    /// process's environment.
+    #[cfg(all(test, unix))]
+    pub(crate) fn with_shell(
+        home: PathBuf,
+        fantastic_bin: PathBuf,
+        shell: Option<OsString>,
+    ) -> SysOs {
+        let mut os = SysOs::new(home, fantastic_bin);
+        os.shell = Some(shell);
+        os
+    }
+
+    /// The login environment: the process's own `SHELL`, or a test's.
+    async fn login_env(&self) -> Result<Vec<(OsString, OsString)>, String> {
+        #[cfg(all(test, unix))]
+        if let Some(shell) = &self.shell {
+            return sys::login_env_with(&self.home, shell.clone()).await;
+        }
+        sys::login_env(&self.home).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -74,13 +105,23 @@ impl HomeOs for SysOs {
         sys::read_registry(&self.home)
     }
 
-    async fn answer(&self, ask: &Ask) -> Answer {
+    async fn answer(&self, ask: &Ask) -> (Answer, Option<String>) {
         match ask {
-            Ask::IsFantastic { path } => Answer::IsFantastic(sys::is_fantastic(path)),
-            Ask::LockHolder { path } => Answer::LockHolder(sys::lock_holder(path)),
-            Ask::RunFile { path } => Answer::RunFile(sys::run_file(path)),
-            Ask::CanvasUp { canvas } => Answer::CanvasUp(sys::canvas_up(canvas).await),
-            Ask::Guid { port } => Answer::Guid(sys::guid(*port).await),
+            Ask::IsFantastic { path } => {
+                answered(sys::is_fantastic(path), false, Answer::IsFantastic)
+            }
+            Ask::LockHolder { path } => {
+                let read = sys::lock_holder_checked(path);
+                if let Err(e) = &read {
+                    tracing::warn!("{e}");
+                }
+                answered(read, None, Answer::LockHolder)
+            }
+            Ask::RunFile { path } => answered(sys::run_file(path), None, Answer::RunFile),
+            Ask::CanvasUp { canvas } => {
+                answered(sys::canvas_up(canvas).await, false, Answer::CanvasUp)
+            }
+            Ask::Guid { port } => answered(sys::guid(*port).await, None, Answer::Guid),
         }
     }
 
@@ -89,10 +130,7 @@ impl HomeOs for SysOs {
     async fn spawn(&self, path: &str) -> Result<(), String> {
         let log = sys::log_path(&self.home, path)?;
         let started = async {
-            let env = self
-                .env
-                .get_or_try_init(|| sys::login_env(&self.home))
-                .await?;
+            let env = self.env.get_or_try_init(|| self.login_env()).await?;
             sys::spawn(&self.fantastic_bin, path, env, &self.home, &log).await
         };
         started
@@ -127,5 +165,18 @@ impl HomeOs for SysOs {
 
     fn log_tail(&self, path: &str) -> Option<String> {
         sys::log_tail(&self.home, path)
+    }
+}
+
+/// A reading that may have failed: the answer of `read`, or of `fallback` (the
+/// one a missing reading gives) with the error that stopped it.
+fn answered<T>(
+    read: Result<T, String>,
+    fallback: T,
+    answer: impl FnOnce(T) -> Answer,
+) -> (Answer, Option<String>) {
+    match read {
+        Ok(value) => (answer(value), None),
+        Err(error) => (answer(fallback), Some(error)),
     }
 }

@@ -1,10 +1,11 @@
-import { useSharedWebgl } from "./renderer.ts";
+import { resolveRenderer, setRenderer } from "./renderer.ts";
+import { readShell } from "../shell.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
 import { hostRecordFresh } from "../canvas/host_views.ts";
 import { attach as attachTo, launched, pressed, runLine, savedCmd, shortCmd, stoppedText } from "./last_cmd.ts";
 import type { TermState } from "./last_cmd.ts";
-import { earlyPlan } from "./early.ts";
+import { earlyPlan, runEarly } from "./early.ts";
 import { onSkin, skinNow } from "../skin/apply.ts";
 import { xtermColor } from "../skin/tokens.ts";
 import type { ColorValue, CompiledSkin } from "../skin/tokens.ts";
@@ -27,7 +28,7 @@ export function termLook(skin: CompiledSkin): { theme: { background: string; for
 // attach is this view's: `status` finds a live PTY job and re-attaches (its
 // `output` ring replays), else `start {pty}` — no command, no args: the record's
 // own shell line (`$SHELL -l`; the kernel knows the OS's login flag, if any).
-// When the job ends the frame closes — view and exec agent together, as ✕ does. xterm is the
+// When the job ends the cell is removed (close()); its exec agent lives on. xterm is the
 // vendored UMD bundle (sets globalThis.Terminal / globalThis.FitAddon), lazily
 // imported only when a terminal actually mounts. Preserves VSCode-style flow
 // control (ack), binary image paste, no-reflow resize, and explicit autoscroll.
@@ -126,8 +127,24 @@ export const terminalView: ViewBundle = {
       xtEl.style.boxSizing = "border-box";
       xtEl.style.height = "100%";
     }
-    // the renderer: its own piece (renderer.ts) — the shared WebGL one
-    await useSharedWebgl(term, mount);
+    // the renderer: its own piece (renderer.ts), chosen by the VIEW's
+    // `terminal_renderer` (auto: DOM in WebKitGTK, else the shared WebGL). A
+    // value that is not auto, webgl or dom is said loud, and no addon loads:
+    // xterm keeps its own DOM renderer.
+    const viewId = kernel.get(selfId)?.parentId ?? null;
+    const choiceNow = (): unknown => (viewId === null ? undefined : kernel.get(viewId)?.meta["terminal_renderer"]) ?? "auto";
+    const useRenderer = async (): Promise<void> => {
+      let mode: "webgl" | "dom";
+      try {
+        mode = resolveRenderer(choiceNow(), { shell: readShell(), ua: navigator.userAgent }).in_use;
+      } catch (err) {
+        console.error(`[terminal] ${(err as Error).message}`);
+        term.write(`\r\n[${(err as Error).message}]\r\n`);
+        return;
+      }
+      await setRenderer(term, mount, mode);
+    };
+    await useRenderer();
     // the frame's terminal, for a probe that reads what it shows (E65/E66): a
     // canvas renderer has no text in the DOM
     (mount as unknown as { xterm?: XTerm }).xterm = term;
@@ -371,6 +388,16 @@ export const terminalView: ViewBundle = {
       }, 80);
     });
     ro.observe(mount);
+    // THE VIEW'S RENDERER CHANGES (its `terminal_renderer` verb): switched live
+    const offRenderer = kernel.addStateSubscriber((e) => {
+      const ev = e as { agent_id?: unknown; kind?: unknown; changed?: unknown };
+      if (viewId === null || ev.agent_id !== viewId || ev.kind !== "updated") return;
+      if (!Array.isArray(ev.changed) || !ev.changed.includes("terminal_renderer")) return;
+      void useRenderer().then(() => {
+        term.refresh(0, term.rows - 1);
+        tightFit();
+      });
+    });
     // THE SKIN CHANGES: the theme and font follow; a font can change the cell
     // metrics, so the grid is fitted again
     const offSkin = onSkin((_name, skin) => {
@@ -440,10 +467,7 @@ export const terminalView: ViewBundle = {
     // the frames held while the job was unknown (or an attach ran), in order;
     // the first `covered` are in a ring replay already
     const drainEarly = (covered: number): void => {
-      for (const s of earlyPlan(early.splice(0), covered, jobId)) {
-        if (s.op === "end") ended(s.frame);
-        else if (s.op === "draw") draw(s.frame);
-      }
+      runEarly(earlyPlan(early.splice(0), covered, jobId), draw, ended);
     };
     // START the cell's program (its first placement, or the human's ▶): once
     // started, the cell records it — later it waits for ▶ instead
@@ -510,6 +534,7 @@ export const terminalView: ViewBundle = {
       ],
       unmount(): void {
         offSkin();
+        offRenderer();
         io.disconnect();
         offLifecycle();
         offOutput();

@@ -37,6 +37,8 @@ const CSS = `
   .files-view .ft-row.agent.unloaded { opacity: 0.7; }
   .files-view .ft-row.agent.elsewhere { opacity: 0.45; }
   .files-view .ft-row.agent.has-cell .gl { color: ${tok("color.accent.base")}; }
+  /* HIDDEN (#133): its agent runs, its cells are off their views — a pick shows it */
+  .files-view .ft-row.agent.hidden .nm { font-style: italic; }
   .files-view .ft-row.agent.viewed .nm { font-weight: 600; }
   .files-view .ft-row.fresh .ct { color: ${tok("color.status.warn")}; font-weight: 600; }
   .files-view .ft-row.err .st { color: ${tok("color.status.error")}; }

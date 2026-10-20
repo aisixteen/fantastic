@@ -33,6 +33,7 @@ from mocks.responses import ResponsesMock  # noqa: E402
 from mocks.vllm import VllmMock  # noqa: E402
 
 import os
+import subprocess
 PROVIDERS = {"vllm": VllmMock, "ollama": OllamaMock, "responses": ResponsesMock, "anthropic": AnthropicMock}
 if os.environ.get("E74_ONLY"):  # a comma list: run just these providers
     PROVIDERS = {k: v for k, v in PROVIDERS.items() if k in os.environ["E74_ONLY"].split(",")}
@@ -107,6 +108,31 @@ async def turn(pg, cell: str, mock, text: str, expect: str) -> bool:
     return ok
 
 
+def settings_evidence(rig: Rig, ai: str | None, sent: float, seen: float | None, window_end: float) -> dict:
+    """#96 evidence: when the settings change was sent, when the record file
+    showed it, what the host's agent record answers, and what persist logged."""
+    ev: dict = {"sent": round(sent, 3), "disk_seen_after_s": None if seen is None else round(seen - sent, 3),
+                "window_end_after_s": round(window_end - sent, 3)}
+    if ai:
+        t = time.time()
+        try:
+            p = subprocess.run([str(rig.binary), "send", json.dumps({"target": ai, "payload": {"type": "reflect"}})],
+                               cwd=rig.proj, env=rig.env(), capture_output=True, text=True, timeout=30)
+            try:
+                ev["host_model"] = (json.loads(p.stdout).get("result") or {}).get("model")
+            except ValueError:
+                ev["host_error"] = (p.stdout + p.stderr)[-300:]
+        except subprocess.TimeoutExpired:
+            ev["host_error"] = "reflect timed out after 30 s"
+        ev["host_asked_after_s"] = round(t - sent, 3)
+        ev["host_answer_took_s"] = round(time.time() - t, 3)
+    try:
+        ev["persist_errors"] = [ln for ln in rig.log.read_text(errors="replace").splitlines() if "persist through" in ln]
+    except OSError as e:
+        ev["persist_errors"] = f"host log unreadable: {e}"
+    return ev
+
+
 def main() -> bool:
     T0 = time.time()
     rig = Rig(__file__, live=False)
@@ -162,7 +188,8 @@ def main() -> bool:
                         await pg.js(f"{BTN}('skip')?.click()")  # leave the wizard
                         await asyncio.sleep(1)
                         for f in await pg.js("[...document.querySelectorAll('.ai-not-set-up')].map(x=>x.closest('.agent-frame').dataset.id)"):
-                            await pg.js(f"document.querySelector('.agent-frame[data-id=\"{f}\"] > .frame-head .close')?.click()")
+                            # Shift+✕ deletes the cell (✕ alone only hides it)
+                            await pg.js(f"document.querySelector('.agent-frame[data-id=\"{f}\"] > .frame-head .close')?.dispatchEvent(new MouseEvent('click',{{bubbles:true,shiftKey:true}}))")
                     else:
                         p["C_answers"] = await turn(pg, c, open_, "hi", f"answer-C-{provider}")
                         p["C_keys"] = [k for k in open_.keys()]
@@ -180,13 +207,26 @@ def main() -> bool:
                         # (a slow runner opens and saves the settings in seconds: the bounds are wide)
                         await pg.until("(document.querySelector('.wiz h1')?.textContent||'').startsWith('Settings')", 20)
                         await pg.js("(()=>{const l=[...document.querySelectorAll('.wiz label')].find(l=>l.querySelector('span').textContent==='model'); l.querySelector('input').value='mock-y';})()")
+                        e_sent = time.time()
                         await pg.js(f"{BTN}('save')?.click()")
                         p["E_saved"] = bool(await pg.until("(document.querySelector('.wiz .say')?.textContent||'').includes('saved')", 20))
                         await pg.until("!document.querySelector('.wiz')", 10)
                         cellrec = next((x for x in rig.cells() if x.get("id") == a), {})
                         ai = cellrec.get("backend_id")
-                        await asyncio.sleep(1.5)
-                        p["E_record_model"] = (rig.host_record(ai) or {}).get("model") if ai else None
+                        # the 1.5 s window, polled: when the record file first shows the change (evidence only)
+                        e_seen = None
+                        e_end = time.time() + 1.5
+                        while True:
+                            e_model = (rig.host_record(ai) or {}).get("model") if ai else None
+                            if e_seen is None and e_model == "mock-y":
+                                e_seen = time.time()
+                            left = e_end - time.time()
+                            if left <= 0:
+                                break
+                            await asyncio.sleep(min(0.1, left))
+                        p["E_record_model"] = e_model  # the window's last poll: the assertion reads where the sleep ended
+                        # after the assertion's read, so the host's answer and log add no wait to it
+                        p["E_evidence"] = settings_evidence(rig, ai, e_sent, e_seen, e_end)
                     lap(f"{provider}.DE")
                     # F. a saved provider from page 1: the SAME cell rebound at once
                     f = await wizard(pg, 200, base_y + 600)
@@ -198,9 +238,9 @@ def main() -> bool:
                     lap(f"{provider}.F")
                     p["keyed_keys_seen"] = sorted({str(k) for k in keyed.keys()})
                     p["E_next_turn_model"] = next((q["body"].get("model") for q in reversed(keyed.requests) if q.get("kind") == "turn" and isinstance(q.get("body"), dict)), None)
-                    # tidy the canvas for the next provider
+                    # tidy the canvas for the next provider: Shift+✕ deletes each cell (✕ would only hide it, agent running)
                     for fid in await pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id)"):
-                        await pg.js(f"document.querySelector('.agent-frame[data-id=\"{fid}\"] > .frame-head .close')?.click()")
+                        await pg.js(f"document.querySelector('.agent-frame[data-id=\"{fid}\"] > .frame-head .close')?.dispatchEvent(new MouseEvent('click',{{bubbles:true,shiftKey:true}}))")
                     await asyncio.sleep(0.5)
                 info["console"] = [x for x in pg.logs if "WebGL" not in x][:8]
 
@@ -225,6 +265,9 @@ def main() -> bool:
     info["fails"] = FAILS
     print(json.dumps(info, indent=1, default=str)[:6000])
     failed = [k for k, v in r.items() if not v]
+    for provider in PROVIDERS:
+        if not r.get(f"{provider}: E settings change is live", True):
+            print(f"E74 #96 evidence {provider}: {json.dumps(info.get(provider, {}).get('E_evidence'), default=str)}", flush=True)
     return verdict(*rig.finish(not failed, f"{len(r) - len(failed)}/{len(r)} pass" + ("" if not failed else f" — failed: {'; '.join(failed)}")))
 
 

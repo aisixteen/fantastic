@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::model::{Canvas, CanvasRun, Registered};
 
 /// What is known of one fantastic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Probe {
     /// Its folder has a `.fantastic/` directory.
     pub is_fantastic: bool,
@@ -42,6 +42,19 @@ pub struct Probe {
     pub canvas_up: bool,
     /// The kernel behind that canvas has the registered guid.
     pub guid_matches: bool,
+    /// The read errors the OS layer met asking, one per failed question. Evidence
+    /// only: `Status::of` never reads it, so an error changes no status.
+    pub errors: Vec<ProbeError>,
+}
+
+/// A question the OS layer could not answer cleanly, and why. The answer it
+/// gave in its place is the one the procedure used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProbeError {
+    /// The question's name (`Ask::name`).
+    pub what: &'static str,
+    /// The OS layer's error text.
+    pub error: String,
 }
 
 /// A question for the OS layer.
@@ -52,6 +65,19 @@ pub enum Ask {
     RunFile { path: String },
     CanvasUp { canvas: Canvas },
     Guid { port: u16 },
+}
+
+impl Ask {
+    /// The question's name, as the diagnostics print it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Ask::IsFantastic { .. } => "is_fantastic",
+            Ask::LockHolder { .. } => "lock_holder",
+            Ask::RunFile { .. } => "run_file",
+            Ask::CanvasUp { .. } => "canvas_up",
+            Ask::Guid { .. } => "guid",
+        }
+    }
 }
 
 /// The OS layer's answer to the matching `Ask`.
@@ -188,6 +214,15 @@ impl Prober {
         }
     }
 
+    /// Record that the OS layer met `error` answering `ask`. Evidence only: the
+    /// answer fed by `answer` is the one the procedure uses.
+    pub fn note_error(&mut self, ask: &Ask, error: String) {
+        self.probe.errors.push(ProbeError {
+            what: ask.name(),
+            error,
+        });
+    }
+
     /// What is known so far.
     pub fn probe(&self) -> &Probe {
         &self.probe
@@ -297,6 +332,7 @@ fn start(
         canvas,
         canvas_up: false,
         guid_matches,
+        errors: Vec::new(),
     }
 }
 
@@ -415,6 +451,7 @@ mod tests {
             canvas,
             canvas_up,
             guid_matches,
+            errors: Vec::new(),
         }
     }
 
@@ -770,6 +807,34 @@ mod tests {
         ];
         let (_, probe) = drive(adding(), Mode::Canvas, answers);
         assert_eq!(probe, p(true, None, true, Some(canvas(8001)), false, true));
+    }
+
+    #[test]
+    fn a_failed_read_is_noted_beside_the_answer_it_gave() {
+        let target = Target::Registered {
+            reg: reg(Some(5), Some(canvas(8000))),
+            verified: false,
+        };
+        let mut prober = Prober::new(target, Mode::Lock);
+        let ask = prober.next().expect("a question");
+        prober.answer(Answer::IsFantastic(true));
+        let ask2 = prober.next().expect("a question");
+        assert_eq!(ask2.name(), "lock_holder");
+        prober.note_error(&ask2, "the lock: Access is denied".into());
+        prober.answer(Answer::LockHolder(None));
+        assert_eq!(ask.name(), "is_fantastic");
+        // the answer is used as given; the error only rides along
+        assert_eq!(
+            prober.probe(),
+            &Probe {
+                errors: vec![ProbeError {
+                    what: "lock_holder",
+                    error: "the lock: Access is denied".into(),
+                }],
+                ..p(true, None, false, None, false, false)
+            }
+        );
+        assert_eq!(Status::of(prober.probe(), false, false), Status::Stopped);
     }
 
     // ── answers of the wrong kind ───────────────────────────────────────────

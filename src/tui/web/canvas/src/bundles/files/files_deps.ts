@@ -22,6 +22,8 @@ export interface FilesDeps {
   onHost(id: string): boolean;
   /** the cells showing agent `id` (the cell itself, or cells fronting it) */
   cellsFor(id: string): string[];
+  /** whether cell `id` is hidden from its view (#133: its agent runs on) */
+  isHidden(cell: string): boolean;
   moveTo(viewId: string): void;
   /** VIEW a page agent (`focus`: ⌘-click — focus it on its view instead) */
   view(id: string, focus: boolean): void;
@@ -34,10 +36,16 @@ export interface FilesDeps {
   /** a host agent added in the background and not shown yet (NEW) */
   fresh(id: string): boolean;
   freshIds(): string[];
-  /** delete host agent `id` (its own act: ✕ on a cell only closes the view) */
+  /** delete host agent `id` (its own act: ✕ on a cell only hides it) */
   deleteAgent(id: string): void;
   /** agent `agentId`'s own live view, inside `el` (host: its view bundle; page: a reflect card) */
   mountAgentView(agentId: string, el: HTMLElement, selfId: string): Promise<ViewHandle>;
+}
+
+/** Whether an agent's cells are ALL hidden (#133): it runs, and no cell shows it.
+ *  An agent with no cell at all is not hidden — it is simply not shown. */
+export function allHidden(cells: string[], isHidden: (cell: string) => boolean): boolean {
+  return cells.length > 0 && cells.every(isHidden);
 }
 
 let deps: FilesDeps | null = null;

@@ -16,8 +16,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[6] / "e2e" / "runners"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _lib.canvas_live import Rig, html_cell, verdict  # noqa: E402
 from helpers import oslayer  # noqa: E402
+from hover_frames import hover_keeps_frames  # noqa: E402
 
 BG = """
 const m = new THREE.ShaderMaterial({uniforms:{u:{value:0}}, depthTest:false, depthWrite:false,
@@ -86,11 +88,12 @@ def main() -> bool:
                     after = await pg.js(f"({geo})('c4')")
                     info["corners"][corner] = [before, after]
                 # 3. the cost of hovering: at rest vs the pointer sweeping over the cells
-                async def sample(sweep: bool, secs: float) -> tuple[int, float]:
+                async def sample(sweep: bool, secs: float, cpu: list[float]) -> tuple[int, float]:
                     # frames counted IN the page over `secs`, the pointer moved (or
-                    # not) between counts; the GPU process sampled as it goes
+                    # not) between counts; the GPU process sampled as it goes into
+                    # `cpu`, the caller's list, so every reading is kept as evidence
                     await pg.js("(()=>{window.__n=0; window.__t0=performance.now(); const f=()=>{window.__n++; requestAnimationFrame(f)}; if(!window.__counting){window.__counting=1; requestAnimationFrame(f)}})()")
-                    cpu, k = [], 0
+                    k = 0
                     t0 = asyncio.get_event_loop().time()
                     while asyncio.get_event_loop().time() - t0 < secs:
                         if sweep:
@@ -102,13 +105,20 @@ def main() -> bool:
                     fps = await pg.js("Math.round(window.__n * 1000 / (performance.now() - window.__t0))")
                     return fps, round(sum(cpu) / max(len(cpu), 1))
                 await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=1390, y=890)
-                # interleaved, the best of each: a shared runner's load comes and
-                # goes (at rest 21 fps, not 60) — one sample of each compared its
-                # noise, not the hover's cost
+                # the runner's frame rate with nothing moving, before the samples
+                info["baseline_fps"] = await pg.js(FPS)
+                # interleaved, rest then sweep, three pairs: a shared runner's load
+                # comes and goes (at rest 21 fps, not 60), and each pair meets the
+                # same load. Every sample is kept as evidence; the frame verdict
+                # reads them all (hover_keeps_frames), the GPU check reads the best
                 rests, sweeps = [], []
+                info["gpu_cpu"] = {"rest": [], "sweep": []}
                 for _ in range(3):
-                    rests.append(await sample(False, 1.5))
-                    sweeps.append(await sample(True, 1.5))
+                    cpu_rest, cpu_sweep = [], []
+                    rests.append(await sample(False, 1.5, cpu_rest))
+                    sweeps.append(await sample(True, 1.5, cpu_sweep))
+                    info["gpu_cpu"]["rest"].append(cpu_rest)
+                    info["gpu_cpu"]["sweep"].append(cpu_sweep)
                 info["rest"] = max(rests, key=lambda x: x[0])
                 info["sweep"] = max(sweeps, key=lambda x: x[0])
                 info["samples"] = {"rest": rests, "sweep": sweeps}
@@ -147,8 +157,9 @@ def main() -> bool:
                     "sw": (right1 == right0 and t1 == t0), "se": (l1 == l0 and t1 == t0)}[corner]
             return grew and keep
         r["every_corner_resizes"] = all(fixed(c) for c in ("nw", "ne", "sw", "se"))
-        (fr, cr), (fs, cs) = info["rest"], info["sweep"]
-        r["hover_costs_no_frames"] = fs >= 0.9 * fr
+        (_, cr), (_, cs) = info["rest"], info["sweep"]
+        r["hover_costs_no_frames"] = hover_keeps_frames(
+            [x[0] for x in info["samples"]["rest"]], [x[0] for x in info["samples"]["sweep"]])
         r["hover_costs_no_gpu"] = cs <= 1.5 * cr + 50
         b = info.get("buttons") or {}
         r["min_button_minimizes"] = bool(b.get("min", {}).get("min")) and not b.get("unmin", {}).get("min", True)
@@ -160,7 +171,14 @@ def main() -> bool:
     rig.summary["info"] = info
     print(json.dumps(info, indent=1, default=str)[:2500])
     failed = [k for k, v in r.items() if not v]
-    return verdict(*rig.finish(not failed, "all checks pass" if not failed else f"failed: {', '.join(failed)}"))
+    ok, note = rig.finish(not failed, "all checks pass" if not failed else f"failed: {', '.join(failed)}")
+    # the frame-cost evidence on every run, last before the verdict so a CI log
+    # tail keeps it: every sample hover_costs_no_frames and hover_costs_no_gpu read
+    evidence = {"baseline_fps": info["baseline_fps"], "rest": info["samples"]["rest"],
+                "sweep": info["samples"]["sweep"], "gpu_cpu": info["gpu_cpu"],
+                "best_rest": info["rest"], "best_sweep": info["sweep"]}
+    print("E73 evidence: " + json.dumps(evidence, separators=(",", ":"), default=str), flush=True)
+    return verdict(ok, note)
 
 
 if __name__ == "__main__":

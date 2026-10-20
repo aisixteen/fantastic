@@ -4,7 +4,7 @@ import { isFocusClick } from "../canvas/viewer.ts";
 import { badge, badgeOf, side } from "./agent_index.ts";
 import { fileGrant, kernelBridge, sharedHub } from "./file_bridge.ts";
 import { FilesController, controllers } from "./files_controller.ts";
-import { agentIndex, ensureWalker, filesDeps, getWalker, onRender, rootOf, select } from "./files_deps.ts";
+import { agentIndex, allHidden, ensureWalker, filesDeps, getWalker, onRender, rootOf, select } from "./files_deps.ts";
 import type { Rec } from "./files_deps.ts";
 import { FANTASTIC } from "./paths.ts";
 import { ensureFilesStyle } from "./styles.ts";
@@ -70,6 +70,8 @@ export const filesView: ViewBundle = {
       loaded: boolean;
       elsewhere: boolean;
       cells: string[];
+      /** every cell of it is off its view (#133) */
+      hidden: boolean;
       viewed: boolean;
       fresh: boolean;
       name: string;
@@ -86,6 +88,7 @@ export const filesView: ViewBundle = {
       const sd = page !== undefined ? "page" : host !== undefined ? "host" : side(handler);
       const loaded = rec !== undefined;
       const dn = str(rec, "display_name") ?? info?.displayName ?? "";
+      const cells = loaded ? d.cellsFor(id) : [];
       return {
         id,
         side: sd,
@@ -93,7 +96,8 @@ export const filesView: ViewBundle = {
         handler,
         loaded,
         elsewhere: !loaded && sd === "host" && d.onHost(id) && !d.seenHere(id),
-        cells: loaded ? d.cellsFor(id) : [],
+        cells,
+        hidden: allHidden(cells, d.isHidden),
         viewed: d.viewed() === id,
         fresh: sd === "host" && d.fresh(id),
         name: id,
@@ -139,7 +143,9 @@ export const filesView: ViewBundle = {
       if (a !== null) {
         li.dataset["agent"] = a.id;
         li.classList.add("agent", a.side);
-        if (a.cells.length > 0) li.classList.add("has-cell");
+        // hidden (#133): every cell of it is off its view — shown, it is not "has-cell"
+        if (a.hidden) li.classList.add("hidden");
+        else if (a.cells.length > 0) li.classList.add("has-cell");
         if (a.viewed) li.classList.add("viewed");
         if (a.fresh) li.classList.add("fresh");
         if (a.elsewhere) li.classList.add("elsewhere");
@@ -160,9 +166,11 @@ export const filesView: ViewBundle = {
               ? " · not loaded"
               : a.side === "page"
                 ? ` · double-click: view it · ${fkey}-click: focus it on its canvas`
-                : a.cells.length > 0
-                  ? ` · double-click: view its cell · ${fkey}-click: move to it`
-                  : " · double-click: open it in a cell") +
+                : a.hidden
+                  ? ` · hidden: double-click shows its cell and views it · ${fkey}-click: show it on its view`
+                  : a.cells.length > 0
+                    ? ` · double-click: view its cell · ${fkey}-click: move to it`
+                    : " · double-click: open it in a cell") +
           (path !== null ? ` · ${path}` : "") +
           (o.err !== undefined ? ` — ${o.err}` : "");
         if (!a.elsewhere && a.loaded) {
