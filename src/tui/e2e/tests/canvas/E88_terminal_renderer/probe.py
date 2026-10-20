@@ -66,15 +66,18 @@ DOM_DETAIL = (f"{FRAMES}.map(f=>{{const b=f.querySelector('.frame-body'); return
               " webgl: b.webgl !== undefined, rows: (b.querySelector('.xterm-rows')?.textContent ?? '').trim().length,"
               " canvases: b.querySelectorAll('.xterm-screen canvas').length}})")
 WEBGL_RENDERS = "((globalThis.__fantasticWebgl||{}).renders||0)"
-# the measurement, installed by one evaluation and polled (`window.__lat[mk]`)
+# the measurement, installed by one evaluation and polled: per marker, the
+# first render that shows its echo (`__ren[mk]`) and that render presented, two
+# animation frames later (`__lat[mk]`)
 MEASURE = """(()=>{
 window.__lat = window.__lat || {};
+window.__ren = window.__ren || {};
 window.__measure = (cid, mk) => {
   const f = document.querySelector(`.agent-frame[data-id="${cid}"]`), t = f?.querySelector('.frame-body')?.xterm;
   if (!t) return false;
   const shows = () => { const b = t.buffer.active; for (let i = 0; i < t.rows; i++) { const l = b.getLine(b.viewportY + i); if (l && l.translateToString(true).includes(mk)) return true; } return false; };
   const t0 = performance.now();
-  const d = t.onRender(() => { if (!shows()) return; d.dispose();
+  const d = t.onRender(() => { if (!shows()) return; d.dispose(); window.__ren[mk] = performance.now() - t0;
     requestAnimationFrame(() => requestAnimationFrame(() => { window.__lat[mk] = performance.now() - t0; })); });
   t.input(': ' + mk + '\\r', true);   // the keystrokes, as typed (xterm's onData), in both browsers alike
   return true;
@@ -92,9 +95,15 @@ def step(what: str) -> None:
 FPS = "new Promise(res=>{let n=0;const t=performance.now();const f=()=>{n++; if(performance.now()-t<1000) requestAnimationFrame(f); else res(n)}; requestAnimationFrame(f)})"
 
 
+def stats(v: list[float]) -> dict:
+    v = sorted(v)
+    return {"p50": round(statistics.median(v)), "p95": round(v[int(len(v) * 0.95) - 1]), "max": round(v[-1])}
+
+
 async def measure(page, cids: list[str]) -> dict:
-    """ROUNDS × the terminals, GAP_S apart: each sample's keystroke → the render
-    that shows its echo (+2 frames). One unanswered after UNANSWERED_MS counts as
+    """ROUNDS × the terminals, GAP_S apart: each sample's keystroke → the first
+    render that shows its echo (`render`), and → that render presented, two
+    frames later (p50/p95/max). One unanswered after UNANSWERED_MS counts as
     that. And one 1 s frame-rate sample."""
     await page.js(MEASURE)
     sent: list[tuple[str, float]] = []
@@ -105,20 +114,21 @@ async def measure(page, cids: list[str]) -> dict:
                 raise RuntimeError(f"no terminal {cid} to measure")
             sent.append((mk, time.time()))
             await asyncio.sleep(GAP_S)
-    got: dict[str, float] = {}
+    got: dict[str, tuple[float, float]] = {}
     while len(got) < len(sent):
-        lat = await page.js("window.__lat") or {}
+        seen = await page.js("[window.__ren, window.__lat]") or [{}, {}]
+        ren, lat = seen[0] or {}, seen[1] or {}
         for mk, at in sent:
             if mk in got:
                 continue
             if mk in lat:
-                got[mk] = float(lat[mk])
+                got[mk] = (float(ren[mk]), float(lat[mk]))
             elif time.time() - at > UNANSWERED_MS / 1000:
-                got[mk] = UNANSWERED_MS
+                got[mk] = (UNANSWERED_MS, UNANSWERED_MS)
         await asyncio.sleep(0.05)
-    v = sorted(got[mk] for mk, _ in sent)
+    v = [got[mk][1] for mk, _ in sent]
     fps = await page.js(FPS)
-    return {"p50": round(statistics.median(v)), "p95": round(v[int(len(v) * 0.95) - 1]), "max": round(v[-1]), "n": len(v),
+    return {**stats(v), "render": stats([got[mk][0] for mk, _ in sent]), "n": len(v),
             "unanswered": sum(1 for x in v if x >= UNANSWERED_MS), "fps": fps}
 
 
@@ -220,7 +230,10 @@ def main() -> bool:
                 r["the setting persists on the view"] = info["3_disk"] == "dom" and info["5_disk"] == "auto"
                 chrome["auto"] = chrome["webgl"]
                 r["every Chrome-lane sample answered"] = all(chrome[k]["unanswered"] == 0 for k in ("webgl", "dom"))
-                r[f"Chrome auto p95 ≤ {P95_MS:g} ms"] = chrome["auto"]["p95"] <= P95_MS
+                # the ABSOLUTE bound is on keystroke → the render that shows the
+                # echo: the two frames the presented mark adds are the runner's
+                # frame rate (100–200 ms at Windows CI's 10 fps), not the input path
+                r[f"Chrome auto keystroke → render p95 ≤ {P95_MS:g} ms"] = chrome["auto"]["render"]["p95"] <= P95_MS
                 step('chrome: the flag path')
                 # 6: the flag path
                 await pg.cdp("Page.addScriptToEvaluateOnNewDocument", source=SHELL)
@@ -270,10 +283,12 @@ def main() -> bool:
                 gtk["webgl"] = await measure(wk, CIDS)
                 info["9_back"] = await view({"type": "terminal_renderer", "name": "auto"})
                 await wk.until(ON("dom"), 10)
-                r[f"WebKitGTK auto p95 ≤ {P95_MS:g} ms"] = gtk["auto"]["p95"] <= P95_MS
+                r[f"WebKitGTK auto keystroke → render p95 ≤ {P95_MS:g} ms"] = gtk["auto"]["render"]["p95"] <= P95_MS
+                # the RELATIVE bound keeps the presented mark: a slow presentation
+                # path is WebKitGTK's risk, measured against Chrome on the same runner
                 bound = 1.5 * table["chrome"]["auto"]["p95"] + 20
                 info["webkitgtk_vs_chrome_bound_ms"] = bound
-                r["WebKitGTK auto p95 ≤ 1.5 × Chrome auto p95 + 20 ms"] = gtk["auto"]["p95"] <= bound
+                r["WebKitGTK auto presented p95 ≤ 1.5 × Chrome auto presented p95 + 20 ms"] = gtk["auto"]["p95"] <= bound
                 info["webkitgtk_misses"] = wk.misses[-6:]
             finally:
                 step('webkitgtk: closing')
@@ -288,7 +303,7 @@ def main() -> bool:
     rig.summary["info"] = info
     failed = [k for k, v in r.items() if not v]
     # the latency table in the verdict line: a CI log keeps it, pass or fail
-    lat = " · ".join(f"{lane} {k} p50/p95 {m['p50']}/{m['p95']} ms {m['fps']} fps"
+    lat = " · ".join(f"{lane} {k} render p50/p95 {m['render']['p50']}/{m['render']['p95']}, presented p50/p95 {m['p50']}/{m['p95']} ms, {m['fps']} fps"
                      for lane, rows in table.items() for k, m in rows.items() if k != "auto")
     note = f"{len(r) - len(failed)}/{len(r)} pass" + ("" if not failed else f" — failed: {'; '.join(failed)}") + (f" — {lat}" if lat else "")
     return verdict(*rig.finish(bool(r) and not failed, note))
