@@ -6,8 +6,13 @@ import { grantViewLists, registerCanvas } from "../src/bundles/canvas/canvas_age
 import { registerLayout } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
 import { awaitGrant, bindCellToView, changeOf, isRefusal, onStateFrame, openViewAgent, release, routeOf, routedBridge, servedOf } from "../src/bundles/files/file_bridge.ts";
-import type { Served } from "../src/bundles/files/file_bridge.ts";
-import { FakeBridge } from "./fake_bridge.ts";
+import type { Refusal, Served } from "../src/bundles/files/file_bridge.ts";
+import { filesView } from "../src/bundles/files/files_view.ts";
+import { setFilesDeps } from "../src/bundles/files/files_deps.ts";
+import { previewView } from "../src/bundles/preview/preview_view.ts";
+import type { ViewContext, ViewHandle } from "../src/bundles/view.ts";
+import { installDom, stub } from "./dom_stub.ts";
+import { FakeBridge, settle } from "./fake_bridge.ts";
 import { project } from "./rig.ts";
 
 // #150: the page's file and folder agents. A path a view agent serves goes to that
@@ -28,6 +33,9 @@ function bridgeKernel(b: FakeBridge): Kernel {
   k.bridge = {
     forward: async (t: string, p: Payload) => (await (t.startsWith("view:") ? b.viewCall(t, p as Dict) : b.call(p as Dict))) as never,
     subscribeState: b.subscribeState,
+    // a view's `changed` events: the fake relays none, so there is nothing to subscribe
+    watchRemote: () => {},
+    unwatchRemote: () => {},
   } as unknown as Kernel["bridge"];
   return k;
 }
@@ -286,6 +294,125 @@ test("a grant the host refuses is the page's refusal, and says why", async () =>
   assert.equal(bound.ok ? "" : (bound.refusal as Dict)["error"], "reach: `user`.can_call: refused");
 });
 
+// #153: the host's word on a grant and the page's probe race; every order settles.
+
+test("a grant the state stream reports before the probe's refused reply is heard: the cell opens", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.pendingGrants = 1;
+  b.grantWord = "before"; // the stream's task ran first: `granted` lands while the probe is out
+  const bound = await bindCellToView(k, "file", "docs/a.md", first.view, () => {});
+  assert.deepEqual(bound, { ok: true, view: first.view });
+});
+
+test("a grant refusal reported before the probe's refused reply is the page's refusal", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.pendingGrants = 1;
+  b.grantWord = "before";
+  b.grantRefusal = "reach: `user`.can_call: refused";
+  const bound = await bindCellToView(k, "file", "docs/a.md", first.view, () => {});
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "grant_refused");
+});
+
+test("a grant refusal reported before the wait began is remembered, and answers it", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.emitState({ kind: "grant_refused", agent_id: first.view, error: "reach: refused" });
+  b.pendingGrants = 1;
+  b.grantWord = "never"; // the host has said its word; it will not say it again
+  const bound = await bindCellToView(k, "file", "docs/a.md", first.view, () => {});
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["error"], "reach: refused");
+});
+
+test("a grant reported before the wait, yet the probe is still refused: the probe's refusal stands", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.emitState({ kind: "granted", agent_id: first.view });
+  b.pendingGrants = 1;
+  b.grantWord = "never";
+  const bound = await bindCellToView(k, "file", "docs/a.md", first.view, () => {});
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unauthorized");
+});
+
+test("a restored cell whose view is refused settles at once: no `added` will come for it", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const first = await openViewAgent(bridgeKernel(b), "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  // a fresh page: the cell carries its saved view_agent, which the host never announces again
+  const reloaded = bridgeKernel(b);
+  b.pendingGrants = 1;
+  b.grantWord = "never";
+  const bound = await bindCellToView(reloaded, "file", "docs/a.md", first.view, () => {});
+  assert.equal(bound.ok, false);
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unauthorized");
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["side"], "egress");
+});
+
+test("a view removed while its grant is owed settles the wait, said", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.pendingGrants = 1;
+  b.grantWord = "never";
+  let out: Refusal | null | undefined;
+  void awaitGrant(k, first.view).then((r) => (out = r));
+  await settle();
+  assert.equal(out, undefined, "owed: still waiting");
+  b.emitState({ kind: "removed", agent_id: first.view });
+  await settle();
+  assert.equal((out as Refusal | undefined)?.reason, "removed");
+});
+
+test("a removed view's word is forgotten: a later refusal is the probe's, not the old word", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  b.emitState({ kind: "grant_refused", agent_id: first.view, error: "reach: refused" });
+  b.emitState({ kind: "removed", agent_id: first.view });
+  b.pendingGrants = 1;
+  b.grantWord = "never";
+  const r = await awaitGrant(k, first.view);
+  assert.equal(r?.reason, "unauthorized");
+});
+
+test("a refusal that is not a missing grant is returned at once, not waited for", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const bound = await bindCellToView(k, "file", "docs/a.md", "view:file:gone", () => {});
+  assert.equal(bound.ok, false);
+  assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unknown_agent");
+});
+
+test("awaitGrant returns null straight away when the view answers", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  const seen = spyViews(b);
+  assert.equal(await awaitGrant(k, first.view), null);
+  assert.deepEqual(seen, [first.view], "one probe, no wait");
+});
+
 test("a file dropped while its view is refused makes no cell, and the refusal is the answer", async () => {
   const b = new FakeBridge();
   project(b);
@@ -337,4 +464,46 @@ test("releasing a path nothing holds is a no-op", () => {
   const k = bridgeKernel(new FakeBridge());
   release(k, "never/served.md", "nobody");
   assert.equal(routeOf(servedOf(k), { type: "read", path: "never/served.md" }), null);
+});
+
+// ─── A CELL'S UNMOUNT lets go of the path it held (#153) ─────────────────────
+
+test("a preview and a tree bound to their views release their served paths when they unmount", async () => {
+  installDom();
+  setFilesDeps({
+    hostAgents: async () => [],
+    hostRecords: () => [],
+    pageAgents: () => [],
+    seenHere: () => false,
+    onHost: () => false,
+    cellsFor: () => [],
+    isHidden: () => false,
+    moveTo: () => {},
+    view: () => {},
+    viewed: () => "",
+    mac: false,
+    open: () => {},
+    fresh: () => false,
+    freshIds: () => [],
+    deleteAgent: () => {},
+    mountAgentView: async () => ({ unmount: () => {} }),
+  });
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const file = await openViewAgent(k, "file", "docs/a.md");
+  const folder = await openViewAgent(k, "folder", "src");
+  assert.ok(!isRefusal(file) && !isRefusal(folder));
+  const ctx = (selfId: string, record: Dict): ViewContext =>
+    ({ kernel: k, mount: stub(), selfId, backend: "files", record, close: () => {} }) as unknown as ViewContext;
+  const preview = (await previewView.mount(ctx("pv_1", { pinned: "docs/a.md", follow: false, view_agent: file.view }))) as ViewHandle;
+  const tree = (await filesView.mount(ctx("tree_1", { root: "src", view_agent: folder.view }))) as ViewHandle;
+  await settle();
+  assert.equal(servedOf(k).get("docs/a.md")?.view, file.view, "the preview is its file's view");
+  assert.equal(servedOf(k).get("src")?.view, folder.view, "the tree is its folder's view");
+  preview.unmount();
+  assert.equal(servedOf(k).has("docs/a.md"), false, "the preview let its file go");
+  assert.equal(servedOf(k).get("src")?.view, folder.view, "the tree still holds its folder");
+  tree.unmount();
+  assert.equal(servedOf(k).size, 0, "nothing is served once both are gone");
 });

@@ -26,8 +26,12 @@ export class FakeBridge implements FileBridge {
   private listener: ((ev: Dict) => void) | null = null;
   /** how many of the page's calls to a new view the host still refuses, as an egress
    *  `unauthorized`, before its grant lands: the host announces the grant on the state
-   *  stream just after the first such refusal (the race `awaitGrant` waits out) */
+   *  stream with the first such refusal (the race `awaitGrant` waits out) */
   pendingGrants = 0;
+  /** when that announcement reaches the page: a macrotask after the refused reply, before
+   *  the reply (the stream's task ran first), or never (a view that is not `added` again:
+   *  a restored cell's) */
+  grantWord: "after" | "before" | "never" = "after";
   /** when set, the host refuses the grant and announces that, rather than granting */
   grantRefusal: string | null = null;
   private stateListener: ((frame: Dict) => void) | null = null;
@@ -187,8 +191,9 @@ export class FakeBridge implements FileBridge {
     if (v === undefined) return { error: `no agent ${view}`, reason: "unknown_agent" };
     if (this.pendingGrants > 0) {
       this.pendingGrants -= 1;
-      // the host answers after its reply, as it does: a macrotask later
-      setTimeout(() => this.emitState(this.grantRefusal === null ? { kind: "granted", agent_id: view } : { kind: "grant_refused", agent_id: view, error: this.grantRefusal }), 0);
+      const word = (): void => this.emitState(this.grantRefusal === null ? { kind: "granted", agent_id: view } : { kind: "grant_refused", agent_id: view, error: this.grantRefusal });
+      if (this.grantWord === "after") setTimeout(word, 0);
+      else if (this.grantWord === "before") word();
       return { error: `page may not call ${String(p["type"])} on ${view}`, reason: "unauthorized", side: "egress" };
     }
     const own = v.path;

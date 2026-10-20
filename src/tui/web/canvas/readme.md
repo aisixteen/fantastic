@@ -41,7 +41,10 @@ bundles, seeds an empty tree with the canvas root, and mounts.
   (`bindCellToView`): its view is named on the cell, and the page waits for its grant
   on the view before the first read (`awaitGrant`: the host grants it after `open_view`
   answers, and says so on the state stream as `granted`, or `grant_refused` with why; no
-  timeout and no probe loop). A refusal is said in the cell, which stays open. A cell holds the path it
+  timeout and no probe loop). The page listens before it probes and remembers each word,
+  so either order settles; a restored cell's view, which the host never announces
+  again, is refused at once rather than waited on. A refusal is said in the cell, which
+  stays open. A cell holds the path it
   serves: when it unmounts the path is released, and a view the state stream reports
   removed releases every path it serves (`release`, `onStateFrame`).
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is

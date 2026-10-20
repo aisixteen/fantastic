@@ -438,65 +438,111 @@ function unlisten(s: ViewSet, src: string): void {
 
 /** What the host's grant watch has said about each agent, on the state stream
  *  (`reach.rs` `announce`): `granted` once the page's grant is written, `grant_refused`
- *  with why it was not. The waiters are the page's calls still held for one. */
+ *  with why it was not. The watch says it once per view, on the view's `added`; the page's
+ *  calls and the state stream are separate tasks on the host, so a word may come before
+ *  or after a call's reply. The board remembers each word, and the views still owed one. */
 interface GrantBoard {
-  readonly waiting: Map<string, Array<(r: Refusal | null) => void>>;
+  /** the host's word on each view: null once granted, else why it was refused */
+  readonly said: Map<string, Refusal | null>;
+  /** the views this page made (`open_view` answered `created`): only for these is a word
+   *  sure to come, and they are owed until it does */
+  readonly owed: Set<string>;
+  /** the page's calls listening for a view's word */
+  readonly waiting: Map<string, Set<(r: Refusal | null) => void>>;
 }
 
 const boards = new WeakMap<Kernel, GrantBoard>();
 
-/** The page's grant board, listening on the state stream from its first use. A refusal
- *  is only ever seen before its grant is written, so the event that settles a waiter is
- *  always one that arrives after the refused reply. */
+/** The page's grant board, listening on the state stream from its first use. */
 function grantBoard(kernel: Kernel): GrantBoard {
   const had = boards.get(kernel);
   if (had !== undefined) return had;
-  const board: GrantBoard = { waiting: new Map() };
+  const board: GrantBoard = { said: new Map(), owed: new Set(), waiting: new Map() };
   boards.set(kernel, board);
   kernel.subscribeState((frame) => {
     const id = frame["agent_id"];
     if (typeof id !== "string") return;
     const kind = frame["kind"];
-    if (kind !== "granted" && kind !== "grant_refused") return;
-    const why = frame["error"];
-    const verdict: Refusal | null =
-      kind === "granted" ? null : { error: typeof why === "string" ? why : `the host refused the grant on ${id}`, reason: "grant_refused" };
-    const waiters = board.waiting.get(id) ?? [];
+    let verdict: Refusal | null;
+    if (kind === "granted") verdict = null;
+    else if (kind === "grant_refused") {
+      const why = frame["error"];
+      verdict = { error: typeof why === "string" ? why : `the host refused the grant on ${id}`, reason: "grant_refused" };
+    } else if (kind === "removed") {
+      // a view deleted: its word is forgotten, and one still owed will not come
+      board.said.delete(id);
+      if (!board.owed.has(id)) return;
+      verdict = { error: `${id} was removed before the host granted it`, reason: "removed" };
+    } else return;
+    if (kind !== "removed") board.said.set(id, verdict);
+    board.owed.delete(id);
+    const waiters = board.waiting.get(id) ?? new Set();
     board.waiting.delete(id);
     for (const w of waiters) w(verdict);
   });
   return board;
 }
 
-/** The page waits for its grant on a view it has just been given: `reflect` once, and
- *  when the host refuses it as a missing egress grant, the host's `granted` or
- *  `grant_refused` for that view, whichever comes. Any other refusal is returned at once.
- *  Null once the page may reach the view. The host grants on the view's `added`
- *  (`reach.rs` `start`), so the event arrives after `open_view` has answered; there is
- *  no timeout, because the host always answers for a view it made. */
+/** The page waits for its grant on a view: `reflect` once, and when the host refuses it
+ *  as a missing egress grant, the host's word on that view. Null once the page may reach
+ *  the view; any other refusal is returned at once. The page listens BEFORE it probes, so
+ *  a word that comes while the probe is out is heard, and one that came earlier is on the
+ *  board. Only a view the host still owes a word for is waited on: a restored cell's view
+ *  is never `added` again, so its refusal is returned. No timeout: the host always says
+ *  its word on a view it made. */
 export async function awaitGrant(kernel: Kernel, view: string): Promise<Refusal | null> {
   const board = grantBoard(kernel);
-  const r = (await kernel.callHost(view, { type: "reflect" } as Payload)) as Record<string, unknown>;
-  if (!isRefusal(r)) return null;
-  if (!(r["reason"] === "unauthorized" && r["side"] === "egress")) return r;
-  return new Promise<Refusal | null>((done) => {
-    board.waiting.set(view, [...(board.waiting.get(view) ?? []), done]);
+  const before = board.said.get(view);
+  let heard: { verdict: Refusal | null } | undefined;
+  let listen: (r: Refusal | null) => void = () => {};
+  const word = new Promise<Refusal | null>((done) => {
+    listen = (r) => {
+      heard = { verdict: r };
+      done(r);
+    };
   });
+  const mine = board.waiting.get(view) ?? new Set();
+  mine.add(listen);
+  board.waiting.set(view, mine);
+  const stop = (): void => {
+    mine.delete(listen);
+    if (mine.size === 0 && board.waiting.get(view) === mine) board.waiting.delete(view);
+  };
+  const r = (await kernel.callHost(view, { type: "reflect" } as Payload)) as Record<string, unknown>;
+  if (!isRefusal(r) || !(r["reason"] === "unauthorized" && r["side"] === "egress")) {
+    stop();
+    return isRefusal(r) ? r : null;
+  }
+  // the word came while the probe was out: it is newer than the probe's refusal
+  if (heard !== undefined) return heard.verdict;
+  // the word came before: a refusal says why; a grant the probe still met refused
+  // leaves the probe's refusal standing
+  if (before !== undefined) {
+    stop();
+    return before ?? r;
+  }
+  if (board.owed.has(view)) return word;
+  stop();
+  return r;
 }
 
 /** `open_view` on the bridge: the view agent of `path` — reused when one exists, made
  *  otherwise — served on this page. A refusal (the path is not exposed, say) is returned
  *  as it is. The page's grant on the view is awaited by the cell that reads it
- *  (`bindCellToView`), not here: this runs inside a handler, whose own grant decides. */
+ *  (`bindCellToView`), not here: this runs inside a handler, whose own grant decides. A
+ *  view it made is owed the host's word on its grant; the board listens before the call,
+ *  so a word that beats the reply is kept. */
 export async function openViewAgent(
   kernel: Kernel,
   kind: ViewKind,
   path: string,
 ): Promise<{ view: string; created: boolean } | Refusal> {
+  const board = grantBoard(kernel);
   const r = (await kernelBridge(kernel).call({ type: "open_view", kind, path: wire(norm(path)) })) as Record<string, unknown>;
   if (isRefusal(r)) return r;
   const id = r["id"];
   if (typeof id !== "string") return { error: `open_view ${path}: the reply names no view`, reason: "bad_reply" };
+  if (r["created"] === true) board.owed.add(id);
   route(kernel, kind, path, id);
   return { view: id, created: r["created"] === true };
 }
@@ -505,8 +551,9 @@ export async function openViewAgent(
  *  `view_agent`: that agent serves it again, as it did. A cell saved before views (none)
  *  gets the view of its path, made or reused, and `record` names it on the cell. Either
  *  way the page waits for its grant on the view (`awaitGrant`), so the cell's first reads
- *  are not refused in the gap. A refusal is returned for the cell to show; the cell itself
- *  stays open, and its reads are the view's, so they are refused and shown too. */
+ *  are not refused in the gap; a saved view the host has no word to come on (a restored
+ *  cell's, refused) is refused at once. A refusal is returned for the cell to show; the
+ *  cell itself stays open, and its reads are the view's, so they are refused and shown too. */
 export async function bindCellToView(
   kernel: Kernel,
   kind: ViewKind,
