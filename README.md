@@ -185,7 +185,12 @@ The `.deb` installs `/usr/bin/fantastic-app` and `/usr/bin/fantastic`, with
 `Depends: libwebkit2gtk-4.1-0, libgtk-3-0` and `Recommends: fonts-dejavu-core`.
 On a minimal system installed with `--no-install-recommends` (the kiosk), add
 `fonts-dejavu-core` and `libgl1-mesa-dri`; `fantastic-app --kiosk` then runs it
-fullscreen, with no desktop environment.
+fullscreen, with no desktop environment. The session must set `SHELL`, as a
+login does: the app starts each canvas in the login environment `$SHELL` prints.
+
+The AppImage carries GTK and WebKit but, like every AppImage, takes the
+graphics and text stack from the host: a desktop has it; on a bare system
+install `libgtk-3-0t64 libegl1 libgles2 libgl1-mesa-dri` (Ubuntu 24.04 names).
 
 Verify before you install:
 

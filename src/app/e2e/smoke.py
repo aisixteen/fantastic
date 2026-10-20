@@ -18,14 +18,23 @@ AppImage's runtime): the host's run file must then name a descendant of it.
 4. The canvas is still alive and answers; then it is stopped (SIGTERM, or
    `taskkill /T /F` on Windows).
 
-Prints `SMOKE: PASS` or `SMOKE: FAIL: <why>` (exit 1) with the app's output.
+Prints `SMOKE: PASS` or `SMOKE: FAIL: <why>` (exit 1). A failure also prints,
+while the app still runs: the home's state for alpha (its row and the home's
+problem, asked over the home's socket as the Home page asks), the tail of each
+launch log in `<home>/logs/`, the `fantastic*` files beside the app's
+executable, and the app's own output.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import os
+import secrets
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -151,6 +160,104 @@ def stop_hard(pid: int) -> None:
             pass
 
 
+def ws_call(port: int, target: str, payload: dict, timeout: float = 10) -> dict:
+    """One call over the home's socket (`user.forward`, as the Home page makes
+    it): a minimal stdlib WebSocket client, text frames only."""
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
+        key = base64.b64encode(secrets.token_bytes(16)).decode()
+        s.sendall(
+            (
+                f"GET /user/ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+                f"Origin: http://127.0.0.1:{port}\r\n\r\n"
+            ).encode()
+        )
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                raise OSError("the socket closed during the handshake")
+            buf += chunk
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise OSError(head.split(b"\r\n", 1)[0].decode(errors="replace"))
+        call_id = secrets.token_hex(6)
+        body = {"type": "forward", "target": target, "payload": payload}
+        data = json.dumps({"type": "call", "target": "user", "payload": body, "id": call_id}).encode()
+        mask = secrets.token_bytes(4)
+        n = len(data)
+        hdr = bytes([0x81]) + (bytes([0x80 | n]) if n < 126 else bytes([0x80 | 126]) + struct.pack(">H", n))
+        s.sendall(hdr + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+        def need(k: int) -> bytes:
+            nonlocal buf
+            while len(buf) < k:
+                chunk = s.recv(65536)
+                if not chunk:
+                    raise OSError("the socket closed")
+                buf += chunk
+            out, buf = buf[:k], buf[k:]
+            return out
+
+        message = b""
+        while True:
+            b0, b1 = need(2)
+            n = b1 & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", need(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", need(8))[0]
+            part = need(n)
+            if b0 & 0x0F in (0x1, 0x0):
+                message += part
+                if b0 & 0x80:
+                    m = json.loads(message)
+                    message = b""
+                    if m.get("type") in ("reply", "error") and m.get("id") == call_id:
+                        return m.get("data", m)
+            elif b0 & 0x0F == 0x8:
+                raise OSError("the socket closed")
+
+
+def diagnose(home: Path, alpha: Path, app_exe: Path | None) -> None:
+    """What a failed smoke prints while the app still runs."""
+    print("--- the home's state for alpha ---", flush=True)
+    h = flat_yaml(home / "app" / "home.yaml")
+    if not h or not isinstance(h.get("port"), int):
+        print(f"(no run file at {home / 'app' / 'home.yaml'})", flush=True)
+    else:
+        try:
+            state = ws_call(h["port"], "home", {"type": "list"})
+            want = {str(alpha), os.path.realpath(alpha)}
+            rows = [
+                r for r in state.get("rows", []) if r.get("path") in want or str(r.get("id", "")).endswith(str(alpha))
+            ]
+            rest = {k: v for k, v in state.items() if k != "rows"}
+            print(json.dumps({"alpha's rows": rows, "the home": rest}, indent=1)[:6000], flush=True)
+        except (OSError, ValueError) as e:
+            print(f"(the home did not answer: {e})", flush=True)
+    for f in sorted((home / "logs").glob("*.log")):
+        print(f"--- {f} (tail) ---", flush=True)
+        print(f.read_text(errors="replace")[-1500:] or "(empty)", flush=True)
+    if app_exe:
+        print(f"--- fantastic* beside {app_exe} ---", flush=True)
+        for f in sorted(app_exe.parent.glob("fantastic*")):
+            print(f"{f.stat().st_size:>12}  {f}", flush=True)
+
+
+def exe_of(pid: int, command: list[str]) -> Path | None:
+    """The app's executable: from /proc on Linux, `ps` on macOS, the command on Windows."""
+    if LINUX:
+        try:
+            return Path(os.readlink(f"/proc/{pid}/exe"))
+        except OSError:
+            return None
+    if not WINDOWS:
+        got = ps(pid, "comm")
+        return Path(got) if got else None
+    return Path(command[-1])
+
+
 def smoke(root: Path, command: list[str], log: Path) -> None:
     home = root / "home"
     alpha = root / "alpha"
@@ -163,6 +270,7 @@ def smoke(root: Path, command: list[str], log: Path) -> None:
     with open(log, "wb") as out:
         launched = subprocess.Popen([*command, str(alpha)], env=env, stdout=out, stderr=subprocess.STDOUT)
     started: list[int] = []
+    app_exe: Path | None = None
     try:
         say("1. the host's run file names the app, and its url answers")
 
@@ -175,6 +283,7 @@ def smoke(root: Path, command: list[str], log: Path) -> None:
         h = until(f"the run file {run_file}", host, 60)
         app_pid = h["pid"]
         started.append(app_pid)
+        app_exe = exe_of(app_pid, command)
         if WINDOWS:
             if app_pid != launched.pid:
                 raise Fail(f"the run file names pid {app_pid}, the app is {launched.pid}")
@@ -224,6 +333,9 @@ def smoke(root: Path, command: list[str], log: Path) -> None:
         else:
             os.kill(c["pid"], signal.SIGTERM)
         until("the canvas gone", lambda: not pid_alive(c["pid"]), 20)
+    except Fail:
+        diagnose(home, alpha, app_exe)
+        raise
     finally:
         for pid in started:
             if pid_alive(pid):
