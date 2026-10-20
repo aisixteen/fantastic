@@ -143,6 +143,44 @@ def quit_app(pid: int) -> None:
         u32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
 
 
+# WebView2's per-app override of its browser arguments, read when its browser
+# process starts (CreateCoreWebView2EnvironmentWithOptions): value name the
+# exe's file name, data the arguments, appended to the app's own.
+WEBVIEW2_POLICY = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+_POLICY_KEYS = ("Software\\Policies\\Microsoft", "Software\\Policies\\Microsoft\\Edge", "Software\\Policies\\Microsoft\\Edge\\WebView2", WEBVIEW2_POLICY)
+_policy_created: list[str] = []
+
+
+def policy_set(exe: str, browser_args: str) -> None:
+    """HKCU's WebView2 override for `exe`, remembering each key this run creates."""
+    import winreg
+
+    for key in _POLICY_KEYS:
+        try:
+            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, key))
+        except FileNotFoundError:
+            winreg.CloseKey(winreg.CreateKey(winreg.HKEY_CURRENT_USER, key))
+            _policy_created.append(key)
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WEBVIEW2_POLICY, 0, winreg.KEY_SET_VALUE) as k:
+        winreg.SetValueEx(k, exe, 0, winreg.REG_SZ, browser_args)
+
+
+def policy_clear(exe: str) -> None:
+    """Remove `exe`'s override and the keys this run created (deepest first)."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WEBVIEW2_POLICY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.DeleteValue(k, exe)
+    except FileNotFoundError:
+        pass
+    while _policy_created:
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, _policy_created.pop())
+        except OSError:
+            break
+
+
 def exit_status(code: int | None) -> str:
     """How a process ended, as a person reads it (a Windows NTSTATUS in hex)."""
     if code is None:
@@ -319,6 +357,7 @@ class WebDriver:
         # Windows: the app this run launched, and where its output goes
         self.proc: subprocess.Popen | None = None
         self.app_env: dict[str, str] = {}
+        self.browser_args = ""
 
     def req(self, method: str, path: str, body: dict | None = None, timeout: float = 120):
         data = None if body is None else json.dumps(body).encode()
@@ -351,25 +390,35 @@ class WebDriver:
     def launch(self, app: Path, args: list[str]) -> str:
         """Windows: start the app with exactly `args`, its WebView2 on a debugger
         port, and return that port's address for msedgedriver to attach to:
-        msedgedriver then launches nothing and adds no argv of its own."""
+        msedgedriver then launches nothing and adds no argv of its own.
+
+        The port reaches WebView2 through the per-app registry override
+        (WEBVIEW2_POLICY): the WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS variable
+        never reached the browser process through Tauri (run 39330272032: its
+        command line had wry's arguments and not ours). WebView2 reads the
+        registry only when no WEBVIEW2_* override variable is set, so the app
+        gets none. The value is removed once the browser has started (it is
+        read only then) and again in `end()`."""
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        env = {
-            **self.run.env,
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": f"--remote-debugging-port={port} --enable-logging",
-            "TAURI_WEBVIEW_AUTOMATION": "true",
-        }
+        env = {k: v for k, v in self.run.env.items() if not k.upper().startswith("WEBVIEW2_")}
+        env["TAURI_WEBVIEW_AUTOMATION"] = "true"
+        self.browser_args = f"--remote-debugging-port={port} --enable-logging"
         self.app_env = {k: v for k, v in env.items() if k.upper().startswith(("WEBVIEW2_", "TAURI_"))}
-        out = open(self.run.root / "app.out", "a")
-        self.proc = subprocess.Popen([str(app), *args], env=env, stdout=out, stderr=subprocess.STDOUT)
-        self.run.pids.add(self.proc.pid)
-        end = time.monotonic() + 60
-        while not http_ok(f"http://127.0.0.1:{port}/json/version"):
-            code = self.proc.poll()
-            need(code is None, f"the app exited {exit_status(code)} before its WebView2 served port {port}; argv {args}")
-            need(time.monotonic() < end, f"no WebView2 on port {port} within 60 s; argv {args}")
-            time.sleep(0.25)
+        policy_set(app.name, self.browser_args)
+        try:
+            out = open(self.run.root / "app.out", "a")
+            self.proc = subprocess.Popen([str(app), *args], env=env, stdout=out, stderr=subprocess.STDOUT)
+            self.run.pids.add(self.proc.pid)
+            end = time.monotonic() + 60
+            while not http_ok(f"http://127.0.0.1:{port}/json/version"):
+                code = self.proc.poll()
+                need(code is None, f"the app exited {exit_status(code)} before its WebView2 served port {port}; argv {args}")
+                need(time.monotonic() < end, f"no WebView2 on port {port} within 60 s; argv {args}")
+                time.sleep(0.25)
+        finally:
+            policy_clear(app.name)
         return f"127.0.0.1:{port}"
 
     def url(self) -> str:
@@ -404,6 +453,8 @@ class WebDriver:
         # an attached driver leaves the app running: the run that launched it ends it
         if self.proc is not None and self.proc.poll() is None:
             kill(self.proc.pid)
+        if WINDOWS:
+            policy_clear(self.run.app.name)
 
 
 SHELL_JS = """const f = globalThis.__FANTASTIC_SHELL__;
@@ -443,6 +494,7 @@ async def webdriver(run: Run, args: argparse.Namespace) -> None:
             say(f"the app, launched by this run (pid {wd.proc.pid}): {exit_status(wd.proc.poll())}")
             print(tail(run.root / "app.out"), flush=True)
             say(f"the app's WEBVIEW2_* and TAURI_* environment: {wd.app_env}")
+            say(f"the WebView2 registry override it was launched with: {WEBVIEW2_POLICY}\\{wd.run.app.name} = {wd.browser_args!r}")
             data = Path(os.environ["LOCALAPPDATA"]) / APP_ID
             say(f"the app's data dir ({data}), two levels:")
             print(listing(data, 2), flush=True)
