@@ -246,6 +246,58 @@ test("a pending call rejects when its socket drops", async () => {
   bridge.close();
 });
 
+test("a socket closing under calls logs which were in flight (target and verb, no payload), once", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+    maxReconnectDelay: 5,
+  });
+  const logged: string[] = [];
+  const orig = console.error;
+  console.error = (m: unknown) => void logged.push(String(m));
+  try {
+    const a = bridge.forward("kernel_state", { type: "slow", secret_text: "hunter2" });
+    const b = bridge.forward("kernel_state", { type: "other" });
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    fk.forEndpoint("kernel_state")[0]!.drop();
+    await assert.rejects(a, /disconnected/);
+    await assert.rejects(b, /disconnected/);
+  } finally {
+    console.error = orig;
+    bridge.close();
+  }
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /kernel_state slow/);
+  assert.match(logged[0]!, /kernel_state other/);
+  assert.ok(!logged[0]!.includes("hunter2"));
+});
+
+test("a drop with nothing in flight, and close(), log nothing", async () => {
+  const fk = fakeFactory();
+  const k = kernelWithRoot();
+  const bridge = new WsBridge(k, {
+    origin: "ws://host",
+    controlEndpoint: "kernel_state",
+    makeSocket: fk.factory,
+    maxReconnectDelay: 5,
+  });
+  const logged: string[] = [];
+  const orig = console.error;
+  console.error = (m: unknown) => void logged.push(String(m));
+  try {
+    const p = bridge.forward("kernel_state", { type: "slow" });
+    await until(() => (fk.forEndpoint("kernel_state")[0]?.lastCall() ?? undefined) !== undefined);
+    bridge.close(); // our own close rejects "closed", not a drop
+    await assert.rejects(p, /closed/);
+  } finally {
+    console.error = orig;
+  }
+  assert.deepEqual(logged, []);
+});
+
 // ─── the wire id IS the execution id ────────────────────────────────────────
 
 test("two bridges mint DISJOINT correlator ids — a second tab must not collide", async () => {

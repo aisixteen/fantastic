@@ -49,6 +49,9 @@ export interface BridgeOptions {
 interface Pending {
   resolve: (value: Json) => void;
   reject: (err: Error) => void;
+  /** Who and what the call was for, kept only to say what a drop cut off. */
+  target: string;
+  verb: string;
 }
 
 /** One auto-reconnecting socket to `/<endpoint>/ws`; its events are `endpoint`'s. */
@@ -150,6 +153,7 @@ class Conn {
     };
     ws.onclose = () => {
       this.connected = false;
+      this.reportInFlight();
       this.rejectAll(new Error("disconnected"));
       for (const l of this.lifecycle) {
         try {
@@ -208,6 +212,14 @@ class Conn {
     }
   }
 
+  /** A socket closing under calls in flight: say which ones (target and verb,
+   *  never the payload), once, so a page's console shows what the drop cut off. */
+  private reportInFlight(): void {
+    if (this.pending.size === 0) return;
+    const calls = [...this.pending.values()].map((p) => `${p.target} ${p.verb}`);
+    error(`bridge ${this.endpoint}: socket closed with ${calls.length} call(s) in flight: ${calls.join(", ")}`);
+  }
+
   private rejectAll(err: Error): void {
     const snapshot = [...this.pending.values()];
     this.pending.clear();
@@ -228,7 +240,8 @@ class Conn {
     if (secret.length > 0) env["secret"] = [...secret]; // paths into `payload`
     const frame = encodeFrame(env);
     return new Promise<Json>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const verb = envelopePayload["type"];
+      this.pending.set(id, { resolve, reject, target, verb: typeof verb === "string" ? verb : "?" });
       try {
         this.ws!.send(frame.data);
       } catch (e) {
@@ -315,6 +328,10 @@ class Conn {
       /* already closing */
     }
   }
+}
+
+function error(msg: string): void {
+  (globalThis as { console?: { error(m: string): void } }).console?.error(msg);
 }
 
 function warn(msg: string): void {
