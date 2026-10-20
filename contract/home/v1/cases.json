@@ -1,0 +1,939 @@
+{
+ "_doc": "THE home PROTOCOL v1, as DATA (contract/home/README.md). Replayed IN ORDER against one runner by the Rust agent (src/tui/crates/fantastic-home-kernel/src/home/contract_tests.rs, through agent::call on FakeOs::from_fixture) and by the TS client (src/tui/web/canvas/tests/home_contract.test.ts). Keys of a case: call (the payload sent to home); before ['look'] (one tick, settled, first); expect (dotted path → value); expect_keys (the reply's keys, in order); expect_absent (dotted path with * → a value no element may have); expect_refusal {reason, arg (null: none), error_contains?}; expect_same_state (settle, list, then the call: its reply equals that list reply, seq included); expect_same_seq (the same, for seq only); expect_emits (the payload types the call emitted on home besides state, in order); expect_spawned / expect_terminated (the folders the call started / asked to stop, once settled); expect_forwarded ([{port, target, payload}] the call sent to fantastics' kernels, once settled); after {expect?, problem_contains?} (the state once settled: dotted path → value, and what its problem says). Every call is settled before the next case. Paths are POSIX; a runner on Windows roots every '/w/' at 'C:/w/'.",
+ "protocol": "fantastic.home",
+ "version": 1,
+ "verbs": [
+  "reflect",
+  "list",
+  "open",
+  "register",
+  "start",
+  "stop",
+  "remove",
+  "select",
+  "select_page",
+  "close_page",
+  "dismiss",
+  "log",
+  "focus",
+  "menu"
+ ],
+ "events": [
+  "state",
+  "focus",
+  "menu_spec"
+ ],
+ "statuses": [
+  "stopped",
+  "starting",
+  "stopping",
+  "running",
+  "no_canvas",
+  "unverified",
+  "missing"
+ ],
+ "actions": [
+  "start",
+  "stop",
+  "open",
+  "remove"
+ ],
+ "fixture": {
+  "now_ms": 1760800000000,
+  "own_folder": "/w/home",
+  "registry": {
+   "g-run": "guid: g-run\npath: /w/run\npid: 41\ncanvas: http://127.0.0.1:8001/canvas_page/file/index.html\nstored_at: 1\nlast_seen: 1760799000\n",
+   "g-stop": "guid: g-stop\npath: /w/stop\nstored_at: 2\nlast_seen: 1760790000\n",
+   "g-gone": "guid: g-gone\npath: /w/gone\nstored_at: 3\n",
+   "g-self": "guid: g-self\npath: /w/home\nstored_at: 4\n",
+   "g-broken": "guid: g-broken\npath: /w/broken\nstored_at: 5\nlast_seen: 1760700000\n",
+   "g-two": "guid: g-two\npath: /w/two\npid: 43\ncanvas: http://127.0.0.1:8003/canvas_page/file/index.html\nstored_at: 6\nlast_seen: 1760799500\n"
+  },
+  "folders": {
+   "/w/run": {
+    "fantastic": true,
+    "holder": 41,
+    "run": {
+     "pid": 41,
+     "port": 8001,
+     "url": "http://127.0.0.1:8001/canvas_page/file/index.html"
+    },
+    "canvas_up": true,
+    "guid": "g-run"
+   },
+   "/w/stop": {
+    "fantastic": true,
+    "holder": null
+   },
+   "/w/gone": {
+    "fantastic": false
+   },
+   "/w/home": {
+    "fantastic": true,
+    "holder": 7
+   },
+   "/w/broken": {
+    "fantastic": true,
+    "holder": null
+   },
+   "/w/new": {
+    "fantastic": true,
+    "holder": null
+   },
+   "/w/two": {
+    "fantastic": true,
+    "holder": 43,
+    "run": {
+     "pid": 43,
+     "port": 8003,
+     "url": "http://127.0.0.1:8003/canvas_page/file/index.html"
+    },
+    "canvas_up": true,
+    "guid": "g-two"
+   }
+  },
+  "spawn": {
+   "/w/stop": "ok",
+   "/w/new": "ok",
+   "/w/broken": "fantastic: no such file or directory"
+  },
+  "forward": {
+   "8001 user_store": {
+    "register_home_folder": false,
+    "unstored": true
+   }
+  },
+  "logs": {
+   "/w/stop": {
+    "file": "/w/logs/stop-0a1b2c3d.log",
+    "tail": "the canvas: http://127.0.0.1:8002/canvas_page/file/index.html"
+   }
+  }
+ },
+ "cases": [
+  {
+   "name": "reflect-names-the-protocol",
+   "call": {
+    "type": "reflect"
+   },
+   "expect": {
+    "protocol": "fantastic.home",
+    "version": 1,
+    "mode": "lock"
+   }
+  },
+  {
+   "name": "reflect-refuses-a-future-version",
+   "call": {
+    "type": "reflect",
+    "version": 2
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "version",
+    "error_contains": "asked for v2"
+   }
+  },
+  {
+   "name": "first-look",
+   "before": [
+    "look"
+   ],
+   "call": {
+    "type": "list"
+   },
+   "expect_keys": [
+    "type",
+    "protocol",
+    "version",
+    "seq",
+    "mode",
+    "listed",
+    "rows",
+    "pages",
+    "selection",
+    "problem"
+   ],
+   "expect": {
+    "listed": true,
+    "rows.0.id": "g-run",
+    "rows.0.status": "running",
+    "rows.0.actions": [
+     "stop",
+     "open",
+     "remove"
+    ],
+    "rows.0.canvas": {
+     "url": "http://127.0.0.1:8001/canvas_page/file/index.html",
+     "port": 8001
+    },
+    "rows.1.status": "stopped",
+    "rows.1.actions": [
+     "start",
+     "open",
+     "remove"
+    ],
+    "rows.2.status": "missing",
+    "rows.2.actions": [
+     "open",
+     "remove"
+    ],
+    "rows.3.id": "g-broken",
+    "rows.3.status": "stopped",
+    "pages": [],
+    "selection": null,
+    "problem": null,
+    "rows.4.id": "g-two",
+    "rows.4.status": "running"
+   },
+   "expect_absent": {
+    "rows.*.id": "g-self"
+   }
+  },
+  {
+   "name": "a-future-version-is-refused",
+   "call": {
+    "type": "list",
+    "version": 2
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "version",
+    "error_contains": "home speaks fantastic.home v1; this client asked for v2"
+   }
+  },
+  {
+   "name": "a-version-that-is-no-integer-is-refused",
+   "call": {
+    "type": "dismiss",
+    "version": "1"
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "version"
+   }
+  },
+  {
+   "name": "version-1-is-v1",
+   "call": {
+    "type": "list",
+    "version": 1
+   },
+   "expect_same_state": true
+  },
+  {
+   "name": "an-unknown-verb-is-unhandled",
+   "call": {
+    "type": "launch",
+    "id": "g-stop"
+   },
+   "expect_refusal": {
+    "reason": "unhandled",
+    "arg": null,
+    "error_contains": "unknown type"
+   }
+  },
+  {
+   "name": "open-needs-paths",
+   "call": {
+    "type": "open"
+   },
+   "expect_refusal": {
+    "reason": "missing_arg",
+    "arg": "paths"
+   }
+  },
+  {
+   "name": "open-refuses-a-relative-path",
+   "call": {
+    "type": "open",
+    "paths": [
+     "w/run"
+    ]
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "paths",
+    "error_contains": "not an absolute path"
+   }
+  },
+  {
+   "name": "open-refuses-a-path-that-is-no-folder",
+   "call": {
+    "type": "open",
+    "paths": [
+     "/w/nowhere"
+    ]
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "paths",
+    "error_contains": "not a folder"
+   }
+  },
+  {
+   "name": "the-own-folder-is-refused",
+   "call": {
+    "type": "open",
+    "paths": [
+     "/w/home"
+    ]
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "paths",
+    "error_contains": "own folder"
+   }
+  },
+  {
+   "name": "register-needs-a-path",
+   "call": {
+    "type": "register"
+   },
+   "expect_refusal": {
+    "reason": "missing_arg",
+    "arg": "path"
+   }
+  },
+  {
+   "name": "register-refuses-a-listed-folder",
+   "call": {
+    "type": "register",
+    "path": "/w/stop"
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "path",
+    "error_contains": "in the list already"
+   }
+  },
+  {
+   "name": "register-refuses-the-own-folder",
+   "call": {
+    "type": "register",
+    "path": "/w/home"
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "path",
+    "error_contains": "own folder"
+   }
+  },
+  {
+   "name": "start-needs-an-id",
+   "call": {
+    "type": "start"
+   },
+   "expect_refusal": {
+    "reason": "missing_arg",
+    "arg": "id"
+   }
+  },
+  {
+   "name": "start-an-unknown-id-is-not-found",
+   "call": {
+    "type": "start",
+    "id": "g-nope"
+   },
+   "expect_refusal": {
+    "reason": "not_found",
+    "arg": "id"
+   }
+  },
+  {
+   "name": "start-a-running-one-is-refused",
+   "call": {
+    "type": "start",
+    "id": "g-run"
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "id",
+    "error_contains": "it is running"
+   }
+  },
+  {
+   "name": "stop-a-stopped-one-is-refused",
+   "call": {
+    "type": "stop",
+    "id": "g-stop"
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "id",
+    "error_contains": "it is stopped"
+   }
+  },
+  {
+   "name": "remove-an-unknown-id-is-not-found",
+   "call": {
+    "type": "remove",
+    "id": "g-self"
+   },
+   "expect_refusal": {
+    "reason": "not_found",
+    "arg": "id"
+   }
+  },
+  {
+   "name": "select-needs-the-id-key",
+   "call": {
+    "type": "select"
+   },
+   "expect_refusal": {
+    "reason": "missing_arg",
+    "arg": "id"
+   }
+  },
+  {
+   "name": "select-refuses-an-id-of-another-type",
+   "call": {
+    "type": "select",
+    "id": 3
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "id"
+   }
+  },
+  {
+   "name": "select-an-unknown-id-is-not-found",
+   "call": {
+    "type": "select",
+    "id": "g-nope"
+   },
+   "expect_refusal": {
+    "reason": "not_found",
+    "arg": "id"
+   }
+  },
+  {
+   "name": "select-page-needs-an-index",
+   "call": {
+    "type": "select_page"
+   },
+   "expect_refusal": {
+    "reason": "missing_arg",
+    "arg": "index"
+   }
+  },
+  {
+   "name": "select-page-with-no-page-open-is-refused",
+   "call": {
+    "type": "select_page",
+    "index": 0
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "index",
+    "error_contains": "no page 0"
+   }
+  },
+  {
+   "name": "close-page-of-no-open-page-is-not-found",
+   "call": {
+    "type": "close_page",
+    "id": "g-run"
+   },
+   "expect_refusal": {
+    "reason": "not_found",
+    "arg": "id"
+   }
+  },
+  {
+   "name": "log-with-no-launch-log-is-not-found",
+   "call": {
+    "type": "log",
+    "id": "g-run"
+   },
+   "expect_refusal": {
+    "reason": "not_found",
+    "arg": "id",
+    "error_contains": "no launch log"
+   }
+  },
+  {
+   "name": "log-answers-the-file-and-tail",
+   "call": {
+    "type": "log",
+    "id": "g-stop"
+   },
+   "expect_keys": [
+    "id",
+    "file",
+    "tail"
+   ],
+   "expect": {
+    "id": "g-stop",
+    "file": "/w/logs/stop-0a1b2c3d.log",
+    "tail": "the canvas: http://127.0.0.1:8002/canvas_page/file/index.html"
+   }
+  },
+  {
+   "name": "open-a-listed-folder-shows-its-page",
+   "call": {
+    "type": "open",
+    "paths": [
+     "/w/run"
+    ]
+   },
+   "expect": {
+    "pages": [
+     "g-run"
+    ],
+    "selection": "g-run",
+    "rows.0.status": "running"
+   }
+  },
+  {
+   "name": "select-null-shows-the-home",
+   "call": {
+    "type": "select",
+    "id": null
+   },
+   "expect": {
+    "pages": [
+     "g-run"
+    ],
+    "selection": null
+   }
+  },
+  {
+   "name": "select-page-shows-an-open-page",
+   "call": {
+    "type": "select_page",
+    "index": 0
+   },
+   "expect": {
+    "pages": [
+     "g-run"
+    ],
+    "selection": "g-run"
+   }
+  },
+  {
+   "name": "select-page-past-the-last-is-refused",
+   "call": {
+    "type": "select_page",
+    "index": 1
+   },
+   "expect_refusal": {
+    "reason": "bad_arg",
+    "arg": "index",
+    "error_contains": "no page 1"
+   }
+  },
+  {
+   "name": "select-a-row-opens-its-page",
+   "call": {
+    "type": "select",
+    "id": "g-stop"
+   },
+   "expect": {
+    "pages": [
+     "g-run",
+     "g-stop"
+    ],
+    "selection": "g-stop"
+   }
+  },
+  {
+   "name": "close-page-closes-it",
+   "call": {
+    "type": "close_page",
+    "id": "g-stop"
+   },
+   "expect": {
+    "pages": [
+     "g-run"
+    ],
+    "selection": "g-run",
+    "rows.1.status": "stopped"
+   }
+  },
+  {
+   "name": "a-start-that-fails-is-the-problem",
+   "call": {
+    "type": "start",
+    "id": "g-broken"
+   },
+   "expect": {
+    "rows.3.status": "starting"
+   },
+   "expect_spawned": [
+    "/w/broken"
+   ],
+   "after": {
+    "problem_contains": "no such file or directory"
+   }
+  },
+  {
+   "name": "dismiss-clears-the-problem",
+   "call": {
+    "type": "dismiss"
+   },
+   "expect": {
+    "problem": null
+   }
+  },
+  {
+   "name": "start-the-stopped-one",
+   "call": {
+    "type": "start",
+    "id": "g-stop"
+   },
+   "expect": {
+    "rows.1.status": "starting",
+    "rows.1.actions": [
+     "open",
+     "remove"
+    ]
+   },
+   "expect_spawned": [
+    "/w/stop"
+   ]
+  },
+  {
+   "name": "register-adds-an-unlisted-folder",
+   "call": {
+    "type": "register",
+    "path": "/w/new"
+   },
+   "expect": {
+    "rows.5.id": "adding:/w/new",
+    "rows.5.guid": null,
+    "rows.5.path": "/w/new",
+    "rows.5.status": "starting",
+    "pages": [
+     "g-run",
+     "adding:/w/new"
+    ],
+    "selection": "adding:/w/new"
+   },
+   "expect_spawned": [
+    "/w/new"
+   ]
+  },
+  {
+   "name": "focus-changes-nothing",
+   "call": {
+    "type": "focus"
+   },
+   "expect_same_state": true,
+   "expect_emits": [
+    "focus"
+   ]
+  },
+  {
+   "name": "menu-answers-the-spec-at-the-state-seq",
+   "call": {
+    "type": "menu"
+   },
+   "expect_keys": [
+    "type",
+    "seq",
+    "spec"
+   ],
+   "expect": {
+    "type": "menu_spec",
+    "spec.version": 1
+   },
+   "expect_same_seq": true,
+   "expect_emits": []
+  },
+  {
+   "name": "remove-a-stopped-one-through-a-running-kernel",
+   "call": {
+    "type": "remove",
+    "id": "g-gone"
+   },
+   "expect_forwarded": [
+    {
+     "port": 8001,
+     "target": "user_store",
+     "payload": {
+      "type": "unstore",
+      "guid": "g-gone"
+     }
+    }
+   ]
+  },
+  {
+   "name": "remove-the-running-one-through-its-own-kernel",
+   "call": {
+    "type": "remove",
+    "id": "g-run"
+   },
+   "expect_forwarded": [
+    {
+     "port": 8001,
+     "target": "user_store",
+     "payload": {
+      "type": "register_home_folder",
+      "value": false
+     }
+    }
+   ]
+  },
+  {
+   "name": "stop-the-running-one",
+   "call": {
+    "type": "stop",
+    "id": "g-two"
+   },
+   "expect_terminated": [
+    "/w/two"
+   ],
+   "after": {
+    "expect": {
+     "rows.4.status": "stopping",
+     "rows.4.actions": [
+      "open",
+      "remove"
+     ]
+    }
+   }
+  }
+ ],
+ "states": {
+  "valid": [
+   {
+    "type": "state",
+    "protocol": "fantastic.home",
+    "version": 1,
+    "seq": 3,
+    "mode": "lock",
+    "listed": true,
+    "rows": [
+     {
+      "id": "g-run",
+      "guid": "g-run",
+      "name": "run",
+      "path": "/w/run",
+      "last_seen": 1760799000,
+      "status": "running",
+      "canvas": {
+       "url": "http://127.0.0.1:8001/canvas_page/file/index.html",
+       "port": 8001
+      },
+      "pid": 41,
+      "actions": [
+       "stop",
+       "open",
+       "remove"
+      ],
+      "log": null
+     },
+     {
+      "id": "g-stop",
+      "guid": "g-stop",
+      "name": "stop",
+      "path": "/w/stop",
+      "last_seen": 1760790000,
+      "status": "stopped",
+      "canvas": null,
+      "pid": null,
+      "actions": [
+       "start",
+       "open",
+       "remove"
+      ],
+      "log": "/w/logs/stop-0a1b2c3d.log"
+     },
+     {
+      "id": "g-gone",
+      "guid": "g-gone",
+      "name": "gone",
+      "path": "/w/gone",
+      "last_seen": 0,
+      "status": "missing",
+      "canvas": null,
+      "pid": null,
+      "actions": [
+       "open",
+       "remove"
+      ],
+      "log": null
+     },
+     {
+      "id": "g-broken",
+      "guid": "g-broken",
+      "name": "broken",
+      "path": "/w/broken",
+      "last_seen": 1760700000,
+      "status": "stopped",
+      "canvas": null,
+      "pid": null,
+      "actions": [
+       "start",
+       "open",
+       "remove"
+      ],
+      "log": null
+     },
+     {
+      "id": "g-two",
+      "guid": "g-two",
+      "name": "two",
+      "path": "/w/two",
+      "last_seen": 1760799500,
+      "status": "running",
+      "canvas": {
+       "url": "http://127.0.0.1:8003/canvas_page/file/index.html",
+       "port": 8003
+      },
+      "pid": 43,
+      "actions": [
+       "stop",
+       "open",
+       "remove"
+      ],
+      "log": null
+     }
+    ],
+    "pages": [],
+    "selection": null,
+    "problem": null
+   }
+  ],
+  "invalid": [
+   {
+    "state": {
+     "type": "state",
+     "protocol": "fantastic.home",
+     "version": 2,
+     "seq": 1,
+     "mode": "lock",
+     "listed": true,
+     "rows": [],
+     "pages": [],
+     "selection": null,
+     "problem": null
+    },
+    "why": "version"
+   },
+   {
+    "state": {
+     "type": "state",
+     "protocol": "fantastic.canvas",
+     "version": 1,
+     "seq": 1,
+     "mode": "lock",
+     "listed": true,
+     "rows": [],
+     "pages": [],
+     "selection": null,
+     "problem": null
+    },
+    "why": "protocol"
+   },
+   {
+    "state": {
+     "type": "state",
+     "protocol": "fantastic.home",
+     "version": 1,
+     "seq": 1,
+     "mode": "lock",
+     "listed": true,
+     "rows": {},
+     "pages": [],
+     "selection": null,
+     "problem": null
+    },
+    "why": "rows"
+   },
+   {
+    "state": {
+     "type": "state",
+     "protocol": "fantastic.home",
+     "version": 1,
+     "seq": 1,
+     "mode": "lock",
+     "listed": true,
+     "rows": [
+      {
+       "id": "g-1",
+       "guid": "g-1",
+       "name": "a",
+       "path": "/w/a",
+       "last_seen": null,
+       "status": "sleeping",
+       "canvas": null,
+       "pid": null,
+       "actions": [
+        "start",
+        "open",
+        "remove"
+       ],
+       "log": null
+      }
+     ],
+     "pages": [],
+     "selection": null,
+     "problem": null
+    },
+    "why": "status"
+   },
+   {
+    "state": {
+     "type": "state",
+     "protocol": "fantastic.home",
+     "version": 1,
+     "seq": 1,
+     "mode": "lock",
+     "listed": true,
+     "rows": [
+      {
+       "id": "g-1",
+       "guid": "g-1",
+       "name": "a",
+       "path": "/w/a",
+       "last_seen": null,
+       "status": "stopped",
+       "canvas": null,
+       "pid": null,
+       "actions": [
+        "launch"
+       ],
+       "log": null
+      }
+     ],
+     "pages": [],
+     "selection": null,
+     "problem": null
+    },
+    "why": "actions"
+   },
+   {
+    "state": {
+     "type": "state",
+     "protocol": "fantastic.home",
+     "version": 1,
+     "seq": "7",
+     "mode": "lock",
+     "listed": true,
+     "rows": [],
+     "pages": [],
+     "selection": null,
+     "problem": null
+    },
+    "why": "seq"
+   },
+   {
+    "state": {
+     "type": "state",
+     "protocol": "fantastic.home",
+     "version": 1,
+     "seq": 1,
+     "mode": "lock",
+     "listed": true,
+     "rows": [],
+     "pages": "g-1",
+     "selection": null,
+     "problem": null
+    },
+    "why": "pages"
+   }
+  ]
+ }
+}

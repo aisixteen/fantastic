@@ -17,6 +17,8 @@ pub mod sys;
 pub mod wire;
 
 #[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
 pub(crate) mod fake;
 
 pub use agent::HomeBundle;

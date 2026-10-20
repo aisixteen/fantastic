@@ -77,6 +77,146 @@ impl FakeOs {
         }
     }
 
+    /// The machine a contract fixture describes (`contract/home/v1/cases.json`,
+    /// `fixture`). Every key is read strictly: an unknown one panics, naming it.
+    ///
+    /// ```text
+    ///   now_ms     the clock
+    ///   registry   {folder: fantastic.yaml text}, in registry order
+    ///   folders    {path: {fantastic, holder, run?: {pid, port, url}, canvas_up?, guid?}};
+    ///              each path resolves to itself; canvas_up and guid answer for the run's port
+    ///   spawn      {path: "ok" | why it failed}
+    ///   forward    {"<port> <target>": reply}
+    ///   logs       {path: {file, tail}}
+    /// ```
+    ///
+    /// `own_folder` is the runner's config, not the machine's: it is skipped here.
+    pub fn from_fixture(fixture: &Value) -> FakeOs {
+        let os = FakeOs::new();
+        let obj = |v: &Value, at: &str| -> serde_json::Map<String, Value> {
+            v.as_object()
+                .unwrap_or_else(|| panic!("fixture: {at} must be an object, got {v}"))
+                .clone()
+        };
+        let str_of = |v: &Value, at: &str| -> String {
+            v.as_str()
+                .unwrap_or_else(|| panic!("fixture: {at} must be a string, got {v}"))
+                .to_string()
+        };
+        for (key, value) in obj(fixture, "the fixture") {
+            match key.as_str() {
+                "own_folder" => {}
+                "now_ms" => os.set_now(
+                    value
+                        .as_u64()
+                        .unwrap_or_else(|| panic!("fixture: now_ms must be an integer")),
+                ),
+                "registry" => os.set_registry(
+                    obj(&value, "registry")
+                        .into_iter()
+                        .map(|(folder, text)| {
+                            let text = str_of(&text, &format!("registry.{folder}"));
+                            (folder, text)
+                        })
+                        .collect(),
+                ),
+                "folders" => {
+                    for (path, f) in obj(&value, "folders") {
+                        let at = format!("folders.{path}");
+                        let mut folder = Folder::default();
+                        let (mut up, mut guid) = (None, None);
+                        for (k, v) in obj(&f, &at) {
+                            match k.as_str() {
+                                "fantastic" => {
+                                    folder.is_fantastic = v
+                                        .as_bool()
+                                        .unwrap_or_else(|| panic!("{at}.fantastic: a bool"))
+                                }
+                                "holder" => {
+                                    folder.holder = match &v {
+                                        Value::Null => None,
+                                        v => Some(
+                                            v.as_u64()
+                                                .and_then(|p| u32::try_from(p).ok())
+                                                .unwrap_or_else(|| panic!("{at}.holder: a pid")),
+                                        ),
+                                    }
+                                }
+                                "run" => {
+                                    let r = obj(&v, &format!("{at}.run"));
+                                    let num = |k: &str| {
+                                        r.get(k)
+                                            .and_then(Value::as_u64)
+                                            .unwrap_or_else(|| panic!("{at}.run.{k}: an integer"))
+                                    };
+                                    let url = str_of(&r["url"], &format!("{at}.run.url"));
+                                    let canvas = Canvas::local(&url)
+                                        .unwrap_or_else(|| panic!("{at}.run.url: not local"));
+                                    folder.run = Some(CanvasRun {
+                                        pid: u32::try_from(num("pid")).expect("a pid"),
+                                        port: u16::try_from(num("port")).expect("a port"),
+                                        canvas,
+                                    });
+                                }
+                                "canvas_up" => {
+                                    up = Some(
+                                        v.as_bool()
+                                            .unwrap_or_else(|| panic!("{at}.canvas_up: a bool")),
+                                    )
+                                }
+                                "guid" => guid = Some(str_of(&v, &format!("{at}.guid"))),
+                                other => panic!("fixture: {at}: unknown key `{other}`"),
+                            }
+                        }
+                        if up.is_some() || guid.is_some() {
+                            let run = folder.run.as_ref().unwrap_or_else(|| {
+                                panic!("{at}: canvas_up and guid answer for its run: give `run`")
+                            });
+                            if let Some(up) = up {
+                                os.set_canvas_up(run.port, up);
+                            }
+                            if let Some(guid) = &guid {
+                                os.set_guid(run.port, guid);
+                            }
+                        }
+                        os.set_resolve(&path, Ok(path.clone()));
+                        os.set_folder(&path, folder);
+                    }
+                }
+                "spawn" => {
+                    for (path, result) in obj(&value, "spawn") {
+                        let result = str_of(&result, &format!("spawn.{path}"));
+                        os.set_spawn(&path, if result == "ok" { Ok(()) } else { Err(result) });
+                    }
+                }
+                "forward" => {
+                    for (key, reply) in obj(&value, "forward") {
+                        let (port, target) = key
+                            .split_once(' ')
+                            .and_then(|(p, t)| Some((p.parse::<u16>().ok()?, t)))
+                            .unwrap_or_else(|| {
+                                panic!("fixture: forward.{key}: \"<port> <target>\"")
+                            });
+                        os.set_forward_reply(port, target, Ok(reply));
+                    }
+                }
+                "logs" => {
+                    for (path, log) in obj(&value, "logs") {
+                        let at = format!("logs.{path}");
+                        let log = obj(&log, &at);
+                        os.set_log(
+                            &path,
+                            &str_of(&log["file"], &format!("{at}.file")),
+                            &str_of(&log["tail"], &format!("{at}.tail")),
+                        );
+                    }
+                }
+                other => panic!("fixture: unknown key `{other}`"),
+            }
+        }
+        os
+    }
+
     fn s(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("the fake is poisoned")
     }
@@ -101,6 +241,14 @@ impl FakeOs {
     }
     pub fn set_resolve(&self, path: &str, folder: Result<String, String>) {
         self.s().resolve.insert(path.to_string(), folder);
+    }
+    pub fn set_now(&self, now_ms: u64) {
+        self.s().now_ms = now_ms;
+    }
+    pub fn set_forward_reply(&self, port: u16, target: &str, reply: Result<Value, String>) {
+        self.s()
+            .forward_replies
+            .insert((port, target.to_string()), reply);
     }
     pub fn set_log(&self, path: &str, file: &str, tail: &str) {
         self.s()
