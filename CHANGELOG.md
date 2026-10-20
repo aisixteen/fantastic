@@ -126,6 +126,15 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   dropped out of the next view (the bug above). With that fixed, every S8
   compaction is a fold, and a recall made due by the folds took a turn's queued
   mock reply.
+- The desktop app on Linux shows its canvases again: its window's navigation
+  filter admits the running canvases' ports. WebKitGTK sends their frames
+  through the same check, which refused them (a regression from #77).
+- home: a canvas that fails to start says why. The row reads `it did not start
+  — <error>`, the launch log keeps the error, and `--kiosk` prints a new problem
+  once on stderr.
+- Canvas terminal: after a re-attach, flow control counts each character once,
+  so the unacked count no longer reads low and output is not sent past the
+  limit.
 
 ## [0.0.6] - 2026-10-18
 
