@@ -151,6 +151,13 @@ A skin must give every token below, with its type, and no other (but
 | `color.side.page-text` | color | `--fc-color-side-page-text` | page agents in the tree | `rgb(140 185 255 / 0.95)` | `rgb(160 198 255)` |
 | `color.side.host` (opaque) | color | `--fc-color-side-host` | host-side bezel border (tint) | `rgb(255 190 90)` | `rgb(255 198 108)` |
 | `color.side.host-text` | color | `--fc-color-side-host-text` | host agents in the tree | `rgb(255 200 120 / 0.95)` | `rgb(255 210 144)` |
+| `color.syntax.keyword` | color | `--fc-color-syntax-keyword` | keywords in the previewer and editor | `rgb(199 146 234)` | `rgb(212 168 242)` |
+| `color.syntax.string` | color | `--fc-color-syntax-string` | strings in the previewer and editor | `rgb(165 214 167)` | `rgb(180 224 182)` |
+| `color.syntax.comment` | color | `--fc-color-syntax-comment` | comments in the previewer and editor | `rgb(122 127 148)` | `rgb(142 147 168)` |
+| `color.syntax.number` | color | `--fc-color-syntax-number` | numbers in the previewer and editor | `rgb(249 168 106)` | `rgb(255 184 124)` |
+| `color.syntax.type` | color | `--fc-color-syntax-type` | types and keys in the previewer and editor | `rgb(127 209 232)` | `rgb(146 220 239)` |
+| `color.syntax.punct` | color | `--fc-color-syntax-punct` | punctuation in the previewer and editor | `rgb(139 144 168)` | `rgb(157 162 186)` |
+| `color.tree.fantastic` (opaque) | color | `--fc-color-tree-fantastic` | the .fantastic folder in the file tree (via tint) | `rgb(95 211 181)` | `rgb(114 224 194)` |
 | `color.surface.bezel` | color | `--fc-color-surface-bezel` | a cell's bezel | `rgb(15 15 25 / 0.88)` | `rgb(18 18 30 / 0.42)` |
 | `color.surface.bezel-flat` | color | `--fc-color-surface-bezel-flat` | the mobile bezel | `rgb(17 17 26)` | `rgb(17 17 26 / 0.55)` |
 | `color.surface.raised` | color | `--fc-color-surface-raised` | the stopped-terminal box | `rgb(17 17 26 / 0.92)` | `rgb(20 20 31 / 0.72)` |
