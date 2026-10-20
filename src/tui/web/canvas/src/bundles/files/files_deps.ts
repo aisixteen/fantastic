@@ -109,6 +109,11 @@ export function rootOf(recs: Rec[]): string {
   return roots.sort()[0] ?? "";
 }
 
+/** Draw every tree and preview again from what they hold. */
+export function drawAll(): void {
+  for (const fn of [...drawers]) fn();
+}
+
 /** The canvas says something changed: draw every tree again (decorations only — no
  *  re-listing), and read the agent folders again when the set of agents changed. */
 export function renderFileTrees(): void {
@@ -119,5 +124,5 @@ export function renderFileTrees(): void {
       walkAgain();
     }
   }
-  for (const fn of [...drawers]) fn();
+  drawAll();
 }

@@ -1,65 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Agent, Kernel } from "../src/lib.ts";
-import type { Payload } from "../src/lib.ts";
-import { WatchHub } from "../src/bundles/files/file_bridge.ts";
-import { AgentIndex } from "../src/bundles/files/agent_index.ts";
-import { FilesController, controllers, registerFilesView } from "../src/bundles/files/files_controller.ts";
-import type { Selection } from "../src/bundles/files/files_deps.ts";
-import { FakeBridge, settle } from "./fake_bridge.ts";
+import { Agent } from "../src/lib.ts";
+import { controllers } from "../src/bundles/files/files_controller.ts";
+import { settle } from "./fake_bridge.ts";
+import { project, rig } from "./rig.ts";
 
-type Dict = Record<string, unknown>;
-
-// THE VERBS of the file tree and the previewer, driven through a Kernel as an AI
-// drives them, over an in-memory file bridge.
-
-interface Rig {
-  k: Kernel;
-  bridge: FakeBridge;
-  hub: WatchHub;
-  index: AgentIndex;
-  published: Array<Selection>;
-  saved: Dict[];
-  mountTree(id: string): Promise<FilesController>;
-  call(target: string, p: Dict): Promise<Dict>;
-}
-
-function rig(): Rig {
-  const bridge = new FakeBridge();
-  const hub = new WatchHub(bridge, bridge.subscribe);
-  const index = new AgentIndex();
-  const k = new Kernel();
-  registerFilesView(k);
-  k.registerBundle("canvas.ts", () => null);
-  k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
-  const published: Selection[] = [];
-  const saved: Dict[] = [];
-  const mountTree = async (id: string): Promise<FilesController> => {
-    k.register(new Agent({ id, parentId: "canvas", handlerModule: "files_view.ts" }));
-    const ctl = new FilesController({
-      bridge,
-      hub,
-      selfId: id,
-      persist: (s) => saved.push({ ...s }),
-      index,
-      walk: () => {},
-      publish: (s) => published.push(s),
-    });
-    controllers.set(id, ctl);
-    await ctl.start({});
-    return ctl;
-  };
-  const call = async (target: string, p: Dict): Promise<Dict> => ((await k.send([{ target, payload: p as Payload }]))[0]!.result ?? {}) as Dict;
-  return { k, bridge, hub, index, published, saved, mountTree, call };
-}
-
-function project(b: FakeBridge): void {
-  b.put("docs/a.md", "# Hello\n");
-  b.put("src/one.txt", "one");
-  b.put("src/deep/x.ts", "export {};\n");
-  b.put("top.txt", "t");
-  b.put(".fantastic/agents/user/agents/files/agent.yaml", "id: files\nhandler_module: file_bridge.tools\n");
-}
+// THE VERBS of the file tree, driven through a Kernel as an AI drives them, over an
+// in-memory file bridge. (The previewer's are in preview_verbs.test.ts.)
 
 test("the tree opens the root: listed and watched; folders and files in the model", async () => {
   const r = rig();
