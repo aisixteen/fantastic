@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 publish = false
+readme = "README.md"
 description = "The home kernel, in-process: a minimal kernel in the fantastic home dir whose `home` agent manages your fantastics. Every OS call is in src/home/sys."
 
 # Like `src/tui/Cargo.toml`, the kernel crates are path dependencies outside this

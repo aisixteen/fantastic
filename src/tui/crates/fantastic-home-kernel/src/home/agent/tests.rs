@@ -665,3 +665,32 @@ async fn every_intent_in_the_default_menu_is_a_verb_home_accepts() {
         t.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn a_version_other_than_1_is_refused() {
+    let t = t();
+    t.boot().await;
+    let before = t.call(json!({"type": "list"})).await;
+    for verb in ["list", "dismiss", "focus", "reflect", "start"] {
+        let r = t.call(json!({"type": verb, "version": 2, "id": "x"})).await;
+        refused(
+            &r,
+            "bad_arg",
+            "home speaks fantastic.home v1; this client asked for v2",
+        );
+        assert_eq!(r["arg"], json!("version"), "{verb}: {r}");
+    }
+    let r = t.call(json!({"type": "list", "version": "1"})).await;
+    refused(
+        &r,
+        "bad_arg",
+        "home speaks fantastic.home v1; this client asked for v\"1\"",
+    );
+    // 1, or none, is v1
+    assert_eq!(t.call(json!({"type": "list", "version": 1})).await, before);
+    let r = t.call(json!({"type": "reflect", "version": 1})).await;
+    assert_eq!(r["version"], json!(1));
+    // a refused call changed nothing
+    assert_eq!(t.call(json!({"type": "list"})).await, before);
+    t.shutdown().await;
+}

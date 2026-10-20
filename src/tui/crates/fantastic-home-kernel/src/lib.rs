@@ -32,6 +32,12 @@ pub use kernel::HomeKernel;
 
 use home::sys;
 
+/// The README's example, compiled as a doctest (`no_run`: it needs a
+/// `fantastic` binary and a port).
+#[doc = include_str!("../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;
+
 /// How long a running home has to answer a hand-over.
 const HAND_OVER_TIMEOUT: Duration = Duration::from_secs(5);
 
