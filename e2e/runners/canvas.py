@@ -34,6 +34,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
@@ -61,6 +62,11 @@ MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 #: the canvas then rightly shows every cell's chrome, as on a phone.
 DESKTOP_POINTER = ("--blink-settings=primaryHoverType=2,availableHoverTypes=2,"
                    "primaryPointerType=4,availablePointerTypes=4")
+#: how long a CDP call waits for Chrome to send ANYTHING (a reply or an event)
+REPLY_S = 30
+#: what a call that got no reply shows (#88): the page's last console lines,
+#: and the first characters of the expression it sent and of each line
+CONSOLE_KEPT, EXPR_SHOWN = 8, 120
 # a terminal's text, from its BUFFER (the WebGL renderer leaves no text in the DOM)
 XTERM_TEXT = "((()=>{const t=document.querySelector('.agent-frame .frame-body')?.xterm; if(!t) return ''; const b=t.buffer.active; let s=''; for(let i=0;i<b.length;i++){const l=b.getLine(i); if(l) s+=l.translateToString(true)+'\\n';} return s;})())"
 
@@ -204,13 +210,28 @@ class Page:
         #: seconds since the page opened, the wait, its expression, and `mark()`
         #: (a probe may set it, e.g. to where the host's log stands)
         self.t0, self.misses, self.mark = time.time(), [], None
+        #: what a call that got no reply says about the page (#88): its last
+        #: console lines (every type) and the frames still loading — frame id ->
+        #: when it started — with the main frame's id and url. Read from the
+        #: events a call's receive loop sees: a line the page logs while no call
+        #: is pending is read by the next call, so a call that runs out has read
+        #: everything Chrome sent up to its timeout.
+        self.console: deque[str] = deque(maxlen=CONSOLE_KEPT)
+        self.loading: dict[str, float] = {}
+        self.main_frame: str | None = None
+        self.main_url = ""
 
     async def cdp(self, method: str, **params):
         self.n += 1
         me = self.n
+        sent = time.time()
         await self.ws.send(json.dumps({"id": me, "method": method, "params": params}))
         while True:
-            m = json.loads(await asyncio.wait_for(self.ws.recv(), 30))
+            try:
+                m = json.loads(await asyncio.wait_for(self.ws.recv(), REPLY_S))
+            except asyncio.TimeoutError:
+                raise TimeoutError(self.no_reply(method, params, time.time() - sent)) from None
+            self.observe(m)
             if m.get("method") == "Runtime.exceptionThrown":
                 d = m["params"]["exceptionDetails"]
                 self.logs.append("EXC " + d.get("exception", {}).get("description", d.get("text", "")))
@@ -240,6 +261,43 @@ class Page:
                 if "error" in m:
                     raise RuntimeError(f"{method}: {m['error']}")
                 return m.get("result", {})
+
+    def observe(self, m: dict) -> None:
+        """One event, kept for `no_reply`: a console line or exception, a frame
+        that started or stopped loading, the main frame's navigation."""
+        ev, p = m.get("method"), m.get("params") or {}
+        at = f"+{time.time() - self.t0:.1f}s"
+        if ev == "Runtime.consoleAPICalled":
+            text = " ".join(str(a.get("value", a.get("description", ""))) for a in p.get("args", []))
+            self.console.append(f"{at} {p.get('type')} {' '.join(text.split())[:EXPR_SHOWN]}")
+        elif ev == "Runtime.exceptionThrown":
+            d = p.get("exceptionDetails", {})
+            text = d.get("exception", {}).get("description", d.get("text", ""))
+            self.console.append(f"{at} exception {' '.join(text.split())[:EXPR_SHOWN]}")
+        elif ev == "Page.frameStartedLoading":
+            self.loading[p["frameId"]] = time.time()
+        elif ev == "Page.frameStoppedLoading":
+            self.loading.pop(p["frameId"], None)
+        elif ev == "Page.frameNavigated" and not p["frame"].get("parentId"):
+            self.main_frame, self.main_url = p["frame"]["id"], p["frame"].get("url", "")
+
+    def no_reply(self, method: str, params: dict, waited: float) -> str:
+        """What a call that got no reply says: the call, how long it waited, the
+        main frame's load state and the page's last console lines."""
+        expr = " ".join(str(params.get("expression", "")).split())[:EXPR_SHOWN]
+        if self.main_frame is None:
+            frame = "no main-frame navigation seen"
+        elif self.main_frame in self.loading:
+            frame = (f"main frame STILL LOADING {self.main_url} (since"
+                     f" +{self.loading[self.main_frame] - self.t0:.1f}s)")
+        else:
+            frame = f"main frame loaded {self.main_url}"
+        # the main frame's FIRST load starts before it commits (and is named)
+        others = len(self.loading) - (self.main_frame in self.loading)
+        lines = "\n  ".join(self.console) or "(none)"
+        return (f"CDP {method} got no reply in {waited:.1f} s (nothing from Chrome for"
+                f" {REPLY_S:g} s) at +{time.time() - self.t0:.1f}s{': ' + expr if expr else ''}\n"
+                f"{frame}; {others} other frame(s) loading\nlast console lines:\n  {lines}")
 
     async def js(self, expr: str):
         r = await self.cdp("Runtime.evaluate", expression=expr, returnByValue=True, awaitPromise=True)
