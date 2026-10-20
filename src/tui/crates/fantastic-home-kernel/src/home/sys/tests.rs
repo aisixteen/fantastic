@@ -64,7 +64,12 @@ fn run_file_parses_only_a_valid_file() {
     assert!(err.contains("not a run file"), "{err}");
     std::fs::write(&file, [0xff, 0xfe]).unwrap();
     let err = run_file(&path).expect_err("not text");
-    assert!(err.contains(RUN_FILE), "the error names the file: {err}");
+    // the file as the OS prints it (backslashes on Windows)
+    let named = file.display().to_string();
+    assert!(
+        err.contains(&named),
+        "the error names the file {named}: {err}"
+    );
 }
 
 #[test]
