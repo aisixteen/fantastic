@@ -27,7 +27,8 @@ cleanup.push(() => { q.geometry.dispose(); m.dispose(); });
 """
 WIDTH = int(os.environ.get("E70_WIDTH", "390"))  # 390: a phone (mobile); 1500: desktop (canvas)
 VERBS = ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]
-FPS = "new Promise(res=>{let n=0;const t=performance.now();const f=()=>{n++; if(performance.now()-t<1000) requestAnimationFrame(f); else res(n)}; requestAnimationFrame(f)})"
+# frames per second over a 3 s window, divided by the measured elapsed time: a 1 s count at ~20 fps is quantised and noisy
+FPS = "new Promise(res=>{let n=0;const t=performance.now();const f=()=>{n++; const e=performance.now()-t; if(e<3000) requestAnimationFrame(f); else res(n*1000/e)}; requestAnimationFrame(f)})"
 
 
 def seeds() -> tuple[list[dict], list[tuple[str, dict]]]:
@@ -91,11 +92,12 @@ def main() -> bool:
                     body = await pg.rect(".agent-frame[data-id=term] .frame-body")
                     await pg.cdp("Input.dispatchMouseEvent", type="mouseMoved", x=body["x"] + 20, y=body["y"] + 20)
                 await sample("shipped")
-                await pg.js("(()=>{const s=document.createElement('style'); s.id='noblur'; s.textContent='.agent-frame::before,.frame-head{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}'; document.head.appendChild(s)})()")
-                await sample("no_blur")
-                await pg.js("document.getElementById('noblur').remove()")
+                # the chrome carries no backdrop blur (styles.ts:35-37, 67): assert it from computed style, not a timing control
+                info["chrome_backdrop"] = await pg.js("(()=>{const v=[]; document.querySelectorAll('.agent-frame').forEach(f=>{v.push(getComputedStyle(f,'::before').backdropFilter); const h=f.querySelector(':scope > .frame-head'); if(h) v.push(getComputedStyle(h).backdropFilter)}); return v;})()")
                 cw = (await pg.js("document.getElementById('canvas').clientWidth")) or 500
-                fps, calls = [await pg.js(FPS)], []
+                # two 3 s windows, averaged: one window is too noisy to gate on
+                base = [await pg.js(FPS), await pg.js(FPS)]
+                fps, calls = [sum(base) / 2], []
                 for burst in range(8):
                     l0, t0 = len(rig.log.read_text().splitlines()), time.time()
                     for k in range(30):
@@ -115,7 +117,8 @@ def main() -> bool:
         f = info.get("fps") or [0]
         r["fps_holds"] = min(f[1:] or [0]) >= 0.7 * f[0] and info.get("fps_idle_after", 0) >= 0.7 * f[0]
         # the phone's always-shown chrome costs no backdrop blur (it did: 658% vs 185%)
-        r["no_blur_cost"] = info.get("shipped_gpu_cpu", 9999) <= 1.5 * info.get("no_blur_gpu_cpu", 0) + 50
+        cb = info.get("chrome_backdrop") or []
+        r["no_blur_cost"] = len(cb) >= 3 and all(v in (None, "", "none") for v in cb)
         r["host_quiet_at_rest"] = info.get("idle_host_lines_per_s", 999) < 5
     finally:
         rig.stop()
