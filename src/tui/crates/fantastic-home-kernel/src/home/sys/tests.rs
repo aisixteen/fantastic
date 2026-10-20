@@ -32,6 +32,20 @@ fn lock_holder_none_without_a_lock_and_self_with_one() {
 }
 
 #[test]
+fn a_lock_that_cannot_be_read_is_an_error_naming_why() {
+    let (_d, dir) = temp();
+    let path = dir.display().to_string();
+    lock::acquire(&dir).expect("the lock");
+    lock::release(&dir).expect("released");
+    std::fs::write(dir.join(".fantastic/lock.yaml"), "not: [a lock").unwrap();
+    let error = lock_holder_checked(&path).expect_err("a malformed lock");
+    assert!(error.starts_with(&format!("{path}: the lock: ")), "{error}");
+    assert!(error.contains("lock.yaml malformed"), "{error}");
+    // the unchecked form logs it and sees no holder
+    assert_eq!(lock_holder(&path), None);
+}
+
+#[test]
 fn run_file_parses_only_a_valid_file() {
     let (_d, dir) = temp();
     let path = dir.display().to_string();

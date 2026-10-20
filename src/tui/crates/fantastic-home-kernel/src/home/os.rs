@@ -82,7 +82,11 @@ impl HomeOs for SysOs {
                 answered(sys::is_fantastic(path), false, Answer::IsFantastic)
             }
             Ask::LockHolder { path } => {
-                answered(sys::lock_holder_checked(path), None, Answer::LockHolder)
+                let read = sys::lock_holder_checked(path);
+                if let Err(e) = &read {
+                    tracing::warn!("{e}");
+                }
+                answered(read, None, Answer::LockHolder)
             }
             Ask::RunFile { path } => answered(sys::run_file(path), None, Answer::RunFile),
             Ask::CanvasUp { canvas } => {

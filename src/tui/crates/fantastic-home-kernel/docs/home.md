@@ -51,6 +51,8 @@ as `{"type": "event", "payload": {…}}`. Its payloads are:
 - `focus`, `{"type":"focus"}`, from the `focus` verb, for the host shell;
 - `menu_spec`, `{"type":"menu_spec", seq, spec}`, after a state emit that
   changed the native menus (see `menu`);
+- `diagnostics`, the evidence for a row that stops showing as running (see
+  **Diagnostics** below);
 - every call another client sent to `home`, mirrored as it was sent.
 
 Keep only the payload types you read (a page keeps `state`). The order that
