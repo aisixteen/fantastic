@@ -449,3 +449,108 @@ async fn pages_and_selection_are_kept_only_once_listed_and_on_change() {
         ]
     );
 }
+
+#[tokio::test]
+async fn a_demotion_is_emitted_as_diagnostics_with_the_probe_that_caused_it() {
+    let t = t();
+    let diagnostics = |t: &T| -> Vec<Value> {
+        t.emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == json!("diagnostics"))
+            .cloned()
+            .collect()
+    };
+    t.os.set_registry(vec![entry("g2", "/w/b", Some(7), Some(8100))]);
+    t.running("/w/b", 7, 8100, "g2");
+    let s = t.look().await;
+    assert_eq!(status(&s, "g2"), "running");
+    assert!(
+        diagnostics(&t).is_empty(),
+        "a row that starts demotes nothing"
+    );
+    // its canvas misses two answers: ridden out, nothing recorded
+    t.os.set_canvas_up(8100, false);
+    t.look().await;
+    let s = t.look().await;
+    assert_eq!(status(&s, "g2"), "running");
+    assert!(diagnostics(&t).is_empty());
+    // the 3rd miss demotes it: one event, after the state, with the probe
+    let s = t.look().await;
+    assert_eq!(status(&s, "g2"), "unverified");
+    let events = diagnostics(&t);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["seq"], s["seq"]);
+    assert_eq!(
+        events[0]["demotions"],
+        json!([{
+            "at_ms": 0,
+            "guid": "g2",
+            "path": "/w/b",
+            "probe": {
+                "is_fantastic": true,
+                "holder": 7,
+                "owns_entry": true,
+                "canvas": {"url": "http://127.0.0.1:8100/canvas_page/file/index.html", "port": 8100},
+                "canvas_up": false,
+                "guid_matches": false,
+                "errors": [],
+            },
+        }])
+    );
+    let all = t.emitted.lock().unwrap().clone();
+    let at = all
+        .iter()
+        .rposition(|e| e["type"] == json!("diagnostics"))
+        .unwrap();
+    assert_eq!(all[at - 1]["type"], json!("state"), "the state it follows");
+    // a row that comes back demotes nothing more
+    t.os.set_canvas_up(8100, true);
+    t.look().await;
+    assert_eq!(diagnostics(&t).len(), 1);
+}
+
+#[tokio::test]
+async fn a_demotion_carries_the_read_error_that_came_with_its_probe() {
+    let t = t();
+    let diagnostics = |t: &T| -> Vec<Value> {
+        t.emitted
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == json!("diagnostics"))
+            .cloned()
+            .collect()
+    };
+    t.os.set_registry(vec![entry("g3", "/w/c", Some(7), Some(8100))]);
+    t.running("/w/c", 7, 8100, "g3");
+    assert_eq!(status(&t.look().await, "g3"), "running");
+    // its lock cannot be read: no holder is seen, so the row shows stopped at once
+    t.os.set_folder(
+        "/w/c",
+        Folder {
+            is_fantastic: true,
+            holder: None,
+            run: None,
+        },
+    );
+    t.os.set_read_error(
+        "/w/c",
+        "lock_holder",
+        "/w/c: the lock: Access is denied (os error 5)",
+    );
+    let s = t.look().await;
+    assert_eq!(status(&s, "g3"), "stopped");
+    let events = diagnostics(&t);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0]["demotions"][0]["probe"]["errors"],
+        json!([{
+            "what": "lock_holder",
+            "error": "/w/c: the lock: Access is denied (os error 5)",
+        }])
+    );
+    // the state carries no error: it is diagnostics only
+    assert!(!s.to_string().contains("Access is denied"), "{s}");
+}

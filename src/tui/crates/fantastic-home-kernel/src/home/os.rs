@@ -16,7 +16,9 @@ use super::sys;
 pub trait HomeOs: Send + Sync + 'static {
     fn now_ms(&self) -> u64;
     async fn read_registry(&self) -> Result<Vec<(String, String)>, String>;
-    async fn answer(&self, ask: &Ask) -> Answer;
+    /// The answer to `ask`, and the error the machine met giving it, if any: the
+    /// answer then is the one a missing reading gives, and the error is evidence.
+    async fn answer(&self, ask: &Ask) -> (Answer, Option<String>);
     async fn spawn(&self, path: &str) -> Result<(), String>;
     /// Ok(true): asked to stop; Ok(false): nothing holds the folder; Err: could not ask.
     async fn terminate(&self, path: &str) -> Result<bool, String>;
@@ -103,13 +105,23 @@ impl HomeOs for SysOs {
         sys::read_registry(&self.home)
     }
 
-    async fn answer(&self, ask: &Ask) -> Answer {
+    async fn answer(&self, ask: &Ask) -> (Answer, Option<String>) {
         match ask {
-            Ask::IsFantastic { path } => Answer::IsFantastic(sys::is_fantastic(path)),
-            Ask::LockHolder { path } => Answer::LockHolder(sys::lock_holder(path)),
-            Ask::RunFile { path } => Answer::RunFile(sys::run_file(path)),
-            Ask::CanvasUp { canvas } => Answer::CanvasUp(sys::canvas_up(canvas).await),
-            Ask::Guid { port } => Answer::Guid(sys::guid(*port).await),
+            Ask::IsFantastic { path } => {
+                answered(sys::is_fantastic(path), false, Answer::IsFantastic)
+            }
+            Ask::LockHolder { path } => {
+                let read = sys::lock_holder_checked(path);
+                if let Err(e) = &read {
+                    tracing::warn!("{e}");
+                }
+                answered(read, None, Answer::LockHolder)
+            }
+            Ask::RunFile { path } => answered(sys::run_file(path), None, Answer::RunFile),
+            Ask::CanvasUp { canvas } => {
+                answered(sys::canvas_up(canvas).await, false, Answer::CanvasUp)
+            }
+            Ask::Guid { port } => answered(sys::guid(*port).await, None, Answer::Guid),
         }
     }
 
@@ -153,5 +165,18 @@ impl HomeOs for SysOs {
 
     fn log_tail(&self, path: &str) -> Option<String> {
         sys::log_tail(&self.home, path)
+    }
+}
+
+/// A reading that may have failed: the answer of `read`, or of `fallback` (the
+/// one a missing reading gives) with the error that stopped it.
+fn answered<T>(
+    read: Result<T, String>,
+    fallback: T,
+    answer: impl FnOnce(T) -> Answer,
+) -> (Answer, Option<String>) {
+    match read {
+        Ok(value) => (answer(value), None),
+        Err(error) => (answer(fallback), Some(error)),
     }
 }

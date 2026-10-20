@@ -136,6 +136,10 @@ def main() -> bool:
                 if any(st["rows"].get(i) != ["running", urls[i]] for i in (aid, bid))
             ][:10]
             r["frames_still_kept"] = born_after == born and pg.navigations == []
+            info["demotions"] = log.demotions
+            if not r["frames_still_kept"]:
+                # the probe behind each running row the home demoted, whole
+                print("demotions: " + json.dumps(log.demotions))
 
             # mod+W closes the shown page (alpha); alpha keeps running
             await key(pg, "w")
