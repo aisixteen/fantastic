@@ -56,12 +56,14 @@ from file_bridge import file_agent, fs, folder_agent, views
 from io_bridge import describe as _describe
 from io_bridge import gate_inbound, resolve_ingress, unknown_ingress_refusal
 from io_bridge._base import parse_spec
+from kernel import current_origin
 from kernel._refusal import (
     NOT_FOUND,
     TRANSPORT_ERROR,
     UNAUTHORIZED,
     UNHANDLED,
     bad,
+    guard_agent_id,
     missing,
     refusal,
 )
@@ -1128,11 +1130,17 @@ async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, st
 
 
 async def _open_view(id, payload, kernel):
-    """args: kind:str (req — `file` or `folder`), path:str (req — root-relative, exposed by `allow`; `.` = the whole root, folders only). Reuses the view of that path or makes it: {id, kind, path, created}. The new view's grant on THIS bridge is its own verbs only (views.GRANTS)."""
+    """args: kind:str (req — `file` or `folder`), path:str (req — root-relative, exposed by `allow`; `.` = the whole root, folders only), id:str? (a view id you choose, if free — so you can declare it to a caller up front). Reuses the view of that path or makes it: {id, kind, path, created}. The new view's grant on THIS bridge is its own verbs only (views.GRANTS)."""
     rec = kernel.get(id) or {}
     kind = payload.get("kind")
     if kind not in (views.FILE, views.FOLDER):
         return bad("open_view", "kind", "`file` or `folder`")
+    chosen = payload.get("id")
+    if chosen is not None:
+        if not isinstance(chosen, str):
+            return bad("open_view", "id", "an agent id (a string)")
+        if err := guard_agent_id("open_view", chosen):
+            return err
     path, err = _path_arg("open_view", payload)
     if err:
         return err
@@ -1143,7 +1151,7 @@ async def _open_view(id, payload, kernel):
         return bad("open_view", "path", "a file path (the root is a folder)")
     if err := _gate_path("open_view", _root(kernel, rec), _allow(rec), norm):
         return err
-    return views.open_view(kernel, kernel.ctx.agents[id], kind, norm)
+    return views.open_view(kernel, kernel.ctx.agents[id], kind, norm, chosen)
 
 
 # ─── dispatch ───────────────────────────────────────────────────
@@ -1249,6 +1257,35 @@ def instance_verbs(agent) -> dict[str, str] | None:
     return {n: f.__doc__ or "" for n, f in VIEW_MODULES[view].VERBS.items()}
 
 
+#: The verbs a view may send its bridge (`views.GRANTS`) that name one path of the disk.
+SCOPED_VERBS = {"read", "write", "list", "watch_path", "unwatch_path"}
+
+
+def _view_scope(bridge: str, verb: str, payload: dict, kernel) -> dict | None:
+    """THE PATH GATE FOR A VIEW CALLER. A view that calls this bridge reaches only inside
+    its own path (a file: that file; a folder: itself and what is under it), whatever its
+    grant names. The view's scope is its own record (`views.caller_scope`), so there is no
+    second copy of it to drift. An operator or a plain agent is not path-scoped here."""
+    scope = views.caller_scope(kernel, bridge, current_origin())
+    if scope is None:
+        return None
+    kind, own = scope
+    rel = payload.get("path", "")
+    if rel is None:
+        rel = ""
+    if not isinstance(rel, str):
+        return bad(verb, "path", "a string")
+    path = _norm(rel)
+    if path is None or not (own and views.inside(kind, own, path)):
+        return refusal(
+            UNAUTHORIZED,
+            f"{verb}: {rel!r} is outside this {kind} view's path {own!r}",
+            hint="a view reaches only its own path; open a view of that path (open_view)",
+            path=rel,
+        )
+    return None
+
+
 async def handler(id: str, payload: dict, kernel) -> dict | None:
     view = (kernel.get(id) or {}).get("view")
     if view is not None:
@@ -1271,4 +1308,6 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
             if decision.see:
                 out["see"] = decision.see
             return out
+    if t in SCOPED_VERBS and (err := _view_scope(id, t, payload, kernel)):
+        return err
     return await fn(id, payload, kernel)

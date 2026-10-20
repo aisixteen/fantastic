@@ -2,7 +2,7 @@
 # file and folder VIEW agents (open_view), driven over web_rest (events over the ws face).
 id: file_agents
 group: kernel
-title: "file and folder agents over a file_bridge: open_view makes or reuses one agent per path (an unexposed or escaping path makes none), a file view reads and writes its own path against the version read, a folder view lists inside itself and reveals, and a view's watch arms its relay once (the relay's events are judged in-process)"
+title: "file and folder agents over a file_bridge: open_view makes or reuses one agent per path under a chosen id (an unexposed or escaping path makes none), a file view reads and writes its own path against the version read, a folder view lists inside itself and reveals, a view's watch arms its relay once, and the relay emits live over ws (a file's changed on an edit; a folder's added and removed)"
 runner: probe.py
 runtimes: [python, rust, swift]
 costs: free

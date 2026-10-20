@@ -83,13 +83,61 @@ func viewCallers(_ bridge: Agent, kind: String) -> OrderedDictionary<String, JSO
     return result
 }
 
-/// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type.
-func folderEvent(_ raw: String) -> String {
+/// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type. Any
+/// other kind is nil: the relay drops it, it is never relabelled as a change.
+func folderEvent(_ raw: String) -> String? {
     switch raw {
     case "added": return "added"
+    case "modified": return "changed"
     case "deleted": return "removed"
-    default: return "changed"
+    default: return nil
     }
+}
+
+/// python `views.inside`: is the bridge path `target` inside the view's own path `own`?
+/// A file is its own path only; a folder is itself and everything under it.
+func viewInside(_ kind: String, own: String, target: String) -> Bool {
+    if kind == VIEW_FILE { return target == own }
+    return own == "." || target == own || target.hasPrefix(own + "/")
+}
+
+/// The verbs a view may send its bridge that name one path of the disk (python
+/// `tools.SCOPED_VERBS`).
+let viewScopedVerbs: Set<String> = ["read", "write", "list", "watch_path", "unwatch_path"]
+
+/// python `tools._view_scope`: a VIEW caller reaches only inside its own path, whatever
+/// its grant names. Nil admits; a refusal is returned. An operator or a plain agent is
+/// not path-scoped here.
+func viewPathGate(
+    _ kernel: Kernel, bridge: String, origin: AgentId?, verb: String, payload: JSON
+) -> JSON? {
+    guard let scope = viewCallerScope(kernel, bridge: bridge, origin: origin) else { return nil }
+    let rel: String
+    switch payload["path"] {
+    case .null: rel = ""
+    case .string(let s): rel = s
+    default: return Refusal.bad(verb, "path", "a string")
+    }
+    if let target = allowNorm(rel), !scope.own.isEmpty, viewInside(scope.kind, own: scope.own, target: target) {
+        return nil
+    }
+    return Refusal.make(
+        Refusal.unauthorized,
+        "\(verb): \(pyRepr(rel)) is outside this \(scope.kind) view's path \(pyRepr(scope.own))",
+        hint: "a view reaches only its own path; open a view of that path (open_view)",
+        extra: [("path", .string(rel))])
+}
+
+/// python `views.caller_scope`: the (kind, path) a VIEW caller is scoped to on this
+/// bridge, or nil for a caller that is not a view. A view of ANOTHER bridge has no
+/// standing here: its path is empty, which matches nothing.
+func viewCallerScope(_ kernel: Kernel, bridge: String, origin: AgentId?) -> (kind: String, own: String)? {
+    guard let origin, let caller = kernel.agent(origin) else { return nil }
+    guard let kind = caller.metaValue(forKey: "view")?.asString,
+        kind == VIEW_FILE || kind == VIEW_FOLDER
+    else { return nil }
+    if caller.metaValue(forKey: "bridge")?.asString != bridge { return (kind, "") }
+    return (kind, caller.metaValue(forKey: "path")?.asString ?? ".")
 }
 
 /// python `views.bridge_path`: the bridge path a view's relative `rel` names. A file
@@ -156,16 +204,47 @@ func viewFind(_ kernel: Kernel, bridge: String, kind: String, path: String) -> S
 
 /// python `views.open_view`: reuse the view of `path` on this bridge, or make it. The
 /// bridge grants the new view exactly its grant in its `callable_by`.
-func viewOpen(_ kernel: Kernel, bridge: Agent, kind: String, path: String) async -> JSON {
+///
+/// `chosen` is a caller-picked id for the new view. It is taken only when it is free: a
+/// `chosen` that is another agent, or a view of another path, is refused; so is a path
+/// that already has a view under another id. Nothing is replaced or ignored.
+func viewOpen(
+    _ kernel: Kernel, bridge: Agent, kind: String, path: String, chosen: String? = nil
+) async -> JSON {
     let bid = bridge.id.value
-    if let existing = viewFind(kernel, bridge: bid, kind: kind, path: path) {
+    let existing = viewFind(kernel, bridge: bid, kind: kind, path: path)
+    if let chosen {
+        if let held = kernel.agent(AgentId(chosen)) {
+            let isView = held.metaValue(forKey: "view")?.asString == kind
+                && held.metaValue(forKey: "bridge")?.asString == bid
+                && held.metaValue(forKey: "path")?.asString == path
+            if !isView {
+                return Refusal.make(
+                    Refusal.exists,
+                    "open_view: \(pyRepr(chosen)) is already an agent, not a \(kind) view of \(pyRepr(path))",
+                    extra: [("id", .string(chosen))])
+            }
+            return .object([
+                "id": .string(chosen), "kind": .string(kind), "path": .string(path),
+                "created": .bool(false),
+            ])
+        }
+        if let existing {
+            return Refusal.make(
+                Refusal.exists,
+                "open_view: \(pyRepr(path)) already has the \(kind) view \(pyRepr(existing))",
+                hint: "open it by that id, or omit `id`",
+                extra: [("id", .string(existing))])
+        }
+    }
+    if let existing {
         return .object([
             "id": .string(existing), "kind": .string(kind), "path": .string(path),
             "created": .bool(false),
         ])
     }
     let own = viewGrants(kind)
-    let made = await kernel.createFromPayload(payload: .object([
+    var payload: OrderedDictionary<String, JSON> = [
         "handler_module": .string(VIEW_HANDLER_MODULE),
         "parent_id": .string(bid),
         "view": .string(kind),
@@ -174,7 +253,9 @@ func viewOpen(_ kernel: Kernel, bridge: Agent, kind: String, path: String) async
         "display_name": .string(viewBaseName(path)),
         "can_call": .object([bid: .array(own.map { .string($0) })]),
         "callable_by": .object(viewCallers(bridge, kind: kind)),
-    ]))
+    ]
+    if let chosen { payload["id"] = .string(chosen) }
+    let made = await kernel.createFromPayload(payload: .object(payload))
     if made.asObject?["error"] != nil { return made }
     let vid = made["id"].asString ?? ""
     var cb = bridge.metaValue(forKey: "callable_by")?.asObject ?? [:]
@@ -208,7 +289,13 @@ final class ViewRelays: @unchecked Sendable {
 /// python `views._relay_rule`: one bridge `changed` → the view's own event, or nil.
 func viewRelayEvent(_ kind: String, own: String, ev: JSON) -> JSON? {
     guard let p = ev["path"].asString else { return nil }
-    let raw = ev["kind"].asString ?? "modified"
+    guard let raw = ev["kind"].asString, ["added", "modified", "deleted"].contains(raw) else {
+        // The bridge reports added / modified / deleted, always. Anything else is a bug
+        // upstream: dropped and logged, never relabelled as a change.
+        FileHandle.standardError.write(
+            Data("  [file_bridge] view relay: dropped event with kind \(ev["kind"]) for \(pyRepr(p))\n".utf8))
+        return nil
+    }
     if kind == VIEW_FILE {
         if p != own { return nil }
         return .object(["type": .string("changed"), "path": .string(own), "kind": .string(raw)])
@@ -223,8 +310,9 @@ func viewRelayEvent(_ kind: String, own: String, ev: JSON) -> JSON? {
         name = p
     }
     if p == own || parent != own { return nil }  // the folder itself, or something deeper
+    guard let event = folderEvent(raw) else { return nil }
     return .object([
-        "type": .string(folderEvent(raw)), "path": .string(p), "name": .string(name),
+        "type": .string(event), "path": .string(p), "name": .string(name),
     ])
 }
 
@@ -397,6 +485,14 @@ extension FileBundle {
         case .some(let k) where k == VIEW_FILE || k == VIEW_FOLDER: kind = k
         default: return Refusal.bad("open_view", "kind", "`file` or `folder`")
         }
+        let chosen: String?
+        switch payload["id"] {
+        case .null: chosen = nil
+        case .string(let s):
+            if let err = Refusal.guardAgentId("open_view", s) { return err }
+            chosen = s
+        default: return Refusal.bad("open_view", "id", "an agent id (a string)")
+        }
         let path: String
         do { path = try pathArg("open_view", payload, "path") } catch { return error.json }
         guard let norm = allowNorm(path) else {
@@ -411,7 +507,7 @@ extension FileBundle {
         {
             return err
         }
-        return await viewOpen(kernel, bridge: agent, kind: kind, path: norm)
+        return await viewOpen(kernel, bridge: agent, kind: kind, path: norm, chosen: chosen)
     }
 
     /// The `validate_meta` judgement on the view field: a view is `file` or `folder`.

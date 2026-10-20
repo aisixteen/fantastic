@@ -33,7 +33,7 @@ import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
 import { DRAG_MIME, decodeDrag, layoutAround } from "../files/drag.ts";
-import { fileGrant } from "../files/file_bridge.ts";
+import { fileGrant, onStateFrame } from "../files/file_bridge.ts";
 import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
 import { previewView } from "../preview/preview_view.ts";
 import type { Pick, Presets } from "./action_popup.ts";
@@ -367,6 +367,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // the host's lifecycle events, debounced (an `updated` comes with every record write)
   let syncTimer: ReturnType<typeof setTimeout> | null = null;
   kernel.subscribeState((frame) => {
+    // a view the state stream reports removed releases the paths it serves
+    onStateFrame(kernel, frame as Rec);
     const k = (frame as Rec)["kind"];
     if (k !== "added" && k !== "removed" && k !== "updated") return;
     if (syncTimer !== null) clearTimeout(syncTimer);

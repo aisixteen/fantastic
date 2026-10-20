@@ -251,6 +251,8 @@ export interface Served {
 
 interface ViewSet {
   served: Map<string, Served>;
+  /** who holds each served path: the cells bound to it. A path is served while any holds it. */
+  holders: Map<string, Set<string>>;
   listeners: Set<(ev: Record<string, unknown>) => void>;
   /** the sources this page listens to for `changed` */
   watching: Set<string>;
@@ -262,10 +264,21 @@ const viewSets = new WeakMap<Kernel, ViewSet>();
 function viewSet(kernel: Kernel): ViewSet {
   let s = viewSets.get(kernel);
   if (s === undefined) {
-    s = { served: new Map(), listeners: new Set(), watching: new Set(), host: new Host(kernel, "files_hub") };
+    s = {
+      served: new Map(),
+      holders: new Map(),
+      listeners: new Set(),
+      watching: new Set(),
+      host: new Host(kernel, "files_hub"),
+    };
     viewSets.set(kernel, s);
   }
   return s;
+}
+
+/** The state stream's removals: a view that is deleted stops serving its paths. */
+export function onStateFrame(kernel: Kernel, frame: Record<string, unknown>): void {
+  if (frame["kind"] === "removed" && typeof frame["agent_id"] === "string") dropView(kernel, frame["agent_id"]);
 }
 
 /** What a verb sent to a served path becomes: the view it goes to and the payload it
@@ -362,13 +375,65 @@ function changesOf(kernel: Kernel): Subscribe {
   };
 }
 
-/** Serve `path` through view `view` on this page: its routes now, its events once
- *  anything listens. Used by `openViewAgent`, and by a cell that is restored bound to one. */
-export function serve(kernel: Kernel, kind: ViewKind, path: string, view: string): void {
+/** The page's served paths, for the tests of its routes and releases. */
+export function servedOf(kernel: Kernel): Map<string, Served> {
+  return viewSet(kernel).served;
+}
+
+/** Route `path` through view `view` on this page: its routes now, its events once
+ *  anything listens. Holds nothing: a route is the page's answer, and a cell holds it. */
+function route(kernel: Kernel, kind: ViewKind, path: string, view: string): void {
   const s = viewSet(kernel);
   const p = norm(path);
   s.served.set(p, { view, kind, path: p });
   if (s.listeners.size > 0) listenTo(s, view);
+}
+
+/** Serve `path` through view `view` for `holder` (a cell's id): the route holds until that
+ *  holder releases it (`release`). */
+export function serve(kernel: Kernel, kind: ViewKind, path: string, view: string, holder: string): void {
+  route(kernel, kind, path, view);
+  const s = viewSet(kernel);
+  const p = norm(path);
+  const held = s.holders.get(p) ?? new Set<string>();
+  held.add(holder);
+  s.holders.set(p, held);
+}
+
+/** `holder` lets go of `path`. The path stops being served when its last holder lets go;
+ *  a holder that holds nothing here is a no-op. */
+export function release(kernel: Kernel, path: string, holder: string): void {
+  const s = viewSet(kernel);
+  const p = norm(path);
+  const held = s.holders.get(p);
+  if (held === undefined || !held.delete(holder)) return;
+  if (held.size > 0) return;
+  s.holders.delete(p);
+  const sv = s.served.get(p);
+  s.served.delete(p);
+  if (sv !== undefined && !viewIsServed(s, sv.view)) unlisten(s, sv.view);
+}
+
+/** A view is gone (deleted, or removed from the state): every path it serves is released,
+ *  and its events are no longer listened to. */
+export function dropView(kernel: Kernel, view: string): void {
+  const s = viewSet(kernel);
+  for (const [p, sv] of [...s.served]) {
+    if (sv.view !== view) continue;
+    s.served.delete(p);
+    s.holders.delete(p);
+  }
+  unlisten(s, view);
+}
+
+function viewIsServed(s: ViewSet, view: string): boolean {
+  for (const sv of s.served.values()) if (sv.view === view) return true;
+  return false;
+}
+
+function unlisten(s: ViewSet, src: string): void {
+  if (!s.watching.delete(src)) return;
+  s.host.unwatch(src);
 }
 
 /** How long the page waits for the host to grant it a view it has just been given: the
@@ -408,7 +473,7 @@ export async function openViewAgent(
   if (isRefusal(r)) return r;
   const id = r["id"];
   if (typeof id !== "string") return { error: `open_view ${path}: the reply names no view`, reason: "bad_reply" };
-  serve(kernel, kind, path, id);
+  route(kernel, kind, path, id);
   return { view: id, created: r["created"] === true };
 }
 
@@ -425,15 +490,17 @@ export async function bindCellToView(
   saved: string | undefined,
   record: (view: string) => void,
   waitMs = GRANT_WAIT_MS,
+  holder = "",
 ): Promise<{ ok: true; view: string } | { ok: false; refusal: Refusal }> {
   let view: string;
   if (saved !== undefined) {
-    serve(kernel, kind, path, saved);
+    serve(kernel, kind, path, saved, holder);
     view = saved;
   } else {
     const r = await openViewAgent(kernel, kind, path);
     if (isRefusal(r)) return { ok: false, refusal: r };
     record(r.view);
+    serve(kernel, kind, path, r.view, holder);
     view = r.view;
   }
   const ungranted = await awaitGrant(kernel, view, waitMs);

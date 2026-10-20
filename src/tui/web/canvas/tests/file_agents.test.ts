@@ -5,7 +5,7 @@ import type { Payload } from "../src/lib.ts";
 import { grantViewLists, registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerLayout } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
-import { awaitGrant, bindCellToView, changeOf, isRefusal, openViewAgent, routeOf, routedBridge } from "../src/bundles/files/file_bridge.ts";
+import { awaitGrant, bindCellToView, changeOf, isRefusal, onStateFrame, openViewAgent, release, routeOf, routedBridge, servedOf } from "../src/bundles/files/file_bridge.ts";
 import type { Served } from "../src/bundles/files/file_bridge.ts";
 import { FakeBridge } from "./fake_bridge.ts";
 import { project } from "./rig.ts";
@@ -313,3 +313,44 @@ test("a file dropped while its view is refused makes no cell, and the refusal is
   assert.equal(k.get("view_root")!.children.size, before, "no cell was placed");
 });
 
+test("a served path is released when its last cell lets go, and not before", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const first = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(first));
+  const cellA = "cell-a";
+  const cellB = "cell-b";
+  const bindA = await bindCellToView(k, "file", "docs/a.md", first.view, () => {}, 5_000, cellA);
+  const bindB = await bindCellToView(k, "file", "docs/a.md", first.view, () => {}, 5_000, cellB);
+  assert.ok(bindA.ok && bindB.ok);
+  assert.ok(payloadOf(routeOf(servedOf(k), { type: "read", path: "docs/a.md" })) !== undefined);
+  release(k, "docs/a.md", cellA);
+  assert.ok(payloadOf(routeOf(servedOf(k), { type: "read", path: "docs/a.md" })) !== undefined, "b still holds it");
+  release(k, "docs/a.md", "a stranger");
+  assert.ok(payloadOf(routeOf(servedOf(k), { type: "read", path: "docs/a.md" })) !== undefined, "a stranger releases nothing");
+  release(k, "docs/a.md", cellB);
+  assert.equal(routeOf(servedOf(k), { type: "read", path: "docs/a.md" }), null, "the last holder let go");
+});
+
+test("a view the state stream reports removed releases every path it serves", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  const file = await openViewAgent(k, "file", "docs/a.md");
+  const folder = await openViewAgent(k, "folder", "docs");
+  assert.ok(!isRefusal(file) && !isRefusal(folder));
+  assert.ok((await bindCellToView(k, "file", "docs/a.md", file.view, () => {}, 5_000, "c1")).ok);
+  assert.ok((await bindCellToView(k, "folder", "docs", folder.view, () => {}, 5_000, "c2")).ok);
+  onStateFrame(k, { kind: "removed", agent_id: file.view });
+  assert.equal(routeOf(servedOf(k), { type: "read", path: "docs/a.md" }), null, "the removed view's path is released");
+  assert.ok(routeOf(servedOf(k), { type: "list", path: "docs" }) !== null, "another view's path is still served");
+  onStateFrame(k, { kind: "added", agent_id: folder.view });
+  assert.ok(routeOf(servedOf(k), { type: "list", path: "docs" }) !== null, "an added frame releases nothing");
+});
+
+test("releasing a path nothing holds is a no-op", () => {
+  const k = bridgeKernel(new FakeBridge());
+  release(k, "never/served.md", "nobody");
+  assert.equal(routeOf(servedOf(k), { type: "read", path: "never/served.md" }), null);
+});

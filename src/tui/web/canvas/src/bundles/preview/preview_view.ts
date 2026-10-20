@@ -1,7 +1,7 @@
 import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { onMac } from "../canvas/viewer.ts";
-import { bindCellToView, fileGrant, readBytes, routedBridge, said, sharedHub } from "../files/file_bridge.ts";
+import { bindCellToView, fileGrant, readBytes, release, routedBridge, said, sharedHub } from "../files/file_bridge.ts";
 import { agentIndex, ensureWalker, filesDeps, onRender, onSelection, selection } from "../files/files_deps.ts";
 import { extOf, HIGHLIGHT_MAX, human, PAGE } from "./preview_model.ts";
 import { lineDiff } from "./diff.ts";
@@ -482,7 +482,7 @@ export const previewView: ViewBundle = {
       typeof pinnedPath === "string"
         ? bindCellToView(ctx.kernel, "file", pinnedPath, typeof fileAgent === "string" ? fileAgent : undefined, (view) => {
             ctx.kernel.updateMeta(ctx.selfId, { view_agent: view } as unknown as Payload);
-          }).then((b) => {
+          }, undefined, ctx.selfId).then((b) => {
             if (!b.ok) say(`${said(b.refusal)} — this preview is not its file's view`);
           })
         : Promise.resolve();
@@ -500,6 +500,7 @@ export const previewView: ViewBundle = {
         offSel();
         offRender();
         ctl.dispose();
+        if (typeof pinnedPath === "string") release(ctx.kernel, pinnedPath, ctx.selfId);
         previews.delete(ctx.selfId);
         freeBody();
         el.remove();

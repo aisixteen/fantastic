@@ -64,12 +64,14 @@ pub(crate) fn verb_docs_of(meta: &Map<String, Value>) -> Option<Value> {
     ))
 }
 
-/// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type.
-fn folder_event(raw: &str) -> &'static str {
+/// python `views.FOLDER_EVENT` — the bridge's disk kind → a folder's event type. Any
+/// other kind is None: the relay drops it, it is never relabelled as a change.
+fn folder_event(raw: &str) -> Option<&'static str> {
     match raw {
-        "added" => "added",
-        "deleted" => "removed",
-        _ => "changed",
+        "added" => Some("added"),
+        "modified" => Some("changed"),
+        "deleted" => Some("removed"),
+        _ => None,
     }
 }
 
@@ -129,6 +131,35 @@ pub(crate) fn view_callers(
     out.into_iter()
         .map(|(k, v)| (k, json!(v.into_iter().collect::<Vec<_>>())))
         .collect()
+}
+
+/// python `views.inside`: is the bridge path `target` inside the view's own path `own`?
+/// A file is its own path only; a folder is itself and everything under it.
+pub(crate) fn inside(kind: &str, own: &str, target: &str) -> bool {
+    if kind == FILE {
+        return target == own;
+    }
+    own == "." || target == own || target.starts_with(&format!("{own}/"))
+}
+
+/// python `views.caller_scope`: the `(kind, path)` a VIEW caller is scoped to on this
+/// bridge, or None for a caller that is not a view. A view of ANOTHER bridge has no
+/// standing here: its path is returned empty, which matches nothing.
+pub(crate) fn caller_scope(
+    kernel: &Arc<Kernel>,
+    bridge: &str,
+    caller: Option<&AgentId>,
+) -> Option<(String, String)> {
+    let meta = kernel.agents.get(caller?)?.record().meta;
+    let kind = meta.get("view").and_then(Value::as_str)?;
+    if kind != FILE && kind != FOLDER {
+        return None;
+    }
+    if meta.get("bridge").and_then(Value::as_str) != Some(bridge) {
+        return Some((kind.to_string(), String::new()));
+    }
+    let path = meta.get("path").and_then(Value::as_str).unwrap_or(".");
+    Some((kind.to_string(), path.to_string()))
 }
 
 /// python `views.bridge_path`: the bridge path a view's relative `rel` names. A file
@@ -234,14 +265,48 @@ fn find_view(kernel: &Arc<Kernel>, bridge: &str, kind: &str, path: &str) -> Opti
 
 /// python `open_view`: reuse the view of `path` on this bridge, or make it. The
 /// bridge grants the new view exactly its grant in its `callable_by`.
+///
+/// `chosen` is a caller-picked id for the new view. It is taken only when it is free: a
+/// `chosen` that is another agent, or a view of another path, is refused; so is a path
+/// that already has a view under another id. Nothing is replaced or ignored.
 pub(crate) async fn open_view(
     kernel: &Arc<Kernel>,
     bridge: &Arc<Agent>,
     kind: &str,
     path: &str,
+    chosen: Option<&str>,
 ) -> Value {
     let bid = bridge.id.0.clone();
-    if let Some(existing) = find_view(kernel, &bid, kind, path) {
+    let existing = find_view(kernel, &bid, kind, path);
+    if let Some(chosen) = chosen {
+        if let Some(held) = kernel
+            .agents
+            .get(&AgentId::from(chosen))
+            .map(|a| a.record().meta)
+        {
+            if !is_view_of(&held, &bid, kind, path) {
+                let mut r = rf::refusal(
+                    rf::EXISTS,
+                    format!(
+                        "open_view: {chosen:?} is already an agent, not a {kind} view of {path:?}"
+                    ),
+                );
+                rf::with(&mut r, "id", json!(chosen));
+                return r;
+            }
+            return json!({"id": chosen, "kind": kind, "path": path, "created": false});
+        }
+        if let Some(existing) = &existing {
+            let mut r = rf::refusal(
+                rf::EXISTS,
+                format!("open_view: {path:?} already has the {kind} view {existing:?}"),
+            );
+            rf::with(&mut r, "hint", json!("open it by that id, or omit `id`"));
+            rf::with(&mut r, "id", json!(existing));
+            return r;
+        }
+    }
+    if let Some(existing) = existing {
         return json!({"id": existing, "kind": kind, "path": path, "created": false});
     }
     let Some(root) = kernel.root() else {
@@ -257,7 +322,7 @@ pub(crate) async fn open_view(
         .cloned()
         .unwrap_or_default();
     let bridge_parent = bridge.parent_id.as_ref().map(|p| p.0.clone());
-    let payload = json!({
+    let mut payload = json!({
         "handler_module": super::HANDLER_MODULE,
         "parent_id": bid,
         "view": kind,
@@ -267,6 +332,9 @@ pub(crate) async fn open_view(
         "can_call": {bid.clone(): own_grants.clone()},
         "callable_by": Value::Object(view_callers(&bridge_grants, bridge_parent.as_deref(), kind)),
     });
+    if let Some(chosen) = chosen {
+        payload["id"] = json!(chosen);
+    }
     let made = create_from_payload(kernel, &root, &payload).await;
     if made.get("error").is_some() {
         return made;
@@ -299,6 +367,13 @@ pub(crate) async fn open_view(
     json!({"id": vid, "kind": kind, "path": path, "created": true})
 }
 
+/// Is this record the view of `path` of this kind on this bridge?
+fn is_view_of(meta: &Map<String, Value>, bridge: &str, kind: &str, path: &str) -> bool {
+    meta.get("view").and_then(Value::as_str) == Some(kind)
+        && meta.get("bridge").and_then(Value::as_str) == Some(bridge)
+        && meta.get("path").and_then(Value::as_str) == Some(path)
+}
+
 /// python `os.path.basename(path) or "."`.
 fn bridge_name(path: &str) -> String {
     let base = path.rsplit('/').next().unwrap_or(path);
@@ -324,7 +399,13 @@ struct Relay {
 /// python `_relay_rule`: one bridge `changed` → the view's event, or nothing.
 pub(crate) fn relay_event(kind: &str, own: &str, ev: &Value) -> Option<Value> {
     let p = ev.get("path").and_then(Value::as_str)?;
-    let raw = ev.get("kind").and_then(Value::as_str).unwrap_or("modified");
+    let raw = ev.get("kind").and_then(Value::as_str);
+    let Some(raw) = raw.filter(|k| matches!(*k, "added" | "modified" | "deleted")) else {
+        // The bridge reports added / modified / deleted, always. Anything else is a bug
+        // upstream: dropped and logged, never relabelled as a change.
+        eprintln!("  [file_bridge] view relay: dropped event with kind {raw:?} for {p:?}");
+        return None;
+    };
     if kind == FILE {
         if p != own {
             return None;
@@ -339,7 +420,7 @@ pub(crate) fn relay_event(kind: &str, own: &str, ev: &Value) -> Option<Value> {
         return None; // the folder itself, or something deeper than its entries
     }
     let name = p.rsplit('/').next().unwrap_or(p);
-    Some(json!({"type": folder_event(raw), "path": p, "name": name}))
+    Some(json!({"type": folder_event(raw)?, "path": p, "name": name}))
 }
 
 /// python `_relay`: the view's inbox, drained — each bridge change it is handed
@@ -586,10 +667,20 @@ pub(crate) async fn open_view_verb(
     if let Some(err) = gate_path("open_view", &root, &allow, &norm_path) {
         return err;
     }
+    let chosen = match payload.get("id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => {
+            if let Some(err) = rf::guard_agent_id("open_view", s) {
+                return err;
+            }
+            Some(s.as_str())
+        }
+        Some(_) => return rf::bad("open_view", "id", "an agent id (a string)"),
+    };
     let Some(bridge) = kernel.agents.get(agent_id).map(|a| Arc::clone(a.value())) else {
         return json!({"error": format!("no agent {}", agent_id.0)});
     };
-    open_view(kernel, &bridge, kind, &norm_path).await
+    open_view(kernel, &bridge, kind, &norm_path, chosen).await
 }
 
 /// The `validate_meta` judgement on the view field: a view is `file` or `folder`.

@@ -1,44 +1,45 @@
 """kernel/file_agents — the file and folder AGENTS over a file_bridge. NO MODEL.
 
 The kernel's own `file_bridge` (root `box/`, `allow: [docs, top.txt]`) on the packaged
-host of `RUNTIME` (python | rust | swift), every call over `web_rest`. A file or a
-folder is a VIEW AGENT of the bridge (`open_view`), one agent per path (the live relay
-events are judged in-process, see below):
+host of `RUNTIME` (python | rust | swift), every call over `web_rest`, the live events
+over the `ws` face. A file or a folder is a VIEW AGENT of the bridge (`open_view`), one
+agent per path. The harness picks the view ids and declares them in `reach` at boot, so
+the ws leg may watch them:
 
-  1. `open_view` makes a file view and a folder view, and a second open of the same
-     path is the same agent (`created: false`); a path the bridge does not expose, a
-     `..` or an absolute path is refused and makes no agent;
+  1. `open_view` makes a file view and a folder view under the ids the harness chose,
+     and a second open of the same path is the same agent (`created: false`); a path the
+     bridge does not expose, a `..` or an absolute path is refused and makes no agent;
   2. the file view reads and writes its own path against the version read: a write
      with the current version lands, a stale one is refused and the disk is untouched;
      a file view names no other path (refused, nothing of it leaks);
   3. the folder view lists inside its folder and refuses a climb out of it; `reveal`
      shows the folders on the way down, and says `not_found` for what is not there;
   4. `watch` arms a view's relay on its bridge, once: the second `watch` of the same
-     view is the same relay, not a second one.
+     view is the same relay, not a second one;
+  5. LIVE, over the ws face: a file view emits `changed` after an on-disk edit; a folder
+     view emits `added` and then `removed` for an entry made and deleted in it.
 
-Not here: the live `changed` / `added` / `removed` events over the `ws` face. The ws
-leg may call only the ids the harness declares at boot (`reach`), and a view made during
-the run is not one of them, so the leg is refused (`ws may not call 'watch'`). The relay
-itself is judged in-process by `file_bridge/tests/test_views.py` and `fantastic-file`'s
-`tests_views.rs`, where the view's relay events are asserted.
-
-The canvas drop and the TUI's views are the page's; this probe pins the kernel
-contract they both stand on.
+The canvas drop and the TUI's views are the page's; this probe pins the kernel contract
+they both stand on.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 E2E = next(d for d in Path(__file__).resolve().parents if (d / ".e2e-root").exists())
 sys.path.insert(0, str(E2E))
 
 from helpers.host.driver import HostKernel, ensure_runtime, runtime
+from helpers.host.ws import WSWatcher
 from helpers.verdict import verdict
 
 REPO = E2E.parent
@@ -46,6 +47,37 @@ RUNTIME = os.environ.get("RUNTIME", "")
 GRANTS = {"$self": "*", "$parent": "*", "ws": "*"}
 SECRET = "secret-in-root-not-exposed"
 TOP = "top-level-content-not-exposed"
+#: The view ids the harness chooses and declares at boot (so the ws leg may watch them).
+FILE_VIEW = "e123-file"
+FOLDER_VIEW = "e123-folder"
+
+
+def watch(port: int, aid: str) -> list:
+    """Collect `aid`'s events over the ws face, in a daemon thread, for the run."""
+    seen: list = []
+
+    async def run():
+        w = WSWatcher(port, aid)
+        await w.connect()
+        async for ev in w.events():
+            seen.append(ev)
+
+    threading.Thread(target=lambda: asyncio.run(run()), daemon=True).start()
+    return seen
+
+
+def until(step, done, timeout: float = 30.0) -> bool:
+    """Run `step(i)` and check `done()`, until it holds or the bound passes. The step is
+    repeated because the disk watch may not be armed on the first edit."""
+    end = time.monotonic() + timeout
+    i = 0
+    while not done():
+        if time.monotonic() > end:
+            return False
+        step(i)
+        i += 1
+        time.sleep(0.2)
+    return True
 
 
 def main() -> int:
@@ -58,7 +90,7 @@ def main() -> int:
     (box / "docs/sub/b.txt").write_text("bee\n")
     (box / "top.txt").write_text(TOP)
     (box / "secret.txt").write_text(SECRET)
-    hk = HostKernel(spec, work, reach=["fb"]).boot()
+    hk = HostKernel(spec, work, reach=["fb", FILE_VIEW, FOLDER_VIEW]).boot()
     root = hk.root_id
     bad: list[str] = []
 
@@ -82,18 +114,22 @@ def main() -> int:
                         ingress_rule="allow_all_ingress", callable_by=GRANTS)
         need(rec.get("id") == "fb", f"create fb: {str(rec)[:200]}")
 
-        # 1 · open: one agent per path
-        f1 = fb({"type": "open_view", "kind": "file", "path": "docs/a.md"})
-        need(f1.get("created") is True and f1.get("kind") == "file", f"open a file view: {str(f1)[:160]}")
-        fid = str(f1.get("id"))
+        # 1 · open: one agent per path, under the chosen ids
+        f1 = fb({"type": "open_view", "kind": "file", "path": "docs/a.md", "id": FILE_VIEW})
+        need(f1.get("created") is True and f1.get("id") == FILE_VIEW and f1.get("kind") == "file",
+             f"open a file view under its chosen id: {str(f1)[:160]}")
+        fid = FILE_VIEW
         f2 = fb({"type": "open_view", "kind": "file", "path": "docs/a.md"})
         need(f2.get("id") == fid and f2.get("created") is False,
              f"a second open of the same file is the same agent: {str(f2)[:160]}")
-        d1 = fb({"type": "open_view", "kind": "folder", "path": "docs"})
-        need(d1.get("created") is True and d1.get("kind") == "folder", f"open a folder view: {str(d1)[:160]}")
-        did = str(d1.get("id"))
+        d1 = fb({"type": "open_view", "kind": "folder", "path": "docs", "id": FOLDER_VIEW})
+        need(d1.get("created") is True and d1.get("kind") == "folder" and d1.get("id") == FOLDER_VIEW,
+             f"open a folder view under its chosen id: {str(d1)[:160]}")
+        did = FOLDER_VIEW
         d2 = fb({"type": "open_view", "kind": "folder", "path": "docs"})
-        need(d2.get("id") == did and d2.get("created") is False, f"a second open of the folder is the same agent")
+        need(d2.get("id") == did and d2.get("created") is False, "a second open of the folder is the same agent")
+        taken = fb({"type": "open_view", "kind": "file", "path": "top.txt", "id": did})
+        need(taken.get("reason") == "exists", f"a chosen id that is another view's is refused: {str(taken)[:140]}")
         for kind, p in (("file", "secret.txt"), ("file", "../top.txt"), ("file", "/etc/hosts"),
                         ("file", "."), ("dir", "docs")):
             r = fb({"type": "open_view", "kind": kind, "path": p})
@@ -146,6 +182,24 @@ def main() -> int:
         wd = fb({"type": "watch"}, target=did)
         need(wd.get("relayed") is False and wd.get("watching") == "docs",
              f"the folder view's watch arms its own relay: {str(wd)[:120]}")
+
+        # 5 · live, over the ws face: the events the armed relays emit
+        fseen = watch(hk.port, fid)
+        dseen = watch(hk.port, did)
+        changed = lambda e: e.get("type") == "changed" and e.get("path") == "docs/a.md"  # noqa: E731
+        until(lambda i: (box / "docs/a.md").write_text(f"live {i}\n"),
+              lambda: any(changed(e) for e in fseen))
+        need(any(changed(e) for e in fseen),
+             f"a file view emits `changed` after an on-disk edit: {fseen[:2]}")
+        added = lambda e: e.get("type") == "added" and e.get("name") == "live.md"  # noqa: E731
+        removed = lambda e: e.get("type") == "removed" and e.get("name") == "live.md"  # noqa: E731
+        until(lambda i: (box / "docs/live.md").write_text(f"{i}\n"), lambda: any(added(e) for e in dseen))
+        need(any(added(e) for e in dseen), f"a folder view emits `added` for a new entry: {dseen[:3]}")
+        until(lambda i: (box / "docs/live.md").unlink(missing_ok=True),
+              lambda: any(removed(e) for e in dseen))
+        need(any(removed(e) for e in dseen), f"a folder view emits `removed` for a deleted entry: {dseen[-3:]}")
+        need(all(e.get("path", "").startswith("docs") for e in dseen),
+             "a folder view's events name only its folder's entries")
     finally:
         hk.close()
         shutil.rmtree(work, ignore_errors=True)

@@ -101,3 +101,20 @@ def test_the_bridges_own_self_is_no_caller_and_a_parent_is_named_literally():
 def test_a_caller_with_no_verb_the_view_answers_is_not_admitted():
     b = _Bridge({"ai": ["edit", "pump"]})
     assert views.view_callers(b, views.FILE) == {}
+
+
+def test_a_relay_event_without_a_known_kind_is_dropped_and_logged(caplog):
+    # the bridge reports added / modified / deleted; anything else is dropped, never
+    # relabelled as a change
+    file_rule = views._relay_rule(views.FILE, "a.md")
+    folder_rule = views._relay_rule(views.FOLDER, "docs")
+    for rule, path in ((file_rule, "a.md"), (folder_rule, "docs/n.md")):
+        for ev in (
+            {"path": path},
+            {"path": path, "kind": None},
+            {"path": path, "kind": "moved"},
+        ):
+            with caplog.at_level("WARNING", logger="file_bridge.views"):
+                assert rule(ev) is None, ev
+    assert "dropped event with kind" in caplog.text
+    assert "'moved'" in caplog.text

@@ -22,10 +22,13 @@ bridge's `changed` events onto its OWN inbox, filtered to its path. A file emits
 from __future__ import annotations
 
 import asyncio
+import logging
 import posixpath
 
 from file_bridge import fs
-from kernel._refusal import TRANSPORT_ERROR, UNAUTHORIZED, bad, refusal
+from kernel._refusal import EXISTS, TRANSPORT_ERROR, UNAUTHORIZED, bad, refusal
+
+logger = logging.getLogger(__name__)
 
 FILE = "file"
 FOLDER = "folder"
@@ -49,7 +52,8 @@ ANSWERS = {
     FOLDER: ["list", "reveal", "watch", "reflect"],
 }
 
-#: The bridge's disk `kind` → a folder view's event type.
+#: The bridge's disk `kind` → a folder view's event type. Every kind the bridge reports
+#: is one of these keys; any other kind is dropped by the relay, never guessed at.
 FOLDER_EVENT = {"added": "added", "modified": "changed", "deleted": "removed"}
 
 
@@ -116,6 +120,27 @@ def forward_args(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if k not in ("type", "path")}
 
 
+def inside(kind: str, own: str, target: str) -> bool:
+    """Is the bridge path `target` inside the view's own path `own`? A file is its own
+    path only; a folder is itself and everything under it (`.` is the whole root)."""
+    if kind == FILE:
+        return target == own
+    return own == "." or target == own or target.startswith(own + "/")
+
+
+def caller_scope(kernel, bridge: str, caller: str | None) -> tuple[str, str] | None:
+    """The path a VIEW caller is scoped to on this bridge: `(kind, path)`, or None for a
+    caller that is not a view (an agent granted on the bridge is not path-scoped). A view
+    of ANOTHER bridge has no standing here, so the caller is refused in full (`bridge`
+    is returned as `""`, which matches no path)."""
+    rec = kernel.get(caller) if caller else None
+    if not rec or rec.get("view") not in ANSWERS:
+        return None
+    if rec.get("bridge") != bridge:
+        return rec["view"], ""
+    return rec["view"], rec.get("path") or "."
+
+
 def view_callers(bridge_agent, kind: str) -> dict[str, list[str]]:
     """Who may reach a view: whoever may reach its bridge, for the verbs the view answers.
     A bridge grant of `*` is all of them; a list keeps the verbs the view answers. The
@@ -148,15 +173,40 @@ def find_view(kernel, bridge: str, kind: str, path: str) -> str | None:
     return None
 
 
-def open_view(kernel, bridge_agent, kind: str, path: str) -> dict:
+def open_view(
+    kernel, bridge_agent, kind: str, path: str, chosen: str | None = None
+) -> dict:
     """Reuse the view of `path` on this bridge, or make it. The bridge grants the new
-    view exactly its GRANTS (and the relay's `watch`) in its `callable_by`."""
+    view exactly its GRANTS (and the relay's `watch`) in its `callable_by`.
+
+    `chosen` is a caller-picked id for the new view (so a caller can declare it up
+    front). It is taken only when it is free; a `chosen` that is already another agent,
+    or a view of another path, or a path that already has a view under another id, is
+    refused rather than replaced or ignored."""
     existing = find_view(kernel, bridge_agent.id, kind, path)
+    if chosen is not None:
+        held = kernel.get(chosen)
+        if held is not None:
+            if not _is_view_of(held, bridge_agent.id, kind, path):
+                return refusal(
+                    EXISTS,
+                    f"open_view: {chosen!r} is already an agent, not a {kind} view of {path!r}",
+                    id=chosen,
+                )
+            return {"id": chosen, "kind": kind, "path": path, "created": False}
+        if existing is not None:
+            return refusal(
+                EXISTS,
+                f"open_view: {path!r} already has the {kind} view {existing!r}",
+                id=existing,
+                hint="open it by that id, or omit `id`",
+            )
     if existing is not None:
         return {"id": existing, "kind": kind, "path": path, "created": False}
     grants = list(GRANTS[kind]) + [RELAY_VERB]
     made = bridge_agent.create(
         BRIDGE_HANDLER,
+        id=chosen,
         view=kind,
         bridge=bridge_agent.id,
         path=path,
@@ -173,6 +223,14 @@ def open_view(kernel, bridge_agent, kind: str, path: str) -> dict:
     return {"id": vid, "kind": kind, "path": path, "created": True}
 
 
+def _is_view_of(rec: dict, bridge: str, kind: str, path: str) -> bool:
+    return (
+        rec.get("view") == kind
+        and rec.get("bridge") == bridge
+        and rec.get("path") == path
+    )
+
+
 # ─── watching: the bridge's `changed`, relayed onto the view's inbox ─────────
 
 #: view id → the relay's task, inbox key and what it holds on the bridge.
@@ -186,7 +244,12 @@ def _relay_rule(kind: str, own: str):
         p = ev.get("path")
         if not isinstance(p, str):
             return None
-        raw = str(ev.get("kind") or "modified")
+        raw = ev.get("kind")
+        if raw not in FOLDER_EVENT:
+            # The bridge reports added / modified / deleted, always. Anything else is a
+            # bug upstream: dropped and logged, never relabelled as a change.
+            logger.warning("view relay: dropped event with kind %r for %r", raw, p)
+            return None
         if kind == FILE:
             if p != own:
                 return None
@@ -195,7 +258,7 @@ def _relay_rule(kind: str, own: str):
         if p == own or parent != own:
             return None  # the folder itself, or something deeper than its entries
         return {
-            "type": FOLDER_EVENT.get(raw, "changed"),
+            "type": FOLDER_EVENT[raw],
             "path": p,
             "name": posixpath.basename(p),
         }

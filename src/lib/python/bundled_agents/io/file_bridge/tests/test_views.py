@@ -9,6 +9,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from file_bridge import tools
+from kernel._kernel import _current_origin
+
 
 async def _call(k, target, payload):
     return (await k.send([{"target": target, "payload": payload}]))[0]["result"]
@@ -286,3 +289,73 @@ async def test_read_reports_whether_the_file_ends_in_a_newline(
     ):
         r = await _call(k, fb, {"type": "read", "path": name})
         assert r["newline"] is want, (name, r)
+
+
+async def test_a_view_caller_is_held_to_its_path_at_the_bridge(
+    seeded_kernel, file_bridge
+):
+    """The bridge's own path gate: a view that reaches the bridge is held to its path,
+    whatever its grant names. The refusal is the bridge's, not the view's."""
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("one\n")
+    Path("b.txt").write_text("two\n")
+    Path("dir").mkdir()
+    Path("dir/x.txt").write_text("x\n")
+    fv = (await _open(k, fb, "file", "a.txt"))["id"]
+    dv = (await _open(k, fb, "folder", "dir"))["id"]
+    token = _current_origin.set(fv)
+    try:
+        r = await tools.handler(fb, {"type": "read", "path": "b.txt"}, k)
+        assert (
+            r["reason"] == "unauthorized" and "outside this file view" in r["error"]
+        ), r
+        assert (await tools.handler(fb, {"type": "read", "path": "a.txt"}, k))["lines"]
+        r = await tools.handler(fb, {"type": "watch_path", "path": "dir"}, k)
+        assert r["reason"] == "unauthorized", r
+        _current_origin.set(dv)
+        r = await tools.handler(fb, {"type": "read", "path": "a.txt"}, k)
+        assert (
+            r["reason"] == "unauthorized" and "outside this folder view" in r["error"]
+        ), r
+        r = await tools.handler(fb, {"type": "read", "path": "dir/../a.txt"}, k)
+        assert r["reason"] == "unauthorized", r
+        assert (await tools.handler(fb, {"type": "read", "path": "dir/x.txt"}, k))[
+            "lines"
+        ]
+        _current_origin.set(None)  # an operator is not path-scoped
+        assert (await tools.handler(fb, {"type": "read", "path": "b.txt"}, k))["lines"]
+    finally:
+        _current_origin.reset(token)
+
+
+async def test_open_view_takes_a_free_chosen_id_and_refuses_a_taken_one(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("x\n")
+    Path("b.txt").write_text("y\n")
+    made = await _open_with(k, fb, "file", "a.txt", "fv-a")
+    assert made == {"id": "fv-a", "kind": "file", "path": "a.txt", "created": True}, (
+        made
+    )
+    again = await _open_with(k, fb, "file", "a.txt", "fv-a")
+    assert again == {**made, "created": False}, again  # the same view, by its own id
+    assert k.get("fv-a")["path"] == "a.txt"
+    # a chosen id that is another agent, or a view of another path, is refused
+    assert (await _open_with(k, fb, "file", "a.txt", fb))["reason"] == "exists"
+    assert (await _open_with(k, fb, "file", "b.txt", "fv-a"))["reason"] == "exists"
+    assert (await _open_with(k, fb, "folder", "a.txt", "fv-a"))["reason"] == "exists"
+    # a path that already has a view under another id keeps that one
+    assert (await _open_with(k, fb, "file", "a.txt", "fv-other"))["reason"] == "exists"
+    assert k.get("fv-other") is None
+    # a chosen id must be one safe id segment, and a string
+    assert (await _open_with(k, fb, "file", "b.txt", "../escape"))[
+        "reason"
+    ] == "bad_arg"
+    assert (await _open_with(k, fb, "file", "b.txt", 7))["reason"] == "bad_arg"
+
+
+async def _open_with(k, fb, kind, path, chosen):
+    return await _call(
+        k, fb, {"type": "open_view", "kind": kind, "path": path, "id": chosen}
+    )

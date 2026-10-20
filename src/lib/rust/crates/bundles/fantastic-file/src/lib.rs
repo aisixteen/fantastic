@@ -52,7 +52,7 @@ use async_trait::async_trait;
 use fantastic_bundle::{is_absolute, py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal as rf;
-use fantastic_kernel::{body_at, AgentId, Blob, Item, Kernel};
+use fantastic_kernel::{body_at, current_origin, AgentId, Blob, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -258,6 +258,14 @@ impl Bundle for FileBundle {
         if !UNGATED.contains(&verb) {
             if let Some(denied) = gate(&meta, agent_id, verb) {
                 return Ok(Some(denied));
+            }
+        }
+        // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`, after the gate.
+        if SCOPED_VERBS.contains(&verb) {
+            if let Some(refused) =
+                view_scope(kernel, agent_id, current_origin().as_ref(), verb, payload)
+            {
+                return Ok(Some(refused));
             }
         }
         let base = kernel.workdir();
@@ -476,6 +484,47 @@ impl Bundle for FileBundle {
         self.watch.drop_bridge(agent_id);
         Ok(())
     }
+}
+
+/// The verbs a view may send its bridge that name one path of the disk (python
+/// `tools.SCOPED_VERBS`).
+const SCOPED_VERBS: [&str; 5] = ["read", "write", "list", "watch_path", "unwatch_path"];
+
+/// python `tools._view_scope`: a VIEW caller reaches only inside its own path, whatever
+/// its grant names. None admits; a refusal is returned. An operator or a plain agent is
+/// not path-scoped here.
+fn view_scope(
+    kernel: &Arc<Kernel>,
+    agent_id: &AgentId,
+    origin: Option<&AgentId>,
+    verb: &str,
+    payload: &Value,
+) -> Option<Value> {
+    let (kind, own) = views::caller_scope(kernel, &agent_id.0, origin)?;
+    let rel = match payload.get("path") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Some(rf::bad(verb, "path", "a string")),
+    };
+    let inside = norm(rel).is_some_and(|p| !own.is_empty() && views::inside(&kind, &own, &p));
+    if inside {
+        return None;
+    }
+    let mut r = rf::refusal(
+        rf::UNAUTHORIZED,
+        format!(
+            "{verb}: {} is outside this {kind} view's path {}",
+            py_repr(rel),
+            py_repr(&own)
+        ),
+    );
+    rf::with(
+        &mut r,
+        "hint",
+        json!("a view reaches only its own path; open a view of that path (open_view)"),
+    );
+    rf::with(&mut r, "path", json!(rel));
+    Some(r)
 }
 
 /// The sealed-by-default GATE — the fs edge is an io_bridge leg. Mirrors py

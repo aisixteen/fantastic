@@ -2,7 +2,7 @@ import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { isFocusClick } from "../canvas/viewer.ts";
 import { badge, badgeOf, side } from "./agent_index.ts";
-import { bindCellToView, fileGrant, routedBridge, said, sharedHub } from "./file_bridge.ts";
+import { bindCellToView, fileGrant, release, routedBridge, said, sharedHub } from "./file_bridge.ts";
 import { FilesController, controllers } from "./files_controller.ts";
 import { agentIndex, allHidden, ensureWalker, filesDeps, getWalker, onRender, rootOf, select } from "./files_deps.ts";
 import type { Rec } from "./files_deps.ts";
@@ -399,7 +399,7 @@ export const filesView: ViewBundle = {
     // refusal is said on the tree, which stays open.
     const bound = bindCellToView(ctx.kernel, "folder", root, folderAgent, (view) => {
       ctx.kernel.updateMeta(ctx.selfId, { view_agent: view } as unknown as Payload);
-    }).then((b) => {
+    }, undefined, ctx.selfId).then((b) => {
       if (!b.ok) {
         note.hidden = false;
         note.textContent = `${said(b.refusal)} — this tree is not its folder's view`;
@@ -419,6 +419,7 @@ export const filesView: ViewBundle = {
       unmount(): void {
         offRender();
         ctl.dispose();
+        release(ctx.kernel, root, ctx.selfId);
         controllers.delete(ctx.selfId);
         el.remove();
       },

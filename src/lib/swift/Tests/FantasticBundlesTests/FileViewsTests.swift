@@ -248,4 +248,64 @@ struct FileViewsTests {
             #expect(r["newline"].asBool == want, "\(name): \(r)")
         }
     }
+
+    @Test func aChosenViewIdIsTakenOnlyWhenItIsFree() async {
+        let (k, dir) = await bridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.md", "x\n")
+        write(dir, "b.md", "y\n")
+        func openWith(_ kind: String, _ path: String, _ id: JSON) async -> JSON {
+            await call(
+                k, "fs",
+                ["type": "open_view", "kind": .string(kind), "path": .string(path), "id": id])
+        }
+        let made = await openWith("file", "a.md", .string("fv-a"))
+        #expect(made["created"].asBool == true && made["id"].asString == "fv-a", "\(made)")
+        let again = await openWith("file", "a.md", .string("fv-a"))
+        #expect(again["created"].asBool == false && again["id"].asString == "fv-a", "\(again)")
+        // another agent's id, a view of another path, a second id for one path: refused
+        #expect(await openWith("file", "a.md", .string("fs"))["reason"].asString == "exists")
+        #expect(await openWith("file", "b.md", .string("fv-a"))["reason"].asString == "exists")
+        let other = await openWith("file", "a.md", .string("fv-other"))
+        #expect(other["reason"].asString == "exists" && other["id"].asString == "fv-a", "\(other)")
+        #expect(await openWith("file", "b.md", .string("x/y"))["reason"].asString == "bad_arg")
+    }
+
+    @Test func aViewCallerIsHeldToItsPathAtTheBridge() async {
+        let (k, dir) = await bridge()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        write(dir, "a.md", "one\n")
+        write(dir, "b.md", "two\n")
+        write(dir, "dir/x.md", "x\n")
+        let fv = AgentId((await open(k, "file", "a.md"))["id"].asString ?? "")
+        let dv = AgentId((await open(k, "folder", "dir"))["id"].asString ?? "")
+        func read(_ path: String) -> JSON { .object(["path": .string(path)]) }
+        let refused = viewPathGate(k, bridge: "fs", origin: fv, verb: "read", payload: read("b.md"))
+        #expect(refused?["reason"].asString == "unauthorized", "\(String(describing: refused))")
+        #expect(refused?["error"].asString?.contains("outside this file view") == true)
+        #expect(viewPathGate(k, bridge: "fs", origin: fv, verb: "read", payload: read("a.md")) == nil)
+        let watch = viewPathGate(
+            k, bridge: "fs", origin: fv, verb: "watch_path", payload: read("dir"))
+        #expect(watch?["reason"].asString == "unauthorized")
+        let folder = viewPathGate(k, bridge: "fs", origin: dv, verb: "read", payload: read("a.md"))
+        #expect(folder?["error"].asString?.contains("outside this folder view") == true)
+        #expect(viewPathGate(k, bridge: "fs", origin: dv, verb: "read", payload: read("dir/x.md")) == nil)
+        // an operator, or a plain agent, is not path-scoped here
+        #expect(viewPathGate(k, bridge: "fs", origin: nil, verb: "read", payload: read("b.md")) == nil)
+        let bad = viewPathGate(k, bridge: "fs", origin: fv, verb: "read", payload: .object(["path": .bool(true)]))
+        #expect(bad?["reason"].asString == "bad_arg")
+    }
+
+    @Test func aRelayEventWithoutAKnownKindIsDropped() {
+        let noKind: [JSON] = [
+            .object(["path": .string("a.md")]),
+            .object(["path": .string("a.md"), "kind": .string("moved")]),
+        ]
+        for ev in noKind {
+            #expect(viewRelayEvent(VIEW_FILE, own: "a.md", ev: ev) == nil)
+            #expect(viewRelayEvent(VIEW_FOLDER, own: "docs", ev: ev) == nil)
+        }
+        let changed = JSON.object(["path": .string("docs/n.md"), "kind": .string("modified")])
+        #expect(viewRelayEvent(VIEW_FOLDER, own: "docs", ev: changed)?["type"].asString == "changed")
+    }
 }

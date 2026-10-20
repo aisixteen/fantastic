@@ -3,6 +3,7 @@
 //! view reads, writes and refuses another path; a folder view lists inside itself and
 //! refuses an escape; `reveal` shows the way down; a view's watch relays its changes.
 
+use super::views::{relay_event, FILE, FOLDER};
 use super::*;
 use fantastic_kernel::{Agent, Item};
 use serde_json::json;
@@ -487,4 +488,117 @@ async fn a_view_documents_only_its_own_verbs() {
     // and a verb a view does not answer is not in its docs, nor its advertisement
     let r = call(&k, &f, json!({"type": "delete", "path": "a.txt"})).await;
     assert_eq!(r["reason"], "unhandled", "{r}");
+}
+
+#[tokio::test]
+async fn open_view_takes_a_free_chosen_id_and_refuses_a_taken_one() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("a.txt"), "x\n").unwrap();
+    std::fs::write(served(&tmp).join("b.txt"), "y\n").unwrap();
+    let made = open_with(&k, "file", "a.txt", json!("fv-a")).await;
+    assert_eq!(
+        made,
+        json!({"id": "fv-a", "kind": "file", "path": "a.txt", "created": true})
+    );
+    let again = open_with(&k, "file", "a.txt", json!("fv-a")).await;
+    assert_eq!(
+        again,
+        json!({"id": "fv-a", "kind": "file", "path": "a.txt", "created": false})
+    );
+    // another agent's id, a view of another path, a second id for one path: refused
+    assert_eq!(
+        open_with(&k, "file", "a.txt", json!("fb")).await["reason"],
+        "exists"
+    );
+    assert_eq!(
+        open_with(&k, "file", "b.txt", json!("fv-a")).await["reason"],
+        "exists"
+    );
+    assert_eq!(
+        open_with(&k, "folder", "a.txt", json!("fv-a")).await["reason"],
+        "exists"
+    );
+    let other = open_with(&k, "file", "a.txt", json!("fv-other")).await;
+    assert_eq!(other["reason"], "exists", "{other}");
+    assert_eq!(other["id"], "fv-a");
+    let escape = format!("{}escape", "../");
+    assert_eq!(
+        open_with(&k, "file", "b.txt", json!(escape)).await["reason"],
+        "bad_arg"
+    );
+    assert_eq!(
+        open_with(&k, "file", "b.txt", json!(7)).await["reason"],
+        "bad_arg"
+    );
+}
+
+async fn open_with(k: &Arc<Kernel>, kind: &str, path: &str, id: Value) -> Value {
+    call(
+        k,
+        "fb",
+        json!({"type": "open_view", "kind": kind, "path": path, "id": id}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_view_caller_is_held_to_its_path_at_the_bridge() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("a.txt"), "one\n").unwrap();
+    std::fs::write(served(&tmp).join("b.txt"), "two\n").unwrap();
+    std::fs::create_dir(served(&tmp).join("dir")).unwrap();
+    let fv = AgentId::from(open(&k, "file", "a.txt").await["id"].as_str().unwrap());
+    let dv = AgentId::from(open(&k, "folder", "dir").await["id"].as_str().unwrap());
+    let fb = AgentId::from("fb");
+    let read = |p: &str| json!({"type": "read", "path": p});
+    let refused = view_scope(&k, &fb, Some(&fv), "read", &read("b.txt")).expect("refused");
+    assert_eq!(refused["reason"], "unauthorized", "{refused}");
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("outside this file view"));
+    assert!(view_scope(&k, &fb, Some(&fv), "read", &read("a.txt")).is_none());
+    let watch = json!({"path": "dir"});
+    assert_eq!(
+        view_scope(&k, &fb, Some(&fv), "watch_path", &watch).unwrap()["reason"],
+        "unauthorized"
+    );
+    let refused = view_scope(&k, &fb, Some(&dv), "read", &read("a.txt")).expect("refused");
+    assert!(refused["error"]
+        .as_str()
+        .unwrap()
+        .contains("outside this folder view"));
+    let climb = format!("dir/{}a.txt", "../");
+    assert!(view_scope(&k, &fb, Some(&dv), "read", &read(&climb)).is_some());
+    assert!(view_scope(&k, &fb, Some(&dv), "read", &read("dir/x.txt")).is_none());
+    // an operator, or a plain agent, is not path-scoped here
+    assert!(view_scope(&k, &fb, None, "read", &read("b.txt")).is_none());
+    assert_eq!(
+        view_scope(&k, &fb, Some(&fv), "read", &json!({"path": 7})).unwrap()["reason"],
+        "bad_arg"
+    );
+}
+
+#[test]
+fn a_relay_event_without_a_known_kind_is_dropped() {
+    for ev in [
+        json!({"path": "a.md"}),
+        json!({"path": "a.md", "kind": null}),
+        json!({"path": "a.md", "kind": "moved"}),
+    ] {
+        assert!(relay_event(FILE, "a.md", &ev).is_none(), "{ev}");
+    }
+    for ev in [
+        json!({"path": "docs/n.md"}),
+        json!({"path": "docs/n.md", "kind": "moved"}),
+    ] {
+        assert!(relay_event(FOLDER, "docs", &ev).is_none(), "{ev}");
+    }
+    let changed = json!({"path": "docs/n.md", "kind": "modified"});
+    assert_eq!(
+        relay_event(FOLDER, "docs", &changed).unwrap()["type"],
+        "changed"
+    );
 }

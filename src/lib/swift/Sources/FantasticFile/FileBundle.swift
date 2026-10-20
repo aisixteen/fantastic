@@ -236,6 +236,14 @@ public struct FileBundle: AgentBundle {
         {
             return denied
         }
+        // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`, after the gate.
+        if viewScopedVerbs.contains(verb),
+            let refused = viewPathGate(
+                kernel, bridge: agent.id.value, origin: KernelTaskLocals.currentOrigin,
+                verb: verb, payload: payload)
+        {
+            return refused
+        }
         if verb == "reflect" { return reflect(agent: agent, base: kernel.workdir?.path) }
         guard let base = kernel.workdir?.path else { return Self.noRunningDir() }
         // DENY-ALL AT THE PATH LEVEL — after each verb's own argument checks
@@ -897,7 +905,7 @@ public struct FileBundle: AgentBundle {
         - `write_stream(path, bytes, offset?, truncate?)` → push RAW chunks (`bytes` = one raw chunk; append by default; `truncate:true` on the first to start fresh). Text files use the whole-file `write`.
         - `pump(source?, source_path, sink?, sink_path?, chunk=65536)` → server-side SOURCE→SINK copy in ONE call (vs driving each chunk over the wire). Both ends bound by id + the stream verbs, each SELF-gating — so any provider (a `network_bridge` SOURCE, a `file_bridge` SINK) composes. Omitted `source`/`sink` = this bridge. **Both ends run AS THIS BRIDGE**: its `can_call` must reach the source (`read_stream`) and the sink (`write_stream`), and each end's `callable_by` must accept it.
         **Text documents** (any format — the bridge imposes none):
-        - `read(path, offset=0, limit=200)` → a line-numbered page `{lines:[{n,text}], total, eof, version}`; refuses binary.
+        - `read(path, offset=0, limit=200)` → a line-numbered page `{lines:[{n,text}], total, eof, newline, version}` (`newline`: the file ends in a newline, which a whole-document save keeps); refuses binary.
         - `write(path, bytes, if_match?)` → atomic whole-document write; `append(path, bytes)` → one chunk at the end.
         - `edit(edits:[{path, hunks, if_match?}], bytes)` → SEARCH/REPLACE hunks (`reflect` shows the grammar), a TRANSACTION over every listed file: any failure writes nothing.
         - `version` = the document's hash; `if_match` refuses a write when the document changed since you read it.
@@ -909,11 +917,11 @@ public struct FileBundle: AgentBundle {
 
         **Deny-all at the path level** — the `allow` list on the record names what this bridge EXPOSES, relative to `root`: a file, or everything under a directory (`.` = the whole root). No list, or an empty one, exposes NOTHING. Every path verb sees only exposed paths; anything else is `not_found` whether or not it exists (nothing leaks past the list), and `list` also shows the directories on the way to an exposed path. BOTH ends count: the path as asked AND the file it lands on (symlinks followed) must be inside the list — a link that stays inside serves, a link pointing out of it serves nothing. Set it at create (`allow=["docs/a.pdf", "img"]`) or by `update_agent` (it replaces the list). Writes are still governed by `readonly`. Writing an exposed path creates its missing parent directories, even ones the list does not name (`allow:["a/b/c.txt"]` + `write a/b/c.txt` creates `a/` and `a/b/`); `list` shows them as the way to it, nothing else in them is exposed.
 
-        **Views** — files and folders are agents over this bridge, not new bridges. `open_view(kind: file|folder, path)` returns the view of that path, making it if none exists (one agent per path; a second open is the same agent). A view is a `file_bridge.tools` record carrying `view: file|folder`, a child of the bridge, with `bridge` and `path` on it:
+        **Views** — files and folders are agents over this bridge, not new bridges. `open_view(kind: file|folder, path, id?)` returns the view of that path, making it if none exists (one agent per path; a second open is the same agent). `id` names the new view (taken only when it is free: another agent's id, or a path that already has a view under another id, is refused). A view is a `file_bridge.tools` record carrying `view: file|folder`, a child of the bridge, with `bridge` and `path` on it:
         - `file` — `read`, `write` (`if_match` the version you read), `watch` → `{type: changed, path, kind}`, `reflect`. Its `can_call` on the bridge names exactly `read`, `write`, `watch_path`, `unwatch_path`, `watch`; a verb that names another path is refused by the view, before the bridge is asked.
         - `folder` — `list` (a path inside the folder), `reveal` (where a path inside it sits: the folders to open on the way down), `watch` → `{type: added|changed|removed, path, name}`, `reflect`. A path that climbs out of the folder is refused.
 
-        A view reaches its bridge as itself, so the bridge's `allow` list still decides what is exposed: a view of an unexposed path reaches nothing. `watch` arms the bridge's disk watch once per path and relays the bridge's `changed` events onto the view's own inbox; deleting a view ends its relay. Views are not sealed: their gate is their grant. Python is the reference; the Rust port (`fantastic-file`) and the Swift port (`FantasticFile`, `Views.swift`) match it in verbs and posture. The canvas shows them (a preview is a file agent's view, a file tree a folder agent's) and the TUI's file panel shows them too: a file agent edits, a folder agent lists live; `reveal` is the kernel's verb, the panels do not call it.
+        A view reaches its bridge as itself, so the bridge's `allow` list still decides what is exposed: a view of an unexposed path reaches nothing. The bridge holds a view caller to the view's own path too (a file: that file; a folder: itself and what is under it), so a refusal comes from the bridge as well as the view. A view answers its own verbs, not the bridge's: `docs of=<view>` and `advertises` name only the verbs above (through the bundle's per-instance `instance_verbs` / `instance_verb_docs` hook), so an AI given a file agent is told nothing it cannot call. A view's `reflect` says `watching`: whether its relay is armed. `watch` arms the bridge's disk watch once per path and relays the bridge's `changed` events onto the view's own inbox, only for events under its path; an event whose kind is not `added`, `modified` or `deleted` is dropped and logged, never relabelled. Deleting a view ends its relay. Views are not sealed: their gate is their grant. Python is the reference; the Rust port (`fantastic-file`) and the Swift port (`FantasticFile`, `Views.swift`) match it in verbs and posture. The canvas shows them (a preview is a file agent's view, a file tree a folder agent's) and the TUI's file panel shows them too: a file agent edits, a folder agent lists live; `reveal` is the kernel's verb, the panels do not call it.
 
         **Sealed by default** — open: `update_agent <id> ingress_rule=allow_all_ingress`.
         **Running-dir law**: root is clamped inside the kernel's running dir (the dir holding its root's `.fantastic`) — `../`, `~`, absolute paths

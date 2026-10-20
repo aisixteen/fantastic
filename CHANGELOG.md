@@ -37,9 +37,24 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   carries `newline`.
 - E123 `file_agents`: the kernel contract the views stand on, over the packaged
   python, rust and swift kernels: one agent per path, refusals that make no agent,
-  a file view's versioned write, a folder view's scope and reveal, and a view's
-  relay armed once. The live relay events are asserted in the unit tests, not over
-  the ws face (the harness's ws leg is granted only the ids declared at boot).
+  a file view's versioned write, a folder view's scope and reveal, a view's relay
+  armed once, and the relay's events over the ws face: a file view's `changed` after
+  an on-disk edit, a folder view's `added` and `removed`. The harness declares the
+  view ids it watches at boot (`open_view` takes a chosen `id`, see below).
+- `open_view` takes an optional `id` for the new view, so a caller can declare it up
+  front. The id is taken only when it is free: another agent's id, a view of another
+  path, or a second id for a path that already has a view is refused (`exists`).
+- The bridge holds a VIEW caller to its own path. A view's verb that reaches the
+  bridge (`read`, `write`, `list`, `watch_path`, `unwatch_path`) is refused there
+  outside the view's path (a file: that file; a folder: itself and what is under it),
+  as well as by the view. Python, Rust and Swift.
+- A view's relay drops a bridge event whose kind is not `added`, `modified` or
+  `deleted`, and logs it; it no longer relabels such an event as a change (Python,
+  Rust and Swift). The Rust disk watch reports a file the watch had not seen as
+  `added`, whatever the platform named the event.
+- Canvas: a cell that serves a file or folder view releases its path when it unmounts,
+  and a view the state stream reports removed releases every path it serves. A path
+  is served while a cell holds it.
 - A file's or folder's disk change is judged by the disk as it is now: a batch that
   reports a removal and a spurious creation for one unlink reads as `deleted`
   (Python and Rust `file_bridge` watchers).
