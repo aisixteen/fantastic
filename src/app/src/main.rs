@@ -152,7 +152,7 @@ fn window(app: &AppHandle, args: &Args, backdrop: Backdrop) -> Result<(), String
             backdrop.flag(),
             !args.kiosk,
         ))
-        .on_navigation(move |url| page::allowed(url, shell.port()));
+        .on_navigation(move |url| page::allowed(url, shell.port(), &shell.canvas_ports()));
     if args.kiosk {
         b = b.fullscreen(true).decorations(false);
     } else {
