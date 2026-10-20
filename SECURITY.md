@@ -31,6 +31,29 @@ Helpful to include, where you can:
 This is a best-effort alpha project: we aim to acknowledge within a few business
 days and will agree a remediation + disclosure timeline with the reporter.
 
+## Verifying downloads
+
+Every GitHub Release carries `SHA256SUMS` (the CLI archives) and, from the
+desktop app's first signed release, `SHA256SUMS-app` (its installers). CI
+builds and tests the installers; the maintainer signs them by hand, and no
+signing key is stored on GitHub. They are signed:
+
+- **macOS** — the DMG and the app are signed with a Developer ID Application
+  certificate, notarized and stapled:
+  `spctl -a -vvv -t open --context context:primary-signature fantastic-app-aarch64-apple-darwin.dmg`
+  must print `source=Notarized Developer ID`.
+- **Windows** — the setup, `fantastic-app.exe` and `fantastic.exe` carry a
+  timestamped Authenticode signature:
+  `Get-AuthenticodeSignature .\fantastic-app-x86_64-pc-windows-msvc-setup.exe`
+  must report `Valid`.
+- **Linux** — the `.deb` has a detached, armored GPG signature (`<file>.asc`):
+  `gpg --import fantastic-app-linux-signing-key.asc && gpg --verify fantastic-app-x86_64-unknown-linux-gnu.deb.asc fantastic-app-x86_64-unknown-linux-gnu.deb`
+  must report a good signature by the key whose fingerprint is listed here:
+
+  - Linux signing key fingerprint: *(added by the maintainer when the key
+    exists, as `` Linux signing key fingerprint: `<40 hex, no spaces>` ``;
+    `installers.yml -f check=vX.Y.Z` reads it from this line)*
+
 ## Threat model & scope (please read before reporting)
 
 Fantastic is a **single-operator** system: one user's **fleet** of kernels that

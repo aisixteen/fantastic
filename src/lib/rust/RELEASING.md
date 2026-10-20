@@ -7,7 +7,9 @@ laptop, and the release workflow is then started by hand on it. It builds
 nothing: it publishes the archives a green CI run (`.github/workflows/ci.yml`)
 built for that very commit — every target, the model-free e2e passed on those
 binaries — as the GitHub Release (`.github/workflows/release.yml`).
-crates.io stays a local step.
+crates.io stays a local step. The desktop app's installers are built and
+verified by CI (`.github/workflows/installers.yml`) and signed by hand on the
+laptop: no signing key is on GitHub (steps 6–9).
 
 ## Version
 
@@ -66,6 +68,139 @@ All steps run from the repo root, on `main`, with a clean tree.
 
    The Linux builds are musl-static, so they run without a matching glibc. The AI
    backends built in are vLLM, Ollama, the OpenAI Responses API and Anthropic.
+
+   The notes end with `CI run: <url>`, the run whose archives were published. The
+   installers (step 6) are built from that run.
+6. **Installers: built and verified by CI, unsigned.**
+   ```sh
+   gh workflow run installers.yml --ref vX.Y.Z
+   ```
+   `.github/workflows/installers.yml` takes the app (`app-<triple>`) and the CLI
+   (`release-<target>`, checked against the Release's `SHA256SUMS`) of the CI
+   run the Release names (`CI run:` in its notes), bundles them with
+   `--no-sign --no-binary-patching`, installs and launches each installer on a
+   fresh runner, and keeps for 7 days, per OS:
+
+   | artifact | holds |
+   |---|---|
+   | `installer-aarch64-apple-darwin` | the unsigned DMG it verified |
+   | `to-sign-aarch64-apple-darwin` | `fantastic-app-aarch64-apple-darwin.app.tar`: the unsigned `Aisixteen Fantastic.app` |
+   | `installer-x86_64-pc-windows-msvc` | the unsigned setup it verified |
+   | `to-sign-x86_64-pc-windows-msvc` | `fantastic-app-x86_64-pc-windows-msvc.stage.tar`: `fantastic-app.exe` and the sidecar, at the paths the bundler takes them |
+   | `installer-x86_64-unknown-linux-gnu` | the `.deb` — it IS the release package |
+
+   Its guard refuses, listing every problem at once, a tag not on `main`, a
+   Release that is missing or names no CI run, a failed or mismatched run, and
+   expired artifacts. On any other ref it builds from `-f ci_run=<id>` (a full
+   run whose `binaries / build · …` and `binaries / app · …` jobs succeeded) or
+   the newest green `ci · full` run on the commit, and publishes nothing.
+7. **Sign by hand, on the laptop.** No signing secret, certificate or key is on
+   GitHub. Every command below is run by hand; `RUN` is the installers run id
+   of step 6, `V` the version.
+   ```sh
+   RUN=<installers run id>; V=X.Y.Z
+   mkdir -p sign out
+   ```
+   **macOS** (Developer ID Application certificate in the login keychain; a
+   notarytool profile made once with
+   `xcrun notarytool store-credentials fantastic --key AuthKey_<id>.p8 --key-id <id> --issuer <issuer>`).
+   The app is signed inside out and notarized before the DMG is made; then the
+   DMG itself is signed, notarized and stapled:
+   ```sh
+   ID="Developer ID Application: <Name> (<TEAMID>)"
+   gh run download "$RUN" -n to-sign-aarch64-apple-darwin -D sign/mac
+   tar -xf sign/mac/fantastic-app-aarch64-apple-darwin.app.tar -C sign/mac
+   APP="sign/mac/Aisixteen Fantastic.app"
+   codesign --force --timestamp --options runtime -s "$ID" "$APP/Contents/MacOS/fantastic"
+   codesign --force --timestamp --options runtime -s "$ID" "$APP"
+   codesign --verify --deep --strict --verbose=2 "$APP"
+   ditto -c -k --keepParent "$APP" sign/mac/app.zip
+   xcrun notarytool submit sign/mac/app.zip --keychain-profile fantastic --wait
+   xcrun stapler staple "$APP"
+   mkdir sign/mac/dmg && ditto "$APP" "sign/mac/dmg/Aisixteen Fantastic.app" && ln -s /Applications sign/mac/dmg/Applications
+   DMG=out/fantastic-app-aarch64-apple-darwin.dmg
+   hdiutil create -volname "Aisixteen Fantastic" -srcfolder sign/mac/dmg -fs HFS+ -format UDZO -ov "$DMG"
+   codesign --timestamp -s "$ID" "$DMG"
+   xcrun notarytool submit "$DMG" --keychain-profile fantastic --wait
+   xcrun stapler staple "$DMG"
+   spctl -a -vvv -t open --context context:primary-signature "$DMG"   # source=Notarized Developer ID
+   ```
+   No entitlements: the app is not sandboxed and loads no code at run time.
+
+   **Windows, from the Mac** (Azure Artifact Signing; `brew install nsis jsign azure-cli`;
+   `az login` as an identity with the *Artifact Signing Certificate Profile
+   Signer* role). The bundler signs `fantastic-app.exe` and the sidecar, packs
+   them into the NSIS setup, signs its plugins and uninstaller, then signs the
+   setup — every signature through `signCommand`, which runs on macOS and
+   Linux too (see the note below):
+   ```sh
+   gh run download "$RUN" -n to-sign-x86_64-pc-windows-msvc -D sign/win
+   tar -xf sign/win/fantastic-app-x86_64-pc-windows-msvc.stage.tar   # at the repo root, on the tag
+   rustup target add x86_64-pc-windows-msvc
+   npm ci --prefix src/app
+   TOKEN=$(az account get-access-token --resource https://codesigning.azure.net --query accessToken -o tsv)
+   cat > sign/win/sign.json <<EOF
+   {"version":"$V","bundle":{"windows":{"signCommand":{"cmd":"jsign","args":[
+     "--storetype","TRUSTEDSIGNING","--keystore","<region>.codesigning.azure.net",
+     "--storepass","$TOKEN","--alias","<account>/<certificate profile>",
+     "--tsaurl","http://timestamp.acs.microsoft.com","--tsmode","RFC3161","%1"]}}}}
+   EOF
+   (cd src/app && npx tauri bundle --ci --bundles nsis --target x86_64-pc-windows-msvc \
+     --no-binary-patching --config ../../sign/win/sign.json)
+   rm sign/win/sign.json
+   cp "src/app/target/x86_64-pc-windows-msvc/release/bundle/nsis/Aisixteen Fantastic_${V}_x64-setup.exe" \
+     out/fantastic-app-x86_64-pc-windows-msvc-setup.exe
+   ```
+   *Why this works from macOS* (tauri-bundler 2.10.1, the bundler of tauri-cli
+   2.12.1): NSIS bundling is not limited to Windows (`bundle.rs`: "NSIS
+   installers can be built in linux+macOS"); off Windows it runs `makensis`
+   from `PATH` (`nsis/mod.rs`), and `try_sign` runs the custom `signCommand` on
+   any host (`windows/sign.rs`). Checked on Linux, the same non-Windows code
+   path, with the CI's `fantastic-app.exe` and sidecar and a stand-in sign
+   command: the bundler called it, in order, for the sidecar,
+   `fantastic-app.exe`, the five NSIS plugins, the uninstaller and the setup,
+   and wrote the setup. Not yet run on a Mac with jsign and a real Azure
+   account; the first release does that, and `installers.yml -f check` (step 9)
+   confirms every signature on Windows.
+
+   **Linux** (the GPG key whose fingerprint `SECURITY.md` lists). The CI's
+   `.deb` is the release package:
+   ```sh
+   FPR=<40 hex>
+   gh run download "$RUN" -n installer-x86_64-unknown-linux-gnu -D out
+   gpg --local-user "$FPR" --armor --detach-sign out/fantastic-app-x86_64-unknown-linux-gnu.deb   # → .deb.asc
+   gpg --armor --export "$FPR" > out/fantastic-app-linux-signing-key.asc
+   ```
+   Linux ships as a `.deb` only. There is no AppImage: the distributions'
+   WebKitGTK starts its helper processes from a path compiled into the library
+   (`WEBKIT_EXEC_PATH` works only in developer builds), so an AppImage works
+   only by patching that library, as Tauri's linuxdeploy route does (evidence
+   in PR #81). The cross-distribution package is a Flatpak (#82).
+8. **Upload** — never `--clobber`: an existing name fails, so a published
+   installer is never silently replaced.
+   ```sh
+   (cd out && shasum -a 256 fantastic-app-* > SHA256SUMS-app && cat SHA256SUMS-app)
+   gh release upload "v$V" out/fantastic-app-* out/SHA256SUMS-app
+   ```
+
+   | asset | for |
+   |---|---|
+   | `fantastic-app-aarch64-apple-darwin.dmg` | macOS 14+, Apple silicon: Developer ID, the app and the DMG notarized and stapled |
+   | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` | Windows 10/11 x64: NSIS, per user, Authenticode-signed and timestamped |
+   | `fantastic-app-x86_64-unknown-linux-gnu.deb` (+ `.asc`) | x86_64 Linux: Ubuntu 24.04+, Debian 13+ (the kiosk, #54) |
+   | `fantastic-app-linux-signing-key.asc` | the public key of the `.asc` signature |
+   | `SHA256SUMS-app` | the sums of all of the above |
+9. **Check the Release** (on `main`, so it reads `SHA256SUMS-app` against
+   `SECURITY.md`'s current fingerprint):
+   ```sh
+   gh workflow run installers.yml -f check=vX.Y.Z
+   ```
+   It builds nothing and never writes to the Release. On fresh runners it
+   downloads the installers, checks `SHA256SUMS-app`, the notarization, staple
+   and Developer ID of the DMG and the app, the Authenticode signatures (with
+   timestamps) of the setup and the installed binaries, and the GPG
+   signatures against `SECURITY.md`'s fingerprint, then installs and launches
+   each, as a build does.
 
 ## Notes
 
