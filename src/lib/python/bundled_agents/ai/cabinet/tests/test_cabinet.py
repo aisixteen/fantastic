@@ -9,24 +9,117 @@ allow. The operator wires the manager once, as the readme says.
 from __future__ import annotations
 
 import asyncio
+import re
+import types
 
 import pytest
 
 from _testkit import memory_meta
+from kernel import register_unlisted
 
 MANAGER = "cabinet_manager"
 MASTER = "master"
+CANVAS = "canvas_main"
 VERBS = ["create_agent", "update_agent", "delete_agent"]
 MESSAGES = ["send", "reflect"]
 STATUS = "status"
-EQUIP = "equip"
+CANVAS_VERBS = ["create", "place"]
 ROLE = "cabinet_role"
+
+# ─── the canvas that spawns the cabinets (a stub of the Rust host's canvas node) ──
+#
+# A canvas node answers `new_canvas` (a CHILD canvas of itself), `create` (a child
+# agent of itself: equipment) and `place` (a view, here an acknowledgement). The
+# children are wired to the root the way the host wires its canvases: root `create_agent`
+# for the canvas, granted on the root's `callable_by`.
+
+_canvas = types.ModuleType("canvas_stub.tools")
+
+
+async def _grant_canvas(kernel, node: str) -> None:
+    """The root grants a new canvas `create_agent` (its `callable_by`, its `can_call`)."""
+    root = kernel.ctx.root.id
+    cb = dict(kernel.get(root).get("callable_by") or {})
+    cb[node] = ["create_agent"]
+    (out,) = await kernel.send(
+        [
+            {
+                "target": root,
+                "payload": {"type": "update_agent", "id": root, "callable_by": cb},
+            }
+        ]
+    )
+    assert not out["result"].get("error"), out
+    (out,) = await kernel.send(
+        [
+            {
+                "target": root,
+                "payload": {
+                    "type": "update_agent",
+                    "id": node,
+                    "can_call": {"$self": "*", root: ["create_agent"]},
+                },
+            }
+        ]
+    )
+    assert not out["result"].get("error"), out
+
+
+async def _canvas_handler(id, payload, kernel):
+    verb = payload.get("type")
+    root = kernel.ctx.root.id
+    if verb in ("boot", "shutdown"):
+        return None
+    if verb == "reflect":
+        return {"id": id, "sentence": "stub canvas"}
+    if verb == "new_canvas":
+        slug = re.sub(r"[^a-z0-9]+", "_", payload["name"].lower()).strip("_")
+        node = f"canvas_{slug}"
+        (out,) = await kernel.send(
+            [
+                {
+                    "target": root,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": id,
+                        "id": node,
+                        "handler_module": "canvas_stub.tools",
+                        "can_call": {"$self": "*"},
+                        "callable_by": {"$self": "*"},
+                    },
+                }
+            ]
+        )
+        if out["result"].get("error"):
+            return {"error": out["result"]["error"]}
+        await _grant_canvas(kernel, node)
+        return {"id": node}
+    if verb == "create":
+        record = dict(payload["record"])
+        (out,) = await kernel.send(
+            [
+                {
+                    "target": root,
+                    "payload": {"type": "create_agent", "parent_id": id, **record},
+                }
+            ]
+        )
+        return out["result"]
+    if verb == "place":
+        return {"placed": True}
+    return {"error": f"canvas stub: unknown type {verb!r}"}
+
+
+_canvas.handler = _canvas_handler
+_canvas.VERBS = {}
+register_unlisted("canvas_stub.tools", _canvas)
 
 
 @pytest.fixture
 async def world(seeded_kernel):
     """A kernel with the operator's wiring: a MASTER AI, a MANAGER that may create,
-    update and delete on the root, and the root that names the manager."""
+    update and delete on the root, the root that names the manager, and the CANVAS that
+    spawns the cabinets (the manager's `canvas_id`)."""
     k = seeded_kernel
     root = k.id
     # the operator's writes are ungated: no sender
@@ -37,13 +130,25 @@ async def world(seeded_kernel):
                 "payload": {
                     "type": "create_agent",
                     "parent_id": root,
+                    "id": CANVAS,
+                    "handler_module": "canvas_stub.tools",
+                    "can_call": {"$self": "*", root: ["create_agent", "update_agent"]},
+                    "callable_by": {"$self": "*"},
+                },
+            },
+            {
+                "target": root,
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": root,
                     "id": MANAGER,
                     "handler_module": "cabinet.tools",
                     "cabinet_role": "manager",
+                    "canvas_id": CANVAS,
                     "can_call": {"$self": "*", root: VERBS},
                     "callable_by": {"$self": "*", MASTER: "*"},
                 },
-            }
+            },
         ]
     )
     memory = memory_meta(k, MASTER, {MANAGER: "*"})
@@ -67,7 +172,11 @@ async def world(seeded_kernel):
                 "payload": {
                     "type": "update_agent",
                     "id": root,
-                    "callable_by": {"$self": "*", MANAGER: VERBS},
+                    "callable_by": {
+                        "$self": "*",
+                        MANAGER: VERBS,
+                        CANVAS: ["create_agent", "update_agent"],
+                    },
                 },
             },
         ]
@@ -128,13 +237,15 @@ async def test_open_wires_every_worker_to_every_peer_and_the_master(world):
     assert k.get(MASTER)["can_call"][workers[0]] == "*"
     assert k.get(MASTER)["callable_by"][workers[2]] == MESSAGES
     assert k.get(MANAGER)["can_call"][workers[1]] == "*"
-    # the worker holds NOTHING on the root; its cabinet makes its equipment there
+    # the worker holds NOTHING on the root; it places on its own cabinet's canvas only
     root = k.ctx.root.id
     for cab, w in zip(cabs, workers):
         assert root not in k.get(w)["can_call"]
         assert w not in k.get(root)["callable_by"]
-        assert k.get(cab)["can_call"][root] == ["create_agent"]
-        assert k.get(root)["callable_by"][cab] == ["create_agent"]
+        canvas = k.get(cab)["canvas"]
+        assert k.get(w)["can_call"][canvas] == CANVAS_VERBS
+        assert k.get(canvas)["callable_by"][w] == CANVAS_VERBS
+        assert k.ctx.agents[canvas].parent.id == CANVAS
 
 
 async def test_close_unwires_the_peers_and_leaves_nothing_behind(world):
@@ -142,6 +253,7 @@ async def test_close_unwires_the_peers_and_leaves_nothing_behind(world):
     cabs = [(await open_cabinet(k, f"t{i}", name=f"c{i}"))["id"] for i in range(3)]
     workers = [worker_of(k, c) for c in cabs]
     gone_cab, gone_worker = cabs[1], workers[1]
+    gone_canvas = k.get(gone_cab)["canvas"]
     res = await as_(k, MASTER, MANAGER, {"type": "close_cabinet", "id": gone_cab})
     assert not res.get("error"), res
     assert {gone_cab, gone_worker} <= set(res["deleted"])
@@ -155,12 +267,9 @@ async def test_close_unwires_the_peers_and_leaves_nothing_behind(world):
         assert len(rec["cabinet_peers"]) == 1
     assert gone_worker not in k.get(MASTER)["can_call"]
     assert gone_worker not in k.get(MASTER)["callable_by"]
-    # the root's grant for the closed cabinet goes with it (the kernel prunes it)
-    root = k.ctx.root.id
-    assert gone_cab not in k.get(root)["callable_by"]
-    assert (
-        cabs[0] in k.get(root)["callable_by"] and cabs[2] in k.get(root)["callable_by"]
-    )
+    # the closed cabinet's canvas goes with it, and the kernel prunes its grants
+    assert gone_canvas not in k.ctx.agents
+    assert gone_canvas not in k.get(CANVAS)["callable_by"] if k.get(CANVAS) else True
 
 
 async def test_close_refuses_an_agent_that_is_not_a_cabinet_of_this_manager(world):
@@ -290,33 +399,23 @@ async def test_a_worker_reaches_its_master_only_with_messages(world):
     assert not (await as_(k, MASTER, w, {"type": "reflect"})).get("error")
 
 
-async def equip(k, cab: str, sender: str, **payload) -> dict:
-    """The worker's `equip` to its own cabinet (as the worker)."""
-    return await as_(k, sender, cab, {"type": "equip", **payload})
-
-
-async def test_equipment_is_made_under_the_worker_and_reached_by_it_alone(world):
-    k = world
-    cab_a = (await open_cabinet(k, "a", name="a"))["id"]
-    a = worker_of(k, cab_a)
-    b = worker_of(k, (await open_cabinet(k, "b", name="b"))["id"])
-    made = await equip(
-        k,
-        cab_a,
-        a,
-        handler_module="file_bridge.tools",
-        id="a_exec",
-        setup={"allow": ["."]},
-        callable_by={a: "*"},
-    )
-    assert not made.get("error"), made
-    assert made == {"id": "a_exec", "parent": a, "handler_module": "file_bridge.tools"}
-    assert k.ctx.agents["a_exec"].parent.id == a
-    # the worker reaches its equipment through its `$subtree` grant
-    assert not (await as_(k, a, "a_exec", {"type": "reflect"})).get("error")
-    # the peer does not: the equipment grants its own worker and nothing else
-    refused = await as_(k, b, "a_exec", {"type": "reflect"})
-    assert refused.get("reason") == "unauthorized", refused
+async def create_on(
+    k,
+    canvas: str,
+    sender: str,
+    *,
+    handler_module: str,
+    id=None,
+    setup=None,
+    callable_by=None,
+) -> dict:
+    """The worker's `create` on its cabinet's canvas (as the worker): equipment, a child of the canvas."""
+    record = {"handler_module": handler_module, **(setup or {})}
+    if id is not None:
+        record["id"] = id
+    if callable_by is not None:
+        record["callable_by"] = callable_by
+    return await as_(k, sender, canvas, {"type": "create", "record": record})
 
 
 async def test_a_worker_no_longer_creates_on_the_root(world):
@@ -545,34 +644,6 @@ async def test_a_duplicate_name_is_refused_and_the_first_cabinet_stays(world):
 # ─── conclusion ──────────────────────────────────────────────────
 
 
-async def test_conclude_removes_every_cabinet_worker_and_equipment(world):
-    k = world
-    cabs = [(await open_cabinet(k, f"t{i}", name=f"n{i}"))["id"] for i in range(2)]
-    workers = [worker_of(k, c) for c in cabs]
-    made = await equip(
-        k,
-        cabs[0],
-        workers[0],
-        handler_module="file_bridge.tools",
-        id="n0_exec",
-        setup={"allow": ["."]},
-        callable_by={workers[0]: "*"},
-    )
-    assert not made.get("error"), made
-    res = await as_(k, MASTER, MANAGER, {"type": "conclude"})
-    assert not res.get("error"), res
-    assert sorted(res["concluded"]) == sorted(cabs)
-    assert {*cabs, *workers, "n0_exec"} <= set(res["deleted"])
-    for gone in [*cabs, *workers, "n0_exec"]:
-        assert gone not in k.ctx.agents, gone
-    assert k.get(MANAGER) is not None and k.get(MASTER) is not None
-    assert not any(
-        w in k.get(MASTER)["can_call"] or w in k.get(MASTER)["callable_by"]
-        for w in workers
-    )
-    assert (await as_(k, MASTER, MANAGER, {"type": "cabinets"}))["count"] == 0
-
-
 async def test_reflect_tells_the_role_and_the_ceiling(world):
     k = world
     k.update(MANAGER, max_cabinets=4)
@@ -640,7 +711,6 @@ async def test_three_opens_in_one_batch_keep_every_grant(world):
         assert not res.get("error"), res
     cabs = [r["id"] for r in results]
     workers = [r["worker"] for r in results]
-    root = k.ctx.root.id
     for cab, w in zip(cabs, workers):
         peers = [x for x in workers if x != w]
         # every worker: its own grants, its peers, the master
@@ -655,102 +725,164 @@ async def test_three_opens_in_one_batch_keep_every_grant(world):
         assert k.get(MASTER)["callable_by"][w] == MESSAGES
         assert k.get(MANAGER)["can_call"][w] == "*"
         assert k.get("memory")["callable_by"][w] == "*"
-        assert k.get(root)["callable_by"][cab] == ["create_agent"]
-        assert k.get(cab)["callable_by"][w] == [STATUS, EQUIP]
+        assert k.get(k.get(cab)["canvas"])["callable_by"][w] == CANVAS_VERBS
+        assert k.get(cab)["callable_by"][w] == [STATUS]
 
 
-# ─── equipment: placed under the worker, granted inside the cabinet ──
+# ─── equipment: placed on the cabinet's canvas, granted inside it ───
 
 
-async def test_equip_refuses_a_grant_or_a_parent_outside_the_cabinet(world):
+async def test_a_worker_places_equipment_on_its_own_canvas_only(world):
     k = world
-    cab = (await open_cabinet(k, "a", name="a"))["id"]
-    w = worker_of(k, cab)
-    b = worker_of(k, (await open_cabinet(k, "b", name="b"))["id"])
-    before = set(k.ctx.agents)
-    refusals = [
-        {"can_call": {k.id: "*"}},
-        {"can_call": {MASTER: "*"}},
-        {"callable_by": {MASTER: "*"}},
-        {"callable_by": {b: "*"}},
-        {"callable_by": {"$self": "*", "*": "*"}},
-    ]
-    for grants in refusals:
-        res = await equip(
-            k, cab, w, handler_module="file_bridge.tools", id="eq", **grants
-        )
-        assert res["reason"] == "bad_arg" and res["arg"] in (
-            "can_call",
-            "callable_by",
-        ), (grants, res)
-    res = await equip(k, cab, w, handler_module="file_bridge.tools", parent_id=k.id)
-    assert res["reason"] == "bad_arg" and res["arg"] == "parent_id", res
-    assert set(k.ctx.agents) == before
-
-
-async def test_equip_grants_inside_the_cabinet_are_accepted(world):
-    k = world
-    cab = (await open_cabinet(k, "a", name="a"))["id"]
-    w = worker_of(k, cab)
-    res = await equip(
+    cab_a = (await open_cabinet(k, "a", name="a"))["id"]
+    cab_b = (await open_cabinet(k, "b", name="b"))["id"]
+    a = worker_of(k, cab_a)
+    canvas_a, canvas_b = k.get(cab_a)["canvas"], k.get(cab_b)["canvas"]
+    made = await create_on(
         k,
-        cab,
-        w,
+        canvas_a,
+        a,
         handler_module="file_bridge.tools",
-        id="eq_in",
-        can_call={"$parent": "*", w: "*"},
-        callable_by={"$subtree": "*", w: "*"},
+        id="a_exec",
+        setup={"allow": ["."]},
     )
-    assert not res.get("error"), res
-    rec = k.get("eq_in")
-    assert rec["callable_by"][w] == "*" and rec["can_call"]["$parent"] == "*"
-
-
-async def test_equip_refuses_wiring_keys_in_its_setup(world):
-    k = world
-    cab = (await open_cabinet(k, "a", name="a"))["id"]
-    w = worker_of(k, cab)
-    before = set(k.ctx.agents)
-    for setup in (
-        {"parent_id": k.id},
-        {"callable_by": {"*": "*"}},
-        {"handler_module": "x"},
-        {"root": "/"},
-        {ROLE: "manager"},
-    ):
-        res = await equip(k, cab, w, handler_module="file_bridge.tools", setup=setup)
-        assert res["reason"] == "bad_arg" and res["arg"] == "setup", (setup, res)
-    assert set(k.ctx.agents) == before
-
-
-async def test_equip_needs_a_handler_and_is_not_reached_by_a_peer(world):
-    k = world
-    cab = (await open_cabinet(k, "a", name="a"))["id"]
-    w = worker_of(k, cab)
-    b = worker_of(k, (await open_cabinet(k, "b", name="b"))["id"])
-    assert (await equip(k, cab, w)).get("reason") == "missing_arg"
-    # a peer may not equip into another worker's cabinet
-    refused = await as_(
-        k, b, cab, {"type": "equip", "handler_module": "file_bridge.tools"}
+    assert not made.get("error"), made
+    assert k.ctx.agents["a_exec"].parent.id == canvas_a
+    # the peer's canvas is not its to build on
+    refused = await create_on(
+        k, canvas_b, a, handler_module="file_bridge.tools", id="sneak"
     )
-    assert refused.get("reason") == "unauthorized", refused
     assert (
-        await equip(k, cab, w, handler_module="file_bridge.tools", id="eq_default")
-    ).get("error") is None
-    rec = k.get("eq_default")
-    assert rec["callable_by"] == {"$self": "*", "$parent": "*"}
-    assert (await as_(k, b, "eq_default", {"type": "reflect"})).get(
-        "reason"
-    ) == "unauthorized"
+        refused.get("reason") == "unauthorized" and refused.get("side") == "egress"
+    ), refused
+    assert "sneak" not in k.ctx.agents
+    # and a worker's `new_canvas` on its own canvas is refused: its grant is create and place
+    nested = await as_(k, a, canvas_a, {"type": "new_canvas", "name": "deeper"})
+    assert nested.get("reason") == "unauthorized", nested
+    assert "canvas_deeper" not in k.ctx.agents
+
+
+async def test_a_worker_reaches_its_equipment_only_through_the_grants_it_is_given(
+    world,
+):
+    k = world
+    cab_a = (await open_cabinet(k, "a", name="a"))["id"]
+    cab_b = (await open_cabinet(k, "b", name="b"))["id"]
+    a, b = worker_of(k, cab_a), worker_of(k, cab_b)
+    canvas_a = k.get(cab_a)["canvas"]
+    made = await create_on(
+        k,
+        canvas_a,
+        a,
+        handler_module="file_bridge.tools",
+        id="a_exec",
+        setup={"allow": ["."]},
+        callable_by={a: "*"},
+    )
+    assert not made.get("error"), made
+    # the worker's own can_call names no equipment: the egress gate refuses it until a grant does
+    refused = await as_(k, a, "a_exec", {"type": "reflect"})
+    assert (
+        refused.get("reason") == "unauthorized" and refused.get("side") == "egress"
+    ), refused
+    k.update(a, can_call={**k.get(a)["can_call"], "a_exec": "*"})
+    assert not (await as_(k, a, "a_exec", {"type": "reflect"})).get("error")
+    # the peer does not, whatever the equipment grants
+    refused = await as_(k, b, "a_exec", {"type": "reflect"})
+    assert refused.get("reason") == "unauthorized", refused
+
+
+async def test_a_place_on_the_cabinet_canvas_is_allowed_to_the_worker(world):
+    k = world
+    cab = (await open_cabinet(k, "a", name="a"))["id"]
+    w = worker_of(k, cab)
+    placed = await as_(k, w, k.get(cab)["canvas"], {"type": "place", "kind": "html"})
+    assert placed == {"placed": True}, placed
 
 
 async def test_equipment_of_a_closed_cabinet_is_removed_with_it(world):
     k = world
     cab = (await open_cabinet(k, "a", name="a"))["id"]
-    w = worker_of(k, cab)
-    res = await equip(k, cab, w, handler_module="file_bridge.tools", id="eq_gone")
+    canvas = k.get(cab)["canvas"]
+    made = await create_on(
+        k, canvas, worker_of(k, cab), handler_module="file_bridge.tools", id="a_exec"
+    )
+    assert not made.get("error"), made
+    res = await as_(k, MASTER, MANAGER, {"type": "close_cabinet", "id": cab})
     assert not res.get("error"), res
-    closed = await as_(k, MASTER, MANAGER, {"type": "close_cabinet", "id": cab})
-    assert not closed.get("error"), closed
-    assert {"eq_gone", w, cab} <= set(closed["deleted"])
-    assert "eq_gone" not in k.ctx.agents
+    assert {cab, canvas, "a_exec"} <= set(res["deleted"])
+    assert canvas not in k.ctx.agents and "a_exec" not in k.ctx.agents
+    assert canvas not in k.get(CANVAS)["callable_by"] if k.get(CANVAS) else True
+
+
+async def test_open_refuses_loudly_when_the_manager_names_no_canvas(world):
+    k = world
+    k.update(MANAGER, canvas_id=None)
+    before = set(k.ctx.agents)
+    res = await open_cabinet(k, "x", name="x")
+    assert res.get("reason") == "missing_arg" and res.get("arg") == "canvas_id", res
+    assert set(k.ctx.agents) == before
+
+
+async def test_open_refuses_loudly_when_the_canvas_does_not_exist(world):
+    k = world
+    k.update(MANAGER, canvas_id="canvas_nowhere")
+    before = set(k.ctx.agents)
+    res = await open_cabinet(k, "x", name="x")
+    assert res.get("reason") == "unknown_agent" and res.get("id") == "canvas_nowhere", (
+        res
+    )
+    assert set(k.ctx.agents) == before
+
+
+async def test_conclude_keeps_the_named_cabinets_and_refuses_unknown_ids(world):
+    k = world
+    cabs = [(await open_cabinet(k, f"t{i}", name=f"k{i}"))["id"] for i in range(3)]
+    before = set(k.ctx.agents)
+    # an unknown id refuses the whole conclude, and deletes nothing
+    res = await as_(
+        k, MASTER, MANAGER, {"type": "conclude", "keep": [cabs[0], "cabinet_nope"]}
+    )
+    assert res.get("reason") == "unknown_keep" and res["unknown"] == ["cabinet_nope"], (
+        res
+    )
+    assert set(k.ctx.agents) == before
+    # a kept cabinet stays with its worker and its canvas; the rest are concluded
+    res = await as_(k, MASTER, MANAGER, {"type": "conclude", "keep": [cabs[1]]})
+    assert not res.get("error"), res
+    assert res["kept"] == [cabs[1]]
+    assert sorted(res["concluded"]) == sorted([cabs[0], cabs[2]])
+    kept_canvas = k.get(cabs[1])["canvas"]
+    assert cabs[1] in k.ctx.agents and kept_canvas in k.ctx.agents
+    assert worker_of(k, cabs[1]) in k.ctx.agents
+    for gone in (cabs[0], cabs[2]):
+        assert gone not in k.ctx.agents
+    assert (await as_(k, MASTER, MANAGER, {"type": "cabinets"}))["count"] == 1
+
+
+async def test_conclude_removes_every_cabinet_worker_canvas_and_equipment(world):
+    k = world
+    cabs = [(await open_cabinet(k, f"t{i}", name=f"n{i}"))["id"] for i in range(2)]
+    workers = [worker_of(k, c) for c in cabs]
+    canvases = [k.get(c)["canvas"] for c in cabs]
+    made = await create_on(
+        k,
+        canvases[0],
+        workers[0],
+        handler_module="file_bridge.tools",
+        id="n0_exec",
+        setup={"allow": ["."]},
+    )
+    assert not made.get("error"), made
+    res = await as_(k, MASTER, MANAGER, {"type": "conclude"})
+    assert not res.get("error"), res
+    assert sorted(res["concluded"]) == sorted(cabs)
+    assert {*cabs, *workers, *canvases, "n0_exec"} <= set(res["deleted"])
+    for gone in [*cabs, *workers, *canvases, "n0_exec"]:
+        assert gone not in k.ctx.agents, gone
+    assert k.get(MANAGER) is not None and k.get(MASTER) is not None
+    assert not any(
+        w in k.get(MASTER)["can_call"] or w in k.get(MASTER)["callable_by"]
+        for w in workers
+    )
+    assert (await as_(k, MASTER, MANAGER, {"type": "cabinets"}))["count"] == 0

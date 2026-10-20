@@ -1,5 +1,8 @@
 # cabinet
 
+> **NOT YET PORTED TO THE CANVAS DESIGN.** The Python bundle (`src/lib/python/bundled_agents/ai/cabinet`, its readme) now makes each cabinet a child canvas of the manager's `canvas_id`, with the worker placing equipment there by `create` and `place`, and `conclude {keep}`. This Rust port still has the pre-canvas design (a `equip` verb, the root `create_agent` grant for the cabinet, no `canvas_id`). Port it before the e2e (#136). The lock table below is already keyed and released as Python's weak map is.
+
+
 A master AI splits a job into **cabinets**. Each cabinet is a **subcanvas** with one
 **worker AI**. The worker builds its own **equipment** inside its cabinet, knows its
 peers, and reports its **status** up. The master sets the tasks, monitors the cabinets,

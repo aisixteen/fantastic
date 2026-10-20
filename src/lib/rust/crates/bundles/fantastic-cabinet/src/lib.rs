@@ -60,7 +60,9 @@ const SERIAL_VERBS: [&str; 3] = ["open_cabinet", "close_cabinet", "conclude"];
 /// under the worker.
 const RELATIVE_KEYS: [&str; 3] = ["$self", "$parent", "$subtree"];
 
-/// One lock per manager id (python `_LOCKS`): see [`manager_lock`].
+/// One lock per manager id (python `_LOCKS`, keyed by the manager): see [`manager_lock`].
+/// An entry leaves the table when its last holder lets go, so a deleted manager leaves
+/// nothing behind.
 static MANAGER_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -164,12 +166,41 @@ fn slug_of(name: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-/// The lock of `manager`: held for the whole read-wire-refresh of a serial verb.
-fn manager_lock(manager: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut locks = MANAGER_LOCKS
-        .lock()
-        .expect("cabinet manager locks poisoned");
-    Arc::clone(locks.entry(manager.to_string()).or_default())
+/// The lock of `manager`, held by the guard for the whole read-wire-refresh of a serial
+/// verb. When the guard drops with no other task waiting (the table and the guard hold
+/// the only two references), the entry is removed.
+async fn manager_lock(manager: &str) -> ManagerGuard {
+    let lock = {
+        let mut locks = MANAGER_LOCKS
+            .lock()
+            .expect("cabinet manager locks poisoned");
+        Arc::clone(locks.entry(manager.to_string()).or_default())
+    };
+    ManagerGuard {
+        manager: manager.to_string(),
+        _held: lock.lock_owned().await,
+    }
+}
+
+/// The held lock of one manager (see [`manager_lock`]).
+struct ManagerGuard {
+    manager: String,
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for ManagerGuard {
+    fn drop(&mut self) {
+        let mut locks = MANAGER_LOCKS
+            .lock()
+            .expect("cabinet manager locks poisoned");
+        // the table's reference and `_held`'s: nobody else waits on this lock
+        if locks
+            .get(&self.manager)
+            .is_some_and(|l| Arc::strong_count(l) == 2)
+        {
+            locks.remove(&self.manager);
+        }
+    }
 }
 
 /// Python's `repr(list_of_str)`.
@@ -1051,9 +1082,7 @@ impl Bundle for CabinetBundle {
             .and_then(|r| r.get(ROLE).and_then(Value::as_str).map(str::to_string));
         // a serial verb of a manager holds the manager's lock for its whole run
         let _held = match role.as_deref() {
-            Some(MANAGER) if SERIAL_VERBS.contains(&verb) => {
-                Some(manager_lock(id).lock_owned().await)
-            }
+            Some(MANAGER) if SERIAL_VERBS.contains(&verb) => Some(manager_lock(id).await),
             _ => None,
         };
         let reply = match role.as_deref() {

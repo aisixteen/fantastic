@@ -11,10 +11,16 @@
 //!         │   │                              backends (AIs, exec agents)
 //!         │   ├── static_files  file_bridge  THE files every view's cells load:
 //!         │   │                              GET /static_files/file/<path>
-//!         │   └── web_loader  kernel_state   its page records (.fantastic/web)
-//!         └── canvas_<name>   canvas.tools   a PEER canvas (`new_canvas`), flat
-//!             └── canvas_<name>_loader       its page records
-//!                                            (.fantastic/web/canvas_<name>)
+//!         │   ├── web_loader  kernel_state   its page records (.fantastic/web)
+//!         │   └── canvas_<name>  canvas.tools a CHILD canvas (`new_canvas` sent to
+//!         │       │                          canvas_root): its page records nest under
+//!         │       │                          its parent's (.fantastic/web/canvas_<name>)
+//!         │       ├── canvas_<name>_loader    its page records
+//!         │       └── canvas_<sub>  …         a canvas it spawned, the same way
+//!         └── (a flat peer canvas made before nesting loads as it did, under canvas_page)
+//!
+//! A canvas's CHILDREN are the canvases it spawned: deleting a canvas deletes its
+//! whole subtree, the canvases it spawned with it.
 //!
 //! No host id here is a page id: the page's records (`canvas`, `view_root`, …)
 //! resolve against the host tree in the page loader.
@@ -80,14 +86,15 @@ async fn create(h: &Host, spec: Value) -> Result<(), String> {
     err_of(&r).map_or(Ok(()), |e| Err(format!("could not create `{id}`: {e}")))
 }
 
-/// A CANVAS (phase 4, flat peer canvases): a `canvas.tools` node under
+/// A CANVAS (phase 4): a `canvas.tools` node under `parent` (`canvas_page`, or the
+/// canvas that spawned it) —
 /// `canvas_page` — its own page kernel (the page records under `loader`, rooted
 /// at `root`), its own cells' backends as its children. `main` is declarative
 /// only: the page opens the main canvas first and lists it on top. Creates
 /// what is missing (booted by the caller).
-pub async fn ensure_canvas(h: &Host, node: &str, loader: &str, root: &str, main: bool) -> Result<(), String> {
+pub async fn ensure_canvas(h: &Host, parent: &str, node: &str, loader: &str, root: &str, main: bool) -> Result<(), String> {
     if !exists(h, node) {
-        create(h, json!({"parent_id": CANVAS_PAGE_ID, "id": node,
+        create(h, json!({"parent_id": parent, "id": node,
             "handler_module": crate::kern::backend::HANDLER_MODULE, "main": main})).await?;
     }
     if !exists(h, loader) {
@@ -114,45 +121,87 @@ async fn boot_canvas(h: &Host, node: &str, loader: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Every canvas: `(node, loader)` — each `canvas.tools` child of `canvas_page`
-/// and its page loader (its `kernel_state` child).
-pub fn canvases(h: &Host) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = h
-        .kernel
+/// `node`'s page loader: its `kernel_state` child.
+fn loader_of(h: &Host, node: &str) -> Option<String> {
+    h.kernel
         .agents
         .iter()
-        .filter(|a| {
+        .find(|l| {
+            let r = l.value().record();
+            r.parent_id.as_deref() == Some(node) && r.handler_module.as_deref() == Some(fantastic_core::HANDLER_MODULE)
+        })
+        .map(|l| l.key().0.clone())
+}
+
+/// Whether `id` is a canvas node (a `canvas.tools` agent).
+fn is_canvas(h: &Host, id: &str) -> bool {
+    h.kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(id))
+        .is_some_and(|a| a.value().record().handler_module.as_deref() == Some(crate::kern::backend::HANDLER_MODULE))
+}
+
+/// Every canvas: `(node, loader)` — each `canvas.tools` node under `canvas_page`,
+/// and each canvas nested under a canvas (`new_canvas` on it), at any depth — with
+/// its page loader (its `kernel_state` child). A flat peer made before nesting is
+/// found the same way, so it loads as it always did.
+pub fn canvases(h: &Host) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut parents = vec![CANVAS_PAGE_ID.to_string()];
+    while let Some(parent) = parents.pop() {
+        for a in h.kernel.agents.iter() {
             let r = a.value().record();
-            r.parent_id.as_deref() == Some(CANVAS_PAGE_ID) && r.handler_module.as_deref() == Some(crate::kern::backend::HANDLER_MODULE)
-        })
-        .filter_map(|a| {
+            if r.parent_id.as_deref() != Some(parent.as_str()) || r.handler_module.as_deref() != Some(crate::kern::backend::HANDLER_MODULE) {
+                continue;
+            }
             let node = a.key().0.clone();
-            let loader = h.kernel.agents.iter().find(|l| {
-                let r = l.value().record();
-                r.parent_id.as_deref() == Some(node.as_str()) && r.handler_module.as_deref() == Some(fantastic_core::HANDLER_MODULE)
-            })?;
-            Some((node, loader.key().0.clone()))
-        })
-        .collect();
+            if let Some(loader) = loader_of(h, &node) {
+                out.push((node.clone(), loader));
+            }
+            parents.push(node);
+        }
+    }
     out.sort();
     out
 }
 
-/// `new_canvas {name}` (`canvas.tools`): a PEER canvas `canvas_<name>`, its
-/// page records at `.fantastic/web/canvas_<name>`. Returns its node id.
-pub async fn new_canvas(h: &Host, name: &str) -> Result<String, String> {
+/// The node id a canvas named `name` takes: `canvas_<slug>`, the slug its letters
+/// and digits (other characters `_`, the ends trimmed). A name with none is refused.
+pub fn canvas_node_id(name: &str) -> Result<String, String> {
     let slug: String = name.trim().to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    let slug = slug.trim_matches('_').to_string();
+    let slug = slug.trim_matches('_');
     if slug.is_empty() {
         return Err("new_canvas needs a name (letters or digits)".into());
     }
-    let node = format!("canvas_{slug}");
+    Ok(format!("canvas_{slug}"))
+}
+
+/// The page records dir of a canvas `node` spawned by a canvas whose own records
+/// dir is `parent_root`: nested under it, `<parent_root>/<node>`.
+pub fn child_records_root(parent_root: &str, node: &str) -> String {
+    format!("{parent_root}/{node}")
+}
+
+/// `new_canvas {name}` (`canvas.tools`, sent to the canvas `parent`): a CHILD
+/// canvas `canvas_<name>` of `parent`, its page records nested under the parent's
+/// records dir. Returns its node id. A name taken anywhere is refused.
+pub async fn new_canvas(h: &Host, parent: &str, name: &str) -> Result<String, String> {
+    if !is_canvas(h, parent) {
+        return Err(format!("new_canvas: `{parent}` is not a canvas"));
+    }
+    let node = canvas_node_id(name)?;
     if exists(h, &node) {
         return Err(format!("a canvas `{node}` already exists"));
     }
+    let parent_loader = loader_of(h, parent).ok_or_else(|| format!("new_canvas: `{parent}` has no page loader"))?;
+    let parent_root = meta(h, &parent_loader)
+        .get("root")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("new_canvas: the page loader of `{parent}` has no root"))?;
     let loader = format!("{node}_loader");
     // `create_agent` boots each as it makes it
-    ensure_canvas(h, &node, &loader, &format!(".fantastic/web/{node}"), false).await?;
+    ensure_canvas(h, parent, &node, &loader, &child_records_root(&parent_root, &node), false).await?;
     Ok(node)
 }
 
@@ -225,7 +274,7 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
             "ingress_rule": "allow_all_ingress"})).await?;
     }
     // THE MAIN CANVAS: its node, its page records, its cells' backends.
-    ensure_canvas(h, CANVAS_NODE_ID, CANVAS_LOADER_ID, ".fantastic/web", true).await?;
+    ensure_canvas(h, CANVAS_PAGE_ID, CANVAS_NODE_ID, CANVAS_LOADER_ID, ".fantastic/web", true).await?;
     // THE STATIC FILES: one read-only file leg over the project dir, for every
     // view. DENY-ALL per path (`allow: []`): its `allow` list — the record's,
     // written from above (`update_agent`) — exposes what the cells load. `web`
@@ -292,6 +341,24 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_canvas_takes_its_node_id_from_its_name_or_is_refused_without_one() {
+        assert_eq!(canvas_node_id("research").unwrap(), "canvas_research");
+        assert_eq!(canvas_node_id("  Research Team! ").unwrap(), "canvas_research_team");
+        assert_eq!(canvas_node_id("a-b").unwrap(), "canvas_a_b");
+        assert!(canvas_node_id("").unwrap_err().contains("needs a name"));
+        assert!(canvas_node_id(" -- ").unwrap_err().contains("needs a name"));
+    }
+
+    #[test]
+    fn a_child_canvas_records_nest_under_its_parents_records_dir() {
+        // the main canvas's records are `.fantastic/web`: its child's sit inside them
+        let under_main = child_records_root(".fantastic/web", "canvas_cabinet_a");
+        assert_eq!(under_main, ".fantastic/web/canvas_cabinet_a");
+        // a grandchild nests under its parent's, one level deeper
+        assert_eq!(child_records_root(&under_main, "canvas_eq"), ".fantastic/web/canvas_cabinet_a/canvas_eq");
+    }
 
     #[test]
     fn the_run_file_names_this_process_its_port_and_url_until_a_clean_exit() {

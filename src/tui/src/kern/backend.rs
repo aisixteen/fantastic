@@ -646,7 +646,7 @@ impl Bundle for BackendBundle {
                     "rename": "args: id:str, name:str. {id, name}.",
                     "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, saved, live}]}.",
                     "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, saved, name, shared}.",
-                    "new_canvas": "args: name:str (req). A PEER canvas `canvas_<name>` beside this one (flat — never nested): its own page records and page kernel, its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
+                    "new_canvas": "args: name:str (req). A CHILD canvas `canvas_<name>` of this one: its page records nest under this canvas's records, and deleting this canvas deletes it. Its own page kernel and its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
                     "canvases": "No args. Every canvas, the main one first: {canvases: [{id, loader, main, name}]}.",
                     "configure_mcp": "args: id:str (req — an MCP agent of this canvas), url:str?, key:str? — its settings changed (a new key stored for the url's host and named), then it connects and lists its tools again (`boot`). Neither given: a reset — it reconnects as it is. {id, url}.",
                     "add_mcp": "args: url:str (req — the server's MCP endpoint), key:str? (a static API key, sent as Bearer to that host only). One remote MCP server as an agent under this canvas: its tools are its verbs. The key is stored in the credential store (choose where keys are kept first). {id}.",
@@ -674,7 +674,7 @@ impl Bundle for BackendBundle {
                     "rename" => Self::rename(&host, payload).await,
                     "dialogs" => Self::dialogs(&host).await,
                     "reopen" => Self::reopen(&host, agent_id, payload).await,
-                    "new_canvas" => match crate::kern::web::new_canvas(&host, payload.get("name").and_then(Value::as_str).unwrap_or("")).await {
+                    "new_canvas" => match crate::kern::web::new_canvas(&host, &agent_id.0, payload.get("name").and_then(Value::as_str).unwrap_or("")).await {
                         Ok(id) => json!({"id": id}),
                         Err(e) => refuse("bad_arg", e, "name it: new_canvas {name: \"research\"}"),
                     },

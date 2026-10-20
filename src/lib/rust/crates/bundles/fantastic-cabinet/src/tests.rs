@@ -1144,3 +1144,37 @@ async fn each_cabinet_is_a_live_html_panel_of_its_own_id() {
     assert!(bytes.contains("fantastic.watch(ID"));
     assert_eq!(view["calls"], json!(["view", "watch"]));
 }
+
+/// THE LOCK TABLE (python `_LOCKS`, a weak map per manager): a manager's entry leaves the
+/// table when its last holder lets go, so a deleted manager leaves nothing behind. A
+/// second manager's lock is its own.
+#[tokio::test]
+async fn a_manager_lock_leaves_the_table_when_its_last_holder_lets_go() {
+    let (a, b) = ("lock_probe_manager_a", "lock_probe_manager_b");
+    let has = |id: &str| MANAGER_LOCKS.lock().unwrap().contains_key(id);
+    {
+        let _ga = manager_lock(a).await;
+        assert!(has(a), "held: the entry is in the table");
+        let _gb = manager_lock(b).await; // not blocked by `a`: its own lock
+        assert!(has(b));
+    }
+    assert!(
+        !has(a) && !has(b),
+        "released: no entry outlives its holders"
+    );
+}
+
+/// A waiter keeps the entry alive: the lock leaves the table only when nobody waits on it.
+#[tokio::test]
+async fn a_waiting_holder_keeps_the_manager_lock_in_the_table() {
+    let id = "lock_probe_manager_waiter";
+    let first = manager_lock(id).await;
+    let waiter = tokio::spawn(async move {
+        let _second = manager_lock(id).await;
+    });
+    // let the waiter reach the lock
+    tokio::task::yield_now().await;
+    drop(first);
+    waiter.await.unwrap();
+    assert!(!MANAGER_LOCKS.lock().unwrap().contains_key(id));
+}
