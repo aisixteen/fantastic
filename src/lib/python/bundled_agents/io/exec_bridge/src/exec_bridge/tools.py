@@ -1350,7 +1350,7 @@ async def _resize(id, payload, kernel):
 
 
 async def _ack(id, payload, kernel):
-    """args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. Returns {unacked:int, paused:bool}."""
+    """args: job_id:int (req), chars:int (req). Flow control from a streaming consumer (an xterm acks each `output` chunk after parsing it): the reader pauses past 100K unacked chars and resumes under 5K. After an `output` replay the reader does not pause for the backlog until this viewer's first ack. Returns {unacked:int, paused:bool}."""
     job, err = _pty_job("ack", id, payload)
     if err:
         return err
@@ -1368,7 +1368,7 @@ async def _ack(id, payload, kernel):
 
 
 async def _output(id, payload, kernel):
-    """args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer). Returns {job_id, output:str}."""
+    """args: job_id:int (req), max_bytes:int? (default the whole 256 KiB ring). The PTY job's recent output — what a client re-attaching replays before the live `output` events; it clears the unacked backlog (flow control restarts at 0 for this viewer) and opens a re-attach grace: the reader does not pause for the backlog until this viewer's first `ack`. Returns {job_id, output:str}."""
     jid, err = _job_arg("output", payload, required=True)
     if err:
         return err

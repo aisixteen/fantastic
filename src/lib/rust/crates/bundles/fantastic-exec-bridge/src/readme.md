@@ -37,7 +37,7 @@ absolute path; with no `PATH` the start is refused naming it.
   rows)`, `ack(job_id, chars)` (flow control — the reader pauses past 100K unacked chars,
   resumes under 5K), `output(job_id, max_bytes?)` (the 256 KiB ring — replay it when you
   re-attach; the replay clears the unacked backlog, so flow control restarts at 0 for
-  the new viewer. A watcher also sees each `output` CALL as an event with no `data`:
+  the new viewer, and the reader does not pause for the backlog until that viewer's first `ack`. A watcher also sees each `output` CALL as an event with no `data`:
   draw only `output` events that carry `data`) and `paste_image(job_id, data, mime)` (saves the image, types its path).
   Each is a gated verb: a viewer granted only `status`/`output`/`ack` cannot type.
   Any caller the gate admits drives any job of this agent. A running
