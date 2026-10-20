@@ -22,6 +22,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::sync::{mpsc, OwnedRwLockWriteGuard, RwLock};
 
 use crate::fatal::fatal;
+use crate::page;
 use crate::sys::{self, Backdrop};
 use crate::{intents, menu};
 
@@ -36,9 +37,12 @@ pub struct Shell {
     pub kiosk: bool,
     pub backdrop: Backdrop,
     kernel: Arc<RwLock<Option<HomeKernel>>>,
-    /// The kernel's port once it serves (0 before): the one loopback origin the
-    /// window may show.
+    /// The kernel's port once it serves (0 before): the home's own loopback
+    /// origin, which the window may show.
     port: AtomicU16,
+    /// The ports of the canvases the home runs, from its latest state: the other
+    /// loopback origins the window may show (the Home page's canvas frames).
+    canvas_ports: Mutex<Vec<u16>>,
     /// The kernel is down (shut down, or it never booted): an exit passes through.
     down: AtomicBool,
     quitting: AtomicBool,
@@ -55,6 +59,7 @@ impl Shell {
             backdrop,
             kernel: Arc::new(RwLock::new(None)),
             port: AtomicU16::new(0),
+            canvas_ports: Mutex::new(Vec::new()),
             down: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
             failed: AtomicBool::new(false),
@@ -71,6 +76,14 @@ impl Shell {
         }
     }
 
+    /// The ports of the canvases the home runs, as its latest state named them.
+    pub fn canvas_ports(&self) -> Vec<u16> {
+        self.canvas_ports
+            .lock()
+            .expect("the canvas ports are poisoned")
+            .clone()
+    }
+
     pub fn quitting(&self) -> bool {
         self.quitting.load(Ordering::SeqCst)
     }
@@ -78,6 +91,14 @@ impl Shell {
     /// The first failure: true once, false after.
     pub(crate) fn fail(&self) -> bool {
         !self.failed.swap(true, Ordering::SeqCst)
+    }
+
+    /// Replace the running canvases' ports with a state's.
+    pub(crate) fn set_canvas_ports(&self, ports: Vec<u16>) {
+        *self
+            .canvas_ports
+            .lock()
+            .expect("the canvas ports are poisoned") = ports;
     }
 
     /// No kernel will run: a quit passes straight through.
@@ -181,8 +202,9 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     eprintln!("fantastic-app: the backdrop: {}", shell.backdrop.name());
 }
 
-/// The events task: `menu_spec` (applied, outside the kiosk), `focus`, and the
-/// home's problems (to stderr in the kiosk); every other payload is dropped.
+/// The events task: `menu_spec` (applied, outside the kiosk), `state` (the
+/// running canvases' ports; the home's problems to stderr in the kiosk) and
+/// `focus`; every other payload is a mirrored call, and is dropped.
 async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     let shell = shell(&app);
     let mut problem = None;
@@ -194,6 +216,7 @@ async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
                     fatal(&app, &format!("the home's menu: {e}"));
                 }
             }
+            Some("state") => shell.set_canvas_ports(page::running_canvas_ports(&payload)),
             Some("focus") => focus(&app),
             _ => {}
         }
