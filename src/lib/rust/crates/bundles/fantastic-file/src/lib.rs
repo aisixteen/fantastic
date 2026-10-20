@@ -391,6 +391,15 @@ impl Bundle for FileBundle {
             if let Some(denied) = gate(&meta, agent_id, verb) {
                 return Ok((Some(denied), None));
             }
+            // THE PATH GATE FOR A VIEW CALLER, as `handle` runs it after the gate: the
+            // binary channel is no way round it (python's single `handler` gates every entry).
+            if SCOPED_VERBS.contains(&verb) {
+                if let Some(refused) =
+                    view_scope(kernel, agent_id, current_origin().as_ref(), verb, &header)
+                {
+                    return Ok((Some(refused), None));
+                }
+            }
             let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
             let root = clamp_root(&meta, &kernel.workdir());
             let reply = text::dispatch(

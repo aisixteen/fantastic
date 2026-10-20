@@ -356,6 +356,16 @@ public struct FileBundle: AgentBundle {
         {
             return (denied, nil)
         }
+        // THE PATH GATE FOR A VIEW CALLER, as `handle` runs it after the gate: a document
+        // on the binary channel is held to the view's path too (python's single `handler`
+        // gates every entry).
+        if viewScopedVerbs.contains(verb),
+            let refused = viewPathGate(
+                kernel, bridge: agent.id.value, origin: KernelTaskLocals.currentOrigin,
+                verb: verb, payload: header)
+        {
+            return (refused, nil)
+        }
         guard let base = kernel.workdir?.path else { return (Self.noRunningDir(), nil) }
         // THE DOCUMENT RIDES THE BODY: `write`/`edit`/`append` take the body at
         // `bytes` verbatim, as python's handler receives it from the binary
