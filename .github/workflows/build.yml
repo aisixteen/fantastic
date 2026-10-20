@@ -660,12 +660,14 @@ jobs:
           want "the app .deb's Package" "$(field "$APP_DEB" Package)" aisixteen-fantastic
           want "the app .deb's Architecture" "$(field "$APP_DEB" Architecture)" ${{ matrix.deb }}
           want "the app .deb's Version" "$(field "$APP_DEB" Version)" "$FANTASTIC_VERSION"
-          for f in ./usr/bin/fantastic-app ./usr/bin/fantastic; do
-            mode=$(dpkg-deb --contents "$APP_DEB" | awk -v f="$f" '$NF == f { print $1 }')
+          # dpkg-deb lists a member as ./usr/… or usr/… (the tauri bundler writes the latter): compare without ./
+          for f in usr/bin/fantastic-app usr/bin/fantastic; do
+            mode=$(dpkg-deb --contents "$APP_DEB" | awk -v f="$f" '{ p = $NF; sub(/^\.\//, "", p) } p == f { print $1 }')
             want "the app .deb's mode of $f" "$mode" -rwxr-xr-x
           done
           # the sidecar is the tested bytes: the release archive's binary
-          packed=$(dpkg-deb --fsys-tarfile "$APP_DEB" | tar -xO ./usr/bin/fantastic | sha256sum | cut -d' ' -f1)
+          member=$(dpkg-deb --fsys-tarfile "$APP_DEB" | tar -t | grep -xE '(\./)?usr/bin/fantastic')
+          packed=$(dpkg-deb --fsys-tarfile "$APP_DEB" | tar -xO "$member" | sha256sum | cut -d' ' -f1)
           archive=$(tar -xzOf dist/fantastic-${{ matrix.target }}.tar.gz fantastic | sha256sum | cut -d' ' -f1)
           want "the sha256 of the .deb's /usr/bin/fantastic" "$packed" "$archive"
           want "fantastic-session's Architecture" "$(field "$SESSION_DEB" Architecture)" all
