@@ -736,14 +736,7 @@ async fn edit_hunk_count_must_be_an_int() {
     let k = mk(&tmp, json!({})).await;
     seed(&k, "m.py", "a = 1\n").await;
     let blob = block("a = 1", "a = 2");
-    for bad in [
-        json!("1"),
-        json!(1.5),
-        json!(true),
-        Value::Null,
-        json!(0),
-        json!(-1),
-    ] {
+    for bad in [json!("1"), json!(1.5), json!(true), json!(0), json!(-1)] {
         let r = call(
             &k,
             json!({"type": "edit", "edits": [{"path": "m.py", "hunks": bad}], "bytes": blob}),
@@ -874,4 +867,62 @@ async fn reflect_carries_edit_grammar_and_compose() {
     for v in ["read", "write", "edit", "append", "undo"] {
         assert!(docs.get(v).is_some(), "{v}");
     }
+}
+
+// ─── #206: a one-file edit needs no `hunks` count ───────────────
+
+#[tokio::test]
+async fn one_file_without_hunks_applies_every_block() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "b.py", "y = 2\nz = 3\n").await;
+    let blob = block("y = 2", "y = 20") + "\n" + &block("z = 3", "z = 30");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "b.py"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["edited"], true, "{r}");
+    assert_eq!(text_of(&tmp, "b.py"), "y = 20\nz = 30\n");
+}
+
+#[tokio::test]
+async fn one_file_with_a_wrong_hunks_count_names_the_fix() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "b.py", "y = 2\nz = 3\n").await;
+    let blob = block("y = 2", "y = 20") + "\n" + &block("z = 3", "z = 30");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "b.py", "hunks": 3}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("leave hunks out"), "{r}");
+    assert_eq!(text_of(&tmp, "b.py"), "y = 2\nz = 3\n");
+}
+
+#[tokio::test]
+async fn two_files_still_need_hunks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.py", "x = 1\n").await;
+    seed(&k, "b.py", "y = 2\n").await;
+    let blob = block("x = 1", "x = 10") + "\n" + &block("y = 2", "y = 20");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.py", "hunks": 1}, {"path": "b.py"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("hunks"), "{r}");
+    assert_eq!(text_of(&tmp, "a.py"), "x = 1\n");
 }

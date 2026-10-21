@@ -1014,7 +1014,8 @@ const EDIT_GRAMMAR: &str = "one or more blocks: `<<<<<<< SEARCH` / <old lines> /
      <new lines> / `>>>>>>> REPLACE`; each SEARCH must match its document EXACTLY ONCE. \
      `edit` is a TRANSACTION over `edits:[{path, hunks, if_match?}]` — even one file rides \
      the array; the blob holds every edit's hunks concatenated in `edits` order, split by \
-     the per-edit `hunks` count; any failure anywhere writes nothing";
+     the per-edit `hunks` count — with ONE file, `hunks` may be left out and every block \
+     applies to it; any failure anywhere writes nothing";
 
 /// How a document rides a call — python `_reflect`'s `compose`, verbatim.
 const COMPOSE: &str = "every content-carrying verb (`write`, `edit`, `append`) takes its \
