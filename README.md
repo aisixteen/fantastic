@@ -180,6 +180,7 @@ beside `SHA256SUMS-app`:
 | macOS 14+, Apple silicon | `fantastic-app-aarch64-apple-darwin.dmg` (notarized) |
 | Windows 10/11 x64 | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` (per user, no admin) |
 | x86_64 Linux: Ubuntu 24.04+, Debian 13+ | `fantastic-app-x86_64-unknown-linux-gnu.deb` (`sudo apt install ./…deb`) |
+| a headless Debian 13 (amd64), as a kiosk | `fantastic-session_<version>_all.deb`: `sudo apt install ./fantastic-app-x86_64-unknown-linux-gnu.deb ./fantastic-session_<version>_all.deb`, then reboot ([`os/`](os/README.md)) |
 
 The `.deb` installs `/usr/bin/fantastic-app` and `/usr/bin/fantastic`, with
 `Depends: libwebkit2gtk-4.1-0, libgtk-3-0` and `Recommends: fonts-dejavu-core`.
@@ -197,7 +198,7 @@ Verify before you install:
 
 ```sh
 spctl -a -vvv -t open --context context:primary-signature fantastic-app-aarch64-apple-darwin.dmg   # macOS: source=Notarized Developer ID
-gpg --import fantastic-app-linux-signing-key.asc && gpg --verify fantastic-app-x86_64-unknown-linux-gnu.deb.asc fantastic-app-x86_64-unknown-linux-gnu.deb
+gpg --import fantastic-app-linux-signing-key.asc && gpg --verify fantastic-app-x86_64-unknown-linux-gnu.deb.asc fantastic-app-x86_64-unknown-linux-gnu.deb   # and the same for fantastic-session_<version>_all.deb
 ```
 
 ```powershell

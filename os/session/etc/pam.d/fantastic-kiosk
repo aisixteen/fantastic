@@ -1,0 +1,6 @@
+#%PAM-1.0
+# fantastic-kiosk.service: the automatic login of the kiosk user (no password asked)
+auth      required  pam_deny.so
+@include common-account
+session   required  pam_loginuid.so
+@include common-session

@@ -7,10 +7,11 @@
 #   units only (default)   a bug fix: every runtime's unit tests, debug, on
 #                          Linux, macOS and Windows
 #   full (`-f e2e=true`)   a completed phase or a release: the units, plus
-#                          every release target's archive and the model-free
-#                          e2e on those binaries
+#                          every release target's archive, the model-free
+#                          e2e on those binaries, and the fantastic OS image
+#                          booted in QEMU
 #
-# The reusable BUILD (`build.yml`) is called up to three times:
+# The reusable BUILD (`build.yml`) is called up to four times:
 #
 #   units     debug    every runtime's unit tests on Linux, macOS and Windows
 #   binaries  release  every release target's archive (`release-<target>`),
@@ -21,6 +22,11 @@
 #                      binaries — ONLY once every unit
 #                      suite passed and every binary built: a red unit test stops
 #                      the run before the e2e starts (full runs only)
+#   os        release  fantastic OS (Phase 9): the app's .deb and
+#                      `fantastic-session` from those binaries, the Debian
+#                      kiosk image of them, and its boot in QEMU. Beside the
+#                      e2e: it neither gates them nor waits for them (full
+#                      runs only)
 #
 # The run's title says which it was (`ci · units` / `ci · full`). A green FULL
 # run is what `release.yml` publishes for its commit.
@@ -66,3 +72,11 @@ jobs:
     with:
       profile: release
       e2e: true
+
+  os:
+    if: inputs.e2e
+    needs: [binaries]
+    uses: ./.github/workflows/build.yml
+    with:
+      profile: release
+      os: true

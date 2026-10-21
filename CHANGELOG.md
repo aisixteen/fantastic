@@ -40,6 +40,13 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   WebGL renderer everywhere else; switching is live. The e2e probe E88
   measures keystroke → render latency per renderer, in Chrome and, on Linux,
   in WebKitGTK.
+- fantastic OS: a Debian 13 (trixie) kiosk image built with mkosi (x86_64, arm64)
+  that boots into the desktop app. The `fantastic-session` package logs the user
+  `fantastic` in on tty1 and runs `fantastic-app --kiosk` full screen under cage,
+  with screen blanking off; `scripts/build/deb.sh` builds it and the app's `.deb`.
+  CI boots the image in QEMU and checks that the home kernel serves, the Home page
+  answers a key press, and a canvas survives a restart of the kiosk. The
+  installers carry `fantastic-session` beside the app's `.deb`.
 - Installers for the desktop app, built and verified by CI (`installers.yml`,
   from the binaries a green CI run tested) and signed by hand by the
   maintainer: a notarized DMG (macOS, Apple silicon), a signed NSIS installer

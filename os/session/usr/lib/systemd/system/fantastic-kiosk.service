@@ -1,0 +1,32 @@
+[Unit]
+Description=fantastic kiosk: the app full screen under cage on tty1, as the user fantastic
+Documentation=https://github.com/aisixteen/fantastic/tree/main/os
+After=systemd-user-sessions.service plymouth-quit-wait.service getty@tty1.service dbus.socket systemd-logind.service
+Wants=dbus.socket systemd-logind.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty0
+# a kiosk comes back however often it falls: no start rate limit
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=fantastic
+PAMName=fantastic-kiosk
+WorkingDirectory=~
+Environment=XDG_SESSION_TYPE=wayland XDG_SESSION_CLASS=user XDG_SEAT=seat0 XDG_VTNR=1
+Environment=GDK_BACKEND=wayland WLR_RENDERER_ALLOW_SOFTWARE=1 WLR_LIBINPUT_NO_DEVICES=1
+ExecStart=/usr/bin/cage -d -s -- /usr/bin/fantastic-app --kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

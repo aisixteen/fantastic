@@ -118,7 +118,9 @@ pub fn parse_login_env(printed: &[u8]) -> Result<Vec<(OsString, OsString)>, Stri
 /// Start `<bin> canvas` in `path` with exactly `env` plus `FANTASTIC_HOME=<home>`,
 /// stdin and stdout null, stderr to `log` (`0600`). The child leads its own
 /// session (`setsid`), so it outlives the host and never gets its terminal's
-/// signals.
+/// signals, and it inherits NO other descriptor of the host: a long-lived canvas
+/// holding the app's compositor connection (or any socket) would keep it open
+/// after the app is gone (the kiosk's cage then never sees its client leave).
 pub async fn spawn(
     bin: &Path,
     path: &str,
@@ -142,17 +144,52 @@ pub async fn spawn(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(err);
-    // SAFETY: `setsid` is async-signal-safe and touches no memory of the parent.
+    // SAFETY: `setsid`, `close_range` / `fcntl` and `getdtablesize` are
+    // async-signal-safe and touch no memory of the parent.
     unsafe {
         cmd.pre_exec(|| {
             libc::setsid();
-            Ok(())
+            cloexec_from(3)
         });
     }
     let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", bin.display()))?;
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
+    Ok(())
+}
+
+/// Mark every descriptor from `first` up CLOSE-ON-EXEC (in the child, before
+/// exec). Marked, not closed: the spawn's own error pipe is already
+/// close-on-exec and must stay open until the exec, so a failed exec is still
+/// reported.
+fn cloexec_from(first: libc::c_int) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: a plain syscall on descriptor numbers.
+        let r = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                first as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC as libc::c_uint,
+            )
+        };
+        if r != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // SAFETY: fcntl on descriptor numbers; EBADF (not open) is skipped.
+        let top = unsafe { libc::getdtablesize() };
+        for fd in first..top {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags >= 0 {
+                unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+            }
+        }
+    }
     Ok(())
 }
 

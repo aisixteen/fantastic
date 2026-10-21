@@ -456,6 +456,58 @@ mod unix_only {
         assert_eq!(std::fs::metadata(&log).unwrap().mode() & 0o777, 0o600);
     }
 
+    #[tokio::test]
+    async fn the_spawned_canvas_inherits_no_descriptor_of_the_host() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, dir) = temp();
+        // a descriptor the host holds WITHOUT close-on-exec (as a compositor
+        // connection handed down can be)
+        let held = std::fs::File::open(&dir).unwrap();
+        let fd = held.as_raw_fd();
+        // SAFETY: fcntl on a descriptor this test owns
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            assert_eq!(libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC), 0);
+        }
+        let out = dir.join("fds.txt");
+        let bin = dir.join("fantastic");
+        // the child says whether descriptor `fd` is open in it
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh
+if [ -e /dev/fd/{fd} ]; then echo open; else echo closed; fi > '{}'
+",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))];
+        spawn(
+            &bin,
+            dir.to_str().unwrap(),
+            &env,
+            &dir.join("home"),
+            &dir.join("c.log"),
+        )
+        .await
+        .expect("spawned");
+        let mut text = String::new();
+        for _ in 0..500 {
+            if let Ok(t) = std::fs::read_to_string(&out) {
+                if !t.is_empty() {
+                    text = t;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(text.trim(), "closed", "descriptor {fd} reached the canvas");
+        drop(held);
+    }
+
     fn sys_os(dir: &Path, bin: &str) -> crate::home::os::SysOs {
         let env = vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))];
         crate::home::os::SysOs::with_env(dir.join("home"), dir.join(bin), env)
