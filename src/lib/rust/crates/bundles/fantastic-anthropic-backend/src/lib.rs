@@ -15,6 +15,10 @@
 //!   finish. An `error` event is raised with the API's own type and message.
 //! - THE KEY: the record's optional `credentials` ref, sent as `x-api-key` (with
 //!   `anthropic-version`); none, no key header.
+//! - PROMPT CACHING, opt-in (`prompt_cache`): the `system` block and the conversation
+//!   tail carry an ephemeral `cache_control` marker. Off, the body is unchanged.
+//! - USAGE: each stream's token counts accumulate into the agent's [`Usage`] (RAM;
+//!   the `usage` verb and `reflect` read it), side calls included.
 
 #![deny(missing_docs)]
 
@@ -32,8 +36,8 @@ use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
-use std::collections::VecDeque;
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 pub mod server;
@@ -46,6 +50,9 @@ pub const README: &str = include_str!("readme.md");
 
 /// The name every refusal carries.
 const NAME: &str = "anthropic_backend";
+
+/// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
+const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since its kernel started:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices). reset:\ntrue returns the counts, then zeroes them.";
 
 /// What `reflect` says this agent IS — python `tools.py`'s `sentence`.
 pub const SENTENCE: &str = "Anthropic Messages-API LLM agent (raw prompt-and-parse tool-calling).";
@@ -100,6 +107,83 @@ pub fn to_messages(messages: &[Value]) -> (String, Vec<Value>) {
     (systems.join("\n\n"), turns)
 }
 
+/// The cache marker a cached request sends: the 5-minute ephemeral TTL, the only one.
+fn cache_control() -> Value {
+    json!({"type": "ephemeral"})
+}
+
+/// `round(0.9 * cache_read - 0.25 * cache_write)` in full-price input tokens: a read
+/// costs 0.1x the base input price, a write 1.25x. Exact integer arithmetic, halves
+/// to even, so every runtime agrees. May be negative. Python `saved_tokens`.
+#[must_use]
+pub fn saved_tokens(cache_read: i64, cache_write: i64) -> i64 {
+    let n = 18 * cache_read - 5 * cache_write;
+    let (mut q, r) = (n.div_euclid(20), n.rem_euclid(20));
+    if 2 * r > 20 || (2 * r == 20 && q.rem_euclid(2) == 1) {
+        q += 1;
+    }
+    q
+}
+
+/// One agent's token counts since its kernel started (RAM — a restart zeroes them).
+/// `input` is the uncached remainder; the two cache counts are what the API reports
+/// for the prompt. Python `Usage`.
+#[derive(Default)]
+struct Usage {
+    requests: i64,
+    input: i64,
+    cache_write: i64,
+    cache_read: i64,
+    output: i64,
+}
+
+impl Usage {
+    /// What the counts derive to, with the record's prices when BOTH are set (USD per
+    /// million tokens). Python `Usage.snapshot`.
+    fn snapshot(&self, price_in: Option<f64>, price_out: Option<f64>) -> Value {
+        let prompt = self.input + self.cache_write + self.cache_read;
+        let saved = saved_tokens(self.cache_read, self.cache_write);
+        let hit_rate = if prompt > 0 {
+            json!(self.cache_read as f64 / prompt as f64)
+        } else {
+            json!(0)
+        };
+        let mut out = Map::new();
+        out.insert("requests".into(), json!(self.requests));
+        out.insert("input_tokens".into(), json!(self.input));
+        out.insert("cache_write_tokens".into(), json!(self.cache_write));
+        out.insert("cache_read_tokens".into(), json!(self.cache_read));
+        out.insert("output_tokens".into(), json!(self.output));
+        out.insert("prompt_tokens".into(), json!(prompt));
+        out.insert("hit_rate".into(), hit_rate);
+        out.insert("saved_tokens".into(), json!(saved));
+        if let (Some(pin), Some(pout)) = (price_in, price_out) {
+            let cost_in =
+                self.input as f64 + 1.25 * self.cache_write as f64 + 0.1 * self.cache_read as f64;
+            let cost = cost_in * pin / 1e6 + self.output as f64 * pout / 1e6;
+            out.insert("cost_usd".into(), json!(cost));
+            out.insert("saved_usd".into(), json!(saved as f64 * pin / 1e6));
+        }
+        Value::Object(out)
+    }
+}
+
+/// Each agent's counts, keyed by id: the provider adds to it, the verbs read it.
+fn usage_table() -> &'static Mutex<HashMap<String, Arc<Mutex<Usage>>>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, Arc<Mutex<Usage>>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The agent's running counts — created on first use.
+fn usage_of(agent_id: &AgentId) -> Arc<Mutex<Usage>> {
+    let mut table = usage_table().lock().expect("usage table poisoned");
+    Arc::clone(
+        table
+            .entry(agent_id.as_str().to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(Usage::default()))),
+    )
+}
+
 /// The Messages provider. PURE RAW TEXT.
 struct AnthropicProvider {
     endpoint: String,
@@ -108,6 +192,8 @@ struct AnthropicProvider {
     max_tokens: i64,
     temperature: Option<f64>,
     thinking_budget: Option<i64>,
+    prompt_cache: bool,
+    usage: Arc<Mutex<Usage>>,
     report: ReportCell,
 }
 
@@ -122,7 +208,15 @@ impl AnthropicProvider {
         body.insert("messages".into(), Value::Array(turns));
         body.insert("stream".into(), json!(true));
         if !system.is_empty() {
-            body.insert("system".into(), json!(system));
+            let system = if self.prompt_cache {
+                json!([{"type": "text", "text": system, "cache_control": cache_control()}])
+            } else {
+                json!(system)
+            };
+            body.insert("system".into(), system);
+        }
+        if self.prompt_cache {
+            body.insert("cache_control".into(), cache_control());
         }
         if let Some(t) = self.temperature {
             body.insert("temperature".into(), json!(t));
@@ -214,6 +308,7 @@ impl Provider for AnthropicProvider {
         Ok(consume_sse(
             resp,
             Arc::clone(&self.report),
+            Arc::clone(&self.usage),
             self.endpoint.clone(),
             max_tokens.is_none().then_some(self.max_tokens),
         ))
@@ -224,6 +319,7 @@ impl Provider for AnthropicProvider {
 fn consume_sse(
     resp: reqwest::Response,
     report: ReportCell,
+    usage: Arc<Mutex<Usage>>,
     endpoint: String,
     main_turn_max: Option<i64>,
 ) -> ProviderStream {
@@ -234,6 +330,8 @@ fn consume_sse(
             buf: Vec::new(),
             wrap: ThinkWrap::new(),
             report,
+            usage,
+            billed_out: 0,
             stopped: false,
             endpoint,
             main_turn_max,
@@ -288,6 +386,9 @@ struct SseState {
     buf: Vec<u8>,
     wrap: ThinkWrap,
     report: ReportCell,
+    usage: Arc<Mutex<Usage>>,
+    /// The output tokens this stream has already billed to the agent's usage.
+    billed_out: i64,
     stopped: bool,
     endpoint: String,
     /// `Some(bound)` on a MAIN turn, where a cut is a failure.
@@ -314,16 +415,20 @@ impl SseState {
         match evt.get("type").and_then(Value::as_str).unwrap_or("") {
             "message_start" => {
                 let u = &evt["message"]["usage"];
-                let total: i64 = [
-                    "input_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                ]
-                .iter()
-                .map(|k| u.get(*k).and_then(Value::as_i64).unwrap_or(0))
-                .sum();
+                let count = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+                let (input, write, read) = (
+                    count("input_tokens"),
+                    count("cache_creation_input_tokens"),
+                    count("cache_read_input_tokens"),
+                );
+                let total = input + write + read;
                 self.report.lock().expect("report poisoned").prompt_tokens =
                     (total > 0).then_some(total);
+                let mut usage = self.usage.lock().expect("usage poisoned");
+                usage.requests += 1;
+                usage.input += input;
+                usage.cache_write += write;
+                usage.cache_read += read;
             }
             "content_block_delta" => {
                 let delta = &evt["delta"];
@@ -362,6 +467,9 @@ impl SseState {
                         .lock()
                         .expect("report poisoned")
                         .completion_tokens = Some(n);
+                    // message_delta carries the running total: bill the step.
+                    self.usage.lock().expect("usage poisoned").output += n - self.billed_out;
+                    self.billed_out = n;
                 }
             }
             "message_stop" => self.stopped = true,
@@ -434,6 +542,8 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
             max_tokens: required_int(&meta, "max_tokens")?,
             temperature: meta.get("temperature").and_then(Value::as_f64),
             thinking_budget: positive_int(meta.get("thinking_budget")),
+            prompt_cache: prompt_cache_of(&meta),
+            usage: usage_of(agent_id),
             report: ReportCell::default(),
         })
     })();
@@ -443,7 +553,46 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
     }
 }
 
-/// `reflect` — the shared base body, then what the next request will send.
+/// The record's `prompt_cache`, validated boolean at the write; absent is false.
+fn prompt_cache_of(meta: &Map<String, Value>) -> bool {
+    meta.get("prompt_cache")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The counts with the record's prices applied (python `_usage_now`).
+fn usage_now(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let price = |k: &str| meta.get(k).and_then(Value::as_f64);
+    let counts = usage_of(agent_id);
+    let usage = counts.lock().expect("usage poisoned");
+    usage.snapshot(
+        price("price_input_per_mtok"),
+        price("price_output_per_mtok"),
+    )
+}
+
+/// `usage` — args: reset? (bool). The agent's token usage since its kernel started.
+/// `reset: true` returns the counts, then zeroes them. Python `_usage`.
+fn usage_reply(agent_id: &AgentId, payload: &Value, kernel: &Kernel) -> Value {
+    let reset = payload.get("reset").cloned().unwrap_or(json!(false));
+    let Some(reset) = reset.as_bool() else {
+        let mut r = fantastic_kernel::refusal::refusal(
+            fantastic_kernel::refusal::BAD_ARG,
+            "usage: reset must be true or false",
+        );
+        fantastic_kernel::refusal::with(&mut r, "arg", json!("reset"));
+        return r;
+    };
+    let out = usage_now(agent_id, kernel);
+    if reset {
+        *usage_of(agent_id).lock().expect("usage poisoned") = Usage::default();
+    }
+    out
+}
+
+/// `reflect` — the shared base body, then what the next request will send, and the
+/// usage so far.
 fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleError> {
     let mut out = verbs::reflect_base(agent_id, kernel, SENTENCE, CFG.model_window);
     let meta = helpers::agent_meta(agent_id, kernel);
@@ -456,6 +605,8 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
         };
         out.insert(k.to_string(), v);
     }
+    out.insert("prompt_cache".into(), json!(prompt_cache_of(&meta)));
+    out.insert("usage".into(), usage_now(agent_id, kernel));
     Ok(Value::Object(out))
 }
 
@@ -477,6 +628,18 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     if let Some(t) = meta.get("temperature").filter(|v| !v.is_null()) {
         if !t.is_number() {
             return Some("temperature must be a number".to_string());
+        }
+    }
+    if let Some(c) = meta.get("prompt_cache").filter(|v| !v.is_null()) {
+        if !c.is_boolean() {
+            return Some("prompt_cache must be a boolean".to_string());
+        }
+    }
+    for key in ["price_input_per_mtok", "price_output_per_mtok"] {
+        if let Some(p) = meta.get(key).filter(|v| !v.is_null()) {
+            if !p.is_number() || p.as_f64().unwrap_or(0.0) < 0.0 {
+                return Some(format!("{key} must be a number, zero or more"));
+            }
         }
     }
     if let Some(budget) = positive_int(merged.get("thinking_budget")) {
@@ -549,6 +712,24 @@ pub fn record_schema() -> &'static Value {
                      max_tokens); unset, no thinking is asked for"
                 ),
             ),
+            Field::new(
+                "prompt_cache",
+                "bool",
+                "prompt caching, opt-in: the system block and the conversation tail carry \
+                 a 5-minute cache marker; unset or false, the request is unchanged",
+            ),
+            Field::new(
+                "price_input_per_mtok",
+                "float",
+                "USD per million input tokens — with price_output_per_mtok, reflect and \
+                 usage report cost_usd and saved_usd; no default price",
+            ),
+            Field::new(
+                "price_output_per_mtok",
+                "float",
+                "USD per million output tokens — with price_input_per_mtok, reflect and \
+                 usage report cost_usd and saved_usd; no default price",
+            ),
             // the API key — optional on the record: absent, no key header goes out
             schema::credentials_field(false),
         ])
@@ -565,7 +746,17 @@ impl Bundle for AnthropicBundle {
     }
 
     fn verb_docs(&self) -> Value {
-        fantastic_ai_core::verbs::verb_docs()
+        // `usage` right after `history`, where python's build() merges extra_verbs.
+        let core = fantastic_ai_core::verbs::verb_docs();
+        let mut out = serde_json::Map::new();
+        for (k, v) in core.as_object().cloned().unwrap_or_default() {
+            let after = k == "history";
+            out.insert(k, v);
+            if after {
+                out.insert("usage".into(), json!(USAGE_DOC));
+            }
+        }
+        Value::Object(out)
     }
 
     fn emits_doc(&self) -> Option<Value> {
@@ -608,6 +799,9 @@ impl Bundle for AnthropicBundle {
         if verb == "reflect" {
             return Ok(Some(reflect_reply(agent_id, kernel)?));
         }
+        if verb == "usage" {
+            return Ok(Some(usage_reply(agent_id, payload, kernel)));
+        }
         // A verb that runs a turn first reads what the record leaves to the API; an
         // API that does not answer refuses the verb, naming the field.
         if server::TURN_VERBS.contains(&verb) {
@@ -631,6 +825,11 @@ impl Bundle for AnthropicBundle {
     }
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        // this agent's counts go with it: an id re-created later starts clean
+        usage_table()
+            .lock()
+            .expect("usage table poisoned")
+            .remove(agent_id.as_str());
         verbs::on_delete(agent_id, kernel).await;
         Ok(())
     }

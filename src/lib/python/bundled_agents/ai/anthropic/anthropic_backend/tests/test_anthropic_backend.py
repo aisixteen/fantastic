@@ -337,3 +337,210 @@ async def test_a_verb_that_runs_no_turn_reads_nothing(seeded_kernel, mock_http):
     for verb in ("reflect", "status", "context_status", "rows"):
         await _call(seeded_kernel, "a1", {"type": verb})
     assert seen == []
+
+
+# ─── prompt caching ──────────────────────────────────────────────────────────
+
+CACHED = {"type": "ephemeral"}
+PLAIN = [
+    {"role": "system", "content": "s"},
+    {"role": "user", "content": "hi"},
+]
+
+
+def test_prompt_cache_off_leaves_the_body_exactly_as_it_was():
+    for p in (_provider(None), _provider(None, prompt_cache=False)):
+        assert p.body(PLAIN, None) == {
+            "model": MODEL,
+            "max_tokens": 8000,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "system": "s",
+        }
+
+
+def test_prompt_cache_marks_the_system_block_and_the_tail():
+    p = _provider(None, prompt_cache=True, temperature=0.2, thinking_budget=2048)
+    b = p.body(PLAIN, None)
+    assert b["system"] == [{"type": "text", "text": "s", "cache_control": CACHED}]
+    assert b["cache_control"] == CACHED
+    # nothing else moves: order, merging, thinking, max_tokens
+    assert b["messages"] == [{"role": "user", "content": "hi"}]
+    assert b["max_tokens"] == 8000 and b["temperature"] == 0.2
+    assert b["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+    # a side call's own bound is marked the same way
+    b = p.body(PLAIN, 1500)
+    assert b["max_tokens"] == 1500 and b["cache_control"] == CACHED
+
+
+def test_prompt_cache_sends_no_system_block_when_the_system_is_empty():
+    p = _provider(None, prompt_cache=True)
+    b = p.body([{"role": "user", "content": "hi"}], None)
+    assert "system" not in b
+    assert b["cache_control"] == CACHED
+
+
+async def test_prompt_cache_marks_every_request_a_provider_sends():
+    seen: list = []
+    p = _provider(
+        _transport(_sse(START, _text("ok"), *_stop()), seen), prompt_cache=True
+    )
+    await _drain(p, PLAIN)
+    assert json.loads(seen[0].content)["cache_control"] == CACHED
+    assert json.loads(seen[0].content)["system"][0]["cache_control"] == CACHED
+
+
+# ─── usage ───────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _fresh_usage():
+    from anthropic_backend import tools
+
+    tools._USAGE.clear()
+    yield
+    tools._USAGE.clear()
+
+
+def _usage_start(inp: int, cw: int, cr: int) -> dict:
+    return {
+        "type": "message_start",
+        "message": {
+            "usage": {
+                "input_tokens": inp,
+                "cache_creation_input_tokens": cw,
+                "cache_read_input_tokens": cr,
+            }
+        },
+    }
+
+
+def _usage_stop(out: int) -> list[dict]:
+    return [
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": out},
+        },
+        {"type": "message_stop"},
+    ]
+
+
+async def test_the_stream_sets_last_prompt_tokens_and_the_counts():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    body = _sse(_usage_start(100, 400, 1000), _text("ok"), *_usage_stop(35))
+    p = _provider(_transport(body), usage=u)
+    await _drain(p)
+    assert p.last_prompt_tokens == 1500 and p.last_completion_tokens == 35
+    assert (u.requests, u.input_tokens, u.cache_write_tokens) == (1, 100, 400)
+    assert (u.cache_read_tokens, u.output_tokens) == (1000, 35)
+
+
+async def test_two_passes_accumulate_and_a_side_call_counts_too():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    first = _sse(_usage_start(100, 400, 0), _text("a"), *_usage_stop(10))
+    second = _sse(_usage_start(50, 0, 900), _text("b"), *_usage_stop(20))
+    await _drain(_provider(_transport(first), usage=u))
+    await _drain(_provider(_transport(second), usage=u), max_tokens=500)
+    assert (u.requests, u.input_tokens, u.cache_write_tokens) == (2, 150, 400)
+    assert (u.cache_read_tokens, u.output_tokens) == (900, 30)
+
+
+def test_hit_rate_and_saved_tokens_follow_the_formulas():
+    from anthropic_backend.provider import Usage, saved_tokens
+
+    u = Usage()
+    u.add_request(100, 400, 1000)
+    s = u.snapshot()
+    assert s["prompt_tokens"] == 1500
+    assert s["hit_rate"] == pytest.approx(1000 / 1500)
+    assert s["saved_tokens"] == 800  # 0.9*1000 - 0.25*400
+    assert "cost_usd" not in s and "saved_usd" not in s
+    # a write that is never read is a loss: negative, reported, never clamped
+    w = Usage()
+    w.add_request(10, 400, 0)
+    assert w.snapshot()["saved_tokens"] == -100
+    assert w.snapshot()["hit_rate"] == 0.0
+    # nothing counted: no prompt, no hit rate
+    assert Usage().snapshot()["hit_rate"] == 0
+    # halves round to even
+    assert saved_tokens(5, 0) == 4 and saved_tokens(0, 2) == 0
+    assert saved_tokens(0, 3) == -1 and saved_tokens(1, 0) == 1
+
+
+def test_prices_on_the_record_add_cost_and_saving_in_usd():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    u.add_request(100, 400, 1000)
+    u.output_tokens = 50
+    s = u.snapshot(price_in=3.0, price_out=15.0)
+    cost = (100 + 1.25 * 400 + 0.1 * 1000) * 3.0 / 1e6 + 50 * 15.0 / 1e6
+    assert s["cost_usd"] == pytest.approx(cost)
+    assert s["saved_usd"] == pytest.approx(800 * 3.0 / 1e6)
+    # one price without the other: neither field
+    s = u.snapshot(price_in=3.0)
+    assert "cost_usd" not in s and "saved_usd" not in s
+
+
+async def test_the_usage_verb_returns_the_counts_and_reset_zeroes_them(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    from anthropic_backend import tools
+
+    mock_http(_api([]))
+    await _create(seeded_kernel, price_input_per_mtok=3.0, price_output_per_mtok=15.0)
+    tools.usage_of("a1").add_request(100, 400, 1000)
+    got = await _call(seeded_kernel, "a1", {"type": "usage"})
+    assert got["cache_read_tokens"] == 1000 and got["saved_tokens"] == 800
+    assert "cost_usd" in got and "saved_usd" in got
+    assert await _call(seeded_kernel, "a1", {"type": "usage", "reset": True}) == got
+    zero = await _call(seeded_kernel, "a1", {"type": "usage"})
+    assert zero["requests"] == 0 and zero["hit_rate"] == 0 and zero["saved_tokens"] == 0
+    bad = await _call(seeded_kernel, "a1", {"type": "usage", "reset": "yes"})
+    assert bad["reason"] == "bad_arg" and bad["arg"] == "reset"
+
+
+async def test_reflect_carries_the_usage_and_the_cache_flag(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_api([]))
+    await _create(seeded_kernel, prompt_cache=True)
+    r = await _call(seeded_kernel, "a1", {"type": "reflect"})
+    assert r["prompt_cache"] is True
+    assert r["usage"]["requests"] == 0 and r["usage"]["hit_rate"] == 0
+
+
+async def test_deleting_an_agent_drops_its_counts(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    from anthropic_backend import tools
+
+    mock_http(_api([]))
+    await _create(seeded_kernel)
+    tools.usage_of("a1").add_request(100, 400, 1000)
+    r = await _call(
+        seeded_kernel, seeded_kernel.id, {"type": "delete_agent", "id": "a1"}
+    )
+    assert r["deleted"] is True, r
+    assert "a1" not in tools._USAGE
+    await _create(seeded_kernel)
+    zero = await _call(seeded_kernel, "a1", {"type": "usage"})
+    assert zero["requests"] == 0 and zero["cache_read_tokens"] == 0, zero
+
+
+def test_the_record_refuses_a_bad_cache_flag_or_price():
+    assert validate_meta({"prompt_cache": True}, _rec()) is None
+    assert validate_meta({"price_input_per_mtok": 3}, _rec()) is None
+    assert "prompt_cache must be a boolean" in validate_meta(
+        {"prompt_cache": "yes"}, _rec()
+    )
+    assert "must be a number" in validate_meta({"price_output_per_mtok": "x"}, _rec())
+    assert "must be a number" in validate_meta({"price_input_per_mtok": True}, _rec())
+    assert "zero or more" in validate_meta({"price_input_per_mtok": -1}, _rec())
+    names = {f["name"] for f in RECORD_SCHEMA["fields"]}
+    assert {"prompt_cache", "price_input_per_mtok", "price_output_per_mtok"} <= names
