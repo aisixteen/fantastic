@@ -243,4 +243,198 @@ struct AnthropicBackendTests {
                 "python/bundled_agents/ai/anthropic/anthropic_backend/src/anthropic_backend/readme.md")
         #expect(AnthropicBundle().readme == (try String(contentsOf: py, encoding: .utf8)))
     }
+
+    // ─── prompt caching and usage ───────────────────────────────
+
+    private func plain() -> [JSON] {
+        [["role": "system", "content": "s"], ["role": "user", "content": "hi"]]
+    }
+
+    private func usageStart(_ input: Int64, _ write: Int64, _ read: Int64) -> JSON {
+        .object([
+            "type": "message_start",
+            "message": .object([
+                "usage": .object([
+                    "input_tokens": .integer(input),
+                    "cache_creation_input_tokens": .integer(write),
+                    "cache_read_input_tokens": .integer(read),
+                ])
+            ]),
+        ])
+    }
+
+    private func usageStop(_ out: Int64) -> [JSON] {
+        [
+            .object([
+                "type": "message_delta", "delta": .object(["stop_reason": "end_turn"]),
+                "usage": .object(["output_tokens": .integer(out)]),
+            ]),
+            .object(["type": "message_stop"]),
+        ]
+    }
+
+    @Test func promptCacheOffLeavesTheBodyExactlyAsItWas() {
+        let expected: JSON = .object([
+            "model": .string(MODEL), "max_tokens": 8000,
+            "messages": [["role": "user", "content": "hi"]], "stream": true, "system": "s",
+        ])
+        var p = provider("http://x/v1/messages")
+        #expect(p.body(plain(), maxTokens: nil) == expected)
+        p.promptCache = false
+        #expect(p.body(plain(), maxTokens: nil) == expected)
+    }
+
+    @Test func promptCacheMarksTheSystemBlockAndTheTail() {
+        var p = AnthropicProvider(
+            endpoint: "http://x/v1/messages", model: MODEL, key: { _ in nil }, maxTokens: 8000,
+            temperature: 0.2, thinkingBudget: 2048)
+        p.promptCache = true
+        let b = p.body(plain(), maxTokens: nil)
+        #expect(
+            b["system"]
+                == .array([.object(["type": "text", "text": "s", "cache_control": ["type": "ephemeral"]])]))
+        #expect(b["cache_control"] == .object(["type": "ephemeral"]))
+        #expect(b["messages"] == .array([.object(["role": "user", "content": "hi"])]))
+        #expect(b["max_tokens"] == 8000 && b["temperature"] == .double(0.2))
+        #expect(b["thinking"] == .object(["type": "enabled", "budget_tokens": 2048]))
+        let side = p.body(plain(), maxTokens: 1500)
+        #expect(side["max_tokens"] == 1500 && side["cache_control"] == .object(["type": "ephemeral"]))
+    }
+
+    @Test func promptCacheSendsNoSystemBlockWhenTheSystemIsEmpty() {
+        var p = provider("http://x/v1/messages")
+        p.promptCache = true
+        let b = p.body([["role": "user", "content": "hi"]], maxTokens: nil)
+        #expect(b["system"] == .null)
+        #expect(b["cache_control"] == .object(["type": "ephemeral"]))
+    }
+
+    @Test func theStreamSetsLastPromptTokensAndTheCounts() async throws {
+        let stub = StubHTTP([sse([usageStart(100, 400, 1000), text("ok")] + usageStop(35))])
+        var p = provider("http://127.0.0.1:\(stub.port)/v1/messages")
+        p.counts = AnthropicUsage()
+        #expect(try await drain(p) == "ok")
+        #expect(p.usage?.lastPromptTokens == 1500 && p.usage?.lastCompletionTokens == 35)
+        #expect(
+            p.counts.take(reset: false)
+                == AnthropicCounts(requests: 1, input: 100, cacheWrite: 400, cacheRead: 1000, output: 35))
+    }
+
+    @Test func twoPassesAccumulateAndASideCallCountsToo() async throws {
+        let stub = StubHTTP([
+            sse([usageStart(100, 400, 0), text("a")] + usageStop(10)),
+            sse([usageStart(50, 0, 900), text("b")] + usageStop(20)),
+        ])
+        var p = provider("http://127.0.0.1:\(stub.port)/v1/messages")
+        p.counts = AnthropicUsage()
+        _ = try await drain(p)
+        _ = try await drain(p, maxTokens: 500)
+        #expect(
+            p.counts.take(reset: false)
+                == AnthropicCounts(requests: 2, input: 150, cacheWrite: 400, cacheRead: 900, output: 30))
+    }
+
+    @Test func hitRateAndSavedTokensFollowTheFormulas() {
+        let c = AnthropicCounts(requests: 1, input: 100, cacheWrite: 400, cacheRead: 1000, output: 0)
+        let s = c.snapshot(priceIn: nil, priceOut: nil)
+        #expect(s["prompt_tokens"] == 1500 && s["saved_tokens"] == 800)  // 0.9*1000 - 0.25*400
+        #expect(s["hit_rate"] == .double(1000.0 / 1500.0))
+        #expect(s.asObject?["cost_usd"] == nil && s.asObject?["saved_usd"] == nil)
+        // a write that is never read is a loss: negative, reported, never clamped
+        let w = AnthropicCounts(input: 10, cacheWrite: 400).snapshot(priceIn: nil, priceOut: nil)
+        #expect(w["saved_tokens"] == -100)
+        #expect(w["hit_rate"] == .double(0))
+        // nothing counted: no prompt, no hit rate
+        #expect(AnthropicCounts().snapshot(priceIn: nil, priceOut: nil)["hit_rate"] == 0)
+        // halves round to even
+        #expect(savedTokens(cacheRead: 5, cacheWrite: 0) == 4 && savedTokens(cacheRead: 0, cacheWrite: 2) == 0)
+        #expect(savedTokens(cacheRead: 0, cacheWrite: 3) == -1 && savedTokens(cacheRead: 1, cacheWrite: 0) == 1)
+    }
+
+    @Test func pricesOnTheRecordAddCostAndSavingInUSD() {
+        let c = AnthropicCounts(requests: 1, input: 100, cacheWrite: 400, cacheRead: 1000, output: 50)
+        let s = c.snapshot(priceIn: 3.0, priceOut: 15.0)
+        let cost = (100 + 1.25 * 400 + 0.1 * 1000) * 3.0 / 1e6 + 50 * 15.0 / 1e6
+        guard case .double(let got) = s["cost_usd"] else {
+            Issue.record("no cost_usd: \(s)")
+            return
+        }
+        #expect(abs(got - cost) < 1e-12)
+        guard case .double(let saved) = s["saved_usd"] else {
+            Issue.record("no saved_usd: \(s)")
+            return
+        }
+        #expect(abs(saved - 800 * 3.0 / 1e6) < 1e-12)
+        // one price without the other: neither field
+        let one = c.snapshot(priceIn: 3.0, priceOut: nil)
+        #expect(one.asObject?["cost_usd"] == nil && one.asObject?["saved_usd"] == nil)
+    }
+
+    /// A kernel with one anthropic agent `id` created on it.
+    private func kernelWith(_ id: String, _ extra: OrderedDictionary<String, JSON>) async -> Kernel {
+        let registry = BundleRegistry()
+        registry.register(ANTHROPIC_HANDLER_MODULE, AnthropicBundle())
+        let k = Kernel(storage: .inMemory, bundles: registry)
+        let root = Agent(id: AgentId("kernel_state"), handlerModule: nil, parentId: nil)
+        k.register(root)
+        k.setRoot(root)
+        var payload: OrderedDictionary<String, JSON> = [
+            "type": "create_agent", "parent_id": "kernel_state", "id": .string(id),
+            "handler_module": .string(ANTHROPIC_HANDLER_MODULE),
+        ]
+        for (key, v) in rec(extra) { payload[key] = v }
+        let r = await call(k, "kernel_state", .object(payload))
+        #expect(r["id"] == .string(id), "\(r)")
+        return k
+    }
+
+    private func call(_ k: Kernel, _ target: String, _ payload: JSON) async -> JSON {
+        await k.send([Item(AgentId(target), payload)])[0].result
+    }
+
+    // Each test names its own agent: the usage table is process-wide and tests run in parallel.
+    @Test func theUsageVerbReturnsTheCountsAndResetZeroesThem() async {
+        let k = await kernelWith("usage1", ["price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0])
+        AnthropicUsageTable.of(AgentId("usage1")).addRequest(input: 100, cacheWrite: 400, cacheRead: 1000)
+        let got = await call(k, "usage1", ["type": "usage"])
+        #expect(got["cache_read_tokens"] == 1000 && got["saved_tokens"] == 800)
+        #expect(got.asObject?["cost_usd"] != nil && got.asObject?["saved_usd"] != nil)
+        let again = await call(k, "usage1", ["type": "usage", "reset": true])
+        #expect(again == got)
+        let zero = await call(k, "usage1", ["type": "usage"])
+        #expect(zero["requests"] == 0 && zero["saved_tokens"] == 0)
+        let bad = await call(k, "usage1", ["type": "usage", "reset": "yes"])
+        #expect(bad["reason"] == "bad_arg" && bad["arg"] == "reset")
+    }
+
+    @Test func reflectCarriesTheUsageAndTheCacheFlag() async {
+        let k = await kernelWith("usage2", ["prompt_cache": true])
+        let r = await call(k, "usage2", ["type": "reflect"])
+        #expect(r["prompt_cache"] == true)
+        #expect(r["usage"]["prompt_tokens"] == 0 && r["usage"]["requests"] == 0)
+    }
+
+    @Test func deletingAnAgentDropsItsCounts() async {
+        let k = await kernelWith("gone3", [:])
+        AnthropicUsageTable.of(AgentId("gone3")).addRequest(input: 100, cacheWrite: 400, cacheRead: 1000)
+        let gone = await call(k, "kernel_state", ["type": "delete_agent", "id": "gone3"])
+        #expect(gone["deleted"] == true, "\(gone.serialize())")
+        // a re-created agent under the same id starts at zero, not at the dropped counts
+        let again = await kernelWith("gone3", [:])
+        let zero = await call(again, "gone3", ["type": "usage"])
+        #expect(zero["requests"] == 0 && zero["cache_read_tokens"] == 0, "\(zero.serialize())")
+    }
+
+    @Test func theRecordRefusesABadCacheFlagOrPrice() {
+        let b = AnthropicBundle()
+        #expect(b.validateMeta(["prompt_cache": true], record: rec()) == nil)
+        #expect(b.validateMeta(["price_input_per_mtok": 3], record: rec()) == nil)
+        #expect(b.validateMeta(["prompt_cache": "yes"], record: rec()) == "prompt_cache must be a boolean")
+        #expect(b.validateMeta(["price_output_per_mtok": "x"], record: rec())?.contains("must be a number") == true)
+        #expect(b.validateMeta(["price_input_per_mtok": true], record: rec())?.contains("must be a number") == true)
+        #expect(b.validateMeta(["price_input_per_mtok": -1], record: rec())?.contains("zero or more") == true)
+        let names = (AnthropicBundle.RECORD_SCHEMA["fields"].asArray ?? []).compactMap { $0["name"].asString }
+        #expect(names.contains("prompt_cache") && names.contains("price_input_per_mtok"))
+        #expect(names.contains("price_output_per_mtok"))
+    }
 }
