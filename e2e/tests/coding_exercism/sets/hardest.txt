@@ -1,0 +1,10 @@
+# The hardest set: exercises that failed in our own runs (2026-10-21).
+# Haiku 5.5 sweep over python/rust/go/javascript/cpp (148/178; the 26 cpp
+# CMake-generate failures were the environment and are left out):
+go/bottle-song
+go/hexadecimal
+go/kindergarten-garden
+javascript/robot-name
+# Qwen on the 3090 failed these (Sonnet's runs crashed in the harness):
+rust/decimal
+rust/forth

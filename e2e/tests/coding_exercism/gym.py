@@ -358,7 +358,8 @@ async def main() -> None:
     ap.add_argument("--only", default="", help="a single exercise name")
     ap.add_argument("--pick", default="",
                     help="comma list of lang/exercise pairs — the EXACT work "
-                         "list, e.g. python/wordy,rust/decimal (overrides "
+                         "list, e.g. python/wordy,rust/decimal, or @NAME for the "
+                         "set in sets/NAME.txt (overrides "
                          "--lang/--sample/--only)")
     ap.add_argument("--skip-stored", action="store_true",
                     help="skip pairs already verdicted for this runtime in "
@@ -372,6 +373,15 @@ async def main() -> None:
     # driver; everything else (toolchain precheck, lanes) applies unchanged.
     picks: dict[str, set[str]] = {}
     if args.pick:
+        # `@NAME` reads a named SET: tests/coding_exercism/sets/NAME.txt, one
+        # lang/exercise per line (`#` comments) — e.g. `--pick @hardest`.
+        if args.pick.startswith("@"):
+            set_file = Path(__file__).parent / "sets" / f"{args.pick[1:]}.txt"
+            if not set_file.is_file():
+                sys.exit(f"no such set {args.pick!r} — want {set_file}")
+            args.pick = ",".join(
+                ln.split("#")[0].strip() for ln in set_file.read_text().splitlines()
+                if ln.split("#")[0].strip())
         for pair in args.pick.split(","):
             lang, _, name = pair.strip().partition("/")
             if lang not in LANGS or not name:
