@@ -14,7 +14,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   `/home/fantastic/.fantastic` and `/work`; tini as PID 1; SIGTERM stops it in
   order. `fantastic canvas --host ADDR` is the bind address it needs (`127.0.0.1`
   unless named; the container names `0.0.0.0`), recorded on `web` like `--port`.
-  CI builds both architectures and smoke-tests them under Docker and rootless
+  A `0.0.0.0` bind admits the loopback names (`localhost`, `127.0.0.1`, `[::1]`)
+  on its port, so the canvas opens at `http://localhost:<port>/`; a LAN address
+  admits only itself. CI builds both architectures and smoke-tests them under Docker and rootless
   Podman (`os/ci/container_check.py`); `publish-container.yml` pushes the manifest
   by hand, from a green full run, with GITHUB_TOKEN.
 - Drag from the file tree onto the canvas (#134, #135). The tree's rows drag

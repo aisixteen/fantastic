@@ -22,9 +22,14 @@ struct WebOriginGuardTests {
         #expect(WEB_DEFAULT_HOST == "127.0.0.1")
         let own = webOwnOrigins(.object(["port": .integer(8088)]))
         #expect(own.isSuperset(of: ["http://127.0.0.1:8088", "http://localhost:8088"]))
+        // a wildcard bind answers its own origin AND the loopback spellings
         #expect(
             webOwnOrigins(.object(["host": .string("0.0.0.0"), "port": .integer(8088)]))
-                == ["http://0.0.0.0:8088"])
+                == ["http://0.0.0.0:8088", "http://127.0.0.1:8088", "http://localhost:8088", "http://[::1]:8088"])
+        // a LAN address answers only itself
+        #expect(
+            webOwnOrigins(.object(["host": .string("192.168.1.5"), "port": .integer(8088)]))
+                == ["http://192.168.1.5:8088"])
     }
 
     @Test func originRule() {
@@ -134,17 +139,18 @@ struct WebOriginGuardTests {
         #expect(
             webOwnAuthorities(.object(["host": .string("localhost"), "port": .integer(8088)]))
                 == loopback)
-        // a non-loopback bind answers its own host:port and nothing else
+        // a wildcard bind answers its own host:port and the loopback spellings
         #expect(
             webOwnAuthorities(.object(["host": .string("0.0.0.0"), "port": .integer(8088)]))
-                == ["0.0.0.0:8088"])
+                == ["0.0.0.0:8088", "127.0.0.1:8088", "localhost:8088", "[::1]:8088"])
+        // a LAN bind answers its own host:port and nothing else
         #expect(
             webOwnAuthorities(.object(["host": .string("192.168.1.5"), "port": .integer(8088)]))
                 == ["192.168.1.5:8088"])
-        // an IPv6 literal is bracketed, as a Host header spells it
+        // an IPv6 wildcard is bracketed, as a Host header spells it, and answers loopback
         #expect(
             webOwnAuthorities(.object(["host": .string("::"), "port": .integer(8088)]))
-                == ["[::]:8088"])
+                == ["[::]:8088", "127.0.0.1:8088", "localhost:8088", "[::1]:8088"])
         // no Host header at all is not an authority
         #expect(!webOwnAuthorities(.object(["port": .integer(8088)])).contains(""))
     }
@@ -190,11 +196,11 @@ struct WebOriginGuardTests {
         }
     }
 
-    /// `0.0.0.0` publishes the port, but the only Host it answers is
-    /// `0.0.0.0:<port>` — a port map, a LAN name, a tunnel name, even the loopback
-    /// spellings are other authorities. Judged on the
-    /// request head, without binding a public port.
-    @Test func aPublishedBindAdmitsOnlyItsOwnHostPort() async throws {
+    /// `0.0.0.0` publishes the port (a container's port map). It answers its own
+    /// `0.0.0.0:<port>` and the loopback spellings on that port; a LAN name, a LAN
+    /// address, another port are refused. Judged on the request head, without
+    /// binding a public port.
+    @Test func aPublishedBindAdmitsItsOwnHostPortAndLoopbackOnIt() async throws {
         let kernel = try await startKernelInMemory(portHint: 0)
         _ = await call(
             kernel, "kernel_state",
@@ -211,10 +217,15 @@ struct WebOriginGuardTests {
             }
             return nil
         }
-        #expect(status("0.0.0.0:8088") == nil)
-        for host in ["127.0.0.1:8088", "localhost:8088", "192.168.1.5:8088", "box.lan:8088"] {
+        for host in ["0.0.0.0:8088", "localhost:8088", "127.0.0.1:8088", "[::1]:8088"] {
+            #expect(status(host) == nil, "\(host)")
+        }
+        for host in ["localhost:9999", "127.0.0.1:52999", "192.168.1.5:8088", "box.lan:8088"] {
             #expect(status(host) == 403, "\(host)")
         }
+        // a browser at localhost:<port> is an own origin of the wildcard bind
+        #expect(webOriginAllowed(.object(["host": .string("0.0.0.0"), "port": .integer(8088)]), "http://localhost:8088"))
+        #expect(!webOriginAllowed(.object(["host": .string("0.0.0.0"), "port": .integer(8088)]), "http://localhost:52999"))
     }
 
     @Test func aReboundWebsocketUpgradeIsRefused() async throws {

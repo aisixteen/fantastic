@@ -11,11 +11,19 @@ only, and checks, in order (the steps are numbered as in the issue):
   2  the kernel answers: `user` forwards a call to the root agent over /user/ws
   3  a canvas page loads: its document and its bundle (boot_check's page check)
   4  a terminal runs a command: a PTY job runs the login shell, which evaluates
-     `echo smoke-$((6*7))` and prints `smoke-42` (the typed line does not match)
+     `echo smoke-$((6*7))` and prints `smoke-42` (the typed line does not match).
+     The same shell writes a marker under $FANTASTIC_HOME first (the state volume)
   5  stop: SIGTERM, orderly: the container exits 0 within the stop timeout
-  6  restart: a new container on the same volumes answers, and the agents step 4
-     made are still there
+  6  restart: a new container on the same volumes answers, the agents step 4 made
+     are still there (the /work volume), and the marker is still there (the
+     $FANTASTIC_HOME volume)
 
+The port map is an identity map: the host port is FANTASTIC_PORT, so the browser's
+`localhost:<port>` is the URL a user opens, and the Host guard admits it (the server
+binds 0.0.0.0, and the guard accepts the loopback spellings on a wildcard bind).
+The checks send the Host and Origin a browser at that URL sends.
+
+Each container's output is kept in --out (`<name>.log`) before it is removed.
 Steps 3 and 5 reuse `boot_check.py`'s page check and call helpers; the QEMU side is
 not used here. Stdlib plus `websockets` (imported by the socket helpers only, so
 the pure helpers import anywhere: see test_container_check.py).
@@ -35,10 +43,7 @@ from pathlib import Path
 
 import boot_check as bc
 
-# the port the server listens on inside the container (FANTASTIC_PORT's default)
-CONTAINER_PORT = 8088
-# the authority the server's Host guard accepts: the server binds 0.0.0.0
-AUTHORITY = f"0.0.0.0:{CONTAINER_PORT}"
+# the canvas page's routes, as the image serves them (the page's own kernel)
 CANVAS_PAGE = "/canvas_page/file/index.html"
 CANVAS_BUNDLE = "/canvas_page/file/bundle.min.js"
 CANVAS_TITLE = "Aisixteen Fantastic · canvas"
@@ -47,6 +52,9 @@ ROOT = "kernel_state"
 TERM_ID = "smoke_term"
 SMOKE_LINE = "echo smoke-$((6*7))\n"
 SMOKE_OUTPUT = "smoke-42"
+# a file the terminal writes under $FANTASTIC_HOME (the state volume), read back after the restart
+HOME_MARKER = "smoke-state"
+HOME_MARKER_TEXT = "kept"
 STATE_DIR = "/home/fantastic/.fantastic"
 WORK_DIR = "/work"
 
@@ -54,14 +62,27 @@ WORK_DIR = "/work"
 # ── pure helpers (unit-tested) ───────────────────────────────────────────────
 
 
-def run_argv(engine: str, image: str, name: str, host_port: int, state: str, work: str) -> list[str]:
+def authority_for(port: int) -> str:
+    """The Host a browser sends at the port map: `localhost:<port>`, the spelling the
+    guard admits on the server's 0.0.0.0 bind (`fantastic-web`'s origin.rs)."""
+    return f"localhost:{port}"
+
+
+def origin_for(port: int) -> str:
+    """The Origin a browser page sends on its websocket: the page's own origin."""
+    return f"http://{authority_for(port)}"
+
+
+def run_argv(engine: str, image: str, name: str, port: int, state: str, work: str) -> list[str]:
     """`<engine> run`: detached, the port mapped to loopback ONLY (never published on a
-    public interface: the canvas has terminals), the two state volumes named."""
+    public interface: the canvas has terminals) as an identity map, FANTASTIC_PORT set
+    to the same port, and the two state volumes named."""
     if engine not in ("docker", "podman"):
         raise ValueError(f"engine must be docker or podman, got {engine!r}")
     return [
         engine, "run", "--detach", "--name", name,
-        "--publish", f"127.0.0.1:{host_port}:{CONTAINER_PORT}",
+        "--publish", f"127.0.0.1:{port}:{port}",
+        "--env", f"FANTASTIC_PORT={port}",
         "--volume", f"{state}:{STATE_DIR}",
         "--volume", f"{work}:{WORK_DIR}",
         image,
@@ -92,6 +113,17 @@ def terminal_printed(output: str) -> bool:
     return SMOKE_OUTPUT in output
 
 
+def home_marker_line() -> str:
+    """The shell line that writes the marker into the state volume. It names
+    $FANTASTIC_HOME, so a shell without that variable writes to / and fails."""
+    return f'echo {HOME_MARKER_TEXT} > "$FANTASTIC_HOME/{HOME_MARKER}"\n'
+
+
+def marker_kept(text: str) -> bool:
+    """Whether a read of the marker (`cat`) is the text the shell wrote."""
+    return text.strip() == HOME_MARKER_TEXT
+
+
 def free_port() -> int:
     """A free port on loopback now (the engine maps it; a race is the one-off cost)."""
     with socket.socket() as s:
@@ -99,9 +131,9 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def get_for(host_port: int):
-    """`boot_check.http_get`, dialled at the port map with the container's own authority."""
-    return functools.partial(bc.http_get, connect=host_port, authority=AUTHORITY)
+def get_for(run: "Run"):
+    """`boot_check.http_get`, dialled at the run's port map with the browser's authority."""
+    return functools.partial(bc.http_get, connect=run.port, authority=run.authority)
 
 
 # ── the engine ───────────────────────────────────────────────────────────────
@@ -119,11 +151,13 @@ class Run:
 
     def __init__(self, engine_name: str, image: str, name: str, state: str, work: str):
         self.engine, self.image, self.name, self.state, self.work = engine_name, image, name, state, work
-        self.host_port = free_port()
+        self.port = free_port()
+        self.authority = authority_for(self.port)
+        self.origin = origin_for(self.port)
 
     def start(self) -> None:
-        argv = run_argv(self.engine, self.image, self.name, self.host_port, self.state, self.work)
-        bc.log(f"{self.engine} run {self.name} (127.0.0.1:{self.host_port} -> {CONTAINER_PORT})")
+        argv = run_argv(self.engine, self.image, self.name, self.port, self.state, self.work)
+        bc.log(f"{self.engine} run {self.name} (127.0.0.1:{self.port}, the browser's {self.authority})")
         engine(self.engine, *argv[1:])
 
     def stop(self, timeout: float) -> float:
@@ -134,6 +168,15 @@ class Run:
 
     def exit_code(self) -> int:
         return parse_exit_code(engine(self.engine, "inspect", "--format", "{{.State.ExitCode}}", self.name).stdout)
+
+    def home_marker(self) -> str:
+        """The marker's text as the container sees it now ('' when it is not there)."""
+        return engine(self.engine, "exec", self.name, "cat", f"{STATE_DIR}/{HOME_MARKER}", check=False).stdout
+
+    def save_logs(self, out: Path) -> None:
+        """`<engine> logs`: the kernel's output, kept beside the checker's log."""
+        proc = subprocess.run([self.engine, "logs", self.name], capture_output=True, text=True, errors="replace")
+        (out / f"{self.name}.log").write_text(proc.stdout + proc.stderr)
 
     def remove(self) -> None:
         engine(self.engine, "rm", "--force", self.name, check=False)
@@ -148,10 +191,10 @@ def step_start(run: Run, step: float) -> None:
     bc.until(
         None,
         f"GET {CANVAS_PAGE} through the port map (200, the canvas title)",
-        lambda: bc.page_served(get_for(run.host_port), CONTAINER_PORT, CANVAS_PAGE, CANVAS_TITLE),
+        lambda: bc.page_served(get_for(run), run.port, CANVAS_PAGE, CANVAS_TITLE),
         step,
     )
-    bc.log(f"step 1: the page answers on 127.0.0.1:{run.host_port}")
+    bc.log(f"step 1: the page answers at {run.authority}")
 
 
 def step_kernel(run: Run, step: float) -> str:
@@ -160,7 +203,9 @@ def step_kernel(run: Run, step: float) -> str:
 
     def reflected():
         try:
-            return asyncio.run(bc.forward_call(CONTAINER_PORT, ROOT, {"type": "reflect"}, connect=run.host_port, authority=AUTHORITY))
+            return asyncio.run(
+                bc.forward_call(run.port, ROOT, {"type": "reflect"}, connect=run.port, authority=run.authority, origin=run.origin)
+            )
         except bc.ws_errors() as e:
             bc.retrying("reflect", e)
             return None
@@ -178,7 +223,7 @@ def step_canvas(run: Run, step: float) -> None:
     bc.until(
         None,
         f"GET {CANVAS_BUNDLE} through the port map (200)",
-        lambda: bc.page_served(get_for(run.host_port), CONTAINER_PORT, CANVAS_BUNDLE, ""),
+        lambda: bc.page_served(get_for(run), run.port, CANVAS_BUNDLE, ""),
         step,
     )
     bc.log(f"step 3: the canvas page and its bundle are served ({CANVAS_TITLE!r})")
@@ -189,7 +234,9 @@ def step_terminal(run: Run, root: str, step: float) -> str:
     bc.at("4")
 
     def call(target: str, payload: dict):
-        return asyncio.run(bc.forward_call(CONTAINER_PORT, target, payload, connect=run.host_port, authority=AUTHORITY))
+        return asyncio.run(
+            bc.forward_call(run.port, target, payload, connect=run.port, authority=run.authority, origin=run.origin)
+        )
 
     # a terminal sits under `user`, as the app's terminal does (kern/terminal.rs)
     made = call(root, {
@@ -202,6 +249,9 @@ def step_terminal(run: Run, root: str, step: float) -> str:
     job = started.get("job_id") if isinstance(started, dict) else None
     if not isinstance(job, int):
         raise bc.Fail(f"start on {TERM_ID} answered {started!r}, not a job")
+    # the marker first: the shell runs its lines in order, so `smoke-42` printed after it
+    # means the marker is written
+    call(TERM_ID, {"type": "write", "job_id": job, "bytes": home_marker_line()})
     call(TERM_ID, {"type": "write", "job_id": job, "bytes": SMOKE_LINE})
     output = bc.until(
         None,
@@ -224,26 +274,34 @@ def step_stop(run: Run, timeout: float) -> None:
 
 
 def step_restart(run2: Run, root: str, term: str, step: float) -> None:
-    """Step 6: a new container on the same volumes answers; the agents are still there."""
+    """Step 6: a new container on the same volumes answers; the agents and the marker are still there."""
     bc.at("6")
     run2.start()
     bc.until(
         None,
         f"GET {CANVAS_PAGE} after the restart (200, the canvas title)",
-        lambda: bc.page_served(get_for(run2.host_port), CONTAINER_PORT, CANVAS_PAGE, CANVAS_TITLE),
+        lambda: bc.page_served(get_for(run2), run2.port, CANVAS_PAGE, CANVAS_TITLE),
         step,
     )
 
     def listed():
         try:
-            reply = asyncio.run(bc.forward_call(CONTAINER_PORT, root, {"type": "list_agents"}, connect=run2.host_port, authority=AUTHORITY))
+            reply = asyncio.run(
+                bc.forward_call(run2.port, root, {"type": "list_agents"}, connect=run2.port, authority=run2.authority, origin=run2.origin)
+            )
         except bc.ws_errors() as e:
             bc.retrying("list_agents", e)
             return None
         return reply if isinstance(reply, (dict, list)) and term in json.dumps(reply) else None
 
-    bc.until(None, f"{term} listed after the restart (the state volume kept it)", listed, step)
-    bc.log(f"step 6: the restarted container answers, and {term} is still there")
+    bc.until(None, f"{term} listed after the restart (the /work volume kept it)", listed, step)
+    bc.until(
+        None,
+        f"{HOME_MARKER} kept under $FANTASTIC_HOME after the restart (the state volume kept it)",
+        lambda: marker_kept(run2.home_marker()),
+        step,
+    )
+    bc.log(f"step 6: the restarted container answers, {term} is still there, and {HOME_MARKER} is kept")
 
 
 def main() -> int:
@@ -276,7 +334,9 @@ def main() -> int:
         bc.log(f"FAIL at step {bc.STEP}: {type(e).__name__}: {e}")
         return 1
     finally:
+        # the kernel's own output first: a failed step is debugged from it
         for r in (first, second):
+            r.save_logs(a.out)
             r.remove()
         for v in (state, work):
             engine(a.engine, "volume", "rm", "--force", v, check=False)

@@ -213,7 +213,14 @@ podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Pod
 ```
 
 - **Ports.** The server listens on `8088` inside the container
-  (`FANTASTIC_PORT`). Map it to any host port, always on `127.0.0.1`.
+  (`FANTASTIC_PORT`), and the Host guard admits its port only: map it as
+  `-p 127.0.0.1:<port>:<port>` (the same port on both sides). Any other mapping
+  reaches the server, but the browser's address is refused with a 403. For another
+  port, set both: `-e FANTASTIC_PORT=9000 -p 127.0.0.1:9000:9000`.
+- **One canvas.** One container is one canvas, with no headless home beside it. To
+  serve another canvas, run another container with its own volumes and port.
+- **No login.** The port's reach is the access: the Host guard checks the address,
+  not a password. Keep the port on loopback, or behind an SSH tunnel.
 - **Volumes.** `/home/fantastic/.fantastic` is the state (the saved set-ups and the
   shared stores); `/work` is the canvas folder. A new container on the same
   volumes keeps everything: `docker stop` then `docker start`, or a new `run`.
@@ -225,24 +232,28 @@ podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Pod
   `HEALTHCHECK` from its default OCI image format (it warns at build); `podman
   inspect` shows none.
 - **Remote, through a tunnel.** On the server, the same `run` as above. On your
-  machine:
+  machine, the local port equal to the container's:
 
   ```sh
   ssh -N -L 8088:127.0.0.1:8088 you@server
   ```
 
-  then open the address the Host guard accepts (see below).
-- **Opening it.** The server's Host guard answers only the address it binds: a
-  `0.0.0.0` bind answers `Host: 0.0.0.0:<port>`, and any other name is refused with
-  a 403 (a DNS-rebinding page is refused the same way). Open
-  `http://0.0.0.0:8088/`.
+  then open `http://localhost:8088/`.
+- **Opening it.** Open `http://localhost:8088/` (or `http://127.0.0.1:8088/`). The
+  container binds `0.0.0.0`, so the port map reaches it; the Host guard admits the
+  loopback names on that port. Any other name, a LAN address or another port is
+  refused with a 403, and so is a DNS-rebinding page. A browser cannot open
+  `0.0.0.0`, so do not use it as the address.
 
 The image's build is `scripts/build/container.sh` (`--arch amd64|arm64`, one
 image, loaded locally; `--arch all --push`, the manifest). CI builds both
 architectures and smoke-tests them under Docker and rootless Podman
 (`os/ci/container_check.py`: starts, answers, a canvas page loads, a terminal runs
-a command, stops with SIGTERM, restarts on the same volumes). The image is pushed
-only by `publish-container.yml`, by hand, from a green full run.
+a command, stops with SIGTERM, restarts on the same volumes with its state kept).
+The image is pushed only by `publish-container.yml`, by hand, from a green full
+run. That workflow rebuilds the image from the run's archives rather than pushing
+the smoke-tested image: the binary and the pinned base are the same, but the apt
+packages are not pinned, so the pushed bytes can differ from the tested ones.
 
 ## Security
 

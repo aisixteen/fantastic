@@ -8,8 +8,8 @@
 # build.
 #
 # Same base as the kiosk (os/): Debian 13 "trixie", pinned by digest. The digest
-# is the one ci.yml names (TRIXIE_SLIM); a multi-arch index, so each platform
-# pulls its own architecture.
+# is the one .github/workflows/build.yml names (TRIXIE_SLIM); a multi-arch index,
+# so each platform pulls its own architecture.
 FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 
 # Filled in by the build (container.sh, the publish workflow): the release's version.
@@ -55,10 +55,11 @@ VOLUME ["/home/fantastic/.fantastic", "/work"]
 EXPOSE 8088
 
 # The canvas's page is served on the port inside the container. The Host guard
-# (fantastic-web) answers only the authority the bind names: the server binds
-# 0.0.0.0, so the check sends `Host: 0.0.0.0:<port>` and connects to loopback.
+# (fantastic-web) admits, on the server's 0.0.0.0 bind, the loopback spellings on
+# that port: the check connects to loopback and sends `Host: localhost:<port>`,
+# the Host a browser at the port map sends (os/README.md).
 # Podman ignores HEALTHCHECK in its default OCI image format (it warns at build).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${FANTASTIC_PORT} && printf 'GET /canvas_page/file/index.html HTTP/1.0\\r\\nHost: 0.0.0.0:%s\\r\\n\\r\\n' \"$FANTASTIC_PORT\" >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+    CMD ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${FANTASTIC_PORT} && printf 'GET /canvas_page/file/index.html HTTP/1.0\\r\\nHost: localhost:%s\\r\\n\\r\\n' \"$FANTASTIC_PORT\" >&3 && head -n 1 <&3 | grep -q ' 200 '"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fantastic-server"]

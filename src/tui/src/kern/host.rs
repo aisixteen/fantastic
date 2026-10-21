@@ -656,3 +656,58 @@ mod tests {
         assert_eq!(Host::read(out).unwrap(), json!({"lines": [], "total": 0}));
     }
 }
+
+/// `set_web_field`: a `--port` / `--host` lands on the `web` record before its listener
+/// boots, once; a value already held is left alone; a refused update is a note.
+#[cfg(test)]
+mod set_web_field_tests {
+    use super::*;
+    use crate::kern::web::canvas_tree_tests::harness;
+
+    fn field_of(h: &Host, id: &str, key: &str) -> Option<Value> {
+        h.kernel.agents.get(&AgentId::from(id)).and_then(|a| a.value().record().meta.get(key).cloned())
+    }
+
+    #[tokio::test]
+    async fn a_host_is_set_on_the_web_record_and_a_held_one_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("fc-set-web-field-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = harness(&dir);
+        h.operator(
+            "kernel",
+            json!({"type": "create_agent", "parent_id": "kernel", "id": "web",
+                "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088}),
+        )
+        .await;
+        let web = AgentId::from("web");
+        let mut notes = Vec::new();
+        // absent: the bind is written, and nothing is noted
+        set_web_field(&h.kernel, &web, "host", json!("0.0.0.0"), &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "host"), Some(json!("0.0.0.0")));
+        // the same bind again: already held, so nothing changes and nothing is noted
+        set_web_field(&h.kernel, &web, "host", json!("0.0.0.0"), &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "host"), Some(json!("0.0.0.0")));
+        // a different bind overwrites it (the record is the user's to change before boot)
+        set_web_field(&h.kernel, &web, "host", json!("127.0.0.1"), &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "host"), Some(json!("127.0.0.1")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_refused_host_is_a_note_and_the_boot_goes_on() {
+        let dir = std::env::temp_dir().join(format!("fc-set-web-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = harness(&dir);
+        let mut notes = Vec::new();
+        // no such agent: the update is refused, and the refusal is said, with the value
+        set_web_field(&h.kernel, &AgentId::from("nobody"), "host", json!("0.0.0.0"), &mut notes).await;
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("nobody: --host \"0.0.0.0\" not set: "), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

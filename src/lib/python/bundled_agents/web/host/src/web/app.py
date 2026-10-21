@@ -42,15 +42,22 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 FILE_CHUNK = 262144
 
 
+#: The binds that answer the loopback spellings too: a loopback bind, and a WILDCARD
+#: (`0.0.0.0`, `::`), which listens on every address, loopback included. A browser
+#: cannot dial a wildcard, so the canvas is reached at `localhost` (a container's port
+#: map, an `ssh -L`); a LAN address answers only itself.
+LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::")
+
+
 def own_origins(rec: dict) -> set[str]:
     """The origins that ARE this web host: `http://<host>:<port>`, plus both loopback
-    spellings when it binds loopback. A browser Origin is compared against these (and
-    the record's `allowed_origins`) EXACTLY — never against the request's Host header,
-    which a DNS-rebinding page controls."""
+    spellings when it binds loopback (or a wildcard). A browser Origin is compared
+    against these (and the record's `allowed_origins`) EXACTLY — never against the
+    request's Host header, which a DNS-rebinding page controls."""
     host = rec.get("host") or DEFAULT_HOST
     port = rec.get("port")
     out = {f"http://{host}:{port}"}
-    if host in ("127.0.0.1", "localhost", "::1"):
+    if host in LOOPBACK_BINDS:
         out |= {
             f"http://127.0.0.1:{port}",
             f"http://localhost:{port}",
@@ -61,13 +68,13 @@ def own_origins(rec: dict) -> set[str]:
 
 def own_authorities(rec: dict) -> set[str]:
     """The Host values that ARE this web host: `<host>:<port>` (an IPv6 literal in
-    brackets), plus the three loopback spellings when it binds loopback. Nothing else
-    — a container port map, a LAN name, a tunnel name are other authorities and are
-    refused; a `0.0.0.0` bind answers only `0.0.0.0:<port>`."""
+    brackets), plus the three loopback spellings when it binds loopback or a wildcard.
+    Nothing else — a LAN name, a tunnel name, another port are other authorities and
+    are refused; a LAN bind answers only its own `<host>:<port>`."""
     host = rec.get("host") or DEFAULT_HOST
     port = rec.get("port")
     out = {f"[{host}]:{port}" if ":" in host else f"{host}:{port}"}
-    if host in ("127.0.0.1", "localhost", "::1"):
+    if host in LOOPBACK_BINDS:
         out |= {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
     return out
 

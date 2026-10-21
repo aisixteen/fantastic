@@ -502,12 +502,17 @@ def http_get(port: int, path: str, *, connect: int = FORWARD_PORT, authority: st
         c.close()
 
 
-def ws_connect(port: int, path: str, *, connect: int = FORWARD_PORT, authority: str | None = None):
+def ws_connect(
+    port: int, path: str, *, connect: int = FORWARD_PORT, authority: str | None = None, origin: str | None = None
+):
     """A websocket to the guest's kernel: the TCP connection goes to the forward, the
-    URI (and so `Host`) names the guest's port, and no `Origin` is sent."""
+    URI (and so `Host`) names the guest's port. No `Origin` is sent unless `origin` is
+    given: a browser page's websocket sends its own (the guard checks it)."""
     from websockets.asyncio.client import connect as open_ws
 
-    return open_ws(f"ws://{authority or f'127.0.0.1:{port}'}{path}", host="127.0.0.1", port=connect, open_timeout=10)
+    return open_ws(
+        f"ws://{authority or f'127.0.0.1:{port}'}{path}", host="127.0.0.1", port=connect, open_timeout=10, origin=origin
+    )
 
 
 def ws_errors() -> tuple[type[BaseException], ...]:
@@ -534,12 +539,19 @@ async def home_call(port: int, payload: dict, timeout: float = 10) -> object:
 
 
 async def forward_call(
-    port: int, target: str, payload: dict, timeout: float = 10, *, connect: int = FORWARD_PORT, authority: str | None = None
+    port: int,
+    target: str,
+    payload: dict,
+    timeout: float = 10,
+    *,
+    connect: int = FORWARD_PORT,
+    authority: str | None = None,
+    origin: str | None = None,
 ) -> object:
     """A call to agent `target` the way a page makes one: through `user`'s `forward`."""
     call_id = f"boot-check-{next(_call_ids)}"
     frame = {"type": "call", "target": "user", "payload": {"type": "forward", "target": target, "payload": payload}, "id": call_id}
-    async with ws_connect(port, "/user/ws", connect=connect, authority=authority) as ws:
+    async with ws_connect(port, "/user/ws", connect=connect, authority=authority, origin=origin) as ws:
         await ws.send(json.dumps(frame))
         end = time.monotonic() + timeout
         while True:

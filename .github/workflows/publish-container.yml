@@ -10,6 +10,10 @@
 #            days) are staged, and `scripts/build/container.sh --arch all` pushes the
 #            multi-arch manifest to ghcr.io/aisixteen/fantastic: tags X.Y.Z, the
 #            commit's sha, and `latest` when asked.
+#   note     the image is REBUILT from those archives, not the image the CI job
+#            smoke-tested: the same binary and the same digest-pinned base, but the
+#            apt packages are not pinned, so the pushed bytes can differ from the
+#            tested ones. Shipping the tested per-arch images instead is open.
 #
 # No secret is stored: the push uses GITHUB_TOKEN with `packages: write`. The
 # first push of a package makes it; set its visibility to public once, on GitHub.

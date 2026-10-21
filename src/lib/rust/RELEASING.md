@@ -215,7 +215,9 @@ All steps run from the repo root, on `main`, with a clean tree.
     within them), builds `os/container/Containerfile` for `linux/amd64` and
     `linux/arm64` with `scripts/build/container.sh --arch all`, and pushes
     `ghcr.io/aisixteen/fantastic` with `X.Y.Z`, the sha, and `latest` (pass
-    `latest=false`, or leave it out, for an older release). It uses GITHUB_TOKEN
+    `latest=false`, or leave it out, for an older release). It rebuilds the image
+    from those archives (its header says how that differs from the tested image).
+    It uses GITHUB_TOKEN
     (`packages: write`), not a stored secret. The first push creates the package:
     make it public once, on GitHub.
 
