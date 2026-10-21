@@ -91,6 +91,7 @@ def _note(rec: dict, obj: dict) -> None:
             for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
         )
         rec["cached_tokens"] = int(u.get("cache_read_input_tokens") or 0)
+        rec["cache_write_tokens"] = int(u.get("cache_creation_input_tokens") or 0)
         return
     if kind == "message_delta":
         if (u := obj.get("usage")) and u.get("output_tokens") is not None:

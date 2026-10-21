@@ -176,6 +176,10 @@ def _anthropic() -> Backend:
     extra: dict[str, Any] = {}
     if ep := os.environ.get("ANTHROPIC_ENDPOINT"):
         extra["endpoint"] = ep
+    # Prompt caching is the backend's opt-in (`prompt_cache`); a run turns it on
+    # with ANTHROPIC_PROMPT_CACHE=1, so a cached and an uncached run compare.
+    if os.environ.get("ANTHROPIC_PROMPT_CACHE") == "1":
+        extra["prompt_cache"] = True
     return Backend(
         name="anthropic",
         handler_module="anthropic_backend.tools",
