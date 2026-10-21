@@ -84,6 +84,8 @@ fn provider_idle(
         max_tokens: 8000,
         temperature: None,
         thinking_budget: None,
+        effort: None,
+        thinking_display: None,
         caching: Caching::Cleanup,
         usage: Arc::new(Mutex::new(Usage::default())),
         report: ReportCell::default(),
@@ -1014,6 +1016,7 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
         .filter_map(|f| f["name"].as_str())
         .collect();
     assert!(names.contains(&"caching") && names.contains(&"cache_primer_until"));
+    assert!(names.contains(&"effort") && names.contains(&"thinking_display"));
     assert!(!names.contains(&"prompt_cache"));
     assert!(names.contains(&"price_input_per_mtok") && names.contains(&"price_output_per_mtok"));
 }
@@ -1108,4 +1111,61 @@ async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
     assert!(content.contains("stream_stalled"), "{content}");
     let status = call(&kernel, STALL_AGENT, json!({"type": "status"})).await;
     assert_eq!(status["generating"], json!(false), "{status}");
+}
+
+#[test]
+fn effort_and_thinking_display_shape_the_body() {
+    let msgs = [json!({"role": "user", "content": "hi"})];
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.effort = Some("high".into());
+    let b = p.body(&msgs, None);
+    assert_eq!(b["output_config"], json!({"effort": "high"}));
+    assert!(b.get("thinking").is_none(), "{b}");
+
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.thinking_display = Some("summarized".into());
+    p.thinking_budget = Some(2048);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["thinking"],
+        json!({"type": "adaptive", "display": "summarized"})
+    );
+    assert!(b.get("output_config").is_none(), "{b}");
+
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let b = p.body(&msgs, None);
+    assert!(
+        b.get("output_config").is_none() && b.get("thinking").is_none(),
+        "{b}"
+    );
+}
+
+#[test]
+fn a_bad_effort_or_display_or_both_modes_are_refused() {
+    for (meta, fragment) in [
+        (
+            json!({"effort": "ultra"}),
+            "effort must be one of low, medium, high, xhigh, max",
+        ),
+        (
+            json!({"thinking_display": "verbose"}),
+            "thinking_display must be summarized or omitted",
+        ),
+        (
+            json!({"thinking_display": "summarized", "thinking_budget": 2048}),
+            "two thinking modes — set one",
+        ),
+    ] {
+        let err = validate(meta.as_object().unwrap(), &rec(json!({}))).unwrap_or_default();
+        assert!(err.contains(fragment), "{meta}: {err}");
+    }
+    assert_eq!(
+        validate(
+            json!({"effort": "xhigh", "thinking_display": "omitted"})
+                .as_object()
+                .unwrap(),
+            &rec(json!({}))
+        ),
+        None
+    );
 }
