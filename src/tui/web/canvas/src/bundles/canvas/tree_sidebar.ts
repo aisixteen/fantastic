@@ -81,9 +81,10 @@ export interface TreeSidebar {
  * canvas whose root view is `view`. `wide` is the screen's width test: the default
  * open state when nothing is saved, and whether the canvas sits beside the sidebar
  * (`tree-beside`: the canvas's margin is the sidebar's width) or under it (a narrow
- * screen's overlay).
+ * screen's overlay). `onPlace` runs after a change of the sidebar's width on the page (open
+ * or collapsed, beside or over): the canvas's box moves with it, so what reads the box follows.
  */
-export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLElement; wide: boolean }): TreeSidebar {
+export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLElement; wide: boolean; onPlace?: () => void }): TreeSidebar {
   const { kernel, view } = o;
   const saved = sidebarSavedOf(kernel.get(view)?.meta);
   let open = sidebarOpenOf(saved, o.wide);
@@ -135,12 +136,14 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
     open = v;
     paint();
     saveSidebar(kernel, view, { open: v });
+    o.onPlace?.();
   };
   toggle.addEventListener("click", () => setOpen(!open));
   paint();
   const setWide = (v: boolean): void => {
     wide = v;
     place();
+    o.onPlace?.();
   };
 
   return {

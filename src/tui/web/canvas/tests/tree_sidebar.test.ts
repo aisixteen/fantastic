@@ -100,7 +100,7 @@ test("the sidebar's rule is fixed to the viewport's left edge, and the world is 
 
 test("the canvas mounts the sidebar into its page, beside the world, and gives it no drop of its own", () => {
   const src = readFileSync(new URL("../src/bundles/canvas/canvas.ts", import.meta.url), "utf8");
-  assert.match(src, /mountTreeSidebar\(\{ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768 \}\)/);
+  assert.match(src, /mountTreeSidebar\(\{ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768, onPlace: \(\) => glHost\?\.applyCamera\(\) \}\)/);
   assert.doesNotMatch(src, /world\.appendChild\(\s*mountTreeSidebar/, "never inside the zoomed layer");
   const side = readFileSync(new URL("../src/bundles/canvas/tree_sidebar.ts", import.meta.url), "utf8");
   assert.doesNotMatch(side, /addEventListener\("drop"/, "a drop is the canvas's, whichever tree it came from");
@@ -506,6 +506,25 @@ test("a narrow mount crossing 768px both ways: the canvas is beside the sidebar 
   assert.equal(page.classes.has(BESIDE), true, "widened: beside");
   sb.setWide(false);
   assert.equal(page.classes.has(BESIDE), false, "narrowed again: over");
+  sb.dispose();
+});
+
+test("the sidebar tells the canvas when its width changes: open or collapsed, beside or over (not at mount)", () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const k = pageKernel(b);
+  const page = pageMount();
+  let moved = 0;
+  const sb = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: page.mount, wide: true, onPlace: () => moved++ });
+  assert.equal(moved, 0, "mounting is not a change of the canvas's box");
+  sb.setOpen(false);
+  assert.equal(moved, 1, "collapsed: the canvas's box moved");
+  sb.setWide(false);
+  assert.equal(moved, 2, "over the canvas: the box moved");
+  sb.setOpen(true);
+  assert.equal(moved, 3, "expanded: the box moved again");
   sb.dispose();
 });
 

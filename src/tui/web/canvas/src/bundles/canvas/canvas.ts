@@ -443,6 +443,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       glHost = await createGlHost({
         bg,
         view,
+        box: () => canvas.getBoundingClientRect(),
         host,
         kernel,
         selfId,
@@ -1980,7 +1981,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // THE CANVAS'S OWN SIDEBAR (#148): the file tree beside the zoomed world, never in it,
   // so a zoom or a pan leaves it where it is. Its rows drag onto `#canvas` like the tree cell's.
   // Mounted after `setFilesDeps` (the tree reads the canvas through it).
-  const treeSidebar = mountTreeSidebar({ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768 });
+  // (its open or its place moves the canvas's box: the GL camera reads that box, so it follows)
+  const treeSidebar = mountTreeSidebar({ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768, onPlace: () => glHost?.applyCamera() });
   // ESC LEAVES FULL VIEW (owner 2026-10-08: nothing floats, so this is the way
   // back): to the canvas's root view — unless the keyboard is in an editor (a
   // terminal, a text field), whose Esc is its own
