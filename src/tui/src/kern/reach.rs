@@ -156,6 +156,23 @@ fn union(had: Option<&Value>, add: &Value) -> Value {
     Value::Array(out)
 }
 
+/// `id`'s `callable_by`, edited and written as ONE step. The record is read here, at the
+/// write, and `edit` merges into that read: a plan made from an earlier read would overwrite
+/// an entry another writer (an `open_view`, say) put there while the plan awaited. The
+/// kernel's `update_agent` replaces the whole key it is sent, so the merge is made here.
+/// `edit` says whether it changed the map; nothing is written when it did not.
+async fn write_callable_by(h: &Host, id: &str, why: &str, edit: impl FnOnce(&mut Map<String, Value>) -> bool) -> Result<(), String> {
+    let mut cb = field(h, id, "callable_by");
+    if !edit(&mut cb) {
+        return Ok(());
+    }
+    let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "callable_by": cb})).await.result;
+    match r.get("error").and_then(Value::as_str) {
+        Some(e) => Err(format!("reach: `{id}`.callable_by{why}: {e}")),
+        None => Ok(()),
+    }
+}
+
 /// The agents whose `callable_by` their own code narrows to `user` (the user's
 /// home files): no other holder is granted them here — `user` keeps its own
 /// side (its `can_call`), the leg its own verbs.
@@ -175,30 +192,28 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
         if !exists(h, id) {
             continue;
         }
-        let mut cb = field(h, id, "callable_by");
-        let mut changed = false;
         let narrowed = NARROWED.contains(&id.as_str());
         let cabinet = owned.contains(id);
-        for holder in holders.iter().filter(|x| *x != id && !narrowed && (!cabinet || *x == crate::env::HUMAN)) {
-            if cb.get(holder) != Some(&all) {
-                cb.insert(holder.clone(), all.clone());
-                changed = true;
+        let reach: Vec<&String> = holders.iter().filter(|x| *x != id && !narrowed && (!cabinet || *x == crate::env::HUMAN)).collect();
+        write_callable_by(h, id, "", |cb| {
+            let mut changed = false;
+            for holder in reach {
+                if cb.get(holder) != Some(&all) {
+                    cb.insert(holder.clone(), all.clone());
+                    changed = true;
+                }
             }
-        }
-        if leg && id != CANVAS_LEG {
-            // MERGED into what the record names (`user` admits the leg's calls)
-            let lv = union(cb.get(CANVAS_LEG), &leg_verbs(h, id));
-            if cb.get(CANVAS_LEG) != Some(&lv) {
-                cb.insert(CANVAS_LEG.to_string(), lv);
-                changed = true;
+            if leg && id != CANVAS_LEG {
+                // MERGED into what the record names (`user` admits the leg's calls)
+                let lv = union(cb.get(CANVAS_LEG), &leg_verbs(h, id));
+                if cb.get(CANVAS_LEG) != Some(&lv) {
+                    cb.insert(CANVAS_LEG.to_string(), lv);
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "callable_by": cb})).await.result;
-            if let Some(e) = r.get("error").and_then(Value::as_str) {
-                return Err(format!("reach: `{id}`.callable_by: {e}"));
-            }
-        }
+            changed
+        })
+        .await?;
     }
     let mut writers: Vec<(String, bool)> = holders.into_iter().map(|x| (x, true)).collect();
     if leg {
@@ -268,21 +283,19 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
     };
     // the holders' side: who may send to them
     for holder in &holders {
-        let mut cb = field(h, holder, "callable_by");
-        let mut changed = false;
-        for x in pairs(holder) {
-            let want = union(cb.get(&x), &send);
-            if cb.get(&x) != Some(&want) {
-                cb.insert(x, want);
-                changed = true;
+        let mine = pairs(holder);
+        write_callable_by(h, holder, " (the way back)", |cb| {
+            let mut changed = false;
+            for x in mine {
+                let want = union(cb.get(&x), &send);
+                if cb.get(&x) != Some(&want) {
+                    cb.insert(x, want);
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "callable_by": cb})).await.result;
-            if let Some(e) = r.get("error").and_then(Value::as_str) {
-                return Err(format!("reach: `{holder}`.callable_by (the way back): {e}"));
-            }
-        }
+            changed
+        })
+        .await?;
     }
     // the senders' side: whom they may send to
     for x in &everyone {
@@ -454,7 +467,7 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{announce, cabinet_owned, grant, leg_verbs, CANVAS_LEG};
+    use super::{announce, cabinet_owned, field, grant, leg_verbs, write_callable_by, CANVAS_LEG};
     use crate::kern::host::Host;
     use fantastic_kernel::{Agent, AgentId, Kernel};
     use serde_json::{json, Map, Value};
@@ -541,6 +554,50 @@ mod tests {
             put(&h.kernel, id, Some(parent), json!({}));
         }
         h
+    }
+
+    #[tokio::test]
+    async fn a_callable_by_write_keeps_the_entry_another_writer_put_while_the_plan_awaited() {
+        let h = host_with_leg("merge-write").await;
+        let k = &h.kernel;
+        put(k, "tree", Some("kernel"), json!({"callable_by": {"user": "*"}}));
+        // the plan reads the record first (as `grant` did, before its awaits)
+        let plan = field(&h, "tree", "callable_by");
+        assert_eq!(plan.get("user"), Some(&json!("*")));
+        // meanwhile another writer (an `open_view` on a bridge) names its view on the record
+        let r = h.operator("kernel", json!({"type": "update_agent", "id": "tree", "callable_by": {"user": "*", "folder_view": ["folder:docs"]}})).await.result;
+        assert!(r.get("error").is_none(), "{r}");
+        // the write is made from the record as it is at the write: it keeps that entry, and adds its own
+        write_callable_by(&h, "tree", "", |cb| {
+            cb.insert("mcp".to_string(), json!("*"));
+            true
+        })
+        .await
+        .unwrap();
+        let cb = field(&h, "tree", "callable_by");
+        assert_eq!(cb.get("folder_view"), Some(&json!(["folder:docs"])), "the other writer's entry survives: {cb:?}");
+        assert_eq!(cb.get("mcp"), Some(&json!("*")), "{cb:?}");
+        assert_eq!(cb.get("user"), Some(&json!("*")), "{cb:?}");
+    }
+
+    #[tokio::test]
+    async fn a_callable_by_edit_that_changes_nothing_writes_nothing_and_a_refusal_is_said_with_its_label() {
+        let h = host_with_leg("merge-noop").await;
+        let k = &h.kernel;
+        put(k, "tree", Some("kernel"), json!({"callable_by": {"user": "*"}}));
+        let before = k.agents.get(&AgentId::from("tree")).unwrap().record().meta.get("callable_by").cloned();
+        // no change: nothing is sent, so no refusal can come back from the kernel
+        write_callable_by(&h, "tree", "", |_| false).await.unwrap();
+        let after = k.agents.get(&AgentId::from("tree")).unwrap().record().meta.get("callable_by").cloned();
+        assert_eq!(before, after);
+        // a refused write names the agent and the label of the grant that failed
+        let err = write_callable_by(&h, "no_such_agent", " (the way back)", |cb| {
+            cb.insert("x".to_string(), json!("*"));
+            true
+        })
+        .await
+        .unwrap_err();
+        assert!(err.contains("`no_such_agent`.callable_by (the way back)"), "{err}");
     }
 
     #[tokio::test]

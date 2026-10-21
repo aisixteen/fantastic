@@ -399,10 +399,10 @@ pub(crate) async fn open_view(
     set.extend(own_grants.iter().map(|s| s.to_string()));
     set.insert(scope);
     cb.insert(vid.clone(), json!(set.into_iter().collect::<Vec<_>>()));
-    bridge.update_meta(Map::from_iter([(
-        "callable_by".to_string(),
-        Value::Object(cb),
-    )]));
+    // python `bridge.update(callable_by=cb)`: the `updated` event is what the root loader
+    // persists, so the view's grant survives a restart (a bare `update_meta` is in memory only,
+    // and a restored view was then refused by its bridge: `files does not accept 'list'`)
+    kernel.update(&bridge.id, Map::from_iter([("callable_by".to_string(), Value::Object(cb))]));
     json!({"id": vid, "kind": kind, "path": path, "created": true})
 }
 

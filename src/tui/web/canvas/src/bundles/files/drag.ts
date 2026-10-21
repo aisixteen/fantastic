@@ -124,3 +124,59 @@ export async function resolveTarget(t: Target, look: Look): Promise<Opened | Ref
 
 /** Whether a resolution is a refusal. */
 export const isRefusalOf = (r: Opened | Refusal): r is Refusal => "error" in r;
+
+// ─── WHERE A DROP IS, IN THE CANVAS'S WORLD ─────────────────────────────────
+
+/** The canvas's view: its zoom and the world's pan, in screen pixels. */
+export interface ViewPose {
+  z: number;
+  ox: number;
+  oy: number;
+}
+
+/**
+ * The world point under a screen point, for a canvas whose top-left corner is `rect`
+ * and whose world is zoomed `view.z` and panned `(view.ox, view.oy)`. The inverse of
+ * the world's transform, so a drop lands at its point at any zoom.
+ */
+export function worldAt(clientX: number, clientY: number, rect: { left: number; top: number }, view: ViewPose): { x: number; y: number } {
+  return {
+    x: (clientX - rect.left - view.ox) / view.z,
+    y: (clientY - rect.top - view.oy) / view.z,
+  };
+}
+
+/**
+ * The middle of a canvas's box, in client coordinates. The canvas's box is what is left
+ * of the viewport beside the file tree (#148), so its middle is not the viewport's.
+ */
+export function boxCentre(rect: { left: number; top: number; width: number; height: number }): { x: number; y: number } {
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+}
+
+/**
+ * The view zoomed to `z` about `anchor`, a point in the canvas's own box (its top-left
+ * corner is the origin, as the world's offset is): the world point under the anchor stays under it.
+ */
+export function zoomAbout(view: ViewPose, anchor: { x: number; y: number }, z: number): ViewPose {
+  const ratio = z / view.z;
+  return { z, ox: anchor.x - (anchor.x - view.ox) * ratio, oy: anchor.y - (anchor.y - view.oy) * ratio };
+}
+
+/**
+ * Where a drop of `items` at a screen point lands: one spot (the top-left corner of
+ * its box, in world coordinates) per item, in the grid `layoutAround` gives, centred
+ * on the drop point. The canvas's drop and the tests read it the same way, whatever
+ * the drag came from (the tree cell or the sidebar).
+ */
+export function dropPlan(
+  items: readonly DragItem[],
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number },
+  view: ViewPose,
+  slot: { width: number; height: number },
+): Array<{ item: DragItem; x: number; y: number }> {
+  const spots = layoutAround(worldAt(clientX, clientY, rect, view), items.length, slot);
+  return items.map((item, i) => ({ item, x: spots[i]!.x, y: spots[i]!.y }));
+}

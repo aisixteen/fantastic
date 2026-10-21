@@ -2,6 +2,8 @@ import { Host } from "../../lib.ts";
 import type { Kernel, Payload } from "../../lib.ts";
 import { onSkin, skinNow } from "../skin/apply.ts";
 import type { ColorValue } from "../skin/tokens.ts";
+import { worldAt } from "../files/drag.ts";
+import type { ViewPose } from "../files/drag.ts";
 
 // The canvas WebGL host — ported from canvas_webapp/index.html's GL scaffolding.
 // A shared THREE renderer/scene/camera (locked to the canvas pan/zoom) hosting
@@ -45,16 +47,27 @@ const BASE_Z = 140;
 const BASE_Y = 14;
 const LOOK_Y = -2;
 
+/** The world point under the viewport's middle, as the DOM world puts it: the canvas's box is where the world starts on screen (beside a sidebar it is not the viewport's left edge), so the GL camera follows the DOM world's offset. */
+export function viewportMiddleInWorld(
+  viewport: { width: number; height: number },
+  box: { left: number; top: number },
+  view: ViewPose,
+): { x: number; y: number } {
+  return worldAt(viewport.width / 2, viewport.height / 2, box, view);
+}
+
 export async function createGlHost(opts: {
   bg: HTMLCanvasElement;
   view: { z: number; ox: number; oy: number };
+  /** the canvas element's box, read at each camera change: the world starts at its top-left corner */
+  box: () => { left: number; top: number };
   host: Host;
   /** the page kernel: each view emits as itself and hears its own inbox */
   kernel: Kernel;
   selfId: string;
   fetchSource: (agentId: string) => Promise<GlView | null>;
 }): Promise<GlHost> {
-  const { bg, view, host, kernel, selfId, fetchSource } = opts;
+  const { bg, view, box, host, kernel, selfId, fetchSource } = opts;
   const THREE = (await import("three")) as Record<string, unknown> & {
     WebGLRenderer: new (o: unknown) => any;
     Scene: new () => any;
@@ -228,10 +241,9 @@ export async function createGlHost(opts: {
     const W = window.innerWidth;
     const H = window.innerHeight;
     const wpp = worldH / H;
-    const cwX = (W / 2 - view.ox) / view.z;
-    const cwY = (H / 2 - view.oy) / view.z;
-    const lookX = (cwX - W / 2) * wpp;
-    const lookY = -(cwY - H / 2) * wpp + LOOK_Y;
+    const mid = viewportMiddleInWorld({ width: W, height: H }, box(), view);
+    const lookX = (mid.x - W / 2) * wpp;
+    const lookY = -(mid.y - H / 2) * wpp + LOOK_Y;
     camera.position.set(lookX, lookY + (BASE_Y - LOOK_Y), BASE_Z);
     camera.zoom = view.z;
     camera.updateProjectionMatrix();
