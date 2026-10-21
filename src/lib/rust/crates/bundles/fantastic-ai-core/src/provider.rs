@@ -15,9 +15,11 @@
 //! [`crate::think::THINK_OPEN`]/[`crate::think::THINK_CLOSE`] once per turn, or a
 //! reasoning model's whole turn reads as an empty completion.
 
+use crate::constants::STREAM_IDLE_SECONDS;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::time::Duration;
 
 /// One event off a provider stream, in arrival order.
 pub enum ProviderEvent {
@@ -100,6 +102,50 @@ impl Provider for Unconfigured {
 /// driven inside a spawned task.
 pub type ProviderStream = BoxStream<'static, Result<ProviderEvent, ProviderError>>;
 
+/// The read clock a provider's stream runs on: the record's `stream_idle_seconds`
+/// (a positive number of seconds), else [`STREAM_IDLE_SECONDS`]. Anything else is
+/// refused by name — a window the backend cannot run on is never guessed at.
+pub fn stream_idle_of(meta: &Map<String, Value>) -> Result<Duration, ProviderError> {
+    match meta.get("stream_idle_seconds").filter(|v| !v.is_null()) {
+        None => Ok(Duration::from_secs_f64(STREAM_IDLE_SECONDS)),
+        Some(v) => match v.as_f64().filter(|s| *s > 0.0 && s.is_finite()) {
+            Some(secs) => Ok(Duration::from_secs_f64(secs)),
+            None => Err(ProviderError::value_error(format!(
+                "stream_idle_seconds must be a positive number of seconds, not {v}"
+            ))),
+        },
+    }
+}
+
+/// A provider's read clock tripped: nothing arrived within the idle window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stalled {
+    /// The idle window that passed, in seconds.
+    pub idle_secs: f64,
+}
+
+impl Stalled {
+    /// The turn's failure: `stream_stalled`, the seconds and the endpoint. A
+    /// raise, so the turn ends with an error row and `status(done, reason='error')`.
+    #[must_use]
+    pub fn error(&self, name: &str, endpoint: &str) -> ProviderError {
+        ProviderError::raised(format!(
+            "{name}: stream_stalled — {endpoint} sent no bytes for {}s; this turn is NOT \
+             complete",
+            self.idle_secs
+        ))
+    }
+}
+
+/// `fut` gets `idle` to make progress: its output, or [`Stalled`] when the window
+/// passes first. The caller drops the future — and with it the connection — on
+/// `Err`. Used for the response headers and for every read of the body.
+pub async fn within<F: std::future::Future>(idle: Duration, fut: F) -> Result<F::Output, Stalled> {
+    tokio::time::timeout(idle, fut).await.map_err(|_| Stalled {
+        idle_secs: idle.as_secs_f64(),
+    })
+}
+
 /// What the endpoint REPORTED about the last pass — python's provider attributes
 /// `last_prompt_tokens` / `last_stop_reason`. Shared with the stream a provider
 /// hands out, which fills it in as the endpoint reports.
@@ -166,3 +212,7 @@ pub trait Provider: Send + Sync {
     /// `provider.last_stop_reason = None`.
     fn clear_stop_reason(&self) {}
 }
+
+#[cfg(test)]
+#[path = "tests_provider_clock.rs"]
+mod tests_provider_clock;

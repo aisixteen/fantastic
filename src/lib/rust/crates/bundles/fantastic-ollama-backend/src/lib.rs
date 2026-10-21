@@ -25,8 +25,8 @@
 use async_trait::async_trait;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
-    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
-    Unconfigured,
+    stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
+    ReportCell, Unconfigured,
 };
 use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::ThinkWrap;
@@ -38,6 +38,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 /// `handler_module` key under which this bundle registers.
 pub const HANDLER_MODULE: &str = "ollama_backend.tools";
@@ -112,6 +113,9 @@ struct OllamaProvider {
     /// (ai_core calibrates its estimate with it) and `done_reason` (`length` ⇒
     /// the output stopped at its bound).
     report: ReportCell,
+    /// The read clock: the longest the server may go without a byte, headers
+    /// included ([`within`]).
+    stream_idle: Duration,
 }
 
 #[async_trait]
@@ -179,10 +183,12 @@ impl Provider for OllamaProvider {
         if let Some(key) = &key {
             req = req.bearer_auth(key);
         }
-        let resp = req
-            .send()
+        // The headers are part of the read clock too (#177).
+        let sent = within(self.stream_idle, req.send())
             .await
-            .map_err(|e| ProviderError::raised(format!("ollama: request failed: {e}")))?;
+            .map_err(|s| s.error(BACKEND, &self.endpoint))?;
+        let resp =
+            sent.map_err(|e| ProviderError::raised(format!("ollama: request failed: {e}")))?;
         if !resp.status().is_success() {
             // PYTHON'S TEXT: the ollama SDK raises `ResponseError(body,
             // status)`, which reads the body's `error` field (the raw body when
@@ -200,7 +206,12 @@ impl Provider for OllamaProvider {
             });
         }
 
-        Ok(consume_ndjson(resp, std::sync::Arc::clone(&self.report)))
+        Ok(consume_ndjson(
+            resp,
+            std::sync::Arc::clone(&self.report),
+            self.stream_idle,
+            self.endpoint.clone(),
+        ))
     }
 }
 
@@ -211,64 +222,82 @@ impl Provider for OllamaProvider {
 /// `streaming` phase until the completion was already finished, and a long turn
 /// would be indistinguishable from a stalled request. Python's provider is an
 /// async generator over the response lines; this yields on the same boundary.
-fn consume_ndjson(resp: reqwest::Response, report: ReportCell) -> ProviderStream {
+fn consume_ndjson(
+    resp: reqwest::Response,
+    report: ReportCell,
+    stream_idle: Duration,
+    endpoint: String,
+) -> ProviderStream {
     let inner = resp.bytes_stream();
     // `pending` holds the events decoded from ONE chunk: a chunk can carry
     // several lines, and each line several tokens.
     let init = (inner, NdjsonState::new(report), VecDeque::new(), false);
     Box::pin(futures_util::stream::unfold(
         init,
-        |(mut inner, mut st, mut pending, mut finished)| async move {
-            loop {
-                if let Some(ev) = pending.pop_front() {
-                    return Some((ev, (inner, st, pending, finished)));
-                }
-                if finished {
-                    return None;
-                }
-                let Some(chunk_res) = inner.next().await else {
-                    finished = true;
-                    // A trailing line with no newline is still a chunk.
-                    if !st.buf.is_empty() {
-                        if let Ok(parsed) = serde_json::from_slice::<Value>(&st.buf) {
-                            note_usage(&parsed, &st.report);
-                            decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
+        move |(mut inner, mut st, mut pending, mut finished)| {
+            let endpoint = endpoint.clone();
+            async move {
+                loop {
+                    if let Some(ev) = pending.pop_front() {
+                        return Some((ev, (inner, st, pending, finished)));
+                    }
+                    if finished {
+                        return None;
+                    }
+                    // THE READ CLOCK: a body quiet for the idle window is a stalled
+                    // stream, and the turn fails with its error row (#177).
+                    let chunk = match within(stream_idle, inner.next()).await {
+                        Ok(chunk) => chunk,
+                        Err(stalled) => {
+                            finished = true;
+                            pending.push_back(Err(stalled.error(BACKEND, &endpoint)));
+                            continue;
                         }
-                        st.buf.clear();
-                    }
-                    // The turn ended while still reasoning (content never
-                    // started) — close the span exactly once so the
-                    // deliberation is strippable.
-                    if let Some(m) = st.wrap.close_marker() {
-                        pending.push_back(Ok(ProviderEvent::Token(m.to_string())));
-                    }
-                    continue;
-                };
-                match chunk_res {
-                    Ok(bytes) => st.buf.extend_from_slice(&bytes),
-                    Err(e) => {
-                        // A span left open here stays unterminated on purpose:
-                        // the stream was cut mid-thought, and `without_thinking`
-                        // drops an unterminated tail rather than persisting a
-                        // fragment.
+                    };
+                    let Some(chunk_res) = chunk else {
                         finished = true;
-                        pending.push_back(Err(ProviderError::raised(format!(
-                            "ollama: stream error: {e}"
-                        ))));
-                        continue;
-                    }
-                }
-                while let Some(pos) = st.buf.iter().position(|b| *b == b'\n') {
-                    let line: Vec<u8> = st.buf.drain(..=pos).collect();
-                    let trimmed = &line[..line.len().saturating_sub(1)];
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let Ok(parsed) = serde_json::from_slice::<Value>(trimmed) else {
+                        // A trailing line with no newline is still a chunk.
+                        if !st.buf.is_empty() {
+                            if let Ok(parsed) = serde_json::from_slice::<Value>(&st.buf) {
+                                note_usage(&parsed, &st.report);
+                                decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
+                            }
+                            st.buf.clear();
+                        }
+                        // The turn ended while still reasoning (content never
+                        // started) — close the span exactly once so the
+                        // deliberation is strippable.
+                        if let Some(m) = st.wrap.close_marker() {
+                            pending.push_back(Ok(ProviderEvent::Token(m.to_string())));
+                        }
                         continue;
                     };
-                    note_usage(&parsed, &st.report);
-                    decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
+                    match chunk_res {
+                        Ok(bytes) => st.buf.extend_from_slice(&bytes),
+                        Err(e) => {
+                            // A span left open here stays unterminated on purpose:
+                            // the stream was cut mid-thought, and `without_thinking`
+                            // drops an unterminated tail rather than persisting a
+                            // fragment.
+                            finished = true;
+                            pending.push_back(Err(ProviderError::raised(format!(
+                                "ollama: stream error: {e}"
+                            ))));
+                            continue;
+                        }
+                    }
+                    while let Some(pos) = st.buf.iter().position(|b| *b == b'\n') {
+                        let line: Vec<u8> = st.buf.drain(..=pos).collect();
+                        let trimmed = &line[..line.len().saturating_sub(1)];
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let Ok(parsed) = serde_json::from_slice::<Value>(trimmed) else {
+                            continue;
+                        };
+                        note_usage(&parsed, &st.report);
+                        decode_chunk_into(&parsed, &mut st.wrap, &mut pending);
+                    }
                 }
             }
         },
@@ -398,6 +427,16 @@ pub fn record_schema() -> &'static Value {
                 "bool",
                 "turn the model's thinking channel on or off",
             ),
+            Field::new(
+                "stream_idle_seconds",
+                "float",
+                format!(
+                    "the read clock on the answer stream: seconds with no byte from the \
+                     server (headers included) before the turn is judged stalled and ends \
+                     with an error row; default {}",
+                    fantastic_ai_core::constants::STREAM_IDLE_SECONDS
+                ),
+            ),
             // a door's key, when the server sits behind one — absent = no header
             schema::credentials_field(false),
         ])
@@ -442,6 +481,9 @@ impl Bundle for OllamaBackendBundle {
         meta: &Map<String, Value>,
         record: &Map<String, Value>,
     ) -> Option<String> {
+        if let Err(e) = stream_idle_of(meta) {
+            return Some(e.message);
+        }
         schema::validate(record_schema(), "ollama_backend", meta, record)
     }
 
@@ -519,6 +561,10 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         (Ok(e), Ok(m)) => (e, m),
         (Err(e), _) | (_, Err(e)) => return Arc::new(Unconfigured(e)),
     };
+    let stream_idle = match stream_idle_of(&meta) {
+        Ok(idle) => idle,
+        Err(e) => return Arc::new(Unconfigured(e)),
+    };
     Arc::new(OllamaProvider {
         endpoint,
         model,
@@ -531,6 +577,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         think: meta.get("think").and_then(Value::as_bool),
         key: Arc::new(key_reader(agent_id, kernel, BACKEND, false)),
         report: ReportCell::default(),
+        stream_idle,
     })
 }
 

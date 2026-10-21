@@ -58,6 +58,10 @@ pub struct CurrentEntry {
     /// against it; `on_cancel` aborts its open parts. `None` until the provider
     /// pass starts.
     pub parts: Option<Arc<AsyncMutex<crate::events::PassParts>>>,
+    /// Fired by `stop`: the generation's own loop watches it and drops the
+    /// provider stream, so a stop reaches the stream whether or not the kernel's
+    /// task walk does (#177).
+    pub abort: Arc<tokio::sync::Notify>,
     /// Who stopped this generation with the `stop` verb — the caller's id, or
     /// `"operator"` (python `stopped_by`). The cut marker names them.
     pub stopped_by: Option<String>,

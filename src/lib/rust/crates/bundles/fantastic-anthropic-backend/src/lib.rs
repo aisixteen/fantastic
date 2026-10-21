@@ -21,8 +21,8 @@
 use async_trait::async_trait;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
-    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
-    Unconfigured,
+    stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
+    ReportCell, Unconfigured,
 };
 use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::ThinkWrap;
@@ -109,6 +109,9 @@ struct AnthropicProvider {
     temperature: Option<f64>,
     thinking_budget: Option<i64>,
     report: ReportCell,
+    /// The read clock: the longest the API may go without a byte, headers
+    /// included ([`within`]).
+    stream_idle: Duration,
 }
 
 impl AnthropicProvider {
@@ -182,7 +185,12 @@ impl Provider for AnthropicProvider {
         if let Some(key) = &key {
             req = req.header("x-api-key", key);
         }
-        let resp = req.send().await.map_err(|e| {
+        // The headers are part of the read clock too: a connection that is up but
+        // never answers is the same stall as a body that stops (#177).
+        let sent = within(self.stream_idle, req.send())
+            .await
+            .map_err(|s| s.error(NAME, &self.endpoint))?;
+        let resp = sent.map_err(|e| {
             ProviderError::raised(if e.is_timeout() {
                 format!(
                     "{NAME}: no answer from {} within {CONNECT_TIMEOUT}s",
@@ -216,6 +224,7 @@ impl Provider for AnthropicProvider {
             Arc::clone(&self.report),
             self.endpoint.clone(),
             max_tokens.is_none().then_some(self.max_tokens),
+            self.stream_idle,
         ))
     }
 }
@@ -226,6 +235,7 @@ fn consume_sse(
     report: ReportCell,
     endpoint: String,
     main_turn_max: Option<i64>,
+    stream_idle: Duration,
 ) -> ProviderStream {
     let inner = resp.bytes_stream();
     let init = (
@@ -243,7 +253,7 @@ fn consume_sse(
     );
     Box::pin(futures_util::stream::unfold(
         init,
-        |(mut inner, mut st, mut pending, mut finished)| async move {
+        move |(mut inner, mut st, mut pending, mut finished)| async move {
             loop {
                 if let Some(ev) = pending.pop_front() {
                     return Some((ev, (inner, st, pending, finished)));
@@ -251,7 +261,19 @@ fn consume_sse(
                 if finished {
                     return None;
                 }
-                let Some(chunk_res) = inner.next().await else {
+                // THE READ CLOCK: a body that goes quiet for the idle window is a
+                // stalled stream — the connection is dropped with this stream and
+                // the turn fails with the error row, instead of holding the lock
+                // until the send ceiling (#177).
+                let chunk = match within(stream_idle, inner.next()).await {
+                    Ok(chunk) => chunk,
+                    Err(stalled) => {
+                        finished = true;
+                        pending.push_back(Err(stalled.error(NAME, &st.endpoint)));
+                        continue;
+                    }
+                };
+                let Some(chunk_res) = chunk else {
                     finished = true;
                     st.end(&mut pending);
                     continue;
@@ -435,6 +457,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
             temperature: meta.get("temperature").and_then(Value::as_f64),
             thinking_budget: positive_int(meta.get("thinking_budget")),
             report: ReportCell::default(),
+            stream_idle: stream_idle_of(&meta)?,
         })
     })();
     match built {
@@ -478,6 +501,9 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         if !t.is_number() {
             return Some("temperature must be a number".to_string());
         }
+    }
+    if let Err(e) = stream_idle_of(meta) {
+        return Some(e.message);
     }
     if let Some(budget) = positive_int(merged.get("thinking_budget")) {
         if budget < THINKING_FLOOR {
@@ -547,6 +573,16 @@ pub fn record_schema() -> &'static Value {
                 format!(
                     "extended thinking per turn (tokens, at least {THINKING_FLOOR}, below \
                      max_tokens); unset, no thinking is asked for"
+                ),
+            ),
+            Field::new(
+                "stream_idle_seconds",
+                "float",
+                format!(
+                    "the read clock on the answer stream: seconds with no byte from the API \
+                     (headers included) before the turn is judged stalled and ends with an \
+                     error row; default {}",
+                    fantastic_ai_core::constants::STREAM_IDLE_SECONDS
                 ),
             ),
             // the API key — optional on the record: absent, no key header goes out

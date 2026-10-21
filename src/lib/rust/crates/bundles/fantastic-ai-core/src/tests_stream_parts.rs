@@ -420,6 +420,54 @@ async fn a_model_that_stops_with_a_block_open_leaves_the_marker_on_top() {
     assert!(!last.contains("reflect"), "{last}");
 }
 
+/// A stream that never sends a byte is stopped like any other: `stop` closes the
+/// turn, and `status` reports `generating: false` straight after (#177).
+#[tokio::test]
+async fn stop_during_a_stalled_stream_clears_generating() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = slow_kernel(&tmp).await;
+    let ai = make_ai(&kernel, &id_for(&tmp, "sp_stall")).await;
+    ram_store(&kernel, "rx").await;
+    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    // the first chunk never comes: the stream is stalled until the stop
+    let fp = slow(&ai, &["never"], Duration::from_secs(600));
+    let k = Arc::clone(&kernel);
+    let target = ai.clone();
+    let turn = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            target,
+            json!({"type": "send", "text": "go", "client_id": "tab"}),
+        )])
+        .await
+        .remove(0)
+    });
+    until_requests(&fp, 1).await;
+    let before = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(before["generating"], json!(true), "{before}");
+    let out = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
+    let after = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(after["generating"], json!(false), "{after}");
+    assert_eq!(turn.await.unwrap().status, Status::Cancelled);
+}
+
 /// One thread, as python's event loop: the stop lands between two chunks.
 #[tokio::test]
 async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {

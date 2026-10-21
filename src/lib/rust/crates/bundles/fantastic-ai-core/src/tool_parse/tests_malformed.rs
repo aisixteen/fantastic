@@ -85,3 +85,61 @@ fn a_good_turn_reports_nothing() {
     assert_eq!(extract_tool_calls(text).len(), 1);
     assert!(malformed_calls(text).is_empty());
 }
+
+/// A trailing code fence after the last call is prose, not a call: the calls
+/// before it dispatch, and the fence is no fault (#177).
+#[test]
+fn a_trailing_fence_after_the_calls_leaves_them_dispatchable() {
+    let text = "<call name=\"send\"><target_id>exec</target_id><type>tail</type>\
+                <text>go</text></call>\n\
+                <call name=\"await\"></call>\n\
+                ```\n";
+    let calls = extract_tool_calls(text);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].name, "send");
+    assert_eq!(calls[1].name, "await");
+    assert!(
+        malformed_calls(text).is_empty(),
+        "{:?}",
+        malformed_calls(text)
+    );
+}
+
+/// A leftover native tool-call fragment (`<invoke …>`) BEFORE valid calls is not
+/// an envelope: the valid calls after it still dispatch (#177).
+#[test]
+fn a_leading_invoke_fragment_leaves_the_valid_calls_after_it() {
+    let text = "<invoke name=\"x\"></invoke>\n\
+                <call name=\"send\"><target_id>exec</target_id><type>tail</type>\
+                <text>go</text></call>\n\
+                <call name=\"await\"></call>";
+    let calls = extract_tool_calls(text);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].name, "send");
+    assert_eq!(calls[1].name, "await");
+    assert!(
+        malformed_calls(text).is_empty(),
+        "{:?}",
+        malformed_calls(text)
+    );
+}
+
+/// Both at once: an `<invoke …>` fragment before the calls and a fence after
+/// them. Every valid call dispatches, in order, and nothing is reported (#177).
+#[test]
+fn a_leading_invoke_fragment_and_a_trailing_fence_together() {
+    let text = "<invoke name=\"x\"></invoke>\n\
+                <call name=\"send\"><target_id>exec</target_id><type>tail</type>\
+                <text>go</text></call>\n\
+                <call name=\"await\"></call>\n\
+                ```\n";
+    let calls = extract_tool_calls(text);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0].name, "send");
+    assert_eq!(calls[1].name, "await");
+    assert!(
+        malformed_calls(text).is_empty(),
+        "{:?}",
+        malformed_calls(text)
+    );
+}

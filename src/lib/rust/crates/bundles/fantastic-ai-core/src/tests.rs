@@ -5975,6 +5975,9 @@ mod prompt_file_tests;
 #[path = "tests_stream_parts.rs"]
 mod stream_parts;
 
+#[path = "tests_stall.rs"]
+mod stall;
+
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
 /// `test_a_docs_reply_is_cut_to_a_stub_once_answered`.

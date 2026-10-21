@@ -83,6 +83,7 @@ fn provider(endpoint: String, max_tokens: i64, sampling: Map<String, Value>) -> 
         max_tokens,
         sampling,
         report: ReportCell::default(),
+        stream_idle: std::time::Duration::from_secs_f64(fantastic_ai_core::constants::STREAM_IDLE_SECONDS),
     }
 }
 
