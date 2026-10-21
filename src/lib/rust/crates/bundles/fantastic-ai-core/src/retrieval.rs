@@ -11,6 +11,7 @@
 //! Mirrors python `ai_core/core.py` `_grep` / `_context_clear` / `_context_recall`.
 
 use crate::assembly::system_content;
+use crate::assembly::{listed_entries, render_history};
 use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
 use crate::context::{
     budget as agent_budget, estimate_one, fit_reply, inline_cap, recent_n as cfg_recent_n,
@@ -355,41 +356,15 @@ pub async fn context_clear(
     Ok(json!({"cleared": rid, "rows": members.len()}))
 }
 
-/// The view the model reads now, as `assembly` builds it: the persisted view
-/// array's entries, each at its recorded resolution, then the head rows after the
-/// newest of them; with no usable array (none, or one naming a row the store no
-/// longer has), the head itself. `(index into rows, resolution)` in view order.
-fn current_view(rows: &[Value], view: Option<&Map<String, Value>>) -> Vec<(usize, String)> {
-    let by_id: std::collections::HashMap<i64, usize> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| row_id(r).map(|id| (id, i)))
-        .collect();
-    let listed: Option<Vec<(usize, String)>> = view.and_then(|v| {
-        let ids = v.get("ids")?.as_array()?;
-        let mut out = Vec::with_capacity(ids.len());
-        for e in ids {
-            let i = *by_id.get(&e.get("id")?.as_i64()?)?;
-            out.push((
-                i,
-                e.get("res")
-                    .and_then(Value::as_str)
-                    .unwrap_or("full")
-                    .to_string(),
-            ));
-        }
-        (!out.is_empty()).then_some(out)
-    });
-    match listed {
-        Some(mut entries) => {
-            let newest = entries.iter().map(|(i, _)| *i).max().unwrap_or(0);
-            entries.extend((newest + 1..rows.len()).map(|i| (i, res_of(&rows[i]).to_string())));
-            entries
-        }
-        None => (0..rows.len())
-            .map(|i| (i, res_of(&rows[i]).to_string()))
-            .collect(),
+/// The persisted view entry for a row the view keeps: its id and resolution, and
+/// its body when a trimmer changed it, so the next turn renders the same message
+/// the model saw before the fold.
+fn kept_entry(row: &Value, msg: &Value, res: &str) -> Value {
+    let mut e = json!({"id": row_id(row), "res": res});
+    if msg != &crate::view::apply_res(row, res) {
+        e["content"] = msg["content"].clone();
     }
+    e
 }
 
 /// A fold or a clear: the rows a span may not cross.
@@ -458,8 +433,9 @@ pub async fn context_fold(
     };
     let rows = load_history(agent_id, kernel, false).await?;
     let anchors = anchors_of(&crate::memory::head(agent_id, kernel).await?);
-    let view = current_view(&rows, load_view(agent_id, kernel).await?.as_ref());
-    let pos_of = |id: i64| view.iter().position(|(i, _)| row_id(&rows[*i]) == Some(id));
+    let listed = listed_entries(&rows, load_view(agent_id, kernel).await?.as_ref());
+    let view = render_history(&rows, listed.as_deref());
+    let pos_of = |id: i64| view.iter().position(|r| row_id(&rows[r.idx]) == Some(id));
     let empty = |arg: &str, why: &str| {
         let mut v = refusal_hint(
             BAD_ARG,
@@ -475,7 +451,7 @@ pub async fn context_fold(
     // The default `from` is the row after the last fold or clear in the view.
     let default_from = view
         .iter()
-        .rposition(|(i, _)| is_boundary(&rows[*i]))
+        .rposition(|r| is_boundary(&rows[r.idx]))
         .map_or(0, |p| p + 1);
     let from_p = match from {
         None => default_from,
@@ -494,7 +470,7 @@ pub async fn context_fold(
     if from_p > to_p {
         return Ok(empty("to", "to comes before from"));
     }
-    let span: Vec<usize> = view[from_p..=to_p].iter().map(|(i, _)| *i).collect();
+    let span: Vec<usize> = view[from_p..=to_p].iter().map(|r| r.idx).collect();
     if span.iter().any(|&i| is_boundary(&rows[i])) {
         let mut v = refusal_hint(
             BAD_ARG,
@@ -526,18 +502,18 @@ pub async fn context_fold(
     )
     .await?;
     let fid = row_id(&fold).unwrap_or_default();
-    // THE NEW VIEW: the rows before the range as they were, the fold where the range
-    // began, then the rows after — every row the store holds, so none is left to the
-    // tail rule (the fold is the newest row, and would otherwise leave them out).
+    // THE NEW VIEW: the rows before the range as they were rendered (a trimmed body
+    // kept as trimmed, a dropped row left out), the fold where the range began, then
+    // the rows after. The fold is the newest row, so the array carries every kept row.
     let mut ids: Vec<Value> = Vec::with_capacity(view.len() - span.len() + 1);
-    for (p, (i, res)) in view.iter().enumerate() {
+    for (p, r) in view.iter().enumerate() {
         if p == from_p {
             ids.push(json!({"id": fid, "res": "fold"}));
         }
         if (from_p..=to_p).contains(&p) {
             continue;
         }
-        ids.push(json!({"id": row_id(&rows[*i]), "res": res}));
+        ids.push(kept_entry(&rows[r.idx], &r.msg, &r.res));
     }
     let meta = agent_meta(agent_id, kernel);
     save_view(

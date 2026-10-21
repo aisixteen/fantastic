@@ -517,3 +517,121 @@ async fn a_view_array_naming_a_missing_row_is_no_view() {
     let fid = out["folded"].as_i64().unwrap();
     assert_eq!(refs(&fold_of(&store(&kernel, &backend).await, fid)), ids);
 }
+
+#[tokio::test]
+async fn the_prefix_keeps_the_trimmed_bytes_the_model_saw_before_the_fold() {
+    // The model's view trims the store: a whole-state read a later one supersedes is
+    // dropped, and a body repeated from an earlier reply is stubbed. A fold must not
+    // bring either back: the messages before the range stay byte-identical.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "cf_trim").await;
+    let long = "the same long reply body, repeated word for word. ".repeat(10);
+    let superseded = put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "[reply to 1 · notes reflect]\nthe old state"}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "assistant", "content": "noted"}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": "[reply to 2 · notes reflect]\nthe new state"}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "assistant", "content": "noted again"}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": format!("[reply to 3 · notes read]\n{long}")}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "assistant", "content": "read it"}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "user", "content": format!("[reply to 4 · notes read]\n{long}")}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &backend,
+        json!({"role": "assistant", "content": "and again"}),
+    )
+    .await;
+    let ids = turns(
+        &kernel,
+        &backend,
+        &[
+            "question about the range",
+            "answer about the range",
+            "question after the range",
+            "answer after the range",
+        ],
+    )
+    .await;
+    let before = messages(&kernel, &backend).await;
+    // the trimmers did their work: the superseded read is gone, the repeat is a stub
+    assert!(!before
+        .iter()
+        .any(|m| m["content"] == "[reply to 1 · notes reflect]\nthe old state"));
+    assert!(before.iter().any(|m| m["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("[identical to the reply in row")));
+    let k = before
+        .iter()
+        .position(|m| m["content"] == "question about the range")
+        .expect("the range's first row");
+
+    let out = verb(
+        &kernel,
+        &backend,
+        json!({"type": "context_fold", "from": ids[0], "to": ids[1],
+               "summary": "the range, folded"}),
+    )
+    .await;
+    assert_eq!(out["rows"], 2, "{out}");
+    let fid = out["folded"].as_i64().unwrap();
+
+    let after = messages(&kernel, &backend).await;
+    let f = after
+        .iter()
+        .position(|m| {
+            m["content"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with(&format!("[fold {fid} ·"))
+        })
+        .expect("the fold message");
+    assert_eq!(f, k, "the fold sits where the range began");
+    assert_eq!(
+        serde_json::to_string(&after[..f]).unwrap(),
+        serde_json::to_string(&before[..k]).unwrap(),
+        "the messages before the fold are byte-identical",
+    );
+    assert_eq!(
+        serde_json::to_string(&after[f + 1..]).unwrap(),
+        serde_json::to_string(&before[k + 2..]).unwrap(),
+        "the rows after the range are byte-identical",
+    );
+    assert!(
+        !view_ids(&kernel, &backend).await.contains(&superseded),
+        "a row the view dropped stays out of the persisted view"
+    );
+}
