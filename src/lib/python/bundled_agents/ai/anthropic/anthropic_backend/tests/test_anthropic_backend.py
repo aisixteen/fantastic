@@ -515,6 +515,23 @@ async def test_reflect_carries_the_usage_and_the_cache_flag(
     assert r["usage"]["requests"] == 0 and r["usage"]["hit_rate"] == 0
 
 
+async def test_deleting_an_agent_drops_its_counts(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    from anthropic_backend import tools
+
+    mock_http(_api([]))
+    await _create(seeded_kernel)
+    tools.usage_of("a1").add_request(100, 400, 1000)
+    r = await _call(
+        seeded_kernel, seeded_kernel.id, {"type": "delete_agent", "id": "a1"}
+    )
+    assert r["deleted"] is True, r
+    assert "a1" not in tools._USAGE
+    await _create(seeded_kernel)
+    zero = await _call(seeded_kernel, "a1", {"type": "usage"})
+    assert zero["requests"] == 0 and zero["cache_read_tokens"] == 0, zero
+
 def test_the_record_refuses_a_bad_cache_flag_or_price():
     assert validate_meta({"prompt_cache": True}, _rec()) is None
     assert validate_meta({"price_input_per_mtok": 3}, _rec()) is None

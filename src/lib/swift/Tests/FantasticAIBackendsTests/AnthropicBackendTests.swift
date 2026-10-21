@@ -414,6 +414,17 @@ struct AnthropicBackendTests {
         #expect(r["usage"]["prompt_tokens"] == 0 && r["usage"]["requests"] == 0)
     }
 
+    @Test func deletingAnAgentDropsItsCounts() async {
+        let k = await kernelWith("gone3", [:])
+        AnthropicUsageTable.of(AgentId("gone3")).addRequest(input: 100, cacheWrite: 400, cacheRead: 1000)
+        let gone = await call(k, "kernel_state", ["type": "delete_agent", "id": "gone3"])
+        #expect(gone["deleted"] == true, "\(gone.serialize())")
+        // a re-created agent under the same id starts at zero, not at the dropped counts
+        let again = await kernelWith("gone3", [:])
+        let zero = await call(again, "gone3", ["type": "usage"])
+        #expect(zero["requests"] == 0 && zero["cache_read_tokens"] == 0, "\(zero.serialize())")
+    }
+
     @Test func theRecordRefusesABadCacheFlagOrPrice() {
         let b = AnthropicBundle()
         #expect(b.validateMeta(["prompt_cache": true], record: rec()) == nil)

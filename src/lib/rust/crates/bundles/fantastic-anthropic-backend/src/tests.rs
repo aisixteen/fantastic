@@ -366,6 +366,10 @@ async fn mk(tmp: &TempDir, endpoint: &str) -> Arc<Kernel> {
 }
 
 async fn mk_with(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
+    mk_with_id(tmp, endpoint, extra, "a1").await
+}
+
+async fn mk_with_id(tmp: &TempDir, endpoint: &str, extra: Value, id: &str) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     let kernel = Arc::new(kernel);
@@ -379,14 +383,14 @@ async fn mk_with(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": "a1"});
+    let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": id});
     let mut record = rec(extra);
     record.insert("endpoint".into(), json!(endpoint));
     for (k, v) in record {
         payload[k] = v;
     }
     let r = call(&kernel, "kernel_state", payload).await;
-    assert_eq!(r["id"], json!("a1"), "{r}");
+    assert_eq!(r["id"], json!(id), "{r}");
     kernel
 }
 
@@ -625,6 +629,30 @@ async fn reflect_carries_the_usage_and_the_cache_flag() {
     assert_eq!(r["prompt_cache"], json!(true));
     assert!(r["usage"]["prompt_tokens"].is_number(), "{r}");
     assert!(r["usage"]["saved_tokens"].is_number(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_an_agent_drops_its_counts() {
+    let tmp = TempDir::new().unwrap();
+    let endpoint = "http://unused.test/v1/messages";
+    let kernel = mk_with_id(&tmp, endpoint, json!({}), "gone1").await;
+    {
+        let counts = usage_of(&AgentId::from("gone1"));
+        let mut u = counts.lock().unwrap();
+        (u.requests, u.input, u.cache_write, u.cache_read) = (1, 100, 400, 1000);
+    }
+    let r = call(
+        &kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": "gone1"}),
+    )
+    .await;
+    assert_eq!(r["deleted"], json!(true), "{r}");
+    assert!(!usage_table().lock().unwrap().contains_key("gone1"));
+    let kernel = mk_with_id(&tmp, endpoint, json!({}), "gone1").await;
+    let zero = call(&kernel, "gone1", json!({"type": "usage"})).await;
+    assert_eq!(zero["requests"], json!(0), "{zero}");
+    assert_eq!(zero["cache_read_tokens"], json!(0), "{zero}");
 }
 
 #[test]
