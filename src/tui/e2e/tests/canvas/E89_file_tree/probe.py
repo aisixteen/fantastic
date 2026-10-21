@@ -17,7 +17,8 @@ h) the file changed on disk under unsaved edits: the conflict is shown, NOTHING 
    Compare shows `.pv-diff`; Keep mine overwrites the disk with the editor's text;
 i) the filter narrows the loaded tree, and ↓ from it goes into the tree;
 j) collapsing `src` drops its watch from the bridge;
-k) once the cells close, the file bridge holds no watch of theirs; no page error."""
+k) once the cells close, the file bridge holds no watch of theirs, except a file or
+   folder view's own relay (the views outlive the cells, #150); no page error."""
 
 from __future__ import annotations
 
@@ -26,6 +27,8 @@ import json
 import sys
 import time
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _lib.canvas_live import Rig, verdict  # noqa: E402
@@ -37,6 +40,19 @@ LEAKS = ["", ".", "src", "docs", "src/one.txt", "docs/a.md"]
 
 def cell(cid: str, handler: str, x: int, y: int, w: int, h: int, **extra) -> dict:
     return {"id": cid, "handler_module": handler, "display_name": cid, "can_call": {"files": FILE_VERBS}, "x": x, "y": y, "width": w, "height": h, **extra}
+
+
+def view_paths(proj: Path) -> set:
+    """The paths of the file and folder view agents still on the host (`file_bridge_*`, #150)."""
+    out = set()
+    for f in (proj / ".fantastic").rglob("file_bridge_*/agent.yaml"):
+        try:
+            rec = yaml.safe_load(f.read_text()) or {}
+        except FileNotFoundError:
+            continue  # deleted between the listing and the read
+        if rec.get("handler_module") == "file_bridge.tools" and rec.get("view") in ("file", "folder") and isinstance(rec.get("path"), str):
+            out.add(rec["path"])
+    return out
 
 
 def frame(cid: str) -> str:
@@ -180,19 +196,24 @@ def main() -> bool:
                     break
                 await asyncio.sleep(0.25)
             r["j2 collapsing src unwatches it"] = gone_src
-            # 10 close the cells: no watch of theirs is left on the bridge
+            # 10 close the cells: no watch of theirs is left on the bridge, but a view's own relay: a
+            # file or folder view outlives its cells (#150, "one live object per path"), and its relay
+            # lives with it until the view is deleted (`routeOf`), so its path is no leak
             for cid in (TREE, PIN, FOLLOW):
                 await call("view_root", {"type": "remove", "id": cid})
             r["10a the frames are gone"] = bool(await pg.until(f"!{frame(TREE)} && !{frame(PIN)} && !{frame(FOLLOW)}", 15))
+            views = view_paths(rig.proj)
+            leaks = [p for p in LEAKS if p not in views]
             held: list = []
             end = time.time() + 10  # unmount runs asynchronously
             while time.time() < end:
                 held = await held_paths()
-                if not set(LEAKS) & set(held):
+                if not set(leaks) & set(held):
                     break
                 await asyncio.sleep(0.25)
             info["10_paths"] = held
-            r["10 no watch of the cells' is left"] = not set(LEAKS) & set(held)
+            info["10_views"] = sorted(views)
+            r["10 no watch of the cells' is left"] = not set(leaks) & set(held)
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
             r["11 no page errors"] = not info["page_errors"]
 
