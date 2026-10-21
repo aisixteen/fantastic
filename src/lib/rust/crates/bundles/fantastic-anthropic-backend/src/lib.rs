@@ -15,14 +15,17 @@
 //!   finish. An `error` event is raised with the API's own type and message.
 //! - THE KEY: the record's optional `credentials` ref, sent as `x-api-key` (with
 //!   `anthropic-version`); none, no key header.
-//! - PROMPT CACHING, opt-in (`prompt_cache`): the `system` block and the conversation
-//!   tail carry an ephemeral `cache_control` marker. Off, the body is unchanged.
+//! - CACHING (ai-core's `caching`): `provider_cache` sends ephemeral `cache_control`
+//!   markers: on the `system` block, on the block that ends the primer row, on the
+//!   block that ends the last fold, and the top-level automatic one. At most four.
+//!   Every other mode sends none, and the body is unchanged.
 //! - USAGE: each stream's token counts accumulate into the agent's [`Usage`] (RAM;
 //!   the `usage` verb and `reflect` read it), side calls included.
 
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use fantastic_ai_core::caching::{self, Caching};
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
@@ -68,21 +71,53 @@ pub const THINKING_FLOOR: i64 = 1024;
 const CFG: BackendConfig = BackendConfig {
     name: NAME,
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: true,
 };
 
 /// ai-core's messages → (`system`, the user/assistant turns): every system message
 /// joins the one `system` string; consecutive turns of one role merge, blank-line
-/// separated. Python `to_messages`.
+/// separated. Python `to_messages`. The cache flags are not read: see [`to_wire`].
 #[must_use]
 pub fn to_messages(messages: &[Value]) -> (String, Vec<Value>) {
+    to_wire(messages, false)
+}
+
+/// The cache flags ai-core sets on a message (`provider_cache` only).
+#[derive(Clone, Copy, Default)]
+struct Flags {
+    /// The message holds the row the record's primer names: its end is marked.
+    primer: bool,
+    /// The message holds the last fold or clear row: its end is marked.
+    fold: bool,
+}
+
+impl Flags {
+    fn any(self) -> bool {
+        self.primer || self.fold
+    }
+}
+
+/// ai-core's messages → (`system`, the turns as the request sends them). `marks` reads
+/// the cache flags; off, they are ignored and the turns are the plain merged strings.
+///
+/// With `marks`, a merged turn whose rows carry flags is cut into text blocks at the
+/// end of each flagged row's text, so the marker lands there, not at the end of the
+/// merged turn. The block texts concatenate to the merged string exactly: the blank
+/// line that joins two rows opens the next block, and is never dropped or marked.
+fn to_wire(messages: &[Value], marks: bool) -> (String, Vec<Value>) {
     let mut systems: Vec<String> = Vec::new();
-    let mut turns: Vec<(String, String)> = Vec::new();
+    let mut turns: Vec<(String, Vec<(String, Flags)>)> = Vec::new();
     for m in messages {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
         let content = match m.get("content") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Null) | None => String::new(),
             Some(v) => fantastic_bundle::py_str(v),
+        };
+        let flag = |key: &str| marks && m.get(key).and_then(Value::as_bool) == Some(true);
+        let flags = Flags {
+            primer: flag("cache_primer"),
+            fold: flag("cache_fold"),
         };
         match role {
             "system" => {
@@ -91,20 +126,59 @@ pub fn to_messages(messages: &[Value]) -> (String, Vec<Value>) {
                 }
             }
             "user" | "assistant" => match turns.last_mut() {
-                Some((r, c)) if r == role => {
-                    c.push_str("\n\n");
-                    c.push_str(&content);
-                }
-                _ => turns.push((role.to_string(), content)),
+                Some((r, rows)) if r == role => rows.push((content, flags)),
+                _ => turns.push((role.to_string(), vec![(content, flags)])),
             },
             _ => {}
         }
     }
     let turns = turns
         .into_iter()
-        .map(|(role, content)| json!({"role": role, "content": content}))
+        .map(|(role, rows)| json!({"role": role, "content": turn_content(&rows)}))
         .collect();
     (systems.join("\n\n"), turns)
+}
+
+/// One merged turn's `content`: the plain string when no row in it is flagged, else
+/// its text blocks, the marked ones carrying the cache marker.
+fn turn_content(rows: &[(String, Flags)]) -> Value {
+    if !rows.iter().any(|(_, f)| f.any()) {
+        let plain: Vec<&str> = rows.iter().map(|(t, _)| t.as_str()).collect();
+        return json!(plain.join("\n\n"));
+    }
+    Value::Array(
+        cut_blocks(rows)
+            .into_iter()
+            .map(|(text, marked)| {
+                let mut block = json!({"type": "text", "text": text});
+                if marked {
+                    block["cache_control"] = cache_control();
+                }
+                block
+            })
+            .collect(),
+    )
+}
+
+/// A merged turn cut at the end of each flagged row: `(block text, ends a flagged
+/// row)`. A flagged row with no text opens no block of its own (an empty block is
+/// refused), so it carries no marker; every other row's text is whole in its block.
+fn cut_blocks(rows: &[(String, Flags)]) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    let mut cur = String::new();
+    for (i, (text, flags)) in rows.iter().enumerate() {
+        if i > 0 {
+            cur.push_str("\n\n");
+        }
+        cur.push_str(text);
+        if flags.any() && !text.is_empty() {
+            out.push((std::mem::take(&mut cur), true));
+        }
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push((cur, false));
+    }
+    out
 }
 
 /// The cache marker a cached request sends: the 5-minute ephemeral TTL, the only one.
@@ -192,7 +266,7 @@ struct AnthropicProvider {
     max_tokens: i64,
     temperature: Option<f64>,
     thinking_budget: Option<i64>,
-    prompt_cache: bool,
+    caching: Caching,
     usage: Arc<Mutex<Usage>>,
     report: ReportCell,
 }
@@ -200,7 +274,9 @@ struct AnthropicProvider {
 impl AnthropicProvider {
     /// The request body. Python `AnthropicProvider.body`.
     fn body(&self, messages: &[Value], max_tokens: Option<i64>) -> Value {
-        let (system, turns) = to_messages(messages);
+        // Markers only in `provider_cache`: every other mode's body is the plain one.
+        let marks = self.caching.marks();
+        let (system, turns) = to_wire(messages, marks);
         let call_max = max_tokens.unwrap_or(self.max_tokens);
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
@@ -208,14 +284,16 @@ impl AnthropicProvider {
         body.insert("messages".into(), Value::Array(turns));
         body.insert("stream".into(), json!(true));
         if !system.is_empty() {
-            let system = if self.prompt_cache {
+            // M1: the system block
+            let system = if marks {
                 json!([{"type": "text", "text": system, "cache_control": cache_control()}])
             } else {
                 json!(system)
             };
             body.insert("system".into(), system);
         }
-        if self.prompt_cache {
+        if marks {
+            // auto: the conversation tail, cached by the API itself
             body.insert("cache_control".into(), cache_control());
         }
         if let Some(t) = self.temperature {
@@ -542,7 +620,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
             max_tokens: required_int(&meta, "max_tokens")?,
             temperature: meta.get("temperature").and_then(Value::as_f64),
             thinking_budget: positive_int(meta.get("thinking_budget")),
-            prompt_cache: prompt_cache_of(&meta),
+            caching: caching::mode_of(&meta).map_err(ProviderError::value_error)?,
             usage: usage_of(agent_id),
             report: ReportCell::default(),
         })
@@ -551,13 +629,6 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         Ok(p) => Arc::new(p),
         Err(e) => Arc::new(Unconfigured(e)),
     }
-}
-
-/// The record's `prompt_cache`, validated boolean at the write; absent is false.
-fn prompt_cache_of(meta: &Map<String, Value>) -> bool {
-    meta.get("prompt_cache")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 /// The counts with the record's prices applied (python `_usage_now`).
@@ -605,7 +676,12 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
         };
         out.insert(k.to_string(), v);
     }
-    out.insert("prompt_cache".into(), json!(prompt_cache_of(&meta)));
+    out.insert(
+        "caching".into(),
+        meta.get("caching")
+            .cloned()
+            .unwrap_or_else(|| json!(caching::DEFAULT_MODE)),
+    );
     out.insert("usage".into(), usage_now(agent_id, kernel));
     Ok(Value::Object(out))
 }
@@ -628,11 +704,6 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     if let Some(t) = meta.get("temperature").filter(|v| !v.is_null()) {
         if !t.is_number() {
             return Some("temperature must be a number".to_string());
-        }
-    }
-    if let Some(c) = meta.get("prompt_cache").filter(|v| !v.is_null()) {
-        if !c.is_boolean() {
-            return Some("prompt_cache must be a boolean".to_string());
         }
     }
     for key in ["price_input_per_mtok", "price_output_per_mtok"] {
@@ -673,6 +744,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         ));
     }
     schema::validate(record_schema(), NAME, meta, record)
+        .or_else(|| caching::refusal(meta, record, NAME, CFG.provider_cache))
 }
 
 /// THE RECORD SCHEMA — python `RECORD_SCHEMA`, field for field.
@@ -711,12 +783,6 @@ pub fn record_schema() -> &'static Value {
                     "extended thinking per turn (tokens, at least {THINKING_FLOOR}, below \
                      max_tokens); unset, no thinking is asked for"
                 ),
-            ),
-            Field::new(
-                "prompt_cache",
-                "bool",
-                "prompt caching, opt-in: the system block and the conversation tail carry \
-                 a 5-minute cache marker; unset or false, the request is unchanged",
             ),
             Field::new(
                 "price_input_per_mtok",

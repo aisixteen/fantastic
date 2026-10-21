@@ -71,7 +71,7 @@ fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
         max_tokens: 8000,
         temperature: None,
         thinking_budget: None,
-        prompt_cache: false,
+        caching: Caching::Cleanup,
         usage: Arc::new(Mutex::new(Usage::default())),
         report: ReportCell::default(),
     }
@@ -452,20 +452,178 @@ fn fresh_usage() -> Arc<Mutex<Usage>> {
     Arc::new(Mutex::new(Usage::default()))
 }
 
+/// The number of `cache_control` markers a body sends.
+fn markers(body: &Value) -> usize {
+    body.to_string().matches("\"cache_control\"").count()
+}
+
+/// The conversation's `messages` as ai-core flags them, with a system row first.
+fn flagged(rows: &[(&str, &str, Option<&str>)]) -> Vec<Value> {
+    let mut out = vec![json!({"role": "system", "content": "S"})];
+    for (role, text, flag) in rows {
+        let mut m = json!({"role": role, "content": text});
+        if let Some(f) = flag {
+            m[*f] = json!(true);
+        }
+        out.push(m);
+    }
+    out
+}
+
 #[test]
-fn prompt_cache_off_leaves_the_body_exactly_as_it_was() {
+fn cleanup_and_none_send_no_marker_even_when_a_message_is_flagged() {
     let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
     let expected = json!({"model": MODEL, "max_tokens": 8000, "messages": [{"role": "user", "content": "hi"}],
                           "stream": true, "system": "s"});
     assert_eq!(p.body(&plain(), None), expected);
-    p.prompt_cache = false;
-    assert_eq!(p.body(&plain(), None), expected);
+    let flags = flagged(&[
+        ("user", "a", Some("cache_primer")),
+        ("assistant", "b", Some("cache_fold")),
+    ]);
+    for mode in [Caching::Cleanup, Caching::None] {
+        p.caching = mode;
+        let b = p.body(&flags, None);
+        assert_eq!(markers(&b), 0, "{mode:?}: {b}");
+        assert_eq!(b["system"], json!("S"), "{mode:?}: the plain system string");
+        assert_eq!(
+            b["messages"],
+            json!([
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": "b"},
+            ]),
+            "{mode:?}: the flags do not reach the wire"
+        );
+    }
 }
 
 #[test]
-fn prompt_cache_marks_the_system_block_and_the_tail() {
+fn provider_cache_splits_the_merged_turns_at_the_flagged_rows() {
+    // [primer rows][fold][fold][task rows]: the primer's row is the assistant turn
+    // "p2"; the fold rows and the task rows are one merged user turn, and the marker
+    // lands at the end of the last fold's text, not at the end of that merged turn.
     let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.prompt_cache = true;
+    p.caching = Caching::ProviderCache;
+    let msgs = flagged(&[
+        ("user", "p1", None),
+        ("assistant", "p2", Some("cache_primer")),
+        ("user", "f1", None),
+        ("user", "f2", Some("cache_fold")),
+        ("user", "t1", None),
+        ("assistant", "t2", None),
+        ("user", "live", None),
+    ]);
+    let b = p.body(&msgs, None);
+    let marked = json!({"type": "ephemeral"});
+    assert_eq!(b["system"][0]["cache_control"], marked, "M1: {b}");
+    assert_eq!(
+        b["messages"],
+        json!([
+            {"role": "user", "content": "p1"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "p2", "cache_control": marked},
+            ]},
+            {"role": "user", "content": [
+                {"type": "text", "text": "f1\n\nf2", "cache_control": marked},
+                {"type": "text", "text": "\n\nt1"},
+            ]},
+            {"role": "assistant", "content": "t2"},
+            {"role": "user", "content": "live"},
+        ]),
+        "M2 ends the primer's text, M3 ends the last fold's text: {b}"
+    );
+    assert_eq!(b["cache_control"], marked, "auto: {b}");
+    assert_eq!(markers(&b), 4, "M1, M2, M3 and auto: {b}");
+}
+
+#[test]
+fn the_split_turns_concatenate_to_exactly_the_merged_string() {
+    // The block texts of a merged turn, joined, are the string the turn was before
+    // any split: no byte added or lost, wherever a flag falls.
+    let shapes: [&[Option<&str>]; 5] = [
+        &[Some("cache_primer"), None, None],
+        &[None, Some("cache_fold"), None],
+        &[None, Some("cache_primer"), Some("cache_fold")],
+        &[Some("cache_fold"), Some("cache_fold"), None],
+        &[None, None, Some("cache_primer")],
+    ];
+    for shape in shapes {
+        let rows: Vec<(&str, &str, Option<&str>)> = ["one", "", "three"]
+            .iter()
+            .zip(shape)
+            .map(|(t, f)| ("user", *t, *f))
+            .collect();
+        let msgs = flagged(&rows);
+        let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+        p.caching = Caching::ProviderCache;
+        let b = p.body(&msgs, None);
+        let plain = to_messages(&msgs).1;
+        let merged = plain[0]["content"]
+            .as_str()
+            .expect("plain turn")
+            .to_string();
+        let blocks = b["messages"][0]["content"].clone();
+        let joined: String = match &blocks {
+            Value::String(s) => s.clone(),
+            Value::Array(a) => a.iter().map(|x| x["text"].as_str().unwrap()).collect(),
+            other => panic!("unexpected content {other}"),
+        };
+        assert_eq!(joined, merged, "shape {shape:?}: {b}");
+        assert!(markers(&b) <= 4, "shape {shape:?}: {b}");
+    }
+}
+
+#[test]
+fn a_flagged_row_with_no_text_carries_no_marker() {
+    // An empty block is refused by the API, so an empty flagged row opens none.
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let msgs = flagged(&[("user", "a", None), ("user", "", Some("cache_primer"))]);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["messages"],
+        json!([{"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}]),
+        "{b}"
+    );
+    assert_eq!(markers(&b), 2, "M1 and auto only: {b}");
+}
+
+#[test]
+fn a_primer_and_a_fold_on_one_message_send_one_marker() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let mut msgs = flagged(&[
+        ("user", "only", None),
+        ("assistant", "both", Some("cache_primer")),
+    ]);
+    msgs[2]["cache_fold"] = json!(true);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["messages"][1]["content"],
+        json!([{"type": "text", "text": "both", "cache_control": {"type": "ephemeral"}}]),
+        "{b}"
+    );
+    assert_eq!(markers(&b), 3, "M1, the one shared block, auto: {b}");
+}
+
+#[test]
+fn provider_cache_with_no_primer_and_no_fold_marks_only_the_system_and_the_tail() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let b = p.body(
+        &flagged(&[("user", "a", None), ("assistant", "b", None)]),
+        None,
+    );
+    assert_eq!(
+        b["messages"],
+        json!([{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}])
+    );
+    assert_eq!(markers(&b), 2, "M1 and auto: {b}");
+}
+
+#[test]
+fn provider_cache_marks_the_system_block_and_the_tail() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
     p.temperature = Some(0.2);
     p.thinking_budget = Some(2048);
     assert_eq!(
@@ -488,9 +646,9 @@ fn prompt_cache_marks_the_system_block_and_the_tail() {
 }
 
 #[test]
-fn prompt_cache_sends_no_system_block_when_the_system_is_empty() {
+fn provider_cache_sends_no_system_block_when_the_system_is_empty() {
     let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
-    p.prompt_cache = true;
+    p.caching = Caching::ProviderCache;
     let b = p.body(&[json!({"role": "user", "content": "hi"})], None);
     assert!(b.get("system").is_none(), "{b}");
     assert_eq!(b["cache_control"], json!({"type": "ephemeral"}));
@@ -617,16 +775,17 @@ async fn the_usage_verb_returns_the_counts_and_reset_zeroes_them() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reflect_carries_the_usage_and_the_cache_flag() {
+async fn reflect_carries_the_usage_and_the_caching_mode() {
     let tmp = TempDir::new().unwrap();
     let kernel = mk_with(
         &tmp,
         "http://unused.test/v1/messages",
-        json!({"prompt_cache": true}),
+        json!({"caching": "provider_cache"}),
     )
     .await;
     let r = call(&kernel, "a1", json!({"type": "reflect"})).await;
-    assert_eq!(r["prompt_cache"], json!(true));
+    assert_eq!(r["caching"], json!("provider_cache"));
+    assert!(r.get("prompt_cache").is_none(), "{r}");
     assert!(r["usage"]["prompt_tokens"].is_number(), "{r}");
     assert!(r["usage"]["saved_tokens"].is_number(), "{r}");
 }
@@ -656,13 +815,28 @@ async fn deleting_an_agent_drops_its_counts() {
 }
 
 #[test]
-fn the_record_refuses_a_bad_cache_flag_or_price() {
+fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
     let check = |meta: Value| validate(meta.as_object().unwrap(), &rec(json!({})));
-    assert_eq!(check(json!({"prompt_cache": true})), None);
+    assert_eq!(check(json!({"caching": "provider_cache"})), None);
+    assert_eq!(check(json!({"caching": "none"})), None);
+    assert_eq!(check(json!({"cache_primer_until": 12})), None);
     assert_eq!(check(json!({"price_input_per_mtok": 3})), None);
     assert_eq!(
-        check(json!({"prompt_cache": "yes"})).as_deref(),
-        Some("prompt_cache must be a boolean")
+        check(json!({"caching": "always"})).as_deref(),
+        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
+    );
+    assert_eq!(
+        check(json!({"caching": true})).as_deref(),
+        Some("caching=True is not one of the legal values: none, cleanup, provider_cache")
+    );
+    assert_eq!(
+        check(json!({"cache_primer_until": 0})).as_deref(),
+        Some("cache_primer_until=0 must be a row id (a positive int)")
+    );
+    assert_eq!(
+        check(json!({"prompt_cache": true})),
+        None,
+        "retired: an unknown key is not this backend's to refuse"
     );
     assert!(check(json!({"price_output_per_mtok": "x"}))
         .unwrap()
@@ -679,6 +853,7 @@ fn the_record_refuses_a_bad_cache_flag_or_price() {
         .iter()
         .filter_map(|f| f["name"].as_str())
         .collect();
-    assert!(names.contains(&"prompt_cache"));
+    assert!(names.contains(&"caching") && names.contains(&"cache_primer_until"));
+    assert!(!names.contains(&"prompt_cache"));
     assert!(names.contains(&"price_input_per_mtok") && names.contains(&"price_output_per_mtok"));
 }

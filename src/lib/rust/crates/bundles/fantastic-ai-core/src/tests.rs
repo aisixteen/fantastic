@@ -205,6 +205,7 @@ fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
 const CFG: BackendConfig = BackendConfig {
     name: "mock_backend",
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: false,
 };
 
 #[async_trait]
@@ -2158,7 +2159,15 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     let state = crate::state::state_for(&backend);
     let (messages, _store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "hi",
+            &kernel,
+            "probe",
+            None,
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -3205,7 +3214,15 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     .expect("store append");
     let (messages, store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "hi",
+            &kernel,
+            "probe",
+            None,
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -4248,7 +4265,15 @@ async fn a_fold_projection_over_budget_writes_folds() {
     let state = crate::state::state_for(&backend);
     let (messages, store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys")),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "next",
+            &kernel,
+            "cli",
+            Some("sys"),
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -4335,6 +4360,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
                 &kernel,
                 "cli",
                 Some("sys"),
+                crate::caching::Caching::Cleanup,
             ),
         )
         .await
@@ -5762,6 +5788,12 @@ mod fold_anchors;
 /// The operator's `context_fold` — a range of the view folded into one fold row.
 #[path = "tests_context_fold.rs"]
 mod context_fold;
+
+/// The record's `caching` modes: `cleanup` trims the view, `none` and `provider_cache`
+/// keep it append-only, `provider_cache` flags the primer and the last fold, and the
+/// primer pins its prefix against `context_fold`.
+#[path = "tests_caching.rs"]
+mod caching_modes;
 
 /// Per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the

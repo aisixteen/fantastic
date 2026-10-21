@@ -49,7 +49,15 @@ async fn messages(kernel: &Arc<Kernel>, agent: &AgentId) -> Vec<Value> {
     let state = crate::state::state_for(agent);
     let (msgs, _) = as_agent(
         agent.clone(),
-        crate::assembly::assemble_messages(agent, &state, "next", kernel, "c", Some("sys")),
+        crate::assembly::assemble_messages(
+            agent,
+            &state,
+            "next",
+            kernel,
+            "c",
+            Some("sys"),
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("assemble");

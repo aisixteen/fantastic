@@ -412,6 +412,21 @@ pub async fn context_fold(
             "fold once the running turn has answered",
         ));
     };
+    // The view is rendered as the record's caching mode renders it, so the fold
+    // persists exactly the view the next turn will send. A primer pins its prefix.
+    let meta = agent_meta(agent_id, kernel);
+    let (caching, primer) = match crate::caching::settings(&meta) {
+        Ok(s) => s,
+        Err(why) => {
+            let mut v = refusal_hint(
+                BAD_ARG,
+                format!("{verb}: {why}"),
+                "set caching to none, cleanup or provider_cache",
+            );
+            with(&mut v, "arg", Value::from("caching"));
+            return Ok(v);
+        }
+    };
     // `from` / `to`: absent or null is the default; anything else must be an id.
     let id_arg = |key: &str| -> Result<Option<i64>, Value> {
         match payload.get(key).filter(|v| !v.is_null()) {
@@ -434,7 +449,7 @@ pub async fn context_fold(
     let rows = load_history(agent_id, kernel, false).await?;
     let anchors = anchors_of(&crate::memory::head(agent_id, kernel).await?);
     let listed = listed_entries(&rows, load_view(agent_id, kernel).await?.as_ref());
-    let view = render_history(&rows, listed.as_deref());
+    let view = render_history(&rows, listed.as_deref(), caching.cleans());
     let pos_of = |id: i64| view.iter().position(|r| row_id(&rows[r.idx]) == Some(id));
     let empty = |arg: &str, why: &str| {
         let mut v = refusal_hint(
@@ -469,6 +484,24 @@ pub async fn context_fold(
     };
     if from_p > to_p {
         return Ok(empty("to", "to comes before from"));
+    }
+    // THE PRIMER IS PINNED: the cached prefix ends at its row, so a range that starts at
+    // or before that row (a range before it, or one that includes it) would move bytes
+    // the provider has cached. A primer not in this view pins nothing.
+    if let Some(pp) = primer.and_then(pos_of) {
+        if from_p <= pp {
+            let mut v = refusal_hint(
+                BAD_ARG,
+                format!(
+                    "{verb}: the primer is pinned — row {} ends the cached prefix, so a range \
+                     may not start at or before it",
+                    primer.unwrap_or_default()
+                ),
+                "fold rows after the primer; the primer and the rows before it stay as they are",
+            );
+            with(&mut v, "arg", Value::from("from"));
+            return Ok(v);
+        }
     }
     let span: Vec<usize> = view[from_p..=to_p].iter().map(|r| r.idx).collect();
     if span.iter().any(|&i| is_boundary(&rows[i])) {
@@ -515,7 +548,6 @@ pub async fn context_fold(
         }
         ids.push(kept_entry(&rows[r.idx], &r.msg, &r.res));
     }
-    let meta = agent_meta(agent_id, kernel);
     save_view(
         agent_id,
         kernel,

@@ -41,7 +41,7 @@ use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
 };
 use fantastic_ai_core::schema::{self, Field};
-use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
 use fantastic_bundle::{py_repr_value, py_str};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -94,6 +94,7 @@ impl FoundationModelsBackendBundle {
         BackendConfig {
             name: NAME,
             model_window: self.engine.context_size(),
+            provider_cache: false,
         }
     }
 
@@ -252,6 +253,7 @@ impl Bundle for FoundationModelsBackendBundle {
             meta,
             record,
         )
+        .or_else(|| caching::refusal(meta, record, NAME, self.cfg().provider_cache))
     }
 
     fn record_schema(&self) -> Option<Value> {

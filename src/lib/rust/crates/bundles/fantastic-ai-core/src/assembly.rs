@@ -14,6 +14,7 @@
 //! wording because it is "tuned" would quietly void every emergence result taken
 //! afterwards.
 
+use crate::caching::Caching;
 use crate::history_view::{dedupe_repeat_bodies, dedupe_stale_reads, drop_read_docs};
 use crate::memory::{load_history, MemoryStoreError};
 use crate::prompt_file::PromptFileError;
@@ -504,6 +505,7 @@ pub async fn assemble_messages(
     kernel: &Arc<Kernel>,
     _client_id: &str,
     system_prompt: Option<&str>,
+    caching: Caching,
 ) -> Result<(Vec<Value>, usize), BlockFail> {
     let system_content = system_content(self_id, kernel, system_prompt).await?;
     let mut messages = vec![json!({"role": "system", "content": system_content})];
@@ -536,7 +538,7 @@ pub async fn assemble_messages(
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
     messages.extend(
-        render_history(&store, listed.as_deref())
+        render_history(&store, listed.as_deref(), caching.cleans())
             .into_iter()
             .map(|r| r.msg),
     );
@@ -603,17 +605,25 @@ pub fn listed_entries(
 /// resolution, then the rows after the newest of them with the trimmers applied;
 /// with no listed array, the whole store with the trimmers applied. Shared with
 /// `context_fold`, which persists exactly what this renders.
-pub fn render_history(store: &[Value], listed: Option<&[ViewEntry]>) -> Vec<Rendered> {
+///
+/// `cleanup` is the record's `caching` cleanup (see [`crate::caching::Caching::cleans`]).
+/// Off, the view is append-only: no trimmer runs, and a trimmed body an earlier
+/// cleanup left on a listed entry is ignored, so every row renders as stored.
+pub fn render_history(
+    store: &[Value],
+    listed: Option<&[ViewEntry]>,
+    cleanup: bool,
+) -> Vec<Rendered> {
     let Some(entries) = listed else {
-        return trim_tail(store, 0);
+        return trim_tail(store, 0, cleanup);
     };
     let mut out: Vec<Rendered> = entries
         .iter()
         .map(|e| {
             let row = &store[e.idx];
             let msg = match &e.content {
-                Some(c) => crate::history_view::with_content(row, c.clone()),
-                None => crate::view::apply_res(row, &e.res),
+                Some(c) if cleanup => crate::history_view::with_content(row, c.clone()),
+                _ => crate::view::apply_res(row, &e.res),
             };
             Rendered {
                 idx: e.idx,
@@ -623,13 +633,26 @@ pub fn render_history(store: &[Value], listed: Option<&[ViewEntry]>) -> Vec<Rend
         })
         .collect();
     let newest = entries.iter().map(|e| e.idx).max().unwrap_or(0);
-    out.extend(trim_tail(store, newest + 1));
+    out.extend(trim_tail(store, newest + 1, cleanup));
     out
 }
 
-/// The rows of `store` from `from` on, through the three trimmers, each with its
-/// store index. A trimmed row keeps its id; a dropped row is simply absent.
-fn trim_tail(store: &[Value], from: usize) -> Vec<Rendered> {
+/// The rows of `store` from `from` on, each with its store index. With `cleanup`
+/// they run through the three trimmers, and a trimmed row keeps its id while a
+/// dropped row is simply absent. Without it, every row is kept as stored, in order.
+fn trim_tail(store: &[Value], from: usize, cleanup: bool) -> Vec<Rendered> {
+    if !cleanup {
+        return store
+            .iter()
+            .enumerate()
+            .skip(from)
+            .map(|(idx, row)| Rendered {
+                idx,
+                res: crate::view::res_of(row).to_string(),
+                msg: row.clone(),
+            })
+            .collect();
+    }
     let idx: HashMap<i64, usize> = store
         .iter()
         .enumerate()
