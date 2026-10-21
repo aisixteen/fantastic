@@ -32,7 +32,8 @@ import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
 import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
-import { DRAG_MIME, decodeDrag, layoutAround } from "../files/drag.ts";
+import { DRAG_MIME, decodeDrag, dropPlan, worldAt } from "../files/drag.ts";
+import { mountTreeSidebar } from "./tree_sidebar.ts";
 import { fileGrant, onStateFrame } from "../files/file_bridge.ts";
 import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
 import { previewView } from "../preview/preview_view.ts";
@@ -581,13 +582,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return false;
   };
 
-  const screenToWorld = (clientX: number, clientY: number): { x: number; y: number } => {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: (clientX - rect.left - view.ox) / view.z,
-      y: (clientY - rect.top - view.oy) / view.z,
-    };
-  };
+  const screenToWorld = (clientX: number, clientY: number): { x: number; y: number } => worldAt(clientX, clientY, canvas.getBoundingClientRect(), view);
 
   // ─── themes: where the cells sit (`layout.ts`) ────────────────────
   // A cell's rect is in its view's layout for the theme in use — never on the
@@ -1957,14 +1952,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     e.preventDefault();
     const got = decodeDrag(e.dataTransfer.getData(DRAG_MIME));
     if ("error" in got) return toast(`✕ ${got.error}`);
-    // several items sit around the drop point, one slot each (no two overlap)
-    const spots = layoutAround(screenToWorld(e.clientX, e.clientY), got.items.length, DROP_SLOT);
+    // several items sit around the drop point, one slot each (no two overlap): the same
+    // plan for a drag from the tree cell and from the sidebar (#148)
+    const plan = dropPlan(got.items, e.clientX, e.clientY, canvas.getBoundingClientRect(), view, DROP_SLOT);
     void (async (): Promise<void> => {
-      for (const [i, it] of got.items.entries()) {
-        const at = spots[i]!;
+      for (const { item: it, x, y } of plan) {
         const what = it.kind === "agent" ? { agent: it.id } : { path: it.path };
         try {
-          const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x: at.x, y: at.y } as unknown as Payload }]))[0]?.result as Rec | null;
+          const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x, y } as unknown as Payload }]))[0]?.result as Rec | null;
           const err = r?.["error"];
           if (typeof err === "string") toast(`✕ ${err}`);
         } catch (err) {
@@ -1978,6 +1973,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if ((e.target as Element).closest(".agent-frame")) return;
     openSelector(e.clientX, e.clientY);
   });
+  // THE CANVAS'S OWN SIDEBAR (#148): the file tree beside the zoomed world, never in it,
+  // so a zoom or a pan leaves it where it is. Its rows drag onto `#canvas` like the tree cell's.
+  // Mounted after `setFilesDeps` (the tree reads the canvas through it).
+  mountTreeSidebar({ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768 });
   // ESC LEAVES FULL VIEW (owner 2026-10-08: nothing floats, so this is the way
   // back): to the canvas's root view — unless the keyboard is in an editor (a
   // terminal, a text field), whose Esc is its own

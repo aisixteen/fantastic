@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
 import { grantViewLists, registerCanvas, VIEW_VERBS } from "../src/bundles/canvas/canvas_agent.ts";
-import { hiddenOf, rectsOf, registerLayout, tabWidth, themeOf } from "../src/bundles/canvas/layout.ts";
+import { hiddenOf, prune, rectsOf, registerLayout, tabWidth, themeOf } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode, setHostRecords, setHostSync } from "../src/bundles/canvas/host_views.ts";
 import { DRAG_MIME, decodeDrag, encodeDrag, layoutAround, rangeOf, resolveTarget, toggled } from "../src/bundles/files/drag.ts";
 import type { Look } from "../src/bundles/files/drag.ts";
@@ -412,4 +412,17 @@ test("a rooted tree's watch events: a change re-lists the folder it is in, the r
   assert.deepEqual(m.rows().map((x) => x.path), ["docs", "docs/a.md"]);
   // the root deleted: its own watch ends
   assert.deepEqual(m.changed({ path: "docs", kind: "deleted" }), [{ kind: "unwatch", path: "docs" }]);
+});
+
+test("a file dropped at x, y is laid out there: its rect is the drop's spot, not a free one", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = page(b);
+  // the page's refresh runs on every state change, and prunes the rects of cells it does not hold yet
+  // (canvas.ts refreshView: `prune` with the live cells): a write to the layout must not lose the new cell's rect
+  k.addStateSubscriber(() => prune(k, "view_root", new Set([...k.get("view_root")!.children.values()].map((c) => c.id))));
+  const r = await call(k, { type: "open", path: "docs/a.md", x: 2140, y: 1118 });
+  const cell = String(r["cell"]);
+  const theme = themeOf(k, "view_root", tabWidth());
+  assert.deepEqual(rectsOf(k, "view_root", theme)[cell], { x: 2140, y: 1118, width: 520, height: 360 });
 });

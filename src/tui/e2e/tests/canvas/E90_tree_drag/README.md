@@ -15,4 +15,9 @@ on `#canvas`.
 5. `src/one.txt` dragged in: a preview pinned to it shows "one", and "two" written
    on disk shows in it;
 6. `docs` dragged in: a file tree rooted at it lists `docs/a.md`, not `src`;
-7. the cells this probe made are removed; no page error is logged.
+7. the cells this probe made are removed; no page error is logged;
+8. the canvas's own sidebar (#148, the file tree fixed beside the canvas): zoomed
+   far out (`wheel`), it stays at the viewport's left edge; its `reveal` runs
+   through the root view's `tree` verb; both cells hidden again; the agent row
+   dragged from the sidebar brings its cell back centred on the drop point; the
+   file row dragged from it opens a preview centred on its drop point.

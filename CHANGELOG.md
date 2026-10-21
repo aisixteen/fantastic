@@ -7,6 +7,16 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The canvas's own file tree sidebar (#148): the file tree fused into the canvas page,
+  fixed to the viewport's left edge and beside the zoomed world, so a zoom or a pan
+  never moves it. Zoom far out and drag files, folders and agents from it onto the
+  canvas: each lands at the drop point, at any zoom (the drop is converted to world
+  coordinates). The sidebar and the tree cell draw and drag with one panel
+  (`files/tree_panel.ts`); the tree cell stays as the extra kind, a folder dropped on
+  the canvas opens a tree rooted at it. A `‹`/`›` button collapses the sidebar, and its
+  open state and tree state are kept per canvas across a reload. Its verbs are reached
+  through the root view: `tree {verb, path | agent}`. A narrow screen opens it as an
+  overlay, when asked.
 - File and folder agents: thin view agents over the file bridge (#150). A file or a
   folder is an agent shipped in the `file_bridge` bundle, scoped to one path.
   `open_view {kind: file|folder, path}` on a `file_bridge` returns the view of that
@@ -200,6 +210,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- A file dropped on the canvas (#134) opens its preview where it was dropped: the
+  layout rect was written before the preview cell existed, and the page's refresh
+  pruned it, so the preview landed on a free spot near the centre. The rect is written
+  after the cell (`openFile`, `openDir`).
 - S4: the desktop app's shell flag (`__FANTASTIC_SHELL__`) reaches the canvas
   on macOS and Linux too: it is set in every frame, so the canvas (a frame of
   the Home page) knows its webview and backdrop; only the top frame gets

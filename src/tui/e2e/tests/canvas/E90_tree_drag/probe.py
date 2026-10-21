@@ -15,6 +15,11 @@ f) the folder `docs` dragged in: a file tree rooted at it lists `docs/a.md` and
    nothing above `docs`;
 g) the cells this probe made are removed; no page error is logged.
 
+Then the canvas's own sidebar (#148), the file tree fixed beside the canvas:
+h) zoomed far out, the sidebar stays where it was; both cells are hidden again,
+   the agent row dragged from the SIDEBAR brings its cell back at the drop point,
+   and a file row dragged from it opens a preview at its drop point.
+
 Every page call below is `host_call` to `<page guid>|<cell>` or to `view_root`,
 the way an AI reaches a cell."""
 
@@ -70,6 +75,26 @@ def click_mod(src_expr: str) -> str:
     return (
         f"(()=>{{const el={src_expr}; const m=/Mac|iPhone|iPad/.test(navigator.platform);"
         " el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:!m,metaKey:m}));})()"
+    )
+
+
+SIDE = "document.querySelector('.tree-sidebar')"
+# the zoom of the world, read off its transform (the canvas writes `scale(z)`)
+SCALE = "parseFloat((/scale\\(([\\d.]+)\\)/.exec(document.querySelector('.canvas-world').style.transform)||[0,'1'])[1])"
+
+
+def side_row(sel: str) -> str:
+    """A row of the canvas's own sidebar, by its CSS selector (#148)."""
+    return f"document.querySelector('.tree-sidebar .ft-tree')?.querySelector('{sel}')"
+
+
+def placed(expr: str, x: int, y: int) -> str:
+    """How far the element `expr` is from where a drop at screen (x, y) puts its corner, as [dx, dy] (or null).
+    A drop centres its spot on the point (`layoutAround`): the spot is the canvas's drop slot (520 x 560
+    world units, `canvas.ts` DROP_SLOT), so the corner is the point less half a slot, at the zoom in use."""
+    return (
+        f"(()=>{{const e={expr}; if(!e) return null; const z={SCALE}; const b=e.getBoundingClientRect();"
+        f" return [b.left-({x}-260*z), b.top-({y}-280*z)];}})()"
     )
 
 
@@ -145,6 +170,19 @@ def main() -> bool:
                     await asyncio.sleep(0.5)
                 return False
 
+            async def side_reveal(what: dict, secs_: float = 10) -> bool:
+                """Show a folder (or an agent's) in the canvas's sidebar, through the root view's `tree` verb."""
+                end = asyncio.get_event_loop().time() + secs_
+                while asyncio.get_event_loop().time() < end:
+                    a = await view({"type": "tree", "verb": "reveal", **what})
+                    reveal_log.append({"sidebar": what, "reply": a})
+                    if "revealed" in a:
+                        return True
+                    if a.get("reason") != "not_found":
+                        return False
+                    await asyncio.sleep(0.5)
+                return False
+
             async def last_tick(cid: str) -> int:
                 text = await pg.js(f"({term_text(cid)})")
                 m = TICK.findall(text or "")
@@ -197,6 +235,38 @@ def main() -> bool:
             info["f_tree"] = tree_root
             src_row = row(tree_root, '.ft-row[data-path="src"]')
             r["f2 it shows nothing above docs"] = not await pg.js(f"!!{src_row}")
+            # h) the canvas's own sidebar (#148): zoomed far out, it stays put; its rows drag onto the canvas
+            await pg.js(
+                "(()=>{const c=document.getElementById('canvas'); for(let i=0;i<30;i++) c.dispatchEvent(new WheelEvent('wheel',{deltaY:100,bubbles:true,cancelable:true,clientX:760,clientY:420}));})()"
+            )
+            r["h1 zoomed far out, the sidebar stays put"] = bool(await pg.until(f"{SCALE} < 0.3 && {SIDE}?.getBoundingClientRect().left === 0", 20))
+            agent_sel = f'.ft-row[data-agent="{BACKEND_A}"]'
+            file_sel = '.ft-row[data-path="src/one.txt"]'
+            r["h2 the sidebar lists the agent folder"] = bool(await side_reveal({"agent": BACKEND_A}) and await pg.until(f"!!{side_row(agent_sel)}", 15))
+            await view({"type": "hide", "id": CELL_A})
+            await view({"type": "hide", "id": CELL_B})
+            r["h3 both cells are hidden again"] = bool(await pg.until(f"!{frame(CELL_A)} && !{frame(CELL_B)}", 15))
+            info["h_drop"] = await pg.js(drag_drop(side_row(agent_sel), 760, 420))
+            r["h4 the agent dragged from the sidebar comes back"] = info["h_drop"] is True and bool(await pg.until(f"!!{frame(CELL_A)}", 20))
+            c_agent = await pg.js(placed(frame(CELL_A), 760, 420))
+            info["h_agent_corner_off"] = c_agent
+            r["h5 its cell lands at the drop point, zoomed far out"] = bool(c_agent) and abs(c_agent[0]) <= 30 and abs(c_agent[1]) <= 30
+            r["h6 the other cell stays hidden"] = bool(await pg.js(f"!{frame(CELL_B)}"))
+            before = set(await pg.js("[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"]')].map(f=>f.dataset.id)") or [])
+            await side_reveal({"path": "src/one.txt"})
+            r["h7 the file shows in the sidebar"] = bool(await pg.until(f"!!{side_row(file_sel)}", 15))
+            # the file goes to an empty spot of the world (a cell already there would push the new one aside)
+            fx, fy = await pg.js(
+                "(()=>{const m=/translate\\(([-\\d.]+)px, ([-\\d.]+)px\\) scale\\(([\\d.]+)\\)/.exec(document.querySelector('.canvas-world').style.transform); const z=+m[3]; return [Math.round(+m[1]+z*2400), Math.round(+m[2]+z*1400)];})()"
+            )
+            info["h_file_at"] = [fx, fy]
+            info["h_file"] = await pg.js(drag_drop(side_row(file_sel), fx, fy))
+            fresh = "[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"]')].map(f=>f.dataset.id).filter(i=>!%s.includes(i))" % json.dumps(sorted(before))
+            r["h8 a file dragged from the sidebar opens a preview"] = bool(await pg.until(f"({fresh}).length === 1", 20))
+            c_file = await pg.js(placed(f"document.querySelector('.agent-frame[data-id=\"'+({fresh})[0]+'\"]')", fx, fy))
+            info["h_file_corner_off"] = c_file
+            r["h9 the preview lands at the drop point, zoomed far out"] = bool(c_file) and abs(c_file[0]) <= 30 and abs(c_file[1]) <= 30
+
             # g) the cells this probe made are removed; no page error
             made = await pg.js("[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"], .agent-frame[data-id^=\"files_\"]')].map(f=>f.dataset.id)")
             for cid in [TREE, CELL_A, CELL_B, *made]:
