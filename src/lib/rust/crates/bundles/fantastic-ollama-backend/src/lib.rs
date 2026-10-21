@@ -204,6 +204,7 @@ impl Provider for OllamaProvider {
             return Err(ProviderError {
                 message: format!("{error} (status code: {code})"),
                 kind: "ResponseError",
+                transport: false,
             });
         }
 

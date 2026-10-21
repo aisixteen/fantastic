@@ -191,6 +191,7 @@ impl SessionTable {
                     // python raises its own `KvSlotsFull(RuntimeError)`, and a
                     // raise renders as `<class name>: <message>`.
                     kind: "KvSlotsFull",
+                    transport: false,
                 });
             }
             if !self.live.is_empty() {
@@ -545,31 +546,34 @@ fn classify(
     connect_timeout: f64,
     read_clock: f64,
 ) -> ProviderError {
-    ProviderError::raised(if connect && timeout {
-        format!(
+    // every branch here is the LINK failing, not the model or the request (#198)
+    if connect && timeout {
+        ProviderError::transport(format!(
             "{NAME}: no answer from {endpoint} within connect_timeout={}s — the \
              instance is STOPPED (its SYNs are dropped), or the tunnel/port is wrong",
             py_g(connect_timeout)
-        )
+        ))
     } else if connect {
-        format!(
+        ProviderError::transport(format!(
             "{NAME}: {endpoint} refused the connection — the host is up but vLLM is \
              not listening yet (it loads for ~75 s after boot), or the tunnel in front \
              of it is down"
-        )
+        ))
     } else if timeout {
         // the same stall every stream backend reports (#177)
-        Stalled {
-            idle_secs: read_clock,
-        }
-        .error(NAME, endpoint)
-        .message
+        ProviderError::transport(
+            Stalled {
+                idle_secs: read_clock,
+            }
+            .error(NAME, endpoint)
+            .message,
+        )
     } else {
-        format!(
+        ProviderError::transport(format!(
             "{NAME}: {endpoint} dropped the stream mid-answer — vLLM died or \
              restarted; this turn is NOT complete"
-        )
-    })
+        ))
+    }
 }
 
 #[async_trait]
@@ -657,6 +661,14 @@ impl Provider for VllmProvider {
             } else {
                 String::new()
             };
+            // a transient 5xx is the LINK failing, not the request (#198)
+            if matches!(status.as_u16(), 502..=504) {
+                return Err(ProviderError::transport(format!(
+                    "{NAME}: {} answered HTTP {}{why}: {detail}",
+                    self.endpoint,
+                    status.as_u16()
+                )));
+            }
             return Err(ProviderError::raised(format!(
                 "{NAME}: {} answered HTTP {}{why}: {detail}",
                 self.endpoint,
@@ -812,6 +824,7 @@ impl SseState {
         let obj: Value = serde_json::from_str(data).map_err(|e| ProviderError {
             message: e.to_string(),
             kind: "JSONDecodeError",
+            transport: false,
         })?;
         // `usage.prompt_tokens` and a `length` finish → `max_tokens`
         fantastic_ai_core::think::note_openai_usage(&obj, &self.report);
@@ -913,7 +926,7 @@ impl SseState {
             }
         }
         if !self.saw_finish {
-            out.push_back(Err(ProviderError::raised(format!(
+            out.push_back(Err(ProviderError::transport(format!(
                 "{NAME}: the stream from {} ended without a finish_reason — vLLM died \
                  mid-answer; this turn is NOT complete",
                 self.endpoint

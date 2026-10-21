@@ -39,6 +39,8 @@ pub struct ProviderError {
     /// The python exception class a raise renders as (`RuntimeError`, or
     /// `ValueError` for a record field the backend cannot run without).
     pub kind: &'static str,
+    /// true when the failure is the LINK, not the model or the request — a retry may succeed (#198)
+    pub transport: bool,
 }
 
 impl ProviderError {
@@ -47,6 +49,17 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: "RuntimeError",
+            transport: false,
+        }
+    }
+
+    /// A failure of the LINK (connect, stall, dropped stream, a transient 5xx):
+    /// the request itself was fine, so a retry may succeed (#198).
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: "RuntimeError",
+            transport: true,
         }
     }
 
@@ -56,6 +69,7 @@ impl ProviderError {
         Self {
             message: message.into(),
             kind: "ValueError",
+            transport: false,
         }
     }
 }

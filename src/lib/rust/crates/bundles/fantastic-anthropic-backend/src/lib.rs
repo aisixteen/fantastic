@@ -533,6 +533,7 @@ impl SseState {
         let evt: Value = serde_json::from_str(data).map_err(|e| ProviderError {
             message: e.to_string(),
             kind: "JSONDecodeError",
+            transport: false,
         })?;
         match evt.get("type").and_then(Value::as_str).unwrap_or("") {
             "message_start" => {
