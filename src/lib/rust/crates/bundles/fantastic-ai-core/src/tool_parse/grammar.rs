@@ -291,11 +291,12 @@ fn track(text: &str, from: usize, to: usize, open: &mut Vec<OpenTag>) {
 /// and reported by [`crate::call_check`] until it is written at the top level. A
 /// tag closed before the call (`<b>x</b> <call …>`) wraps nothing.
 pub fn envelopes_in(text: &str) -> Vec<Envelope> {
-    let masked = code_masked(text);
+    let spans = envelopes(text);
+    let masked = code_masked(&blank_envelopes(text, &spans));
     let mut out = Vec::new();
     let mut open: Vec<OpenTag> = Vec::new();
     let mut at = 0usize;
-    for (start, body, end) in envelopes(text) {
+    for (start, body, end) in spans {
         track(&masked, at, start, &mut open);
         out.push(Envelope {
             start,
@@ -305,6 +306,22 @@ pub fn envelopes_in(text: &str) -> Vec<Envelope> {
         });
         at = end.map_or(text.len(), |e| e + CLOSE.len());
     }
+    out
+}
+
+/// `text` with every envelope blanked, its newlines kept. Code is masked over the
+/// prose only, as the stream splitter reads it: a backtick inside a call's argument
+/// must not open a code span that runs on past the call and hides a wrapper after it.
+fn blank_envelopes(text: &str, spans: &[(usize, usize, Option<usize>)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0usize;
+    for &(start, _, end) in spans {
+        let stop = end.map_or(text.len(), |e| e + CLOSE.len());
+        out.push_str(&text[at..start]);
+        out.push_str(&blank(&text[start..stop]));
+        at = stop;
+    }
+    out.push_str(&text[at..]);
     out
 }
 

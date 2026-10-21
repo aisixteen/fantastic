@@ -780,3 +780,24 @@ async fn deltas_never_reach_the_state_stream() {
         "{on_stream:?}"
     );
 }
+
+/// #188 review: a backtick inside a call's argument must not open a code span that
+/// hides the wrapper after it. The splitter masks prose only, so the wrapped call
+/// ends not ok and is not matched, the same as the scanner reads it.
+#[test]
+fn a_backtick_in_a_call_argument_does_not_hide_a_wrapper_after_it() {
+    let text = format!(
+        "<call name=\"send\"><target_id>a</target_id><type>run</type><cmd>echo `x</cmd></call>\n\
+         <tool_call>`y` {DONE}</tool_call>"
+    );
+    let (ev, sp) = run(&text, 4);
+    let oks: Vec<Option<bool>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            PartEvent::End(p, ok) if p.kind == PartKind::Call => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(oks, vec![Some(true), Some(false)], "{ev:?}");
+    assert_eq!(sp.closed_calls.len(), 1, "{:?}", sp.closed_calls);
+}

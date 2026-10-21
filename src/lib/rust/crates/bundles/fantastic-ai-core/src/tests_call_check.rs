@@ -385,3 +385,28 @@ fn prose_angle_brackets_that_are_not_tags_do_not_wrap_a_call() {
 fn a_code_span_is_not_an_open_wrapper_in_the_report() {
     assert!(check("returns `Vec<String>` and nothing else", 0).is_empty());
 }
+
+/// #188 review: a backtick inside a call's argument must not open a code span that
+/// runs on past the call and hides the wrapper after it. Code is masked over the
+/// prose only (as the stream splitter reads it), so the wrapped call is refused.
+#[test]
+fn a_backtick_inside_a_call_argument_does_not_hide_a_wrapper_after_it() {
+    let answer = format!(
+        "<call name=\"send\"><target_id>a</target_id><type>run</type><cmd>echo `x</cmd></call>\n\
+         <tool_call>`y` {SEND}</tool_call>"
+    );
+    assert_eq!(extract_tool_calls(&answer).len(), 1);
+    let r = check(&answer, 1);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(
+        r[0].starts_with("[malformed call — nothing ran] line 2, col 1:\n  <tool_call>"),
+        "{}",
+        r[0]
+    );
+    assert!(
+        r[0].contains(&format!("  ^~~~~~~~~~~ {DROP}\n")),
+        "{}",
+        r[0]
+    );
+    assert!(r[0].ends_with("The other call of this answer ran — its reply is in this batch; do not write it again."), "{}", r[0]);
+}
