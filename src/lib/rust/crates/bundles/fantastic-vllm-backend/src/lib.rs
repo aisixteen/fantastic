@@ -763,6 +763,10 @@ struct SseState {
     /// `Some(bound)` on a MAIN turn (the record's `max_tokens`), where a cut
     /// is a failure; `None` on a bounded side call, where it is the answer.
     main_turn_max: Option<i64>,
+    /// OpenAI-style servers send the model's calls as `delta.tool_calls`
+    /// pieces (#186): collected here, rendered as call text when the stream
+    /// ends, so a native call never vanishes into a dead turn.
+    tool_calls: Vec<(String, String)>,
 }
 
 impl SseState {
@@ -782,6 +786,7 @@ impl SseState {
             endpoint,
             timeouts,
             main_turn_max,
+            tool_calls: Vec::new(),
         }
     }
 
@@ -843,6 +848,29 @@ impl SseState {
                 delta["reasoning_content"] = r;
             }
         }
+        // `delta.tool_calls`: `{index, function: {name?, arguments?}}` pieces,
+        // `name` arriving once and `arguments` as a JSON string in chunks (#186).
+        if let Some(pieces) = delta.get("tool_calls").and_then(Value::as_array) {
+            for piece in pieces {
+                let idx = piece
+                    .get("index")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .max(0) as usize;
+                if self.tool_calls.len() <= idx {
+                    self.tool_calls
+                        .resize(idx + 1, (String::new(), String::new()));
+                }
+                if let Some(f) = piece.get("function") {
+                    if let Some(name) = f.get("name").and_then(Value::as_str) {
+                        self.tool_calls[idx].0.push_str(name);
+                    }
+                    if let Some(args) = f.get("arguments").and_then(Value::as_str) {
+                        self.tool_calls[idx].1.push_str(args);
+                    }
+                }
+            }
+        }
         for piece in decode_openai_delta(&delta, &mut self.wrap) {
             out.push_back(Ok(ProviderEvent::Token(piece)));
         }
@@ -854,6 +882,35 @@ impl SseState {
     fn end(&mut self, out: &mut VecDeque<Result<ProviderEvent, ProviderError>>) {
         if let Some(m) = self.wrap.close_marker() {
             out.push_back(Ok(ProviderEvent::Token(m.to_string())));
+        }
+        // A native call the server parsed for us becomes fantastic call text,
+        // so the turn is not read as thinking-only (#186).
+        if !self.tool_calls.is_empty() {
+            let mut rendered: Vec<String> = Vec::new();
+            for (name, args) in &self.tool_calls {
+                match serde_json::from_str::<Value>(args) {
+                    Ok(Value::Object(map)) => {
+                        let body: String = map
+                            .iter()
+                            .map(|(k, v)| {
+                                let text = match v {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                format!("<{k}>{text}</{k}>")
+                            })
+                            .collect();
+                        rendered.push(format!("<call name=\"{name}\">{body}</call>"));
+                    }
+                    _ => out.push_back(Err(ProviderError::raised(format!(
+                        "{NAME}: the server sent a native tool call '{name}' whose \
+                         arguments are not a JSON object: {args}"
+                    )))),
+                }
+            }
+            if !rendered.is_empty() {
+                out.push_back(Ok(ProviderEvent::Token(rendered.join("\n"))));
+            }
         }
         if !self.saw_finish {
             out.push_back(Err(ProviderError::raised(format!(
