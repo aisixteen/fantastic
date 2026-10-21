@@ -57,6 +57,13 @@ pub const TRIGGER: f64 = 0.8;
 /// `SEND_TIMEOUT` (the hard ceiling per generation; releases the lock).
 pub const SEND_TIMEOUT_SECS: f64 = 180.0;
 
+/// The READ CLOCK on a provider stream, in seconds: the longest the endpoint may
+/// go without sending a byte (headers included) before the stream is judged
+/// stalled and the turn ends with an error row (#177). A record's
+/// `stream_idle_seconds` replaces it; it is a bound BETWEEN bytes, never a widened
+/// [`SEND_TIMEOUT_SECS`].
+pub const STREAM_IDLE_SECONDS: f64 = 60.0;
+
 /// The effective per-`send` ceiling: `FANTASTIC_AI_SEND_TIMEOUT` if set, else
 /// [`SEND_TIMEOUT_SECS`]. python `SEND_TIMEOUT = float(os.environ.get(
 /// "FANTASTIC_AI_SEND_TIMEOUT", "180"))`.

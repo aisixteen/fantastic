@@ -198,6 +198,18 @@ pub async fn on_cancel(
     let Some(entry) = crate::state::take_current_for_cancel(agent_id, task_id) else {
         return Ok(());
     };
+    close_stopped(agent_id, entry, kernel).await
+}
+
+/// Close out a turn that was STOPPED — by the kernel's cancel ([`on_cancel`]) or by
+/// `stop` — from its in-flight entry, which the caller has taken. The open parts
+/// abort, the turn keeps its incoming message and a `[stopped by …]` marker row,
+/// and `status` goes to `done` with `reason='cancelled'`.
+pub async fn close_stopped(
+    agent_id: &AgentId,
+    entry: CurrentEntry,
+    kernel: &Arc<Kernel>,
+) -> Result<(), BundleError> {
     let state = state_for(agent_id);
     let mut unsent: Vec<Part> = Vec::new();
     // HELD TO THE END OF THE HOOK: the doomed stream loop runs on another worker
@@ -296,6 +308,18 @@ pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         .map(|a| a.0)
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| "operator".to_string());
+    let pid = task_id
+        .parse::<i64>()
+        .expect("the in-flight task id is the kernel's TaskId number");
+    // The kernel's cancel first: its task walk runs `on_cancel`, which closes the
+    // turn (marker row, `status` done), and drops the dispatch with its stream.
+    // THE CAUSE OF A STOP THAT LEAVES A TURN GENERATING (#177): the walk finds the
+    // turn only by the task id it recorded, which is the id of its own dispatch row
+    // (`current_task()`). When that id is not in the kernel's task table the walk
+    // answers `{cancelled:false}` and runs no `on_cancel`, so nothing closes the
+    // turn. A reply-woken turn is not that case: its send is a dispatch row nested
+    // under the `deliver_reply` task, and the walk reaches it (pinned by
+    // `stop_reaches_a_reply_woken_turn`). The miss is named below, not dropped.
     if let Some(c) = state
         .current_meta
         .lock()
@@ -303,13 +327,72 @@ pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         .as_mut()
         .filter(|c| c.task_id.as_deref() == Some(task_id.as_str()))
     {
-        c.stopped_by = Some(who);
+        c.stopped_by = Some(who.clone());
     }
-    let pid = task_id
-        .parse::<i64>()
-        .expect("the in-flight task id is the kernel's TaskId number");
-    kernel.cancel_task(&TaskId(pid)).await;
+    let reached = kernel.cancel_task(&TaskId(pid)).await;
+    // STOP REACHES THE TURN ITSELF (#177). When the task walk did not reach the
+    // generation, the turn is still in flight: stop closes it here, so `status`
+    // reports `generating: false` the moment this returns, and fires the
+    // generation's own abort, which drops its provider stream. Before this, a stop
+    // the kernel did not deliver left the turn and its stream running while `stop`
+    // answered `stopped: true`.
+    if reached["cancelled"] != json!(true) {
+        // The kernel's answer is named, not dropped: `{cancelled:false}` means the
+        // task id the turn recorded is not in the kernel's task table.
+        println!(
+            "  [stop] {} kernel cancel did not reach task {pid}: {reached}",
+            agent_id.0
+        );
+    }
+    if let Some(mut entry) = crate::state::take_current_for_cancel(agent_id, &task_id) {
+        entry.stopped_by = Some(who);
+        entry.abort.notify_one();
+        if let Err(e) = close_stopped(agent_id, entry, kernel).await {
+            return json!({"stopped": true, "error": e.to_string()});
+        }
+    }
     json!({"stopped": true})
+}
+
+/// A turn that ends in a failure stores its own rows (#177): the incoming message
+/// and an error row naming why, so the model reads the failure on its next turn and
+/// the operator sees it in the history. Nothing of the turn was dispatched.
+async fn store_failed_turn(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    text: &str,
+    notice: bool,
+    reason: &str,
+) -> Result<(), String> {
+    let in_id = kernel.mint_id();
+    let in_parent = crate::agent_loop::incoming_parent(text);
+    let error_id = kernel.mint_id();
+    let rows = [
+        crate::agent_loop::incoming_row(text, in_id, in_parent, notice),
+        json!({
+            "role": "user",
+            "kind": "error",
+            "content": format!(
+                "[turn failed] {reason}. No answer was stored, and nothing this turn meant \
+                 to send was dispatched."
+            ),
+            "id": error_id,
+            "parent": in_id,
+        }),
+    ];
+    crate::memory::save_history(agent_id, kernel, &rows)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.0)
+}
+
+/// The failure a turn reports, with the store's outcome: when its error row could
+/// not be stored, the message says so too.
+fn with_store_outcome(message: String, stored: Result<(), String>) -> String {
+    match stored {
+        Ok(()) => message,
+        Err(e) => format!("{message}; the turn's error row could not be stored: {e}"),
+    }
 }
 
 /// `rows` — python `_rows`. args: `after:int?` (a row id — the page starts
@@ -952,6 +1035,8 @@ pub async fn send(
     // Pop ourselves from the queue, become the in-flight entry — and disarm the
     // guard, whose job (the wait is over) is done.
     queued_guard.disarm();
+    // Fired by `stop` ([`stop`]) — the generation below watches it.
+    let abort = Arc::new(tokio::sync::Notify::new());
     {
         let mut cur = state.current_meta.lock().expect("current poisoned");
         *cur = Some(CurrentEntry {
@@ -971,6 +1056,7 @@ pub async fn send(
             parts: None,
             stopped_by: None,
             notice,
+            abort: Arc::clone(&abort),
         });
     }
     emit_status(kernel, &state, agent_id, &client_id, "thinking", Map::new()).await;
@@ -980,20 +1066,32 @@ pub async fn send(
     // dropped, releasing the provider stream and the FIFO guard) — the backend
     // holds no task handle of its own.
     let timeout_secs = send_timeout_secs();
-    let outcome = tokio::time::timeout(
-        Duration::from_secs_f64(timeout_secs),
-        run_generation(
-            &provider,
-            agent_id,
-            &state,
-            &text,
-            kernel,
-            &client_id,
-            cfg,
-            system_prompt,
-        ),
-    )
-    .await;
+    let outcome = tokio::select! {
+        biased;
+        // STOPPED: `stop` closed this turn already, and the generation below is
+        // dropped — its provider stream with it (#177).
+        _ = abort.notified() => None,
+        r = tokio::time::timeout(
+            Duration::from_secs_f64(timeout_secs),
+            run_generation(
+                &provider,
+                agent_id,
+                &state,
+                &text,
+                kernel,
+                &client_id,
+                cfg,
+                system_prompt,
+            ),
+        ) => Some(r),
+    };
+    let Some(outcome) = outcome else {
+        // Nothing is routed and nothing is stored here: `stop` wrote the marker row
+        // and the `done` status. Clear the entry the stop left, release the lock.
+        *state.current_meta.lock().expect("current poisoned") = None;
+        drop(_guard);
+        return Ok(json!({"cancelled": true, "client_id": client_id}));
+    };
 
     let mut message_id: Option<i64> = None;
     // Every closed call part `(stream_id, body)` — routing stamps each dispatched
@@ -1108,7 +1206,17 @@ pub async fn send(
                 m
             })
             .await;
-            raise = Some((pe.kind, pe.message));
+            // A FAILED PASS stores its own error row (#177): nothing ends silently. A
+            // REFUSED RECORD (`ValueError`: the record cannot run) never opened a pass
+            // and stores nothing, as ever.
+            let message = if pe.kind == "ValueError" {
+                pe.message
+            } else {
+                let stored =
+                    store_failed_turn(agent_id, kernel, &incoming_text, notice, &pe.message).await;
+                with_store_outcome(pe.message, stored)
+            };
+            raise = Some((pe.kind, message));
             Value::Null
         }
         Err(_elapsed) => {
@@ -1122,8 +1230,12 @@ pub async fn send(
                 m
             })
             .await;
+            let message = format!("send: timeout after {}s", py_float_repr(timeout_secs));
+            // The send ceiling ends the turn with an error row too (#177).
+            let stored =
+                store_failed_turn(agent_id, kernel, &incoming_text, notice, &message).await;
             json!({
-                "error": format!("send: timeout after {}s", py_float_repr(timeout_secs)),
+                "error": with_store_outcome(message, stored),
                 "client_id": client_id,
             })
         }

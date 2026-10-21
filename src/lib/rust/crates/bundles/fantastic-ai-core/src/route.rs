@@ -65,11 +65,13 @@ fn inflight_count(self_id: &str) -> u64 {
         .unwrap_or(&0)
 }
 
-/// What `await` is told when there is nothing to wait for. DELIVERED TO SELF, as
-/// a fresh turn: it must WAKE the model, not sit in a return value nobody reads.
-const AWAIT_REFUSED: &str = "[await refused] nothing of yours is in flight and \
-nothing is queued for you, so there is nothing to wait for. Act — make the call — \
-or end the chain with <call name=\"done\"></call>.";
+/// The note an empty `await` leaves (#177): nothing of the agent is in flight, so
+/// the chain ends HERE, visibly. It is a stored row, not a turn delivered to self:
+/// the model reads it on its next turn and the operator reads it in the history.
+const EMPTY_AWAIT_NOTE: &str = "[await: nothing to wait for] Nothing of yours is in \
+flight and nothing is queued for you, so this chain ends here and nothing was \
+awaited. Make the call you were waiting on, or end the chain with \
+<call name=\"done\"></call>.";
 
 /// What a call that named a VERB but no agent gets told.
 ///
@@ -1409,16 +1411,9 @@ async fn route_reply_gated(
             emit_status(&kernel, &st, &self_id, &client_id, "done", detail).await;
             return;
         }
-        // Nothing to wait for: say so, as a turn, so the model acts instead of
-        // waiting forever on an empty inbox.
-        deliver_soon(
-            &kernel,
-            self_id.as_str(),
-            AWAIT_REFUSED,
-            &client_id,
-            sp,
-            true,
-        );
+        // Nothing to wait for: the chain ENDS, with a stored note the model and the
+        // operator both read — never a silent end, never a turn nobody asked for (#177).
+        note_empty_await(&self_id, &kernel, &client_id, message_id).await;
         return;
     }
     if nudging {
@@ -1451,6 +1446,40 @@ async fn route_reply_gated(
     if let Some(to) = send_to.as_deref() {
         deliver_soon(&kernel, to, &text, &client_id, sp, false);
     }
+}
+
+/// An `await` with nothing in flight ends the chain VISIBLY (#177): the note is
+/// stored as a row the model reads on its next turn, and `status` goes to `done`
+/// with `reason='nothing_to_await'`. A store that refuses the note is reported on
+/// `status(done, reason='error')` instead — the end is never silent.
+async fn note_empty_await(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    client_id: &str,
+    parent: Option<i64>,
+) {
+    let row = json!({
+        "role": "user",
+        "kind": "note",
+        "content": EMPTY_AWAIT_NOTE,
+        "id": kernel.mint_id(),
+        "parent": parent,
+    });
+    let mut detail = Map::new();
+    match crate::memory::save_history(self_id, kernel, &[row]).await {
+        Ok(_) => {
+            detail.insert("reason".to_string(), json!("nothing_to_await"));
+        }
+        Err(e) => {
+            detail.insert("reason".to_string(), json!("error"));
+            detail.insert(
+                "error".to_string(),
+                json!(format!("the await's note could not be stored: {}", e.0)),
+            );
+        }
+    }
+    let st = state_for(self_id);
+    emit_status(kernel, &st, self_id, client_id, "done", detail).await;
 }
 
 /// The calls that are not dispatches: they end, park or answer the chain.

@@ -64,6 +64,19 @@ async fn api(status: u16, body: String) -> (MockServer, String) {
 }
 
 fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
+    provider_idle(
+        endpoint,
+        key,
+        Duration::from_secs_f64(fantastic_ai_core::constants::STREAM_IDLE_SECONDS),
+    )
+}
+
+/// The provider with a chosen read clock — a stall test shortens it.
+fn provider_idle(
+    endpoint: &str,
+    key: Arc<dyn KeySource>,
+    stream_idle: Duration,
+) -> AnthropicProvider {
     AnthropicProvider {
         endpoint: endpoint.to_string(),
         model: MODEL.into(),
@@ -74,7 +87,35 @@ fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
         caching: Caching::Cleanup,
         usage: Arc::new(Mutex::new(Usage::default())),
         report: ReportCell::default(),
+        stream_idle,
     }
+}
+
+/// A fake endpoint on a local socket: it reads the request, answers with `body`
+/// as a chunked SSE response (or, with `None`, never answers at all), then holds
+/// the connection open and sends nothing more. The hold is the stall under test;
+/// the caller aborts the returned task when it is done.
+async fn stalling_endpoint(body: Option<String>) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let task = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let mut req = vec![0u8; 65536];
+        let _ = sock.read(&mut req).await;
+        if let Some(body) = body {
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                        transfer-encoding: chunked\r\n\r\n";
+            sock.write_all(head.as_bytes()).await.expect("head");
+            let chunk = format!("{:x}\r\n{body}\r\n", body.len());
+            sock.write_all(chunk.as_bytes()).await.expect("chunk");
+        }
+        // Held open, silent — longer than any idle window a test uses.
+        tokio::time::sleep(Duration::from_secs(600)).await;
+    });
+    (format!("http://{addr}/v1/messages"), task)
 }
 
 async fn drain(p: &AnthropicProvider, max_tokens: Option<i64>) -> Result<String, String> {
@@ -185,6 +226,59 @@ async fn the_thought_is_wrapped_once_and_the_usage_reported() {
         (r.prompt_tokens, r.stop_reason.as_deref()),
         (Some(120), Some("end_turn"))
     );
+}
+
+/// A stream that sends its first events and then goes quiet: once the read clock's
+/// idle window passes, the stream fails with `stream_stalled`, naming the seconds
+/// and the endpoint — it does not wait for the send ceiling (#177).
+#[tokio::test]
+async fn a_stream_that_goes_quiet_fails_after_the_idle_window() {
+    let (ep, server) = stalling_endpoint(Some(sse(&[start(), text("half")]))).await;
+    let p = provider_idle(&ep, Arc::new(NoKey), Duration::from_millis(200));
+    let started = std::time::Instant::now();
+    let e = drain(&p, None).await.unwrap_err();
+    server.abort();
+    assert!(e.contains("stream_stalled"), "{e}");
+    assert!(e.contains("sent no bytes for 0.2s"), "{e}");
+    assert!(e.contains(&ep), "{e}");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Headers that never come are the same stall: the window runs from the request,
+/// and the turn fails naming the stall, not a connect error (#177).
+#[tokio::test]
+async fn an_endpoint_that_never_answers_fails_after_the_idle_window() {
+    let (ep, server) = stalling_endpoint(None).await;
+    let p = provider_idle(&ep, Arc::new(NoKey), Duration::from_millis(200));
+    let e = drain(&p, None).await.unwrap_err();
+    server.abort();
+    assert!(e.contains("stream_stalled"), "{e}");
+    assert!(e.contains("sent no bytes for 0.2s"), "{e}");
+}
+
+#[test]
+fn stream_idle_seconds_defaults_and_is_validated() {
+    let meta = |v: Value| {
+        let mut m = Map::new();
+        m.insert("stream_idle_seconds".to_string(), v);
+        m
+    };
+    let default = fantastic_ai_core::provider::stream_idle_of(&Map::new()).expect("default");
+    assert_eq!(default, Duration::from_secs(60));
+    let set = fantastic_ai_core::provider::stream_idle_of(&meta(json!(2.5))).expect("set");
+    assert_eq!(set, Duration::from_millis(2500));
+    for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
+        let m = meta(bad.clone());
+        assert!(validate(&m, &Map::new()).is_some(), "{bad} is refused");
+        assert!(
+            fantastic_ai_core::provider::stream_idle_of(&m).is_err(),
+            "{bad} is refused at the read too"
+        );
+    }
 }
 
 #[tokio::test]
@@ -904,4 +998,96 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
     assert!(names.contains(&"caching") && names.contains(&"cache_primer_until"));
     assert!(!names.contains(&"prompt_cache"));
     assert!(names.contains(&"price_input_per_mtok") && names.contains(&"price_output_per_mtok"));
+}
+
+/// A kernel with the agent [`STALL_AGENT`] on a memory store, its record naming `endpoint` and
+/// the given extra fields — the whole turn runs through ai-core, the read clock
+/// included (#177).
+async fn mk_with_store(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
+    kernel.bundles.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let memory =
+        fantastic_ram_store::test_support::memory_meta(&kernel, STALL_AGENT, json!({"cli": "*"}))
+            .await;
+    let mut payload = json!({
+        "type": "create_agent",
+        "parent_id": "kernel",
+        "handler_module": HANDLER_MODULE,
+        "id": STALL_AGENT,
+        "endpoint": endpoint,
+        "model": MODEL,
+        "max_tokens": 1000,
+        "context_window": 200_000,
+    });
+    for (k, v) in memory
+        .into_iter()
+        .chain(extra.as_object().cloned().unwrap_or_default())
+    {
+        payload[k] = v;
+    }
+    let r = call(&kernel, "kernel_state", payload).await;
+    assert_eq!(r["id"], json!(STALL_AGENT), "{r}");
+    kernel
+}
+
+/// The process-global turn state is keyed by agent id, so this turn has an id of
+/// its own: no other test's `a1` can hold its lock or its in-flight entry.
+const STALL_AGENT: &str = "stall_turn";
+
+/// THE WHOLE PATH (#177): a stream that answers its first events and then goes
+/// silent ends its turn after the record's `stream_idle_seconds`. The turn stores
+/// an error row naming the stall, `status` reports the turn done with
+/// `reason='error'` and nothing generating.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
+    let (ep, server) = stalling_endpoint(Some(sse(&[start(), text("half")]))).await;
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with_store(&tmp, &ep, json!({"stream_idle_seconds": 0.2})).await;
+    let started = std::time::Instant::now();
+    let r = call(
+        &kernel,
+        STALL_AGENT,
+        json!({"type": "send", "text": "hi", "client_id": "t"}),
+    )
+    .await;
+    server.abort();
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(r["raised"], json!(true), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("stream_stalled"), "{err}");
+    assert!(err.contains("sent no bytes for 0.2s"), "{err}");
+    assert!(err.contains(&ep), "{err}");
+    let rows = call(&kernel, STALL_AGENT, json!({"type": "rows"})).await;
+    let errors: Vec<&Value> = rows["rows"]
+        .as_array()
+        .map(|rs| {
+            rs.iter()
+                .filter(|r| r.get("kind").and_then(Value::as_str) == Some("error"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(errors.len(), 1, "{rows}");
+    let content = errors[0]["content"].as_str().unwrap_or_default();
+    assert!(content.contains("stream_stalled"), "{content}");
+    let status = call(&kernel, STALL_AGENT, json!({"type": "status"})).await;
+    assert_eq!(status["generating"], json!(false), "{status}");
 }
