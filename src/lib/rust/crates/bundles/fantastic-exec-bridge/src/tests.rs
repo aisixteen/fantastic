@@ -3041,11 +3041,22 @@ async fn status_wait_refuses_a_bad_value() {
     };
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
+    // a real job, so the range and type checks are what refuse — not the
+    // missing job_id
+    let started = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(30)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = started["job_id"].as_i64().expect("job_id");
     for bad in [json!(-1), json!(500), json!("x")] {
         let r = kernel
             .send(vec![Item::new(
                 a.clone(),
-                json!({"type": "status", "wait_s": bad}),
+                json!({"type": "status", "job_id": jid, "wait_s": bad}),
             )])
             .await
             .remove(0)
@@ -3063,6 +3074,14 @@ async fn status_wait_refuses_a_bad_value() {
         .result;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     assert_eq!(r["arg"], "wait_s", "{r}");
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "stop", "job_id": jid}),
+        )])
+        .await
+        .remove(0)
+        .result;
 }
 
 #[test]
