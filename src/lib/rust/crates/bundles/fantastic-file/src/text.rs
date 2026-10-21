@@ -474,14 +474,20 @@ async fn edit(
                 &format!("edit {i}: an object with a `path`"),
             );
         };
-        let Some(n) = e.get("hunks").and_then(Value::as_u64).filter(|n| *n >= 1) else {
-            return rf::bad(
-                "edit",
-                "edits",
-                &format!("edit {i} ({}): `hunks` (int >= 1)", py_repr(path)),
-            );
+        // #206 — with exactly one file, `hunks` may be left out: every block of
+        // the blob applies to it. With several files the split must be stated.
+        let n = if edits.len() == 1 && e.get("hunks").filter(|v| !v.is_null()).is_none() {
+            hunks.len()
+        } else {
+            let Some(n) = e.get("hunks").and_then(Value::as_u64).filter(|n| *n >= 1) else {
+                return rf::bad(
+                    "edit",
+                    "edits",
+                    &format!("edit {i} ({}): `hunks` (int >= 1)", py_repr(path)),
+                );
+            };
+            usize::try_from(n).unwrap_or(usize::MAX)
         };
-        let n = usize::try_from(n).unwrap_or(usize::MAX);
         if plan.iter().any(|p| norm(&p.path) == norm(path)) {
             return rf::bad(
                 "edit",
@@ -506,12 +512,17 @@ async fn edit(
         cursor = cursor.saturating_add(n);
     }
     if cursor != hunks.len() {
+        let hint = if edits.len() == 1 {
+            " — with one file, leave hunks out and every block applies"
+        } else {
+            ""
+        };
         return rf::bad(
             "edit",
             "edits",
             &format!(
                 "hunk counts that sum to the blob's blocks — edits claim {cursor}, \
-                 the patch holds {}",
+                 the patch holds {}{hint}",
                 hunks.len()
             ),
         );
