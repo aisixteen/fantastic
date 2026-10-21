@@ -11,17 +11,19 @@
 //! Mirrors python `ai_core/core.py` `_grep` / `_context_clear` / `_context_recall`.
 
 use crate::assembly::system_content;
+use crate::assembly::{listed_entries, render_history};
 use crate::constants::{BUDGET_FLOOR, NOTICE_ENVELOPE_RESERVE};
 use crate::context::{
     budget as agent_budget, estimate_one, fit_reply, inline_cap, recent_n as cfg_recent_n,
 };
 use crate::events::to_caller;
+use crate::folds::member_anchor;
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
 use crate::helpers::{agent_meta, now_secs};
 use crate::history_view::{parse_reply_tag, reply_blocks};
 use crate::memory::{head, load_history, save_history, save_view, store_call, MemResult};
 use crate::provider::{Provider, ProviderEvent};
-use crate::strategies::fold::fold_down;
+use crate::strategies::fold::{append_fold, fold_down, summarize_span, summary_title};
 use crate::strategies::strip::{pid_of, LOW};
 use crate::strategies::ProjectionCtx;
 use crate::think::without_thinking;
@@ -352,6 +354,209 @@ pub async fn context_clear(
     *st.recall_due.lock().expect("recall_due poisoned") = false;
     *st.view_source.lock().expect("view_source poisoned") = None;
     Ok(json!({"cleared": rid, "rows": members.len()}))
+}
+
+/// The persisted view entry for a row the view keeps: its id and resolution, and
+/// its body when a trimmer changed it, so the next turn renders the same message
+/// the model saw before the fold.
+fn kept_entry(row: &Value, msg: &Value, res: &str) -> Value {
+    let mut e = json!({"id": row_id(row), "res": res});
+    if msg != &crate::view::apply_res(row, res) {
+        e["content"] = msg["content"].clone();
+    }
+    e
+}
+
+/// A fold or a clear: the rows a span may not cross.
+fn is_boundary(row: &Value) -> bool {
+    crate::folds::is_fold(row) || row.get("kind").and_then(Value::as_str) == Some("clear")
+}
+
+/// `context_fold` (operator only — not in the model's howto): fold a chosen
+/// stretch of the agent's VIEW into ONE fold row, the same kind and shape an
+/// automatic fold writes (members in `refs`, reachable by `history {fold}`,
+/// `recall`, `grep`). Nothing is deleted; the view becomes the rows before the
+/// range (unchanged), the fold, then the rows after.
+///
+/// args: `from?` / `to?` (row ids, inclusive, consecutive in the view; default
+/// `from` = the first row after the last fold or clear in the view, default `to`
+/// = the last row), `summary?` (the fold's text, used verbatim; absent, the fold
+/// summarizer writes it). Returns `{folded, rows, summarized}`; `summarized` is
+/// false only when the summarizer gave nothing and the fold carries its titles.
+///
+/// Refused, with the reason named: an empty range, an id not in the view, a range
+/// crossing a fold or clear row, a turn running for this agent.
+///
+/// # Errors
+/// The memory store refused a read or a write; a summary would not fit its budget
+/// after every re-summarise; a member has no known place (the turn fails loud,
+/// as an automatic fold does).
+pub async fn context_fold(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+    provider: &Arc<dyn Provider>,
+    model_window: i64,
+) -> Result<Value, crate::assembly::BlockFail> {
+    use crate::folds::anchors_of;
+    use crate::memory::load_view;
+    use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG, LOCKED};
+    let verb = "context_fold";
+    // A turn holds the FIFO lock for its whole run: the view must not move under it.
+    let st = crate::state::state_for(agent_id);
+    let lock = Arc::clone(&st.lock);
+    let Ok(_turn) = lock.try_lock() else {
+        return Ok(refusal_hint(
+            LOCKED,
+            format!("{verb}: a turn is running for {agent_id}"),
+            "fold once the running turn has answered",
+        ));
+    };
+    // The view is rendered as the record's caching mode renders it, so the fold
+    // persists exactly the view the next turn will send. A primer pins its prefix.
+    let meta = agent_meta(agent_id, kernel);
+    let (caching, primer) = match crate::caching::settings(&meta) {
+        Ok(s) => s,
+        Err(why) => {
+            let mut v = refusal_hint(
+                BAD_ARG,
+                format!("{verb}: {why}"),
+                "set caching to none, cleanup or provider_cache",
+            );
+            with(&mut v, "arg", Value::from("caching"));
+            return Ok(v);
+        }
+    };
+    // `from` / `to`: absent or null is the default; anything else must be an id.
+    let id_arg = |key: &str| -> Result<Option<i64>, Value> {
+        match payload.get(key).filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(raw) => as_id(raw)
+                .map(Some)
+                .ok_or_else(|| bad(verb, key, "a row id (int)")),
+        }
+    };
+    let (from, to) = match (id_arg("from"), id_arg("to")) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(e), _) | (_, Err(e)) => return Ok(e),
+    };
+    // `summary`: absent or null writes the summarizer's; a given one is the text.
+    let summary = match payload.get("summary").filter(|v| !v.is_null()) {
+        None => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.as_str()),
+        Some(_) => return Ok(bad(verb, "summary", "a non-empty string")),
+    };
+    let rows = load_history(agent_id, kernel, false).await?;
+    let anchors = anchors_of(&crate::memory::head(agent_id, kernel).await?);
+    let listed = listed_entries(&rows, load_view(agent_id, kernel).await?.as_ref());
+    let view = render_history(&rows, listed.as_deref(), caching.cleans());
+    let pos_of = |id: i64| view.iter().position(|r| row_id(&rows[r.idx]) == Some(id));
+    let empty = |arg: &str, why: &str| {
+        let mut v = refusal_hint(
+            BAD_ARG,
+            format!("{verb}: the range is empty — {why}"),
+            "name a range of rows that are in the view, from first to last",
+        );
+        with(&mut v, "arg", Value::from(arg));
+        v
+    };
+    if view.is_empty() {
+        return Ok(empty("from", "the view holds no rows"));
+    }
+    // The default `from` is the row after the last fold or clear in the view.
+    let default_from = view
+        .iter()
+        .rposition(|r| is_boundary(&rows[r.idx]))
+        .map_or(0, |p| p + 1);
+    let from_p = match from {
+        None => default_from,
+        Some(id) => match pos_of(id) {
+            Some(p) => p,
+            None => return Ok(bad(verb, "from", "a row id in this agent's view")),
+        },
+    };
+    let to_p = match to {
+        None => view.len() - 1,
+        Some(id) => match pos_of(id) {
+            Some(p) => p,
+            None => return Ok(bad(verb, "to", "a row id in this agent's view")),
+        },
+    };
+    if from_p > to_p {
+        return Ok(empty("to", "to comes before from"));
+    }
+    // THE PRIMER IS PINNED: the cached prefix ends at its row, so a range that starts at
+    // or before that row (a range before it, or one that includes it) would move bytes
+    // the provider has cached. A primer not in this view pins nothing.
+    if let Some(pp) = primer.and_then(pos_of) {
+        if from_p <= pp {
+            let mut v = refusal_hint(
+                BAD_ARG,
+                format!(
+                    "{verb}: the primer is pinned — row {} ends the cached prefix, so a range \
+                     may not start at or before it",
+                    primer.unwrap_or_default()
+                ),
+                "fold rows after the primer; the primer and the rows before it stay as they are",
+            );
+            with(&mut v, "arg", Value::from("from"));
+            return Ok(v);
+        }
+    }
+    let span: Vec<usize> = view[from_p..=to_p].iter().map(|r| r.idx).collect();
+    if span.iter().any(|&i| is_boundary(&rows[i])) {
+        let mut v = refusal_hint(
+            BAD_ARG,
+            format!("{verb}: the range crosses a fold or clear row"),
+            "fold the rows on each side of it separately; a fold row is never folded again by a range",
+        );
+        with(&mut v, "arg", Value::from("from"));
+        return Ok(v);
+    }
+    let anchor =
+        member_anchor(&rows, &span, &anchors).map_err(crate::assembly::BlockFail::FoldAnchor)?;
+    let (title, body, summarized) = match summary {
+        // Verbatim: the body IS the given text, its first line the title.
+        Some(text) => (summary_title(text), text.to_string(), true),
+        None => {
+            let (title, body, degraded) = summarize_span(provider, &rows, &span).await?;
+            (title, body, !degraded)
+        }
+    };
+    let fold = append_fold(
+        agent_id,
+        kernel,
+        &rows,
+        &span,
+        anchor,
+        &title,
+        &body,
+        !summarized,
+    )
+    .await?;
+    let fid = row_id(&fold).unwrap_or_default();
+    // THE NEW VIEW: the rows before the range as they were rendered (a trimmed body
+    // kept as trimmed, a dropped row left out), the fold where the range began, then
+    // the rows after. The fold is the newest row, so the array carries every kept row.
+    let mut ids: Vec<Value> = Vec::with_capacity(view.len() - span.len() + 1);
+    for (p, r) in view.iter().enumerate() {
+        if p == from_p {
+            ids.push(json!({"id": fid, "res": "fold"}));
+        }
+        if (from_p..=to_p).contains(&p) {
+            continue;
+        }
+        ids.push(kept_entry(&rows[r.idx], &r.msg, &r.res));
+    }
+    save_view(
+        agent_id,
+        kernel,
+        &ids,
+        agent_budget(&meta, model_window),
+        verb,
+    )
+    .await?;
+    Ok(json!({"folded": fid, "rows": span.len(), "summarized": summarized}))
 }
 
 /// `context_forget`: compact this agent's OWN store — drop the rows the model can

@@ -30,7 +30,7 @@ use fantastic_ai_core::provider::{
 };
 use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::ThinkWrap;
-use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
 use fantastic_bundle::{py_float, py_int, py_repr_value, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -73,6 +73,7 @@ const CFG: BackendConfig = BackendConfig {
     // A server's window is the record's to name (`num_ctx` / `context_window`);
     // the kernel cannot read it.
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: false,
 };
 
 // ── ollama provider (NDJSON transport) ──────────────────────────────
@@ -443,6 +444,7 @@ impl Bundle for OllamaBackendBundle {
         record: &Map<String, Value>,
     ) -> Option<String> {
         schema::validate(record_schema(), "ollama_backend", meta, record)
+            .or_else(|| caching::refusal(meta, record, "ollama_backend", CFG.provider_cache))
     }
 
     fn record_schema(&self) -> Option<Value> {

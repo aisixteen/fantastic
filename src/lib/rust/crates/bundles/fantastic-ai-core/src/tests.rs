@@ -128,8 +128,11 @@ impl Provider for MockProvider {
 }
 
 /// The test bundle: dispatches every verb through ai-core, building a
-/// `MockProvider` over the process-global script keyed by agent id.
-struct MockBundle;
+/// `MockProvider` over the process-global script keyed by agent id. Its `cfg` is
+/// the backend it stands for: [`CFG`] cannot cache, a second one can.
+struct MockBundle {
+    cfg: BackendConfig,
+}
 
 type ScriptMap = std::collections::HashMap<String, Arc<MockScript>>;
 
@@ -205,12 +208,13 @@ fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
 const CFG: BackendConfig = BackendConfig {
     name: "mock_backend",
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: false,
 };
 
 #[async_trait]
 impl Bundle for MockBundle {
     fn name(&self) -> &str {
-        "mock_backend"
+        self.cfg.name
     }
     async fn handle(
         &self,
@@ -232,7 +236,7 @@ impl Bundle for MockBundle {
         // EVERY OTHER VERB through the one shared table, exactly as a real
         // backend dispatches it — boot is a new incarnation there too.
         let script = script_for(agent_id);
-        let reply = verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
+        let reply = verbs::handle_common(agent_id, payload, kernel, self.cfg, move |_client| {
             Arc::new(MockProvider {
                 script: Arc::clone(&script),
             }) as Arc<dyn Provider>
@@ -278,7 +282,9 @@ fn id_for(tmp: &TempDir, tag: &str) -> String {
 /// the shared test memory store under it.
 async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
-    kernel.bundles.register(HANDLER_MODULE, MockBundle);
+    kernel
+        .bundles
+        .register(HANDLER_MODULE, MockBundle { cfg: CFG });
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle::default());
@@ -403,6 +409,12 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
 /// `context_insufficient` — which looks exactly like a routing bug. python
 /// documents the same trap at `test_send_to.py:53-66`.
 async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
+    add_backend_on(kernel, id, file_id, HANDLER_MODULE).await
+}
+
+/// [`add_backend`] on a given handler module: a backend other than the mock that
+/// cannot cache, such as the caching mock.
+async fn add_backend_on(kernel: &Arc<Kernel>, id: &str, file_id: &str, module: &str) -> AgentId {
     // The conversation lives in the memory store the record names — wired both
     // ways (python `_testkit.memory_meta`). Deny-all otherwise: the backend
     // streams its turn to `cli` and names its leg, each an explicit grant.
@@ -415,7 +427,7 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
-        "handler_module": HANDLER_MODULE,
+        "handler_module": module,
         "id": id,
         "model": "test-model",
         "context_window": 32768,
@@ -2158,7 +2170,15 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     let state = crate::state::state_for(&backend);
     let (messages, _store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "hi",
+            &kernel,
+            "probe",
+            None,
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -3205,7 +3225,15 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     .expect("store append");
     let (messages, store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "hi",
+            &kernel,
+            "probe",
+            None,
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -4248,7 +4276,15 @@ async fn a_fold_projection_over_budget_writes_folds() {
     let state = crate::state::state_for(&backend);
     let (messages, store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys")),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "next",
+            &kernel,
+            "cli",
+            Some("sys"),
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -4335,6 +4371,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
                 &kernel,
                 "cli",
                 Some("sys"),
+                crate::caching::Caching::Cleanup,
             ),
         )
         .await
@@ -4426,6 +4463,7 @@ fn verb_docs_match_python_docstrings() {
             "grep",
             "context_recall",
             "context_clear",
+            "context_fold",
             "context_forget",
             "watch",
             "unwatch",
@@ -5757,6 +5795,16 @@ mod memory_features;
 /// A fold carries its own place (python `test_fold_anchors.py`), on this harness.
 #[path = "tests_fold_anchors.rs"]
 mod fold_anchors;
+
+/// The operator's `context_fold` — a range of the view folded into one fold row.
+#[path = "tests_context_fold.rs"]
+mod context_fold;
+
+/// The record's `caching` modes: `cleanup` trims the view, `none` and `provider_cache`
+/// keep it append-only, `provider_cache` flags the primer and the last fold, and the
+/// primer pins its prefix against `context_fold`.
+#[path = "tests_caching.rs"]
+mod caching_modes;
 
 /// Per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the

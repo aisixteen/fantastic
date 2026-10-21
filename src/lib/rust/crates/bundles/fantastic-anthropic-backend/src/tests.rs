@@ -71,6 +71,8 @@ fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
         max_tokens: 8000,
         temperature: None,
         thinking_budget: None,
+        caching: Caching::Cleanup,
+        usage: Arc::new(Mutex::new(Usage::default())),
         report: ReportCell::default(),
     }
 }
@@ -360,6 +362,14 @@ async fn an_api_that_does_not_answer_refuses_naming_the_field() {
 // ─── through the kernel ─────────────────────────────────────────────────────
 
 async fn mk(tmp: &TempDir, endpoint: &str) -> Arc<Kernel> {
+    mk_with(tmp, endpoint, json!({})).await
+}
+
+async fn mk_with(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
+    mk_with_id(tmp, endpoint, extra, "a1").await
+}
+
+async fn mk_with_id(tmp: &TempDir, endpoint: &str, extra: Value, id: &str) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     let kernel = Arc::new(kernel);
@@ -373,12 +383,14 @@ async fn mk(tmp: &TempDir, endpoint: &str) -> Arc<Kernel> {
     );
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
-    let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": "a1"});
-    for (k, v) in rec(json!({"endpoint": endpoint})) {
+    let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": id});
+    let mut record = rec(extra);
+    record.insert("endpoint".into(), json!(endpoint));
+    for (k, v) in record {
         payload[k] = v;
     }
     let r = call(&kernel, "kernel_state", payload).await;
-    assert_eq!(r["id"], json!("a1"), "{r}");
+    assert_eq!(r["id"], json!(id), "{r}");
     kernel
 }
 
@@ -410,4 +422,486 @@ async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
         (&rec["max_tokens"], &rec["context_window"]),
         (&json!(64000), &json!(200_000))
     );
+}
+
+// ─── prompt caching and usage ───────────────────────────────────────────────
+
+fn plain() -> Vec<Value> {
+    vec![
+        json!({"role": "system", "content": "s"}),
+        json!({"role": "user", "content": "hi"}),
+    ]
+}
+
+fn usage_start(input: i64, write: i64, read: i64) -> Value {
+    json!({"type": "message_start", "message": {"usage": {
+        "input_tokens": input,
+        "cache_creation_input_tokens": write,
+        "cache_read_input_tokens": read,
+    }}})
+}
+
+fn usage_stop(out: i64) -> [Value; 2] {
+    [
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": out}}),
+        json!({"type": "message_stop"}),
+    ]
+}
+
+fn fresh_usage() -> Arc<Mutex<Usage>> {
+    Arc::new(Mutex::new(Usage::default()))
+}
+
+/// The number of `cache_control` markers a body sends.
+fn markers(body: &Value) -> usize {
+    body.to_string().matches("\"cache_control\"").count()
+}
+
+/// The conversation's `messages` as ai-core flags them, with a system row first.
+fn flagged(rows: &[(&str, &str, Option<&str>)]) -> Vec<Value> {
+    let mut out = vec![json!({"role": "system", "content": "S"})];
+    for (role, text, flag) in rows {
+        let mut m = json!({"role": role, "content": text});
+        if let Some(f) = flag {
+            m[*f] = json!(true);
+        }
+        out.push(m);
+    }
+    out
+}
+
+#[test]
+fn cleanup_and_none_send_no_marker_even_when_a_message_is_flagged() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let expected = json!({"model": MODEL, "max_tokens": 8000, "messages": [{"role": "user", "content": "hi"}],
+                          "stream": true, "system": "s"});
+    assert_eq!(p.body(&plain(), None), expected);
+    let flags = flagged(&[
+        ("user", "a", Some("cache_primer")),
+        ("assistant", "b", Some("cache_fold")),
+    ]);
+    for mode in [Caching::Cleanup, Caching::None] {
+        p.caching = mode;
+        let b = p.body(&flags, None);
+        assert_eq!(markers(&b), 0, "{mode:?}: {b}");
+        assert_eq!(b["system"], json!("S"), "{mode:?}: the plain system string");
+        assert_eq!(
+            b["messages"],
+            json!([
+                {"role": "user", "content": "a"},
+                {"role": "assistant", "content": "b"},
+            ]),
+            "{mode:?}: the flags do not reach the wire"
+        );
+    }
+}
+
+#[test]
+fn provider_cache_splits_the_merged_turns_at_the_flagged_rows() {
+    // [primer rows][fold][fold][task rows]: the primer's row is the assistant turn
+    // "p2"; the fold rows and the task rows are one merged user turn, and the marker
+    // lands at the end of the last fold's text, not at the end of that merged turn.
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let msgs = flagged(&[
+        ("user", "p1", None),
+        ("assistant", "p2", Some("cache_primer")),
+        ("user", "f1", None),
+        ("user", "f2", Some("cache_fold")),
+        ("user", "t1", None),
+        ("assistant", "t2", None),
+        ("user", "live", None),
+    ]);
+    let b = p.body(&msgs, None);
+    let marked = json!({"type": "ephemeral"});
+    assert_eq!(b["system"][0]["cache_control"], marked, "M1: {b}");
+    assert_eq!(
+        b["messages"],
+        json!([
+            {"role": "user", "content": "p1"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "p2", "cache_control": marked},
+            ]},
+            {"role": "user", "content": [
+                {"type": "text", "text": "f1\n\nf2", "cache_control": marked},
+                {"type": "text", "text": "\n\nt1"},
+            ]},
+            {"role": "assistant", "content": "t2"},
+            {"role": "user", "content": "live"},
+        ]),
+        "M2 ends the primer's text, M3 ends the last fold's text: {b}"
+    );
+    assert_eq!(b["cache_control"], marked, "auto: {b}");
+    assert_eq!(markers(&b), 4, "M1, M2, M3 and auto: {b}");
+}
+
+#[test]
+fn the_split_turns_concatenate_to_exactly_the_merged_string() {
+    // The block texts of a merged turn, joined, are the string the turn was before
+    // any split: no byte added or lost, wherever a flag falls. And no block is blank:
+    // the API refuses a whitespace-only text block, so a flagged row followed by empty
+    // rows must not leave a trailing "\n\n" block of its own.
+    let cases: [(&[&str], &[Option<&str>]); 12] = [
+        (&["one", "", "three"], &[Some("cache_primer"), None, None]),
+        (&["one", "", "three"], &[None, Some("cache_fold"), None]),
+        (
+            &["one", "", "three"],
+            &[None, Some("cache_primer"), Some("cache_fold")],
+        ),
+        (
+            &["one", "", "three"],
+            &[Some("cache_fold"), Some("cache_fold"), None],
+        ),
+        (&["one", "", "three"], &[None, None, Some("cache_primer")]),
+        (&["one", ""], &[Some("cache_primer"), None]),
+        (&["one", "", ""], &[Some("cache_fold"), None, None]),
+        (&["", "one", ""], &[None, Some("cache_fold"), None]),
+        (&["one", ""], &[Some("cache_primer"), Some("cache_fold")]),
+        // a flagged row that is only whitespace, first in its turn, opens no block
+        // of its own (the API refuses a blank block): it joins the next text
+        (&[" ", "two"], &[Some("cache_primer"), None]),
+        (
+            &[" ", "two", "three"],
+            &[Some("cache_fold"), Some("cache_primer"), None],
+        ),
+        // ...and after text, it closes the block it is part of, bytes unchanged
+        (&["one", " "], &[None, Some("cache_fold")]),
+    ];
+    for (texts, shape) in cases {
+        let rows: Vec<(&str, &str, Option<&str>)> = texts
+            .iter()
+            .zip(shape)
+            .map(|(t, f)| ("user", *t, *f))
+            .collect();
+        let msgs = flagged(&rows);
+        let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+        p.caching = Caching::ProviderCache;
+        let b = p.body(&msgs, None);
+        let plain = to_messages(&msgs).1;
+        let merged = plain[0]["content"]
+            .as_str()
+            .expect("plain turn")
+            .to_string();
+        let blocks = b["messages"][0]["content"].clone();
+        let joined: String = match &blocks {
+            Value::String(s) => s.clone(),
+            Value::Array(a) => {
+                for block in a {
+                    let text = block["text"].as_str().unwrap();
+                    assert!(
+                        !text.trim().is_empty(),
+                        "shape {shape:?}: a blank block is refused by the API: {b}"
+                    );
+                }
+                a.iter().map(|x| x["text"].as_str().unwrap()).collect()
+            }
+            other => panic!("unexpected content {other}"),
+        };
+        assert_eq!(joined, merged, "shape {shape:?}: {b}");
+        assert!(markers(&b) <= 4, "shape {shape:?}: {b}");
+    }
+}
+
+#[test]
+fn a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_block() {
+    // The trailing blank separator joins the flagged row's block: the marker lands
+    // after the "\n\n" that followed "one", and the bytes are the merged string.
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let msgs = flagged(&[("user", "one", Some("cache_primer")), ("user", "", None)]);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["messages"],
+        json!([{"role": "user", "content": [
+            {"type": "text", "text": "one\n\n", "cache_control": {"type": "ephemeral"}},
+        ]}]),
+        "{b}"
+    );
+    assert_eq!(markers(&b), 3, "M1, M2 and auto: {b}");
+}
+
+#[test]
+fn a_flagged_row_with_no_text_carries_no_marker() {
+    // An empty block is refused by the API, so an empty flagged row opens none.
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let msgs = flagged(&[("user", "a", None), ("user", "", Some("cache_primer"))]);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["messages"],
+        json!([{"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}]),
+        "{b}"
+    );
+    assert_eq!(markers(&b), 2, "M1 and auto only: {b}");
+}
+
+#[test]
+fn a_primer_and_a_fold_on_one_message_send_one_marker() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let mut msgs = flagged(&[
+        ("user", "only", None),
+        ("assistant", "both", Some("cache_primer")),
+    ]);
+    msgs[2]["cache_fold"] = json!(true);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["messages"][1]["content"],
+        json!([{"type": "text", "text": "both", "cache_control": {"type": "ephemeral"}}]),
+        "{b}"
+    );
+    assert_eq!(markers(&b), 3, "M1, the one shared block, auto: {b}");
+}
+
+#[test]
+fn provider_cache_with_no_primer_and_no_fold_marks_only_the_system_and_the_tail() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let b = p.body(
+        &flagged(&[("user", "a", None), ("assistant", "b", None)]),
+        None,
+    );
+    assert_eq!(
+        b["messages"],
+        json!([{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}])
+    );
+    assert_eq!(markers(&b), 2, "M1 and auto: {b}");
+}
+
+#[test]
+fn provider_cache_marks_the_system_block_and_the_tail() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    p.temperature = Some(0.2);
+    p.thinking_budget = Some(2048);
+    assert_eq!(
+        p.body(&plain(), None),
+        json!({
+            "model": MODEL,
+            "max_tokens": 8000,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}],
+            "cache_control": {"type": "ephemeral"},
+            "temperature": 0.2,
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+        })
+    );
+    // a side call's own bound is marked the same way
+    let b = p.body(&plain(), Some(1500));
+    assert_eq!(b["max_tokens"], json!(1500));
+    assert_eq!(b["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[test]
+fn provider_cache_sends_no_system_block_when_the_system_is_empty() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let b = p.body(&[json!({"role": "user", "content": "hi"})], None);
+    assert!(b.get("system").is_none(), "{b}");
+    assert_eq!(b["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[tokio::test]
+async fn the_stream_sets_last_prompt_tokens_and_the_counts() {
+    let mut events = vec![usage_start(100, 400, 1000), text("ok")];
+    events.extend(usage_stop(35));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let mut p = provider(&ep, Arc::new(NoKey));
+    p.usage = fresh_usage();
+    assert_eq!(drain(&p, None).await.unwrap(), "ok");
+    let report = p.report();
+    assert_eq!(report.prompt_tokens, Some(1500));
+    assert_eq!(report.completion_tokens, Some(35));
+    let u = p.usage.lock().unwrap();
+    assert_eq!(
+        (u.requests, u.input, u.cache_write, u.cache_read, u.output),
+        (1, 100, 400, 1000, 35)
+    );
+}
+
+#[tokio::test]
+async fn two_passes_accumulate_and_a_side_call_counts_too() {
+    let mut first = vec![usage_start(100, 400, 0), text("a")];
+    first.extend(usage_stop(10));
+    let mut second = vec![usage_start(50, 0, 900), text("b")];
+    second.extend(usage_stop(20));
+    let (_s1, ep1) = api(200, sse(&first)).await;
+    let (_s2, ep2) = api(200, sse(&second)).await;
+    let usage = fresh_usage();
+    let mut p = provider(&ep1, Arc::new(NoKey));
+    p.usage = Arc::clone(&usage);
+    drain(&p, None).await.unwrap();
+    p.endpoint = ep2;
+    drain(&p, Some(500)).await.unwrap();
+    let u = usage.lock().unwrap();
+    assert_eq!(
+        (u.requests, u.input, u.cache_write, u.cache_read, u.output),
+        (2, 150, 400, 900, 30)
+    );
+}
+
+#[test]
+fn hit_rate_and_saved_tokens_follow_the_formulas() {
+    let u = Usage {
+        requests: 1,
+        input: 100,
+        cache_write: 400,
+        cache_read: 1000,
+        output: 0,
+    };
+    let s = u.snapshot(None, None);
+    assert_eq!(s["prompt_tokens"], json!(1500));
+    assert_eq!(s["saved_tokens"], json!(800)); // 0.9*1000 - 0.25*400
+    let hit = s["hit_rate"].as_f64().unwrap();
+    assert!((hit - 1000.0 / 1500.0).abs() < 1e-12, "{hit}");
+    assert!(s.get("cost_usd").is_none() && s.get("saved_usd").is_none());
+    // a write that is never read is a loss: negative, reported, never clamped
+    let w = Usage {
+        input: 10,
+        cache_write: 400,
+        ..Usage::default()
+    };
+    let s = w.snapshot(None, None);
+    assert_eq!(s["saved_tokens"], json!(-100));
+    assert_eq!(s["hit_rate"].as_f64(), Some(0.0));
+    // nothing counted: no prompt, no hit rate
+    assert_eq!(Usage::default().snapshot(None, None)["hit_rate"], json!(0));
+    // halves round to even
+    assert_eq!(saved_tokens(5, 0), 4);
+    assert_eq!(saved_tokens(0, 2), 0);
+    assert_eq!(saved_tokens(0, 3), -1);
+    assert_eq!(saved_tokens(1, 0), 1);
+}
+
+#[test]
+fn prices_on_the_record_add_cost_and_saving_in_usd() {
+    let u = Usage {
+        requests: 1,
+        input: 100,
+        cache_write: 400,
+        cache_read: 1000,
+        output: 50,
+    };
+    let s = u.snapshot(Some(3.0), Some(15.0));
+    let cost = (100.0 + 1.25 * 400.0 + 0.1 * 1000.0) * 3.0 / 1e6 + 50.0 * 15.0 / 1e6;
+    assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
+    assert!((s["saved_usd"].as_f64().unwrap() - 800.0 * 3.0 / 1e6).abs() < 1e-12);
+    // one price without the other: neither field
+    let s = u.snapshot(Some(3.0), None);
+    assert!(s.get("cost_usd").is_none() && s.get("saved_usd").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_usage_verb_returns_the_counts_and_reset_zeroes_them() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with(
+        &tmp,
+        "http://unused.test/v1/messages",
+        json!({"price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0}),
+    )
+    .await;
+    {
+        let counts = usage_of(&AgentId::from("a1"));
+        let mut u = counts.lock().unwrap();
+        (u.requests, u.input, u.cache_write, u.cache_read) = (1, 100, 400, 1000);
+    }
+    let got = call(&kernel, "a1", json!({"type": "usage"})).await;
+    assert_eq!(got["cache_read_tokens"], json!(1000));
+    assert_eq!(got["saved_tokens"], json!(800));
+    assert!(got.get("cost_usd").is_some() && got.get("saved_usd").is_some());
+    assert_eq!(
+        call(&kernel, "a1", json!({"type": "usage", "reset": true})).await,
+        got
+    );
+    let zero = call(&kernel, "a1", json!({"type": "usage"})).await;
+    assert_eq!(zero["requests"], json!(0));
+    assert_eq!(zero["saved_tokens"], json!(0));
+    let bad = call(&kernel, "a1", json!({"type": "usage", "reset": "yes"})).await;
+    assert_eq!(bad["reason"], json!("bad_arg"));
+    assert_eq!(bad["arg"], json!("reset"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reflect_carries_the_usage_and_the_caching_mode() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with(
+        &tmp,
+        "http://unused.test/v1/messages",
+        json!({"caching": "provider_cache"}),
+    )
+    .await;
+    let r = call(&kernel, "a1", json!({"type": "reflect"})).await;
+    assert_eq!(r["caching"], json!("provider_cache"));
+    assert!(r.get("prompt_cache").is_none(), "{r}");
+    assert!(r["usage"]["prompt_tokens"].is_number(), "{r}");
+    assert!(r["usage"]["saved_tokens"].is_number(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_an_agent_drops_its_counts() {
+    let tmp = TempDir::new().unwrap();
+    let endpoint = "http://unused.test/v1/messages";
+    let kernel = mk_with_id(&tmp, endpoint, json!({}), "gone1").await;
+    {
+        let counts = usage_of(&AgentId::from("gone1"));
+        let mut u = counts.lock().unwrap();
+        (u.requests, u.input, u.cache_write, u.cache_read) = (1, 100, 400, 1000);
+    }
+    let r = call(
+        &kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": "gone1"}),
+    )
+    .await;
+    assert_eq!(r["deleted"], json!(true), "{r}");
+    assert!(!usage_table().lock().unwrap().contains_key("gone1"));
+    let kernel = mk_with_id(&tmp, endpoint, json!({}), "gone1").await;
+    let zero = call(&kernel, "gone1", json!({"type": "usage"})).await;
+    assert_eq!(zero["requests"], json!(0), "{zero}");
+    assert_eq!(zero["cache_read_tokens"], json!(0), "{zero}");
+}
+
+#[test]
+fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
+    let check = |meta: Value| validate(meta.as_object().unwrap(), &rec(json!({})));
+    assert_eq!(check(json!({"caching": "provider_cache"})), None);
+    assert_eq!(check(json!({"caching": "none"})), None);
+    assert_eq!(check(json!({"cache_primer_until": 12})), None);
+    assert_eq!(check(json!({"price_input_per_mtok": 3})), None);
+    assert_eq!(
+        check(json!({"caching": "always"})).as_deref(),
+        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
+    );
+    assert_eq!(
+        check(json!({"caching": true})).as_deref(),
+        Some("caching=True is not one of the legal values: none, cleanup, provider_cache")
+    );
+    assert_eq!(
+        check(json!({"cache_primer_until": 0})).as_deref(),
+        Some("cache_primer_until=0 must be a row id (a positive int)")
+    );
+    assert_eq!(
+        check(json!({"prompt_cache": true})),
+        None,
+        "retired: an unknown key is not this backend's to refuse"
+    );
+    assert!(check(json!({"price_output_per_mtok": "x"}))
+        .unwrap()
+        .contains("must be a number"));
+    assert!(check(json!({"price_input_per_mtok": true}))
+        .unwrap()
+        .contains("must be a number"));
+    assert!(check(json!({"price_input_per_mtok": -1}))
+        .unwrap()
+        .contains("zero or more"));
+    let names: Vec<&str> = record_schema()["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(names.contains(&"caching") && names.contains(&"cache_primer_until"));
+    assert!(!names.contains(&"prompt_cache"));
+    assert!(names.contains(&"price_input_per_mtok") && names.contains(&"price_output_per_mtok"));
 }
