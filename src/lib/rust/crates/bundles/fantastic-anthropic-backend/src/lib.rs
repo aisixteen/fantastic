@@ -52,7 +52,7 @@ pub const README: &str = include_str!("readme.md");
 const NAME: &str = "anthropic_backend";
 
 /// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
-const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since its kernel started: requests, input, cache write and read, output, the derived prompt_tokens, hit_rate and saved_tokens (cost_usd and saved_usd when the record has both prices). reset: true returns the counts, then zeroes them.";
+const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since its kernel started:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices). reset:\ntrue returns the counts, then zeroes them.";
 
 /// What `reflect` says this agent IS — python `tools.py`'s `sentence`.
 pub const SENTENCE: &str = "Anthropic Messages-API LLM agent (raw prompt-and-parse tool-calling).";
@@ -746,11 +746,17 @@ impl Bundle for AnthropicBundle {
     }
 
     fn verb_docs(&self) -> Value {
-        let mut docs = fantastic_ai_core::verbs::verb_docs();
-        if let Some(map) = docs.as_object_mut() {
-            map.insert("usage".into(), json!(USAGE_DOC));
+        // `usage` right after `history`, where python's build() merges extra_verbs.
+        let core = fantastic_ai_core::verbs::verb_docs();
+        let mut out = serde_json::Map::new();
+        for (k, v) in core.as_object().cloned().unwrap_or_default() {
+            let after = k == "history";
+            out.insert(k, v);
+            if after {
+                out.insert("usage".into(), json!(USAGE_DOC));
+            }
         }
-        docs
+        Value::Object(out)
     }
 
     fn emits_doc(&self) -> Option<Value> {

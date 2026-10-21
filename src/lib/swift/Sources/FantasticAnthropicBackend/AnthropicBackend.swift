@@ -313,14 +313,20 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     public let name = "anthropic_backend"
     /// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
     static let USAGE_DOC =
-        "usage — args: reset? (bool). The agent's token usage since its kernel started: requests, "
-        + "input, cache write and read, output, the derived prompt_tokens, hit_rate and saved_tokens "
-        + "(cost_usd and saved_usd when the record has both prices). reset: true returns the counts, "
-        + "then zeroes them."
-    public var verbs: [String] { AIBackend.verbNames + ["usage"] }
+        "usage — args: reset? (bool). The agent's token usage since its kernel started:\n"
+        + "requests, input, cache write and read, output, the derived prompt_tokens, hit_rate\n"
+        + "and saved_tokens (cost_usd and saved_usd when the record has both prices). reset:\n"
+        + "true returns the counts, then zeroes them."
+    // `usage` right after `history`, where python's build() merges extra_verbs.
+    public var verbs: [String] {
+        AIBackend.verbNames.flatMap { $0 == "history" ? [$0, "usage"] : [$0] }
+    }
     public var verbDocTable: JSON {
-        var docs = AIBackend.VERBS
-        docs["usage"] = .string(Self.USAGE_DOC)
+        var docs = OrderedDictionary<String, JSON>()
+        for (k, v) in AIBackend.VERBS {
+            docs[k] = v
+            if k == "history" { docs["usage"] = .string(Self.USAGE_DOC) }
+        }
         return .object(docs)
     }
     public var emitsDoc: JSON? { .object(AIBackend.REFLECT_EMITS) }
