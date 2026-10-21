@@ -204,6 +204,20 @@ All steps run from the repo root, on `main`, with a clean tree.
    timestamps) of the setup and the installed binaries, and the GPG
    signatures of both `.deb`s against `SECURITY.md`'s fingerprint, then
    installs and launches each, as a build does.
+10. **Publish the server image** (Phase 12, #158), after the release, from the
+    same commit. It runs only on a commit of a green FULL `ci.yml` run (its
+    `container` job smoke-tested that image under Docker and Podman); the
+    workflow refuses any other commit. Dispatch it by hand, never from a tag:
+    ```sh
+    gh workflow run publish-container.yml -f commit=<sha> -f version=X.Y.Z -f latest=true
+    ```
+    It stages the `release-*` archives of that run (kept 30 days, so publish
+    within them), builds `os/container/Containerfile` for `linux/amd64` and
+    `linux/arm64` with `scripts/build/container.sh --arch all`, and pushes
+    `ghcr.io/aisixteen/fantastic` with `X.Y.Z`, the sha, and `latest` (pass
+    `latest=false`, or leave it out, for an older release). It uses GITHUB_TOKEN
+    (`packages: write`), not a stored secret. The first push creates the package:
+    make it public once, on GitHub.
 
 ## Notes
 

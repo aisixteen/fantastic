@@ -146,6 +146,22 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     reg
 }
 
+/// Set `web`'s record field `key` (`--port`, `--host`) before its listener boots.
+/// A value the record already holds is left alone; a refused one is a note, and
+/// the boot goes on with the recorded value.
+async fn set_web_field(kernel: &Arc<Kernel>, id: &AgentId, key: &str, value: Value, notes: &mut Vec<String>) {
+    let had = kernel.agents.get(id).and_then(|a| a.value().record().meta.get(key).cloned());
+    if had.as_ref() == Some(&value) {
+        return;
+    }
+    let mut update = json!({"type": "update_agent", "id": id.0});
+    update[key] = value.clone();
+    let r = kernel.send(vec![Item::new(AgentId::from("kernel"), update)]).await.remove(0).result;
+    if let Some(err) = r.get("error").and_then(Value::as_str) {
+        notes.push(format!("{id}: --{key} {value} not set: {err}"));
+    }
+}
+
 impl Host {
     /// Boot over `paths.cwd`. Acquires the directory lock, so a second shell in
     /// the same directory fails here rather than corrupting the store.
@@ -155,8 +171,8 @@ impl Host {
     /// mcp` leave a `web` record on disk untouched (not booted).
     /// `web_port`: `--port` — a recorded `web` on another port is set to it
     /// BEFORE its listener boots (nothing runs here yet, so it is the user's to
-    /// overwrite).
-    pub async fn boot(paths: &Paths, serve_web: bool, web_port: Option<u16>) -> Result<Self, KernelErr> {
+    /// overwrite). `web_bind`: `--host`, set on the record the same way.
+    pub async fn boot(paths: &Paths, serve_web: bool, web_port: Option<u16>, web_bind: Option<String>) -> Result<Self, KernelErr> {
         let booted = bootstrap::bootstrap(registry(&paths.cwd), BootstrapOptions::daemon(&paths.cwd))
             .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
@@ -218,17 +234,12 @@ impl Host {
             if is_web && !serve_web {
                 continue;
             }
-            if let (true, Some(p)) = (is_web, web_port) {
-                let had = kernel.agents.get(&id).and_then(|a| a.value().record().meta.get("port").and_then(Value::as_u64));
-                if had != Some(u64::from(p)) {
-                    let r = kernel
-                        .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "update_agent", "id": id.0, "port": p}))])
-                        .await
-                        .remove(0)
-                        .result;
-                    if let Some(err) = r.get("error").and_then(Value::as_str) {
-                        notes.push(format!("{id}: --port {p} not set: {err}"));
-                    }
+            if is_web {
+                if let Some(p) = web_port {
+                    set_web_field(&kernel, &id, "port", json!(p), &mut notes).await;
+                }
+                if let Some(addr) = &web_bind {
+                    set_web_field(&kernel, &id, "host", json!(addr), &mut notes).await;
                 }
             }
             let reply = kernel

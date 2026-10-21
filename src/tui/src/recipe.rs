@@ -27,9 +27,11 @@
 //! its View — and the kernel's message stream goes to stdout. `--headless`: the
 //! same with no canvas. Both together are refused: `canvas` says it already.
 //! `--port N` belongs to `canvas`; a new one overwrites the recorded. The first
-//! `canvas` without one picks a free port and records it; later runs reuse it. A kernel
-//! already running here refuses every argument (`run.rs`). `fantastic mcp` stays its own
-//! command (stdout is its protocol).
+//! `canvas` without one picks a free port and records it; later runs reuse it.
+//! `--host ADDR` (the bind address, `127.0.0.1` unless named) belongs to `canvas`
+//! the same way: it is recorded on `web`, and a container names `0.0.0.0` to
+//! publish its port. A kernel already running here refuses every argument
+//! (`run.rs`). `fantastic mcp` stays its own command (stdout is its protocol).
 
 use crate::kern::root_ai::Backend;
 
@@ -44,6 +46,8 @@ pub enum Recipe {
 pub struct Opts {
     pub recipes: Vec<Recipe>,
     pub port: Option<u16>,
+    /// `--host ADDR`: the address the canvas's `web` binds (recorded like `port`).
+    pub bind: Option<String>,
     pub headless: bool,
     /// `ai BACKEND …`: the root AI's backend.
     pub ai: Option<Backend>,
@@ -66,6 +70,13 @@ const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|o
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
+}
+
+/// `--host`: an IP address literal (`127.0.0.1`, `0.0.0.0`, `::1`). A name is
+/// refused: the Host guard compares the bind address, and a name would need its
+/// own resolution to mean anything.
+fn bind_of(v: &str) -> Result<String, String> {
+    v.parse::<std::net::IpAddr>().map(|_| v.to_string()).map_err(|_| format!("--host must be an IP address, got `{v}`"))
 }
 
 /// The flags after `ai BACKEND`, up to the next recipe word.
@@ -114,7 +125,7 @@ fn backend(word: &str, f: AiFlags) -> Result<Backend, String> {
 }
 
 pub fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { recipes: Vec::new(), port: None, headless: false, ai: None, run: None };
+    let mut o = Opts { recipes: Vec::new(), port: None, bind: None, headless: false, ai: None, run: None };
     let mut i = 0;
     let next = |i: &mut usize, what: &str| -> Result<String, String> {
         *i += 1;
@@ -124,6 +135,7 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
         match args[i].as_str() {
             "--headless" => o.headless = true,
             "--port" => o.port = Some(port_of(&next(&mut i, "--port needs a number")?, "--port")?),
+            "--host" => o.bind = Some(bind_of(&next(&mut i, "--host needs an IP address")?)?),
             "canvas" => push(&mut o.recipes, Recipe::Canvas),
             "ai" => {
                 push(&mut o.recipes, Recipe::Ai);
@@ -190,6 +202,9 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
     if o.port.is_some() && !o.canvas() {
         return Err("--port belongs to the `canvas` recipe".into());
     }
+    if o.bind.is_some() && !o.canvas() {
+        return Err("--host belongs to the `canvas` recipe".into());
+    }
     if o.headless && o.run.is_some() && !o.canvas() {
         return Err("`run` needs a View: the terminal UI (drop --headless) or the canvas".into());
     }
@@ -239,6 +254,19 @@ mod tests {
         assert!(h.headless && !h.canvas(), "--headless alone: no UI, no canvas");
         assert!(p("ai --port 8123").is_err());
         assert!(p("canvas --port 0").is_err());
+    }
+
+    #[test]
+    fn host_belongs_to_canvas_and_is_an_address() {
+        assert_eq!(p("canvas --host 0.0.0.0").unwrap().bind.as_deref(), Some("0.0.0.0"));
+        assert_eq!(p("canvas --port 8088 --host 0.0.0.0").unwrap().bind.as_deref(), Some("0.0.0.0"));
+        assert_eq!(p("canvas --host ::1").unwrap().bind.as_deref(), Some("::1"), "an IPv6 literal");
+        assert!(p("canvas").unwrap().bind.is_none(), "no host: the web host's own default (loopback)");
+        assert!(p("ai --host 0.0.0.0").is_err(), "--host belongs to the canvas");
+        assert!(p("--host 0.0.0.0").is_err(), "--host belongs to the canvas");
+        assert!(p("canvas --host").is_err(), "--host needs an address");
+        assert!(p("canvas --host localhost").is_err(), "a name is not an address");
+        assert!(p("canvas --host 0.0.0.0.1").is_err());
     }
 
     #[test]

@@ -1,0 +1,30 @@
+#!/bin/sh
+# The container's command: `fantastic canvas`, headless, on $FANTASTIC_PORT, in
+# the canvas folder /work. It binds 0.0.0.0, so a port mapping reaches it; the
+# image publishes nothing by itself (see os/README.md: map 127.0.0.1 only).
+# Extra arguments are recipes, as on the command line:
+#   docker run … fantastic-server ai ollama -p 11434
+#
+# exec: the canvas becomes the process tini forwards SIGTERM to. It stops in
+# order (the kernel drains, and its lock is released) and tini reaps the rest.
+set -eu
+
+PORT="${FANTASTIC_PORT:-8088}"
+case "$PORT" in
+  ''|*[!0-9]*) echo "fantastic-server: FANTASTIC_PORT must be a port number, got '$PORT'" >&2; exit 2 ;;
+esac
+
+# Preflight: /work must be writable by this user (uid 1000). A host folder that
+# uid cannot write fails here with the fix, not with a cryptic error. The probe
+# is a file beside .fantastic, not .fantastic itself: its existence marks a folder
+# as used, and the kernel seeds a new one only when it is absent.
+if ! : >/work/.fantastic-wtest 2>/dev/null; then
+  echo "fantastic-server: FATAL — /work is not writable by uid $(id -u), the container user." >&2
+  echo "  Podman:  add  --userns=keep-id  (your host uid becomes the container's)." >&2
+  echo "  Docker:  add  --user $(id -u):$(id -g)  (run as your host uid)." >&2
+  exit 1
+fi
+rm -f /work/.fantastic-wtest
+
+cd /work
+exec /usr/bin/fantastic canvas --port "$PORT" --host 0.0.0.0 "$@"

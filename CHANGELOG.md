@@ -7,6 +7,16 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The fantastic server: a headless container image of one canvas (#158), for
+  Docker and Podman (rootless), amd64 and arm64, from
+  `ghcr.io/aisixteen/fantastic`. Debian 13 "trixie", the kiosk's base; the same
+  `fantastic` binary as the `.deb`; non-root uid 1000; state on the volumes
+  `/home/fantastic/.fantastic` and `/work`; tini as PID 1; SIGTERM stops it in
+  order. `fantastic canvas --host ADDR` is the bind address it needs (`127.0.0.1`
+  unless named; the container names `0.0.0.0`), recorded on `web` like `--port`.
+  CI builds both architectures and smoke-tests them under Docker and rootless
+  Podman (`os/ci/container_check.py`); `publish-container.yml` pushes the manifest
+  by hand, from a green full run, with GITHUB_TOKEN.
 - Drag from the file tree onto the canvas (#134, #135). The tree's rows drag
   together: Shift-click selects a range, ⌘-click (Ctrl-click off macOS) adds or
   drops one row. An agent row drops its cell back on the canvas (shown again, or

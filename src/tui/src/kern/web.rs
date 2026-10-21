@@ -234,9 +234,17 @@ pub fn remove_run_file(dir: &std::path::Path) {
     let _ = std::fs::remove_file(dir.join(RUN_FILE));
 }
 
-/// Create what is missing, grant, boot, mount. Returns the pages' URLs.
-pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
+/// Create what is missing, grant, boot, mount. Returns the pages' URLs. `bind` is
+/// `--host`: a fresh `web` binds it; a recorded `web` must already bind it (`Host::boot`
+/// set it before the listener booted).
+pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<Urls, String> {
     let recorded = meta(h, WEB_ID).get("port").and_then(Value::as_u64).map(|p| p as u16);
+    if let (true, Some(b)) = (exists(h, WEB_ID), bind) {
+        let bound = meta(h, WEB_ID).get("host").and_then(Value::as_str).map(str::to_string);
+        if bound.as_deref() != Some(b) {
+            return Err(format!("--host {b}: the `web` leg still binds {}", bound.as_deref().unwrap_or("127.0.0.1 (the default)")));
+        }
+    }
     let port = match (exists(h, WEB_ID), port) {
         // Repeating the recorded port changes nothing, so it is not a conflict.
         (true, Some(p)) if recorded == Some(p) => p,
@@ -260,7 +268,11 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
     // (measured). So `web` is booted only when it is created here.
     let fresh_host = !exists(h, WEB_ID);
     if fresh_host {
-        create(h, json!({"parent_id": user, "id": WEB_ID, "handler_module": fantastic_web::HANDLER_MODULE, "port": port})).await?;
+        let mut rec = json!({"parent_id": user, "id": WEB_ID, "handler_module": fantastic_web::HANDLER_MODULE, "port": port});
+        if let Some(b) = bind {
+            rec["host"] = json!(b);
+        }
+        create(h, rec).await?;
     }
 
     // THE CANVAS.

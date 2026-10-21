@@ -20,9 +20,12 @@ the new app adopts them.
 os/
   session/          the fantastic-session package's tree (installed paths)
   mkosi/            the image: mkosi.conf, one kernel per architecture, the ci profile
-  ci/               boot_check.py: boots the image in QEMU and checks the kiosk
-scripts/build/deb.sh   the app's .deb and fantastic-session into dist/deb/
-scripts/build/os.sh    the image into dist/os/
+  container/        the server image: Containerfile, fantastic-server (its entrypoint)
+  ci/               boot_check.py: boots the image in QEMU and checks the kiosk;
+                    container_check.py: smoke-tests the server image under Docker and Podman
+scripts/build/deb.sh        the app's .deb and fantastic-session into dist/deb/
+scripts/build/os.sh         the image into dist/os/
+scripts/build/container.sh  the server image (docker or podman)
 ```
 
 ## On an existing Debian 13
@@ -179,6 +182,67 @@ printf '%s\n' '{"execute":"qmp_capabilities"}' \
   '{"execute":"screendump","arguments":{"filename":"idle.png","format":"png"}}' \
   | socat - UNIX-CONNECT:/tmp/qmp.sock
 ```
+
+## The server container
+
+The same `fantastic` CLI, headless, in a container: one canvas on a port, for a
+server or a CI box. It runs under Docker and under rootless Podman, on amd64 and
+arm64, from `ghcr.io/aisixteen/fantastic` (tags `X.Y.Z`, the commit sha, and
+`latest` for the newest release). Its base is the kiosk's, Debian 13 "trixie";
+the `fantastic` binary is the one the `.deb` carries. The recipe is
+`os/container/Containerfile`; the entrypoint is `os/container/fantastic-server`.
+
+> **The canvas has terminals.** Anyone who reaches the port runs commands as the
+> container's user. Publish it on `127.0.0.1` only, never on a public interface,
+> and reach a remote server through an SSH tunnel.
+
+```sh
+# Docker: the canvas on this machine's loopback, its state and its folder kept
+docker run -d --name fantastic -p 127.0.0.1:8088:8088 \
+  -v fantastic-state:/home/fantastic/.fantastic -v fantastic-work:/work \
+  ghcr.io/aisixteen/fantastic:latest
+
+# Podman, rootless: the same
+podman run -d --name fantastic -p 127.0.0.1:8088:8088 \
+  -v fantastic-state:/home/fantastic/.fantastic -v fantastic-work:/work \
+  ghcr.io/aisixteen/fantastic:latest
+
+# a folder of yours as the canvas folder: the container's user (uid 1000) must write it
+docker run … --user "$(id -u):$(id -g)" -v "$PWD/canvas:/work" …      # Docker
+podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Podman
+```
+
+- **Ports.** The server listens on `8088` inside the container
+  (`FANTASTIC_PORT`). Map it to any host port, always on `127.0.0.1`.
+- **Volumes.** `/home/fantastic/.fantastic` is the state (the saved set-ups and the
+  shared stores); `/work` is the canvas folder. A new container on the same
+  volumes keeps everything: `docker stop` then `docker start`, or a new `run`.
+- **Stop.** `docker stop` / `podman stop` send SIGTERM. The kernel drains and exits
+  0, so the stop is orderly; tini forwards the signal and reaps the children.
+- **Recipes.** Arguments after the image are recipes, as on the command line:
+  `… ghcr.io/aisixteen/fantastic:latest ai ollama -p 11434`.
+- **Health.** Docker's `HEALTHCHECK` asks the canvas page for a 200. Podman drops
+  `HEALTHCHECK` from its default OCI image format (it warns at build); `podman
+  inspect` shows none.
+- **Remote, through a tunnel.** On the server, the same `run` as above. On your
+  machine:
+
+  ```sh
+  ssh -N -L 8088:127.0.0.1:8088 you@server
+  ```
+
+  then open the address the Host guard accepts (see below).
+- **Opening it.** The server's Host guard answers only the address it binds: a
+  `0.0.0.0` bind answers `Host: 0.0.0.0:<port>`, and any other name is refused with
+  a 403 (a DNS-rebinding page is refused the same way). Open
+  `http://0.0.0.0:8088/`.
+
+The image's build is `scripts/build/container.sh` (`--arch amd64|arm64`, one
+image, loaded locally; `--arch all --push`, the manifest). CI builds both
+architectures and smoke-tests them under Docker and rootless Podman
+(`os/ci/container_check.py`: starts, answers, a canvas page loads, a terminal runs
+a command, stops with SIGTERM, restarts on the same volumes). The image is pushed
+only by `publish-container.yml`, by hand, from a green full run.
 
 ## Security
 

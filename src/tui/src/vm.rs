@@ -99,6 +99,8 @@ pub struct Boot {
     pub canvas: bool,
     /// `--port`: stored on `web`'s record; a different one overwrites it at boot.
     pub port: Option<u16>,
+    /// `--host`: the address `web` binds, stored on its record like `port`.
+    pub bind: Option<String>,
     /// `ai BACKEND …`: the root AI's backend (`kern/root_ai`).
     pub ai: Option<crate::kern::root_ai::Backend>,
     /// `run COMMAND…`: the program the terminal (or a canvas cell) runs.
@@ -195,7 +197,7 @@ async fn run(
             if let Err(e) = crate::tty::redirect_std_to(&paths.cli.join("kernel.log")) {
                 app.note(format!("{e}"));
             }
-            match Host::boot(&paths, boot.canvas, boot.port).await {
+            match Host::boot(&paths, boot.canvas, boot.port, boot.bind.clone()).await {
                 Ok(h) => {
                     let h = Arc::new(h);
                     app.cfg = h.cfg.clone();
@@ -209,7 +211,7 @@ async fn run(
                     crate::kern::term_watch::spawn(Arc::clone(&h));
                     cmds = Some(crate::kern::runner::spawn(Arc::clone(&h), tx.clone()));
                     if boot.canvas {
-                        match crate::kern::web::ensure(&h, boot.port).await {
+                        match crate::kern::web::ensure(&h, boot.port, boot.bind.as_deref()).await {
                             Ok(urls) => {
                                 boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
                                 app.note(format!("the canvas: {}", urls.canvas));
