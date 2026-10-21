@@ -207,9 +207,10 @@ podman run -d --name fantastic -p 127.0.0.1:8088:8088 \
   -v fantastic-state:/home/fantastic/.fantastic -v fantastic-work:/work \
   ghcr.io/aisixteen/fantastic:latest
 
-# a folder of yours as the canvas folder: the container's user (uid 1000) must write it
-docker run … --user "$(id -u):$(id -g)" -v "$PWD/canvas:/work" …      # Docker
-podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Podman
+# your own uid, with your own folders for the state and the canvas: the container runs
+# as you, so both must be host folders you own (a named volume belongs to uid 1000)
+docker run … --user "$(id -u):$(id -g)" -v "$PWD/state:/home/fantastic/.fantastic" -v "$PWD/canvas:/work" …   # Docker
+podman run … --userns=keep-id -v "$PWD/state:/home/fantastic/.fantastic" -v "$PWD/canvas:/work" …            # Podman
 ```
 
 - **Ports.** The server listens on `8088` inside the container
@@ -224,6 +225,11 @@ podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Pod
 - **Volumes.** `/home/fantastic/.fantastic` is the state (the saved set-ups and the
   shared stores); `/work` is the canvas folder. A new container on the same
   volumes keeps everything: `docker stop` then `docker start`, or a new `run`.
+- **Your uid.** Without `--user` or `--userns=keep-id` the container runs as uid 1000,
+  which owns `/home/fantastic` and its `.fantastic`. With them it runs as your uid, so
+  the state must be a host folder you own as well: with the named state volume the
+  container reports healthy, but the saved set-ups and the shared stores fail later
+  with Permission denied. The preflight checks `/work` only.
 - **Stop.** `docker stop` / `podman stop` send SIGTERM. The kernel drains and exits
   0, so the stop is orderly; tini forwards the signal and reaps the children.
 - **Recipes.** Arguments after the image are recipes, as on the command line:
@@ -260,10 +266,12 @@ packages are not pinned, so the pushed bytes can differ from the tested ones.
 
 ## Security
 
-- **Loopback only.** The home kernel and every canvas listen on 127.0.0.1. The
-  shipped image has no debugging surface: no WebKit inspector (the release app is
-  built without devtools), no WebDriver and no forwarder. `socat` and the guest
-  agent exist in the `ci` profile only.
+- **Loopback only.** The home kernel and every canvas listen on 127.0.0.1. This
+  covers the kiosk only: the server container listens on every address inside its
+  network namespace, and its port reaches the host only through the `-p 127.0.0.1:`
+  map (see The server container). The shipped image has no debugging surface: no
+  WebKit inspector (the release app is built without devtools), no WebDriver and no
+  forwarder. `socat` and the guest agent exist in the `ci` profile only.
 - **No password.** The kiosk user has none (the account is locked for password
   login). tty1 is the kiosk; the other VTs ask for a login nobody can give until
   an administrator sets a password. The PAM service `fantastic-kiosk` denies
@@ -292,6 +300,12 @@ binaries are built:
   those packages and `boot_check.py`. It keeps `os-check-<arch>` (screenshots,
   `boot_check.log`, `serial.log`, and on failure the journal and the kiosk's
   status) for 14 days.
+- `container` (amd64 and arm64 on the native free runners; Docker and rootless
+  Podman): `container.sh` builds the image for the arch, and `container_check.py` runs
+  the smoke test under each engine (the container starts and reports healthy, the
+  kernel answers, a canvas page loads, a terminal runs a command, SIGTERM exits 0, and
+  a restart on the same volumes keeps the state). It keeps `container-check-<arch>`
+  (`container_check-<engine>-<arch>.log` and each container's log) for 14 days.
 
 `boot_check.py` checks, in the booted image: the run file names a live
 `fantastic-app` with `SHELL` set; the logind session is `wayland` on seat0/tty1

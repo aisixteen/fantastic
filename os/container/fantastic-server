@@ -17,8 +17,10 @@ esac
 # Preflight: /work must be writable by this user (uid 1000). A host folder that
 # uid cannot write fails here with the fix, not with a cryptic error. The probe
 # is a file beside .fantastic, not .fantastic itself: its existence marks a folder
-# as used, and the kernel seeds a new one only when it is absent.
-if ! : >/work/.fantastic-wtest 2>/dev/null; then
+# as used, and the kernel seeds a new one only when it is absent. The probe runs
+# in a subshell: in dash a failed redirection on the special builtin `:` exits the
+# shell, so the FATAL text below would never print.
+if ! ( : >/work/.fantastic-wtest ) 2>/dev/null; then
   echo "fantastic-server: FATAL — /work is not writable by uid $(id -u), the container user." >&2
   echo "  Podman:  add  --userns=keep-id  (your host uid becomes the container's)." >&2
   echo "  Docker:  add  --user $(id -u):$(id -g)  (run as your host uid)." >&2

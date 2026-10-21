@@ -165,10 +165,14 @@ async fn set_web_field(kernel: &Arc<Kernel>, id: &AgentId, key: &str, flag: &str
 /// `--host ADDR` on `web`: the listener's `bind` is ADDR. The guard's identity (`host`) is
 /// ADDR too, unless ADDR is a wildcard, which a browser cannot dial: the record keeps its
 /// loopback identity, so `localhost:<port>` is the address the guard admits (see `web.rs`).
+/// A wildcard over a recorded concrete `host` (an earlier LAN bind) resets it to loopback,
+/// so the guard never judges by an address the listener no longer names.
 async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mut Vec<String>) {
     set_web_field(kernel, id, "bind", "--host", json!(addr), notes).await;
     if !crate::kern::web::is_wildcard(addr) {
         set_web_field(kernel, id, "host", "--host", json!(addr), notes).await;
+    } else if kernel.agents.get(id).is_some_and(|a| a.value().record().meta.contains_key("host")) {
+        set_web_field(kernel, id, "host", "--host", json!("127.0.0.1"), notes).await;
     }
 }
 
@@ -756,6 +760,37 @@ mod set_web_bind_tests {
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(field_of(&h, "web", "bind"), Some(json!("192.168.1.5")));
         assert_eq!(field_of(&h, "web", "host"), Some(json!("192.168.1.5")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_over_a_lan_bind_resets_the_guard_identity_to_loopback() {
+        let dir = std::env::temp_dir().join(format!("fc-set-web-bind-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = harness(&dir);
+        h.operator(
+            "kernel",
+            json!({"type": "create_agent", "parent_id": "kernel", "id": "web",
+                "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088}),
+        )
+        .await;
+        let web = AgentId::from("web");
+        let mut notes = Vec::new();
+        // `--host 192.168.1.5` records both the listener and the guard's identity
+        set_web_bind(&h.kernel, &web, "192.168.1.5", &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "host"), Some(json!("192.168.1.5")));
+        // `--host 0.0.0.0` then moves the listener only: the identity must not stay on the LAN
+        // address (the guard would refuse the `localhost:<port>` the run file names)
+        set_web_bind(&h.kernel, &web, "0.0.0.0", &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "bind"), Some(json!("0.0.0.0")));
+        assert_eq!(field_of(&h, "web", "host"), Some(json!("127.0.0.1")));
+        // and a wildcard again over the loopback identity changes nothing
+        set_web_bind(&h.kernel, &web, "0.0.0.0", &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "host"), Some(json!("127.0.0.1")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

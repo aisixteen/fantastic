@@ -136,10 +136,6 @@ class Ports(unittest.TestCase):
         self.assertTrue(1 <= p <= 65535)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class Health(unittest.TestCase):
     def test_healthy_passes_and_starting_waits(self):
         self.assertTrue(cc.health_ready("healthy"))
@@ -149,3 +145,7 @@ class Health(unittest.TestCase):
     def test_unhealthy_is_a_failure_now(self):
         with self.assertRaisesRegex(bc.Fail, "reports unhealthy"):
             cc.health_ready("unhealthy")
+
+
+if __name__ == "__main__":
+    unittest.main()
