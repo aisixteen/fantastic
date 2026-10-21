@@ -71,6 +71,8 @@ fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
         max_tokens: 8000,
         temperature: None,
         thinking_budget: None,
+        prompt_cache: false,
+        usage: Arc::new(Mutex::new(Usage::default())),
         report: ReportCell::default(),
     }
 }
@@ -360,6 +362,10 @@ async fn an_api_that_does_not_answer_refuses_naming_the_field() {
 // ─── through the kernel ─────────────────────────────────────────────────────
 
 async fn mk(tmp: &TempDir, endpoint: &str) -> Arc<Kernel> {
+    mk_with(tmp, endpoint, json!({})).await
+}
+
+async fn mk_with(tmp: &TempDir, endpoint: &str, extra: Value) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
     let kernel = Arc::new(kernel);
@@ -374,7 +380,9 @@ async fn mk(tmp: &TempDir, endpoint: &str) -> Arc<Kernel> {
     kernel.register(Arc::clone(&root));
     kernel.set_root(Arc::clone(&root));
     let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": "a1"});
-    for (k, v) in rec(json!({"endpoint": endpoint})) {
+    let mut record = rec(extra);
+    record.insert("endpoint".into(), json!(endpoint));
+    for (k, v) in record {
         payload[k] = v;
     }
     let r = call(&kernel, "kernel_state", payload).await;
@@ -410,4 +418,239 @@ async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
         (&rec["max_tokens"], &rec["context_window"]),
         (&json!(64000), &json!(200_000))
     );
+}
+
+// ─── prompt caching and usage ───────────────────────────────────────────────
+
+fn plain() -> Vec<Value> {
+    vec![
+        json!({"role": "system", "content": "s"}),
+        json!({"role": "user", "content": "hi"}),
+    ]
+}
+
+fn usage_start(input: i64, write: i64, read: i64) -> Value {
+    json!({"type": "message_start", "message": {"usage": {
+        "input_tokens": input,
+        "cache_creation_input_tokens": write,
+        "cache_read_input_tokens": read,
+    }}})
+}
+
+fn usage_stop(out: i64) -> [Value; 2] {
+    [
+        json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": out}}),
+        json!({"type": "message_stop"}),
+    ]
+}
+
+fn fresh_usage() -> Arc<Mutex<Usage>> {
+    Arc::new(Mutex::new(Usage::default()))
+}
+
+#[test]
+fn prompt_cache_off_leaves_the_body_exactly_as_it_was() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let expected = json!({"model": MODEL, "max_tokens": 8000, "messages": [{"role": "user", "content": "hi"}],
+                          "stream": true, "system": "s"});
+    assert_eq!(p.body(&plain(), None), expected);
+    p.prompt_cache = false;
+    assert_eq!(p.body(&plain(), None), expected);
+}
+
+#[test]
+fn prompt_cache_marks_the_system_block_and_the_tail() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.prompt_cache = true;
+    p.temperature = Some(0.2);
+    p.thinking_budget = Some(2048);
+    assert_eq!(
+        p.body(&plain(), None),
+        json!({
+            "model": MODEL,
+            "max_tokens": 8000,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}],
+            "cache_control": {"type": "ephemeral"},
+            "temperature": 0.2,
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+        })
+    );
+    // a side call's own bound is marked the same way
+    let b = p.body(&plain(), Some(1500));
+    assert_eq!(b["max_tokens"], json!(1500));
+    assert_eq!(b["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[test]
+fn prompt_cache_sends_no_system_block_when_the_system_is_empty() {
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.prompt_cache = true;
+    let b = p.body(&[json!({"role": "user", "content": "hi"})], None);
+    assert!(b.get("system").is_none(), "{b}");
+    assert_eq!(b["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[tokio::test]
+async fn the_stream_sets_last_prompt_tokens_and_the_counts() {
+    let mut events = vec![usage_start(100, 400, 1000), text("ok")];
+    events.extend(usage_stop(35));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let mut p = provider(&ep, Arc::new(NoKey));
+    p.usage = fresh_usage();
+    assert_eq!(drain(&p, None).await.unwrap(), "ok");
+    let report = p.report();
+    assert_eq!(report.prompt_tokens, Some(1500));
+    assert_eq!(report.completion_tokens, Some(35));
+    let u = p.usage.lock().unwrap();
+    assert_eq!(
+        (u.requests, u.input, u.cache_write, u.cache_read, u.output),
+        (1, 100, 400, 1000, 35)
+    );
+}
+
+#[tokio::test]
+async fn two_passes_accumulate_and_a_side_call_counts_too() {
+    let mut first = vec![usage_start(100, 400, 0), text("a")];
+    first.extend(usage_stop(10));
+    let mut second = vec![usage_start(50, 0, 900), text("b")];
+    second.extend(usage_stop(20));
+    let (_s1, ep1) = api(200, sse(&first)).await;
+    let (_s2, ep2) = api(200, sse(&second)).await;
+    let usage = fresh_usage();
+    let mut p = provider(&ep1, Arc::new(NoKey));
+    p.usage = Arc::clone(&usage);
+    drain(&p, None).await.unwrap();
+    p.endpoint = ep2;
+    drain(&p, Some(500)).await.unwrap();
+    let u = usage.lock().unwrap();
+    assert_eq!(
+        (u.requests, u.input, u.cache_write, u.cache_read, u.output),
+        (2, 150, 400, 900, 30)
+    );
+}
+
+#[test]
+fn hit_rate_and_saved_tokens_follow_the_formulas() {
+    let u = Usage {
+        requests: 1,
+        input: 100,
+        cache_write: 400,
+        cache_read: 1000,
+        output: 0,
+    };
+    let s = u.snapshot(None, None);
+    assert_eq!(s["prompt_tokens"], json!(1500));
+    assert_eq!(s["saved_tokens"], json!(800)); // 0.9*1000 - 0.25*400
+    let hit = s["hit_rate"].as_f64().unwrap();
+    assert!((hit - 1000.0 / 1500.0).abs() < 1e-12, "{hit}");
+    assert!(s.get("cost_usd").is_none() && s.get("saved_usd").is_none());
+    // a write that is never read is a loss: negative, reported, never clamped
+    let w = Usage {
+        input: 10,
+        cache_write: 400,
+        ..Usage::default()
+    };
+    let s = w.snapshot(None, None);
+    assert_eq!(s["saved_tokens"], json!(-100));
+    assert_eq!(s["hit_rate"].as_f64(), Some(0.0));
+    // nothing counted: no prompt, no hit rate
+    assert_eq!(Usage::default().snapshot(None, None)["hit_rate"], json!(0));
+    // halves round to even
+    assert_eq!(saved_tokens(5, 0), 4);
+    assert_eq!(saved_tokens(0, 2), 0);
+    assert_eq!(saved_tokens(0, 3), -1);
+    assert_eq!(saved_tokens(1, 0), 1);
+}
+
+#[test]
+fn prices_on_the_record_add_cost_and_saving_in_usd() {
+    let u = Usage {
+        requests: 1,
+        input: 100,
+        cache_write: 400,
+        cache_read: 1000,
+        output: 50,
+    };
+    let s = u.snapshot(Some(3.0), Some(15.0));
+    let cost = (100.0 + 1.25 * 400.0 + 0.1 * 1000.0) * 3.0 / 1e6 + 50.0 * 15.0 / 1e6;
+    assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
+    assert!((s["saved_usd"].as_f64().unwrap() - 800.0 * 3.0 / 1e6).abs() < 1e-12);
+    // one price without the other: neither field
+    let s = u.snapshot(Some(3.0), None);
+    assert!(s.get("cost_usd").is_none() && s.get("saved_usd").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_usage_verb_returns_the_counts_and_reset_zeroes_them() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with(
+        &tmp,
+        "http://unused.test/v1/messages",
+        json!({"price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0}),
+    )
+    .await;
+    {
+        let counts = usage_of(&AgentId::from("a1"));
+        let mut u = counts.lock().unwrap();
+        (u.requests, u.input, u.cache_write, u.cache_read) = (1, 100, 400, 1000);
+    }
+    let got = call(&kernel, "a1", json!({"type": "usage"})).await;
+    assert_eq!(got["cache_read_tokens"], json!(1000));
+    assert_eq!(got["saved_tokens"], json!(800));
+    assert!(got.get("cost_usd").is_some() && got.get("saved_usd").is_some());
+    assert_eq!(
+        call(&kernel, "a1", json!({"type": "usage", "reset": true})).await,
+        got
+    );
+    let zero = call(&kernel, "a1", json!({"type": "usage"})).await;
+    assert_eq!(zero["requests"], json!(0));
+    assert_eq!(zero["saved_tokens"], json!(0));
+    let bad = call(&kernel, "a1", json!({"type": "usage", "reset": "yes"})).await;
+    assert_eq!(bad["reason"], json!("bad_arg"));
+    assert_eq!(bad["arg"], json!("reset"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reflect_carries_the_usage_and_the_cache_flag() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_with(
+        &tmp,
+        "http://unused.test/v1/messages",
+        json!({"prompt_cache": true}),
+    )
+    .await;
+    let r = call(&kernel, "a1", json!({"type": "reflect"})).await;
+    assert_eq!(r["prompt_cache"], json!(true));
+    assert!(r["usage"]["prompt_tokens"].is_number(), "{r}");
+    assert!(r["usage"]["saved_tokens"].is_number(), "{r}");
+}
+
+#[test]
+fn the_record_refuses_a_bad_cache_flag_or_price() {
+    let check = |meta: Value| validate(meta.as_object().unwrap(), &rec(json!({})));
+    assert_eq!(check(json!({"prompt_cache": true})), None);
+    assert_eq!(check(json!({"price_input_per_mtok": 3})), None);
+    assert_eq!(
+        check(json!({"prompt_cache": "yes"})).as_deref(),
+        Some("prompt_cache must be a boolean")
+    );
+    assert!(check(json!({"price_output_per_mtok": "x"}))
+        .unwrap()
+        .contains("must be a number"));
+    assert!(check(json!({"price_input_per_mtok": true}))
+        .unwrap()
+        .contains("must be a number"));
+    assert!(check(json!({"price_input_per_mtok": -1}))
+        .unwrap()
+        .contains("zero or more"));
+    let names: Vec<&str> = record_schema()["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(names.contains(&"prompt_cache"));
+    assert!(names.contains(&"price_input_per_mtok") && names.contains(&"price_output_per_mtok"));
 }

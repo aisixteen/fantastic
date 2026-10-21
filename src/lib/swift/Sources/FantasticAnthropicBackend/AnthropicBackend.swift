@@ -7,7 +7,9 @@
 // every request; `thinking_budget` asks for extended thinking (`thinking_delta` →
 // `<think>`); a stream without `message_stop` did not finish; an `error` event is
 // raised with the API's own message. THE KEY is optional on the record
-// (`credentials`, sent as `x-api-key` with `anthropic-version`).
+// (`credentials`, sent as `x-api-key` with `anthropic-version`). PROMPT CACHING is
+// opt-in (`prompt_cache`): the `system` block and the conversation tail carry an
+// ephemeral `cache_control`; USAGE accumulates per agent in RAM (`usage` verb).
 
 import AsyncHTTPClient
 import FantasticAICore
@@ -61,6 +63,104 @@ func anthropicHeaders(_ req: inout HTTPClientRequest, key: String?) {
     if let key, !key.isEmpty { req.headers.add(name: "x-api-key", value: key) }
 }
 
+/// The cache marker a cached request sends: the 5-minute ephemeral TTL, the only one.
+let CACHE_CONTROL: JSON = ["type": "ephemeral"]
+
+/// `round(0.9 * cache_read - 0.25 * cache_write)` in full-price input tokens: a read
+/// costs 0.1x the base input price, a write 1.25x. Exact integer arithmetic, halves to
+/// even, so every runtime agrees. May be negative. Python `saved_tokens`.
+func savedTokens(cacheRead: Int, cacheWrite: Int) -> Int {
+    let n = 18 * cacheRead - 5 * cacheWrite
+    // floored division, as python's divmod: the remainder is in 0..<20
+    var q = n >= 0 ? n / 20 : -((-n + 19) / 20)
+    let r = n - q * 20
+    if 2 * r > 20 || (2 * r == 20 && q.isMultiple(of: 2) == false) { q += 1 }
+    return q
+}
+
+/// One agent's token counts since its kernel started (RAM — a restart zeroes them).
+/// `input` is the uncached remainder; the two cache counts are what the API reports
+/// for the prompt. Python `Usage`.
+struct AnthropicCounts: Equatable {
+    var requests = 0
+    var input = 0
+    var cacheWrite = 0
+    var cacheRead = 0
+    var output = 0
+
+    /// What the counts derive to, with the record's prices when BOTH are set (USD per
+    /// million tokens). Python `Usage.snapshot`.
+    func snapshot(priceIn: Double?, priceOut: Double?) -> JSON {
+        let prompt = input + cacheWrite + cacheRead
+        let saved = savedTokens(cacheRead: cacheRead, cacheWrite: cacheWrite)
+        var out: OrderedDictionary<String, JSON> = [
+            "requests": .integer(Int64(requests)),
+            "input_tokens": .integer(Int64(input)),
+            "cache_write_tokens": .integer(Int64(cacheWrite)),
+            "cache_read_tokens": .integer(Int64(cacheRead)),
+            "output_tokens": .integer(Int64(output)),
+            "prompt_tokens": .integer(Int64(prompt)),
+            "hit_rate": prompt > 0 ? JSON.double(Double(cacheRead) / Double(prompt)) : JSON.integer(0),
+            "saved_tokens": .integer(Int64(saved)),
+        ]
+        if let priceIn, let priceOut {
+            let costIn = Double(input) + 1.25 * Double(cacheWrite) + 0.1 * Double(cacheRead)
+            out["cost_usd"] = .double(costIn * priceIn / 1e6 + Double(output) * priceOut / 1e6)
+            out["saved_usd"] = .double(Double(saved) * priceIn / 1e6)
+        }
+        return .object(out)
+    }
+}
+
+/// The agent's running counts, shared by its providers and read by its verbs.
+final class AnthropicUsage: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts = AnthropicCounts()
+
+    /// A stream's usage at `message_start`: one request, its three input counts.
+    func addRequest(input: Int, cacheWrite: Int, cacheRead: Int) {
+        lock.withLock {
+            counts.requests += 1
+            counts.input += input
+            counts.cacheWrite += cacheWrite
+            counts.cacheRead += cacheRead
+        }
+    }
+
+    /// Output tokens billed from a stream's `message_delta` step.
+    func addOutput(_ n: Int) {
+        lock.withLock { counts.output += n }
+    }
+
+    /// The counts, read and — with `reset` — zeroed in one step.
+    func take(reset: Bool) -> AnthropicCounts {
+        lock.withLock {
+            let now = counts
+            if reset { counts = AnthropicCounts() }
+            return now
+        }
+    }
+}
+
+/// Each agent's counts, keyed by id: a provider adds to them, the verbs read them.
+enum AnthropicUsageTable {
+    nonisolated(unsafe) private static let lock = NSLock()
+    nonisolated(unsafe) private static var table: [String: AnthropicUsage] = [:]
+
+    static func of(_ id: AgentId) -> AnthropicUsage {
+        lock.withLock {
+            if let found = table[id.value] { return found }
+            let fresh = AnthropicUsage()
+            table[id.value] = fresh
+            return fresh
+        }
+    }
+
+    static func drop(_ id: AgentId) {
+        lock.withLock { table[id.value] = nil }
+    }
+}
+
 /// The Messages provider. PURE RAW TEXT.
 struct AnthropicProvider: AIProvider {
     let endpoint: String
@@ -69,6 +169,8 @@ struct AnthropicProvider: AIProvider {
     let maxTokens: Int64
     let temperature: Double?
     let thinkingBudget: Int64?
+    var promptCache: Bool = false
+    var counts: AnthropicUsage = AnthropicUsage()
     let usage: AIUsage? = AIUsage()
 
     /// The request body. Python `AnthropicProvider.body`.
@@ -79,7 +181,12 @@ struct AnthropicProvider: AIProvider {
             "model": .string(model), "max_tokens": .integer(callMax),
             "messages": .array(turns), "stream": .bool(true),
         ]
-        if !system.isEmpty { b["system"] = .string(system) }
+        if !system.isEmpty {
+            b["system"] = promptCache
+                ? .array([.object(["type": "text", "text": .string(system), "cache_control": CACHE_CONTROL])])
+                : .string(system)
+        }
+        if promptCache { b["cache_control"] = CACHE_CONTROL }
         if let temperature { b["temperature"] = .double(temperature) }
         if let budget = thinkingBudget, budget >= THINKING_FLOOR, budget < callMax {
             b["thinking"] = .object(["type": "enabled", "budget_tokens": .integer(budget)])
@@ -130,6 +237,8 @@ struct AnthropicProvider: AIProvider {
         }
         var wrap = ThinkingWrap()
         var stopped = false
+        // The output tokens this stream has already billed to the agent's usage.
+        var billedOut = 0
         do {
             for try await line in bytesToLines(response.body) {
                 guard line.hasPrefix("data:") else { continue }
@@ -140,9 +249,12 @@ struct AnthropicProvider: AIProvider {
                 switch evt["type"].asString ?? "" {
                 case "message_start":
                     let u = evt["message"]["usage"]
-                    let total = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]
-                        .reduce(Int64(0)) { $0 + (u[$1].asInt ?? 0) }
-                    usage?.lastPromptTokens = total > 0 ? Int(total) : nil
+                    let input = Int(u["input_tokens"].asInt ?? 0)
+                    let write = Int(u["cache_creation_input_tokens"].asInt ?? 0)
+                    let read = Int(u["cache_read_input_tokens"].asInt ?? 0)
+                    let total = input + write + read
+                    usage?.lastPromptTokens = total > 0 ? total : nil
+                    counts.addRequest(input: input, cacheWrite: write, cacheRead: read)
                 case "content_block_delta":
                     let delta = evt["delta"]
                     switch delta["type"].asString {
@@ -160,6 +272,9 @@ struct AnthropicProvider: AIProvider {
                     if let r = evt["delta"]["stop_reason"].asString { usage?.lastStopReason = r }
                     if let n = evt["usage"]["output_tokens"].asInt, n > 0 {
                         usage?.lastCompletionTokens = Int(n)
+                        // message_delta carries the running total: bill the step.
+                        counts.addOutput(Int(n) - billedOut)
+                        billedOut = Int(n)
                     }
                 case "message_stop":
                     stopped = true
@@ -196,8 +311,18 @@ struct AnthropicProvider: AIProvider {
 
 public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     public let name = "anthropic_backend"
-    public var verbs: [String] { AIBackend.verbNames }
-    public var verbDocTable: JSON { .object(AIBackend.VERBS) }
+    /// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
+    static let USAGE_DOC =
+        "usage — args: reset? (bool). The agent's token usage since its kernel started: requests, "
+        + "input, cache write and read, output, the derived prompt_tokens, hit_rate and saved_tokens "
+        + "(cost_usd and saved_usd when the record has both prices). reset: true returns the counts, "
+        + "then zeroes them."
+    public var verbs: [String] { AIBackend.verbNames + ["usage"] }
+    public var verbDocTable: JSON {
+        var docs = AIBackend.VERBS
+        docs["usage"] = .string(Self.USAGE_DOC)
+        return .object(docs)
+    }
     public var emitsDoc: JSON? { .object(AIBackend.REFLECT_EMITS) }
     public var cancelDoc: JSON? { .string(CANCEL_DOC) }
     public var notesDoc: JSON? { .object(AIBackend.NOTES) }
@@ -214,6 +339,8 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
                         "max_tokens": agent.metaValue(forKey: "max_tokens") ?? .null,
                         "temperature": agent.metaValue(forKey: "temperature") ?? .null,
                         "thinking_budget": agent.metaValue(forKey: "thinking_budget") ?? .null,
+                        "prompt_cache": .bool(Self.promptCacheOf(agent)),
+                        "usage": Self.usageNow(agent),
                     ]
                 },
                 makeProvider: { agent, _, kernel in
@@ -236,6 +363,9 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
         {
             return refused
         }
+        if payload["type"].asString == "usage", let agent = kernel.agent(agentId) {
+            return Self.usageReply(agent, payload)
+        }
         return try await core.handle(agentId: agentId, payload: payload, kernel: kernel)
     }
 
@@ -244,7 +374,49 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
     }
 
     public func onDelete(agentId: AgentId, kernel: Kernel) async throws {
+        // this agent's counts go with it: an id re-created later starts clean
+        AnthropicUsageTable.drop(agentId)
         await core.onDelete(agentId: agentId, kernel: kernel)
+    }
+
+    /// `prompt_cache`, validated boolean at the write; absent is false.
+    static func promptCacheOf(_ agent: Agent) -> Bool {
+        if case .bool(true)? = agent.metaValue(forKey: "prompt_cache") { return true }
+        return false
+    }
+
+    /// A record price (USD per million tokens) as a number, or nil when unset.
+    static func price(_ agent: Agent, _ key: String) -> Double? {
+        switch agent.metaValue(forKey: key) {
+        case .double(let d)?: return d
+        case .integer(let n)?: return Double(n)
+        default: return nil
+        }
+    }
+
+    /// The agent's counts with the record's prices applied (python `_usage_now`).
+    static func usageNow(_ agent: Agent) -> JSON {
+        AnthropicUsageTable.of(agent.id).take(reset: false).snapshot(
+            priceIn: price(agent, "price_input_per_mtok"),
+            priceOut: price(agent, "price_output_per_mtok"))
+    }
+
+    /// `usage` — args: reset? (bool). The agent's token usage since its kernel started.
+    /// `reset: true` returns the counts, then zeroes them. Python `_usage`.
+    static func usageReply(_ agent: Agent, _ payload: JSON) -> JSON {
+        let raw = payload.asObject?["reset"]
+        let reset: Bool
+        switch raw {
+        case nil: reset = false
+        case .bool(let b)?: reset = b
+        default:
+            return Refusal.make(
+                Refusal.badArg, "usage: reset must be true or false", extra: [("arg", .string("reset"))])
+        }
+        let out = AnthropicUsageTable.of(agent.id).take(reset: reset).snapshot(
+            priceIn: price(agent, "price_input_per_mtok"),
+            priceOut: price(agent, "price_output_per_mtok"))
+        return out
     }
 
     static func requiredInt(_ agent: Agent, _ key: String) throws(PyError) -> Int64 {
@@ -268,10 +440,13 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
         }
         var budget: Int64? = nil
         if case .integer(let b)? = agent.metaValue(forKey: "thinking_budget"), b >= 1 { budget = b }
-        return AnthropicProvider(
+        var provider = AnthropicProvider(
             endpoint: endpoint, model: try requiredMeta(agent, "model", ANTHROPIC), key: key,
             maxTokens: try requiredInt(agent, "max_tokens"), temperature: temperature,
             thinkingBudget: budget)
+        provider.promptCache = promptCacheOf(agent)
+        provider.counts = AnthropicUsageTable.of(agent.id)
+        return provider
     }
 
     static func positiveInt(_ v: JSON?) -> Int64? {
@@ -294,6 +469,20 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
             switch t {
             case .integer, .double: break
             default: return "temperature must be a number"
+            }
+        }
+        if let c = meta["prompt_cache"], c != .null {
+            guard case .bool = c else { return "prompt_cache must be a boolean" }
+        }
+        for key in ["price_input_per_mtok", "price_output_per_mtok"] {
+            if let p = meta[key], p != .null {
+                let value: Double? =
+                    switch p {
+                    case .integer(let n): Double(n)
+                    case .double(let d): d
+                    default: nil
+                    }
+                guard let value, value >= 0 else { return "\(key) must be a number, zero or more" }
             }
         }
         if let budget = Self.positiveInt(merged["thinking_budget"]) {
@@ -332,6 +521,18 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
             "thinking_budget", "int",
             "extended thinking per turn (tokens, at least \(THINKING_FLOOR), below max_tokens); unset, "
                 + "no thinking is asked for"),
+        RecordSchema.field(
+            "prompt_cache", "bool",
+            "prompt caching, opt-in: the system block and the conversation tail carry a 5-minute "
+                + "cache marker; unset or false, the request is unchanged"),
+        RecordSchema.field(
+            "price_input_per_mtok", "float",
+            "USD per million input tokens — with price_output_per_mtok, reflect and usage report "
+                + "cost_usd and saved_usd; no default price"),
+        RecordSchema.field(
+            "price_output_per_mtok", "float",
+            "USD per million output tokens — with price_input_per_mtok, reflect and usage report "
+                + "cost_usd and saved_usd; no default price"),
         // the API key — optional on the record: absent, no key header goes out
         RecordSchema.credentialsField(required: false),
     ])
@@ -366,7 +567,60 @@ public final class AnthropicBundle: AgentBundle, @unchecked Sendable {
 
     Optional: `temperature` (sent only when set), `thinking_budget` (extended thinking
     per turn — at least 1024 tokens and below `max_tokens`, refused at the write
-    otherwise; unset, no thinking is asked for; a side call too small for it gets none).
+    otherwise; unset, no thinking is asked for; a side call too small for it gets none),
+    `prompt_cache` (boolean, default false — see below), and `price_input_per_mtok` /
+    `price_output_per_mtok` (USD per million tokens, numbers zero or more; no default
+    price — see Usage).
+
+    ## Prompt caching
+
+    Opt-in: `prompt_cache: true` on the record. Off (the default, or absent), the request
+    is exactly what it always was: `system` a plain string, no `cache_control`.
+
+    On, EVERY request — main turns and side calls such as fold summaries alike — sends the
+    optimal markers for the prompt's shape:
+    - `system` as one text block carrying `"cache_control": {"type": "ephemeral"}` (absent
+      when the system string is empty, as always);
+    - a top-level `"cache_control": {"type": "ephemeral"}`, which caches the conversation
+      tail automatically.
+
+    The TTL is 5 minutes, the only one sent. Nothing else in the body changes: order,
+    merging, thinking and `max_tokens` are as they are without the flag.
+
+    The cache is a server-side PREFIX match. A turn whose system block changed re-writes
+    from the change on: an agent added or removed changes the tree index in the system
+    block. A turn whose history was trimmed or folded re-writes from the first changed
+    byte on. A repeat within 5 minutes of the previous request reads the shared prefix.
+
+    ## Usage
+
+    Always on, whether caching is on or off. Each response's stream reports its counts:
+    `message_start` gives `input_tokens`, `cache_creation_input_tokens` and
+    `cache_read_input_tokens`; `message_delta` gives `output_tokens`. These accumulate per
+    agent, in the backend's RAM — they reset when the kernel restarts. The `reflect` reply
+    carries them as `usage`, and the `usage` verb returns the same object:
+    `{type: "usage"}`, or `{type: "usage", reset: true}` to return it and then zero the
+    counts (`reset` must be a boolean).
+
+    - `requests` — responses counted (side calls too)
+    - `input_tokens` — the uncached remainder of the prompt
+    - `cache_write_tokens` — prompt tokens written to the cache
+    - `cache_read_tokens` — prompt tokens read from the cache
+    - `output_tokens` — output tokens
+    - `prompt_tokens` = `input_tokens` + `cache_write_tokens` + `cache_read_tokens`
+    - `hit_rate` = `cache_read_tokens` / `prompt_tokens` (0 when there are no prompt tokens)
+    - `saved_tokens` = round(0.9 × `cache_read_tokens` − 0.25 × `cache_write_tokens`), in
+      full-price input-token equivalents: a read costs 0.1×, a write 1.25× the base input
+      price. Computed exactly, halves to even. It may be negative — a write that is never
+      read costs more than no cache — and is never clamped.
+
+    With BOTH `price_input_per_mtok` and `price_output_per_mtok` on the record (USD per
+    million tokens):
+    - `cost_usd` = (`input_tokens` + 1.25 × `cache_write_tokens` + 0.1 ×
+      `cache_read_tokens`) × price_in / 1e6 + `output_tokens` × price_out / 1e6
+    - `saved_usd` = `saved_tokens` × price_in / 1e6
+
+    Without both prices, `cost_usd` and `saved_usd` are absent. No price is assumed.
 
     ## The key
 
