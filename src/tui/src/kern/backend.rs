@@ -63,11 +63,26 @@ const DIALOG: &str = "dialog";
 
 /// A saved set-up-record field the dialog snapshot never carries (identity, wiring,
 /// authority — added again when the AI is re-made).
-const NOT_SNAPSHOT: [&str; 7] = ["id", "parent_id", "guid", "agents", "memory_store_id", "can_call", "callable_by"];
+const NOT_SNAPSHOT: [&str; 7] = [
+    "id",
+    "parent_id",
+    "guid",
+    "agents",
+    "memory_store_id",
+    "can_call",
+    "callable_by",
+];
 
 /// Fields a caller's `stamp` may never set: the structural ones (they make a
 /// different agent).
-const NOT_STAMPABLE: [&str; 6] = ["type", "id", "parent_id", "guid", "handler_module", "agents"];
+const NOT_STAMPABLE: [&str; 6] = [
+    "type",
+    "id",
+    "parent_id",
+    "guid",
+    "handler_module",
+    "agents",
+];
 
 /// The caller's `stamp`: an object of fields, none of them structural (a
 /// structural field makes a different agent). Grants pass: the kernel judges
@@ -76,7 +91,11 @@ fn stamp_of(p: &Value) -> Result<Map<String, Value>, Value> {
     match p.get("stamp") {
         None | Some(Value::Null) => Ok(Map::new()),
         Some(Value::Object(m)) => match m.keys().find(|k| NOT_STAMPABLE.contains(&k.as_str())) {
-            Some(k) => Err(refuse("bad_arg", format!("stamp: `{k}` is not the caller's to set"), "stamp only fields of your own")),
+            Some(k) => Err(refuse(
+                "bad_arg",
+                format!("stamp: `{k}` is not the caller's to set"),
+                "stamp only fields of your own",
+            )),
             None => Ok(m.clone()),
         },
         Some(_) => Err(refuse("bad_arg", "stamp: must be an object", "")),
@@ -110,7 +129,11 @@ pub(crate) fn hex8() -> String {
 impl BackendBundle {
     fn host(kernel: &Arc<Kernel>) -> Option<Host> {
         let root = kernel.root()?.id.0.clone();
-        Some(Host { kernel: Arc::clone(kernel), cfg: ClientCfg::here(), root })
+        Some(Host {
+            kernel: Arc::clone(kernel),
+            cfg: ClientCfg::here(),
+            root,
+        })
     }
 
     /// Whether `handler` makes an AI agent: its bundle's record names a memory
@@ -122,7 +145,11 @@ impl BackendBundle {
             .catalog()
             .find(|(m, _)| *m == handler)
             .and_then(|(_, b)| b.record_schema())
-            .is_some_and(|s| s["fields"].as_array().is_some_and(|a| a.iter().any(|f| f["name"] == "memory_store_id")))
+            .is_some_and(|s| {
+                s["fields"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|f| f["name"] == "memory_store_id"))
+            })
     }
 
     async fn presets(host: &Host) -> Value {
@@ -140,7 +167,9 @@ impl BackendBundle {
     /// `{name, sentence}`, sorted — each placeable as a new instance
     /// (`spawn {instance_of}`).
     fn project_bundles(host: &Host) -> Vec<Value> {
-        let Ok(paths) = crate::env::Paths::here() else { return Vec::new() };
+        let Ok(paths) = crate::env::Paths::here() else {
+            return Vec::new();
+        };
         let mut out: Vec<(String, String)> = std::fs::read_dir(paths.store.join("bundles"))
             .into_iter()
             .flatten()
@@ -149,16 +178,24 @@ impl BackendBundle {
             .filter_map(|e| e.file_name().to_str().map(str::to_string))
             .filter(|n| host.kernel.bundles.is_folder(n))
             .map(|n| {
-                let sentence = std::fs::read_to_string(paths.store.join("bundles").join(&n).join("bundle.yaml"))
-                    .ok()
-                    .and_then(|t| serde_yaml::from_str::<Value>(&t).ok())
-                    .and_then(|d| d.get("sentence").and_then(Value::as_str).map(str::to_string))
-                    .unwrap_or_default();
+                let sentence = std::fs::read_to_string(
+                    paths.store.join("bundles").join(&n).join("bundle.yaml"),
+                )
+                .ok()
+                .and_then(|t| serde_yaml::from_str::<Value>(&t).ok())
+                .and_then(|d| {
+                    d.get("sentence")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
                 (n, sentence)
             })
             .collect();
         out.sort();
-        out.into_iter().map(|(name, sentence)| json!({"name": name, "sentence": sentence})).collect()
+        out.into_iter()
+            .map(|(name, sentence)| json!({"name": name, "sentence": sentence}))
+            .collect()
     }
 
     async fn spawn(host: &Host, me: &AgentId, p: &Value) -> Value {
@@ -176,15 +213,27 @@ impl BackendBundle {
         };
         // a STARTER BUNDLE (the double-click's "python agent"): a new project
         // bundle folder from the CLI's starter, loaded, and one instance of it
-        if let Some(kind) = p.get("bundle").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Some(kind) = p
+            .get("bundle")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             return Self::spawn_bundle(host, me, kind, stamp).await;
         }
         // ONE MORE INSTANCE of a bundle the project already holds (the popup's
         // "host · bundles" group)
-        if let Some(name) = p.get("instance_of").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Some(name) = p
+            .get("instance_of")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             return Self::spawn_instance(host, me, name, stamp).await;
         }
-        let name = match p.get("saved").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        let name = match p
+            .get("saved")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             Some(n) => n.to_string(),
             None => match &shelf.preferred {
                 Some(n) => n.clone(),
@@ -198,10 +247,21 @@ impl BackendBundle {
             },
         };
         let Some(t) = shelf.saved.iter().find(|t| t.name == name) else {
-            return refuse("not_found", format!("no saved set-up `{name}`"), "open ⚙ AI set-up to see your saved set-ups");
+            return refuse(
+                "not_found",
+                format!("no saved set-up `{name}`"),
+                "open ⚙ AI set-up to see your saved set-ups",
+            );
         };
         if !Self::is_ai_handler(host, &t.handler()) {
-            return refuse("bad_arg", format!("saved set-up `{name}` is not an AI set-up ({})", t.handler()), "open ⚙ AI set-up to see your saved set-ups");
+            return refuse(
+                "bad_arg",
+                format!(
+                    "saved set-up `{name}` is not an AI set-up ({})",
+                    t.handler()
+                ),
+                "open ⚙ AI set-up to see your saved set-ups",
+            );
         }
         let ai = format!("ai_{}", hex8());
         let mut spec: Map<String, Value> = t.record.clone();
@@ -215,7 +275,11 @@ impl BackendBundle {
                 json!({"id": ai, "root": ai, "saved": name, "handler_module": t.handler(), "model": t.model(),
                        "dialog_name": kept.get("name").cloned().unwrap_or(json!(ai))})
             }
-            Err(e) => refuse("bad_arg", format!("spawn: the AI from saved set-up `{name}`: {e}"), ""),
+            Err(e) => refuse(
+                "bad_arg",
+                format!("spawn: the AI from saved set-up `{name}`: {e}"),
+                "",
+            ),
         }
     }
 
@@ -224,7 +288,12 @@ impl BackendBundle {
     /// told to load it (`reload_bundle`), one instance made under `canvas_root`,
     /// its view written from the bundle's view file. Editing the folder then takes
     /// effect at once (`kern/bundle_watch`).
-    async fn spawn_bundle(host: &Host, me: &AgentId, kind: &str, stamp: Map<String, Value>) -> Value {
+    async fn spawn_bundle(
+        host: &Host,
+        me: &AgentId,
+        kind: &str,
+        stamp: Map<String, Value>,
+    ) -> Value {
         let paths = match crate::env::Paths::here() {
             Ok(p) => p,
             Err(e) => return refuse("not_found", format!("spawn: the project dir: {e}"), ""),
@@ -237,18 +306,34 @@ impl BackendBundle {
         // its files watched BEFORE it loads: an edit from now on reloads it, and
         // the folder's own (late) event does not restart the instance made below
         crate::kern::bundle_watch::arm(host, &name).await;
-        let r = host.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
+        let r = host
+            .operator("kernel", json!({"type": "reload_bundle", "name": name}))
+            .await
+            .result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("spawn: loading the bundle `{name}`: {e}"), "");
+            return refuse(
+                "bad_arg",
+                format!("spawn: loading the bundle `{name}`: {e}"),
+                "",
+            );
         }
         let id = format!("{name}_1");
         let mut spec = stamp;
-        for (k, v) in [("type", json!("create_agent")), ("parent_id", json!(me.0)), ("id", json!(id)), ("handler_module", json!(name))] {
+        for (k, v) in [
+            ("type", json!("create_agent")),
+            ("parent_id", json!(me.0)),
+            ("id", json!(id)),
+            ("handler_module", json!(name)),
+        ] {
             spec.insert(k.into(), v);
         }
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("spawn: an instance of `{name}`: {e}"), "");
+            return refuse(
+                "bad_arg",
+                format!("spawn: an instance of `{name}`: {e}"),
+                "",
+            );
         }
         if let Err(e) = crate::kern::reach::granted(host, &id).await {
             return refuse("bad_arg", e, "");
@@ -262,27 +347,48 @@ impl BackendBundle {
     /// An instance of project bundle `name` (`.fantastic/bundles/<name>/`, loaded):
     /// `<name>_<n>` (the next free n) under this canvas node, granted like any
     /// cell's backend, its view written from the bundle's view file.
-    async fn spawn_instance(host: &Host, me: &AgentId, name: &str, stamp: Map<String, Value>) -> Value {
+    async fn spawn_instance(
+        host: &Host,
+        me: &AgentId,
+        name: &str,
+        stamp: Map<String, Value>,
+    ) -> Value {
         let paths = match crate::env::Paths::here() {
             Ok(p) => p,
             Err(e) => return refuse("not_found", format!("spawn: the project dir: {e}"), ""),
         };
         let dir = paths.store.join("bundles").join(name);
         if !dir.join("bundle.yaml").is_file() || !host.kernel.bundles.is_folder(name) {
-            let have: Vec<String> = Self::project_bundles(host).iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect();
-            return refuse("not_found", format!("spawn: no project bundle `{name}`"), &format!("the project's bundles: {}", have.join(", ")));
+            let have: Vec<String> = Self::project_bundles(host)
+                .iter()
+                .filter_map(|b| b["name"].as_str().map(str::to_string))
+                .collect();
+            return refuse(
+                "not_found",
+                format!("spawn: no project bundle `{name}`"),
+                &format!("the project's bundles: {}", have.join(", ")),
+            );
         }
         let id = (1..)
             .map(|n| format!("{name}_{n}"))
             .find(|c| !host.kernel.agents.contains_key(&AgentId::from(c.as_str())))
             .expect("an unused instance id");
         let mut spec = stamp;
-        for (k, v) in [("type", json!("create_agent")), ("parent_id", json!(me.0)), ("id", json!(id)), ("handler_module", json!(name))] {
+        for (k, v) in [
+            ("type", json!("create_agent")),
+            ("parent_id", json!(me.0)),
+            ("id", json!(id)),
+            ("handler_module", json!(name)),
+        ] {
             spec.insert(k.into(), v);
         }
         let r = host.operator("kernel", Value::Object(spec)).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return refuse("bad_arg", format!("spawn: an instance of `{name}`: {e}"), "");
+            return refuse(
+                "bad_arg",
+                format!("spawn: an instance of `{name}`: {e}"),
+                "",
+            );
         }
         if let Err(e) = crate::kern::reach::granted(host, &id).await {
             return refuse("bad_arg", e, "");
@@ -298,16 +404,30 @@ impl BackendBundle {
     /// store's parent), its record names the store, `user` may call its chat
     /// verbs, it may call the store, its key and `peer`. `user`'s own side is
     /// `kern/reach`'s.
-    pub(crate) async fn make_ai(host: &Host, me: &AgentId, ai: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Result<(), String> {
+    pub(crate) async fn make_ai(
+        host: &Host,
+        me: &AgentId,
+        ai: &str,
+        mut spec: Map<String, Value>,
+        peer: Map<String, Value>,
+    ) -> Result<(), String> {
         // the project's store, named or not, admits the AI (a cabinet's helper AI
         // names it: equipment is not a reach holder, so nothing else would); a
         // caller's OWN store is the caller's to grant
-        let named = spec.get("memory_store_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+        let named = spec
+            .get("memory_store_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let store = match named {
             Some(s) if host.ai_store().ok().as_deref() != Some(s.as_str()) => s,
             _ => host.admit_to_memory(ai).await?,
         };
-        let handler = spec.get("handler_module").and_then(Value::as_str).unwrap_or("").to_string();
+        let handler = spec
+            .get("handler_module")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         crate::kern::keys::attach(host, &handler, &mut spec)?;
         let spec = Self::ai_create_spec(me, ai, &store, spec, peer);
         let named = spec.clone();
@@ -316,7 +436,9 @@ impl BackendBundle {
             return Err(e.to_string());
         }
         if let Err(e) = crate::kern::keys::wire_record(host, ai, &named).await {
-            let _ = host.operator("kernel", json!({"type": "delete_agent", "id": ai})).await;
+            let _ = host
+                .operator("kernel", json!({"type": "delete_agent", "id": ai}))
+                .await;
             return Err(e);
         }
         // the cell calls it through `user` and watches it through the leg the
@@ -327,7 +449,13 @@ impl BackendBundle {
     /// The `create_agent` spec of AI `ai` under `me`, on memory `store` (pure): the
     /// store's grant on the AI's `can_call`, the human's chat verbs on its `callable_by`,
     /// and the caller's own grants MERGED over both (the caller's keys win on a clash).
-    fn ai_create_spec(me: &AgentId, ai: &str, store: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Map<String, Value> {
+    fn ai_create_spec(
+        me: &AgentId,
+        ai: &str,
+        store: &str,
+        mut spec: Map<String, Value>,
+        peer: Map<String, Value>,
+    ) -> Map<String, Value> {
         spec.insert("type".into(), json!("create_agent"));
         spec.insert("parent_id".into(), json!(me.0));
         spec.insert("id".into(), json!(ai));
@@ -336,7 +464,10 @@ impl BackendBundle {
             Some(Value::Object(m)) => m,
             _ => Map::new(),
         };
-        let (caller_cc, caller_cb) = (caller(&mut spec, "can_call"), caller(&mut spec, "callable_by"));
+        let (caller_cc, caller_cb) = (
+            caller(&mut spec, "can_call"),
+            caller(&mut spec, "callable_by"),
+        );
         let mut cb = Map::new();
         cb.insert(CHAT_USER.into(), json!(CHAT_VERBS));
         cb.extend(caller_cb);
@@ -354,7 +485,11 @@ impl BackendBundle {
 
     /// Whether `id` sits under `me` (strictly).
     fn below(host: &Host, me: &AgentId, id: &str) -> bool {
-        let mut cur = host.kernel.agents.get(&AgentId::from(id)).and_then(|a| a.value().record().parent_id);
+        let mut cur = host
+            .kernel
+            .agents
+            .get(&AgentId::from(id))
+            .and_then(|a| a.value().record().parent_id);
         let mut hops = 0;
         while let Some(p) = cur {
             if p == me.0 {
@@ -364,7 +499,11 @@ impl BackendBundle {
             if hops > 4096 {
                 return false;
             }
-            cur = host.kernel.agents.get(&AgentId::from(p.as_str())).and_then(|a| a.value().record().parent_id);
+            cur = host
+                .kernel
+                .agents
+                .get(&AgentId::from(p.as_str()))
+                .and_then(|a| a.value().record().parent_id);
         }
         false
     }
@@ -374,10 +513,20 @@ impl BackendBundle {
         let Some(Value::Object(rec)) = p.get("record") else {
             return refuse("bad_arg", "create: record (dict) required", "");
         };
-        if let Some(k) = rec.keys().find(|k| *k != "handler_module" && NOT_STAMPABLE.contains(&k.as_str()) && *k != "id") {
-            return refuse("bad_arg", format!("create: `{k}` is structural — not the caller's to set"), "the child's parent is this agent");
+        if let Some(k) = rec
+            .keys()
+            .find(|k| *k != "handler_module" && NOT_STAMPABLE.contains(&k.as_str()) && *k != "id")
+        {
+            return refuse(
+                "bad_arg",
+                format!("create: `{k}` is structural — not the caller's to set"),
+                "the child's parent is this agent",
+            );
         }
-        let handler = rec.get("handler_module").and_then(Value::as_str).unwrap_or("");
+        let handler = rec
+            .get("handler_module")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if handler.is_empty() {
             return refuse("bad_arg", "create: record.handler_module required", "");
         }
@@ -385,10 +534,16 @@ impl BackendBundle {
         if let Some(id) = rec.get("id").and_then(Value::as_str) {
             if let Some(a) = host.kernel.agents.get(&AgentId::from(id)) {
                 let r = a.value().record();
-                if r.parent_id.as_deref() == Some(me.0.as_str()) && r.handler_module.as_deref() == Some(handler) {
+                if r.parent_id.as_deref() == Some(me.0.as_str())
+                    && r.handler_module.as_deref() == Some(handler)
+                {
                     return json!({"id": id, "existed": true});
                 }
-                return refuse("exists", format!("create: `{id}` already exists elsewhere"), "");
+                return refuse(
+                    "exists",
+                    format!("create: `{id}` already exists elsewhere"),
+                    "",
+                );
             }
         }
         // an AI is made the way every AI is (`make_ai`): on the project's memory store from
@@ -413,7 +568,11 @@ impl BackendBundle {
         }
         // the page calls it through `user` and watches it through the leg the
         // moment this answers: both grants first
-        let id = r.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let id = r
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         if let Err(e) = crate::kern::reach::granted(host, &id).await {
             return refuse("not_found", format!("create: {e}"), "");
         }
@@ -424,9 +583,15 @@ impl BackendBundle {
     async fn delete(host: &Host, me: &AgentId, p: &Value) -> Value {
         let id = p.get("id").and_then(Value::as_str).unwrap_or("");
         if !Self::below(host, me, id) {
-            return refuse("not_found", format!("delete: no {id:?} under `{}`", me.0), "");
+            return refuse(
+                "not_found",
+                format!("delete: no {id:?} under `{}`", me.0),
+                "",
+            );
         }
-        host.operator("kernel", json!({"type": "delete_agent", "id": id})).await.result
+        host.operator("kernel", json!({"type": "delete_agent", "id": id}))
+            .await
+            .result
     }
 
     /// `add_mcp {url, key?}` — ONE remote MCP server as an agent (`mcp_client`):
@@ -434,18 +599,35 @@ impl BackendBundle {
     /// host; the agent made under this node naming it, and granted its `get`.
     async fn add_mcp(host: &Host, me: &AgentId, p: &Value) -> Value {
         const MCP: &str = fantastic_mcp_client::HANDLER_MODULE;
-        let url = p.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let url = p
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if url.is_empty() {
-            return refuse("bad_arg", "add_mcp: url (the server's MCP endpoint) required", "");
+            return refuse(
+                "bad_arg",
+                "add_mcp: url (the server's MCP endpoint) required",
+                "",
+            );
         }
-        let key = p.get("key").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let key = p
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if !key.is_empty() {
             if let Err(e) = crate::kern::keys::store(host, MCP, &url, &key).await {
                 return refuse("bad_arg", format!("add_mcp: the key: {e}"), "");
             }
         }
         let host_part = crate::kern::keys::host_of(&url).unwrap_or_default();
-        let slug: String = host_part.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let slug: String = host_part
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
         let id = format!("mcp_{}_{}", slug.trim_matches('_'), hex8());
         let mut spec = Map::new();
         spec.insert("type".into(), json!("create_agent"));
@@ -456,7 +638,10 @@ impl BackendBundle {
         spec.insert("can_call".into(), json!({}));
         if let Ok(r) = crate::kern::keys::ref_for(MCP, &url) {
             if crate::kern::keys::has(host, &r) {
-                spec.insert("credentials".into(), json!({"store": crate::kern::keys::STORE, "ref": r}));
+                spec.insert(
+                    "credentials".into(),
+                    json!({"store": crate::kern::keys::STORE, "ref": r}),
+                );
             }
         }
         crate::kern::keys::grant_on_create(&mut spec);
@@ -481,17 +666,47 @@ impl BackendBundle {
     /// lists the server's tools. Neither given: a reset (reconnect as it is).
     async fn configure_mcp(host: &Host, p: &Value) -> Value {
         const MCP: &str = fantastic_mcp_client::HANDLER_MODULE;
-        let id = p.get("id").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let id = p
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let Some(meta) = Self::meta_of(host, &id) else {
             return refuse("not_found", format!("configure_mcp: no agent {id:?}"), "");
         };
-        if host.kernel.agents.get(&AgentId::from(id.as_str())).and_then(|a| a.value().record().handler_module.clone()).as_deref() != Some(MCP) {
-            return refuse("bad_arg", format!("configure_mcp: {id:?} is not an MCP agent"), "");
+        if host
+            .kernel
+            .agents
+            .get(&AgentId::from(id.as_str()))
+            .and_then(|a| a.value().record().handler_module.clone())
+            .as_deref()
+            != Some(MCP)
+        {
+            return refuse(
+                "bad_arg",
+                format!("configure_mcp: {id:?} is not an MCP agent"),
+                "",
+            );
         }
-        let url = p.get("url").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty())
+        let url = p
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| meta.get("url").and_then(Value::as_str).unwrap_or("").to_string());
-        let key = p.get("key").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            .unwrap_or_else(|| {
+                meta.get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            });
+        let key = p
+            .get("key")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if !key.is_empty() {
             if let Err(e) = crate::kern::keys::store(host, MCP, &url, &key).await {
                 return refuse("bad_arg", format!("configure_mcp: the key: {e}"), "");
@@ -502,7 +717,11 @@ impl BackendBundle {
         if let Ok(r) = crate::kern::keys::ref_for(MCP, &url) {
             if crate::kern::keys::has(host, &r) {
                 upd["credentials"] = json!({"store": crate::kern::keys::STORE, "ref": r});
-                let mut cc = meta.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
+                let mut cc = meta
+                    .get("can_call")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
                 cc.insert(crate::kern::keys::STORE.into(), json!(["get"]));
                 upd["can_call"] = Value::Object(cc);
                 if let Err(e) = crate::kern::keys::wire(host, &id).await {
@@ -536,7 +755,10 @@ impl BackendBundle {
     }
 
     fn meta_of(host: &Host, id: &str) -> Option<Map<String, Value>> {
-        host.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta.clone())
+        host.kernel
+            .agents
+            .get(&AgentId::from(id))
+            .map(|a| a.value().record().meta.clone())
     }
 
     /// The kept dialogs: `dialog` rows in the AI store under `user`'s key
@@ -544,7 +766,10 @@ impl BackendBundle {
     /// from above), the newest row per AI wins — `{id: {name, saved set-up, record}}`.
     async fn dialogs_map(host: &Host) -> Result<Map<String, Value>, String> {
         let store = host.ai_store()?;
-        let r = host.act(&store, json!({"type": "read", "kinds": [DIALOG]})).await.result;
+        let r = host
+            .act(&store, json!({"type": "read", "kinds": [DIALOG]}))
+            .await
+            .result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return Err(format!("backend: reading the kept dialogs: {e}"));
         }
@@ -561,7 +786,10 @@ impl BackendBundle {
     async fn save_dialog(host: &Host, ai: &str, d: &Value) -> Result<(), String> {
         let store = host.ai_store()?;
         let row = json!({"kind": DIALOG, "ai": ai, "name": d.get("name"), "saved": d.get("saved"), "record": d.get("record")});
-        let r = host.act(&store, json!({"type": "append", "rows": [row]})).await.result;
+        let r = host
+            .act(&store, json!({"type": "append", "rows": [row]}))
+            .await
+            .result;
         match r.get("error").and_then(Value::as_str) {
             Some(e) => Err(format!("backend: could not record the dialog: {e}")),
             None => Ok(()),
@@ -571,7 +799,11 @@ impl BackendBundle {
     /// KEEP: the AI is on the project's memory store from its first turn, so a
     /// kept dialog is a recorded one — its name, saved set-up and how to re-make it.
     async fn keep(host: &Host, p: &Value) -> Value {
-        let ai = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let ai = p
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let Some(meta) = Self::meta_of(host, &ai) else {
             return refuse("not_found", format!("keep: no AI {ai:?}"), "");
         };
@@ -582,12 +814,25 @@ impl BackendBundle {
         if let Some(d) = dialogs.get(&ai) {
             return json!({"kept": ai, "name": d["name"]});
         }
-        let mut record: Map<String, Value> =
-            meta.iter().filter(|(k, _)| !NOT_SNAPSHOT.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut record: Map<String, Value> = meta
+            .iter()
+            .filter(|(k, _)| !NOT_SNAPSHOT.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         // the handler is on the record, not in its meta
-        let handler = host.kernel.agents.get(&AgentId::from(ai.as_str())).and_then(|a| a.value().record().handler_module);
+        let handler = host
+            .kernel
+            .agents
+            .get(&AgentId::from(ai.as_str()))
+            .and_then(|a| a.value().record().handler_module);
         record.insert("handler_module".into(), json!(handler));
-        let name = p.get("name").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(&ai).trim().to_string();
+        let name = p
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&ai)
+            .trim()
+            .to_string();
         let d = json!({"name": name, "saved": meta.get("saved"), "record": record});
         match Self::save_dialog(host, &ai, &d).await {
             Ok(()) => json!({"kept": ai, "name": name}),
@@ -597,15 +842,28 @@ impl BackendBundle {
 
     async fn rename(host: &Host, p: &Value) -> Value {
         let ai = p.get("id").and_then(Value::as_str).unwrap_or("");
-        let name = p.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let name = p
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let dialogs = match Self::dialogs_map(host).await {
             Ok(d) => d,
             Err(e) => return refuse("not_found", e, ""),
         };
         let Some(mut d) = dialogs.get(ai).cloned() else {
-            return refuse("not_found", format!("rename: no kept dialog {ai:?}"), "keep it first");
+            return refuse(
+                "not_found",
+                format!("rename: no kept dialog {ai:?}"),
+                "keep it first",
+            );
         };
-        d["name"] = json!(if name.is_empty() { ai.to_string() } else { name });
+        d["name"] = json!(if name.is_empty() {
+            ai.to_string()
+        } else {
+            name
+        });
         match Self::save_dialog(host, ai, &d).await {
             Ok(()) => json!({"id": ai, "name": d["name"]}),
             Err(e) => refuse("bad_arg", e, ""),
@@ -626,7 +884,11 @@ impl BackendBundle {
     /// open (one dialog, several cells), else the same AI re-made here
     /// — its history is in the memory store under its own id.
     async fn reopen(host: &Host, me: &AgentId, p: &Value) -> Value {
-        let ai = p.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let ai = p
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let dialogs = match Self::dialogs_map(host).await {
             Ok(d) => d,
             Err(e) => return refuse("not_found", e, ""),
@@ -641,10 +903,16 @@ impl BackendBundle {
         if host.kernel.agents.contains_key(&AgentId::from(ai.as_str())) {
             return json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": true});
         }
-        let mut spec: Map<String, Value> = d.get("record").and_then(Value::as_object).cloned().unwrap_or_default();
+        let mut spec: Map<String, Value> = d
+            .get("record")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         spec.extend(stamp);
         match Self::make_ai(host, me, &ai, spec, peer).await {
-            Ok(()) => json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": false}),
+            Ok(()) => {
+                json!({"id": ai, "root": ai, "saved": d.get("saved"), "name": d.get("name"), "shared": false})
+            }
             Err(e) => refuse("bad_arg", format!("reopen: re-making the AI: {e}"), ""),
         }
     }
@@ -659,22 +927,27 @@ impl Bundle for BackendBundle {
     /// HOW TO CALL it — served by the kernel's `docs` verb, never on a reflect.
     fn verb_docs(&self) -> Value {
         json!({
-                    "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. An AI (its handler names a memory store) is made as every AI is: on the project's memory store, granted that store and the human's chat verbs. {id, …}.",
-                    "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
-                    "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles)}.",
-                    "spawn": "args: saved:str? (else the default) | bundle:str (a NEW project bundle from that starter — only when the user asks for a bundle) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, saved, handler_module, model}.",
-                    "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
-                    "rename": "args: id:str, name:str. {id, name}.",
-                    "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, saved, live}]}.",
-                    "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, saved, name, shared}.",
-                    "new_canvas": "args: name:str (req). A CHILD canvas `canvas_<name>` of this one: its page records nest under this canvas's records, and deleting this canvas deletes it. Its own page kernel and its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
-                    "canvases": "No args. Every canvas, the main one first: {canvases: [{id, loader, main, name}]}.",
-                    "configure_mcp": "args: id:str (req — an MCP agent of this canvas), url:str?, key:str? — its settings changed (a new key stored for the url's host and named), then it connects and lists its tools again (`boot`). Neither given: a reset — it reconnects as it is. {id, url}.",
-                    "add_mcp": "args: url:str (req — the server's MCP endpoint), key:str? (a static API key, sent as Bearer to that host only). One remote MCP server as an agent under this canvas: its tools are its verbs. The key is stored in the credential store (choose where keys are kept first). {id}.",
-                })
+            "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. An AI (its handler names a memory store) is made as every AI is: on the project's memory store, granted that store and the human's chat verbs. {id, …}.",
+            "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
+            "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles)}.",
+            "spawn": "args: saved:str? (else the default) | bundle:str (a NEW project bundle from that starter — only when the user asks for a bundle) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, saved, handler_module, model}.",
+            "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
+            "rename": "args: id:str, name:str. {id, name}.",
+            "dialogs": "No args. The kept dialogs: {dialogs: [{id, name, saved, live}]}.",
+            "reopen": "args: id:str (a kept dialog), stamp:dict?, peer_grants:dict? (as spawn). The live AI if another cell has it, else the same AI re-made here, its history intact. {id, root, saved, name, shared}.",
+            "new_canvas": "args: name:str (req). A CHILD canvas `canvas_<name>` of this one: its page records nest under this canvas's records, and deleting this canvas deletes it. Its own page kernel and its own cells' backends. Open it at the page URL with ?canvas=<id>. {id}.",
+            "canvases": "No args. Every canvas, the main one first: {canvases: [{id, loader, main, name}]}.",
+            "configure_mcp": "args: id:str (req — an MCP agent of this canvas), url:str?, key:str? — its settings changed (a new key stored for the url's host and named), then it connects and lists its tools again (`boot`). Neither given: a reset — it reconnects as it is. {id, url}.",
+            "add_mcp": "args: url:str (req — the server's MCP endpoint), key:str? (a static API key, sent as Bearer to that host only). One remote MCP server as an agent under this canvas: its tools are its verbs. The key is stored in the credential store (choose where keys are kept first). {id}.",
+        })
     }
 
-    async fn handle(&self, agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Reply, BundleError> {
+    async fn handle(
+        &self,
+        agent_id: &AgentId,
+        payload: &Value,
+        kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
         let verb = payload.get("type").and_then(Value::as_str).unwrap_or("");
         match verb {
             "boot" => Ok(None),
@@ -684,7 +957,11 @@ impl Bundle for BackendBundle {
             }))),
             _ => {
                 let Some(host) = Self::host(kernel) else {
-                    return Ok(Some(refuse("not_found", "canvas: the kernel has no root", "")));
+                    return Ok(Some(refuse(
+                        "not_found",
+                        "canvas: the kernel has no root",
+                        "",
+                    )));
                 };
                 Ok(Some(match verb {
                     "create" => Self::create(&host, agent_id, payload).await,
@@ -695,7 +972,13 @@ impl Bundle for BackendBundle {
                     "rename" => Self::rename(&host, payload).await,
                     "dialogs" => Self::dialogs(&host).await,
                     "reopen" => Self::reopen(&host, agent_id, payload).await,
-                    "new_canvas" => match crate::kern::web::new_canvas(&host, &agent_id.0, payload.get("name").and_then(Value::as_str).unwrap_or("")).await {
+                    "new_canvas" => match crate::kern::web::new_canvas(
+                        &host,
+                        &agent_id.0,
+                        payload.get("name").and_then(Value::as_str).unwrap_or(""),
+                    )
+                    .await
+                    {
                         Ok(id) => json!({"id": id}),
                         Err(e) => refuse("bad_arg", e, "name it: new_canvas {name: \"research\"}"),
                     },
@@ -703,7 +986,8 @@ impl Bundle for BackendBundle {
                     "add_mcp" => Self::add_mcp(&host, agent_id, payload).await,
                     "configure_mcp" => Self::configure_mcp(&host, payload).await,
                     _ => {
-                        let mut r = refuse("unhandled", format!("canvas: unknown type {verb:?}"), "");
+                        let mut r =
+                            refuse("unhandled", format!("canvas: unknown type {verb:?}"), "");
                         r["verb"] = json!(verb);
                         r
                     }
@@ -734,7 +1018,12 @@ mod create_tests {
             Some(json!({"fields": [{"name": "memory_store_id"}]}))
         }
 
-        async fn handle(&self, _id: &AgentId, _p: &Value, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
+        async fn handle(
+            &self,
+            _id: &AgentId,
+            _p: &Value,
+            _k: &Arc<Kernel>,
+        ) -> Result<Option<Value>, BundleError> {
             Ok(None)
         }
     }
@@ -747,24 +1036,37 @@ mod create_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut kernel = Kernel::new();
-        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        kernel.bundles.register(
+            fantastic_core::HANDLER_MODULE,
+            fantastic_core::KernelStateBundle::default(),
+        );
         kernel.bundles.register(HANDLER_MODULE, BackendBundle);
         kernel.bundles.register("fake_ai.tools", FakeAi);
         // `user` is real: the host admits an AI to the store AS `user` (`Host::act`)
-        kernel.bundles.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
+        kernel.bundles.register(
+            fantastic_user::HANDLER_MODULE,
+            fantastic_user::UserBundle::default(),
+        );
         let kernel = Arc::new(kernel);
         let root = Agent::new(
             AgentId::from("kernel"),
             Some(fantastic_core::HANDLER_MODULE.to_string()),
             None,
             // `user` updates records through the kernel (the reach's grant in a real host)
-            json!({"callable_by": {crate::env::HUMAN: ["update_agent", "create_agent"]}}).as_object().unwrap().clone(),
+            json!({"callable_by": {crate::env::HUMAN: ["update_agent", "create_agent"]}})
+                .as_object()
+                .unwrap()
+                .clone(),
             dir.join(".fantastic"),
             false,
         );
         kernel.register(Arc::clone(&root));
         kernel.set_root(root);
-        let h = Host { kernel, cfg: ClientCfg::here(), root: "kernel".to_string() };
+        let h = Host {
+            kernel,
+            cfg: ClientCfg::here(),
+            root: "kernel".to_string(),
+        };
         let mut human_cc = Map::new();
         human_cc.insert("kernel".into(), json!(["update_agent", "create_agent"]));
         for ai in ai_ids {
@@ -786,7 +1088,11 @@ mod create_tests {
     }
 
     fn record_of(h: &Host, id: &str) -> Map<String, Value> {
-        h.kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta.clone()).unwrap_or_default()
+        h.kernel
+            .agents
+            .get(&AgentId::from(id))
+            .map(|a| a.value().record().meta.clone())
+            .unwrap_or_default()
     }
 
     #[tokio::test]
@@ -800,15 +1106,29 @@ mod create_tests {
         )
         .await;
         assert_eq!(out, json!({"id": "helper"}), "{out}");
-        let rec = h.kernel.agents.get(&AgentId::from("helper")).unwrap().value().record();
-        assert_eq!(rec.parent_id.as_deref(), Some("canvas_root"), "a child of the canvas");
+        let rec = h
+            .kernel
+            .agents
+            .get(&AgentId::from("helper"))
+            .unwrap()
+            .value()
+            .record();
+        assert_eq!(
+            rec.parent_id.as_deref(),
+            Some("canvas_root"),
+            "a child of the canvas"
+        );
         let meta = record_of(&h, "helper");
         assert_eq!(meta["memory_store_id"], json!("memory"));
         // the AI reads its store (its own side), and the human's chat verbs reach it
         assert_eq!(meta["can_call"]["memory"], json!("*"));
         assert_eq!(meta["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
         // and the store admits it (its ingress side)
-        assert_eq!(record_of(&h, "memory")["callable_by"]["helper"], json!("*"), "the store admits the helper");
+        assert_eq!(
+            record_of(&h, "memory")["callable_by"]["helper"],
+            json!("*"),
+            "the store admits the helper"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -824,9 +1144,24 @@ mod create_tests {
         )
         .await;
         assert_eq!(out, json!({"id": "helper2"}), "{out}");
-        assert_eq!(record_of(&h, "helper2")["memory_store_id"], json!("own_store"));
-        assert!(record_of(&h, "own_store").get("callable_by").and_then(|c| c.get("helper2")).is_none(), "a caller's own store is the caller's to grant");
-        assert!(record_of(&h, "memory").get("callable_by").and_then(|c| c.get("helper2")).is_none(), "nor is the project's store opened to it");
+        assert_eq!(
+            record_of(&h, "helper2")["memory_store_id"],
+            json!("own_store")
+        );
+        assert!(
+            record_of(&h, "own_store")
+                .get("callable_by")
+                .and_then(|c| c.get("helper2"))
+                .is_none(),
+            "a caller's own store is the caller's to grant"
+        );
+        assert!(
+            record_of(&h, "memory")
+                .get("callable_by")
+                .and_then(|c| c.get("helper2"))
+                .is_none(),
+            "nor is the project's store opened to it"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -875,4 +1210,3 @@ mod create_tests {
         assert!(spec.get("can_call").and_then(|c| c.as_object()).is_some());
     }
 }
-

@@ -79,7 +79,9 @@ impl GenericPanel {
         let label = |t: &str| {
             Line::from(Span::styled(
                 format!("  ── {t} "),
-                Style::default().fg(theme::LABEL).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::LABEL)
+                    .add_modifier(Modifier::BOLD),
             ))
         };
 
@@ -140,7 +142,10 @@ impl GenericPanel {
                 .map(|m| m.iter().partition(|(k, _)| k.starts_with('$')))
                 .unwrap_or_default();
             if named.is_empty() {
-                out.push(Line::from(Span::styled("    nobody named", Style::default().fg(theme::DIM))));
+                out.push(Line::from(Span::styled(
+                    "    nobody named",
+                    Style::default().fg(theme::DIM),
+                )));
             }
             for (k, v) in named {
                 out.push(Line::from(vec![
@@ -206,21 +211,31 @@ impl GenericPanel {
         let rows: Vec<_> = cx.store.rows_of(cx.agent).collect();
         if !rows.is_empty() {
             out.push(Line::from(""));
-            out.push(label(&format!("ROWS · {} · newest {}", rows.len(), rows.len().min(3))));
+            out.push(label(&format!(
+                "ROWS · {} · newest {}",
+                rows.len(),
+                rows.len().min(3)
+            )));
             for row in rows.iter().rev().take(3).rev() {
                 // A call row carries no content; its verb (and name) is what it says.
                 let said = row
                     .content
                     .clone()
                     .filter(|c| !c.is_empty())
-                    .or_else(|| row.verb.clone().map(|v| match &row.name {
-                        Some(n) => format!("{v} · {n}"),
-                        None => v,
-                    }))
+                    .or_else(|| {
+                        row.verb.clone().map(|v| match &row.name {
+                            Some(n) => format!("{v} · {n}"),
+                            None => v,
+                        })
+                    })
                     .unwrap_or_default();
                 let head: String = said.chars().take(80).collect::<String>().replace('\n', " ");
                 out.push(Line::from(Span::styled(
-                    format!("    {:>5}  {:<7} {head}", row.id, row.kind.as_deref().unwrap_or("")),
+                    format!(
+                        "    {:>5}  {:<7} {head}",
+                        row.id,
+                        row.kind.as_deref().unwrap_or("")
+                    ),
                     Style::default().fg(theme::DIM),
                 )));
             }
@@ -377,7 +392,12 @@ mod tests {
     fn text(lines: &[Line<'_>]) -> String {
         lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -396,15 +416,40 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "files".into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r) };
+        let cx = Cx {
+            agent: &a,
+            store: &store,
+            tasks: &[],
+            seen: &seen,
+            reflect: Some(&r),
+        };
         let t = text(&p.lines(&cx));
-        for want in ["files  ● open", "EGRESS · may call", "INGRESS · callable by", "ingress_rule  allow_all_ingress", "read_stream", "VERBS"] {
+        for want in [
+            "files  ● open",
+            "EGRESS · may call",
+            "INGRESS · callable by",
+            "ingress_rule  allow_all_ingress",
+            "read_stream",
+            "VERBS",
+        ] {
             assert!(t.contains(want), "default view lacks {want:?}:\n{t}");
         }
-        assert!(t.contains("exec          read_stream"), "a narrow grant shows its verbs:\n{t}");
-        assert!(t.contains("baseline: $self $parent"), "the baseline is folded, not listed:\n{t}");
-        assert!(!t.contains("    $self"), "the baseline is never a grant line:\n{t}");
-        assert!(!t.contains("sealed —"), "an open agent is never called sealed:\n{t}");
+        assert!(
+            t.contains("exec          read_stream"),
+            "a narrow grant shows its verbs:\n{t}"
+        );
+        assert!(
+            t.contains("baseline: $self $parent"),
+            "the baseline is folded, not listed:\n{t}"
+        );
+        assert!(
+            !t.contains("    $self"),
+            "the baseline is never a grant line:\n{t}"
+        );
+        assert!(
+            !t.contains("sealed —"),
+            "an open agent is never called sealed:\n{t}"
+        );
     }
 
     #[test]
@@ -414,9 +459,18 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "leg".into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: Some(&r) };
+        let cx = Cx {
+            agent: &a,
+            store: &store,
+            tasks: &[],
+            seen: &seen,
+            reflect: Some(&r),
+        };
         let t = text(&p.lines(&cx));
-        assert!(t.contains("○ sealed") && t.contains("sealed — only reflect and boot answer"), "{t}");
+        assert!(
+            t.contains("○ sealed") && t.contains("sealed — only reflect and boot answer"),
+            "{t}"
+        );
     }
 
     #[test]

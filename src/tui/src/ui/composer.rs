@@ -453,9 +453,18 @@ mod tests {
         // `exec.start` takes args:list[str]. Without this the string form was
         // refused and the pane showed nothing.
         let v = Composer::parse_verb("/start command=echo args=[hello,world]").unwrap();
-        assert_eq!(v, json!({"type":"start","command":"echo","args":["hello","world"]}));
-        assert_eq!(Composer::parse_verb("/start args=[]").unwrap()["args"], json!([]));
-        assert_eq!(Composer::parse_verb("/x a=[1,2]").unwrap()["a"], json!([1, 2]));
+        assert_eq!(
+            v,
+            json!({"type":"start","command":"echo","args":["hello","world"]})
+        );
+        assert_eq!(
+            Composer::parse_verb("/start args=[]").unwrap()["args"],
+            json!([])
+        );
+        assert_eq!(
+            Composer::parse_verb("/x a=[1,2]").unwrap()["a"],
+            json!([1, 2])
+        );
     }
 
     #[test]

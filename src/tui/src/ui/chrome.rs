@@ -162,7 +162,10 @@ pub fn draw_box(buf: &mut Buffer, clip: Rect, bx: i32, by: i32, w: i32, h: i32, 
 mod tests {
     #[test]
     fn wrap_breaks_on_words_splits_a_long_one_and_keeps_blank_lines() {
-        assert_eq!(super::wrap("the entry point is main", 10), vec!["the entry", "point is", "main"]);
+        assert_eq!(
+            super::wrap("the entry point is main", 10),
+            vec!["the entry", "point is", "main"]
+        );
         assert_eq!(super::wrap("abcdefghijkl", 5), vec!["abcde", "fghij", "kl"]);
         assert_eq!(super::wrap("a\n\nb", 5), vec!["a", "", "b"]);
         // display width, not chars: each CJK glyph is two columns

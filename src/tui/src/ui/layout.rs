@@ -4,7 +4,6 @@
 // `sh design/sync.sh`. Editing this file directly means the next sync silently
 // reverts you.
 
-
 //! Every dimension the frame is laid out from.
 
 /// rows reserved at the top for a docked title. Zero: the title belongs to the start screen only, and every pane starts at row 0.

@@ -40,7 +40,13 @@ pub fn parse_ps(out: &str) -> Vec<Proc> {
             let pgid = it.next()?.parse().ok()?;
             let tpgid = it.next()?.parse().ok()?;
             let args = it.collect::<Vec<_>>().join(" ");
-            (!args.is_empty()).then_some(Proc { pid, ppid, pgid, tpgid, args })
+            (!args.is_empty()).then_some(Proc {
+                pid,
+                ppid,
+                pgid,
+                tpgid,
+                args,
+            })
         })
         .collect()
 }
@@ -49,7 +55,10 @@ pub fn parse_ps(out: &str) -> Vec<Proc> {
 /// own process group, that group being the terminal's foreground one. None: the
 /// shell is at its prompt.
 pub fn foreground_child(procs: &[Proc], shell: u32) -> Option<&Proc> {
-    procs.iter().filter(|p| p.ppid == shell && p.pid == p.pgid && p.tpgid == i64::from(p.pgid)).max_by_key(|p| p.pid)
+    procs
+        .iter()
+        .filter(|p| p.ppid == shell && p.pid == p.pgid && p.tpgid == i64::from(p.pgid))
+        .max_by_key(|p| p.pid)
 }
 
 /// Every live login-shell PTY job: (its exec agent, the shell's pid).
@@ -72,21 +81,37 @@ pub fn spawn(h: Arc<Host>) {
             if shells.is_empty() {
                 continue;
             }
-            let Some(out) = tokio::task::spawn_blocking(crate::sys::process_table).await.ok().flatten() else { continue };
+            let Some(out) = tokio::task::spawn_blocking(crate::sys::process_table)
+                .await
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
             let procs = parse_ps(&out);
             for (agent, shell) in shells {
-                let Some(fg) = foreground_child(&procs, shell) else { continue };
+                let Some(fg) = foreground_child(&procs, shell) else {
+                    continue;
+                };
                 if seen.get(&agent) == Some(&fg.pid) {
                     continue;
                 }
                 seen.insert(agent.clone(), fg.pid);
                 let cmd = fg.args.clone();
-                let r = h.operator("kernel", json!({"type": "update_agent", "id": agent.as_str(), "last_cmd": cmd})).await.result;
+                let r = h
+                    .operator(
+                        "kernel",
+                        json!({"type": "update_agent", "id": agent.as_str(), "last_cmd": cmd}),
+                    )
+                    .await
+                    .result;
                 if let Some(e) = r.get("error").and_then(Value::as_str) {
                     tracing::warn!("last_cmd on {agent}: {e}");
                     continue;
                 }
-                h.kernel.emit(&agent, json!({"type": "last_cmd", "cmd": cmd})).await;
+                h.kernel
+                    .emit(&agent, json!({"type": "last_cmd", "cmd": cmd}))
+                    .await;
             }
         }
     });
@@ -102,14 +127,26 @@ mod tests {
     fn ps_rows_parse_and_a_bad_row_is_skipped() {
         let p = parse_ps(PS);
         assert_eq!(p.len(), 5);
-        assert_eq!(p[3], Proc { pid: 700, ppid: 500, pgid: 700, tpgid: 700, args: "npm run dev".into() });
+        assert_eq!(
+            p[3],
+            Proc {
+                pid: 700,
+                ppid: 500,
+                pgid: 700,
+                tpgid: 700,
+                args: "npm run dev".into()
+            }
+        );
         assert_eq!(p[0].tpgid, -1);
     }
 
     #[test]
     fn the_foreground_child_is_the_launched_command_not_a_prompt_helper() {
         let p = parse_ps(PS);
-        assert_eq!(foreground_child(&p, 500).map(|x| x.args.as_str()), Some("npm run dev"));
+        assert_eq!(
+            foreground_child(&p, 500).map(|x| x.args.as_str()),
+            Some("npm run dev")
+        );
         // the command's own child is not the shell's
         assert_eq!(foreground_child(&p, 700), None);
     }
@@ -117,7 +154,9 @@ mod tests {
     #[test]
     fn at_the_prompt_there_is_none() {
         // only the prompt helper (in the shell's own group) runs
-        let p = parse_ps("  500   400   500    500 -zsh\n  610   500   500    500 git status --porcelain\n");
+        let p = parse_ps(
+            "  500   400   500    500 -zsh\n  610   500   500    500 git status --porcelain\n",
+        );
         assert_eq!(foreground_child(&p, 500), None);
         // a background job (its own group, not the foreground one) is not it either
         let p = parse_ps("  500   400   500    500 -zsh\n  620   500   620    500 sleep 100\n");

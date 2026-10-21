@@ -84,7 +84,11 @@ pub fn areas(app: &App, area: Rect) -> Areas {
     let below = app.term_open() && app.selected().map(String::as_str) != Some(TERM_ID);
     if below && page_box.height >= 14 {
         let h = term_h(page_box.height);
-        let tbox = Rect { y: page_box.y + page_box.height - h, height: h, ..page_box };
+        let tbox = Rect {
+            y: page_box.y + page_box.height - h,
+            height: h,
+            ..page_box
+        };
         page_box.height -= h;
         term = Some((tbox, inner(tbox)));
     }
@@ -132,7 +136,9 @@ fn frame_box<'a>(f: &mut Frame, area: Rect, focused: bool, title: Option<Line<'a
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(if focused {
-            Style::default().fg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::ACCENT_HI)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme::RULE)
         });
@@ -175,7 +181,11 @@ pub fn layout(app: &mut App, area: Rect, authoritative: bool) {
                 let cx = app.cx(&agent);
                 p.layout(rect, &cx);
             }
-            let cmds = if authoritative { p.take_cmds() } else { Vec::new() };
+            let cmds = if authoritative {
+                p.take_cmds()
+            } else {
+                Vec::new()
+            };
             app.panels.insert(agent, p);
             for c in cmds {
                 app.push(c);
@@ -278,11 +288,18 @@ fn term_heading(f: &mut Frame, area: Rect, app: &App) {
     let title = Line::from(vec![
         Span::styled(
             format!(" {TERM_ID} "),
-            Style::default().fg(theme::INK).bg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::INK)
+                .bg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {command}  "), Style::default().fg(theme::DIM)),
         Span::styled(
-            if typing { " typing · Esc hands the keyboard back " } else { " T type into it · t close it " },
+            if typing {
+                " typing · Esc hands the keyboard back "
+            } else {
+                " T type into it · t close it "
+            },
             Style::default().fg(if typing { theme::WORKING } else { theme::DIM }),
         ),
     ]);
@@ -490,8 +507,15 @@ mod tests {
         assert_eq!(a.composer, inner(a.composer_box));
         assert_eq!(hit(&a, a.tree_box.x + 2, a.tree_box.y + 3), Hit::Tree);
         assert_eq!(hit(&a, a.page_box.x + 5, a.page_box.y + 5), Hit::Page);
-        assert_eq!(hit(&a, a.composer_box.x + 5, a.composer_box.y + 1), Hit::Composer);
-        assert_eq!(hit(&a, 0, a.status.y), Hit::None, "the statusline is not a panel");
+        assert_eq!(
+            hit(&a, a.composer_box.x + 5, a.composer_box.y + 1),
+            Hit::Composer
+        );
+        assert_eq!(
+            hit(&a, 0, a.status.y),
+            Hit::None,
+            "the statusline is not a panel"
+        );
     }
 
     #[test]

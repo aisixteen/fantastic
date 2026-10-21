@@ -8,7 +8,10 @@ fn run(args: &[&str]) -> (Option<i32>, String) {
         .args(args)
         .output()
         .expect("the fantastic binary runs");
-    (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 #[cfg(unix)]
@@ -29,5 +32,8 @@ fn ctrl_break_names_the_failed_step() {
     assert!(stderr.contains("AttachConsole"), "stderr: {stderr}");
     let (code, stderr) = run(&["__ctrl_break", "not-a-pid"]);
     assert_eq!(code, Some(2), "stderr: {stderr}");
-    assert!(stderr.contains("usage: fantastic __ctrl_break <pid>"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("usage: fantastic __ctrl_break <pid>"),
+        "stderr: {stderr}"
+    );
 }

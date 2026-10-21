@@ -45,17 +45,32 @@ fn seed(dir: &std::path::Path) {
 
 fn registry(home: &std::path::Path, here: &std::path::Path) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
-    reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
-    reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
-    reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
-    reg.register(user_store::HANDLER_MODULE, UserStore::new(Ok(home.to_path_buf()), here.to_path_buf()));
+    reg.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
+    reg.register(
+        fantastic_user::HANDLER_MODULE,
+        fantastic_user::UserBundle::default(),
+    );
+    reg.register(
+        user_store::HANDLER_MODULE,
+        UserStore::new(Ok(home.to_path_buf()), here.to_path_buf()),
+    );
     reg
 }
 
 /// As the human: `user.forward`.
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
-    let item = Item::new(AgentId::from("user"), json!({"type":"forward","target":target,"payload":payload}));
+    let item = Item::new(
+        AgentId::from("user"),
+        json!({"type":"forward","target":target,"payload":payload}),
+    );
     kernel.send(vec![item]).await.remove(0).result
 }
 
@@ -74,7 +89,8 @@ async fn the_switch_and_the_name_are_on_disk_when_the_verbs_answer() {
     seed(&dir);
     std::env::set_current_dir(&dir).unwrap();
 
-    let booted = bootstrap::bootstrap(registry(&home, &dir), BootstrapOptions::daemon(&dir)).expect("boots");
+    let booted =
+        bootstrap::bootstrap(registry(&home, &dir), BootstrapOptions::daemon(&dir)).expect("boots");
     let kernel = std::sync::Arc::clone(&booted.kernel);
     kernel
         .send(vec![Item::new(
@@ -86,27 +102,71 @@ async fn the_switch_and_the_name_are_on_disk_when_the_verbs_answer() {
     assert_eq!(out["started"], json!(true), "kernel_start: {out}");
     for id in &booted.loaded {
         if !out["booted"].as_array().unwrap().contains(&json!(id.0)) {
-            kernel.send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+            kernel
+                .send(vec![Item::new(id.clone(), json!({"type":"boot"}))])
+                .await;
         }
     }
-    let root = kernel.send(vec![Item::new(AgentId::from("kernel"), json!({"type":"reflect","tree":"none"}))]).await.remove(0).result;
-    assert_eq!(root["persistence"]["provider"], "store", "records persist through `store`: {root}");
+    let root = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"reflect","tree":"none"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(
+        root["persistence"]["provider"], "store",
+        "records persist through `store`: {root}"
+    );
     let guid = root["guid"].as_str().expect("a guid").to_string();
 
     // ON: the record has landed by the time the answer is here — no wait
-    let r = act(&kernel, "user_store", json!({"type": user_store::SWITCH, "value": true})).await;
+    let r = act(
+        &kernel,
+        "user_store",
+        json!({"type": user_store::SWITCH, "value": true}),
+    )
+    .await;
     assert_eq!(r[user_store::SWITCH], true, "{r}");
-    assert_eq!(record_on_disk(&dir)[user_store::SWITCH], true, "the switch is on disk when the verb answers");
-    assert!(home.join("fantastics").join(&guid).join(user_store::INFO).is_file(), "and the folder is in the home");
+    assert_eq!(
+        record_on_disk(&dir)[user_store::SWITCH],
+        true,
+        "the switch is on disk when the verb answers"
+    );
+    assert!(
+        home.join("fantastics")
+            .join(&guid)
+            .join(user_store::INFO)
+            .is_file(),
+        "and the folder is in the home"
+    );
 
     // NAMED: the same
-    let r = act(&kernel, "user_store", json!({"type": "name_home_folder", "name": "durable"})).await;
+    let r = act(
+        &kernel,
+        "user_store",
+        json!({"type": "name_home_folder", "name": "durable"}),
+    )
+    .await;
     assert_eq!(r["folder"], "durable", "{r}");
-    assert_eq!(record_on_disk(&dir)[user_store::NAME], "durable", "the name is on disk when the verb answers");
-    assert!(home.join("fantastics/durable").join(user_store::INFO).is_file());
+    assert_eq!(
+        record_on_disk(&dir)[user_store::NAME],
+        "durable",
+        "the name is on disk when the verb answers"
+    );
+    assert!(home
+        .join("fantastics/durable")
+        .join(user_store::INFO)
+        .is_file());
 
     // OFF: the same
-    let r = act(&kernel, "user_store", json!({"type": user_store::SWITCH, "value": false})).await;
+    let r = act(
+        &kernel,
+        "user_store",
+        json!({"type": user_store::SWITCH, "value": false}),
+    )
+    .await;
     assert_eq!(r["unstored"], true, "{r}");
     assert_eq!(record_on_disk(&dir)[user_store::SWITCH], false);
     assert!(!home.join("fantastics/durable").exists());

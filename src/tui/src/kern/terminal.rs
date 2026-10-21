@@ -39,7 +39,9 @@ fn shell() -> Result<String, String> {
     let var = crate::sys::SHELL_VAR;
     match std::env::var(var) {
         Ok(s) if !s.trim().is_empty() => Ok(s),
-        _ => Err(format!("{var} is not set — the terminal runs ${var} and guesses no other")),
+        _ => Err(format!(
+            "{var} is not set — the terminal runs ${var} and guesses no other"
+        )),
     }
 }
 
@@ -59,7 +61,10 @@ fn line_record(argv: &[String]) -> Value {
 
 /// The argv `term`'s record names (`run`), if any.
 fn recorded(host: &Host, id: &str) -> Option<Vec<String>> {
-    let a = host.kernel.agents.get(&fantastic_kernel::AgentId::from(id))?;
+    let a = host
+        .kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(id))?;
     let v = a.value().record().meta.get("command")?.as_array()?.clone();
     v.iter().map(|x| x.as_str().map(str::to_string)).collect()
 }
@@ -104,11 +109,21 @@ async fn create(host: &Host, argv: &[String]) -> Result<(), String> {
         .kernel
         .agents
         .get(&fantastic_kernel::AgentId::from(user.as_str()))
-        .and_then(|a| a.value().record().meta.get("can_call").and_then(Value::as_object).cloned())
+        .and_then(|a| {
+            a.value()
+                .record()
+                .meta
+                .get("can_call")
+                .and_then(Value::as_object)
+                .cloned()
+        })
         .unwrap_or_default();
     cc.insert(TERM_ID.into(), json!("*"));
     let r = host
-        .operator("kernel", json!({"type": "update_agent", "id": user, "can_call": cc}))
+        .operator(
+            "kernel",
+            json!({"type": "update_agent", "id": user, "can_call": cc}),
+        )
         .await;
     if let Some(e) = r.result.get("error").and_then(Value::as_str) {
         return Err(format!("could not grant `{user}` → `{TERM_ID}`: {e}"));
@@ -154,7 +169,10 @@ pub async fn canvas_cell(host: &Host, argv: &[String]) -> Result<Option<String>,
         ("y", json!(0)),
         ("width", json!(720)),
         ("height", json!(420)),
-        ("can_call", json!({exec.clone(): ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]})),
+        (
+            "can_call",
+            json!({exec.clone(): ["watch", "status", "start", "write", "ack", "resize", "output", "paste_image"]}),
+        ),
         ("callable_by", json!({"$self": "*"})),
     ] {
         rec.insert(k.into(), v);
@@ -182,11 +200,18 @@ pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
         return Err(format!("`{TERM_ID}` status: {e}"));
     }
     if let Some(job_id) = live_pty(&st.result) {
-        let r = host.act(TERM_ID, json!({"type": "output", "job_id": job_id})).await;
+        let r = host
+            .act(TERM_ID, json!({"type": "output", "job_id": job_id}))
+            .await;
         if let Some(e) = r.result.get("error").and_then(Value::as_str) {
             return Err(format!("`{TERM_ID}` output: {e}"));
         }
-        let replay = r.result.get("output").and_then(Value::as_str).unwrap_or_default().to_string();
+        let replay = r
+            .result
+            .get("output")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         return Ok(Attach { job_id, replay });
     }
 
@@ -198,11 +223,20 @@ pub async fn open(host: &Host, cols: u16, rows: u16) -> Result<Attach, String> {
         .await;
     if let Some(e) = r.result.get("error").and_then(Value::as_str) {
         let why = r.result.get("reason").and_then(Value::as_str).unwrap_or(e);
-        return Err(format!("`{TERM_ID}` did not start {}: {why}", argv.join(" ")));
+        return Err(format!(
+            "`{TERM_ID}` did not start {}: {why}",
+            argv.join(" ")
+        ));
     }
     match r.result.get("job_id").and_then(Value::as_i64) {
-        Some(j) => Ok(Attach { job_id: j, replay: String::new() }),
-        None => Err(format!("`{TERM_ID}` start answered no job_id: {}", r.result)),
+        Some(j) => Ok(Attach {
+            job_id: j,
+            replay: String::new(),
+        }),
+        None => Err(format!(
+            "`{TERM_ID}` start answered no job_id: {}",
+            r.result
+        )),
     }
 }
 
@@ -211,7 +245,8 @@ fn live_pty(status: &Value) -> Option<i64> {
     status.get("jobs")?.as_array()?.iter().find_map(|j| {
         let live = j.get("pty").and_then(Value::as_bool) == Some(true)
             && j.get("status").and_then(Value::as_str) == Some("running");
-        live.then(|| j.get("job_id").and_then(Value::as_i64)).flatten()
+        live.then(|| j.get("job_id").and_then(Value::as_i64))
+            .flatten()
     })
 }
 

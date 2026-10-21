@@ -44,7 +44,12 @@ pub struct ActivityPanel {
 
 impl ActivityPanel {
     pub fn new() -> Self {
-        Self { agents: Vec::new(), open: Vec::new(), answered: Vec::new(), cursor: 0 }
+        Self {
+            agents: Vec::new(),
+            open: Vec::new(),
+            answered: Vec::new(),
+            cursor: 0,
+        }
     }
 
     /// The app calls this on every reflow: the page reads every agent's rows,
@@ -72,7 +77,11 @@ impl Panel for ActivityPanel {
 
     fn needs(&self) -> Needs {
         // Nothing of its own: it reads the rows the tree already keeps fresh.
-        Needs { rows: false, reflect: false, watch: false }
+        Needs {
+            rows: false,
+            reflect: false,
+            watch: false,
+        }
     }
 
     fn on_key(&mut self, k: KeyEvent, _cx: &Cx<'_>, out: &mut Vec<Cmd>) -> Handled {
@@ -89,7 +98,10 @@ impl Panel for ActivityPanel {
             }
             KeyCode::Enter => {
                 if let Some((agent, w)) = self.open.get(self.cursor) {
-                    out.push(Cmd::Jump { agent: agent.clone(), row: w.row });
+                    out.push(Cmd::Jump {
+                        agent: agent.clone(),
+                        row: w.row,
+                    });
                 }
                 Handled::Yes
             }
@@ -111,9 +123,17 @@ impl Panel for ActivityPanel {
         let mut now: Vec<(AgentId, Waiting)> = self
             .agents
             .iter()
-            .flat_map(|a| thread::waiting_for(cx.store, a, crate::env::HUMAN).into_iter().map(move |w| (a.clone(), w)))
+            .flat_map(|a| {
+                thread::waiting_for(cx.store, a, crate::env::HUMAN)
+                    .into_iter()
+                    .map(move |w| (a.clone(), w))
+            })
             .collect();
-        now.sort_by(|a, b| b.1.ts.partial_cmp(&a.1.ts).unwrap_or(std::cmp::Ordering::Equal));
+        now.sort_by(|a, b| {
+            b.1.ts
+                .partial_cmp(&a.1.ts)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         // What was open and is no longer was answered.
         let still: HashSet<RowId> = now.iter().map(|(_, w)| w.row).collect();
         for (a, w) in self.open.drain(..) {
@@ -128,13 +148,27 @@ impl Panel for ActivityPanel {
 
     fn render(&self, f: &mut Frame<'_>, area: Rect, _cx: &Cx<'_>) {
         let label = |t: String| {
-            Line::from(Span::styled(t, Style::default().fg(theme::LABEL).add_modifier(Modifier::BOLD)))
+            Line::from(Span::styled(
+                t,
+                Style::default()
+                    .fg(theme::LABEL)
+                    .add_modifier(Modifier::BOLD),
+            ))
         };
         let mut lines = vec![
             Line::from(vec![
-                Span::styled(format!("  {} Activity  ", theme::INQUIRY), Style::default().fg(theme::BLOCKED).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    format!("{} open · {} answered", self.open.len(), self.answered.len()),
+                    format!("  {} Activity  ", theme::INQUIRY),
+                    Style::default()
+                        .fg(theme::BLOCKED)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "{} open · {} answered",
+                        self.open.len(),
+                        self.answered.len()
+                    ),
                     Style::default().fg(theme::DIM),
                 ),
             ]),
@@ -146,19 +180,30 @@ impl Panel for ActivityPanel {
             label(format!("  ── OPEN · {}", self.open.len())),
         ];
         if self.open.is_empty() {
-            lines.push(Line::from(Span::styled("    nothing waiting on you", Style::default().fg(theme::DIM))));
+            lines.push(Line::from(Span::styled(
+                "    nothing waiting on you",
+                Style::default().fg(theme::DIM),
+            )));
         }
         for (i, (agent, w)) in self.open.iter().enumerate() {
             let cur = i == self.cursor;
             let style = if cur {
-                Style::default().fg(theme::FG).add_modifier(Modifier::REVERSED)
+                Style::default()
+                    .fg(theme::FG)
+                    .add_modifier(Modifier::REVERSED)
             } else {
                 Style::default().fg(theme::FG)
             };
             let text = format!("{agent} · from {} · {}", w.from, w.head);
             lines.push(Line::from(vec![
-                Span::styled(format!("{}{} ", if cur { "  ▸ " } else { "    " }, theme::INQUIRY), Style::default().fg(theme::BLOCKED)),
-                Span::styled(crate::ui::chrome::clip_str(&text, area.width.saturating_sub(8) as usize), style),
+                Span::styled(
+                    format!("{}{} ", if cur { "  ▸ " } else { "    " }, theme::INQUIRY),
+                    Style::default().fg(theme::BLOCKED),
+                ),
+                Span::styled(
+                    crate::ui::chrome::clip_str(&text, area.width.saturating_sub(8) as usize),
+                    style,
+                ),
             ]));
         }
         lines.push(Line::from(""));
@@ -166,7 +211,10 @@ impl Panel for ActivityPanel {
         for (agent, w) in self.answered.iter().take(10) {
             let text = format!("✓ {agent} · from {} · {}", w.from, w.head);
             lines.push(Line::from(Span::styled(
-                format!("    {}", crate::ui::chrome::clip_str(&text, area.width.saturating_sub(6) as usize)),
+                format!(
+                    "    {}",
+                    crate::ui::chrome::clip_str(&text, area.width.saturating_sub(6) as usize)
+                ),
                 Style::default().fg(theme::DIM),
             )));
         }
@@ -193,17 +241,30 @@ mod tests {
         let mut s = Store::default();
         let by: std::collections::BTreeMap<String, Vec<Value>> =
             rows.into_iter().fold(Default::default(), |mut m, r| {
-                m.entry(r["agent"].as_str().unwrap().to_string()).or_default().push(r);
+                m.entry(r["agent"].as_str().unwrap().to_string())
+                    .or_default()
+                    .push(r);
                 m
             });
         for (agent, rs) in by {
-            s.apply_full(&agent, rs.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect());
+            s.apply_full(
+                &agent,
+                rs.into_iter()
+                    .map(|v| serde_json::from_value(v).unwrap())
+                    .collect(),
+            );
         }
         s
     }
 
     fn cx<'a>(s: &'a Store, a: &'a AgentId, seen: &'a HashSet<RowId>) -> Cx<'a> {
-        Cx { agent: a, store: s, tasks: &[], seen, reflect: None }
+        Cx {
+            agent: a,
+            store: s,
+            tasks: &[],
+            seen,
+            reflect: None,
+        }
     }
 
     #[test]
@@ -223,7 +284,9 @@ mod tests {
 
     #[test]
     fn an_answered_question_moves_to_answered_and_enter_jumps_to_the_asker() {
-        let mut s = store(vec![json!({"id":1,"agent":"ai","ts":1.0,"content":"[from files · msg 1]\nwhich root?"})]);
+        let mut s = store(vec![
+            json!({"id":1,"agent":"ai","ts":1.0,"content":"[from files · msg 1]\nwhich root?"}),
+        ]);
         let mut p = ActivityPanel::new();
         p.set_agents(vec!["ai".into()]);
         let seen = HashSet::new();
@@ -234,9 +297,13 @@ mod tests {
         assert!(matches!(&out[0], Cmd::Jump { agent, row: 1 } if agent == "ai"));
 
         // The answer lives in the asker's conversation and points back with `re`.
-        s.apply_full(&"files".to_string(), vec![
-            serde_json::from_value(json!({"id":2,"agent":"files","ts":2.0,"content":"[from ai · re 1]\n/work"})).unwrap(),
-        ]);
+        s.apply_full(
+            &"files".to_string(),
+            vec![serde_json::from_value(
+                json!({"id":2,"agent":"files","ts":2.0,"content":"[from ai · re 1]\n/work"}),
+            )
+            .unwrap()],
+        );
         p.layout(Rect::new(0, 0, 80, 20), &cx(&s, &a, &seen));
         assert!(p.open().is_empty(), "answered is no longer open");
         assert_eq!(p.answered.len(), 1);

@@ -59,7 +59,10 @@ pub struct Host {
 fn registry(cwd: &std::path::Path) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     // THE ROOT. Its handler is the durable-state loader; see the module header.
-    reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     // The one disk surface. Clamped to its declared root; a path outside is
     // refused rather than normalised.
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
@@ -67,7 +70,10 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // (call / settle / task / ack / flush) in RAM — the root's `kernel_memory`,
     // a ram_store, so a keystroke never touches disk — and every AI agent's
     // conversation in ONE shared SQLite file (`memory`) that survives the process.
-    reg.register(fantastic_ram_store::HANDLER_MODULE, fantastic_ram_store::RamStoreBundle::default());
+    reg.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
         fantastic_sqlite_store::SqliteStoreBundle::default(),
@@ -80,17 +86,25 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     );
     // THE HUMAN, as an agent. This is the id the terminal acts as, so every act
     // carries a ledger row naming a person instead of an operator injection.
-    reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
+    reg.register(
+        fantastic_user::HANDLER_MODULE,
+        fantastic_user::UserBundle::default(),
+    );
     // THE MCP LEG — a bundle from outside the kernel tree. Registered so a
     // persisted `mcp` record hydrates into a live agent on every run; the
     // record itself is only ever created by `fantastic mcp`, never by the
     // blueprint.
-    reg.register(fantastic_web_mcp::HANDLER_MODULE, fantastic_web_mcp::WebMcpBundle);
+    reg.register(
+        fantastic_web_mcp::HANDLER_MODULE,
+        fantastic_web_mcp::WebMcpBundle,
+    );
     // THE AI AGENT'S SAVED SET-UPS. Its directory is fixed here, by the binary —
     // never by a record; who reaches it is its `callable_by` (`kern/saved`).
     reg.register(
         fantastic_user_home_store::HANDLER_MODULE,
-        fantastic_user_home_store::UserHomeStore::new(fantastic_user_home_store::home_dir_from_env()),
+        fantastic_user_home_store::UserHomeStore::new(
+            fantastic_user_home_store::home_dir_from_env(),
+        ),
     );
     // THE USER STORE: the keys, set-ups and stored fantastic locations in the
     // user's home; "here" is this project's dir, fixed by the binary (`kern/user_store`).
@@ -104,17 +118,32 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // THE CANVAS: the HTTP host, its embedded page and its socket leg. Only ever
     // created by `fantastic canvas`; registered so they rehydrate.
     reg.register(fantastic_web::HANDLER_MODULE, fantastic_web::WebBundle);
-    reg.register(fantastic_canvas_page::HANDLER_MODULE, fantastic_canvas_page::CanvasPageBundle);
-    reg.register(fantastic_web_ws::HANDLER_MODULE, fantastic_web_ws::WebWsBundle);
+    reg.register(
+        fantastic_canvas_page::HANDLER_MODULE,
+        fantastic_canvas_page::CanvasPageBundle,
+    );
+    reg.register(
+        fantastic_web_ws::HANDLER_MODULE,
+        fantastic_web_ws::WebWsBundle,
+    );
     // THE BROWSER'S SET-UP PAGE, host side. Registered so the page can create
     // it; it exists only while that page is open (`kern/setup_agent`).
-    reg.register(crate::kern::setup_agent::HANDLER_MODULE, crate::kern::setup_agent::SetupBundle);
+    reg.register(
+        crate::kern::setup_agent::HANDLER_MODULE,
+        crate::kern::setup_agent::SetupBundle,
+    );
     // THE CANVAS, host side: its node `canvas_root` — creates and deletes its
     // the cells' backends and spawns AI cells from the user's
     // saved set-ups (`kern/backend`).
-    reg.register(crate::kern::backend::HANDLER_MODULE, crate::kern::backend::BackendBundle);
+    reg.register(
+        crate::kern::backend::HANDLER_MODULE,
+        crate::kern::backend::BackendBundle,
+    );
     // KEYS: the credential store (`kern/keys`) — every provider key, by ref.
-    reg.register(fantastic_credential_store::HANDLER_MODULE, fantastic_credential_store::CredentialStoreBundle::default());
+    reg.register(
+        fantastic_credential_store::HANDLER_MODULE,
+        fantastic_credential_store::CredentialStoreBundle::default(),
+    );
     // Apple's on-device model: linked by `--features foundation-models`.
     #[cfg(feature = "foundation-models")]
     reg.register(
@@ -124,19 +153,37 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // FOLDER BUNDLES' python base (`py_agent`): a `.fantastic/bundles/<name>/`
     // with `base: py_agent` runs its program as the agent's implementation
     // (`kern/bundle_watch` reloads it when its folder changes).
-    reg.register(fantastic_py_agent::HANDLER_MODULE, fantastic_py_agent::PyAgentBundle);
+    reg.register(
+        fantastic_py_agent::HANDLER_MODULE,
+        fantastic_py_agent::PyAgentBundle,
+    );
     // CABINETS: a master AI opens subcanvases, each with one worker AI (the crate's bundle).
-    reg.register(fantastic_cabinet::HANDLER_MODULE, fantastic_cabinet::CabinetBundle);
-    reg.register(fantastic_mcp_client::HANDLER_MODULE, fantastic_mcp_client::McpClientBundle::default());
+    reg.register(
+        fantastic_cabinet::HANDLER_MODULE,
+        fantastic_cabinet::CabinetBundle,
+    );
+    reg.register(
+        fantastic_mcp_client::HANDLER_MODULE,
+        fantastic_mcp_client::McpClientBundle::default(),
+    );
     // The vLLM backend: linked by `--features vllm`.
     #[cfg(feature = "vllm")]
-    reg.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
+    reg.register(
+        fantastic_vllm_backend::HANDLER_MODULE,
+        fantastic_vllm_backend::VllmBundle,
+    );
     // The Anthropic Messages backend: linked by `--features anthropic`.
     #[cfg(feature = "anthropic")]
-    reg.register(fantastic_anthropic_backend::HANDLER_MODULE, fantastic_anthropic_backend::AnthropicBundle);
+    reg.register(
+        fantastic_anthropic_backend::HANDLER_MODULE,
+        fantastic_anthropic_backend::AnthropicBundle,
+    );
     // The Ollama backend: linked by `--features ollama`.
     #[cfg(feature = "ollama")]
-    reg.register(fantastic_ollama_backend::HANDLER_MODULE, fantastic_ollama_backend::OllamaBackendBundle);
+    reg.register(
+        fantastic_ollama_backend::HANDLER_MODULE,
+        fantastic_ollama_backend::OllamaBackendBundle,
+    );
     // The OpenAI Responses backend: linked by `--features responses`.
     #[cfg(feature = "responses")]
     reg.register(
@@ -156,9 +203,14 @@ impl Host {
     /// `web_port`: `--port` — a recorded `web` on another port is set to it
     /// BEFORE its listener boots (nothing runs here yet, so it is the user's to
     /// overwrite).
-    pub async fn boot(paths: &Paths, serve_web: bool, web_port: Option<u16>) -> Result<Self, KernelErr> {
-        let booted = bootstrap::bootstrap(registry(&paths.cwd), BootstrapOptions::daemon(&paths.cwd))
-            .map_err(|e| KernelErr::Boot(format!("{e}")))?;
+    pub async fn boot(
+        paths: &Paths,
+        serve_web: bool,
+        web_port: Option<u16>,
+    ) -> Result<Self, KernelErr> {
+        let booted =
+            bootstrap::bootstrap(registry(&paths.cwd), BootstrapOptions::daemon(&paths.cwd))
+                .map_err(|e| KernelErr::Boot(format!("{e}")))?;
         let kernel = Arc::clone(&booted.kernel);
         // THE LEDGER CAP (owner 2026-10-09): 100 000 calls; past it the kernel
         // prunes its store to 90% — oldest settled first, unnamed before named,
@@ -192,18 +244,28 @@ impl Host {
                 .remove(0)
                 .result;
             if let Some(e) = r.get("error").and_then(Value::as_str) {
-                return Err(KernelErr::Boot(format!("could not set the root's fields: {e}")));
+                return Err(KernelErr::Boot(format!(
+                    "could not set the root's fields: {e}"
+                )));
             }
         }
 
         // THE KERNEL'S START: root, then its memory store, then the flusher.
         let started = kernel.start(false).await;
         if started.get("started") != Some(&json!(true)) {
-            let why = started.get("error").and_then(Value::as_str).unwrap_or("kernel_start refused");
-            let hint = started.get("hint").and_then(Value::as_str).map(|h| format!(" — {h}")).unwrap_or_default();
+            let why = started
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("kernel_start refused");
+            let hint = started
+                .get("hint")
+                .and_then(Value::as_str)
+                .map(|h| format!(" — {h}"))
+                .unwrap_or_default();
             return Err(KernelErr::Boot(format!("{why}{hint}")));
         }
-        let done: Vec<String> = serde_json::from_value(started["booted"].clone()).unwrap_or_default();
+        let done: Vec<String> =
+            serde_json::from_value(started["booted"].clone()).unwrap_or_default();
 
         // Everyone else, in registration order. A failure is logged and
         // skipped: one bundle refusing must not take the shell down with it.
@@ -219,10 +281,16 @@ impl Host {
                 continue;
             }
             if let (true, Some(p)) = (is_web, web_port) {
-                let had = kernel.agents.get(&id).and_then(|a| a.value().record().meta.get("port").and_then(Value::as_u64));
+                let had = kernel
+                    .agents
+                    .get(&id)
+                    .and_then(|a| a.value().record().meta.get("port").and_then(Value::as_u64));
                 if had != Some(u64::from(p)) {
                     let r = kernel
-                        .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "update_agent", "id": id.0, "port": p}))])
+                        .send(vec![Item::new(
+                            AgentId::from("kernel"),
+                            json!({"type": "update_agent", "id": id.0, "port": p}),
+                        )])
                         .await
                         .remove(0)
                         .result;
@@ -299,7 +367,14 @@ impl Host {
     pub fn kernel_store(&self) -> Result<String, String> {
         self.kernel
             .root()
-            .and_then(|r| r.meta.read().ok()?.get("memory_store_id")?.as_str().map(str::to_string))
+            .and_then(|r| {
+                r.meta
+                    .read()
+                    .ok()?
+                    .get("memory_store_id")?
+                    .as_str()
+                    .map(str::to_string)
+            })
             .ok_or_else(|| "the root names no `memory_store_id`".to_string())
     }
 
@@ -323,7 +398,14 @@ impl Host {
             .agents
             .iter()
             .filter(|e| Some(e.key()) != root.as_ref())
-            .filter(|e| e.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some())
+            .filter(|e| {
+                e.value()
+                    .record()
+                    .meta
+                    .get("memory_store_id")
+                    .and_then(Value::as_str)
+                    .is_some()
+            })
             .map(|e| e.key().0.clone())
             .collect()
     }
@@ -338,12 +420,22 @@ impl Host {
             .kernel
             .agents
             .get(&AgentId::from(store.as_str()))
-            .and_then(|a| a.value().record().meta.get("callable_by").and_then(Value::as_object).cloned())
+            .and_then(|a| {
+                a.value()
+                    .record()
+                    .meta
+                    .get("callable_by")
+                    .and_then(Value::as_object)
+                    .cloned()
+            })
             .ok_or_else(|| format!("the memory store `{store}` is not in the tree"))?;
         cb.insert(ai.into(), json!("*"));
         // as `user`, the store's parent: grants come from above
         let r = self
-            .act("kernel", json!({"type": "update_agent", "id": store, "callable_by": cb}))
+            .act(
+                "kernel",
+                json!({"type": "update_agent", "id": store, "callable_by": cb}),
+            )
             .await
             .result;
         match r.get("error").and_then(Value::as_str) {
@@ -389,9 +481,14 @@ impl Host {
         let calls = guids.into_iter().map(|g| {
             let k = Arc::clone(&self.kernel);
             async move {
-                let item = Item::new(AgentId::from(format!("{g}|canvas").as_str()), json!({"type": "host_stopping"}));
+                let item = Item::new(
+                    AgentId::from(format!("{g}|canvas").as_str()),
+                    json!({"type": "host_stopping"}),
+                );
                 match tokio::time::timeout(PAGE_STOP_GRACE, k.send(vec![item])).await {
-                    Err(_) => tracing::warn!("shutdown: page {g} did not stop within {PAGE_STOP_GRACE:?}"),
+                    Err(_) => {
+                        tracing::warn!("shutdown: page {g} did not stop within {PAGE_STOP_GRACE:?}")
+                    }
                     Ok(mut out) => {
                         if let Some(e) = out.remove(0).result.get("error").and_then(Value::as_str) {
                             tracing::warn!("shutdown: page {g}: {e}");
@@ -471,7 +568,14 @@ impl Host {
                 .kernel
                 .agents
                 .get(&AgentId::from(agent))
-                .is_some_and(|a| a.value().record().meta.get("memory_store_id").and_then(Value::as_str).is_some());
+                .is_some_and(|a| {
+                    a.value()
+                        .record()
+                        .meta
+                        .get("memory_store_id")
+                        .and_then(Value::as_str)
+                        .is_some()
+                });
         let mut loaded = None;
         if keeps_rows {
             let mut cursor = after;
@@ -502,7 +606,13 @@ impl Host {
         }
         let exec = self.operator(&store, q).await.result;
         let ram = self.kernel.rows.all().into_iter().map(Value::Object);
-        for r in exec["rows"].as_array().cloned().unwrap_or_default().into_iter().chain(ram) {
+        for r in exec["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .chain(ram)
+        {
             if r.get("agent").and_then(Value::as_str) != Some(agent) {
                 continue;
             }
@@ -513,7 +623,12 @@ impl Host {
                 by.insert(id, r);
             }
         }
-        (by.into_values().filter_map(|v| serde_json::from_value(v).ok()).collect(), loaded)
+        (
+            by.into_values()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect(),
+            loaded,
+        )
     }
 
     /// What is running right now.

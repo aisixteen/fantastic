@@ -142,7 +142,9 @@ impl TerminalPanel {
 
     fn write(&self, data: String, out: &mut Vec<Cmd>) {
         // Keys before a job exists, or after it exited, have nowhere to go.
-        let Some(job) = self.job.as_ref().filter(|_| !self.closed) else { return };
+        let Some(job) = self.job.as_ref().filter(|_| !self.closed) else {
+            return;
+        };
         out.push(Cmd::Send {
             target: self.agent.clone(),
             payload: json!({"type":"write","job_id":job,"data":data}),
@@ -170,10 +172,19 @@ impl Panel for TerminalPanel {
 
     fn needs(&self) -> Needs {
         // The stream IS the content, so the watch matters and rows do not.
-        Needs { rows: false, reflect: true, watch: true }
+        Needs {
+            rows: false,
+            reflect: true,
+            watch: true,
+        }
     }
 
-    fn on_key(&mut self, k: crossterm::event::KeyEvent, _cx: &Cx<'_>, out: &mut Vec<Cmd>) -> Handled {
+    fn on_key(
+        &mut self,
+        k: crossterm::event::KeyEvent,
+        _cx: &Cx<'_>,
+        out: &mut Vec<Cmd>,
+    ) -> Handled {
         use crossterm::event::{KeyCode as K, KeyModifiers as M};
         if k.modifiers.contains(M::SHIFT) && matches!(k.code, K::PageUp | K::PageDown) {
             let (rows, _) = self.screen.screen().size();
@@ -232,7 +243,11 @@ impl Panel for TerminalPanel {
             Some(Value::String(s)) => (s.as_bytes().to_vec(), s.chars().count()),
             // A bytes-valued frame arrives decoded as an array of bytes.
             Some(Value::Array(a)) => {
-                let b: Vec<u8> = a.iter().filter_map(Value::as_u64).map(|n| n as u8).collect();
+                let b: Vec<u8> = a
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .map(|n| n as u8)
+                    .collect();
                 let n = String::from_utf8_lossy(&b).chars().count();
                 (b, n)
             }
@@ -271,7 +286,9 @@ impl Panel for TerminalPanel {
         }
         // Told once per change, and only to a live job: the size a job starts
         // at comes with its `start`.
-        let Some(job) = self.job.as_ref().filter(|_| !self.closed) else { return };
+        let Some(job) = self.job.as_ref().filter(|_| !self.closed) else {
+            return;
+        };
         if self.told != Some(want) {
             self.told = Some(want);
             self.pending.push(Cmd::Stream {
@@ -296,14 +313,22 @@ impl Panel for TerminalPanel {
             );
             return;
         }
-        draw_screen(self.screen.screen(), f.buffer_mut(), area, self.takeover && self.scrollback == 0);
+        draw_screen(
+            self.screen.screen(),
+            f.buffer_mut(),
+            area,
+            self.takeover && self.scrollback == 0,
+        );
     }
 
     fn status(&self, _cx: &Cx<'_>) -> Option<String> {
         Some(if self.closed {
             format!("{} · the shell exited · Enter starts a new one", self.agent)
         } else if self.takeover {
-            format!("{} · typing into the terminal · Esc hands the keyboard back", self.agent)
+            format!(
+                "{} · typing into the terminal · Esc hands the keyboard back",
+                self.agent
+            )
         } else {
             format!("{} · Enter to type into it", self.agent)
         })
@@ -362,8 +387,16 @@ mod tests {
         p
     }
 
-    fn cx_parts() -> (crate::store::Store, std::collections::HashSet<crate::kern::model::RowId>, AgentId) {
-        (crate::store::Store::default(), std::collections::HashSet::new(), "term".into())
+    fn cx_parts() -> (
+        crate::store::Store,
+        std::collections::HashSet<crate::kern::model::RowId>,
+        AgentId,
+    ) {
+        (
+            crate::store::Store::default(),
+            std::collections::HashSet::new(),
+            "term".into(),
+        )
     }
 
     #[test]
@@ -372,7 +405,10 @@ mod tests {
         let mut out = Vec::new();
         // A cursor move and an overwrite: a line log would show both, a terminal
         // shows the result.
-        assert!(p.on_event(&json!({"type":"output","job_id":11,"data":"hello\r\x1b[2Kbye"}), &mut out));
+        assert!(p.on_event(
+            &json!({"type":"output","job_id":11,"data":"hello\r\x1b[2Kbye"}),
+            &mut out
+        ));
         assert!(p.text().starts_with("bye"), "{:?}", p.text());
         assert!(!p.text().contains("hello"));
         match &out[0] {
@@ -386,9 +422,15 @@ mod tests {
         assert!(!p.on_event(&json!({"type":"token","text":"a"}), &mut out));
         // Another job's frames are not this pane's to draw.
         assert!(!p.on_event(&json!({"type":"output","job_id":10,"data":"x"}), &mut out));
-        assert!(!p.on_event(&json!({"type":"job_done","job_id":10,"exit_code":0}), &mut out));
+        assert!(!p.on_event(
+            &json!({"type":"job_done","job_id":10,"exit_code":0}),
+            &mut out
+        ));
         assert!(!p.closed);
-        assert!(p.on_event(&json!({"type":"job_done","job_id":11,"exit_code":0,"ok":true}), &mut out));
+        assert!(p.on_event(
+            &json!({"type":"job_done","job_id":11,"exit_code":0,"ok":true}),
+            &mut out
+        ));
         assert!(p.closed);
     }
 
@@ -396,7 +438,13 @@ mod tests {
     fn a_new_size_is_told_to_the_pty_once() {
         let mut p = panel();
         let (s, seen, a) = cx_parts();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         p.layout(Rect::new(0, 0, 70, 12), &cx);
         p.layout(Rect::new(0, 0, 70, 12), &cx);
         let cmds = p.take_cmds();
@@ -405,7 +453,10 @@ mod tests {
             Cmd::Stream { payload, .. } => {
                 assert_eq!(payload["type"], "resize");
                 assert_eq!(payload["job_id"], 11);
-                assert_eq!((payload["rows"].as_u64(), payload["cols"].as_u64()), (Some(12), Some(70)));
+                assert_eq!(
+                    (payload["rows"].as_u64(), payload["cols"].as_u64()),
+                    (Some(12), Some(70))
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -414,19 +465,38 @@ mod tests {
 
     #[test]
     fn control_keys_encode_to_their_control_codes() {
-        let ctrl = |c: char| TerminalPanel::encode_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        let ctrl = |c: char| {
+            TerminalPanel::encode_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+        };
         assert_eq!(ctrl('c').unwrap(), "\u{3}");
         assert_eq!(ctrl('d').unwrap(), "\u{4}");
-        assert_eq!(TerminalPanel::encode_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap(), "\r");
-        assert_eq!(TerminalPanel::encode_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).unwrap(), "\x1b[A");
+        assert_eq!(
+            TerminalPanel::encode_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).unwrap(),
+            "\r"
+        );
+        assert_eq!(
+            TerminalPanel::encode_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).unwrap(),
+            "\x1b[A"
+        );
     }
 
     #[test]
     fn every_encoded_key_is_ascii_so_a_string_write_is_exact() {
         for code in [
-            KeyCode::Enter, KeyCode::Tab, KeyCode::Backspace, KeyCode::Esc, KeyCode::Up, KeyCode::Down,
-            KeyCode::Left, KeyCode::Right, KeyCode::Home, KeyCode::End, KeyCode::Delete, KeyCode::PageUp,
-            KeyCode::PageDown, KeyCode::Char('x'),
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::Esc,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Delete,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Char('x'),
         ] {
             let s = TerminalPanel::encode_key(KeyEvent::new(code, KeyModifiers::NONE)).unwrap();
             assert!(s.is_ascii(), "{code:?} encoded to non-ascii {s:?}");
@@ -438,10 +508,24 @@ mod tests {
         let mut p = panel();
         p.takeover = true;
         let (s, seen, a) = cx_parts();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let mut out = Vec::new();
-        p.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &cx, &mut out);
-        p.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL), &cx, &mut out);
+        p.on_key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            &cx,
+            &mut out,
+        );
+        p.on_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cx,
+            &mut out,
+        );
         let data: Vec<&str> = out
             .iter()
             .map(|c| match c {
@@ -449,8 +533,16 @@ mod tests {
                 other => panic!("{other:?}"),
             })
             .collect();
-        assert_eq!(data, vec!["l", "\u{3}"], "Ctrl-C belongs to the program in the terminal");
-        p.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &cx, &mut out);
+        assert_eq!(
+            data,
+            vec!["l", "\u{3}"],
+            "Ctrl-C belongs to the program in the terminal"
+        );
+        p.on_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &cx,
+            &mut out,
+        );
         assert!(!p.takeover);
     }
 
@@ -458,11 +550,21 @@ mod tests {
     fn a_reattach_replays_the_ring_and_a_finished_shell_restarts_on_enter() {
         let mut p = TerminalPanel::new("term".into());
         let (s, seen, a) = cx_parts();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let mut out = Vec::new();
         // No job yet: keys and sizes go nowhere.
         p.takeover = true;
-        p.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE), &cx, &mut out);
+        p.on_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &cx,
+            &mut out,
+        );
         p.layout(Rect::new(0, 0, 40, 10), &cx);
         assert!(out.is_empty() && p.take_cmds().is_empty());
         p.attach(12, "$ ls\r\nREADME\r\n$ ");
@@ -470,8 +572,18 @@ mod tests {
         // The size is told to the job once it exists.
         p.layout(Rect::new(0, 0, 40, 10), &cx);
         assert_eq!(p.take_cmds().len(), 1);
-        p.on_event(&json!({"type":"job_done","job_id":12,"exit_code":0,"ok":true}), &mut out);
-        p.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &cx, &mut out);
-        assert!(matches!(out.last(), Some(Cmd::OpenTerminal { cols: 40, rows: 10 })), "{out:?}");
+        p.on_event(
+            &json!({"type":"job_done","job_id":12,"exit_code":0,"ok":true}),
+            &mut out,
+        );
+        p.on_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &cx,
+            &mut out,
+        );
+        assert!(
+            matches!(out.last(), Some(Cmd::OpenTerminal { cols: 40, rows: 10 })),
+            "{out:?}"
+        );
     }
 }

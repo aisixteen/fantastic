@@ -267,7 +267,9 @@ pub fn body_of(content: &str) -> String {
         out.push_str(&s[..at]);
         s = &s[at..];
         if s.starts_with("<think>") {
-            s = s.find("</think>").map_or("", |e| &s[e + "</think>".len()..]);
+            s = s
+                .find("</think>")
+                .map_or("", |e| &s[e + "</think>".len()..]);
         } else {
             let name = s
                 .strip_prefix("<call name=\"")
@@ -320,7 +322,11 @@ mod tests {
                    [reply to 247 · files list · ↑241 · 2 of 2 in batch 241]\nB";
         assert_eq!(head_of(row), "2 replies · files read_stream · files list");
         let one = "[reply to 234 · files list · ↑229]\nbody";
-        assert_eq!(head_of(one), "[reply to 234 · files list · ↑229]", "a single reply is unchanged");
+        assert_eq!(
+            head_of(one),
+            "[reply to 234 · files list · ↑229]",
+            "a single reply is unchanged"
+        );
     }
 
     #[test]
@@ -332,9 +338,16 @@ mod tests {
         assert_eq!(m.label.as_deref(), Some("w5"));
         assert!(m.ended);
         assert_eq!(&row[m.end..], "\nFATAL w5: x\nFATAL w5: y");
-        let bare = monitor("[from runner]\n[monitor 9 · job 8 · from the operator's call None]\nl").unwrap();
-        assert_eq!((bare.who.as_str(), bare.call, bare.label, bare.ended), ("the operator's", None, None, false));
-        assert!(monitor("[from ai]\nI saw [monitor 9 · job 8 · from your call 1] once").is_none(), "anchored");
+        let bare = monitor("[from runner]\n[monitor 9 · job 8 · from the operator's call None]\nl")
+            .unwrap();
+        assert_eq!(
+            (bare.who.as_str(), bare.call, bare.label, bare.ended),
+            ("the operator's", None, None, false)
+        );
+        assert!(
+            monitor("[from ai]\nI saw [monitor 9 · job 8 · from your call 1] once").is_none(),
+            "anchored"
+        );
     }
 
     #[test]

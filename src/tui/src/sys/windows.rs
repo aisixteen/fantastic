@@ -104,7 +104,10 @@ impl LocalListener {
             let mut got = vec![0u8; self.token.len()];
             let sent = tokio::time::timeout(TOKEN_WAIT, s.read_exact(&mut got)).await;
             // small frames, as over a unix socket: no Nagle delay
-            if matches!(sent, Ok(Ok(_))) && same(&got, self.token.as_bytes()) && s.set_nodelay(true).is_ok() {
+            if matches!(sent, Ok(Ok(_)))
+                && same(&got, self.token.as_bytes())
+                && s.set_nodelay(true).is_ok()
+            {
                 return Ok((s, peer));
             }
         }
@@ -124,7 +127,12 @@ pub(crate) async fn connect_local(path: &str) -> io::Result<LocalStream> {
         .trim()
         .split_once(' ')
         .and_then(|(p, t)| Some((p.parse::<u16>().ok()?, t)))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{path} names no port and token")))?;
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{path} names no port and token"),
+            )
+        })?;
     let mut s = LocalStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
     s.set_nodelay(true)?;
     s.write_all(token.as_bytes()).await?;
@@ -141,7 +149,8 @@ pub(crate) fn bind_local(path: &str) -> io::Result<LocalListener> {
     let tcp = tokio::net::TcpListener::from_std(l)?;
     let token = fantastic_kernel::lifecycle::token_hex(16);
     let line = format!("{} {token}\n", tcp.local_addr()?.port());
-    fantastic_file::fs::write_bytes(Path::new("."), path, line.as_bytes(), true, Some(0o600)).map_err(io::Error::other)?;
+    fantastic_file::fs::write_bytes(Path::new("."), path, line.as_bytes(), true, Some(0o600))
+        .map_err(io::Error::other)?;
     Ok(LocalListener { tcp, token })
 }
 
@@ -174,7 +183,9 @@ pub(crate) fn interrupt() -> io::Result<Interrupt> {
 /// canvas's (`AttachConsole(pid)`) and sends it Ctrl-Break, every fantastic's
 /// SIGTERM. Exit 0 sent; 1 a step failed (named on stderr); 2 a bad argument.
 pub(crate) fn ctrl_break_main(argv: &[String]) -> ! {
-    use windows_sys::Win32::System::Console::{AttachConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT,
+    };
     let pid: u32 = match argv {
         [one] => match one.parse() {
             Ok(p) => p,
@@ -200,7 +211,10 @@ fn usage() -> ! {
 }
 
 fn failed(pid: u32, step: &str) -> ! {
-    eprintln!("fantastic: ctrl-break {pid}: {step}: {}", io::Error::last_os_error());
+    eprintln!(
+        "fantastic: ctrl-break {pid}: {step}: {}",
+        io::Error::last_os_error()
+    );
     std::process::exit(1)
 }
 

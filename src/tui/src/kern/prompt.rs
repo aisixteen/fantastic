@@ -36,7 +36,9 @@ pub const BRIDGE: &str = "prompt_file";
 pub const DEFAULT: &str = "{tree}\n\n{self}\n\n{howto}\n\n## Building here\n- Make every agent with a `create_agent` call to `kernel`, from the bundles reflect lists.\n- Write a new bundle (`.fantastic/bundles/<name>/`, or `spawn` with `bundle`) ONLY when the user asks for one.\n- After placing or updating an html cell, size it to its content: `fit {id}` on its view.\n";
 
 fn exists(h: &Host, id: &str) -> bool {
-    h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))
+    h.kernel
+        .agents
+        .contains_key(&fantastic_kernel::AgentId::from(id))
 }
 
 fn err_of(r: &Value) -> Option<String> {
@@ -51,9 +53,12 @@ pub async fn ensure(h: &Host, cwd: &Path) -> Result<(), String> {
     }
     if !exists(h, BRIDGE) {
         let r = h
-            .operator("kernel", json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
+            .operator(
+                "kernel",
+                json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
                 "handler_module": "file_bridge.tools", "root": ".", "readonly": true,
-                "allow": [PATH], "ingress_rule": "allow_all_ingress"}))
+                "allow": [PATH], "ingress_rule": "allow_all_ingress"}),
+            )
             .await
             .result;
         if let Some(e) = err_of(&r) {
@@ -65,10 +70,18 @@ pub async fn ensure(h: &Host, cwd: &Path) -> Result<(), String> {
 
 /// Whether `id` is an AI agent (its bundle's record takes a memory store).
 fn is_ai(h: &Host, id: &str) -> bool {
-    let Some(a) = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)) else { return false };
+    let Some(a) = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)) else {
+        return false;
+    };
     let r = a.value().record();
-    let Some(hm) = r.handler_module.as_deref() else { return false };
-    r.meta.get("memory_store_id").and_then(Value::as_str).is_some() && crate::kern::backend::BackendBundle::is_ai_handler(h, hm)
+    let Some(hm) = r.handler_module.as_deref() else {
+        return false;
+    };
+    r.meta
+        .get("memory_store_id")
+        .and_then(Value::as_str)
+        .is_some()
+        && crate::kern::backend::BackendBundle::is_ai_handler(h, hm)
 }
 
 /// Name the file on AI `id`'s record — unless it names a file, or a bridge, of
@@ -77,10 +90,16 @@ pub async fn stamp(h: &Host, id: &str) -> Result<(), String> {
     if !exists(h, BRIDGE) || !is_ai(h, id) {
         return Ok(());
     }
-    let own = h.kernel.agents.get(&fantastic_kernel::AgentId::from(id)).is_some_and(|a| {
-        let m = &a.value().record().meta;
-        ["system_prompt_file", "file_bridge_id"].iter().any(|k| m.get(*k).is_some_and(|v| !v.is_null()))
-    });
+    let own = h
+        .kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(id))
+        .is_some_and(|a| {
+            let m = &a.value().record().meta;
+            ["system_prompt_file", "file_bridge_id"]
+                .iter()
+                .any(|k| m.get(*k).is_some_and(|v| !v.is_null()))
+        });
     if own {
         return Ok(());
     }

@@ -37,6 +37,10 @@ use crate::vm::{Frame, Frames, ViewId, VmIn};
 /// it serves; a relative path never meets the unix address-length limit).
 pub const SOCKET: &str = ".fantastic/cli/tui.sock";
 
+/// #210: said to a thin client when the kernel it attached to has no terminal
+/// view at all — there is nothing to paint, so it is told why and exits.
+pub const NO_VIEW: &str = "this kernel runs without a terminal view (canvas or headless) — run `fantastic` in a terminal to own the view, or open the canvas";
+
 /// A thin client → the owner.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Up {
@@ -47,9 +51,19 @@ pub enum Up {
 /// The owner → a thin client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Down {
-    Hello { pid: u32 },
-    Full { buf: Buffer, cursor: Option<(u16, u16)>, mouse: bool },
-    Diff { cells: Vec<(u16, u16, Cell)>, cursor: Option<(u16, u16)>, mouse: bool },
+    Hello {
+        pid: u32,
+    },
+    Full {
+        buf: Buffer,
+        cursor: Option<(u16, u16)>,
+        mouse: bool,
+    },
+    Diff {
+        cells: Vec<(u16, u16, Cell)>,
+        cursor: Option<(u16, u16)>,
+        mouse: bool,
+    },
     Bye(String),
 }
 
@@ -60,7 +74,9 @@ async fn write_msg<W: AsyncWrite + Unpin, T: Serialize>(w: &mut W, m: &T) -> std
     w.flush().await
 }
 
-async fn read_msg<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(r: &mut R) -> std::io::Result<Option<T>> {
+async fn read_msg<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(
+    r: &mut R,
+) -> std::io::Result<Option<T>> {
     let mut len = [0u8; 4];
     match r.read_exact(&mut len).await {
         Ok(_) => {}
@@ -69,20 +85,35 @@ async fn read_msg<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(r: &mut R)
     }
     let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
     r.read_exact(&mut body).await?;
-    serde_json::from_slice(&body).map(Some).map_err(std::io::Error::other)
+    serde_json::from_slice(&body)
+        .map(Some)
+        .map_err(std::io::Error::other)
 }
 
 /// What one frame costs on the wire, given what this client already has.
 pub fn delta(prev: Option<&Frame>, next: &Frame) -> Option<Down> {
     match prev {
         Some(p) if p.buf.area == next.buf.area => {
-            let cells: Vec<(u16, u16, Cell)> = p.buf.diff(&next.buf).into_iter().map(|(x, y, c)| (x, y, c.clone())).collect();
+            let cells: Vec<(u16, u16, Cell)> = p
+                .buf
+                .diff(&next.buf)
+                .into_iter()
+                .map(|(x, y, c)| (x, y, c.clone()))
+                .collect();
             if cells.is_empty() && p.cursor == next.cursor && p.mouse == next.mouse {
                 return None;
             }
-            Some(Down::Diff { cells, cursor: next.cursor, mouse: next.mouse })
+            Some(Down::Diff {
+                cells,
+                cursor: next.cursor,
+                mouse: next.mouse,
+            })
         }
-        _ => Some(Down::Full { buf: next.buf.clone(), cursor: next.cursor, mouse: next.mouse }),
+        _ => Some(Down::Full {
+            buf: next.buf.clone(),
+            cursor: next.cursor,
+            mouse: next.mouse,
+        }),
     }
 }
 
@@ -105,11 +136,29 @@ impl Share {
     }
 }
 
+/// #210: what an attaching client is told. With a terminal view, just the Hello;
+/// without one, the Hello is followed by a Bye — a kernel with no view has no
+/// frames to send, so the thin client is told so and ends instead of sitting on
+/// a blank screen.
+fn greeting(has_view: bool, pid: u32) -> Vec<Down> {
+    if has_view {
+        vec![Down::Hello { pid }]
+    } else {
+        vec![Down::Hello { pid }, Down::Bye(NO_VIEW.into())]
+    }
+}
+
 /// Serve the socket. The caller holds the directory's lock, so a socket file
-/// already there is stale.
-pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Frames>>>) -> Result<Arc<Share>, String> {
+/// already there is stale. `has_view` (#210) is whether the owner has a terminal
+/// View; without one every client is greeted with a Bye and served no frames.
+pub fn listen(
+    input: mpsc::Sender<VmIn>,
+    frames: watch::Receiver<Option<Arc<Frames>>>,
+    has_view: bool,
+) -> Result<Arc<Share>, String> {
     let _ = std::fs::remove_file(SOCKET);
-    let l = crate::sys::bind_local(SOCKET).map_err(|e| format!("could not open the TUI socket `{SOCKET}`: {e}"))?;
+    let l = crate::sys::bind_local(SOCKET)
+        .map_err(|e| format!("could not open the TUI socket `{SOCKET}`: {e}"))?;
     crate::sys::make_private(SOCKET)
         .map_err(|e| format!("could not make `{SOCKET}` private: {e}"))?;
     let share = Arc::new(Share::default());
@@ -119,7 +168,15 @@ pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Fram
             let id = NEXT.fetch_add(1, Ordering::SeqCst);
             let (bye_tx, bye_rx) = oneshot::channel();
             s.bye.lock().expect("share poisoned").insert(id, bye_tx);
-            tokio::spawn(serve(id, stream, input.clone(), frames.clone(), bye_rx, Arc::clone(&s)));
+            tokio::spawn(serve(
+                id,
+                stream,
+                input.clone(),
+                frames.clone(),
+                bye_rx,
+                Arc::clone(&s),
+                has_view,
+            ));
         }
     });
     Ok(share)
@@ -137,6 +194,7 @@ async fn serve(
     mut frames: watch::Receiver<Option<Arc<Frames>>>,
     mut bye: oneshot::Receiver<String>,
     share: Arc<Share>,
+    has_view: bool,
 ) {
     let (mut r, mut w) = stream.into_split();
     // up: size and events, until the client goes
@@ -154,9 +212,16 @@ async fn serve(
             }
         }
     });
-    // down: hello, then every frame as a delta, until the ViewModel ends, the
-    // client goes, or the client is detached
-    if write_msg(&mut w, &Down::Hello { pid: std::process::id() }).await.is_ok() {
+    // down: the greeting, then every frame as a delta, until the ViewModel ends,
+    // the client goes, or the client is detached. #210: with no terminal view the
+    // greeting ends with a Bye, so there is no frame loop at all.
+    let greet = greeting(has_view, std::process::id());
+    let no_view = matches!(greet.last(), Some(Down::Bye(_)));
+    let mut greeted = true;
+    for m in &greet {
+        greeted = write_msg(&mut w, m).await.is_ok();
+    }
+    if greeted && !no_view {
         let mut sent: Option<Arc<Frame>> = None;
         loop {
             tokio::select! {
@@ -173,7 +238,9 @@ async fn serve(
                 _ = &mut up => break,
             }
             // this client's own frame, as a delta of what it already has
-            let Some(f) = frames.borrow().as_ref().and_then(|fs| fs.for_view(id)) else { continue };
+            let Some(f) = frames.borrow().as_ref().and_then(|fs| fs.for_view(id)) else {
+                continue;
+            };
             if let Some(m) = delta(sent.as_deref(), &f) {
                 if write_msg(&mut w, &m).await.is_err() {
                     break;
@@ -219,7 +286,14 @@ async fn run_client(
     pid: u32,
 ) -> Result<String> {
     let size = term.size()?;
-    write_msg(w, &Up::Size { w: size.width, h: size.height }).await?;
+    write_msg(
+        w,
+        &Up::Size {
+            w: size.width,
+            h: size.height,
+        },
+    )
+    .await?;
     let mut keys = crossterm::event::EventStream::new();
     let mut buf: Option<Buffer> = None;
     let mut cursor: Option<(u16, u16)> = None;
@@ -294,7 +368,14 @@ fn paint(
         let badge = badge(pid);
         let bw = badge.chars().count() as u16;
         if area.width > bw {
-            out.set_string(area.width - bw, 0, &badge, ratatui::style::Style::default().fg(crate::theme::ACCENT).bg(ratatui::style::Color::Black));
+            out.set_string(
+                area.width - bw,
+                0,
+                &badge,
+                ratatui::style::Style::default()
+                    .fg(crate::theme::ACCENT)
+                    .bg(ratatui::style::Color::Black),
+            );
         }
         if let Some((x, y)) = cursor.filter(|(x, y)| *x < area.width && *y < area.height) {
             f.set_cursor_position((x, y));
@@ -316,7 +397,11 @@ mod tests {
     fn frame(w: u16, h: u16, text: &str) -> Frame {
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
         buf.set_string(0, 0, text, ratatui::style::Style::default());
-        Frame { buf, cursor: None, mouse: false }
+        Frame {
+            buf,
+            cursor: None,
+            mouse: false,
+        }
     }
 
     #[test]
@@ -328,13 +413,21 @@ mod tests {
             Some(Down::Diff { cells, .. }) => assert_eq!(cells.len(), 1),
             other => panic!("{other:?}"),
         }
-        assert!(delta(Some(&b), &b).is_none(), "nothing changed, nothing sent");
-        assert!(matches!(delta(Some(&b), &frame(12, 2, "x")), Some(Down::Full { .. })));
+        assert!(
+            delta(Some(&b), &b).is_none(),
+            "nothing changed, nothing sent"
+        );
+        assert!(matches!(
+            delta(Some(&b), &frame(12, 2, "x")),
+            Some(Down::Full { .. })
+        ));
     }
 
     #[test]
     fn messages_round_trip_the_wire() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let (mut a, mut b) = tokio::io::duplex(1 << 16);
             write_msg(&mut a, &Down::Full { buf: frame(4, 1, "ab").buf, cursor: Some((1, 0)), mouse: true }).await.unwrap();
@@ -350,6 +443,24 @@ mod tests {
             drop(a);
             assert!(read_msg::<_, Up>(&mut b).await.unwrap().is_none(), "EOF is a clean end");
         });
+    }
+
+    #[test]
+    fn a_view_owner_greets_with_hello_only() {
+        let g = greeting(true, 7);
+        assert_eq!(g.len(), 1, "a view owner gets no Bye");
+        assert!(matches!(g[0], Down::Hello { pid: 7 }));
+    }
+
+    #[test]
+    fn an_owner_without_a_view_says_so_and_ends() {
+        let g = greeting(false, 7);
+        assert_eq!(g.len(), 2, "the Hello is followed by a Bye");
+        assert!(matches!(g[0], Down::Hello { pid: 7 }));
+        match &g[1] {
+            Down::Bye(why) => assert!(why.contains("without a terminal view"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

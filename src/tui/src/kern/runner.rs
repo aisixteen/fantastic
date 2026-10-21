@@ -31,7 +31,11 @@ pub fn spawn(host: Arc<Host>, tx: mpsc::Sender<Ev>) -> mpsc::Sender<Cmd> {
     // Deep enough that a burst of keys never blocks the render loop; bounded so a
     // wedged handler applies backpressure instead of growing without limit.
     let (ctx, mut crx) = mpsc::channel::<Cmd>(256);
-    let r = Arc::new(Runner { host, tx, watches: Default::default() });
+    let r = Arc::new(Runner {
+        host,
+        tx,
+        watches: Default::default(),
+    });
     tokio::spawn(async move {
         // KEYSTROKES ARE ORDERED. Every other command runs in its own task, but
         // `write`s to one agent go through that agent's own queue, one at a
@@ -88,7 +92,8 @@ impl Runner {
                 self.got(Got::Tree(t)).await;
             }
         }
-        self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
+        self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await))
+            .await;
         self.got(Got::Keys(crate::kern::keys::stored())).await;
         self.got(Got::Created(r)).await;
     }
@@ -113,40 +118,73 @@ impl Runner {
                         if let Some(t) = self.host.tree() {
                             self.got(Got::Tree(t)).await;
                         }
-                        self.got(Got::TermAttached { job_id: a.job_id, replay: a.replay }).await;
+                        self.got(Got::TermAttached {
+                            job_id: a.job_id,
+                            replay: a.replay,
+                        })
+                        .await;
                     }
                     Err(why) => self.note(why).await,
                 }
             }
-            Cmd::Backends => self.got(Got::Backends(crate::kern::setup::backends(&self.host))).await,
+            Cmd::Backends => {
+                self.got(Got::Backends(crate::kern::setup::backends(&self.host)))
+                    .await
+            }
             Cmd::KeyMode => {
-                let r = crate::kern::keys::mode().map(|(m, w)| (m.map(|m| m.name().to_string()), w));
+                let r =
+                    crate::kern::keys::mode().map(|(m, w)| (m.map(|m| m.name().to_string()), w));
                 self.got(Got::KeyMode(r)).await
             }
             Cmd::Keys => self.got(Got::Keys(crate::kern::keys::stored())).await,
-            Cmd::Saved => self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await,
-            Cmd::Prefer { name } => {
-                let r = crate::kern::saved::prefer(&self.host, name.as_deref()).await.map(|p| match p {
-                    Some(n) => format!("`{n}` is your default for new AI agents"),
-                    None => "no default AI set-up — new AI agents start from nothing".to_string(),
-                });
-                self.got(Got::Setup(r)).await;
-                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
+            Cmd::Saved => {
+                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await))
+                    .await
             }
-            Cmd::WizardCreate { name, module, texts, key } => {
-                let r = crate::kern::wizard::create(&self.host, name, module, texts, key.as_ref()).await;
+            Cmd::Prefer { name } => {
+                let r = crate::kern::saved::prefer(&self.host, name.as_deref())
+                    .await
+                    .map(|p| match p {
+                        Some(n) => format!("`{n}` is your default for new AI agents"),
+                        None => {
+                            "no default AI set-up — new AI agents start from nothing".to_string()
+                        }
+                    });
+                self.got(Got::Setup(r)).await;
+                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await))
+                    .await;
+            }
+            Cmd::WizardCreate {
+                name,
+                module,
+                texts,
+                key,
+            } => {
+                let r = crate::kern::wizard::create(&self.host, name, module, texts, key.as_ref())
+                    .await;
                 self.made(r).await;
             }
             Cmd::WizardFromSaved { name } => {
                 let r = crate::kern::wizard::from_saved(&self.host, name).await;
                 self.made(r).await;
             }
-            Cmd::WizardSaveEdit { name, module, texts, key } => {
-                let r = crate::kern::wizard::save_edit(&self.host, name, module, texts, key.as_ref())
-                    .await
-                    .map(|()| format!("saved `{name}` — agents made from it from now on use these values"));
+            Cmd::WizardSaveEdit {
+                name,
+                module,
+                texts,
+                key,
+            } => {
+                let r =
+                    crate::kern::wizard::save_edit(&self.host, name, module, texts, key.as_ref())
+                        .await
+                        .map(|()| {
+                            format!(
+                                "saved `{name}` — agents made from it from now on use these values"
+                            )
+                        });
                 self.got(Got::Setup(r)).await;
-                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await)).await;
+                self.got(Got::Saved(crate::kern::saved::shelf(&self.host).await))
+                    .await;
                 self.got(Got::Keys(crate::kern::keys::stored())).await;
             }
             Cmd::CloseTerminal => {
@@ -196,8 +234,17 @@ impl Runner {
             Cmd::Rows { agent, full, after } => {
                 // `full` re-reads everything and rebuilds the order; otherwise
                 // only what came after the shell's newest row, merged in.
-                let (rows, loaded) = self.host.rows(agent, if *full { None } else { *after }).await;
-                self.got(Got::Rows { agent: agent.clone(), rows, full: *full, loaded }).await
+                let (rows, loaded) = self
+                    .host
+                    .rows(agent, if *full { None } else { *after })
+                    .await;
+                self.got(Got::Rows {
+                    agent: agent.clone(),
+                    rows,
+                    full: *full,
+                    loaded,
+                })
+                .await
             }
 
             // READING A SELF-DESCRIPTION IS RENDERING, not acting, so it goes out
@@ -222,10 +269,16 @@ impl Runner {
                         // lists the verbs beside the self-description
                         let docs = self
                             .host
-                            .operator("kernel", json!({"type":"docs","of": agent,"tier":"detailed"}))
+                            .operator(
+                                "kernel",
+                                json!({"type":"docs","of": agent,"tier":"detailed"}),
+                            )
                             .await;
                         if let (Ok(d), Value::Object(m)) = (Host::read(docs), &mut reply) {
-                            if let Some(v) = d.get("verbs").filter(|v| v.as_object().is_some_and(|o| !o.is_empty())) {
+                            if let Some(v) = d
+                                .get("verbs")
+                                .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+                            {
                                 m.insert("verbs".into(), v.clone());
                             }
                         }
@@ -256,7 +309,13 @@ impl Runner {
                         // The act moved the kernel. Re-read rather than guessing
                         // from the reply: the log is the truth.
                         let (rows, loaded) = self.host.rows(target, None).await;
-                        self.got(Got::Rows { agent: target.clone(), rows, full: true, loaded }).await;
+                        self.got(Got::Rows {
+                            agent: target.clone(),
+                            rows,
+                            full: true,
+                            loaded,
+                        })
+                        .await;
                         self.got(Got::Ps(self.host.tasks())).await;
                     }
                     Err(e) => self.refused(&cmd, e).await,
@@ -303,20 +362,27 @@ impl Runner {
         let src = fantastic_kernel::AgentId::from(agent.as_str());
         if let Some(refusal) = k.watch(&src, w.clone()).await {
             k.remove_inbox(&w);
-            self.note(format!("{agent}: watch refused: {refusal}")).await;
+            self.note(format!("{agent}: watch refused: {refusal}"))
+                .await;
             return;
         }
         let tx = self.tx.clone();
         let who = agent.clone();
         let task = tokio::spawn(async move {
             while let Some(item) = rx.recv().await {
-                let ev = Ev::Link(crate::ev::LinkEv::AgentEvent { agent: who.clone(), payload: item.payload });
+                let ev = Ev::Link(crate::ev::LinkEv::AgentEvent {
+                    agent: who.clone(),
+                    payload: item.payload,
+                });
                 if tx.send(ev).await.is_err() {
                     break;
                 }
             }
         });
-        self.watches.lock().expect("watches").insert(agent.clone(), task);
+        self.watches
+            .lock()
+            .expect("watches")
+            .insert(agent.clone(), task);
     }
 
     async fn unwatch(&self, agent: &crate::kern::model::AgentId) {
@@ -325,7 +391,10 @@ impl Runner {
         };
         task.abort();
         let w = self.watcher_of(agent);
-        self.host.kernel.unwatch(&fantastic_kernel::AgentId::from(agent.as_str()), &w).await;
+        self.host
+            .kernel
+            .unwatch(&fantastic_kernel::AgentId::from(agent.as_str()), &w)
+            .await;
         self.host.kernel.remove_inbox(&w);
     }
 
@@ -354,11 +423,16 @@ pub fn spawn_row_tail(host: Arc<Host>, tx: mpsc::Sender<Ev>, after: i64) {
         // they never move anything a view shows, and following them would loop
         let mut own: std::collections::VecDeque<i64> = std::collections::VecDeque::new();
         while let Some(id) = tail.recv().await {
-            let Some(row) = host.kernel.rows.get_one(id) else { continue };
+            let Some(row) = host.kernel.rows.get_one(id) else {
+                continue;
+            };
             let kind = row.get("kind").and_then(Value::as_str);
             if kind == Some("call")
                 && row.get("caller").is_none_or(Value::is_null)
-                && row.get("verb").and_then(Value::as_str).is_some_and(|v| ["read", "rows", "reflect"].contains(&v))
+                && row
+                    .get("verb")
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| ["read", "rows", "reflect"].contains(&v))
             {
                 if let Some(pid) = row.get("id").and_then(Value::as_i64) {
                     own.push_back(pid);
@@ -368,12 +442,25 @@ pub fn spawn_row_tail(host: Arc<Host>, tx: mpsc::Sender<Ev>, after: i64) {
                 }
                 continue;
             }
-            if kind == Some("settle") && row.get("parent").and_then(Value::as_i64).is_some_and(|p| own.contains(&p)) {
+            if kind == Some("settle")
+                && row
+                    .get("parent")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|p| own.contains(&p))
+            {
                 continue;
             }
-            let key = if kind == Some("settle") { "settled" } else { "agent" };
-            let Some(agent) = row.get(key).and_then(Value::as_str) else { continue };
-            let ev = Ev::Link(crate::ev::LinkEv::RowsMoved { agent: agent.to_string() });
+            let key = if kind == Some("settle") {
+                "settled"
+            } else {
+                "agent"
+            };
+            let Some(agent) = row.get(key).and_then(Value::as_str) else {
+                continue;
+            };
+            let ev = Ev::Link(crate::ev::LinkEv::RowsMoved {
+                agent: agent.to_string(),
+            });
             if tx.send(ev).await.is_err() {
                 return;
             }
@@ -400,8 +487,12 @@ pub async fn spawn_row_watch(host: Arc<Host>, tx: mpsc::Sender<Ev>) {
             if item.payload.get("type").and_then(Value::as_str) != Some("row") {
                 continue;
             }
-            let Some(agent) = item.payload.get("source").and_then(Value::as_str) else { continue };
-            let ev = Ev::Link(crate::ev::LinkEv::RowsMoved { agent: agent.to_string() });
+            let Some(agent) = item.payload.get("source").and_then(Value::as_str) else {
+                continue;
+            };
+            let ev = Ev::Link(crate::ev::LinkEv::RowsMoved {
+                agent: agent.to_string(),
+            });
             if tx.send(ev).await.is_err() {
                 return;
             }
@@ -433,10 +524,11 @@ pub async fn watch_rows(host: &Host, ai: &str) -> Result<(), String> {
 pub fn subscribe_state(host: &Arc<Host>, tx: mpsc::Sender<Ev>) {
     // The second argument is a traffic event's raw body. The shell shows no bytes,
     // so it is ignored here.
-    let sub: fantastic_kernel::StateSubscriber = Arc::new(move |v: &Value, _body: Option<&fantastic_kernel::Blob>| {
-        if let Ok(ev) = serde_json::from_value::<crate::kern::model::StateEvent>(v.clone()) {
-            let _ = tx.try_send(Ev::Link(crate::ev::LinkEv::State(ev)));
-        }
-    });
+    let sub: fantastic_kernel::StateSubscriber =
+        Arc::new(move |v: &Value, _body: Option<&fantastic_kernel::Blob>| {
+            if let Ok(ev) = serde_json::from_value::<crate::kern::model::StateEvent>(v.clone()) {
+                let _ = tx.try_send(Ev::Link(crate::ev::LinkEv::State(ev)));
+            }
+        });
     host.kernel.add_state_subscriber(sub);
 }

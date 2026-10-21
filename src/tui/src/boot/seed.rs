@@ -184,12 +184,31 @@ mod tests {
         // the KERNEL'S store is RAM; the AI store is the sqlite file
         assert_eq!(f["memory_store_id"], json!("kernel_memory"));
         let list = entries(BLUEPRINT).unwrap();
-        let km = list.iter().find(|e| e["id"] == json!("kernel_memory")).expect("the kernel's store is a root child");
-        assert_eq!(km["handler_module"], json!(fantastic_ram_store::HANDLER_MODULE));
-        let kids = list.iter().find(|e| e["id"] == json!(USER)).and_then(|u| u["agents"].as_array()).expect("user holds the tree");
-        let mem = kids.iter().find(|e| e["id"] == json!("memory")).expect("the store is in the blueprint");
-        assert_eq!(mem["handler_module"], json!(fantastic_sqlite_store::HANDLER_MODULE));
-        assert!(mem.get("operator").is_none(), "the kernel no longer writes the AI store");
+        let km = list
+            .iter()
+            .find(|e| e["id"] == json!("kernel_memory"))
+            .expect("the kernel's store is a root child");
+        assert_eq!(
+            km["handler_module"],
+            json!(fantastic_ram_store::HANDLER_MODULE)
+        );
+        let kids = list
+            .iter()
+            .find(|e| e["id"] == json!(USER))
+            .and_then(|u| u["agents"].as_array())
+            .expect("user holds the tree");
+        let mem = kids
+            .iter()
+            .find(|e| e["id"] == json!("memory"))
+            .expect("the store is in the blueprint");
+        assert_eq!(
+            mem["handler_module"],
+            json!(fantastic_sqlite_store::HANDLER_MODULE)
+        );
+        assert!(
+            mem.get("operator").is_none(),
+            "the kernel no longer writes the AI store"
+        );
         assert_eq!(mem["admins"], json!(["kernel"]));
     }
 
@@ -263,7 +282,10 @@ mod tests {
     fn init_writes_no_roster_file() {
         let p = sandbox("noroster");
         write_all(&p).unwrap();
-        assert!(!p.store.join("kernel.yaml").exists(), "every agent is a record under agents/");
+        assert!(
+            !p.store.join("kernel.yaml").exists(),
+            "every agent is a record under agents/"
+        );
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
 
@@ -281,14 +303,20 @@ mod tests {
         }
         let mut all = Vec::new();
         ids(&list, &mut all);
-        assert!(!all.iter().any(|i| i == "mcp"), "mcp is added by code, not the blueprint");
+        assert!(
+            !all.iter().any(|i| i == "mcp"),
+            "mcp is added by code, not the blueprint"
+        );
     }
 
     #[test]
     fn a_blueprint_naming_mcp_is_refused() {
         let p = sandbox("nomcp");
-        let err = write_from(&p, "agents:\n  - id: mcp\n    handler_module: web_mcp.tools\n")
-            .unwrap_err();
+        let err = write_from(
+            &p,
+            "agents:\n  - id: mcp\n    handler_module: web_mcp.tools\n",
+        )
+        .unwrap_err();
         assert!(err.contains("mcp"), "{err}");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
@@ -308,7 +336,11 @@ mod tests {
         write_all(&p).unwrap();
         let s = rec(&p, "user/agents/store/agent.yaml");
         assert_eq!(s["handler_module"], "file_bridge.tools");
-        assert_eq!(s["allow"], json!(["."]), "a bridge is deny-all per path: the store exposes its whole dir");
+        assert_eq!(
+            s["allow"],
+            json!(["."]),
+            "a bridge is deny-all per path: the store exposes its whole dir"
+        );
         assert_eq!(s["root"], ".fantastic");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
@@ -318,7 +350,10 @@ mod tests {
         let p = sandbox("root_id");
         write_all(&p).unwrap();
         let u = rec(&p, "user/agent.yaml");
-        assert!(u["can_call"].get(ROOT_PLACEHOLDER).is_none(), "the placeholder never reaches disk");
+        assert!(
+            u["can_call"].get(ROOT_PLACEHOLDER).is_none(),
+            "the placeholder never reaches disk"
+        );
         assert_eq!(u["can_call"][ROOT_ID], "*");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }

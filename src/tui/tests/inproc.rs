@@ -24,7 +24,10 @@ use serde_json::{json, Value};
 
 fn registry() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
-    reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
@@ -34,7 +37,10 @@ fn registry() -> BundleRegistry {
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
-    reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
+    reg.register(
+        fantastic_user::HANDLER_MODULE,
+        fantastic_user::UserBundle::default(),
+    );
     reg
 }
 
@@ -86,7 +92,10 @@ fn seed(dir: &std::path::Path) {
 /// is made from inside `user`'s own handler, so it carries `user`.
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
-    let item = Item::new(AgentId::from("user"), json!({"type":"forward","target":target,"payload":payload}));
+    let item = Item::new(
+        AgentId::from("user"),
+        json!({"type":"forward","target":target,"payload":payload}),
+    );
     k.send(vec![item]).await.remove(0).result
 }
 
@@ -131,7 +140,10 @@ async fn the_human_drives_the_specified_set_in_process() {
     let lvl1: Vec<String> = root.child_ids().into_iter().map(|i| i.0).collect();
     assert_eq!(lvl1, vec!["user"], "level one: the one user");
 
-    let user = kernel.agents.get(&AgentId::from("user")).expect("the user loaded");
+    let user = kernel
+        .agents
+        .get(&AgentId::from("user"))
+        .expect("the user loaded");
     let mut under: Vec<String> = user.child_ids().into_iter().map(|i| i.0).collect();
     under.sort();
     assert_eq!(under, vec!["exec", "files", "memory"], "under the user");
@@ -177,12 +189,7 @@ async fn the_human_drives_the_specified_set_in_process() {
     // ── a call the grants do not cover is REFUSED, as data ───────────────
     // Ask the AI store to do something it does not own: an
     // unknown verb comes back as a refusal object, not a panic and not a success.
-    let bad = act(
-        &kernel,
-        "memory",
-        json!({"type":"definitely_not_a_verb"}),
-    )
-    .await;
+    let bad = act(&kernel, "memory", json!({"type":"definitely_not_a_verb"})).await;
     assert!(
         bad.get("error").is_some(),
         "an unknown verb must answer with a refusal: {bad}"
@@ -202,7 +209,10 @@ async fn the_human_drives_the_specified_set_in_process() {
         !settles["rows"].as_array().unwrap().is_empty(),
         "the calls above must have left settle rows in the store: {settles}"
     );
-    assert!(dir.join(".fantastic").join("memory.db").is_file(), "one SQLite file");
+    assert!(
+        dir.join(".fantastic").join("memory.db").is_file(),
+        "one SQLite file"
+    );
 
     kernel.shutdown().await;
     let _ = bootstrap::shutdown(&dir);

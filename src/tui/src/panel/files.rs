@@ -70,7 +70,11 @@ impl FilesPanel {
         self.entries = items
             .iter()
             .map(|v| Entry {
-                name: v.get("name").and_then(Value::as_str).unwrap_or("?").to_string(),
+                name: v
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
                 dir: v.get("type").and_then(Value::as_str) == Some("dir"),
                 size: v.get("size").and_then(Value::as_u64),
             })
@@ -345,7 +349,9 @@ mod tests {
     #[test]
     fn a_record_list_keeps_its_sizes() {
         let mut f = p();
-        f.absorb_list(&json!({"files":[{"name":"a","type":"dir"},{"name":"b","type":"file","size":12}]}));
+        f.absorb_list(
+            &json!({"files":[{"name":"a","type":"dir"},{"name":"b","type":"file","size":12}]}),
+        );
         assert!(f.entries[0].dir);
         assert_eq!(f.entries[1].size, Some(12));
     }

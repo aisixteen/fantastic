@@ -59,8 +59,13 @@ pub enum VmIn {
 /// THE SIZE POLICY, tmux's `latest`: the screen is the size of the View that
 /// most recently resized or typed; with that one gone, any remaining View
 /// (the owner's own first). None until some View has said how big it is.
-pub fn effective(sizes: &std::collections::BTreeMap<ViewId, (u16, u16)>, latest: Option<ViewId>) -> Option<(u16, u16)> {
-    latest.and_then(|v| sizes.get(&v).copied()).or_else(|| sizes.values().next().copied())
+pub fn effective(
+    sizes: &std::collections::BTreeMap<ViewId, (u16, u16)>,
+    latest: Option<ViewId>,
+) -> Option<(u16, u16)> {
+    latest
+        .and_then(|v| sizes.get(&v).copied())
+        .or_else(|| sizes.values().next().copied())
 }
 
 /// Every View's frame: the same state, laid out for each View.
@@ -140,8 +145,18 @@ pub struct Vm {
 pub fn new() -> (Handle, Vm) {
     let (in_tx, input) = mpsc::channel(1024);
     let (frames, f_rx) = watch::channel(None);
-    let h = Handle { input: in_tx.clone(), frames: f_rx };
-    (h, Vm { input, input_tx: in_tx, frames })
+    let h = Handle {
+        input: in_tx.clone(),
+        frames: f_rx,
+    };
+    (
+        h,
+        Vm {
+            input,
+            input_tx: in_tx,
+            frames,
+        },
+    )
 }
 
 impl Vm {
@@ -200,7 +215,11 @@ async fn run(
                     let h = Arc::new(h);
                     app.cfg = h.cfg.clone();
                     app.link = Link::Up;
-                    crate::kern::runner::spawn_row_tail(Arc::clone(&h), tx.clone(), h.kernel.rows.next_id() - 1);
+                    crate::kern::runner::spawn_row_tail(
+                        Arc::clone(&h),
+                        tx.clone(),
+                        h.kernel.rows.next_id() - 1,
+                    );
                     crate::kern::runner::spawn_row_watch(Arc::clone(&h), tx.clone()).await;
                     crate::kern::runner::subscribe_state(&h, tx.clone());
                     // a host bundle's folder changed → it takes effect at once
@@ -213,10 +232,13 @@ async fn run(
                             Ok(urls) => {
                                 boot.say(&format!("fantastic: the canvas: {}", urls.canvas));
                                 app.note(format!("the canvas: {}", urls.canvas));
-                                if let Err(e) = crate::kern::web::write_run_file(&paths.cwd, &urls) {
+                                if let Err(e) = crate::kern::web::write_run_file(&paths.cwd, &urls)
+                                {
                                     app.note(format!("the run file: {e}"));
                                 }
-                                if let Err(e) = crate::kern::user_store::set_canvas(&h, &urls.canvas).await {
+                                if let Err(e) =
+                                    crate::kern::user_store::set_canvas(&h, &urls.canvas).await
+                                {
                                     app.note(e);
                                 }
                             }
@@ -255,12 +277,22 @@ async fn run(
                     }
                     if let Some(argv) = &boot.run {
                         let r = if boot.canvas {
-                            crate::kern::terminal::canvas_cell(&h, argv).await.map(|c| match c {
-                                Some(cell) => format!("`{}` runs in the canvas cell `{cell}`", argv.join(" ")),
-                                None => "the canvas has no view yet — open it once and run again".to_string(),
-                            })
+                            crate::kern::terminal::canvas_cell(&h, argv)
+                                .await
+                                .map(|c| match c {
+                                    Some(cell) => format!(
+                                        "`{}` runs in the canvas cell `{cell}`",
+                                        argv.join(" ")
+                                    ),
+                                    None => {
+                                        "the canvas has no view yet — open it once and run again"
+                                            .to_string()
+                                    }
+                                })
                         } else {
-                            crate::kern::terminal::prepare_run(&h, argv).await.map(|()| format!("`{}` runs in the terminal", argv.join(" ")))
+                            crate::kern::terminal::prepare_run(&h, argv)
+                                .await
+                                .map(|()| format!("`{}` runs in the terminal", argv.join(" ")))
                         };
                         match r {
                             Ok(said) => {
@@ -281,7 +313,7 @@ async fn run(
                     }
                     // THE TUI SOCKET: a second `fantastic` here is a thin client
                     // of THIS ViewModel.
-                    match crate::share::listen(input_tx.clone(), frames.subscribe()) {
+                    match crate::share::listen(input_tx.clone(), frames.subscribe(), boot.tui) {
                         Ok(s) => share = Some(s),
                         Err(e) => {
                             boot.say(&format!("fantastic: {e}"));
@@ -457,7 +489,10 @@ fn dispatch(app: &mut App, cmds: &Option<mpsc::Sender<Cmd>>) {
     for c in out {
         if let Err(e) = tx.try_send(c.clone()) {
             if c.is_act() {
-                app.note(format!("{:?} was not sent: the command queue is full ({e})", c.what()));
+                app.note(format!(
+                    "{:?} was not sent: the command queue is full ({e})",
+                    c.what()
+                ));
             }
         }
     }
@@ -482,7 +517,9 @@ fn spawn_stream(h: Arc<Host>, boot: Boot) {
     let mut rx = h.kernel.ensure_inbox(&w);
     tokio::spawn(async move {
         for ai in h.ai_agents() {
-            let _ = h.operator(&ai, serde_json::json!({"type": "watch", "watcher": w.0})).await;
+            let _ = h
+                .operator(&ai, serde_json::json!({"type": "watch", "watcher": w.0}))
+                .await;
         }
         while let Some(item) = rx.recv().await {
             let p = &item.payload;
@@ -499,9 +536,18 @@ fn spawn_stream(h: Arc<Host>, boot: Boot) {
 /// `[<id>] <agent> <kind|role> <verb>? · <first line of content>`
 pub fn stream_line(row: &serde_json::Value) -> String {
     let s = |k: &str| row.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
-    let what = if s("kind").is_empty() { s("role") } else { s("kind") };
+    let what = if s("kind").is_empty() {
+        s("role")
+    } else {
+        s("kind")
+    };
     let head = crate::tags::head_of(s("content"));
-    let mut line = format!("[{}] {} {}", row.get("id").map(|v| v.to_string()).unwrap_or_default(), s("agent"), what);
+    let mut line = format!(
+        "[{}] {} {}",
+        row.get("id").map(|v| v.to_string()).unwrap_or_default(),
+        s("agent"),
+        what
+    );
     if !s("verb").is_empty() {
         line.push(' ');
         line.push_str(s("verb"));
@@ -520,7 +566,8 @@ mod tests {
 
     #[test]
     fn a_stream_line_says_who_what_and_the_first_line() {
-        let row = json!({"id": 12, "agent": "ai", "role": "assistant", "content": "I'll scan it.\nmore"});
+        let row =
+            json!({"id": 12, "agent": "ai", "role": "assistant", "content": "I'll scan it.\nmore"});
         assert_eq!(stream_line(&row), "[12] ai assistant · I'll scan it.");
         let call = json!({"id": 13, "agent": "files", "kind": "call", "verb": "list"});
         assert_eq!(stream_line(&call), "[13] files call list");

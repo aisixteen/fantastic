@@ -141,20 +141,39 @@ impl AiPanel {
         for (_, d) in &self.drafts {
             match d.kind.as_str() {
                 "text" => {
-                    let lines: Vec<String> = d.text.lines().flat_map(|l| {
-                        let cs: Vec<char> = l.chars().collect();
-                        if cs.is_empty() { vec![String::new()] } else { cs.chunks(w).map(|c| c.iter().collect()).collect() }
-                    }).collect();
+                    let lines: Vec<String> = d
+                        .text
+                        .lines()
+                        .flat_map(|l| {
+                            let cs: Vec<char> = l.chars().collect();
+                            if cs.is_empty() {
+                                vec![String::new()]
+                            } else {
+                                cs.chunks(w).map(|c| c.iter().collect()).collect()
+                            }
+                        })
+                        .collect();
                     for l in lines.iter().skip(lines.len().saturating_sub(DRAFT_TAIL)) {
-                        out.push(Line::from(Span::styled(format!("  {l}"), Style::default().fg(theme::FG))));
+                        out.push(Line::from(Span::styled(
+                            format!("  {l}"),
+                            Style::default().fg(theme::FG),
+                        )));
                     }
                 }
-                "call" => out.push(Line::from(Span::styled(format!("  {}", d.head), Style::default().fg(theme::DIM)))),
+                "call" => out.push(Line::from(Span::styled(
+                    format!("  {}", d.head),
+                    Style::default().fg(theme::DIM),
+                ))),
                 _ => {}
             }
         }
         for n in &self.not_sent {
-            out.push(Line::from(Span::styled(format!("  {n}"), Style::default().fg(theme::DIM).add_modifier(Modifier::CROSSED_OUT))));
+            out.push(Line::from(Span::styled(
+                format!("  {n}"),
+                Style::default()
+                    .fg(theme::DIM)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            )));
         }
         out
     }
@@ -171,7 +190,14 @@ impl AiPanel {
             let what = match d.kind.as_str() {
                 "call" => d.head,
                 "thinking" => "thinking".to_string(),
-                _ => d.text.lines().next().unwrap_or("").chars().take(60).collect(),
+                _ => d
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect(),
             };
             self.not_sent.push(format!("{what} · not sent — {why}"));
         }
@@ -214,7 +240,14 @@ impl AiPanel {
         pins.sort();
         let mut open: Vec<_> = self.st.open.iter().collect();
         open.sort();
-        (pins, open, self.st.zoom as u8, self.st.model_view_only, self.st.narrow).hash(&mut h);
+        (
+            pins,
+            open,
+            self.st.zoom as u8,
+            self.st.model_view_only,
+            self.st.narrow,
+        )
+            .hash(&mut h);
         h.finish()
     }
 
@@ -300,13 +333,19 @@ impl AiPanel {
     /// `S`: the agent's own `stop` — the generation is cancelled (its provider
     /// stream closed), its open parts abort, nothing is sent.
     fn stop(&self, cx: &Cx<'_>, out: &mut Vec<Cmd>) {
-        out.push(Cmd::Send { target: cx.agent.clone(), payload: json!({"type": "stop"}) });
+        out.push(Cmd::Send {
+            target: cx.agent.clone(),
+            payload: json!({"type": "stop"}),
+        });
     }
 
     /// CLEAR (owner 2026-10-12, as on the canvas): a new thread on the same
     /// store — `context_clear`; nothing is deleted.
     fn clear(&self, cx: &Cx<'_>, out: &mut Vec<Cmd>) {
-        out.push(Cmd::Send { target: cx.agent.clone(), payload: json!({"type": "context_clear", "why": "cleared from the terminal"}) });
+        out.push(Cmd::Send {
+            target: cx.agent.clone(),
+            payload: json!({"type": "context_clear", "why": "cleared from the terminal"}),
+        });
     }
 
     /// The gutter legend. It names the marks in the model's own words, because a
@@ -363,7 +402,10 @@ impl AiPanel {
     /// body is empty.
     fn text_of(l: &thread::OutlineLine) -> &str {
         match &l.kind {
-            LineKind::Turn { .. } | LineKind::Waiting | LineKind::Late | LineKind::Monitor { .. }
+            LineKind::Turn { .. }
+            | LineKind::Waiting
+            | LineKind::Late
+            | LineKind::Monitor { .. }
                 if !l.body.is_empty() =>
             {
                 &l.body
@@ -391,9 +433,16 @@ impl AiPanel {
             LineKind::Late => "late ".into(),
             LineKind::Waiting => "asks you ".into(),
             // `monitor 787 · job 514 "w5" · ended` — which watch spoke, on which job.
-            LineKind::Monitor { id, job, label, ended } => format!(
+            LineKind::Monitor {
+                id,
+                job,
+                label,
+                ended,
+            } => format!(
                 "monitor {id} · job {job}{}{} ",
-                label.as_ref().map_or(String::new(), |l| format!(" \"{l}\"")),
+                label
+                    .as_ref()
+                    .map_or(String::new(), |l| format!(" \"{l}\"")),
                 if *ended { " · ended" } else { "" },
             ),
             LineKind::Turn { .. } => String::new(),
@@ -403,7 +452,9 @@ impl AiPanel {
         // text reads red whatever it is. The bullet and bar keep the state.
         let text_col = match (&l.kind, l.reply, l.closure) {
             (_, _, thread::Closure::Failed) => theme::FAILED,
-            (LineKind::Fold { .. } | LineKind::Recall | LineKind::Other(_), _, _) => theme::SAY_PLUMBING,
+            (LineKind::Fold { .. } | LineKind::Recall | LineKind::Other(_), _, _) => {
+                theme::SAY_PLUMBING
+            }
             (_, true, _) => theme::SAY_REPLY,
             _ => theme::FG,
         };
@@ -418,7 +469,9 @@ impl AiPanel {
             (Some(f), _) if f == crate::env::HUMAN => (format!("{f}: "), theme::SAY_HUMAN),
             (Some(f), _) if f == &self.agent => (format!("{f}: "), theme::SAY_SELF),
             (Some(f), _) => (format!("{f}: "), theme::SAY_OTHER),
-            (None, LineKind::Turn { assistant: true }) => (format!("{}: ", self.agent), theme::SAY_SELF),
+            (None, LineKind::Turn { assistant: true }) => {
+                (format!("{}: ", self.agent), theme::SAY_SELF)
+            }
             _ => (String::new(), theme::FG),
         };
         // THE QUESTION BADGE on a root that carries one: the inquiry colour, the
@@ -438,26 +491,50 @@ impl AiPanel {
             if n == 0 {
                 spans.push(Span::styled(format!("{glyph} "), Style::default().fg(gcol)));
                 if badge {
-                    spans.push(Span::styled("✉ ", Style::default().fg(theme::BLOCKED).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(
+                        "✉ ",
+                        Style::default()
+                            .fg(theme::BLOCKED)
+                            .add_modifier(Modifier::BOLD),
+                    ));
                 }
                 spans.push(Span::styled(format!("{indent}{bullet} "), state));
             } else {
                 spans.push(Span::raw(" ".repeat(lead - 1)));
             }
-            let rev = |st: Style| if cursor && n == 0 { st.add_modifier(Modifier::REVERSED) } else { st };
+            let rev = |st: Style| {
+                if cursor && n == 0 {
+                    st.add_modifier(Modifier::REVERSED)
+                } else {
+                    st
+                }
+            };
             let mut rest: &str = piece;
             if n == 0 {
                 if let Some(r) = rest.strip_prefix(tag.as_str()).filter(|_| !tag.is_empty()) {
-                    spans.push(Span::styled(tag.clone(), rev(Style::default().fg(theme::LABEL))));
+                    spans.push(Span::styled(
+                        tag.clone(),
+                        rev(Style::default().fg(theme::LABEL)),
+                    ));
                     rest = r;
                 }
-                if let Some(r) = rest.strip_prefix(from.as_str()).filter(|_| !from.is_empty()) {
-                    spans.push(Span::styled(from.clone(), rev(Style::default().fg(from_col).add_modifier(Modifier::BOLD))));
+                if let Some(r) = rest
+                    .strip_prefix(from.as_str())
+                    .filter(|_| !from.is_empty())
+                {
+                    spans.push(Span::styled(
+                        from.clone(),
+                        rev(Style::default().fg(from_col).add_modifier(Modifier::BOLD)),
+                    ));
                     rest = r;
                 }
             }
             // a tool call, as `body_of` wrote it
-            let st = if rest.starts_with("▸ ") { Style::default().fg(theme::SAY_CALL) } else { style };
+            let st = if rest.starts_with("▸ ") {
+                Style::default().fg(theme::SAY_CALL)
+            } else {
+                style
+            };
             spans.push(Span::styled(rest.to_string(), rev(st)));
             out.push(Line::from(spans));
         }
@@ -481,12 +558,19 @@ impl AiPanel {
         let at = (t * 9.0) % (n + 6.0) - 3.0; // the shimmer's centre, off both ends
         let mut spans = vec![
             Span::raw("  "),
-            Span::styled(format!("{frame} "), Style::default().fg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{frame} "),
+                Style::default()
+                    .fg(theme::ACCENT_HI)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ];
         for (i, ch) in WORD.chars().enumerate() {
             let d = (i as f32 - at).abs();
             let st = if d < 0.8 {
-                Style::default().fg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme::ACCENT_HI)
+                    .add_modifier(Modifier::BOLD)
             } else if d < 2.0 {
                 Style::default().fg(theme::FG)
             } else {
@@ -494,7 +578,10 @@ impl AiPanel {
             };
             spans.push(Span::styled(ch.to_string(), st));
         }
-        spans.push(Span::styled(format!("  {}s", t as u64), Style::default().fg(theme::DIM)));
+        spans.push(Span::styled(
+            format!("  {}s", t as u64),
+            Style::default().fg(theme::DIM),
+        ));
         Line::from(spans)
     }
 }
@@ -611,7 +698,13 @@ impl Panel for AiPanel {
             // the pager — Esc closes it, as any body
             K::Char('t') => {
                 if let Some(id) = self.at() {
-                    if let Some(t) = cx.store.rows.get(&id).and_then(|r| r.thinking.clone()).filter(|t| !t.trim().is_empty()) {
+                    if let Some(t) = cx
+                        .store
+                        .rows
+                        .get(&id)
+                        .and_then(|r| r.thinking.clone())
+                        .filter(|t| !t.trim().is_empty())
+                    {
                         self.body = Some((id, format!("💭 thought\n\n{t}")));
                     }
                 }
@@ -622,18 +715,46 @@ impl Panel for AiPanel {
     }
 
     fn on_event(&mut self, payload: &Value, _out: &mut Vec<Cmd>) -> bool {
-        let sid = || payload.get("stream_id").and_then(Value::as_str).unwrap_or("").to_string();
-        let st = |k: &str| payload.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let sid = || {
+            payload
+                .get("stream_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let st = |k: &str| {
+            payload
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         match payload.get("type").and_then(Value::as_str) {
             // THE PARTS: one draft per stream_id. A delta never acts.
             Some("part_start") => {
                 self.go_live();
                 let to = payload.get("to").and_then(Value::as_array).map(|a| {
-                    a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 });
-                let target = Some(st("target")).filter(|t| !t.is_empty()).or(to).unwrap_or_default();
-                let head = format!("→ {target} {}", st("name")).split_whitespace().collect::<Vec<_>>().join(" ");
-                self.drafts.push((sid(), Draft { kind: st("kind"), head, text: String::new() }));
+                let target = Some(st("target"))
+                    .filter(|t| !t.is_empty())
+                    .or(to)
+                    .unwrap_or_default();
+                let head = format!("→ {target} {}", st("name"))
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.drafts.push((
+                    sid(),
+                    Draft {
+                        kind: st("kind"),
+                        head,
+                        text: String::new(),
+                    },
+                ));
                 true
             }
             Some("part_delta") => {
@@ -656,7 +777,9 @@ impl Panel for AiPanel {
                 true
             }
             Some("part_abort") => {
-                let why = Some(st("reason")).filter(|r| !r.is_empty()).unwrap_or_else(|| "aborted".into());
+                let why = Some(st("reason"))
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or_else(|| "aborted".into());
                 self.not_sent(&sid(), &why);
                 true
             }
@@ -669,7 +792,10 @@ impl Panel for AiPanel {
                     .get("detail")
                     .and_then(|d| d.get("ahead"))
                     .and_then(Value::as_i64);
-                if let Some(d) = payload.get("detail").filter(|d| d.get("completion_tokens").is_some()) {
+                if let Some(d) = payload
+                    .get("detail")
+                    .filter(|d| d.get("completion_tokens").is_some())
+                {
                     self.usage = Some(d.clone());
                 }
                 match phase.as_deref() {
@@ -859,9 +985,18 @@ impl Panel for AiPanel {
         let mut bits = vec![self.agent.to_string()];
         // THE KV-CACHE TABLE, when the backend keeps one (vLLM: `kv` in its
         // reflect — live conversations of the slots, how many rotated out).
-        if let Some(kv) = cx.reflect.and_then(|r| r.get("kv")).filter(|k| k.get("slots").is_some_and(|s| !s.is_null())) {
+        if let Some(kv) = cx
+            .reflect
+            .and_then(|r| r.get("kv"))
+            .filter(|k| k.get("slots").is_some_and(|s| !s.is_null()))
+        {
             let n = |k: &str| kv.get(k).and_then(Value::as_i64).unwrap_or(0);
-            bits.push(format!("kv {}/{} · evicted {}", n("live"), n("slots"), n("evicted")));
+            bits.push(format!(
+                "kv {}/{} · evicted {}",
+                n("live"),
+                n("slots"),
+                n("evicted")
+            ));
         }
         // THE HONEST WORD for a second send: it is queued behind a turn that holds
         // the backend's lock. It is linked to what is running; it does not steer it.
@@ -902,17 +1037,35 @@ impl Panel for AiPanel {
 /// `N tok/s · Xk / Wk ctx` from a `done` status's usage (`~` marks an estimate);
 /// the window alone before any generation. None without a window.
 fn speed_and_context(usage: Option<&Value>, window: Option<f64>) -> Option<String> {
-    let k = |n: f64| if n >= 1000.0 { format!("{:.1}k", n / 1000.0).replace(".0k", "k") } else { format!("{n:.0}") };
-    let est = |f: &str| if usage.and_then(|u| u.get(f)).and_then(Value::as_bool) == Some(true) { "~" } else { "" };
+    let k = |n: f64| {
+        if n >= 1000.0 {
+            format!("{:.1}k", n / 1000.0).replace(".0k", "k")
+        } else {
+            format!("{n:.0}")
+        }
+    };
+    let est = |f: &str| {
+        if usage.and_then(|u| u.get(f)).and_then(Value::as_bool) == Some(true) {
+            "~"
+        } else {
+            ""
+        }
+    };
     let num = |f: &str| usage.and_then(|u| u.get(f)).and_then(Value::as_f64);
     let mut bits = Vec::new();
     if let (Some(out), Some(secs)) = (num("completion_tokens"), num("gen_seconds")) {
         if secs > 0.0 {
-            bits.push(format!("{}{:.0} tok/s", est("completion_tokens_estimated"), out / secs));
+            bits.push(format!(
+                "{}{:.0} tok/s",
+                est("completion_tokens_estimated"),
+                out / secs
+            ));
         }
     }
     let w = window?;
-    let prompt = num("prompt_tokens").map(|p| format!("{}{}", est("prompt_tokens_estimated"), k(p))).unwrap_or_else(|| "—".into());
+    let prompt = num("prompt_tokens")
+        .map(|p| format!("{}{}", est("prompt_tokens_estimated"), k(p)))
+        .unwrap_or_else(|| "—".into());
     bits.push(format!("{prompt} / {} ctx", k(w)));
     Some(bits.join(" · "))
 }
@@ -999,7 +1152,11 @@ mod tests {
         term.draw(|f| p.render(f, f.area(), cx)).unwrap();
         let buf = term.backend().buffer().clone();
         (0..h)
-            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1008,31 +1165,56 @@ mod tests {
     fn render_is_a_pure_view_layout_is_where_state_changes() {
         // MVVM, pinned: `layout` derives, `render` only reads. Two draws of the
         // same state are identical and leave the panel exactly as it was.
-        let s = store_with((1..=30).map(|i| json!({"id":i,"agent":"ai","role":"user","content":format!("m{i}")})).collect());
+        let s = store_with(
+            (1..=30)
+                .map(|i| json!({"id":i,"agent":"ai","role":"user","content":format!("m{i}")}))
+                .collect(),
+        );
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let area = Rect::new(0, 0, 60, 10);
         p.layout(area, &cx);
         let (top, cur, n) = (p.top, p.st.cursor, p.last.lines.len());
         let first = draw_once(&p, &cx, 60, 10);
         let second = draw_once(&p, &cx, 60, 10);
-        assert_eq!(first, second, "a second draw of the same state must be identical");
-        assert_eq!((p.top, p.st.cursor, p.last.lines.len()), (top, cur, n), "render changed state");
+        assert_eq!(
+            first, second,
+            "a second draw of the same state must be identical"
+        );
+        assert_eq!(
+            (p.top, p.st.cursor, p.last.lines.len()),
+            (top, cur, n),
+            "render changed state"
+        );
     }
 
     #[test]
     fn an_open_question_is_a_badge_not_a_stopped_thread() {
         // A question to the human never blocks the conversation: its thread is
         // drawn in its own state, with the envelope beside it.
-        let s = store_with(vec![json!({"id":1,"agent":"ai","content":"[from other · msg 1]\nwhich port?"})]);
+        let s = store_with(vec![
+            json!({"id":1,"agent":"ai","content":"[from other · msg 1]\nwhich port?"}),
+        ]);
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
         let w = thread::waiting_for(&s, &a, crate::env::HUMAN);
         assert_eq!(w.len(), 1);
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         p.layout(Rect::new(0, 0, 70, 10), &cx);
         assert!(p.last.lines[0].asking);
         let drawn = draw_once(&p, &cx, 70, 10);
@@ -1042,11 +1224,21 @@ mod tests {
 
     #[test]
     fn layout_keeps_the_cursor_on_screen() {
-        let s = store_with((1..=30).map(|i| json!({"id":i,"agent":"ai","role":"user","content":format!("m{i}")})).collect());
+        let s = store_with(
+            (1..=30)
+                .map(|i| json!({"id":i,"agent":"ai","role":"user","content":format!("m{i}")}))
+                .collect(),
+        );
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let area = Rect::new(0, 0, 60, 8);
         p.layout(area, &cx);
         // Put the cursor on the last line, far below an 8-row viewport.
@@ -1054,8 +1246,15 @@ mod tests {
         p.layout(area, &cx);
         let cur = p.at().and_then(|id| p.last.position(id)).unwrap();
         let body_h = (area.height as usize).saturating_sub(p.header(&p.last).len());
-        assert!(cur >= p.top && cur < p.top + body_h.max(1), "cursor {cur} outside [{}, +{body_h})", p.top);
-        assert!(draw_once(&p, &cx, 60, 8).contains("m30"), "the cursor's row is drawn");
+        assert!(
+            cur >= p.top && cur < p.top + body_h.max(1),
+            "cursor {cur} outside [{}, +{body_h})",
+            p.top
+        );
+        assert!(
+            draw_once(&p, &cx, 60, 8).contains("m30"),
+            "the cursor's row is drawn"
+        );
     }
 
     #[test]
@@ -1081,24 +1280,51 @@ mod tests {
     #[test]
     fn speed_and_context_reads_the_done_usage() {
         let u = json!({"prompt_tokens": 3600, "completion_tokens": 120, "gen_seconds": 0.5, "context_window": 65536});
-        assert_eq!(speed_and_context(Some(&u), Some(65536.0)).as_deref(), Some("240 tok/s · 3.6k / 65.5k ctx"));
+        assert_eq!(
+            speed_and_context(Some(&u), Some(65536.0)).as_deref(),
+            Some("240 tok/s · 3.6k / 65.5k ctx")
+        );
         let e = json!({"prompt_tokens": 900, "completion_tokens": 10, "gen_seconds": 1.0, "prompt_tokens_estimated": true});
-        assert_eq!(speed_and_context(Some(&e), Some(262144.0)).as_deref(), Some("10 tok/s · ~900 / 262.1k ctx"));
-        assert_eq!(speed_and_context(None, Some(8192.0)).as_deref(), Some("— / 8.2k ctx"));
+        assert_eq!(
+            speed_and_context(Some(&e), Some(262144.0)).as_deref(),
+            Some("10 tok/s · ~900 / 262.1k ctx")
+        );
+        assert_eq!(
+            speed_and_context(None, Some(8192.0)).as_deref(),
+            Some("— / 8.2k ctx")
+        );
         assert_eq!(speed_and_context(None, None), None);
     }
 
     #[test]
     fn t_opens_the_thought_kept_on_the_row() {
-        let s = store_with(vec![json!({"id":1,"agent":"ai","role":"assistant","content":"the answer","thinking":"why I said it"})]);
+        let s = store_with(vec![
+            json!({"id":1,"agent":"ai","role":"assistant","content":"the answer","thinking":"why I said it"}),
+        ]);
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let mut out = Vec::new();
         p.st.cursor = Some(1);
-        p.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE), &cx, &mut out);
-        assert!(p.body.as_ref().is_some_and(|(id, t)| *id == 1 && t.contains("why I said it")), "{:?}", p.body);
+        p.on_key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &cx,
+            &mut out,
+        );
+        assert!(
+            p.body
+                .as_ref()
+                .is_some_and(|(id, t)| *id == 1 && t.contains("why I said it")),
+            "{:?}",
+            p.body
+        );
     }
 
     #[test]
@@ -1107,10 +1333,23 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let mut out = Vec::new();
-        p.on_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE), &cx, &mut out);
-        assert!(matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "context_clear"), "{out:?}");
+        p.on_key(
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE),
+            &cx,
+            &mut out,
+        );
+        assert!(
+            matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "context_clear"),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -1119,9 +1358,19 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let mut out = Vec::new();
-        p.on_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE), &cx, &mut out);
+        p.on_key(
+            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE),
+            &cx,
+            &mut out,
+        );
         assert!(
             matches!(&out[..], [Cmd::Send { target, payload }] if target.as_str() == "ai" && payload["type"] == "stop"),
             "{out:?}"
@@ -1135,10 +1384,22 @@ mod tests {
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
         let r = json!({"kv": {"slots": 2, "overflow": "evict", "live": 2, "evicted": 1, "rejected": 0}});
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&r) };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: Some(&r),
+        };
         assert!(p.status(&cx).unwrap().contains("kv 2/2 · evicted 1"));
         let none = json!({"model": "x"});
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: Some(&none) };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: Some(&none),
+        };
         assert!(!p.status(&cx).unwrap().contains("kv "));
     }
 
@@ -1171,32 +1432,68 @@ mod tests {
         let s = Store::default();
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let ev = |v: Value| v;
         // reasoning: masked
-        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:1","kind":"thinking","re":4})), &mut out);
-        p.on_event(&ev(json!({"type":"part_delta","stream_id":"ai:1","text":"secret reasoning"})), &mut out);
+        p.on_event(
+            &ev(json!({"type":"part_start","stream_id":"ai:1","kind":"thinking","re":4})),
+            &mut out,
+        );
+        p.on_event(
+            &ev(json!({"type":"part_delta","stream_id":"ai:1","text":"secret reasoning"})),
+            &mut out,
+        );
         assert!(p.live && p.thinking_open());
         p.layout(Rect::new(0, 0, 60, 14), &cx);
         let screen = draw_once(&p, &cx, 60, 14);
-        assert!(screen.contains("thinking") && !screen.contains("secret"), "{screen}");
+        assert!(
+            screen.contains("thinking") && !screen.contains("secret"),
+            "{screen}"
+        );
         p.on_event(&ev(json!({"type":"part_end","stream_id":"ai:1"})), &mut out);
         // the answer: drawn as written
-        p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:2","kind":"text","re":4})), &mut out);
-        p.on_event(&ev(json!({"type":"part_delta","stream_id":"ai:2","text":"hello there"})), &mut out);
+        p.on_event(
+            &ev(json!({"type":"part_start","stream_id":"ai:2","kind":"text","re":4})),
+            &mut out,
+        );
+        p.on_event(
+            &ev(json!({"type":"part_delta","stream_id":"ai:2","text":"hello there"})),
+            &mut out,
+        );
         // a call: its head
         p.on_event(&ev(json!({"type":"part_start","stream_id":"ai:3","kind":"call","name":"send","target":"files","re":4})), &mut out);
         p.layout(Rect::new(0, 0, 60, 14), &cx);
         let screen = draw_once(&p, &cx, 60, 14);
-        assert!(screen.contains("hello there") && screen.contains("→ files send"), "{screen}");
+        assert!(
+            screen.contains("hello there") && screen.contains("→ files send"),
+            "{screen}"
+        );
         // a malformed call is not sent; an aborted text neither
-        p.on_event(&ev(json!({"type":"part_end","stream_id":"ai:3","ok":false})), &mut out);
-        p.on_event(&ev(json!({"type":"part_abort","stream_id":"ai:2","reason":"stopped"})), &mut out);
+        p.on_event(
+            &ev(json!({"type":"part_end","stream_id":"ai:3","ok":false})),
+            &mut out,
+        );
+        p.on_event(
+            &ev(json!({"type":"part_abort","stream_id":"ai:2","reason":"stopped"})),
+            &mut out,
+        );
         assert!(p.drafts.is_empty());
         p.layout(Rect::new(0, 0, 60, 14), &cx);
         let screen = draw_once(&p, &cx, 60, 14);
-        assert!(screen.contains("→ files send · not sent — malformed"), "{screen}");
-        assert!(screen.contains("hello there · not sent — stopped"), "{screen}");
+        assert!(
+            screen.contains("→ files send · not sent — malformed"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("hello there · not sent — stopped"),
+            "{screen}"
+        );
         // the turn ends: the indicator stops; the next turn clears the not-sent lines
         p.on_event(&json!({"type":"status","phase":"done"}), &mut out);
         assert!(!p.live);
@@ -1218,13 +1515,23 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let area = Rect::new(0, 0, 120, 40);
         p.layout(area, &cx);
         p.st.cursor = Some(2000);
         p.layout(area, &cx);
         draw_once(&p, &cx, 120, 40);
-        assert!(p.wraps.borrow().len() <= 12, "only visible messages are wrapped: {}", p.wraps.borrow().len());
+        assert!(
+            p.wraps.borrow().len() <= 12,
+            "only visible messages are wrapped: {}",
+            p.wraps.borrow().len()
+        );
         // moving the cursor never re-projects the thread
         let key = p.proj_key;
         p.st.cursor = Some(1999);
@@ -1246,7 +1553,13 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         p.layout(Rect::new(0, 0, 60, 20), &cx);
         let hue = |id: RowId, needle: &str| -> Option<ratatui::style::Color> {
             let l = p.last.lines.iter().find(|l| l.id == id)?;
@@ -1257,7 +1570,11 @@ mod tests {
                 .and_then(|sp| sp.style.fg)
         };
         assert_eq!(hue(1, "user:"), Some(theme::SAY_HUMAN), "the human's label");
-        assert_eq!(hue(2, "ai:"), Some(theme::SAY_SELF), "the agent's own label");
+        assert_eq!(
+            hue(2, "ai:"),
+            Some(theme::SAY_SELF),
+            "the agent's own label"
+        );
         assert_eq!(hue(2, "▸ send"), Some(theme::SAY_CALL), "a tool call");
         assert_eq!(hue(3, "reply"), Some(theme::SAY_REPLY), "a tool reply");
         assert_eq!(hue(2, "on it"), Some(theme::FG), "plain text");
@@ -1270,15 +1587,27 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         p.layout(Rect::new(0, 0, 80, 10), &cx);
         let screen = draw_once(&p, &cx, 80, 10);
         assert!(
             screen.contains("monitor 787 · job 514 \"w5\" · ended runner: FATAL w5: loss diverged"),
             "{screen}"
         );
-        assert!(!screen.contains("asks you"), "a delivery is not a question: {screen}");
-        assert!(!screen.contains("[monitor"), "the header is the tag, not the text: {screen}");
+        assert!(
+            !screen.contains("asks you"),
+            "a delivery is not a question: {screen}"
+        );
+        assert!(
+            !screen.contains("[monitor"),
+            "the header is the tag, not the text: {screen}"
+        );
     }
 
     #[test]
@@ -1291,7 +1620,13 @@ mod tests {
         let mut p = AiPanel::new("ai".into());
         let seen = std::collections::HashSet::new();
         let a: AgentId = "ai".into();
-        let cx = Cx { agent: &a, store: &s, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &s,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let area = Rect::new(0, 0, 40, 16);
         p.layout(area, &cx);
         p.st.cursor = Some(2);

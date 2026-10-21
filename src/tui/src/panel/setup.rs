@@ -58,8 +58,14 @@ enum Two {
 }
 
 enum Page {
-    One { at: usize },
-    Two { d: Details, at: usize, editing: Option<(Two, String)> },
+    One {
+        at: usize,
+    },
+    Two {
+        d: Details,
+        at: usize,
+        editing: Option<(Two, String)>,
+    },
 }
 
 pub struct SetupPanel {
@@ -80,20 +86,39 @@ impl SetupPanel {
     /// Tests: open a text field (the key's), and read what it holds.
     #[cfg(test)]
     pub fn open_key_prompt(&mut self) {
-        let b = Backend { module: "x.tools".into(), fields: vec![], key: Some(true) };
-        self.page = Page::Two { d: Details::new(&b, None, &[]), at: 0, editing: Some((Two::Secret, String::new())) };
+        let b = Backend {
+            module: "x.tools".into(),
+            fields: vec![],
+            key: Some(true),
+        };
+        self.page = Page::Two {
+            d: Details::new(&b, None, &[]),
+            at: 0,
+            editing: Some((Two::Secret, String::new())),
+        };
         self.backends = Some(vec![b]);
     }
     #[cfg(test)]
     pub fn key_typed(&self) -> Option<&str> {
         match &self.page {
-            Page::Two { editing: Some((_, buf)), .. } => Some(buf.as_str()),
+            Page::Two {
+                editing: Some((_, buf)),
+                ..
+            } => Some(buf.as_str()),
             _ => None,
         }
     }
 
     pub fn new() -> Self {
-        Self { backends: None, shelf: None, keys: Vec::new(), key_mode: None, page: Page::One { at: 0 }, result: None, busy: false }
+        Self {
+            backends: None,
+            shelf: None,
+            keys: Vec::new(),
+            key_mode: None,
+            page: Page::One { at: 0 },
+            result: None,
+            busy: false,
+        }
     }
 
     pub fn set_backends(&mut self, b: Vec<Backend>) {
@@ -140,8 +165,13 @@ impl SetupPanel {
 
     /// The saved set-ups this build can run (an AI backend it links), in order.
     fn saved(&self) -> Vec<&Saved> {
-        let Some(Ok(s)) = &self.shelf else { return Vec::new() };
-        s.saved.iter().filter(|t| self.backend(&t.handler()).is_some()).collect()
+        let Some(Ok(s)) = &self.shelf else {
+            return Vec::new();
+        };
+        s.saved
+            .iter()
+            .filter(|t| self.backend(&t.handler()).is_some())
+            .collect()
     }
 
     fn taken(&self) -> Vec<String> {
@@ -165,7 +195,9 @@ impl SetupPanel {
     }
 
     fn twos(&self, d: &Details) -> Vec<Two> {
-        let Some(b) = self.backend(&d.module) else { return vec![Two::Back] };
+        let Some(b) = self.backend(&d.module) else {
+            return vec![Two::Back];
+        };
         let mut v = vec![Two::Name, Two::Url, Two::Model];
         if let Some(s) = d.key_source(b, &self.keys) {
             v.push(Two::Key);
@@ -177,11 +209,19 @@ impl SetupPanel {
             }
         }
         let fields = own(b);
-        v.extend((0..fields.len()).filter(|i| fields[*i].required).map(Two::Field));
+        v.extend(
+            (0..fields.len())
+                .filter(|i| fields[*i].required)
+                .map(Two::Field),
+        );
         if fields.iter().any(|f| !f.required) {
             v.push(Two::Advanced);
             if d.advanced {
-                v.extend((0..fields.len()).filter(|i| !fields[*i].required).map(Two::Field));
+                v.extend(
+                    (0..fields.len())
+                        .filter(|i| !fields[*i].required)
+                        .map(Two::Field),
+                );
             }
         }
         v.extend([Two::Go, Two::Back]);
@@ -193,7 +233,11 @@ impl SetupPanel {
         match self.backend(module) {
             Some(b) => {
                 let d = Details::new(b, current, &taken);
-                self.page = Page::Two { d, at: 0, editing: None };
+                self.page = Page::Two {
+                    d,
+                    at: 0,
+                    editing: None,
+                };
                 self.result = None;
             }
             None => self.result = Some(Err(format!("this build links no {}", provider_of(module)))),
@@ -201,13 +245,23 @@ impl SetupPanel {
     }
 
     fn page_one(&mut self, k: KeyCode, out: &mut Vec<Cmd>) -> Handled {
-        let Page::One { at } = self.page else { return Handled::No };
+        let Page::One { at } = self.page else {
+            return Handled::No;
+        };
         let ones = self.ones();
         let n = ones.len();
         let line = ones.get(at.min(n.saturating_sub(1))).copied();
         match k {
-            KeyCode::Up => self.page = Page::One { at: at.saturating_sub(1) },
-            KeyCode::Down => self.page = Page::One { at: (at + 1).min(n.saturating_sub(1)) },
+            KeyCode::Up => {
+                self.page = Page::One {
+                    at: at.saturating_sub(1),
+                }
+            }
+            KeyCode::Down => {
+                self.page = Page::One {
+                    at: (at + 1).min(n.saturating_sub(1)),
+                }
+            }
             KeyCode::Enter if self.busy => {}
             KeyCode::Enter => match line {
                 Some(One::Saved(i)) => {
@@ -229,7 +283,9 @@ impl SetupPanel {
                 if let Some(One::Saved(i)) = line {
                     let name = self.saved()[i].name.clone();
                     let is_default = self.preferred() == Some(name.as_str());
-                    out.push(Cmd::Prefer { name: (!is_default).then_some(name) });
+                    out.push(Cmd::Prefer {
+                        name: (!is_default).then_some(name),
+                    });
                 }
             }
             _ => return Handled::No,
@@ -260,7 +316,9 @@ impl SetupPanel {
             Page::Two { d, .. } => self.twos(d),
             Page::One { .. } => return Handled::No,
         };
-        let Page::Two { d, at, editing } = &mut self.page else { return Handled::No };
+        let Page::Two { d, at, editing } = &mut self.page else {
+            return Handled::No;
+        };
         let Some(b) = backends.iter().find(|b| b.module == d.module) else {
             self.page = Page::One { at: 0 };
             return Handled::Yes;
@@ -295,21 +353,42 @@ impl SetupPanel {
             }
             KeyCode::Left | KeyCode::Right if line == Two::Key => {
                 let offered = d.sources(b, &keys);
-                let now = d.key_source(b, &keys).and_then(|s| offered.iter().position(|o| *o == s)).unwrap_or(0);
+                let now = d
+                    .key_source(b, &keys)
+                    .and_then(|s| offered.iter().position(|o| *o == s))
+                    .unwrap_or(0);
                 let n = offered.len();
-                let next = if k == KeyCode::Left { (now + n - 1) % n } else { (now + 1) % n };
+                let next = if k == KeyCode::Left {
+                    (now + n - 1) % n
+                } else {
+                    (now + 1) % n
+                };
                 d.source = Some(offered[next]);
             }
-            KeyCode::Left | KeyCode::Right if line == Two::Keep => d.keep = if d.keep == "secure" { "plain" } else { "secure" },
-            KeyCode::Left | KeyCode::Right if matches!(line, Two::Field(i) if !fields[i].one_of.is_empty()) => {
+            KeyCode::Left | KeyCode::Right if line == Two::Keep => {
+                d.keep = if d.keep == "secure" {
+                    "plain"
+                } else {
+                    "secure"
+                }
+            }
+            KeyCode::Left | KeyCode::Right if matches!(line, Two::Field(i) if !fields[i].one_of.is_empty()) =>
+            {
                 if let Two::Field(i) = line {
                     let f = fields[i];
                     // "" — the backend's default — and each value
                     let mut opts: Vec<String> = vec![String::new()];
                     opts.extend(f.one_of.iter().cloned());
-                    let now = opts.iter().position(|o| Some(o) == d.extra.get(&f.name)).unwrap_or(0);
+                    let now = opts
+                        .iter()
+                        .position(|o| Some(o) == d.extra.get(&f.name))
+                        .unwrap_or(0);
                     let n = opts.len();
-                    let next = if k == KeyCode::Left { (now + n - 1) % n } else { (now + 1) % n };
+                    let next = if k == KeyCode::Left {
+                        (now + n - 1) % n
+                    } else {
+                        (now + 1) % n
+                    };
                     d.extra.insert(f.name.clone(), opts[next].clone());
                 }
             }
@@ -330,8 +409,18 @@ impl SetupPanel {
                 let (texts, key) = (d.texts(b), d.key_in(b, &keys, mode_chosen));
                 let module = d.module.clone();
                 match d.edit.clone() {
-                    Some(name) => out.push(Cmd::WizardSaveEdit { name, module, texts, key }),
-                    None => out.push(Cmd::WizardCreate { name: d.name.trim().to_string(), module, texts, key }),
+                    Some(name) => out.push(Cmd::WizardSaveEdit {
+                        name,
+                        module,
+                        texts,
+                        key,
+                    }),
+                    None => out.push(Cmd::WizardCreate {
+                        name: d.name.trim().to_string(),
+                        module,
+                        texts,
+                        key,
+                    }),
                 }
                 // the pasted key leaves the page with the act — never kept on it
                 d.secret.clear();
@@ -340,7 +429,11 @@ impl SetupPanel {
             }
             KeyCode::Enter => {
                 if let Some(f) = Self::field_mut(d, b, line) {
-                    let text = if line == Two::Secret { String::new() } else { f.clone() };
+                    let text = if line == Two::Secret {
+                        String::new()
+                    } else {
+                        f.clone()
+                    };
                     *editing = Some((line, text));
                 }
             }
@@ -362,11 +455,21 @@ impl Panel for SetupPanel {
     }
 
     fn needs(&self) -> Needs {
-        Needs { rows: false, reflect: false, watch: false }
+        Needs {
+            rows: false,
+            reflect: false,
+            watch: false,
+        }
     }
 
     fn text_input(&self) -> bool {
-        matches!(&self.page, Page::Two { editing: Some(_), .. })
+        matches!(
+            &self.page,
+            Page::Two {
+                editing: Some(_),
+                ..
+            }
+        )
     }
 
     fn on_key(&mut self, k: KeyEvent, _cx: &Cx<'_>, out: &mut Vec<Cmd>) -> Handled {
@@ -393,31 +496,65 @@ impl Panel for SetupPanel {
         let muted = Style::default().fg(theme::MUTED);
         let fg = Style::default().fg(theme::FG);
         let bold = Style::default().fg(theme::FG).add_modifier(Modifier::BOLD);
-        let warn = Style::default().fg(theme::BLOCKED).add_modifier(Modifier::BOLD);
-        let arrow = |c: bool| Span::styled(if c { "  ▸ " } else { "    " }, Style::default().fg(theme::ACCENT_HI));
-        let pick = |c: bool| if c { bold.add_modifier(Modifier::REVERSED) } else { bold };
+        let warn = Style::default()
+            .fg(theme::BLOCKED)
+            .add_modifier(Modifier::BOLD);
+        let arrow = |c: bool| {
+            Span::styled(
+                if c { "  ▸ " } else { "    " },
+                Style::default().fg(theme::ACCENT_HI),
+            )
+        };
+        let pick = |c: bool| {
+            if c {
+                bold.add_modifier(Modifier::REVERSED)
+            } else {
+                bold
+            }
+        };
         let mut lines: Vec<Line<'static>> = Vec::new();
         match &self.page {
             Page::One { at } => {
                 let ones = self.ones();
                 let cur = ones.get((*at).min(ones.len().saturating_sub(1))).copied();
-                lines.push(Line::from(vec![Span::styled("  NEW AI AGENT", bold), Span::styled("      1 / 2", dim)]));
+                lines.push(Line::from(vec![
+                    Span::styled("  NEW AI AGENT", bold),
+                    Span::styled("      1 / 2", dim),
+                ]));
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("  You can set everything up here, or let your coding agent do it.", muted)));
+                lines.push(Line::from(Span::styled(
+                    "  You can set everything up here, or let your coding agent do it.",
+                    muted,
+                )));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled("  SAVED", dim)));
                 let saved = self.saved();
                 if saved.is_empty() {
-                    lines.push(Line::from(Span::styled("    Nothing saved yet — pick a provider below.", dim)));
+                    lines.push(Line::from(Span::styled(
+                        "    Nothing saved yet — pick a provider below.",
+                        dim,
+                    )));
                 }
                 for (i, s) in saved.iter().enumerate() {
                     let c = cur == Some(One::Saved(i));
-                    let star = if self.preferred() == Some(s.name.as_str()) { "  ★ default" } else { "" };
+                    let star = if self.preferred() == Some(s.name.as_str()) {
+                        "  ★ default"
+                    } else {
+                        ""
+                    };
                     lines.push(Line::from(vec![
                         arrow(c),
                         Span::styled(format!(" {} ", s.name), pick(c)),
                         Span::styled(star.to_string(), Style::default().fg(theme::ACCENT_HI)),
-                        Span::styled(format!("   {} · {} · {}", provider_of(&s.handler()), s.model(), s.endpoint()), dim),
+                        Span::styled(
+                            format!(
+                                "   {} · {} · {}",
+                                provider_of(&s.handler()),
+                                s.model(),
+                                s.endpoint()
+                            ),
+                            dim,
+                        ),
                     ]));
                 }
                 lines.push(Line::from(""));
@@ -428,7 +565,14 @@ impl Panel for SetupPanel {
                     lines.push(Line::from(vec![
                         arrow(c),
                         Span::styled(format!(" {} ", p.label), if linked { pick(c) } else { dim }),
-                        Span::styled(if linked { String::new() } else { "   not in this build".into() }, dim),
+                        Span::styled(
+                            if linked {
+                                String::new()
+                            } else {
+                                "   not in this build".into()
+                            },
+                            dim,
+                        ),
                     ]));
                 }
                 lines.push(Line::from(""));
@@ -439,7 +583,13 @@ impl Panel for SetupPanel {
             }
             Page::Two { d, at, editing } => {
                 let Some(b) = self.backend(&d.module) else {
-                    f.render_widget(Paragraph::new(Line::from(Span::styled("  this build links no such backend", warn))), area);
+                    f.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            "  this build links no such backend",
+                            warn,
+                        ))),
+                        area,
+                    );
                     return;
                 };
                 let twos = self.twos(d);
@@ -448,7 +598,10 @@ impl Panel for SetupPanel {
                     Some(n) => format!("  EDIT SAVED · {n}"),
                     None => format!("  NEW AI AGENT · {}", provider_of(&d.module)),
                 };
-                lines.push(Line::from(vec![Span::styled(title, bold), Span::styled(if d.edit.is_some() { "" } else { "      2 / 2" }, dim)]));
+                lines.push(Line::from(vec![
+                    Span::styled(title, bold),
+                    Span::styled(if d.edit.is_some() { "" } else { "      2 / 2" }, dim),
+                ]));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     if d.edit.is_some() {
@@ -461,14 +614,43 @@ impl Panel for SetupPanel {
                 lines.push(Line::from(""));
                 let shown = |l: Two, value: String, secret: bool| -> (String, bool) {
                     match editing {
-                        Some((e, buf)) if *e == l => (format!("{}▌", if secret { "•".repeat(buf.chars().count()) } else { buf.clone() }), false),
+                        Some((e, buf)) if *e == l => (
+                            format!(
+                                "{}▌",
+                                if secret {
+                                    "•".repeat(buf.chars().count())
+                                } else {
+                                    buf.clone()
+                                }
+                            ),
+                            false,
+                        ),
                         _ if value.is_empty() => ("— not set —".into(), true),
-                        _ => (if secret { "•".repeat(value.chars().count()) } else { value }, false),
+                        _ => (
+                            if secret {
+                                "•".repeat(value.chars().count())
+                            } else {
+                                value
+                            },
+                            false,
+                        ),
                     }
                 };
                 // the label column fits the longest label (a backend's own field names run long)
-                let w = own(b).iter().map(|f| f.name.chars().count()).max().unwrap_or(0).max(12) + 2;
-                let row = |l: Two, label: &str, value: String, note: String, required: bool, secret: bool| -> Line<'static> {
+                let w = own(b)
+                    .iter()
+                    .map(|f| f.name.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .max(12)
+                    + 2;
+                let row = |l: Two,
+                           label: &str,
+                           value: String,
+                           note: String,
+                           required: bool,
+                           secret: bool|
+                 -> Line<'static> {
                     let c = cur == l;
                     let (text, empty) = shown(l, value, secret);
                     Line::from(vec![
@@ -485,18 +667,39 @@ impl Panel for SetupPanel {
                             Two::Name,
                             "name",
                             d.name.clone(),
-                            if d.edit.is_some() { String::new() } else { "a name for reuse — it appears under SAVED".into() },
+                            if d.edit.is_some() {
+                                String::new()
+                            } else {
+                                "a name for reuse — it appears under SAVED".into()
+                            },
                             true,
                             false,
                         )),
-                        Two::Url => lines.push(row(Two::Url, "URL", d.url.clone(), "filled for you — change it for your own server".into(), true, false)),
+                        Two::Url => lines.push(row(
+                            Two::Url,
+                            "URL",
+                            d.url.clone(),
+                            "filled for you — change it for your own server".into(),
+                            true,
+                            false,
+                        )),
                         Two::Model => {
                             let req = b.fields.iter().any(|f| f.name == "model" && f.required);
-                            lines.push(row(Two::Model, "model", d.model.clone(), String::new(), req, false));
+                            lines.push(row(
+                                Two::Model,
+                                "model",
+                                d.model.clone(),
+                                String::new(),
+                                req,
+                                false,
+                            ));
                         }
                         Two::Key => {
                             let text = match d.key_source(b, &self.keys) {
-                                Some(KeySource::Saved) => format!("‹ saved key · {} ›", d.fit(&self.keys).unwrap_or_default()),
+                                Some(KeySource::Saved) => format!(
+                                    "‹ saved key · {} ›",
+                                    d.fit(&self.keys).unwrap_or_default()
+                                ),
                                 Some(KeySource::New) => "‹ paste a new key ›".into(),
                                 _ => "‹ no key ›".into(),
                             };
@@ -507,12 +710,23 @@ impl Panel for SetupPanel {
                                 Span::styled("   ← → saved / new / none", dim),
                             ]));
                         }
-                        Two::Secret => lines.push(row(Two::Secret, "  value", d.secret.clone(), "bound to the URL's host; never shown again".into(), true, true)),
+                        Two::Secret => lines.push(row(
+                            Two::Secret,
+                            "  value",
+                            d.secret.clone(),
+                            "bound to the URL's host; never shown again".into(),
+                            true,
+                            true,
+                        )),
                         Two::Keep => lines.push(Line::from(vec![
                             arrow(cur == Two::Keep),
                             Span::styled(format!("{:<w$}", "  keep it in"), muted),
                             Span::styled(
-                                if d.keep == "secure" { "‹ the keychain (secure) ›".to_string() } else { "‹ a 0600 text file (plain) ›".to_string() },
+                                if d.keep == "secure" {
+                                    "‹ the keychain (secure) ›".to_string()
+                                } else {
+                                    "‹ a 0600 text file (plain) ›".to_string()
+                                },
                                 pick(cur == Two::Keep),
                             ),
                             Span::styled("   chosen once, for every key", dim),
@@ -524,7 +738,14 @@ impl Panel for SetupPanel {
                             if !fl.one_of.is_empty() {
                                 note = format!("{note} — ← → {}", fl.one_of.join(" | "));
                             }
-                            lines.push(row(Two::Field(i), &fl.name.replace('_', " "), v, note, fl.required, false));
+                            lines.push(row(
+                                Two::Field(i),
+                                &fl.name.replace('_', " "),
+                                v,
+                                note,
+                                fl.required,
+                                false,
+                            ));
                         }
                         Two::Advanced => lines.push(Line::from(vec![
                             arrow(cur == Two::Advanced),
@@ -532,18 +753,28 @@ impl Panel for SetupPanel {
                                 format!("{} advanced", if d.advanced { "▾" } else { "▸" }),
                                 pick(cur == Two::Advanced),
                             ),
-                            Span::styled("   each starts at the backend's own default — enter shows them", dim),
+                            Span::styled(
+                                "   each starts at the backend's own default — enter shows them",
+                                dim,
+                            ),
                         ])),
                         Two::Go => {
                             lines.push(Line::from(""));
                             let ok = d.missing(b, &self.keys, &self.taken()).is_empty();
-                            let label = if d.edit.is_some() { " SAVE " } else { " CREATE & OPEN CHAT " };
+                            let label = if d.edit.is_some() {
+                                " SAVE "
+                            } else {
+                                " CREATE & OPEN CHAT "
+                            };
                             lines.push(Line::from(vec![
                                 arrow(cur == Two::Go),
                                 Span::styled(
                                     label,
                                     if ok && cur == Two::Go {
-                                        Style::default().fg(theme::FG).bg(theme::ACCENT_HI).add_modifier(Modifier::BOLD)
+                                        Style::default()
+                                            .fg(theme::FG)
+                                            .bg(theme::ACCENT_HI)
+                                            .add_modifier(Modifier::BOLD)
                                     } else if ok {
                                         bold
                                     } else {
@@ -552,18 +783,34 @@ impl Panel for SetupPanel {
                                 ),
                             ]));
                         }
-                        Two::Back => lines.push(Line::from(vec![arrow(cur == Two::Back), Span::styled(" ‹ back ", pick(cur == Two::Back))])),
+                        Two::Back => lines.push(Line::from(vec![
+                            arrow(cur == Two::Back),
+                            Span::styled(" ‹ back ", pick(cur == Two::Back)),
+                        ])),
                     }
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled("  ↑ ↓ pick · enter edit / go · ← → choose · esc back", dim)));
+                lines.push(Line::from(Span::styled(
+                    "  ↑ ↓ pick · enter edit / go · ← → choose · esc back",
+                    dim,
+                )));
             }
         }
         if let Some(r) = &self.result {
             lines.push(Line::from(""));
             lines.push(match r {
-                Ok(s) => Line::from(Span::styled(format!("  ✓ {s}"), Style::default().fg(theme::WORKING).add_modifier(Modifier::BOLD))),
-                Err(e) => Line::from(Span::styled(format!("  ✕ {e}"), Style::default().fg(theme::FAILED).add_modifier(Modifier::BOLD))),
+                Ok(s) => Line::from(Span::styled(
+                    format!("  ✓ {s}"),
+                    Style::default()
+                        .fg(theme::WORKING)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Err(e) => Line::from(Span::styled(
+                    format!("  ✕ {e}"),
+                    Style::default()
+                        .fg(theme::FAILED)
+                        .add_modifier(Modifier::BOLD),
+                )),
             });
         }
         let _ = fg;
@@ -589,7 +836,13 @@ mod tests {
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: crate::kern::model::AgentId = SETUP_ID.into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: None };
+        let cx = Cx {
+            agent: &a,
+            store: &store,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
         let mut out = Vec::new();
         for k in keys {
             p.on_key(key(*k), &cx, &mut out);
@@ -647,11 +900,24 @@ mod tests {
     fn page_one_lists_saved_then_the_four_providers_unlinked_ones_refused() {
         let mut p = panel();
         p.set_shelf(Ok(shelf(&["box"], Some("box"))));
-        assert_eq!(p.ones(), [One::Saved(0), One::Provider(0), One::Provider(1), One::Provider(2), One::Provider(3)]);
+        assert_eq!(
+            p.ones(),
+            [
+                One::Saved(0),
+                One::Provider(0),
+                One::Provider(1),
+                One::Provider(2),
+                One::Provider(3)
+            ]
+        );
         // responses is not linked: enter says so, page 1 stays
         drive(&mut p, &[KeyCode::Down, KeyCode::Enter]);
         assert!(matches!(&p.page, Page::One { .. }));
-        assert!(matches!(&p.result, Some(Err(e)) if e == "this build links no responses"), "{:?}", p.result);
+        assert!(
+            matches!(&p.result, Some(Err(e)) if e == "this build links no responses"),
+            "{:?}",
+            p.result
+        );
     }
 
     #[test]
@@ -659,14 +925,26 @@ mod tests {
         let mut p = panel();
         p.set_shelf(Ok(shelf(&["box"], Some("box"))));
         let out = drive(&mut p, &[KeyCode::Enter]);
-        assert!(matches!(&out[..], [Cmd::WizardFromSaved { name }] if name == "box"), "{out:?}");
-        assert!(drive(&mut p, &[KeyCode::Enter]).is_empty(), "busy: no second act");
+        assert!(
+            matches!(&out[..], [Cmd::WizardFromSaved { name }] if name == "box"),
+            "{out:?}"
+        );
+        assert!(
+            drive(&mut p, &[KeyCode::Enter]).is_empty(),
+            "busy: no second act"
+        );
         p.set_created(&Ok("box".into()));
         let out = drive(&mut p, &[KeyCode::Char('d')]);
-        assert!(matches!(&out[..], [Cmd::Prefer { name: None }]), "the default stops being one: {out:?}");
+        assert!(
+            matches!(&out[..], [Cmd::Prefer { name: None }]),
+            "the default stops being one: {out:?}"
+        );
         drive(&mut p, &[KeyCode::Char('e')]);
         match &p.page {
-            Page::Two { d, .. } => assert_eq!((d.edit.as_deref(), d.url.as_str()), (Some("box"), "http://box:8000/v1")),
+            Page::Two { d, .. } => assert_eq!(
+                (d.edit.as_deref(), d.url.as_str()),
+                (Some("box"), "http://box:8000/v1")
+            ),
             Page::One { .. } => panic!("e opens page 2"),
         }
     }
@@ -675,21 +953,43 @@ mod tests {
     fn a_new_provider_fills_page_two_and_create_sends_one_act() {
         let mut p = panel();
         // vllm is the 4th provider (no saved ones)
-        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        drive(
+            &mut p,
+            &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+        );
         let lines = match &p.page {
             Page::Two { d, .. } => {
-                assert_eq!((d.name.as_str(), d.url.as_str()), ("vllm-1", "http://127.0.0.1:8000/v1"));
+                assert_eq!(
+                    (d.name.as_str(), d.url.as_str()),
+                    ("vllm-1", "http://127.0.0.1:8000/v1")
+                );
                 p.twos(d)
             }
             Page::One { .. } => panic!("page 2"),
         };
-        assert_eq!(lines, [Two::Name, Two::Url, Two::Model, Two::Key, Two::Field(0), Two::Advanced, Two::Go, Two::Back]);
+        assert_eq!(
+            lines,
+            [
+                Two::Name,
+                Two::Url,
+                Two::Model,
+                Two::Key,
+                Two::Field(0),
+                Two::Advanced,
+                Two::Go,
+                Two::Back
+            ]
+        );
         // GO with gaps: refused, naming them
         let go = lines.iter().position(|l| *l == Two::Go).unwrap();
         let mut ks = vec![KeyCode::Down; go];
         ks.push(KeyCode::Enter);
         assert!(drive(&mut p, &ks).is_empty());
-        assert!(matches!(&p.result, Some(Err(e)) if e == "missing: the model, max tokens"), "{:?}", p.result);
+        assert!(
+            matches!(&p.result, Some(Err(e)) if e == "missing: the model, max tokens"),
+            "{:?}",
+            p.result
+        );
         // fill model and max tokens, then GO
         let mut ks = vec![KeyCode::Up; go];
         ks.extend([KeyCode::Down, KeyCode::Down]);
@@ -699,9 +999,20 @@ mod tests {
         ks.extend([KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
         let out = drive(&mut p, &ks);
         match &out[..] {
-            [Cmd::WizardCreate { name, module, texts, key }] => {
-                assert_eq!((name.as_str(), module.as_str()), ("vllm-1", "vllm_backend.tools"));
-                assert_eq!(Value::Object(texts.clone()), json!({"endpoint": "http://127.0.0.1:8000/v1", "model": "qwen", "max_tokens": "262144"}));
+            [Cmd::WizardCreate {
+                name,
+                module,
+                texts,
+                key,
+            }] => {
+                assert_eq!(
+                    (name.as_str(), module.as_str()),
+                    ("vllm-1", "vllm_backend.tools")
+                );
+                assert_eq!(
+                    Value::Object(texts.clone()),
+                    json!({"endpoint": "http://127.0.0.1:8000/v1", "model": "qwen", "max_tokens": "262144"})
+                );
                 assert_eq!(*key, None, "an optional key left at none");
             }
             other => panic!("one create: {other:?}"),
@@ -712,9 +1023,15 @@ mod tests {
     fn a_pasted_key_goes_with_the_act_masked_and_never_kept() {
         let mut p = panel();
         p.set_key_mode(Ok((None, String::new())));
-        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter]);
+        drive(
+            &mut p,
+            &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter],
+        );
         // key: ← → to "paste a new key" — its value and where keys go appear
-        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Right]);
+        drive(
+            &mut p,
+            &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Right],
+        );
         let lines = match &p.page {
             Page::Two { d, .. } => p.twos(d),
             Page::One { .. } => panic!(),
@@ -744,19 +1061,43 @@ mod tests {
             matches!(&out[..], [Cmd::WizardCreate { key: Some(k), .. }] if k.secret == "sk-1" && k.mode.as_deref() == Some("plain")),
             "{out:?}"
         );
-        assert!(matches!(&p.page, Page::Two { d, .. } if d.secret.is_empty()), "the key left the page with the act");
+        assert!(
+            matches!(&p.page, Page::Two { d, .. } if d.secret.is_empty()),
+            "the key left the page with the act"
+        );
     }
 
     #[test]
     fn esc_goes_back_from_page_two_and_leaves_from_page_one() {
         let mut p = panel();
-        drive(&mut p, &[KeyCode::Down, KeyCode::Down, KeyCode::Down, KeyCode::Enter, KeyCode::Esc]);
+        drive(
+            &mut p,
+            &[
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Down,
+                KeyCode::Enter,
+                KeyCode::Esc,
+            ],
+        );
         assert!(matches!(&p.page, Page::One { .. }));
         let store = crate::store::Store::default();
         let seen = std::collections::HashSet::new();
         let a: crate::kern::model::AgentId = SETUP_ID.into();
-        let cx = Cx { agent: &a, store: &store, tasks: &[], seen: &seen, reflect: None };
-        assert!(matches!(p.on_key(key(KeyCode::Esc), &cx, &mut Vec::new()), Handled::No), "page 1: esc is the app's — leave");
+        let cx = Cx {
+            agent: &a,
+            store: &store,
+            tasks: &[],
+            seen: &seen,
+            reflect: None,
+        };
+        assert!(
+            matches!(
+                p.on_key(key(KeyCode::Esc), &cx, &mut Vec::new()),
+                Handled::No
+            ),
+            "page 1: esc is the app's — leave"
+        );
     }
 
     #[test]
@@ -771,7 +1112,10 @@ mod tests {
         let mut ks = vec![KeyCode::Down; go];
         ks.push(KeyCode::Enter);
         let out = drive(&mut p, &ks);
-        assert!(matches!(&out[..], [Cmd::WizardSaveEdit { name, .. }] if name == "box"), "{out:?}");
+        assert!(
+            matches!(&out[..], [Cmd::WizardSaveEdit { name, .. }] if name == "box"),
+            "{out:?}"
+        );
         p.set_result(Ok("saved".into()));
         assert!(matches!(&p.page, Page::One { .. }));
     }

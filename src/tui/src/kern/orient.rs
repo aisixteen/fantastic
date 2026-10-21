@@ -7,9 +7,10 @@
 
 use std::path::Path;
 
-const FILES: &[(&str, &str)] = &[
-    ("AGENTS.md", include_str!("../../starters/orientation/AGENTS.md")),
-];
+const FILES: &[(&str, &str)] = &[(
+    "AGENTS.md",
+    include_str!("../../starters/orientation/AGENTS.md"),
+)];
 
 /// Seed each file under `.fantastic/` that is missing.
 pub fn seed(cwd: &Path) -> Result<(), String> {

@@ -168,17 +168,24 @@ fn main() {
             // `click X Y` (0-based cells): a left press + release as the SGR
             // mouse sequence a terminal sends once the app captures the mouse.
             "click" => {
-                let mut it = rest.split_whitespace().filter_map(|v| v.parse::<u16>().ok());
+                let mut it = rest
+                    .split_whitespace()
+                    .filter_map(|v| v.parse::<u16>().ok());
                 if let (Some(x), Some(y)) = (it.next(), it.next()) {
                     let (cx, cy) = (x + 1, y + 1);
-                    writer.write_all(format!("\x1b[<0;{cx};{cy}M\x1b[<0;{cx};{cy}m").as_bytes()).ok();
+                    writer
+                        .write_all(format!("\x1b[<0;{cx};{cy}M\x1b[<0;{cx};{cy}m").as_bytes())
+                        .ok();
                     writer.flush().ok();
                 }
             }
             // `until MS TEXT`: wait until the screen shows TEXT (at most MS) — a
             // step that waits on the app, not on a guessed time
             "until" => {
-                let (ms, text) = rest.trim().split_once(char::is_whitespace).unwrap_or((rest.trim(), ""));
+                let (ms, text) = rest
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((rest.trim(), ""));
                 let ms: u64 = ms.parse().unwrap_or(10000);
                 let deadline = std::time::Instant::now() + Duration::from_millis(ms);
                 loop {

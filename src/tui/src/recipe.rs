@@ -65,7 +65,10 @@ impl Opts {
 const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp`, `fantastic send <item>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
-    v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
+    v.parse::<u16>()
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
 }
 
 /// The flags after `ai BACKEND`, up to the next recipe word.
@@ -81,8 +84,13 @@ struct AiFlags {
 fn backend(word: &str, f: AiFlags) -> Result<Backend, String> {
     let host = f.host.clone().unwrap_or_else(|| "127.0.0.1".into());
     let only = |allowed: &[&str]| -> Result<(), String> {
-        let given = [("-p", f.port.is_some()), ("--host", f.host.is_some()), ("--kv-overflow", f.overflow.is_some()),
-                     ("--model", f.model.is_some()), ("--endpoint", f.endpoint.is_some())];
+        let given = [
+            ("-p", f.port.is_some()),
+            ("--host", f.host.is_some()),
+            ("--kv-overflow", f.overflow.is_some()),
+            ("--model", f.model.is_some()),
+            ("--endpoint", f.endpoint.is_some()),
+        ];
         match given.iter().find(|(n, set)| *set && !allowed.contains(n)) {
             Some((n, _)) => Err(format!("`ai {word}` does not take {n}")),
             None => Ok(()),
@@ -92,7 +100,11 @@ fn backend(word: &str, f: AiFlags) -> Result<Backend, String> {
         "vllm" => {
             only(&["-p", "--host", "--kv-overflow"])?;
             let port = f.port.ok_or("`ai vllm` needs -p <the server's port>")?;
-            Ok(Backend::Vllm { host, port, kv_overflow: f.overflow.unwrap_or_else(|| "evict".into()) })
+            Ok(Backend::Vllm {
+                host,
+                port,
+                kv_overflow: f.overflow.unwrap_or_else(|| "evict".into()),
+            })
         }
         "ollama" => {
             only(&["-p", "--host"])?;
@@ -101,24 +113,49 @@ fn backend(word: &str, f: AiFlags) -> Result<Backend, String> {
         }
         "responses" => {
             only(&["--model", "--endpoint"])?;
-            let model = f.model.ok_or("`ai responses` needs --model <the model name>")?;
-            Ok(Backend::Responses { endpoint: f.endpoint.unwrap_or_else(|| crate::kern::root_ai::RESPONSES_ENDPOINT.into()), model })
+            let model = f
+                .model
+                .ok_or("`ai responses` needs --model <the model name>")?;
+            Ok(Backend::Responses {
+                endpoint: f
+                    .endpoint
+                    .unwrap_or_else(|| crate::kern::root_ai::RESPONSES_ENDPOINT.into()),
+                model,
+            })
         }
         "anthropic" => {
             only(&["--model", "--endpoint"])?;
-            let model = f.model.ok_or("`ai anthropic` needs --model <the model name>")?;
-            Ok(Backend::Anthropic { endpoint: f.endpoint.unwrap_or_else(|| crate::kern::root_ai::ANTHROPIC_ENDPOINT.into()), model })
+            let model = f
+                .model
+                .ok_or("`ai anthropic` needs --model <the model name>")?;
+            Ok(Backend::Anthropic {
+                endpoint: f
+                    .endpoint
+                    .unwrap_or_else(|| crate::kern::root_ai::ANTHROPIC_ENDPOINT.into()),
+                model,
+            })
         }
-        other => Err(format!("`ai` takes vllm, ollama, responses or anthropic, got `{other}`")),
+        other => Err(format!(
+            "`ai` takes vllm, ollama, responses or anthropic, got `{other}`"
+        )),
     }
 }
 
 pub fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { recipes: Vec::new(), port: None, headless: false, ai: None, run: None };
+    let mut o = Opts {
+        recipes: Vec::new(),
+        port: None,
+        headless: false,
+        ai: None,
+        run: None,
+    };
     let mut i = 0;
     let next = |i: &mut usize, what: &str| -> Result<String, String> {
         *i += 1;
-        args.get(*i).filter(|v| !v.is_empty()).cloned().ok_or_else(|| format!("{what}"))
+        args.get(*i)
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .ok_or_else(|| format!("{what}"))
     };
     while i < args.len() {
         match args[i].as_str() {
@@ -130,7 +167,9 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
                 let word = match args.get(i + 1).map(String::as_str) {
                     Some(w @ ("vllm" | "ollama" | "responses" | "anthropic")) => w.to_string(),
                     Some(w) if !w.starts_with('-') && !matches!(w, "canvas" | "run" | "ai") => {
-                        return Err(format!("`ai` takes vllm, ollama, responses or anthropic, got `{w}`"))
+                        return Err(format!(
+                            "`ai` takes vllm, ollama, responses or anthropic, got `{w}`"
+                        ))
                     }
                     _ => {
                         i += 1;
@@ -143,7 +182,8 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
                     match flag {
                         "-p" => {
                             i += 1;
-                            f.port = Some(port_of(&next(&mut i, "-p needs the server's port")?, "-p")?);
+                            f.port =
+                                Some(port_of(&next(&mut i, "-p needs the server's port")?, "-p")?);
                         }
                         "--host" => {
                             i += 1;
@@ -153,7 +193,11 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
                             i += 1;
                             match next(&mut i, "--kv-overflow is evict or reject")?.as_str() {
                                 k @ ("evict" | "reject") => f.overflow = Some(k.to_string()),
-                                other => return Err(format!("--kv-overflow is evict or reject, got `{other}`")),
+                                other => {
+                                    return Err(format!(
+                                        "--kv-overflow is evict or reject, got `{other}`"
+                                    ))
+                                }
                             }
                         }
                         "--model" => {
@@ -183,7 +227,9 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
         i += 1;
     }
     if o.headless && o.canvas() {
-        return Err("`canvas` runs headless already — run `fantastic canvas` (no --headless)".into());
+        return Err(
+            "`canvas` runs headless already — run `fantastic canvas` (no --headless)".into(),
+        );
     }
     // the canvas's View is the browser: no terminal UI, the stream on stdout
     o.headless |= o.canvas();
@@ -215,10 +261,17 @@ mod tests {
         let o = p("canvas ai").unwrap();
         assert_eq!(o.recipes, vec![Recipe::Canvas, Recipe::Ai]);
         assert_eq!(o.shows(), Some(Recipe::Ai));
-        assert!(o.canvas() && o.headless && o.ai.is_none(), "the canvas runs headless");
+        assert!(
+            o.canvas() && o.headless && o.ai.is_none(),
+            "the canvas runs headless"
+        );
         assert!(p("web").is_err(), "`web` is no longer a word");
         assert_eq!(p("ai canvas").unwrap().shows(), Some(Recipe::Canvas));
-        assert_eq!(p("canvas ai canvas").unwrap().recipes, vec![Recipe::Ai, Recipe::Canvas], "named twice runs once, last");
+        assert_eq!(
+            p("canvas ai canvas").unwrap().recipes,
+            vec![Recipe::Ai, Recipe::Canvas],
+            "named twice runs once, last"
+        );
     }
 
     #[test]
@@ -232,11 +285,20 @@ mod tests {
     fn port_belongs_to_canvas() {
         assert_eq!(p("canvas --port 8123").unwrap().port, Some(8123));
         assert!(p("canvas").unwrap().headless, "the canvas is headless");
-        assert!(p("canvas").unwrap().port.is_none(), "no port: the first run picks one");
-        assert!(p("canvas --headless").is_err(), "canvas says headless already");
+        assert!(
+            p("canvas").unwrap().port.is_none(),
+            "no port: the first run picks one"
+        );
+        assert!(
+            p("canvas --headless").is_err(),
+            "canvas says headless already"
+        );
         assert!(p("--headless canvas").is_err());
         let h = p("--headless").unwrap();
-        assert!(h.headless && !h.canvas(), "--headless alone: no UI, no canvas");
+        assert!(
+            h.headless && !h.canvas(),
+            "--headless alone: no UI, no canvas"
+        );
         assert!(p("ai --port 8123").is_err());
         assert!(p("canvas --port 0").is_err());
     }
@@ -245,41 +307,90 @@ mod tests {
     fn ai_backends_with_or_without_canvas() {
         let v = p("ai vllm -p 10000").unwrap();
         assert!(!v.canvas());
-        assert_eq!(v.ai, Some(Backend::Vllm { host: "127.0.0.1".into(), port: 10000, kv_overflow: "evict".into() }));
         assert_eq!(
-            p("canvas ai vllm -p 1 --host h --kv-overflow reject").unwrap().ai,
-            Some(Backend::Vllm { host: "h".into(), port: 1, kv_overflow: "reject".into() })
+            v.ai,
+            Some(Backend::Vllm {
+                host: "127.0.0.1".into(),
+                port: 10000,
+                kv_overflow: "evict".into()
+            })
         );
-        assert_eq!(p("ai ollama -p 11434").unwrap().ai, Some(Backend::Ollama { host: "127.0.0.1".into(), port: 11434 }));
+        assert_eq!(
+            p("canvas ai vllm -p 1 --host h --kv-overflow reject")
+                .unwrap()
+                .ai,
+            Some(Backend::Vllm {
+                host: "h".into(),
+                port: 1,
+                kv_overflow: "reject".into()
+            })
+        );
+        assert_eq!(
+            p("ai ollama -p 11434").unwrap().ai,
+            Some(Backend::Ollama {
+                host: "127.0.0.1".into(),
+                port: 11434
+            })
+        );
         assert_eq!(
             p("ai responses --model m").unwrap().ai,
-            Some(Backend::Responses { endpoint: crate::kern::root_ai::RESPONSES_ENDPOINT.into(), model: "m".into() })
+            Some(Backend::Responses {
+                endpoint: crate::kern::root_ai::RESPONSES_ENDPOINT.into(),
+                model: "m".into()
+            })
         );
         assert_eq!(
-            p("ai responses --model m --endpoint https://x/v1/responses").unwrap().ai,
-            Some(Backend::Responses { endpoint: "https://x/v1/responses".into(), model: "m".into() })
+            p("ai responses --model m --endpoint https://x/v1/responses")
+                .unwrap()
+                .ai,
+            Some(Backend::Responses {
+                endpoint: "https://x/v1/responses".into(),
+                model: "m".into()
+            })
         );
         assert!(p("ai vllm").is_err(), "no port is refused, never guessed");
         assert!(p("ai responses").is_err(), "no model is refused");
         assert_eq!(
             p("ai anthropic --model m").unwrap().ai,
-            Some(Backend::Anthropic { endpoint: crate::kern::root_ai::ANTHROPIC_ENDPOINT.into(), model: "m".into() })
+            Some(Backend::Anthropic {
+                endpoint: crate::kern::root_ai::ANTHROPIC_ENDPOINT.into(),
+                model: "m".into()
+            })
         );
         assert!(p("ai anthropic").is_err(), "no model is refused");
         assert!(p("ai openai").is_err());
-        assert!(p("ai vllm -p 1 --model m").is_err(), "a flag the backend does not take is refused");
+        assert!(
+            p("ai vllm -p 1 --model m").is_err(),
+            "a flag the backend does not take is refused"
+        );
         assert!(p("ai vllm -p 1 --kv-overflow drop").is_err());
-        assert_eq!(p("ai vllm -p 1 canvas").unwrap().recipes, vec![Recipe::Ai, Recipe::Canvas], "flags end at the next recipe");
+        assert_eq!(
+            p("ai vllm -p 1 canvas").unwrap().recipes,
+            vec![Recipe::Ai, Recipe::Canvas],
+            "flags end at the next recipe"
+        );
     }
 
     #[test]
     fn run_takes_every_word_after_it() {
         let o = p("run claude --resume x").unwrap();
-        assert_eq!(o.run, Some(vec!["claude".into(), "--resume".into(), "x".into()]));
+        assert_eq!(
+            o.run,
+            Some(vec!["claude".into(), "--resume".into(), "x".into()])
+        );
         assert_eq!(o.shows(), Some(Recipe::Run));
-        assert_eq!(p("canvas run htop").unwrap().recipes, vec![Recipe::Canvas, Recipe::Run]);
+        assert_eq!(
+            p("canvas run htop").unwrap().recipes,
+            vec![Recipe::Canvas, Recipe::Run]
+        );
         assert!(p("run").is_err());
-        assert!(p("--headless run htop").is_err(), "headless with no canvas has no View for it");
-        assert!(p("canvas run htop").unwrap().headless, "a canvas terminal cell, no terminal UI");
+        assert!(
+            p("--headless run htop").is_err(),
+            "headless with no canvas has no View for it"
+        );
+        assert!(
+            p("canvas run htop").unwrap().headless,
+            "a canvas terminal cell, no terminal UI"
+        );
     }
 }

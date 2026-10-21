@@ -57,7 +57,8 @@ fn keep_last_lines(path: &Path, keep: usize) -> Result<()> {
         .filter(|(_, &b)| b == b'\n')
         .nth(lines - keep - 1)
         .map_or(0, |(i, _)| i + 1);
-    std::fs::write(path, &text[cut..]).with_context(|| format!("could not write {}", path.display()))
+    std::fs::write(path, &text[cut..])
+        .with_context(|| format!("could not write {}", path.display()))
 }
 
 /// Point fds 1 and 2 at `path`, keeping nothing on the screen. The log is cut
@@ -73,15 +74,20 @@ pub(crate) fn redirect_std_to(path: &Path) -> Result<()> {
         .append(true)
         .open(path)
         .with_context(|| format!("could not open {}", path.display()))?;
-    crate::sys::redirect_stdio_to(&log).with_context(|| format!("could not redirect stdout/stderr to {}", path.display()))
+    crate::sys::redirect_stdio_to(&log)
+        .with_context(|| format!("could not redirect stdout/stderr to {}", path.display()))
 }
 
 /// Open the screen. The panic hook is installed here and restores the terminal
 /// BEFORE panicking, so a crash leaves a usable shell rather than a wrecked one.
 pub fn open(log: &Path) -> Result<Screen> {
     redirect_std_to(log)?;
-    let mut tty = crate::sys::open_tty()
-        .with_context(|| format!("could not open {} — this shell needs a terminal", crate::sys::TTY))?;
+    let mut tty = crate::sys::open_tty().with_context(|| {
+        format!(
+            "could not open {} — this shell needs a terminal",
+            crate::sys::TTY
+        )
+    })?;
 
     enable_raw_mode().context("could not enter raw mode")?;
     crossterm::execute!(
@@ -186,9 +192,16 @@ mod tests {
         let body: String = (1..=12).map(|i| format!("line {i}\n")).collect();
         std::fs::write(&p, &body).unwrap();
         keep_last_lines(&p, 20).unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), body, "under the cap: untouched");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            body,
+            "under the cap: untouched"
+        );
         keep_last_lines(&p, 3).unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "line 10\nline 11\nline 12\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "line 10\nline 11\nline 12\n"
+        );
         keep_last_lines(&d.join("none.log"), 3).unwrap();
         let _ = std::fs::remove_dir_all(&d);
     }

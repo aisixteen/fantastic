@@ -98,6 +98,11 @@ pub(crate) fn ctrl_break_main(_argv: &[String]) -> ! {
 /// (`ps -A -o pid=,ppid=,pgid=,tpgid=,args=`): where a shell's foreground
 /// command is read from (`kern/term_watch`).
 pub(crate) fn process_table() -> Option<String> {
-    let out = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,pgid=,tpgid=,args="]).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,tpgid=,args="])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }

@@ -53,17 +53,25 @@ pub fn verbs() -> Vec<&'static str> {
 }
 
 fn exists(h: &Host, id: &str) -> bool {
-    h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id))
+    h.kernel
+        .agents
+        .contains_key(&fantastic_kernel::AgentId::from(id))
 }
 
 fn field(h: &Host, id: &str, f: &str) -> Map<String, Value> {
     h.kernel
         .agents
         .get(&fantastic_kernel::AgentId::from(id))
-        .and_then(|a| a.value().record().meta.get(f).and_then(Value::as_object).cloned())
+        .and_then(|a| {
+            a.value()
+                .record()
+                .meta
+                .get(f)
+                .and_then(Value::as_object)
+                .cloned()
+        })
         .unwrap_or_default()
 }
-
 
 /// The ids of every cabinet, its worker, its canvas and everything on that canvas (its
 /// equipment, and any canvas nested under it): an agent whose own record or one of whose
@@ -84,14 +92,30 @@ pub fn cabinet_owned(kernel: &fantastic_kernel::Kernel) -> std::collections::Has
     let canvases: std::collections::HashSet<String> = kernel
         .agents
         .iter()
-        .filter(|e| e.value().record().meta.get("cabinet_role").and_then(Value::as_str) == Some("cabinet"))
-        .filter_map(|e| e.value().record().meta.get("canvas").and_then(Value::as_str).map(str::to_string))
+        .filter(|e| {
+            e.value()
+                .record()
+                .meta
+                .get("cabinet_role")
+                .and_then(Value::as_str)
+                == Some("cabinet")
+        })
+        .filter_map(|e| {
+            e.value()
+                .record()
+                .meta
+                .get("canvas")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .collect();
     let mut owned = std::collections::HashSet::new();
     for id in rows.keys() {
         let mut cur = Some(id.clone());
         while let Some(c) = cur {
-            let Some((parent, cabinet)) = rows.get(&c) else { break };
+            let Some((parent, cabinet)) = rows.get(&c) else {
+                break;
+            };
             if *cabinet || canvases.contains(&c) {
                 owned.insert(id.clone());
                 break;
@@ -109,9 +133,16 @@ pub fn cabinet_owned(kernel: &fantastic_kernel::Kernel) -> std::collections::Has
 /// ([`cabinet_owned`]).
 fn holders(h: &Host) -> Vec<String> {
     let root = h.kernel.root().map(|r| r.id.0.clone());
-    let helper = [crate::kern::backend::HANDLER_MODULE, crate::kern::setup_agent::HANDLER_MODULE];
+    let helper = [
+        crate::kern::backend::HANDLER_MODULE,
+        crate::kern::setup_agent::HANDLER_MODULE,
+    ];
     let owned = cabinet_owned(&h.kernel);
-    let mut v: Vec<String> = HOLDING_LEGS.into_iter().filter(|l| exists(h, l)).map(String::from).collect();
+    let mut v: Vec<String> = HOLDING_LEGS
+        .into_iter()
+        .filter(|l| exists(h, l))
+        .map(String::from)
+        .collect();
     if exists(h, crate::env::HUMAN) {
         v.push(crate::env::HUMAN.to_string());
     }
@@ -122,8 +153,13 @@ fn holders(h: &Host) -> Vec<String> {
             .filter(|e| Some(&e.key().0) != root.as_ref() && !owned.contains(&e.key().0))
             .filter(|e| {
                 let r = e.value().record();
-                r.meta.get("memory_store_id").and_then(Value::as_str).is_some()
-                    || r.handler_module.as_deref().is_some_and(|m| helper.contains(&m))
+                r.meta
+                    .get("memory_store_id")
+                    .and_then(Value::as_str)
+                    .is_some()
+                    || r.handler_module
+                        .as_deref()
+                        .is_some_and(|m| helper.contains(&m))
             })
             .map(|e| e.key().0.clone()),
     );
@@ -179,7 +215,10 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
         let mut changed = false;
         let narrowed = NARROWED.contains(&id.as_str());
         let cabinet = owned.contains(id);
-        for holder in holders.iter().filter(|x| *x != id && !narrowed && (!cabinet || *x == crate::env::HUMAN)) {
+        for holder in holders
+            .iter()
+            .filter(|x| *x != id && !narrowed && (!cabinet || *x == crate::env::HUMAN))
+        {
             if cb.get(holder) != Some(&all) {
                 cb.insert(holder.clone(), all.clone());
                 changed = true;
@@ -194,7 +233,13 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             }
         }
         if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "callable_by": cb})).await.result;
+            let r = h
+                .operator(
+                    "kernel",
+                    json!({"type": "update_agent", "id": id, "callable_by": cb}),
+                )
+                .await
+                .result;
             if let Some(e) = r.get("error").and_then(Value::as_str) {
                 return Err(format!("reach: `{id}`.callable_by: {e}"));
             }
@@ -208,23 +253,40 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
         let mut cc = field(h, &holder, "can_call");
         let mut changed = false;
         for id in ids.iter().map(String::as_str).chain(["kernel"]) {
-            if id == holder || (id != "kernel" && !exists(h, id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
+            if id == holder
+                || (id != "kernel" && !exists(h, id))
+                || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN)
+            {
                 continue;
             }
             // a cabinet's agents: only the human's own calls and the canvas leg's frames
             // reach them (its panel and its canvas are `user`'s and the leg's)
-            if id != "kernel" && owned.contains(id) && holder != crate::env::HUMAN && holder != CANVAS_LEG {
+            if id != "kernel"
+                && owned.contains(id)
+                && holder != crate::env::HUMAN
+                && holder != CANVAS_LEG
+            {
                 continue;
             }
             // the leg's own: MERGED into what it holds (its calls to `user`)
-            let want = if full { all.clone() } else { union(cc.get(id), &leg_verbs(h, id)) };
+            let want = if full {
+                all.clone()
+            } else {
+                union(cc.get(id), &leg_verbs(h, id))
+            };
             if cc.get(id) != Some(&want) {
                 cc.insert(id.to_string(), want);
                 changed = true;
             }
         }
         if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "can_call": cc})).await.result;
+            let r = h
+                .operator(
+                    "kernel",
+                    json!({"type": "update_agent", "id": holder, "can_call": cc}),
+                )
+                .await
+                .result;
             if let Some(e) = r.get("error").and_then(Value::as_str) {
                 return Err(format!("reach: `{holder}`.can_call: {e}"));
             }
@@ -253,8 +315,16 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
         .iter()
         .filter(|e| {
             let id = e.key().0.as_str();
-            Some(&e.key().0) != root.as_ref() && id != CANVAS_LEG && !held.contains(id) && !owned.contains(id)
-                && !e.value().record().handler_module.as_deref().is_some_and(|m| m.contains("store"))
+            Some(&e.key().0) != root.as_ref()
+                && id != CANVAS_LEG
+                && !held.contains(id)
+                && !owned.contains(id)
+                && !e
+                    .value()
+                    .record()
+                    .handler_module
+                    .as_deref()
+                    .is_some_and(|m| m.contains("store"))
         })
         .map(|e| e.key().0.clone())
         .collect();
@@ -262,7 +332,9 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
     let pairs = |holder: &str| -> Vec<String> {
         everyone
             .iter()
-            .filter(|x| x.as_str() != holder && (touched.contains(holder) || touched.contains(x.as_str())))
+            .filter(|x| {
+                x.as_str() != holder && (touched.contains(holder) || touched.contains(x.as_str()))
+            })
             .cloned()
             .collect()
     };
@@ -278,7 +350,13 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
             }
         }
         if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "callable_by": cb})).await.result;
+            let r = h
+                .operator(
+                    "kernel",
+                    json!({"type": "update_agent", "id": holder, "callable_by": cb}),
+                )
+                .await
+                .result;
             if let Some(e) = r.get("error").and_then(Value::as_str) {
                 return Err(format!("reach: `{holder}`.callable_by (the way back): {e}"));
             }
@@ -288,7 +366,9 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
     for x in &everyone {
         let mut cc = field(h, x, "can_call");
         let mut changed = false;
-        for holder in holders.iter().filter(|hd| hd.as_str() != x && (touched.contains(hd.as_str()) || touched.contains(x.as_str()))) {
+        for holder in holders.iter().filter(|hd| {
+            hd.as_str() != x && (touched.contains(hd.as_str()) || touched.contains(x.as_str()))
+        }) {
             let want = union(cc.get(holder), &send);
             if cc.get(holder) != Some(&want) {
                 cc.insert(holder.clone(), want);
@@ -296,7 +376,13 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
             }
         }
         if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": x, "can_call": cc})).await.result;
+            let r = h
+                .operator(
+                    "kernel",
+                    json!({"type": "update_agent", "id": x, "can_call": cc}),
+                )
+                .await
+                .result;
             if let Some(e) = r.get("error").and_then(Value::as_str) {
                 return Err(format!("reach: `{x}`.can_call (the way back): {e}"));
             }
@@ -314,7 +400,8 @@ pub async fn grant_all(h: &Host) -> Result<(), String> {
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
 /// Wakes [`granted`] after each batch the watch grants.
-static GRANTED: std::sync::LazyLock<tokio::sync::Notify> = std::sync::LazyLock::new(tokio::sync::Notify::new);
+static GRANTED: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
 
 /// How long [`granted`] waits for the watch.
 const GRANT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -334,7 +421,11 @@ pub async fn granted(h: &Host, id: &str) -> Result<(), String> {
             return Ok(());
         }
         if tokio::time::timeout_at(deadline, wake).await.is_err() {
-            return Err(format!("reach: `{}` was not granted `{id}` within {}s", crate::env::HUMAN, GRANT_WAIT.as_secs()));
+            return Err(format!(
+                "reach: `{}` was not granted `{id}` within {}s",
+                crate::env::HUMAN,
+                GRANT_WAIT.as_secs()
+            ));
         }
     }
 }
@@ -348,13 +439,14 @@ pub async fn start(h: &Host) -> Result<(), String> {
         return Ok(());
     }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let sub: fantastic_kernel::StateSubscriber = Arc::new(move |v: &Value, _body: Option<&fantastic_kernel::Blob>| {
-        if v.get("kind").and_then(Value::as_str) == Some("added") {
-            if let Some(id) = v.get("agent_id").and_then(Value::as_str) {
-                let _ = tx.send(id.to_string());
+    let sub: fantastic_kernel::StateSubscriber =
+        Arc::new(move |v: &Value, _body: Option<&fantastic_kernel::Blob>| {
+            if v.get("kind").and_then(Value::as_str) == Some("added") {
+                if let Some(id) = v.get("agent_id").and_then(Value::as_str) {
+                    let _ = tx.send(id.to_string());
+                }
             }
-        }
-    });
+        });
     h.kernel.add_state_subscriber(sub);
     // A PAGE CONNECTING: `<guid>|*` is the only grant that reaches a connected
     // kernel's agents (the gate compares the guid literally — `*|*` matches
@@ -364,19 +456,31 @@ pub async fn start(h: &Host) -> Result<(), String> {
     // subscriber it registers).
     let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let weak = Arc::downgrade(&h.kernel);
-    let seen = Arc::new(std::sync::Mutex::new(std::collections::HashSet::<String>::new()));
-    let peers: fantastic_kernel::StateSubscriber = Arc::new(move |_v: &Value, _body: Option<&fantastic_kernel::Blob>| {
-        let Some(k) = weak.upgrade() else { return };
-        let rows = k.peer_rows();
-        let mut seen = seen.lock().expect("peers seen poisoned");
-        for g in rows.as_array().into_iter().flatten().filter_map(|r| r.get("guid").and_then(Value::as_str)) {
-            if seen.insert(g.to_string()) {
-                let _ = ptx.send(g.to_string());
+    let seen = Arc::new(std::sync::Mutex::new(
+        std::collections::HashSet::<String>::new(),
+    ));
+    let peers: fantastic_kernel::StateSubscriber =
+        Arc::new(move |_v: &Value, _body: Option<&fantastic_kernel::Blob>| {
+            let Some(k) = weak.upgrade() else { return };
+            let rows = k.peer_rows();
+            let mut seen = seen.lock().expect("peers seen poisoned");
+            for g in rows
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.get("guid").and_then(Value::as_str))
+            {
+                if seen.insert(g.to_string()) {
+                    let _ = ptx.send(g.to_string());
+                }
             }
-        }
-    });
+        });
     h.kernel.add_state_subscriber(peers);
-    let peer_host = Host { kernel: Arc::clone(&h.kernel), cfg: h.cfg.clone(), root: h.root.clone() };
+    let peer_host = Host {
+        kernel: Arc::clone(&h.kernel),
+        cfg: h.cfg.clone(),
+        root: h.root.clone(),
+    };
     tokio::spawn(async move {
         while let Some(guid) = prx.recv().await {
             if let Err(e) = grant_peer(&peer_host, &guid).await {
@@ -384,7 +488,11 @@ pub async fn start(h: &Host) -> Result<(), String> {
             }
         }
     });
-    let host = Host { kernel: Arc::clone(&h.kernel), cfg: h.cfg.clone(), root: h.root.clone() };
+    let host = Host {
+        kernel: Arc::clone(&h.kernel),
+        cfg: h.cfg.clone(),
+        root: h.root.clone(),
+    };
     tokio::spawn(async move {
         while let Some(id) = rx.recv().await {
             let mut batch = vec![id];
@@ -419,7 +527,10 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
     let key = format!("{guid}|*");
     // the holding legs too (the `mcp` leg: a coding CLI reaches the page's
     // agents — the background, the view — as it reaches the host's)
-    for holder in [crate::env::HUMAN, CANVAS_LEG].into_iter().chain(HOLDING_LEGS) {
+    for holder in [crate::env::HUMAN, CANVAS_LEG]
+        .into_iter()
+        .chain(HOLDING_LEGS)
+    {
         if !exists(h, holder) {
             continue;
         }
@@ -428,7 +539,13 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
             continue;
         }
         cc.insert(key.clone(), json!(["*"]));
-        let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "can_call": cc})).await.result;
+        let r = h
+            .operator(
+                "kernel",
+                json!({"type": "update_agent", "id": holder, "can_call": cc}),
+            )
+            .await
+            .result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return Err(format!("reach: `{holder}` → `{key}`: {e}"));
         }
@@ -460,9 +577,24 @@ mod tests {
     #[test]
     fn a_cabinet_its_worker_and_the_equipment_are_owned_and_nothing_else() {
         let kernel = Kernel::new();
-        put(&kernel, "manager", None, json!({"cabinet_role": "manager", "memory_store_id": "m"}));
-        put(&kernel, "cabinet_a", Some("manager"), json!({"cabinet_role": "cabinet"}));
-        put(&kernel, "cabinet_a_worker", Some("cabinet_a"), json!({"memory_store_id": "m"}));
+        put(
+            &kernel,
+            "manager",
+            None,
+            json!({"cabinet_role": "manager", "memory_store_id": "m"}),
+        );
+        put(
+            &kernel,
+            "cabinet_a",
+            Some("manager"),
+            json!({"cabinet_role": "cabinet"}),
+        );
+        put(
+            &kernel,
+            "cabinet_a_worker",
+            Some("cabinet_a"),
+            json!({"memory_store_id": "m"}),
+        );
         put(&kernel, "a_exec", Some("cabinet_a_worker"), json!({}));
         put(&kernel, "a_exec_sub", Some("a_exec"), json!({}));
         put(&kernel, "master", None, json!({"memory_store_id": "m"}));
@@ -482,18 +614,51 @@ mod tests {
         // the spawning canvas is an ordinary canvas (a holder); its child canvas is the cabinet's
         let kernel = Kernel::new();
         put(&kernel, "canvas_root", None, json!({}));
-        put(&kernel, "manager", Some("canvas_root"), json!({"cabinet_role": "manager", "canvas_id": "canvas_root"}));
-        put(&kernel, "cabinet_a", Some("manager"), json!({"cabinet_role": "cabinet", "canvas": "canvas_cabinet_a"}));
-        put(&kernel, "cabinet_a_worker", Some("cabinet_a"), json!({"memory_store_id": "m"}));
+        put(
+            &kernel,
+            "manager",
+            Some("canvas_root"),
+            json!({"cabinet_role": "manager", "canvas_id": "canvas_root"}),
+        );
+        put(
+            &kernel,
+            "cabinet_a",
+            Some("manager"),
+            json!({"cabinet_role": "cabinet", "canvas": "canvas_cabinet_a"}),
+        );
+        put(
+            &kernel,
+            "cabinet_a_worker",
+            Some("cabinet_a"),
+            json!({"memory_store_id": "m"}),
+        );
         put(&kernel, "canvas_cabinet_a", Some("canvas_root"), json!({}));
-        put(&kernel, "helper", Some("canvas_cabinet_a"), json!({"memory_store_id": "m"}));
-        put(&kernel, "canvas_deeper", Some("canvas_cabinet_a"), json!({}));
+        put(
+            &kernel,
+            "helper",
+            Some("canvas_cabinet_a"),
+            json!({"memory_store_id": "m"}),
+        );
+        put(
+            &kernel,
+            "canvas_deeper",
+            Some("canvas_cabinet_a"),
+            json!({}),
+        );
         put(&kernel, "deep_exec", Some("canvas_deeper"), json!({}));
-        put(&kernel, "canvas_root_helper", Some("canvas_root"), json!({"memory_store_id": "m"}));
+        put(
+            &kernel,
+            "canvas_root_helper",
+            Some("canvas_root"),
+            json!({"memory_store_id": "m"}),
+        );
         put(&kernel, "m", Some("canvas_root"), json!({}));
         let owned = cabinet_owned(&kernel);
         for id in ["canvas_cabinet_a", "helper", "canvas_deeper", "deep_exec"] {
-            assert!(owned.contains(id), "{id} is on a cabinet's canvas: {owned:?}");
+            assert!(
+                owned.contains(id),
+                "{id} is on a cabinet's canvas: {owned:?}"
+            );
         }
         // the spawning canvas, its own AI, and the store stay holders of the reach
         for id in ["canvas_root", "canvas_root_helper", "m", "manager"] {
@@ -508,7 +673,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut kernel = Kernel::new();
-        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        kernel.bundles.register(
+            fantastic_core::HANDLER_MODULE,
+            fantastic_core::KernelStateBundle::default(),
+        );
         let kernel = std::sync::Arc::new(kernel);
         let root = Agent::new(
             AgentId::from("kernel"),
@@ -520,7 +688,11 @@ mod tests {
         );
         kernel.register(std::sync::Arc::clone(&root));
         kernel.set_root(root);
-        let h = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        let h = Host {
+            kernel,
+            cfg: crate::env::ClientCfg::here(),
+            root: "kernel".to_string(),
+        };
         for (id, parent) in [(crate::env::HUMAN, "kernel"), (CANVAS_LEG, "kernel")] {
             put(&h.kernel, id, Some(parent), json!({}));
         }
@@ -533,26 +705,74 @@ mod tests {
         let k = &h.kernel;
         // a cabinet on the canvas that spawns it; the equipment (a helper AI) is on the cabinet's canvas
         put(k, "canvas_root", Some("kernel"), json!({}));
-        put(k, "manager", Some("canvas_root"), json!({"cabinet_role": "manager", "canvas_id": "canvas_root"}));
-        put(k, "cabinet_a", Some("manager"), json!({"cabinet_role": "cabinet", "canvas": "canvas_cabinet_a"}));
+        put(
+            k,
+            "manager",
+            Some("canvas_root"),
+            json!({"cabinet_role": "manager", "canvas_id": "canvas_root"}),
+        );
+        put(
+            k,
+            "cabinet_a",
+            Some("manager"),
+            json!({"cabinet_role": "cabinet", "canvas": "canvas_cabinet_a"}),
+        );
         put(k, "canvas_cabinet_a", Some("canvas_root"), json!({}));
-        put(k, "helper", Some("canvas_cabinet_a"), json!({"memory_store_id": "m"}));
+        put(
+            k,
+            "helper",
+            Some("canvas_cabinet_a"),
+            json!({"memory_store_id": "m"}),
+        );
         // an ordinary AI, which must not reach the cabinet's equipment (no god mode)
         put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
         put(k, "m", Some("kernel"), json!({}));
-        grant(&h, &["helper".to_string(), "canvas_cabinet_a".to_string()]).await.unwrap();
+        grant(&h, &["helper".to_string(), "canvas_cabinet_a".to_string()])
+            .await
+            .unwrap();
         let field = |id: &str, f: &str| -> Value {
-            k.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get(f).cloned().unwrap_or(Value::Null)
+            k.agents
+                .get(&AgentId::from(id))
+                .unwrap()
+                .value()
+                .record()
+                .meta
+                .get(f)
+                .cloned()
+                .unwrap_or(Value::Null)
         };
         // the human calls the equipment and the canvas; the leg watches and emits on them
-        assert_eq!(field("helper", "callable_by")[crate::env::HUMAN], json!(["*"]));
-        assert_eq!(field("helper", "callable_by")[CANVAS_LEG], leg_verbs(&h, "helper"));
-        assert_eq!(field("canvas_cabinet_a", "callable_by")[CANVAS_LEG], leg_verbs(&h, "canvas_cabinet_a"));
-        assert_eq!(field(CANVAS_LEG, "can_call")["helper"], leg_verbs(&h, "helper"));
-        assert_eq!(field(CANVAS_LEG, "can_call")["canvas_cabinet_a"], leg_verbs(&h, "canvas_cabinet_a"));
+        assert_eq!(
+            field("helper", "callable_by")[crate::env::HUMAN],
+            json!(["*"])
+        );
+        assert_eq!(
+            field("helper", "callable_by")[CANVAS_LEG],
+            leg_verbs(&h, "helper")
+        );
+        assert_eq!(
+            field("canvas_cabinet_a", "callable_by")[CANVAS_LEG],
+            leg_verbs(&h, "canvas_cabinet_a")
+        );
+        assert_eq!(
+            field(CANVAS_LEG, "can_call")["helper"],
+            leg_verbs(&h, "helper")
+        );
+        assert_eq!(
+            field(CANVAS_LEG, "can_call")["canvas_cabinet_a"],
+            leg_verbs(&h, "canvas_cabinet_a")
+        );
         assert_eq!(field(crate::env::HUMAN, "can_call")["helper"], json!(["*"]));
         // no other holder is granted the cabinet's equipment
-        assert!(field("helper", "callable_by").get("master").is_none(), "{:?}", field("helper", "callable_by"));
-        assert!(field("master", "can_call").get("helper").is_none(), "{:?}", field("master", "can_call"));
+        assert!(
+            field("helper", "callable_by").get("master").is_none(),
+            "{:?}",
+            field("helper", "callable_by")
+        );
+        assert!(
+            field("master", "can_call").get("helper").is_none(),
+            "{:?}",
+            field("master", "can_call")
+        );
     }
 }

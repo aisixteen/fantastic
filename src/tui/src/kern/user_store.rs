@@ -29,7 +29,11 @@ pub async fn ensure(host: &Host) -> Result<(), String> {
     let user = host.cfg.user.clone();
     let view = json!({"kind": "html", "bytes": VIEW, "calls": VERBS});
     let grant = json!({ user.as_str(): VERBS });
-    let payload = if host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(ID)) {
+    let payload = if host
+        .kernel
+        .agents
+        .contains_key(&fantastic_kernel::AgentId::from(ID))
+    {
         json!({"type": "update_agent", "id": ID, "view": view, "callable_by": grant, "display_name": "user store"})
     } else {
         json!({"type": "create_agent", "parent_id": user.as_str(), "id": ID, "handler_module": fantastic_user_home_store::user_store::HANDLER_MODULE,
@@ -45,7 +49,10 @@ pub async fn ensure(host: &Host) -> Result<(), String> {
 /// The canvas this run serves, told to `user_store` — written into this
 /// fantastic's home folder while it is registered, for a manager to open.
 pub async fn set_canvas(host: &Host, url: &str) -> Result<(), String> {
-    let r = host.act(ID, json!({"type": "set_canvas", "url": url})).await.result;
+    let r = host
+        .act(ID, json!({"type": "set_canvas", "url": url}))
+        .await
+        .result;
     match r.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("`{ID}` set_canvas: {e}")),
         None => Ok(()),

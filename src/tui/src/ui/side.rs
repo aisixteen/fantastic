@@ -48,7 +48,9 @@ const TILES: [Color; 6] = [
 /// An agent's tile colour: from its id, so it is the same on every run and in
 /// every client.
 pub fn tile_colour(id: &str) -> Color {
-    let h = id.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
+    let h = id
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b)));
     TILES[(h % TILES.len() as u32) as usize]
 }
 
@@ -83,7 +85,11 @@ pub fn rail_y(i: usize) -> u16 {
 /// Which tile a click at screen row `y` lands on (the rail's own scroll).
 pub fn rail_row_at(n: usize, sel: usize, area: Rect, y: u16) -> Option<usize> {
     let fit = (area.height.saturating_sub(1) / TILE_H) as usize;
-    let top = if sel >= fit && fit > 0 { sel + 1 - fit } else { 0 };
+    let top = if sel >= fit && fit > 0 {
+        sel + 1 - fit
+    } else {
+        0
+    };
     let slot = ((y - area.y) / TILE_H) as usize;
     let i = top + slot;
     (slot < fit && i < n).then_some(i)
@@ -92,7 +98,11 @@ pub fn rail_row_at(n: usize, sel: usize, area: Rect, y: u16) -> Option<usize> {
 /// The rail: one tile per row, the selected one marked.
 pub fn render_rail(buf: &mut Buffer, area: Rect, rows: &[TreeRow], sel: usize) {
     let fit = (area.height.saturating_sub(1) / TILE_H) as usize;
-    let top = if sel >= fit && fit > 0 { sel + 1 - fit } else { 0 };
+    let top = if sel >= fit && fit > 0 {
+        sel + 1 - fit
+    } else {
+        0
+    };
     let x = area.x + 2;
     for (slot, (i, r)) in rows.iter().enumerate().skip(top).take(fit).enumerate() {
         let y = area.y + rail_y(slot);
@@ -104,7 +114,11 @@ pub fn render_rail(buf: &mut Buffer, area: Rect, rows: &[TreeRow], sel: usize) {
         } else if root {
             (theme::ACCENT, theme::FG, 'F')
         } else {
-            (tile_colour(&r.id), theme::FG, r.label.chars().next().unwrap_or('?').to_ascii_uppercase())
+            (
+                tile_colour(&r.id),
+                theme::FG,
+                r.label.chars().next().unwrap_or('?').to_ascii_uppercase(),
+            )
         };
         put(buf, x, y, "▄▄▄▄▄", Style::default().fg(colour));
         put(buf, x, y + 1, "     ", Style::default().bg(colour));
@@ -113,7 +127,10 @@ pub fn render_rail(buf: &mut Buffer, area: Rect, rows: &[TreeRow], sel: usize) {
             x + 2,
             y + 1,
             &letter.to_string(),
-            Style::default().fg(ink).bg(colour).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(ink)
+                .bg(colour)
+                .add_modifier(Modifier::BOLD),
         );
         put(buf, x, y + 2, "▀▀▀▀▀", Style::default().fg(colour));
         let mark = Style::default().fg(theme::ACCENT_HI);
@@ -130,11 +147,22 @@ pub fn render_rail(buf: &mut Buffer, area: Rect, rows: &[TreeRow], sel: usize) {
                 x + 5,
                 y,
                 &r.inquiries.to_string(),
-                Style::default().fg(theme::INK).bg(theme::BLOCKED).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::INK)
+                    .bg(theme::BLOCKED)
+                    .add_modifier(Modifier::BOLD),
             );
         }
         if r.presence == Presence::Working {
-            put(buf, x + 5, y + 2, "●", Style::default().fg(theme::WORKING).add_modifier(Modifier::BOLD));
+            put(
+                buf,
+                x + 5,
+                y + 2,
+                "●",
+                Style::default()
+                    .fg(theme::WORKING)
+                    .add_modifier(Modifier::BOLD),
+            );
         }
     }
     put(
@@ -173,7 +201,13 @@ mod tests {
 
     #[test]
     fn flat_keeps_the_kernel_first_lists_agents_one_level_and_folds_the_system() {
-        let rows = vec![row("kernel_state", 0), row("fs_loader", 1), row("exec", 1), row("ai", 2), row("store", 1)];
+        let rows = vec![
+            row("kernel_state", 0),
+            row("fs_loader", 1),
+            row("exec", 1),
+            row("ai", 2),
+            row("store", 1),
+        ];
         let (flat, folded) = flatten(rows, |r| r.id == "fs_loader" || r.id == "store");
         let ids: Vec<(&str, u8)> = flat.iter().map(|r| (r.id.as_str(), r.depth)).collect();
         assert_eq!(ids, vec![("kernel_state", 0), ("exec", 1), ("ai", 1)]);
@@ -194,7 +228,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_rail(&mut buf, area, &rows, 1);
         let cell = |x: u16, y: u16| buf.cell((x, y)).unwrap().symbol().to_string();
-        assert_eq!(cell(0, rail_y(1) + 1), "▐", "the selected tile has the tall mark");
+        assert_eq!(
+            cell(0, rail_y(1) + 1),
+            "▐",
+            "the selected tile has the tall mark"
+        );
         assert_eq!(cell(0, rail_y(0) + 1), "◆", "the kernel's own tile says so");
         assert_eq!(cell(4, rail_y(1) + 1), "A");
         assert_eq!(cell(7, rail_y(1)), "3", "open questions in the corner");

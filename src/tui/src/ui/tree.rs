@@ -136,7 +136,15 @@ fn colour(p: Presence) -> ratatui::style::Color {
 
 /// Which row a click at screen row `y` lands on — the same scroll `render`
 /// uses, so a click hits exactly the line it is on.
-pub fn row_at(n: usize, sel: usize, area: Rect, filter: bool, view: SideView, folded: usize, y: u16) -> Option<usize> {
+pub fn row_at(
+    n: usize,
+    sel: usize,
+    area: Rect,
+    filter: bool,
+    view: SideView,
+    folded: usize,
+    y: u16,
+) -> Option<usize> {
     if y < area.y || y >= area.y + area.height {
         return None;
     }
@@ -254,10 +262,18 @@ pub fn render(
         )));
     }
     f.render_widget(Paragraph::new(lines), area);
-    let hint = Rect { y: area.y + area.height.saturating_sub(1), height: 1, ..area };
+    let hint = Rect {
+        y: area.y + area.height.saturating_sub(1),
+        height: 1,
+        ..area
+    };
     f.render_widget(
         Paragraph::new(Span::styled(
-            if view == SideView::Flat { " v tree · < collapse" } else { " v flat · < collapse" },
+            if view == SideView::Flat {
+                " v tree · < collapse"
+            } else {
+                " v flat · < collapse"
+            },
             Style::default().fg(theme::DIM),
         )),
         hint,
@@ -274,7 +290,11 @@ mod tests {
         // no filter: line 0 is row 0; the last line is the view hint
         assert_eq!(row_at(5, 0, area, false, SideView::Tree, 0, 1), Some(0));
         assert_eq!(row_at(5, 0, area, false, SideView::Tree, 0, 3), Some(2));
-        assert_eq!(row_at(5, 0, area, false, SideView::Tree, 0, 7), None, "past the last row");
+        assert_eq!(
+            row_at(5, 0, area, false, SideView::Tree, 0, 7),
+            None,
+            "past the last row"
+        );
         // a filter line pushes rows down by one
         assert_eq!(row_at(5, 0, area, true, SideView::Tree, 0, 1), None);
         assert_eq!(row_at(5, 0, area, true, SideView::Tree, 0, 2), Some(0));
@@ -303,9 +323,7 @@ mod tests {
                 node(
                     "roster",
                     Some("static_loader.tools"),
-                    vec![
-                        node("ai", Some("vllm_backend.tools"), vec![]),
-                    ],
+                    vec![node("ai", Some("vllm_backend.tools"), vec![])],
                 ),
                 node(
                     "web",
@@ -354,14 +372,7 @@ mod tests {
         let ids: Vec<_> = flat(&t, &b, None, &[]).into_iter().map(|r| r.id).collect();
         assert_eq!(
             ids,
-            vec![
-                "kernel_state",
-                "store",
-                "roster",
-                "ai",
-                "web",
-                "rest"
-            ],
+            vec!["kernel_state", "store", "roster", "ai", "web", "rest"],
             "a transport leg is an agent and must be selectable"
         );
     }
@@ -394,18 +405,33 @@ mod tests {
             "kernel_state",
             Some("kernel_state.tools"),
             vec![
-                node("group", None, vec![
-                    node("exec", Some("exec_bridge.tools"), vec![]),
-                    node("files", Some("file_bridge.tools"), vec![]),
-                ]),
+                node(
+                    "group",
+                    None,
+                    vec![
+                        node("exec", Some("exec_bridge.tools"), vec![]),
+                        node("files", Some("file_bridge.tools"), vec![]),
+                    ],
+                ),
                 node("fs_loader", Some("static_loader.tools"), vec![]),
             ],
         );
         let b = Bag::new();
         let rows = flat(&t, &b, None, &[]);
         let got: Vec<(&str, u8)> = rows.iter().map(|r| (r.id.as_str(), r.depth)).collect();
-        assert_eq!(got, vec![("kernel_state", 0), ("exec", 1), ("files", 1), ("fs_loader", 1)]);
-        assert!(rows.iter().all(|r| r.live), "every row drawn has something to call");
+        assert_eq!(
+            got,
+            vec![
+                ("kernel_state", 0),
+                ("exec", 1),
+                ("files", 1),
+                ("fs_loader", 1)
+            ]
+        );
+        assert!(
+            rows.iter().all(|r| r.live),
+            "every row drawn has something to call"
+        );
     }
 
     #[test]

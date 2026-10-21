@@ -25,23 +25,38 @@ pub struct KeyIn {
 
 /// The first free agent id for `name`: itself, else `<name>-2`, `<name>-3`…
 pub fn free_id(host: &Host, name: &str) -> String {
-    let taken = |id: &str| host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id));
+    let taken = |id: &str| {
+        host.kernel
+            .agents
+            .contains_key(&fantastic_kernel::AgentId::from(id))
+    };
     if !taken(name) {
         return name.to_string();
     }
-    (2..).map(|n| format!("{name}-{n}")).find(|c| !taken(c)).expect("a free id")
+    (2..)
+        .map(|n| format!("{name}-{n}"))
+        .find(|c| !taken(c))
+        .expect("a free id")
 }
 
 async fn key(host: &Host, module: &str, endpoint: &str, k: &KeyIn) -> Result<(), String> {
     if let Some(m) = &k.mode {
-        let m = fantastic_user_home_store::secrets::Mode::parse(m).ok_or_else(|| format!("no key mode {m:?} — plain or secure"))?;
+        let m = fantastic_user_home_store::secrets::Mode::parse(m)
+            .ok_or_else(|| format!("no key mode {m:?} — plain or secure"))?;
         crate::kern::keys::set_mode(host, m).await?;
     }
-    crate::kern::keys::store(host, module, endpoint, &k.secret).await.map(|_| ())
+    crate::kern::keys::store(host, module, endpoint, &k.secret)
+        .await
+        .map(|_| ())
 }
 
 /// Save `texts` for `module` under `name`: typed, its stored key NAMED (a ref).
-async fn save(host: &Host, name: &str, module: &str, texts: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+async fn save(
+    host: &Host,
+    name: &str,
+    module: &str,
+    texts: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
     let fields = crate::kern::setup::typed(host, module, texts)?;
     let mut record = fields.clone();
     crate::kern::keys::attach(host, module, &mut record)?;
@@ -50,17 +65,37 @@ async fn save(host: &Host, name: &str, module: &str, texts: &Map<String, Value>)
     Ok(fields)
 }
 
-async fn write(host: &Host, name: &str, module: &str, fields: Map<String, Value>) -> Result<String, String> {
+async fn write(
+    host: &Host,
+    name: &str,
+    module: &str,
+    fields: Map<String, Value>,
+) -> Result<String, String> {
     let id = free_id(host, name);
-    let rec = crate::kern::setup::Record { id: id.clone(), handler: module.to_string(), fields, may_call: Vec::new() };
+    let rec = crate::kern::setup::Record {
+        id: id.clone(),
+        handler: module.to_string(),
+        fields,
+        may_call: Vec::new(),
+    };
     crate::kern::setup::write(host, &rec).await?;
     Ok(id)
 }
 
 /// A NEW provider's details → key, saved set-up (the first is the default), agent.
 /// Returns the agent's id.
-pub async fn create(host: &Host, name: &str, module: &str, texts: &Map<String, Value>, k: Option<&KeyIn>) -> Result<String, String> {
-    let endpoint = texts.get("endpoint").and_then(Value::as_str).unwrap_or("").to_string();
+pub async fn create(
+    host: &Host,
+    name: &str,
+    module: &str,
+    texts: &Map<String, Value>,
+    k: Option<&KeyIn>,
+) -> Result<String, String> {
+    let endpoint = texts
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if let Some(k) = k {
         key(host, module, &endpoint, k).await?;
     }
@@ -74,17 +109,35 @@ pub async fn create(host: &Host, name: &str, module: &str, texts: &Map<String, V
 /// An AI agent from saved set-up `name`. Returns its id.
 pub async fn from_saved(host: &Host, name: &str) -> Result<String, String> {
     let shelf = crate::kern::saved::shelf(host).await?;
-    let s = shelf.saved.iter().find(|s| s.name == name).ok_or_else(|| format!("no saved set-up `{name}`"))?;
+    let s = shelf
+        .saved
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("no saved set-up `{name}`"))?;
     let module = s.handler();
     // its key is named again by the write, for its endpoint (`kern/keys`)
-    let fields: Map<String, Value> =
-        s.record.iter().filter(|(k, _)| !matches!(k.as_str(), "handler_module" | "credentials")).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let fields: Map<String, Value> = s
+        .record
+        .iter()
+        .filter(|(k, _)| !matches!(k.as_str(), "handler_module" | "credentials"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     write(host, name, &module, fields).await
 }
 
 /// A saved set-up's fields rewritten under its name (and a key, when pasted).
-pub async fn save_edit(host: &Host, name: &str, module: &str, texts: &Map<String, Value>, k: Option<&KeyIn>) -> Result<(), String> {
-    let endpoint = texts.get("endpoint").and_then(Value::as_str).unwrap_or("").to_string();
+pub async fn save_edit(
+    host: &Host,
+    name: &str,
+    module: &str,
+    texts: &Map<String, Value>,
+    k: Option<&KeyIn>,
+) -> Result<(), String> {
+    let endpoint = texts
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if let Some(k) = k {
         key(host, module, &endpoint, k).await?;
     }

@@ -62,7 +62,12 @@ impl Backend {
                             required: f["required"].as_bool().unwrap_or(false),
                             one_of: f["enum"]
                                 .as_array()
-                                .map(|e| e.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                                .map(|e| {
+                                    e.iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_string)
+                                        .collect()
+                                })
                                 .unwrap_or_default(),
                             default: f.get("default").cloned().filter(|v| !v.is_null()),
                             hint: f["hint"].as_str().unwrap_or("").to_string(),
@@ -72,9 +77,15 @@ impl Backend {
             })
             .unwrap_or_default();
         let key = schema["fields"].as_array().and_then(|a| {
-            a.iter().find(|f| f["type"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))
+            a.iter()
+                .find(|f| f["type"] == "credentials")
+                .map(|f| f["required"].as_bool().unwrap_or(false))
         });
-        Self { module: module.to_string(), fields, key }
+        Self {
+            module: module.to_string(),
+            fields,
+            key,
+        }
     }
 }
 
@@ -108,9 +119,18 @@ pub fn coerce(f: &Field, text: &str) -> Result<Option<Value>, String> {
             "false" | "no" | "0" => false,
             _ => return Err(bad("true or false")),
         }),
-        "enum" if !f.one_of.iter().any(|o| o == t) => return Err(bad(&format!("one of {}", f.one_of.join("|")))),
-        "list" => json!(t.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect::<Vec<_>>()),
-        "map" => serde_json::from_str::<Value>(t).ok().filter(Value::is_object).ok_or_else(|| bad("a JSON object"))?,
+        "enum" if !f.one_of.iter().any(|o| o == t) => {
+            return Err(bad(&format!("one of {}", f.one_of.join("|"))))
+        }
+        "list" => json!(t
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>()),
+        "map" => serde_json::from_str::<Value>(t)
+            .ok()
+            .filter(Value::is_object)
+            .ok_or_else(|| bad("a JSON object"))?,
         _ => json!(t),
     }))
 }
@@ -119,7 +139,11 @@ pub fn coerce(f: &Field, text: &str) -> Result<Option<Value>, String> {
 pub fn text_of(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_string)).collect::<Vec<_>>().join(", "),
+        Value::Array(a) => a
+            .iter()
+            .map(|x| x.as_str().map_or_else(|| x.to_string(), str::to_string))
+            .collect::<Vec<_>>()
+            .join(", "),
         Value::Null => String::new(),
         other => other.to_string(),
     }
@@ -159,11 +183,13 @@ fn err_of(r: &fantastic_kernel::Outcome) -> Option<String> {
     })
 }
 
-
-
 /// Field TEXTS (`{name: text}`) typed by `handler`'s record schema — the one
 /// typing path for a write and a saved set-up (an empty text is left out).
-pub fn typed(host: &Host, handler: &str, texts: &Map<String, Value>) -> Result<Map<String, Value>, String> {
+pub fn typed(
+    host: &Host,
+    handler: &str,
+    texts: &Map<String, Value>,
+) -> Result<Map<String, Value>, String> {
     let backend = backends(host)
         .into_iter()
         .find(|b| b.module == handler)
@@ -185,37 +211,59 @@ pub async fn write(host: &Host, rec: &Record) -> Result<String, String> {
         return Err(format!("missing: {}", missing.join(", ")));
     }
     let id = rec.id.trim();
-    if host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(id)) {
+    if host
+        .kernel
+        .agents
+        .contains_key(&fantastic_kernel::AgentId::from(id))
+    {
         return Err(format!("`{id}` already exists"));
     }
     for t in &rec.may_call {
-        if !host.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(t.as_str())) {
+        if !host
+            .kernel
+            .agents
+            .contains_key(&fantastic_kernel::AgentId::from(t.as_str()))
+        {
             return Err(format!("may call: no agent `{t}`"));
         }
     }
     let user = host.cfg.user.clone();
     // Its conversation lives in the kernel's memory store, both sides granted.
     let store = host.admit_to_memory(id).await?;
-    let mut can_call: Map<String, Value> = rec.may_call.iter().map(|t| (t.clone(), json!("*"))).collect();
+    let mut can_call: Map<String, Value> = rec
+        .may_call
+        .iter()
+        .map(|t| (t.clone(), json!("*")))
+        .collect();
     can_call.insert(store.clone(), json!("*"));
     let mut create = rec.fields.clone();
     crate::kern::keys::attach(host, &rec.handler, &mut create)?;
-    let mut create = { create.extend(
-        json!({
-            "type": "create_agent",
-            "parent_id": PARENT,
-            "id": id,
-            "handler_module": rec.handler,
-            "callable_by": {user.as_str(): "*"},
-            "can_call": can_call,
-            "memory_store_id": store,
-        })
-        .as_object()
-        .cloned()
-        .unwrap_or_default(),
-    ); create };
+    let mut create = {
+        create.extend(
+            json!({
+                "type": "create_agent",
+                "parent_id": PARENT,
+                "id": id,
+                "handler_module": rec.handler,
+                "callable_by": {user.as_str(): "*"},
+                "can_call": can_call,
+                "memory_store_id": store,
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        );
+        create
+    };
     crate::kern::keys::grant_on_create(&mut create);
-    let named: Map<String, Value> = create.get("credentials").map(|c| [("credentials".to_string(), c.clone())].into_iter().collect()).unwrap_or_default();
+    let named: Map<String, Value> = create
+        .get("credentials")
+        .map(|c| {
+            [("credentials".to_string(), c.clone())]
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
     let create = Value::Object(create);
     // created AS `user`, its parent; `user`'s own side, and each target's
     // `callable_by`, are `kern/reach`'s (an AI agent is a holder)

@@ -3,7 +3,6 @@
 //! what it serves, to an agent granted `read_stream` by id on both ends, and it
 //! persists across restarts.
 
-
 /// Drive everything through the binary's own modules by re-exec'ing? No — the
 /// crate is a binary, so its modules are not importable. Instead this test drives
 /// the kernel crates directly with the SAME registry and the SAME records the shell
@@ -16,7 +15,10 @@ use serde_json::{json, Value};
 
 fn registry() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
-    reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
@@ -26,7 +28,10 @@ fn registry() -> BundleRegistry {
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
-    reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
+    reg.register(
+        fantastic_user::HANDLER_MODULE,
+        fantastic_user::UserBundle::default(),
+    );
     reg
 }
 
@@ -76,7 +81,9 @@ async fn boot(dir: &std::path::Path) -> std::sync::Arc<Kernel> {
         .await;
     assert_eq!(kernel.start(false).await["started"], json!(true));
     for id in &booted.loaded {
-        kernel.send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+        kernel
+            .send(vec![Item::new(id.clone(), json!({"type":"boot"}))])
+            .await;
     }
     kernel
 }
@@ -85,7 +92,10 @@ async fn boot(dir: &std::path::Path) -> std::sync::Arc<Kernel> {
 /// inside its own handler — so the call carries `from`.
 async fn call(kernel: &std::sync::Arc<Kernel>, from: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
-    let item = Item::new(AgentId::from(from), json!({"type":"forward","target":"docs","payload":payload}));
+    let item = Item::new(
+        AgentId::from(from),
+        json!({"type":"forward","target":"docs","payload":payload}),
+    );
     k.send(vec![item]).await.remove(0).result
 }
 
@@ -96,7 +106,10 @@ fn refused(v: &Value) -> bool {
 /// The operator sets `docs`'s allow list (the record's, written from above).
 async fn expose(kernel: &std::sync::Arc<Kernel>, allow: Value) {
     let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), json!({"type":"update_agent","id":"docs","allow":allow}))])
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"update_agent","id":"docs","allow":allow}),
+        )])
         .await
         .remove(0)
         .result;
@@ -115,29 +128,52 @@ async fn a_file_leg_is_widened_and_narrowed_and_it_persists() {
     let read = |p: &str| json!({"type":"read_stream","path":p});
 
     let kernel = boot(&dir).await;
-    assert!(!refused(&call(&kernel, "term", read("a.txt")).await), "the listed file is served");
-    assert!(refused(&call(&kernel, "term", read("b.txt")).await), "an unlisted file is not");
+    assert!(
+        !refused(&call(&kernel, "term", read("a.txt")).await),
+        "the listed file is served"
+    );
+    assert!(
+        refused(&call(&kernel, "term", read("b.txt")).await),
+        "an unlisted file is not"
+    );
     // the agent itself may not widen it: grants and fields come from above
-    let r = call(&kernel, "term", json!({"type":"update_agent","id":"docs","allow":["."]})).await;
+    let r = call(
+        &kernel,
+        "term",
+        json!({"type":"update_agent","id":"docs","allow":["."]}),
+    )
+    .await;
     assert!(refused(&r), "{r}");
     expose(&kernel, json!(["a.txt", "b.txt"])).await;
-    assert!(!refused(&call(&kernel, "term", read("b.txt")).await), "b.txt is served once allowed");
+    assert!(
+        !refused(&call(&kernel, "term", read("b.txt")).await),
+        "b.txt is served once allowed"
+    );
 
     // …and it survives a restart (the record is persisted through the store).
     kernel.shutdown().await;
     bootstrap::shutdown(&dir).unwrap();
     drop(kernel);
     let kernel = boot(&dir).await;
-    assert!(!refused(&call(&kernel, "term", read("b.txt")).await), "after a restart");
+    assert!(
+        !refused(&call(&kernel, "term", read("b.txt")).await),
+        "after a restart"
+    );
 
     // narrowed: a.txt no longer served, and still not after a restart
     expose(&kernel, json!(["b.txt"])).await;
-    assert!(refused(&call(&kernel, "term", read("a.txt")).await), "a.txt is no longer served");
+    assert!(
+        refused(&call(&kernel, "term", read("a.txt")).await),
+        "a.txt is no longer served"
+    );
     kernel.shutdown().await;
     bootstrap::shutdown(&dir).unwrap();
     drop(kernel);
     let kernel = boot(&dir).await;
-    assert!(refused(&call(&kernel, "term", read("a.txt")).await), "after the second restart");
+    assert!(
+        refused(&call(&kernel, "term", read("a.txt")).await),
+        "after the second restart"
+    );
     assert!(!refused(&call(&kernel, "term", read("b.txt")).await));
     kernel.shutdown().await;
     bootstrap::shutdown(&dir).unwrap();

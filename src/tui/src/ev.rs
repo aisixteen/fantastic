@@ -239,7 +239,9 @@ impl Cmd {
             Cmd::Stream { .. } => What::Send,
             Cmd::OpenTerminal { .. } | Cmd::CloseTerminal => What::Act,
             Cmd::Backends | Cmd::Keys | Cmd::KeyMode | Cmd::Saved | Cmd::Prefer { .. } => What::Act,
-            Cmd::WizardCreate { .. } | Cmd::WizardFromSaved { .. } | Cmd::WizardSaveEdit { .. } => What::Act,
+            Cmd::WizardCreate { .. } | Cmd::WizardFromSaved { .. } | Cmd::WizardSaveEdit { .. } => {
+                What::Act
+            }
         }
     }
 
@@ -247,10 +249,7 @@ impl Cmd {
     /// retry after a dropped link JOINS the original instead of running twice,
     /// and acts get no client-side timeout. Reads get neither.
     pub fn is_act(&self) -> bool {
-        matches!(
-            self,
-            Cmd::Send { .. } | Cmd::Cancel { .. }
-        )
+        matches!(self, Cmd::Send { .. } | Cmd::Cancel { .. })
     }
 }
 

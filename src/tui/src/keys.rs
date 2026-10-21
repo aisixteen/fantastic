@@ -234,11 +234,29 @@ pub fn handle(app: &mut App, e: Event) {
             }
         }
         Event::Resize(_, _) => app.dirty = true,
-        Event::Mouse(m) if app.mouse && m.kind == crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+        Event::Mouse(m)
+            if app.mouse
+                && m.kind
+                    == crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ) =>
+        {
             click(app, m.column, m.row)
         }
-        Event::Mouse(m) if app.mouse && matches!(m.kind, crossterm::event::MouseEventKind::ScrollUp | crossterm::event::MouseEventKind::ScrollDown) => {
-            wheel(app, m.column, m.row, m.kind == crossterm::event::MouseEventKind::ScrollUp)
+        Event::Mouse(m)
+            if app.mouse
+                && matches!(
+                    m.kind,
+                    crossterm::event::MouseEventKind::ScrollUp
+                        | crossterm::event::MouseEventKind::ScrollDown
+                ) =>
+        {
+            wheel(
+                app,
+                m.column,
+                m.row,
+                m.kind == crossterm::event::MouseEventKind::ScrollUp,
+            )
         }
         _ => {}
     }
@@ -436,7 +454,11 @@ fn quit_gesture(app: &mut App, k: KeyEvent, now: std::time::Instant) -> bool {
     }
     // Never while typing: `q` is a letter in the composer, the filter and a
     // panel's open text field.
-    if k.code == KeyCode::Char('q') && app.focus != Focus::Composer && !app.filtering && !panel_typing(app) {
+    if k.code == KeyCode::Char('q')
+        && app.focus != Focus::Composer
+        && !app.filtering
+        && !panel_typing(app)
+    {
         app.q_streak = q_hold_streak(app.q_streak, app.last_q, now);
         app.last_q = Some(now);
         if app.q_streak >= Q_HOLD_STREAK {
@@ -478,7 +500,10 @@ fn tree_key(app: &mut App, k: KeyEvent) {
             app.focus = Focus::Term;
             let id: crate::kern::model::AgentId = crate::kern::terminal::TERM_ID.into();
             if let Some(p) = app.panels.get_mut(&id) {
-                if let Some(t) = p.as_any_mut().downcast_mut::<crate::panel::terminal::TerminalPanel>() {
+                if let Some(t) = p
+                    .as_any_mut()
+                    .downcast_mut::<crate::panel::terminal::TerminalPanel>()
+                {
                     t.takeover = true;
                 }
             }
@@ -498,7 +523,12 @@ fn tree_key(app: &mut App, k: KeyEvent) {
             let start = app.sel;
             for step in 1..=n {
                 let i = (start + step) % n.max(1);
-                if app.trows.get(i).map(|r| r.inquiries > 0 && r.kind != PanelKind::Activity).unwrap_or(false) {
+                if app
+                    .trows
+                    .get(i)
+                    .map(|r| r.inquiries > 0 && r.kind != PanelKind::Activity)
+                    .unwrap_or(false)
+                {
                     app.sel = i;
                     break;
                 }
@@ -514,7 +544,10 @@ fn tree_key(app: &mut App, k: KeyEvent) {
                 if id == crate::kern::terminal::TERM_ID {
                     app.focus = Focus::Term;
                     if let Some(p) = app.panels.get_mut(&id) {
-                        if let Some(t) = p.as_any_mut().downcast_mut::<crate::panel::terminal::TerminalPanel>() {
+                        if let Some(t) = p
+                            .as_any_mut()
+                            .downcast_mut::<crate::panel::terminal::TerminalPanel>()
+                        {
                             t.takeover = true;
                         }
                     }
@@ -529,7 +562,10 @@ fn tree_key(app: &mut App, k: KeyEvent) {
 /// The focused panel has a text field open.
 fn panel_typing(app: &App) -> bool {
     app.focus == Focus::Panel
-        && app.selected().and_then(|a| app.panels.get(a)).is_some_and(|p| p.text_input())
+        && app
+            .selected()
+            .and_then(|a| app.panels.get(a))
+            .is_some_and(|p| p.text_input())
 }
 
 fn panel_key(app: &mut App, k: KeyEvent) {
@@ -736,7 +772,6 @@ impl App {
     }
 }
 
-
 /// THE WHEEL SCROLLS WHAT IS UNDER THE POINTER, and moves no focus: over the
 /// tree it moves the selection, over the page it is the page's own ↑/↓ (the AI
 /// panel moves by message). One notch, one step. The terminal and the composer
@@ -746,11 +781,16 @@ pub fn wheel(app: &mut App, x: u16, y: u16, up: bool) {
     if app.help || app.screen.width == 0 {
         return;
     }
-    let k = KeyEvent::new(if up { KeyCode::Up } else { KeyCode::Down }, crossterm::event::KeyModifiers::NONE);
+    let k = KeyEvent::new(
+        if up { KeyCode::Up } else { KeyCode::Down },
+        crossterm::event::KeyModifiers::NONE,
+    );
     let a = areas(app, app.screen);
     match hit(&a, x, y) {
         Hit::Tree => tree_key(app, k),
-        Hit::Page if app.selected().is_some_and(|id| app.panels.contains_key(id)) => panel_key(app, k),
+        Hit::Page if app.selected().is_some_and(|id| app.panels.contains_key(id)) => {
+            panel_key(app, k)
+        }
         _ => return,
     }
     app.dirty = true;
@@ -788,7 +828,10 @@ pub fn click(app: &mut App, x: u16, y: u16) {
             app.focus = Focus::Term;
             let id: crate::kern::model::AgentId = crate::kern::terminal::TERM_ID.into();
             if let Some(p) = app.panels.get_mut(&id) {
-                if let Some(t) = p.as_any_mut().downcast_mut::<crate::panel::terminal::TerminalPanel>() {
+                if let Some(t) = p
+                    .as_any_mut()
+                    .downcast_mut::<crate::panel::terminal::TerminalPanel>()
+                {
                     t.takeover = true;
                 }
             }
@@ -822,8 +865,14 @@ mod tests {
         use std::time::{Duration, Instant};
         let now = Instant::now();
         assert!(!ctrl_c_exits(None, now));
-        assert!(ctrl_c_exits(Some(now - Duration::from_millis(DOUBLE_PRESS_MS / 2)), now));
-        assert!(!ctrl_c_exits(Some(now - Duration::from_millis(DOUBLE_PRESS_MS + 50)), now));
+        assert!(ctrl_c_exits(
+            Some(now - Duration::from_millis(DOUBLE_PRESS_MS / 2)),
+            now
+        ));
+        assert!(!ctrl_c_exits(
+            Some(now - Duration::from_millis(DOUBLE_PRESS_MS + 50)),
+            now
+        ));
     }
 
     #[test]
@@ -831,24 +880,44 @@ mod tests {
         use std::time::{Duration, Instant};
         let now = Instant::now();
         assert_eq!(q_hold_streak(0, None, now), 1);
-        assert_eq!(q_hold_streak(3, Some(now - Duration::from_millis(Q_REPEAT_MS / 2)), now), 4);
-        assert_eq!(q_hold_streak(9, Some(now - Duration::from_millis(Q_REPEAT_MS * 3)), now), 1);
+        assert_eq!(
+            q_hold_streak(3, Some(now - Duration::from_millis(Q_REPEAT_MS / 2)), now),
+            4
+        );
+        assert_eq!(
+            q_hold_streak(9, Some(now - Duration::from_millis(Q_REPEAT_MS * 3)), now),
+            1
+        );
     }
 
     #[test]
     fn the_wheel_moves_the_selection_under_the_pointer_and_never_the_focus() {
         use crate::kern::model::TreeNode;
-        let leaf = |id: &str| TreeNode { id: id.into(), parent_id: None, handler_module: Some("x.tools".into()), display_name: None, description: None, children: vec![] };
+        let leaf = |id: &str| TreeNode {
+            id: id.into(),
+            parent_id: None,
+            handler_module: Some("x.tools".into()),
+            display_name: None,
+            description: None,
+            children: vec![],
+        };
         let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
         app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
-        app.tree = Some(TreeNode { children: vec![leaf("a"), leaf("b"), leaf("c")], ..leaf("root") });
+        app.tree = Some(TreeNode {
+            children: vec![leaf("a"), leaf("b"), leaf("c")],
+            ..leaf("root")
+        });
         app.reflow();
         app.focus = Focus::Composer;
         let a = crate::ui::frame::areas(&app, app.screen);
         let (x, y) = (a.tree.x + 2, a.tree.y + 2);
         let before = app.sel;
         wheel(&mut app, x, y, false);
-        assert_eq!(app.sel, before + 1, "a notch down moves the selection one row");
+        assert_eq!(
+            app.sel,
+            before + 1,
+            "a notch down moves the selection one row"
+        );
         wheel(&mut app, x, y, true);
         assert_eq!(app.sel, before);
         assert_eq!(app.focus, Focus::Composer, "scrolling moves no focus");
@@ -861,24 +930,53 @@ mod tests {
     fn an_open_text_field_takes_every_character_no_shortcut_swallows_one() {
         use crate::kern::model::TreeNode;
         use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
-        let leaf = |id: &str| TreeNode { id: id.into(), parent_id: None, handler_module: Some("x.tools".into()), display_name: None, description: None, children: vec![] };
+        let leaf = |id: &str| TreeNode {
+            id: id.into(),
+            parent_id: None,
+            handler_module: Some("x.tools".into()),
+            display_name: None,
+            description: None,
+            children: vec![],
+        };
         let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
         app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
-        app.tree = Some(TreeNode { children: vec![leaf("s")], ..leaf("root") });
+        app.tree = Some(TreeNode {
+            children: vec![leaf("s")],
+            ..leaf("root")
+        });
         app.reflow();
-        app.sel = app.trows.iter().position(|r| r.id.as_str() == "s").expect("the row");
+        app.sel = app
+            .trows
+            .iter()
+            .position(|r| r.id.as_str() == "s")
+            .expect("the row");
         let mut p = crate::panel::setup::SetupPanel::new();
         p.open_key_prompt();
         app.panels.insert("s".into(), Box::new(p));
         app.focus = Focus::Panel;
         let typed = "aRSq?Rz";
         for c in typed.chars() {
-            let k = KeyEvent { code: KeyCode::Char(c), modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+            let k = KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            };
             handle(&mut app, Event::Key(k));
         }
-        let p = app.panels.get_mut(&crate::kern::model::AgentId::from("s")).unwrap();
-        let p = p.as_any_mut().downcast_mut::<crate::panel::setup::SetupPanel>().unwrap();
-        assert_eq!(p.key_typed(), Some(typed), "every character reaches the field");
+        let p = app
+            .panels
+            .get_mut(&crate::kern::model::AgentId::from("s"))
+            .unwrap();
+        let p = p
+            .as_any_mut()
+            .downcast_mut::<crate::panel::setup::SetupPanel>()
+            .unwrap();
+        assert_eq!(
+            p.key_typed(),
+            Some(typed),
+            "every character reaches the field"
+        );
         assert!(!app.help && !app.stale, "no shortcut fired");
     }
 

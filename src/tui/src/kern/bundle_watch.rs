@@ -56,7 +56,9 @@ pub fn view_file(dir: &Path) -> Option<PathBuf> {
 /// lives once, in the bundle. `bytes_rev` (the file's content hash) makes the
 /// write a change; the change is the cells' signal to draw again.
 pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), String> {
-    let Some(f) = view_file(dir) else { return Ok(()) };
+    let Some(f) = view_file(dir) else {
+        return Ok(());
+    };
     let bytes = std::fs::read(&f).map_err(|e| format!("{}: {e}", f.display()))?;
     // the panel's REVISION: a view edit changes no other field of the record,
     // and an unchanged record redraws nothing
@@ -82,12 +84,25 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
             .kernel
             .agents
             .get(&fantastic_kernel::AgentId::from(id.as_str()))
-            .and_then(|a| a.value().record().meta.get("view").and_then(Value::as_object).cloned())
+            .and_then(|a| {
+                a.value()
+                    .record()
+                    .meta
+                    .get("view")
+                    .and_then(Value::as_object)
+                    .cloned()
+            })
             .unwrap_or_default();
         view.extend(bundle_view(dir).unwrap_or_default());
         view.remove("bytes");
         view.insert("bytes_rev".into(), json!(rev));
-        let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "view": view})).await.result;
+        let r = h
+            .operator(
+                "kernel",
+                json!({"type": "update_agent", "id": id, "view": view}),
+            )
+            .await
+            .result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return Err(format!("{id}: its view: {e}"));
         }
@@ -102,16 +117,24 @@ fn err_of(r: &Value) -> Option<String> {
 /// The bridge, made when missing: read-only, rooted at the project, exposing
 /// the host's and the pages' bundle folders, open (the pages watch it too).
 pub async fn ensure_bridge(h: &Host) -> Result<(), String> {
-    if h.kernel.agents.contains_key(&fantastic_kernel::AgentId::from(BRIDGE)) {
+    if h.kernel
+        .agents
+        .contains_key(&fantastic_kernel::AgentId::from(BRIDGE))
+    {
         return Ok(());
     }
     let r = h
-        .operator("kernel", json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
+        .operator(
+            "kernel",
+            json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": BRIDGE,
             "handler_module": "file_bridge.tools", "root": ".", "readonly": true,
-            "allow": [BUNDLES, ".fantastic/web"], "ingress_rule": "allow_all_ingress"}))
+            "allow": [BUNDLES, ".fantastic/web"], "ingress_rule": "allow_all_ingress"}),
+        )
         .await
         .result;
-    err_of(&r).map_or(Ok(()), |e| Err(format!("the bundle watcher's bridge `{BRIDGE}`: {e}")))
+    err_of(&r).map_or(Ok(()), |e| {
+        Err(format!("the bundle watcher's bridge `{BRIDGE}`: {e}"))
+    })
 }
 
 /// The new folders whose files were watched BEFORE their bundle loaded (a
@@ -124,12 +147,18 @@ static ARMED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSe
 /// on is an event, and the folder's own `added` event reloads nothing.
 pub async fn arm(h: &Host, name: &str) {
     // marked first: the folder's event may be handled while the watch is armed
-    ARMED.lock().expect("armed folders").insert(name.to_string());
+    ARMED
+        .lock()
+        .expect("armed folders")
+        .insert(name.to_string());
     watch_path(h, &format!("{BUNDLES}/{name}")).await;
 }
 
 async fn watch_path(h: &Host, path: &str) {
-    let r = h.operator(BRIDGE, json!({"type": "watch_path", "path": path})).await.result;
+    let r = h
+        .operator(BRIDGE, json!({"type": "watch_path", "path": path}))
+        .await
+        .result;
     if let Some(e) = err_of(&r) {
         tracing::warn!("bundle watch {path}: {e}");
     }
@@ -138,7 +167,10 @@ async fn watch_path(h: &Host, path: &str) {
 /// The bundle a changed path belongs to, and whether it is the bundle's folder
 /// itself (added / removed) rather than a file in it.
 fn bundle_of(path: &str) -> Option<(String, bool)> {
-    let rest = path.trim_start_matches("./").strip_prefix(BUNDLES)?.trim_start_matches('/');
+    let rest = path
+        .trim_start_matches("./")
+        .strip_prefix(BUNDLES)?
+        .trim_start_matches('/');
     let mut parts = rest.split('/');
     let name = parts.next().filter(|n| !n.is_empty())?.to_string();
     Some((name, parts.next().is_none()))
@@ -158,7 +190,11 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
         }
         let inbox = fantastic_kernel::AgentId::from(INBOX);
         let mut rx = h.kernel.ensure_inbox(&inbox);
-        if let Some(denial) = h.kernel.watch(&fantastic_kernel::AgentId::from(BRIDGE), inbox.clone()).await {
+        if let Some(denial) = h
+            .kernel
+            .watch(&fantastic_kernel::AgentId::from(BRIDGE), inbox.clone())
+            .await
+        {
             tracing::warn!("bundle watch: {denial}");
             return;
         }
@@ -184,7 +220,11 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                 if p.get("type").and_then(Value::as_str) != Some("changed") {
                     continue;
                 }
-                let Some((name, is_folder)) = p.get("path").and_then(Value::as_str).and_then(bundle_of) else { continue };
+                let Some((name, is_folder)) =
+                    p.get("path").and_then(Value::as_str).and_then(bundle_of)
+                else {
+                    continue;
+                };
                 let dir = root.join(&name);
                 if !dir.is_dir() {
                     if is_folder {
@@ -206,18 +246,29 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
                 // python's own bytecode cache, written when an instance FIRST runs
                 // its code: not an edit — taken as one, it restarted every instance
                 // right after placing (and dropped the panel's first click)
-                if Path::new(file).file_name().is_some_and(|f| f == "__pycache__") {
+                if Path::new(file)
+                    .file_name()
+                    .is_some_and(|f| f == "__pycache__")
+                {
                     continue;
                 }
-                let is_view = view_file(&dir).is_some_and(|v| v.file_name() == Path::new(file).file_name());
-                if is_view { views.insert(name) } else { code.insert(name) };
+                let is_view =
+                    view_file(&dir).is_some_and(|v| v.file_name() == Path::new(file).file_name());
+                if is_view {
+                    views.insert(name)
+                } else {
+                    code.insert(name)
+                };
             }
             // a folder with no `bundle.yaml` yet is one being written, not a
             // bundle: nothing to load (its `bundle.yaml` arriving is the event)
             code.retain(|name| root.join(name).join("bundle.yaml").is_file());
             views.retain(|name| root.join(name).join("bundle.yaml").is_file());
             for name in &code {
-                let r = h.operator("kernel", json!({"type": "reload_bundle", "name": name})).await.result;
+                let r = h
+                    .operator("kernel", json!({"type": "reload_bundle", "name": name}))
+                    .await
+                    .result;
                 if let Some(e) = err_of(&r) {
                     tracing::warn!("bundle {name}: reload: {e}");
                 }
@@ -240,19 +291,44 @@ pub fn spawn(h: Arc<Host>, store: PathBuf) {
 pub const STARTERS: &[(&str, &[(&str, &str)])] = &[(
     "python_agent",
     &[
-        ("bundle.yaml", include_str!("../../starters/python_agent/bundle.yaml")),
-        ("agent.py", include_str!("../../starters/python_agent/agent.py")),
-        ("panel.html", include_str!("../../starters/python_agent/panel.html")),
-        ("fantastic_agent.py", include_str!("../../../lib/python/bundled_agents/io/py_agent/src/py_agent/fantastic_agent.py")),
+        (
+            "bundle.yaml",
+            include_str!("../../starters/python_agent/bundle.yaml"),
+        ),
+        (
+            "agent.py",
+            include_str!("../../starters/python_agent/agent.py"),
+        ),
+        (
+            "panel.html",
+            include_str!("../../starters/python_agent/panel.html"),
+        ),
+        (
+            "fantastic_agent.py",
+            include_str!(
+                "../../../lib/python/bundled_agents/io/py_agent/src/py_agent/fantastic_agent.py"
+            ),
+        ),
     ],
 )];
 
 /// Copy starter `kind` into `<store>/bundles/<name>/` (a NEW folder — refused if
 /// it exists). Returns the folder.
 pub fn scaffold(store: &Path, kind: &str, name: &str) -> Result<PathBuf, String> {
-    let files = STARTERS.iter().find(|(k, _)| *k == kind).map(|(_, f)| *f).ok_or_else(|| {
-        format!("no starter `{kind}` — the starters are {}", STARTERS.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", "))
-    })?;
+    let files = STARTERS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, f)| *f)
+        .ok_or_else(|| {
+            format!(
+                "no starter `{kind}` — the starters are {}",
+                STARTERS
+                    .iter()
+                    .map(|(k, _)| *k)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
     let dir = store.join("bundles").join(name);
     if dir.exists() {
         return Err(format!("{} already exists", dir.display()));

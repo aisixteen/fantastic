@@ -17,16 +17,16 @@ use serde_json::Value;
 use crate::env::{ClientCfg, Paths};
 use crate::ev::{Cmd, Ev, Got, LinkEv, What};
 use crate::kern::model::{AgentId, KernelErr, Record, RowId, Task, TreeNode};
+use crate::kern::terminal::TERM_ID;
 use crate::panel::activity::{ActivityPanel, ACTIVITY_ID};
 use crate::panel::setup::{SetupPanel, SETUP_ID};
 use crate::panel::{self, Cx, Panel, PanelKind};
 use crate::presence::Presence;
-use crate::kern::terminal::TERM_ID;
-use crate::ui::layout::{COMPOSER_H, STATUS_H, TITLE_H, TREE_W};
 use crate::seen::Seen;
 use crate::store::Store;
 use crate::thread;
 use crate::ui::composer::{Composer, Mode};
+use crate::ui::layout::{COMPOSER_H, STATUS_H, TITLE_H, TREE_W};
 use crate::ui::tree::{self, TreeRow};
 
 /// Where keys go.
@@ -285,7 +285,12 @@ impl App {
     fn open_recipe(&mut self, r: crate::recipe::Recipe) {
         use crate::recipe::Recipe;
         let (target, focus) = match r {
-            Recipe::Canvas => (self.trows.iter().position(|t| t.id == crate::kern::web::WEB_ID), Focus::Panel),
+            Recipe::Canvas => (
+                self.trows
+                    .iter()
+                    .position(|t| t.id == crate::kern::web::WEB_ID),
+                Focus::Panel,
+            ),
             // the ROOT AI first (`kern/root_ai`), else any
             Recipe::Ai => match self
                 .trows
@@ -294,7 +299,10 @@ impl App {
                 .or_else(|| self.trows.iter().position(|t| t.kind == PanelKind::Ai))
             {
                 Some(i) => (Some(i), Focus::Composer),
-                None => (self.trows.iter().position(|t| t.id == SETUP_ID), Focus::Panel),
+                None => (
+                    self.trows.iter().position(|t| t.id == SETUP_ID),
+                    Focus::Panel,
+                ),
             },
             // the terminal `run` made (with the canvas the program is a cell there)
             Recipe::Run => (self.trows.iter().position(|t| t.id == TERM_ID), Focus::Term),
@@ -333,7 +341,11 @@ impl App {
     /// `v`: tree ↔ flat. From the rail it expands to the other one.
     pub fn toggle_side(&mut self) {
         use crate::ui::side::SideView::*;
-        let from = if self.side == Rail { self.side_before_rail } else { self.side };
+        let from = if self.side == Rail {
+            self.side_before_rail
+        } else {
+            self.side
+        };
         self.side = if from == Flat { Tree } else { Flat };
         self.reflow();
     }
@@ -369,8 +381,15 @@ impl App {
     /// The size the terminal pane will be drawn at, so a shell started at it
     /// does not redraw its first prompt on a resize.
     fn term_size(&self) -> (u16, u16) {
-        let body = self.screen.height.saturating_sub(COMPOSER_H + STATUS_H + TITLE_H);
-        let rows = (body * 45 / 100).max(8).min(body.saturating_sub(4)).saturating_sub(1).max(1);
+        let body = self
+            .screen
+            .height
+            .saturating_sub(COMPOSER_H + STATUS_H + TITLE_H);
+        let rows = (body * 45 / 100)
+            .max(8)
+            .min(body.saturating_sub(4))
+            .saturating_sub(1)
+            .max(1);
         let cols = self.screen.width.saturating_sub(self.side_w()).max(20);
         (cols, rows)
     }
@@ -383,7 +402,9 @@ impl App {
             self.select(TERM_ID.into(), PanelKind::Terminal);
             if !self.reflect_asked.contains(TERM_ID) {
                 self.reflect_asked.insert(TERM_ID.into());
-                self.push(Cmd::Reflect { agent: TERM_ID.into() });
+                self.push(Cmd::Reflect {
+                    agent: TERM_ID.into(),
+                });
             }
             // A `term` this run did not open (rehydrated from disk) has no pane
             // attached to a job: `boot` starts nothing, so the client attaches —
@@ -405,7 +426,10 @@ impl App {
             self.term_opening = false;
             self.focus = Focus::Term;
             if let Some(p) = self.panels.get_mut(TERM_ID) {
-                if let Some(t) = p.as_any_mut().downcast_mut::<crate::panel::terminal::TerminalPanel>() {
+                if let Some(t) = p
+                    .as_any_mut()
+                    .downcast_mut::<crate::panel::terminal::TerminalPanel>()
+                {
                     t.takeover = true;
                 }
             }
@@ -450,7 +474,11 @@ impl App {
     pub fn leave(&mut self) -> ViewSlots {
         ViewSlots {
             screen: std::mem::take(&mut self.screen),
-            panels: self.panels.iter_mut().filter_map(|(id, p)| p.take_view().map(|s| (id.clone(), s))).collect(),
+            panels: self
+                .panels
+                .iter_mut()
+                .filter_map(|(id, p)| p.take_view().map(|s| (id.clone(), s)))
+                .collect(),
         }
     }
 
@@ -468,7 +496,9 @@ impl App {
     /// state. Everything here animates continuously, so the frame clock draws it
     /// unconditionally; the live shell stays event-driven and costs nothing idle.
     pub fn animating(&self) -> bool {
-        self.selected().and_then(|id| self.panels.get(id)).is_some_and(|p| p.animating())
+        self.selected()
+            .and_then(|id| self.panels.get(id))
+            .is_some_and(|p| p.animating())
     }
 
     pub fn selected(&self) -> Option<&AgentId> {
@@ -549,7 +579,9 @@ impl App {
             let (rows, folded) = crate::ui::side::flatten(all, |r| {
                 r.id == root
                     || provider.as_deref() == Some(r.id.as_str())
-                    || modules.get(&r.id).is_some_and(|m| m.ends_with("_loader.tools"))
+                    || modules
+                        .get(&r.id)
+                        .is_some_and(|m| m.ends_with("_loader.tools"))
             });
             self.trows = rows;
             self.system_folded = folded;
@@ -558,17 +590,24 @@ impl App {
         // filtering (a filter lists agents, and this is not one).
         if self.filter.is_none() && !self.trows.is_empty() {
             let open: usize = self.waiting.values().sum();
-            self.trows.insert(1, TreeRow {
-                id: ACTIVITY_ID.into(),
-                depth: 1,
-                label: "Activity".into(),
-                kind: PanelKind::Activity,
-                live: false,
-                has_children: false,
-                collapsed: false,
-                presence: if open > 0 { Presence::Blocked } else { Presence::Idle },
-                inquiries: open,
-            });
+            self.trows.insert(
+                1,
+                TreeRow {
+                    id: ACTIVITY_ID.into(),
+                    depth: 1,
+                    label: "Activity".into(),
+                    kind: PanelKind::Activity,
+                    live: false,
+                    has_children: false,
+                    collapsed: false,
+                    presence: if open > 0 {
+                        Presence::Blocked
+                    } else {
+                        Presence::Idle
+                    },
+                    inquiries: open,
+                },
+            );
         }
         // THE SET-UP ROW, last: how a new ai agent gets written.
         if self.filter.is_none() && !self.trows.is_empty() {
@@ -646,7 +685,10 @@ impl App {
                 // STREAMING IS FOR THE HUMAN (owner, 2026-10-04): an AI's parts are
                 // drawn only when they answer THIS client; a message between
                 // agents is read whole, as its row.
-                if is_part(&payload) && payload.get("client_id").and_then(Value::as_str) != Some(self.cfg.client_id.as_str()) {
+                if is_part(&payload)
+                    && payload.get("client_id").and_then(Value::as_str)
+                        != Some(self.cfg.client_id.as_str())
+                {
                     return;
                 }
                 if let Some(mut p) = self.panels.remove(&agent) {
@@ -698,7 +740,10 @@ impl App {
             }
             Got::TermAttached { job_id, replay } => {
                 if let Some(p) = self.panels.get_mut(TERM_ID) {
-                    if let Some(t) = p.as_any_mut().downcast_mut::<crate::panel::terminal::TerminalPanel>() {
+                    if let Some(t) = p
+                        .as_any_mut()
+                        .downcast_mut::<crate::panel::terminal::TerminalPanel>()
+                    {
                         t.attach(job_id, &replay);
                     }
                 }
@@ -732,7 +777,12 @@ impl App {
                 self.last_ps = Some(Instant::now());
                 self.reflow();
             }
-            Got::Rows { agent, rows, full, loaded } => {
+            Got::Rows {
+                agent,
+                rows,
+                full,
+                loaded,
+            } => {
                 self.rows_inflight.remove(&agent);
                 if loaded == Some(false) {
                     self.store.unloaded.insert(agent.clone());
@@ -929,7 +979,10 @@ impl App {
             // A panel that keeps no conversation is not polled for rows. A terminal
             // and a file surface are streams and listings, not logs.
             let wants_rows = self.panels.get(&a).map(|p| p.needs().rows).unwrap_or(true);
-            if !wants_rows && Some(&a) != self.selected() && self.selected().map(String::as_str) != Some(ACTIVITY_ID) {
+            if !wants_rows
+                && Some(&a) != self.selected()
+                && self.selected().map(String::as_str) != Some(ACTIVITY_ID)
+            {
                 continue;
             }
             // EVENT-DRIVEN (owner 2026-10-08: no idle loops): an agent's rows are
@@ -940,7 +993,11 @@ impl App {
                 cmds.push(Cmd::Rows {
                     agent: a.clone(),
                     full,
-                    after: if full { None } else { self.row_cursor.get(&a).copied() },
+                    after: if full {
+                        None
+                    } else {
+                        self.row_cursor.get(&a).copied()
+                    },
                 });
                 // Reserve the slot so a slow page does not queue a second read.
                 self.last_rows.insert(a.clone(), now);
@@ -1044,5 +1101,8 @@ fn ancestors(t: &TreeNode, id: &str) -> Vec<AgentId> {
 /// Whether an agent event is a streamed part (`part_start` / `_delta` / `_end` /
 /// `_abort`).
 fn is_part(payload: &Value) -> bool {
-    payload.get("type").and_then(Value::as_str).is_some_and(|t| t.starts_with("part_"))
+    payload
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.starts_with("part_"))
 }

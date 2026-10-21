@@ -18,7 +18,6 @@
 //! - The refs (metadata only — host, field names) are also remembered in the
 //!   user's home, so every project's store knows the keys already stored there.
 
-
 use fantastic_user_home_store::secrets::{Mode, Secrets};
 use serde_json::{json, Map, Value};
 
@@ -44,23 +43,39 @@ pub fn mode() -> Result<(Option<Mode>, String), String> {
 /// The `host[:port]` of an endpoint URL, lowercased — the ref's second half.
 pub fn host_of(endpoint: &str) -> Option<String> {
     let rest = endpoint.split_once("://").map_or(endpoint, |(_, r)| r);
-    let h = rest.split(['/', '?', '#']).next().unwrap_or("").rsplit('@').next().unwrap_or("").to_lowercase();
+    let h = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
     (!h.is_empty()).then_some(h)
 }
 
 /// The ref a key for `module` at `endpoint` lives under.
 pub fn ref_for(module: &str, endpoint: &str) -> Result<String, String> {
-    let provider = module.strip_suffix("_backend.tools").or_else(|| module.strip_suffix(".tools")).unwrap_or(module);
+    let provider = module
+        .strip_suffix("_backend.tools")
+        .or_else(|| module.strip_suffix(".tools"))
+        .unwrap_or(module);
     let host = host_of(endpoint).ok_or_else(|| format!("no host in the endpoint {endpoint:?} — fill the endpoint first; a key is bound to its host"))?;
     Ok(format!("{provider}/{host}"))
 }
 
 fn store_meta(h: &Host) -> Option<Map<String, Value>> {
-    h.kernel.agents.get(&fantastic_kernel::AgentId::from(STORE)).map(|a| a.value().record().meta.clone())
+    h.kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(STORE))
+        .map(|a| a.value().record().meta.clone())
 }
 
 fn refs_of(meta: &Map<String, Value>) -> Map<String, Value> {
-    meta.get("refs").and_then(Value::as_object).cloned().unwrap_or_default()
+    meta.get("refs")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The store, as the user's key mode says: created when missing, its backend
@@ -126,7 +141,13 @@ async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
         o.insert("host".into(), json!(host));
         o.entry("fields").or_insert(json!([FIELD]));
     }
-    let out = h.act("kernel", json!({"type": "update_agent", "id": STORE, "refs": refs})).await.result;
+    let out = h
+        .act(
+            "kernel",
+            json!({"type": "update_agent", "id": STORE, "refs": refs}),
+        )
+        .await
+        .result;
     match out.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("the key's ref {r} could not be declared: {e}")),
         None => Ok(()),
@@ -136,7 +157,9 @@ async fn declare(h: &Host, r: &str, host: &str) -> Result<(), String> {
 /// Store `secret` as the key for `module` at `endpoint`. Returns the ref.
 pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Result<String, String> {
     let s = secrets();
-    let m = s.mode()?.ok_or("choose where keys are kept first — plain or secure")?;
+    let m = s
+        .mode()?
+        .ok_or("choose where keys are kept first — plain or secure")?;
     let r = ref_for(module, endpoint)?;
     ensure_store(h).await?;
     // the ref is DECLARED first, on the store's record (`set` never creates one)
@@ -146,7 +169,14 @@ pub async fn store(h: &Host, module: &str, endpoint: &str, secret: &str) -> Resu
     // state stream reports it — awaited, or a loaded machine refused the key
     // (`user may not call 'set' on credentials`)
     crate::kern::reach::granted(h, STORE).await?;
-    let out = h.act_secret(STORE, json!({"type": "set", "ref": r, "fields": {FIELD: secret}}), &["fields.api_key"]).await.result;
+    let out = h
+        .act_secret(
+            STORE,
+            json!({"type": "set", "ref": r, "fields": {FIELD: secret}}),
+            &["fields.api_key"],
+        )
+        .await
+        .result;
     if let Some(e) = out.get("error").and_then(Value::as_str) {
         return Err(format!("the key was not stored: {e}"));
     }
@@ -171,7 +201,9 @@ pub fn keyed(h: &Host, module: &str) -> Option<bool> {
         .and_then(|(_, b)| b.record_schema())
         .and_then(|s| {
             s["fields"].as_array().and_then(|a| {
-                a.iter().find(|f| f["type"] == "credentials").map(|f| f["required"].as_bool().unwrap_or(false))
+                a.iter()
+                    .find(|f| f["type"] == "credentials")
+                    .map(|f| f["required"].as_bool().unwrap_or(false))
             })
         })
 }
@@ -184,14 +216,18 @@ pub fn attach(h: &Host, module: &str, rec: &mut Map<String, Value>) -> Result<()
     if rec.contains_key("credentials") {
         return Ok(());
     }
-    let Some(required) = keyed(h, module) else { return Ok(()) };
+    let Some(required) = keyed(h, module) else {
+        return Ok(());
+    };
     let endpoint = rec.get("endpoint").and_then(Value::as_str).unwrap_or("");
     match ref_for(module, endpoint) {
         Ok(r) if has(h, &r) => {
             rec.insert("credentials".into(), json!({"store": STORE, "ref": r}));
             Ok(())
         }
-        Ok(r) if required => Err(format!("no key stored for {r} — store one first (k on the set-up page)")),
+        Ok(r) if required => Err(format!(
+            "no key stored for {r} — store one first (k on the set-up page)"
+        )),
         Err(e) if required => Err(e),
         _ => Ok(()),
     }
@@ -207,9 +243,19 @@ pub fn has(h: &Host, r: &str) -> bool {
 /// naming it — is written here, as `user` (the store's parent). Merged.
 pub async fn wire(h: &Host, ai: &str) -> Result<(), String> {
     let meta = store_meta(h).ok_or("no credential store — choose where keys are kept first")?;
-    let mut cb = meta.get("callable_by").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut cb = meta
+        .get("callable_by")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     cb.insert(ai.into(), json!(["get"]));
-    let r = h.act("kernel", json!({"type": "update_agent", "id": STORE, "callable_by": cb})).await.result;
+    let r = h
+        .act(
+            "kernel",
+            json!({"type": "update_agent", "id": STORE, "callable_by": cb}),
+        )
+        .await
+        .result;
     match r.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("could not grant {ai} its key: {e}")),
         None => Ok(()),
@@ -233,7 +279,9 @@ pub fn grant_on_create(spec: &mut Map<String, Value>) {
 
 /// [`wire`], when `record` names a key in this store.
 pub async fn wire_record(h: &Host, ai: &str, record: &Map<String, Value>) -> Result<(), String> {
-    let Some(c) = record.get("credentials").and_then(Value::as_object) else { return Ok(()) };
+    let Some(c) = record.get("credentials").and_then(Value::as_object) else {
+        return Ok(());
+    };
     if c.get("store").and_then(Value::as_str) != Some(STORE) {
         return Ok(());
     }
@@ -246,10 +294,27 @@ mod tests {
 
     #[test]
     fn a_ref_is_the_provider_and_the_endpoints_host() {
-        assert_eq!(ref_for("responses_backend.tools", "https://api.openai.com/v1/responses").unwrap(), "responses/api.openai.com");
-        assert_eq!(ref_for("vllm_backend.tools", "http://Box.Local:8000/v1").unwrap(), "vllm/box.local:8000");
-        assert!(ref_for("vllm_backend.tools", "").is_err(), "no endpoint, no host, no ref");
-        assert_eq!(ref_for("mcp_client.tools", "http://127.0.0.1:9000/mcp").unwrap(), "mcp_client/127.0.0.1:9000", "an MCP server's key: its bundle name and the url's host");
+        assert_eq!(
+            ref_for(
+                "responses_backend.tools",
+                "https://api.openai.com/v1/responses"
+            )
+            .unwrap(),
+            "responses/api.openai.com"
+        );
+        assert_eq!(
+            ref_for("vllm_backend.tools", "http://Box.Local:8000/v1").unwrap(),
+            "vllm/box.local:8000"
+        );
+        assert!(
+            ref_for("vllm_backend.tools", "").is_err(),
+            "no endpoint, no host, no ref"
+        );
+        assert_eq!(
+            ref_for("mcp_client.tools", "http://127.0.0.1:9000/mcp").unwrap(),
+            "mcp_client/127.0.0.1:9000",
+            "an MCP server's key: its bundle name and the url's host"
+        );
         assert_eq!(host_of("http://u:p@h.example/x"), Some("h.example".into()));
     }
 }

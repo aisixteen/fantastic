@@ -27,10 +27,23 @@ const VIEW: &str = "view_root";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
-    Vllm { host: String, port: u16, kv_overflow: String },
-    Ollama { host: String, port: u16 },
-    Responses { endpoint: String, model: String },
-    Anthropic { endpoint: String, model: String },
+    Vllm {
+        host: String,
+        port: u16,
+        kv_overflow: String,
+    },
+    Ollama {
+        host: String,
+        port: u16,
+    },
+    Responses {
+        endpoint: String,
+        model: String,
+    },
+    Anthropic {
+        endpoint: String,
+        model: String,
+    },
 }
 
 impl Backend {
@@ -57,7 +70,9 @@ impl Backend {
         match self {
             Backend::Vllm { host, port, .. } => format!("http://{host}:{port}/v1"),
             Backend::Ollama { host, port } => format!("http://{host}:{port}"),
-            Backend::Responses { endpoint, .. } | Backend::Anthropic { endpoint, .. } => endpoint.clone(),
+            Backend::Responses { endpoint, .. } | Backend::Anthropic { endpoint, .. } => {
+                endpoint.clone()
+            }
         }
     }
 
@@ -80,7 +95,13 @@ impl Backend {
     /// What the server decides — cleared on a re-point, so the new server is read.
     fn from_server(&self) -> &'static [&'static str] {
         match self {
-            Backend::Vllm { .. } => &["model", "context_window", "max_tokens", "kv_slots", "metrics_url"],
+            Backend::Vllm { .. } => &[
+                "model",
+                "context_window",
+                "max_tokens",
+                "kv_slots",
+                "metrics_url",
+            ],
             // only the model: ollama's loaded window is not in its API
             Backend::Ollama { .. } => &["model"],
             Backend::Responses { .. } => &[],
@@ -95,14 +116,23 @@ fn err_of(r: &Value) -> Option<String> {
 }
 
 fn handler_of(h: &Host, id: &str) -> Option<String> {
-    h.kernel.agents.get(&fantastic_kernel::AgentId::from(id))?.value().record().handler_module
+    h.kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(id))?
+        .value()
+        .record()
+        .handler_module
 }
 
 /// Make, re-point or remake the root AI on `b`; says what it did.
 pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
     // a build without the backend would skip the record at the next boot
     if h.kernel.bundles.get(b.handler()).is_none() {
-        return Err(format!("this build has no {} backend — build with `--features {}`", b.handler(), b.feature()));
+        return Err(format!(
+            "this build has no {} backend — build with `--features {}`",
+            b.handler(),
+            b.feature()
+        ));
     }
     let had = handler_of(h, ROOT_AI);
     let did = if had.as_deref() == Some(b.handler()) {
@@ -126,7 +156,10 @@ pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
             .get(&fantastic_kernel::AgentId::from(ROOT_AI))
             .and_then(|a| serde_json::to_value(a.value().record()).ok());
         if had.is_some() {
-            let r = h.operator("kernel", json!({"type": "delete_agent", "id": ROOT_AI})).await.result;
+            let r = h
+                .operator("kernel", json!({"type": "delete_agent", "id": ROOT_AI}))
+                .await
+                .result;
             if let Some(e) = err_of(&r) {
                 return Err(format!("removing the old `{ROOT_AI}`: {e}"));
             }
@@ -134,37 +167,75 @@ pub async fn run(h: &Host, b: &Backend) -> Result<String, String> {
         let mut spec = b.fields();
         spec.insert("handler_module".into(), json!(b.handler()));
         let user = fantastic_kernel::AgentId::from(h.cfg.user.as_str());
-        if let Err(e) = crate::kern::backend::BackendBundle::make_ai(h, &user, ROOT_AI, spec, Map::new()).await {
+        if let Err(e) =
+            crate::kern::backend::BackendBundle::make_ai(h, &user, ROOT_AI, spec, Map::new()).await
+        {
             if let Some(Value::Object(mut rec)) = old {
                 rec.insert("type".into(), json!("create_agent"));
                 let back = h.operator("kernel", Value::Object(rec)).await.result;
                 return Err(match err_of(&back) {
                     None => format!("{e} — `{ROOT_AI}` is left on {}", had.unwrap_or_default()),
-                    Some(b2) => format!("{e} — and the old `{ROOT_AI}` could not be restored: {b2}"),
+                    Some(b2) => {
+                        format!("{e} — and the old `{ROOT_AI}` could not be restored: {b2}")
+                    }
                 });
             }
             return Err(e);
         }
-        if had.is_some() { "remade" } else { "made" }
+        if had.is_some() {
+            "remade"
+        } else {
+            "made"
+        }
     };
-    Ok(format!("the root AI `{ROOT_AI}` ({did}, {}) speaks to {}", b.handler(), b.endpoint()))
+    Ok(format!(
+        "the root AI `{ROOT_AI}` ({did}, {}) speaks to {}",
+        b.handler(),
+        b.endpoint()
+    ))
 }
 
 async fn page_records(h: &Host) -> Result<Vec<Map<String, Value>>, String> {
-    let r = h.operator(crate::kern::web::CANVAS_LOADER_ID, json!({"type": "load_tree"})).await.result;
+    let r = h
+        .operator(
+            crate::kern::web::CANVAS_LOADER_ID,
+            json!({"type": "load_tree"}),
+        )
+        .await
+        .result;
     if let Some(e) = err_of(&r) {
         return Err(format!("the page's records: {e}"));
     }
-    Ok(r.get("records").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_object().cloned()).collect())
+    Ok(r.get("records")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_object().cloned())
+        .collect())
 }
 
 pub(crate) async fn persist(h: &Host, rec: Map<String, Value>) -> Result<(), String> {
-    let id = rec.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let r = h.operator(crate::kern::web::CANVAS_LOADER_ID, json!({"type": "persist_record", "record": rec})).await.result;
-    err_of(&r).map_or(Ok(()), |e| Err(format!("writing the page record `{id}`: {e}")))
+    let id = rec
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let r = h
+        .operator(
+            crate::kern::web::CANVAS_LOADER_ID,
+            json!({"type": "persist_record", "record": rec}),
+        )
+        .await
+        .result;
+    err_of(&r).map_or(Ok(()), |e| {
+        Err(format!("writing the page record `{id}`: {e}"))
+    })
 }
 
 /// Whether the page has its view yet (it is made at the page's first load).
 pub(crate) async fn has_view(h: &Host) -> Result<bool, String> {
-    Ok(page_records(h).await?.iter().any(|r| r.get("id").and_then(Value::as_str) == Some(VIEW)))
+    Ok(page_records(h)
+        .await?
+        .iter()
+        .any(|r| r.get("id").and_then(Value::as_str) == Some(VIEW)))
 }

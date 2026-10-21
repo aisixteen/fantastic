@@ -4,7 +4,6 @@
 // `sh design/sync.sh`. Editing this file directly means the next sync silently
 // reverts you.
 
-
 use ratatui::style::Color;
 
 // ── palette ──────────────────────────────────────────────────────────────────

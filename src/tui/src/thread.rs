@@ -260,8 +260,11 @@ pub fn outline(a: Args<'_>) -> Outline {
     // to its model (the no-call reminder, a malformed-call report, a refused
     // await) — the model reads them, a person need not. A link INTO one lifts to
     // the notice's own parent, so the reply after it stays in its thread.
-    let notice_up: HashMap<RowId, Option<RowId>> =
-        conv.iter().filter(|r| r.kind_is("notice")).map(|r| (r.id, r.parent)).collect();
+    let notice_up: HashMap<RowId, Option<RowId>> = conv
+        .iter()
+        .filter(|r| r.kind_is("notice"))
+        .map(|r| (r.id, r.parent))
+        .collect();
     conv.retain(|r| !r.kind_is("notice"));
     let past_notices = |mut id: RowId| -> Option<RowId> {
         for _ in 0..64 {
@@ -444,7 +447,12 @@ pub fn outline(a: Args<'_>) -> Outline {
             return LineKind::Waiting;
         }
         if let Some(m) = r.content.as_deref().and_then(tags::monitor) {
-            return LineKind::Monitor { id: m.id, job: m.job, label: m.label, ended: m.ended };
+            return LineKind::Monitor {
+                id: m.id,
+                job: m.job,
+                label: m.label,
+                ended: m.ended,
+            };
         }
         match r.kind.as_deref() {
             Some("fold") => LineKind::Fold {
@@ -460,46 +468,51 @@ pub fn outline(a: Args<'_>) -> Outline {
         }
     };
 
-    let line_for = |r: &Row, depth: u8, closure: Closure, asking: bool, expanded: bool| -> OutlineLine {
-        let content = r.content.as_deref().unwrap_or("");
-        let v = vouch.get(&r.id);
-        OutlineLine {
-            id: r.id,
-            agent: r.agent.clone(),
-            depth,
-            kind: kind_of(r),
-            // A monitor's delivery reads as the lines it brought; its header is
-            // the line's tag (`LineKind::Monitor`), not its text.
-            head: {
-                let h = match tags::monitor(content) {
-                    Some(m) => tags::head_of(&content[m.end..]),
-                    None => tags::head_of(content),
-                };
-                // a row that kept its THINKING says so (`t` opens it)
-                if r.thinking.as_deref().is_some_and(|t| !t.trim().is_empty()) { format!("💭 {h}") } else { h }
-            },
-            body: match tags::monitor(content) {
-                Some(m) => content[m.end..].trim().to_string(),
-                None => tags::body_of(content),
-            },
-            reply: tags::is_reply(content),
-            mark: mark_of(r),
-            closure,
-            asking,
-            // A clear is expandable: opening it is how the rows behind come back.
-            // One child is not a nesting (see 8-9), so only a BRANCH opens.
-            expandable: kids.get(&r.id).is_some_and(|k| k.len() > 1)
-                || r.kind_is("fold")
-                || r.kind_is("clear"),
-            expanded,
-            pinned: a.st.pins.contains(&r.id),
-            covered_by: hidden_by.get(&r.id).copied(),
-            from: v.map(|v| v.from.clone()),
-            msg: v.and_then(|v| v.msg),
-            re: v.and_then(|v| v.re),
-            bytes: r.bytes(),
-        }
-    };
+    let line_for =
+        |r: &Row, depth: u8, closure: Closure, asking: bool, expanded: bool| -> OutlineLine {
+            let content = r.content.as_deref().unwrap_or("");
+            let v = vouch.get(&r.id);
+            OutlineLine {
+                id: r.id,
+                agent: r.agent.clone(),
+                depth,
+                kind: kind_of(r),
+                // A monitor's delivery reads as the lines it brought; its header is
+                // the line's tag (`LineKind::Monitor`), not its text.
+                head: {
+                    let h = match tags::monitor(content) {
+                        Some(m) => tags::head_of(&content[m.end..]),
+                        None => tags::head_of(content),
+                    };
+                    // a row that kept its THINKING says so (`t` opens it)
+                    if r.thinking.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                        format!("💭 {h}")
+                    } else {
+                        h
+                    }
+                },
+                body: match tags::monitor(content) {
+                    Some(m) => content[m.end..].trim().to_string(),
+                    None => tags::body_of(content),
+                },
+                reply: tags::is_reply(content),
+                mark: mark_of(r),
+                closure,
+                asking,
+                // A clear is expandable: opening it is how the rows behind come back.
+                // One child is not a nesting (see 8-9), so only a BRANCH opens.
+                expandable: kids.get(&r.id).is_some_and(|k| k.len() > 1)
+                    || r.kind_is("fold")
+                    || r.kind_is("clear"),
+                expanded,
+                pinned: a.st.pins.contains(&r.id),
+                covered_by: hidden_by.get(&r.id).copied(),
+                from: v.map(|v| v.from.clone()),
+                msg: v.and_then(|v| v.msg),
+                re: v.and_then(|v| v.re),
+                bytes: r.bytes(),
+            }
+        };
 
     // ── 8-9. Emit. Folded by default: a CLOSED root is one line unless the
     // human opened or pinned it. Anything that is still running stays open,
@@ -541,7 +554,13 @@ pub fn outline(a: Args<'_>) -> Outline {
             let Some(r) = by_id.get(&id) else { continue };
             let cs = kids.get(&id).map(Vec::as_slice).unwrap_or(&[]);
             let deeper = cs.len() > 1 && (a.st.pins.contains(&id) || a.st.open.contains(&id));
-            lines.push(line_for(r, depth, closure, waiting_ids.contains(&id), deeper));
+            lines.push(line_for(
+                r,
+                depth,
+                closure,
+                waiting_ids.contains(&id),
+                deeper,
+            ));
             if cs.len() == 1 {
                 stack.push((cs[0], depth));
             } else if deeper {
@@ -670,10 +689,14 @@ mod tests {
                 let step = next();
                 rows.push(json!({"id":call,"agent":"ai_b","kind":"call","verb":"read_stream","parent":root,"ts":call}));
                 rows.push(json!({"id":task,"agent":"ai_b","kind":"task","verb":"read_stream","parent":call,"ts":task}));
-                rows.push(json!({"id":reply,"agent":"ai_b","role":"user","parent":root,"ts":reply,
-                                 "content":format!("[from files · re {call}]\nchunk {k}")}));
-                rows.push(json!({"id":step,"agent":"ai_b","role":"assistant","parent":root,"ts":step,
-                                 "content":format!("step {k} of turn {t}")}));
+                rows.push(
+                    json!({"id":reply,"agent":"ai_b","role":"user","parent":root,"ts":reply,
+                                 "content":format!("[from files · re {call}]\nchunk {k}")}),
+                );
+                rows.push(
+                    json!({"id":step,"agent":"ai_b","role":"assistant","parent":root,"ts":step,
+                                 "content":format!("step {k} of turn {t}")}),
+                );
                 if t == 0 {
                     first_steps.extend([call, task, reply, step]);
                 }
@@ -689,9 +712,11 @@ mod tests {
                 l1.push(f);
             }
             let f2 = next();
-            rows.push(json!({"id":f2,"agent":"ai_b","role":"user","kind":"fold","level":2,
+            rows.push(
+                json!({"id":f2,"agent":"ai_b","role":"user","kind":"fold","level":2,
                              "parent":first_root,"refs":l1,"title":"the whole search","ts":f2,
-                             "content":format!("[fold {f2} · 4 refs · L2]")}));
+                             "content":format!("[fold {f2} · 4 refs · L2]")}),
+            );
             let v = next();
             rows.push(json!({"id":v,"agent":"ai_b","kind":"view","v":1,"budget":14976,"why":"projection: fold",
                              "ids":[{"id":first_root,"res":"full"},{"id":f2,"res":"full"}],"ts":v}));
@@ -700,7 +725,12 @@ mod tests {
                              "title":"the turn-0 instruction","content":format!("[recall {r} · kept 2 rows]")}));
         }
         let mut s = Store::default();
-        s.apply_full(&"ai_b".to_string(), rows.into_iter().map(|v| serde_json::from_value(v).unwrap()).collect());
+        s.apply_full(
+            &"ai_b".to_string(),
+            rows.into_iter()
+                .map(|v| serde_json::from_value(v).unwrap())
+                .collect(),
+        );
         s
     }
     fn fixture_outline(s: &Store, agent: &str, st: &OutlineState) -> Outline {
@@ -748,7 +778,10 @@ mod tests {
         ]);
         let o = plain(&s);
         assert_eq!(ids(&o), vec![1, 3, 5], "the notice is not drawn");
-        assert_eq!(o.lines[2].depth, 1, "the reply after the notice hangs off the turn, not off the hidden row");
+        assert_eq!(
+            o.lines[2].depth, 1,
+            "the reply after the notice hangs off the turn, not off the hidden row"
+        );
     }
 
     #[test]
@@ -760,12 +793,21 @@ mod tests {
                    "content":"[from solver]\nwhich port?"}),
         ]);
         let w = waiting_for(&s, &ai(), crate::env::HUMAN);
-        assert_eq!(w.iter().map(|w| w.row).collect::<Vec<_>>(), vec![2], "a delivery asks nothing");
+        assert_eq!(
+            w.iter().map(|w| w.row).collect::<Vec<_>>(),
+            vec![2],
+            "a delivery asks nothing"
+        );
         let o = plain(&s);
         let m = &o.lines[o.position(1).unwrap()];
         assert_eq!(
             m.kind,
-            LineKind::Monitor { id: 787, job: 514, label: Some("w5".into()), ended: false }
+            LineKind::Monitor {
+                id: 787,
+                job: 514,
+                label: Some("w5".into()),
+                ended: false
+            }
         );
         assert_eq!(m.body, "FATAL w5: loss diverged");
         assert_eq!(m.head, "FATAL w5: loss diverged");
@@ -1088,15 +1130,27 @@ mod tests {
         ]);
         let closed = run(&s, &OutlineState::default(), &[], &[]);
         let heads: Vec<&str> = closed.lines.iter().map(|l| l.head.as_str()).collect();
-        assert!(heads.iter().all(|h| !h.contains("old")), "rows behind the clear are not drawn: {heads:?}");
-        assert!(heads[0].contains("cleared 3"), "the clear row starts the thread: {heads:?}");
+        assert!(
+            heads.iter().all(|h| !h.contains("old")),
+            "rows behind the clear are not drawn: {heads:?}"
+        );
+        assert!(
+            heads[0].contains("cleared 3"),
+            "the clear row starts the thread: {heads:?}"
+        );
         assert!(heads.iter().any(|h| h.contains("new question")));
-        assert!(closed.lines[0].expandable, "the clear is the handle to what is behind it");
+        assert!(
+            closed.lines[0].expandable,
+            "the clear is the handle to what is behind it"
+        );
 
         let mut st = OutlineState::default();
         st.open.insert(3);
         let opened = run(&s, &st, &[], &[]);
-        assert!(opened.lines.iter().any(|l| l.head.contains("old question")), "opening the clear brings them back");
+        assert!(
+            opened.lines.iter().any(|l| l.head.contains("old question")),
+            "opening the clear brings them back"
+        );
     }
 
     #[test]
@@ -1111,7 +1165,10 @@ mod tests {
         let o = run(&s, &OutlineState::default(), &[], &[]);
         let heads: Vec<&str> = o.lines.iter().map(|l| l.head.as_str()).collect();
         assert_eq!(heads.len(), 2, "{heads:?}");
-        assert!(heads[0].contains("cleared 4") && heads[1] == "c", "{heads:?}");
+        assert!(
+            heads[0].contains("cleared 4") && heads[1] == "c",
+            "{heads:?}"
+        );
     }
 
     #[test]
@@ -1124,8 +1181,15 @@ mod tests {
         assert_eq!(w[0].from, "other");
         assert_eq!(w[0].head, "which port?");
         let o = run(&s, &OutlineState::default(), &[], &w);
-        assert!(o.lines[0].asking, "an open question is a badge on its thread");
-        assert_ne!(o.lines[0].closure, Closure::Running, "and it is not work in flight");
+        assert!(
+            o.lines[0].asking,
+            "an open question is a badge on its thread"
+        );
+        assert_ne!(
+            o.lines[0].closure,
+            Closure::Running,
+            "and it is not work in flight"
+        );
         assert_eq!(o.lines[0].kind, LineKind::Waiting);
     }
 
@@ -1189,13 +1253,21 @@ mod tests {
         st.open.insert(1);
         let o = run(&s, &st, &[], &[]);
         let at: Vec<(RowId, u8)> = o.lines.iter().map(|l| (l.id, l.depth)).collect();
-        assert_eq!(at, vec![(1, 0), (2, 1), (3, 1), (4, 1)], "a chain is flat; the branch is closed");
+        assert_eq!(
+            at,
+            vec![(1, 0), (2, 1), (3, 1), (4, 1)],
+            "a chain is flat; the branch is closed"
+        );
         assert!(!o.lines[1].expandable, "one child is not a nesting");
         assert!(o.lines[3].expandable, "two children are a branch");
         st.open.insert(4);
         let o = run(&s, &st, &[], &[]);
         let at: Vec<(RowId, u8)> = o.lines.iter().map(|l| (l.id, l.depth)).collect();
-        assert_eq!(at, vec![(1, 0), (2, 1), (3, 1), (4, 1), (5, 2), (6, 2)], "opened, the branch nests once");
+        assert_eq!(
+            at,
+            vec![(1, 0), (2, 1), (3, 1), (4, 1), (5, 2), (6, 2)],
+            "opened, the branch nests once"
+        );
     }
 
     // ── determinism + a long log ───────────────────────────────────────

@@ -3,5 +3,4 @@
 //! `Attract → (key) → Minimizing → Live`, and from `Live` the later steps
 //! writes to the directory before the key press.
 
-
 pub mod seed;

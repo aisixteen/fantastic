@@ -20,7 +20,13 @@ use crate::kern::host::Host;
 pub const HOME_ID: &str = "user_home";
 
 /// Exactly the verbs the human calls on it (three are privileged: named).
-const VERBS: [&str; 5] = ["persist_record", "forget_record", "load_tree", "prefer", "reflect"];
+const VERBS: [&str; 5] = [
+    "persist_record",
+    "forget_record",
+    "load_tree",
+    "prefer",
+    "reflect",
+];
 
 /// One saved set-up.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,7 +38,11 @@ pub struct Saved {
 
 impl Saved {
     fn field(&self, k: &str) -> String {
-        self.record.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+        self.record
+            .get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
     }
     pub fn handler(&self) -> String {
         self.field("handler_module")
@@ -54,10 +64,12 @@ pub struct Shelf {
 }
 
 fn err_of(v: &Value) -> Option<String> {
-    v.get("error").and_then(Value::as_str).map(|e| match v.get("hint").and_then(Value::as_str) {
-        Some(h) => format!("{e} — {h}"),
-        None => e.to_string(),
-    })
+    v.get("error")
+        .and_then(Value::as_str)
+        .map(|e| match v.get("hint").and_then(Value::as_str) {
+            Some(h) => format!("{e} — {h}"),
+            None => e.to_string(),
+        })
 }
 
 /// Make `user_home` exist under `user`, its `callable_by` exactly [`VERBS`] for
@@ -78,7 +90,12 @@ pub async fn ensure(host: &Host) -> Result<(), String> {
             return Err(format!("could not create `{HOME_ID}`: {e}"));
         }
     } else {
-        let r = host.act("kernel", json!({"type": "update_agent", "id": HOME_ID, "callable_by": grant})).await;
+        let r = host
+            .act(
+                "kernel",
+                json!({"type": "update_agent", "id": HOME_ID, "callable_by": grant}),
+            )
+            .await;
         if let Some(e) = err_of(&r.result) {
             return Err(format!("could not narrow `{HOME_ID}`'s grants: {e}"));
         }
@@ -100,7 +117,11 @@ pub async fn shelf(host: &Host) -> Result<Shelf, String> {
         .filter_map(|t| {
             Some(Saved {
                 name: t.get("name")?.as_str()?.to_string(),
-                version: t.get("version").and_then(Value::as_str).unwrap_or("").to_string(),
+                version: t
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 record: t.get("record")?.as_object()?.clone(),
             })
         })
@@ -114,7 +135,13 @@ pub async fn shelf(host: &Host) -> Result<Shelf, String> {
 
 /// Save `record` as saved set-up `name`. Returns where it was written.
 pub async fn save(host: &Host, name: &str, record: Value) -> Result<String, String> {
-    let r = host.act(HOME_ID, json!({"type": "persist_record", "name": name, "record": record})).await.result;
+    let r = host
+        .act(
+            HOME_ID,
+            json!({"type": "persist_record", "name": name, "record": record}),
+        )
+        .await
+        .result;
     match err_of(&r) {
         Some(e) => Err(e),
         None => Ok(r["path"].as_str().unwrap_or("").to_string()),
@@ -123,7 +150,10 @@ pub async fn save(host: &Host, name: &str, record: Value) -> Result<String, Stri
 
 /// Make saved set-up `name` the default for new AI agents; `None` clears it.
 pub async fn prefer(host: &Host, name: Option<&str>) -> Result<Option<String>, String> {
-    let r = host.act(HOME_ID, json!({"type": "prefer", "name": name})).await.result;
+    let r = host
+        .act(HOME_ID, json!({"type": "prefer", "name": name}))
+        .await
+        .result;
     match err_of(&r) {
         Some(e) => Err(e),
         None => Ok(r["preferred"].as_str().map(str::to_string)),

@@ -23,8 +23,8 @@ pub mod ai;
 pub mod files;
 pub mod generic;
 pub mod setup;
-pub mod wizard;
 pub mod terminal;
+pub mod wizard;
 
 use serde_json::Value;
 
@@ -217,9 +217,15 @@ mod tests {
 
     #[test]
     fn the_shells_terminal_is_known_by_its_id_not_its_module() {
-        assert_eq!(PanelKind::of("term", "exec_bridge.tools"), PanelKind::Terminal);
+        assert_eq!(
+            PanelKind::of("term", "exec_bridge.tools"),
+            PanelKind::Terminal
+        );
         // Any other command runner is not the shell's terminal.
-        assert_eq!(PanelKind::of("exec", "exec_bridge.tools"), PanelKind::Generic);
+        assert_eq!(
+            PanelKind::of("exec", "exec_bridge.tools"),
+            PanelKind::Generic
+        );
     }
 
     #[test]

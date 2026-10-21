@@ -20,7 +20,10 @@ use serde_json::{json, Value};
 
 fn registry() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
-    reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+    reg.register(
+        fantastic_core::HANDLER_MODULE,
+        fantastic_core::KernelStateBundle::default(),
+    );
     reg.register("file_bridge.tools", fantastic_file::FileBundle::default());
     reg.register(
         fantastic_sqlite_store::HANDLER_MODULE,
@@ -30,7 +33,10 @@ fn registry() -> BundleRegistry {
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
-    reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
+    reg.register(
+        fantastic_user::HANDLER_MODULE,
+        fantastic_user::UserBundle::default(),
+    );
     reg
 }
 
@@ -82,21 +88,28 @@ fn seed(dir: &std::path::Path) {
 /// is made from inside `user`'s own handler, so it carries `user`.
 async fn act(kernel: &std::sync::Arc<Kernel>, target: &str, payload: Value) -> Value {
     let k = std::sync::Arc::clone(kernel);
-    let item = Item::new(AgentId::from("user"), json!({"type":"forward","target":target,"payload":payload}));
+    let item = Item::new(
+        AgentId::from("user"),
+        json!({"type":"forward","target":target,"payload":payload}),
+    );
     k.send(vec![item]).await.remove(0).result
 }
 
-
 /// Is a process whose command line contains `pat` alive?
 fn alive(pat: &str) -> bool {
-    let out = Command::new("pgrep").args(["-f", pat]).output().expect("pgrep runs");
+    let out = Command::new("pgrep")
+        .args(["-f", pat])
+        .output()
+        .expect("pgrep runs");
     !out.stdout.is_empty()
 }
 
 /// Boot the seeded set, start `$SHELL` as a PTY job on `exec`, and have it start
 /// a background, a foreground and a `nohup`ed child — the processes a human
 /// leaves behind in a terminal. Returns the kernel and the three markers.
-async fn shell_with_children(tag: &str) -> (std::sync::Arc<Kernel>, std::path::PathBuf, [String; 3]) {
+async fn shell_with_children(
+    tag: &str,
+) -> (std::sync::Arc<Kernel>, std::path::PathBuf, [String; 3]) {
     let dir = std::env::temp_dir().join(format!("fc-term-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -112,11 +125,20 @@ async fn shell_with_children(tag: &str) -> (std::sync::Arc<Kernel>, std::path::P
         .await;
     assert_eq!(kernel.start(false).await["started"], json!(true));
     for id in &booted.loaded {
-        kernel.send(vec![Item::new(id.clone(), json!({"type":"boot"}))]).await;
+        kernel
+            .send(vec![Item::new(id.clone(), json!({"type":"boot"}))])
+            .await;
     }
     let sh = std::env::var("SHELL").expect("SHELL is set");
-    let started = act(&kernel, "exec", json!({"type":"start","command":sh,"pty":{"cols":80,"rows":24}})).await;
-    let job = started["job_id"].as_i64().unwrap_or_else(|| panic!("{started}"));
+    let started = act(
+        &kernel,
+        "exec",
+        json!({"type":"start","command":sh,"pty":{"cols":80,"rows":24}}),
+    )
+    .await;
+    let job = started["job_id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{started}"));
     // Distinct per test and per run, so a leftover of another run never counts.
     let n = std::process::id() % 1000;
     let m: [String; 3] = [
@@ -125,7 +147,12 @@ async fn shell_with_children(tag: &str) -> (std::sync::Arc<Kernel>, std::path::P
         format!("sleep 73{n:03}{}", tag.len()),
     ];
     let line = format!("{} &\rnohup {} >/dev/null 2>&1 &\r{}\r", m[0], m[2], m[1]);
-    let w = act(&kernel, "exec", json!({"type":"write","job_id":job,"data":line})).await;
+    let w = act(
+        &kernel,
+        "exec",
+        json!({"type":"write","job_id":job,"data":line}),
+    )
+    .await;
     assert!(w.get("error").is_none(), "{w}");
     for _ in 0..100 {
         if m.iter().all(|p| alive(p)) {
@@ -156,7 +183,10 @@ async fn no_process_outlives_its_terminal() {
     // Closing the terminal (`t` again, a canvas frame's close): `delete_agent`.
     let (kernel, _dir, m) = shell_with_children("close").await;
     let r = kernel
-        .send(vec![Item::new(AgentId::from("kernel"), json!({"type":"delete_agent","id":"exec"}))])
+        .send(vec![Item::new(
+            AgentId::from("kernel"),
+            json!({"type":"delete_agent","id":"exec"}),
+        )])
         .await
         .remove(0)
         .result;

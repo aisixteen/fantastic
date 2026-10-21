@@ -84,7 +84,10 @@ pub fn main(argv: &[String]) -> ! {
 
 /// ATTACH: relay stdio to the running kernel's socket until it closes.
 fn attach(pid: u32) -> ! {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("fantastic mcp: no runtime: {e}");
@@ -145,7 +148,10 @@ fn own(paths: Paths) -> ! {
         )
         .init();
 
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             let _ = writeln!(err_out, "fantastic mcp: no runtime: {e}");
@@ -171,7 +177,12 @@ fn fatal(err_out: &mut std::fs::File, msg: &str) -> i32 {
     1
 }
 
-async fn serve(paths: Paths, fresh: bool, std_out: std::fs::File, err_out: &mut std::fs::File) -> i32 {
+async fn serve(
+    paths: Paths,
+    fresh: bool,
+    std_out: std::fs::File,
+    err_out: &mut std::fs::File,
+) -> i32 {
     if fresh {
         if let Err(e) = crate::boot::seed::write_all(&paths) {
             return fatal(err_out, &format!("init failed: {e}"));
@@ -227,7 +238,10 @@ pub struct Served {
 
 impl Served {
     pub fn new(host: Arc<Host>) -> Arc<Self> {
-        Arc::new(Self { host, core: OnceCell::new() })
+        Arc::new(Self {
+            host,
+            core: OnceCell::new(),
+        })
     }
 
     async fn core(&self) -> Result<Arc<McpCore>, String> {
@@ -250,7 +264,8 @@ impl Served {
 /// already there is stale.
 pub fn listen(served: Arc<Served>) -> Result<(), String> {
     let _ = std::fs::remove_file(SOCKET);
-    let l = crate::sys::bind_local(SOCKET).map_err(|e| format!("could not open the MCP socket `{SOCKET}`: {e}"))?;
+    let l = crate::sys::bind_local(SOCKET)
+        .map_err(|e| format!("could not open the MCP socket `{SOCKET}`: {e}"))?;
     crate::sys::make_private(SOCKET)
         .map_err(|e| format!("could not make `{SOCKET}` private: {e}"))?;
     tokio::spawn(async move {
@@ -323,14 +338,19 @@ where
             Ok(c) => c,
             Err(e) => {
                 if let Some(id) = msg.get("id") {
-                    let _ = tx.send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":e}})).await;
+                    let _ = tx
+                        .send(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":e}}))
+                        .await;
                 }
                 continue;
             }
         };
         // Cancellation is a notification naming the request.
         if msg.get("method").and_then(Value::as_str) == Some("notifications/cancelled") {
-            let rid = msg.pointer("/params/requestId").map(|v| v.to_string()).unwrap_or_default();
+            let rid = msg
+                .pointer("/params/requestId")
+                .map(|v| v.to_string())
+                .unwrap_or_default();
             let task = inflight.lock().expect("inflight poisoned").remove(&rid);
             if let Some(t) = task {
                 let r = core.cancel(&t).await;
@@ -366,7 +386,11 @@ where
 
 /// Bind the leg, creating it the first time; then god mode (`kern/reach`).
 pub(crate) async fn ensure_leg(host: &Host) -> Result<(), String> {
-    let existing = host.kernel.agents.get(&fantastic_kernel::AgentId::from(LEG)).map(|e| e.value().handler_module.clone());
+    let existing = host
+        .kernel
+        .agents
+        .get(&fantastic_kernel::AgentId::from(LEG))
+        .map(|e| e.value().handler_module.clone());
     match existing {
         Some(handler) => {
             if handler.as_deref() != Some(HANDLER_MODULE) {

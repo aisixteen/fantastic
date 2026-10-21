@@ -38,7 +38,10 @@ fn docs() -> impl Iterator<Item = (&'static str, &'static str)> {
 
 /// A doc's one-line summary: its leading `> ` line.
 fn summary(text: &str) -> &str {
-    text.lines().next().and_then(|l| l.strip_prefix("> ")).unwrap_or("")
+    text.lines()
+        .next()
+        .and_then(|l| l.strip_prefix("> "))
+        .unwrap_or("")
 }
 
 /// `fantastic readme` → the index; `fantastic readme <key>` → that doc. Reads
@@ -93,7 +96,12 @@ mod tests {
             assert!(!summary(t).is_empty(), "`{k}` opens with no `> ` summary");
             assert!(keys.insert(k), "`{k}` twice");
         }
-        assert!(keys.contains("canvas") && keys.contains("mcp") && keys.contains("setup") && keys.contains("agents"));
+        assert!(
+            keys.contains("canvas")
+                && keys.contains("mcp")
+                && keys.contains("setup")
+                && keys.contains("agents")
+        );
     }
 
     #[test]
