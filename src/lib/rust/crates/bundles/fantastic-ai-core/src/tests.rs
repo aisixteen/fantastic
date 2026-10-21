@@ -6203,6 +6203,76 @@ async fn the_good_calls_run_and_the_broken_one_comes_back_beside_them() {
     );
 }
 
+/// #188 end to end: a valid call wrapped in `<tool_call>` is NOT dispatched, the
+/// top-level call beside it runs, and the batch carries the wrapper's report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wrapped_call_is_not_dispatched_and_the_top_level_one_runs() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "cc_d").await;
+    let good = call_envelope("kernel", json!({"type": "reflect", "tree": "none"}), None);
+    let s = script(
+        &backend,
+        vec![
+            pass(format!("<tool_call>{good}</tool_call>\n{good}")),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the batch did not come back");
+    let batch = last_content(&s, 1);
+    assert!(
+        batch.contains("[malformed call — nothing ran] line 1, col 1:"),
+        "{batch}"
+    );
+    assert!(batch.contains("drop the wrapper"), "{batch}");
+    assert!(
+        batch.contains("The other call of this answer ran"),
+        "{batch}"
+    );
+    // One reflect reply: the top-level call ran, the wrapped copy did not.
+    assert_eq!(batch.matches("kernel reflect").count(), 1, "{batch}");
+}
+
+/// An answer whose only markup is an open wrapper with no call in it gets the
+/// wrapper report, not only the generic no-call reminder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_wrapper_is_reported_by_name_not_only_reminded() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "cc_e").await;
+    let s = script(
+        &backend,
+        vec![
+            pass("<tool_call>\n<function_calls>\n<function_calls>\n</function_calls>"),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 2).await, "the report did not come back");
+    let nxt = last_content(&s, 1);
+    assert!(!nxt.contains("[no call was dispatched]"), "{nxt}");
+    assert!(nxt.contains("`<tool_call>` holds no call"), "{nxt}");
+    assert!(
+        nxt.contains("<call name=\"send\">\n<target_id>agent id</target_id>"),
+        "{nxt}"
+    );
+}
+
 /// A model stuck on one broken shape still ends: a turn whose only output is
 /// broken calls ran nothing, and counts as silent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

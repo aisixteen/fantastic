@@ -43,7 +43,7 @@ mod tests_malformed;
 #[cfg(test)]
 mod tests_render;
 
-use grammar::{envelopes, parse_call, Malformed};
+use grammar::{envelopes_in, parse_call, Malformed};
 
 pub use grammar::{BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN, TOOLS};
 pub use render::{render_call, render_reply};
@@ -74,11 +74,17 @@ struct Found<'a> {
 
 fn scan(text: &str) -> Vec<Found<'_>> {
     let mut out = Vec::new();
-    for (_pos, after, end) in envelopes(text) {
+    for env in envelopes_in(text) {
+        // A call INSIDE a wrapper tag is not dispatched and is not malformed here
+        // either: it is refused and reported by `call_check`, which owns that
+        // report, so it is not reported twice.
+        if env.wrapper.is_some() {
+            continue;
+        }
         // UNTERMINATED (`end == None`) is not a truncation guess: the envelope is
         // the LAST thing in the completion, so there is nothing after it to
         // misread.
-        let block = &text[after..end.unwrap_or(text.len())];
+        let block = &text[env.body..env.end.unwrap_or(text.len())];
         let (call, fault) = match parse_call(block) {
             Ok(call) => (call, None),
             Err(Malformed(fault)) => (None, Some(fault)),
@@ -90,7 +96,7 @@ fn scan(text: &str) -> Vec<Found<'_>> {
             block,
             call,
             fault,
-            terminated: end.is_some(),
+            terminated: env.end.is_some(),
         });
     }
     out
@@ -120,9 +126,11 @@ pub fn terminated_calls(text: &str) -> Vec<(ToolCall, String)> {
 }
 
 /// Non-streaming: pull every finalized `<call>` out of a complete string. A call
-/// with no `</call>` is NOT a call: the model stopped
-/// generating before it closed, so nothing is dispatched — the turn's cut marker
-/// names it as not sent ([`crate::stream_parts::cut_marker`]).
+/// with no `</call>` is NOT a call: the model stopped generating before it closed,
+/// so nothing is dispatched — the turn's cut marker names it as not sent
+/// ([`crate::stream_parts::cut_marker`]). A call written inside a wrapper tag is not
+/// one either (#188): the router refuses it, so folds and projection, which read the
+/// same calls, do not count it.
 #[must_use]
 pub fn extract_tool_calls(text: &str) -> Vec<ToolCall> {
     scan(text)

@@ -20,7 +20,9 @@
 //! into the answer (the mask keeps every byte where it was); lines and columns are
 //! counted in characters, as python counts them.
 
-use crate::tool_parse::grammar::{envelopes, ROUTING};
+use crate::tool_parse::grammar::{
+    elements, envelopes, envelopes_in, open_tags, parse_call, Envelope, Malformed, OpenTag, ROUTING,
+};
 use crate::tool_parse::{defang, CLOSE, TOOLS};
 use fantastic_bundle::py_str;
 use regex::Regex;
@@ -31,6 +33,8 @@ use std::sync::OnceLock;
 pub const MAX_REPORTS: usize = 3;
 /// Chars of a quoted line.
 const SHOWN: usize = 160;
+/// The last line of every report: the form, in one sentence.
+const FORM: &str = "A call is <call name=\"…\">, one child tag per argument, closed by </call>.";
 
 /// The argument tags a call carries that are ours by name: the routing fields and
 /// the two every payload has.
@@ -497,32 +501,133 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
     if !notes.is_empty() {
         out.push(format!("also: {}.", notes.join("; ")));
     }
-    out.push(
-        "A call is <call name=\"…\">, one child tag per argument, closed by </call>.".to_string(),
-    );
+    out.push(FORM.to_string());
     out.join("\n")
 }
 
-/// One report per call the answer wrote outside every `<call` envelope, in document
-/// order (at most [`MAX_REPORTS`], then a count); empty when there is none. `ran` is
-/// how many of the answer's calls were dispatched — said in each report, so the
-/// model knows its well-formed calls are not to be written again.
+/// A span of the answer as a token, for [`place`] — a wrapper tag is one.
+fn span_tok(text: &str, start: usize, end: usize) -> Tok {
+    Tok {
+        kind: Kind::Other,
+        text: text[start..end].to_string(),
+        start,
+        end,
+        name: None,
+        arg: None,
+        closing: false,
+        bare: false,
+    }
+}
+
+/// The report for a call written INSIDE a wrapper tag (see [`envelopes_in`]). It is
+/// not dispatched; the caret sits under the wrapper, and the call is shown bare —
+/// the form to write. `None` for a block that is not a call at all (a `<call` with
+/// no `name=` head, which the scanner steps over too).
+fn wrapped_report(text: &str, env: &Envelope, end: usize, wrapper: &OpenTag) -> Option<String> {
+    let block = &text[env.body..end];
+    let body = &block[block.find('>').map_or(0, |i| i + 1)..];
+    let (line, col, quoted, caret) = place(text, &span_tok(text, wrapper.start, wrapper.end));
+    let mut out = vec![
+        format!("[malformed call — nothing ran] line {line}, col {col}:"),
+        format!("  {quoted}"),
+        format!(
+            "  {caret} drop the wrapper: write the call at the top level, as <call name=\"…\">…</call>"
+        ),
+    ];
+    match (parse_call(block), elements(body)) {
+        (Ok(None), _) => return None,
+        (Ok(Some(call)), Ok(kids)) => {
+            // The arguments as the model wrote them — the raw text of each tag, so a
+            // nested `<item>` list or a `bytes` document is copied, not re-read.
+            let args: Vec<(String, Value)> = kids
+                .into_iter()
+                .map(|(k, raw)| (k, Value::String(raw.trim().to_string())))
+                .collect();
+            out.push("write it as:".to_string());
+            out.push(expected(&call.name, &args));
+        }
+        (Err(Malformed(fault)), _) | (_, Err(Malformed(fault))) => {
+            out.push(format!("also: the call inside does not parse — {fault}."));
+        }
+    }
+    out.push(FORM.to_string());
+    Some(out.join("\n"))
+}
+
+/// An answer with NO call envelope in it, whose tags are left open — a wrapper that
+/// holds no call (`<tool_call> <function_calls>`). Named after the outermost open
+/// tag, with the form to write. `None` when there is any envelope, so a call that
+/// ran is never followed by a report about its own wrapper.
+fn wrapper_only(answer: &str) -> Option<String> {
+    if !envelopes(answer).is_empty() {
+        return None;
+    }
+    let outer = open_tags(answer).into_iter().next()?;
+    let (line, col, quoted, caret) = place(answer, &span_tok(answer, outer.start, outer.end));
+    let example = vec![
+        (
+            "target_id".to_string(),
+            Value::String("agent id".to_string()),
+        ),
+        ("type".to_string(), Value::String("verb".to_string())),
+    ];
+    Some(
+        [
+            format!("[malformed call — nothing ran] line {line}, col {col}:"),
+            format!("  {quoted}"),
+            format!(
+                "  {caret} `{}` holds no call — write one at the top level, as <call name=\"…\">…</call>",
+                defang(&answer[outer.start..outer.end])
+            ),
+            "write it as:".to_string(),
+            expected("send", &example),
+            FORM.to_string(),
+        ]
+        .join("\n"),
+    )
+}
+
+/// One report per call the answer wrote wrongly, in document order (at most
+/// [`MAX_REPORTS`], then a count); empty when there is none. A wrongly written call is
+/// either markup outside every `<call` envelope, or a complete `<call` envelope inside
+/// a wrapper tag (refused by the scanner, see [`envelopes_in`]). An answer with
+/// nothing but an open wrapper gets one report naming it. `ran` is how many of the
+/// answer's calls were dispatched — said in each report, so the model knows its
+/// well-formed calls are not to be written again.
 #[must_use]
 pub fn check(answer: &str, ran: usize) -> Vec<String> {
     let masked = mask(answer);
-    let found = calls(&masked, tokens(&masked));
-    let mut reports: Vec<String> = found
+    let mut found: Vec<(usize, String)> = calls(&masked, tokens(&masked))
         .iter()
-        .take(MAX_REPORTS)
-        .map(|c| report(answer, &masked, c))
+        .map(|c| {
+            let at = c.toks.first().expect("a run has a token").start;
+            (at, report(answer, &masked, c))
+        })
         .collect();
-    if found.len() > MAX_REPORTS {
+    for env in envelopes_in(answer) {
+        if let (Some(wrapper), Some(end)) = (env.wrapper.as_ref(), env.end) {
+            if let Some(r) = wrapped_report(answer, &env, end, wrapper) {
+                found.push((env.start, r));
+            }
+        }
+    }
+    found.sort_by_key(|(at, _)| *at);
+    let total = found.len();
+    let mut reports: Vec<String> = found
+        .into_iter()
+        .take(MAX_REPORTS)
+        .map(|(_, r)| r)
+        .collect();
+    if total > MAX_REPORTS {
         if let Some(last) = reports.last_mut() {
             last.push_str(&format!(
                 "\n({} more malformed calls not shown.)",
-                found.len() - MAX_REPORTS
+                total - MAX_REPORTS
             ));
         }
+    }
+    if reports.is_empty() {
+        reports.extend(wrapper_only(answer));
     }
     if ran > 0 {
         let tail = if ran == 1 {

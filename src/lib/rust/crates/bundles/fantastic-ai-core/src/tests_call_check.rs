@@ -2,6 +2,12 @@
 //! for string (the reports are the parity proof).
 
 use super::{check, repair, MAX_REPORTS};
+use crate::think::without_thinking;
+use crate::tool_parse::extract_tool_calls;
+
+const SEND: &str = "<call name=\"send\"><target_id>files</target_id><type>reflect</type></call>";
+const DROP: &str =
+    "drop the wrapper: write the call at the top level, as <call name=\"…\">…</call>";
 
 const E59: &str = "I'll look at the files agent.\n<tool_call>\n<function=call name=\"send\">\n\
 <target_id>files</target_id>\n<type>reflect</type>\n</call>\n</tool_call>";
@@ -230,4 +236,110 @@ fn repair_gives_a_dropped_lt_back_and_nothing_else() {
     ] {
         assert_eq!(repair(same), same);
     }
+}
+
+/// #188: a valid call inside a `<tool_call>` wrapper is NOT dispatched. The report
+/// puts the caret under the wrapper and shows the call bare, the form to write.
+#[test]
+fn a_call_inside_a_tool_call_wrapper_is_refused_with_the_bare_rewrite() {
+    let answer = format!("I'll look at the files agent.\n<tool_call>{SEND}</tool_call>");
+    assert_eq!(
+        check(&answer, 0),
+        vec![format!(
+            "[malformed call — nothing ran] line 2, col 1:\n  \
+             <tool_call>‹call name=\"send\"><target_id>files</target_id><type>reflect</type>‹/call›</tool_call>\n  \
+             ^~~~~~~~~~~ {DROP}\nwrite it as:\n<call name=\"send\">\n<target_id>files</target_id>\n\
+             <type>reflect</type>\n</call>\n{TAIL}"
+        )]
+    );
+}
+
+/// The wrapper is any tag, not a fixed list of names.
+#[test]
+fn a_call_inside_an_arbitrary_tag_is_refused() {
+    let r = &check(&format!("<foo>\n{SEND}\n</foo>"), 0)[0];
+    assert!(
+        r.starts_with("[malformed call — nothing ran] line 1, col 1:\n  <foo>\n  ^~~~~ "),
+        "{r}"
+    );
+    assert!(r.contains(&format!("  ^~~~~ {DROP}\n")), "{r}");
+    assert!(r.contains("write it as:\n<call name=\"send\">\n<target_id>files</target_id>"));
+}
+
+/// A wrapped call with a fault inside is refused too, and the fault is named.
+#[test]
+fn a_malformed_call_inside_a_wrapper_names_its_fault() {
+    let answer = "<tool_call><call name=\"send\"><type>reflect</type></call></tool_call>";
+    let r = &check(answer, 0)[0];
+    assert!(
+        r.contains("also: the call inside does not parse — a send names its target"),
+        "{r}"
+    );
+    assert!(!r.contains("write it as:"), "{r}");
+}
+
+/// The wrapped call is refused; the top-level one is not a report, and the report
+/// says the other call ran.
+#[test]
+fn a_top_level_call_beside_a_wrapped_one_runs_and_the_report_says_so() {
+    let answer = format!("{SEND}\n<tool_call>{SEND}</tool_call>");
+    assert_eq!(extract_tool_calls(&answer).len(), 1);
+    let reports = check(&answer, 1);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].starts_with("[malformed call — nothing ran] line 2, col 1:"));
+    assert!(reports[0].ends_with(
+        "The other call of this answer ran — its reply is in this batch; do not write it \
+         again."
+    ));
+}
+
+/// A closed tag before a call wraps nothing: the call runs and no report comes.
+#[test]
+fn a_call_after_a_closed_tag_is_not_wrapped() {
+    let answer = format!("<b>x</b> {SEND}");
+    assert_eq!(extract_tool_calls(&answer).len(), 1);
+    assert!(check(&answer, 1).is_empty());
+}
+
+/// Thinking is stripped before the answer is read: a call after `</think>` runs,
+/// and one inside `<think>` is not an answer call at all.
+#[test]
+fn a_call_after_think_runs_and_one_inside_think_does_not() {
+    let answer = format!("<think>plan {SEND}</think>\n{SEND}");
+    let stripped = without_thinking(&answer);
+    assert_eq!(extract_tool_calls(&stripped).len(), 1);
+    assert!(check(&stripped, 1).is_empty());
+}
+
+/// An answer with no call at all whose tag is left open names the wrapper and shows
+/// the form to write — not only the generic no-call reminder.
+#[test]
+fn an_empty_wrapper_gets_the_wrapper_report() {
+    let answer = "<tool_call>\n<function_calls>\n<function_calls>\n</function_calls>";
+    assert_eq!(
+        check(answer, 0),
+        vec![format!(
+            "[malformed call — nothing ran] line 1, col 1:\n  <tool_call>\n  ^~~~~~~~~~~ \
+             `<tool_call>` holds no call — write one at the top level, as \
+             <call name=\"…\">…</call>\nwrite it as:\n<call name=\"send\">\n\
+             <target_id>agent id</target_id>\n<type>verb</type>\n</call>\n{TAIL}"
+        )]
+    );
+}
+
+/// Prose around an open wrapper is still an open wrapper with no call in it.
+#[test]
+fn an_open_wrapper_after_prose_is_named() {
+    let r = &check("I'll look at the files.\n<tool_call>", 0)[0];
+    assert!(
+        r.starts_with("[malformed call — nothing ran] line 2, col 1:\n  <tool_call>"),
+        "{r}"
+    );
+}
+
+/// A wrapper is only a wrapper while it is open: a closed one, with no call in it, is
+/// not reported.
+#[test]
+fn a_closed_empty_wrapper_is_not_reported() {
+    assert!(check("<tool_call></tool_call>", 0).is_empty());
 }

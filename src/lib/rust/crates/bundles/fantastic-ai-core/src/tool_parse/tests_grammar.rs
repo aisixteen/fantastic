@@ -186,14 +186,16 @@ fn an_unterminated_call_is_not_a_call() {
     assert!(extract_tool_calls(text).is_empty() && malformed_calls(text).is_empty());
 }
 
+/// A call INSIDE `<think>` sits inside a tag, so it is not extracted (#188: a call
+/// inside any wrapper is refused); the top-level call after `</think>` is.
 #[test]
-fn several_calls_in_order_and_a_call_inside_think() {
+fn a_call_inside_think_is_not_extracted_and_one_after_it_is() {
     let text = format!("<think>first {WRITE}</think>then\n{PATCH}\n");
     let verbs: Vec<String> = extract_tool_calls(&text)
         .iter()
         .map(|c| payload(c)["type"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(verbs, vec!["write", "patch"]);
+    assert_eq!(verbs, vec!["patch"]);
 }
 
 #[test]

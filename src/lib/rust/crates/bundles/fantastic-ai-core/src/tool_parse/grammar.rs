@@ -29,7 +29,9 @@
 
 use fantastic_bundle::{is_alnum, is_space, py_str, py_truthy};
 use fantastic_kernel::{coerce_scalar, py_strip};
+use regex::Regex;
 use serde_json::{Map, Value};
+use std::sync::OnceLock;
 
 use super::shape::ToolCall;
 
@@ -125,6 +127,89 @@ pub fn envelopes(text: &str) -> Vec<(usize, usize, Option<usize>)> {
         }
     }
     out
+}
+
+/// A tag the model opened and has not closed yet: its byte span and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenTag {
+    /// Byte index of the `<`.
+    pub start: usize,
+    /// Byte index just past the `>`.
+    pub end: usize,
+    /// The tag's name, as written.
+    pub name: String,
+}
+
+/// One `<call` envelope, with the tag it was written inside, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Envelope {
+    /// Byte index of the `<call` opener.
+    pub start: usize,
+    /// Byte index just past `<call` — the block starts here, at ` name="…">`.
+    pub body: usize,
+    /// Byte index of the `</call>` closer; `None` when unterminated.
+    pub end: Option<usize>,
+    /// The OUTERMOST tag still open when the envelope starts (`<tool_call>` in
+    /// `<tool_call><call …`). `None` for a call at the top level.
+    pub wrapper: Option<OpenTag>,
+}
+
+fn tag_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"<(/?)([A-Za-z_][\w.\-]*)((?:\s[^<>\n]*?)?)(/?)>").expect("tag"))
+}
+
+/// Walks the tags of `text[from..to]`: an open tag is pushed; a close pops the most
+/// recent open tag of its name, and whatever opened after it. A close with no open
+/// tag of its name is stray and does nothing. A self-closing tag is not opened.
+fn track(text: &str, from: usize, to: usize, open: &mut Vec<OpenTag>) {
+    for c in tag_re().captures_iter(&text[from..to]) {
+        let whole = c.get(0).expect("match");
+        let name = c.get(2).map_or("", |g| g.as_str());
+        if !c.get(1).map_or("", |g| g.as_str()).is_empty() {
+            if let Some(i) = open.iter().rposition(|t| t.name == name) {
+                open.truncate(i);
+            }
+        } else if c.get(4).map_or("", |g| g.as_str()).is_empty() {
+            open.push(OpenTag {
+                start: from + whole.start(),
+                end: from + whole.end(),
+                name: name.to_string(),
+            });
+        }
+    }
+}
+
+/// Every envelope in document order, each with the tag it sits inside.
+///
+/// A call inside a wrapper is NOT dispatched. A wrapper is markup the model put
+/// around the call (`<tool_call>`, `<function_calls>`, any name); the call is refused
+/// and reported by [`crate::call_check`] until it is written at the top level. A
+/// tag closed before the call (`<b>x</b> <call …>`) wraps nothing.
+pub fn envelopes_in(text: &str) -> Vec<Envelope> {
+    let mut out = Vec::new();
+    let mut open: Vec<OpenTag> = Vec::new();
+    let mut at = 0usize;
+    for (start, body, end) in envelopes(text) {
+        track(text, at, start, &mut open);
+        out.push(Envelope {
+            start,
+            body,
+            end,
+            wrapper: open.first().cloned(),
+        });
+        at = end.map_or(text.len(), |e| e + CLOSE.len());
+    }
+    out
+}
+
+/// The tags still open at the end of `text`, outermost first. Meant for a text with
+/// no envelope in it: an envelope's own tags are not walked by [`envelopes_in`], and
+/// this does not skip them.
+pub fn open_tags(text: &str) -> Vec<OpenTag> {
+    let mut open = Vec::new();
+    track(text, 0, text.len(), &mut open);
+    open
 }
 
 /// The next `<name>` open tag at or after `from`: `(tag_start, body_start, name)`.
