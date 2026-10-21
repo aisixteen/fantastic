@@ -1099,3 +1099,39 @@ async fn a_native_tool_call_with_bad_arguments_is_an_error() {
     assert!(e.message.contains("native tool call 'send'"), "{e}");
     assert!(e.message.contains("not a JSON object"), "{e}");
 }
+
+// ─── transport: the LINK, not the model (#198) ──────────────────────────────
+
+#[tokio::test]
+async fn a_refused_connection_is_a_transport_error() {
+    let p = provider("http://127.0.0.1:1/v1");
+    let e = drain(&p, &hi(), None).await.expect_err("refused");
+    assert!(e.transport, "{e}");
+}
+
+#[tokio::test]
+async fn a_stream_without_a_finish_is_a_transport_error() {
+    let body = sse(&[delta(None, json!({"content": "hi"}))], false);
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    let e = drain(&p, &hi(), None).await.expect_err("no finish_reason");
+    assert!(e.message.contains("ended without a finish_reason"), "{e}");
+    assert!(e.transport, "{e}");
+}
+
+#[tokio::test]
+async fn an_api_400_is_not_a_transport_error() {
+    let (_server, endpoint) = server_with("bad request".to_string(), 400).await;
+    let p = provider(&endpoint);
+    let e = drain(&p, &hi(), None).await.expect_err("400");
+    assert!(!e.transport, "{e}");
+}
+
+#[tokio::test]
+async fn a_503_is_a_transport_error() {
+    let (_server, endpoint) = server_with("unavailable".to_string(), 503).await;
+    let p = provider(&endpoint);
+    let e = drain(&p, &hi(), None).await.expect_err("503");
+    assert!(e.message.contains("HTTP 503"), "{e}");
+    assert!(e.transport, "{e}");
+}

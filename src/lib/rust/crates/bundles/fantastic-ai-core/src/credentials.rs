@@ -48,6 +48,7 @@ impl From<CredentialError> for ProviderError {
         Self {
             message: e.0,
             kind: "CredentialError",
+            transport: false,
         }
     }
 }
