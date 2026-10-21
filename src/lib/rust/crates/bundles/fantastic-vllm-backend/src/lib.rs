@@ -37,7 +37,7 @@
 use async_trait::async_trait;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
-    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
+    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell, Stalled,
     Unconfigured,
 };
 use fantastic_ai_core::schema::{self, Field};
@@ -385,7 +385,9 @@ struct VllmProvider {
     /// statement — never touched) or from the default (ours to fit per call).
     explicit_budget: bool,
     connect_timeout: f64,
-    read_timeout: f64,
+    /// THE READ CLOCK: the longest the server may go without a byte, headers
+    /// included — the record's `stream_idle_seconds`, else `read_timeout` (#177).
+    read_clock: f64,
     report: ReportCell,
 }
 
@@ -478,7 +480,7 @@ impl VllmProvider {
             e.is_timeout(),
             &self.endpoint,
             self.connect_timeout,
-            self.read_timeout,
+            self.read_clock,
         )
     }
 }
@@ -489,7 +491,7 @@ fn classify(
     timeout: bool,
     endpoint: &str,
     connect_timeout: f64,
-    read_timeout: f64,
+    read_clock: f64,
 ) -> ProviderError {
     ProviderError::raised(if connect && timeout {
         format!(
@@ -504,10 +506,12 @@ fn classify(
              of it is down"
         )
     } else if timeout {
-        format!(
-            "{NAME}: {endpoint} sent nothing for read_timeout={}s",
-            py_g(read_timeout)
-        )
+        // the same stall every stream backend reports (#177)
+        Stalled {
+            idle_secs: read_clock,
+        }
+        .error(NAME, endpoint)
+        .message
     } else {
         format!(
             "{NAME}: {endpoint} dropped the stream mid-answer — vLLM died or \
@@ -564,7 +568,7 @@ impl Provider for VllmProvider {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs_f64(self.connect_timeout))
             // after connect, one deadline per read — python's httpx read timeout
-            .read_timeout(Duration::from_secs_f64(self.read_timeout))
+            .read_timeout(Duration::from_secs_f64(self.read_clock))
             .build()
             .map_err(|e| ProviderError::raised(format!("{NAME}: http client: {e}")))?;
         // THE KEY, read before EACH request (python `await self._key(...)`):
@@ -605,7 +609,7 @@ impl Provider for VllmProvider {
             resp,
             Arc::clone(&self.report),
             self.endpoint.clone(),
-            (self.connect_timeout, self.read_timeout),
+            (self.connect_timeout, self.read_clock),
             // a MAIN turn (no per-call bound) must not end on a cut — see `end`
             max_tokens.is_none().then_some(call_max),
         ))
@@ -859,6 +863,24 @@ fn seconds(meta: &Map<String, Value>, key: &str, default: f64) -> Result<f64, Pr
     }
 }
 
+/// The read clock (#177): the record's `stream_idle_seconds` when it names one,
+/// else the `read_timeout` the backend has always read — the same per-read bound
+/// under the name every stream backend shares. Its default stays `read_timeout`:
+/// a vLLM server may take well over a minute to prefill before its first byte.
+fn read_clock_of(meta: &Map<String, Value>, read_timeout: f64) -> Result<f64, ProviderError> {
+    match meta.get("stream_idle_seconds").filter(|v| !v.is_null()) {
+        None => Ok(read_timeout),
+        Some(v) => v
+            .as_f64()
+            .filter(|s| *s > 0.0 && s.is_finite())
+            .ok_or_else(|| {
+                ProviderError::value_error(format!(
+                    "stream_idle_seconds must be a positive number of seconds, not {v}"
+                ))
+            }),
+    }
+}
+
 /// The provider this agent is configured for — python `make_provider`, with
 /// its checks in python's order: `kv_overflow`, then `endpoint`, `model`,
 /// `max_tokens`, `kv_slots`. Built per call (cheap, and the record can change
@@ -902,7 +924,7 @@ fn configure(
         sampling,
         explicit_budget,
         connect_timeout: seconds(meta, "connect_timeout", CONNECT_TIMEOUT)?,
-        read_timeout: seconds(meta, "read_timeout", READ_TIMEOUT)?,
+        read_clock: read_clock_of(meta, seconds(meta, "read_timeout", READ_TIMEOUT)?)?,
         report: ReportCell::default(),
     })
 }
@@ -994,7 +1016,12 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             return Some(format!("{key} must be a positive int"));
         }
     }
-    for key in ["kv_ttl", "connect_timeout", "read_timeout"] {
+    for key in [
+        "kv_ttl",
+        "connect_timeout",
+        "read_timeout",
+        "stream_idle_seconds",
+    ] {
         if set(key).is_some_and(|v| !positive(v, false)) {
             return Some(format!("{key} must be a positive number of seconds"));
         }
@@ -1161,6 +1188,13 @@ pub fn record_schema() -> &'static Value {
                 .default(json!(CONNECT_TIMEOUT)),
             Field::new("read_timeout", "float", "seconds to wait on a generation")
                 .default(json!(READ_TIMEOUT)),
+            Field::new(
+                "stream_idle_seconds",
+                "float",
+                "the read clock on the answer stream: seconds with no byte from the server \
+                 (headers included) before the turn is judged stalled and ends with an error \
+                 row; default read_timeout",
+            ),
             // the door's key, when it wants one — absent = no Authorization header
             schema::credentials_field(false),
         ])

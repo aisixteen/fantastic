@@ -35,7 +35,13 @@ fn the_idle_window_defaults_and_takes_a_positive_number() {
 
 #[test]
 fn a_window_that_is_not_a_positive_number_is_refused_by_name() {
-    for bad in [json!(0), json!(-1.5), json!("soon"), json!(true), json!([1])] {
+    for bad in [
+        json!(0),
+        json!(-1.5),
+        json!("soon"),
+        json!(true),
+        json!([1]),
+    ] {
         let err = stream_idle_of(&meta(bad.clone())).expect_err("refused");
         assert_eq!(err.kind, "ValueError", "{bad}");
         assert!(

@@ -28,6 +28,16 @@ fn backend_id_for(tmp: &TempDir, tag: &str) -> String {
 /// Build a kernel with a file agent (rooted at tmp) and an ollama
 /// backend agent bound to that file agent + the given ollama endpoint.
 async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, AgentId) {
+    mk_kernel_with(tmp, tag, endpoint, json!({})).await
+}
+
+/// [`mk_kernel`] with extra record fields — a stall test sets its read clock.
+async fn mk_kernel_with(
+    tmp: &TempDir,
+    tag: &str,
+    endpoint: &str,
+    extra: Value,
+) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, OllamaBackendBundle);
     kernel
@@ -83,7 +93,10 @@ async fn mk_kernel(tmp: &TempDir, tag: &str, endpoint: &str) -> (Arc<Kernel>, Ag
         "endpoint": endpoint,
         "model": "test-model",
     });
-    for (k, v) in memory {
+    for (k, v) in memory
+        .into_iter()
+        .chain(extra.as_object().cloned().unwrap_or_default())
+    {
         create[k] = v;
     }
     let _ = kernel
@@ -514,7 +527,9 @@ async fn an_empty_model_fails_loud_in_chat() {
             think: None,
             key: Arc::new(crate::tests_server::NoKey),
             report: Default::default(),
-            stream_idle: std::time::Duration::from_secs_f64(fantastic_ai_core::constants::STREAM_IDLE_SECONDS),
+            stream_idle: std::time::Duration::from_secs_f64(
+                fantastic_ai_core::constants::STREAM_IDLE_SECONDS,
+            ),
         };
         let err = match p
             .chat(&[json!({"role": "user", "content": "hi"})], None)
@@ -886,4 +901,99 @@ async fn a_bad_system_prompt_is_refused_at_the_write() {
     assert!(r.get("error").is_none(), "{r}");
     let r = write(Value::Null).await;
     assert!(r.get("error").is_none(), "{r}");
+}
+
+/// A 200 whose body starts and then stops: the connection stays open, silent — the
+/// stall under test. The client's read clock, not the connection, ends the turn.
+fn quiet_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
+    (
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len() + 4096
+        )
+        .into_bytes(),
+        false,
+    )
+}
+
+/// A stream that answers and then goes quiet fails once its idle window passes,
+/// naming the stall, the seconds and the endpoint — it does not wait out the send
+/// ceiling (#177).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_that_goes_quiet_fails_after_the_idle_window() {
+    let (port, _log) = raw_stub(|_| {
+        quiet_response(
+            "application/x-ndjson",
+            "{\"message\":{\"content\":\"par\"}}\n",
+        )
+    })
+    .await;
+    let tmp = TempDir::new().unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let (kernel, backend) = mk_kernel_with(
+        &tmp,
+        "quiet",
+        &endpoint,
+        json!({"stream_idle_seconds": 0.2}),
+    )
+    .await;
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let started = std::time::Instant::now();
+    let r = send_once(&kernel, &backend, "c_quiet").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(r["raised"], json!(true), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("ollama_backend: stream_stalled"), "{err}");
+    assert!(err.contains("sent no bytes for 0.2s"), "{err}");
+    assert!(err.contains(&endpoint), "{err}");
+}
+
+/// Headers that never come are the same stall: the window runs from the request,
+/// and the turn fails naming the stall, not a connect error (#177).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_that_never_answers_fails_after_the_idle_window() {
+    let (port, _log) = raw_stub(|_| (Vec::new(), false)).await;
+    let tmp = TempDir::new().unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let (kernel, backend) = mk_kernel_with(
+        &tmp,
+        "silent",
+        &endpoint,
+        json!({"stream_idle_seconds": 0.2}),
+    )
+    .await;
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    let r = send_once(&kernel, &backend, "c_silent").await;
+    assert_eq!(r["raised"], json!(true), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("stream_stalled"), "{err}");
+    assert!(err.contains("sent no bytes for 0.2s"), "{err}");
+}
+
+/// `stream_idle_seconds` is a positive number of seconds, refused at the write
+/// otherwise, naming the field (#177).
+#[test]
+fn stream_idle_seconds_is_validated_at_the_write() {
+    let meta = |v: Value| {
+        let mut m = Map::new();
+        m.insert("stream_idle_seconds".to_string(), v);
+        m
+    };
+    for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
+        let msg = OllamaBackendBundle
+            .validate_meta(&meta(bad.clone()), &Map::new())
+            .unwrap_or_else(|| panic!("{bad} is refused"));
+        assert!(
+            msg.contains("stream_idle_seconds must be a positive number"),
+            "{msg}"
+        );
+    }
+    let ok = OllamaBackendBundle
+        .validate_meta(&meta(json!(2.5)), &Map::new())
+        .unwrap_or_default();
+    assert!(!ok.contains("stream_idle_seconds"), "{ok}");
 }
