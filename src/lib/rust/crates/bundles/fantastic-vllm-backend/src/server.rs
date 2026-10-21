@@ -164,16 +164,21 @@ pub fn served_model(
         })
 }
 
-/// That entry's `max_model_len`.
+/// That entry's `max_model_len`, else its `meta.n_ctx` — llama.cpp-style servers
+/// (Strata) give the window there (#191).
 ///
 /// # Errors
-/// An entry that names no positive `max_model_len`.
+/// An entry that names neither as a positive int.
 pub fn max_model_len(
     entry: &Map<String, Value>,
     url: &str,
     field: &str,
 ) -> Result<i64, ServerReadError> {
-    match entry.get("max_model_len").and_then(Value::as_i64) {
+    let n = entry
+        .get("max_model_len")
+        .or_else(|| entry.get("meta").and_then(|m| m.get("n_ctx")))
+        .and_then(Value::as_i64);
+    match n {
         Some(n) if n >= 1 => Ok(n),
         _ => {
             let id = match entry.get("id") {
@@ -184,7 +189,7 @@ pub fn max_model_len(
             Err(fail(
                 field,
                 format!(
-                    "{field}: {url} names no max_model_len for {id}; set {field} on the record"
+                    "{field}: {url} names no max_model_len or meta.n_ctx for {id}; set {field} on the record"
                 ),
             ))
         }
