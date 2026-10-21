@@ -358,6 +358,57 @@ fn last_budgets() -> &'static Mutex<HashMap<String, Option<i64>>> {
     LAST.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// One agent's token counts since its kernel started (RAM — a restart zeroes them),
+/// from the `usage` of each streamed reply, side calls included (#192).
+#[derive(Default)]
+struct Usage {
+    requests: i64,
+    prompt: i64,
+    output: i64,
+}
+
+/// Each agent's counts, keyed by id: the stream adds to it, `usage` and `reflect` read it.
+fn usage_table() -> &'static Mutex<HashMap<String, Arc<Mutex<Usage>>>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, Arc<Mutex<Usage>>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The agent's running counts — created on first use.
+fn usage_of(agent_id: &str) -> Arc<Mutex<Usage>> {
+    let mut table = usage_table().lock().expect("usage table poisoned");
+    Arc::clone(table.entry(agent_id.to_string()).or_default())
+}
+
+/// The agent's counts as the `usage` verb and `reflect` show them.
+fn usage_now(agent_id: &str) -> Value {
+    let counts = usage_of(agent_id);
+    let u = counts.lock().expect("usage poisoned");
+    json!({"requests": u.requests, "prompt_tokens": u.prompt, "output_tokens": u.output})
+}
+
+/// The `usage` verb's doc.
+const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since its kernel \
+     started: requests, prompt_tokens, output_tokens. reset: true returns the counts, then \
+     zeroes them.";
+
+/// `usage` — args: reset? (bool). `reset: true` returns the counts, then zeroes them.
+fn usage_reply(agent_id: &str, payload: &Value) -> Value {
+    let reset = payload.get("reset").cloned().unwrap_or(json!(false));
+    let Some(reset) = reset.as_bool() else {
+        let mut r = fantastic_kernel::refusal::refusal(
+            fantastic_kernel::refusal::BAD_ARG,
+            "usage: reset must be true or false",
+        );
+        fantastic_kernel::refusal::with(&mut r, "arg", json!("reset"));
+        return r;
+    };
+    let out = usage_now(agent_id);
+    if reset {
+        *usage_of(agent_id).lock().expect("usage poisoned") = Usage::default();
+    }
+    out
+}
+
 // ─── provider ───────────────────────────────────────────────────────────────
 
 struct VllmProvider {
@@ -609,6 +660,7 @@ impl Provider for VllmProvider {
         Ok(consume_sse(
             resp,
             Arc::clone(&self.report),
+            usage_of(&self.agent_id),
             self.endpoint.clone(),
             (self.connect_timeout, self.read_clock),
             // a MAIN turn (no per-call bound) must not end on a cut — see `end`
@@ -623,6 +675,7 @@ impl Provider for VllmProvider {
 fn consume_sse(
     resp: reqwest::Response,
     report: ReportCell,
+    usage: Arc<Mutex<Usage>>,
     endpoint: String,
     timeouts: (f64, f64),
     main_turn_max: Option<i64>,
@@ -630,7 +683,7 @@ fn consume_sse(
     let inner = resp.bytes_stream();
     let init = (
         inner,
-        SseState::new(report, endpoint, timeouts, main_turn_max),
+        SseState::new(report, usage, endpoint, timeouts, main_turn_max),
         VecDeque::new(),
         false,
     );
@@ -696,6 +749,8 @@ struct SseState {
     buf: Vec<u8>,
     wrap: ThinkWrap,
     report: ReportCell,
+    /// The agent's counts; the reply's final `usage` chunk adds to them (#192).
+    usage: Arc<Mutex<Usage>>,
     saw_finish: bool,
     endpoint: String,
     timeouts: (f64, f64),
@@ -707,6 +762,7 @@ struct SseState {
 impl SseState {
     fn new(
         report: ReportCell,
+        usage: Arc<Mutex<Usage>>,
         endpoint: String,
         timeouts: (f64, f64),
         main_turn_max: Option<i64>,
@@ -715,6 +771,7 @@ impl SseState {
             buf: Vec::new(),
             wrap: ThinkWrap::new(),
             report,
+            usage,
             saw_finish: false,
             endpoint,
             timeouts,
@@ -747,6 +804,13 @@ impl SseState {
         })?;
         // `usage.prompt_tokens` and a `length` finish → `max_tokens`
         fantastic_ai_core::think::note_openai_usage(&obj, &self.report);
+        if let Some(u) = obj.get("usage").filter(|u| u.is_object()) {
+            let n = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+            let mut counts = self.usage.lock().expect("usage poisoned");
+            counts.requests += 1;
+            counts.prompt += n("prompt_tokens");
+            counts.output += n("completion_tokens");
+        }
         let Some(choice) = obj
             .get("choices")
             .and_then(Value::as_array)
@@ -945,6 +1009,7 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
         }
     };
     out.insert("sampling".into(), Value::Object(sampling));
+    out.insert("usage".into(), usage_now(agent_id.as_str()));
     out.insert(
         "thinking_token_budget_source".into(),
         json!(if explicit { "record" } else { "default" }),
@@ -1222,7 +1287,11 @@ impl Bundle for VllmBundle {
     }
 
     fn verb_docs(&self) -> Value {
-        fantastic_ai_core::verbs::verb_docs()
+        let mut docs = fantastic_ai_core::verbs::verb_docs();
+        if let Some(m) = docs.as_object_mut() {
+            m.insert("usage".into(), json!(USAGE_DOC));
+        }
+        docs
     }
 
     fn emits_doc(&self) -> Option<Value> {
@@ -1265,6 +1334,9 @@ impl Bundle for VllmBundle {
         if verb == "reflect" {
             return Ok(Some(reflect_reply(agent_id, kernel)?));
         }
+        if verb == "usage" {
+            return Ok(Some(usage_reply(agent_id.as_str(), payload)));
+        }
         // A verb that runs a turn first reads what the record leaves to the server;
         // a server that does not answer refuses the verb, naming the field.
         if server::TURN_VERBS.contains(&verb) {
@@ -1293,6 +1365,11 @@ impl Bundle for VllmBundle {
         last_budgets()
             .lock()
             .expect("vllm budgets poisoned")
+            .remove(agent_id.as_str());
+        // this agent's counts go with it: an id re-created later starts clean
+        usage_table()
+            .lock()
+            .expect("usage table poisoned")
             .remove(agent_id.as_str());
         Ok(())
     }
