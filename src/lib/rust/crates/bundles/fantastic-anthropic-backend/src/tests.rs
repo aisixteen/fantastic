@@ -1247,3 +1247,43 @@ async fn the_models_verb_refuses_a_body_that_is_not_a_model_list() {
     let err = r["error"].as_str().unwrap_or_default();
     assert!(err.contains("not a model list"), "{r}");
 }
+
+#[test]
+fn budget_thinking_refused_reads_the_model_family() {
+    for m in [
+        "claude-sonnet-5-5",
+        "claude-opus-4-7",
+        "claude-fable-5-1",
+        "claude-haiku-5-5-20260101",
+    ] {
+        assert!(budget_thinking_refused(m), "{m}");
+    }
+    for m in ["claude-opus-4-6", "claude-3-5-sonnet-20241022", "my-model"] {
+        assert!(!budget_thinking_refused(m), "{m}");
+    }
+}
+
+#[test]
+fn thinking_budget_is_refused_for_a_5x_model() {
+    let err = validate(
+        json!({"model": "claude-sonnet-5-5", "thinking_budget": 2048})
+            .as_object()
+            .unwrap(),
+        &rec(json!({})),
+    )
+    .unwrap_or_default();
+    assert!(
+        err.contains("thinking_budget is refused by claude-sonnet-5-5")
+            && err.contains("thinking_display (summarized|omitted) and effort instead"),
+        "{err}"
+    );
+    assert_eq!(
+        validate(
+            json!({"model": "claude-opus-4-6", "thinking_budget": 2048})
+                .as_object()
+                .unwrap(),
+            &rec(json!({}))
+        ),
+        None
+    );
+}

@@ -739,6 +739,27 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
     Ok(Value::Object(out))
 }
 
+/// #182 — 4.7+ and 5.x models run adaptive thinking and 400 on
+/// `thinking: {type: "enabled", budget_tokens}`. Ids that do not parse as
+/// `claude-<family>-<major>-<minor>` (`claude-3-5-sonnet-…`, custom names) are not
+/// refused.
+#[must_use]
+pub fn budget_thinking_refused(model: &str) -> bool {
+    let parts: Vec<&str> = model.split('-').collect();
+    if parts.len() < 3 || parts[0] != "claude" || !parts[1].chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    let Ok(major) = parts[2].parse::<u32>() else {
+        return false;
+    };
+    if major >= 5 {
+        return true;
+    }
+    let minor = parts.get(3).and_then(|p| p.parse::<u32>().ok());
+    major == 4 && minor.is_some_and(|m| m >= 7)
+}
+
 /// Refuse a write this backend cannot honour, AT THE WRITE, on the MERGED record —
 /// then every required field, named at once. Python `validate_meta`, text for text.
 #[must_use]
@@ -809,6 +830,13 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             }
         }
     }
+    let model = merged.get("model").and_then(Value::as_str).unwrap_or("");
+    if has_budget && budget_thinking_refused(model) {
+        return Some(format!(
+            "thinking_budget is refused by {model} (4.7+ and 5.x models use adaptive thinking) \
+             — set thinking_display (summarized|omitted) and effort instead"
+        ));
+    }
     let endpoint = merged
         .get("endpoint")
         .and_then(Value::as_str)
@@ -862,7 +890,8 @@ pub fn record_schema() -> &'static Value {
                 "int",
                 format!(
                     "extended thinking per turn (tokens, at least {THINKING_FLOOR}, below \
-                     max_tokens); unset, no thinking is asked for"
+                     max_tokens); unset, no thinking is asked for — not for 4.7+ or 5.x \
+                     models: use thinking_display and effort"
                 ),
             ),
             Field::new(
