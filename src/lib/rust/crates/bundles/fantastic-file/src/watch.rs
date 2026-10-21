@@ -171,7 +171,6 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
     // The holders as they stand now: every watch change re-arms this task, so the
     // snapshot is the holders of this watcher's life.
     let holders = held.paths.clone();
-    let mut known = snapshot(&files, &dirs);
     kernel.spawn_task(agent_id, "watch_path", async move {
         loop {
             let Some(first) = rx.recv().await else { return };
@@ -190,17 +189,11 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
             let mut seen: BTreeMap<String, &'static str> = BTreeMap::new();
             for ev in &events {
                 for p in &ev.paths {
-                    let (Some(rel), Some(key)) = (relative(p, &files, &dirs), canonical(p)) else {
+                    let (Some(rel), Some(kind)) =
+                        (relative(p, &files, &dirs), kind_of(&ev.kind, p))
+                    else {
                         continue;
                     };
-                    let Some(kind) = kind_of(&ev.kind, p, known.contains(&key)) else {
-                        continue;
-                    };
-                    if p.symlink_metadata().is_ok() {
-                        known.insert(key);
-                    } else {
-                        known.remove(&key);
-                    }
                     // a path created in this batch stays `added` whatever a later report says
                     let kind = match seen.get(&rel) {
                         Some(&"added") if kind == "modified" => "added",
@@ -281,10 +274,12 @@ fn relative(
 }
 
 /// python `watchfiles.Change`'s names: `added`, `modified`, `deleted`. A mere access
-/// is no change. The DISK AS IT IS NOW decides `deleted` (python `_kind`): a batch
-/// can carry one path twice (macOS FSEvents: `deleted` then a spurious `added` for
-/// one unlink), and the last event must not read as the file's state.
-fn kind_of(kind: &EventKind, p: &Path, known: bool) -> Option<&'static str> {
+/// is no change. The kind follows the event (python `_kind`): a create (or a name
+/// coming to this path) is `added`, anything else `modified`. The DISK AS IT IS NOW
+/// decides `deleted`: a path that is gone is `deleted`, whatever the event said, and
+/// a removal reported for a path that is present (a batch can carry one path twice,
+/// macOS FSEvents: `deleted` then a spurious `added` for one unlink) is `modified`.
+fn kind_of(kind: &EventKind, p: &Path) -> Option<&'static str> {
     if matches!(kind, EventKind::Access(_)) {
         return None;
     }
@@ -293,92 +288,77 @@ fn kind_of(kind: &EventKind, p: &Path, known: bool) -> Option<&'static str> {
     }
     Some(match kind {
         EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => "added",
-        // a platform may report a new file as a modify: the watch has not seen it before
-        _ if !known => "added",
         _ => "modified",
     })
-}
-
-/// The entries the watch sees as it starts (canonical): each watched file that exists,
-/// and each entry of a watched directory. A change to an entry not in here is `added`.
-fn snapshot(
-    files: &HashMap<PathBuf, String>,
-    dirs: &HashMap<PathBuf, String>,
-) -> BTreeSet<PathBuf> {
-    let mut out: BTreeSet<PathBuf> = files
-        .keys()
-        .filter(|f| f.symlink_metadata().is_ok())
-        .cloned()
-        .collect();
-    for d in dirs.keys() {
-        if let Ok(entries) = std::fs::read_dir(d) {
-            out.extend(entries.flatten().map(|e| d.join(e.file_name())));
-        }
-    }
-    out
-}
-
-/// An event path as the disk names it: its parent canonical, its name kept.
-fn canonical(p: &Path) -> Option<PathBuf> {
-    let (parent, name) = (p.parent()?, p.file_name()?);
-    Some(parent.canonicalize().ok()?.join(name))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, RemoveKind};
+    use notify::event::{AccessKind, CreateKind, RemoveKind, RenameMode};
 
     #[test]
-    fn a_change_is_judged_by_the_disk_as_it_is() {
+    fn a_mere_access_is_no_change() {
         let dir = tempfile::TempDir::new().unwrap();
         let here = dir.path().join("here.md");
         std::fs::write(&here, "x").unwrap();
+        assert_eq!(kind_of(&EventKind::Access(AccessKind::Any), &here), None);
+    }
+
+    #[test]
+    fn a_path_that_is_gone_is_deleted_whatever_the_event() {
+        let dir = tempfile::TempDir::new().unwrap();
         let gone = dir.path().join("gone.md");
         // a spurious `added` after an unlink reads as deleted: the disk says so
         assert_eq!(
-            kind_of(&EventKind::Create(CreateKind::File), &gone, false),
+            kind_of(&EventKind::Create(CreateKind::File), &gone),
             Some("deleted")
         );
         assert_eq!(
-            kind_of(&EventKind::Remove(RemoveKind::File), &gone, true),
+            kind_of(&EventKind::Modify(ModifyKind::Any), &gone),
             Some("deleted")
         );
         assert_eq!(
-            kind_of(&EventKind::Create(CreateKind::File), &here, true),
-            Some("added")
-        );
-        assert_eq!(
-            kind_of(&EventKind::Modify(ModifyKind::Any), &here, true),
-            Some("modified")
-        );
-        // present now, so a reported removal is not `deleted`
-        assert_eq!(
-            kind_of(&EventKind::Remove(RemoveKind::File), &here, true),
-            Some("modified")
-        );
-        assert_eq!(
-            kind_of(
-                &EventKind::Access(notify::event::AccessKind::Any),
-                &here,
-                true
-            ),
-            None
+            kind_of(&EventKind::Remove(RemoveKind::File), &gone),
+            Some("deleted")
         );
     }
 
     #[test]
-    fn a_new_entry_is_added_even_when_the_platform_reports_a_modify() {
+    fn a_create_is_added() {
         let dir = tempfile::TempDir::new().unwrap();
-        let fresh = dir.path().join("fresh.md");
-        std::fs::write(&fresh, "x").unwrap();
-        // the watch never saw it: added, whatever the platform named the event
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
         assert_eq!(
-            kind_of(&EventKind::Modify(ModifyKind::Any), &fresh, false),
+            kind_of(&EventKind::Create(CreateKind::File), &here),
             Some("added")
         );
+        // a name coming to this path is a new entry, as watchfiles reports it
         assert_eq!(
-            kind_of(&EventKind::Modify(ModifyKind::Any), &fresh, true),
+            kind_of(&EventKind::Modify(ModifyKind::Name(RenameMode::To)), &here),
+            Some("added")
+        );
+    }
+
+    #[test]
+    fn a_modify_is_modified() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
+        assert_eq!(
+            kind_of(&EventKind::Modify(ModifyKind::Any), &here),
+            Some("modified")
+        );
+    }
+
+    #[test]
+    fn a_removal_of_a_present_path_is_modified() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
+        // present now, so a reported removal is not `deleted` (python `_kind`)
+        assert_eq!(
+            kind_of(&EventKind::Remove(RemoveKind::File), &here),
             Some("modified")
         );
     }
