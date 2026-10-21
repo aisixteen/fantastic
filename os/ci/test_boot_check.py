@@ -4,8 +4,10 @@
 
 The QEMU side is covered by the boot itself; here: the PPM reader and the two
 screen checks, the run-file parser, the frame matchers, the logind and
-environment checks, the QEMU command line, and the QMP / guest-agent channel
-against a fake agent on a unix socket.
+environment checks, the QEMU command line, the QMP / guest-agent channel
+against a fake agent on a unix socket, the Chan line framing, the agent and
+QMP timeouts (reported as one failure each, with no retry), and the step 9
+restart / adopt parsing.
 """
 
 import base64
@@ -315,6 +317,13 @@ class Channels(unittest.TestCase):
 
     def vm(self):
         vm = bc.Vm(Path("/img"), "x86-64", self.dir)
+
+        def close():
+            for ch in (vm._qga, vm._qmp):
+                if ch is not None:
+                    ch.close()
+
+        self.addCleanup(close)
         return vm
 
     def test_guest_agent(self):
@@ -484,11 +493,228 @@ class CanvasAndRestart(unittest.TestCase):
                 bc.check_restart(vm, RUN, 99, 5)
         self.assertEqual(vm.forwarded, [4001])
 
-    def test_restart_count_must_rise_by_one(self):
-        new = {"pid": 11, "port": 4001, "url": "http://127.0.0.1:4001/"}
-        with mock.patch.object(bc, "read_run_file", lambda vm: new):
-            with self.assertRaisesRegex(bc.Fail, "NRestarts is 0, wanted 1"):
-                bc.check_restart(StubVm(("0", "0")), RUN, 99, 5)
+
+class Framing(unittest.TestCase):
+    """The line framing of Chan, over a socket pair: no file, no QEMU."""
+
+    def chan(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        ch = bc.Chan.__new__(bc.Chan)  # skip the connect loop
+        ch.path, ch.alive, ch.buf, ch.sock = Path("qmp.sock"), lambda: None, b"", a
+        return ch, b
+
+    def test_send_writes_one_json_line(self):
+        ch, peer = self.chan()
+        ch.send({"execute": "x", "arguments": {"id": 7}})
+        peer.settimeout(2)
+        self.assertEqual(peer.recv(65536), b'{"execute": "x", "arguments": {"id": 7}}\n')
+
+    def test_a_line_split_over_reads(self):
+        ch, peer = self.chan()
+        peer.sendall(b'{"a"')
+        peer.sendall(b': 1}\n')
+        self.assertEqual(ch.recv(2), {"a": 1})
+
+    def test_lines_in_one_read_come_out_in_order(self):
+        ch, peer = self.chan()
+        peer.sendall(b'{"a": 1}\n{"b": 2}\n')
+        self.assertEqual(ch.recv(2), {"a": 1})
+        self.assertEqual(ch.recv(2), {"b": 2})
+
+    def test_blank_lines_are_skipped(self):
+        ch, peer = self.chan()
+        peer.sendall(b'\n \n{"c": 3}\n')
+        self.assertEqual(ch.recv(2), {"c": 3})
+
+    def test_a_partial_line_is_kept_across_a_timeout(self):
+        ch, peer = self.chan()
+        peer.sendall(b'{"d"')
+        self.assertIsNone(ch.recv(0.05))
+        peer.sendall(b': 4}\n')
+        self.assertEqual(ch.recv(2), {"d": 4})
+
+    def test_nothing_within_the_timeout_is_none(self):
+        ch, _ = self.chan()
+        self.assertIsNone(ch.recv(0.05))
+
+    def test_a_closed_peer_is_a_failure(self):
+        ch, peer = self.chan()
+        peer.close()
+        with self.assertRaisesRegex(bc.Fail, "closed by QEMU"):
+            ch.recv(2)
+
+
+class Timeouts(unittest.TestCase):
+    class Silent:
+        """A guest agent that takes every request and never answers."""
+
+        def __init__(self):
+            self.sent, self.waits = [], []
+
+        def send(self, obj):
+            self.sent.append(obj)
+
+        def recv(self, timeout):
+            self.waits.append(timeout)
+            return None
+
+    def test_a_silent_agent_is_one_failure_not_a_retry(self):
+        vm = bc.Vm(Path("/img"), "x86-64", Path("/out"))
+        vm._qga = self.Silent()
+        with self.assertRaisesRegex(bc.Fail, "guest-exec: no reply within 30 s"):
+            vm.ga_run(["/bin/true"])
+        self.assertEqual(len(vm._qga.sent), 1)
+        self.assertEqual(vm._qga.waits, [30])
+
+    def test_no_guest_agent_is_a_failure(self):
+        with self.assertRaisesRegex(bc.Fail, "not connected"):
+            bc.Vm(Path("/img"), "x86-64", Path("/out")).ga_run(["/bin/true"])
+
+
+class SilentAgent(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="bc")
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+
+    def test_wait_agent_times_out_as_a_failure(self):
+        def mute(conn, seen):
+            for m in lines(conn):  # reads every sync, answers none
+                seen.append(m)
+
+        guest = FakeGuest(self.dir / "qga.sock", mute)
+        self.addCleanup(guest.close)
+        vm = bc.Vm(Path("/img"), "x86-64", self.dir)
+        with mock.patch.object(bc, "SYNC_EVERY", 0.05), self.assertRaisesRegex(bc.Fail, "did not answer within 0.5 s"):
+            vm.wait_agent(0.5)
+
+
+class AppStillThere(StubVm):
+    """`test ! -e` on the old app's pid fails: the process is still there."""
+
+    def ga_run(self, argv, timeout=60):
+        return 1, "", ""
+
+
+class Restart(unittest.TestCase):
+    """Step 9's parsing on what the restart leaves: the count, the new app, the adopted canvas."""
+
+    NEW = {"pid": 11, "port": 4001, "url": "http://127.0.0.1:4001/"}
+    STATE = {
+        "type": "state",
+        "protocol": "fantastic.home",
+        "version": 1,
+        "rows": [{"path": bc.CANVAS_DIR, "status": "running", "pid": 99}],
+    }
+
+    def check(self, vm, *, new=NEW, comm="fantastic-app", state=STATE, canvas_pid=99, step=5):
+        async def home(*_a):
+            return state
+
+        with mock.patch.multiple(
+            bc,
+            read_run_file=lambda vm: new,
+            comm=lambda vm, pid: comm,
+            wait_page=mock.DEFAULT,
+            check_kernel=mock.DEFAULT,
+            check_keys=mock.DEFAULT,
+            check_screen=mock.DEFAULT,
+            home_call=home,
+        ):
+            bc.check_restart(vm, RUN, canvas_pid, step)
+
+    def test_the_kiosk_comes_back_and_the_canvas_is_adopted(self):
+        vm = StubVm(("0", "1"))
+        self.check(vm)
+        self.assertEqual(vm.forwarded, [4001])
+        self.assertEqual(vm.restarts, [])
+
+    def test_the_restart_count_rises_by_exactly_one(self):
+        with self.assertRaisesRegex(bc.Fail, "NRestarts is 5, wanted 4"):
+            self.check(StubVm(("3", "5")))
+
+    def test_the_old_app_must_be_gone(self):
+        with self.assertRaisesRegex(bc.Fail, "still there"):
+            self.check(AppStillThere(("0", "1")))
+
+    def test_a_new_run_file_must_name_another_pid(self):
+        with self.assertRaisesRegex(bc.Fail, "a new run file"):
+            self.check(StubVm(("0", "1")), new=RUN, step=0)
+
+    def test_the_new_process_must_be_the_app(self):
+        with self.assertRaisesRegex(bc.Fail, "comm is 'bash'"):
+            self.check(StubVm(("0", "1")), comm="bash")
+
+    def test_the_canvas_must_be_adopted_running_with_its_pid(self):
+        for rows in (
+            [],
+            [{"path": bc.CANVAS_DIR, "status": "stopped"}],
+            [{"path": bc.CANVAS_DIR, "status": "running", "pid": 98}],
+        ):
+            with self.subTest(rows=rows), self.assertRaisesRegex(bc.Fail, "wanted running with pid 99"):
+                self.check(StubVm(("0", "1")), state={**self.STATE, "rows": rows})
+
+
+class QuietQmp:
+    """A QMP peer that greets (or not), answers qmp_capabilities, then goes silent."""
+
+    def __init__(self, greeting=True):
+        self.sent = []
+        self.queue = [{"QMP": {"version": {}}}] if greeting else []
+
+    def send(self, obj):
+        self.sent.append(obj)
+        if obj["execute"] == "qmp_capabilities":
+            self.queue.append({"return": {}})
+
+    def recv(self, timeout):
+        return self.queue.pop(0) if self.queue else None
+
+
+class QmpTimeouts(unittest.TestCase):
+    """The QMP waits give up with one failure; the clock is faked, nothing waits."""
+
+    def setUp(self):
+        now = [0]
+
+        def tick():  # every reading is 10 s after the last
+            now[0] += 10
+            return now[0]
+
+        p = mock.patch.object(bc.time, "monotonic", tick)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def vm(self, chan):
+        p = mock.patch.object(bc, "Chan", lambda *a: chan)
+        p.start()
+        self.addCleanup(p.stop)
+        return bc.Vm(Path("/img"), "x86-64", Path("/out"))
+
+    def test_no_greeting_is_a_failure(self):
+        with self.assertRaisesRegex(bc.Fail, "qmp: no greeting"):
+            self.vm(QuietQmp(greeting=False)).qmp("query-status")
+
+    def test_a_command_without_a_reply_fails_after_30_s(self):
+        with self.assertRaisesRegex(bc.Fail, "qmp quit: no reply within 30 s"):
+            self.vm(QuietQmp()).qmp("quit")
+
+
+class AgentError(unittest.TestCase):
+    class Refusing:
+        def send(self, obj):
+            pass
+
+        def recv(self, timeout):
+            return {"error": {"class": "GenericError", "desc": "nope"}}
+
+    def test_an_error_reply_is_a_failure(self):
+        vm = bc.Vm(Path("/img"), "x86-64", Path("/out"))
+        vm._qga = self.Refusing()
+        with self.assertRaisesRegex(bc.Fail, "guest agent guest-exec-status: .*nope"):
+            vm._ga("guest-exec-status", pid=1)
 
 
 if __name__ == "__main__":

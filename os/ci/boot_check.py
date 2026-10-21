@@ -431,6 +431,7 @@ class Vm:
                 if m is not None and m.get("return") == n:
                     self._qga = ch
                     return
+        ch.close()  # the timeout ends the wait: do not leak the channel
         raise Fail(f"the guest agent did not answer within {timeout:g} s; serial.log ends:\n{self.serial_tail()}")
 
     def _ga(self, command: str, **arguments) -> object:
