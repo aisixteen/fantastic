@@ -159,6 +159,18 @@ fn the_record_s_model_picks_its_entry_among_several() {
 }
 
 #[test]
+fn a_llama_cpp_entry_gives_its_window_as_meta_n_ctx() {
+    let e = obj(json!({"id": "q", "object": "model", "meta": {"n_ctx": 131_072}}));
+    assert_eq!(
+        server::max_model_len(&e, "u", "context_window").expect("n_ctx"),
+        131_072
+    );
+    let none = obj(json!({"id": "q", "meta": {}}));
+    let err = server::max_model_len(&none, "u", "context_window").unwrap_err();
+    assert_eq!(err.field, "context_window");
+}
+
+#[test]
 fn several_served_models_and_no_model_refuse_naming_them() {
     let body = models(&[("a", 4096), ("b", 8192)]);
     let e = served_model(&body, None, "http://h/v1/models", "model").unwrap_err();
