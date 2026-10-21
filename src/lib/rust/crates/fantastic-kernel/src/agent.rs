@@ -268,6 +268,22 @@ impl Agent {
         self.record()
     }
 
+    /// Edit `callable_by` under the meta write lock, as one step. `edit` gets the map and the
+    /// whole meta as they are at the write, and returns `Ok(changed)`, or `Err` to refuse: then
+    /// nothing is written. Used by `Kernel::edit_callable_by`.
+    pub fn edit_callable_by(
+        &self,
+        edit: impl FnOnce(&mut Map<String, Value>, &Map<String, Value>) -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let mut m = self.meta.write().expect("meta lock poisoned");
+        let mut cb = m.get("callable_by").and_then(Value::as_object).cloned().unwrap_or_default();
+        if !edit(&mut cb, &*m)? {
+            return Ok(false);
+        }
+        m.insert("callable_by".to_string(), Value::Object(cb));
+        Ok(true)
+    }
+
     /// Whether the record's `delete_lock` is TRUTHY. Substrate refuses
     /// cascade-delete on locked agents. Python truthiness
     /// (`P/kernel/_agent.py` `_find_locked_descendant`): `1`, `"yes"` or a

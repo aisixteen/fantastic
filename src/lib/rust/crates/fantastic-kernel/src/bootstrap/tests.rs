@@ -93,6 +93,146 @@ fn bootstrap_hydrates_persisted_children() {
 }
 
 #[test]
+fn two_callable_by_keys_merged_on_one_agent_both_survive_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let store_root = tmp.path().join(".fantastic");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    {
+        let mut reg = with_loader(BundleRegistry::new());
+        reg.register("noop.tools", Noop);
+        crate::test_support::register_fake_store(&mut reg, &store_root);
+        let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+        let kernel = Arc::clone(&booted.kernel);
+        rt.block_on(async {
+            boot_root(&kernel).await;
+            crate::test_support::wire_fake_store(&kernel, &store_root).await;
+            let _ = kernel
+                .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_m"}))])
+                .await.remove(0).result;
+            let id = AgentId::from("child_m");
+            let _ = kernel.edit_callable_by(&id, |cb| {
+                cb.insert("view_a".to_string(), json!(["*"]));
+                true
+            });
+            let _ = kernel.edit_callable_by(&id, |cb| {
+                cb.insert("view_b".to_string(), json!(["*"]));
+                true
+            });
+            kernel.flush_records().await;
+        });
+        shutdown(tmp.path()).unwrap();
+    }
+    let mut reg2 = with_loader(BundleRegistry::new());
+    reg2.register("noop.tools", Noop);
+    crate::test_support::register_fake_store(&mut reg2, &store_root);
+    let booted2 = bootstrap(reg2, BootstrapOptions::daemon(tmp.path())).expect("boot2");
+    let cb = booted2
+        .kernel
+        .agents
+        .get(&AgentId::from("child_m"))
+        .expect("child_m rehydrated")
+        .record()
+        .meta
+        .get("callable_by")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(cb.get("view_a"), Some(&json!(["*"])), "{cb}");
+    assert_eq!(cb.get("view_b"), Some(&json!(["*"])), "{cb}");
+    shutdown(tmp.path()).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_merges_of_two_callable_by_keys_both_survive_every_interleaving() {
+    let tmp = TempDir::new().unwrap();
+    let mut reg = with_loader(BundleRegistry::new());
+    reg.register("noop.tools", Noop);
+    let booted = bootstrap(reg, BootstrapOptions::one_shot(tmp.path())).expect("boot");
+    let kernel = Arc::clone(&booted.kernel);
+    for round in 0..200 {
+        let id = AgentId::from(format!("merge_{round}").as_str());
+        kernel.register(Agent::new(
+            id.clone(),
+            Some("noop.tools".to_string()),
+            None,
+            Map::new(),
+            tmp.path().join(format!("agent_{round}")),
+            false,
+        ));
+        let (a, b) = (Arc::clone(&kernel), Arc::clone(&kernel));
+        let (ida, idb) = (id.clone(), id.clone());
+        let ta = tokio::spawn(async move {
+            a.edit_callable_by(&ida, |cb| {
+                cb.insert("view_a".to_string(), json!(["*"]));
+                true
+            })
+        });
+        let tb = tokio::spawn(async move {
+            b.edit_callable_by(&idb, |cb| {
+                cb.insert("view_b".to_string(), json!(["*"]));
+                true
+            })
+        });
+        ta.await.unwrap().unwrap();
+        tb.await.unwrap().unwrap();
+        let cb = kernel
+            .agents
+            .get(&id)
+            .expect("agent exists")
+            .record()
+            .meta
+            .get("callable_by")
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert!(cb.get("view_a").is_some() && cb.get("view_b").is_some(), "round {round}: {cb}");
+    }
+    shutdown(tmp.path()).unwrap();
+}
+
+#[test]
+fn edit_callable_by_holds_the_record_lock_while_it_edits() {
+    let kernel = Kernel::new();
+    kernel.register(Agent::new(
+        AgentId::from("locked"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/nonexistent"),
+        false,
+    ));
+    let agent = kernel.agents.get(&AgentId::from("locked")).map(|e| Arc::clone(&e)).unwrap();
+    let mut held = false;
+    let r = kernel.edit_callable_by(&AgentId::from("locked"), |cb| {
+        // a reader or writer from outside would block here: the record is locked for the edit
+        held = agent.meta.try_read().is_err();
+        cb.insert("view_a".to_string(), json!(["*"]));
+        true
+    });
+    assert!(r.is_ok(), "{r:?}");
+    assert!(held, "the record's lock was free while the edit ran");
+}
+
+#[test]
+fn an_edit_the_write_time_checks_refuse_writes_nothing() {
+    let kernel = Kernel::new();
+    kernel.register(Agent::new(
+        AgentId::from("guarded"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/nonexistent"),
+        false,
+    ));
+    let before = kernel.agents.get(&AgentId::from("guarded")).unwrap().record().meta.get("callable_by").cloned();
+    let refused = kernel.edit_callable_by(&AgentId::from("guarded"), |cb| {
+        cb.insert("x".to_string(), json!(5));
+        true
+    });
+    assert!(refused.is_err(), "{refused:?}");
+    let cb = kernel.agents.get(&AgentId::from("guarded")).unwrap().record().meta.get("callable_by").cloned();
+    assert_eq!(cb, before, "a refused edit writes nothing");
+}
+
+#[test]
 fn bootstrap_one_shot_does_not_acquire_lock() {
     let tmp = TempDir::new().unwrap();
     // First boot acquires.

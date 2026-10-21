@@ -156,21 +156,14 @@ fn union(had: Option<&Value>, add: &Value) -> Value {
     Value::Array(out)
 }
 
-/// `id`'s `callable_by`, edited and written as ONE step. The record is read here, at the
-/// write, and `edit` merges into that read: a plan made from an earlier read would overwrite
-/// an entry another writer (an `open_view`, say) put there while the plan awaited. The
-/// kernel's `update_agent` replaces the whole key it is sent, so the merge is made here.
-/// `edit` says whether it changed the map; nothing is written when it did not.
-async fn write_callable_by(h: &Host, id: &str, why: &str, edit: impl FnOnce(&mut Map<String, Value>) -> bool) -> Result<(), String> {
-    let mut cb = field(h, id, "callable_by");
-    if !edit(&mut cb) {
-        return Ok(());
-    }
-    let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "callable_by": cb})).await.result;
-    match r.get("error").and_then(Value::as_str) {
-        Some(e) => Err(format!("reach: `{id}`.callable_by{why}: {e}")),
-        None => Ok(()),
-    }
+/// `id`'s `callable_by`, edited and written as ONE step under the record's lock: `edit` sees
+/// the map as it is at the write, so an entry another writer (an `open_view`, say) put there
+/// meanwhile survives. `edit` says whether it changed the map; nothing is written when it did not.
+fn write_callable_by(h: &Host, id: &str, why: &str, edit: impl FnOnce(&mut Map<String, Value>) -> bool) -> Result<(), String> {
+    h.kernel
+        .edit_callable_by(&fantastic_kernel::AgentId::from(id), edit)
+        .map(|_| ())
+        .map_err(|e| format!("reach: `{id}`.callable_by{why}: {e}"))
 }
 
 /// The agents whose `callable_by` their own code narrows to `user` (the user's
@@ -212,8 +205,7 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
                 }
             }
             changed
-        })
-        .await?;
+        })?;
     }
     let mut writers: Vec<(String, bool)> = holders.into_iter().map(|x| (x, true)).collect();
     if leg {
@@ -294,8 +286,7 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
                 }
             }
             changed
-        })
-        .await?;
+        })?;
     }
     // the senders' side: whom they may send to
     for x in &everyone {
@@ -572,7 +563,6 @@ mod tests {
             cb.insert("mcp".to_string(), json!("*"));
             true
         })
-        .await
         .unwrap();
         let cb = field(&h, "tree", "callable_by");
         assert_eq!(cb.get("folder_view"), Some(&json!(["folder:docs"])), "the other writer's entry survives: {cb:?}");
@@ -587,7 +577,7 @@ mod tests {
         put(k, "tree", Some("kernel"), json!({"callable_by": {"user": "*"}}));
         let before = k.agents.get(&AgentId::from("tree")).unwrap().record().meta.get("callable_by").cloned();
         // no change: nothing is sent, so no refusal can come back from the kernel
-        write_callable_by(&h, "tree", "", |_| false).await.unwrap();
+        write_callable_by(&h, "tree", "", |_| false).unwrap();
         let after = k.agents.get(&AgentId::from("tree")).unwrap().record().meta.get("callable_by").cloned();
         assert_eq!(before, after);
         // a refused write names the agent and the label of the grant that failed
@@ -595,7 +585,6 @@ mod tests {
             cb.insert("x".to_string(), json!("*"));
             true
         })
-        .await
         .unwrap_err();
         assert!(err.contains("`no_such_agent`.callable_by (the way back)"), "{err}");
     }
@@ -627,6 +616,29 @@ mod tests {
         // no other holder is granted the cabinet's equipment
         assert!(field("helper", "callable_by").get("master").is_none(), "{:?}", field("helper", "callable_by"));
         assert!(field("master", "can_call").get("helper").is_none(), "{:?}", field("master", "can_call"));
+    }
+
+    #[tokio::test]
+    async fn a_grant_and_a_view_entry_on_one_bridge_both_survive() {
+        let h = host_with_leg("grant-and-view").await;
+        let k = &h.kernel;
+        put(k, "bridge", Some("kernel"), json!({"callable_by": {"user": "*"}}));
+        // the grant, as `grant` writes it
+        write_callable_by(&h, "bridge", "", |cb| {
+            cb.insert("mcp".to_string(), json!("*"));
+            true
+        })
+        .unwrap();
+        // the entry `open_view` writes for its view, on the same record
+        k.edit_callable_by(&AgentId::from("bridge"), |cb| {
+            cb.insert("folder_view".to_string(), json!(["folder:docs"]));
+            true
+        })
+        .unwrap();
+        let cb = field(&h, "bridge", "callable_by");
+        assert_eq!(cb.get("user"), Some(&json!("*")), "{cb:?}");
+        assert_eq!(cb.get("mcp"), Some(&json!("*")), "{cb:?}");
+        assert_eq!(cb.get("folder_view"), Some(&json!(["folder:docs"])), "{cb:?}");
     }
 
     #[test]

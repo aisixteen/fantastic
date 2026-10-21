@@ -382,27 +382,25 @@ pub(crate) async fn open_view(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let mut cb = bridge
-        .record()
-        .meta
-        .get("callable_by")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let mut set: BTreeSet<String> = cb
-        .get(&vid)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    set.extend(own_grants.iter().map(|s| s.to_string()));
-    set.insert(scope);
-    cb.insert(vid.clone(), json!(set.into_iter().collect::<Vec<_>>()));
-    // python `bridge.update(callable_by=cb)`: the `updated` event is what the root loader
-    // persists, so the view's grant survives a restart (a bare `update_meta` is in memory only,
-    // and a restored view was then refused by its bridge: `files does not accept 'list'`)
-    kernel.update(&bridge.id, Map::from_iter([("callable_by".to_string(), Value::Object(cb))]));
+    // ONE merge under the bridge record's lock: an entry another writer put there while this
+    // view was being made survives. The `updated` event is what the root loader persists, so
+    // the grant survives a restart (a restored view refused by its bridge was `files does not
+    // accept 'list'`).
+    if let Err(e) = kernel.edit_callable_by(&bridge.id, |cb| {
+        let mut set: BTreeSet<String> = cb
+            .get(&vid)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        set.extend(own_grants.iter().map(|s| s.to_string()));
+        set.insert(scope);
+        cb.insert(vid.clone(), json!(set.into_iter().collect::<Vec<_>>()));
+        true
+    }) {
+        return json!({"error": e});
+    }
     json!({"id": vid, "kind": kind, "path": path, "created": true})
 }
 
