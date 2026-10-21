@@ -186,6 +186,14 @@ pub async fn run_generation(
     // have answered. Python `_run` builds its provider (`_get_provider`, which
     // may raise) before anything else; swift's `providerInTurn` likewise.
     provider.ready().map_err(GenFailure::Provider)?;
+    // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching
+    // on a backend that cannot cache is refused before any row is written, and so
+    // before the owed recall below (which writes a view and a recall row).
+    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
+        .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
+    if caching.marks() && !cfg.provider_cache {
+        return Err(GenFailure::Provider(crate::caching::unsupported(cfg.name)));
+    }
     // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
     // turn is assembled over the head the recall chose — python `_recall_due`.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
@@ -200,11 +208,6 @@ pub async fn run_generation(
             Some(client_id),
         )
         .await?;
-    }
-    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
-        .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
-    if caching.marks() && !cfg.provider_cache {
-        return Err(GenFailure::Provider(crate::caching::unsupported(cfg.name)));
     }
     let (messages, store_len) = assemble_messages(
         self_id,

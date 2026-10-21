@@ -609,6 +609,11 @@ pub fn listed_entries(
 /// `cleanup` is the record's `caching` cleanup (see [`crate::caching::Caching::cleans`]).
 /// Off, the view is append-only: no trimmer runs, and a trimmed body an earlier
 /// cleanup left on a listed entry is ignored, so every row renders as stored.
+///
+/// The listed array is the record of what the view is, whatever mode wrote it. A row
+/// an earlier cleanup left out of a listed view stays out after a switch to `none`
+/// or `provider_cache`: only the rows after the newest listed entry render as stored.
+/// A `context_clear` starts a new thread, and the old rows leave the view with it.
 pub fn render_history(
     store: &[Value],
     listed: Option<&[ViewEntry]>,

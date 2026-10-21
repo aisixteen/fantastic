@@ -128,8 +128,11 @@ impl Provider for MockProvider {
 }
 
 /// The test bundle: dispatches every verb through ai-core, building a
-/// `MockProvider` over the process-global script keyed by agent id.
-struct MockBundle;
+/// `MockProvider` over the process-global script keyed by agent id. Its `cfg` is
+/// the backend it stands for: [`CFG`] cannot cache, a second one can.
+struct MockBundle {
+    cfg: BackendConfig,
+}
 
 type ScriptMap = std::collections::HashMap<String, Arc<MockScript>>;
 
@@ -211,7 +214,7 @@ const CFG: BackendConfig = BackendConfig {
 #[async_trait]
 impl Bundle for MockBundle {
     fn name(&self) -> &str {
-        "mock_backend"
+        self.cfg.name
     }
     async fn handle(
         &self,
@@ -233,7 +236,7 @@ impl Bundle for MockBundle {
         // EVERY OTHER VERB through the one shared table, exactly as a real
         // backend dispatches it — boot is a new incarnation there too.
         let script = script_for(agent_id);
-        let reply = verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
+        let reply = verbs::handle_common(agent_id, payload, kernel, self.cfg, move |_client| {
             Arc::new(MockProvider {
                 script: Arc::clone(&script),
             }) as Arc<dyn Provider>
@@ -279,7 +282,9 @@ fn id_for(tmp: &TempDir, tag: &str) -> String {
 /// the shared test memory store under it.
 async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
-    kernel.bundles.register(HANDLER_MODULE, MockBundle);
+    kernel
+        .bundles
+        .register(HANDLER_MODULE, MockBundle { cfg: CFG });
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle::default());
@@ -404,6 +409,12 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
 /// `context_insufficient` — which looks exactly like a routing bug. python
 /// documents the same trap at `test_send_to.py:53-66`.
 async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
+    add_backend_on(kernel, id, file_id, HANDLER_MODULE).await
+}
+
+/// [`add_backend`] on a given handler module: a backend other than the mock that
+/// cannot cache, such as the caching mock.
+async fn add_backend_on(kernel: &Arc<Kernel>, id: &str, file_id: &str, module: &str) -> AgentId {
     // The conversation lives in the memory store the record names — wired both
     // ways (python `_testkit.memory_meta`). Deny-all otherwise: the backend
     // streams its turn to `cli` and names its leg, each an explicit grant.
@@ -416,7 +427,7 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
-        "handler_module": HANDLER_MODULE,
+        "handler_module": module,
         "id": id,
         "model": "test-model",
         "context_window": 32768,

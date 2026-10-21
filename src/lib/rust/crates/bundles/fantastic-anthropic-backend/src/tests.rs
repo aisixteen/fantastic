@@ -538,16 +538,28 @@ fn provider_cache_splits_the_merged_turns_at_the_flagged_rows() {
 #[test]
 fn the_split_turns_concatenate_to_exactly_the_merged_string() {
     // The block texts of a merged turn, joined, are the string the turn was before
-    // any split: no byte added or lost, wherever a flag falls.
-    let shapes: [&[Option<&str>]; 5] = [
-        &[Some("cache_primer"), None, None],
-        &[None, Some("cache_fold"), None],
-        &[None, Some("cache_primer"), Some("cache_fold")],
-        &[Some("cache_fold"), Some("cache_fold"), None],
-        &[None, None, Some("cache_primer")],
+    // any split: no byte added or lost, wherever a flag falls. And no block is blank:
+    // the API refuses a whitespace-only text block, so a flagged row followed by empty
+    // rows must not leave a trailing "\n\n" block of its own.
+    let cases: [(&[&str], &[Option<&str>]); 9] = [
+        (&["one", "", "three"], &[Some("cache_primer"), None, None]),
+        (&["one", "", "three"], &[None, Some("cache_fold"), None]),
+        (
+            &["one", "", "three"],
+            &[None, Some("cache_primer"), Some("cache_fold")],
+        ),
+        (
+            &["one", "", "three"],
+            &[Some("cache_fold"), Some("cache_fold"), None],
+        ),
+        (&["one", "", "three"], &[None, None, Some("cache_primer")]),
+        (&["one", ""], &[Some("cache_primer"), None]),
+        (&["one", "", ""], &[Some("cache_fold"), None, None]),
+        (&["", "one", ""], &[None, Some("cache_fold"), None]),
+        (&["one", ""], &[Some("cache_primer"), Some("cache_fold")]),
     ];
-    for shape in shapes {
-        let rows: Vec<(&str, &str, Option<&str>)> = ["one", "", "three"]
+    for (texts, shape) in cases {
+        let rows: Vec<(&str, &str, Option<&str>)> = texts
             .iter()
             .zip(shape)
             .map(|(t, f)| ("user", *t, *f))
@@ -564,12 +576,39 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
         let blocks = b["messages"][0]["content"].clone();
         let joined: String = match &blocks {
             Value::String(s) => s.clone(),
-            Value::Array(a) => a.iter().map(|x| x["text"].as_str().unwrap()).collect(),
+            Value::Array(a) => {
+                for block in a {
+                    let text = block["text"].as_str().unwrap();
+                    assert!(
+                        !text.trim().is_empty(),
+                        "shape {shape:?}: a blank block is refused by the API: {b}"
+                    );
+                }
+                a.iter().map(|x| x["text"].as_str().unwrap()).collect()
+            }
             other => panic!("unexpected content {other}"),
         };
         assert_eq!(joined, merged, "shape {shape:?}: {b}");
         assert!(markers(&b) <= 4, "shape {shape:?}: {b}");
     }
+}
+
+#[test]
+fn a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_block() {
+    // The trailing blank separator joins the flagged row's block: the marker lands
+    // after the "\n\n" that followed "one", and the bytes are the merged string.
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.caching = Caching::ProviderCache;
+    let msgs = flagged(&[("user", "one", Some("cache_primer")), ("user", "", None)]);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["messages"],
+        json!([{"role": "user", "content": [
+            {"type": "text", "text": "one\n\n", "cache_control": {"type": "ephemeral"}},
+        ]}]),
+        "{b}"
+    );
+    assert_eq!(markers(&b), 3, "M1, M2 and auto: {b}");
 }
 
 #[test]

@@ -27,7 +27,8 @@ pub const CACHING_HINT: &str = "how the conversation is kept in the model's view
      reads, repeated reply bodies and used docs from the view; provider_cache = none's \
      history plus the provider's cache markers (the end of the primer row named by \
      cache_primer_until, and the end of the last fold); provider_cache is refused by a \
-     backend that cannot cache";
+     backend that cannot cache. A switch keeps the view already written: a row a cleanup \
+     left out of it stays out until a context_clear starts a new thread";
 
 /// The `cache_primer_until` field's hint.
 pub const CACHE_PRIMER_HINT: &str = "a row id: the row that ends the stable prefix. The \

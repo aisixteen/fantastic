@@ -103,7 +103,9 @@ impl Flags {
 /// With `marks`, a merged turn whose rows carry flags is cut into text blocks at the
 /// end of each flagged row's text, so the marker lands there, not at the end of the
 /// merged turn. The block texts concatenate to the merged string exactly: the blank
-/// line that joins two rows opens the next block, and is never dropped or marked.
+/// line that joins two rows opens the next block, and is never dropped. The one
+/// exception is a trailing blank line with no row after it, which closes the block
+/// before it (see [`cut_blocks`]), so that marker sits a blank line after its text.
 fn to_wire(messages: &[Value], marks: bool) -> (String, Vec<Value>) {
     let mut systems: Vec<String> = Vec::new();
     let mut turns: Vec<(String, Vec<(String, Flags)>)> = Vec::new();
@@ -163,6 +165,12 @@ fn turn_content(rows: &[(String, Flags)]) -> Value {
 /// A merged turn cut at the end of each flagged row: `(block text, ends a flagged
 /// row)`. A flagged row with no text opens no block of its own (an empty block is
 /// refused), so it carries no marker; every other row's text is whole in its block.
+///
+/// A cut block always holds the flagged row's own text, so it is never blank. The
+/// tail after the last cut can be blank separators only (a flagged row followed by
+/// empty rows): the API refuses a whitespace-only text block, so those separators
+/// join the block before them. The marker then sits after the blank line that
+/// followed the flagged row, not on its last character; the bytes are unchanged.
 fn cut_blocks(rows: &[(String, Flags)]) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut cur = String::new();
@@ -175,8 +183,10 @@ fn cut_blocks(rows: &[(String, Flags)]) -> Vec<(String, bool)> {
             out.push((std::mem::take(&mut cur), true));
         }
     }
-    if !cur.is_empty() || out.is_empty() {
+    if !cur.trim().is_empty() || out.is_empty() {
         out.push((cur, false));
+    } else if let Some((last, _)) = out.last_mut() {
+        last.push_str(&cur);
     }
     out
 }

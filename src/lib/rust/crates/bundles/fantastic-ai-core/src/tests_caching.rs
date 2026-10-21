@@ -129,6 +129,74 @@ async fn fold(kernel: &Arc<Kernel>, agent: &AgentId, from: i64, to: i64, summary
         .unwrap_or_else(|| panic!("context_fold refused: {out}"))
 }
 
+/// The module the caching mock is registered under: a backend that declares
+/// provider caching, as the anthropic backend does.
+const CACHING_MODULE: &str = "mock_caching.tools";
+const CACHING_CFG: BackendConfig = BackendConfig {
+    name: "mock_caching",
+    model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: true,
+};
+
+/// [`mk_kernel`] on the caching mock, so a `provider_cache` record is accepted and a
+/// turn reaches the provider with its cache flags.
+async fn mk_caching_kernel(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, AgentId) {
+    let kernel = base_kernel(tmp, |k| {
+        k.bundles
+            .register(CACHING_MODULE, MockBundle { cfg: CACHING_CFG });
+    })
+    .await;
+    let backend_id = id_for(tmp, tag);
+    let file_id = format!("ff_{}", backend_id);
+    add_file_bridge(
+        &kernel,
+        &file_id,
+        &tmp.path().join(".fantastic"),
+        &backend_id,
+    )
+    .await;
+    let backend = add_backend_on(&kernel, &backend_id, &file_id, CACHING_MODULE).await;
+    (kernel, backend)
+}
+
+/// One `send` turn on the agent: the messages the provider was handed for the turn
+/// itself, as it received them (cache flags included). An owed recall is a provider
+/// pass of its own, served first, so the turn is the pass whose last message is the
+/// live text.
+async fn turn_messages(kernel: &Arc<Kernel>, agent: &AgentId, text: &str) -> Vec<Value> {
+    let s = script(
+        agent,
+        vec![pass("ok"), pass("ok"), pass("ok")],
+        Duration::ZERO,
+    );
+    let _rx = rebind_backend_inbox(kernel, agent);
+    let reply = kernel
+        .send(vec![Item::new(
+            agent.clone(),
+            json!({"type": "send", "text": text, "client_id": "c"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        reply.get("error").is_none() && reply.get("raised").is_none(),
+        "{reply}"
+    );
+    assert!(until_passes(&s, 1).await, "the provider was never called");
+    (0..s.passes_served())
+        .map(|n| s.request_messages(n))
+        .find(|msgs| msgs.last().and_then(|m| m["content"].as_str()) == Some(text))
+        .unwrap_or_else(|| panic!("no provider pass carried the turn {text:?}"))
+}
+
+/// The contents of the messages that carry `key` set to true.
+fn flagged_contents(msgs: &[Value], key: &str) -> Vec<String> {
+    msgs.iter()
+        .filter(|m| m.get(key) == Some(&json!(true)))
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
 // ─── the record's values ────────────────────────────────────────────────────
 
 #[test]
@@ -442,7 +510,9 @@ async fn provider_cache_is_refused_by_a_backend_that_cannot_cache() {
     // the mock backend declares no provider caching: a turn on it refuses the mode
     let tmp = TempDir::new().unwrap();
     let (kernel, agent) = mk_kernel(&tmp, "cm_cap").await;
+    put(&kernel, &agent, "user", "kept").await;
     set(&kernel, &agent, json!({"caching": "provider_cache"})).await;
+    let before = store(&kernel, &agent).await.len();
     let reply = verb(
         &kernel,
         &agent,
@@ -454,4 +524,117 @@ async fn provider_cache_is_refused_by_a_backend_that_cannot_cache() {
         text.contains("mock_backend: caching=provider_cache is not supported by this backend"),
         "{reply}"
     );
+    assert_eq!(
+        store(&kernel, &agent).await.len(),
+        before,
+        "a refused turn stores no row: {reply}"
+    );
+}
+
+// ─── the flags reach the provider on a real turn ────────────────────────────
+
+#[tokio::test]
+async fn a_provider_cache_turn_hands_the_provider_the_primer_and_the_last_fold_flagged() {
+    // [primer rows][fold][fold][task rows], then the live turn: the primer's end and
+    // the LAST fold's end are flagged on the messages the provider receives, the
+    // earlier fold is not.
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_caching_kernel(&tmp, "cm_wire").await;
+    set(&kernel, &agent, json!({"caching": "provider_cache"})).await;
+    put(&kernel, &agent, "user", "u1").await;
+    let a1 = put(&kernel, &agent, "assistant", "a1").await;
+    let u2 = put(&kernel, &agent, "user", "u2").await;
+    let a2 = put(&kernel, &agent, "assistant", "a2").await;
+    let u3 = put(&kernel, &agent, "user", "u3").await;
+    let a3 = put(&kernel, &agent, "assistant", "a3").await;
+    put(&kernel, &agent, "user", "task").await;
+    set(&kernel, &agent, json!({"cache_primer_until": a1})).await;
+    fold(&kernel, &agent, u2, a2, "fold one").await;
+    fold(&kernel, &agent, u3, a3, "fold two").await;
+
+    let msgs = turn_messages(&kernel, &agent, "live").await;
+    assert_eq!(
+        flagged_contents(&msgs, "cache_primer"),
+        vec!["a1".to_string()],
+        "M2 on the primer row's message only: {msgs:?}"
+    );
+    let folds = flagged_contents(&msgs, "cache_fold");
+    assert_eq!(folds.len(), 1, "M3 on one message: {msgs:?}");
+    assert!(
+        folds[0].contains("\"fold two\""),
+        "M3 is on the LAST fold: {folds:?}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m["content"].as_str().unwrap_or("").contains("\"fold one\"")),
+        "the earlier fold stays in the view, unflagged: {msgs:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cleanup_or_none_turn_hands_the_provider_no_flag_even_with_a_primer_and_folds() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_caching_kernel(&tmp, "cm_wire_off").await;
+    put(&kernel, &agent, "user", "u1").await;
+    let a1 = put(&kernel, &agent, "assistant", "a1").await;
+    let u2 = put(&kernel, &agent, "user", "u2").await;
+    let a2 = put(&kernel, &agent, "assistant", "a2").await;
+    set(&kernel, &agent, json!({"cache_primer_until": a1})).await;
+    fold(&kernel, &agent, u2, a2, "fold one").await;
+    for mode in ["cleanup", "none"] {
+        set(&kernel, &agent, json!({"caching": mode})).await;
+        let msgs = turn_messages(&kernel, &agent, "live").await;
+        assert!(
+            msgs.iter()
+                .all(|m| m.get("cache_primer").is_none() && m.get("cache_fold").is_none()),
+            "{mode}: no flag reaches the provider: {msgs:?}"
+        );
+        assert!(msgs.len() > 3, "{mode}: the view is sent: {msgs:?}");
+    }
+}
+
+// ─── a mode switch keeps the view array's membership ────────────────────────
+
+#[tokio::test]
+async fn a_mode_switch_keeps_the_rows_a_cleanup_left_out_of_the_view_array() {
+    // The view array is the record of what the view is. A fold written under cleanup
+    // lists only the rows cleanup kept, so the superseded read stays out after a
+    // switch to none: none renders the listed rows and the rows after the newest of
+    // them. The row returns only when the array is gone (a context_clear starts a new
+    // thread, so it never does within this one).
+    let tmp = TempDir::new().unwrap();
+    let (kernel, agent) = mk_kernel(&tmp, "cm_switch").await;
+    put(
+        &kernel,
+        &agent,
+        "user",
+        "[reply to 11 · notes reflect]\nold state",
+    )
+    .await;
+    put(&kernel, &agent, "assistant", "ok one").await;
+    put(
+        &kernel,
+        &agent,
+        "user",
+        "[reply to 14 · notes reflect]\nnew state",
+    )
+    .await;
+    put(&kernel, &agent, "assistant", "ok two").await;
+    let u5 = put(&kernel, &agent, "user", "question").await;
+    let a5 = put(&kernel, &agent, "assistant", "answer").await;
+    fold(&kernel, &agent, u5, a5, "fold").await;
+
+    let cleaned = history(&view_with(&kernel, &agent, Caching::Cleanup).await);
+    assert!(cleaned.iter().all(|(_, c)| !c.contains("old state")));
+    let switched = history(&view_with(&kernel, &agent, Caching::None).await);
+    assert_eq!(
+        switched.len(),
+        4,
+        "the listed rows, the fold among them: {switched:?}"
+    );
+    assert!(
+        switched.iter().all(|(_, c)| !c.contains("old state")),
+        "a dropped row stays out of the array's view: {switched:?}"
+    );
+    assert!(switched.iter().any(|(_, c)| c.contains("new state")));
 }
