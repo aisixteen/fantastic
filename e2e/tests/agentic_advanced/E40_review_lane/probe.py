@@ -675,13 +675,13 @@ async def main() -> None:
             for ts, rid, text in _sends_to(crows, REVIEWER):
                 if _is_review(text) and ("R", rid, text) not in seen:
                     seen.add(("R", rid, text))
-                    reviews.append({"ts": ts, "text": text, "snap": _read(ledger)})
+                    reviews.append({"ts": ts, "rid": rid, "text": text, "snap": _read(ledger)})
                     print(f"  · {time.monotonic() - t0:5.0f}s REVIEW #{len(reviews)} sent — ledger.py snapshot taken", flush=True)
             for ts, rid, text in _sends_to(rrows, CODER):
                 word = _verdict_word(text)
                 if word and ("V", rid, text) not in seen:
                     seen.add(("V", rid, text))
-                    verdicts.append({"ts": ts, "word": word, "text": text, "snap": _read(ledger)})
+                    verdicts.append({"ts": ts, "rid": rid, "word": word, "text": text, "snap": _read(ledger)})
                     print(f"  · {time.monotonic() - t0:5.0f}s verdict {word} sent — ledger.py snapshot taken", flush=True)
             for who, rows in ((CODER, crows), (REVIEWER, rrows)):
                 for r in rows:
@@ -728,15 +728,22 @@ async def main() -> None:
         crows, rrows = state["crows"], state["rrows"]
         final = _read(ledger)
         final_ok, final_failed = run_oracle(final)
-        pairing = _pair([r["ts"] for r in reviews], [v["ts"] for v in verdicts])
-        ts_missing = any(x["ts"] <= 0 for x in reviews + verdicts)
+        # ORDER: the rows' `ts` where every row carries one; otherwise their ids, which
+        # the kernel mints from one rising counter for every agent (rust rows carry no ts).
+        def _order(x):
+            return x["ts"] if all(y["ts"] > 0 for y in reviews + verdicts) else float(x["rid"])
+        try:
+            pairing = _pair([_order(r) for r in reviews], [_order(v) for v in verdicts])
+            ts_missing = False
+        except (TypeError, ValueError):
+            pairing, ts_missing = [None] * len(verdicts), True
         oracle_at_review = [run_oracle(r["snap"]) for r in reviews]
         oracle_at_verdict = [run_oracle(v["snap"]) for v in verdicts]
         received = sum(1 for r in rrows if _is_incoming(r) and "REVIEW:" in str(r.get("content") or ""))
 
         print("\n" + "=" * (W + 4))
         if fault or ts_missing:
-            print(f"    HARNESS FAULT — not a model result: {fault or 'rows carry no ts, verdicts cannot be paired'}")
+            print(f"    HARNESS FAULT — not a model result: {fault or 'rows carry neither a ts nor a numeric id, verdicts cannot be paired'}")
         print(f"    1. team built and wired              {'OK' if c1 else 'NO'}")
         c2 = bool(reviews) and received >= 1 and bool(verdicts)
         print(f"    2. a review round happened           {'OK' if c2 else 'NO'} reviews sent={len(reviews)} "
