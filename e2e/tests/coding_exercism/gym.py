@@ -98,7 +98,7 @@ LANGS: dict[str, Lang] = {
     ),
     "go": Lang(
         precheck="go",
-        test_cmd=["go", "test", "./..."],
+        test_cmd=["go", "test", "-count=1", "./..."],
         stub_globs=["*.go"], test_globs=["*_test.go"],
         allow=[r"go test .*"],
     ),
