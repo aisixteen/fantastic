@@ -176,10 +176,16 @@ def _anthropic() -> Backend:
     extra: dict[str, Any] = {}
     if ep := os.environ.get("ANTHROPIC_ENDPOINT"):
         extra["endpoint"] = ep
-    # Prompt caching is the backend's opt-in (`prompt_cache`); a run turns it on
-    # with ANTHROPIC_PROMPT_CACHE=1, so a cached and an uncached run compare.
-    if os.environ.get("ANTHROPIC_PROMPT_CACHE") == "1":
-        extra["prompt_cache"] = True
+    # Caching is always named on the record: `provider_cache` by default, or
+    # ANTHROPIC_CACHING (`none` | `cleanup` | `provider_cache`) so runs can compare
+    # modes. Any other value is refused here, naming the variable.
+    caching = os.environ.get("ANTHROPIC_CACHING") or "provider_cache"
+    if caching not in ("none", "cleanup", "provider_cache"):
+        raise SystemExit(
+            f"ANTHROPIC_CACHING={caching!r} is not a caching mode. Use one of: "
+            "none, cleanup, provider_cache."
+        )
+    extra["caching"] = caching
     return Backend(
         name="anthropic",
         handler_module="anthropic_backend.tools",
