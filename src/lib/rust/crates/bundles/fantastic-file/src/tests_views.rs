@@ -791,3 +791,37 @@ async fn open_view_writes_the_bridge_grant_as_an_update_so_it_persists() {
         .unwrap();
     assert_eq!(cb[&vid], json!(["folder:docs", "list", "unwatch_path", "watch_path"]), "{cb}");
 }
+
+#[tokio::test]
+async fn open_view_deletes_the_view_it_made_when_the_bridge_refuses_the_grant() {
+    // the view is deleted with the kernel's own delete_agent, as the root (a send as the bridge
+    // is refused: the bridge holds no grant on the kernel)
+    let tmp = tempfile::tempdir().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::create_dir_all(served(&tmp).join("docs")).unwrap();
+    // a malformed entry already on the bridge: the write-time check refuses the merged map
+    set_callable_by(&k, "fb", "stale", json!(5));
+    let before = k.agent_ids();
+    let cb_before = k.agents.get(&AgentId::from("fb")).unwrap().record().meta["callable_by"].clone();
+    let r = open(&k, "folder", "docs").await;
+    assert!(r.get("error").is_some(), "the grant is refused: {r}");
+    assert!(r.get("id").is_none(), "no view is handed back: {r}");
+    assert_eq!(k.agent_ids(), before, "the view made for the refused grant is deleted");
+    let cb = k.agents.get(&AgentId::from("fb")).unwrap().record().meta["callable_by"].clone();
+    assert_eq!(cb, cb_before, "a refused grant writes nothing: {cb}");
+    assert_eq!(cb["stale"], json!(5), "{cb}");
+}
+
+#[test]
+fn a_refused_grant_names_a_view_its_cleanup_could_not_delete() {
+    use super::views::grant_refused;
+    // the delete went through: the error stands alone
+    let clean = grant_refused("bad shape".to_string(), "v1", json!({"deleted": true, "id": "v1"}));
+    assert_eq!(clean, json!({"error": "bad shape"}));
+    // the delete refused: the view left and why ride along, the grant's error stays first
+    let refusal = json!({"error": "delete_agent: 'v1' blocked by delete_lock", "reason": "locked"});
+    let left = grant_refused("bad shape".to_string(), "v1", refusal.clone());
+    assert_eq!(left["error"], "bad shape", "{left}");
+    assert_eq!(left["view_left"], "v1", "{left}");
+    assert_eq!(left["cleanup_error"], refusal, "{left}");
+}

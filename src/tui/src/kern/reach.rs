@@ -212,30 +212,27 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
         writers.push((CANVAS_LEG.to_string(), false));
     }
     for (holder, full) in writers {
-        let mut cc = field(h, &holder, "can_call");
-        let mut changed = false;
-        for id in ids.iter().map(String::as_str).chain(["kernel"]) {
-            if id == holder || (id != "kernel" && !exists(h, id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
-                continue;
+        h.kernel.edit_can_call(&fantastic_kernel::AgentId::from(holder.as_str()), |cc| {
+            let mut changed = false;
+            for id in ids.iter().map(String::as_str).chain(["kernel"]) {
+                if id == holder || (id != "kernel" && !exists(h, id)) || (full && NARROWED.contains(&id) && holder != crate::env::HUMAN) {
+                    continue;
+                }
+                // a cabinet's agents: only the human's own calls and the canvas leg's frames
+                // reach them (its panel and its canvas are `user`'s and the leg's)
+                if id != "kernel" && owned.contains(id) && holder != crate::env::HUMAN && holder != CANVAS_LEG {
+                    continue;
+                }
+                // the leg's own: MERGED into what it holds (its calls to `user`)
+                let want = if full { all.clone() } else { union(cc.get(id), &leg_verbs(h, id)) };
+                if cc.get(id) != Some(&want) {
+                    cc.insert(id.to_string(), want);
+                    changed = true;
+                }
             }
-            // a cabinet's agents: only the human's own calls and the canvas leg's frames
-            // reach them (its panel and its canvas are `user`'s and the leg's)
-            if id != "kernel" && owned.contains(id) && holder != crate::env::HUMAN && holder != CANVAS_LEG {
-                continue;
-            }
-            // the leg's own: MERGED into what it holds (its calls to `user`)
-            let want = if full { all.clone() } else { union(cc.get(id), &leg_verbs(h, id)) };
-            if cc.get(id) != Some(&want) {
-                cc.insert(id.to_string(), want);
-                changed = true;
-            }
-        }
-        if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "can_call": cc})).await.result;
-            if let Some(e) = r.get("error").and_then(Value::as_str) {
-                return Err(format!("reach: `{holder}`.can_call: {e}"));
-            }
-        }
+            changed
+        })
+        .map_err(|e| format!("reach: `{holder}`.can_call: {e}"))?;
     }
     grant_back(h, ids).await
 }
@@ -290,21 +287,19 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
     }
     // the senders' side: whom they may send to
     for x in &everyone {
-        let mut cc = field(h, x, "can_call");
-        let mut changed = false;
-        for holder in holders.iter().filter(|hd| hd.as_str() != x && (touched.contains(hd.as_str()) || touched.contains(x.as_str()))) {
-            let want = union(cc.get(holder), &send);
-            if cc.get(holder) != Some(&want) {
-                cc.insert(holder.clone(), want);
-                changed = true;
+        // one locked merge per sender: a concurrent writer's entry survives
+        let r = h.kernel.edit_can_call(&fantastic_kernel::AgentId::from(x.as_str()), |cc| {
+            let mut changed = false;
+            for holder in holders.iter().filter(|hd| hd.as_str() != x && (touched.contains(hd.as_str()) || touched.contains(x.as_str()))) {
+                let want = union(cc.get(holder), &send);
+                if cc.get(holder) != Some(&want) {
+                    cc.insert(holder.clone(), want);
+                    changed = true;
+                }
             }
-        }
-        if changed {
-            let r = h.operator("kernel", json!({"type": "update_agent", "id": x, "can_call": cc})).await.result;
-            if let Some(e) = r.get("error").and_then(Value::as_str) {
-                return Err(format!("reach: `{x}`.can_call (the way back): {e}"));
-            }
-        }
+            changed
+        });
+        r.map_err(|e| format!("reach: `{x}`.can_call (the way back): {e}"))?;
     }
     Ok(())
 }
@@ -443,15 +438,14 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
         if !exists(h, holder) {
             continue;
         }
-        let mut cc = field(h, holder, "can_call");
-        if cc.get(&key) == Some(&json!(["*"])) {
-            continue;
-        }
-        cc.insert(key.clone(), json!(["*"]));
-        let r = h.operator("kernel", json!({"type": "update_agent", "id": holder, "can_call": cc})).await.result;
-        if let Some(e) = r.get("error").and_then(Value::as_str) {
-            return Err(format!("reach: `{holder}` → `{key}`: {e}"));
-        }
+        let r = h.kernel.edit_can_call(&fantastic_kernel::AgentId::from(holder), |cc| {
+            if cc.get(&key) == Some(&json!(["*"])) {
+                return false;
+            }
+            cc.insert(key.clone(), json!(["*"]));
+            true
+        });
+        r.map_err(|e| format!("reach: `{holder}` → `{key}`: {e}"))?;
     }
     Ok(())
 }
@@ -619,7 +613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_grant_and_a_view_entry_on_one_bridge_both_survive() {
+    async fn sequential_merges_on_one_bridge_keep_both_keys() {
         let h = host_with_leg("grant-and-view").await;
         let k = &h.kernel;
         put(k, "bridge", Some("kernel"), json!({"callable_by": {"user": "*"}}));

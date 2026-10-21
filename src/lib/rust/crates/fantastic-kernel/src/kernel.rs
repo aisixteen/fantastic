@@ -322,19 +322,62 @@ impl Kernel {
         id: &AgentId,
         edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
     ) -> Result<bool, String> {
+        self.edit_grant(id, "callable_by", edit)
+    }
+
+    /// `can_call`, merged the same way as `edit_callable_by`.
+    pub fn edit_can_call(
+        &self,
+        id: &AgentId,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
+    ) -> Result<bool, String> {
+        self.edit_grant(id, "can_call", edit)
+    }
+
+    /// One grant map of [`Kernel::edit_grants`]: `field` is the record key.
+    fn edit_grant(
+        &self,
+        id: &AgentId,
+        field: &str,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
+    ) -> Result<bool, String> {
+        self.edit_grants(id, |cc, cb| {
+            if field == "can_call" {
+                (edit(cc), false)
+            } else {
+                (false, edit(cb))
+            }
+        })
+    }
+
+    /// BOTH grant maps as ONE step: `edit` gets `can_call` and `callable_by` as they are at
+    /// the write and returns which of the two it changed. One record lock, one run of the
+    /// write-time checks (`bad_grant_shape`, the bundle's `validate_meta`) over what changed,
+    /// one `updated` event: a shape refused in either map writes neither.
+    pub fn edit_grants(
+        &self,
+        id: &AgentId,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>, &mut serde_json::Map<String, Value>) -> (bool, bool),
+    ) -> Result<bool, String> {
         let agent = self
             .agents
             .get(id)
             .map(|e| Arc::clone(&e))
             .ok_or_else(|| "no such agent".to_string())?;
         let handler = agent.handler_module.clone();
-        let changed = agent.edit_callable_by(|cb, meta| {
-            if !edit(cb) {
-                return Ok(false);
+        let (cc_changed, cb_changed) = agent.edit_grants(|cc, cb, meta| {
+            let (cc_edited, cb_edited) = edit(cc, cb);
+            if !cc_edited && !cb_edited {
+                return Ok((false, false));
             }
-            // the same write-time checks update_agent makes, on the edited map
+            // the same write-time checks update_agent makes, on the edited maps
             let mut patch = serde_json::Map::new();
-            patch.insert("callable_by".to_string(), Value::Object(cb.clone()));
+            if cc_edited {
+                patch.insert("can_call".to_string(), Value::Object(cc.clone()));
+            }
+            if cb_edited {
+                patch.insert("callable_by".to_string(), Value::Object(cb.clone()));
+            }
             if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
                 return Err(why.to_string());
             }
@@ -345,16 +388,23 @@ impl Kernel {
                     }
                 }
             }
-            Ok(true)
+            Ok((cc_edited, cb_edited))
         })?;
-        if changed {
+        if cc_changed || cb_changed {
+            let mut changed = Vec::new();
+            if cc_changed {
+                changed.push(Value::String("can_call".to_string()));
+            }
+            if cb_changed {
+                changed.push(Value::String("callable_by".to_string()));
+            }
             let mut ev = serde_json::Map::new();
             ev.insert("agent_id".to_string(), Value::String(id.0.clone()));
             ev.insert("kind".to_string(), Value::String("updated".to_string()));
-            ev.insert("changed".to_string(), Value::Array(vec![Value::String("callable_by".to_string())]));
+            ev.insert("changed".to_string(), Value::Array(changed));
             self.publish_state(&Value::Object(ev));
         }
-        Ok(changed)
+        Ok(cc_changed || cb_changed)
     }
 
     /// THE COUNTER COMES BACK WITH THE GUID: the root record's reserved bound

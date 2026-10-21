@@ -233,6 +233,50 @@ fn an_edit_the_write_time_checks_refuse_writes_nothing() {
 }
 
 #[test]
+fn edit_can_call_holds_the_record_lock_while_it_edits() {
+    let kernel = Kernel::new();
+    kernel.register(Agent::new(
+        AgentId::from("cc_locked"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/nonexistent"),
+        false,
+    ));
+    let agent = kernel.agents.get(&AgentId::from("cc_locked")).map(|e| Arc::clone(&e)).unwrap();
+    let mut held = false;
+    let r = kernel.edit_can_call(&AgentId::from("cc_locked"), |cc| {
+        // a reader or writer from outside would block here: the record is locked for the edit
+        held = agent.meta.try_read().is_err();
+        cc.insert("view_a".to_string(), json!(["*"]));
+        true
+    });
+    assert!(r.is_ok(), "{r:?}");
+    assert!(held, "the record's lock was free while the edit ran");
+}
+
+#[test]
+fn a_refused_can_call_shape_writes_nothing() {
+    let kernel = Kernel::new();
+    kernel.register(Agent::new(
+        AgentId::from("cc_guarded"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/nonexistent"),
+        false,
+    ));
+    let before = kernel.agents.get(&AgentId::from("cc_guarded")).unwrap().record().meta.get("can_call").cloned();
+    let refused = kernel.edit_can_call(&AgentId::from("cc_guarded"), |cc| {
+        cc.insert("x".to_string(), json!(5));
+        true
+    });
+    assert!(refused.is_err(), "{refused:?}");
+    let cc = kernel.agents.get(&AgentId::from("cc_guarded")).unwrap().record().meta.get("can_call").cloned();
+    assert_eq!(cc, before, "a refused edit writes nothing");
+}
+
+#[test]
 fn bootstrap_one_shot_does_not_acquire_lock() {
     let tmp = TempDir::new().unwrap();
     // First boot acquires.
@@ -662,4 +706,41 @@ fn the_guard_refuses_a_state_dir_that_is_the_home() {
     let proj = tmp.path().join("proj");
     refuse_home_as_state_dir(&proj, &proj.join(".fantastic"), Some(&home)).unwrap();
     refuse_home_as_state_dir(tmp.path(), &home, None).unwrap();
+}
+
+#[test]
+fn edit_grants_refused_in_one_map_writes_neither() {
+    let kernel = Kernel::new();
+    kernel.register(Agent::new(
+        AgentId::from("both_guarded"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/nonexistent"),
+        false,
+    ));
+    let id = AgentId::from("both_guarded");
+    let meta = |k: &Kernel| k.agents.get(&AgentId::from("both_guarded")).unwrap().record().meta;
+    let before = meta(&kernel);
+    // a good can_call entry and a malformed callable_by one: the whole step is refused
+    let refused = kernel.edit_grants(&id, |cc, cb| {
+        cc.insert("peer".to_string(), json!(["*"]));
+        cb.insert("x".to_string(), json!(5));
+        (true, true)
+    });
+    assert!(refused.is_err(), "{refused:?}");
+    let m = meta(&kernel);
+    assert_eq!(m.get("can_call"), before.get("can_call"), "the can_call edit is not written: {m:?}");
+    assert_eq!(m.get("callable_by"), before.get("callable_by"), "{m:?}");
+    assert!(m["can_call"].get("peer").is_none(), "{m:?}");
+    // the same step with a good callable_by writes both
+    let ok = kernel.edit_grants(&id, |cc, cb| {
+        cc.insert("peer".to_string(), json!(["*"]));
+        cb.insert("x".to_string(), json!(["send"]));
+        (true, true)
+    });
+    assert_eq!(ok, Ok(true));
+    let m = meta(&kernel);
+    assert_eq!(m["can_call"]["peer"], json!(["*"]));
+    assert_eq!(m["callable_by"]["x"], json!(["send"]));
 }

@@ -245,9 +245,10 @@ async fn tree(kernel: &Arc<Kernel>, payload: Value) -> Value {
     call(kernel, &root_id(kernel), payload).await
 }
 
-/// Edit `holder`'s grants and fields in ONE update. Each `(key, verbs)` pair sets one
-/// grant key; the whole maps are restated, because `update_agent` replaces them.
-/// Returns the refusal's error, or `None`.
+/// Edit `holder`'s grants, then its other fields. Each `(key, verbs)` pair sets ONE key of a
+/// grant map, MERGED into what the record holds at the write (a key another writer put there
+/// stays). Both maps go in one locked, once-validated step (`Kernel::edit_grants`); the other
+/// fields follow in an `update_agent`. Returns the refusal's error, or `None`.
 async fn wire(
     kernel: &Arc<Kernel>,
     holder: &str,
@@ -255,33 +256,44 @@ async fn wire(
     callable_by: &[(String, Value)],
     fields: &[(&str, Value)],
 ) -> Option<String> {
-    let Some(rec) = record(kernel, holder) else {
+    if record(kernel, holder).is_none() {
         return Some(format!("`{holder}` does not exist"));
-    };
+    }
+    // BOTH grant maps merge in ONE step under the record's lock and are checked once: a
+    // concurrent writer's entry survives, and a shape refused in either map writes neither.
+    // The other fields go in a separate `update_agent` once the grants hold (a refusal
+    // there leaves the grants written).
+    if !can_call.is_empty() || !callable_by.is_empty() {
+        let id = fantastic_kernel::AgentId::from(holder);
+        let r = kernel.edit_grants(&id, |cc, cb| {
+            (merge_grants(cc, can_call), merge_grants(cb, callable_by))
+        });
+        if let Err(e) = r {
+            return Some(e);
+        }
+    }
+    if fields.is_empty() {
+        return None;
+    }
     let mut upd = Map::new();
     upd.insert("type".into(), json!("update_agent"));
     upd.insert("id".into(), json!(holder));
     for (key, value) in fields {
         upd.insert((*key).to_string(), value.clone());
     }
-    for (field, changes) in [("can_call", can_call), ("callable_by", callable_by)] {
-        if changes.is_empty() {
-            continue;
-        }
-        let mut grant = rec
-            .get(field)
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        for (key, verbs) in changes {
-            grant.insert(key.clone(), verbs.clone());
-        }
-        upd.insert(field.to_string(), Value::Object(grant));
-    }
-    if upd.len() == 2 {
-        return None;
-    }
     error_of(&tree(kernel, Value::Object(upd)).await)
+}
+
+/// Merge `(key, verbs)` pairs into one grant map; whether it changed.
+fn merge_grants(map: &mut Map<String, Value>, pairs: &[(String, Value)]) -> bool {
+    let mut changed = false;
+    for (key, verbs) in pairs {
+        if map.get(key) != Some(verbs) {
+            map.insert(key.clone(), verbs.clone());
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// `(key, verbs)` pairs from literals.

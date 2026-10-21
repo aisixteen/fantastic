@@ -275,12 +275,53 @@ impl Agent {
         &self,
         edit: impl FnOnce(&mut Map<String, Value>, &Map<String, Value>) -> Result<bool, String>,
     ) -> Result<bool, String> {
+        self.edit_grant("callable_by", edit)
+    }
+
+    /// `can_call`, under the same meta write lock and with the same contract.
+    pub fn edit_can_call(
+        &self,
+        edit: impl FnOnce(&mut Map<String, Value>, &Map<String, Value>) -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        self.edit_grant("can_call", edit)
+    }
+
+    /// BOTH grant maps under ONE write lock: `edit` gets `can_call`, `callable_by` and the
+    /// record, and says which of the two it changed (or refuses). Nothing is written unless
+    /// `edit` returns `Ok`; then each changed map is written.
+    pub(crate) fn edit_grants(
+        &self,
+        edit: impl FnOnce(
+            &mut Map<String, Value>,
+            &mut Map<String, Value>,
+            &Map<String, Value>,
+        ) -> Result<(bool, bool), String>,
+    ) -> Result<(bool, bool), String> {
         let mut m = self.meta.write().expect("meta lock poisoned");
+        let mut cc = m.get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
         let mut cb = m.get("callable_by").and_then(Value::as_object).cloned().unwrap_or_default();
+        let (cc_changed, cb_changed) = edit(&mut cc, &mut cb, &*m)?;
+        if cc_changed {
+            m.insert("can_call".to_string(), Value::Object(cc));
+        }
+        if cb_changed {
+            m.insert("callable_by".to_string(), Value::Object(cb));
+        }
+        Ok((cc_changed, cb_changed))
+    }
+
+    /// The one locked merge both grant maps use. `field` names the map in the record.
+    pub(crate) fn edit_grant(
+        &self,
+        field: &str,
+        edit: impl FnOnce(&mut Map<String, Value>, &Map<String, Value>) -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let mut m = self.meta.write().expect("meta lock poisoned");
+        let mut cb = m.get(field).and_then(Value::as_object).cloned().unwrap_or_default();
         if !edit(&mut cb, &*m)? {
             return Ok(false);
         }
-        m.insert("callable_by".to_string(), Value::Object(cb));
+        m.insert(field.to_string(), Value::Object(cb));
         Ok(true)
     }
 

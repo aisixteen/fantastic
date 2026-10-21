@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use fantastic_bundle::py_repr;
 use fantastic_kernel::inbox::{InboxItem, InboxReceiver};
-use fantastic_kernel::lifecycle::create_from_payload;
+use fantastic_kernel::lifecycle::{create_from_payload, delete_from_payload};
 use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
@@ -399,9 +399,24 @@ pub(crate) async fn open_view(
         cb.insert(vid.clone(), json!(set.into_iter().collect::<Vec<_>>()));
         true
     }) {
-        return json!({"error": e});
+        // the view must not outlive a refused grant: delete it with the kernel's own
+        // `delete_agent`, as the root, the way the view was made (a send as the bridge is
+        // refused: the bridge holds no grant on the kernel)
+        let gone = delete_from_payload(kernel, &root, &json!({"id": vid})).await;
+        return grant_refused(e, &vid, gone);
     }
     json!({"id": vid, "kind": kind, "path": path, "created": true})
+}
+
+/// The error of a refused grant edit in `open_view`. `gone` is the reply of deleting the view
+/// made for it: a refused delete is not swallowed, it names the view left and why.
+pub(crate) fn grant_refused(e: String, vid: &str, gone: Value) -> Value {
+    let mut out = json!({"error": e});
+    if gone.get("error").is_some() {
+        out["view_left"] = json!(vid);
+        out["cleanup_error"] = gone;
+    }
+    out
 }
 
 /// Is this record the view of `path` of this kind on this bridge?

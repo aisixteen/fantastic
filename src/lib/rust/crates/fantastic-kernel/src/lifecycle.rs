@@ -361,7 +361,7 @@ fn find_locked_descendant(kernel: &Kernel, target: &Arc<Agent>) -> Option<AgentI
 }
 
 /// Implementation of the `delete_agent` system verb.
-pub(crate) async fn delete_from_payload(
+pub async fn delete_from_payload(
     kernel: &Arc<Kernel>,
     caller: &Arc<Agent>,
     payload: &Value,
