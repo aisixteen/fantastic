@@ -14,6 +14,7 @@ that keeps working after the builder walks away".
 | `multisubai_build` (E37) | the creator builds the three-solver team, sleeps, is woken by its conclusion, validates, deletes the fleet, stops |
 | `chat_users` (E38) | one AI is the bot of a multi-user chat server — events over several channels and accounts, including look-alike names, one person on two accounts and a spoofed identity |
 | `chat_memory` (E39) | the chat bot's long pre-written past folds at a small window (a fold per batch, then a fold of folds); live asks recall from it |
+| `review_lane` (E40) | a reviewer AI (read-only bridge, own runner) checks a coder AI's `ledger.py`; the coder fixes what it reports; a hidden oracle, run on a snapshot at every REVIEW, proves the reviewer never passes broken work (`probe.py --selftest` checks the oracle without a model) |
 
 **Wiring here includes granting authority.** The substrate is deny-all: creating
 an agent connects it to nothing, and a builder that only creates agents has built

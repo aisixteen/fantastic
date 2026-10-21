@@ -1,0 +1,17 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+id: review_lane
+group: agentic_advanced
+title: a reviewer AI checks a coder AI's work — the coder fixes what the reviewer reports, and the reviewer never passes broken work
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: turns
+# TWO LANES inside one test (coder, reviewer) share the proxy. Run alone.
+long: true
+limits:
+  idle_seconds: 60
+  max_turns: 40
+  no_progress_turns: 0
+  turn_chars: 120000
+  turn_seconds: 600
+env: {FANTASTIC_AI_SEND_TIMEOUT: "420", UNATTENDED: "900", REVIEW_ROUNDS: "4"}
