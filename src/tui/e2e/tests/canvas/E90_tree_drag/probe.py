@@ -17,8 +17,10 @@ g) the cells this probe made are removed; no page error is logged.
 
 Then the canvas's own sidebar (#148), the file tree fixed beside the canvas:
 h) zoomed far out, the sidebar stays where it was; both cells are hidden again,
-   the agent row dragged from the SIDEBAR brings its cell back at the drop point,
-   and a file row dragged from it opens a preview at its drop point.
+   the two agent rows marked IN THE SIDEBAR are dragged together and both cells
+   come back at the drop point, and a file row dragged from it opens a preview at
+   its drop point;
+i) the sidebar is collapsed, the page is reloaded, and it is still collapsed.
 
 Every page call below is `host_call` to `<page guid>|<cell>` or to `view_root`,
 the way an AI reaches a cell."""
@@ -88,13 +90,34 @@ def side_row(sel: str) -> str:
     return f"document.querySelector('.tree-sidebar .ft-tree')?.querySelector('{sel}')"
 
 
-def placed(expr: str, x: int, y: int) -> str:
+def placed(expr: str, x: int, y: int, dwx: int = -260, dwy: int = -280) -> str:
     """How far the element `expr` is from where a drop at screen (x, y) puts its corner, as [dx, dy] (or null).
-    A drop centres its spot on the point (`layoutAround`): the spot is the canvas's drop slot (520 x 560
-    world units, `canvas.ts` DROP_SLOT), so the corner is the point less half a slot, at the zoom in use."""
+    A drop centres its spots on the point (`layoutAround`): one spot is the canvas's drop slot (520 x 560
+    world units, `canvas.ts` DROP_SLOT), so its corner is the point less half a slot (dwx, dwy: the corner's
+    offset from the point, in world units, at the zoom in use)."""
     return (
         f"(()=>{{const e={expr}; if(!e) return null; const z={SCALE}; const b=e.getBoundingClientRect();"
-        f" return [b.left-({x}-260*z), b.top-({y}-280*z)];}})()"
+        f" return [b.left-({x}+({dwx})*z), b.top-({y}+({dwy})*z)];}})()"
+    )
+
+
+def geom(expr: str) -> str:
+    """Where an element sits, three ways: its world rect (the style's left/top, in world units), the view's transform, and its screen rect with the canvas's."""
+    return (
+        f"(()=>{{const e={expr}; if(!e) return null; const w=document.querySelector('.canvas-world'); const c=document.getElementById('canvas');"
+        " const b=e.getBoundingClientRect(); const cb=c.getBoundingClientRect();"
+        " return {left: e.style.left, top: e.style.top, transform: w.style.transform, screen: [b.left, b.top, b.width, b.height], canvas: [cb.left, cb.top, cb.width, cb.height]};})()"
+    )
+
+
+def pair(a: str, b: str, x: int, y: int) -> str:
+    """For two cells, the offset of each from its nearer spot of the two a drop of two items plans (`layoutAround`:
+    the grid is 1064 world units wide, the spots 544 apart, the first 532 units left of the point), and which spot it is."""
+    return (
+        f"(()=>{{const z={SCALE}; const sp=[[{x}-532*z,{y}-280*z],[{x}+12*z,{y}-280*z]]; const out=[];"
+        f" for (const e of [{a},{b}]) {{ if(!e) return null; const r=e.getBoundingClientRect(); let best=null;"
+        " sp.forEach(([sx,sy],i)=>{const d=[r.left-sx,r.top-sy]; const m=Math.max(Math.abs(d[0]),Math.abs(d[1])); if(best===null||m<best.m) best={m,i,d};});"
+        " out.push({spot: best.i, dx: best.d[0], dy: best.d[1]}); } return out;})()"
     )
 
 
@@ -146,7 +169,6 @@ def main() -> bool:
 
     async def run() -> None:
         from canvas import host_call
-
         call = lambda cid, payload: host_call(rig.port, f"{rig.page_guid()}|{cid}", payload)  # noqa: E731
         view = lambda payload: host_call(rig.port, f"{rig.page_guid()}|view_root", payload)  # noqa: E731
         async with rig.page(1400, 920) as pg:
@@ -240,18 +262,36 @@ def main() -> bool:
                 "(()=>{const c=document.getElementById('canvas'); for(let i=0;i<30;i++) c.dispatchEvent(new WheelEvent('wheel',{deltaY:100,bubbles:true,cancelable:true,clientX:760,clientY:420}));})()"
             )
             r["h1 zoomed far out, the sidebar stays put"] = bool(await pg.until(f"{SCALE} < 0.3 && {SIDE}?.getBoundingClientRect().left === 0", 20))
+            # beside the canvas, not over it: the canvas starts where the sidebar ends (a wide screen's margin)
+            r["h1b the canvas starts where the sidebar ends, and covers none of it"] = bool(await pg.until(
+                f"Math.abs(document.getElementById('canvas').getBoundingClientRect().left - {SIDE}.getBoundingClientRect().right) < 1 && {SIDE}.getBoundingClientRect().right > 0", 10))
             agent_sel = f'.ft-row[data-agent="{BACKEND_A}"]'
+            agent_sel_b = f'.ft-row[data-agent="{BACKEND_B}"]'
             file_sel = '.ft-row[data-path="src/one.txt"]'
-            r["h2 the sidebar lists the agent folder"] = bool(await side_reveal({"agent": BACKEND_A}) and await pg.until(f"!!{side_row(agent_sel)}", 15))
+            r["h2 the sidebar lists both agent folders"] = bool(
+                await side_reveal({"agent": BACKEND_A}) and await side_reveal({"agent": BACKEND_B})
+                and await pg.until(f"!!{side_row(agent_sel)} && !!{side_row(agent_sel_b)}", 15))
             await view({"type": "hide", "id": CELL_A})
             await view({"type": "hide", "id": CELL_B})
             r["h3 both cells are hidden again"] = bool(await pg.until(f"!{frame(CELL_A)} && !{frame(CELL_B)}", 15))
+            # two hidden agents, marked IN THE SIDEBAR (a click, then ⌘/Ctrl-click), dragged together
+            await pg.js(f"{side_row(agent_sel)}.click()")
+            await pg.js(click_mod(side_row(agent_sel_b)))
+            r["h4a both sidebar rows are marked"] = bool(await pg.until(
+                f"!!{side_row(agent_sel)}?.classList.contains('marked') && !!{side_row(agent_sel_b)}?.classList.contains('marked')", 10))
             info["h_drop"] = await pg.js(drag_drop(side_row(agent_sel), 760, 420))
-            r["h4 the agent dragged from the sidebar comes back"] = info["h_drop"] is True and bool(await pg.until(f"!!{frame(CELL_A)}", 20))
-            c_agent = await pg.js(placed(frame(CELL_A), 760, 420))
-            info["h_agent_corner_off"] = c_agent
-            r["h5 its cell lands at the drop point, zoomed far out"] = bool(c_agent) and abs(c_agent[0]) <= 30 and abs(c_agent[1]) <= 30
-            r["h6 the other cell stays hidden"] = bool(await pg.js(f"!{frame(CELL_B)}"))
+            r["h4 both agents dragged from the sidebar come back"] = info["h_drop"] is True and bool(await pg.until(f"!!{frame(CELL_A)} && !!{frame(CELL_B)}", 20))
+            info["h_pair"] = await pg.js(pair(frame(CELL_A), frame(CELL_B), 760, 420))
+            # both sit on the two spots of the drop, one each. The bound is what the geometry leaves: a spot's corner
+            # is a whole world unit (at most half a unit, 0.5 * zoom, off the point) and the view's offset is a
+            # whole pixel (at most half a pixel off), plus a pixel of sub-pixel rounding in the screen rect.
+            tol = await pg.js(f"0.5*{SCALE}+1")
+            info["h_tol"] = tol
+            pr = info["h_pair"] or [{"spot": -1, "dx": 999, "dy": 999}, {"spot": -1, "dx": 999, "dy": 999}]
+            r["h5 the pair lands at the drop point, one spot each, zoomed far out"] = (
+                pr[0]["spot"] != pr[1]["spot"] and all(abs(c["dx"]) <= tol and abs(c["dy"]) <= tol for c in pr))
+            info["h_agent_geom"] = await pg.js(geom(frame(CELL_A)))
+            r["h6 the other cell stays where the drop put it"] = bool(await pg.js(f"!!{frame(CELL_B)}"))
             before = set(await pg.js("[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"]')].map(f=>f.dataset.id)") or [])
             await side_reveal({"path": "src/one.txt"})
             r["h7 the file shows in the sidebar"] = bool(await pg.until(f"!!{side_row(file_sel)}", 15))
@@ -263,9 +303,10 @@ def main() -> bool:
             info["h_file"] = await pg.js(drag_drop(side_row(file_sel), fx, fy))
             fresh = "[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"]')].map(f=>f.dataset.id).filter(i=>!%s.includes(i))" % json.dumps(sorted(before))
             r["h8 a file dragged from the sidebar opens a preview"] = bool(await pg.until(f"({fresh}).length === 1", 20))
+            info["h_file_geom"] = await pg.js(geom(f"document.querySelector('.agent-frame[data-id=\"'+({fresh})[0]+'\"]')"))
             c_file = await pg.js(placed(f"document.querySelector('.agent-frame[data-id=\"'+({fresh})[0]+'\"]')", fx, fy))
             info["h_file_corner_off"] = c_file
-            r["h9 the preview lands at the drop point, zoomed far out"] = bool(c_file) and abs(c_file[0]) <= 30 and abs(c_file[1]) <= 30
+            r["h9 the preview lands at the drop point, zoomed far out"] = bool(c_file) and abs(c_file[0]) <= tol and abs(c_file[1]) <= tol
 
             # g) the cells this probe made are removed; no page error
             made = await pg.js("[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"], .agent-frame[data-id^=\"files_\"]')].map(f=>f.dataset.id)")
@@ -274,6 +315,19 @@ def main() -> bool:
             r["g1 the cells are gone"] = bool(await pg.until(f"!{frame(TREE)} && !{frame(CELL_A)} && !{frame(CELL_B)}", 15))
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
             r["g2 no page errors"] = not info["page_errors"]
+            # i) collapsed, the choice is kept on the canvas: a reload brings the sidebar back collapsed
+            await pg.js("document.querySelector('.tree-sidebar .ts-toggle').click()")
+            r["i1 collapsed, the sidebar is a rail"] = bool(await pg.until(f"{SIDE}?.classList.contains('collapsed')", 10))
+            # the choice reaches the canvas's record on disk before the page goes: the loader persists on its debounce
+            saved = False
+            end = asyncio.get_event_loop().time() + 15
+            while asyncio.get_event_loop().time() < end and not saved:
+                saved = (rig.host_record("view_root") or {}).get("tree_sidebar", {}).get("open") is False
+                await asyncio.sleep(0.25)
+            r["i1a the collapse is saved on the canvas's record"] = saved
+            await pg.open(rig.url)
+            await pg.until("!!document.getElementById('canvas')", 30)
+            r["i2 after a reload it is still collapsed"] = bool(await pg.until(f"{SIDE}?.classList.contains('collapsed')", 20))
 
     try:
         asyncio.run(run())

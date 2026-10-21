@@ -5,13 +5,16 @@ import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
 import { CANVAS_CSS } from "../src/bundles/canvas/styles.ts";
 import { ROOT_VIEW, VIEW_VERBS, viewAgent } from "../src/bundles/canvas/canvas_agent.ts";
-import { SIDEBAR_KEY, mountTreeSidebar, saveSidebar, sidebarOpenOf, sidebarSavedOf } from "../src/bundles/canvas/tree_sidebar.ts";
+import { BESIDE, OPEN, SIDEBAR_KEY, mountTreeSidebar, saveSidebar, sidebarOpenOf, sidebarSavedOf } from "../src/bundles/canvas/tree_sidebar.ts";
 import { PAGE_VERB_DOCS } from "../src/bundles/verb_docs.ts";
 import { decodeDrag, dropPlan, encodeDrag, worldAt } from "../src/bundles/files/drag.ts";
 import type { DragItem, ViewPose } from "../src/bundles/files/drag.ts";
+import { servedOf } from "../src/bundles/files/file_bridge.ts";
+import { filesView } from "../src/bundles/files/files_view.ts";
 import { setFilesDeps } from "../src/bundles/files/files_deps.ts";
-import { installDom } from "./dom_stub.ts";
-import { FakeBridge } from "./fake_bridge.ts";
+import type { ViewContext, ViewHandle } from "../src/bundles/view.ts";
+import { installDom, stub } from "./dom_stub.ts";
+import { FakeBridge, settle } from "./fake_bridge.ts";
 import { project } from "./rig.ts";
 
 // #148: the file tree as the canvas's own sidebar. It is mounted beside the zoomed
@@ -22,11 +25,11 @@ import { project } from "./rig.ts";
 
 type Dict = Record<string, unknown>;
 
-/** A page kernel with the canvas's root and its root view, and a bridge to the fake project. */
+/** A page kernel with the canvas's root and its root view, and a bridge to the fake project. A view's calls go to the view. */
 function pageKernel(b: FakeBridge): Kernel {
   const k = new Kernel();
   k.bridge = {
-    forward: async (t: string, p: Payload) => (await b.call(p as Dict)) as never,
+    forward: async (t: string, p: Payload) => (await (t.startsWith("view:") ? b.viewCall(t, p as Dict) : b.call(p as Dict))) as never,
     subscribeState: b.subscribeState,
     watchRemote: () => {},
     unwatchRemote: () => {},
@@ -58,11 +61,19 @@ function deps(): void {
   });
 }
 
-/** A page's mount that records what is appended to it: the sidebar's element, and nothing else. */
-function pageMount(): { mount: HTMLElement; appended: unknown[] } {
+/** A page's mount that records what is appended to it (the sidebar's element, and nothing else) and the classes the sidebar sets on it. */
+function pageMount(): { mount: HTMLElement; appended: unknown[]; classes: Set<string> } {
   const appended: unknown[] = [];
-  const mount = { appendChild: (el: unknown) => (appended.push(el), el) } as unknown as HTMLElement;
-  return { mount, appended };
+  const classes = new Set<string>();
+  const mount = {
+    appendChild: (el: unknown) => (appended.push(el), el),
+    classList: {
+      add: (c: string) => classes.add(c),
+      remove: (...cs: string[]) => cs.forEach((c) => classes.delete(c)),
+      toggle: (c: string, force: boolean) => (force ? classes.add(c) : classes.delete(c)),
+    },
+  } as unknown as HTMLElement;
+  return { mount, appended, classes };
 }
 
 // ─── MOUNTED BESIDE THE WORLD ───────────────────────────────────────────────
@@ -218,6 +229,9 @@ test("the tree's verbs reach the sidebar through the root view: `tree` names its
   assert.ok(PAGE_VERB_DOCS["view.ts"]?.["tree"]?.includes("select"), "and says what it takes");
   const none = (await viewAgent(ROOT_VIEW, { type: "tree" } as Payload, k)) as Dict;
   assert.equal(none["reason"], "bad_arg", "no verb is refused");
+  assert.equal(none["arg"], "verb", "and the refusal names the argument the caller gave: `verb`");
+  const empty = (await viewAgent(ROOT_VIEW, { type: "tree", verb: "" } as Payload, k)) as Dict;
+  assert.equal(empty["arg"], "verb", "an empty verb is refused the same way");
   const bogus = (await viewAgent(ROOT_VIEW, { type: "tree", verb: "bogus" } as Payload, k)) as Dict;
   assert.equal(bogus["reason"], "unhandled", "an unknown verb is refused, said");
   const out = (await viewAgent(ROOT_VIEW, { type: "tree", verb: "expand", path: "../x" } as Payload, k)) as Dict;
@@ -225,4 +239,53 @@ test("the tree's verbs reach the sidebar through the root view: `tree` names its
   sb.dispose();
   const gone = (await viewAgent(ROOT_VIEW, { type: "tree", verb: "expand", path: "src" } as Payload, k)) as Dict;
   assert.equal(gone["reason"], "not_mounted", "with the sidebar gone, its verbs say so");
+});
+
+test("the canvas's margin is the sidebar's width: the open and the rail widths are the sidebar's own", () => {
+  const css = CANVAS_CSS.replace(/\s+/g, " ");
+  assert.match(css, /\.tree-sidebar \{ position: fixed; top: 0; bottom: 0; left: 0;[^}]*width: 300px;/, "open, the sidebar is 300px");
+  assert.match(css, /\.tree-sidebar\.collapsed \{ width: 22px; \}/, "collapsed, a 22px rail");
+  assert.match(css, /\.tree-beside \{ --tree-w: 22px; \}/, "beside the canvas, a collapsed sidebar takes the rail's width");
+  assert.match(css, /\.tree-beside\.tree-open \{ --tree-w: 300px; \}/, "and an open one takes the sidebar's");
+  assert.match(css, /\.tree-beside #canvas \{ margin-left: var\(--tree-w\); width: calc\(100% - var\(--tree-w\)\); \}/, "the canvas starts where the sidebar ends");
+  assert.match(css, /#canvas\.full-view \.agent-frame\.full \{ left: 12px !important; top: 44px !important; width: calc\(100% - 24px\) !important;/, "a full cell fits the canvas, not the viewport");
+});
+
+test("on a wide screen the canvas sits beside the sidebar and it is open; on a narrow one it is an overlay, and closed", () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const wide = pageMount();
+  const sb = mountTreeSidebar({ kernel: pageKernel(b), view: ROOT_VIEW, mount: wide.mount, wide: true });
+  assert.ok(wide.classes.has(BESIDE), "the canvas is beside it");
+  assert.ok(wide.classes.has(OPEN), "and it is open");
+  sb.setOpen(false);
+  assert.ok(wide.classes.has(BESIDE), "collapsed, it is still beside: its rail is the canvas's margin");
+  assert.ok(!wide.classes.has(OPEN), "and the margin is the rail's");
+  sb.dispose();
+  assert.equal(wide.classes.size, 0, "a disposed sidebar leaves no class on the page");
+  const narrow = pageMount();
+  const nb = mountTreeSidebar({ kernel: pageKernel(b), view: ROOT_VIEW, mount: narrow.mount, wide: false });
+  assert.equal(narrow.classes.size, 0, "a narrow screen's sidebar overlays the canvas: no margin");
+  nb.dispose();
+});
+
+test("the tree cell still binds its own folder beside the sidebar: the sidebar holds none, and the cell lets go on unmount", async () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const k = pageKernel(b);
+  const sb = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: pageMount().mount, wide: true });
+  await settle();
+  assert.equal(servedOf(k).has(""), false, "the sidebar serves no folder of its own: it reads the project through the bridge");
+  const ctx = (selfId: string, record: Dict): ViewContext =>
+    ({ kernel: k, mount: stub(), selfId, backend: "files", record, close: () => {} }) as unknown as ViewContext;
+  const cell = (await filesView.mount(ctx("tree_1", { root: "src" }))) as ViewHandle;
+  await settle();
+  assert.ok(servedOf(k).get("src") !== undefined, "the tree cell holds its own folder");
+  cell.unmount();
+  assert.equal(servedOf(k).has("src"), false, "the cell let its folder go");
+  sb.dispose();
 });

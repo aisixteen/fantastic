@@ -17,6 +17,10 @@ export const SIDEBAR_ID = "canvas_tree";
 /** The key on the root view's meta that holds the sidebar's state. */
 export const SIDEBAR_KEY = "tree_sidebar";
 
+/** The page's classes for the sidebar's place: `tree-beside` on a wide screen (the canvas sits beside it), `tree-open` while it is open. */
+export const BESIDE = "tree-beside";
+export const OPEN = "tree-open";
+
 /** What is kept of the sidebar: whether it is open, and the tree's folders and selection. */
 export interface SidebarState {
   open?: boolean;
@@ -66,7 +70,9 @@ export interface TreeSidebar {
 /**
  * Mount the sidebar into `mount` (the canvas's page, beside its zoomed world) for the
  * canvas whose root view is `view`. `wide` is the screen's width test: the default
- * open state when nothing is saved.
+ * open state when nothing is saved, and whether the canvas sits beside the sidebar
+ * (`tree-beside`: the canvas's margin is the sidebar's width) or under it (a narrow
+ * screen's overlay).
  */
 export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLElement; wide: boolean }): TreeSidebar {
   const { kernel, view } = o;
@@ -83,6 +89,7 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
   el.appendChild(toggle);
   el.appendChild(body);
   o.mount.appendChild(el);
+  if (o.wide) o.mount.classList.add(BESIDE);
 
   const tree = mountTreePanel({
     kernel,
@@ -95,6 +102,7 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
 
   const paint = (): void => {
     el.classList.toggle("collapsed", !open);
+    o.mount.classList.toggle(OPEN, open);
     toggle.textContent = open ? "‹" : "›";
     toggle.title = open ? "hide the file tree" : "show the file tree";
     toggle.setAttribute("aria-expanded", String(open));
@@ -116,6 +124,7 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
     setOpen,
     dispose(): void {
       tree.dispose();
+      o.mount.classList.remove(BESIDE, OPEN);
       el.remove();
     },
   };

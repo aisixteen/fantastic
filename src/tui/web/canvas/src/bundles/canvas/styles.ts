@@ -191,7 +191,7 @@ export const CANVAS_CSS = `
   /* VIEWING ONE AGENT FULL: no world transform, the frame fills the page */
   #canvas.full-view .canvas-world { transform: none !important; }
   #canvas.full-view .agent-frame.full { left: 12px !important; top: 44px !important;
-    width: calc(100vw - 24px) !important; height: calc(100vh - 56px) !important; }
+    width: calc(100% - 24px) !important; height: calc(100vh - 56px) !important; }
   #canvas.full-view .agent-frame.full .resize-handle { display: none; }
   /* an AI cell not set up yet (the wizard's skip) */
   .ai-not-set-up { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -221,6 +221,11 @@ export const CANVAS_CSS = `
   .tree-sidebar .ts-body { flex: 1; min-width: 0; display: flex; }
   .tree-sidebar.collapsed .ts-body { display: none; }
   .tree-sidebar .ts-body > .files-view { flex: 1; min-width: 0; }
+  /* ON A WIDE SCREEN the canvas sits beside the sidebar: its margin is the sidebar's width (the
+     widths of \`.tree-sidebar\` above, 300px open and 22px collapsed); a narrow screen's is an overlay */
+  .tree-beside { --tree-w: 22px; }
+  .tree-beside.tree-open { --tree-w: 300px; }
+  .tree-beside #canvas { margin-left: var(--tree-w); width: calc(100% - var(--tree-w)); }
   .full-hint b { color: ${tok("color.text.bright")}; font-weight: 600; }
   .full-hint kbd { font: 600 11px ${tok("font.family.mono")}; color: ${tok("color.accent.text")};
     padding: 2px 6px; margin: 0 1px; border-radius: ${tok("radius.key")}; background: ${tint("color.accent.base", 16)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 40)}; }

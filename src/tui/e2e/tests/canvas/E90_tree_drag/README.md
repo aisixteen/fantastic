@@ -17,7 +17,12 @@ on `#canvas`.
 6. `docs` dragged in: a file tree rooted at it lists `docs/a.md`, not `src`;
 7. the cells this probe made are removed; no page error is logged;
 8. the canvas's own sidebar (#148, the file tree fixed beside the canvas): zoomed
-   far out (`wheel`), it stays at the viewport's left edge; its `reveal` runs
-   through the root view's `tree` verb; both cells hidden again; the agent row
-   dragged from the sidebar brings its cell back centred on the drop point; the
-   file row dragged from it opens a preview centred on its drop point.
+   far out (`wheel`), it stays at the viewport's left edge, and the canvas starts where
+   it ends (beside, not under it); its `reveal` runs
+   through the root view's `tree` verb, for both agent folders; both cells hidden
+   again; the two agent rows marked in the sidebar and dragged together bring both
+   cells back, one on each spot of the drop (`layoutAround`: 532 world units left
+   of the point, and 12 right of it); the file row dragged from it opens a preview
+   at its drop point.
+9. the sidebar is collapsed (`.ts-toggle`), the page is reloaded, and it is still
+   collapsed: the choice is kept on the canvas.

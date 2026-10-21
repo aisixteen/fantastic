@@ -52,16 +52,20 @@ bundles, seeds an empty tree with the canvas root, and mounts.
 - **the canvas's own file tree sidebar** (#148, `canvas/tree_sidebar.ts`) — the file
   tree fused into the canvas page, not an agent and not a cell: a column fixed to the
   viewport's left edge, mounted beside the zoomed world (never in it), so a zoom or a
-  pan never moves or scales it. From a bird's-eye zoom its rows drag onto the canvas
+  pan never moves or scales it. On a wide screen (over 768px) the canvas sits beside it
+  (the page's `tree-beside` and `tree-open` classes set the canvas's margin to the
+  sidebar's width: 300px open, 22px as a rail); on a narrow one it is an overlay. It is
+  From a bird's-eye zoom its rows drag onto the canvas
   like the tree cell's: the same panel (`files/tree_panel.ts`, the drawing, the marks
   and the drag source) and the same drop on `#canvas`, which places each item by
   `dropPlan` (a grid centred on the point in world coordinates, at any zoom). A `‹`/`›`
   button collapses it, to a strip; its open state and its tree's folders and selection
   are kept on the root view (`tree_sidebar`), so a reload restores them. A narrow screen
   opens it only when asked (an overlay). Its verbs are the tree's, reached through the
-  root view: `tree {verb: select|expand|collapse|reveal, path | agent}`. The tree cell
-  (`files_view.ts`) stays as the extra kind: a folder dropped on the canvas opens a tree
-  rooted at it. Its colours and sizes are skin tokens (`--fc-*`).
+  root view alone: `tree {verb: select|expand|collapse|reveal, path | agent}`; any other
+  view refuses it (`bad_arg`, `arg: view`). The tree cell (`files_view.ts`) stays as the
+  extra kind: a folder dropped on the canvas opens a tree rooted at it. Its colours are
+  skin tokens (`--fc-*`); its widths are the two sizes in `styles.ts`.
 
 A cell's head: **✕ hides** it — the view lets go of the cell, its agent keeps
 running and its stream is torn down until it is shown again (the view's `show`

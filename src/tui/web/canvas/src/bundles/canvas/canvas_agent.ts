@@ -333,9 +333,14 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
     }
     case "open":
       return openView(id, payload, kernel);
-    // THE TREE SIDEBAR (#148): its verbs, through the view — `tree {verb, path | agent}`
-    case "tree":
-      return filesAgent(SIDEBAR_ID, { ...payload, type: str(payload, "verb") }, kernel);
+    // THE TREE SIDEBAR (#148): its verbs, through the root view — `tree {verb, path | agent}`.
+    // The sidebar is the page's one, bound to the root view alone: any other view refuses it.
+    case "tree": {
+      if (id !== ROOT_VIEW) return { error: `view: tree — the sidebar is the canvas's own, on ${ROOT_VIEW}; ask that view`, reason: "bad_arg", arg: "view" };
+      const verb = str(payload, "verb");
+      if (verb === "") return { error: "view: tree needs verb (select | expand | collapse | reveal)", reason: "bad_arg", arg: "verb" };
+      return filesAgent(SIDEBAR_ID, { ...payload, type: verb }, kernel);
+    }
     case "theme": {
       // THE THEME: which layout the cells sit in (canvas | mobile), or `auto` —
       // per tab, mobile under 768px wide. No name: what it is.
