@@ -11,7 +11,8 @@ before a turn and written back (`server.py`). The key is optional on the record:
 `credentials`, a
 credential-store ref, sent as `x-api-key` when named.
 
-`on_cancel` / `on_delete` are re-exported from `ai_core` — the bundle's hooks.
+`on_cancel` is re-exported from `ai_core`; `on_delete` wraps ai_core's and also
+drops the agent's usage counts. These are the bundle's hooks.
 """
 
 from __future__ import annotations

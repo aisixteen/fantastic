@@ -532,6 +532,7 @@ async def test_deleting_an_agent_drops_its_counts(
     zero = await _call(seeded_kernel, "a1", {"type": "usage"})
     assert zero["requests"] == 0 and zero["cache_read_tokens"] == 0, zero
 
+
 def test_the_record_refuses_a_bad_cache_flag_or_price():
     assert validate_meta({"prompt_cache": True}, _rec()) is None
     assert validate_meta({"price_input_per_mtok": 3}, _rec()) is None
