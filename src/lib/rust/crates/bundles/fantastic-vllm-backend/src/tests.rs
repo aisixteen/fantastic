@@ -86,7 +86,7 @@ fn provider(endpoint: &str) -> VllmProvider {
         sampling,
         explicit_budget: false,
         connect_timeout: CONNECT_TIMEOUT,
-        read_timeout: READ_TIMEOUT,
+        read_clock: READ_TIMEOUT,
         report: ReportCell::default(),
     }
 }
@@ -237,7 +237,9 @@ fn each_connection_failure_says_what_it_means() {
     let t = |connect, timeout| classify(connect, timeout, "http://gpu:8000/v1", 5.0, 900.0).message;
     assert!(t(true, true).contains("within connect_timeout=5s — the instance is STOPPED"));
     assert!(t(true, false).contains("not listening yet"));
-    assert!(t(false, true).contains("sent nothing for read_timeout=900s"));
+    assert!(t(false, true)
+        .contains("http://gpu:8000/v1 sent no bytes for 900s; this turn is NOT complete"));
+    assert!(t(false, true).contains("stream_stalled"));
     assert!(t(false, false).contains("died or restarted"));
 }
 
@@ -879,4 +881,74 @@ async fn the_last_budget_is_per_agent_and_freed_on_delete() {
     let r = create(&kernel, meta).await;
     assert_eq!(r["id"], json!(id), "{r}");
     assert_eq!(last(id.clone()).await, Value::Null, "freed on delete");
+}
+
+/// A server that sends its headers and one fragment of a line, then goes silent.
+async fn quiet_server(headers_only: bool) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf).await;
+        if headers_only {
+            // the stall before any answer: no bytes at all
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            return;
+        }
+        let _ = sock
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                  transfer-encoding: chunked\r\n\r\n20\r\ndata: {\"cho",
+            )
+            .await;
+        tokio::time::sleep(Duration::from_secs(600)).await;
+    });
+    format!("http://{addr}/v1")
+}
+
+/// A stream that goes quiet fails after the record's `stream_idle_seconds`, naming
+/// the stall, the seconds and the endpoint (#177).
+#[tokio::test]
+async fn a_stream_that_goes_quiet_stalls_on_the_read_clock() {
+    let ep = quiet_server(false).await;
+    let mut p = provider(&ep);
+    p.read_clock = 0.2;
+    let e = drain(&p, &hi(), None).await.expect_err("stalled");
+    assert!(e.message.contains("stream_stalled"), "{e}");
+    assert!(e.message.contains("sent no bytes for 0.2s"), "{e}");
+    assert!(e.message.contains(&ep), "{e}");
+}
+
+/// Headers that never come are the same stall (#177).
+#[tokio::test]
+async fn a_server_that_never_answers_stalls_on_the_read_clock() {
+    let ep = quiet_server(true).await;
+    let mut p = provider(&ep);
+    p.read_clock = 0.2;
+    let e = drain(&p, &hi(), None).await.expect_err("stalled");
+    assert!(e.message.contains("stream_stalled"), "{e}");
+    assert!(e.message.contains("sent no bytes for 0.2s"), "{e}");
+}
+
+/// `stream_idle_seconds` is a positive number of seconds, refused at the write
+/// otherwise; a record without it keeps its `read_timeout` as the read clock (#177).
+#[test]
+fn stream_idle_seconds_is_validated_and_read_clock_defaults_to_read_timeout() {
+    let meta = |v: Value| {
+        let mut m = Map::new();
+        m.insert("stream_idle_seconds".to_string(), v);
+        m
+    };
+    for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
+        let msg =
+            validate(&meta(bad.clone()), &Map::new()).unwrap_or_else(|| panic!("{bad} is refused"));
+        assert!(
+            msg.contains("stream_idle_seconds must be a positive number"),
+            "{msg}"
+        );
+    }
+    assert_eq!(read_clock_of(&Map::new(), 900.0).ok(), Some(900.0));
+    assert_eq!(read_clock_of(&meta(json!(2.5)), 900.0).ok(), Some(2.5));
+    assert!(read_clock_of(&meta(json!(0)), 900.0).is_err());
 }

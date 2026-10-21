@@ -28,8 +28,8 @@
 use async_trait::async_trait;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
-    Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
-    Unconfigured,
+    stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
+    ReportCell, Unconfigured,
 };
 use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
@@ -218,6 +218,9 @@ struct ResponsesProvider {
     /// The endpoint's reported prompt size and the last stop reason — ai_core
     /// calibrates on the first and refuses a cut fold summary on the second.
     report: ReportCell,
+    /// The read clock: the longest the endpoint may go without a byte, headers
+    /// included ([`within`]).
+    stream_idle: Duration,
 }
 
 #[async_trait]
@@ -294,13 +297,16 @@ impl Provider for ResponsesProvider {
         let mut attempt: u32 = 0;
         let resp = loop {
             let client = get_or_build_client(&self.self_id).map_err(ProviderError::raised)?;
-            let resp = client
+            let req = client
                 .post(&self.endpoint)
                 .header(reqwest::header::AUTHORIZATION, auth.clone())
-                .json(&body)
-                .send()
+                .json(&body);
+            // The headers are part of the read clock too (#177).
+            let sent = within(self.stream_idle, req.send())
                 .await
-                .map_err(|e| ProviderError::raised(format!("http: {}", error_chain(&e))))?;
+                .map_err(|s| s.error(BACKEND, &self.endpoint))?;
+            let resp =
+                sent.map_err(|e| ProviderError::raised(format!("http: {}", error_chain(&e))))?;
             let code = resp.status().as_u16();
             if code < 400 {
                 break resp;
@@ -338,6 +344,8 @@ impl Provider for ResponsesProvider {
             resp,
             Arc::clone(&self.report),
             max_tokens.is_some(),
+            self.stream_idle,
+            self.endpoint.clone(),
         ))
     }
 }
@@ -550,7 +558,13 @@ fn wire_reply_line(st: &SseState) -> String {
 
 /// The SSE body as a LIVE stream of events — one per delta, the terminality
 /// verdict last, so a cut completion fails loudly instead of reading as finished.
-fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> ProviderStream {
+fn consume_sse(
+    resp: reqwest::Response,
+    report: ReportCell,
+    bounded: bool,
+    stream_idle: Duration,
+    endpoint: String,
+) -> ProviderStream {
     let inner = resp.bytes_stream();
     let init = (
         inner,
@@ -560,61 +574,74 @@ fn consume_sse(resp: reqwest::Response, report: ReportCell, bounded: bool) -> Pr
     );
     Box::pin(futures_util::stream::unfold(
         init,
-        |(mut inner, mut st, mut pending, mut finished)| async move {
-            loop {
-                if let Some(ev) = pending.pop_front() {
-                    return Some((ev, (inner, st, pending, finished)));
-                }
-                if finished {
-                    return None;
-                }
-                let Some(chunk_res) = inner.next().await else {
-                    finished = true;
-                    // A span the stream never closed is balanced before the verdict.
-                    if let Some(m) = st.wrap.close_marker() {
-                        pending.push_back(Ok(ProviderEvent::Token(m.to_string())));
+        move |(mut inner, mut st, mut pending, mut finished)| {
+            let endpoint = endpoint.clone();
+            async move {
+                loop {
+                    if let Some(ev) = pending.pop_front() {
+                        return Some((ev, (inner, st, pending, finished)));
                     }
-                    if wire_on() {
-                        println!("{}", wire_reply_line(&st));
+                    if finished {
+                        return None;
                     }
-                    if let Some(why) = st.finish() {
-                        pending.push_back(Err(ProviderError::raised(why)));
-                    }
-                    continue;
-                };
-                match chunk_res {
-                    Ok(bytes) => st.buf.extend_from_slice(&bytes),
-                    Err(e) => {
-                        finished = true;
-                        pending.push_back(Err(ProviderError::raised(format!(
-                            "stream: {}",
-                            error_chain(&e)
-                        ))));
-                        continue;
-                    }
-                }
-                while let Some(nl) = st.buf.iter().position(|b| *b == b'\n') {
-                    let line_bytes: Vec<u8> = st.buf.drain(..=nl).collect();
-                    let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
-                        .trim_end_matches('\r')
-                        .to_string();
-                    match decode_sse_line(&mut st, &line) {
-                        Ok(events) => pending.extend(events.into_iter().map(Ok)),
-                        Err(e) => {
+                    // THE READ CLOCK: a body quiet for the idle window is a stalled
+                    // stream, and the turn fails with its error row (#177).
+                    let chunk = match within(stream_idle, inner.next()).await {
+                        Ok(chunk) => chunk,
+                        Err(stalled) => {
                             finished = true;
-                            pending.push_back(Err(ProviderError::raised(e)));
-                            break;
+                            pending.push_back(Err(stalled.error(BACKEND, &endpoint)));
+                            continue;
                         }
-                    }
-                    if st.stop {
+                    };
+                    let Some(chunk_res) = chunk else {
                         finished = true;
+                        // A span the stream never closed is balanced before the verdict.
+                        if let Some(m) = st.wrap.close_marker() {
+                            pending.push_back(Ok(ProviderEvent::Token(m.to_string())));
+                        }
                         if wire_on() {
                             println!("{}", wire_reply_line(&st));
                         }
                         if let Some(why) = st.finish() {
                             pending.push_back(Err(ProviderError::raised(why)));
                         }
-                        break;
+                        continue;
+                    };
+                    match chunk_res {
+                        Ok(bytes) => st.buf.extend_from_slice(&bytes),
+                        Err(e) => {
+                            finished = true;
+                            pending.push_back(Err(ProviderError::raised(format!(
+                                "stream: {}",
+                                error_chain(&e)
+                            ))));
+                            continue;
+                        }
+                    }
+                    while let Some(nl) = st.buf.iter().position(|b| *b == b'\n') {
+                        let line_bytes: Vec<u8> = st.buf.drain(..=nl).collect();
+                        let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                            .trim_end_matches('\r')
+                            .to_string();
+                        match decode_sse_line(&mut st, &line) {
+                            Ok(events) => pending.extend(events.into_iter().map(Ok)),
+                            Err(e) => {
+                                finished = true;
+                                pending.push_back(Err(ProviderError::raised(e)));
+                                break;
+                            }
+                        }
+                        if st.stop {
+                            finished = true;
+                            if wire_on() {
+                                println!("{}", wire_reply_line(&st));
+                            }
+                            if let Some(why) = st.finish() {
+                                pending.push_back(Err(ProviderError::raised(why)));
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -641,6 +668,16 @@ pub fn record_schema() -> &'static Value {
             )
             .required(),
             Field::new("model", "str", "the model name").required(),
+            Field::new(
+                "stream_idle_seconds",
+                "float",
+                format!(
+                    "the read clock on the answer stream: seconds with no byte from the \
+                     endpoint (headers included) before the turn is judged stalled and ends \
+                     with an error row; default {}",
+                    fantastic_ai_core::constants::STREAM_IDLE_SECONDS
+                ),
+            ),
             Field::new("max_tokens", "int", "a turn's output budget (tokens)")
                 .default(json!(DEFAULT_MAX_TOKENS)),
             Field::new(
@@ -691,6 +728,9 @@ impl Bundle for ResponsesBundle {
         meta: &Map<String, Value>,
         record: &Map<String, Value>,
     ) -> Option<String> {
+        if let Err(e) = stream_idle_of(meta) {
+            return Some(e.message);
+        }
         schema::validate(record_schema(), "responses_backend", meta, record)
             .or_else(|| caching::refusal(meta, record, "responses_backend", CFG.provider_cache))
     }
@@ -787,6 +827,10 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
                 .collect()
         })
         .unwrap_or_default();
+    let stream_idle = match stream_idle_of(&meta) {
+        Ok(idle) => idle,
+        Err(e) => return Arc::new(Unconfigured(e)),
+    };
     Arc::new(ResponsesProvider {
         self_id: agent_id.clone(),
         endpoint,
@@ -795,6 +839,7 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
         max_tokens,
         sampling,
         report: ReportCell::default(),
+        stream_idle,
     })
 }
 

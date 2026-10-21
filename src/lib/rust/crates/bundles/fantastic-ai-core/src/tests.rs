@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::agent_loop::BackendConfig;
-use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
+use crate::provider::{within, Provider, ProviderError, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
@@ -23,6 +23,13 @@ enum ScriptEvent {
     /// `send` reply carries an `error` — which is what a broken chain must look
     /// like from the router's side.
     Fail(String),
+    /// The read clock tripped: the stream sends nothing for `idle`, then fails with
+    /// the provider's own `stream_stalled` error ([`crate::provider::within`]). The
+    /// window is the record's `stream_idle_seconds`, shortened for the test.
+    Stall {
+        idle: Duration,
+        endpoint: String,
+    },
 }
 
 /// One agent's scripted generation: the passes it will serve IN ORDER, plus the
@@ -113,14 +120,33 @@ impl Provider for MockProvider {
                 .pop_front()
                 .unwrap_or_default(),
         };
+        let stall = pass.iter().find_map(|e| match e {
+            ScriptEvent::Stall { idle, endpoint } => Some((*idle, endpoint.clone())),
+            _ => None,
+        });
         let evs: Vec<Result<ProviderEvent, ProviderError>> = pass
             .into_iter()
-            .map(|e| match e {
-                ScriptEvent::Token(t) => Ok(ProviderEvent::Token(t)),
-                ScriptEvent::Fail(e) => Err(ProviderError::raised(e)),
+            .filter_map(|e| match e {
+                ScriptEvent::Token(t) => Some(Ok(ProviderEvent::Token(t))),
+                ScriptEvent::Fail(e) => Some(Err(ProviderError::raised(e))),
+                ScriptEvent::Stall { .. } => None,
             })
             .collect();
-        Ok(Box::pin(futures_util::stream::iter(evs)))
+        let Some((idle, endpoint)) = stall else {
+            return Ok(Box::pin(futures_util::stream::iter(evs)));
+        };
+        // THE READ CLOCK, as the provider runs it: nothing arrives, the window
+        // passes, and the stream fails naming the stall.
+        let silent = futures_util::stream::once(async move {
+            let Err(stalled) = within(idle, std::future::pending::<()>()).await else {
+                unreachable!("a pending future never completes")
+            };
+            Err(stalled.error("mock_backend", &endpoint))
+        });
+        Ok(Box::pin(futures_util::StreamExt::chain(
+            futures_util::stream::iter(evs),
+            silent,
+        )))
     }
     fn model(&self) -> String {
         "test-model".to_string()
@@ -3412,11 +3438,12 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
 
 // ── await: the honest wait ───────────────────────────────────────────────────
 
-/// `await` with nothing of the agent's in flight and nothing queued is REFUSED,
-/// and the refusal says what to do instead. Twin of python's
-/// `test_await_with_nothing_in_flight_is_refused_and_told_what_to_do`.
+/// `await` with nothing of the agent's in flight and nothing queued ENDS the chain
+/// visibly (#177): no second pass runs, and the stored note says there was nothing
+/// to await. The note is a row the model reads on its next turn, not a turn sent to
+/// self (python delivered a refusal turn; the spec overrides that here).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn await_with_nothing_in_flight_is_refused_and_told_what_to_do() {
+async fn await_with_nothing_in_flight_ends_the_chain_with_a_visible_note() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "aw1").await;
     let s = script(
@@ -3430,17 +3457,26 @@ async fn await_with_nothing_in_flight_is_refused_and_told_what_to_do() {
     let _ = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "send", "text": "hi"}),
+            json!({"type": "send", "text": "hi", "client_id": "probe"}),
         )])
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&s, 2).await, "the refusal never woke it");
+    assert!(until_passes(&s, 1).await, "the first pass never ran");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 2, "and nothing else ran");
-    let turn2 = s.request(1);
-    assert!(turn2.contains("[await refused]"), "{turn2}");
-    assert!(turn2.contains("nothing of yours is in flight"), "{turn2}");
+    assert_eq!(s.passes_served(), 1, "the empty await ended the chain");
+    let rows = conversation(&kernel, &backend).await;
+    let notes: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r.get("kind").and_then(Value::as_str) == Some("note"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{rows:#?}");
+    let content = notes[0]["content"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("[await: nothing to wait for]"),
+        "{content}"
+    );
+    assert!(content.contains("nothing was awaited"), "{content}");
 }
 
 /// The honest wait: something is QUEUED for the agent, so `await` ends the turn
@@ -3480,7 +3516,7 @@ async fn await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it() {
     assert_eq!(s.passes_served(), 2, "the queued message is the next turn");
     for n in 0..2 {
         let t = s.request(n);
-        assert!(!t.contains("[await refused]"), "pass {n}: {t}");
+        assert!(!t.contains("[await: nothing to wait for]"), "pass {n}: {t}");
         assert!(!t.contains("[no call was dispatched]"), "pass {n}: {t}");
     }
     assert!(s.request(1).contains("two"), "{}", s.request(1));
@@ -4726,7 +4762,7 @@ async fn an_inquiry_is_accepted_and_answered_later_under_its_pid() {
         "{third}"
     );
     assert!(third.contains("<answer>ship it</answer>"), "{third}");
-    assert!(!third.contains("await refused"), "{third}");
+    assert!(!third.contains("nothing to wait for"), "{third}");
     assert!(r.request(0).contains("[inquiry from "), "{}", r.request(0));
 }
 
@@ -6022,6 +6058,9 @@ mod prompt_file_tests;
 /// Streaming parts (python `test_stream_parts.py`), on this harness.
 #[path = "tests_stream_parts.rs"]
 mod stream_parts;
+
+#[path = "tests_stall.rs"]
+mod stall;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
