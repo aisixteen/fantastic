@@ -754,3 +754,36 @@ async fn the_bridge_relays_a_view_only_the_changes_in_its_scope() {
     // a view with no relay inbox gets nothing, and the drop is reported
     assert!(!deliver(&k, "gone", json!({"type": "changed"})));
 }
+
+#[tokio::test]
+async fn open_view_writes_the_bridge_grant_as_an_update_so_it_persists() {
+    // python `bridge.update(callable_by=…)` publishes `updated`; the root loader persists the bridge
+    // from that event alone, so a grant written without it is lost at the next start
+    let tmp = tempfile::tempdir().unwrap();
+    let kernel = kernel(&tmp).await;
+    std::fs::create_dir_all(served(&tmp).join("docs")).unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    kernel.add_state_subscriber(Arc::new(move |ev: &Value, _body: Option<&fantastic_kernel::Blob>| {
+        if ev.get("agent_id").and_then(Value::as_str) == Some("fb") && ev.get("kind").and_then(Value::as_str) == Some("updated") {
+            sink.lock().unwrap().push(ev.clone());
+        }
+    }));
+    let r = open(&kernel, "folder", "docs").await;
+    let vid = r["id"].as_str().unwrap().to_string();
+    let events = seen.lock().unwrap().clone();
+    assert!(
+        events.iter().any(|e| e["changed"] == json!(["callable_by"])),
+        "the grant is an update of the bridge: {events:?}"
+    );
+    let cb = kernel
+        .agents
+        .get(&AgentId::from("fb"))
+        .unwrap()
+        .record()
+        .meta
+        .get("callable_by")
+        .cloned()
+        .unwrap();
+    assert_eq!(cb[&vid], json!(["folder:docs", "list", "unwatch_path", "watch_path"]), "{cb}");
+}

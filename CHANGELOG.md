@@ -18,7 +18,9 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   through the root view: `tree {verb, path | agent}`, which the root view alone answers
   (any other view refuses it, `bad_arg` on `view`). On a wide screen the canvas sits
   beside the sidebar (its margin is the sidebar's width, so nothing is covered); a
-  narrow screen opens it as an overlay, when asked.
+  narrow screen opens it as an overlay, when asked. Its tree is the project folder's
+  view (#150), bound on the bridge as the tree cell binds its folder, so every read goes
+  through that view agent; dispose lets it go.
 - File and folder agents: thin view agents over the file bridge (#150). A file or a
   folder is an agent shipped in the `file_bridge` bundle, scoped to one path.
   `open_view {kind: file|folder, path}` on a `file_bridge` returns the view of that
@@ -251,6 +253,13 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - Canvas terminal: after a re-attach, flow control counts each character once,
   so the unacked count no longer reads low and output is not sent past the
   limit.
+- A view's grant on its file bridge survives a restart. `open_view` on the Rust file bridge
+  wrote the bridge's `callable_by` in memory only, so the root loader never persisted it and
+  a restored view was refused (`files does not accept 'list'`). It now writes it as an update,
+  as Python's `bridge.update(callable_by=…)` does (#148).
+- The grant writes (`kern/reach.rs`) read a record's `callable_by` at the write, not at the
+  start of a plan, and merge into that read, so an entry another writer put there while the
+  plan awaited is kept (#148).
 
 ## [0.0.6] - 2026-10-18
 

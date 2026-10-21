@@ -426,3 +426,16 @@ test("a file dropped at x, y is laid out there: its rect is the drop's spot, not
   const theme = themeOf(k, "view_root", tabWidth());
   assert.deepEqual(rectsOf(k, "view_root", theme)[cell], { x: 2140, y: 1118, width: 520, height: 360 });
 });
+
+test("a folder dropped at x, y is laid out there too: its rect is the drop's spot, and its size the tree cell's", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = page(b);
+  // as the file's: a refresh of the page prunes the rect of a cell it does not hold yet, so the write comes after the cell
+  k.addStateSubscriber(() => prune(k, "view_root", new Set([...k.get("view_root")!.children.values()].map((c) => c.id))));
+  const r = await call(k, { type: "open", path: "docs", x: 2140, y: 1118 });
+  assert.equal(r["kind"], "dir");
+  const cell = String(r["cell"]);
+  const theme = themeOf(k, "view_root", tabWidth());
+  assert.deepEqual(rectsOf(k, "view_root", theme)[cell], { x: 2140, y: 1118, width: 320, height: 560 });
+});

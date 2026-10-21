@@ -7,13 +7,14 @@ import { CANVAS_CSS } from "../src/bundles/canvas/styles.ts";
 import { ROOT_VIEW, VIEW_VERBS, viewAgent } from "../src/bundles/canvas/canvas_agent.ts";
 import { BESIDE, OPEN, SIDEBAR_KEY, mountTreeSidebar, saveSidebar, sidebarOpenOf, sidebarSavedOf } from "../src/bundles/canvas/tree_sidebar.ts";
 import { PAGE_VERB_DOCS } from "../src/bundles/verb_docs.ts";
-import { decodeDrag, dropPlan, encodeDrag, worldAt } from "../src/bundles/files/drag.ts";
+import { DRAG_MIME, decodeDrag, dropPlan, encodeDrag, worldAt } from "../src/bundles/files/drag.ts";
 import type { DragItem, ViewPose } from "../src/bundles/files/drag.ts";
 import { servedOf } from "../src/bundles/files/file_bridge.ts";
 import { filesView } from "../src/bundles/files/files_view.ts";
 import { setFilesDeps } from "../src/bundles/files/files_deps.ts";
 import type { ViewContext, ViewHandle } from "../src/bundles/view.ts";
 import { installDom, stub } from "./dom_stub.ts";
+import { FakeEl, FakeTransfer, installFakeDom } from "./fake_dom.ts";
 import { FakeBridge, settle } from "./fake_bridge.ts";
 import { project } from "./rig.ts";
 
@@ -201,17 +202,51 @@ test("a point is the world's: the screen's corner is the world's origin at zero 
   assert.deepEqual(worldAt(110, 150, { left: 10, top: 50 }, { z: 2, ox: 20, oy: 20 }), { x: 40, y: 40 });
 });
 
-test("a drag from the sidebar or the tree cell carries the same payload, so it plans the same spots", () => {
-  // both trees write their rows' items with the one encoder (`tree_panel.ts`); a drop reads them with the one decoder
-  const items: DragItem[] = [{ kind: "agent", id: "ea" }, { kind: "file", path: "src/one.txt" }, { kind: "dir", path: "docs" }];
-  const fromSidebar = decodeDrag(encodeDrag(items));
-  const fromCell = decodeDrag(encodeDrag(items));
-  assert.ok(!("error" in fromSidebar) && !("error" in fromCell));
-  for (const pose of POSES) {
-    assert.deepEqual(
-      dropPlan(fromSidebar.items, 700, 300, RECT, pose, SLOT),
-      dropPlan(fromCell.items, 700, 300, RECT, pose, SLOT),
-    );
+test("a drag from the sidebar and a drag from the tree cell carry the same payload, and plan the same spots", async () => {
+  // both trees draw the same rows, and a row's dragstart writes its marked rows with the one encoder (`tree_panel.ts`)
+  installFakeDom();
+  try {
+    deps();
+    const b = new FakeBridge();
+    project(b);
+    const k = pageKernel(b);
+    const page = new FakeEl("div") as unknown as HTMLElement;
+    const sb = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: page, wide: true });
+    const cellMount = new FakeEl("div");
+    const ctx = { kernel: k, mount: cellMount, selfId: "tree_1", backend: "files", record: {}, close: () => {} } as unknown as ViewContext;
+    const cell = (await filesView.mount(ctx)) as ViewHandle;
+    await settle();
+    const sideList = sb.el.querySelector(".ft-tree") as FakeEl;
+    const cellList = cellMount.querySelector(".ft-tree") as FakeEl;
+    /** the payload a drag of the rows `from` to `to` writes, from the tree's own dragstart (a Shift-click marks the range) */
+    const payloadOf = (list: FakeEl): string => {
+      const row = (path: string): FakeEl => {
+        const r = list.querySelectorAll(".ft-row").find((x) => x.dataset["path"] === path);
+        assert.ok(r, `a row for ${path}`);
+        return r;
+      };
+      const docs = row("docs");
+      list.dispatch("click", { target: docs });
+      list.dispatch("click", { target: row("top.txt"), shiftKey: true });
+      const dt = new FakeTransfer();
+      list.dispatch("dragstart", { target: docs, dataTransfer: dt });
+      return dt.getData(DRAG_MIME);
+    };
+    const fromSidebar = payloadOf(sideList);
+    const fromCell = payloadOf(cellList);
+    assert.ok(fromSidebar !== "", "the sidebar's dragstart writes a payload");
+    assert.equal(fromSidebar, fromCell, "the same payload from either tree");
+    const side = decodeDrag(fromSidebar);
+    const tree = decodeDrag(fromCell);
+    assert.ok(!("error" in side) && !("error" in tree));
+    assert.ok(side.items.length >= 2, "the range is several items, so the plan has several spots to compare");
+    for (const pose of POSES) {
+      assert.deepEqual(dropPlan(side.items, 700, 300, RECT, pose, SLOT), dropPlan(tree.items, 700, 300, RECT, pose, SLOT), `z=${pose.z}: the same plan`);
+    }
+    cell.unmount();
+    sb.dispose();
+  } finally {
+    installDom();
   }
 });
 
@@ -271,7 +306,7 @@ test("on a wide screen the canvas sits beside the sidebar and it is open; on a n
   nb.dispose();
 });
 
-test("the tree cell still binds its own folder beside the sidebar: the sidebar holds none, and the cell lets go on unmount", async () => {
+test("the sidebar's tree is the project folder's view: it serves the project through that view, and dispose lets it go", async () => {
   installDom();
   deps();
   const b = new FakeBridge();
@@ -279,13 +314,95 @@ test("the tree cell still binds its own folder beside the sidebar: the sidebar h
   const k = pageKernel(b);
   const sb = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: pageMount().mount, wide: true });
   await settle();
-  assert.equal(servedOf(k).has(""), false, "the sidebar serves no folder of its own: it reads the project through the bridge");
+  const held = servedOf(k).get("");
+  assert.equal(held?.kind, "folder", "the sidebar holds the project folder");
+  assert.equal(held?.view, "view:folder:", "through the view the bridge made for it");
+  assert.equal(b.views.get(held?.view ?? "")?.path, "", "which is a view of the project itself");
+  assert.equal(sidebarSavedOf(k.get(ROOT_VIEW)?.meta).view_agent, "view:folder:", "and the view is kept on the canvas's root view");
+  sb.dispose();
+  assert.equal(servedOf(k).has(""), false, "dispose lets the project go");
+});
+
+test("the sidebar's tree lists the project only once its view is bound: the open comes before the first listing", async () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const sb = mountTreeSidebar({ kernel: pageKernel(b), view: ROOT_VIEW, mount: pageMount().mount, wide: true });
+  await settle();
+  const types = b.calls.map((c) => c["type"]);
+  const opened = types.indexOf("open_view");
+  assert.ok(opened >= 0, "the project's view is opened");
+  assert.ok(types.indexOf("list") > opened, "and the listing comes after it");
+  sb.dispose();
+});
+
+test("a reload serves the saved view again: no second view of the project is opened", async () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const k = pageKernel(b);
+  const first = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: pageMount().mount, wide: true });
+  await settle();
+  const opens = b.calls.filter((c) => c["type"] === "open_view").length;
+  first.dispose();
+  const again = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: pageMount().mount, wide: true });
+  await settle();
+  assert.equal(b.calls.filter((c) => c["type"] === "open_view").length, opens, "no new open_view on a reload");
+  assert.equal(servedOf(k).get("")?.view, "view:folder:", "the sidebar holds the same view again");
+  again.dispose();
+  assert.equal(servedOf(k).has(""), false);
+});
+
+test("a dispose before the binding settles still lets the project go once it has bound", async () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const k = pageKernel(b);
+  const sb = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: pageMount().mount, wide: true });
+  sb.dispose();
+  await settle();
+  assert.equal(servedOf(k).has(""), false, "the path is not left served by a sidebar that is gone");
+});
+
+test("a refused binding is said on the sidebar's tree, and the sidebar stays open", async () => {
+  installFakeDom();
+  try {
+    deps();
+    const b = new FakeBridge();
+    project(b);
+    b.openViewRefusal = { error: "the bridge does not expose the project to views", reason: "not_exposed" };
+    const page = new FakeEl("div") as unknown as HTMLElement;
+    const sb = mountTreeSidebar({ kernel: pageKernel(b), view: ROOT_VIEW, mount: page, wide: true });
+    await settle();
+    const note = sb.el.querySelector(".ft-note") as FakeEl;
+    assert.match(note.textContent, /does not expose the project to views — the sidebar is not the project's view/);
+    assert.equal(sb.open, true, "the refusal does not close the sidebar");
+    sb.dispose();
+  } finally {
+    installDom();
+  }
+});
+
+test("the tree cell still binds its own folder beside the sidebar, and lets it go on unmount; the sidebar keeps the project", async () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const k = pageKernel(b);
+  const sb = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: pageMount().mount, wide: true });
+  await settle();
   const ctx = (selfId: string, record: Dict): ViewContext =>
     ({ kernel: k, mount: stub(), selfId, backend: "files", record, close: () => {} }) as unknown as ViewContext;
   const cell = (await filesView.mount(ctx("tree_1", { root: "src" }))) as ViewHandle;
   await settle();
   assert.ok(servedOf(k).get("src") !== undefined, "the tree cell holds its own folder");
+  assert.equal(servedOf(k).get("")?.view, "view:folder:", "the sidebar holds the project's view beside it");
   cell.unmount();
   assert.equal(servedOf(k).has("src"), false, "the cell let its folder go");
+  assert.equal(servedOf(k).get("")?.view, "view:folder:", "and the sidebar still holds the project");
   sb.dispose();
+  assert.equal(servedOf(k).has(""), false, "the sidebar's dispose lets the project go");
 });

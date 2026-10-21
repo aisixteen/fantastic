@@ -2,6 +2,7 @@ import type { Kernel, Payload } from "../../lib.ts";
 import { mountTreePanel } from "../files/tree_panel.ts";
 import type { TreePanel } from "../files/tree_panel.ts";
 import type { FilesState } from "../files/files_controller.ts";
+import { bindCellToView, release, said } from "../files/file_bridge.ts";
 
 // THE CANVAS'S OWN SIDEBAR (#148): the file tree, fused into the canvas page. It is
 // not an agent and not a cell: the canvas mounts it beside the zoomed world (never
@@ -9,7 +10,9 @@ import type { FilesState } from "../files/files_controller.ts";
 // scales it. From a bird's-eye zoom its rows drag onto the canvas like the tree
 // cell's do: the same panel (`files/tree_panel.ts`), the same drop (`#canvas`).
 // Its open state and its tree's state are kept on the canvas's root view, so a
-// reload restores them.
+// reload restores them. The tree is the PROJECT FOLDER'S VIEW (#150), as the tree
+// cell is: bound to the folder agent on the bridge, so every path it reads goes
+// through that agent (`file_bridge.ts`), not around it.
 
 /** The controller's id: the verbs of the tree answer to it (`controllers`), reached through the root view's `tree`. */
 export const SIDEBAR_ID = "canvas_tree";
@@ -26,6 +29,8 @@ export interface SidebarState {
   open?: boolean;
   expanded?: string[];
   selected?: string;
+  /** the project folder's view agent on the bridge (#150): the tree serves its folder through it */
+  view_agent?: string;
 }
 
 /** The sidebar's saved state, from a view's meta (`{}` when none, or not one this reads). */
@@ -37,6 +42,7 @@ export function sidebarSavedOf(meta: Record<string, unknown> | undefined): Sideb
     ...(typeof o["open"] === "boolean" ? { open: o["open"] } : {}),
     ...(Array.isArray(o["expanded"]) ? { expanded: o["expanded"].filter((x): x is string => typeof x === "string") } : {}),
     ...(typeof o["selected"] === "string" ? { selected: o["selected"] } : {}),
+    ...(typeof o["view_agent"] === "string" ? { view_agent: o["view_agent"] } : {}),
   };
 }
 
@@ -64,6 +70,7 @@ export interface TreeSidebar {
   readonly open: boolean;
   /** open or collapse it; the choice is kept on the view */
   setOpen(open: boolean): void;
+  /** the sidebar's tree lets go of the project folder, and the element leaves the page */
   dispose(): void;
 }
 
@@ -98,7 +105,18 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
     mount: body,
     persist: (s) => saveSidebar(kernel, view, treePatch(s)),
   });
-  void tree.start({ expanded: saved.expanded ?? [], ...(saved.selected !== undefined ? { selected: saved.selected } : {}) });
+  // The tree is the project folder's view, bound now (a saved `view_agent` serves it again; one
+  // saved before views gets the view of the project). Its first listing waits for that, and a
+  // refusal is said on the tree, which stays open. As the tree cell does (`files_view.ts`).
+  let gone = false;
+  const bound = bindCellToView(kernel, "folder", "", saved.view_agent, (v) => saveSidebar(kernel, view, { view_agent: v }), SIDEBAR_ID).then((b) => {
+    if (!b.ok) tree.say(`${said(b.refusal)} — the sidebar is not the project's view`);
+    // disposed while it was binding: the path it took is let go now
+    if (gone) release(kernel, "", SIDEBAR_ID);
+  });
+  void bound.then(() => {
+    if (!gone) void tree.start({ expanded: saved.expanded ?? [], ...(saved.selected !== undefined ? { selected: saved.selected } : {}) });
+  });
 
   const paint = (): void => {
     el.classList.toggle("collapsed", !open);
@@ -123,7 +141,9 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
     },
     setOpen,
     dispose(): void {
+      gone = true;
       tree.dispose();
+      release(kernel, "", SIDEBAR_ID);
       o.mount.classList.remove(BESIDE, OPEN);
       el.remove();
     },

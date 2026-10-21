@@ -291,7 +291,6 @@ def main() -> bool:
             r["h5 the pair lands at the drop point, one spot each, zoomed far out"] = (
                 pr[0]["spot"] != pr[1]["spot"] and all(abs(c["dx"]) <= tol and abs(c["dy"]) <= tol for c in pr))
             info["h_agent_geom"] = await pg.js(geom(frame(CELL_A)))
-            r["h6 the other cell stays where the drop put it"] = bool(await pg.js(f"!!{frame(CELL_B)}"))
             before = set(await pg.js("[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"]')].map(f=>f.dataset.id)") or [])
             await side_reveal({"path": "src/one.txt"})
             r["h7 the file shows in the sidebar"] = bool(await pg.until(f"!!{side_row(file_sel)}", 15))
@@ -307,6 +306,11 @@ def main() -> bool:
             c_file = await pg.js(placed(f"document.querySelector('.agent-frame[data-id=\"'+({fresh})[0]+'\"]')", fx, fy))
             info["h_file_corner_off"] = c_file
             r["h9 the preview lands at the drop point, zoomed far out"] = bool(c_file) and abs(c_file[0]) <= tol and abs(c_file[1]) <= tol
+            # the file's drop moved neither cell of the pair: each is still on its spot of the first drop, within the same bound
+            info["h_pair_after"] = await pg.js(pair(frame(CELL_A), frame(CELL_B), 760, 420))
+            pa = info["h_pair_after"] or [{"spot": -1, "dx": 999, "dy": 999}, {"spot": -1, "dx": 999, "dy": 999}]
+            r["h10 the pair stays where the first drop put it, after the file drop"] = all(
+                pa[i]["spot"] == pr[i]["spot"] and abs(pa[i]["dx"]) <= tol and abs(pa[i]["dy"]) <= tol for i in (0, 1))
 
             # g) the cells this probe made are removed; no page error
             made = await pg.js("[...document.querySelectorAll('.agent-frame[data-id^=\"preview_\"], .agent-frame[data-id^=\"files_\"]')].map(f=>f.dataset.id)")
