@@ -404,7 +404,8 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
         # THE METER (E2E_METER=1): this test's model traffic goes through the
         # run's forwarder under the test's own name — see helpers/meter.py.
         if meter := os.environ.get("E2E_METER_URL"):
-            env["VLLM_ENDPOINT"] = f"{meter}/m/{name}"
+            var, _, path = _meter_target()
+            env[var] = f"{meter}/m/{name}{path}"
         began = time.monotonic()
         stop_s = int(t.get("hard_stop_minutes") or HARD_STOP_S // 60) * 60
         results[name] = {"state": "running", "since": began}
@@ -533,15 +534,36 @@ class _NoBackend:
         return []
 
 
+def _meter_target() -> tuple[str, str, str]:
+    """(the endpoint variable the meter stands in for, the upstream it forwards
+    to, the path a test's endpoint keeps after `<meter>/m/<test>`).
+
+    vLLM's endpoint is a base the backend appends to, so it is the upstream
+    whole. Anthropic's is the full Messages URL: the meter forwards to its
+    origin and the test keeps the path (`/v1/messages`), so the backend's
+    `/models` lookup goes through the meter too."""
+    from urllib.parse import urlsplit
+
+    if os.environ.get("BACKEND") == "anthropic":
+        ep = os.environ.get("ANTHROPIC_ENDPOINT")
+        if not ep:
+            raise SystemExit("E2E_METER=1 needs ANTHROPIC_ENDPOINT — the meter forwards to it")
+        u = urlsplit(ep)
+        return "ANTHROPIC_ENDPOINT", f"{u.scheme}://{u.netloc}", u.path
+    ep = os.environ.get("VLLM_ENDPOINT")
+    if not ep:
+        raise SystemExit("E2E_METER=1 needs VLLM_ENDPOINT — the meter forwards to it")
+    return "VLLM_ENDPOINT", ep, ""
+
+
 async def start_meter(logdir: Path):
-    """Spawn helpers/meter.py in front of `VLLM_ENDPOINT`; per-request usage
-    lands in `<logdir>/meter.jsonl`. Opt-in (`E2E_METER=1`), vLLM only."""
+    """Spawn helpers/meter.py in front of the model endpoint (vLLM, or Anthropic
+    with `BACKEND=anthropic`); per-request usage lands in
+    `<logdir>/meter.jsonl`. Opt-in (`E2E_METER=1`)."""
     import socket
     import urllib.request
 
-    upstream = os.environ.get("VLLM_ENDPOINT")
-    if not upstream:
-        raise SystemExit("E2E_METER=1 needs VLLM_ENDPOINT — the meter forwards to it")
+    _, upstream, _ = _meter_target()
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]

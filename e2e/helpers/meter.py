@@ -1,8 +1,8 @@
 """THE METER — what each test cost the model, per request.
 
-A forwarder between the kernels of one run and the vLLM endpoint. `run.py`
-starts it when `E2E_METER=1` and points each test's `VLLM_ENDPOINT` at
-`<meter>/m/<test name>`, so every request lands in `meter.jsonl` under the test
+A forwarder between the kernels of one run and the model endpoint (vLLM, or
+Anthropic's Messages API with `BACKEND=anthropic`). `run.py` starts it when
+`E2E_METER=1` and points each test's endpoint at `<meter>/m/<test name>`, so every request lands in `meter.jsonl` under the test
 that made it — sub-AIs included, since they inherit the endpoint.
 
 Recorded per request: the endpoint's own `usage` (prompt / completion / cached
@@ -64,6 +64,13 @@ def _last_message(body: bytes) -> str:
 
 
 def _text(obj: dict, think: list[str], said: list[str]) -> None:
+    if obj.get("type") == "content_block_delta":  # Anthropic Messages stream
+        d = obj.get("delta") or {}
+        if r := d.get("thinking"):
+            think.append(r)
+        if c := d.get("text"):
+            said.append(c)
+        return
     for ch in obj.get("choices") or []:
         d = ch.get("delta") or ch.get("message") or {}
         if r := d.get("reasoning_content") or d.get("reasoning"):
@@ -73,6 +80,24 @@ def _text(obj: dict, think: list[str], said: list[str]) -> None:
 
 
 def _note(rec: dict, obj: dict) -> None:
+    # Anthropic Messages stream: the prompt's usage is on `message_start`, the
+    # completion's on `message_delta`. The prompt counts every input token:
+    # fresh, written to the cache and read from it.
+    kind = obj.get("type")
+    if kind == "message_start":
+        u = (obj.get("message") or {}).get("usage") or {}
+        rec["prompt_tokens"] = sum(
+            int(u.get(k) or 0)
+            for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        )
+        rec["cached_tokens"] = int(u.get("cache_read_input_tokens") or 0)
+        return
+    if kind == "message_delta":
+        if (u := obj.get("usage")) and u.get("output_tokens") is not None:
+            rec["completion_tokens"] = u["output_tokens"]
+        if fr := (obj.get("delta") or {}).get("stop_reason"):
+            rec["finish_reason"] = fr
+        return
     if u := obj.get("usage"):
         rec["prompt_tokens"] = u.get("prompt_tokens")
         rec["completion_tokens"] = u.get("completion_tokens")

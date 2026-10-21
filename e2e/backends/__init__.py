@@ -169,6 +169,26 @@ def _responses() -> Backend:
     )
 
 
+def _anthropic() -> Backend:
+    # Anthropic's Messages API (`…/v1/messages`). The URL and the model are the
+    # operator's to name. `max_tokens` and `context_window` are left out: the
+    # backend reads them from the model's entry in the API (its readme).
+    extra: dict[str, Any] = {}
+    if ep := os.environ.get("ANTHROPIC_ENDPOINT"):
+        extra["endpoint"] = ep
+    return Backend(
+        name="anthropic",
+        handler_module="anthropic_backend.tools",
+        model=_model_or_die("anthropic"),
+        extra=extra,
+        key_ref="anthropic",
+        requires=(
+            ("ANTHROPIC_ENDPOINT", "the full …/v1/messages URL; no host is guessed"),
+            (KEYED["anthropic"][0], "the `creds` store reads the key from it"),
+        ),
+    )
+
+
 def _vllm() -> Backend:
     # A vLLM server reached DIRECTLY (no proxy) — its `/v1` URL, the served
     # model, and the KV-cache session table's size and rotation policy are all
@@ -243,6 +263,7 @@ def _foundation_models() -> Backend:
 
 
 REGISTRY = {
+    "anthropic": _anthropic,
     "ollama": _ollama,
     "responses": _responses,
     "vllm": _vllm,
