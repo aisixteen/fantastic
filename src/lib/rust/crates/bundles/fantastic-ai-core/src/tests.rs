@@ -6635,3 +6635,99 @@ async fn a_routing_name_the_verb_documents_is_refused_loud() {
         "create must not run"
     );
 }
+
+/// #203: the SECOND wrapped answer in a row escalates its report — the first is
+/// only named, the second says plainly that nothing has run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_wrapped_answer_in_a_row_escalates() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "esc_w").await;
+    let wrapped = "<tool_call>\n<call name=\"done\"></call>\n</tool_call>";
+    let s = script(
+        &backend,
+        vec![
+            pass(wrapped),
+            pass(wrapped),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 3).await, "the chain did not finish");
+    let first = s.request(1);
+    assert!(first.contains("drop the wrapper"), "{first}");
+    assert!(!first.contains("[no progress"), "{first}");
+    let second = s.request(2);
+    assert!(
+        second.contains("[no progress — 2 answers in a row ran nothing]"),
+        "{second}"
+    );
+    assert!(second.contains("<tool_call>"), "{second}");
+    assert!(second.contains("must START with <call"), "{second}");
+}
+
+/// A call that actually runs resets the streak: the next wrapped answer is only
+/// named, never escalated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_that_runs_resets_the_escalation() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "esc_r").await;
+    let wrapped = "<tool_call>\n<call name=\"done\"></call>\n</tool_call>";
+    let s = script(
+        &backend,
+        vec![
+            pass(wrapped),
+            pass("<call name=\"send\"><target_id>kernel</target_id><type>reflect</type></call>"),
+            pass(wrapped),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 4).await, "the chain did not finish");
+    let report = s.request(3);
+    assert!(report.contains("drop the wrapper"), "{report}");
+    assert!(!report.contains("[no progress"), "{report}");
+}
+
+/// Two thinking-only turns in a row escalate the nudge itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_thinking_only_turns_escalate_the_nudge() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "esc_t").await;
+    let dead = "\n\n";
+    let s = script(
+        &backend,
+        vec![pass(dead), pass(dead), pass("<call name=\"done\"></call>")],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&s, 3).await, "the chain did not finish");
+    let nudge = s.request(2);
+    assert!(
+        nudge.contains("[no progress — 2 answers in a row ran nothing]"),
+        "{nudge}"
+    );
+    assert!(nudge.contains("were only thinking"), "{nudge}");
+}
