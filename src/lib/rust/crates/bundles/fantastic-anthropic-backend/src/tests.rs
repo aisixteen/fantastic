@@ -84,6 +84,8 @@ fn provider_idle(
         max_tokens: 8000,
         temperature: None,
         thinking_budget: None,
+        effort: None,
+        thinking_display: None,
         caching: Caching::Cleanup,
         usage: Arc::new(Mutex::new(Usage::default())),
         report: ReportCell::default(),
@@ -1014,6 +1016,7 @@ fn the_record_refuses_a_bad_caching_mode_or_primer_or_price() {
         .filter_map(|f| f["name"].as_str())
         .collect();
     assert!(names.contains(&"caching") && names.contains(&"cache_primer_until"));
+    assert!(names.contains(&"effort") && names.contains(&"thinking_display"));
     assert!(!names.contains(&"prompt_cache"));
     assert!(names.contains(&"price_input_per_mtok") && names.contains(&"price_output_per_mtok"));
 }
@@ -1170,4 +1173,77 @@ async fn the_models_verb_names_a_refusing_api() {
     let err = r["error"].as_str().unwrap_or_default();
     assert!(err.contains("401"), "{r}");
     assert!(err.contains("credentials"), "{err}");
+}
+
+#[test]
+fn effort_and_thinking_display_shape_the_body() {
+    let msgs = [json!({"role": "user", "content": "hi"})];
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.effort = Some("high".into());
+    let b = p.body(&msgs, None);
+    assert_eq!(b["output_config"], json!({"effort": "high"}));
+    assert!(b.get("thinking").is_none(), "{b}");
+
+    let mut p = provider("http://x/v1/messages", Arc::new(NoKey));
+    p.thinking_display = Some("summarized".into());
+    p.thinking_budget = Some(2048);
+    let b = p.body(&msgs, None);
+    assert_eq!(
+        b["thinking"],
+        json!({"type": "adaptive", "display": "summarized"})
+    );
+    assert!(b.get("output_config").is_none(), "{b}");
+
+    let p = provider("http://x/v1/messages", Arc::new(NoKey));
+    let b = p.body(&msgs, None);
+    assert!(
+        b.get("output_config").is_none() && b.get("thinking").is_none(),
+        "{b}"
+    );
+}
+
+#[test]
+fn a_bad_effort_or_display_or_both_modes_are_refused() {
+    for (meta, fragment) in [
+        (
+            json!({"effort": "ultra"}),
+            "effort must be one of low, medium, high, xhigh, max",
+        ),
+        (
+            json!({"thinking_display": "verbose"}),
+            "thinking_display must be summarized or omitted",
+        ),
+        (
+            json!({"thinking_display": "summarized", "thinking_budget": 2048}),
+            "two thinking modes — set one",
+        ),
+    ] {
+        let err = validate(meta.as_object().unwrap(), &rec(json!({}))).unwrap_or_default();
+        assert!(err.contains(fragment), "{meta}: {err}");
+    }
+    assert_eq!(
+        validate(
+            json!({"effort": "xhigh", "thinking_display": "omitted"})
+                .as_object()
+                .unwrap(),
+            &rec(json!({}))
+        ),
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_models_verb_refuses_a_body_that_is_not_a_model_list() {
+    let tmp = TempDir::new().unwrap();
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>proxy</html>"))
+        .mount(&srv)
+        .await;
+    let ep = format!("{}/v1/messages", srv.uri());
+    let kernel = mk(&tmp, &ep).await;
+    let r = call(&kernel, "a1", json!({"type": "models"})).await;
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("not a model list"), "{r}");
 }

@@ -108,11 +108,11 @@ pub async fn list(endpoint: &str, key: &dyn KeySource) -> Result<Vec<Value>, Str
     }
     let body = resp.text().await.map_err(|_| unreachable())?;
     let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
-    let data = parsed
-        .get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let Some(data) = parsed.get("data").and_then(Value::as_array).cloned() else {
+        return Err(format!(
+            "GET {url} answered HTTP 200 without a `data` list — not a model list"
+        ));
+    };
     Ok(data
         .into_iter()
         .map(|entry| {
