@@ -625,6 +625,36 @@ async fn a_message_carries_the_stream_it_was_previewed_as() {
     assert!(prod.requests() >= 1);
 }
 
+/// #188: a call inside an open tag streams as not ok (the router refuses it), and it
+/// is not in `closed_calls`, so it can never take a dispatched call's stream id.
+#[test]
+fn a_wrapped_closed_call_ends_not_ok_and_is_not_matched() {
+    let (ev, sp) = run(&format!("<tool_call>{DONE}</tool_call>\n{DONE}"), 4);
+    let oks: Vec<Option<bool>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            PartEvent::End(p, ok) if p.kind == PartKind::Call => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(oks, vec![Some(false), Some(true)], "{ev:?}");
+    assert_eq!(sp.closed_calls.len(), 1, "{:?}", sp.closed_calls);
+}
+
+/// #188: a call after a closed tag, or after thinking, is not wrapped and streams ok.
+#[test]
+fn a_call_after_a_closed_tag_or_after_think_is_not_wrapped() {
+    let (ev, _) = run(&format!("<b>x</b> {DONE}<think>t</think>{DONE}"), 5);
+    let oks: Vec<Option<bool>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            PartEvent::End(p, ok) if p.kind == PartKind::Call => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(oks, vec![Some(true), Some(true)], "{ev:?}");
+}
+
 #[test]
 fn a_malformed_closed_call_ends_not_ok() {
     let (ev, _) = run(

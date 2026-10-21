@@ -154,9 +154,113 @@ pub struct Envelope {
     pub wrapper: Option<OpenTag>,
 }
 
+/// A tag: a name, then nothing, or attributes written `name="…"`, `name='…'` or
+/// `name=value`. Prose such as `a<b and c>d` has bare words where an attribute
+/// would be, so it is not a tag.
 fn tag_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"<(/?)([A-Za-z_][\w.\-]*)((?:\s[^<>\n]*?)?)(/?)>").expect("tag"))
+    R.get_or_init(|| {
+        Regex::new(
+            r#"<(/?)([A-Za-z_][\w.\-]*)((?:\s+[\w:.\-]+\s*=\s*(?:"[^"<>\n]*"|'[^'<>\n]*'|[^\s"'<>=`]+))*\s*)(/?)>"#,
+        )
+        .expect("tag")
+    })
+}
+
+/// The answer with every code fence and code span blanked, for the tag walk only
+/// (#188): `Vec<String>` in backticks, or a fenced `<div>`, is code, not markup, so
+/// it opens no wrapper. Every byte keeps its offset (each char becomes spaces, a
+/// newline stays), so positions in the masked text are positions in the answer. A
+/// span needs its closing backticks of the same run length before a blank line; an
+/// unmatched backtick is a plain character.
+pub fn code_masked(text: &str) -> String {
+    blank_spans(&blank_fences(text))
+}
+
+/// Blanks a string, keeping its newlines and its byte length.
+fn blank(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if c == '\n' {
+                vec![c]
+            } else {
+                vec![' '; c.len_utf8()]
+            }
+        })
+        .collect()
+}
+
+/// Blanks every fenced block: a line of three or more backticks or tildes opens it,
+/// and a line of the same mark, at least as long, closes it. Unclosed, it runs to
+/// the end of the text.
+fn blank_fences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let t = line.trim_start_matches(' ');
+        let mark = t.chars().next().filter(|c| *c == '`' || *c == '~');
+        let run = mark.map_or(0, |m| t.chars().take_while(|c| *c == m).count());
+        match fence {
+            None if run >= 3 => {
+                fence = mark.map(|m| (m, run));
+                out.push_str(&blank(line));
+            }
+            None => out.push_str(line),
+            Some((m, n)) => {
+                out.push_str(&blank(line));
+                if mark == Some(m) && run >= n && t[run..].trim().is_empty() {
+                    fence = None;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Blanks every code span: a run of backticks, through the next run of the SAME
+/// length, with no blank line between.
+fn blank_spans(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    let mut i = 0usize;
+    while let Some(off) = text[i..].find('`') {
+        let start = i + off;
+        let run = backticks_at(text, start);
+        match closer(text, start + run, run) {
+            Some(end) => {
+                out.push_str(&text[last..start]);
+                out.push_str(&blank(&text[start..end]));
+                last = end;
+                i = end;
+            }
+            None => i = start + run,
+        }
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// The number of backticks in the run at `at`.
+fn backticks_at(text: &str, at: usize) -> usize {
+    text[at..].bytes().take_while(|b| *b == b'`').count()
+}
+
+/// The byte index just past the closing run of `len` backticks, searching from
+/// `from`; `None` when a blank line comes first or the text ends.
+fn closer(text: &str, from: usize, len: usize) -> Option<usize> {
+    let mut i = from;
+    while let Some(off) = text[i..].find('`') {
+        let p = i + off;
+        if text[i..p].contains("\n\n") {
+            return None;
+        }
+        let run = backticks_at(text, p);
+        if run == len {
+            return Some(p + run);
+        }
+        i = p + run;
+    }
+    None
 }
 
 /// Walks the tags of `text[from..to]`: an open tag is pushed; a close pops the most
@@ -187,11 +291,12 @@ fn track(text: &str, from: usize, to: usize, open: &mut Vec<OpenTag>) {
 /// and reported by [`crate::call_check`] until it is written at the top level. A
 /// tag closed before the call (`<b>x</b> <call …>`) wraps nothing.
 pub fn envelopes_in(text: &str) -> Vec<Envelope> {
+    let masked = code_masked(text);
     let mut out = Vec::new();
     let mut open: Vec<OpenTag> = Vec::new();
     let mut at = 0usize;
     for (start, body, end) in envelopes(text) {
-        track(text, at, start, &mut open);
+        track(&masked, at, start, &mut open);
         out.push(Envelope {
             start,
             body,
@@ -203,12 +308,13 @@ pub fn envelopes_in(text: &str) -> Vec<Envelope> {
     out
 }
 
-/// The tags still open at the end of `text`, outermost first. Meant for a text with
-/// no envelope in it: an envelope's own tags are not walked by [`envelopes_in`], and
-/// this does not skip them.
+/// The tags still open at the end of `text`, outermost first, code excluded (see
+/// [`code_masked`]). Meant for a text with no envelope in it: an envelope's own tags
+/// are not walked by [`envelopes_in`], and this does not skip them.
 pub fn open_tags(text: &str) -> Vec<OpenTag> {
+    let masked = code_masked(text);
     let mut open = Vec::new();
-    track(text, 0, text.len(), &mut open);
+    track(&masked, 0, masked.len(), &mut open);
     open
 }
 

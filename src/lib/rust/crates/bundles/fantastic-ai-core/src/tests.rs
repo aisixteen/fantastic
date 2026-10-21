@@ -6268,6 +6268,10 @@ async fn an_empty_wrapper_is_reported_by_name_not_only_reminded() {
     assert!(!nxt.contains("[no call was dispatched]"), "{nxt}");
     assert!(nxt.contains("`<tool_call>` holds no call"), "{nxt}");
     assert!(
+        nxt.contains("If it is finished, end the chain explicitly: <call name=\"done\"></call>"),
+        "{nxt}"
+    );
+    assert!(
         nxt.contains("<call name=\"send\">\n<target_id>agent id</target_id>"),
         "{nxt}"
     );

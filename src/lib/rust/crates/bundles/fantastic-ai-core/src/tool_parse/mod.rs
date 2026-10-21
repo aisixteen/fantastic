@@ -102,9 +102,11 @@ fn scan(text: &str) -> Vec<Found<'_>> {
     out
 }
 
-/// Whether one envelope body (` name="…">…`, the text after `<call`) is a call
-/// [`extract_tool_calls`] would dispatch — the streaming splitter asks it at
-/// `</call>`.
+/// Whether one envelope body (` name="…">…`, the text after `<call`) parses as a
+/// call. It does NOT look at the wrapper: a call inside an open tag parses here and is
+/// still refused by [`extract_tool_calls`] (#188). The streaming splitter asks this at
+/// `</call>` and ANDs in its own wrapper test (`stream_parts`), so a wrapped call
+/// streams as not ok.
 #[must_use]
 pub fn parses(block: &str) -> bool {
     matches!(parse_call(block), Ok(Some(_)))

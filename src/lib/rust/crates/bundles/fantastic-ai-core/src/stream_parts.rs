@@ -25,6 +25,7 @@
 //! watcher of that addressee sees the whole part.
 
 use crate::think::{THINK_CLOSE, THINK_OPEN};
+use crate::tool_parse::grammar::open_tags;
 use crate::tool_parse::{parses, BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN};
 use fantastic_bundle::{is_space, py_strip};
 use serde_json::{json, Map, Value};
@@ -150,6 +151,12 @@ pub struct PartSplitter {
     call_body: String,
     /// Its `Start` was emitted.
     call_started: bool,
+    /// The call was written inside an open tag (`<tool_call>`): the router refuses
+    /// it (#188), so it ends not ok and is never matched to a dispatch.
+    call_wrapped: bool,
+    /// The answer's text outside thinking and outside calls, as the router reads it:
+    /// the tags a call written now would sit inside ([`open_tags`]).
+    outside: String,
     /// Deltas held until the addressee is known.
     call_pending: String,
     in_bytes: bool,
@@ -177,6 +184,8 @@ impl PartSplitter {
             call: None,
             call_body: String::new(),
             call_started: false,
+            call_wrapped: false,
+            outside: String::new(),
             call_pending: String::new(),
             in_bytes: false,
             parts: Vec::new(),
@@ -280,6 +289,9 @@ impl PartSplitter {
         if text.is_empty() {
             return;
         }
+        if !self.in_think {
+            self.outside.push_str(text);
+        }
         let kind = if self.in_think {
             PartKind::Thinking
         } else {
@@ -368,6 +380,9 @@ impl PartSplitter {
             let name = head[NAME_HEAD.len()..q].to_string();
             let ci = self.new_part(PartKind::Call, Some(name));
             self.call = Some(ci);
+            // The same test the scanner runs (`envelopes_in`): a tag still open
+            // before the call wraps it. Code is not markup there either.
+            self.call_wrapped = !open_tags(&self.outside).is_empty();
             self.call_body.clear();
             self.call_started = false;
             self.call_pending.clear();
@@ -479,13 +494,20 @@ impl PartSplitter {
         }
         self.call_pending.clear();
         let call = &self.parts[ci];
-        let ok = parses(&format!(
-            " name=\"{}\">{}",
-            call.name.as_deref().unwrap_or(""),
-            self.call_body
-        ));
-        self.closed_calls
-            .push((call.stream_id.clone(), self.call_body.clone()));
+        // A wrapped call is not dispatched, so it is not ok, and it is not pushed to
+        // `closed_calls`: the router matches a dispatch to a stream by its exact body,
+        // and a refused copy with the same body must not take the dispatched call's
+        // stream id.
+        let ok = !self.call_wrapped
+            && parses(&format!(
+                " name=\"{}\">{}",
+                call.name.as_deref().unwrap_or(""),
+                self.call_body
+            ));
+        if !self.call_wrapped {
+            self.closed_calls
+                .push((call.stream_id.clone(), self.call_body.clone()));
+        }
         out.push(PartEvent::End(call.clone(), Some(ok)));
     }
 

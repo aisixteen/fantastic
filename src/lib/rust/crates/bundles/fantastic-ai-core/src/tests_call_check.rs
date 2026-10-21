@@ -322,7 +322,8 @@ fn an_empty_wrapper_gets_the_wrapper_report() {
             "[malformed call — nothing ran] line 1, col 1:\n  <tool_call>\n  ^~~~~~~~~~~ \
              `<tool_call>` holds no call — write one at the top level, as \
              <call name=\"…\">…</call>\nwrite it as:\n<call name=\"send\">\n\
-             <target_id>agent id</target_id>\n<type>verb</type>\n</call>\n{TAIL}"
+             <target_id>agent id</target_id>\n<type>verb</type>\n</call>\n\
+             If it is finished, end the chain explicitly: <call name=\"done\"></call>\n{TAIL}"
         )]
     );
 }
@@ -342,4 +343,45 @@ fn an_open_wrapper_after_prose_is_named() {
 #[test]
 fn a_closed_empty_wrapper_is_not_reported() {
     assert!(check("<tool_call></tool_call>", 0).is_empty());
+}
+
+/// #188 review: a tag-shaped token in INLINE CODE is code, not a wrapper. The call
+/// after it runs, and no report comes.
+#[test]
+fn a_call_after_a_type_in_inline_code_runs_with_no_report() {
+    let answer = format!("The helper returns `Vec<String>`.\n{SEND}");
+    assert_eq!(extract_tool_calls(&answer).len(), 1);
+    assert!(check(&answer, 1).is_empty(), "{:?}", check(&answer, 1));
+}
+
+/// A tag-shaped token in a CODE FENCE is code, not a wrapper: the call after the
+/// fence runs with no report.
+#[test]
+fn a_call_after_a_fenced_div_runs_with_no_report() {
+    let answer = format!("```html\n<div>\n```\n{SEND}");
+    assert_eq!(extract_tool_calls(&answer).len(), 1);
+    assert!(check(&answer, 1).is_empty(), "{:?}", check(&answer, 1));
+}
+
+/// A `<br>` or `<b and c>` in plain prose is not an open wrapper that would take the
+/// call after it: `<b and c>` has bare words where an attribute would be, and a
+/// `<br>` inside a code span is code.
+#[test]
+fn prose_angle_brackets_that_are_not_tags_do_not_wrap_a_call() {
+    for prose in ["if a<b and c>d then", "line `line<br>` ends"] {
+        let answer = format!("{prose}\n{SEND}");
+        assert_eq!(extract_tool_calls(&answer).len(), 1, "{prose}");
+        assert!(
+            check(&answer, 1).is_empty(),
+            "{prose}: {:?}",
+            check(&answer, 1)
+        );
+    }
+}
+
+/// An open tag in code is no wrapper for an empty-answer report either: a code span
+/// holding `<String>` is not a wrapper that holds no call.
+#[test]
+fn a_code_span_is_not_an_open_wrapper_in_the_report() {
+    assert!(check("returns `Vec<String>` and nothing else", 0).is_empty());
 }

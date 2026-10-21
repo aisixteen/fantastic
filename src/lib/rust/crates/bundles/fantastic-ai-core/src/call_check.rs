@@ -556,7 +556,7 @@ fn wrapped_report(text: &str, env: &Envelope, end: usize, wrapper: &OpenTag) -> 
 
 /// An answer with NO call envelope in it, whose tags are left open — a wrapper that
 /// holds no call (`<tool_call> <function_calls>`). Named after the outermost open
-/// tag, with the form to write. `None` when there is any envelope, so a call that
+/// tag, with the form to write and the done line, so a finished answer still ends. `None` when there is any envelope, so a call that
 /// ran is never followed by a report about its own wrapper.
 fn wrapper_only(answer: &str) -> Option<String> {
     if !envelopes(answer).is_empty() {
@@ -581,6 +581,9 @@ fn wrapper_only(answer: &str) -> Option<String> {
             ),
             "write it as:".to_string(),
             expected("send", &example),
+            // The done path stays open: a finished answer that only wrote a wrapper
+            // still ends the chain, as the no-call reminder says.
+            "If it is finished, end the chain explicitly: <call name=\"done\"></call>".to_string(),
             FORM.to_string(),
         ]
         .join("\n"),
