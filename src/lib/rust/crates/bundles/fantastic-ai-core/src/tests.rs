@@ -4426,6 +4426,7 @@ fn verb_docs_match_python_docstrings() {
             "grep",
             "context_recall",
             "context_clear",
+            "context_fold",
             "context_forget",
             "watch",
             "unwatch",
@@ -5757,6 +5758,10 @@ mod memory_features;
 /// A fold carries its own place (python `test_fold_anchors.py`), on this harness.
 #[path = "tests_fold_anchors.rs"]
 mod fold_anchors;
+
+/// The operator's `context_fold` — a range of the view folded into one fold row.
+#[path = "tests_context_fold.rs"]
+mod context_fold;
 
 /// Per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the

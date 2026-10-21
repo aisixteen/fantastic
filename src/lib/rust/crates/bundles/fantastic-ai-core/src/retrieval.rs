@@ -16,12 +16,13 @@ use crate::context::{
     budget as agent_budget, estimate_one, fit_reply, inline_cap, recent_n as cfg_recent_n,
 };
 use crate::events::to_caller;
+use crate::folds::member_anchor;
 use crate::folds::{expand_ids, quoted_title, render as fold_render, row_content, row_id};
 use crate::helpers::{agent_meta, now_secs};
 use crate::history_view::{parse_reply_tag, reply_blocks};
 use crate::memory::{head, load_history, save_history, save_view, store_call, MemResult};
 use crate::provider::{Provider, ProviderEvent};
-use crate::strategies::fold::fold_down;
+use crate::strategies::fold::{append_fold, fold_down, summarize_span, summary_title};
 use crate::strategies::strip::{pid_of, LOW};
 use crate::strategies::ProjectionCtx;
 use crate::think::without_thinking;
@@ -352,6 +353,202 @@ pub async fn context_clear(
     *st.recall_due.lock().expect("recall_due poisoned") = false;
     *st.view_source.lock().expect("view_source poisoned") = None;
     Ok(json!({"cleared": rid, "rows": members.len()}))
+}
+
+/// The view the model reads now, as `assembly` builds it: the persisted view
+/// array's entries, each at its recorded resolution, then the head rows after the
+/// newest of them; with no usable array (none, or one naming a row the store no
+/// longer has), the head itself. `(index into rows, resolution)` in view order.
+fn current_view(rows: &[Value], view: Option<&Map<String, Value>>) -> Vec<(usize, String)> {
+    let by_id: std::collections::HashMap<i64, usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| row_id(r).map(|id| (id, i)))
+        .collect();
+    let listed: Option<Vec<(usize, String)>> = view.and_then(|v| {
+        let ids = v.get("ids")?.as_array()?;
+        let mut out = Vec::with_capacity(ids.len());
+        for e in ids {
+            let i = *by_id.get(&e.get("id")?.as_i64()?)?;
+            out.push((
+                i,
+                e.get("res")
+                    .and_then(Value::as_str)
+                    .unwrap_or("full")
+                    .to_string(),
+            ));
+        }
+        (!out.is_empty()).then_some(out)
+    });
+    match listed {
+        Some(mut entries) => {
+            let newest = entries.iter().map(|(i, _)| *i).max().unwrap_or(0);
+            entries.extend((newest + 1..rows.len()).map(|i| (i, res_of(&rows[i]).to_string())));
+            entries
+        }
+        None => (0..rows.len())
+            .map(|i| (i, res_of(&rows[i]).to_string()))
+            .collect(),
+    }
+}
+
+/// A fold or a clear: the rows a span may not cross.
+fn is_boundary(row: &Value) -> bool {
+    crate::folds::is_fold(row) || row.get("kind").and_then(Value::as_str) == Some("clear")
+}
+
+/// `context_fold` (operator only — not in the model's howto): fold a chosen
+/// stretch of the agent's VIEW into ONE fold row, the same kind and shape an
+/// automatic fold writes (members in `refs`, reachable by `history {fold}`,
+/// `recall`, `grep`). Nothing is deleted; the view becomes the rows before the
+/// range (unchanged), the fold, then the rows after.
+///
+/// args: `from?` / `to?` (row ids, inclusive, consecutive in the view; default
+/// `from` = the first row after the last fold or clear in the view, default `to`
+/// = the last row), `summary?` (the fold's text, used verbatim; absent, the fold
+/// summarizer writes it). Returns `{folded, rows, summarized}`; `summarized` is
+/// false only when the summarizer gave nothing and the fold carries its titles.
+///
+/// Refused, with the reason named: an empty range, an id not in the view, a range
+/// crossing a fold or clear row, a turn running for this agent.
+///
+/// # Errors
+/// The memory store refused a read or a write; a summary would not fit its budget
+/// after every re-summarise; a member has no known place (the turn fails loud,
+/// as an automatic fold does).
+pub async fn context_fold(
+    agent_id: &AgentId,
+    payload: &Value,
+    kernel: &Arc<Kernel>,
+    provider: &Arc<dyn Provider>,
+    model_window: i64,
+) -> Result<Value, crate::assembly::BlockFail> {
+    use crate::folds::anchors_of;
+    use crate::memory::load_view;
+    use fantastic_kernel::refusal::{bad, refusal_hint, with, BAD_ARG, LOCKED};
+    let verb = "context_fold";
+    // A turn holds the FIFO lock for its whole run: the view must not move under it.
+    let st = crate::state::state_for(agent_id);
+    let lock = Arc::clone(&st.lock);
+    let Ok(_turn) = lock.try_lock() else {
+        return Ok(refusal_hint(
+            LOCKED,
+            format!("{verb}: a turn is running for {agent_id}"),
+            "fold once the running turn has answered",
+        ));
+    };
+    // `from` / `to`: absent or null is the default; anything else must be an id.
+    let id_arg = |key: &str| -> Result<Option<i64>, Value> {
+        match payload.get(key).filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(raw) => as_id(raw)
+                .map(Some)
+                .ok_or_else(|| bad(verb, key, "a row id (int)")),
+        }
+    };
+    let (from, to) = match (id_arg("from"), id_arg("to")) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(e), _) | (_, Err(e)) => return Ok(e),
+    };
+    // `summary`: absent or null writes the summarizer's; a given one is the text.
+    let summary = match payload.get("summary").filter(|v| !v.is_null()) {
+        None => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.as_str()),
+        Some(_) => return Ok(bad(verb, "summary", "a non-empty string")),
+    };
+    let rows = load_history(agent_id, kernel, false).await?;
+    let anchors = anchors_of(&crate::memory::head(agent_id, kernel).await?);
+    let view = current_view(&rows, load_view(agent_id, kernel).await?.as_ref());
+    let pos_of = |id: i64| view.iter().position(|(i, _)| row_id(&rows[*i]) == Some(id));
+    let empty = |arg: &str, why: &str| {
+        let mut v = refusal_hint(
+            BAD_ARG,
+            format!("{verb}: the range is empty — {why}"),
+            "name a range of rows that are in the view, from first to last",
+        );
+        with(&mut v, "arg", Value::from(arg));
+        v
+    };
+    if view.is_empty() {
+        return Ok(empty("from", "the view holds no rows"));
+    }
+    // The default `from` is the row after the last fold or clear in the view.
+    let default_from = view
+        .iter()
+        .rposition(|(i, _)| is_boundary(&rows[*i]))
+        .map_or(0, |p| p + 1);
+    let from_p = match from {
+        None => default_from,
+        Some(id) => match pos_of(id) {
+            Some(p) => p,
+            None => return Ok(bad(verb, "from", "a row id in this agent's view")),
+        },
+    };
+    let to_p = match to {
+        None => view.len() - 1,
+        Some(id) => match pos_of(id) {
+            Some(p) => p,
+            None => return Ok(bad(verb, "to", "a row id in this agent's view")),
+        },
+    };
+    if from_p > to_p {
+        return Ok(empty("to", "to comes before from"));
+    }
+    let span: Vec<usize> = view[from_p..=to_p].iter().map(|(i, _)| *i).collect();
+    if span.iter().any(|&i| is_boundary(&rows[i])) {
+        let mut v = refusal_hint(
+            BAD_ARG,
+            format!("{verb}: the range crosses a fold or clear row"),
+            "fold the rows on each side of it separately; a fold row is never folded again by a range",
+        );
+        with(&mut v, "arg", Value::from("from"));
+        return Ok(v);
+    }
+    let anchor =
+        member_anchor(&rows, &span, &anchors).map_err(crate::assembly::BlockFail::FoldAnchor)?;
+    let (title, body, summarized) = match summary {
+        // Verbatim: the body IS the given text, its first line the title.
+        Some(text) => (summary_title(text), text.to_string(), true),
+        None => {
+            let (title, body, degraded) = summarize_span(provider, &rows, &span).await?;
+            (title, body, !degraded)
+        }
+    };
+    let fold = append_fold(
+        agent_id,
+        kernel,
+        &rows,
+        &span,
+        anchor,
+        &title,
+        &body,
+        !summarized,
+    )
+    .await?;
+    let fid = row_id(&fold).unwrap_or_default();
+    // THE NEW VIEW: the rows before the range as they were, the fold where the range
+    // began, then the rows after — every row the store holds, so none is left to the
+    // tail rule (the fold is the newest row, and would otherwise leave them out).
+    let mut ids: Vec<Value> = Vec::with_capacity(view.len() - span.len() + 1);
+    for (p, (i, res)) in view.iter().enumerate() {
+        if p == from_p {
+            ids.push(json!({"id": fid, "res": "fold"}));
+        }
+        if (from_p..=to_p).contains(&p) {
+            continue;
+        }
+        ids.push(json!({"id": row_id(&rows[*i]), "res": res}));
+    }
+    let meta = agent_meta(agent_id, kernel);
+    save_view(
+        agent_id,
+        kernel,
+        &ids,
+        agent_budget(&meta, model_window),
+        verb,
+    )
+    .await?;
+    Ok(json!({"folded": fid, "rows": span.len(), "summarized": summarized}))
 }
 
 /// `context_forget`: compact this agent's OWN store — drop the rows the model can
