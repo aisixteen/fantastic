@@ -214,6 +214,9 @@ def main() -> bool:
                 return int(await pg.js("document.querySelectorAll('.agent-frame').length") or 0)
 
             # a) the tree lists both agents; both cells draw
+            # the tree cell is on screen before its first verb: a verb to a cell not yet mounted is refused
+            # `not_mounted`, and `reveal` only asks again on `not_found`
+            r["a0 the tree cell is on screen"] = bool(await pg.until(f"!!{frame(TREE)}", 20))
             # the agent folders are collapsed until revealed: each is shown through the tree cell's own verb
             r["a1 the tree lists both agents"] = bool(await reveal(TREE, BACKEND_A) and await reveal(TREE, BACKEND_B)) and bool(await pg.until(f"!!{agent_row(BACKEND_A)} && !!{agent_row(BACKEND_B)}", 30))
             r["a2 both cells draw their ticks"] = bool(await pg.until(f"/TICK \\d+/.test({term_text(CELL_A)}) && /TICK \\d+/.test({term_text(CELL_B)})", 30))
@@ -261,6 +264,11 @@ def main() -> bool:
             await pg.js(
                 "(()=>{const c=document.getElementById('canvas'); for(let i=0;i<30;i++) c.dispatchEvent(new WheelEvent('wheel',{deltaY:100,bubbles:true,cancelable:true,clientX:760,clientY:420}));})()"
             )
+            # the zoom eases frame by frame (`canvas.ts` ZOOM_LERP): wait until it has come to rest at the
+            # target of the 30 steps (0.95 each), so the drops below are planned at the zoom they are
+            # measured at. A drop made mid-ease is placed at the zoom it saw, and the ease then moves it.
+            # (the transform is written to six digits, so the rest is within 1e-5 of the target)
+            r["h1a the zoom comes to rest at the 30 steps' target"] = bool(await pg.until(f"Math.abs({SCALE} - Math.pow(0.95, 30)) < 1e-5", 20))
             r["h1 zoomed far out, the sidebar stays put"] = bool(await pg.until(f"{SCALE} < 0.3 && {SIDE}?.getBoundingClientRect().left === 0", 20))
             # beside the canvas, not over it: the canvas starts where the sidebar ends (a wide screen's margin)
             r["h1b the canvas starts where the sidebar ends, and covers none of it"] = bool(await pg.until(
