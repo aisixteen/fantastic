@@ -312,6 +312,13 @@ pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         .expect("the in-flight task id is the kernel's TaskId number");
     // The kernel's cancel first: its task walk runs `on_cancel`, which closes the
     // turn (marker row, `status` done), and drops the dispatch with its stream.
+    // THE CAUSE OF A STOP THAT LEAVES A TURN GENERATING (#177): the walk finds the
+    // turn only by the task id it recorded, which is the id of its own dispatch row
+    // (`current_task()`). When that id is not in the kernel's task table the walk
+    // answers `{cancelled:false}` and runs no `on_cancel`, so nothing closes the
+    // turn. A reply-woken turn is not that case: its send is a dispatch row nested
+    // under the `deliver_reply` task, and the walk reaches it (pinned by
+    // `stop_reaches_a_reply_woken_turn`). The miss is named below, not dropped.
     if let Some(c) = state
         .current_meta
         .lock()
@@ -321,13 +328,21 @@ pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     {
         c.stopped_by = Some(who.clone());
     }
-    kernel.cancel_task(&TaskId(pid)).await;
+    let reached = kernel.cancel_task(&TaskId(pid)).await;
     // STOP REACHES THE TURN ITSELF (#177). When the task walk did not reach the
     // generation, the turn is still in flight: stop closes it here, so `status`
     // reports `generating: false` the moment this returns, and fires the
     // generation's own abort, which drops its provider stream. Before this, a stop
     // the kernel did not deliver left the turn and its stream running while `stop`
     // answered `stopped: true`.
+    if reached["cancelled"] != json!(true) {
+        // The kernel's answer is named, not dropped: `{cancelled:false}` means the
+        // task id the turn recorded is not in the kernel's task table.
+        println!(
+            "  [stop] {} kernel cancel did not reach task {pid}: {reached}",
+            agent_id.0
+        );
+    }
     if let Some(mut entry) = crate::state::take_current_for_cancel(agent_id, &task_id) {
         entry.stopped_by = Some(who);
         entry.abort.notify_one();

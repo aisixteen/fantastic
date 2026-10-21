@@ -233,7 +233,9 @@ async fn the_key_rides_the_chat_only_when_set() {
             think: None,
             key,
             report: Default::default(),
-            stream_idle: std::time::Duration::from_secs_f64(fantastic_ai_core::constants::STREAM_IDLE_SECONDS),
+            stream_idle: std::time::Duration::from_secs_f64(
+                fantastic_ai_core::constants::STREAM_IDLE_SECONDS,
+            ),
         };
         let mut stream = p
             .chat(&[json!({"role": "user", "content": "hi"})], None)

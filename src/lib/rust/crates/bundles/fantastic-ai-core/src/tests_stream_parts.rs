@@ -574,6 +574,144 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     let _ = turn.await;
 }
 
+/// A turn woken by a tool reply (#177) — the shape `deliver_reply` gives it: the
+/// send runs as a dispatch row nested under a `deliver_reply` task. Stalled, then
+/// stopped. The kernel's cancel reaches it: `stop` closes the turn through the
+/// walk's `on_cancel` and needs no fallback. The turn ends, the marker is stored,
+/// `status` reads `generating: false`, and the next send runs at once.
+#[tokio::test]
+async fn stop_reaches_a_reply_woken_turn() {
+    // the send ceiling is process-wide: hold the lock a ceiling test takes, so this
+    // turn runs under the default ceiling
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let kernel = slow_kernel(&tmp).await;
+    let ai = make_ai(&kernel, &id_for(&tmp, "sp_reply")).await;
+    ram_store(&kernel, "rx").await;
+    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    let fp = slow(&ai, &["never"], Duration::from_secs(600));
+    let k = Arc::clone(&kernel);
+    let target = ai.clone();
+    let born = crate::state::incarnation(&ai);
+    kernel.spawn_task(&ai, "deliver_reply", async move {
+        crate::route::deliver(&k, target.as_str(), "tool reply", "tab", None, born, false).await;
+    });
+    until_requests(&fp, 1).await;
+    let out = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
+    let after = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(after["generating"], json!(false), "{after}");
+    let rows = conversation(&kernel, &ai).await;
+    assert!(
+        rows.iter().any(|r| r["content"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("[stopped by rx"))),
+        "{rows:#?}"
+    );
+    *fp.step.lock().unwrap() = Duration::ZERO;
+    let next = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(
+            ai.clone(),
+            json!({"type": "send", "text": "after", "client_id": "tab"}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert!(next.get("raised").is_none(), "{next}");
+    assert_eq!(fp.requests(), 2, "the next send ran its own pass");
+}
+
+/// THE ABORT ARM (#177). The kernel's cancel does NOT find the turn: the task id
+/// its in-flight entry records is not in the task table, so `cancel_task` answers
+/// `{cancelled:false}` and runs no `on_cancel`. `stop` then closes the turn itself,
+/// fires the generation's abort, and the send returns `{cancelled:true}` from its
+/// abort arm — its provider stream dropped, the FIFO lock released — so the next
+/// send runs at once.
+#[tokio::test]
+async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let kernel = slow_kernel(&tmp).await;
+    let ai = make_ai(&kernel, &id_for(&tmp, "sp_abort_arm")).await;
+    ram_store(&kernel, "rx").await;
+    wire(&kernel, "rx", ai.as_str(), json!("*"));
+    let fp = slow(&ai, &["never"], Duration::from_secs(600));
+    let k = Arc::clone(&kernel);
+    let target = ai.clone();
+    let turn = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            target,
+            json!({"type": "send", "text": "go", "client_id": "tab"}),
+        )])
+        .await
+        .remove(0)
+    });
+    until_requests(&fp, 1).await;
+    // a task id the kernel's table never held: the kernel cancel cannot find it
+    const UNKNOWN_TASK: &str = "9000000001";
+    {
+        let state = crate::state::state_for(&ai);
+        let mut cur = state.current_meta.lock().expect("current poisoned");
+        cur.as_mut().expect("a turn in flight").task_id = Some(UNKNOWN_TASK.to_string());
+    }
+    let out = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(ai.clone(), json!({"type": "stop"}))]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(out.result, json!({"stopped": true}), "{:?}", out.result);
+    // the send's abort arm returned: a cancelled answer, not a stream left open
+    let turn_out = turn.await.expect("the turn task");
+    assert_eq!(
+        turn_out.result["cancelled"],
+        json!(true),
+        "{:?}",
+        turn_out.result
+    );
+    let after = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(ai.clone(), json!({"type": "status"}))]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert_eq!(after["generating"], json!(false), "{after}");
+    let rows = conversation(&kernel, &ai).await;
+    assert!(
+        rows.iter().any(|r| r["content"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("[stopped by rx"))),
+        "{rows:#?}"
+    );
+    *fp.step.lock().unwrap() = Duration::ZERO;
+    let next = as_agent(
+        "rx",
+        kernel.send(vec![Item::new(
+            ai.clone(),
+            json!({"type": "send", "text": "after", "client_id": "tab"}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    assert!(next.get("raised").is_none(), "{next}");
+    assert_eq!(fp.requests(), 2, "the next send ran its own pass");
+}
+
 /// One thread, as python's event loop: the stop lands between two chunks.
 #[tokio::test]
 async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
