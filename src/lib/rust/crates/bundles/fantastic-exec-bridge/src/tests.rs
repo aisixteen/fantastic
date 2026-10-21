@@ -2961,6 +2961,110 @@ async fn tail_and_grep_read_a_running_job() {
 
 /// A broken `allowed` pattern permits nothing, even one the fullmatch wrapper
 /// would balance into match-everything (python `re.fullmatch` raises).
+/// `status` with `wait_s` returns once the job is no longer running — no polling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_wait_returns_when_the_job_ends() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let started = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(0.5)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = started["job_id"].as_i64().expect("job_id");
+    let t0 = std::time::Instant::now();
+    let st = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": jid, "wait_s": 10}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let took = t0.elapsed();
+    assert_ne!(st["jobs"][0]["status"], "running", "{st}");
+    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+}
+
+/// A `wait_s` shorter than the job's life gives up at the deadline and still
+/// reports the job running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_wait_gives_up_at_the_deadline() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let started = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(30)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = started["job_id"].as_i64().expect("job_id");
+    let t0 = std::time::Instant::now();
+    let st = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": jid, "wait_s": 0.5}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let took = t0.elapsed();
+    assert_eq!(st["jobs"][0]["status"], "running", "{st}");
+    assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "stop", "job_id": jid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// A `wait_s` that is not a number in 0..=120, or has no job to wait for, is a
+/// bad argument.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_wait_refuses_a_bad_value() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    for bad in [json!(-1), json!(500), json!("x")] {
+        let r = kernel
+            .send(vec![Item::new(
+                a.clone(),
+                json!({"type": "status", "wait_s": bad}),
+            )])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{r}");
+        assert_eq!(r["arg"], "wait_s", "{r}");
+    }
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "wait_s": 1}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "wait_s", "{r}");
+}
+
 #[test]
 fn an_unbalanced_allowed_pattern_permits_nothing() {
     let mut meta = Map::new();

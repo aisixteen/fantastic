@@ -268,7 +268,7 @@ pub struct ExecBridgeBundle;
 fn verb_docs_json() -> Value {
     json!({
         "start": "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
-        "status": "args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}.",
+        "status": "args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. `wait_s`:float? (0–120) with job_id — returns as soon as the job is no longer running, or when the wait ends; use it instead of polling. Returns {jobs:[…]}.",
         "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
         "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
         "clear": "args: job_id:int? — drop finished jobs (one, or all non-running) from the RAM",
@@ -464,7 +464,7 @@ impl Bundle for ExecBridgeBundle {
             "reflect" => reflect_reply(agent_id, kernel),
             "start" => start_reply(agent_id, payload, kernel).await,
             "boot" => boot_reply(agent_id, kernel).await,
-            "status" => status_reply(agent_id, payload),
+            "status" => status_reply(agent_id, payload).await,
             "clear" => clear_reply(agent_id, payload),
             "interrupt" => interrupt_reply(agent_id, payload),
             "stop" => stop_reply(agent_id, payload),
@@ -1232,11 +1232,39 @@ async fn boot_reply(_agent_id: &AgentId, _kernel: &Arc<Kernel>) -> Value {
 }
 
 /// `status` — one job (full output) or all of THIS agent's jobs.
-fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
+///
+/// `wait_s` (0–120, with a `job_id`) waits for the job to stop RUNNING before
+/// answering, so a caller does not have to poll.
+async fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
     let want = match job_arg("status", payload, false) {
         Ok(w) => w,
         Err(e) => return e,
     };
+    if let Some(w) = payload.get("wait_s").filter(|v| !v.is_null()) {
+        let Some(jid) = &want else {
+            return bad("status", "wait_s", "a job_id to wait for");
+        };
+        let Some(secs) = w.as_f64() else {
+            return bad("status", "wait_s", "a number of seconds, 0 to 120");
+        };
+        if !(0.0..=120.0).contains(&secs) {
+            return bad("status", "wait_s", "a number of seconds, 0 to 120");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
+        loop {
+            let live = {
+                let g = jobs::jobs();
+                match jid.find(&g, agent_id) {
+                    Some(j) => j.status == "running" || j.status == "stopping",
+                    None => false,
+                }
+            };
+            if !live || std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
     let g = jobs::jobs();
     match want {
         Some(jid) => match (jid.id, jid.find(&g, agent_id)) {
