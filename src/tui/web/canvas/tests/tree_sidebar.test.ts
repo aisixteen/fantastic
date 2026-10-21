@@ -7,7 +7,7 @@ import { CANVAS_CSS } from "../src/bundles/canvas/styles.ts";
 import { ROOT_VIEW, VIEW_VERBS, viewAgent } from "../src/bundles/canvas/canvas_agent.ts";
 import { BESIDE, OPEN, SIDEBAR_KEY, mountTreeSidebar, saveSidebar, sidebarOpenOf, sidebarSavedOf } from "../src/bundles/canvas/tree_sidebar.ts";
 import { PAGE_VERB_DOCS } from "../src/bundles/verb_docs.ts";
-import { DRAG_MIME, decodeDrag, dropPlan, encodeDrag, worldAt } from "../src/bundles/files/drag.ts";
+import { DRAG_MIME, boxCentre, decodeDrag, dropPlan, encodeDrag, worldAt, zoomAbout } from "../src/bundles/files/drag.ts";
 import type { DragItem, ViewPose } from "../src/bundles/files/drag.ts";
 import { servedOf } from "../src/bundles/files/file_bridge.ts";
 import { filesView } from "../src/bundles/files/files_view.ts";
@@ -405,4 +405,112 @@ test("the tree cell still binds its own folder beside the sidebar, and lets it g
   assert.equal(servedOf(k).get("")?.view, "view:folder:", "and the sidebar still holds the project");
   sb.dispose();
   assert.equal(servedOf(k).has(""), false, "the sidebar's dispose lets the project go");
+});
+
+// ─── THE CANVAS'S OWN BOX: ZOOM AND CENTRE FOLLOW IT (#148) ─────────────────
+
+const VIEWPORT = { width: 1200, height: 800 };
+/** The canvas's box beside the sidebar at each of its three places: open (300px), collapsed (22px), and absent (the viewport). */
+const BOXES: Array<[string, { left: number; top: number; width: number; height: number }]> = [
+  ["open", { left: 300, top: 0, width: VIEWPORT.width - 300, height: VIEWPORT.height }],
+  ["collapsed", { left: 22, top: 0, width: VIEWPORT.width - 22, height: VIEWPORT.height }],
+  ["absent", { left: 0, top: 0, width: VIEWPORT.width, height: VIEWPORT.height }],
+];
+
+test("the canvas's centre is the middle of its own box: the viewport's only when nothing is beside it", () => {
+  for (const [, box] of BOXES) {
+    const mid = boxCentre(box);
+    assert.equal(mid.x, box.left + box.width / 2, "x is the middle of the box, not of the viewport");
+    assert.equal(mid.y, box.top + box.height / 2, "y is the middle of the box");
+  }
+  assert.equal(boxCentre(BOXES[0]![1]).x, 300 + (VIEWPORT.width - 300) / 2, "open: the middle of what is left of the sidebar");
+  assert.equal(boxCentre(BOXES[2]![1]).x, VIEWPORT.width / 2, "absent: the viewport's middle");
+});
+
+test("the centre puts the canvas's middle on the world's centre, whatever the sidebar's place", () => {
+  const view = { z: 1.5, ox: -340, oy: 120 };
+  for (const [name, box] of BOXES) {
+    const mid = boxCentre(box);
+    const at = worldAt(mid.x, mid.y, box, view);
+    // the world point at the canvas's middle, put back on the screen by the world's transform, is that middle
+    assert.ok(Math.abs(at.x * view.z + box.left + view.ox - mid.x) < 1e-9, `${name}: centre x round-trips`);
+    assert.ok(Math.abs(at.y * view.z + box.top + view.oy - mid.y) < 1e-9, `${name}: centre y round-trips`);
+  }
+});
+
+test("a zoom keeps the world point under its anchor fixed, the anchor being the canvas's middle in its own box", () => {
+  const start = { z: 0.8, ox: 150, oy: -60 };
+  for (const [name, box] of BOXES) {
+    const anchor = { x: box.width / 2, y: box.height / 2 }; // the canvas's middle, in its own box
+    const screen = boxCentre(box);
+    for (const z of [0.4, 1, 2.5]) {
+      const next = zoomAbout(start, anchor, z);
+      assert.equal(next.z, z, `${name}: the zoom is the one asked for`);
+      const before = worldAt(screen.x, screen.y, box, start);
+      const after = worldAt(screen.x, screen.y, box, next);
+      assert.ok(Math.abs(before.x - after.x) < 1e-9 && Math.abs(before.y - after.y) < 1e-9, `${name} z=${z}: the middle stays on the same world point`);
+    }
+  }
+});
+
+test("a zoom about the viewport's middle would drift the world beside the sidebar: the anchor is the canvas's own", () => {
+  // the old anchor, the viewport's middle, in the canvas's own box: the world under the canvas's middle moves
+  const start = { z: 1, ox: 0, oy: 0 };
+  const box = BOXES[0]![1];
+  const wrong = zoomAbout(start, { x: VIEWPORT.width / 2, y: VIEWPORT.height / 2 }, 2);
+  const right = zoomAbout(start, { x: box.width / 2, y: box.height / 2 }, 2);
+  const screen = boxCentre(box);
+  const drift = worldAt(screen.x, screen.y, box, wrong).x - worldAt(screen.x, screen.y, box, start).x;
+  assert.ok(Math.abs(drift) > 1, "the viewport's middle moves the canvas's middle off its world point");
+  assert.ok(Math.abs(worldAt(screen.x, screen.y, box, right).x - worldAt(screen.x, screen.y, box, start).x) < 1e-9);
+});
+
+test("the canvas reads no viewport middle: its zoom, centre and pointer default use its own box", () => {
+  const src = readFileSync(new URL("../src/bundles/canvas/canvas.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /innerWidth \/ 2|innerHeight \/ 2/, "no viewport middle as the canvas's middle");
+  assert.match(src, /const box = canvas\.getBoundingClientRect\(\);/, "the zoom reads the canvas's box");
+  assert.match(src, /zoomAbout\(view, \{ x: box\.width \/ 2, y: box\.height \/ 2 \}, nextZ\)/, "and anchors on its middle");
+  assert.match(src, /const pointerAt = \(\): \{ x: number; y: number \} => pointer \?\? boxCentre\(canvas\.getBoundingClientRect\(\)\);/, "the pointer before a move is the canvas's middle");
+});
+
+// ─── THE PLACE FOLLOWS A RESIZE (#148) ──────────────────────────────────────
+
+test("crossing 768px both ways moves the sidebar between beside the canvas and over it, and keeps its open state", () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const k = pageKernel(b);
+  const page = pageMount();
+  const sb = mountTreeSidebar({ kernel: k, view: ROOT_VIEW, mount: page.mount, wide: true });
+  assert.ok(page.classes.has(BESIDE), "wide at mount: beside");
+  sb.setWide(false);
+  assert.ok(!page.classes.has(BESIDE), "narrowed below 768px: over the canvas, no margin");
+  assert.equal(sb.open, true, "the open state is not changed by the place");
+  sb.setWide(true);
+  assert.ok(page.classes.has(BESIDE), "widened past 768px: beside again");
+  sb.setWide(true);
+  assert.ok(page.classes.has(BESIDE), "a resize within the same place changes nothing");
+  sb.dispose();
+});
+
+test("a narrow mount crossing 768px both ways: the canvas is beside the sidebar only while wide", () => {
+  installDom();
+  deps();
+  const b = new FakeBridge();
+  project(b);
+  const page = pageMount();
+  const sb = mountTreeSidebar({ kernel: pageKernel(b), view: ROOT_VIEW, mount: page.mount, wide: false });
+  assert.equal(page.classes.has(BESIDE), false, "narrow at mount: over the canvas");
+  sb.setWide(true);
+  assert.equal(page.classes.has(BESIDE), true, "widened: beside");
+  sb.setWide(false);
+  assert.equal(page.classes.has(BESIDE), false, "narrowed again: over");
+  sb.dispose();
+});
+
+test("the canvas's resize handler gives the sidebar the width test, as the theme gets it", () => {
+  const src = readFileSync(new URL("../src/bundles/canvas/canvas.ts", import.meta.url), "utf8");
+  assert.match(src, /treeSidebar\.setWide\(innerWidth > 768\);/, "the resize handler sets the place from the width");
+  assert.match(src, /const treeSidebar = mountTreeSidebar\(/, "the sidebar it sets is the one mounted on the page");
 });

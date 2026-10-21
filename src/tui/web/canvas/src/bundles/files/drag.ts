@@ -147,6 +147,23 @@ export function worldAt(clientX: number, clientY: number, rect: { left: number; 
 }
 
 /**
+ * The middle of a canvas's box, in client coordinates. The canvas's box is what is left
+ * of the viewport beside the file tree (#148), so its middle is not the viewport's.
+ */
+export function boxCentre(rect: { left: number; top: number; width: number; height: number }): { x: number; y: number } {
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+}
+
+/**
+ * The view zoomed to `z` about `anchor`, a point in the canvas's own box (its top-left
+ * corner is the origin, as the world's offset is): the world point under the anchor stays under it.
+ */
+export function zoomAbout(view: ViewPose, anchor: { x: number; y: number }, z: number): ViewPose {
+  const ratio = z / view.z;
+  return { z, ox: anchor.x - (anchor.x - view.ox) * ratio, oy: anchor.y - (anchor.y - view.oy) * ratio };
+}
+
+/**
  * Where a drop of `items` at a screen point lands: one spot (the top-left corner of
  * its box, in world coordinates) per item, in the grid `layoutAround` gives, centred
  * on the drop point. The canvas's drop and the tests read it the same way, whatever

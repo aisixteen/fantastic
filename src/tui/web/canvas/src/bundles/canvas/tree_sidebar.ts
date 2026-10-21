@@ -70,6 +70,8 @@ export interface TreeSidebar {
   readonly open: boolean;
   /** open or collapse it; the choice is kept on the view */
   setOpen(open: boolean): void;
+  /** the screen is wide (`true`: beside the canvas) or narrow (`false`: over it); the place follows a resize, the open state does not */
+  setWide(wide: boolean): void;
   /** the sidebar's tree lets go of the project folder, and the element leaves the page */
   dispose(): void;
 }
@@ -85,6 +87,7 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
   const { kernel, view } = o;
   const saved = sidebarSavedOf(kernel.get(view)?.meta);
   let open = sidebarOpenOf(saved, o.wide);
+  let wide = o.wide;
 
   const el = document.createElement("aside");
   el.className = "tree-sidebar";
@@ -96,7 +99,10 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
   el.appendChild(toggle);
   el.appendChild(body);
   o.mount.appendChild(el);
-  if (o.wide) o.mount.classList.add(BESIDE);
+  const place = (): void => {
+    o.mount.classList.toggle(BESIDE, wide);
+  };
+  place();
 
   const tree = mountTreePanel({
     kernel,
@@ -132,6 +138,10 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
   };
   toggle.addEventListener("click", () => setOpen(!open));
   paint();
+  const setWide = (v: boolean): void => {
+    wide = v;
+    place();
+  };
 
   return {
     el,
@@ -140,6 +150,7 @@ export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLE
       return open;
     },
     setOpen,
+    setWide,
     dispose(): void {
       gone = true;
       tree.dispose();
