@@ -1054,3 +1054,48 @@ async fn the_usage_verb_shows_the_counts_reset_zeroes_them_and_delete_drops_them
     assert_eq!(gone["deleted"], json!(true), "{gone}");
     assert!(!usage_table().lock().unwrap().contains_key(id.as_str()));
 }
+
+#[tokio::test]
+async fn native_tool_calls_become_call_text() {
+    // #186: a server that parsed the model's call into `delta.tool_calls`
+    // pieces must not let it vanish — the pieces render as call text.
+    let body = sse(
+        &[
+            delta(
+                None,
+                json!({"tool_calls": [{"index": 0, "function": {"name": "send", "arguments": "{\"target_id\":\"files\","}}]}),
+            ),
+            delta(
+                None,
+                json!({"tool_calls": [{"index": 0, "function": {"arguments": "\"type\":\"reflect\"}"}}]}),
+            ),
+            delta(Some("tool_calls"), json!({})),
+        ],
+        true,
+    );
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    assert_eq!(
+        drain(&p, &hi(), None).await.expect("stream"),
+        "<call name=\"send\"><target_id>files</target_id><type>reflect</type></call>"
+    );
+}
+
+#[tokio::test]
+async fn a_native_tool_call_with_bad_arguments_is_an_error() {
+    let body = sse(
+        &[
+            delta(
+                None,
+                json!({"tool_calls": [{"index": 0, "function": {"name": "send", "arguments": "not json"}}]}),
+            ),
+            delta(Some("tool_calls"), json!({})),
+        ],
+        true,
+    );
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    let e = drain(&p, &hi(), None).await.expect_err("bad args");
+    assert!(e.message.contains("native tool call 'send'"), "{e}");
+    assert!(e.message.contains("not a JSON object"), "{e}");
+}
