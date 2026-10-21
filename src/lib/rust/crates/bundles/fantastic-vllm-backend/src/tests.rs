@@ -443,6 +443,32 @@ async fn the_table_is_shared_per_endpoint_across_agents() {
     drain(&p2, &first, None).await.expect("same conversation");
 }
 
+#[tokio::test]
+async fn side_calls_take_no_kv_slot() {
+    // folds on a one-slot reject endpoint must not fill the table (#184)
+    let ok = sse(&[delta(Some("stop"), json!({}))], true);
+    let (_server, endpoint) = server_with(ok, 200).await;
+    let mut p = provider(&endpoint);
+    p.kv_slots = 1;
+    p.kv_overflow = "reject".to_string();
+    for i in 0..3 {
+        let fold = vec![json!({"role": "user", "content": format!("summarize part {i}")})];
+        drain(&p, &fold, Some(64))
+            .await
+            .expect("a side call is never refused");
+    }
+    let turn = vec![json!({"role": "user", "content": "the conversation"})];
+    drain(&p, &turn, None)
+        .await
+        .expect("the one slot is still free");
+    let live = with_table(&endpoint, |t| t.view());
+    assert_eq!(
+        live["conversations"].as_array().map(Vec::len),
+        Some(1),
+        "{live:?}"
+    );
+}
+
 #[test]
 fn a_conversation_is_its_prefix() {
     let base = vec![

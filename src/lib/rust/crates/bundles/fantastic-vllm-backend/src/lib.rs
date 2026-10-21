@@ -602,17 +602,23 @@ impl Provider for VllmProvider {
         let call_max = max_tokens.unwrap_or(self.max_tokens);
         // a per-call bound marks a SIDE CALL (a fold summary)
         let body = self.body(messages, call_max, max_tokens.is_some())?;
-        // Admission BEFORE the request: a `reject` must not reach the GPU.
-        let key = conversation_key(messages);
-        let rotated = with_table(&self.endpoint, |t| {
-            t.admit(
-                &key,
-                self.kv_slots,
-                &self.kv_overflow,
-                self.kv_ttl,
-                monotonic(),
-            )
-        })?;
+        // Admission BEFORE the request: a `reject` must not reach the GPU. A side
+        // call is one request, not a conversation kept warm: it takes no slot, so
+        // folds cannot fill the table (#184).
+        let rotated = if max_tokens.is_some() {
+            None
+        } else {
+            let key = conversation_key(messages);
+            with_table(&self.endpoint, |t| {
+                t.admit(
+                    &key,
+                    self.kv_slots,
+                    &self.kv_overflow,
+                    self.kv_ttl,
+                    monotonic(),
+                )
+            })?
+        };
         if let Some(out) = rotated {
             tracing::info!("{NAME}: KV slot rotated — conversation {out} out");
         }
