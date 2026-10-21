@@ -32,7 +32,7 @@ use fantastic_ai_core::provider::{
     ReportCell, Unconfigured,
 };
 use fantastic_ai_core::schema::{self, Field};
-use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
 use fantastic_bundle::{py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -89,6 +89,7 @@ const CFG: BackendConfig = BackendConfig {
     // A server's window is the record's to name (`context_window`); the kernel
     // cannot read it.
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: false,
 };
 
 // ── HTTP client cache (the key rides each request, never the client) ─
@@ -731,6 +732,7 @@ impl Bundle for ResponsesBundle {
             return Some(e.message);
         }
         schema::validate(record_schema(), "responses_backend", meta, record)
+            .or_else(|| caching::refusal(meta, record, "responses_backend", CFG.provider_cache))
     }
 
     fn record_schema(&self) -> Option<Value> {

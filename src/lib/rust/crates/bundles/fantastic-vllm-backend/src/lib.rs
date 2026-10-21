@@ -42,7 +42,7 @@ use fantastic_ai_core::provider::{
 };
 use fantastic_ai_core::schema::{self, Field};
 use fantastic_ai_core::think::{decode_openai_delta, ThinkWrap};
-use fantastic_ai_core::{agent_loop::BackendConfig, helpers, verbs};
+use fantastic_ai_core::{agent_loop::BackendConfig, caching, helpers, verbs};
 use fantastic_bundle::{py_float, py_int, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Kernel, TaskId};
@@ -73,6 +73,7 @@ const CFG: BackendConfig = BackendConfig {
     // A server's window is the record's to name (`context_window`); the kernel
     // cannot read it.
     model_window: fantastic_ai_core::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: false,
 };
 
 // ─── sampling ───────────────────────────────────────────────────────────────
@@ -1093,6 +1094,7 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     // caused it. Named ALL at once, from the schema, so one retry fixes the
     // record.
     schema::validate(record_schema(), NAME, meta, record)
+        .or_else(|| caching::refusal(meta, record, NAME, CFG.provider_cache))
 }
 
 /// The sampling default for `key` — the one table the provider fills from.

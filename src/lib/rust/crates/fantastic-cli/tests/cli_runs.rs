@@ -1340,6 +1340,8 @@ fn the_catalog_carries_the_on_device_backend() {
             "output_reserve",
             "context_strategy",
             "recent_n",
+            "caching",
+            "cache_primer_until",
             "system_prompt",
             "file_bridge_id",
             "system_prompt_file",

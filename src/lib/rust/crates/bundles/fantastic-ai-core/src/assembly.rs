@@ -14,13 +14,14 @@
 //! wording because it is "tuned" would quietly void every emergence result taken
 //! afterwards.
 
+use crate::caching::Caching;
 use crate::history_view::{dedupe_repeat_bodies, dedupe_stale_reads, drop_read_docs};
 use crate::memory::{load_history, MemoryStoreError};
 use crate::prompt_file::PromptFileError;
 use crate::state::BackendState;
 use fantastic_bundle::{py_split_whitespace, py_str, py_strip, py_truthy};
 use fantastic_kernel::{AgentId, Item, Kernel};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -504,6 +505,7 @@ pub async fn assemble_messages(
     kernel: &Arc<Kernel>,
     _client_id: &str,
     system_prompt: Option<&str>,
+    caching: Caching,
 ) -> Result<(Vec<Value>, usize), BlockFail> {
     let system_content = system_content(self_id, kernel, system_prompt).await?;
     let mut messages = vec![json!({"role": "system", "content": system_content})];
@@ -517,30 +519,9 @@ pub async fn assemble_messages(
     // resolution — plus only the rows that landed AFTER it, trimmed. Python
     // `_assemble`.
     let view = crate::memory::load_view(self_id, kernel).await?;
-    let by_id: std::collections::HashMap<i64, &Value> = store
-        .iter()
-        .filter_map(|r| r.get("id").and_then(Value::as_i64).map(|id| (id, r)))
-        .collect();
-    let listed: Option<Vec<(i64, String)>> = view.as_ref().and_then(|v| {
-        let ids = v.get("ids")?.as_array()?;
-        let mut out = Vec::with_capacity(ids.len());
-        for e in ids {
-            let id = e.get("id")?.as_i64()?;
-            if !by_id.contains_key(&id) {
-                return None; // a stale array names a row this store no longer has
-            }
-            out.push((
-                id,
-                e.get("res")
-                    .and_then(Value::as_str)
-                    .unwrap_or("full")
-                    .to_string(),
-            ));
-        }
-        (!out.is_empty()).then_some(out)
-    });
+    let listed = listed_entries(&store, view.as_ref());
     // An EMPTY ids list is a `context_clear`'s view, not a stale one: the body is
-    // the store from the clear row on. Python `view is None or not view["ids"]`.
+    // the store from the clear on. Python `view is None or not view["ids"]`.
     let source = match (&listed, &view) {
         (Some(_), _) => "array",
         (None, None) => "store",
@@ -556,26 +537,143 @@ pub async fn assemble_messages(
         }
     };
     *state.view_source.lock().expect("view_source poisoned") = Some(source.to_string());
-    match listed {
-        Some(entries) => {
-            for (id, res) in &entries {
-                messages.push(crate::view::apply_res(by_id[id], res));
-            }
-            let idx: std::collections::HashMap<i64, usize> = store
-                .iter()
-                .enumerate()
-                .filter_map(|(i, r)| r.get("id").and_then(Value::as_i64).map(|id| (id, i)))
-                .collect();
-            let newest = entries.iter().map(|(id, _)| idx[id]).max().unwrap_or(0);
-            let tail: Vec<Value> = store[newest + 1..].to_vec();
-            messages.extend(drop_read_docs(&dedupe_stale_reads(&dedupe_repeat_bodies(
-                &tail,
-            ))));
-        }
-        None => messages.extend(drop_read_docs(&dedupe_stale_reads(&dedupe_repeat_bodies(
-            &store,
-        )))),
-    }
+    messages.extend(
+        render_history(&store, listed.as_deref(), caching.cleans())
+            .into_iter()
+            .map(|r| r.msg),
+    );
     messages.push(json!({"role": "user", "content": user_text}));
     Ok((messages, store_len))
+}
+
+/// One entry of the persisted view array, resolved against the store: the row's
+/// index, the resolution it is shown at, and the body a trimmer left on it (absent,
+/// the row renders as its resolution gives it).
+pub struct ViewEntry {
+    /// Index of the row in the store.
+    pub idx: usize,
+    /// The resolution the row is shown at.
+    pub res: String,
+    /// The trimmed body, when a trimmer left one.
+    pub content: Option<String>,
+}
+
+/// One message of the history part of the model view: the store row's index, the
+/// resolution it is shown at, and the message the provider receives for it.
+pub struct Rendered {
+    /// Index of the row in the store.
+    pub idx: usize,
+    /// The resolution the row is shown at.
+    pub res: String,
+    /// The message the provider receives for the row.
+    pub msg: Value,
+}
+
+/// The persisted view array's entries that name a row the store still has, in
+/// array order. `None` when there is no usable array: none, an empty one, or a
+/// stale one that names a row the store no longer has.
+pub fn listed_entries(
+    store: &[Value],
+    view: Option<&Map<String, Value>>,
+) -> Option<Vec<ViewEntry>> {
+    let idx: HashMap<i64, usize> = store
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.get("id").and_then(Value::as_i64).map(|id| (id, i)))
+        .collect();
+    let ids = view?.get("ids")?.as_array()?;
+    let mut out = Vec::with_capacity(ids.len());
+    for e in ids {
+        let id = e.get("id")?.as_i64()?;
+        // a stale array names a row this store no longer has
+        let &idx = idx.get(&id)?;
+        out.push(ViewEntry {
+            idx,
+            res: e
+                .get("res")
+                .and_then(Value::as_str)
+                .unwrap_or("full")
+                .to_string(),
+            content: e.get("content").and_then(Value::as_str).map(str::to_string),
+        });
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The history part of the model view (no system block, no user turn), as
+/// `assemble_messages` sends it: the listed entries each at its recorded
+/// resolution, then the rows after the newest of them with the trimmers applied;
+/// with no listed array, the whole store with the trimmers applied. Shared with
+/// `context_fold`, which persists exactly what this renders.
+///
+/// `cleanup` is the record's `caching` cleanup (see [`crate::caching::Caching::cleans`]).
+/// Off, the view is append-only: no trimmer runs, and a trimmed body an earlier
+/// cleanup left on a listed entry is ignored, so every row renders as stored.
+///
+/// The listed array is the record of what the view is, whatever mode wrote it. A row
+/// an earlier cleanup left out of a listed view stays out after a switch to `none`
+/// or `provider_cache`: only the rows after the newest listed entry render as stored.
+/// A `context_clear` starts a new thread, and the old rows leave the view with it.
+pub fn render_history(
+    store: &[Value],
+    listed: Option<&[ViewEntry]>,
+    cleanup: bool,
+) -> Vec<Rendered> {
+    let Some(entries) = listed else {
+        return trim_tail(store, 0, cleanup);
+    };
+    let mut out: Vec<Rendered> = entries
+        .iter()
+        .map(|e| {
+            let row = &store[e.idx];
+            let msg = match &e.content {
+                Some(c) if cleanup => crate::history_view::with_content(row, c.clone()),
+                _ => crate::view::apply_res(row, &e.res),
+            };
+            Rendered {
+                idx: e.idx,
+                res: e.res.clone(),
+                msg,
+            }
+        })
+        .collect();
+    let newest = entries.iter().map(|e| e.idx).max().unwrap_or(0);
+    out.extend(trim_tail(store, newest + 1, cleanup));
+    out
+}
+
+/// The rows of `store` from `from` on, each with its store index. With `cleanup`
+/// they run through the three trimmers, and a trimmed row keeps its id while a
+/// dropped row is simply absent. Without it, every row is kept as stored, in order.
+fn trim_tail(store: &[Value], from: usize, cleanup: bool) -> Vec<Rendered> {
+    if !cleanup {
+        return store
+            .iter()
+            .enumerate()
+            .skip(from)
+            .map(|(idx, row)| Rendered {
+                idx,
+                res: crate::view::res_of(row).to_string(),
+                msg: row.clone(),
+            })
+            .collect();
+    }
+    let idx: HashMap<i64, usize> = store
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.get("id").and_then(Value::as_i64).map(|id| (id, i)))
+        .collect();
+    let tail: Vec<Value> = store[from..].to_vec();
+    drop_read_docs(&dedupe_stale_reads(&dedupe_repeat_bodies(&tail)))
+        .into_iter()
+        .map(|msg| Rendered {
+            idx: msg
+                .get("id")
+                .and_then(Value::as_i64)
+                .and_then(|id| idx.get(&id).copied())
+                .expect("a trimmed row keeps its store id"),
+            res: crate::view::res_of(&msg).to_string(),
+            msg,
+        })
+        .collect()
 }

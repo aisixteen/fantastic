@@ -30,6 +30,7 @@ use crate::folds::{
 use crate::memory::{save_history, MemoryStoreError};
 use crate::provider::Provider;
 use fantastic_bundle::{py_split_whitespace, py_splitlines, py_str, py_strip, py_truthy};
+use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
@@ -243,6 +244,24 @@ fn split(text: &str) -> Option<(String, String)> {
     ))
 }
 
+/// The title of an operator-given summary: its first non-empty line, read the way
+/// [`split`] reads a summarised one's. `(untitled)` when nothing is left.
+#[must_use]
+pub fn summary_title(text: &str) -> String {
+    let first = py_splitlines(text)
+        .into_iter()
+        .map(py_strip)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let title = py_strip(first.trim_matches('"').trim_matches(['*', '#']));
+    let cut = cut_title(title);
+    if cut.is_empty() {
+        "(untitled)".to_string()
+    } else {
+        cut
+    }
+}
+
 /// `(title, body, degraded)`. The model is told the budget ([`SUMMARY_BUDGET`]);
 /// the call's `max_tokens` is the budget plus [`THINK_ALLOWANCE`] (a reasoning
 /// model's thought counts against it). An answer OVER the budget, or CUT OFF by
@@ -330,26 +349,70 @@ pub async fn write_fold(
     idxs: &[usize],
     anchors: &HashMap<i64, i64>,
 ) -> Result<Value, FoldFail> {
-    let ids: Vec<i64> = idxs.iter().filter_map(|&i| row_id(&rows[i])).collect();
     let anchor = member_anchor(rows, idxs, anchors).map_err(FoldFail::Anchor)?;
+    let (title, text, degraded) = summarize_span(ctx.provider, rows, idxs).await?;
+    append_fold(
+        ctx.self_id,
+        ctx.kernel,
+        rows,
+        idxs,
+        anchor,
+        &title,
+        &text,
+        degraded,
+    )
+    .await
+}
+
+/// The summarised `(title, body, degraded)` of a span, the mechanical index riding
+/// beside the summary. Shared by the automatic fold and `context_fold`.
+///
+/// # Errors
+/// The summary would not fit after every re-summarise.
+pub async fn summarize_span(
+    provider: &Arc<dyn Provider>,
+    rows: &[Value],
+    idxs: &[usize],
+) -> Result<(String, String, bool), FoldFail> {
+    // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
+    let index = mechanical_index(rows, idxs);
+    let (title, mut text, degraded) = summarize(provider, rows, idxs)
+        .await
+        .map_err(FoldFail::Summary)?;
+    if !index.is_empty() {
+        text = format!("{text}\n\n{index}");
+    }
+    Ok((title, text, degraded))
+}
+
+/// Append ONE fold row over `rows[idxs]` carrying `title` and `body` as given,
+/// placed at `anchor` (the smallest leaf id it covers). The one writer both folds
+/// share: the automatic fold, after its summarizer, and `context_fold`.
+///
+/// # Errors
+/// The memory store refused the row.
+#[allow(clippy::too_many_arguments)]
+pub async fn append_fold(
+    self_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    rows: &[Value],
+    idxs: &[usize],
+    anchor: i64,
+    title: &str,
+    body: &str,
+    degraded: bool,
+) -> Result<Value, FoldFail> {
+    let ids: Vec<i64> = idxs.iter().filter_map(|&i| row_id(&rows[i])).collect();
     let lvl = 1 + idxs
         .iter()
         .filter(|&&i| is_fold(&rows[i]))
         .map(|&i| level(rows, &rows[i]))
         .max()
         .unwrap_or(0);
-    // THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
-    let index = mechanical_index(rows, idxs);
-    let (title, mut text, degraded) = summarize(ctx.provider, rows, idxs)
-        .await
-        .map_err(FoldFail::Summary)?;
-    if !index.is_empty() {
-        text = format!("{text}\n\n{index}");
-    }
-    let id = ctx.kernel.mint_id();
+    let id = kernel.mint_id();
     let parent = idxs.first().and_then(|&i| row_parent(&rows[i]));
-    let fr = make_fold(&ids, &title, &text, degraded, id, anchor, lvl, parent);
-    save_history(ctx.self_id, ctx.kernel, std::slice::from_ref(&fr)).await?;
+    let fr = make_fold(&ids, title, body, degraded, id, anchor, lvl, parent);
+    save_history(self_id, kernel, std::slice::from_ref(&fr)).await?;
     Ok(fr)
 }
 
@@ -665,6 +728,16 @@ mod tests {
             .await
             .expect_err("loud");
         assert!(err.0.contains("cut off at its 1024-token budget"), "{err}");
+    }
+
+    #[test]
+    fn a_given_summarys_title_is_its_first_line() {
+        assert_eq!(summary_title("TITLE\n\nbody"), "TITLE");
+        assert_eq!(summary_title("\n  \n\"Quoted\"\nbody"), "Quoted");
+        assert_eq!(summary_title("**bold**"), "bold");
+        assert_eq!(summary_title("   \n\n"), "(untitled)");
+        let long = "t".repeat(MAX_TITLE + 10);
+        assert_eq!(summary_title(&long).chars().count(), MAX_TITLE);
     }
 
     #[test]
