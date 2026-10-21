@@ -29,6 +29,7 @@ GET = ["get"]
 KEYED: dict[str, tuple[str, str]] = {
     "responses": ("OPENAI_API_KEY", "RESPONSES_ENDPOINT"),
     "vllm": ("VLLM_API_KEY", "VLLM_ENDPOINT"),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_ENDPOINT"),
 }
 
 
