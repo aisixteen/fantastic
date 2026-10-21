@@ -550,3 +550,15 @@ fn a_bare_word_tag_is_not_a_wrapper() {
     let text = format!("a<b and c>d\n{WRITE}");
     assert!(envelopes_in(&text)[0].wrapper.is_none());
 }
+
+#[test]
+fn a_backtick_in_thinking_does_not_hide_the_think_close() {
+    // A span opened by a backtick in thinking would run across `</think>` to the
+    // backtick after the call; raw extraction must match dispatch (#188).
+    let text = "<think>maybe `x</think>\n<call name=\"send\"><target_id>self</target_id><type>recall</type></call> then `y`";
+    let raw = extract_tool_calls(text);
+    let stripped = extract_tool_calls(&crate::think::without_thinking(text));
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw.len(), stripped.len());
+    assert!(envelopes_in(text)[0].wrapper.is_none());
+}

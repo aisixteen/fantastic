@@ -174,7 +174,34 @@ fn tag_re() -> &'static Regex {
 /// span needs its closing backticks of the same run length before a blank line; an
 /// unmatched backtick is a plain character.
 pub fn code_masked(text: &str) -> String {
-    blank_spans(&blank_fences(text))
+    blank_spans(&blank_fences(&blank_thinking(text)))
+}
+
+/// Blanks the inside of every `<think>` region and keeps its tags, so a backtick in
+/// thinking cannot open a code span that runs across `</think>` and hides it. The
+/// region stays an open `<think>` tag, so a call inside thinking is still wrapped
+/// in raw content (folds, projection), as route never dispatches it. An unclosed
+/// region runs to the end of the text.
+fn blank_thinking(text: &str) -> String {
+    use crate::think::{THINK_CLOSE, THINK_OPEN};
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0usize;
+    while let Some(off) = text[at..].find(THINK_OPEN) {
+        let body = at + off + THINK_OPEN.len();
+        out.push_str(&text[at..body]);
+        let stop = text[body..]
+            .find(THINK_CLOSE)
+            .map_or(text.len(), |e| body + e);
+        out.push_str(&blank(&text[body..stop]));
+        at = stop;
+        if at == text.len() {
+            break;
+        }
+        out.push_str(THINK_CLOSE);
+        at += THINK_CLOSE.len();
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// Blanks a string, keeping its newlines and its byte length.

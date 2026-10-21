@@ -556,8 +556,9 @@ fn wrapped_report(text: &str, env: &Envelope, end: usize, wrapper: &OpenTag) -> 
 
 /// An answer with NO call envelope in it, whose tags are left open — a wrapper that
 /// holds no call (`<tool_call> <function_calls>`). Named after the outermost open
-/// tag, with the form to write and the done line, so a finished answer still ends. `None` when there is any envelope, so a call that
-/// ran is never followed by a report about its own wrapper.
+/// tag, with the form to write and the done line, so a finished answer still ends.
+/// `None` when there is any envelope, so a call that ran is never followed by a
+/// report about its own wrapper.
 fn wrapper_only(answer: &str) -> Option<String> {
     if !envelopes(answer).is_empty() {
         return None;
