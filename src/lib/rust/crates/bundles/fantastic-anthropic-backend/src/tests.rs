@@ -933,6 +933,24 @@ async fn reflect_carries_the_usage_and_the_caching_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reflect_shows_cache_primer_until_only_when_set() {
+    let tmp = TempDir::new().unwrap();
+    let endpoint = "http://unused.test/v1/messages";
+    let set = mk_with(
+        &tmp,
+        endpoint,
+        json!({"caching": "provider_cache", "cache_primer_until": 3}),
+    )
+    .await;
+    let r = call(&set, "a1", json!({"type": "reflect"})).await;
+    assert_eq!(r["cache_primer_until"], json!(3), "{r}");
+    let tmp = TempDir::new().unwrap();
+    let unset = mk_with(&tmp, endpoint, json!({"caching": "provider_cache"})).await;
+    let r = call(&unset, "a1", json!({"type": "reflect"})).await;
+    assert!(r.get("cache_primer_until").is_none(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deleting_an_agent_drops_its_counts() {
     let tmp = TempDir::new().unwrap();
     let endpoint = "http://unused.test/v1/messages";

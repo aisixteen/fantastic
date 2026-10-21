@@ -716,6 +716,9 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
             .cloned()
             .unwrap_or_else(|| json!(caching::DEFAULT_MODE)),
     );
+    if let Some(row) = meta.get("cache_primer_until").filter(|v| !v.is_null()) {
+        out.insert("cache_primer_until".into(), row.clone());
+    }
     out.insert("usage".into(), usage_now(agent_id, kernel));
     Ok(Value::Object(out))
 }
