@@ -66,6 +66,69 @@ pub fn models_url(endpoint: &str) -> Option<String> {
         .map(|base| format!("{base}/models"))
 }
 
+/// The models the key can use: `GET {models_url(endpoint)}?limit=1000`, each entry
+/// reduced to `{id, display_name, max_input_tokens, max_tokens}` (null when absent).
+///
+/// # Errors
+/// Text naming the URL and the HTTP code when the API does not answer, or the endpoint
+/// when it does not end in `/messages`.
+pub async fn list(endpoint: &str, key: &dyn KeySource) -> Result<Vec<Value>, String> {
+    let Some(base) = models_url(endpoint) else {
+        return Err(format!(
+            "the endpoint {endpoint} does not end in /messages, so the model list is not known"
+        ));
+    };
+    let url = format!("{base}?limit=1000");
+    let secret = key
+        .key(endpoint)
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?
+        .filter(|k| !k.is_empty());
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs_f64(crate::CONNECT_TIMEOUT))
+        .timeout(Duration::from_secs_f64(READ_TIMEOUT))
+        .build()
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    let mut req = client
+        .get(&url)
+        .header("anthropic-version", crate::ANTHROPIC_VERSION);
+    if let Some(k) = &secret {
+        req = req.header("x-api-key", k);
+    }
+    let unreachable = || format!("GET {url} failed — the API is not reachable there");
+    let resp = req.send().await.map_err(|_| unreachable())?;
+    let code = resp.status().as_u16();
+    if code != 200 {
+        let why = if matches!(code, 401 | 403) {
+            " — the API wants a key: name it in `credentials` ({store, ref})"
+        } else {
+            ""
+        };
+        return Err(format!("GET {url} answered HTTP {code}{why}"));
+    }
+    let body = resp.text().await.map_err(|_| unreachable())?;
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+    let Some(data) = parsed.get("data").and_then(Value::as_array).cloned() else {
+        return Err(format!(
+            "GET {url} answered HTTP 200 without a `data` list — not a model list"
+        ));
+    };
+    Ok(data
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "id": entry.get("id").cloned().unwrap_or(Value::Null),
+                "display_name": entry.get("display_name").cloned().unwrap_or(Value::Null),
+                "max_input_tokens": entry
+                    .get("max_input_tokens")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "max_tokens": entry.get("max_tokens").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect())
+}
+
 /// The values for the record's absent fields.
 ///
 /// # Errors

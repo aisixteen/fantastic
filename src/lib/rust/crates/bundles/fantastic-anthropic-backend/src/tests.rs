@@ -1113,6 +1113,68 @@ async fn a_stalled_api_stream_ends_the_turn_with_an_error_row() {
     assert_eq!(status["generating"], json!(false), "{status}");
 }
 
+// ─── the models verb ─────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_models_verb_lists_the_keys_models() {
+    let tmp = TempDir::new().unwrap();
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                json!({"data": [
+                    {"id": "claude-haiku-5-5", "display_name": "Haiku",
+                     "max_input_tokens": 200000, "max_tokens": 64000},
+                    {"id": "x"}
+                ]})
+                .to_string(),
+            ),
+        )
+        .mount(&srv)
+        .await;
+    let ep = format!("{}/v1/messages", srv.uri());
+    let kernel = mk(&tmp, &ep).await;
+    let r = call(&kernel, "a1", json!({"type": "models"})).await;
+    let models = r["models"].as_array().cloned().unwrap_or_default();
+    assert_eq!(models.len(), 2, "{r}");
+    assert_eq!(models[0]["id"], json!("claude-haiku-5-5"), "{r}");
+    assert_eq!(models[0]["display_name"], json!("Haiku"), "{r}");
+    assert_eq!(models[0]["max_input_tokens"], json!(200000), "{r}");
+    assert_eq!(models[0]["max_tokens"], json!(64000), "{r}");
+    assert_eq!(models[1]["id"], json!("x"), "{r}");
+    assert!(models[1]["display_name"].is_null(), "{r}");
+    assert!(models[1]["max_input_tokens"].is_null(), "{r}");
+    assert!(models[1]["max_tokens"].is_null(), "{r}");
+    let reqs = srv.received_requests().await.unwrap_or_default();
+    assert!(
+        reqs[0]
+            .url
+            .query()
+            .unwrap_or_default()
+            .contains("limit=1000"),
+        "{}",
+        reqs[0].url
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_models_verb_names_a_refusing_api() {
+    let tmp = TempDir::new().unwrap();
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&srv)
+        .await;
+    let ep = format!("{}/v1/messages", srv.uri());
+    let kernel = mk(&tmp, &ep).await;
+    let r = call(&kernel, "a1", json!({"type": "models"})).await;
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("401"), "{r}");
+    assert!(err.contains("credentials"), "{err}");
+}
+
 #[test]
 fn effort_and_thinking_display_shape_the_body() {
     let msgs = [json!({"role": "user", "content": "hi"})];
@@ -1168,4 +1230,20 @@ fn a_bad_effort_or_display_or_both_modes_are_refused() {
         ),
         None
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_models_verb_refuses_a_body_that_is_not_a_model_list() {
+    let tmp = TempDir::new().unwrap();
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>proxy</html>"))
+        .mount(&srv)
+        .await;
+    let ep = format!("{}/v1/messages", srv.uri());
+    let kernel = mk(&tmp, &ep).await;
+    let r = call(&kernel, "a1", json!({"type": "models"})).await;
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("not a model list"), "{r}");
 }
