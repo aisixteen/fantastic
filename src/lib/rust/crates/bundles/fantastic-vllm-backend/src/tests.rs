@@ -952,3 +952,79 @@ fn stream_idle_seconds_is_validated_and_read_clock_defaults_to_read_timeout() {
     assert_eq!(read_clock_of(&meta(json!(2.5)), 900.0).ok(), Some(2.5));
     assert!(read_clock_of(&meta(json!(0)), 900.0).is_err());
 }
+
+// ─── usage (#192) ───────────────────────────────────────────────────────────
+
+#[test]
+fn the_final_usage_chunk_adds_one_request_and_its_tokens() {
+    let usage = Arc::new(Mutex::new(Usage::default()));
+    let mut st = SseState::new(
+        ReportCell::default(),
+        Arc::clone(&usage),
+        "http://u.test/v1".into(),
+        (5.0, 60.0),
+        None,
+    );
+    let mut out = VecDeque::new();
+    let chunk = r#"data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30}}"#;
+    assert!(!st.decode_line(chunk, &mut out).expect("decoded"));
+    assert!(!st
+        .decode_line(
+            r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#,
+            &mut out
+        )
+        .expect("decoded"));
+    let u = usage.lock().unwrap();
+    assert_eq!((u.requests, u.prompt, u.output), (1, 120, 30));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_usage_verb_shows_the_counts_reset_zeroes_them_and_delete_drops_them() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = mk_kernel(&tmp).await;
+    let id = unique_id(&tmp);
+    let r = create(
+        &kernel,
+        json!({
+            "id": id, "endpoint": format!("http://{id}.test/v1"), "model": "qwen3.8-27b",
+            "max_tokens": 8000, "kv_slots": 2, "kv_overflow": "evict",
+            "memory_store_id": "memory", "context_window": 262144,
+        }),
+    )
+    .await;
+    assert_eq!(r["id"], json!(id), "{r}");
+    {
+        let counts = usage_of(&id);
+        let mut u = counts.lock().unwrap();
+        (u.requests, u.prompt, u.output) = (2, 500, 70);
+    }
+    let ask = |payload: Value| {
+        let kernel = Arc::clone(&kernel);
+        let id = id.clone();
+        async move {
+            kernel
+                .send(vec![Item::new(AgentId::from(id.as_str()), payload)])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    let want = json!({"requests": 2, "prompt_tokens": 500, "output_tokens": 70});
+    assert_eq!(ask(json!({"type": "usage"})).await, want);
+    assert_eq!(ask(json!({"type": "reflect"})).await["usage"], want);
+    assert_eq!(ask(json!({"type": "usage", "reset": true})).await, want);
+    assert_eq!(ask(json!({"type": "usage"})).await["requests"], json!(0));
+    let bad = ask(json!({"type": "usage", "reset": "yes"})).await;
+    assert_eq!(bad["arg"], json!("reset"), "{bad}");
+    usage_of(&id).lock().unwrap().requests = 9;
+    let gone = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "delete_agent", "id": id}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(gone["deleted"], json!(true), "{gone}");
+    assert!(!usage_table().lock().unwrap().contains_key(id.as_str()));
+}
