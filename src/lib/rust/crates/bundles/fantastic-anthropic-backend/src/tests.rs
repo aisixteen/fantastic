@@ -541,7 +541,7 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
     // any split: no byte added or lost, wherever a flag falls. And no block is blank:
     // the API refuses a whitespace-only text block, so a flagged row followed by empty
     // rows must not leave a trailing "\n\n" block of its own.
-    let cases: [(&[&str], &[Option<&str>]); 9] = [
+    let cases: [(&[&str], &[Option<&str>]); 12] = [
         (&["one", "", "three"], &[Some("cache_primer"), None, None]),
         (&["one", "", "three"], &[None, Some("cache_fold"), None]),
         (
@@ -557,6 +557,15 @@ fn the_split_turns_concatenate_to_exactly_the_merged_string() {
         (&["one", "", ""], &[Some("cache_fold"), None, None]),
         (&["", "one", ""], &[None, Some("cache_fold"), None]),
         (&["one", ""], &[Some("cache_primer"), Some("cache_fold")]),
+        // a flagged row that is only whitespace, first in its turn, opens no block
+        // of its own (the API refuses a blank block): it joins the next text
+        (&[" ", "two"], &[Some("cache_primer"), None]),
+        (
+            &[" ", "two", "three"],
+            &[Some("cache_fold"), Some("cache_primer"), None],
+        ),
+        // ...and after text, it closes the block it is part of, bytes unchanged
+        (&["one", " "], &[None, Some("cache_fold")]),
     ];
     for (texts, shape) in cases {
         let rows: Vec<(&str, &str, Option<&str>)> = texts

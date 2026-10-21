@@ -163,14 +163,15 @@ fn turn_content(rows: &[(String, Flags)]) -> Value {
 }
 
 /// A merged turn cut at the end of each flagged row: `(block text, ends a flagged
-/// row)`. A flagged row with no text opens no block of its own (an empty block is
-/// refused), so it carries no marker; every other row's text is whole in its block.
-///
-/// A cut block always holds the flagged row's own text, so it is never blank. The
-/// tail after the last cut can be blank separators only (a flagged row followed by
-/// empty rows): the API refuses a whitespace-only text block, so those separators
-/// join the block before them. The marker then sits after the blank line that
-/// followed the flagged row, not on its last character; the bytes are unchanged.
+/// row)`. A flagged row with no text (empty) opens no block of its own and carries no
+/// marker; its text is none, so nothing is lost by it. A cut also needs the block so
+/// far to hold text, so no cut block is blank: the API refuses a whitespace-only text
+/// block. A flagged row whose text is only whitespace, reached while the block is
+/// still blank (it opens its turn or follows blank rows), therefore carries no marker
+/// either; its text joins the block that follows it. The tail after the last cut can
+/// be blank separators only (a flagged row followed by empty rows): those separators
+/// join the block before them. The marker then sits after the blank line that followed
+/// the flagged row, not on its last character; the bytes are unchanged.
 fn cut_blocks(rows: &[(String, Flags)]) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
     let mut cur = String::new();
@@ -179,7 +180,7 @@ fn cut_blocks(rows: &[(String, Flags)]) -> Vec<(String, bool)> {
             cur.push_str("\n\n");
         }
         cur.push_str(text);
-        if flags.any() && !text.is_empty() {
+        if flags.any() && !text.is_empty() && !cur.trim().is_empty() {
             out.push((std::mem::take(&mut cur), true));
         }
     }
