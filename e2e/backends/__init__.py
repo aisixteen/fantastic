@@ -23,6 +23,7 @@ variable, never a guess that quietly measures the wrong model.
 from __future__ import annotations
 
 import os
+import re
 
 from helpers.creds import KEYED, credentials
 
@@ -68,13 +69,34 @@ class Backend:
     #: (`helpers/creds.py`), or None for a keyless plug. The backend never reads
     #: the environment: the STORE does (env backend), at use time.
     key_ref: str | None = None
+    #: role -> model, for every role asked about so far (`model_for`/`record(role=)`)
+    _roles: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
 
-    def record(self, **overrides: Any) -> dict:
+    def model_for(self, role: str | None = None) -> str:
+        """The model a ROLE gets. `FANTASTIC_AI_MODEL` is the default for every AI;
+        `FANTASTIC_AI_MODEL_<ROLE>` (role upper-cased, any non-alphanumeric char
+        becoming `_`) overrides it for that role only. Roles are plain strings, none
+        is hard-coded, and an unknown role simply gets the default. A plug that names
+        no model (foundation_models) names none for any role."""
+        if not self.model or not role:
+            return self.model
+        key = re.sub(r"\W", "_", role).upper()
+        model = os.environ.get(f"FANTASTIC_AI_MODEL_{key}") or self.model
+        self._roles[role] = model
+        return model
+
+    def roles_used(self) -> dict[str, str]:
+        """role -> model for each role asked about so far, in first-asked order —
+        a probe prints it as its "role -> model" header."""
+        return dict(self._roles)
+
+    def record(self, role: str | None = None, **overrides: Any) -> dict:
         """The record fields for `create_agent`. Merged over by the probe's own
-        wiring (grants, ids), never the reverse."""
+        wiring (grants, ids), never the reverse. With a `role`, `model` is that
+        role's (`model_for`); every other field is the same for every role."""
         meta: dict[str, Any] = {
             "handler_module": self.handler_module,
-            "model": self.model,
+            "model": self.model_for(role),
             **self.extra,
             # THE KEY, by reference: the backend reads it from `creds` per request.
             **({"credentials": credentials(self.key_ref)} if self.key_ref else {}),
@@ -246,7 +268,7 @@ class _FoundationModels(Backend):
     """Apple's on-device model (rust + swift only — python has no FM backend). Its
     record names no model, endpoint or key: the backend refuses them."""
 
-    def record(self, **overrides: Any) -> dict:
+    def record(self, role: str | None = None, **overrides: Any) -> dict:
         meta: dict[str, Any] = {"handler_module": self.handler_module, **self.extra}
         meta.update(overrides)
         return meta

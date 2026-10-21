@@ -392,7 +392,7 @@ def _ai_rec(root, bk, aid: str, peer: str, fb: str, run: str, description: str) 
         "callable_by": {"$self": "*", "rest": "*", "web": "*", peer: ["send"]},
     }
     # The plug describes ITSELF (e2e/backends); the probe's own wiring wins.
-    for k, v in bk.record().items():
+    for k, v in bk.record(role=aid).items():
         meta.setdefault(k, v)
     return meta
 
@@ -636,6 +636,8 @@ async def main() -> None:
     bk = _resolve_backend()
     print("=" * (W + 4))
     print(f"  REVIEW LANE · {bk.name}/{bk.model} · round cap {CAP} · window {UNATTENDED:.0f}s")
+    print(f"  models: {CODER} -> {bk.model_for(CODER)} · {REVIEWER} -> {bk.model_for(REVIEWER)}"
+          "  (FANTASTIC_AI_MODEL_<ROLE> overrides the default)")
     print("=" * (W + 4))
     root, core, close = await open_kernel("review_lane_", reach=IDS)
     try:
@@ -789,7 +791,7 @@ async def main() -> None:
             print(f"    review {i + 1}: oracle={'PASS' if ok else 'FAIL'}" + (f" failing={failed[:3]}" if failed else ""))
         print("  per lane — usage:")
         for lane in (CODER, REVIEWER):
-            print(f"    {lane:9}: {await _usage(root, lane)}")
+            print(f"    {lane:9} [{bk.model_for(lane)}]: {await _usage(root, lane)}")
         print(f"  wall: {time.monotonic() - t0:.0f}s")
 
         harness_ok = not fault and not ts_missing

@@ -135,6 +135,31 @@ same rule the kernel holds itself to, for the same reason: a guessed default is
 how a run ends up measuring something other than what you meant, and here that
 mistake also costs real turns to discover.
 
+## A model per role
+
+`FANTASTIC_AI_MODEL` is the default model for every AI a probe creates. A probe that
+names its roles (`BK.record(role="reviewer")`) lets one run give each role its own
+model: `FANTASTIC_AI_MODEL_<ROLE>` (the role upper-cased) overrides the default for
+that role only. Roles are plain strings and none is hard-coded; a role with no
+override, or one nobody has heard of, gets the default. A probe prints the
+resulting "role -> model" in its log header (`BK.model_for(role)`,
+`BK.roles_used()`), so a result always says which model played which part. For
+`review_lane` (roles `coder` and `reviewer`):
+
+```sh
+# Haiku coder + Haiku reviewer
+BACKEND=anthropic FANTASTIC_AI_MODEL=<haiku> ...
+
+# Haiku coder + Sonnet reviewer
+BACKEND=anthropic FANTASTIC_AI_MODEL=<haiku> FANTASTIC_AI_MODEL_REVIEWER=<sonnet> ...
+
+# Opus master + Haiku workers (the group test to come; role names are its to choose)
+BACKEND=anthropic FANTASTIC_AI_MODEL=<haiku> FANTASTIC_AI_MODEL_MASTER=<opus> ...
+```
+
+The model names are the operator's to give; none is guessed. `backends/selftest.py`
+checks the rule without a model: `cd e2e && python3 -m unittest backends.selftest -v`.
+
 ## Reading a result
 
 Probes print a human verdict line *and* a machine one — `E2E-VERDICT: PASS|FAIL`.
