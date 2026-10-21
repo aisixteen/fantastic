@@ -277,6 +277,8 @@ struct AnthropicProvider {
     max_tokens: i64,
     temperature: Option<f64>,
     thinking_budget: Option<i64>,
+    effort: Option<String>,
+    thinking_display: Option<String>,
     caching: Caching,
     usage: Arc<Mutex<Usage>>,
     report: ReportCell,
@@ -313,7 +315,13 @@ impl AnthropicProvider {
         if let Some(t) = self.temperature {
             body.insert("temperature".into(), json!(t));
         }
-        if let Some(b) = self
+        if let Some(e) = &self.effort {
+            body.insert("output_config".into(), json!({"effort": e}));
+        }
+        if let Some(d) = &self.thinking_display {
+            // adaptive thinking: its display is the mode, so a budget adds nothing
+            body.insert("thinking".into(), json!({"type": "adaptive", "display": d}));
+        } else if let Some(b) = self
             .thinking_budget
             .filter(|b| *b >= THINKING_FLOOR && *b < call_max)
         {
@@ -653,6 +661,11 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
             max_tokens: required_int(&meta, "max_tokens")?,
             temperature: meta.get("temperature").and_then(Value::as_f64),
             thinking_budget: positive_int(meta.get("thinking_budget")),
+            effort: meta.get("effort").and_then(Value::as_str).map(String::from),
+            thinking_display: meta
+                .get("thinking_display")
+                .and_then(Value::as_str)
+                .map(String::from),
             caching: caching::mode_of(&meta).map_err(ProviderError::value_error)?,
             usage: usage_of(agent_id),
             report: ReportCell::default(),
@@ -753,6 +766,31 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
     if let Err(e) = stream_idle_of(meta) {
         return Some(e.message);
     }
+    if let Some(e) = meta.get("effort").filter(|v| !v.is_null()) {
+        let e = e.as_str().unwrap_or("");
+        if !["low", "medium", "high", "xhigh", "max"].contains(&e) {
+            return Some("effort must be one of low, medium, high, xhigh, max".to_string());
+        }
+    }
+    if let Some(d) = meta.get("thinking_display").filter(|v| !v.is_null()) {
+        let d = d.as_str().unwrap_or("");
+        if !["summarized", "omitted"].contains(&d) {
+            return Some("thinking_display must be summarized or omitted".to_string());
+        }
+    }
+    let has_display = merged
+        .get("thinking_display")
+        .filter(|v| !v.is_null())
+        .is_some();
+    let has_budget = merged
+        .get("thinking_budget")
+        .filter(|v| !v.is_null())
+        .is_some();
+    if has_display && has_budget {
+        return Some(
+            "thinking_display and thinking_budget are two thinking modes — set one".to_string(),
+        );
+    }
     if let Some(budget) = positive_int(merged.get("thinking_budget")) {
         if budget < THINKING_FLOOR {
             return Some(format!(
@@ -824,6 +862,19 @@ pub fn record_schema() -> &'static Value {
                      max_tokens); unset, no thinking is asked for"
                 ),
             ),
+            Field::new(
+                "effort",
+                "enum",
+                "the model's effort per turn, sent as output_config.effort; unset, the model's default",
+            )
+            .one_of(&["low", "medium", "high", "xhigh", "max"]),
+            Field::new(
+                "thinking_display",
+                "enum",
+                "adaptive thinking with its text shown (summarized) or hidden (omitted); unset, \
+                 the API default — set summarized so long thinking streams",
+            )
+            .one_of(&["summarized", "omitted"]),
             Field::new(
                 "price_input_per_mtok",
                 "float",
