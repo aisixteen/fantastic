@@ -452,6 +452,64 @@ pub(crate) fn silent() -> &'static Mutex<HashMap<(String, String), usize>> {
     SILENT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The chain's CURRENT silent streak, read without touching it (#203). 0 when
+/// the chain has never been silent.
+fn silent_streak(self_id: &AgentId, client_id: &str) -> usize {
+    silent()
+        .lock()
+        .expect("silent poisoned")
+        .get(&(self_id.as_str().to_string(), client_id.to_string()))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The wrapper tag a report blames, e.g. tool_call; tool_call when the report
+/// names none.
+fn wrapper_tag(report: &str) -> String {
+    if let Some(i) = report.find("drop the wrapper") {
+        let before = &report[..i];
+        if let Some(close) = before.rfind('`') {
+            if let Some(open) = before[..close].rfind('`') {
+                let tag: String = before[open + 1..close]
+                    .chars()
+                    .filter(|c| *c != '<' && *c != '>')
+                    .collect();
+                if !tag.is_empty() {
+                    return tag;
+                }
+            }
+        }
+    }
+    "tool_call".to_string()
+}
+
+/// #203: the escalating wording for a chain whose answers keep running nothing.
+/// `n` is the streak INCLUDING this answer; `kind` says why nothing ran.
+fn escalation(n: usize, kind: &str, tag: Option<&str>) -> String {
+    let (phrase, forbidden) = match kind {
+        "wrapped" => {
+            let t = tag.unwrap_or("tool_call");
+            (format!("put the call inside <{t}>"), format!("<{t}>"))
+        }
+        "malformed" => (
+            "had calls that did not parse".to_string(),
+            "any other markup around or inside the call".to_string(),
+        ),
+        "thinking_only" => (
+            "were only thinking, with no answer".to_string(),
+            "a turn without a call: think briefly, then write the call".to_string(),
+        ),
+        _ => (
+            "had no call".to_string(),
+            "an answer without a call (or <call name=\"done\"></call> if the task is finished)"
+                .to_string(),
+        ),
+    };
+    format!(
+        "[no progress — {n} answers in a row ran nothing] Your last {n} answers {phrase}, so nothing ran.\nYour next answer must START with <call name=\"…\"> — the very first characters of the answer — and contain {forbidden} nowhere.\nThen continue with your current step."
+    )
+}
+
 /// An `inquiry` an AI received and has not answered yet — python's
 /// `_open_inquiries` value: the asker (`None` for the operator), the pid its reply
 /// tag carries, the asker's own thread, and the request id.
@@ -849,11 +907,30 @@ async fn route_reply_gated(
         .iter()
         .filter(|c| !CONTROL_CALLS.contains(&c.name.as_str()))
         .count();
-    let reports = if cut {
+    let mut reports = if cut {
         Vec::new()
     } else {
         crate::call_check::check(&answer, ran)
     };
+    // #203: a second answer in a row that ran NOTHING escalates its own report.
+    // The streak this turn will be counted into is read BEFORE the silent block
+    // below touches it, so n = current + 1.
+    if !reports.is_empty() && ran == 0 {
+        let n = silent_streak(&self_id, &client_id) + 1;
+        if n >= 2 {
+            let last = reports.last().expect("non-empty reports").clone();
+            let (kind, tag) = if last.contains("drop the wrapper") {
+                ("wrapped", Some(wrapper_tag(&last)))
+            } else {
+                ("malformed", None)
+            };
+            let esc = escalation(n, kind, tag.as_deref());
+            if let Some(r) = reports.last_mut() {
+                r.push('\n');
+                r.push_str(&esc);
+            }
+        }
+    }
     for report in reports {
         units.push(Unit {
             dest: self_id.as_str().to_string(),
@@ -1429,11 +1506,26 @@ async fn route_reply_gated(
         if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
             return;
         }
-        let nudge = if dead_turn {
+        let mut nudge = if dead_turn {
             format!("{DEAD_TURN_LINE}{NO_CALL_NUDGE}")
         } else {
             NO_CALL_NUDGE.to_string()
         };
+        // #203: the SECOND silent turn in a row escalates the reminder. The
+        // streak already counts this turn (silent_turn incremented it above).
+        let n = silent_streak(&self_id, &client_id);
+        if n >= 2 {
+            nudge.push('\n');
+            nudge.push_str(&escalation(
+                n,
+                if dead_turn {
+                    "thinking_only"
+                } else {
+                    "no_call"
+                },
+                None,
+            ));
+        }
         deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, sp, true);
         return;
     }
