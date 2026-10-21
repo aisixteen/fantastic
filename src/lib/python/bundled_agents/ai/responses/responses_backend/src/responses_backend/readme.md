@@ -60,14 +60,6 @@ not sent]` for every call of the pass.
 memory — no store read, no transform; before your first turn you hold nothing
 (`loaded:false`).
 
-## Caching
-
-`caching` is `none` | `cleanup` (default) here; `provider_cache` is refused — it is
-Anthropic's, and the Responses API gets no cache marker (#171). `none` keeps the history
-append-only (folds still compact it), which suits a server that caches identical prompt
-starts on its own. `cleanup` lets ai-core drop stale tool output: it saves tokens but
-changes the prompt start.
-
 ## Recursion guard
 A `send` carrying a reserved `_call_stack` that already contains this agent (a cycle)
 or exceeds depth 8 is refused BEFORE the FIFO lock — so an authored agent's AI→AI chain can
