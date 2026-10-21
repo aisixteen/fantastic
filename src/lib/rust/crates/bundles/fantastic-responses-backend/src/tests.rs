@@ -879,3 +879,47 @@ fn stream_idle_seconds_is_validated_at_the_write() {
         .unwrap_or_default();
     assert!(!ok.contains("stream_idle_seconds"), "{ok}");
 }
+
+#[test]
+fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
+    // responses declares no provider caching: the mode is refused at the write, naming
+    // the backend; the two modes that send no marker are accepted.
+    let rec = json!({
+        "endpoint": "https://api.test/v1/responses", "model": "gpt-x",
+        "credentials": {"store": "credential_store", "ref": "openai"},
+        "memory_store_id": "memory"
+    });
+    let rec = rec.as_object().unwrap();
+    for mode in ["none", "cleanup"] {
+        let meta = json!({"caching": mode});
+        assert_eq!(
+            ResponsesBundle.validate_meta(meta.as_object().unwrap(), rec),
+            None,
+            "{mode}"
+        );
+    }
+    let meta = json!({"caching": "provider_cache"});
+    assert_eq!(
+        ResponsesBundle
+            .validate_meta(meta.as_object().unwrap(), rec)
+            .as_deref(),
+        Some("responses_backend cannot do provider caching: caching=provider_cache is refused — use \
+             none or cleanup")
+    );
+    // a record already in provider_cache is refused on any write to it
+    let stored = json!({
+        "endpoint": "https://api.test/v1/responses", "model": "gpt-x",
+        "caching": "provider_cache"
+    });
+    assert!(ResponsesBundle
+        .validate_meta(&Map::new(), stored.as_object().unwrap())
+        .is_some());
+    // an unknown mode is the schema's enum refusal
+    let meta = json!({"caching": "always"});
+    assert_eq!(
+        ResponsesBundle
+            .validate_meta(meta.as_object().unwrap(), rec)
+            .as_deref(),
+        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
+    );
+}

@@ -349,6 +349,37 @@ fn an_endpoint_without_v1_passes_with_metrics_url_or_kv_slots() {
     assert_eq!(validate(&obj(json!({"kv_slots": 3})), &base), None);
 }
 
+#[test]
+fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
+    // vllm declares no provider caching: the mode is refused at the write, naming
+    // the backend; the two modes that send no marker are accepted.
+    let rec = rec("http://vllm.test/v1", json!({}));
+    for mode in ["none", "cleanup"] {
+        let meta = json!({"caching": mode});
+        assert_eq!(validate(&obj(meta.clone()), &rec), None, "{mode}");
+    }
+    let meta = json!({"caching": "provider_cache"});
+    assert_eq!(
+        validate(&obj(meta.clone()), &rec).as_deref(),
+        Some(
+            "vllm_backend cannot do provider caching: caching=provider_cache is refused — use \
+             none or cleanup"
+        )
+    );
+    // a record already in provider_cache is refused on any write to it
+    let stored = json!({
+        "endpoint": "http://vllm.test/v1", "kv_overflow": "evict",
+        "memory_store_id": "memory", "caching": "provider_cache"
+    });
+    assert!(validate(&Map::new(), stored.as_object().unwrap()).is_some());
+    // an unknown mode is the schema's enum refusal
+    let meta = json!({"caching": "always"});
+    assert_eq!(
+        validate(&obj(meta.clone()), &rec).as_deref(),
+        Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
+    );
+}
+
 // ─── through the kernel ─────────────────────────────────────────────────────
 
 async fn mk_kernel(tmp: &TempDir) -> Arc<Kernel> {
