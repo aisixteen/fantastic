@@ -172,6 +172,14 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
             format!("recent turns a compaction keeps verbatim ({lo}–{hi})"),
         )
         .default(json!(RECENT_N)),
+        Field::new("caching", "enum", crate::caching::CACHING_HINT)
+            .one_of(&crate::caching::MODES)
+            .default(json!(crate::caching::DEFAULT_MODE)),
+        Field::new(
+            "cache_primer_until",
+            "int",
+            crate::caching::CACHE_PRIMER_HINT,
+        ),
         Field::new("system_prompt", "str", SYSTEM_PROMPT_HINT),
         Field::new("file_bridge_id", "str", FILE_BRIDGE_ID_HINT),
         Field::new("system_prompt_file", "str", SYSTEM_PROMPT_FILE_HINT),
@@ -442,6 +450,8 @@ mod tests {
                 "output_reserve",
                 "context_strategy",
                 "recent_n",
+                "caching",
+                "cache_primer_until",
                 "system_prompt",
                 "file_bridge_id",
                 "system_prompt_file",
@@ -511,7 +521,7 @@ mod tests {
         let sch = sample();
         let rec = obj(json!({"endpoint": "http://h", "memory_store_id": "m"}));
         assert_eq!(
-            sch["fields"][7].to_string(),
+            sch["fields"][9].to_string(),
             json!({"name": "system_prompt", "type": "str", "required": false,
                    "hint": SYSTEM_PROMPT_HINT})
             .to_string()

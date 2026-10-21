@@ -19,6 +19,11 @@ What is Anthropic-specific here:
 - THE KEY: the record's `credentials` ref, read before each request and sent as
   `x-api-key` (with `anthropic-version`); no `credentials`, no key header — the API
   then answers 401, and the error says to name one.
+- PROMPT CACHING, opt-in (`prompt_cache`): the `system` block and the conversation
+  tail carry an ephemeral `cache_control` marker (5-minute TTL). Off, the body is
+  unchanged.
+- USAGE: each stream's token counts accumulate into the agent's `Usage` (RAM; the
+  `usage` verb and `reflect` read it), side calls included.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ CONNECT_TIMEOUT = 15.0
 #: Below this a side call gets no thinking: the API needs budget_tokens >= 1024 and
 #: below max_tokens.
 THINKING_FLOOR = 1024
+#: The cache marker a cached request sends: the 5-minute ephemeral TTL, the only one.
+CACHE_CONTROL = {"type": "ephemeral"}
 
 
 def headers(key: str | None) -> dict:
@@ -45,6 +52,66 @@ def headers(key: str | None) -> dict:
     if key:
         out["x-api-key"] = key
     return out
+
+
+def saved_tokens(cache_read: int, cache_write: int) -> int:
+    """round(0.9 * cache_read - 0.25 * cache_write), in full-price input tokens: a
+    read costs 0.1x the base input price, a write 1.25x. Exact integer arithmetic,
+    halves to even, so every runtime agrees. May be negative."""
+    q, r = divmod(18 * cache_read - 5 * cache_write, 20)
+    if 2 * r > 20 or (2 * r == 20 and q % 2 == 1):
+        q += 1
+    return q
+
+
+class Usage:
+    """One agent's token counts since its kernel started (RAM — a restart zeroes
+    them). `input_tokens` is the uncached remainder; the two cache counts are what
+    the API reports for the prompt."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.requests = 0
+        self.input_tokens = 0
+        self.cache_write_tokens = 0
+        self.cache_read_tokens = 0
+        self.output_tokens = 0
+
+    def add_request(self, input_tokens: int, cache_write: int, cache_read: int) -> None:
+        self.requests += 1
+        self.input_tokens += input_tokens
+        self.cache_write_tokens += cache_write
+        self.cache_read_tokens += cache_read
+
+    def snapshot(self, price_in=None, price_out=None) -> dict:
+        """The counts and what they derive to. `cost_usd` and `saved_usd` (USD per
+        million tokens, from the record's prices) are reported only when BOTH prices
+        are set."""
+        prompt = self.input_tokens + self.cache_write_tokens + self.cache_read_tokens
+        saved = saved_tokens(self.cache_read_tokens, self.cache_write_tokens)
+        out = {
+            "requests": self.requests,
+            "input_tokens": self.input_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "output_tokens": self.output_tokens,
+            "prompt_tokens": prompt,
+            "hit_rate": self.cache_read_tokens / prompt if prompt else 0,
+            "saved_tokens": saved,
+        }
+        if price_in is not None and price_out is not None:
+            cost_in = (
+                self.input_tokens
+                + 1.25 * self.cache_write_tokens
+                + 0.1 * self.cache_read_tokens
+            )
+            out["cost_usd"] = (
+                cost_in * price_in / 1e6 + self.output_tokens * price_out / 1e6
+            )
+            out["saved_usd"] = saved * price_in / 1e6
+        return out
 
 
 def to_messages(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -83,6 +150,8 @@ class AnthropicProvider:
         max_tokens: int,
         temperature: float | None = None,
         thinking_budget: int | None = None,
+        prompt_cache: bool = False,
+        usage: Usage | None = None,
         transport=None,
     ):
         self._endpoint = endpoint.rstrip("/")
@@ -92,6 +161,9 @@ class AnthropicProvider:
         self._max_tokens = int(max_tokens)
         self._temperature = temperature
         self._thinking_budget = thinking_budget
+        self._prompt_cache = prompt_cache
+        # The agent's running counts; None = nothing is counted (a bare provider).
+        self._usage = usage
         self._transport = transport
 
     def body(self, messages: list[dict], max_tokens: int | None) -> dict:
@@ -104,7 +176,13 @@ class AnthropicProvider:
             "stream": True,
         }
         if system:
-            body["system"] = system
+            body["system"] = (
+                [{"type": "text", "text": system, "cache_control": dict(CACHE_CONTROL)}]
+                if self._prompt_cache
+                else system
+            )
+        if self._prompt_cache:
+            body["cache_control"] = dict(CACHE_CONTROL)
         if self._temperature is not None:
             body["temperature"] = self._temperature
         # Thinking only where the bound leaves room for it and an answer after it.
@@ -120,6 +198,8 @@ class AnthropicProvider:
         key = await self._key(self._endpoint)
         thinking = False
         stopped = False
+        # The output tokens this stream has already billed to the agent's usage.
+        billed_out = 0
         try:
             async with (
                 httpx.AsyncClient(
@@ -151,7 +231,7 @@ class AnthropicProvider:
                     kind = evt.get("type")
                     if kind == "message_start":
                         u = (evt.get("message") or {}).get("usage") or {}
-                        total = sum(
+                        inp, cw, cr = (
                             int(u.get(k) or 0)
                             for k in (
                                 "input_tokens",
@@ -159,7 +239,9 @@ class AnthropicProvider:
                                 "cache_read_input_tokens",
                             )
                         )
-                        self.last_prompt_tokens = total or None
+                        self.last_prompt_tokens = (inp + cw + cr) or None
+                        if self._usage is not None:
+                            self._usage.add_request(inp, cw, cr)
                     elif kind == "content_block_delta":
                         delta = evt.get("delta") or {}
                         if delta.get("type") == "thinking_delta":
@@ -183,6 +265,10 @@ class AnthropicProvider:
                         out = (evt.get("usage") or {}).get("output_tokens")
                         if out:
                             self.last_completion_tokens = int(out)
+                            # message_delta carries the running total: bill the step.
+                            if self._usage is not None:
+                                self._usage.output_tokens += int(out) - billed_out
+                            billed_out = int(out)
                     elif kind == "message_stop":
                         stopped = True
                     elif kind == "error":

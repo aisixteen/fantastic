@@ -409,7 +409,15 @@ async fn prompt(kernel: &Arc<Kernel>, agent: &AgentId) -> String {
     let state = crate::state::state_for(agent);
     let (msgs, _) = as_agent(
         agent.clone(),
-        crate::assembly::assemble_messages(agent, &state, "next", kernel, "c", Some("sys")),
+        crate::assembly::assemble_messages(
+            agent,
+            &state,
+            "next",
+            kernel,
+            "c",
+            Some("sys"),
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("assemble");
@@ -431,7 +439,15 @@ async fn project(kernel: &Arc<Kernel>, agent: &AgentId) {
     let state = crate::state::state_for(agent);
     let (messages, store_len) = as_agent(
         agent.clone(),
-        crate::assembly::assemble_messages(agent, &state, "next", kernel, "cli", Some("sys")),
+        crate::assembly::assemble_messages(
+            agent,
+            &state,
+            "next",
+            kernel,
+            "cli",
+            Some("sys"),
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -743,7 +759,15 @@ async fn a_dump_from_before_anchors_restores_with_the_same_view() {
     let state = crate::state::state_for(&agent);
     let (msgs, _) = as_agent(
         agent.clone(),
-        crate::assembly::assemble_messages(&agent, &state, "next", &kernel, "c", Some("sys")),
+        crate::assembly::assemble_messages(
+            &agent,
+            &state,
+            "next",
+            &kernel,
+            "c",
+            Some("sys"),
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .unwrap();

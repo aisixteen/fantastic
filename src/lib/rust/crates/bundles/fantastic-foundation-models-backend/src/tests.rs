@@ -134,6 +134,8 @@ fn the_schema_is_two_knobs_then_the_ai_fields_with_the_models_window() {
             "output_reserve",
             "context_strategy",
             "recent_n",
+            "caching",
+            "cache_primer_until",
             "system_prompt",
             "file_bridge_id",
             "system_prompt_file",

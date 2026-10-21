@@ -83,6 +83,9 @@ fn provider(endpoint: String, max_tokens: i64, sampling: Map<String, Value>) -> 
         max_tokens,
         sampling,
         report: ReportCell::default(),
+        stream_idle: std::time::Duration::from_secs_f64(
+            fantastic_ai_core::constants::STREAM_IDLE_SECONDS,
+        ),
     }
 }
 
@@ -390,6 +393,15 @@ async fn set_key(kernel: &Arc<Kernel>, tmp: &tempfile::TempDir, id: &AgentId, ke
 /// A kernel with the ram store, the credential store, and one responses agent
 /// pointed at `endpoint` whose `credentials` name the store's `openai` ref.
 async fn mk_kernel(tmp: &tempfile::TempDir, endpoint: &str) -> (Arc<Kernel>, AgentId) {
+    mk_kernel_with(tmp, endpoint, json!({})).await
+}
+
+/// [`mk_kernel`] with extra record fields — a stall test sets its read clock.
+async fn mk_kernel_with(
+    tmp: &tempfile::TempDir,
+    endpoint: &str,
+    extra: Value,
+) -> (Arc<Kernel>, AgentId) {
     let mut kernel = Kernel::new();
     kernel.bundles.register(HANDLER_MODULE, ResponsesBundle);
     kernel.bundles.register(
@@ -430,7 +442,10 @@ async fn mk_kernel(tmp: &tempfile::TempDir, endpoint: &str) -> (Arc<Kernel>, Age
         "model": "test-model",
         "endpoint": endpoint,
     });
-    for (k, v) in memory {
+    for (k, v) in memory
+        .into_iter()
+        .chain(extra.as_object().cloned().unwrap_or_default())
+    {
         create[k] = v;
     }
     let _ = kernel
@@ -781,4 +796,86 @@ async fn unknown_type_wire_shape_is_byte_exact() {
         serde_json::to_string(&r).unwrap(),
         r#"{"error":"responses_backend: unknown type 'frob'","reason":"unhandled","verb":"frob"}"#
     );
+}
+
+/// A 200 whose body starts and then stops: the connection stays open and silent,
+/// the stall under test. The read clock, not the connection, ends the turn (#177).
+fn quiet_response(content_type: &str, body: &str) -> (Vec<u8>, bool) {
+    (
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len() + 4096
+        )
+        .into_bytes(),
+        false,
+    )
+}
+
+/// A stream that answers and then goes quiet fails once its idle window passes,
+/// naming the stall, the seconds and the endpoint (#177).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_that_goes_quiet_fails_after_the_idle_window() {
+    let (port, _log) = raw_stub(|_| {
+        quiet_response(
+            "text/event-stream",
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+        )
+    })
+    .await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
+    let (kernel, id) = mk_kernel_with(&tmp, &endpoint, json!({"stream_idle_seconds": 0.2})).await;
+    set_key(&kernel, &tmp, &id, "sk").await;
+    let started = std::time::Instant::now();
+    let r = send_once(&kernel, &id).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(r["raised"], json!(true), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("responses_backend: stream_stalled"), "{err}");
+    assert!(err.contains("sent no bytes for 0.2s"), "{err}");
+    assert!(err.contains(&endpoint), "{err}");
+}
+
+/// Headers that never come are the same stall: the window runs from the request
+/// (#177).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_that_never_answers_fails_after_the_idle_window() {
+    let (port, _log) = raw_stub(|_| (Vec::new(), false)).await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
+    let (kernel, id) = mk_kernel_with(&tmp, &endpoint, json!({"stream_idle_seconds": 0.2})).await;
+    set_key(&kernel, &tmp, &id, "sk").await;
+    let r = send_once(&kernel, &id).await;
+    assert_eq!(r["raised"], json!(true), "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("stream_stalled"), "{err}");
+    assert!(err.contains("sent no bytes for 0.2s"), "{err}");
+}
+
+/// `stream_idle_seconds` is a positive number of seconds, refused at the write
+/// otherwise, naming the field (#177).
+#[test]
+fn stream_idle_seconds_is_validated_at_the_write() {
+    let meta = |v: Value| {
+        let mut m = Map::new();
+        m.insert("stream_idle_seconds".to_string(), v);
+        m
+    };
+    for bad in [json!(0), json!(-1), json!("soon"), json!(true)] {
+        let msg = ResponsesBundle
+            .validate_meta(&meta(bad.clone()), &Map::new())
+            .unwrap_or_else(|| panic!("{bad} is refused"));
+        assert!(
+            msg.contains("stream_idle_seconds must be a positive number"),
+            "{msg}"
+        );
+    }
+    let ok = ResponsesBundle
+        .validate_meta(&meta(json!(2.5)), &Map::new())
+        .unwrap_or_default();
+    assert!(!ok.contains("stream_idle_seconds"), "{ok}");
 }

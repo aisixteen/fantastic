@@ -39,6 +39,10 @@ pub struct BackendConfig {
     /// `contextSize`). Its schema's `context_window` default is the same number
     /// ([`crate::schema::schema_with_window`]). Swift `AIBackendConfig.modelWindow`.
     pub model_window: i64,
+    /// THE CAPABILITY: this backend can run the provider's own cache markers
+    /// (`caching=provider_cache`). A backend that cannot refuses that mode at the
+    /// write, and a turn on it refuses too. Only anthropic declares it.
+    pub provider_cache: bool,
 }
 
 /// Why a generation produced no completion. The two kinds settle differently,
@@ -119,7 +123,14 @@ pub(crate) fn render_for_model(messages: &[Value]) -> Vec<Value> {
         .map(|m| {
             let role = m.get("role").cloned().unwrap_or(Value::Null);
             let content = m.get("content").cloned().unwrap_or_else(|| json!(""));
-            json!({"role": role, "content": content})
+            let mut out = json!({"role": role, "content": content});
+            // the cache flags travel with their message; nothing else does
+            for flag in ["cache_primer", "cache_fold"] {
+                if let Some(v) = m.get(flag) {
+                    out[flag] = v.clone();
+                }
+            }
+            out
         })
         .collect()
 }
@@ -175,6 +186,14 @@ pub async fn run_generation(
     // have answered. Python `_run` builds its provider (`_get_provider`, which
     // may raise) before anything else; swift's `providerInTurn` likewise.
     provider.ready().map_err(GenFailure::Provider)?;
+    // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching
+    // on a backend that cannot cache is refused before any row is written, and so
+    // before the owed recall below (which writes a view and a recall row).
+    let (caching, primer) = crate::caching::settings(&crate::helpers::agent_meta(self_id, kernel))
+        .map_err(|why| GenFailure::Provider(ProviderError::value_error(why)))?;
+    if caching.marks() && !cfg.provider_cache {
+        return Err(GenFailure::Provider(crate::caching::unsupported(cfg.name)));
+    }
     // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
     // turn is assembled over the head the recall chose — python `_recall_due`.
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
@@ -197,13 +216,14 @@ pub async fn run_generation(
         kernel,
         client_id,
         system_prompt.as_deref(),
+        caching,
     )
     .await?;
     // Context-overflow projection: shape what the MODEL sees this turn to fit the
     // window via the agent's `context_strategy`. Done ONCE at turn entry. The
     // window is read off the record EVERY turn, so a model switched to a smaller
     // one (`update_agent`) is fitted — folded — on its very next turn.
-    let model_messages = match crate::projection::project_context(
+    let mut model_messages = match crate::projection::project_context(
         provider,
         self_id,
         state,
@@ -231,6 +251,11 @@ pub async fn run_generation(
         }
     };
 
+    // THE PROVIDER'S MARKERS, flagged on the list it is handed: the primer's end and
+    // the last fold's. Only `provider_cache` asks for them.
+    if caching.marks() {
+        crate::caching::mark(&mut model_messages, primer);
+    }
     // ONE provider pass. Every chunk is a content token — the provider knows
     // nothing of the tool protocol; the envelope is text this crate parses after.
     let model_view = render_for_model(&model_messages);

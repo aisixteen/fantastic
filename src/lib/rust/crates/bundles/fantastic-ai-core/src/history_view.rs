@@ -271,7 +271,7 @@ pub fn point_to_docs(target: &str, verb: &str, result: &Value) -> Option<Value> 
 
 /// The row with a NEW `content` and every other key intact — python's
 /// `{**turn, "content": …}`.
-fn with_content(turn: &Value, content: String) -> Value {
+pub fn with_content(turn: &Value, content: String) -> Value {
     let mut row = match turn {
         Value::Object(m) => m.clone(),
         _ => serde_json::Map::new(),

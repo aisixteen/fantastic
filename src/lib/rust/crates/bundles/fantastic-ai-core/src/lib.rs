@@ -90,6 +90,7 @@
 
 pub mod agent_loop;
 pub mod assembly;
+pub mod caching;
 pub mod call_check;
 pub mod constants;
 pub mod context;

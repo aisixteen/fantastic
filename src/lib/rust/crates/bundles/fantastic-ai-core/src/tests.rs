@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::agent_loop::BackendConfig;
-use crate::provider::{Provider, ProviderError, ProviderEvent, ProviderStream};
+use crate::provider::{within, Provider, ProviderError, ProviderEvent, ProviderStream};
 use async_trait::async_trait;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{Agent, AgentId, Item, Kernel};
@@ -23,6 +23,13 @@ enum ScriptEvent {
     /// `send` reply carries an `error` — which is what a broken chain must look
     /// like from the router's side.
     Fail(String),
+    /// The read clock tripped: the stream sends nothing for `idle`, then fails with
+    /// the provider's own `stream_stalled` error ([`crate::provider::within`]). The
+    /// window is the record's `stream_idle_seconds`, shortened for the test.
+    Stall {
+        idle: Duration,
+        endpoint: String,
+    },
 }
 
 /// One agent's scripted generation: the passes it will serve IN ORDER, plus the
@@ -113,14 +120,33 @@ impl Provider for MockProvider {
                 .pop_front()
                 .unwrap_or_default(),
         };
+        let stall = pass.iter().find_map(|e| match e {
+            ScriptEvent::Stall { idle, endpoint } => Some((*idle, endpoint.clone())),
+            _ => None,
+        });
         let evs: Vec<Result<ProviderEvent, ProviderError>> = pass
             .into_iter()
-            .map(|e| match e {
-                ScriptEvent::Token(t) => Ok(ProviderEvent::Token(t)),
-                ScriptEvent::Fail(e) => Err(ProviderError::raised(e)),
+            .filter_map(|e| match e {
+                ScriptEvent::Token(t) => Some(Ok(ProviderEvent::Token(t))),
+                ScriptEvent::Fail(e) => Some(Err(ProviderError::raised(e))),
+                ScriptEvent::Stall { .. } => None,
             })
             .collect();
-        Ok(Box::pin(futures_util::stream::iter(evs)))
+        let Some((idle, endpoint)) = stall else {
+            return Ok(Box::pin(futures_util::stream::iter(evs)));
+        };
+        // THE READ CLOCK, as the provider runs it: nothing arrives, the window
+        // passes, and the stream fails naming the stall.
+        let silent = futures_util::stream::once(async move {
+            let Err(stalled) = within(idle, std::future::pending::<()>()).await else {
+                unreachable!("a pending future never completes")
+            };
+            Err(stalled.error("mock_backend", &endpoint))
+        });
+        Ok(Box::pin(futures_util::StreamExt::chain(
+            futures_util::stream::iter(evs),
+            silent,
+        )))
     }
     fn model(&self) -> String {
         "test-model".to_string()
@@ -128,8 +154,11 @@ impl Provider for MockProvider {
 }
 
 /// The test bundle: dispatches every verb through ai-core, building a
-/// `MockProvider` over the process-global script keyed by agent id.
-struct MockBundle;
+/// `MockProvider` over the process-global script keyed by agent id. Its `cfg` is
+/// the backend it stands for: [`CFG`] cannot cache, a second one can.
+struct MockBundle {
+    cfg: BackendConfig,
+}
 
 type ScriptMap = std::collections::HashMap<String, Arc<MockScript>>;
 
@@ -205,12 +234,13 @@ fn pass(text: impl Into<String>) -> Vec<ScriptEvent> {
 const CFG: BackendConfig = BackendConfig {
     name: "mock_backend",
     model_window: crate::constants::DEFAULT_CONTEXT_WINDOW,
+    provider_cache: false,
 };
 
 #[async_trait]
 impl Bundle for MockBundle {
     fn name(&self) -> &str {
-        "mock_backend"
+        self.cfg.name
     }
     async fn handle(
         &self,
@@ -232,7 +262,7 @@ impl Bundle for MockBundle {
         // EVERY OTHER VERB through the one shared table, exactly as a real
         // backend dispatches it — boot is a new incarnation there too.
         let script = script_for(agent_id);
-        let reply = verbs::handle_common(agent_id, payload, kernel, CFG, move |_client| {
+        let reply = verbs::handle_common(agent_id, payload, kernel, self.cfg, move |_client| {
             Arc::new(MockProvider {
                 script: Arc::clone(&script),
             }) as Arc<dyn Provider>
@@ -278,7 +308,9 @@ fn id_for(tmp: &TempDir, tag: &str) -> String {
 /// the shared test memory store under it.
 async fn base_kernel(tmp: &TempDir, extra: impl FnOnce(&mut Kernel)) -> Arc<Kernel> {
     let mut kernel = Kernel::new();
-    kernel.bundles.register(HANDLER_MODULE, MockBundle);
+    kernel
+        .bundles
+        .register(HANDLER_MODULE, MockBundle { cfg: CFG });
     kernel
         .bundles
         .register("file_bridge.tools", fantastic_file::FileBundle::default());
@@ -403,6 +435,12 @@ async fn add_peer(kernel: &Arc<Kernel>, tmp: &TempDir, primary: &AgentId) -> Age
 /// `context_insufficient` — which looks exactly like a routing bug. python
 /// documents the same trap at `test_send_to.py:53-66`.
 async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
+    add_backend_on(kernel, id, file_id, HANDLER_MODULE).await
+}
+
+/// [`add_backend`] on a given handler module: a backend other than the mock that
+/// cannot cache, such as the caching mock.
+async fn add_backend_on(kernel: &Arc<Kernel>, id: &str, file_id: &str, module: &str) -> AgentId {
     // The conversation lives in the memory store the record names — wired both
     // ways (python `_testkit.memory_meta`). Deny-all otherwise: the backend
     // streams its turn to `cli` and names its leg, each an explicit grant.
@@ -415,7 +453,7 @@ async fn add_backend(kernel: &Arc<Kernel>, id: &str, file_id: &str) -> AgentId {
     let mut create = json!({
         "type": "create_agent",
         "parent_id": "kernel",
-        "handler_module": HANDLER_MODULE,
+        "handler_module": module,
         "id": id,
         "model": "test-model",
         "context_window": 32768,
@@ -2158,7 +2196,15 @@ async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     let state = crate::state::state_for(&backend);
     let (messages, _store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "hi",
+            &kernel,
+            "probe",
+            None,
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -3205,7 +3251,15 @@ async fn the_compaction_cursor_is_the_store_length_not_the_view() {
     .expect("store append");
     let (messages, store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "hi", &kernel, "probe", None),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "hi",
+            &kernel,
+            "probe",
+            None,
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -3384,11 +3438,12 @@ async fn a_batch_that_includes_a_peer_ai_still_delivers() {
 
 // ── await: the honest wait ───────────────────────────────────────────────────
 
-/// `await` with nothing of the agent's in flight and nothing queued is REFUSED,
-/// and the refusal says what to do instead. Twin of python's
-/// `test_await_with_nothing_in_flight_is_refused_and_told_what_to_do`.
+/// `await` with nothing of the agent's in flight and nothing queued ENDS the chain
+/// visibly (#177): no second pass runs, and the stored note says there was nothing
+/// to await. The note is a row the model reads on its next turn, not a turn sent to
+/// self (python delivered a refusal turn; the spec overrides that here).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn await_with_nothing_in_flight_is_refused_and_told_what_to_do() {
+async fn await_with_nothing_in_flight_ends_the_chain_with_a_visible_note() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "aw1").await;
     let s = script(
@@ -3402,17 +3457,26 @@ async fn await_with_nothing_in_flight_is_refused_and_told_what_to_do() {
     let _ = kernel
         .send(vec![Item::new(
             backend.clone(),
-            json!({"type": "send", "text": "hi"}),
+            json!({"type": "send", "text": "hi", "client_id": "probe"}),
         )])
         .await
         .remove(0)
         .result;
-    assert!(until_passes(&s, 2).await, "the refusal never woke it");
+    assert!(until_passes(&s, 1).await, "the first pass never ran");
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(s.passes_served(), 2, "and nothing else ran");
-    let turn2 = s.request(1);
-    assert!(turn2.contains("[await refused]"), "{turn2}");
-    assert!(turn2.contains("nothing of yours is in flight"), "{turn2}");
+    assert_eq!(s.passes_served(), 1, "the empty await ended the chain");
+    let rows = conversation(&kernel, &backend).await;
+    let notes: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r.get("kind").and_then(Value::as_str) == Some("note"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{rows:#?}");
+    let content = notes[0]["content"].as_str().unwrap_or_default();
+    assert!(
+        content.contains("[await: nothing to wait for]"),
+        "{content}"
+    );
+    assert!(content.contains("nothing was awaited"), "{content}");
 }
 
 /// The honest wait: something is QUEUED for the agent, so `await` ends the turn
@@ -3452,7 +3516,7 @@ async fn await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it() {
     assert_eq!(s.passes_served(), 2, "the queued message is the next turn");
     for n in 0..2 {
         let t = s.request(n);
-        assert!(!t.contains("[await refused]"), "pass {n}: {t}");
+        assert!(!t.contains("[await: nothing to wait for]"), "pass {n}: {t}");
         assert!(!t.contains("[no call was dispatched]"), "pass {n}: {t}");
     }
     assert!(s.request(1).contains("two"), "{}", s.request(1));
@@ -4248,7 +4312,15 @@ async fn a_fold_projection_over_budget_writes_folds() {
     let state = crate::state::state_for(&backend);
     let (messages, store_len) = fantastic_kernel::test_support::as_agent(
         backend.clone(),
-        crate::assembly::assemble_messages(&backend, &state, "next", &kernel, "cli", Some("sys")),
+        crate::assembly::assemble_messages(
+            &backend,
+            &state,
+            "next",
+            &kernel,
+            "cli",
+            Some("sys"),
+            crate::caching::Caching::Cleanup,
+        ),
     )
     .await
     .expect("store read");
@@ -4335,6 +4407,7 @@ async fn successive_fold_projections_do_not_nest_into_a_chain() {
                 &kernel,
                 "cli",
                 Some("sys"),
+                crate::caching::Caching::Cleanup,
             ),
         )
         .await
@@ -4426,6 +4499,7 @@ fn verb_docs_match_python_docstrings() {
             "grep",
             "context_recall",
             "context_clear",
+            "context_fold",
             "context_forget",
             "watch",
             "unwatch",
@@ -4688,7 +4762,7 @@ async fn an_inquiry_is_accepted_and_answered_later_under_its_pid() {
         "{third}"
     );
     assert!(third.contains("<answer>ship it</answer>"), "{third}");
-    assert!(!third.contains("await refused"), "{third}");
+    assert!(!third.contains("nothing to wait for"), "{third}");
     assert!(r.request(0).contains("[inquiry from "), "{}", r.request(0));
 }
 
@@ -5758,6 +5832,16 @@ mod memory_features;
 #[path = "tests_fold_anchors.rs"]
 mod fold_anchors;
 
+/// The operator's `context_fold` — a range of the view folded into one fold row.
+#[path = "tests_context_fold.rs"]
+mod context_fold;
+
+/// The record's `caching` modes: `cleanup` trims the view, `none` and `provider_cache`
+/// keep it append-only, `provider_cache` flags the primer and the last fold, and the
+/// primer pins its prefix against `context_fold`.
+#[path = "tests_caching.rs"]
+mod caching_modes;
+
 /// Per-agent backend state. Two agents never share a
 /// state slot; `drop_state` (every backend's `on_delete`) frees the slot so the
 /// next touch builds a fresh one; the INCARNATION count is NOT freed by it —
@@ -5974,6 +6058,9 @@ mod prompt_file_tests;
 /// Streaming parts (python `test_stream_parts.py`), on this harness.
 #[path = "tests_stream_parts.rs"]
 mod stream_parts;
+
+#[path = "tests_stall.rs"]
+mod stall;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
