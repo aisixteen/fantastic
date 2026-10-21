@@ -217,13 +217,19 @@ pub struct Urls {
     pub port: u16,
 }
 
-/// The authority a browser dials for a `web` bound at `host` on `port`. A wildcard
-/// (`0.0.0.0`, `::`) is not dialable, so it is reached at `localhost`, the spelling
-/// the Host guard admits for a wildcard bind (`fantastic_web`'s `origin.rs`); an IPv6
-/// literal is bracketed, as a URL spells it; any other address is itself.
+/// A wildcard listener address (`0.0.0.0`, `::`): it listens on every address, and a
+/// browser cannot dial it.
+pub fn is_wildcard(host: &str) -> bool {
+    matches!(host, "0.0.0.0" | "::")
+}
+
+/// The authority a browser dials for a `web` listening at `host` on `port`. A wildcard
+/// is reached at `localhost`, which the Host guard admits on the loopback identity
+/// (`fantastic_web`'s `origin.rs`); an IPv6 literal is bracketed, as a URL spells it;
+/// any other address is itself.
 pub fn canvas_authority(host: &str, port: u16) -> String {
     match host {
-        "0.0.0.0" | "::" => format!("localhost:{port}"),
+        h if is_wildcard(h) => format!("localhost:{port}"),
         h if h.contains(':') => format!("[{h}]:{port}"),
         h => format!("{h}:{port}"),
     }
@@ -251,10 +257,11 @@ pub fn remove_run_file(dir: &std::path::Path) {
 /// set it before the listener booted).
 pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<Urls, String> {
     let recorded = meta(h, WEB_ID).get("port").and_then(Value::as_u64).map(|p| p as u16);
-    let bound = meta(h, WEB_ID).get("host").and_then(Value::as_str).map(str::to_string);
+    // the address the recorded `web` listens on (its `bind`, else its `host`)
+    let bound = exists(h, WEB_ID).then(|| fantastic_web::listen_host(&meta(h, WEB_ID)));
     if let (true, Some(b)) = (exists(h, WEB_ID), bind) {
         if bound.as_deref() != Some(b) {
-            return Err(format!("--host {b}: the `web` leg still binds {}", bound.as_deref().unwrap_or("127.0.0.1 (the default)")));
+            return Err(format!("--host {b}: the `web` leg still binds {}", bound.as_deref().unwrap_or(fantastic_web::DEFAULT_HOST)));
         }
     }
     let port = match (exists(h, WEB_ID), port) {
@@ -361,12 +368,17 @@ pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<U
     })
 }
 
-/// The `web` record a fresh canvas creates: its port, and its `host` only when
-/// `--host` names one (the default is loopback, which the record leaves unsaid).
+/// The `web` record a fresh canvas creates: its port, and its address only when
+/// `--host` names one (the default is loopback, which the record leaves unsaid). The
+/// listener's address is `bind`; `host`, the guard's identity, is set only for a
+/// concrete address, so a wildcard publish keeps the loopback identity.
 fn web_record(user: &str, port: u16, bind: Option<&str>) -> Value {
     let mut rec = json!({"parent_id": user, "id": WEB_ID, "handler_module": fantastic_web::HANDLER_MODULE, "port": port});
     if let Some(b) = bind {
-        rec["host"] = json!(b);
+        rec["bind"] = json!(b);
+        if !is_wildcard(b) {
+            rec["host"] = json!(b);
+        }
     }
     rec
 }
@@ -408,15 +420,21 @@ mod tests {
 
     #[test]
     fn a_fresh_web_record_names_its_host_only_when_the_bind_is_given() {
+        // a wildcard publish: its listener is `bind`, and the guard's `host` stays unsaid
         let named = web_record("user", 8088, Some("0.0.0.0"));
-        assert_eq!(named["host"], json!("0.0.0.0"));
+        assert_eq!(named["bind"], json!("0.0.0.0"));
+        assert!(named.get("host").is_none(), "{named}");
         assert_eq!(named["port"], json!(8088));
         assert_eq!(named["parent_id"], json!("user"));
         assert_eq!(named["id"], json!(WEB_ID));
         assert_eq!(named["handler_module"], json!(fantastic_web::HANDLER_MODULE));
-        // no --host: the record says nothing about the host, so the default (loopback) holds
+        // a concrete address is both the listener and the guard's identity
+        let lan = web_record("user", 8088, Some("192.168.1.5"));
+        assert_eq!(lan["bind"], json!("192.168.1.5"));
+        assert_eq!(lan["host"], json!("192.168.1.5"));
+        // no --host: the record says nothing about the address, so the default (loopback) holds
         let plain = web_record("user", 8088, None);
-        assert!(plain.get("host").is_none(), "{plain}");
+        assert!(plain.get("host").is_none() && plain.get("bind").is_none(), "{plain}");
         assert_eq!(plain["port"], json!(8088));
     }
 
@@ -533,7 +551,7 @@ pub(crate) mod canvas_tree_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A `web` record as a recorded run left it: its port, and its host when `--host` named one.
+    /// A `web` record as a recorded run left it: its port, and its `bind` (or `host`) when `--host` named one.
     /// Kernel-state handled, so the tree boots no listener here.
     async fn recorded_web(h: &Host, extra: Value) {
         let mut spec = json!({"parent_id": "kernel", "id": WEB_ID, "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088});
@@ -547,7 +565,7 @@ pub(crate) mod canvas_tree_tests {
     async fn a_recorded_web_refuses_a_bind_it_does_not_hold() {
         let dir = scratch("bind-refused");
         let h = harness(&dir);
-        recorded_web(&h, json!({"host": "0.0.0.0"})).await;
+        recorded_web(&h, json!({"bind": "0.0.0.0"})).await;
         // another bind than the record's: refused before anything is created or booted
         let Err(err) = ensure(&h, None, Some("127.0.0.1")).await else { panic!("a bind the record does not hold is refused") };
         assert!(err.contains("--host 127.0.0.1") && err.contains("still binds 0.0.0.0"), "{err}");
@@ -556,9 +574,16 @@ pub(crate) mod canvas_tree_tests {
         let h2 = harness(&plain);
         recorded_web(&h2, json!({})).await;
         let Err(err) = ensure(&h2, None, Some("0.0.0.0")).await else { panic!("refused") };
-        assert!(err.contains("still binds 127.0.0.1 (the default)"), "{err}");
+        assert!(err.contains("--host 0.0.0.0") && err.contains("still binds 127.0.0.1"), "{err}");
+        // a record from before `bind` names its listener in `host`, and that is the bind it holds
+        let legacy = scratch("bind-refused-legacy");
+        let h3 = harness(&legacy);
+        recorded_web(&h3, json!({"host": "0.0.0.0"})).await;
+        let Err(err) = ensure(&h3, None, Some("127.0.0.1")).await else { panic!("refused") };
+        assert!(err.contains("still binds 0.0.0.0"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&plain);
+        let _ = std::fs::remove_dir_all(&legacy);
     }
 
     #[tokio::test]

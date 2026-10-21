@@ -213,8 +213,8 @@ podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Pod
 ```
 
 - **Ports.** The server listens on `8088` inside the container
-  (`FANTASTIC_PORT`), and the Host guard admits its port only: map it as
-  `-p 127.0.0.1:<port>:<port>` (the same port on both sides). Any other mapping
+  (`FANTASTIC_PORT`), and the Host guard admits the loopback names on that port: map
+  it as `-p 127.0.0.1:<port>:<port>` (the same port on both sides). Any other mapping
   reaches the server, but the browser's address is refused with a 403. For another
   port, set both: `-e FANTASTIC_PORT=9000 -p 127.0.0.1:9000:9000`.
 - **One canvas.** One container is one canvas, with no headless home beside it. To
@@ -228,9 +228,10 @@ podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Pod
   0, so the stop is orderly; tini forwards the signal and reaps the children.
 - **Recipes.** Arguments after the image are recipes, as on the command line:
   `… ghcr.io/aisixteen/fantastic:latest ai ollama -p 11434`.
-- **Health.** Docker's `HEALTHCHECK` asks the canvas page for a 200. Podman drops
-  `HEALTHCHECK` from its default OCI image format (it warns at build); `podman
-  inspect` shows none.
+- **Health.** The image's `HEALTHCHECK` asks the canvas page for a 200, on the
+  `localhost` Host a browser sends. The build uses Docker's image format, so Podman
+  keeps it too: `docker inspect` shows its status, and `podman healthcheck run
+  fantastic` runs it once.
 - **Remote, through a tunnel.** On the server, the same `run` as above. On your
   machine, the local port equal to the container's:
 
@@ -238,12 +239,14 @@ podman run … --userns=keep-id -v "$PWD/canvas:/work" …                 # Pod
   ssh -N -L 8088:127.0.0.1:8088 you@server
   ```
 
-  then open `http://localhost:8088/`.
-- **Opening it.** Open `http://localhost:8088/` (or `http://127.0.0.1:8088/`). The
+  then open `http://localhost:8088/canvas_page/file/index.html`.
+- **Opening it.** Open `http://localhost:8088/canvas_page/file/index.html` (or the same path on `127.0.0.1`). The
   container binds `0.0.0.0`, so the port map reaches it; the Host guard admits the
-  loopback names on that port. Any other name, a LAN address or another port is
-  refused with a 403, and so is a DNS-rebinding page. A browser cannot open
-  `0.0.0.0`, so do not use it as the address.
+  loopback names on that port. The server prints this address at start (`docker
+  logs fantastic`). The root `/` is not a page, so a bare `http://localhost:8088/`
+  is a 404. Any other name, a LAN address or another port is refused with a 403, and
+  so is a DNS-rebinding page. A browser cannot open `0.0.0.0`, so do not use it as
+  the address.
 
 The image's build is `scripts/build/container.sh` (`--arch amd64|arm64`, one
 image, loaded locally; `--arch all --push`, the manifest). CI builds both

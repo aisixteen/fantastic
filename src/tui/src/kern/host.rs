@@ -146,10 +146,10 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     reg
 }
 
-/// Set `web`'s record field `key` (`--port`, `--host`) before its listener boots.
+/// Set `web`'s record field `key` (named `flag` in a note) before its listener boots.
 /// A value the record already holds is left alone; a refused one is a note, and
 /// the boot goes on with the recorded value.
-async fn set_web_field(kernel: &Arc<Kernel>, id: &AgentId, key: &str, value: Value, notes: &mut Vec<String>) {
+async fn set_web_field(kernel: &Arc<Kernel>, id: &AgentId, key: &str, flag: &str, value: Value, notes: &mut Vec<String>) {
     let had = kernel.agents.get(id).and_then(|a| a.value().record().meta.get(key).cloned());
     if had.as_ref() == Some(&value) {
         return;
@@ -158,7 +158,17 @@ async fn set_web_field(kernel: &Arc<Kernel>, id: &AgentId, key: &str, value: Val
     update[key] = value.clone();
     let r = kernel.send(vec![Item::new(AgentId::from("kernel"), update)]).await.remove(0).result;
     if let Some(err) = r.get("error").and_then(Value::as_str) {
-        notes.push(format!("{id}: --{key} {value} not set: {err}"));
+        notes.push(format!("{id}: {flag} {value} not set: {err}"));
+    }
+}
+
+/// `--host ADDR` on `web`: the listener's `bind` is ADDR. The guard's identity (`host`) is
+/// ADDR too, unless ADDR is a wildcard, which a browser cannot dial: the record keeps its
+/// loopback identity, so `localhost:<port>` is the address the guard admits (see `web.rs`).
+async fn set_web_bind(kernel: &Arc<Kernel>, id: &AgentId, addr: &str, notes: &mut Vec<String>) {
+    set_web_field(kernel, id, "bind", "--host", json!(addr), notes).await;
+    if !crate::kern::web::is_wildcard(addr) {
+        set_web_field(kernel, id, "host", "--host", json!(addr), notes).await;
     }
 }
 
@@ -236,10 +246,10 @@ impl Host {
             }
             if is_web {
                 if let Some(p) = web_port {
-                    set_web_field(&kernel, &id, "port", json!(p), &mut notes).await;
+                    set_web_field(&kernel, &id, "port", "--port", json!(p), &mut notes).await;
                 }
                 if let Some(addr) = &web_bind {
-                    set_web_field(&kernel, &id, "host", json!(addr), &mut notes).await;
+                    set_web_bind(&kernel, &id, addr, &mut notes).await;
                 }
             }
             let reply = kernel
@@ -683,15 +693,15 @@ mod set_web_field_tests {
         let web = AgentId::from("web");
         let mut notes = Vec::new();
         // absent: the bind is written, and nothing is noted
-        set_web_field(&h.kernel, &web, "host", json!("0.0.0.0"), &mut notes).await;
+        set_web_field(&h.kernel, &web, "host", "--host", json!("0.0.0.0"), &mut notes).await;
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(field_of(&h, "web", "host"), Some(json!("0.0.0.0")));
         // the same bind again: already held, so nothing changes and nothing is noted
-        set_web_field(&h.kernel, &web, "host", json!("0.0.0.0"), &mut notes).await;
+        set_web_field(&h.kernel, &web, "host", "--host", json!("0.0.0.0"), &mut notes).await;
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(field_of(&h, "web", "host"), Some(json!("0.0.0.0")));
         // a different bind overwrites it (the record is the user's to change before boot)
-        set_web_field(&h.kernel, &web, "host", json!("127.0.0.1"), &mut notes).await;
+        set_web_field(&h.kernel, &web, "host", "--host", json!("127.0.0.1"), &mut notes).await;
         assert!(notes.is_empty(), "{notes:?}");
         assert_eq!(field_of(&h, "web", "host"), Some(json!("127.0.0.1")));
         let _ = std::fs::remove_dir_all(&dir);
@@ -705,9 +715,47 @@ mod set_web_field_tests {
         let h = harness(&dir);
         let mut notes = Vec::new();
         // no such agent: the update is refused, and the refusal is said, with the value
-        set_web_field(&h.kernel, &AgentId::from("nobody"), "host", json!("0.0.0.0"), &mut notes).await;
+        set_web_field(&h.kernel, &AgentId::from("nobody"), "host", "--host", json!("0.0.0.0"), &mut notes).await;
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].starts_with("nobody: --host \"0.0.0.0\" not set: "), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// `--host` on `web` writes the listener's `bind`, and its identity `host` only for a
+/// concrete address: a wildcard publish keeps the loopback identity the guard judges by.
+#[cfg(test)]
+mod set_web_bind_tests {
+    use super::*;
+    use crate::kern::web::canvas_tree_tests::harness;
+
+    fn field_of(h: &Host, id: &str, key: &str) -> Option<Value> {
+        h.kernel.agents.get(&AgentId::from(id)).and_then(|a| a.value().record().meta.get(key).cloned())
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_bind_leaves_the_guard_identity_unset_and_a_lan_bind_sets_both() {
+        let dir = std::env::temp_dir().join(format!("fc-set-web-bind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = harness(&dir);
+        h.operator(
+            "kernel",
+            json!({"type": "create_agent", "parent_id": "kernel", "id": "web",
+                "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088}),
+        )
+        .await;
+        let web = AgentId::from("web");
+        let mut notes = Vec::new();
+        set_web_bind(&h.kernel, &web, "0.0.0.0", &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "bind"), Some(json!("0.0.0.0")));
+        assert_eq!(field_of(&h, "web", "host"), None);
+        // a LAN address is both the listener and the identity
+        set_web_bind(&h.kernel, &web, "192.168.1.5", &mut notes).await;
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(field_of(&h, "web", "bind"), Some(json!("192.168.1.5")));
+        assert_eq!(field_of(&h, "web", "host"), Some(json!("192.168.1.5")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

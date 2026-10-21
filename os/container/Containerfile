@@ -54,11 +54,13 @@ WORKDIR /work
 VOLUME ["/home/fantastic/.fantastic", "/work"]
 EXPOSE 8088
 
-# The canvas's page is served on the port inside the container. The Host guard
-# (fantastic-web) admits, on the server's 0.0.0.0 bind, the loopback spellings on
-# that port: the check connects to loopback and sends `Host: localhost:<port>`,
-# the Host a browser at the port map sends (os/README.md).
-# Podman ignores HEALTHCHECK in its default OCI image format (it warns at build).
+# The canvas's page is served on the port inside the container. The server binds
+# 0.0.0.0 (fantastic-server), and the Host guard (fantastic-web) judges by its
+# loopback identity, so it admits the loopback spellings on that port: the check
+# connects to loopback and sends `Host: localhost:<port>`, the Host a browser at
+# the port map sends (os/README.md).
+# HEALTHCHECK is kept only in docker's image format: container.sh passes
+# `--format docker` to podman, whose default OCI format drops it.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${FANTASTIC_PORT} && printf 'GET /canvas_page/file/index.html HTTP/1.0\\r\\nHost: localhost:%s\\r\\n\\r\\n' \"$FANTASTIC_PORT\" >&3 && head -n 1 <&3 | grep -q ' 200 '"]
 

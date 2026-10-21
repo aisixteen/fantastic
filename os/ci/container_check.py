@@ -7,7 +7,8 @@
 It runs the image with its state on named volumes, the port mapped to loopback
 only, and checks, in order (the steps are numbered as in the issue):
 
-  1  start: the container runs, and its page answers through the port map
+  1  start: the container runs, and its page answers through the port map. The image's
+     HEALTHCHECK passes too: docker waits for `healthy`, podman runs the check once
   2  the kernel answers: `user` forwards a call to the root agent over /user/ws
   3  a canvas page loads: its document and its bundle (boot_check's page check)
   4  a terminal runs a command: a PTY job runs the login shell, which evaluates
@@ -19,9 +20,10 @@ only, and checks, in order (the steps are numbered as in the issue):
      $FANTASTIC_HOME volume)
 
 The port map is an identity map: the host port is FANTASTIC_PORT, so the browser's
-`localhost:<port>` is the URL a user opens, and the Host guard admits it (the server
-binds 0.0.0.0, and the guard accepts the loopback spellings on a wildcard bind).
-The checks send the Host and Origin a browser at that URL sends.
+`localhost:<port>` is the URL a user opens. The server binds 0.0.0.0 (`--host`, which
+sets only its listener), and the Host guard judges by its loopback identity, so it
+admits `localhost:<port>`. The checks send the Host and Origin a browser at that URL
+sends.
 
 Each container's output is kept in --out (`<name>.log`) before it is removed.
 Steps 3 and 5 reuse `boot_check.py`'s page check and call helpers; the QEMU side is
@@ -63,8 +65,8 @@ WORK_DIR = "/work"
 
 
 def authority_for(port: int) -> str:
-    """The Host a browser sends at the port map: `localhost:<port>`, the spelling the
-    guard admits on the server's 0.0.0.0 bind (`fantastic-web`'s origin.rs)."""
+    """The Host a browser sends at the port map: `localhost:<port>`, a loopback spelling
+    the guard admits on the server's port (its loopback identity, `fantastic-web`'s origin.rs)."""
     return f"localhost:{port}"
 
 
@@ -124,6 +126,14 @@ def marker_kept(text: str) -> bool:
     return text.strip() == HOME_MARKER_TEXT
 
 
+def health_ready(status: str) -> bool:
+    """Whether docker's `{{.State.Health.Status}}` says the image's HEALTHCHECK passed.
+    `unhealthy` is a failure: the check ran and failed. Any other status is still waiting."""
+    if status == "unhealthy":
+        raise bc.Fail("the image's HEALTHCHECK reports unhealthy")
+    return status == "healthy"
+
+
 def free_port() -> int:
     """A free port on loopback now (the engine maps it; a race is the one-off cost)."""
     with socket.socket() as s:
@@ -169,6 +179,10 @@ class Run:
     def exit_code(self) -> int:
         return parse_exit_code(engine(self.engine, "inspect", "--format", "{{.State.ExitCode}}", self.name).stdout)
 
+    def health_status(self) -> str:
+        """docker's health status: starting, healthy or unhealthy ('' with no HEALTHCHECK)."""
+        return engine(self.engine, "inspect", "--format", "{{.State.Health.Status}}", self.name).stdout.strip()
+
     def home_marker(self) -> str:
         """The marker's text as the container sees it now ('' when it is not there)."""
         return engine(self.engine, "exec", self.name, "cat", f"{STATE_DIR}/{HOME_MARKER}", check=False).stdout
@@ -195,6 +209,17 @@ def step_start(run: Run, step: float) -> None:
         step,
     )
     bc.log(f"step 1: the page answers at {run.authority}")
+    step_health(run, step)
+
+
+def step_health(run: Run, step: float) -> None:
+    """Step 1, the image's HEALTHCHECK: docker runs it on its interval, so the status
+    is waited for; podman runs the check command once, which exits 0 when it passes."""
+    if run.engine == "docker":
+        bc.until(None, "the image's HEALTHCHECK reports healthy", lambda: health_ready(run.health_status()), step)
+    else:
+        engine(run.engine, "healthcheck", "run", run.name)
+    bc.log(f"step 1: the image's HEALTHCHECK passes under {run.engine}")
 
 
 def step_kernel(run: Run, step: float) -> str:
@@ -233,10 +258,28 @@ def step_terminal(run: Run, root: str, step: float) -> str:
     """Step 4: a PTY job runs the login shell; the shell evaluates the line."""
     bc.at("4")
 
-    def call(target: str, payload: dict):
+    def send(target: str, payload: dict):
         return asyncio.run(
             bc.forward_call(run.port, target, payload, connect=run.port, authority=run.authority, origin=run.origin)
         )
+
+    def call(target: str, payload: dict):
+        try:
+            return send(target, payload)
+        except bc.ws_errors() as e:
+            raise bc.Fail(f"{payload.get('type')} on {target} over /user/ws: {e}") from e
+
+    def output() -> str:
+        """The terminal's output so far; a transient websocket error is retried by the wait."""
+        try:
+            return (send(TERM_ID, {"type": "output", "job_id": job}) or {}).get("output", "")
+        except bc.ws_errors() as e:
+            bc.retrying("output", e)
+            return ""
+
+    def printed():
+        text = output()
+        return text if terminal_printed(text) else None
 
     # a terminal sits under `user`, as the app's terminal does (kern/terminal.rs)
     made = call(root, {
@@ -253,15 +296,8 @@ def step_terminal(run: Run, root: str, step: float) -> str:
     # means the marker is written
     call(TERM_ID, {"type": "write", "job_id": job, "bytes": home_marker_line()})
     call(TERM_ID, {"type": "write", "job_id": job, "bytes": SMOKE_LINE})
-    output = bc.until(
-        None,
-        f"the terminal prints {SMOKE_OUTPUT!r}",
-        lambda: (lambda o: o if terminal_printed(o) else None)(
-            (call(TERM_ID, {"type": "output", "job_id": job}) or {}).get("output", "")
-        ),
-        step,
-    )
-    bc.log(f"step 4: the terminal (job {job}) printed {SMOKE_OUTPUT!r}: {output[-80:]!r}")
+    output_text = bc.until(None, f"the terminal prints {SMOKE_OUTPUT!r}", printed, step)
+    bc.log(f"step 4: the terminal (job {job}) printed {SMOKE_OUTPUT!r}: {output_text[-80:]!r}")
     return TERM_ID
 
 

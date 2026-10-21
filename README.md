@@ -297,7 +297,7 @@ fantastic readme [key]            # the docs
 These words are **recipes**: each adds its agents only if they are missing, then
 runs them. `--port` is recorded on the first `canvas` and reused after that.
 `--host` is the address the canvas binds (`127.0.0.1` unless named; `0.0.0.0`
-publishes it, as the server container does), recorded the same way. The canvas
+publishes it, as the server container does), recorded on `web` as its `bind`. The canvas
 has terminals: bind a public interface only on a machine you trust.
 
 ### The canvas

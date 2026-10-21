@@ -6,7 +6,7 @@ The engine and the server are not run here: the CI job and a local podman run do
 that. Here: the run command (the port map is loopback only, an identity map, the
 volumes are the state), the browser's authority and origin, the stop verdict, the
 exit-code parser, the terminal's output matcher, the state marker, the log saving,
-and the page check's reuse of boot_check's helper.
+the page check's reuse of boot_check's helper, and the HEALTHCHECK's status reading.
 """
 
 import tempfile
@@ -138,3 +138,14 @@ class Ports(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Health(unittest.TestCase):
+    def test_healthy_passes_and_starting_waits(self):
+        self.assertTrue(cc.health_ready("healthy"))
+        self.assertFalse(cc.health_ready("starting"))
+        self.assertFalse(cc.health_ready(""))
+
+    def test_unhealthy_is_a_failure_now(self):
+        with self.assertRaisesRegex(bc.Fail, "reports unhealthy"):
+            cc.health_ready("unhealthy")

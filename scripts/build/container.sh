@@ -17,7 +17,8 @@
 # it from: the bytes the fantastic-app .deb carries, so the server and the kiosk
 # run one build. Build the archives first (`cli.sh --target <triple>`).
 #
-# Engine: $ENGINE (docker or podman) when set, else podman, else docker.
+# Engine: $ENGINE (docker or podman) when set, else podman, else docker. Podman
+# builds in docker's image format, so the image keeps its HEALTHCHECK (OCI drops it).
 # Version: FANTASTIC_VERSION, else the last git tag (deb.sh's rule), baked into the
 # image's version label.
 set -eu
@@ -85,6 +86,10 @@ stage() {  # amd64|arm64
   echo "container.sh: staged $archive -> dist/container/$1/fantastic"
 }
 
+# podman's default image format is OCI, which has no HEALTHCHECK
+FORMAT_ARG=""
+if [ "$ENGINE" = podman ]; then FORMAT_ARG="--format docker"; fi
+
 # the -t flags for each tag
 tag_args() {
   for t in $TAGS; do printf '%s\n' "-t" "$t"; done
@@ -96,8 +101,8 @@ case "$ARCH" in
     stage "$ARCH"
     FIRST=$(printf '%s' "$TAGS" | awk '{ print $1 }')
     echo "container.sh: $ENGINE build linux/$ARCH -> $TAGS (version $VERSION)"
-    # shellcheck disable=SC2046
-    "$ENGINE" build --platform "linux/$ARCH" --build-arg "FANTASTIC_VERSION=$VERSION" \
+    # shellcheck disable=SC2046,SC2086
+    "$ENGINE" build $FORMAT_ARG --platform "linux/$ARCH" --build-arg "FANTASTIC_VERSION=$VERSION" \
       -f os/container/Containerfile $(tag_args) .
     if [ "$PUSH" = 1 ]; then
       for t in $TAGS; do "$ENGINE" push "$t"; done

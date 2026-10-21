@@ -3447,3 +3447,19 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
 // the body is bounded by the one frame cap.
 #[path = "tests_rest_ingress_order.rs"]
 mod rest_ingress_order;
+
+/// The listener's address is the record's `bind`, else its `host`, else loopback; the
+/// guard's identity (`host`) is not moved by a `bind`.
+#[test]
+fn the_listener_binds_the_bind_field_and_the_guard_keeps_the_host() {
+    let rec = |v: Value| v.as_object().cloned().unwrap();
+    assert_eq!(listen_host(&rec(json!({}))), "127.0.0.1");
+    assert_eq!(listen_host(&rec(json!({"host": "192.168.1.5"}))), "192.168.1.5");
+    assert_eq!(listen_host(&rec(json!({"bind": "0.0.0.0"}))), "0.0.0.0");
+    // a bind beats a host: the publish is the listener, the host stays the guard's identity
+    let both = rec(json!({"bind": "0.0.0.0", "host": "192.168.1.5"}));
+    assert_eq!(listen_host(&both), "0.0.0.0");
+    assert_eq!(origin::effective_host(&both), "192.168.1.5");
+    // an empty bind is no bind (python's `rec.get("bind") or ...`)
+    assert_eq!(listen_host(&rec(json!({"bind": "", "host": "0.0.0.0"}))), "0.0.0.0");
+}

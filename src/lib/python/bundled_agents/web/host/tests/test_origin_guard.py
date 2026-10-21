@@ -53,15 +53,7 @@ def test_loopback_is_the_default_and_its_spellings_are_own():
     assert DEFAULT_HOST == "127.0.0.1"
     own = own_origins({"port": 8088})
     assert {"http://127.0.0.1:8088", "http://localhost:8088"} <= own
-    # a wildcard bind answers its own origin AND the loopback spellings
-    assert own_origins({"host": "0.0.0.0", "port": 8088}) == {
-        "http://0.0.0.0:8088",
-        "http://127.0.0.1:8088",
-        "http://localhost:8088",
-        "http://[::1]:8088",
-    }
-    # a LAN address answers only itself
-    assert own_origins({"host": "192.168.1.5", "port": 8088}) == {"http://192.168.1.5:8088"}
+    assert own_origins({"host": "0.0.0.0", "port": 8088}) == {"http://0.0.0.0:8088"}
 
 
 def test_origin_rule():
@@ -112,20 +104,13 @@ def test_own_authorities_are_the_bound_host_port_plus_loopback_spellings():
         "localhost:8088",
         "[::1]:8088",
     }
-    # a wildcard bind answers its own host:port and the loopback spellings
-    wildcard = {"0.0.0.0:8088", "127.0.0.1:8088", "localhost:8088", "[::1]:8088"}
-    assert own_authorities({"host": "0.0.0.0", "port": 8088}) == wildcard
-    # a LAN bind answers its own host:port and nothing else
+    # a non-loopback bind answers its own host:port and nothing else
+    assert own_authorities({"host": "0.0.0.0", "port": 8088}) == {"0.0.0.0:8088"}
     assert own_authorities({"host": "192.168.1.5", "port": 8088}) == {
         "192.168.1.5:8088"
     }
-    # an IPv6 wildcard is bracketed, as a Host header spells it, and answers loopback
-    assert own_authorities({"host": "::", "port": 8088}) == {
-        "[::]:8088",
-        "127.0.0.1:8088",
-        "localhost:8088",
-        "[::1]:8088",
-    }
+    # an IPv6 literal is bracketed, as a Host header spells it
+    assert own_authorities({"host": "::", "port": 8088}) == {"[::]:8088"}
     # no Host header at all is not an authority
     assert "" not in own_authorities({"port": 8088})
 
@@ -158,33 +143,19 @@ def test_loopback_spellings_pass_another_port_does_not():
         assert c.get("/x", headers={"Host": host}).status_code == 403, host
 
 
-def test_a_published_bind_admits_its_own_host_port_and_loopback_on_it():
-    """`0.0.0.0` publishes the port (a container's port map). It answers its own
-    `0.0.0.0:<port>` and the loopback spellings on that port, so `localhost:<port>`
-    works from the browser; a LAN name, a LAN address, another port are refused."""
+def test_a_published_bind_admits_only_its_own_host_port():
+    """`0.0.0.0` publishes the port, but the only Host it answers is `0.0.0.0:<port>`
+    — a port map, a LAN name, a tunnel name, even the loopback spellings are other
+    authorities."""
     c = TestClient(_app({"host": "0.0.0.0", "port": 8088}), base_url=OWN)
-    for host in ("0.0.0.0:8088", "localhost:8088", "127.0.0.1:8088", "[::1]:8088"):
-        assert c.get("/x", headers={"Host": host}).status_code == 200, host
+    assert c.get("/x", headers={"Host": "0.0.0.0:8088"}).status_code == 200
     for host in (
-        "localhost:9999",
-        "127.0.0.1:52999",
+        "127.0.0.1:8088",
+        "localhost:8088",
         "192.168.1.5:8088",
         "box.lan:8088",
     ):
         assert c.get("/x", headers={"Host": host}).status_code == 403, host
-
-
-def test_a_wildcard_bind_admits_a_localhost_browser_origin():
-    """A browser at `localhost:<port>` is an own origin of a wildcard bind, so its
-    websocket upgrade passes; a foreign origin, or a LAN bind's loopback, does not."""
-    rec = {"host": "0.0.0.0", "port": 8088}
-    assert origin_allowed(rec, "http://localhost:8088")
-    assert origin_allowed(rec, "http://127.0.0.1:8088")
-    assert not origin_allowed(rec, "http://localhost:52999")
-    assert not origin_allowed(rec, "http://192.168.1.5:8088")
-    lan = {"host": "192.168.1.5", "port": 8088}
-    assert origin_allowed(lan, "http://192.168.1.5:8088")
-    assert not origin_allowed(lan, "http://localhost:8088")
 
 
 def test_rebound_websocket_upgrade_is_refused():
