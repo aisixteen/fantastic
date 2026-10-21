@@ -7,6 +7,7 @@
 
 use serde_json::{json, Map, Value};
 
+use super::grammar::{code_masked, envelopes_in};
 use super::{defang, extract_tool_calls, malformed_calls, render_call, ToolCall};
 
 const WRITE: &str = r#"<call name="send">
@@ -186,14 +187,16 @@ fn an_unterminated_call_is_not_a_call() {
     assert!(extract_tool_calls(text).is_empty() && malformed_calls(text).is_empty());
 }
 
+/// A call INSIDE `<think>` sits inside a tag, so it is not extracted (#188: a call
+/// inside any wrapper is refused); the top-level call after `</think>` is.
 #[test]
-fn several_calls_in_order_and_a_call_inside_think() {
+fn a_call_inside_think_is_not_extracted_and_one_after_it_is() {
     let text = format!("<think>first {WRITE}</think>then\n{PATCH}\n");
     let verbs: Vec<String> = extract_tool_calls(&text)
         .iter()
         .map(|c| payload(c)["type"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(verbs, vec!["write", "patch"]);
+    assert_eq!(verbs, vec!["patch"]);
 }
 
 #[test]
@@ -510,4 +513,52 @@ fn name_and_space_classes_follow_python() {
     );
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert_eq!(calls[0].arguments.get("target_id"), Some(&json!("a")));
+}
+
+/// #188 review: code is not markup. Blanked spans and fences keep their byte length
+/// and newlines; an unmatched backtick is a plain character.
+#[test]
+fn code_masked_blanks_spans_and_fences_and_keeps_offsets() {
+    let text = "a `<b>` c\n```html\n<div>\n```\nd ``x`y`` e ` f <i>";
+    let masked = code_masked(text);
+    assert_eq!(masked.len(), text.len());
+    assert_eq!(
+        masked.matches('\n').count(),
+        text.matches('\n').count(),
+        "newlines are kept"
+    );
+    assert!(
+        !masked.contains("<b>") && !masked.contains("<div>"),
+        "{masked}"
+    );
+    assert!(
+        masked.contains("<i>"),
+        "an unmatched backtick hides nothing: {masked}"
+    );
+}
+
+/// A code span does not reach across a blank line, so a backtick there is literal.
+#[test]
+fn a_code_span_does_not_cross_a_blank_line() {
+    let text = "a ` b\n\n<tool_call> `c`";
+    assert!(code_masked(text).contains("<tool_call>"), "{text}");
+}
+
+/// A tag with bare words where its attributes would be is prose, not a wrapper.
+#[test]
+fn a_bare_word_tag_is_not_a_wrapper() {
+    let text = format!("a<b and c>d\n{WRITE}");
+    assert!(envelopes_in(&text)[0].wrapper.is_none());
+}
+
+#[test]
+fn a_backtick_in_thinking_does_not_hide_the_think_close() {
+    // A span opened by a backtick in thinking would run across `</think>` to the
+    // backtick after the call; raw extraction must match dispatch (#188).
+    let text = "<think>maybe `x</think>\n<call name=\"send\"><target_id>self</target_id><type>recall</type></call> then `y`";
+    let raw = extract_tool_calls(text);
+    let stripped = extract_tool_calls(&crate::think::without_thinking(text));
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw.len(), stripped.len());
+    assert!(envelopes_in(text)[0].wrapper.is_none());
 }

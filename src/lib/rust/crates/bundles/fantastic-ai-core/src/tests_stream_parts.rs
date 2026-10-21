@@ -917,6 +917,36 @@ async fn a_message_carries_the_stream_it_was_previewed_as() {
     assert!(prod.requests() >= 1);
 }
 
+/// #188: a call inside an open tag streams as not ok (the router refuses it), and it
+/// is not in `closed_calls`, so it can never take a dispatched call's stream id.
+#[test]
+fn a_wrapped_closed_call_ends_not_ok_and_is_not_matched() {
+    let (ev, sp) = run(&format!("<tool_call>{DONE}</tool_call>\n{DONE}"), 4);
+    let oks: Vec<Option<bool>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            PartEvent::End(p, ok) if p.kind == PartKind::Call => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(oks, vec![Some(false), Some(true)], "{ev:?}");
+    assert_eq!(sp.closed_calls.len(), 1, "{:?}", sp.closed_calls);
+}
+
+/// #188: a call after a closed tag, or after thinking, is not wrapped and streams ok.
+#[test]
+fn a_call_after_a_closed_tag_or_after_think_is_not_wrapped() {
+    let (ev, _) = run(&format!("<b>x</b> {DONE}<think>t</think>{DONE}"), 5);
+    let oks: Vec<Option<bool>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            PartEvent::End(p, ok) if p.kind == PartKind::Call => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(oks, vec![Some(true), Some(true)], "{ev:?}");
+}
+
 #[test]
 fn a_malformed_closed_call_ends_not_ok() {
     let (ev, _) = run(
@@ -1041,4 +1071,25 @@ async fn deltas_never_reach_the_state_stream() {
         ["part_end", "part_start"].map(String::from).into(),
         "{on_stream:?}"
     );
+}
+
+/// #188 review: a backtick inside a call's argument must not open a code span that
+/// hides the wrapper after it. The splitter masks prose only, so the wrapped call
+/// ends not ok and is not matched, the same as the scanner reads it.
+#[test]
+fn a_backtick_in_a_call_argument_does_not_hide_a_wrapper_after_it() {
+    let text = format!(
+        "<call name=\"send\"><target_id>a</target_id><type>run</type><cmd>echo `x</cmd></call>\n\
+         <tool_call>`y` {DONE}</tool_call>"
+    );
+    let (ev, sp) = run(&text, 4);
+    let oks: Vec<Option<bool>> = ev
+        .iter()
+        .filter_map(|e| match e {
+            PartEvent::End(p, ok) if p.kind == PartKind::Call => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(oks, vec![Some(true), Some(false)], "{ev:?}");
+    assert_eq!(sp.closed_calls.len(), 1, "{:?}", sp.closed_calls);
 }
