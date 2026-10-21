@@ -57,6 +57,9 @@ const NAME: &str = "anthropic_backend";
 /// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
 const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since its kernel started:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices). reset:\ntrue returns the counts, then zeroes them.";
 
+/// The `models` verb's doc.
+const MODELS_DOC: &str = "models — args: none. The models this agent's key can use: [{id, display_name, max_input_tokens, max_tokens}], read from the API.";
+
 /// What `reflect` says this agent IS — python `tools.py`'s `sentence`.
 pub const SENTENCE: &str = "Anthropic Messages-API LLM agent (raw prompt-and-parse tool-calling).";
 
@@ -870,6 +873,7 @@ impl Bundle for AnthropicBundle {
             out.insert(k, v);
             if after {
                 out.insert("usage".into(), json!(USAGE_DOC));
+                out.insert("models".into(), json!(MODELS_DOC));
             }
         }
         Value::Object(out)
@@ -917,6 +921,19 @@ impl Bundle for AnthropicBundle {
         }
         if verb == "usage" {
             return Ok(Some(usage_reply(agent_id, payload, kernel)));
+        }
+        if verb == "models" {
+            let meta = helpers::agent_meta(agent_id, kernel);
+            let endpoint = meta.get("endpoint").and_then(Value::as_str).unwrap_or("");
+            match server::list(endpoint, &key_reader(agent_id, kernel, NAME, false)).await {
+                Ok(models) => return Ok(Some(json!({"models": models}))),
+                Err(e) => {
+                    return Ok(Some(fantastic_kernel::refusal::refusal(
+                        fantastic_kernel::refusal::UNHANDLED,
+                        e,
+                    )));
+                }
+            }
         }
         // A verb that runs a turn first reads what the record leaves to the API; an
         // API that does not answer refuses the verb, naming the field.
