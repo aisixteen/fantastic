@@ -1853,6 +1853,7 @@ async fn verb_docs_are_python_first_docstring_lines() {
         verbs.keys().map(String::as_str).collect::<Vec<_>>(),
         [
             "start",
+            "run",
             "status",
             "stop",
             "interrupt",
@@ -1875,6 +1876,10 @@ async fn verb_docs_are_python_first_docstring_lines() {
     assert_eq!(
         verbs["start"],
         "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits."
+    );
+    assert_eq!(
+        verbs["run"],
+        "args: command:str (req), args?, cwd?, wait_s:float? (default 60, max 600), tail:int? (default 200) — start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. Use run for short commands; a job still running at wait_s comes back running (continue with status wait_s / tail). Read files with files.read, not run."
     );
     assert_eq!(
         verbs["clear"],
@@ -3090,4 +3095,116 @@ fn an_unbalanced_allowed_pattern_permits_nothing() {
     meta.insert("allowed".into(), json!(["ls)|(?:.*"]));
     assert!(command_permitted(&meta, "rm -rf /").is_some());
     assert!(command_permitted(&meta, "ls").is_some());
+}
+
+/// `run` — start, wait, output in ONE reply: a short program comes back done,
+/// with its exit code and its printed lines.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_returns_the_output_in_one_reply() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let program = format!("{LF_STDIO}import sys; print(\"hello\"); sys.exit(3)");
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({
+                "type": "run",
+                "command": py.to_string_lossy(),
+                "args": ["-u", "-c", program],
+                "wait_s": 30,
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = r["job_id"].as_i64().expect("job_id");
+    assert_ne!(r["status"], "running", "{r}");
+    assert_eq!(r["exit_code"], 3, "{r}");
+    assert!(
+        r["lines"]
+            .as_array()
+            .map(|l| l
+                .iter()
+                .any(|row| row["line"].as_str().is_some_and(|s| s.contains("hello"))))
+            .unwrap_or(false),
+        "{r}"
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "clear", "job_id": jid}),
+        )])
+        .await;
+}
+
+/// A `wait_s` shorter than the job's life gives up at the deadline and answers
+/// `running` with the job_id, so the caller can keep watching it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_returns_running_at_the_deadline() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let program = format!("{LF_STDIO}import time; time.sleep(30)");
+    let t0 = std::time::Instant::now();
+    let r = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({
+                "type": "run",
+                "command": py.to_string_lossy(),
+                "args": ["-u", "-c", program],
+                "wait_s": 0.5,
+            }),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let took = t0.elapsed();
+    let jid = r["job_id"].as_i64().expect("job_id");
+    assert_eq!(r["status"], "running", "{r}");
+    assert!(took < Duration::from_secs(3), "took {took:?}");
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "stop", "job_id": jid}),
+        )])
+        .await;
+}
+
+/// `run` refuses a `wait_s` out of 0..=600 or not a number, and a `tail` below 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_refuses_bad_arguments() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let base = json!({
+        "type": "run",
+        "command": py.to_string_lossy(),
+        "args": ["-u", "-c", "print(1)"],
+    });
+    for (arg, bad) in [
+        ("wait_s", json!(700)),
+        ("wait_s", json!("x")),
+        ("tail", json!(0)),
+    ] {
+        let mut payload = base.clone();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert(arg.to_string(), bad);
+        let r = kernel
+            .send(vec![Item::new(a.clone(), payload)])
+            .await
+            .remove(0)
+            .result;
+        assert_eq!(r["reason"], "bad_arg", "{r}");
+        assert_eq!(r["arg"], arg, "{r}");
+    }
 }

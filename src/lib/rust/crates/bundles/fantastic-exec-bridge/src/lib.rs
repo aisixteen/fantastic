@@ -268,6 +268,7 @@ pub struct ExecBridgeBundle;
 fn verb_docs_json() -> Value {
     json!({
         "start": "args: command:str (req — the executable ALONE, e.g. `grep`; on a PTY start, absent = the child's $SHELL, and with no `args` the record's whole shell line: `$SHELL -l` under shell=\"login\"), args:list[str]? (its arguments, one item each — `<args><item>-rn</item><item>x</item></args>`), pty:{cols,rows}? (run on a terminal). The FULL line (command + args) must fullmatch one of the `allowed` regexes, or be the shell line the record's `shell` permits.",
+        "run": "args: command:str (req), args?, cwd?, wait_s:float? (default 60, max 600), tail:int? (default 200) — start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. Use run for short commands; a job still running at wait_s comes back running (continue with status wait_s / tail). Read files with files.read, not run.",
         "status": "args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. `wait_s`:float? (0–120) with job_id — returns as soon as the job is no longer running, or when the wait ends; use it instead of polling. Returns {jobs:[…]}.",
         "stop": "args: job_id:int? — SIGKILL one job (its whole session: the command and everything it launched) or ALL running jobs on this agent.",
         "interrupt": "args: job_id:int? — SIGINT one job or ALL running jobs on this agent.",
@@ -463,6 +464,7 @@ impl Bundle for ExecBridgeBundle {
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, kernel),
             "start" => start_reply(agent_id, payload, kernel).await,
+            "run" => run_reply(agent_id, payload, kernel).await,
             "boot" => boot_reply(agent_id, kernel).await,
             "status" => status_reply(agent_id, payload).await,
             "clear" => clear_reply(agent_id, payload),
@@ -1286,6 +1288,66 @@ async fn status_reply(agent_id: &AgentId, payload: &Value) -> Value {
             "origin": format!("{agent_id} status — the job table NOW; re-send, it changes"),
         }),
     }
+}
+
+/// `run` — start, wait, and answer with the output in ONE reply.
+///
+/// `wait_s` (default 60, 0–600) bounds the wait exactly like `status`'s: the job
+/// is polled every 200 ms and the reply comes as soon as it is no longer
+/// `running`/`stopping`. `tail` (default 200, 1–2000) is how many of its last
+/// lines come back. A job still running at the deadline is returned `running`
+/// with its `job_id`, so the caller continues with `status wait_s` / `tail`.
+async fn run_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    let wait_s = match payload.get("wait_s").filter(|v| !v.is_null()) {
+        None => 60.0,
+        Some(v) => match v.as_f64() {
+            Some(s) if (0.0..=600.0).contains(&s) => s,
+            _ => return bad("run", "wait_s", "a number of seconds, 0 to 600"),
+        },
+    };
+    let tail = match payload.get("tail").filter(|v| !v.is_null()) {
+        None => 200,
+        Some(v) => match v.as_i64() {
+            Some(n) if (1..=2000).contains(&n) => n,
+            _ => return bad("run", "tail", "a line count, 1 to 2000"),
+        },
+    };
+    let started = start_reply(agent_id, payload, kernel).await;
+    // A refusal from `start` (no command, not allowed, no cwd) is the answer.
+    let jid = match require_job("run", &started) {
+        Ok(j) => j,
+        Err(_) => return started,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(wait_s);
+    loop {
+        let live = {
+            let g = jobs::jobs();
+            match jid.find(&g, agent_id) {
+                Some(j) => j.status == "running" || j.status == "stopping",
+                None => false,
+            }
+        };
+        if !live || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let (status, exit_code) = {
+        let g = jobs::jobs();
+        match jid.find(&g, agent_id) {
+            Some(j) => (j.status.clone(), j.exit_code),
+            None => ("running".to_string(), None),
+        }
+    };
+    // `tail`'s reply carries at most its ring's 500 lines; `run`'s wider cap is
+    // clamped rather than refused, so a large `tail` never turns into a bad_arg.
+    let mut reply = tail::tail_reply(
+        agent_id,
+        &json!({"job_id": jid.raw, "lines": tail.min(tail::MAX_LINES)}),
+    );
+    with(&mut reply, "status", json!(status));
+    with(&mut reply, "exit_code", json!(exit_code));
+    reply
 }
 
 /// `clear` — forget this agent's FINISHED rows: one named job, or every one.
