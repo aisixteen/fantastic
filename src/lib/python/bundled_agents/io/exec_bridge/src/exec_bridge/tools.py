@@ -1095,14 +1095,26 @@ def _snap(job_id: int, full: bool = False) -> dict:
 
 
 async def _status(id, payload, kernel):
-    """args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."""
+    """args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. wait_s:float? (0–120) with job_id — returns as soon as the job is no longer running, or when the wait ends; use it instead of polling. Returns {jobs:[…]}."""
     jid, err = _job_arg("status", payload, required=False)
     if err:
         return err
+    w = payload.get("wait_s")
+    if w is not None:
+        if jid is None:
+            return bad("status", "wait_s", "a job_id to wait for")
+        if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0 or w > 120:
+            return bad("status", "wait_s", "a number of seconds, 0 to 120")
     if jid is not None:
         j = _jobs.get(jid)
         if j is None or j.get("owner") != id:
             return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+        if w is not None:
+            deadline = time.monotonic() + w
+            while _alive(j) or j["status"] in ("running", "stopping"):
+                if time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.2)
         return {
             "jobs": [_snap(jid, full=True)],
             "origin": f"{id} status {{job_id: {jid}}} — a live job; re-send for its output NOW, which may differ",
