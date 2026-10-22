@@ -173,7 +173,7 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
     assert!(second_out.get("raised").is_none(), "{second_out}");
     // ONE CHAIN PER AGENT (#227): the second send is held; the wake turn that
     // answers it runs once the stalled chain has ended.
-    assert!(until_passes(&s, 2).await, "the held send ran");
+    assert_eq!(s.passes_served(), 2, "the queued send ran");
     // status: the first turn is done with reason='error', naming the stall
     events_until(&mut rx, &mut seen, |ev| {
         status_of(ev, "probe_a", "done").is_some()

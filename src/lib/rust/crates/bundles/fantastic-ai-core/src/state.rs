@@ -129,8 +129,52 @@ pub struct ChainState {
 pub struct HeldMsg {
     /// The held message's client_id.
     pub client_id: String,
+    /// The held send's own id — how a watchdog names the senders of one wake.
+    pub send_id: String,
     /// Hands the caller the reply of the pass that answers it.
     pub reply: tokio::sync::oneshot::Sender<serde_json::Value>,
+}
+
+impl ChainState {
+    /// Answer one held sender with an error: its caller is released, not left
+    /// waiting for a pass that will never read it.
+    fn release(h: HeldMsg, why: &str) {
+        let _ = h.reply.send(serde_json::json!({
+            "error": why,
+            "held": true,
+            "client_id": h.client_id,
+        }));
+    }
+
+    /// END THE CHAIN AND FORGET IT (a reboot, a context clear, a delete): every
+    /// held sender is released with `why`, and the token is dropped, so a reply
+    /// still in flight for the old chain is recorded, never admitted.
+    pub fn reset(&mut self, why: &str) {
+        for h in std::mem::take(&mut self.held) {
+            Self::release(h, why);
+        }
+        self.alive = false;
+        self.token = String::new();
+    }
+
+    /// The wake for these held senders never ran: release exactly them with
+    /// `why`. With nobody left held the chain is over. Returns whether any were
+    /// still waiting.
+    pub fn expire(&mut self, send_ids: &[String], why: &str) -> bool {
+        let (gone, keep): (Vec<HeldMsg>, Vec<HeldMsg>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|h| send_ids.contains(&h.send_id));
+        self.held = keep;
+        let any = !gone.is_empty();
+        for h in gone {
+            Self::release(h, why);
+        }
+        if any && self.held.is_empty() {
+            self.alive = false;
+            self.token = String::new();
+        }
+        any
+    }
 }
 
 impl BackendState {
@@ -216,7 +260,15 @@ pub fn is_generating(agent_id: &AgentId) -> bool {
 /// KERNEL task — it dies with the agent's dispatches, not through a bundle-held
 /// handle.
 pub fn drop_state(agent_id: &AgentId) {
-    BACKENDS.lock().remove(agent_id);
+    let removed = BACKENDS.lock().remove(agent_id);
+    // ONE CHAIN PER AGENT (#227): held senders are released, not left to the ceiling.
+    if let Some(state) = removed {
+        state
+            .chain
+            .lock()
+            .expect("chain poisoned")
+            .reset("send: the agent was deleted or shut down");
+    }
 }
 
 /// Close out a generation the kernel is cancelling: if `task_id` names the turn

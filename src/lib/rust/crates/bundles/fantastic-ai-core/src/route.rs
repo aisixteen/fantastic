@@ -124,7 +124,14 @@ pub(crate) fn deliver_soon(
     notice: bool,
 ) {
     let born = crate::state::incarnation(&AgentId::from(target));
-    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born, notice);
+    // ONE CHAIN PER AGENT (#227 Bug 4): the chain token is read when the routing
+    // decision is made, not when the delivery later runs.
+    let chain = if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
+        state_for(&AgentId::from(target)).chain.lock().expect("chain poisoned").token.clone()
+    } else {
+        String::new()
+    };
+    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born, notice, chain);
 }
 
 /// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
@@ -146,6 +153,7 @@ fn deliver_soon_with_born(
     system_prompt: Option<&str>,
     born: u64,
     notice: bool,
+    chain: String,
 ) {
     let target_id = AgentId::from(target);
     let work_kernel = Arc::clone(kernel);
@@ -161,6 +169,7 @@ fn deliver_soon_with_born(
             system_prompt.as_deref(),
             born,
             notice,
+            chain,
         )
         .await;
     });
@@ -178,6 +187,7 @@ fn deliver_soon_with_born(
 /// TARGET into its own store (the send is marked `late`) — but it wakes no turn.
 /// Woken, the rebooted agent would finish its predecessor's work instead of the
 /// new instruction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn deliver(
     kernel: &Arc<Kernel>,
     target: &str,
@@ -186,6 +196,7 @@ pub(crate) async fn deliver(
     system_prompt: Option<&str>,
     born: u64,
     notice: bool,
+    chain: String,
 ) {
     let target_agent = AgentId::from(target);
     let late = crate::state::incarnation(&target_agent) != born;
@@ -197,14 +208,9 @@ pub(crate) async fn deliver(
     // is running is that chain's own turn — it carries the chain token, so it is
     // never held.
     // Harness self-turns (nudges, the held-message wake) are chain turns too.
-    if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
-        let token = state_for(&target_agent)
-            .chain
-            .lock()
-            .expect("chain poisoned")
-            .token
-            .clone();
-        payload.insert("chain".to_string(), json!(token));
+    // The token captured when the routing decision was made (#227 Bug 4).
+    if !chain.is_empty() {
+        payload.insert("chain".to_string(), json!(chain));
     }
     // HARNESS TEXT, NOT A MESSAGE: a turn this layer writes to
     // its own agent is stored as `kind: "notice"`, so a view can hide it; the model
@@ -251,6 +257,15 @@ pub(crate) async fn deliver(
     // is NOT announced: an operator kill already told whoever asked for it.
     let reply_error = out.result.get("error").filter(|v| py_truthy(v));
     let failed = matches!(out.status, Status::Failed | Status::TimedOut) || reply_error.is_some();
+    if failed && notice {
+        // ONE CHAIN PER AGENT (#227 Bug 3): a wake that failed ends the chain and
+        // releases the held senders (their callers get the cancelled shape).
+        state_for(&target_agent)
+            .chain
+            .lock()
+            .expect("chain poisoned")
+            .reset("send: the turn that was to read this message did not run");
+    }
     if failed {
         // The reply's own error, else the RAW status — python passes
         // `out["status"]`, so the text is `failed`/`timed_out` with no prefix.
@@ -552,13 +567,11 @@ pub(crate) fn awaiting() -> &'static Mutex<HashMap<String, HashSet<String>>> {
 
 /// Settle what `self_id` was owed: every `[reply to <pid> · <who> inquiry]` tag in
 /// an incoming message clears that pid. Python `_send`'s `_ANSWER_TAG` scan.
-pub(crate) fn settle_owed(self_id: &str, text: &str) -> bool {
+pub(crate) fn settle_owed(self_id: &str, text: &str) {
     let mut owed = awaiting().lock().expect("awaiting poisoned");
     let Some(set) = owed.get_mut(self_id) else {
-        return false;
+        return;
     };
-    // ONE CHAIN PER AGENT (#227): true when this message answered an owed inquiry.
-    let mut settled = false;
     for line in text.lines() {
         let Some(rest) = line.trim_start().strip_prefix("[reply to ") else {
             continue;
@@ -572,10 +585,8 @@ pub(crate) fn settle_owed(self_id: &str, text: &str) -> bool {
             .is_some_and(|t| t.ends_with(" inquiry"))
         {
             set.remove(pid);
-            settled = true;
         }
     }
-    settled
 }
 
 /// Close the inquiry this chain `(self_id, client_id)` is answering: hand `body`
@@ -812,16 +823,36 @@ pub async fn route_reply(
 
 /// ONE CHAIN PER AGENT (#227): the chain has ended. Messages held while it ran
 /// are answered by ONE wake turn; with none held, the chain is no longer alive.
+///
+/// The wake can be lost (refused by the gate, a send error, an agent being shut
+/// down), so a watchdog releases the senders it was for if no pass has taken them
+/// within the send ceiling.
 pub(crate) fn chain_ended(kernel: &Arc<Kernel>, self_id: &AgentId, system_prompt: Option<&str>) {
+    chain_ended_within(
+        kernel,
+        self_id,
+        system_prompt,
+        std::time::Duration::from_secs_f64(crate::constants::send_timeout_secs()),
+    );
+}
+
+/// [`chain_ended`] with the watchdog's window given.
+pub(crate) fn chain_ended_within(
+    kernel: &Arc<Kernel>,
+    self_id: &AgentId,
+    system_prompt: Option<&str>,
+    ceiling: std::time::Duration,
+) {
     let state = state_for(self_id);
-    let held = {
+    let (held, ids) = {
         let mut chain = state.chain.lock().expect("chain poisoned");
         // The held senders STAY in `chain.held`: the wake pass takes and answers them.
         let held: Vec<String> = chain.held.iter().map(|h| h.client_id.clone()).collect();
+        let ids: Vec<String> = chain.held.iter().map(|h| h.send_id.clone()).collect();
         if held.is_empty() {
             chain.alive = false;
         }
-        held
+        (held, ids)
     };
     if held.is_empty() {
         return;
@@ -838,6 +869,18 @@ pub(crate) fn chain_ended(kernel: &Arc<Kernel>, self_id: &AgentId, system_prompt
         system_prompt,
         true,
     );
+    let watched = self_id.clone();
+    kernel.spawn_task(self_id, "chain_wake_watch", async move {
+        tokio::time::sleep(ceiling).await;
+        state_for(&watched)
+            .chain
+            .lock()
+            .expect("chain poisoned")
+            .expire(
+                &ids,
+                "send: no turn read this message within the send ceiling",
+            );
+    });
 }
 
 /// Fires the route's launch signal however the route ends.
@@ -1594,7 +1637,9 @@ async fn route_reply_gated(
         return true;
     }
     if any_calls {
-        return true;
+        // Calls that reply elsewhere bring no message back to this agent, so the
+        // chain ends here unless a reply batch landed on self (#227 Bug 1).
+        return to_self;
     }
     // No call of the model's own, so the CALLER's one-shot handoff applies: hand
     // this pass's TEXT to `send_to`, once. It must not propagate — a caller cannot
@@ -1766,6 +1811,18 @@ async fn deliver_grouped(
             sp,
             born.get(&dest).copied().unwrap_or_default(),
             notice,
+            // ONE CHAIN PER AGENT (#227 Bug 4): the token is read when this routing
+            // decision is made, as in `deliver_soon`.
+            if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str()) {
+                state_for(&AgentId::from(dest.as_str()))
+                    .chain
+                    .lock()
+                    .expect("chain poisoned")
+                    .token
+                    .clone()
+            } else {
+                String::new()
+            },
         );
     }
 }

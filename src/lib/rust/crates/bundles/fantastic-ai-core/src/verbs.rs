@@ -150,6 +150,32 @@ fn scalar_text(v: &Value) -> String {
         .unwrap_or_else(|| v.to_string())
 }
 
+/// A reply that answers a call of a chain that is over — a previous incarnation's,
+/// or one a stop / clear / lost wake ended — is kept as a `late` row in this
+/// agent's own store and wakes nothing.
+async fn save_late(
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    payload: &Value,
+) -> Result<(), BundleError> {
+    let raw = payload.get("text").map_or_else(String::new, py_str);
+    crate::memory::save_history(
+        agent_id,
+        kernel,
+        &[json!({
+            "role": "user",
+            "parent": Value::Null,
+            "kind": "late",
+            "content": format!(
+                "[late reply — answered a call made before this agent last booted; \
+                 recorded, not acted on]\n{raw}"
+            ),
+        })],
+    )
+    .await?;
+    Ok(())
+}
+
 /// `status` verb.
 pub fn status(agent_id: &AgentId, payload: &Value) -> Value {
     status_snapshot(agent_id, payload)
@@ -335,6 +361,8 @@ pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
         let mut chain = state.chain.lock().expect("chain poisoned");
         chain.alive = false;
         chain.held.clear();
+        // Rotate the token: a routed reply still in flight carries the old one (#227 Bug 5).
+        chain.token = mint_send_id();
     }
     let reached = kernel.cancel_task(&TaskId(pid)).await;
     // STOP REACHES THE TURN ITSELF (#177). When the task walk did not reach the
@@ -866,7 +894,7 @@ pub async fn send(
         _ => String::new(),
     };
     // AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
-    let answered_owed = crate::route::settle_owed(agent_id.as_str(), &text);
+    crate::route::settle_owed(agent_id.as_str(), &text);
     // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
     // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
     // inquiry arrives as bare prose and the receiver cannot tell it is being
@@ -959,21 +987,7 @@ pub async fn send(
     if payload.get("late").is_some_and(py_truthy) {
         // A reply to a call a PREVIOUS incarnation made (see `route::deliver`):
         // recorded in this agent's own store, never a turn.
-        let raw = payload.get("text").map_or_else(String::new, py_str);
-        crate::memory::save_history(
-            agent_id,
-            kernel,
-            &[json!({
-                "role": "user",
-                "parent": Value::Null,
-                "kind": "late",
-                "content": format!(
-                    "[late reply — answered a call made before this agent last booted; \
-                     recorded, not acted on]\n{raw}"
-                ),
-            })],
-        )
-        .await?;
+        save_late(agent_id, kernel, payload).await?;
         return Ok(json!({"late": true, "client_id": client_id}));
     }
     let send_id = mint_send_id();
@@ -989,8 +1003,9 @@ pub async fn send(
     // A message the agent sends to ITSELF is its own chain and is never held.
     let chain_turn = (!chain_token.is_empty()
         && state.chain.lock().expect("chain poisoned").token == chain_token)
-        || fantastic_kernel::current_origin().is_some_and(|o| o == *agent_id)
-        || answered_owed;
+        || fantastic_kernel::current_origin().is_some_and(|o| o == *agent_id);
+    // An inquiry's answer obeys the hold like any other message: it is read by the
+    // chain's next pass, never a second chain of its own.
     let chain_alive = state.chain.lock().expect("chain poisoned").alive;
     if !chain_turn && chain_alive {
         crate::memory::save_history(
@@ -1016,6 +1031,7 @@ pub async fn send(
             .held
             .push(crate::state::HeldMsg {
                 client_id: client_id.clone(),
+                send_id: send_id.clone(),
                 reply: reply_tx,
             });
         let mut detail = Map::new();
@@ -1099,6 +1115,17 @@ pub async fn send(
     // Pop ourselves from the queue, become the in-flight entry — and disarm the
     // guard, whose job (the wait is over) is done.
     queued_guard.disarm();
+    // ONE CHAIN PER AGENT (#227): a routed reply carries the token of the chain it
+    // was decided under. If that chain has since ended (a stop, a reboot, a clear,
+    // a lost wake) the token no longer matches: the reply is RECORDED, never a
+    // turn, so it cannot resume or double the chain.
+    let stale = !chain_token.is_empty()
+        && state.chain.lock().expect("chain poisoned").token != chain_token;
+    if stale {
+        save_late(agent_id, kernel, payload).await?;
+        drop(_guard);
+        return Ok(json!({"late": true, "client_id": client_id}));
+    }
     // ONE CHAIN PER AGENT (#227): this pass owns the chain. A new chain mints its
     // token; this pass TAKES the held messages (it reads their rows) and answers
     // each of them with its own reply below.
@@ -1169,6 +1196,7 @@ pub async fn send(
             let mut chain = state.chain.lock().expect("chain poisoned");
             chain.alive = false;
             chain.held.clear();
+            chain.token = mint_send_id();
         }
         drop(_guard);
         return Ok(json!({"cancelled": true, "client_id": client_id}));
@@ -1553,6 +1581,13 @@ pub fn inquiry_accept(
 /// `context_recall`. Python `_make_boot`.
 pub fn boot(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     crate::state::bump_incarnation(agent_id);
+    // ONE CHAIN PER AGENT (#227): a new incarnation starts with no chain. Held
+    // senders are dropped here, so their callers get the cancelled shape (Bug 2).
+    state_for(agent_id)
+        .chain
+        .lock()
+        .expect("chain poisoned")
+        .reset("send: the agent rebooted before a turn read this message");
     if let Err(e) = crate::memory::store_of(agent_id, kernel) {
         return json!({"error": e.0, "reason": "missing_arg", "arg": "memory_store_id"});
     }

@@ -352,7 +352,11 @@ pub async fn context_clear(
     crate::strategies::strip::forget(agent_id.as_str());
     *st.folds_since.lock().expect("folds_since poisoned") = 0;
     *st.recall_due.lock().expect("recall_due poisoned") = false;
-
+    // ONE CHAIN PER AGENT (#227): a new thread starts a new chain (Bug 2).
+    st.chain
+        .lock()
+        .expect("chain poisoned")
+        .reset("send: the context was cleared before a turn read this message");
     *st.view_source.lock().expect("view_source poisoned") = None;
     Ok(json!({"cleared": rid, "rows": members.len()}))
 }
