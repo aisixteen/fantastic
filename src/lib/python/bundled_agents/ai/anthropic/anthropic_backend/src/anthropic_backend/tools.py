@@ -137,7 +137,6 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         "price_input_long_per_mtok",
         "price_output_long_per_mtok",
     ):
-    for key in ("price_input_per_mtok", "price_output_per_mtok"):
         p = meta.get(key)
         if p is not None and (not _number(p) or p < 0):
             return f"{key} must be a number, zero or more"
