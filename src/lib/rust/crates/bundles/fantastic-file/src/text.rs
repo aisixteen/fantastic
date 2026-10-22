@@ -18,10 +18,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// Lines per `read` page when the caller names no `limit`.
 pub(crate) const READ_LIMIT: u64 = 200;
 
-const H_START: &str = "<<<<<<< SEARCH";
-const H_DIV: &str = "=======";
-const H_END: &str = ">>>>>>> REPLACE";
-
 /// The verbs this module answers.
 pub(crate) const TEXT_VERBS: [&str; 5] = ["read", "write", "edit", "append", "undo"];
 
@@ -363,6 +359,8 @@ async fn append(
 /// SEARCH/REPLACE blocks → `(file, search, replace)` triples, taken VERBATIM (the
 /// marker lines excluded). A block may name its file on its opening line
 /// (`<<<<<<< SEARCH path/to/file`); then `file` is `Some`, otherwise `None`.
+/// A block is fenced by N `<` (N ≥ 7; use 8 when the text holds conflict
+/// markers): its divider is exactly N `=` and its close exactly N `>` + ` REPLACE`.
 /// `Err` on a block that opens but does not close.
 fn parse_hunks(text: &str) -> Result<Vec<(Option<String>, String, String)>, String> {
     let lines: Vec<&str> = text.split('\n').collect();
@@ -370,41 +368,54 @@ fn parse_hunks(text: &str) -> Result<Vec<(Option<String>, String, String)>, Stri
     let n = lines.len();
     let mut i = 0;
     while i < n {
-        // `<<<<<<< SEARCH` alone, or `<<<<<<< SEARCH <path>` naming the file.
-        let open = lines[i];
-        if open != H_START && !open.starts_with(&format!("{H_START} ")) {
+        let Some((width, file)) = fence_open(lines[i]) else {
             i += 1;
             continue;
-        }
-        let file = match open.strip_prefix(H_START) {
-            Some(rest) => {
-                let rest = rest.trim();
-                (!rest.is_empty()).then(|| rest.to_string())
-            }
-            None => None,
         };
+        let divider = "=".repeat(width);
+        let close = format!("{} REPLACE", ">".repeat(width));
         let mut j = i + 1;
         let mut search: Vec<&str> = Vec::new();
-        while j < n && lines[j] != H_DIV {
+        while j < n && lines[j] != divider.as_str() {
             search.push(lines[j]);
             j += 1;
         }
         if j >= n {
-            return Err("a SEARCH block has no `=======` divider".to_string());
+            return Err(format!("a SEARCH block has no `{divider}` divider"));
         }
         j += 1;
         let mut replace: Vec<&str> = Vec::new();
-        while j < n && lines[j] != H_END {
+        while j < n && lines[j] != close.as_str() {
+            if lines[j] == divider.as_str() {
+                return Err(format!(
+                    "a block has a second `{divider}` line; the text contains conflict markers: use the 8-character fence"
+                ));
+            }
             replace.push(lines[j]);
             j += 1;
         }
         if j >= n {
-            return Err("a block has no closing `>>>>>>> REPLACE`".to_string());
+            return Err(format!("a block has no closing `{close}`"));
         }
         hunks.push((file, search.join("\n"), replace.join("\n")));
         i = j + 1;
     }
     Ok(hunks)
+}
+
+/// An opener: N `<` (N ≥ 7), then ` SEARCH`, then optionally ` <path>`.
+/// Returns the fence width N and the named file, if any.
+fn fence_open(line: &str) -> Option<(usize, Option<String>)> {
+    let width = line.bytes().take_while(|b| *b == b'<').count();
+    if width < 7 {
+        return None;
+    }
+    let rest = line[width..].strip_prefix(" SEARCH")?;
+    if rest.is_empty() {
+        return Some((width, None));
+    }
+    let path = rest.strip_prefix(' ')?.trim();
+    Some((width, (!path.is_empty()).then(|| path.to_string())))
 }
 
 /// python `str.count` (non-overlapping); an empty needle counts code points + 1,

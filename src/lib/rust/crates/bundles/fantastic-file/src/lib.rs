@@ -1017,7 +1017,8 @@ const EDIT_GRAMMAR: &str = "one or more blocks: `<<<<<<< SEARCH` / <old lines> /
      the per-edit `hunks` count — with ONE file, `hunks` may be left out and every block \
      applies to it; with several files, a block may name its file on its first line \
      (`<<<<<<< SEARCH path`), and then no hunks are needed; any failure anywhere writes \
-     nothing";
+     nothing. Text that holds conflict markers takes the 8-character fence instead: \
+     `<<<<<<<< SEARCH` / `========` / `>>>>>>>> REPLACE` (N `<`, `=`, `>` with N ≥ 8).";
 
 /// How a document rides a call — python `_reflect`'s `compose`, verbatim.
 const COMPOSE: &str = "every content-carrying verb (`write`, `edit`, `append`) takes its \
