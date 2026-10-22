@@ -270,6 +270,8 @@ def test_misfire_limit_is_validated(backend):
     for good in (2, 50, None):
         err = _tools(backend).validate_meta({"misfire_limit": good}, {})
         assert err != refusal, good
+
+
 #: A record each of the three backends accepts as it stands (its required fields).
 _CACHING_REC = {
     "ollama_backend": {"endpoint": "http://o.test", "memory_store_id": "memory"},
