@@ -285,6 +285,26 @@ async def test_the_table_is_shared_per_endpoint_across_agents():
     await _drain(p2, messages=[{"role": "user", "content": "first"}])
 
 
+async def test_side_calls_take_no_kv_slot():
+    # a fold summary is one request, not a conversation kept warm: three of them
+    # never fill the one slot, and the main turn after them is still admitted
+    p = _provider(
+        _transport(_sse(_delta(finish="stop"))),
+        kv_slots=1,
+        kv_overflow="reject",
+    )
+    for i in range(3):
+        await _drain(
+            p,
+            messages=[{"role": "user", "content": f"summarize part {i}"}],
+            max_tokens=64,
+        )
+    await _drain(p, messages=[{"role": "user", "content": "go"}])
+    assert vp.table_for(ENDPOINT).view()["conversations"] == [
+        conversation_key([{"role": "user", "content": "go"}])
+    ]
+
+
 def test_a_conversation_is_its_prefix():
     base = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
     grown = [
