@@ -69,7 +69,7 @@ from ai_core.strategies.fold import FoldSummaryError
 # consumer, scanning the durable transcript for a recall/persist reaction.
 from ai_core.call_check import check as check_calls
 from ai_core.call_check import repair as repair_calls
-from ai_core.stream_parts import PartSplitter, cut_marker
+from ai_core.stream_parts import PartSplitter, cut_marker, stop_rows
 from ai_core.tool_parse import (
     _ROUTING,
     extract_tool_calls,
@@ -3478,29 +3478,43 @@ async def on_cancel(id, task_id, kernel):
     if entry.get("text") is not None:
         who = "the host stopping" if stopping else entry.get("stopped_by") or "cancel"
         in_id, in_parent = _row_ids_for_incoming(id, entry["text"], kernel)
-        await _save_history(
-            id,
-            kernel,
-            [
-                {
-                    "role": "user",
-                    "content": entry["text"],
-                    "id": in_id,
-                    "parent": in_parent,
-                    **({"kind": "notice"} if entry.get("notice") else {}),
-                },
+        so_far = entry.get("text_so_far", "")
+        # A STOPPED TURN SAYS SO IN A USER ROW, never as the model's answer (#232):
+        # the visible text streamed so far (if any) is the assistant row; the notice
+        # naming who stopped it is a `stopped` user row after it.
+        shown, notice = stop_rows(so_far, who, unsent)
+        rows = [
+            {
+                "role": "user",
+                "content": entry["text"],
+                "id": in_id,
+                "parent": in_parent,
+                **({"kind": "notice"} if entry.get("notice") else {}),
+            }
+        ]
+        prev = in_id
+        if shown is not None:
+            prev = _mint_row_id(id, kernel)
+            rows.append(
                 {
                     "role": "assistant",
-                    "content": cut_marker(
-                        entry.get("text_so_far", ""), f"stopped by {who}", unsent
-                    ),
-                    "id": _mint_row_id(id, kernel),
+                    "content": shown,
+                    "id": prev,
                     "parent": in_id,
-                    **thinking_fields(entry.get("text_so_far", "")),
-                    **({"interrupted": {"client_id": client_id}} if stopping else {}),
-                },
-            ],
+                    **thinking_fields(so_far),
+                }
+            )
+        rows.append(
+            {
+                "role": "user",
+                "kind": "stopped",
+                "content": notice,
+                "id": _mint_row_id(id, kernel),
+                "parent": prev,
+                **({"interrupted": {"client_id": client_id}} if stopping else {}),
+            }
         )
+        await _save_history(id, kernel, rows)
     await _emit_status(
         kernel,
         id,
@@ -4267,7 +4281,7 @@ async def _resume_interrupted(id: str, kernel) -> None:
     this from `_boot`.
 
     RESUME AFTER RESTART. A turn in flight when the host
-    stopped left its incoming row and a cut row marked `interrupted` (`on_cancel`
+    stopped left its incoming row and a `stopped` row marked `interrupted` (`on_cancel`
     during the drain). If that cut row is still the newest of this agent's
     conversation, the turn is run again ONCE — a `[resumed after restart]` notice
     to the client it streamed to; the model has the message above it. A turn ended
@@ -4285,7 +4299,7 @@ async def _resume_interrupted(id: str, kernel) -> None:
     last = rows[-1] if rows else None
     if not (
         last
-        and last.get("role") == "assistant"
+        and last.get("kind") == "stopped"
         and isinstance(last.get("interrupted"), dict)
     ):
         return
