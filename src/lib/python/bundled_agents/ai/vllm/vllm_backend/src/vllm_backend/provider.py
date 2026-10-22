@@ -98,6 +98,11 @@ READ_TIMEOUT = 900.0
 KV_TTL = 1800.0
 KV_OVERFLOWS = ("evict", "reject")
 
+#: How a server names the thinking budget (#207): vllm sends
+#: `thinking_token_budget`, strata `reasoning_budget_tokens`, llamacpp takes
+#: no per-request budget (a server flag).
+DIALECTS = ("vllm", "strata", "llamacpp")
+
 
 #: Tokens a chat template adds around one message (role markers, separators) —
 #: a generous bound (Qwen's ChatML adds ~5).
@@ -258,6 +263,7 @@ class VllmProvider:
         kv_slots: int,
         kv_overflow: str,
         kv_ttl: float = KV_TTL,
+        dialect: str = "vllm",
         sampling: dict | None = None,
         explicit_budget: bool = False,
         connect_timeout: float = CONNECT_TIMEOUT,
@@ -282,6 +288,7 @@ class VllmProvider:
         # window size is refused once any prompt is added).
         self._window = int(window) if window else None
         self._kv = (int(kv_slots), kv_overflow, float(kv_ttl))
+        self._dialect = dialect
         # The effective sampling: the record's values over SAMPLING_DEFAULTS,
         # plus any PASSTHROUGH field the record set.
         self._sampling = dict(sampling or {})
@@ -352,7 +359,11 @@ class VllmProvider:
         budget = self._budget_for(call_max, side_call=side_call)
         last_budgets[self._agent_id] = budget
         if budget is not None:
-            body["thinking_token_budget"] = budget
+            # the dialect's own name for the budget (#207); llamacpp takes none
+            if self._dialect == "strata":
+                body["reasoning_budget_tokens"] = budget
+            elif self._dialect != "llamacpp":
+                body["thinking_token_budget"] = budget
         return body
 
     async def chat(

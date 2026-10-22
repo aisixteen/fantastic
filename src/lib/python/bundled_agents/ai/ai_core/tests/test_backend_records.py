@@ -109,6 +109,7 @@ SCHEMAS = {
             ("kv_slots", "int", False, None, None),
             ("metrics_url", "str", False, None, None),
             ("kv_overflow", "enum", True, None, ["evict", "reject"]),
+            ("server_dialect", "enum", False, None, ["vllm", "strata", "llamacpp"]),
             ("temperature", "float", False, 0.2, None),
             ("top_p", "float", False, 0.8, None),
             ("top_k", "int", False, 20, None),
@@ -544,6 +545,7 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
         "kv_slots": 3,
         "kv_overflow": "reject",
         "kv_ttl": 1800.0,
+        "dialect": "vllm",
         "sampling": {
             "temperature": 0.2,
             "top_p": 0.8,
