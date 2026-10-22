@@ -242,6 +242,40 @@ async def test_an_explicit_budget_rules_the_turn_and_halves_on_a_side_call():
     assert [b.get("thinking_token_budget") for b in sink] == [8000, 1000, None]
 
 
+async def test_the_budget_goes_out_under_the_dialects_name():
+    for d in vp.DIALECTS:
+        sink: list = []
+        p = _provider(
+            _transport(_sse(_delta(finish="stop")), sink),
+            sampling=dict(vp.SAMPLING_DEFAULTS, thinking_token_budget=4000),
+            explicit_budget=True,
+            dialect=d,
+        )
+        await _drain(p)
+        body = sink[0]
+        if d == "vllm":
+            assert body["thinking_token_budget"] == 4000
+            assert "reasoning_budget_tokens" not in body
+        elif d == "strata":
+            assert body["reasoning_budget_tokens"] == 4000
+            assert "thinking_token_budget" not in body
+        else:
+            assert "thinking_token_budget" not in body
+            assert "reasoning_budget_tokens" not in body
+
+
+async def test_no_dialect_given_sends_the_vllm_name():
+    sink: list = []
+    p = _provider(
+        _transport(_sse(_delta(finish="stop")), sink),
+        sampling=dict(vp.SAMPLING_DEFAULTS, thinking_token_budget=4000),
+        explicit_budget=True,
+    )
+    await _drain(p)
+    assert sink[0]["thinking_token_budget"] == 4000
+    assert "reasoning_budget_tokens" not in sink[0]
+
+
 # ─── the KV-cache session table ──────────────────────────────────────────────
 
 
@@ -318,6 +352,21 @@ def test_a_conversation_is_its_prefix():
             {"thinking_token_budget": 2000},
             "not below max_tokens=1000",
         ),
+        (
+            {"server_dialect": "bogus"},
+            {},
+            "server_dialect must be one of vllm, strata, llamacpp",
+        ),
+        (
+            {"server_dialect": "llamacpp", "thinking_token_budget": 4000},
+            {},
+            "llama.cpp takes the reasoning budget as a server flag",
+        ),
+        (
+            {"thinking_token_budget": 4000},
+            {"server_dialect": "llamacpp"},
+            "llama.cpp takes the reasoning budget as a server flag",
+        ),
     ],
 )
 def test_a_write_the_backend_cannot_honour_is_refused(meta, record, fragment):
@@ -351,6 +400,22 @@ def test_a_consistent_write_passes():
         "thinking_token_budget": 4000,
         "reasoning_effort": "xhigh",
         "memory_store_id": "memory",
+    }
+    assert validate_meta(meta, {}) is None
+
+
+def test_a_strata_budget_write_passes():
+    meta = {
+        "endpoint": ENDPOINT,
+        "model": "qwen3.8-27b",
+        "max_tokens": 8000,
+        "context_window": 262144,
+        "kv_slots": 6,
+        "kv_overflow": "evict",
+        "thinking_token_budget": 4000,
+        "reasoning_effort": "xhigh",
+        "memory_store_id": "memory",
+        "server_dialect": "strata",
     }
     assert validate_meta(meta, {}) is None
 
@@ -408,6 +473,7 @@ async def test_reflect_shows_the_effective_posture_and_the_shared_table(seeded_k
         "evicted": 0,
         "rejected": 0,
     }, out["kv"]
+    assert out["server_dialect"] == "vllm"
 
 
 # ─── the key (an HTTPS door in front of the GPU) ─────────────────────────────

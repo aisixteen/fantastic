@@ -28,6 +28,7 @@ from ai_core.schema import credentials_field, field, schema, validate
 from vllm_backend import server
 from vllm_backend.provider import (
     CONNECT_TIMEOUT,
+    DIALECTS,
     KV_OVERFLOWS,
     KV_TTL,
     PASSTHROUGH,
@@ -91,6 +92,7 @@ def make_provider(id, kernel):
         kv_slots=_required_int(rec, "kv_slots"),
         kv_overflow=overflow,
         kv_ttl=float(rec.get("kv_ttl") or KV_TTL),
+        dialect=rec.get("server_dialect") or "vllm",
         sampling=sampling,
         explicit_budget=explicit,
         connect_timeout=float(rec.get("connect_timeout") or CONNECT_TIMEOUT),
@@ -122,6 +124,7 @@ async def _reflect_extra(id, kernel):
             # shared by every vllm_backend agent on the same endpoint
             **(table_for(endpoint).view() if isinstance(endpoint, str) else {}),
         },
+        "server_dialect": rec.get("server_dialect") or "vllm",
     }
 
 
@@ -170,6 +173,14 @@ RECORD_SCHEMA = schema(
             "(the newcomer is refused)",
             required=True,
             enum=KV_OVERFLOWS,
+        ),
+        field(
+            "server_dialect",
+            "enum",
+            "how this server names things: vllm (default) sends thinking_token_budget; "
+            "strata sends reasoning_budget_tokens; llamacpp takes no per-request budget "
+            "(a server flag) — set explicitly, never guessed (#207)",
+            enum=DIALECTS,
         ),
         field(
             "temperature",
@@ -300,6 +311,14 @@ def validate_meta(meta: dict, record: dict) -> str | None:
             f"thinking_token_budget={budget} is not below max_tokens={mx} — it could "
             "never fire, and a turn would end mid-thought with no answer; keep it "
             "below max_tokens (half is a good start)"
+        )
+    if "server_dialect" in meta and meta["server_dialect"] is not None:
+        if meta["server_dialect"] not in DIALECTS:
+            return "server_dialect must be one of vllm, strata, llamacpp"
+    if merged.get("server_dialect") == "llamacpp" and budget is not None:
+        return (
+            "llama.cpp takes the reasoning budget as a server flag, not per request — "
+            "unset thinking_token_budget (or use server_dialect strata/vllm)"
         )
     # EVERY required field, checked at the WRITE: a model spawning a sub-AI copies
     # the fields it can see, and a record the write accepted but no turn could use
