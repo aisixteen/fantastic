@@ -35,14 +35,6 @@ with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) an
 `context_clear` (a boundary, nothing deleted) inspect and page it; `context_forget`
 drops the rows folds already summarise. `watch {body?}` /
 `unwatch` subscribe to this agent's row events (a digest; with `body` the content too).
-## Caching
-
-`caching` is `none` | `cleanup` (default) here; `provider_cache` is refused — it is
-Anthropic's, and ollama gets no cache marker (#171). `none` keeps the history append-only
-(folds still compact it), which suits a server that caches identical prompt starts on its
-own — llama.cpp/Strata slot caches. `cleanup` lets ai-core drop stale tool output: it
-saves tokens but changes the prompt start.
-
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
 and returns `{response, final}`. A first-class peer of `exec_bridge`: a
