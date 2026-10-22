@@ -1047,12 +1047,19 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
     assert_eq!(started["started"], json!(true), "{started}");
 
     seed(&f.k).await;
-    let got = call(
-        &f.k,
-        json!({"type": "get", "ref": "openai/main"}),
-        Some("alice"),
+    // The `get` is NAMED: only a named call's settle row keeps its whole result
+    // (an unnamed one keeps a `{status, bytes}` digest), so only then does the
+    // reply's secret mark decide whether the value reaches a row.
+    let got = as_agent(
+        AgentId::from("alice"),
+        f.k.send(vec![Item::new(
+            AgentId::from("creds"),
+            json!({"type": "get", "ref": "openai/main"}),
+        )
+        .with_id("get-1")]),
     )
-    .await;
+    .await
+    .remove(0);
     assert_eq!(got.result["fields"], json!({"api_key": KEY}), "{}", got.result);
 
     f.k.flush_executions().await;
@@ -1065,8 +1072,24 @@ async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
         .remove(0)
         .result
         .to_string();
+    // the `get`'s own record is IN the dump (else "no KEY" proves nothing) and
+    // carries its reply fields as the mark
+    assert!(dumped.contains("get-1"), "the get's record is not in the dump: {dumped}");
     assert!(!dumped.contains(KEY), "{dumped}");
     assert!(dumped.contains("[secret]"), "{dumped}");
+
+    // the `ledger` verb — the kernel's own read of those rows — shows the get's
+    // outcome with the mark, never the value
+    let ledger = f
+        .k
+        .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))])
+        .await
+        .remove(0)
+        .result
+        .to_string();
+    assert!(ledger.contains("get-1"), "the get is not in the ledger: {ledger}");
+    assert!(!ledger.contains(KEY), "{ledger}");
+    assert!(ledger.contains("[secret]"), "{ledger}");
 
     // and no row of the store or its callers holds it
     for who in ["creds", "alice", "bob", "kernel"] {

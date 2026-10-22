@@ -155,6 +155,11 @@ pub trait Bundle: Send + Sync {
     /// answered to `payload`) that the kernel records — the settle row, the
     /// `ledger` verb, the memory store — only as `[secret]`. The caller receives
     /// the reply whole. Default: none.
+    ///
+    /// KNOWN GAP (issue #285): both secret hooks run on the kernel that HOSTS the
+    /// bundle. A call to an agent on a CONNECTED kernel is recorded by the CALLING
+    /// kernel, which does not know that agent's marks — so it records the payload
+    /// and the reply in clear.
     fn reply_secret(&self, _payload: &Value, _reply: &Value) -> Vec<String> {
         Vec::new()
     }
