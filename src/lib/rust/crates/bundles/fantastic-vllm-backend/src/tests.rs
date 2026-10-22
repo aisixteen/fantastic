@@ -82,6 +82,7 @@ fn provider(endpoint: &str) -> VllmProvider {
         window: None,
         kv_slots: 7,
         kv_overflow: "evict".to_string(),
+        dialect: "vllm".to_string(),
         kv_ttl: KV_TTL,
         sampling,
         explicit_budget: false,
@@ -378,6 +379,51 @@ async fn an_explicit_budget_rules_the_turn_and_halves_on_a_side_call() {
         .map(|b| b["thinking_token_budget"].clone())
         .collect();
     assert_eq!(sent, vec![json!(8000), json!(1000), Value::Null]);
+}
+
+#[test]
+fn the_budget_goes_out_under_the_dialects_name() {
+    // one explicit budget, three servers: each gets it under its own name
+    let mut p = provider("http://unused/v1");
+    p.sampling
+        .insert("thinking_token_budget".into(), json!(4000));
+    p.explicit_budget = true;
+    p.dialect = "vllm".into();
+    let b = p.body(&hi(), 8000, false).expect("vllm body");
+    assert_eq!(b["thinking_token_budget"], json!(4000));
+    assert!(b.get("reasoning_budget_tokens").is_none());
+
+    p.dialect = "strata".into();
+    let b = p.body(&hi(), 8000, false).expect("strata body");
+    assert_eq!(b["reasoning_budget_tokens"], json!(4000));
+    assert!(b.get("thinking_token_budget").is_none());
+
+    p.dialect = "llamacpp".into();
+    let b = p.body(&hi(), 8000, false).expect("llamacpp body");
+    assert!(b.get("thinking_token_budget").is_none());
+    assert!(b.get("reasoning_budget_tokens").is_none());
+}
+
+#[test]
+fn validate_refuses_a_bad_dialect_and_a_llamacpp_budget() {
+    let record = serde_json::Map::new();
+    let meta = json!({"server_dialect": "bogus"});
+    let msg = validate(meta.as_object().unwrap(), &record).expect("refused");
+    assert!(msg.contains("server_dialect must be one of vllm, strata, llamacpp"));
+
+    let meta = json!({"server_dialect": "llamacpp", "thinking_token_budget": 4000});
+    let msg = validate(meta.as_object().unwrap(), &record).expect("refused");
+    assert!(msg.contains("llama.cpp takes the reasoning budget as a server flag"));
+
+    let meta = json!({
+        "endpoint": "http://x/v1",
+        "memory_store_id": "mem_test",
+        "kv_overflow": "evict",
+        "server_dialect": "strata",
+        "thinking_token_budget": 4000,
+        "max_tokens": 8000
+    });
+    assert!(validate(meta.as_object().unwrap(), &record).is_none());
 }
 
 // ─── the KV-cache session table ─────────────────────────────────────────────

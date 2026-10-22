@@ -189,7 +189,7 @@ impl Provider for OllamaProvider {
             .await
             .map_err(|s| s.error(BACKEND, &self.endpoint))?;
         let resp =
-            sent.map_err(|e| ProviderError::raised(format!("ollama: request failed: {e}")))?;
+            sent.map_err(|e| ProviderError::transport(format!("ollama: request failed: {e}")))?;
         if !resp.status().is_success() {
             // PYTHON'S TEXT: the ollama SDK raises `ResponseError(body,
             // status)`, which reads the body's `error` field (the raw body when
@@ -282,7 +282,7 @@ fn consume_ndjson(
                             // drops an unterminated tail rather than persisting a
                             // fragment.
                             finished = true;
-                            pending.push_back(Err(ProviderError::raised(format!(
+                            pending.push_back(Err(ProviderError::transport(format!(
                                 "ollama: stream error: {e}"
                             ))));
                             continue;

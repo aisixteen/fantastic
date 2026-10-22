@@ -77,9 +77,11 @@ async def _drain(p: VllmProvider, messages=None, **kw) -> str:
 def _fresh_tables():
     vp._tables.clear()
     vp.last_budgets.clear()
+    vp.usage.clear()
     yield
     vp._tables.clear()
     vp.last_budgets.clear()
+    vp.usage.clear()
 
 
 # ─── the stream ──────────────────────────────────────────────────────────────
@@ -118,6 +120,39 @@ async def test_a_stream_that_ends_without_finish_reason_is_an_error():
     p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
     with pytest.raises(RuntimeError, match="without a finish_reason"):
         await _drain(p)
+
+
+async def test_a_transport_failure_is_marked_transport():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    p = _provider(httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+
+
+async def test_a_stream_without_finish_reason_is_transport():
+    p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+
+
+@pytest.mark.parametrize("code", [502, 503, 504])
+async def test_a_gateway_status_is_transport(code):
+    p = _provider(_transport('{"error":"down"}', status=code))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+
+
+@pytest.mark.parametrize("code", [400, 500])
+async def test_a_plain_http_status_is_not_transport(code):
+    p = _provider(_transport('{"error":"bad"}', status=code))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is False
 
 
 async def test_an_http_error_names_the_endpoint_and_the_body():
@@ -164,7 +199,7 @@ async def test_the_body_carries_the_defaults_and_only_what_the_record_set():
 async def test_a_cap_that_is_the_whole_window_sends_no_max_tokens():
     """vLLM counts prompt AND output against one window: `max_tokens` equal to the
     window is refused (HTTP 400). A turn capped at the window asks for the rest of
-    it — the body carries no `max_tokens`; a side call keeps its own bound."""
+    it; the body carries no `max_tokens`, and a side call keeps its own bound."""
     sink: list = []
     p = _provider(
         _transport(_sse(_delta(finish="stop")), sink), max_tokens=262144, window=262144
@@ -319,6 +354,26 @@ async def test_the_table_is_shared_per_endpoint_across_agents():
     await _drain(p2, messages=[{"role": "user", "content": "first"}])
 
 
+async def test_side_calls_take_no_kv_slot():
+    # a fold summary is one request, not a conversation kept warm: three of them
+    # never fill the one slot, and the main turn after them is still admitted
+    p = _provider(
+        _transport(_sse(_delta(finish="stop"))),
+        kv_slots=1,
+        kv_overflow="reject",
+    )
+    for i in range(3):
+        await _drain(
+            p,
+            messages=[{"role": "user", "content": f"summarize part {i}"}],
+            max_tokens=64,
+        )
+    await _drain(p, messages=[{"role": "user", "content": "go"}])
+    assert vp.table_for(ENDPOINT).view()["conversations"] == [
+        conversation_key([{"role": "user", "content": "go"}])
+    ]
+
+
 def test_a_conversation_is_its_prefix():
     base = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
     grown = [
@@ -404,6 +459,17 @@ def test_a_consistent_write_passes():
     assert validate_meta(meta, {}) is None
 
 
+async def test_the_final_usage_chunk_adds_one_request_and_its_tokens():
+    sse = _sse(
+        _delta(content="hi"),
+        _delta(finish="stop"),
+        {"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 30}},
+    )
+    p = _provider(_transport(sse))
+    await _drain(p)
+    assert vp.usage["v1"] == {"requests": 1, "prompt_tokens": 120, "output_tokens": 30}
+
+
 def test_a_strata_budget_write_passes():
     meta = {
         "endpoint": ENDPOINT,
@@ -421,6 +487,44 @@ def test_a_strata_budget_write_passes():
 
 
 # ─── through the kernel ──────────────────────────────────────────────────────
+
+
+async def test_the_usage_verb_shows_the_counts_reset_zeroes_them_and_delete_drops_them(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    r = await _create(
+        k,
+        id="v1",
+        endpoint=ENDPOINT,
+        model="qwen3.8-27b",
+        max_tokens=8000,
+        context_window=262144,
+        kv_slots=7,
+        kv_overflow="evict",
+        memory_store_id="memory",
+    )
+    assert r.get("id") == "v1", r
+    vp.usage["v1"] = {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}
+
+    def call(payload):
+        return k.send([{"target": "v1", "payload": payload}])
+
+    got = (await call({"type": "usage"}))[0]["result"]
+    assert got == {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}, got
+
+    out = (await call({"type": "reflect"}))[0]["result"]
+    assert out["usage"] == {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}, out
+
+    got = (await call({"type": "usage", "reset": True}))[0]["result"]
+    assert got == {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}, got
+    assert vp.usage["v1"] == {"requests": 0, "prompt_tokens": 0, "output_tokens": 0}
+
+    bad = (await call({"type": "usage", "reset": "yes"}))[0]["result"]
+    assert bad.get("reason") == "bad_arg" and bad.get("arg") == "reset", bad
+
+    await k.send([{"target": k.id, "payload": {"type": "delete_agent", "id": "v1"}}])
+    assert "v1" not in vp.usage
 
 
 async def _create(kernel, **meta):

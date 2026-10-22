@@ -9,7 +9,9 @@
 ![platforms: macOS · Linux · Windows](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-lightgrey)
 [![roadmap](https://img.shields.io/badge/roadmap-app%20%E2%86%92%20fantastic%20OS-5319e7)](https://github.com/orgs/aisixteen/projects/1)
 
-![Aisixteen Fantastic](media/hero.gif)
+[![Aisixteen Fantastic — watch the 2-minute video](media/hero-poster.jpg)](media/hero.mp4)
+
+▶ [Watch the 2-minute video](media/hero.mp4)
 
 Fantastic is a kernel of **agents**. A model, a program, a file tree, a shell, a
 browser canvas and the human at the keyboard are all agents in one tree, addressed

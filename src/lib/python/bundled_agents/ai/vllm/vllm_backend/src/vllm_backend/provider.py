@@ -42,6 +42,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.provider import ProviderError
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +206,16 @@ def table_for(endpoint: str) -> SessionTable:
 # beside the tables — dropped by the bundle's `on_delete`.
 last_budgets: dict[str, int | None] = {}
 
+# agent id -> its token counts since the kernel started: requests, prompt_tokens,
+# output_tokens. Reflect and the `usage` verb report it; on_delete drops it.
+usage: dict[str, dict] = {}
+
+
+def _usage_of(agent_id: str) -> dict:
+    return usage.setdefault(
+        agent_id, {"requests": 0, "prompt_tokens": 0, "output_tokens": 0}
+    )
+
 
 def conversation_key(messages: list[dict]) -> str:
     """A conversation's identity: its system text + first user turn.
@@ -364,10 +375,13 @@ class VllmProvider:
         call_max = int(max_tokens) if max_tokens is not None else self._max_tokens
         body = self._body(messages, call_max, side_call=max_tokens is not None)
         slots, overflow, ttl = self._kv
-        # Admission BEFORE the request: a `reject` must not reach the GPU.
-        rotated = table_for(self._endpoint).admit(
-            conversation_key(messages), slots, overflow, ttl, self._clock()
-        )
+        # A side call is one request, not a conversation kept warm: it takes no slot, so folds cannot fill the table (#184).
+        rotated = None
+        if max_tokens is None:
+            # Admission BEFORE the request: a `reject` must not reach the GPU.
+            rotated = table_for(self._endpoint).admit(
+                conversation_key(messages), slots, overflow, ttl, self._clock()
+            )
         if rotated is not None:
             log.info("vllm_backend: KV slot rotated — conversation %s out", rotated)
 
@@ -398,9 +412,10 @@ class VllmProvider:
                         if resp.status_code in (401, 403)
                         else ""
                     )
-                    raise RuntimeError(
+                    raise ProviderError(
                         f"vllm_backend: {self._endpoint} answered HTTP "
-                        f"{resp.status_code}{why}: {detail}"
+                        f"{resp.status_code}{why}: {detail}",
+                        transport=resp.status_code in (502, 503, 504),
                     )
                 async for line in resp.aiter_lines():
                     # `aiter_lines` reassembles lines a read split mid-JSON;
@@ -419,6 +434,11 @@ class VllmProvider:
                         self.last_prompt_tokens = int(usage["prompt_tokens"])
                     if isinstance(usage, dict) and usage.get("completion_tokens"):
                         self.last_completion_tokens = int(usage["completion_tokens"])
+                    if isinstance(usage, dict):
+                        u = _usage_of(self._agent_id)
+                        u["requests"] += 1
+                        u["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+                        u["output_tokens"] += int(usage.get("completion_tokens") or 0)
                     choices = obj.get("choices") or []
                     if not choices:
                         continue  # the usage-only final chunk
@@ -443,33 +463,38 @@ class VllmProvider:
                             yield THINK_CLOSE
                         yield content
         except httpx.ConnectTimeout as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: no answer from {self._endpoint} within "
                 f"connect_timeout={self._timeouts[0]:g}s — the instance is STOPPED "
-                "(its SYNs are dropped), or the tunnel/port is wrong"
+                "(its SYNs are dropped), or the tunnel/port is wrong",
+                transport=True,
             ) from e
         except httpx.ConnectError as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: {self._endpoint} refused the connection — the host is "
                 "up but vLLM is not listening yet (it loads for ~75 s after boot), or "
-                "the tunnel in front of it is down"
+                "the tunnel in front of it is down",
+                transport=True,
             ) from e
         except httpx.ReadTimeout as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: {self._endpoint} sent nothing for "
-                f"read_timeout={self._timeouts[1]:g}s"
+                f"read_timeout={self._timeouts[1]:g}s",
+                transport=True,
             ) from e
         except (httpx.ReadError, httpx.RemoteProtocolError) as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: {self._endpoint} dropped the stream mid-answer — "
-                "vLLM died or restarted; this turn is NOT complete"
+                "vLLM died or restarted; this turn is NOT complete",
+                transport=True,
             ) from e
         if thinking:
             yield THINK_CLOSE
         if not saw_finish:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: the stream from {self._endpoint} ended without a "
-                "finish_reason — vLLM died mid-answer; this turn is NOT complete"
+                "finish_reason — vLLM died mid-answer; this turn is NOT complete",
+                transport=True,
             )
         # A CUT: a BOUNDED SIDE CALL (a fold summary, which passed its own
         # `max_tokens`) that stopped at its bound got what it asked for — an

@@ -1075,7 +1075,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     reload = (): void => {
       handle.unmount();
       body.innerHTML = "";
-      void Promise.resolve(bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: rec, close, actions: canvasActions })).then((h) => {
+      // the record may have been refreshed since this closure was made (#222)
+      const live = frames.get(rec.id)?.rec ?? rec;
+      void Promise.resolve(bundle.mount({ kernel: asView, mount: body, selfId: rec.id, backend, record: live, close, actions: canvasActions })).then((h) => {
         const f = frames.get(rec.id);
         if (f) f.handle = h;
       });

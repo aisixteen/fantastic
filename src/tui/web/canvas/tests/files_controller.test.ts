@@ -306,6 +306,44 @@ test("a change under an open folder of .fantastic asks the agent folders to be r
   ctl.dispose();
 });
 
+test("start does not overwrite the saved folders with an empty list", async () => {
+  const r = rig();
+  project(r.bridge);
+  const saved: Array<{ expanded: string[]; selected: string | null }> = [];
+  const ctl = new FilesController({ bridge: r.bridge, hub: r.hub, selfId: "t_overwrite", persist: (s) => saved.push({ ...s }), index: r.index, walk: () => {}, publish: () => {} });
+  await ctl.start({ expanded: ["src", "src/deep"] });
+  assert.ok(saved.length > 0, "the restore saves the tree");
+  for (const s of saved) assert.notDeepEqual(s.expanded, [], "a restore never saves an empty open set");
+  assert.deepEqual(saved.at(-1)!.expanded, ["src", "src/deep"], "the last save lists both folders");
+  ctl.dispose();
+});
+
+test("start saves once, not once per folder", async () => {
+  const r = rig();
+  project(r.bridge);
+  const saved: Array<{ expanded: string[]; selected: string | null }> = [];
+  const ctl = new FilesController({ bridge: r.bridge, hub: r.hub, selfId: "t_once", persist: (s) => saved.push({ ...s }), index: r.index, walk: () => {}, publish: () => {} });
+  await ctl.start({ expanded: ["src", "src/deep"] });
+  assert.equal(saved.length, 1, "the whole restore is one save");
+  assert.deepEqual(saved[0].expanded, ["src", "src/deep"]);
+  ctl.dispose();
+});
+
+test("a folder that disappears is saved closed", async () => {
+  const r = rig();
+  project(r.bridge);
+  const saved: Array<{ expanded: string[]; selected: string | null }> = [];
+  const ctl = new FilesController({ bridge: r.bridge, hub: r.hub, selfId: "t_gone", persist: (s) => saved.push({ ...s }), index: r.index, walk: () => {}, publish: () => {} });
+  await ctl.start({ expanded: ["src", "src/deep"] });
+  assert.equal(ctl.model.isOpen("src/deep"), true);
+  r.bridge.remove("src/deep"); // the tree closes it on its own
+  await settle();
+  assert.equal(ctl.model.isOpen("src/deep"), false);
+  assert.ok(saved.length > 1, "the closing is saved too");
+  assert.deepEqual(saved.at(-1)!.expanded, ["src"], "the record no longer lists the folder that went away");
+  ctl.dispose();
+});
+
 test("the page's walker is the one ensureWalker made, and getWalker says so", async () => {
   const b = new FakeBridge();
   const w = ensureWalker(b);

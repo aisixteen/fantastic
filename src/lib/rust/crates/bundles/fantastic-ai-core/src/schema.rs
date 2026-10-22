@@ -28,7 +28,9 @@
 //!
 //! [`Bundle::record_schema`]: fantastic_kernel::bundle::Bundle::record_schema
 
-use crate::constants::{DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE, RECENT_N, RECENT_N_RANGE};
+use crate::constants::{
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_RESERVE, MAX_SILENT_TURNS, RECENT_N, RECENT_N_RANGE,
+};
 use crate::credentials::shape_error;
 use crate::strategies::{DEFAULT_STRATEGY, STRATEGY_NAMES};
 use fantastic_bundle::{py_repr_value, py_strip};
@@ -180,6 +182,7 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
             "int",
             crate::caching::CACHE_PRIMER_HINT,
         ),
+        Field::new("misfire_limit", "int", MISFIRE_LIMIT_HINT).default(json!(MAX_SILENT_TURNS)),
         Field::new("system_prompt", "str", SYSTEM_PROMPT_HINT),
         Field::new("file_bridge_id", "str", FILE_BRIDGE_ID_HINT),
         Field::new("system_prompt_file", "str", SYSTEM_PROMPT_FILE_HINT),
@@ -187,6 +190,9 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
         Field::new("post_system_prompt", "str", POST_SYSTEM_PROMPT_HINT),
     ]
 }
+
+/// The `misfire_limit` field's hint (#203).
+pub const MISFIRE_LIMIT_HINT: &str = "answers in a row that ran nothing (wrapped, malformed, thinking-only, no call) before the chain gives up; from the 2nd one on, the reply escalates (2–50, default 10) (#203)";
 
 /// The `pre_system_prompt` field's hint. Python `AI_FIELDS`.
 pub const PRE_SYSTEM_PROMPT_HINT: &str = "text placed BEFORE the system block on every turn \
@@ -369,6 +375,12 @@ pub fn validate(
             ));
         }
     }
+    // `misfire_limit`: named on a write it is an int from 2 to 50 (#203).
+    if let Some(v) = meta.get("misfire_limit").filter(|v| !v.is_null()) {
+        if !v.as_i64().is_some_and(|n| (2..=50).contains(&n)) {
+            return Some("misfire_limit must be an int from 2 to 50".to_string());
+        }
+    }
     // `system_prompt` (every ai_core agent's): named on a write it is a non-blank
     // string, or null to clear it.
     if let Some(v) = meta.get("system_prompt").filter(|v| !v.is_null()) {
@@ -452,6 +464,7 @@ mod tests {
                 "recent_n",
                 "caching",
                 "cache_primer_until",
+                "misfire_limit",
                 "system_prompt",
                 "file_bridge_id",
                 "system_prompt_file",
@@ -521,7 +534,7 @@ mod tests {
         let sch = sample();
         let rec = obj(json!({"endpoint": "http://h", "memory_store_id": "m"}));
         assert_eq!(
-            sch["fields"][9].to_string(),
+            sch["fields"][10].to_string(),
             json!({"name": "system_prompt", "type": "str", "required": false,
                    "hint": SYSTEM_PROMPT_HINT})
             .to_string()

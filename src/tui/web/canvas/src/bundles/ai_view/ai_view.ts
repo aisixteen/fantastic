@@ -142,6 +142,56 @@ export function monitorTag(d: MonitorDelivery): string {
   return `monitor ${d.id} · job ${d.job}${d.label !== null ? ` "${d.label}"` : ""}`;
 }
 
+/** The CALL CHECKER's report: the person sees why nothing ran. */
+export function isReport(m: Record<string, unknown>): boolean {
+  return typeof m["head"] === "string" && m["head"].includes("[malformed call — nothing ran]");
+}
+
+/** The newest `keep` history rows, oldest first, over every page (history answers
+ *  oldest-first, one page at a time: `next` is the cursor for the following page).
+ *  `bytes` sums every row's bytes; `lastId` is the highest row id seen. */
+export async function historyTail(
+  call: (p: Record<string, unknown>) => Promise<Record<string, unknown> | null>,
+  keep = 300,
+): Promise<{ rows: Record<string, unknown>[]; bytes: number; lastId: number }> {
+  let window: Record<string, unknown>[] = [];
+  let bytes = 0;
+  let lastId = 0;
+  let args: Record<string, unknown> = { type: "history" };
+  for (let page = 0; page < 1000; page++) {
+    const r = await call(args);
+    if (r === null) break;
+    const rows = Array.isArray(r["rows"]) ? (r["rows"] as Record<string, unknown>[]) : [];
+    for (const m of rows) {
+      if (typeof m["bytes"] === "number") bytes += m["bytes"] as number;
+      if (typeof m["id"] === "number") lastId = Math.max(lastId, m["id"] as number);
+    }
+    window = window.concat(rows);
+    if (window.length > keep) window = window.slice(window.length - keep);
+    if (typeof r["next"] !== "number") break;
+    args = { type: "history", after: r["next"] };
+  }
+  return { rows: window, bytes, lastId };
+}
+
+/** A run of CONSECUTIVE report rows with the same head becomes the first of them
+ *  with `repeat: n` (n >= 2); every other row is unchanged. */
+export function collapseReports(
+  rows: Record<string, unknown>[],
+  isRep: (m: Record<string, unknown>) => boolean,
+): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const m of rows) {
+    const last = out[out.length - 1];
+    if (isRep(m) && last !== undefined && isRep(last) && last["head"] === m["head"]) {
+      last["repeat"] = typeof last["repeat"] === "number" ? (last["repeat"] as number) + 1 : 2;
+      continue;
+    }
+    out.push({ ...m });
+  }
+  return out;
+}
+
 /** ai_core's header on a reply that comes back as the next turn. */
 const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
 
@@ -754,20 +804,16 @@ export const aiView: ViewBundle = {
     // `history` answers at DIGEST resolution ({id, role, head, bytes} per row) on
     // every runtime; a row's full text is behind the agent's recall / grep.
     let lastRow = 0; // the newest history row this cell has drawn
-    const hist = (await host.call(backend, { type: "history", client_id: clientId })) as Dict;
-    // a backend not answering yet (a host just restarted) answers null: no rows
-    const rows = Array.isArray(hist?.["rows"]) ? (hist["rows"] as Dict[]) : [];
-    // `kind: "notice"` rows are the AI layer's own turns to its model (the
-    // no-call reminder, a malformed-call report, a refused await): not chat
-    // — except the CALL CHECKER's report (owner 2026-10-12): the person sees why
-    // nothing ran
-    const isReport = (m: Dict): boolean => s(m, "head").includes("[malformed call — nothing ran]");
+    // the NEWEST rows only: history pages oldest-first; historyTail keeps the last 300
+    // (a backend not answering yet answers null: no rows)
+    const tail = await historyTail((p) => host.call(backend, { ...p, client_id: clientId } as never) as Promise<Dict | null>);
+    const rows = tail.rows as Dict[];
     // THINKING, kept on its answer's row (`thinking`, flagged `has_thinking` in the
     // digest): the full rows are read once, and each answer is drawn after its
-    // thought — collapsed
+    // thought — collapsed. The pager starts just before the first kept row.
     const thoughts = new Map<number, { text: string; cut: number }>();
     if (rows.some((m) => m["has_thinking"] === true)) {
-      let after: unknown = undefined;
+      let after: unknown = typeof rows[0]?.["id"] === "number" ? (rows[0]!["id"] as number) - 1 : undefined;
       for (let page = 0; page < 20; page++) {
         const r = (await host.call(backend, { type: "rows", ...(after !== undefined ? { after } : {}) } as never).catch(() => null)) as Dict | null;
         const got = r !== null && Array.isArray(r["rows"]) ? (r["rows"] as Dict[]) : [];
@@ -776,13 +822,18 @@ export const aiView: ViewBundle = {
         after = r["next"];
       }
     }
-    for (const m of rows) {
+    // `kind: "notice"` rows are the AI layer's own turns to its model: not chat
+    // — except the checker's report (isReport), which repeats fold to one ×N row
+    for (const m of collapseReports(rows, isReport)) {
       const t = typeof m["id"] === "number" ? thoughts.get(m["id"] as number) : undefined;
       if (t !== undefined) dialogEl.appendChild(thoughtBlock(t.text, t.cut));
-      if (s(m, "kind") !== "notice" || isReport(m)) addMsg(s(m, "role"), s(m, "head"), dialogEl);
+      if (s(m, "kind") !== "notice" || isReport(m)) {
+        const rep = typeof m["repeat"] === "number" ? ` ×${m["repeat"]}` : "";
+        addMsg(s(m, "role"), s(m, "head") + rep, dialogEl);
+      }
     }
-    for (const m of rows) if (typeof m["id"] === "number") lastRow = Math.max(lastRow, m["id"] as number);
-    for (const m of rows) if (typeof m["bytes"] === "number") convBytes += m["bytes"] as number;
+    lastRow = tail.lastId;
+    convBytes += tail.bytes;
     const snap = (await host.call(backend, { type: "status", client_id: clientId })) as Dict;
     if (snap) {
       setOthersHint(typeof snap["others_pending"] === "number" ? (snap["others_pending"] as number) : 0);

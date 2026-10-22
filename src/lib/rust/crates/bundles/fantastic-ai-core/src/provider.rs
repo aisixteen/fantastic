@@ -143,7 +143,7 @@ impl Stalled {
     /// raise, so the turn ends with an error row and `status(done, reason='error')`.
     #[must_use]
     pub fn error(&self, name: &str, endpoint: &str) -> ProviderError {
-        ProviderError::raised(format!(
+        ProviderError::transport(format!(
             "{name}: stream_stalled — {endpoint} sent no bytes for {}s; this turn is NOT \
              complete",
             self.idle_secs
@@ -158,6 +158,17 @@ pub async fn within<F: std::future::Future>(idle: Duration, fut: F) -> Result<F:
     tokio::time::timeout(idle, fut).await.map_err(|_| Stalled {
         idle_secs: idle.as_secs_f64(),
     })
+}
+
+#[cfg(test)]
+mod stalled_tests {
+    use super::*;
+
+    #[test]
+    fn a_stalled_read_is_a_transport_failure() {
+        let err = Stalled { idle_secs: 5.0 }.error("x", "http://e");
+        assert!(err.transport, "a stalled read is the link: {}", err.message);
+    }
 }
 
 /// What the endpoint REPORTED about the last pass — python's provider attributes
