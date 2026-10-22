@@ -1342,6 +1342,7 @@ fn the_catalog_carries_the_on_device_backend() {
             "recent_n",
             "caching",
             "cache_primer_until",
+            "transport_retries",
             "misfire_limit",
             "system_prompt",
             "file_bridge_id",

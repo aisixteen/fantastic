@@ -136,6 +136,7 @@ fn the_schema_is_two_knobs_then_the_ai_fields_with_the_models_window() {
             "recent_n",
             "caching",
             "cache_primer_until",
+            "transport_retries",
             "misfire_limit",
             "system_prompt",
             "file_bridge_id",

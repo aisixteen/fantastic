@@ -23,6 +23,8 @@ enum ScriptEvent {
     /// `send` reply carries an `error` — which is what a broken chain must look
     /// like from the router's side.
     Fail(String),
+    /// A failure of the LINK (`ProviderError::transport`): the retry path (#198).
+    TransportFail(String),
     /// The read clock tripped: the stream sends nothing for `idle`, then fails with
     /// the provider's own `stream_stalled` error ([`crate::provider::within`]). The
     /// window is the record's `stream_idle_seconds`, shortened for the test.
@@ -44,7 +46,7 @@ enum ScriptEvent {
 /// with no visible symptom. The request log is the fix: `passes()` is python's
 /// `_FakeProvider.calls`, and an unscripted pass is a recorded request with no
 /// tokens, not a no-op.
-struct MockScript {
+pub(crate) struct MockScript {
     passes: std::sync::Mutex<std::collections::VecDeque<Vec<ScriptEvent>>>,
     /// Every `chat()` served, in order — the model-view message list it was
     /// handed. Turn 2's entry is how a test proves a reply actually came back.
@@ -129,6 +131,7 @@ impl Provider for MockProvider {
             .filter_map(|e| match e {
                 ScriptEvent::Token(t) => Some(Ok(ProviderEvent::Token(t))),
                 ScriptEvent::Fail(e) => Some(Err(ProviderError::raised(e))),
+                ScriptEvent::TransportFail(e) => Some(Err(ProviderError::transport(e))),
                 ScriptEvent::Stall { .. } => None,
             })
             .collect();
@@ -6135,6 +6138,8 @@ mod stream_parts;
 
 #[path = "tests_stall.rs"]
 mod stall;
+#[path = "tests_retries.rs"]
+mod tests_retries;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
