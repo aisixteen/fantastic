@@ -363,10 +363,13 @@ class VllmProvider:
         call_max = int(max_tokens) if max_tokens is not None else self._max_tokens
         body = self._body(messages, call_max, side_call=max_tokens is not None)
         slots, overflow, ttl = self._kv
-        # Admission BEFORE the request: a `reject` must not reach the GPU.
-        rotated = table_for(self._endpoint).admit(
-            conversation_key(messages), slots, overflow, ttl, self._clock()
-        )
+        # A side call is one request, not a conversation kept warm: it takes no slot, so folds cannot fill the table (#184).
+        rotated = None
+        if max_tokens is None:
+            # Admission BEFORE the request: a `reject` must not reach the GPU.
+            rotated = table_for(self._endpoint).admit(
+                conversation_key(messages), slots, overflow, ttl, self._clock()
+            )
         if rotated is not None:
             log.info("vllm_backend: KV slot rotated — conversation %s out", rotated)
 
