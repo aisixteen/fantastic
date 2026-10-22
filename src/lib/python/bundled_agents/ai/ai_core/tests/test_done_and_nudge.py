@@ -212,7 +212,12 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
         assert fp.calls == 2, fp.incoming
         assert not any("[await refused]" in m for m in fp.incoming)
         assert not any("[no call was dispatched]" in m for m in fp.incoming)
-        assert fp.incoming[-1].endswith("two")
+        # ONE CHAIN PER AGENT (#227): "two" landed mid-chain, so it was held; the
+        # await ended the chain and its ONE wake turn read it.
+        assert fp.incoming[-1].startswith(
+            "[1 message(s) arrived while you were working"
+        )
+        assert any(m["content"] == "two" for m in fp.seen[-1]), fp.seen[-1]
     finally:
         fake_providers.pop(aid, None)
 
