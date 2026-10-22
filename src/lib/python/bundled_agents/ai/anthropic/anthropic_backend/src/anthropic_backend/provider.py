@@ -19,9 +19,10 @@ What is Anthropic-specific here:
 - THE KEY: the record's `credentials` ref, read before each request and sent as
   `x-api-key` (with `anthropic-version`); no `credentials`, no key header — the API
   then answers 401, and the error says to name one.
-- PROMPT CACHING, opt-in (`prompt_cache`): the `system` block and the conversation
-  tail carry an ephemeral `cache_control` marker (5-minute TTL). Off, the body is
-  unchanged.
+- CACHING (ai_core's `caching`): `provider_cache` sends ephemeral `cache_control`
+  markers: on the `system` block, on the block that ends the primer row, on the
+  block that ends the last fold, and the top-level automatic one. At most four.
+  Every other mode sends none, and the body is unchanged.
 - USAGE: each stream's token counts accumulate into the agent's `Usage` (RAM; the
   `usage` verb and `reflect` read it), side calls included.
 """
@@ -33,6 +34,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core import caching as ai_caching
 
 #: The API version every request names.
 ANTHROPIC_VERSION = "2023-06-01"
@@ -117,21 +119,73 @@ class Usage:
 def to_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     """ai_core's messages → (`system`, the user/assistant turns). Every system
     message joins the one `system` string; consecutive turns of one role are merged
-    into one turn, blank-line separated."""
+    into one turn, blank-line separated. The cache flags are not read: see
+    `to_wire`."""
+    return to_wire(messages, False)
+
+
+def to_wire(messages: list[dict], marks: bool) -> tuple[str, list[dict]]:
+    """ai_core's messages → (`system`, the turns as the request sends them). `marks`
+    reads the cache flags (`cache_primer`, `cache_fold`); off, they are ignored and
+    the turns are the plain merged strings.
+
+    With `marks`, a merged turn whose rows carry flags is cut into text blocks at
+    the end of each flagged row's text, so the marker lands there, not at the end of
+    the merged turn. The block texts concatenate to the merged string exactly (see
+    `cut_blocks`)."""
     systems: list[str] = []
-    turns: list[dict] = []
+    turns: list[tuple[str, list[tuple[str, bool]]]] = []
     for m in messages:
         role = m.get("role")
         content = str(m.get("content") or "")
+        flagged = marks and (
+            m.get("cache_primer") is True or m.get("cache_fold") is True
+        )
         if role == "system":
             if content:
                 systems.append(content)
         elif role in ("user", "assistant"):
-            if turns and turns[-1]["role"] == role:
-                turns[-1]["content"] += "\n\n" + content
+            if turns and turns[-1][0] == role:
+                turns[-1][1].append((content, flagged))
             else:
-                turns.append({"role": role, "content": content})
-    return "\n\n".join(systems), turns
+                turns.append((role, [(content, flagged)]))
+    return "\n\n".join(systems), [
+        {"role": role, "content": turn_content(rows)} for role, rows in turns
+    ]
+
+
+def turn_content(rows: list[tuple[str, bool]]) -> str | list[dict]:
+    """One merged turn's `content`: the plain string when no row in it is flagged,
+    else its text blocks, the marked ones carrying the cache marker."""
+    if not any(flagged for _, flagged in rows):
+        return "\n\n".join(text for text, _ in rows)
+    out = []
+    for text, marked in cut_blocks(rows):
+        block: dict = {"type": "text", "text": text}
+        if marked:
+            block["cache_control"] = dict(CACHE_CONTROL)
+        out.append(block)
+    return out
+
+
+def cut_blocks(rows: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """A merged turn cut at the end of each flagged row: (block text, ends a flagged
+    row). The texts join to the merged string. A blank tail joins the last block."""
+    out: list[tuple[str, bool]] = []
+    cur = ""
+    for i, (text, flagged) in enumerate(rows):
+        if i > 0:
+            cur += "\n\n"
+        cur += text
+        if flagged and text and cur.strip():
+            out.append((cur, True))
+            cur = ""
+    if cur.strip() or not out:
+        out.append((cur, False))
+    else:
+        last, marked = out[-1]
+        out[-1] = (last + cur, marked)
+    return out
 
 
 class AnthropicProvider:
@@ -150,7 +204,7 @@ class AnthropicProvider:
         max_tokens: int,
         temperature: float | None = None,
         thinking_budget: int | None = None,
-        prompt_cache: bool = False,
+        caching: str = ai_caching.DEFAULT_MODE,
         usage: Usage | None = None,
         transport=None,
     ):
@@ -161,13 +215,15 @@ class AnthropicProvider:
         self._max_tokens = int(max_tokens)
         self._temperature = temperature
         self._thinking_budget = thinking_budget
-        self._prompt_cache = prompt_cache
+        self._marks = ai_caching.marks(caching)
         # The agent's running counts; None = nothing is counted (a bare provider).
         self._usage = usage
         self._transport = transport
 
     def body(self, messages: list[dict], max_tokens: int | None) -> dict:
-        system, turns = to_messages(messages)
+        # Markers only in provider_cache: every other mode's body is the plain one.
+        marks = self._marks
+        system, turns = to_wire(messages, marks)
         call_max = int(max_tokens) if max_tokens is not None else self._max_tokens
         body: dict = {
             "model": self._model,
@@ -178,10 +234,10 @@ class AnthropicProvider:
         if system:
             body["system"] = (
                 [{"type": "text", "text": system, "cache_control": dict(CACHE_CONTROL)}]
-                if self._prompt_cache
+                if marks
                 else system
             )
-        if self._prompt_cache:
+        if marks:
             body["cache_control"] = dict(CACHE_CONTROL)
         if self._temperature is not None:
             body["temperature"] = self._temperature

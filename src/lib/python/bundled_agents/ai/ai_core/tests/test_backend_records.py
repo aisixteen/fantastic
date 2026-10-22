@@ -95,7 +95,6 @@ SCHEMAS = {
             ("context_window", "int", False, None, None),
             ("temperature", "float", False, None, None),
             ("thinking_budget", "int", False, None, None),
-            ("prompt_cache", "bool", False, None, None),
             ("price_input_per_mtok", "float", False, None, None),
             ("price_output_per_mtok", "float", False, None, None),
             ("credentials", "credentials", False, None, None),

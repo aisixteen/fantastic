@@ -348,46 +348,205 @@ PLAIN = [
 ]
 
 
-def test_prompt_cache_off_leaves_the_body_exactly_as_it_was():
-    for p in (_provider(None), _provider(None, prompt_cache=False)):
-        assert p.body(PLAIN, None) == {
-            "model": MODEL,
-            "max_tokens": 8000,
-            "messages": [{"role": "user", "content": "hi"}],
-            "stream": True,
-            "system": "s",
+def _markers(body: dict) -> int:
+    """The number of `cache_control` markers a body sends."""
+    return json.dumps(body).count('"cache_control"')
+
+
+def _flagged(rows) -> list[dict]:
+    """The conversation's messages as ai_core flags them, a system row first.
+    `rows` = [(role, text, flag-or-None)]."""
+    out = [{"role": "system", "content": "S"}]
+    for role, text, flag in rows:
+        m = {"role": role, "content": text}
+        if flag:
+            m[flag] = True
+        out.append(m)
+    return out
+
+
+def test_cleanup_and_none_send_no_marker_even_when_a_message_is_flagged():
+    assert _provider(None).body(PLAIN, None) == {
+        "model": MODEL,
+        "max_tokens": 8000,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "system": "s",
+    }
+    flags = _flagged([("user", "a", "cache_primer"), ("assistant", "b", "cache_fold")])
+    for mode in ("cleanup", "none"):
+        b = _provider(None, caching=mode).body(flags, None)
+        assert _markers(b) == 0, b
+        assert b["system"] == "S"
+        assert b["messages"] == [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ]
+
+
+def test_provider_cache_splits_the_merged_turns_at_the_flagged_rows():
+    # [primer rows][fold][fold][task rows]: the primer's row is the assistant turn
+    # "p2"; the fold rows and the task rows are one merged user turn, and the marker
+    # lands at the end of the last fold's text, not at the end of that merged turn.
+    msgs = _flagged(
+        [
+            ("user", "p1", None),
+            ("assistant", "p2", "cache_primer"),
+            ("user", "f1", None),
+            ("user", "f2", "cache_fold"),
+            ("user", "t1", None),
+            ("assistant", "t2", None),
+            ("user", "live", None),
+        ]
+    )
+    b = _provider(None, caching="provider_cache").body(msgs, None)
+    marked = {"type": "ephemeral"}
+    assert b["system"][0]["cache_control"] == marked, b
+    assert b["messages"] == [
+        {"role": "user", "content": "p1"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "p2", "cache_control": marked},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "f1\n\nf2", "cache_control": marked},
+                {"type": "text", "text": "\n\nt1"},
+            ],
+        },
+        {"role": "assistant", "content": "t2"},
+        {"role": "user", "content": "live"},
+    ], b
+    assert b["cache_control"] == marked, b
+    assert _markers(b) == 4, b
+
+
+_SPLIT_CASES = [
+    (["one", "", "three"], ["cache_primer", None, None]),
+    (["one", "", "three"], [None, "cache_fold", None]),
+    (["one", "", "three"], [None, "cache_primer", "cache_fold"]),
+    (["one", "", "three"], ["cache_fold", "cache_fold", None]),
+    (["one", "", "three"], [None, None, "cache_primer"]),
+    (["one", ""], ["cache_primer", None]),
+    (["one", "", ""], ["cache_fold", None, None]),
+    (["", "one", ""], [None, "cache_fold", None]),
+    (["one", ""], ["cache_primer", "cache_fold"]),
+    # a flagged row that is only whitespace, first in its turn, opens no block of its
+    # own (the API refuses a blank block): it joins the next text
+    ([" ", "two"], ["cache_primer", None]),
+    ([" ", "two", "three"], ["cache_fold", "cache_primer", None]),
+    # ...and after text, it closes the block it is part of, bytes unchanged
+    (["one", " "], [None, "cache_fold"]),
+]
+
+
+@pytest.mark.parametrize("texts, shape", _SPLIT_CASES)
+def test_the_split_turns_concatenate_to_exactly_the_merged_string(texts, shape):
+    # The block texts of a merged turn, joined, are the string the turn was before
+    # any split: no byte added or lost, wherever a flag falls. And no block is blank.
+    msgs = _flagged([("user", t, f) for t, f in zip(texts, shape)])
+    b = _provider(None, caching="provider_cache").body(msgs, None)
+    merged = to_messages(msgs)[1][0]["content"]
+    content = b["messages"][0]["content"]
+    if isinstance(content, list):
+        for block in content:
+            assert block["text"].strip(), f"a blank block is refused by the API: {b}"
+        joined = "".join(x["text"] for x in content)
+    else:
+        joined = content
+    assert joined == merged, b
+    assert _markers(b) <= 4, b
+
+
+def test_a_flagged_row_followed_by_empty_rows_keeps_its_marker_and_no_blank_block():
+    msgs = _flagged([("user", "one", "cache_primer"), ("user", "", None)])
+    b = _provider(None, caching="provider_cache").body(msgs, None)
+    assert b["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "one\n\n",
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
         }
+    ], b
+    assert _markers(b) == 3, b
 
 
-def test_prompt_cache_marks_the_system_block_and_the_tail():
-    p = _provider(None, prompt_cache=True, temperature=0.2, thinking_budget=2048)
-    b = p.body(PLAIN, None)
-    assert b["system"] == [{"type": "text", "text": "s", "cache_control": CACHED}]
-    assert b["cache_control"] == CACHED
-    # nothing else moves: order, merging, thinking, max_tokens
-    assert b["messages"] == [{"role": "user", "content": "hi"}]
-    assert b["max_tokens"] == 8000 and b["temperature"] == 0.2
-    assert b["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+def test_a_flagged_row_with_no_text_carries_no_marker():
+    msgs = _flagged([("user", "a", None), ("user", "", "cache_primer")])
+    b = _provider(None, caching="provider_cache").body(msgs, None)
+    assert b["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "a\n\n"}]}
+    ], b
+    assert _markers(b) == 2, b
+
+
+def test_a_primer_and_a_fold_on_one_message_send_one_marker():
+    msgs = _flagged([("user", "only", None), ("assistant", "both", "cache_primer")])
+    msgs[2]["cache_fold"] = True
+    b = _provider(None, caching="provider_cache").body(msgs, None)
+    assert b["messages"][1]["content"] == [
+        {"type": "text", "text": "both", "cache_control": {"type": "ephemeral"}},
+    ], b
+    assert _markers(b) == 3, b
+
+
+def test_provider_cache_with_no_primer_and_no_fold_marks_only_the_system_and_the_tail():
+    b = _provider(None, caching="provider_cache").body(
+        _flagged([("user", "a", None), ("assistant", "b", None)]), None
+    )
+    assert b["messages"] == [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"},
+    ]
+    assert _markers(b) == 2, b
+
+
+def test_provider_cache_marks_the_system_block_and_the_tail():
+    p = _provider(None, caching="provider_cache", temperature=0.2, thinking_budget=2048)
+    assert p.body(PLAIN, None) == {
+        "model": MODEL,
+        "max_tokens": 8000,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "system": [{"type": "text", "text": "s", "cache_control": CACHED}],
+        "cache_control": CACHED,
+        "temperature": 0.2,
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+    }
     # a side call's own bound is marked the same way
     b = p.body(PLAIN, 1500)
     assert b["max_tokens"] == 1500 and b["cache_control"] == CACHED
 
 
-def test_prompt_cache_sends_no_system_block_when_the_system_is_empty():
-    p = _provider(None, prompt_cache=True)
+def test_provider_cache_sends_no_system_block_when_the_system_is_empty():
+    p = _provider(None, caching="provider_cache")
     b = p.body([{"role": "user", "content": "hi"}], None)
     assert "system" not in b
     assert b["cache_control"] == CACHED
 
 
-async def test_prompt_cache_marks_every_request_a_provider_sends():
+async def test_provider_cache_marks_every_request_a_provider_sends():
     seen: list = []
     p = _provider(
-        _transport(_sse(START, _text("ok"), *_stop()), seen), prompt_cache=True
+        _transport(_sse(START, _text("ok"), *_stop()), seen), caching="provider_cache"
     )
     await _drain(p, PLAIN)
     assert json.loads(seen[0].content)["cache_control"] == CACHED
     assert json.loads(seen[0].content)["system"][0]["cache_control"] == CACHED
+
+
+def test_the_flags_reach_the_wire_only_through_body_marks():
+    assert to_messages(_flagged([("user", "a", "cache_primer")]))[1] == [
+        {"role": "user", "content": "a"}
+    ]
 
 
 # ─── usage ───────────────────────────────────────────────────────────────────
@@ -505,14 +664,38 @@ async def test_the_usage_verb_returns_the_counts_and_reset_zeroes_them(
     assert bad["reason"] == "bad_arg" and bad["arg"] == "reset"
 
 
-async def test_reflect_carries_the_usage_and_the_cache_flag(
+async def test_reflect_carries_the_usage_and_the_caching_mode(
     seeded_kernel, mock_http, fake_providers, _fresh_usage
 ):
     mock_http(_api([]))
-    await _create(seeded_kernel, prompt_cache=True)
+    await _create(seeded_kernel, caching="provider_cache")
     r = await _call(seeded_kernel, "a1", {"type": "reflect"})
-    assert r["prompt_cache"] is True
+    assert r["caching"] == "provider_cache"
+    assert "prompt_cache" not in r
     assert r["usage"]["requests"] == 0 and r["usage"]["hit_rate"] == 0
+
+
+async def test_reflect_shows_cache_primer_until_only_when_set(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_api([]))
+    await _create(seeded_kernel, caching="provider_cache", cache_primer_until=3)
+    r = await _call(seeded_kernel, "a1", {"type": "reflect"})
+    assert r["cache_primer_until"] == 3
+    await _call(seeded_kernel, seeded_kernel.id, {"type": "delete_agent", "id": "a1"})
+    await _create(seeded_kernel, caching="provider_cache")
+    r = await _call(seeded_kernel, "a1", {"type": "reflect"})
+    assert "cache_primer_until" not in r
+
+
+async def test_reflect_shows_cleanup_when_caching_is_unset(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_api([]))
+    await _create(seeded_kernel)
+    r = await _call(seeded_kernel, "a1", {"type": "reflect"})
+    assert r["caching"] == "cleanup"
+    assert "cache_primer_until" not in r
 
 
 async def test_deleting_an_agent_drops_its_counts(
@@ -533,14 +716,54 @@ async def test_deleting_an_agent_drops_its_counts(
     assert zero["requests"] == 0 and zero["cache_read_tokens"] == 0, zero
 
 
-def test_the_record_refuses_a_bad_cache_flag_or_price():
-    assert validate_meta({"prompt_cache": True}, _rec()) is None
-    assert validate_meta({"price_input_per_mtok": 3}, _rec()) is None
-    assert "prompt_cache must be a boolean" in validate_meta(
-        {"prompt_cache": "yes"}, _rec()
+def test_the_record_refuses_a_bad_caching_mode_or_primer_or_price():
+    check = lambda meta: validate_meta(meta, _rec())  # noqa: E731
+    assert check({"caching": "provider_cache"}) is None
+    assert check({"caching": "none"}) is None
+    assert check({"cache_primer_until": 12}) is None
+    assert check({"price_input_per_mtok": 3}) is None
+    assert check({"caching": "always"}) == (
+        "caching='always' is not one of the legal values: none, cleanup, provider_cache"
     )
-    assert "must be a number" in validate_meta({"price_output_per_mtok": "x"}, _rec())
-    assert "must be a number" in validate_meta({"price_input_per_mtok": True}, _rec())
-    assert "zero or more" in validate_meta({"price_input_per_mtok": -1}, _rec())
+    assert check({"caching": True}) == (
+        "caching=True is not one of the legal values: none, cleanup, provider_cache"
+    )
+    assert check({"cache_primer_until": 0}) == (
+        "cache_primer_until=0 must be a row id (a positive int)"
+    )
+    # retired: an unknown key is not this backend's to refuse
+    assert check({"prompt_cache": True}) is None
+    assert "must be a number" in check({"price_output_per_mtok": "x"})
+    assert "must be a number" in check({"price_input_per_mtok": True})
+    assert "zero or more" in check({"price_input_per_mtok": -1})
     names = {f["name"] for f in RECORD_SCHEMA["fields"]}
-    assert {"prompt_cache", "price_input_per_mtok", "price_output_per_mtok"} <= names
+    assert {
+        "caching",
+        "cache_primer_until",
+        "price_input_per_mtok",
+        "price_output_per_mtok",
+    } <= names
+    assert "prompt_cache" not in names
+
+
+def test_make_provider_reads_the_caching_mode(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_api([]))
+    import asyncio
+
+    asyncio.run(_create(seeded_kernel, caching="provider_cache", max_tokens=8000))
+    from anthropic_backend import tools
+
+    p = tools.make_provider("a1", seeded_kernel)
+    assert p.body(PLAIN, None)["cache_control"] == CACHED
+
+
+def test_the_backend_declares_provider_cache(monkeypatch):
+    from anthropic_backend import tools
+
+    seen = {}
+    real = tools.build
+    monkeypatch.setattr(tools, "build", lambda **kw: (seen.update(kw), real(**kw))[1])
+    tools._build()
+    assert seen["provider_cache"] is True

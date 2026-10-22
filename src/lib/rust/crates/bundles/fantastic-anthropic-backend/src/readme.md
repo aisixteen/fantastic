@@ -27,29 +27,38 @@ the URL and what came back.
 Optional: `temperature` (sent only when set), `thinking_budget` (extended thinking
 per turn — at least 1024 tokens and below `max_tokens`, refused at the write
 otherwise; unset, no thinking is asked for; a side call too small for it gets none),
-`prompt_cache` (boolean, default false — see below), and `price_input_per_mtok` /
-`price_output_per_mtok` (USD per million tokens, numbers zero or more; no default
-price — see Usage).
+and `price_input_per_mtok` / `price_output_per_mtok` (USD per million tokens, numbers
+zero or more; no default price — see Usage). `caching` and `cache_primer_until` are
+ai_core's, on every AI agent — see Caching.
 
-## Prompt caching
+## Caching
 
-Opt-in: `prompt_cache: true` on the record. Off (the default, or absent), the request
-is exactly what it always was: `system` a plain string, no `cache_control`.
+`caching` is ai_core's mode: `none` | `cleanup` (default) | `provider_cache`, and this
+backend can run all three. `none` and `cleanup` send no marker: `system` a plain
+string, no `cache_control`, the body as it always was.
 
-On, EVERY request — main turns and side calls such as fold summaries alike — sends the
-optimal markers for the prompt's shape:
-- `system` as one text block carrying `"cache_control": {"type": "ephemeral"}` (absent
-  when the system string is empty, as always);
-- a top-level `"cache_control": {"type": "ephemeral"}`, which caches the conversation
-  tail automatically.
+`provider_cache` sends ephemeral `cache_control` markers (`{"type": "ephemeral"}`, the
+5-minute TTL, the only one sent) on EVERY request — main turns and side calls such as
+fold summaries alike — at most four:
+- `system` as one text block carrying the marker (absent when the system string is
+  empty, as always);
+- the end of the primer row — the row `cache_primer_until` names, when it is in view;
+- the end of the last fold (or clear) row in view;
+- a top-level marker, which caches the conversation tail automatically.
 
-The TTL is 5 minutes, the only one sent. Nothing else in the body changes: order,
-merging, thinking and `max_tokens` are as they are without the flag.
+A turn holding a marked row is sent as text blocks cut at the end of that row's text,
+so the marker lands there and not at the end of the merged turn; the blocks join to
+exactly the merged string. A row with no text carries no marker, and no block is blank
+(the API refuses one). A primer and a fold on one row send one marker. Nothing else in
+the body changes: order, merging, thinking and `max_tokens` are as in the other modes.
 
 The cache is a server-side PREFIX match. A turn whose system block changed re-writes
 from the change on: an agent added or removed changes the tree index in the system
-block. A turn whose history was trimmed or folded re-writes from the first changed
+block. A turn whose history before a marker changed re-writes from the first changed
 byte on. A repeat within 5 minutes of the previous request reads the shared prefix.
+
+`prompt_cache` is retired: `caching: provider_cache` replaces `prompt_cache: true`.
+`reflect` shows `caching`, and `cache_primer_until` when it is set.
 
 ## Usage
 
