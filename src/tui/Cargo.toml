@@ -110,6 +110,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
+# The base binary reaches any model: the four AI backends are linked by default.
+# Each stays a feature, so an embedder can build lean with --no-default-features.
+default = ["vllm", "anthropic", "ollama", "responses"]
 # Links the OpenAI Responses backend (`responses_backend.tools`): `endpoint` (the
 # full …/v1/responses URL) and `model` are written on the set-up page — no
 # default; its key is a credential-store ref (required).
