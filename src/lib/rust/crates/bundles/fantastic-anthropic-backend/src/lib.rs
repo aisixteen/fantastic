@@ -385,7 +385,7 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|s| s.error(NAME, &self.endpoint))?;
         let resp = sent.map_err(|e| {
-            ProviderError::raised(if e.is_timeout() {
+            ProviderError::transport(if e.is_timeout() {
                 format!(
                     "{NAME}: no answer from {} within {CONNECT_TIMEOUT}s",
                     self.endpoint
@@ -408,10 +408,12 @@ impl Provider for AnthropicProvider {
             } else {
                 ""
             };
-            return Err(ProviderError::raised(format!(
+            let mut err = ProviderError::raised(format!(
                 "{NAME}: {} answered HTTP {status}{why}: {detail}",
                 self.endpoint
-            )));
+            ));
+            err.transport = matches!(status, 502 | 503 | 504 | 529);
+            return Err(err);
         }
         Ok(consume_sse(
             resp,
@@ -480,7 +482,7 @@ fn consume_sse(
                     Ok(bytes) => st.buf.extend_from_slice(&bytes),
                     Err(_) => {
                         finished = true;
-                        pending.push_back(Err(ProviderError::raised(format!(
+                        pending.push_back(Err(ProviderError::transport(format!(
                             "{NAME}: {} dropped the stream mid-answer; this turn is NOT \
                              complete",
                             st.endpoint

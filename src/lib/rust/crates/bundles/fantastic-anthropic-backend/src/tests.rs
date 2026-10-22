@@ -63,6 +63,43 @@ async fn api(status: u16, body: String) -> (MockServer, String) {
     (srv, ep)
 }
 
+/// The first error a turn raises, whether the provider refuses at the send
+/// or the stream fails mid-answer (#198).
+async fn turn_error(p: &AnthropicProvider) -> ProviderError {
+    let msgs = [json!({"role": "user", "content": "hi"})];
+    match p.chat(&msgs, None).await {
+        Err(e) => e,
+        Ok(mut s) => {
+            while let Some(ev) = futures_util::StreamExt::next(&mut s).await {
+                if let Err(e) = ev {
+                    return e;
+                }
+            }
+            panic!("the turn raised no error");
+        }
+    }
+}
+
+#[tokio::test]
+async fn connect_failure_is_transport() {
+    let p = provider("http://127.0.0.1:1/v1/messages", Arc::new(Key));
+    assert!(turn_error(&p).await.transport);
+}
+
+#[tokio::test]
+async fn http_529_is_transport() {
+    let (_srv, ep) = api(529, String::new()).await;
+    let p = provider(&ep, Arc::new(Key));
+    assert!(turn_error(&p).await.transport);
+}
+
+#[tokio::test]
+async fn http_400_is_not_transport() {
+    let (_srv, ep) = api(400, "bad request".into()).await;
+    let p = provider(&ep, Arc::new(Key));
+    assert!(!turn_error(&p).await.transport);
+}
+
 fn provider(endpoint: &str, key: Arc<dyn KeySource>) -> AnthropicProvider {
     provider_idle(
         endpoint,
