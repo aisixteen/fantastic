@@ -31,7 +31,7 @@
 # macOS is `xcode-27` (macOS 27 + Xcode 27, a preview image): the Apple
 # Foundation Models bridge the rust kernel links needs the macOS 27 SDK. Swift is
 # the Apple app's kernel: it builds and tests on macOS only, and the e2e on Linux
-# and Windows runs every runtime but swift.
+# and Windows runs every runtime but swift. (Swift is off everywhere now.)
 
 name: build
 
@@ -87,6 +87,12 @@ jobs:
         working-directory: src/lib/python
     steps:
       - uses: actions/checkout@v7
+      - name: trust roots (#280)
+        # fails if a lockfile brings back a bundle that trusts the compromised
+        # emSign root (webpki-roots < 1.0.10, certifi < 2026.10.19)
+        working-directory: .
+        shell: bash
+        run: sh scripts/check-trust-roots.sh
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
@@ -110,6 +116,12 @@ jobs:
         working-directory: src/lib/rust
     steps:
       - uses: actions/checkout@v7
+      - name: trust roots (#280)
+        # fails if a lockfile brings back a bundle that trusts the compromised
+        # emSign root (webpki-roots < 1.0.10, certifi < 2026.10.19)
+        working-directory: .
+        shell: bash
+        run: sh scripts/check-trust-roots.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -169,8 +181,11 @@ jobs:
           cp ../target/${{ inputs.profile }}/fantastic$X binaries/fantastic-$t$X
           cargo test --locked --no-fail-fast
 
+  # SWIFT IS OFF (maintainer, 2026-10-22: Swift is deprecated, no new parity).
+  # Its code and tests stay in the repo, untouched, until it is retired (#53);
+  # CI no longer builds, tests or gates on it. Back on: `if: inputs.units`.
   swift:
-    if: inputs.units
+    if: false
     name: swift · xcode-27
     runs-on: xcode-27
     timeout-minutes: 60
@@ -262,7 +277,7 @@ jobs:
         run: |
           uv run python ../../../e2e/build.py --out ../../../dist/e2e \
             --profile ${{ inputs.profile }} --target ${{ matrix.target }} \
-            ${{ runner.os != 'macOS' && '--exclude-runtime swift' || '' }}
+            --exclude-runtime swift
           # one tar: upload-artifact drops the executable bit
           tar -cf ../../../dist/e2e.tar -C ../../../dist/e2e .
       - name: the CLI
@@ -507,7 +522,7 @@ jobs:
             skip: "--exclude-runtime swift"
             lanes: 2
           - os: xcode-27
-            skip: ""
+            skip: "--exclude-runtime swift"
             lanes: 2
           - os: windows-latest
             skip: "--exclude-runtime swift"

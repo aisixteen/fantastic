@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from ai_core import build, on_cancel, required_meta  # noqa: F401 — the hooks
 from ai_core import on_delete as _core_on_delete
+from ai_core import caching
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 from kernel._refusal import BAD_ARG, refusal
@@ -72,12 +73,6 @@ RECORD_SCHEMA = schema(
             "max_tokens); unset, no thinking is asked for",
         ),
         field(
-            "prompt_cache",
-            "bool",
-            "prompt caching, opt-in: the system block and the conversation tail carry "
-            "a 5-minute cache marker; unset or false, the request is unchanged",
-        ),
-        field(
             "price_input_per_mtok",
             "float",
             "USD per million input tokens — with price_output_per_mtok, reflect and "
@@ -113,9 +108,7 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     t = meta.get("temperature")
     if t is not None and not _number(t):
         return "temperature must be a number"
-    c = meta.get("prompt_cache")
-    if c is not None and not isinstance(c, bool):
-        return "prompt_cache must be a boolean"
+
     for key in ("price_input_per_mtok", "price_output_per_mtok"):
         p = meta.get(key)
         if p is not None and (not _number(p) or p < 0):
@@ -136,7 +129,9 @@ def validate_meta(meta: dict, record: dict) -> str | None:
             f"{left[0]} is left to the API, but the endpoint {endpoint!r} does not end "
             f"in /messages, so the model list is not known — set {', '.join(left)}"
         )
-    return validate(RECORD_SCHEMA, NAME, meta, record)
+    return validate(RECORD_SCHEMA, NAME, meta, record) or caching.refusal(
+        meta, record, NAME, True
+    )
 
 
 def _required_int(rec: dict, key: str) -> int:
@@ -162,7 +157,7 @@ def make_provider(id, kernel):
         max_tokens=_required_int(rec, "max_tokens"),
         temperature=float(t) if t is not None else None,
         thinking_budget=rec.get("thinking_budget") or None,
-        prompt_cache=bool(rec.get("prompt_cache")),
+        caching=caching.mode_of(rec),
         usage=usage_of(id),
     )
 
@@ -176,15 +171,20 @@ def _usage_now(id, kernel) -> dict:
 
 
 async def _reflect_extra(id, kernel):
-    """Merged into reflect: what the next request will send, and the usage so far."""
+    """Merged into reflect: what the next request will send (the caching mode, the primer when set), and the usage so far."""
     rec = kernel.get(id) or {}
-    return {
+    out = {
         "max_tokens": rec.get("max_tokens"),
         "temperature": rec.get("temperature"),
         "thinking_budget": rec.get("thinking_budget"),
-        "prompt_cache": bool(rec.get("prompt_cache")),
-        "usage": _usage_now(id, kernel),
+        "caching": rec.get("caching")
+        if rec.get("caching") is not None
+        else caching.DEFAULT_MODE,
     }
+    if rec.get("cache_primer_until") is not None:
+        out["cache_primer_until"] = rec["cache_primer_until"]
+    out["usage"] = _usage_now(id, kernel)
+    return out
 
 
 async def _usage(id, payload, kernel):
@@ -230,6 +230,7 @@ def _build():
         name=NAME,
         extra_verbs={"usage": _usage, "models": _models},
         reflect_extra=_reflect_extra,
+        provider_cache=True,
     )
 
     async def handler(id: str, payload: dict, kernel) -> dict | None:

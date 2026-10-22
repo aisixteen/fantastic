@@ -126,16 +126,17 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
     async for raw in reader:
         text = raw.decode("utf-8", errors="replace")
         job["lines"] += 1
-        job["last_line"] = text.rstrip("\n")
-        _line_ring_add(job, job["lines"], stream, job["last_line"])
-        _monitor.feed_line(job_id, text.rstrip("\n"))
+        line = text.rstrip(chr(10) + chr(13))
+        job["last_line"] = line
+        _line_ring_add(job, job["lines"], stream, line)
+        _monitor.feed_line(job_id, line)
         await kernel.emit(
             owner,
             {
                 "type": "progress",
                 "job_id": job_id,
                 "n": job["lines"],
-                "line": text.rstrip("\n"),
+                "line": line,
                 "stream": stream,
             },
         )
@@ -1095,14 +1096,26 @@ def _snap(job_id: int, full: bool = False) -> dict:
 
 
 async def _status(id, payload, kernel):
-    """args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. Returns {jobs:[…]}."""
+    """args: job_id:int? — one job (with its `cwd`; read its output with `tail`/`grep`), or all of this agent's jobs (summary). A job's id is its kernel task id: `ps` lists it, `cancel task_id=` kills it. wait_s:float? (0–120) with job_id — returns as soon as the job is no longer running, or when the wait ends; use it instead of polling. Returns {jobs:[…]}."""
     jid, err = _job_arg("status", payload, required=False)
     if err:
         return err
+    w = payload.get("wait_s")
+    if w is not None:
+        if jid is None:
+            return bad("status", "wait_s", "a job_id to wait for")
+        if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0 or w > 120:
+            return bad("status", "wait_s", "a number of seconds, 0 to 120")
     if jid is not None:
         j = _jobs.get(jid)
         if j is None or j.get("owner") != id:
             return refusal(NOT_FOUND, f"exec_bridge: no job {jid!r}", job_id=jid)
+        if w is not None:
+            deadline = time.monotonic() + w
+            while _alive(j) or j["status"] in ("running", "stopping"):
+                if time.monotonic() >= deadline:
+                    break
+                await asyncio.sleep(0.2)
         return {
             "jobs": [_snap(jid, full=True)],
             "origin": f"{id} status {{job_id: {jid}}} — a live job; re-send for its output NOW, which may differ",
@@ -1110,6 +1123,43 @@ async def _status(id, payload, kernel):
     return {
         "jobs": [_snap(k) for k, v in _jobs.items() if v.get("owner") == id],
         "origin": f"{id} status — the job table NOW; re-send, it changes",
+    }
+
+
+async def _run(id, payload, kernel):
+    """args: command:str (req), args?, wait_s:float? (default 60, max 600), tail:int? (default 200) — start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. Use run for short commands; a job still running at wait_s comes back running (continue with status / tail). Read files with files.read, not run."""
+    import asyncio
+
+    wait_s = payload.get("wait_s")
+    wait_s = 60 if wait_s is None else wait_s
+    if (
+        isinstance(wait_s, bool)
+        or not isinstance(wait_s, (int, float))
+        or not 0 <= wait_s <= 600
+    ):
+        return bad("run", "wait_s", "a number of seconds, 0 to 600")
+    tail = payload.get("tail")
+    tail = 200 if tail is None else tail
+    if isinstance(tail, bool) or not isinstance(tail, int) or not 1 <= tail <= 2000:
+        return bad("run", "tail", "a line count, 1 to 2000")
+    rest = {k: v for k, v in payload.items() if k not in ("wait_s", "tail")}
+    r = await _start(id, rest, kernel)
+    if "reason" in r:
+        return r
+    jid = r["job_id"]
+    job = _jobs[jid]
+    deadline = time.monotonic() + wait_s
+    while _alive(job) and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+    out = await _tail(id, {"job_id": jid, "lines": min(tail, MAX_LINES)}, kernel)
+    if "reason" in out:
+        return out
+    alive = _alive(job)
+    return {
+        "job_id": jid,
+        "status": "running" if alive else job["status"],
+        "exit_code": job["exit_code"],
+        "lines": out["lines"],
     }
 
 
@@ -1537,6 +1587,7 @@ NOTES = {
 
 VERBS = {
     "start": _start,
+    "run": _run,
     "status": _status,
     "stop": _stop,
     "interrupt": _interrupt,

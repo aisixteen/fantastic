@@ -451,7 +451,7 @@ async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
     seeded_kernel, fake_providers, monkeypatch
 ):
     """RESUME AFTER RESTART: the host stops (the kernel drains)
-    while a turn is generating — its cut row is marked `interrupted` with the
+    while a turn is generating — its stopped row is marked `interrupted` with the
     client it streamed to; the next boot runs it again ONCE, as a
     `[resumed after restart]` turn to that client. A cancel by anyone else, or a
     boot with nothing cut, resumes nothing."""
@@ -491,7 +491,7 @@ async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
         ctx.draining = False  # the stop is over; read the store as the next life will
         rows = [r for r in await core._load_history(aid, seeded_kernel)]
         cut = rows[-1]
-        assert cut["role"] == "assistant" and cut["interrupted"] == {
+        assert cut["kind"] == "stopped" and cut["interrupted"] == {
             "client_id": "tab7"
         }, cut
         assert "the host stopping" in cut["content"], cut

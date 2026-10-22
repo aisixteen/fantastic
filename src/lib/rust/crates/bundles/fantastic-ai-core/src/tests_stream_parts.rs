@@ -474,14 +474,18 @@ async fn stop_during_a_stalled_stream_clears_generating() {
     .result;
     assert_eq!(after["generating"], json!(false), "{after}");
     assert_eq!(turn.await.unwrap().status, Status::Cancelled);
-    // the aborted marker: the turn keeps its message and says who stopped it
+    // the stopped notice: the turn keeps its message, and a user row of kind
+    // `stopped` says who stopped it — no bare marker is stored as an answer
     let rows = conversation(&kernel, &ai).await;
-    let marker = rows
+    let notice = rows
         .iter()
-        .find(|r| r["role"] == json!("assistant"))
+        .find(|r| r["kind"] == json!("stopped"))
         .and_then(|r| r["content"].as_str())
         .unwrap_or_default();
-    assert!(marker.contains("[stopped by rx"), "{rows:#?}");
+    assert!(
+        notice.starts_with("[your turn was stopped by rx"),
+        "{rows:#?}"
+    );
     assert!(
         rows.iter().any(|r| r["content"] == json!("go")),
         "{rows:#?}"
@@ -552,9 +556,10 @@ async fn stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach() {
     assert_eq!(after["generating"], json!(false), "{after}");
     let rows = conversation(&kernel, &ai).await;
     assert!(
-        rows.iter().any(|r| r["content"]
-            .as_str()
-            .is_some_and(|c| c.starts_with("[stopped by rx"))),
+        rows.iter().any(|r| r["kind"] == json!("stopped")
+            && r["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("[your turn was stopped by rx"))),
         "{rows:#?}"
     );
     // the stream is gone: the next send runs at once, not behind the 600s stall
@@ -614,9 +619,10 @@ async fn stop_reaches_a_reply_woken_turn() {
     assert_eq!(after["generating"], json!(false), "{after}");
     let rows = conversation(&kernel, &ai).await;
     assert!(
-        rows.iter().any(|r| r["content"]
-            .as_str()
-            .is_some_and(|c| c.starts_with("[stopped by rx"))),
+        rows.iter().any(|r| r["kind"] == json!("stopped")
+            && r["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("[your turn was stopped by rx"))),
         "{rows:#?}"
     );
     *fp.step.lock().unwrap() = Duration::ZERO;
@@ -692,9 +698,10 @@ async fn stop_aborts_a_send_the_kernel_cancel_does_not_find() {
     assert_eq!(after["generating"], json!(false), "{after}");
     let rows = conversation(&kernel, &ai).await;
     assert!(
-        rows.iter().any(|r| r["content"]
-            .as_str()
-            .is_some_and(|c| c.starts_with("[stopped by rx"))),
+        rows.iter().any(|r| r["kind"] == json!("stopped")
+            && r["content"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("[your turn was stopped by rx"))),
         "{rows:#?}"
     );
     *fp.step.lock().unwrap() = Duration::ZERO;
@@ -765,12 +772,10 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
             && m["content"].as_str().is_some_and(|c| c.contains("go"))),
         "{nxt:?}"
     );
-    let marker = last_assistant(&fp, 1);
-    assert!(
-        marker.starts_with("[stopped by rx]\npartial words"),
-        "{}",
-        marker.chars().take(80).collect::<String>()
-    );
+    let answer = last_assistant(&fp, 1);
+    // the fake provider keeps streaming during the sleep: the visible text is a run
+    // of "partial words", never the bare marker; the stopped notice follows it.
+    assert!(answer.starts_with("partial words"), "{answer}");
 }
 
 #[tokio::test]
@@ -1092,4 +1097,26 @@ fn a_backtick_in_a_call_argument_does_not_hide_a_wrapper_after_it() {
         .collect();
     assert_eq!(oks, vec![Some(true), Some(false)], "{ev:?}");
     assert_eq!(sp.closed_calls.len(), 1, "{:?}", sp.closed_calls);
+}
+
+#[test]
+fn stop_rows_with_nothing_said_has_no_answer() {
+    let (shown, notice) = crate::stream_parts::stop_rows("", "rx", &[]);
+    assert_eq!(shown, None);
+    assert_eq!(notice, "[your turn was stopped by rx before you answered]");
+}
+
+#[test]
+fn stop_rows_while_thinking() {
+    let open = "\u{3c}think>hmm";
+    let (shown, notice) = crate::stream_parts::stop_rows(open, "rx", &[]);
+    assert_eq!(shown, None);
+    assert_eq!(notice, "[your turn was stopped by rx while thinking]");
+}
+
+#[test]
+fn stop_rows_keeps_the_partial_text() {
+    let (shown, notice) = crate::stream_parts::stop_rows("partial words", "rx", &[]);
+    assert_eq!(shown, Some("partial words".to_string()));
+    assert_eq!(notice, "[your turn was stopped by rx]");
 }

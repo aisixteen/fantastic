@@ -96,7 +96,6 @@ SCHEMAS = {
             ("context_window", "int", False, None, None),
             ("temperature", "float", False, None, None),
             ("thinking_budget", "int", False, None, None),
-            ("prompt_cache", "bool", False, None, None),
             ("price_input_per_mtok", "float", False, None, None),
             ("price_output_per_mtok", "float", False, None, None),
             ("credentials", "credentials", False, None, None),
@@ -271,6 +270,60 @@ def test_misfire_limit_is_validated(backend):
     for good in (2, 50, None):
         err = _tools(backend).validate_meta({"misfire_limit": good}, {})
         assert err != refusal, good
+#: A record each of the three backends accepts as it stands (its required fields).
+_CACHING_REC = {
+    "ollama_backend": {"endpoint": "http://o.test", "memory_store_id": "memory"},
+    "vllm_backend": {
+        "endpoint": "http://vllm.test/v1",
+        "kv_overflow": "evict",
+        "memory_store_id": "memory",
+    },
+    "responses_backend": {
+        "endpoint": "https://api.test/v1/responses",
+        "model": "gpt-x",
+        "credentials": {"store": "credential_store", "ref": "openai"},
+        "memory_store_id": "memory",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "backend", ["ollama_backend", "vllm_backend", "responses_backend"]
+)
+def test_caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here(
+    backend,
+):
+    rec = _CACHING_REC[backend]
+    vm = _tools(backend).validate_meta
+    assert vm({}, rec) is None
+    for mode in ("none", "cleanup"):
+        assert vm({"caching": mode}, rec) is None
+    refusal = (
+        f"{backend} cannot do provider caching: caching=provider_cache is refused — "
+        "use none or cleanup"
+    )
+    assert vm({"caching": "provider_cache"}, rec) == refusal
+    # a record already in provider_cache is refused on any write to it
+    assert vm({}, {**rec, "caching": "provider_cache"}) == refusal
+    assert vm({"caching": "always"}, rec) == (
+        "caching='always' is not one of the legal values: none, cleanup, provider_cache"
+    )
+
+
+@pytest.mark.parametrize(
+    "backend", ["ollama_backend", "vllm_backend", "responses_backend"]
+)
+def test_a_bad_cache_primer_is_refused_by_every_backend_that_cannot_cache(backend):
+    rec = _CACHING_REC[backend]
+    vm = _tools(backend).validate_meta
+    assert vm({"cache_primer_until": 12}, rec) is None
+    assert vm({"cache_primer_until": 0}, rec) == (
+        "cache_primer_until=0 must be a row id (a positive int)"
+    )
+    assert vm({"cache_primer_until": "7"}, rec) == (
+        "cache_primer_until='7' must be a row id (a positive int)"
+    )
+    assert vm({"caching": "none", "cache_primer_until": 5}, rec) is None
 
 
 @pytest.mark.parametrize(

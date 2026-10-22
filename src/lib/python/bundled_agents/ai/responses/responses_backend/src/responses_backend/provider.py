@@ -19,9 +19,12 @@ record's `credentials` ref in a credential store (`ai_core/credentials.py`).
 from __future__ import annotations
 
 import os
+from contextlib import aclosing
 from typing import AsyncIterator
 
+import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.provider import ProviderError
 
 # EDGE TRANSPORT FAILURES — not answers, and not statements about the request.
 # A 4xx, or any 5xx carrying a JSON body, is the endpoint DELIBERATELY answering:
@@ -127,6 +130,23 @@ class ResponsesProvider:
     async def chat(
         self, messages: list[dict], max_tokens: int | None = None
     ) -> AsyncIterator[str]:
+        """Stream raw text tokens (see `_chat`). THE LINK FAILED, not the endpoint's
+        answer (#198): a connect or read error, a timeout, or a stream the peer
+        broke is a `ProviderError` marked transport."""
+        try:
+            async with aclosing(self._chat(messages, max_tokens)) as stream:
+                async for token in stream:
+                    yield token
+        except (
+            httpx.TimeoutException,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ) as e:
+            raise ProviderError(f"http: {e}", transport=True) from e
+
+    async def _chat(
+        self, messages: list[dict], max_tokens: int | None
+    ) -> AsyncIterator[str]:
         """Stream raw text tokens; ai_core parses any `<call>` element out of them.
 
         BOTH channels are read: reasoning deltas are wrapped in `<think>…</think>`
@@ -199,8 +219,10 @@ class ResponsesProvider:
                             and "json" not in ctype.lower()
                             and attempt < RETRIES
                         ):
-                            raise RuntimeError(
-                                f"responses {resp.status_code}: {detail}"
+                            # a gateway is the link, not the request (#198)
+                            raise ProviderError(
+                                f"responses {resp.status_code}: {detail}",
+                                transport=resp.status_code in (502, 503, 504),
                             )
                         attempt += 1
                         print(

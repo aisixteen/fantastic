@@ -20,7 +20,11 @@ fn pathext() -> Vec<String> {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_PATHEXT.to_string());
-    source.split(';').filter(|e| !e.is_empty()).map(str::to_string).collect()
+    source
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The name a shell runs the file named `file` by, and its rank among the files
@@ -31,8 +35,13 @@ fn pathext() -> Vec<String> {
 pub(crate) fn program_name(file: &str) -> Option<(String, usize)> {
     pathext().iter().enumerate().find_map(|(rank, ext)| {
         // the extensions are ASCII, matched case-insensitively, as the OS does
-        let cut = file.len().checked_sub(ext.len()).filter(|&c| c > 0 && file.is_char_boundary(c))?;
-        file[cut..].eq_ignore_ascii_case(ext).then(|| (file[..cut].to_string(), rank))
+        let cut = file
+            .len()
+            .checked_sub(ext.len())
+            .filter(|&c| c > 0 && file.is_char_boundary(c))?;
+        file[cut..]
+            .eq_ignore_ascii_case(ext)
+            .then(|| (file[..cut].to_string(), rank))
     })
 }
 
@@ -47,7 +56,11 @@ pub(crate) fn is_program(p: &Path) -> bool {
 /// (`<stem>.exe`) or not (`<stem>`, no extension). Returns its path.
 #[cfg(test)]
 pub(crate) fn program_fixture(dir: &Path, stem: &str, runs: bool) -> std::path::PathBuf {
-    let f = dir.join(if runs { format!("{stem}.exe") } else { stem.to_string() });
+    let f = dir.join(if runs {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    });
     std::fs::write(&f, "x").unwrap();
     f
 }

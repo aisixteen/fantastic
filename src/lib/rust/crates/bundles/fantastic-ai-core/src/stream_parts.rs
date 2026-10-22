@@ -563,3 +563,46 @@ pub fn cut_marker(text_so_far: &str, why: &str, unsent: &[Part]) -> String {
     }
     lines.join("\n")
 }
+
+/// The stopped turn's two halves — kept apart so a model never reads the notice
+/// as its own answer. First: the VISIBLE text streamed so far (thinking stripped),
+/// `None` when there is none, saved as the assistant row. Second: the notice, a
+/// USER row (kind `stopped`), naming who stopped the turn, whether it was cut
+/// while thinking or before any answer, and every unsent call as not sent.
+#[must_use]
+pub fn stop_rows(text_so_far: &str, who: &str, unsent: &[Part]) -> (Option<String>, String) {
+    let mut splitter = PartSplitter::new("marker");
+    let events = splitter.feed(text_so_far);
+    let visible: String = events
+        .iter()
+        .filter_map(|ev| match ev {
+            PartEvent::Delta(p, t) if p.kind == PartKind::Text => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    let visible = py_strip(&visible);
+    let mut head = format!("[your turn was stopped by {who}");
+    if splitter.in_think() && visible.is_empty() {
+        head.push_str(" while thinking");
+    } else if visible.is_empty() {
+        head.push_str(" before you answered");
+    }
+    let mut lines = vec![head + "]"];
+    for call in unsent {
+        let to = match (&call.target, &call.to) {
+            (Some(t), _) if !t.is_empty() => t.clone(),
+            (_, Some(to)) if !to.join(", ").is_empty() => to.join(", "),
+            _ => "the caller".to_string(),
+        };
+        lines.push(format!(
+            "[a {} call to {to} was not sent]",
+            call.name.as_deref().unwrap_or("call")
+        ));
+    }
+    let shown = if visible.is_empty() {
+        None
+    } else {
+        Some(visible.to_string())
+    };
+    (shown, lines.join("\n"))
+}

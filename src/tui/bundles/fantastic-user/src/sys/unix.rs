@@ -19,7 +19,9 @@ pub(crate) async fn login_path() -> Option<String> {
         .kill_on_drop(true)
         .output();
     let out = tokio::time::timeout(SHELL_WAIT, child).await.ok()?.ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The name a shell runs the file named `file` by, and its rank among the files
@@ -41,6 +43,10 @@ pub(crate) fn is_program(p: &Path) -> bool {
 pub(crate) fn program_fixture(dir: &Path, stem: &str, runs: bool) -> std::path::PathBuf {
     let f = dir.join(stem);
     std::fs::write(&f, "x").unwrap();
-    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(if runs { 0o755 } else { 0o644 })).unwrap();
+    std::fs::set_permissions(
+        &f,
+        std::fs::Permissions::from_mode(if runs { 0o755 } else { 0o644 }),
+    )
+    .unwrap();
     f
 }

@@ -100,3 +100,52 @@ async def test_bad_arguments_are_refused(seeded_kernel):
         assert out.get("reason") == "bad_arg" and out.get("arg") == arg, (p, out)
     nope = await _ask(k, {"type": "tail", "job_id": 999999})
     assert nope.get("reason") == "not_found", nope
+
+
+async def test_run_returns_the_output_in_one_reply(seeded_kernel):
+    k = seeded_kernel
+    await _mk(k, allowed=[r".*"])
+    r = await _ask(
+        k,
+        {
+            "type": "run",
+            "command": sys.executable,
+            "args": ["-c", "import sys; print('hello'); sys.exit(3)"],
+        },
+    )
+    assert r.get("status") != "running", r
+    assert r.get("exit_code") == 3, r
+    assert any(x["line"] == "hello" for x in r["lines"]), r
+
+
+async def test_run_gives_up_at_wait_s(seeded_kernel):
+    import time
+
+    k = seeded_kernel
+    await _mk(k, allowed=[r".*"])
+    t0 = time.monotonic()
+    r = await _ask(
+        k,
+        {
+            "type": "run",
+            "command": sys.executable,
+            "args": ["-c", "import time; time.sleep(30)"],
+            "wait_s": 0.5,
+        },
+    )
+    assert time.monotonic() - t0 < 3, r
+    assert r.get("status") == "running", r
+    await _ask(k, {"type": "stop", "job_id": r["job_id"]})
+    await _wait_done(k, "runner", r["job_id"])
+
+
+async def test_run_refuses_bad_arguments(seeded_kernel):
+    k = seeded_kernel
+    await _mk(k, allowed=[r".*"])
+    for p, arg in [
+        ({"type": "run", "command": sys.executable, "wait_s": 700}, "wait_s"),
+        ({"type": "run", "command": sys.executable, "wait_s": "x"}, "wait_s"),
+        ({"type": "run", "command": sys.executable, "tail": 0}, "tail"),
+    ]:
+        out = await _ask(k, p)
+        assert out.get("reason") == "bad_arg" and out.get("arg") == arg, (p, out)

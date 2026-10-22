@@ -8,7 +8,7 @@ import asyncio
 
 from _testkit import as_agent, memory_meta, wire
 
-from ai_core.stream_parts import PartSplitter, cut_marker
+from ai_core.stream_parts import PartSplitter, cut_marker, stop_rows
 
 CALL = (
     '<call name="send">\n<target_id>notes</target_id>\n<type>reflect</type>\n'
@@ -85,6 +85,37 @@ def test_the_cut_marker_is_a_marker_not_a_half_answer():
         cut_marker("<think>hmm", "stopped by rx", [])
         == "[stopped by rx while thinking]"
     )
+
+
+def test_stop_rows_with_nothing_said_has_no_answer():
+    shown, notice = stop_rows("", "rx", [])
+    assert shown is None
+    assert notice == "[your turn was stopped by rx before you answered]"
+
+
+def test_stop_rows_while_thinking():
+    shown, notice = stop_rows("<" + "think" + ">hmm", "rx", [])
+    assert shown is None
+    assert notice == "[your turn was stopped by rx while thinking]"
+
+
+def test_stop_rows_keeps_the_partial_text():
+    shown, notice = stop_rows("partial words", "rx", [])
+    assert shown == "partial words"
+    assert notice == "[your turn was stopped by rx]"
+
+
+def test_stop_rows_names_each_unsent_call():
+    shown, notice = stop_rows(
+        "said this " + '<call name="send">' + "<target_id>x</target_id>",
+        "rx",
+        [{"name": "send", "target": "x"}],
+    )
+    assert shown == "said this"
+    assert notice.splitlines() == [
+        "[your turn was stopped by rx]",
+        "[a send call to x was not sent]",
+    ]
 
 
 # ─── through an AI agent ─────────────────────────────────────────────────────
@@ -225,8 +256,14 @@ async def test_a_receiver_stops_the_stream_and_the_turn_keeps_a_marker(
     await _until(lambda: len(fp.requests) >= 2)
     nxt = fp.requests[1]
     assert any(m["role"] == "user" and "go" in m["content"] for m in nxt), nxt
-    marker = [m["content"] for m in nxt if m["role"] == "assistant"][-1]
-    assert marker.startswith("[stopped by rx]\npartial words"), marker[:80]
+    # the visible text is the answer — never the bare marker; the stopped notice
+    # is a user row after it (#232)
+    answer = [m["content"] for m in nxt if m["role"] == "assistant"][-1]
+    assert answer.startswith("partial words"), answer[:80]
+    assert any(
+        m["role"] == "user" and m["content"].startswith("[your turn was stopped by rx]")
+        for m in nxt
+    ), nxt
 
 
 async def test_stop_with_nothing_in_flight_says_so(seeded_kernel, fake_providers):
