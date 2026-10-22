@@ -219,6 +219,40 @@ fn ids(r: &Value) -> Vec<String> {
     v
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_path_verb_names_the_running_fantastic_as_fantastic() {
+    // #216: the menu tile for `fantastic` must not depend on PATH. Put a DIFFERENT
+    // executable named `fantastic` first on PATH; `executables.fantastic` must still
+    // be the running binary (`self`).
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("fgw_fake_fantastic_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = dir.join("fantastic");
+    std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = std::ffi::OsString::from(&dir);
+    new_path.push(":");
+    new_path.push(&old_path);
+    std::env::set_var("PATH", &new_path);
+
+    let k = setup().await;
+    let r = op(&k, "user", json!({"type": "path", "rescan": true})).await;
+
+    std::env::set_var("PATH", &old_path);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let me = r["self"].as_str().unwrap_or_default().to_string();
+    assert!(!me.is_empty(), "path reply names self: {r}");
+    assert_ne!(me, fake.to_string_lossy(), "self must be the running binary: {r}");
+    assert_eq!(
+        r["executables"]["fantastic"].as_str(),
+        Some(me.as_str()),
+        "executables.fantastic must be the running binary, not the PATH copy: {r}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tab_forwards_through_user() {
     let k = setup().await;
