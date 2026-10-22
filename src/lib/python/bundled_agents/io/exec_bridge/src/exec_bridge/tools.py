@@ -126,9 +126,7 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
     async for raw in reader:
         text = raw.decode("utf-8", errors="replace")
         job["lines"] += 1
-        line = text.rstrip("\n")
-        if line.endswith("\r"):
-            line = line[:-1]
+        line = text.rstrip(chr(10) + chr(13))
         job["last_line"] = line
         _line_ring_add(job, job["lines"], stream, line)
         _monitor.feed_line(job_id, line)
@@ -138,7 +136,7 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
                 "type": "progress",
                 "job_id": job_id,
                 "n": job["lines"],
-                "line": text.rstrip("\n"),
+                "line": line,
                 "stream": stream,
             },
         )
