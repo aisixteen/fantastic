@@ -6,9 +6,12 @@ stream). This provider just streams the model's text tokens.
 
 from __future__ import annotations
 
+from contextlib import aclosing
 from typing import AsyncIterator
 
+import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.provider import ProviderError
 
 
 #: Sampling temperature when the record names none — LOW, because an agentic
@@ -67,7 +70,25 @@ class OllamaProvider:
         self, messages: list[dict], max_tokens: int | None = None
     ) -> AsyncIterator[str]:
         """Stream raw text tokens from ollama — NO tools array. ai_core parses
-        any `<call>` element out of the text stream."""
+        any `<call>` element out of the text stream.
+
+        THE LINK FAILED, not the model (#198): a connection that never opened or a
+        stream that broke mid-answer is a `ProviderError` marked transport, so a
+        retry may take it. An HTTP status the server answered
+        (`ollama.ResponseError`) is raised as it was."""
+        try:
+            async with aclosing(self._chat(messages, max_tokens)) as stream:
+                async for token in stream:
+                    yield token
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            raise ProviderError(f"ollama: request failed: {e}", transport=True) from e
+        except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+            raise ProviderError(f"ollama: stream error: {e}", transport=True) from e
+
+    async def _chat(
+        self, messages: list[dict], max_tokens: int | None
+    ) -> AsyncIterator[str]:
+        """The stream itself (see `chat`)."""
         if not self._model:
             raise RuntimeError(
                 "ollama_backend: no `model` set — this connector does not guess one. "
