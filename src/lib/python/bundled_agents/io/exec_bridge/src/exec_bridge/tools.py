@@ -126,9 +126,12 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
     async for raw in reader:
         text = raw.decode("utf-8", errors="replace")
         job["lines"] += 1
-        job["last_line"] = text.rstrip("\n")
-        _line_ring_add(job, job["lines"], stream, job["last_line"])
-        _monitor.feed_line(job_id, text.rstrip("\n"))
+        line = text.rstrip("\n")
+        if line.endswith("\r"):
+            line = line[:-1]
+        job["last_line"] = line
+        _line_ring_add(job, job["lines"], stream, line)
+        _monitor.feed_line(job_id, line)
         await kernel.emit(
             owner,
             {
