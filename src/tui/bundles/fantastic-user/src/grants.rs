@@ -8,19 +8,28 @@ use fantastic_kernel::{AgentId, Kernel};
 use serde_json::{Map, Value};
 
 fn meta(kernel: &Kernel, id: &str) -> Option<Map<String, Value>> {
-    kernel.agents.get(&AgentId::from(id)).map(|a| a.value().record().meta)
+    kernel
+        .agents
+        .get(&AgentId::from(id))
+        .map(|a| a.value().record().meta)
 }
 
 /// The user's `can_call`.
 #[must_use]
 pub fn can_call(kernel: &Kernel, user: &AgentId) -> Map<String, Value> {
-    meta(kernel, &user.0).and_then(|m| m.get("can_call").and_then(Value::as_object).cloned()).unwrap_or_default()
+    meta(kernel, &user.0)
+        .and_then(|m| m.get("can_call").and_then(Value::as_object).cloned())
+        .unwrap_or_default()
 }
 
 fn verbs(v: &Value) -> Vec<String> {
     match v {
         Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
         Value::Object(o) => o.get("verbs").map(verbs).unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -33,7 +42,10 @@ fn verbs(v: &Value) -> Vec<String> {
 pub fn page_verbs(cc: &Map<String, Value>, guid: &str, id: &str, up: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for g in [guid, "*"] {
-        for k in std::iter::once(id).chain(up.iter().map(String::as_str)).chain(["*"]) {
+        for k in std::iter::once(id)
+            .chain(up.iter().map(String::as_str))
+            .chain(["*"])
+        {
             if let Some(v) = cc.get(&format!("{g}|{k}")) {
                 out.extend(verbs(v));
             }
