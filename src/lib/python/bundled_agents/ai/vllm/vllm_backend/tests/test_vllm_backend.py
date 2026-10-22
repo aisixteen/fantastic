@@ -178,6 +178,44 @@ async def test_each_connection_failure_says_what_it_means(exc, words):
         await _drain(p)
 
 
+async def test_a_native_tool_call_becomes_call_text():
+    sse = _sse(
+        _delta(
+            tool_calls=[
+                {
+                    "index": 0,
+                    "function": {"name": "send", "arguments": '{"target_id":"files",'},
+                }
+            ]
+        ),
+        _delta(
+            tool_calls=[{"index": 0, "function": {"arguments": '"type":"reflect"}'}}]
+        ),
+        _delta("tool_calls"),
+    )
+    p = _provider(_transport(sse))
+    assert (
+        await _drain(p)
+        == '<call name="send"><target_id>files</target_id><type>reflect</type></call>'
+    )
+
+
+async def test_a_native_tool_call_with_bad_arguments_fails_loud():
+    sse = _sse(
+        _delta(
+            tool_calls=[
+                {"index": 0, "function": {"name": "send", "arguments": "not json"}}
+            ]
+        ),
+        _delta("tool_calls"),
+    )
+    p = _provider(_transport(sse))
+    with pytest.raises(
+        RuntimeError, match=r"native tool call 'send'.*not a JSON object"
+    ):
+        await _drain(p)
+
+
 # ─── the request ─────────────────────────────────────────────────────────────
 
 
