@@ -2503,6 +2503,64 @@ async fn a_bundle_names_its_own_secret_paths() {
     assert_eq!(again.result["token"], json!("tk-REAL"));
 }
 
+/// Review bug 3: a bundle's reply names its `error` as a secret path, because the
+/// error echoes the value. The call row shows `[secret]`, never the value; the caller
+/// still gets the error whole.
+#[tokio::test]
+async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Echo;
+    #[async_trait::async_trait]
+    impl Bundle for Echo {
+        fn name(&self) -> &str {
+            "echo_probe"
+        }
+        fn reply_secret(&self, payload: &Value, _reply: &Value) -> Vec<String> {
+            if payload.get("type") == Some(&json!("fail")) {
+                vec!["error".into()]
+            } else {
+                Vec::new()
+            }
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            _payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(Some(json!({"error": "bad key sk-ERR-REAL"})))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("echo_probe.tools", Echo);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    kernel.register(Agent::new(
+        AgentId::from("ep"),
+        Some("echo_probe.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("ep"),
+        true,
+    ));
+    let out = kernel
+        .send(vec![Item::new("ep", json!({"type": "fail"})).with_id("f1")])
+        .await
+        .remove(0);
+    assert!(
+        out.result["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("sk-ERR-REAL"),
+        "the caller gets the error whole: {}",
+        out.result
+    );
+    let rows = serde_json::to_string(&kernel.rows.all()).unwrap();
+    assert!(!rows.contains("sk-ERR-REAL"), "a row kept the error text: {rows}");
+    assert!(rows.contains("[secret]"), "{rows}");
+}
+
 /// While draining, a FORK starting a send is new work: refused. A keepalive fork
 /// (a persister) still sends (python `drain_admits`).
 #[tokio::test]
