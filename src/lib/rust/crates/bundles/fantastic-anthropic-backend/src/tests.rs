@@ -1287,3 +1287,40 @@ fn thinking_budget_is_refused_for_a_5x_model() {
         None
     );
 }
+
+#[tokio::test]
+async fn a_dead_endpoint_is_a_transport_failure() {
+    let p = provider("http://127.0.0.1:1/v1/messages", Arc::new(NoKey));
+    let err = match p
+        .chat(&[json!({"role": "user", "content": "hi"})], Some(64))
+        .await
+    {
+        Ok(_) => panic!("no connection, so chat must fail"),
+        Err(e) => e,
+    };
+    assert!(err.transport, "{err}");
+}
+
+#[tokio::test]
+async fn overloaded_529_is_transport_and_400_is_not() {
+    let (srv, ep) = api(529, "overloaded".into()).await;
+    let err = match provider(&ep, Arc::new(Key))
+        .chat(&[json!({"role": "user", "content": "hi"})], Some(64))
+        .await
+    {
+        Ok(_) => panic!("529 must fail the pass"),
+        Err(e) => e,
+    };
+    assert!(err.transport, "{err}");
+    drop(srv);
+
+    let (_srv, ep) = api(400, "bad request".into()).await;
+    let err = match provider(&ep, Arc::new(Key))
+        .chat(&[json!({"role": "user", "content": "hi"})], Some(64))
+        .await
+    {
+        Ok(_) => panic!("400 must fail the pass"),
+        Err(e) => e,
+    };
+    assert!(!err.transport, "{err}");
+}

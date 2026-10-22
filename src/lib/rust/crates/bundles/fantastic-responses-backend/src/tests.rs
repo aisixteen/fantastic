@@ -923,3 +923,42 @@ fn caching_none_and_cleanup_are_accepted_and_provider_cache_is_refused_here() {
         Some("caching='always' is not one of the legal values: none, cleanup, provider_cache")
     );
 }
+
+/// A transient 5xx is the LINK (#198); a 401 is the request.
+#[tokio::test]
+async fn a_503_is_a_transport_error_and_a_401_is_not() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("content-type", "application/json")
+                .set_body_string("unavailable"),
+        )
+        .mount(&server)
+        .await;
+    let p = provider(format!("{}/v1/responses", server.uri()), 1000, Map::new());
+    let e = match p.chat(&msgs(), None).await {
+        Ok(_) => panic!("503 must fail the pass"),
+        Err(e) => e,
+    };
+    assert!(e.message.contains("responses 503"), "{e}");
+    assert!(e.transport, "{e}");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .insert_header("content-type", "application/json")
+                .set_body_string("no key"),
+        )
+        .mount(&server)
+        .await;
+    let p = provider(format!("{}/v1/responses", server.uri()), 1000, Map::new());
+    let e = match p.chat(&msgs(), None).await {
+        Ok(_) => panic!("401 must fail the pass"),
+        Err(e) => e,
+    };
+    assert!(!e.transport, "{e}");
+}

@@ -143,7 +143,7 @@ impl Stalled {
     /// raise, so the turn ends with an error row and `status(done, reason='error')`.
     #[must_use]
     pub fn error(&self, name: &str, endpoint: &str) -> ProviderError {
-        ProviderError::raised(format!(
+        ProviderError::transport(format!(
             "{name}: stream_stalled — {endpoint} sent no bytes for {}s; this turn is NOT \
              complete",
             self.idle_secs

@@ -6731,3 +6731,11 @@ async fn two_thinking_only_turns_escalate_the_nudge() {
     );
     assert!(nudge.contains("were only thinking"), "{nudge}");
 }
+
+/// A stalled read is the LINK, not the request: its error is a transport failure
+/// (#198).
+#[test]
+fn a_stalled_stream_error_is_a_transport_failure() {
+    let e = crate::provider::Stalled { idle_secs: 5.0 }.error("x", "http://e");
+    assert!(e.transport, "{e}");
+}

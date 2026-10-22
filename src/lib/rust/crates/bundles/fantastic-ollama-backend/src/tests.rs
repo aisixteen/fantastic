@@ -997,3 +997,30 @@ fn stream_idle_seconds_is_validated_at_the_write() {
         .unwrap_or_default();
     assert!(!ok.contains("stream_idle_seconds"), "{ok}");
 }
+
+/// A connect failure is the LINK, so the provider's error is a transport failure (#198).
+#[tokio::test]
+async fn a_dead_endpoint_is_a_transport_failure() {
+    let p = OllamaProvider {
+        endpoint: "http://127.0.0.1:1/api/chat".to_string(),
+        model: "ollama-test".to_string(),
+        temperature: 0.3,
+        num_ctx: None,
+        num_predict: None,
+        think: None,
+        key: Arc::new(crate::tests_server::NoKey),
+        report: Default::default(),
+        stream_idle: std::time::Duration::from_secs_f64(
+            fantastic_ai_core::constants::STREAM_IDLE_SECONDS,
+        ),
+    };
+    let e = match p
+        .chat(&[json!({"role": "user", "content": "hi"})], None)
+        .await
+    {
+        Ok(_) => panic!("no connection, so chat must fail"),
+        Err(e) => e,
+    };
+    assert!(e.message.contains("request failed"), "{e}");
+    assert!(e.transport, "{e}");
+}
