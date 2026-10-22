@@ -201,6 +201,22 @@ async def _usage(id, payload, kernel):
     return out
 
 
+async def _models(id, payload, kernel):
+    """models — args: none. The models this agent's key can use: [{id, display_name, max_input_tokens, max_tokens}], read from the API."""
+    rec = kernel.get(id) or {}
+    from ai_core.credentials import CredentialError
+
+    endpoint = str(rec.get("endpoint") or "")
+    try:
+        secret = await key_reader(id, kernel, NAME, required=False)(endpoint)
+    except CredentialError as e:
+        return {"error": str(e)}
+    out = await server.list_models(endpoint, key=secret or "")
+    if isinstance(out, str):
+        return {"error": out}
+    return {"models": out}
+
+
 async def on_delete(agent) -> None:
     """The shared teardown, and this agent's counts dropped with it."""
     _USAGE.pop(agent.id, None)
@@ -212,7 +228,7 @@ def _build():
         sentence="Anthropic Messages-API LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
         name=NAME,
-        extra_verbs={"usage": _usage},
+        extra_verbs={"usage": _usage, "models": _models},
         reflect_extra=_reflect_extra,
     )
 
