@@ -2446,16 +2446,90 @@ async fn a_chain_gives_up_after_max_silent_turns() {
     assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
     assert_eq!(
         last["detail"]["error"],
-        json!(crate::route::gave_up_text()),
+        json!(crate::route::gave_up_text(cap)),
         "{last:#?}"
     );
     assert_eq!(last["detail"]["silent_turns"], json!(cap), "{last:#?}");
     assert_eq!(
-        crate::route::gave_up_text(),
+        crate::route::gave_up_text(cap),
         "The LLM was not able to answer — 10 turns in a row produced no call. \
          Reiterate the inquiry.",
         "python `_GAVE_UP`, byte for byte"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chain_gives_up_after_its_misfire_limit() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "misfire_limit").await;
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": backend.as_str(), "misfire_limit": 3}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let s = script(
+        &backend,
+        (0..8).map(|_| pass("just prose")).collect(),
+        Duration::ZERO,
+    );
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "tab1"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        until_passes(&s, 3).await,
+        "the chain stalled before the limit"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(s.passes_served(), 3, "no reminder after the limit");
+    let mut dones = Vec::new();
+    while let Some(v) = rx.try_recv() {
+        let p = v.payload;
+        if p["type"] == json!("status") && p["phase"] == json!("done") {
+            dones.push(p);
+        }
+    }
+    let last = dones.last().expect("a done status");
+    assert_eq!(last["detail"]["reason"], json!("gave_up"), "{dones:#?}");
+    assert_eq!(last["detail"]["silent_turns"], json!(3), "{last:#?}");
+    assert_eq!(
+        last["detail"]["error"],
+        json!(crate::route::gave_up_text(3)),
+        "{last:#?}"
+    );
+    assert!(
+        crate::route::gave_up_text(3).contains("3 turns in a row"),
+        "the gave-up text names the limit"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn misfire_limit_is_validated() {
+    let sch = crate::schema::schema(vec![]);
+    let rec = json!({"endpoint": "e", "memory_store_id": "m"});
+    let rec = rec.as_object().unwrap();
+    let check = |v| {
+        let meta = json!({"misfire_limit": v});
+        crate::schema::validate(&sch, "ai", meta.as_object().unwrap(), rec)
+    };
+    for bad in [json!(1), json!(51), json!("x")] {
+        assert_eq!(
+            check(bad.clone()),
+            Some("misfire_limit must be an int from 2 to 50".to_string()),
+            "{bad} should be refused"
+        );
+    }
+    for good in [json!(2), json!(50)] {
+        assert_eq!(check(good.clone()), None, "{good} should be accepted");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

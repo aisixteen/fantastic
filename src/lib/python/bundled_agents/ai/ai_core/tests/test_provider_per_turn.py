@@ -12,9 +12,16 @@ from __future__ import annotations
 
 from _testkit import memory_meta
 
-from ai_core import core
+from ai_core import ProviderError, core
 
 DONE = '<call name="done"></call>'
+
+
+def test_provider_error_transport_flag():
+    assert str(ProviderError("x")) == "x"
+    assert ProviderError("x").transport is False
+    assert ProviderError("x", transport=True).transport is True
+    assert isinstance(ProviderError("x"), RuntimeError)
 
 
 class _Recorded:

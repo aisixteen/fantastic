@@ -412,6 +412,11 @@ fn usage_reply(agent_id: &str, payload: &Value) -> Value {
 
 // ─── provider ───────────────────────────────────────────────────────────────
 
+/// How a server names the thinking budget (#207): vllm sends
+/// `thinking_token_budget`, strata `reasoning_budget_tokens`, llamacpp takes
+/// no per-request budget (a server flag).
+pub const DIALECTS: [&str; 3] = ["vllm", "strata", "llamacpp"];
+
 struct VllmProvider {
     agent_id: String,
     endpoint: String,
@@ -430,6 +435,8 @@ struct VllmProvider {
     window: Option<i64>,
     kv_slots: i64,
     kv_overflow: String,
+    /// how this server names the thinking budget (#207): vllm, strata or llamacpp
+    dialect: String,
     kv_ttl: f64,
     /// The effective sampling: the record's values over the defaults, plus any
     /// PASSTHROUGH field the record set.
@@ -520,7 +527,12 @@ impl VllmProvider {
             .expect("vllm budgets poisoned")
             .insert(self.agent_id.clone(), budget);
         if let Some(b) = budget {
-            body.insert("thinking_token_budget".into(), json!(b));
+            // the dialect's own name for the budget (#207); llamacpp takes none
+            match self.dialect.as_str() {
+                "strata" => body.insert("reasoning_budget_tokens".into(), json!(b)),
+                "llamacpp" => None,
+                _ => body.insert("thinking_token_budget".into(), json!(b)),
+            };
         }
         Ok(Value::Object(body))
     }
@@ -1061,6 +1073,11 @@ fn configure(
         window: Some(required_int(meta, "context_window")?),
         kv_slots: required_int(meta, "kv_slots")?,
         kv_overflow: kv_overflow.to_string(),
+        dialect: meta
+            .get("server_dialect")
+            .and_then(Value::as_str)
+            .unwrap_or("vllm")
+            .to_string(),
         kv_ttl: seconds(meta, "kv_ttl", KV_TTL)?,
         sampling,
         explicit_budget,
@@ -1124,6 +1141,13 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
         kv.extend(with_table(endpoint, |t| t.view()));
     }
     out.insert("kv".into(), Value::Object(kv));
+    out.insert(
+        "server_dialect".into(),
+        json!(meta
+            .get("server_dialect")
+            .and_then(Value::as_str)
+            .unwrap_or("vllm")),
+    );
     Ok(Value::Object(out))
 }
 
@@ -1229,6 +1253,19 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             }
         }
     }
+    if let Some(v) = set("server_dialect") {
+        if !v.as_str().is_some_and(|s| DIALECTS.contains(&s)) {
+            return Some("server_dialect must be one of vllm, strata, llamacpp".to_string());
+        }
+    }
+    let dialect = merged.get("server_dialect").and_then(Value::as_str);
+    if dialect == Some("llamacpp") && budget.is_some() {
+        return Some(
+            "llama.cpp takes the reasoning budget as a server flag, not per request — \
+             unset thinking_token_budget (or use server_dialect strata/vllm)"
+                .to_string(),
+        );
+    }
     // EVERY required field, checked at the WRITE: a model spawning a sub-AI
     // copies the fields it can see, and a record the write accepted but no turn
     // could use would fail only later, on every turn, far from the create that
@@ -1296,6 +1333,14 @@ pub fn record_schema() -> &'static Value {
             )
             .required()
             .one_of(&KV_OVERFLOWS),
+            Field::new(
+                "server_dialect",
+                "enum",
+                "how this server names things: vllm (default) sends thinking_token_budget; \
+                 strata sends reasoning_budget_tokens; llamacpp takes no per-request budget \
+                 (a server flag) — set explicitly, never guessed (#207)",
+            )
+            .one_of(&DIALECTS),
             Field::new("temperature", "float", "sampling temperature")
                 .default(sampling_default("temperature")),
             Field::new("top_p", "float", "nucleus sampling").default(sampling_default("top_p")),

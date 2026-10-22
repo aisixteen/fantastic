@@ -108,6 +108,52 @@ async def read(rec: dict, *, key, transport=None) -> dict:
     return out
 
 
+async def list_models(endpoint: str, *, key: str, transport=None) -> list[dict] | str:
+    """The models this key can use, read from the API beside the endpoint's Messages
+    path: [{id, display_name, max_input_tokens, max_tokens}], or the reason it could
+    not be read."""
+    endpoint = endpoint.rstrip("/")
+    base = models_url(endpoint)
+    if base is None:
+        return (
+            f"the endpoint {endpoint} does not end in /messages, so the "
+            "model list is not known"
+        )
+    url = f"{base}?limit=1000"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(READ_TIMEOUT, connect=CONNECT_TIMEOUT),
+            transport=transport,
+        ) as client:
+            resp = await client.get(url, headers=headers(key))
+    except httpx.HTTPError:
+        return f"GET {url} failed — the API is not reachable there"
+    if resp.status_code != 200:
+        why = (
+            " — the API wants a key: name it in `credentials` ({store, ref})"
+            if resp.status_code in (401, 403)
+            else ""
+        )
+        return f"GET {url} answered HTTP {resp.status_code}{why}"
+    try:
+        body = json.loads(resp.text)
+    except ValueError:
+        body = None
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, list):
+        return f"GET {url} answered HTTP 200 without a `data` list — not a model list"
+    return [
+        {
+            "id": e.get("id"),
+            "display_name": e.get("display_name"),
+            "max_input_tokens": e.get("max_input_tokens"),
+            "max_tokens": e.get("max_tokens"),
+        }
+        for e in data
+        if isinstance(e, dict)
+    ]
+
+
 async def resolve(id: str, kernel, *, key, validate, transport=None) -> dict | None:
     """Read the record's absent fields from the API and write them back. None when
     nothing is absent or all were written; otherwise the verb's refusal."""
