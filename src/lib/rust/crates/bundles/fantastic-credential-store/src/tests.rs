@@ -20,6 +20,20 @@ const KEY: &str = "sk-live-0123456789abcdef";
 const KEY2: &str = "sk-live-rotated-fedcba98";
 
 #[test]
+fn field_marks_names_each_field_or_the_whole_map() {
+    assert_eq!(
+        field_marks(Some(&json!({"api_key": "x", "user": "y"}))),
+        vec!["fields.api_key".to_string(), "fields.user".to_string()]
+    );
+    assert_eq!(
+        field_marks(Some(&json!({"a.b": "x"}))),
+        vec!["fields".to_string()]
+    );
+    assert_eq!(field_marks(Some(&json!("x"))), vec!["fields".to_string()]);
+    assert!(field_marks(None).is_empty());
+}
+
+#[test]
 fn readme_is_python_verbatim() {
     let py = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -1008,6 +1022,115 @@ async fn concurrent_sets_lose_no_ref() {
         (0..16).all(|i| text.contains(&format!("r{i:02}:"))),
         "{text}"
     );
+}
+
+/// The spec's end-to-end test: a real `set` and `get` through the store, then a
+/// flush. The value is in no row, no stored memory row; the caller still gets it.
+#[tokio::test]
+async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
+    use fantastic_kernel::test_support::rows_about;
+    let f = mk(json!({})).await;
+    // a ram_store memory under the root, named by the root, so the flush lands in it
+    let root = f.k.root().expect("root").id.clone();
+    let made = op(
+        &f.k,
+        json!({"type": "create_agent", "parent_id": root.0, "id": "memory",
+               "handler_module": "ram_store.tools"}),
+    )
+    .await;
+    assert_eq!(made["id"], json!("memory"), "{made}");
+    let mut patch = Map::new();
+    patch.insert("memory_store_id".to_string(), json!("memory"));
+    f.k.update(&root, patch);
+    // the flusher runs only on a started kernel
+    let started = f.k.start(false).await;
+    assert_eq!(started["started"], json!(true), "{started}");
+
+    seed(&f.k).await;
+    // The `get` is NAMED: only a named call's settle row keeps its whole result
+    // (an unnamed one keeps a `{status, bytes}` digest), so only then does the
+    // reply's secret mark decide whether the value reaches a row.
+    let got = as_agent(
+        AgentId::from("alice"),
+        f.k.send(vec![Item::new(
+            AgentId::from("creds"),
+            json!({"type": "get", "ref": "openai/main"}),
+        )
+        .with_id("get-1")]),
+    )
+    .await
+    .remove(0);
+    assert_eq!(got.result["fields"], json!({"api_key": KEY}), "{}", got.result);
+
+    f.k.flush_executions().await;
+
+    // the memory store holds no value: its whole dump is free of KEY
+    let dumped = f
+        .k
+        .send(vec![Item::new(AgentId::from("memory"), json!({"type": "dump"}))])
+        .await
+        .remove(0)
+        .result
+        .to_string();
+    // the `get`'s own record is IN the dump (else "no KEY" proves nothing) and
+    // carries its reply fields as the mark
+    assert!(dumped.contains("get-1"), "the get's record is not in the dump: {dumped}");
+    assert!(!dumped.contains(KEY), "{dumped}");
+    assert!(dumped.contains("[secret]"), "{dumped}");
+
+    // the `ledger` verb — the kernel's own read of those rows — shows the get's
+    // outcome with the mark, never the value
+    let ledger = f
+        .k
+        .send(vec![Item::new(AgentId::from("kernel"), json!({"type": "ledger"}))])
+        .await
+        .remove(0)
+        .result
+        .to_string();
+    assert!(ledger.contains("get-1"), "the get is not in the ledger: {ledger}");
+    assert!(!ledger.contains(KEY), "{ledger}");
+    assert!(ledger.contains("[secret]"), "{ledger}");
+
+    // and no row of the store or its callers holds it
+    for who in ["creds", "alice", "bob", "kernel"] {
+        let rows = format!("{:?}", rows_about(&f.k, &AgentId::from(who)));
+        assert!(!rows.contains(KEY), "{who}: {rows}");
+    }
+}
+
+/// Review bug 2: a `set` refused by the CALL GATE (a caller the store does not
+/// admit) stores nothing, and its value is in no row of the kernel.
+#[tokio::test]
+async fn a_gate_refused_set_leaves_no_value_in_any_row() {
+    use fantastic_kernel::test_support::rows_about;
+    let f = mk(json!({})).await;
+    seed(&f.k).await;
+    // a registered agent with no grants: the store's callable_by does not name it
+    f.k.register(Agent::new(
+        AgentId::from("stranger"),
+        None,
+        Some(AgentId::from(root_of(&f.k))),
+        json!({}).as_object().cloned().unwrap(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    let refused = call(
+        &f.k,
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}}),
+        Some("stranger"),
+    )
+    .await;
+    assert_ne!(refused.status.as_str(), "completed", "{}", refused.result);
+    assert!(!refused.result.to_string().contains(KEY2), "{}", refused.result);
+    for who in ["creds", "stranger", "alice", "bob", "kernel"] {
+        let rows = format!("{:?}", rows_about(&f.k, &AgentId::from(who)));
+        assert!(!rows.contains(KEY2), "{who}: {rows}");
+    }
+    assert!(!std::fs::read_to_string(f.file()).unwrap().contains(KEY2));
+}
+
+fn root_of(k: &Arc<Kernel>) -> String {
+    k.root().expect("root").id.0.clone()
 }
 
 #[test]

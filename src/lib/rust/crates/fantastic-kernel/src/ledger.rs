@@ -439,6 +439,7 @@ impl Ledger {
             // A RECALLED outcome has no binary body: the store records raw bytes
             // as their LENGTH, never the bytes.
             body: None,
+            secret: Vec::new(),
         };
         let (tx, _rx) = watch::channel(Some(out.clone()));
         let name = call.get("name").and_then(Value::as_str).map(str::to_string);
@@ -541,6 +542,7 @@ pub fn is_dead(status: Status) -> bool {
 pub fn stored_outcome(out: &Outcome, named: bool, body_as: crate::jsonsafe::BodyAs) -> Value {
     let status = Value::from(out.status.as_str());
     let res = crate::jsonsafe::with_body(&out.result, out.body.as_ref(), body_as);
+    let res = crate::secret::shown(&res, &out.secret);
     let mut kept = Map::new();
     kept.insert("status".to_string(), status);
     if named {

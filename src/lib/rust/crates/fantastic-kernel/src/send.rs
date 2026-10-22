@@ -632,6 +632,43 @@ impl Kernel {
         }
     }
 
+    /// The bundle that answers `target` here — `None` for a remote agent, a bare
+    /// agent, or a handler_module no registry holds.
+    fn local_bundle(&self, target: &Agent) -> Option<Arc<dyn crate::bundle::Bundle>> {
+        if target.is_remote() {
+            return None;
+        }
+        target
+            .handler_module
+            .as_deref()
+            .and_then(|hm| self.bundles.get(hm))
+    }
+
+    /// The item's marks plus the ones `target`'s bundle names for this payload
+    /// (`Bundle::payload_secret`) — the well-formed ones (`crate::secret::check`'s
+    /// rules: non-empty steps, never `type`), each once.
+    fn with_bundle_marks(
+        &self,
+        target: &Agent,
+        payload: &Value,
+        marks: Arc<Vec<String>>,
+    ) -> Arc<Vec<String>> {
+        let Some(bundle) = self.local_bundle(target) else {
+            return marks;
+        };
+        let mut all = marks.as_ref().clone();
+        for m in bundle.payload_secret(payload) {
+            if m != "type" && !m.split('.').any(str::is_empty) && !all.contains(&m) {
+                all.push(m);
+            }
+        }
+        if all.len() == marks.len() {
+            marks
+        } else {
+            Arc::new(all)
+        }
+    }
+
     /// One item's SYNCHRONOUS half: validate, resolve, gate. Python
     /// `Agent._launch` (`kernel/_agent.py:601-732`) — the check order:
     /// target → payload dict → timeout → payload.type → id → retries → killed
@@ -774,6 +811,12 @@ impl Kernel {
             )));
         };
 
+        // 9b. THE TARGET'S OWN SECRETS — its bundle names paths of this payload
+        // (`Bundle::payload_secret`: a credential store's `set` fields). They join the
+        // item's marks before ANY refusal below, so a refused call row, the state
+        // stream and every mirror show them as `[secret]` whoever sent the call.
+        let marks = self.with_bundle_marks(&target, &item.payload, marks);
+
         // 10. ── CALL GATE — two-sided, deny-all, explicit grants ──────
         // Trust boundary = who ORIGINATED the send. An operator send (no
         // dispatch running: the CLI, the cold bootstrap, a test driver, a
@@ -785,6 +828,7 @@ impl Kernel {
                 return Launched::Settled(Outcome::refused(denial));
             }
         }
+
 
         // The UNNAMED `kernel` reflect fast path. python checks the
         // LITERAL reserved address the caller sent (`target_id == "kernel"`,
@@ -1081,9 +1125,19 @@ impl Kernel {
         // where python puts it and what a watcher needs: mirroring after the
         // reply would show a watcher the request only once the work was done,
         // its echo landing after the handler's own progress events.
-        let out = self
-            .ledger
-            .settle(exec_id, Outcome::new(pid, status, reply).with_body(body));
+        // THE REPLY'S OWN SECRETS (`Bundle::reply_secret`): recorded as `[secret]`
+        // by `stored_outcome` — the settle row, `ledger`, the store — while the
+        // caller (and a joiner, from RAM) gets the reply whole.
+        let reply_marks = self
+            .local_bundle(&target)
+            .map(|b| b.reply_secret(&payload, &reply))
+            .unwrap_or_default();
+        let out = self.ledger.settle(
+            exec_id,
+            Outcome::new(pid, status, reply)
+                .with_body(body)
+                .with_secret(reply_marks),
+        );
         // A SETTLE IS A ROW — see `stamp_call`.
         self.stamp_call(pid, &out, &target.id).await;
         out
@@ -1232,7 +1286,10 @@ impl Kernel {
         let pid = pid?;
         let mut stamp = Map::new();
         stamp.insert("status".to_string(), Value::from(out.status.as_str()));
-        if let Some(res) = out.result.as_object() {
+        // review bug 3: the error text is read from the SHOWN result, so a value the
+        // bundle marked (`Outcome.secret`, e.g. an `error` path) never reaches the row.
+        let shown_result = crate::secret::shown(&out.result, &out.secret);
+        if let Some(res) = shown_result.as_object() {
             if let Some(err) = res.get("error").filter(|v| py_truthy(v)) {
                 stamp.insert(
                     "error".to_string(),

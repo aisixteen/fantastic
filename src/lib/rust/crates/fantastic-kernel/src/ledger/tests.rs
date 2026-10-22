@@ -426,6 +426,23 @@ fn forget_drops_the_entry_and_its_name() {
 }
 
 #[test]
+fn stored_outcome_shows_reply_marks_as_secret() {
+    use crate::jsonsafe::BodyAs;
+    let o = Outcome::new(
+        None,
+        Status::Completed,
+        json!({"token": "tk-REAL", "host": "h"}),
+    )
+    .with_secret(vec!["token".into(), "nope.deep".into()]);
+    assert_eq!(
+        stored_outcome(&o, true, BodyAs::Len),
+        json!({"status": "completed", "result": {"token": "[secret]", "host": "h"}})
+    );
+    // the outcome itself is untouched: the caller's answer stays whole
+    assert_eq!(o.result["token"], json!("tk-REAL"));
+}
+
+#[test]
 fn stored_outcome_keeps_a_named_result_a_dead_error_else_a_digest() {
     use crate::jsonsafe::BodyAs;
     let ok = Outcome::new(None, Status::Completed, json!({"ok": true}));

@@ -50,8 +50,15 @@
 //! are the stored value's NAMES: `set` writes them, `forget` drops them.
 //!
 //! THE RECORD holds only metadata — the host and the field NAMES. The CALL
-//! carries the value: a `set` payload and a `get` reply are recorded like any
-//! call's (the ledger, the memory store, the state stream), in clear.
+//! carries the value, and the kernel records it as `[secret]`: a `set` payload's
+//! and a `get` reply's field values are marked secret (`payload_secret` /
+//! `reply_secret`), so the ledger, the memory store and the state stream never
+//! hold them; the caller receives them whole.
+//!
+//! KNOWN GAP (issue #285): this holds for a store on THIS kernel. A store on a
+//! CONNECTED kernel is recorded in clear by the caller — the calling kernel
+//! writes the `set` payload and the `get` reply into its own ledger and memory
+//! store, and it cannot see the remote store's secret marks.
 //!
 //! WHO MAY CALL is the kernel's call gate alone.
 //!
@@ -808,6 +815,19 @@ fn is_str_list(v: &Value) -> bool {
         .is_some_and(|a| a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty())))
 }
 
+/// The secret marks of a `fields` value: `fields.<name>` for each name of a
+/// map; the whole `fields` when a name is empty or holds a dot (a dotted mark
+/// would name a nested key and miss it) or `fields` is not a map.
+fn field_marks(fields: Option<&Value>) -> Vec<String> {
+    match fields {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Object(m)) if m.keys().all(|k| !k.is_empty() && !k.contains('.')) => {
+            m.keys().map(|k| format!("fields.{k}")).collect()
+        }
+        Some(_) => vec!["fields".to_string()],
+    }
+}
+
 #[async_trait]
 impl Bundle for CredentialStoreBundle {
     /// The CATALOG name — python's entry-point name.
@@ -825,6 +845,23 @@ impl Bundle for CredentialStoreBundle {
 
     fn readme(&self) -> Option<&'static str> {
         Some(README)
+    }
+
+    /// A `set`'s field values are secret: recorded as `[secret]`.
+    fn payload_secret(&self, payload: &Value) -> Vec<String> {
+        if payload.get("type").and_then(Value::as_str) != Some("set") {
+            return Vec::new();
+        }
+        field_marks(payload.get("fields"))
+    }
+
+    /// A `get` reply's field values are secret: recorded as `[secret]`; the
+    /// caller gets them whole.
+    fn reply_secret(&self, payload: &Value, reply: &Value) -> Vec<String> {
+        if payload.get("type").and_then(Value::as_str) != Some("get") {
+            return Vec::new();
+        }
+        field_marks(reply.get("fields"))
     }
 
     /// The record's own fields, refused at the write when malformed — python

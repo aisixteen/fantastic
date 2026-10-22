@@ -53,3 +53,8 @@ a `set` payload and a `get` reply are recorded like any call's — the ledger, t
 memory store, the state stream — in clear. Never give a credential to an AI agent's
 prompt — give it to a bundle that sends it (an AI backend reads its own key this
 way, as itself).
+
+**Known gap (issue #285):** a store on a CONNECTED kernel is recorded in clear by
+the caller — the calling kernel writes the `set` payload and the `get` reply into
+its own ledger and memory store, because it cannot see the remote store's secret
+marks.
