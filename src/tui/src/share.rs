@@ -37,6 +37,10 @@ use crate::vm::{Frame, Frames, ViewId, VmIn};
 /// it serves; a relative path never meets the unix address-length limit).
 pub const SOCKET: &str = ".fantastic/cli/tui.sock";
 
+/// #210: said to a thin client when the kernel it attached to has no terminal
+/// view at all — there is nothing to paint, so it is told why and exits.
+pub const NO_VIEW: &str = "this kernel runs without a terminal view (canvas or headless) — run `fantastic` in a terminal to own the view, or open the canvas";
+
 /// A thin client → the owner.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Up {
@@ -107,7 +111,17 @@ impl Share {
 
 /// Serve the socket. The caller holds the directory's lock, so a socket file
 /// already there is stale.
-pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Frames>>>) -> Result<Arc<Share>, String> {
+/// #210: what an attaching client is told. With a terminal view, the Hello; without
+/// one, the Hello and then a Bye — a kernel with no view has no frames to send.
+fn greeting(has_view: bool, pid: u32) -> Vec<Down> {
+    if has_view {
+        vec![Down::Hello { pid }]
+    } else {
+        vec![Down::Hello { pid }, Down::Bye(NO_VIEW.into())]
+    }
+}
+
+pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Frames>>>, has_view: bool) -> Result<Arc<Share>, String> {
     let _ = std::fs::remove_file(SOCKET);
     let l = crate::sys::bind_local(SOCKET).map_err(|e| format!("could not open the TUI socket `{SOCKET}`: {e}"))?;
     crate::sys::make_private(SOCKET)
@@ -119,7 +133,7 @@ pub fn listen(input: mpsc::Sender<VmIn>, frames: watch::Receiver<Option<Arc<Fram
             let id = NEXT.fetch_add(1, Ordering::SeqCst);
             let (bye_tx, bye_rx) = oneshot::channel();
             s.bye.lock().expect("share poisoned").insert(id, bye_tx);
-            tokio::spawn(serve(id, stream, input.clone(), frames.clone(), bye_rx, Arc::clone(&s)));
+            tokio::spawn(serve(id, stream, input.clone(), frames.clone(), bye_rx, Arc::clone(&s), has_view));
         }
     });
     Ok(share)
@@ -137,6 +151,7 @@ async fn serve(
     mut frames: watch::Receiver<Option<Arc<Frames>>>,
     mut bye: oneshot::Receiver<String>,
     share: Arc<Share>,
+    has_view: bool,
 ) {
     let (mut r, mut w) = stream.into_split();
     // up: size and events, until the client goes
@@ -156,7 +171,12 @@ async fn serve(
     });
     // down: hello, then every frame as a delta, until the ViewModel ends, the
     // client goes, or the client is detached
-    if write_msg(&mut w, &Down::Hello { pid: std::process::id() }).await.is_ok() {
+    // #210: the greeting; with no terminal view it ends with a Bye, and no frames follow.
+    let mut greeted = true;
+    for m in &greeting(has_view, std::process::id()) {
+        greeted = greeted && write_msg(&mut w, m).await.is_ok();
+    }
+    if greeted && has_view {
         let mut sent: Option<Arc<Frame>> = None;
         loop {
             tokio::select! {
@@ -350,6 +370,24 @@ mod tests {
             drop(a);
             assert!(read_msg::<_, Up>(&mut b).await.unwrap().is_none(), "EOF is a clean end");
         });
+    }
+
+    #[test]
+    fn a_view_owner_greets_with_hello_only() {
+        let g = greeting(true, 7);
+        assert_eq!(g.len(), 1, "a view owner gets no Bye");
+        assert!(matches!(g[0], Down::Hello { pid: 7 }));
+    }
+
+    #[test]
+    fn an_owner_without_a_view_says_so_and_ends() {
+        let g = greeting(false, 7);
+        assert_eq!(g.len(), 2, "the Hello is followed by a Bye");
+        assert!(matches!(g[0], Down::Hello { pid: 7 }));
+        match &g[1] {
+            Down::Bye(why) => assert!(why.contains("without a terminal view"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

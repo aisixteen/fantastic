@@ -34,6 +34,7 @@ import time
 from collections.abc import AsyncIterator
 
 import httpx
+from ai_core.provider import ProviderError
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 from ai_core import caching as ai_caching
 
@@ -364,9 +365,11 @@ class AnthropicProvider:
                         if resp.status_code in (401, 403)
                         else ""
                     )
-                    raise RuntimeError(
+                    # a gateway or an overloaded API (529) is the link, not the request: transport (#198)
+                    raise ProviderError(
                         f"anthropic_backend: {self._endpoint} answered HTTP "
-                        f"{resp.status_code}{why}: {detail}"
+                        f"{resp.status_code}{why}: {detail}",
+                        transport=resp.status_code in (502, 503, 504, 529),
                     )
                 async for line in resp.aiter_lines():
                     if not line.startswith("data:"):
@@ -437,18 +440,21 @@ class AnthropicProvider:
                     # ping / content_block_start / content_block_stop /
                     # signature_delta: nothing to stream
         except httpx.ConnectTimeout as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"anthropic_backend: no answer from {self._endpoint} within "
-                f"{CONNECT_TIMEOUT:g}s"
+                f"{CONNECT_TIMEOUT:g}s",
+                transport=True,
             ) from e
         except httpx.ConnectError as e:
-            raise RuntimeError(
-                f"anthropic_backend: could not connect to {self._endpoint}"
+            raise ProviderError(
+                f"anthropic_backend: could not connect to {self._endpoint}",
+                transport=True,
             ) from e
         except (httpx.ReadError, httpx.RemoteProtocolError) as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"anthropic_backend: {self._endpoint} dropped the stream mid-answer; "
-                "this turn is NOT complete"
+                "this turn is NOT complete",
+                transport=True,
             ) from e
         if thinking:
             yield THINK_CLOSE

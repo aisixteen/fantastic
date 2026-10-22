@@ -302,3 +302,26 @@ def cut_marker(text_so_far: str, why: str, unsent: list[dict]) -> str:
         to = call.get("target") or ", ".join(call.get("to") or []) or "the caller"
         lines.append(f"[a {call.get('name', 'call')} call to {to} was not sent]")
     return "\n".join(lines)
+
+
+def stop_rows(text_so_far: str, who: str, unsent: list[dict]) -> tuple[str | None, str]:
+    """The stopped turn's two halves — kept apart so a model never reads the notice
+    as its own answer. First: the VISIBLE text streamed so far (thinking stripped),
+    None when there is none, saved as the assistant row. Second: the notice, a USER
+    row (kind `stopped`), naming who stopped the turn, whether it was cut while
+    thinking or before any answer, and every unsent call as not sent."""
+    splitter = PartSplitter("marker")
+    events = splitter.feed(text_so_far)
+    visible = "".join(
+        ev[2] for ev in events if ev[0] == "delta" and ev[1]["kind"] == "text"
+    ).strip()
+    head = f"[your turn was stopped by {who}"
+    if splitter.in_think and not visible:
+        head += " while thinking"
+    elif not visible:
+        head += " before you answered"
+    lines = [head + "]"]
+    for call in unsent:
+        to = call.get("target") or ", ".join(call.get("to") or []) or "the caller"
+        lines.append(f"[a {call.get('name', 'call')} call to {to} was not sent]")
+    return (visible or None), "\n".join(lines)

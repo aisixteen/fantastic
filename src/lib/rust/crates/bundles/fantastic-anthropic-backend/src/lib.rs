@@ -223,34 +223,81 @@ struct Usage {
     cache_write: i64,
     cache_read: i64,
     output: i64,
+    /// Requests whose prompt was over the record's `long_context_tokens`.
+    long_requests: i64,
+    long_input: i64,
+    long_cache_write: i64,
+    long_cache_read: i64,
+    long_output: i64,
+    /// The tier of the request in flight: its tokens land in the long bucket.
+    cur_long: bool,
+    /// The last usage-log write error, reported in `usage`.
+    log_error: Option<String>,
 }
 
 impl Usage {
     /// What the counts derive to, with the record's prices when BOTH are set (USD per
     /// million tokens). Python `Usage.snapshot`.
-    fn snapshot(&self, price_in: Option<f64>, price_out: Option<f64>) -> Value {
-        let prompt = self.input + self.cache_write + self.cache_read;
-        let saved = saved_tokens(self.cache_read, self.cache_write);
+    /// `long_in` / `long_out` price the long-context bucket; unset, the base prices.
+    fn snapshot(
+        &self,
+        price_in: Option<f64>,
+        price_out: Option<f64>,
+        long_in: Option<f64>,
+        long_out: Option<f64>,
+    ) -> Value {
+        let input = self.input + self.long_input;
+        let cache_write = self.cache_write + self.long_cache_write;
+        let cache_read = self.cache_read + self.long_cache_read;
+        let output = self.output + self.long_output;
+        let prompt = input + cache_write + cache_read;
+        let saved = saved_tokens(cache_read, cache_write);
         let hit_rate = if prompt > 0 {
-            json!(self.cache_read as f64 / prompt as f64)
+            json!(cache_read as f64 / prompt as f64)
         } else {
             json!(0)
         };
         let mut out = Map::new();
-        out.insert("requests".into(), json!(self.requests));
-        out.insert("input_tokens".into(), json!(self.input));
-        out.insert("cache_write_tokens".into(), json!(self.cache_write));
-        out.insert("cache_read_tokens".into(), json!(self.cache_read));
-        out.insert("output_tokens".into(), json!(self.output));
+        out.insert("requests".into(), json!(self.requests + self.long_requests));
+        out.insert("input_tokens".into(), json!(input));
+        out.insert("cache_write_tokens".into(), json!(cache_write));
+        out.insert("cache_read_tokens".into(), json!(cache_read));
+        out.insert("output_tokens".into(), json!(output));
         out.insert("prompt_tokens".into(), json!(prompt));
         out.insert("hit_rate".into(), hit_rate);
         out.insert("saved_tokens".into(), json!(saved));
+        out.insert("long_context_requests".into(), json!(self.long_requests));
+        if let Some(e) = &self.log_error {
+            out.insert("usage_log_error".into(), json!(e));
+        }
         if let (Some(pin), Some(pout)) = (price_in, price_out) {
-            let cost_in =
-                self.input as f64 + 1.25 * self.cache_write as f64 + 0.1 * self.cache_read as f64;
-            let cost = cost_in * pin / 1e6 + self.output as f64 * pout / 1e6;
+            let (lin, lout) = match (long_in, long_out) {
+                (Some(a), Some(b)) => (a, b),
+                _ => (pin, pout),
+            };
+            let cost_of = |i: i64, w: i64, r: i64, o: i64, pi: f64, po: f64| {
+                let cost_in = i as f64 + 1.25 * w as f64 + 0.1 * r as f64;
+                cost_in * pi / 1e6 + o as f64 * po / 1e6
+            };
+            let cost = cost_of(
+                self.input,
+                self.cache_write,
+                self.cache_read,
+                self.output,
+                pin,
+                pout,
+            ) + cost_of(
+                self.long_input,
+                self.long_cache_write,
+                self.long_cache_read,
+                self.long_output,
+                lin,
+                lout,
+            );
+            let saved_usd = saved_tokens(self.cache_read, self.cache_write) as f64 * pin / 1e6
+                + saved_tokens(self.long_cache_read, self.long_cache_write) as f64 * lin / 1e6;
             out.insert("cost_usd".into(), json!(cost));
-            out.insert("saved_usd".into(), json!(saved as f64 * pin / 1e6));
+            out.insert("saved_usd".into(), json!(saved_usd));
         }
         Value::Object(out)
     }
@@ -288,6 +335,12 @@ struct AnthropicProvider {
     /// The read clock: the longest the API may go without a byte, headers
     /// included ([`within`]).
     stream_idle: Duration,
+    /// Prompt tokens above which a request is billed at the long-context prices.
+    long_context_tokens: Option<i64>,
+    /// The file each request appends one JSON usage line to.
+    usage_log: Option<std::path::PathBuf>,
+    /// The agent id, written into each usage line.
+    agent_id: String,
 }
 
 impl AnthropicProvider {
@@ -385,7 +438,7 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|s| s.error(NAME, &self.endpoint))?;
         let resp = sent.map_err(|e| {
-            ProviderError::raised(if e.is_timeout() {
+            ProviderError::transport(if e.is_timeout() {
                 format!(
                     "{NAME}: no answer from {} within {CONNECT_TIMEOUT}s",
                     self.endpoint
@@ -408,10 +461,12 @@ impl Provider for AnthropicProvider {
             } else {
                 ""
             };
-            return Err(ProviderError::raised(format!(
+            let mut err = ProviderError::raised(format!(
                 "{NAME}: {} answered HTTP {status}{why}: {detail}",
                 self.endpoint
-            )));
+            ));
+            err.transport = matches!(status, 502 | 503 | 504 | 529);
+            return Err(err);
         }
         Ok(consume_sse(
             resp,
@@ -420,6 +475,12 @@ impl Provider for AnthropicProvider {
             self.endpoint.clone(),
             max_tokens.is_none().then_some(self.max_tokens),
             self.stream_idle,
+            StreamLog {
+                long_context_tokens: self.long_context_tokens,
+                path: self.usage_log.clone(),
+                agent_id: self.agent_id.clone(),
+                model: self.model.clone(),
+            },
         ))
     }
 }
@@ -432,6 +493,7 @@ fn consume_sse(
     endpoint: String,
     main_turn_max: Option<i64>,
     stream_idle: Duration,
+    log: StreamLog,
 ) -> ProviderStream {
     let inner = resp.bytes_stream();
     let init = (
@@ -445,6 +507,8 @@ fn consume_sse(
             stopped: false,
             endpoint,
             main_turn_max,
+            log,
+            cur: RequestCounts::default(),
         },
         VecDeque::new(),
         false,
@@ -480,7 +544,7 @@ fn consume_sse(
                     Ok(bytes) => st.buf.extend_from_slice(&bytes),
                     Err(_) => {
                         finished = true;
-                        pending.push_back(Err(ProviderError::raised(format!(
+                        pending.push_back(Err(ProviderError::transport(format!(
                             "{NAME}: {} dropped the stream mid-answer; this turn is NOT \
                              complete",
                             st.endpoint
@@ -504,6 +568,24 @@ fn consume_sse(
     ))
 }
 
+/// Where a request's usage line goes: the threshold, the file, the agent and model.
+struct StreamLog {
+    long_context_tokens: Option<i64>,
+    path: Option<std::path::PathBuf>,
+    agent_id: String,
+    model: String,
+}
+
+/// One request's own counts, as the stream sees them (the usage log's line).
+#[derive(Default)]
+struct RequestCounts {
+    input: i64,
+    cache_write: i64,
+    cache_read: i64,
+    output: i64,
+    long: bool,
+}
+
 struct SseState {
     buf: Vec<u8>,
     wrap: ThinkWrap,
@@ -515,6 +597,8 @@ struct SseState {
     endpoint: String,
     /// `Some(bound)` on a MAIN turn, where a cut is a failure.
     main_turn_max: Option<i64>,
+    log: StreamLog,
+    cur: RequestCounts,
 }
 
 impl SseState {
@@ -547,11 +631,27 @@ impl SseState {
                 let total = input + write + read;
                 self.report.lock().expect("report poisoned").prompt_tokens =
                     (total > 0).then_some(total);
+                let long = self.log.long_context_tokens.is_some_and(|t| total > t);
+                self.cur = RequestCounts {
+                    input,
+                    cache_write: write,
+                    cache_read: read,
+                    output: 0,
+                    long,
+                };
                 let mut usage = self.usage.lock().expect("usage poisoned");
-                usage.requests += 1;
-                usage.input += input;
-                usage.cache_write += write;
-                usage.cache_read += read;
+                usage.cur_long = long;
+                if long {
+                    usage.long_requests += 1;
+                    usage.long_input += input;
+                    usage.long_cache_write += write;
+                    usage.long_cache_read += read;
+                } else {
+                    usage.requests += 1;
+                    usage.input += input;
+                    usage.cache_write += write;
+                    usage.cache_read += read;
+                }
             }
             "content_block_delta" => {
                 let delta = &evt["delta"];
@@ -591,11 +691,23 @@ impl SseState {
                         .expect("report poisoned")
                         .completion_tokens = Some(n);
                     // message_delta carries the running total: bill the step.
-                    self.usage.lock().expect("usage poisoned").output += n - self.billed_out;
+                    let step = n - self.billed_out;
+                    {
+                        let mut usage = self.usage.lock().expect("usage poisoned");
+                        if self.cur.long {
+                            usage.long_output += step;
+                        } else {
+                            usage.output += step;
+                        }
+                    }
+                    self.cur.output += step;
                     self.billed_out = n;
                 }
             }
-            "message_stop" => self.stopped = true,
+            "message_stop" => {
+                self.stopped = true;
+                self.write_usage_line();
+            }
             "error" => {
                 let err = &evt["error"];
                 return Err(ProviderError::raised(format!(
@@ -608,6 +720,40 @@ impl SseState {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Append this request's own counts as one JSON line to the usage log. A write
+    /// error does not fail the turn: it is kept in `Usage` and reported.
+    fn write_usage_line(&self) {
+        let Some(path) = &self.log.path else {
+            return;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let line = json!({
+            "ts": ts,
+            "agent": self.log.agent_id,
+            "model": self.log.model,
+            "input_tokens": self.cur.input,
+            "cache_write_tokens": self.cur.cache_write,
+            "cache_read_tokens": self.cur.cache_read,
+            "output_tokens": self.cur.output,
+            "long_context": self.cur.long,
+        });
+        let result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "{line}")
+            });
+        if let Err(e) = result {
+            self.usage.lock().expect("usage poisoned").log_error =
+                Some(format!("{}: {e}", path.display()));
+        }
     }
 
     fn end(&mut self, out: &mut VecDeque<Result<ProviderEvent, ProviderError>>) {
@@ -674,6 +820,13 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
             usage: usage_of(agent_id),
             report: ReportCell::default(),
             stream_idle: stream_idle_of(&meta)?,
+            long_context_tokens: positive_int(meta.get("long_context_tokens")),
+            usage_log: meta
+                .get("usage_log")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from),
+            agent_id: agent_id.as_str().to_string(),
         })
     })();
     match built {
@@ -691,6 +844,8 @@ fn usage_now(agent_id: &AgentId, kernel: &Kernel) -> Value {
     usage.snapshot(
         price("price_input_per_mtok"),
         price("price_output_per_mtok"),
+        price("price_input_long_per_mtok"),
+        price("price_output_long_per_mtok"),
     )
 }
 
@@ -781,11 +936,26 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
             return Some("temperature must be a number".to_string());
         }
     }
-    for key in ["price_input_per_mtok", "price_output_per_mtok"] {
+    for key in [
+        "price_input_per_mtok",
+        "price_output_per_mtok",
+        "price_input_long_per_mtok",
+        "price_output_long_per_mtok",
+    ] {
         if let Some(p) = meta.get(key).filter(|v| !v.is_null()) {
             if !p.is_number() || p.as_f64().unwrap_or(0.0) < 0.0 {
                 return Some(format!("{key} must be a number, zero or more"));
             }
+        }
+    }
+    if let Some(t) = meta.get("long_context_tokens").filter(|v| !v.is_null()) {
+        if positive_int(Some(t)).is_none() || t.is_boolean() {
+            return Some("long_context_tokens must be a positive int".to_string());
+        }
+    }
+    if let Some(u) = meta.get("usage_log").filter(|v| !v.is_null()) {
+        if !u.as_str().is_some_and(|s| !s.is_empty()) {
+            return Some("usage_log must be a non-empty string".to_string());
         }
     }
     if let Err(e) = stream_idle_of(meta) {
@@ -919,6 +1089,26 @@ pub fn record_schema() -> &'static Value {
                 "float",
                 "USD per million output tokens — with price_input_per_mtok, reflect and \
                  usage report cost_usd and saved_usd; no default price",
+            ),
+            Field::new(
+                "price_input_long_per_mtok",
+                "float",
+                "USD per million input tokens for a long-context request; unset = the base price",
+            ),
+            Field::new(
+                "price_output_long_per_mtok",
+                "float",
+                "USD per million output tokens for a long-context request; unset = the base price",
+            ),
+            Field::new(
+                "long_context_tokens",
+                "int",
+                "prompt tokens above which a request is billed at the long-context prices",
+            ),
+            Field::new(
+                "usage_log",
+                "str",
+                "a file every request appends one JSON usage line to",
             ),
             Field::new(
                 "stream_idle_seconds",

@@ -217,6 +217,33 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
         fake_providers.pop(aid, None)
 
 
+async def test_two_thinking_only_turns_escalate_the_nudge(
+    seeded_kernel, fake_providers
+):
+    """Two dead turns in a row ran nothing: the second nudge escalates."""
+    dead = f"{core.THINK_OPEN}hmm{core.THINK_CLOSE}\n\n"
+    fp = _Script([dead, dead, DONE])
+    aid = "dead_think_esc"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    fake_providers[aid] = fp
+    try:
+        await seeded_kernel.send(
+            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+        )
+        await _settle(fp, 3)
+        assert "were only thinking" not in fp.incoming[1], fp.incoming
+        assert "[no progress — 2 answers in a row ran nothing]" in fp.incoming[2], (
+            fp.incoming
+        )
+    finally:
+        fake_providers.pop(aid, None)
+
+
 async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel, fake_providers):
     """A turn that is ONLY thinking did not answer: it is never stored and never
     counts as completed — it is rerolled by the no-call reminder, told why
@@ -385,7 +412,7 @@ async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
     seeded_kernel, fake_providers, monkeypatch
 ):
     """RESUME AFTER RESTART: the host stops (the kernel drains)
-    while a turn is generating — its cut row is marked `interrupted` with the
+    while a turn is generating — its stopped row is marked `interrupted` with the
     client it streamed to; the next boot runs it again ONCE, as a
     `[resumed after restart]` turn to that client. A cancel by anyone else, or a
     boot with nothing cut, resumes nothing."""
@@ -425,7 +452,7 @@ async def test_a_turn_a_host_stop_cut_is_resumed_once_on_the_next_boot(
         ctx.draining = False  # the stop is over; read the store as the next life will
         rows = [r for r in await core._load_history(aid, seeded_kernel)]
         cut = rows[-1]
-        assert cut["role"] == "assistant" and cut["interrupted"] == {
+        assert cut["kind"] == "stopped" and cut["interrupted"] == {
             "client_id": "tab7"
         }, cut
         assert "the host stopping" in cut["content"], cut

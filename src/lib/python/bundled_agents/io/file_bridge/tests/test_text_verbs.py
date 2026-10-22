@@ -462,6 +462,64 @@ async def test_hunk_counts_must_sum_to_the_blob(seeded_kernel, tmp_path, monkeyp
     assert (tmp_path / "sd" / "a.py").read_text(encoding="utf-8") == "x = 1\n"
 
 
+async def test_one_file_without_hunks_applies_every_block(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "b.py", "y = 2\nz = 3\n")
+    patch = _block("y = 2", "y = 20") + "\n" + _block("z = 3", "z = 30")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "edit",
+            "edits": [{"path": "b.py"}],
+            "bytes": patch.encode("utf-8"),
+        },
+    )
+    assert r.get("edited") is True, r
+    assert (tmp_path / "sd" / "b.py").read_text(encoding="utf-8") == "y = 20\nz = 30\n"
+
+
+async def test_one_file_with_a_wrong_hunks_count_names_the_fix(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "b.py", "y = 2\nz = 3\n")
+    patch = _block("y = 2", "y = 20") + "\n" + _block("z = 3", "z = 30")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "edit",
+            "edits": [{"path": "b.py", "hunks": 3}],
+            "bytes": patch.encode("utf-8"),
+        },
+    )
+    assert r["reason"] == "bad_arg" and "leave hunks out" in r["error"], r
+    assert (tmp_path / "sd" / "b.py").read_text(encoding="utf-8") == "y = 2\nz = 3\n"
+
+
+async def test_two_files_still_need_hunks(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.py", "x = 1\n")
+    await _seed(seeded_kernel, ed, "b.py", "y = 2\n")
+    patch = _block("x = 1", "x = 2") + "\n" + _block("y = 2", "y = 3")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "edit",
+            "edits": [{"path": "a.py", "hunks": 1}, {"path": "b.py"}],
+            "bytes": patch.encode("utf-8"),
+        },
+    )
+    assert r["reason"] == "bad_arg" and "hunks" in r["error"], r
+
+
 async def test_per_edit_if_match_guards_the_whole_transaction(
     seeded_kernel, tmp_path, monkeypatch
 ):
@@ -609,7 +667,7 @@ async def test_patch_hunk_count_must_be_an_int(seeded_kernel, tmp_path, monkeypa
     fb, ed = await _mk(seeded_kernel)
     await _seed(seeded_kernel, ed, "m.py", "a = 1\n")
     blob = _block("a = 1", "a = 2").encode("utf-8")
-    for bad_value in ("1", 1.5, True, None, 0, -1):
+    for bad_value in ("1", 1.5, True, 0, -1):
         r = await _call(
             seeded_kernel,
             ed,

@@ -182,3 +182,54 @@ async def test_no_model_fails_loud_before_any_request():
         "Name a model on the agent record (model=...)."
     )
     client.chat.assert_not_called()
+
+
+# ─── link failures are transport (#198) ─────────────────────────────────────
+
+
+async def _raising_stream(first: dict, exc: Exception):
+    yield first
+    raise exc
+
+
+async def test_an_unreachable_endpoint_is_a_transport_failure():
+    from ai_core.provider import ProviderError
+
+    p = OllamaProvider(endpoint="http://127.0.0.1:1", model="test-model")
+    with pytest.raises(ProviderError) as e:
+        async for _ in p.chat([{"role": "user", "content": "hi"}]):
+            pass
+    assert e.value.transport is True
+    assert str(e.value).startswith("ollama: request failed: ")
+
+
+async def test_a_stream_that_breaks_mid_answer_is_a_transport_failure():
+    import httpx
+    from ai_core.provider import ProviderError
+
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    client = _patched_client([])
+    client.chat = AsyncMock(
+        return_value=_raising_stream(_mk_chunk("par"), httpx.ReadError("cut"))
+    )
+    with patch("ollama.AsyncClient", return_value=client):
+        with pytest.raises(ProviderError) as e:
+            async for _ in p.chat([{"role": "user", "content": "hi"}]):
+                pass
+    assert e.value.transport is True
+    assert str(e.value) == "ollama: stream error: cut"
+
+
+async def test_a_status_the_server_answered_is_raised_as_it_was():
+    import ollama
+
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    client = _patched_client([])
+    client.chat = AsyncMock(
+        return_value=_raising_stream(_mk_chunk("x"), ollama.ResponseError("boom", 503))
+    )
+    with patch("ollama.AsyncClient", return_value=client):
+        with pytest.raises(ollama.ResponseError) as e:
+            async for _ in p.chat([{"role": "user", "content": "hi"}]):
+                pass
+    assert getattr(e.value, "transport", False) is False

@@ -306,7 +306,7 @@ impl Provider for ResponsesProvider {
                 .await
                 .map_err(|s| s.error(BACKEND, &self.endpoint))?;
             let resp =
-                sent.map_err(|e| ProviderError::raised(format!("http: {}", error_chain(&e))))?;
+                sent.map_err(|e| ProviderError::transport(format!("http: {}", error_chain(&e))))?;
             let code = resp.status().as_u16();
             if code < 400 {
                 break resp;
@@ -319,13 +319,20 @@ impl Provider for ResponsesProvider {
                 .to_string();
             let detail = match resp.bytes().await {
                 Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-                Err(e) => return Err(ProviderError::raised(format!("http: {}", error_chain(&e)))),
+                Err(e) => {
+                    return Err(ProviderError::transport(format!(
+                        "http: {}",
+                        error_chain(&e)
+                    )))
+                }
             };
             if !(TRANSPORT_CODES.contains(&code)
                 && !ctype.to_lowercase().contains("json")
                 && attempt < RETRIES)
             {
-                return Err(ProviderError::raised(format!("responses {code}: {detail}")));
+                let mut err = ProviderError::raised(format!("responses {code}: {detail}"));
+                err.transport = matches!(code, 502..=504);
+                return Err(err);
             }
             attempt += 1;
             let ctype_shown = if ctype.is_empty() {

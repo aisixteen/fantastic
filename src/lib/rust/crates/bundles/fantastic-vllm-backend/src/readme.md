@@ -114,14 +114,6 @@ A door in front of vLLM may want one (`Authorization: Bearer <key>`). Name it wi
 and sent only to the ref's host. No `credentials` on the record, no header goes out,
 so a vLLM started without `--api-key` works as it is.
 
-## Caching
-
-`caching` is `none` | `cleanup` (default) here; `provider_cache` is refused — it is
-Anthropic's, and vLLM gets no cache marker (#171). `none` keeps the history append-only
-(folds still compact it), which suits a server that caches identical prompt starts on its
-own — vLLM's automatic prefix caching. `cleanup` lets ai-core drop stale tool output: it
-saves tokens but changes the prompt start.
-
 ## Failures, in words
 
 - connection refused → vLLM is not listening yet (it loads for ~75 s after boot), or the tunnel is down

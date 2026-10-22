@@ -53,10 +53,17 @@ pub struct Host {
     pub root: MyId,
 }
 
+/// Every bundle this shell's roster can name, plus the EMBEDDER'S
+/// (`crate::extras`, set by `main_with`; none for the `fantastic` binary).
+fn registry(cwd: &std::path::Path) -> BundleRegistry {
+    registry_with(cwd, crate::extras())
+}
+
 /// Every bundle this shell's roster can name. Deliberately short: the set of
 /// agents is the user's to grow, and registering a bundle nobody declared only
-/// widens what a stray record could become.
-fn registry(cwd: &std::path::Path) -> BundleRegistry {
+/// widens what a stray record could become. `extras` (an embedding binary's
+/// own bundles, #248) run AFTER the stock set.
+fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegistry {
     let mut reg = BundleRegistry::new();
     // THE ROOT. Its handler is the durable-state loader; see the module header.
     reg.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
@@ -128,21 +135,26 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // CABINETS: a master AI opens subcanvases, each with one worker AI (the crate's bundle).
     reg.register(fantastic_cabinet::HANDLER_MODULE, fantastic_cabinet::CabinetBundle);
     reg.register(fantastic_mcp_client::HANDLER_MODULE, fantastic_mcp_client::McpClientBundle::default());
-    // The vLLM backend: linked by `--features vllm`.
+    // The vLLM backend: linked by default (feature `vllm`).
     #[cfg(feature = "vllm")]
     reg.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
-    // The Anthropic Messages backend: linked by `--features anthropic`.
+    // The Anthropic Messages backend: linked by default (feature `anthropic`).
     #[cfg(feature = "anthropic")]
     reg.register(fantastic_anthropic_backend::HANDLER_MODULE, fantastic_anthropic_backend::AnthropicBundle);
-    // The Ollama backend: linked by `--features ollama`.
+    // The Ollama backend: linked by default (feature `ollama`).
     #[cfg(feature = "ollama")]
     reg.register(fantastic_ollama_backend::HANDLER_MODULE, fantastic_ollama_backend::OllamaBackendBundle);
-    // The OpenAI Responses backend: linked by `--features responses`.
+    // The OpenAI Responses backend: linked by default (feature `responses`).
     #[cfg(feature = "responses")]
     reg.register(
         fantastic_responses_backend::HANDLER_MODULE,
         fantastic_responses_backend::ResponsesBundle,
     );
+    // THE EMBEDDER'S BUNDLES (#248), after the stock set: a record naming one
+    // hydrates like any other.
+    for extra in extras {
+        extra(&mut reg);
+    }
     reg
 }
 
@@ -618,6 +630,129 @@ mod tests {
             "ui.tools",
         ] {
             assert!(reg.get(m).is_none(), "{m} was never asked for");
+        }
+    }
+
+    /// An embedder's bundle (#248): answers every call with a fixed reply.
+    struct ExtraProbe;
+
+    const PROBE: &str = "extra_probe.tools";
+
+    #[async_trait::async_trait]
+    impl fantastic_kernel::bundle::Bundle for ExtraProbe {
+        fn name(&self) -> &str {
+            "extra_probe"
+        }
+
+        async fn handle(
+            &self,
+            _id: &AgentId,
+            _payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Option<Value>, fantastic_kernel::bundle::BundleError> {
+            Ok(Some(json!({"probe": "pong"})))
+        }
+    }
+
+    /// The `Extra` an embedding binary passes to `main_with`.
+    fn probe_extra(reg: &mut BundleRegistry) {
+        reg.register(PROBE, ExtraProbe);
+    }
+
+    /// THE STOCK SET, pinned: exactly these handler modules (plus the backends the
+    /// build's features link). A bundle added to or dropped from the roster
+    /// changes this list on purpose.
+    #[test]
+    fn the_stock_registry_is_exactly_this_list() {
+        let reg = registry_with(std::path::Path::new("."), &[]);
+        let mut got: Vec<&str> = reg.catalog().map(|(m, _)| m).collect();
+        got.sort_unstable();
+        #[allow(unused_mut)]
+        let mut want: Vec<&str> = vec![
+            "cabinet.tools",
+            "canvas.tools",
+            "canvas_page.tools",
+            "credential_store.tools",
+            "exec_bridge.tools",
+            "file_bridge.tools",
+            "kernel_state.tools",
+            "mcp_client.tools",
+            "py_agent.tools",
+            "ram_store.tools",
+            "setup.tools",
+            "sqlite_store.tools",
+            "user.tools",
+            "user_home_store.tools",
+            "user_store.tools",
+            "web.tools",
+            "web_mcp.tools",
+            "web_ws.tools",
+        ];
+        #[cfg(feature = "foundation-models")]
+        want.push(fantastic_foundation_models_backend::HANDLER_MODULE);
+        #[cfg(feature = "vllm")]
+        want.push(fantastic_vllm_backend::HANDLER_MODULE);
+        #[cfg(feature = "anthropic")]
+        want.push(fantastic_anthropic_backend::HANDLER_MODULE);
+        #[cfg(feature = "ollama")]
+        want.push(fantastic_ollama_backend::HANDLER_MODULE);
+        #[cfg(feature = "responses")]
+        want.push(fantastic_responses_backend::HANDLER_MODULE);
+        want.sort_unstable();
+        assert_eq!(got, want, "the stock handler-module list");
+    }
+
+    #[test]
+    fn an_extra_bundle_is_registered_after_the_stock_set() {
+        let here = std::path::Path::new(".");
+        let stock = registry_with(here, &[]);
+        let reg = registry_with(here, &[probe_extra]);
+        assert!(stock.get(PROBE).is_none(), "not in the stock set");
+        assert!(reg.get(PROBE).is_some(), "the extra registered it");
+        assert!(reg.get(fantastic_core::HANDLER_MODULE).is_some(), "the stock set stays");
+        assert_eq!(reg.catalog().count(), stock.catalog().count() + 1, "one bundle more, listed");
+    }
+
+    /// `main_with` sets the process's extras; `registry` — what `Host::boot` builds —
+    /// runs them. (The only test that sets them: the first set wins.)
+    #[test]
+    fn the_extras_main_with_sets_reach_the_host_registry() {
+        crate::set_extras(&[probe_extra]);
+        assert_eq!(crate::extras().len(), 1);
+        assert!(registry(std::path::Path::new(".")).get(PROBE).is_some(), "Host::boot's registry has the extra");
+    }
+
+    /// A record on disk naming the extra's handler module HYDRATES with the extra,
+    /// and is weak-skipped without it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_extra_bundle_hydrates_its_record() {
+        let dir = std::env::temp_dir().join(format!("fc-extra-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let rec = dir.join(".fantastic").join("agents").join("probe").join("agent.yaml");
+        std::fs::create_dir_all(rec.parent().unwrap()).unwrap();
+        std::fs::write(&rec, fantastic_kernel::yaml_io::dump(&json!({"id": "probe", "handler_module": PROBE}))).unwrap();
+
+        // one_shot: no lock, nothing written
+        let booted = bootstrap::bootstrap(registry_with(&dir, &[probe_extra]), BootstrapOptions::one_shot(&dir))
+            .expect("boots");
+        assert!(booted.loaded.contains(&AgentId::from("probe")), "hydrated: {:?}", booted.loaded);
+
+        let stock = bootstrap::bootstrap(registry_with(&dir, &[]), BootstrapOptions::one_shot(&dir)).expect("boots");
+        assert!(!stock.loaded.contains(&AgentId::from("probe")), "weak-skipped without the extra: {:?}", stock.loaded);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(all(feature = "vllm", feature = "anthropic", feature = "ollama", feature = "responses"))]
+    fn the_default_build_links_the_four_ai_backends() {
+        let reg = registry(std::path::Path::new("."));
+        for m in [
+            "vllm_backend.tools",
+            "anthropic_backend.tools",
+            "ollama_backend.tools",
+            "responses_backend.tools",
+        ] {
+            assert!(reg.get(m).is_some(), "{m} must be in the default build");
         }
     }
 

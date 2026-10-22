@@ -182,6 +182,80 @@ async def test_a_cut_main_turn_fails_and_a_cut_side_call_is_its_answer():
     assert p.last_stop_reason == "max_tokens"
 
 
+# ─── link failures are transport (#198) ──────────────────────────────────────
+
+
+class _BrokenStream(httpx.AsyncByteStream):
+    """A body that sends one event, then the link breaks mid-answer."""
+
+    def __init__(self, first: bytes):
+        self._first = first
+
+    async def __aiter__(self):
+        yield self._first
+        raise httpx.ReadError("the peer went away")
+
+
+def _raising(exc: Exception):
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise exc
+
+    return httpx.MockTransport(handler)
+
+
+async def _turn_error(p) -> Exception:
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    return e.value
+
+
+async def test_a_connect_failure_is_transport():
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_raising(httpx.ConnectError("refused"))))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert str(err) == f"anthropic_backend: could not connect to {ENDPOINT}"
+    err = await _turn_error(_provider(_raising(httpx.ConnectTimeout("slow"))))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert str(err) == f"anthropic_backend: no answer from {ENDPOINT} within 15s"
+
+
+async def test_a_stream_dropped_mid_answer_is_transport():
+    from ai_core.provider import ProviderError
+
+    first = _sse(START, _text("par")).encode()
+    t = httpx.MockTransport(
+        lambda req: httpx.Response(200, stream=_BrokenStream(first))
+    )
+    err = await _turn_error(_provider(t))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert "dropped the stream mid-answer" in str(err)
+
+
+@pytest.mark.parametrize("code", [502, 503, 504, 529])
+async def test_a_gateway_or_overloaded_status_is_transport(code):
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_transport("busy", status=code)))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert f"answered HTTP {code}: busy" in str(err)
+
+
+@pytest.mark.parametrize("code", [400, 401, 500])
+async def test_a_status_the_api_meant_is_not_transport(code):
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_transport("bad request", status=code)))
+    assert isinstance(err, ProviderError) and err.transport is False
+
+
+async def test_a_stream_without_message_stop_is_not_transport():
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_transport(_sse(START, _text("x")))))
+    assert not isinstance(err, ProviderError) or err.transport is False
+
+
 # ─── the write ───────────────────────────────────────────────────────────────
 
 
@@ -696,6 +770,71 @@ async def test_reflect_shows_cleanup_when_caching_is_unset(
     r = await _call(seeded_kernel, "a1", {"type": "reflect"})
     assert r["caching"] == "cleanup"
     assert "cache_primer_until" not in r
+
+
+def _models_api(status: int, body: str, seen: list | None = None):
+    def handler(req: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(str(req.url))
+        return httpx.Response(status, text=body)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_models_lists_the_keys_models(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    seen: list = []
+    body = json.dumps(
+        {
+            "data": [
+                {
+                    "id": "m1",
+                    "display_name": "M1",
+                    "max_input_tokens": 200000,
+                    "max_tokens": 64000,
+                },
+                {"id": "m2", "display_name": "M2", "max_input_tokens": 100000},
+            ]
+        }
+    )
+    mock_http(_models_api(200, body, seen))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert [m["id"] for m in got["models"]] == ["m1", "m2"]
+    assert got["models"][1]["max_tokens"] is None
+    assert "limit=1000" in seen[0]
+
+
+async def test_models_names_a_missing_key_on_401(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_models_api(401, "{}"))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "401" in got["error"] and "credentials" in got["error"]
+
+
+async def test_models_refuses_a_body_that_is_not_a_model_list(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_models_api(200, "<html>"))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "not a model list" in got["error"]
+
+    mock_http(_models_api(200, "{}"))
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "not a model list" in got["error"]
+
+
+async def test_reflect_lists_the_models_verb(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_api([]))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "not a model list" in got["error"]
 
 
 async def test_deleting_an_agent_drops_its_counts(

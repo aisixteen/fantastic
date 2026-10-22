@@ -69,7 +69,7 @@ from ai_core.strategies.fold import FoldSummaryError
 # consumer, scanning the durable transcript for a recall/persist reaction.
 from ai_core.call_check import check as check_calls
 from ai_core.call_check import repair as repair_calls
-from ai_core.stream_parts import PartSplitter, cut_marker
+from ai_core.stream_parts import PartSplitter, cut_marker, stop_rows
 from ai_core.tool_parse import (
     _ROUTING,
     extract_tool_calls,
@@ -1380,6 +1380,35 @@ _NO_CALL_NUDGE = (
 )
 
 
+def _wrapper_tag(report: str) -> str:
+    """The tag a wrapped answer used, named in its report (default `tool_call`)."""
+    head = report.split("drop the wrapper", 1)[0]
+    quoted = re.findall(r"`([^`]*)`", head)
+    return quoted[-1].strip("<>") if quoted else "tool_call"
+
+
+def _escalation(n: int, kind: str, tag: str | None = None) -> str:
+    """The block a chain gets from its second answer in a row that ran nothing."""
+    if kind == "wrapped":
+        phrase, forbidden = f"put the call inside <{tag}>", f"<{tag}>"
+    elif kind == "malformed":
+        phrase = "had calls that did not parse"
+        forbidden = "any other markup around or inside the call"
+    elif kind == "thinking_only":
+        phrase = "were only thinking, with no answer"
+        forbidden = "a turn without a call: think briefly, then write the call"
+    else:
+        phrase = "had no call"
+        forbidden = 'an answer without a call (or <call name="done"></call> if the task is finished)'
+    return (
+        f"[no progress — {n} answers in a row ran nothing] Your last {n} answers "
+        f"{phrase}, so nothing ran.\n"
+        f'Your next answer must START with <call name="…"> — the very first characters '
+        f"of the answer — and contain {forbidden} nowhere.\n"
+        "Then continue with your current step."
+    )
+
+
 #: The calls that are not dispatches: they end, park or answer the chain.
 _CONTROL_CALLS = ("done", "await", "inquiry_answer")
 
@@ -1614,7 +1643,13 @@ async def _route_reply(
     # write instead (`call_check`). The answer's well-formed calls run as written,
     # and each report says how many did.
     ran = sum(1 for c in calls if c.get("name") not in _CONTROL_CALLS)
-    for report in [] if cut else check_calls(answer, ran=ran):
+    reports = [] if cut else check_calls(answer, ran=ran)
+    if reports and ran == 0:
+        n = _silent.get((self_id, client_id), 0) + 1
+        if n >= 2:
+            kind = "wrapped" if "drop the wrapper" in reports[-1] else "malformed"
+            reports[-1] += "\n" + _escalation(n, kind, _wrapper_tag(reports[-1]))
+    for report in reports:
         units.append((self_id, "-", "-", None, report))
     done_called = any(c.get("name") == "done" for c in calls)
     await_called = any(c.get("name") == "await" for c in calls)
@@ -2068,6 +2103,9 @@ async def _route_reply(
         if await _silent_turn(kernel, self_id, client_id, send_to, system_prompt):
             return
         nudge = (_DEAD_TURN_LINE + _NO_CALL_NUDGE) if dead_turn else _NO_CALL_NUDGE
+        n = _silent.get((self_id, client_id), 0)
+        if n >= 2:
+            nudge += "\n" + _escalation(n, "thinking_only" if dead_turn else "no_call")
         _deliver_soon(kernel, self_id, nudge, client_id, system_prompt, notice=True)
         return
     if calls:
@@ -3440,29 +3478,43 @@ async def on_cancel(id, task_id, kernel):
     if entry.get("text") is not None:
         who = "the host stopping" if stopping else entry.get("stopped_by") or "cancel"
         in_id, in_parent = _row_ids_for_incoming(id, entry["text"], kernel)
-        await _save_history(
-            id,
-            kernel,
-            [
-                {
-                    "role": "user",
-                    "content": entry["text"],
-                    "id": in_id,
-                    "parent": in_parent,
-                    **({"kind": "notice"} if entry.get("notice") else {}),
-                },
+        so_far = entry.get("text_so_far", "")
+        # A STOPPED TURN SAYS SO IN A USER ROW, never as the model's answer (#232):
+        # the visible text streamed so far (if any) is the assistant row; the notice
+        # naming who stopped it is a `stopped` user row after it.
+        shown, notice = stop_rows(so_far, who, unsent)
+        rows = [
+            {
+                "role": "user",
+                "content": entry["text"],
+                "id": in_id,
+                "parent": in_parent,
+                **({"kind": "notice"} if entry.get("notice") else {}),
+            }
+        ]
+        prev = in_id
+        if shown is not None:
+            prev = _mint_row_id(id, kernel)
+            rows.append(
                 {
                     "role": "assistant",
-                    "content": cut_marker(
-                        entry.get("text_so_far", ""), f"stopped by {who}", unsent
-                    ),
-                    "id": _mint_row_id(id, kernel),
+                    "content": shown,
+                    "id": prev,
                     "parent": in_id,
-                    **thinking_fields(entry.get("text_so_far", "")),
-                    **({"interrupted": {"client_id": client_id}} if stopping else {}),
-                },
-            ],
+                    **thinking_fields(so_far),
+                }
+            )
+        rows.append(
+            {
+                "role": "user",
+                "kind": "stopped",
+                "content": notice,
+                "id": _mint_row_id(id, kernel),
+                "parent": prev,
+                **({"interrupted": {"client_id": client_id}} if stopping else {}),
+            }
         )
+        await _save_history(id, kernel, rows)
     await _emit_status(
         kernel,
         id,
@@ -4229,7 +4281,7 @@ async def _resume_interrupted(id: str, kernel) -> None:
     this from `_boot`.
 
     RESUME AFTER RESTART. A turn in flight when the host
-    stopped left its incoming row and a cut row marked `interrupted` (`on_cancel`
+    stopped left its incoming row and a `stopped` row marked `interrupted` (`on_cancel`
     during the drain). If that cut row is still the newest of this agent's
     conversation, the turn is run again ONCE — a `[resumed after restart]` notice
     to the client it streamed to; the model has the message above it. A turn ended
@@ -4247,7 +4299,7 @@ async def _resume_interrupted(id: str, kernel) -> None:
     last = rows[-1] if rows else None
     if not (
         last
-        and last.get("role") == "assistant"
+        and last.get("kind") == "stopped"
         and isinstance(last.get("interrupted"), dict)
     ):
         return

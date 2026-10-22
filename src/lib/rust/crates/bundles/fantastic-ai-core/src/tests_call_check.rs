@@ -1,9 +1,10 @@
 //! The CALL CHECKER — python `tests/test_call_check.py`, case for case and string
 //! for string (the reports are the parity proof).
 
-use super::{check, repair, MAX_REPORTS};
+use super::{check, repair, risky, MAX_REPORTS};
 use crate::think::without_thinking;
 use crate::tool_parse::extract_tool_calls;
+use serde_json::json;
 
 const SEND: &str = "<call name=\"send\"><target_id>files</target_id><type>reflect</type></call>";
 const DROP: &str =
@@ -276,6 +277,88 @@ fn a_malformed_call_inside_a_wrapper_names_its_fault() {
         "{r}"
     );
     assert!(!r.contains("write it as:"), "{r}");
+}
+
+/// #255: each destructive pattern is named; benign commands and other verbs are not.
+#[test]
+fn risky_names_each_destructive_pattern() {
+    let a = |line: &str| {
+        vec![
+            ("type".to_string(), json!("start")),
+            ("command".to_string(), json!("sh")),
+            ("args".to_string(), json!(["-c", line])),
+        ]
+    };
+    assert_eq!(
+        risky(&a("cd wt && git stash && cargo test && git stash pop")),
+        Some("git stash")
+    );
+    assert_eq!(risky(&a("git -C /w/x stash")), Some("git stash"));
+    assert_eq!(
+        risky(&a("git reset --hard origin/main")),
+        Some("git reset --hard")
+    );
+    assert_eq!(risky(&a("git reset --soft HEAD~1")), None);
+    assert_eq!(risky(&a("git clean -fdx")), Some("git clean -f"));
+    assert_eq!(
+        risky(&a("git push --force origin b")),
+        Some("git push --force")
+    );
+    assert_eq!(risky(&a("git push -u origin b")), None);
+    assert_eq!(risky(&a("rm -rf target")), Some("rm -rf"));
+    assert_eq!(risky(&a("rm -fR target")), Some("rm -rf"));
+    assert_eq!(risky(&a("rm -r -f target")), Some("rm -rf"));
+    assert_eq!(risky(&a("rm -f x")), None);
+    assert_eq!(risky(&a("cargo test -p fantastic-ai-core")), None);
+    let write = vec![
+        ("type".to_string(), json!("write")),
+        ("bytes".to_string(), json!("git stash")),
+    ];
+    assert_eq!(risky(&write), None);
+    let run = vec![
+        ("type".to_string(), json!("run")),
+        ("command".to_string(), json!("sh")),
+        ("args".to_string(), json!(["-c", "git stash"])),
+    ];
+    assert_eq!(risky(&run), Some("git stash"));
+}
+
+/// #255: a wrapped exec call that stashes is not rewritten ready to run.
+#[test]
+fn a_wrapped_exec_call_that_stashes_is_not_rewritten_ready_to_run() {
+    let answer = "<tool_call><call name=\"send\"><target_id>exec</target_id><type>start</type><command>sh</command><args><item>-c</item><item>cd wt && git stash && cargo test && git stash pop</item></args></call></tool_call>";
+    let r = &check(answer, 0)[0];
+    assert!(r.contains("careful: this command runs `git stash`"), "{r}");
+    let form = r.split_once("write it as:\n").unwrap().1;
+    assert!(!form.contains("git stash"), "{r}");
+    assert!(
+        form.contains("<command>LEFT OUT — write the command yourself</command>"),
+        "{r}"
+    );
+    assert!(
+        form.contains("<target_id>exec</target_id>\n<type>start</type>"),
+        "{r}"
+    );
+}
+
+/// #255: a bare exec call with rm -rf is shown without its command.
+#[test]
+fn a_bare_tag_exec_call_with_rm_rf_is_shown_without_its_command() {
+    let answer = "<send><target_id>exec</target_id><type>run</type><command>rm</command><args><item>-rf</item><item>/tmp/x</item></args></send>";
+    let r = &check(answer, 0)[0];
+    assert!(r.contains("careful: this command runs `rm -rf`,"), "{r}");
+    let form = r.split_once("write it as:\n").unwrap().1;
+    assert!(!form.contains("-rf"), "{r}");
+}
+
+/// #255: a harmless exec call is still rewritten whole, with no careful line.
+#[test]
+fn a_harmless_exec_call_is_still_rewritten_whole() {
+    let answer = "<tool_call><call name=\"send\"><target_id>exec</target_id><type>start</type><command>sh</command><args><item>-c</item><item>cargo test -p fantastic-ai-core</item></args></call></tool_call>";
+    let r = &check(answer, 0)[0];
+    assert!(!r.contains("careful:"), "{r}");
+    let form = r.split_once("write it as:\n").unwrap().1;
+    assert!(form.contains("cargo test -p fantastic-ai-core"), "{r}");
 }
 
 /// The wrapped call is refused; the top-level one is not a report, and the report
