@@ -7,6 +7,14 @@ license = "AGPL-3.0-or-later"
 publish = false
 description = "Aisixteen Fantastic — the kernel as a terminal shell. Thin: no agentic logic lives here."
 
+# THE LIBRARY (#248): the whole shell, so another binary (aisixteen/fantastic_shift)
+# embeds it and adds its own bundles — `fantastic_tui::main_with(args, extras)`.
+# `fantastic` (below) is that library with no extras.
+[lib]
+name = "fantastic_tui"
+path = "src/lib.rs"
+doctest = false
+
 [[bin]]
 name = "fantastic"
 path = "src/main.rs"
