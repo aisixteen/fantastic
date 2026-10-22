@@ -42,6 +42,8 @@ export class FilesController {
   readonly errors = new Map<string, Refusal>();
   private listener: (() => void) | null = null;
   private disposed = false;
+  /** true while `start` is restoring: the record is not saved until it is done */
+  private restoring = false;
 
   readonly o: FilesCtlOptions;
 
@@ -62,6 +64,7 @@ export class FilesController {
 
   /** Open the root, then bring back what the record remembered. */
   async start(saved: Partial<FilesState>): Promise<void> {
+    this.restoring = true;
     await this.expand(this.root);
     const open = (saved.expanded ?? []).filter((p) => typeof p === "string" && inRoot(p) && under(p, this.root) && p !== this.root);
     for (const p of open.sort((a, b) => a.split("/").length - b.split("/").length)) {
@@ -75,6 +78,8 @@ export class FilesController {
       this.model.cursor = saved.selected;
       this.o.publish({ path: saved.selected, agent: this.o.index.agentAt(saved.selected)?.id ?? null });
     }
+    this.restoring = false;
+    this.persist();
     this.changed();
   }
 
@@ -97,6 +102,7 @@ export class FilesController {
           // not live is not a tree: close the folder and say why on its row
           const why = (err as Error).message;
           await this.run(this.model.collapse(e.path));
+          this.persist();
           const n = this.model.nodes.get(e.path);
           if (n !== undefined) {
             n.status = "error";
@@ -123,6 +129,8 @@ export class FilesController {
           }));
           await this.run(this.model.listed(e.path, entries));
         }
+        // a listing that no longer has a folder closed it: save that too
+        this.persist();
         this.changed();
         return;
       }
@@ -132,12 +140,16 @@ export class FilesController {
   private onEvent(c: Change): void {
     if (this.disposed) return;
     if ((c.path === ".fantastic" || c.path.startsWith(FANTASTIC_PREFIX)) && (c.kind === "added" || c.kind === "deleted")) this.o.walk();
-    void this.run(this.model.changed(c)).then(() => this.changed());
+    void this.run(this.model.changed(c)).then(() => {
+      this.persist(); // a change can close a folder on its own
+      this.changed();
+    });
   }
 
   // ─── what the cell and the verbs do ───────────────────────────────────
 
   private persist(): void {
+    if (this.restoring) return; // `start` saves once, when the restore is done
     this.o.persist({ expanded: [...this.model.expanded].filter((p) => p !== this.root).sort(), selected: this.model.selected });
   }
 
