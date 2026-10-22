@@ -26,13 +26,14 @@ ollama / responses / vllm backends. Holds:
 from __future__ import annotations
 
 from .core import CANCEL, EMITS, NOTES, build, on_cancel, on_delete, required_meta
-from .provider import Provider
+from .provider import Provider, ProviderError
 
 __all__ = [
     "CANCEL",
     "EMITS",
     "NOTES",
     "Provider",
+    "ProviderError",
     "build",
     "on_cancel",
     "on_delete",

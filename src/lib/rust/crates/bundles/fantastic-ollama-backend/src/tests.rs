@@ -513,6 +513,31 @@ async fn history_persists_and_round_trips() {
     );
 }
 
+/// A connection that never opens is the link failing, not the model: it must be
+/// marked transport so the retry loop can take it.
+#[tokio::test]
+async fn an_unreachable_endpoint_is_a_transport_failure() {
+    let p = OllamaProvider {
+        endpoint: "http://127.0.0.1:1/api/chat".to_string(),
+        model: "test-model".to_string(),
+        temperature: 0.3,
+        num_ctx: None,
+        num_predict: None,
+        think: None,
+        key: Arc::new(crate::tests_server::NoKey),
+        report: Default::default(),
+        stream_idle: Duration::from_secs_f64(fantastic_ai_core::constants::STREAM_IDLE_SECONDS),
+    };
+    let err = match p
+        .chat(&[json!({"role": "user", "content": "hi"})], None)
+        .await
+    {
+        Ok(_) => panic!("chat must fail against a closed port"),
+        Err(e) => e,
+    };
+    assert!(err.transport, "expected transport: {}", err.message);
+}
+
 /// NO guessy default (mirror of the Python provider test): an empty model never
 /// reaches the wire — the request path fails loud, naming `model`.
 #[tokio::test]

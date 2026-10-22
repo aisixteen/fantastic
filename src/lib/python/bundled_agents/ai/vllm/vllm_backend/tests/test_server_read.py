@@ -414,3 +414,26 @@ async def test_a_key_the_store_refuses_refuses_the_verb_naming_the_first_field()
         "reason": "bad_arg",
         "arg": "max_tokens",
     }, r
+
+
+async def test_a_llama_cpp_entry_gives_its_window_as_meta_n_ctx():
+    body = json.dumps(
+        {
+            "object": "list",
+            "data": [{"id": MODEL, "object": "model", "meta": {"n_ctx": 131072}}],
+        }
+    )
+    k = _Kernel(_rec(model=MODEL, kv_slots=6))
+    assert await _resolve(k, _server([], models=body)) is None
+    assert k.updates == [{"max_tokens": 131072, "context_window": 131072}]
+
+
+async def test_an_entry_with_neither_max_model_len_nor_n_ctx_is_refused():
+    body = json.dumps(
+        {"object": "list", "data": [{"id": MODEL, "object": "model", "meta": {}}]}
+    )
+    k = _Kernel(_rec(kv_slots=6))
+    r = await _resolve(k, _server([], models=body))
+    assert r["reason"] == "bad_arg" and r["arg"] == "max_tokens", r
+    assert "names no max_model_len or meta.n_ctx" in r["error"], r
+    assert k.updates == []

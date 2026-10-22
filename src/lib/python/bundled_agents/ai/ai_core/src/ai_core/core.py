@@ -54,6 +54,7 @@ from ai_core.context import (
     output_reserve,
     resolve_context_window,
 )
+from ai_core import caching
 from ai_core import prompt_file
 from ai_core.folds import anchors_of
 from ai_core.folds import expand_ids as expand_fold_ids
@@ -155,6 +156,10 @@ class Backend:
     name: str  # error-message prefix, e.g. "ollama_backend"
     extra_verbs: dict = field(default_factory=dict)
     reflect_extra: Callable[[str, Any], Awaitable[dict] | dict] | None = None
+    # THE CAPABILITY: this backend can run the provider's own cache markers
+    # (caching=provider_cache). A backend that cannot refuses a turn in that mode.
+    # Only anthropic declares it (task B).
+    provider_cache: bool = False
 
 
 # ─── status state helpers ───────────────────────────────────────
@@ -304,8 +309,15 @@ def _lock_for(self_id: str) -> asyncio.Lock:
 
 def _render_for_model(messages: list[dict]) -> list[dict]:
     """Project the message list to what the model actually reads — its role and
-    its text; every other key is stripped."""
-    return [{"role": m.get("role"), "content": m.get("content", "")} for m in messages]
+    its text; every other key is stripped. The cache flags travel with their message."""
+    out = []
+    for m in messages:
+        r = {"role": m.get("role"), "content": m.get("content", "")}
+        for flag in ("cache_primer", "cache_fold"):
+            if m.get(flag):
+                r[flag] = True
+        out.append(r)
+    return out
 
 
 # ─── persistence (the KERNEL ROW STORE — this bundle owns no files) ─────────
@@ -2251,6 +2263,8 @@ async def _assemble(
     kernel,
     client_id: str,
     system_prompt: str | None = None,
+    *,
+    mode: str = caching.DEFAULT_MODE,
 ) -> tuple[list[dict], int]:
     """Build the message list. A caller-supplied `system_prompt` REPLACES the
     deterministic substrate prompt — absent, the record's own `system_prompt`
@@ -2279,6 +2293,14 @@ async def _assemble(
     # reflects reduced to a stub — the model's own distillation carries the facts.
     hist = await _load_history(self_id, kernel)
     store_len = len(hist)
+    clean = caching.cleans(mode)
+
+    def _trim(rows: list[dict]) -> list[dict]:
+        # caching=cleanup trims the tail; none and provider_cache keep it as stored.
+        if not clean:
+            return list(rows)
+        return drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(rows)))
+
     # THE VIEW ARRAY IS THE STATE. When one exists and every id it names still
     # resolves, the model sees exactly those rows at exactly those resolutions —
     # the same bytes before and after a restart. Otherwise (no array yet, or an
@@ -2295,12 +2317,10 @@ async def _assemble(
         # read it had just made and would restart its work in a circle.
         idx = {r.get("id"): i for i, r in enumerate(hist) if r.get("id")}
         newest = max(idx[e["id"]] for e in view["ids"])
-        messages.extend(
-            drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(hist[newest + 1 :])))
-        )
+        messages.extend(_trim(hist[newest + 1 :]))
         _view_source[self_id] = "array"
     else:
-        messages.extend(drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(hist))))
+        messages.extend(_trim(hist))
         _view_source[self_id] = (
             "store" if view is None or not view["ids"] else "store (stale array)"
         )
@@ -2789,11 +2809,17 @@ async def _run(
     system_prompt: str | None = None,
 ) -> dict:
     provider = await _build_provider(self_id, kernel, cfg)
+    # THE CACHING MODE IS CHECKED FIRST: a record that asks for provider caching on a
+    # backend that cannot cache is refused before any row is written — before the
+    # owed recall, which writes a view and a recall row.
+    mode, primer = caching.settings(kernel.get(self_id) or {})
+    if caching.marks(mode) and not cfg.provider_cache:
+        raise caching.unsupported(cfg.name)
     if self_id in _recall_due:
         _recall_due.discard(self_id)
         await _context_recall(self_id, {}, kernel, cfg, system_prompt, client_id)
     messages, store_len = await _assemble(
-        self_id, user_text, kernel, client_id, system_prompt
+        self_id, user_text, kernel, client_id, system_prompt, mode=mode
     )
     # Context-overflow projection: shape what the MODEL sees this turn to fit the
     # window via the agent's `context_strategy` (default compact). Done ONCE at turn
@@ -2812,6 +2838,10 @@ async def _run(
     if isinstance(projected, dict):  # too_small failsafe / config error
         return projected
     messages = projected
+    # THE PROVIDER'S MARKERS, flagged on the list it is handed: the primer's end and
+    # the last fold's. Only provider_cache asks for them.
+    if caching.marks(mode):
+        messages = caching.mark(messages, primer)
     # ONE provider pass — no tool loop. The provider streams pure text; every chunk
     # is a content token routed to the caller. Any tool convention is the caller's
     # (an authored agent reads this completion + drives its own loop).
@@ -4325,6 +4355,7 @@ def build(
     name: str,
     extra_verbs: dict | None = None,
     reflect_extra: Callable | None = None,
+    provider_cache: bool = False,
 ) -> tuple[dict, Callable]:
     """Bind one backend's config into a fresh `(VERBS, handler)` pair.
 
@@ -4351,6 +4382,8 @@ def build(
         carried are gone (keys come from the environment).
       reflect_extra: fn(id, kernel) -> dict (sync OR async), merged into
         the reflect reply (vllm: the effective sampling + the KV table).
+      provider_cache: the backend runs the provider's cache markers
+        (caching=provider_cache).
     """
     cfg = Backend(
         sentence=sentence,
@@ -4358,6 +4391,7 @@ def build(
         name=name,
         extra_verbs=extra_verbs or {},
         reflect_extra=reflect_extra,
+        provider_cache=provider_cache,
     )
 
     verbs: dict[str, Callable] = {

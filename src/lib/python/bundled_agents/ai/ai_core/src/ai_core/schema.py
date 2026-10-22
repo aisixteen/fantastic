@@ -32,6 +32,7 @@ from ai_core.constants import (
     RECENT_N,
     RECENT_N_RANGE,
 )
+from ai_core.caching import CACHE_PRIMER_HINT, CACHING_HINT, DEFAULT_MODE, MODES
 from ai_core.credentials import shape_error
 from ai_core.strategies import DEFAULT_STRATEGY, strategy_names
 
@@ -108,6 +109,8 @@ AI_FIELDS: tuple = (
         f"recent turns a compaction keeps verbatim ({RECENT_N_RANGE[0]}–{RECENT_N_RANGE[1]})",
         default=RECENT_N,
     ),
+    field("caching", "enum", CACHING_HINT, enum=MODES, default=DEFAULT_MODE),
+    field("cache_primer_until", "int", CACHE_PRIMER_HINT),
     field("misfire_limit", "int", MISFIRE_LIMIT_HINT, default=MAX_SILENT_TURNS),
     field(
         "system_prompt",
