@@ -1,7 +1,7 @@
 import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { onMac } from "../canvas/viewer.ts";
-import { fileGrant, kernelBridge, readBytes, sharedHub } from "../files/file_bridge.ts";
+import { bindCellToView, fileGrant, readBytes, release, routedBridge, said, sharedHub } from "../files/file_bridge.ts";
 import { agentIndex, ensureWalker, filesDeps, onRender, onSelection, selection } from "../files/files_deps.ts";
 import { extOf, HIGHLIGHT_MAX, human, PAGE } from "./preview_model.ts";
 import { lineDiff } from "./diff.ts";
@@ -54,8 +54,11 @@ export const previewView: ViewBundle = {
   mount(ctx: ViewContext): ViewHandle {
     const d = filesDeps("preview_view");
     ensurePreviewStyle();
-    const bridge = kernelBridge(ctx.kernel);
+    const bridge = routedBridge(ctx.kernel);
     ensureWalker(bridge);
+    // a preview opened on a file agent (#150) is that agent's view: its file is served by it
+    const fileAgent = (ctx.record ?? {})["view_agent"];
+    const pinnedPath = (ctx.record ?? {})["pinned"];
     const mac = onMac();
     const ctl = new PreviewController({
       bridge,
@@ -472,19 +475,32 @@ export const previewView: ViewBundle = {
       } else rePaint?.();
     };
 
+    // A pinned preview is its file's view: bound now (a saved `view_agent` serves it again;
+    // one saved before views gets the view of its file). Its first read waits for that, and a
+    // refusal is said in the cell, which stays open.
+    const bound =
+      typeof pinnedPath === "string"
+        ? bindCellToView(ctx.kernel, "file", pinnedPath, typeof fileAgent === "string" ? fileAgent : undefined, (view) => {
+            ctx.kernel.updateMeta(ctx.selfId, { view_agent: view } as unknown as Payload);
+          }, ctx.selfId).then((b) => {
+            if (!b.ok) say(`${said(b.refusal)} — this preview is not its file's view`);
+          })
+        : Promise.resolve();
+
     ctl.onChange(draw);
     const offRender = onRender(draw);
     const offSel = onSelection(() => {
       if ("follow" in ctl.binding) void ctl.refresh();
     });
     draw();
-    void ctl.refresh();
+    void bound.then(() => ctl.refresh());
 
     return {
       unmount(): void {
         offSel();
         offRender();
         ctl.dispose();
+        if (typeof pinnedPath === "string") release(ctx.kernel, pinnedPath, ctx.selfId);
         previews.delete(ctx.selfId);
         freeBody();
         el.remove();

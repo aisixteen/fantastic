@@ -7,6 +7,62 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- File and folder agents: thin view agents over the file bridge (#150). A file or a
+  folder is an agent shipped in the `file_bridge` bundle, scoped to one path.
+  `open_view {kind: file|folder, path}` on a `file_bridge` returns the view of that
+  path, making it if none exists, so one path is one agent (a second open is the
+  same agent, `created: false`). A file view reads, writes (`if_match`) and watches
+  its file (`changed`); a folder view lists, reveals a path inside it and watches its
+  entries (`added`, `changed`, `removed`). A view reaches its bridge as itself, for
+  its own path only: its entry in the bridge's `callable_by` names the bridge's verbs
+  it needs and carries its path (`file:<path>`, `folder:<prefix>`), and the bridge
+  refuses a path outside it, as well as the view. The bridge pushes a view only the
+  changes under its path, so the view is never a kernel watcher of its bridge. An
+  entry with no single scope token refuses that caller in full. Python is the
+  reference; the Rust `fantastic-file` and the Swift `FantasticFile` ports match it.
+- Canvas: a file or folder dropped on the canvas (and the view's `open` verb) makes
+  or reuses its agent and places its view. The preview is the file agent's view (its
+  reads, saves and live changes go through the agent); the file tree rooted at a
+  folder is the folder agent's view. Two views of one file share one agent and one
+  watch. A cell saved before this is bound to its view when it mounts, and waits for
+  the page's grant on that view first, which the host announces on the state stream
+  (`granted`, or `grant_refused` with why) once it writes the grant; a refusal is shown
+  in the cell, which stays open.
+- CLI (TUI): the file panel shows the agent it selects by what the agent is. A file
+  agent is a viewer and editor (`e` edits, Ctrl-S saves against the version read, Esc
+  leaves and discards unsaved edits); a folder agent is a live tree (it re-lists when
+  its entries change). Both arm their view's relay with the view's own `watch`. Picking
+  a file in a folder, or at a `file_bridge`, opens it as its view (`open_view`) and
+  selects that agent, as the canvas does. A file longer than one page is not opened
+  for editing (a save writes the whole document), and a save keeps the file's final
+  newline as it was. A `file_bridge` itself browses its root as before.
+- A view answers its own verbs: `docs of=<view>` lists the view's table (file: read,
+  write, watch, reflect; folder: list, reveal, watch, reflect), not the bridge's. A
+  view's `reflect` says whether its relay is `watching`. The bridge's `read` reply
+  carries `newline`.
+- E123 `file_agents`: the kernel contract the views stand on, over the packaged
+  python, rust and swift kernels: one agent per path, refusals that make no agent,
+  a file view's versioned write, a folder view's scope and reveal, a view's relay
+  armed once, and the relay's events over the ws face: a file view's `changed` after
+  an on-disk edit, a folder view's `added` and `removed`. The harness declares the
+  view ids it watches at boot (`open_view` takes a chosen `id`, see below).
+- `open_view` takes an optional `id` for the new view, so a caller can declare it up
+  front. The id is taken only when it is free: another agent's id, a view of another
+  path, or a second id for a path that already has a view is refused (`exists`).
+- The bridge holds a VIEW caller to its own path. A view's verb that reaches the
+  bridge (`read`, `write`, `list`, `watch_path`, `unwatch_path`) is refused there
+  outside the view's path (a file: that file; a folder: itself and what is under it),
+  as well as by the view. Python, Rust and Swift.
+- A view's relay drops a bridge event whose kind is not `added`, `modified` or
+  `deleted`, and logs it; it no longer relabels such an event as a change (Python,
+  Rust and Swift). The Rust disk watch reports a file the watch had not seen as
+  `added`, whatever the platform named the event.
+- Canvas: a cell that serves a file or folder view releases its path when it unmounts,
+  and a view the state stream reports removed releases every path it serves. A path
+  is served while a cell holds it.
+- A file's or folder's disk change is judged by the disk as it is now: a batch that
+  reports a removal and a spurious creation for one unlink reads as `deleted`
+  (Python and Rust `file_bridge` watchers).
 - Drag from the file tree onto the canvas (#134, #135). The tree's rows drag
   together: Shift-click selects a range, ⌘-click (Ctrl-click off macOS) adds or
   drops one row. An agent row drops its cell back on the canvas (shown again, or

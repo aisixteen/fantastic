@@ -108,6 +108,12 @@ pub enum Got {
     /// The set-up page made an AI agent: its id (selected, its chat opened) —
     /// or why not.
     Created(Result<String, String>),
+    /// The bridge's `open_view` answered for `from`: the view's id (selected) or a
+    /// refusal (shown in `from`'s pane).
+    Opened {
+        from: AgentId,
+        reply: Value,
+    },
     /// A REFUSAL IS DATA. The kernel's `{"error":…,"reason":…}` is not an
     /// exception to swallow — it is the answer, and it renders where the request
     /// was made so the human sees which grant is missing.
@@ -164,6 +170,15 @@ pub enum Cmd {
     },
     Cancel {
         task_id: RowId,
+    },
+    /// Open the VIEW agent of a file or folder on `bridge` (`open_view`): made or
+    /// reused, then selected by the shell. `from` is the panel that asked, and the
+    /// one that shows a refusal.
+    OpenView {
+        bridge: AgentId,
+        from: AgentId,
+        kind: String,
+        path: String,
     },
     Watch(AgentId),
     Unwatch(AgentId),
@@ -234,6 +249,7 @@ impl Cmd {
             Cmd::Rows { .. } => What::Rows,
             Cmd::Reflect { .. } => What::Reflect,
             Cmd::Send { .. } => What::Send,
+            Cmd::OpenView { .. } => What::Send,
             Cmd::Cancel { .. } => What::Cancel,
             Cmd::Watch(_) | Cmd::Unwatch(_) | Cmd::Jump { .. } | Cmd::Quit => What::Ps,
             Cmd::Stream { .. } => What::Send,

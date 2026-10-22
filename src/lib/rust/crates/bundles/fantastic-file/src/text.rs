@@ -277,6 +277,8 @@ fn read(
         "lines": page,
         "total": all_lines.len(),
         "eof": off.saturating_add(limit) >= all_lines.len(),
+        // whether the file ends in a newline: a whole-document save keeps it as it was
+        "newline": text.ends_with('\n'),
         "version": ver,
         "origin": origin,
     })

@@ -117,7 +117,10 @@ pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
     None
 }
 
-pub(crate) async fn create_from_payload(
+/// The `create_agent` body, for a bundle that makes a child as bookkeeping — python's
+/// `Agent.create` (a view of a file bridge is made this way). NOT a gated send: the
+/// caller already holds the verb that asked for it.
+pub async fn create_from_payload(
     kernel: &Arc<Kernel>,
     root: &Arc<Agent>,
     payload: &Value,

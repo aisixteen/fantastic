@@ -32,5 +32,7 @@ conflict. Seeded: a `file tree` cell (`tree_e89`), a preview pinned to
    collapsing `src` drops `src` from the bridge's holds (the same sentinel poll);
 10. the three cells removed (`view_root remove`): the bridge's holds (the
     `paths` of `unwatch_path` on a sentinel, polled up to 10 s) name none of
-    `.`, `src`, `docs`, `src/one.txt`, `docs/a.md`.
+    `.`, `src`, `docs`, `src/one.txt`, `docs/a.md` except the paths of the file
+    and folder views still on the host (`file_bridge_*` records): a view keeps
+    its own relay until it is deleted (#150), so its path is not a cell's leftover.
 11. no page error is logged (WebGL noise aside).

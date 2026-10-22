@@ -398,9 +398,11 @@ pub async fn start(h: &Host) -> Result<(), String> {
             } else {
                 grant(&host, &batch).await
             };
-            if let Err(e) = r {
+            let refused = r.as_ref().err().cloned();
+            if let Some(e) = &refused {
                 tracing::warn!("{e}");
             }
+            announce(&host.kernel, &batch, refused.as_deref());
             GRANTED.notify_waiters();
             // a new AI reads the project's system block (`kern/prompt`)
             for id in &batch {
@@ -411,6 +413,20 @@ pub async fn start(h: &Host) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// The watch's outcome for each of `ids`, on the state stream: `granted` once the
+/// caller's grant is written, or `grant_refused` with why it was not (`error`). A page
+/// that has just been given a view (`open_view`) waits on this, not on a probe of its
+/// own (the canvas's `awaitGrant`).
+pub fn announce(kernel: &fantastic_kernel::Kernel, ids: &[String], refused: Option<&str>) {
+    for id in ids {
+        let ev = match refused {
+            None => json!({"kind": "granted", "agent_id": id}),
+            Some(e) => json!({"kind": "grant_refused", "agent_id": id, "error": e}),
+        };
+        kernel.publish_state(&ev);
+    }
 }
 
 /// The human, the canvas leg and the holding legs (`mcp`) reach every agent of
@@ -438,7 +454,7 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cabinet_owned, grant, leg_verbs, CANVAS_LEG};
+    use super::{announce, cabinet_owned, grant, leg_verbs, CANVAS_LEG};
     use crate::kern::host::Host;
     use fantastic_kernel::{Agent, AgentId, Kernel};
     use serde_json::{json, Map, Value};
@@ -554,5 +570,35 @@ mod tests {
         // no other holder is granted the cabinet's equipment
         assert!(field("helper", "callable_by").get("master").is_none(), "{:?}", field("helper", "callable_by"));
         assert!(field("master", "can_call").get("helper").is_none(), "{:?}", field("master", "can_call"));
+    }
+
+    #[test]
+    fn a_grant_the_watch_writes_is_announced_on_the_state_stream_and_a_refusal_says_why() {
+        let kernel = Kernel::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let sink = std::sync::Arc::clone(&seen);
+        kernel.add_state_subscriber(std::sync::Arc::new(move |v: &Value, _b: Option<&fantastic_kernel::Blob>| {
+            sink.lock().unwrap().push(v.clone());
+        }));
+        announce(&kernel, &["view_a".to_string(), "view_b".to_string()], None);
+        announce(&kernel, &["view_c".to_string()], Some("reach: `user`.can_call: refused"));
+        // the kernel stamps each state event with its time: compared without it
+        let seen: Vec<Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                let mut v = v.clone();
+                v.as_object_mut().expect("an object").remove("ts");
+                v
+            })
+            .collect();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert_eq!(seen[0], json!({"kind": "granted", "agent_id": "view_a"}));
+        assert_eq!(seen[1], json!({"kind": "granted", "agent_id": "view_b"}));
+        assert_eq!(
+            seen[2],
+            json!({"kind": "grant_refused", "agent_id": "view_c", "error": "reach: `user`.can_call: refused"})
+        );
     }
 }

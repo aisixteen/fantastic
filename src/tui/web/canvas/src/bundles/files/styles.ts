@@ -11,6 +11,8 @@ const CSS = `
   .files-view .ft-kernel.page { color: ${tok("color.side.page-text")}; }
   .files-view .ft-new { color: ${tok("color.status.warn")}; font-weight: 600; cursor: pointer; }
   .files-view .ft-new[hidden] { display: none; }
+  .files-view .ft-note { flex: none; padding: 4px 10px; color: ${tok("color.status.warn-text")}; background: ${tint("color.status.warn", 10)}; }
+  .files-view .ft-note[hidden] { display: none; }
   .files-view .ft-filter { flex: 1 1 100%; box-sizing: border-box; background: ${tint("color.shade", 30)}; border: 1px solid ${tint("color.accent.base", 40)};
     color: inherit; font: inherit; padding: 3px 6px; border-radius: ${tok("radius.control")}; }
   .files-view ul.ft-tree { flex: 1; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: 0 0 6px; outline: none; }

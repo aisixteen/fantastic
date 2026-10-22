@@ -21,6 +21,8 @@ use notify::event::{EventKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 
+use crate::views;
+
 /// A burst of disk events (an editor's save) inside this window is one `changed`
 /// per path (python `WATCH_DEBOUNCE_MS`).
 const DEBOUNCE: Duration = Duration::from_millis(50);
@@ -166,6 +168,9 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
     held.watcher = Some(watcher);
     let me = agent_id.clone();
     let k = Arc::clone(kernel);
+    // The holders as they stand now: every watch change re-arms this task, so the
+    // snapshot is the holders of this watcher's life.
+    let holders = held.paths.clone();
     kernel.spawn_task(agent_id, "watch_path", async move {
         loop {
             let Some(first) = rx.recv().await else { return };
@@ -184,11 +189,17 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
             let mut seen: BTreeMap<String, &'static str> = BTreeMap::new();
             for ev in &events {
                 for p in &ev.paths {
-                    if let Some(rel) = relative(p, &files, &dirs) {
-                        if let Some(kind) = kind_of(&ev.kind, p) {
-                            seen.insert(rel, kind);
-                        }
-                    }
+                    let (Some(rel), Some(kind)) =
+                        (relative(p, &files, &dirs), kind_of(&ev.kind, p))
+                    else {
+                        continue;
+                    };
+                    // a path created in this batch stays `added` whatever a later report says
+                    let kind = match seen.get(&rel) {
+                        Some(&"added") if kind == "modified" => "added",
+                        _ => kind,
+                    };
+                    seen.insert(rel, kind);
                 }
             }
             // `allow` is read LIVE: a path the bridge stopped exposing after the
@@ -202,6 +213,7 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
                 if crate::exposed(&allow, &rel) {
                     k.emit(&me, json!({"type": "changed", "path": rel, "kind": kind}))
                         .await;
+                    relay_to_views(&k, &me, &holders, &rel, kind);
                 }
             }
             if closed {
@@ -209,6 +221,33 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
             }
         }
     });
+}
+
+/// python `tools._relay_to_views`: push one change to each VIEW caller whose watch
+/// covers it, and only where its scope on this bridge admits it (its `callable_by` entry
+/// here). The kernel's own watch would mirror every change to a watcher, so a view is
+/// never a kernel watcher of its bridge.
+pub(crate) fn relay_to_views(
+    kernel: &Arc<Kernel>,
+    bridge: &AgentId,
+    holders: &BTreeMap<String, BTreeSet<String>>,
+    rel: &str,
+    kind: &str,
+) {
+    let ev = json!({"type": "changed", "path": rel, "kind": kind});
+    for (norm, callers) in holders {
+        if rel != norm && parent_of(rel) != *norm {
+            continue;
+        }
+        for caller in callers {
+            let caller = AgentId::from(caller.as_str());
+            if let Some((scope_kind, own)) = views::caller_scope(kernel, &bridge.0, Some(&caller)) {
+                if views::inside(&scope_kind, &own, rel) {
+                    views::deliver(kernel, &caller.0, ev.clone());
+                }
+            }
+        }
+    }
 }
 
 /// An event path → the watched path it belongs to (a file, or a watched
@@ -234,16 +273,93 @@ fn relative(
     })
 }
 
-/// python `watchfiles.Change`'s names: `added`, `modified`, `deleted`. A rename
-/// reads as whichever the path now is; a mere access is no change.
+/// python `watchfiles.Change`'s names: `added`, `modified`, `deleted`. A mere access
+/// is no change. The kind follows the event (python `_kind`): a create (or a name
+/// coming to this path) is `added`, anything else `modified`. The DISK AS IT IS NOW
+/// decides `deleted`: a path that is gone is `deleted`, whatever the event said, and
+/// a removal reported for a path that is present (a batch can carry one path twice,
+/// macOS FSEvents: `deleted` then a spurious `added` for one unlink) is `modified`.
 fn kind_of(kind: &EventKind, p: &Path) -> Option<&'static str> {
-    match kind {
-        EventKind::Access(_) => None,
-        EventKind::Create(_) => Some("added"),
-        EventKind::Remove(_) => Some("deleted"),
-        EventKind::Modify(ModifyKind::Name(_)) => {
-            Some(if p.exists() { "added" } else { "deleted" })
-        }
-        _ => Some(if p.exists() { "modified" } else { "deleted" }),
+    if matches!(kind, EventKind::Access(_)) {
+        return None;
+    }
+    if p.symlink_metadata().is_err() {
+        return Some("deleted");
+    }
+    Some(match kind {
+        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_)) => "added",
+        _ => "modified",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, CreateKind, RemoveKind, RenameMode};
+
+    #[test]
+    fn a_mere_access_is_no_change() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
+        assert_eq!(kind_of(&EventKind::Access(AccessKind::Any), &here), None);
+    }
+
+    #[test]
+    fn a_path_that_is_gone_is_deleted_whatever_the_event() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let gone = dir.path().join("gone.md");
+        // a spurious `added` after an unlink reads as deleted: the disk says so
+        assert_eq!(
+            kind_of(&EventKind::Create(CreateKind::File), &gone),
+            Some("deleted")
+        );
+        assert_eq!(
+            kind_of(&EventKind::Modify(ModifyKind::Any), &gone),
+            Some("deleted")
+        );
+        assert_eq!(
+            kind_of(&EventKind::Remove(RemoveKind::File), &gone),
+            Some("deleted")
+        );
+    }
+
+    #[test]
+    fn a_create_is_added() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
+        assert_eq!(
+            kind_of(&EventKind::Create(CreateKind::File), &here),
+            Some("added")
+        );
+        // a name coming to this path is a new entry, as watchfiles reports it
+        assert_eq!(
+            kind_of(&EventKind::Modify(ModifyKind::Name(RenameMode::To)), &here),
+            Some("added")
+        );
+    }
+
+    #[test]
+    fn a_modify_is_modified() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
+        assert_eq!(
+            kind_of(&EventKind::Modify(ModifyKind::Any), &here),
+            Some("modified")
+        );
+    }
+
+    #[test]
+    fn a_removal_of_a_present_path_is_modified() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let here = dir.path().join("here.md");
+        std::fs::write(&here, "x").unwrap();
+        // present now, so a reported removal is not `deleted` (python `_kind`)
+        assert_eq!(
+            kind_of(&EventKind::Remove(RemoveKind::File), &here),
+            Some("modified")
+        );
     }
 }
