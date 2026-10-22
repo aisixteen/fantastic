@@ -90,6 +90,9 @@ fn provider_idle(
         usage: Arc::new(Mutex::new(Usage::default())),
         report: ReportCell::default(),
         stream_idle,
+        long_context_tokens: None,
+        usage_log: None,
+        agent_id: "a1".into(),
     }
 }
 
@@ -799,6 +802,111 @@ fn provider_cache_sends_no_system_block_when_the_system_is_empty() {
 }
 
 #[tokio::test]
+async fn a_request_over_the_long_context_line_is_billed_long() {
+    let mut events = vec![usage_start(50, 50, 50), text("ok")];
+    events.extend(usage_stop(10));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let mut p = provider(&ep, Arc::new(NoKey));
+    p.usage = fresh_usage();
+    p.long_context_tokens = Some(100);
+    drain(&p, None).await.unwrap();
+    let u = p.usage.lock().unwrap();
+    assert_eq!(u.long_requests, 1);
+    assert_eq!(u.requests, 0);
+    let s = u.snapshot(Some(1.0), Some(5.0), Some(2.0), Some(10.0));
+    assert_eq!(s["long_context_requests"], json!(1));
+    let cost = (50.0 + 1.25 * 50.0 + 0.1 * 50.0) * 2.0 / 1e6 + 10.0 * 10.0 / 1e6;
+    assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
+}
+
+#[tokio::test]
+async fn a_request_under_the_line_is_billed_base() {
+    let mut events = vec![usage_start(50, 40, 0), text("ok")];
+    events.extend(usage_stop(10));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let mut p = provider(&ep, Arc::new(NoKey));
+    p.usage = fresh_usage();
+    p.long_context_tokens = Some(100);
+    drain(&p, None).await.unwrap();
+    let u = p.usage.lock().unwrap();
+    assert_eq!(u.long_requests, 0);
+    assert_eq!(u.requests, 1);
+    let s = u.snapshot(Some(1.0), Some(5.0), Some(2.0), Some(10.0));
+    assert_eq!(s["long_context_requests"], json!(0));
+    let cost = (50.0 + 1.25 * 40.0) * 1.0 / 1e6 + 10.0 * 5.0 / 1e6;
+    assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
+}
+
+#[tokio::test]
+async fn without_long_prices_the_long_bucket_uses_the_base_prices() {
+    let mut events = vec![usage_start(50, 50, 50), text("ok")];
+    events.extend(usage_stop(10));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let mut p = provider(&ep, Arc::new(NoKey));
+    p.usage = fresh_usage();
+    p.long_context_tokens = Some(100);
+    drain(&p, None).await.unwrap();
+    let u = p.usage.lock().unwrap();
+    let s = u.snapshot(Some(1.0), Some(5.0), None, None);
+    let cost = (50.0 + 1.25 * 50.0 + 0.1 * 50.0) * 1.0 / 1e6 + 10.0 * 5.0 / 1e6;
+    assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
+}
+
+#[tokio::test]
+async fn the_usage_log_gets_one_line_per_request() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("usage.jsonl");
+    let mut first = vec![usage_start(100, 400, 1000), text("a")];
+    first.extend(usage_stop(35));
+    let mut second = vec![usage_start(50, 0, 900), text("b")];
+    second.extend(usage_stop(20));
+    let (_s1, ep1) = api(200, sse(&first)).await;
+    let (_s2, ep2) = api(200, sse(&second)).await;
+    let mut p = provider(&ep1, Arc::new(NoKey));
+    p.usage = fresh_usage();
+    p.usage_log = Some(path.clone());
+    p.agent_id = "a1".into();
+    drain(&p, None).await.unwrap();
+    p.endpoint = ep2;
+    drain(&p, None).await.unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<Value> = raw
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["input_tokens"], json!(100));
+    assert_eq!(lines[0]["output_tokens"], json!(35));
+    assert_eq!(lines[1]["input_tokens"], json!(50));
+    assert_eq!(lines[1]["cache_read_tokens"], json!(900));
+    assert_eq!(lines[1]["output_tokens"], json!(20));
+    assert_eq!(lines[1]["long_context"], json!(false));
+    assert_eq!(lines[1]["agent"], json!("a1"));
+}
+
+#[test]
+fn the_new_fields_are_validated() {
+    let rec = serde_json::Map::new();
+    let check = |m: Value| validate(m.as_object().unwrap(), &rec);
+    assert_eq!(
+        check(json!({"long_context_tokens": 0})).as_deref(),
+        Some("long_context_tokens must be a positive int")
+    );
+    assert_eq!(
+        check(json!({"long_context_tokens": "x"})).as_deref(),
+        Some("long_context_tokens must be a positive int")
+    );
+    assert_eq!(
+        check(json!({"price_input_long_per_mtok": -1})).as_deref(),
+        Some("price_input_long_per_mtok must be a number, zero or more")
+    );
+    assert_eq!(
+        check(json!({"usage_log": ""})).as_deref(),
+        Some("usage_log must be a non-empty string")
+    );
+}
+
+#[tokio::test]
 async fn the_stream_sets_last_prompt_tokens_and_the_counts() {
     let mut events = vec![usage_start(100, 400, 1000), text("ok")];
     events.extend(usage_stop(35));
@@ -845,8 +953,9 @@ fn hit_rate_and_saved_tokens_follow_the_formulas() {
         cache_write: 400,
         cache_read: 1000,
         output: 0,
+        ..Usage::default()
     };
-    let s = u.snapshot(None, None);
+    let s = u.snapshot(None, None, None, None);
     assert_eq!(s["prompt_tokens"], json!(1500));
     assert_eq!(s["saved_tokens"], json!(800)); // 0.9*1000 - 0.25*400
     let hit = s["hit_rate"].as_f64().unwrap();
@@ -858,11 +967,14 @@ fn hit_rate_and_saved_tokens_follow_the_formulas() {
         cache_write: 400,
         ..Usage::default()
     };
-    let s = w.snapshot(None, None);
+    let s = w.snapshot(None, None, None, None);
     assert_eq!(s["saved_tokens"], json!(-100));
     assert_eq!(s["hit_rate"].as_f64(), Some(0.0));
     // nothing counted: no prompt, no hit rate
-    assert_eq!(Usage::default().snapshot(None, None)["hit_rate"], json!(0));
+    assert_eq!(
+        Usage::default().snapshot(None, None, None, None)["hit_rate"],
+        json!(0)
+    );
     // halves round to even
     assert_eq!(saved_tokens(5, 0), 4);
     assert_eq!(saved_tokens(0, 2), 0);
@@ -878,13 +990,14 @@ fn prices_on_the_record_add_cost_and_saving_in_usd() {
         cache_write: 400,
         cache_read: 1000,
         output: 50,
+        ..Usage::default()
     };
-    let s = u.snapshot(Some(3.0), Some(15.0));
+    let s = u.snapshot(Some(3.0), Some(15.0), None, None);
     let cost = (100.0 + 1.25 * 400.0 + 0.1 * 1000.0) * 3.0 / 1e6 + 50.0 * 15.0 / 1e6;
     assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
     assert!((s["saved_usd"].as_f64().unwrap() - 800.0 * 3.0 / 1e6).abs() < 1e-12);
     // one price without the other: neither field
-    let s = u.snapshot(Some(3.0), None);
+    let s = u.snapshot(Some(3.0), None, None, None);
     assert!(s.get("cost_usd").is_none() && s.get("saved_usd").is_none());
 }
 
