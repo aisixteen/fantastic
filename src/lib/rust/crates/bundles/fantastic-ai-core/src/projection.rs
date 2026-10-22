@@ -209,6 +209,17 @@ pub async fn project_context(
         })));
     };
     let strat_name = strat_name.to_string();
+    // `none`: never shrink. An over-budget turn is refused here, before any
+    // model call or row write, and nothing is dropped.
+    if strat_name == "none" {
+        return Err(ProjectFail::Refusal(json!({
+            "error": format!(
+                "{name}: context full: {}k of {}k tokens — clear, fold by hand, or raise context_window",
+                estimate_tokens(&messages) / 1000,
+                b / 1000
+            ),
+        })));
+    }
     let recent = cfg_recent_n(&meta);
     // Over the HEAD, not the body: a body rebuilt from the view array holds the
     // folds without the rows they hide.

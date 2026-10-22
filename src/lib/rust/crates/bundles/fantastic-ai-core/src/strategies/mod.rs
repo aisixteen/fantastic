@@ -265,7 +265,7 @@ pub const DEFAULT_STRATEGY: &str = "compact";
 
 /// The registry's names in insertion order — python `strategy_names()`, whose
 /// `str(list)` is what the unknown-strategy refusal prints.
-pub const STRATEGY_NAMES: [&str; 4] = ["compact", "truncate", "strip", "fold"];
+pub const STRATEGY_NAMES: [&str; 5] = ["compact", "truncate", "strip", "fold", "none"];
 
 /// The known strategy names (config validity check; unknown ⇒ caller errors).
 pub fn is_known_strategy(name: &str) -> bool {
