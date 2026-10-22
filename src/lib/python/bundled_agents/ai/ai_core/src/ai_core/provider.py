@@ -16,6 +16,16 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
 
+class ProviderError(RuntimeError):
+    """A provider failure. `transport` is True when the LINK failed (connect,
+    read, dropped stream, a 502/503/504 gateway), so a retry may be safe;
+    False for everything else."""
+
+    def __init__(self, message: str, *, transport: bool = False):
+        super().__init__(message)
+        self.transport = transport
+
+
 class Provider(ABC):
     """Streaming chat adapter for one upstream LLM.
 

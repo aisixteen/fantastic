@@ -120,6 +120,39 @@ async def test_a_stream_that_ends_without_finish_reason_is_an_error():
         await _drain(p)
 
 
+async def test_a_transport_failure_is_marked_transport():
+    def handler(request):
+        raise httpx.ConnectError("refused")
+
+    p = _provider(httpx.MockTransport(handler))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+
+
+async def test_a_stream_without_finish_reason_is_transport():
+    p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+
+
+@pytest.mark.parametrize("code", [502, 503, 504])
+async def test_a_gateway_status_is_transport(code):
+    p = _provider(_transport('{"error":"down"}', status=code))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+
+
+@pytest.mark.parametrize("code", [400, 500])
+async def test_a_plain_http_status_is_not_transport(code):
+    p = _provider(_transport('{"error":"bad"}', status=code))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert e.value.transport is False
+
+
 async def test_an_http_error_names_the_endpoint_and_the_body():
     p = _provider(_transport('{"error":"bad effort"}', status=400))
     with pytest.raises(RuntimeError, match=r"answered HTTP 400: .*bad effort"):
