@@ -256,7 +256,7 @@ def _store_safe(o: Any) -> Any:
     return o
 
 
-def stored_outcome(out: dict, named: bool) -> dict:
+def stored_outcome(out: dict, named: bool, secret=()) -> dict:
     """WHAT A SETTLE ROW KEEPS of an outcome — the one definition.
 
     A NAMED call keeps its whole result: its name is a dedup contract, and a re-send
@@ -268,8 +268,12 @@ def stored_outcome(out: dict, named: bool) -> dict:
     would re-record the store inside the store, growing several-fold per `ledger`
     call. And a reply body is not persisted anyway: its
     receiver holds it in RAM with the one-line `origin` that gets it again."""
+    from kernel._secret import shown  # noqa: PLC0415 — keeps the module graph acyclic
+
     status = out.get("status")
     res = out.get("result")
+    if secret and isinstance(res, dict):
+        res = shown(res, tuple(secret))
     if named:
         return {"status": status, "result": res}
     if status in DEAD_STATUSES:
