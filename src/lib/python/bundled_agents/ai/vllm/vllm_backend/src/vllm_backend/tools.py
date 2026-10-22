@@ -24,6 +24,7 @@ from ai_core import build, on_cancel, required_meta  # noqa: F401 — the cancel
 from ai_core import on_delete as _core_on_delete
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
+from kernel._refusal import bad
 
 from vllm_backend import server
 from vllm_backend.provider import (
@@ -34,8 +35,10 @@ from vllm_backend.provider import (
     READ_TIMEOUT,
     REASONING_EFFORTS,
     SAMPLING_DEFAULTS,
+    _usage_of,
     last_budgets,
     table_for,
+    usage,
 )
 
 NAME = "vllm_backend"
@@ -122,6 +125,7 @@ async def _reflect_extra(id, kernel):
             # shared by every vllm_backend agent on the same endpoint
             **(table_for(endpoint).view() if isinstance(endpoint, str) else {}),
         },
+        "usage": dict(_usage_of(id)),
     }
 
 
@@ -313,6 +317,19 @@ async def on_delete(agent) -> None:
     this backend's own — the agent's last-sent thinking budget."""
     await _core_on_delete(agent)
     last_budgets.pop(agent.id, None)
+    usage.pop(agent.id, None)
+
+
+async def _usage(id, payload, kernel):
+    """usage — args: reset? (bool). The agent's token usage since its kernel started: requests, prompt_tokens, output_tokens. reset: true returns the counts, then zeroes them."""
+    reset = payload.get("reset", False)
+    if not isinstance(reset, bool):
+        return bad("usage", "reset", "true or false")
+    u = _usage_of(id)
+    counts = dict(u)
+    if reset:
+        u.update({"requests": 0, "prompt_tokens": 0, "output_tokens": 0})
+    return counts
 
 
 def _build():
@@ -324,6 +341,7 @@ def _build():
         make_provider=make_provider,
         name=NAME,
         reflect_extra=_reflect_extra,
+        extra_verbs={"usage": _usage},
     )
 
     async def handler(id: str, payload: dict, kernel) -> dict | None:

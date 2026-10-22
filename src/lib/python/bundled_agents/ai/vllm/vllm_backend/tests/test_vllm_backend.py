@@ -77,9 +77,11 @@ async def _drain(p: VllmProvider, messages=None, **kw) -> str:
 def _fresh_tables():
     vp._tables.clear()
     vp.last_budgets.clear()
+    vp.usage.clear()
     yield
     vp._tables.clear()
     vp.last_budgets.clear()
+    vp.usage.clear()
 
 
 # ─── the stream ──────────────────────────────────────────────────────────────
@@ -355,7 +357,56 @@ def test_a_consistent_write_passes():
     assert validate_meta(meta, {}) is None
 
 
+async def test_the_final_usage_chunk_adds_one_request_and_its_tokens():
+    sse = _sse(
+        _delta(content="hi"),
+        _delta(finish="stop"),
+        {"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 30}},
+    )
+    p = _provider(_transport(sse))
+    await _drain(p)
+    assert vp.usage["v1"] == {"requests": 1, "prompt_tokens": 120, "output_tokens": 30}
+
+
 # ─── through the kernel ──────────────────────────────────────────────────────
+
+
+async def test_the_usage_verb_shows_the_counts_reset_zeroes_them_and_delete_drops_them(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    r = await _create(
+        k,
+        id="v1",
+        endpoint=ENDPOINT,
+        model="qwen3.8-27b",
+        max_tokens=8000,
+        context_window=262144,
+        kv_slots=7,
+        kv_overflow="evict",
+        memory_store_id="memory",
+    )
+    assert r.get("id") == "v1", r
+    vp.usage["v1"] = {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}
+
+    def call(payload):
+        return k.send([{"target": "v1", "payload": payload}])
+
+    got = (await call({"type": "usage"}))[0]["result"]
+    assert got == {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}, got
+
+    out = (await call({"type": "reflect"}))[0]["result"]
+    assert out["usage"] == {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}, out
+
+    got = (await call({"type": "usage", "reset": True}))[0]["result"]
+    assert got == {"requests": 2, "prompt_tokens": 10, "output_tokens": 5}, got
+    assert vp.usage["v1"] == {"requests": 0, "prompt_tokens": 0, "output_tokens": 0}
+
+    bad = (await call({"type": "usage", "reset": "yes"}))[0]["result"]
+    assert bad.get("reason") == "bad_arg" and bad.get("arg") == "reset", bad
+
+    await k.send([{"target": k.id, "payload": {"type": "delete_agent", "id": "v1"}}])
+    assert "v1" not in vp.usage
 
 
 async def _create(kernel, **meta):
