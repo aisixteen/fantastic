@@ -288,12 +288,6 @@ async def test_a_chain_gives_up_after_max_silent_turns(
     """Silent turns in a row are bounded: at MAX_SILENT_TURNS the chain stops
     reminding and tells its caller the model could not answer."""
     monkeypatch.setattr(core, "MAX_SILENT_TURNS", 3)
-    monkeypatch.setattr(
-        core,
-        "_GAVE_UP",
-        "The LLM was not able to answer — 3 turns in a row "
-        "produced no call. Reiterate the inquiry.",
-    )
     fp = _Script(["just prose"] * 10)
     aid = "gives_up"
     seeded_kernel.create(
@@ -326,7 +320,52 @@ async def test_a_chain_gives_up_after_max_silent_turns(
             if ev.get("type") == "status" and ev.get("phase") == "done":
                 reasons.append(((ev.get("detail") or {}).get("reason"), ev))
         assert reasons and reasons[-1][0] == "gave_up", reasons
-        assert "Reiterate the inquiry" in reasons[-1][1]["detail"]["error"], reasons
+        assert reasons[-1][1]["detail"]["error"] == core._gave_up(3), reasons
+    finally:
+        fake_providers.pop(aid, None)
+    assert core._gave_up(10) == (
+        "The LLM was not able to answer — 10 turns in a row produced no call. "
+        "Reiterate the inquiry."
+    ), "python and rust, byte for byte"
+
+
+async def test_a_chain_gives_up_after_its_misfire_limit(seeded_kernel, fake_providers):
+    """A record's `misfire_limit` bounds the silent turns in a row (#203): with 3,
+    the chain gives up after 3 and says so in its own words."""
+    fp = _Script(["just prose"] * 10)
+    aid = "gives_up_ml"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        misfire_limit=3,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    seeded_kernel.ctx.ensure_inbox("watch_ml")
+    seeded_kernel.watch(aid, "watch_ml")
+    fake_providers[aid] = fp
+    try:
+        await seeded_kernel.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "send", "text": "go", "client_id": "tab1"},
+                }
+            ]
+        )
+        await _settle(fp, 3)
+        await asyncio.sleep(0.5)
+        assert fp.calls == 3, f"no give-up after 3 silent turns; incoming={fp.incoming}"
+        q = seeded_kernel.ctx.inboxes["watch_ml"]
+        details = []
+        while not q.empty():
+            ev = q.get_nowait()
+            if ev.get("type") == "status" and ev.get("phase") == "done":
+                details.append(ev.get("detail") or {})
+        assert details and details[-1]["reason"] == "gave_up", details
+        assert details[-1]["silent_turns"] == 3, details
+        assert details[-1]["error"] == core._gave_up(3), details
+        assert "3 turns in a row" in core._gave_up(3)
     finally:
         fake_providers.pop(aid, None)
 
