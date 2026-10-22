@@ -486,28 +486,55 @@ fn wrapper_tag(report: &str) -> String {
 /// #203: the escalating wording for a chain whose answers keep running nothing.
 /// `n` is the streak INCLUDING this answer; `kind` says why nothing ran.
 fn escalation(n: usize, kind: &str, tag: Option<&str>) -> String {
-    let (phrase, forbidden) = match kind {
+    let (phrase, rule) = match kind {
         "wrapped" => {
             let t = tag.unwrap_or("tool_call");
-            (format!("put the call inside <{t}>"), format!("<{t}>"))
+            (
+                format!("put the call inside <{t}>"),
+                format!("Your next answer must START with <call name=\"…\"> — the very first characters of the answer — and contain <{t}> nowhere."),
+            )
         }
         "malformed" => (
             "had calls that did not parse".to_string(),
-            "any other markup around or inside the call".to_string(),
+            "Your next answer must START with <call name=\"…\"> — the very first characters of the answer — with no other markup around or inside the call.".to_string(),
         ),
         "thinking_only" => (
             "were only thinking, with no answer".to_string(),
-            "a turn without a call: think briefly, then write the call".to_string(),
+            "Keep your thinking to a few lines, then write the call in your answer, after the thinking — a call inside the thinking does not run.".to_string(),
         ),
         _ => (
             "had no call".to_string(),
-            "an answer without a call (or <call name=\"done\"></call> if the task is finished)"
-                .to_string(),
+            "Your next answer must START with <call name=\"…\"> — the very first characters of the answer. If the task is finished, that call is <call name=\"done\"></call>.".to_string(),
         ),
     };
     format!(
-        "[no progress — {n} answers in a row ran nothing] Your last {n} answers {phrase}, so nothing ran.\nYour next answer must START with <call name=\"…\"> — the very first characters of the answer — and contain {forbidden} nowhere.\nThen continue with your current step."
+        "[no progress — {n} answers in a row ran nothing] Your last {n} answers {phrase}, so nothing ran.\n{rule}\nThen continue with your current step."
     )
+}
+
+#[cfg(test)]
+mod escalation_tests {
+    use super::*;
+
+    #[test]
+    fn escalation_texts_say_what_to_do() {
+        let done = format!("<call name=\"done\"><{}call>", "/");
+        let d = escalation(3, "no_call", None);
+        assert!(d.starts_with("[no progress — 3 answers in a row ran nothing] Your last 3 answers had no call, so nothing ran.\n"));
+        assert!(d.contains(&format!("If the task is finished, that call is {done}.")));
+        assert!(!d.contains("nowhere"));
+        let t = escalation(2, "thinking_only", None);
+        assert!(t.contains("Keep your thinking to a few lines"));
+        assert!(!t.contains("nowhere"));
+        let w = escalation(2, "wrapped", Some("tool_call"));
+        assert!(w.contains("and contain <tool_call> nowhere."));
+        let m = escalation(2, "malformed", None);
+        assert!(m.contains("with no other markup around or inside the call."));
+        assert!(!m.contains("nowhere"));
+        for s in [&d, &t, &w, &m] {
+            assert!(s.ends_with("\nThen continue with your current step."));
+        }
+    }
 }
 
 /// An `inquiry` an AI received and has not answered yet — python's
