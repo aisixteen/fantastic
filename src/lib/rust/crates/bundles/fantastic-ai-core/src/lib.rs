@@ -41,6 +41,21 @@
 //!   `system_prompt` override replaces the default system block whole.
 //!   `_call_stack` is reserved for the recursion guard, refused BEFORE the FIFO
 //!   lock so a cycle cannot deadlock on it.
+//!   ONE CHAIN PER AGENT (#227): a message that lands while the agent's chain is
+//!   alive is HELD, not run as a second chain — it is stored as a row and read
+//!   by the chain's next pass (a wake turn when the chain ends with messages
+//!   still held). THE HELD SEND RETURNS THE ANSWER OF THE PASS THAT READS IT:
+//!   its caller waits (up to the send ceiling), and gets that pass's reply
+//!   under its own `client_id` — the whole pass's answer, shared by every sender
+//!   that pass read, not a reply to that message alone. It is released at once
+//!   with `{error, held:true}` when the agent reboots, clears its context, is
+//!   deleted, or the wake turn is refused (its delivery fails), and with
+//!   `{held:true, cancelled:true}` on `stop`. When the wake is accepted but
+//!   never runs, a watchdog frees the CHAIN (`alive`) at the send ceiling; a
+//!   held sender's own ceiling began earlier, so it times out on its own
+//!   first. The chain ends only when a reply comes back to the agent itself;
+//!   a turn whose calls all reply elsewhere
+//!   ends it. An inquiry's answer obeys the hold like any other message.
 //! - `stop` args `{stream_id:str?}` → `{stopped:bool}` — a receiver of this
 //!   agent's streaming parts stops the generation in flight (the provider stream
 //!   closes, open parts abort, the turn keeps a `[stopped by <caller>]` marker).

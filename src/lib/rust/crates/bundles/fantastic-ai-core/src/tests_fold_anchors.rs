@@ -1007,6 +1007,21 @@ async fn folds_at_a_small_window_and_every_turn_answers() {
         let backend = backend.clone();
         let s = Arc::clone(&s);
         async move {
+            // ONE CHAIN PER AGENT (#227): a turn sent while the chain is alive is held
+            // and answered by a wake turn, which shifts the pass order this test
+            // scripts. Wait for the chain to end before each turn, so every turn is
+            // its own chain, as the script assumes.
+            for _ in 0..300 {
+                if !crate::state::state_for(&backend)
+                    .chain
+                    .lock()
+                    .unwrap()
+                    .alive
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
             s.passes.lock().unwrap().push_back(pass(reply));
             let _ = kernel
                 .send(vec![Item::new(

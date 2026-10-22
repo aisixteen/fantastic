@@ -3596,6 +3596,642 @@ async fn await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it() {
     assert!(s.request(1).contains("two"), "{}", s.request(1));
 }
 
+/// ONE CHAIN PER AGENT (#227): a message that lands mid-chain joins the chain.
+/// It is held (not a second pass), and the chain's next pass reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_mid_chain_joins_the_chain() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "joins").await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let ask = call_envelope(peer.as_str(), json!({"type": "send", "text": "ask"}), None);
+    let a = script(
+        &backend,
+        vec![pass(ask), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let _r = script(&peer, vec![pass("answered")], Duration::from_millis(300));
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "go", "client_id": "g"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&a, 1).await, "the first pass never started");
+    // A held send RETURNS THE ANSWER of the pass that reads it (#227): it stays
+    // pending while held, so it runs as its own task.
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    assert!(!second.is_finished(), "a held send waits for its answer");
+    let _ = first.await.expect("first send");
+    assert!(until_passes(&a, 2).await, "the reply never woke the chain");
+    let two = second.await.expect("second send");
+    assert!(
+        two.get("response").is_some(),
+        "the held send gets its answer: {two}"
+    );
+    assert!(a.request(1).contains("two"), "{}", a.request(1));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(a.passes_served(), 2, "a joined message is no extra pass");
+    // The peer's prose answer is nudged for a call (#227 test): its pass count is
+    // not what this test checks, so it is not asserted.
+}
+
+/// ONE CHAIN PER AGENT (#227): a chain that ends with a held message wakes ONCE
+/// for it, and that wake turn reads the held message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chain_that_ends_with_a_held_message_wakes_once() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "wakeonce").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::from_millis(300),
+    );
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    assert!(!second.is_finished(), "a held send waits for its answer");
+    let _ = first.await.expect("first send");
+    assert!(
+        until_passes(&s, 2).await,
+        "the held message never woke the agent"
+    );
+    let two = second.await.expect("second send");
+    assert!(two.get("response").is_some(), "{two}");
+    let wake = s.request(1);
+    assert!(wake.contains("arrived while you were working"), "{wake}");
+    assert!(wake.contains("two"), "{wake}");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        s.passes_served(),
+        2,
+        "exactly one wake for the held message"
+    );
+}
+
+/// ONE CHAIN PER AGENT (#227): `stop` ends the chain and wakes nothing, even
+/// with a message held for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_ends_the_chain_and_wakes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "stopnowake").await;
+    let s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::from_millis(500),
+    );
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+    let _ = first.await;
+    // A held send whose chain was stopped gets the cancelled shape (#227).
+    let second_out = second.await.expect("second send");
+    assert_eq!(second_out["cancelled"], json!(true), "{second_out}");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(s.passes_served(), 1, "stop woke the held message");
+}
+
+/// ONE CHAIN PER AGENT (#227): a held send returns the answer of the pass that
+/// reads it, not a bare `held` acknowledgement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "heldanswer").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass("ANSWER-OF-THE-READING-PASS"),
+        ],
+        Duration::from_millis(300),
+    );
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    let _ = first.await.expect("first send");
+    // The held message is READ by the chain's next pass, which says so in its request.
+    assert!(until_passes(&s, 2).await, "the held message never got its pass");
+    let reading = s.request(1);
+    assert!(
+        reading.contains("arrived while you were working") && reading.contains("two"),
+        "the reading pass did not carry the held message: {reading}"
+    );
+    let out = second.await.expect("second send");
+    assert!(
+        out["response"]
+            .as_str()
+            .is_some_and(|r| r.contains("ANSWER-OF-THE-READING-PASS")),
+        "{out}"
+    );
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 1): a turn whose calls all reply ELSEWHERE
+/// (`reply_to` null) brings no message back to the agent, so its chain ends and
+/// the next message runs its own pass instead of being held forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_whose_calls_all_reply_elsewhere_ends_the_chain() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "elsewhere").await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let elsewhere = format!(
+        r#"<call name="send"><target_id>{peer}</target_id><type>send</type><text>hi</text><reply_to>null</reply_to></call>"#
+    );
+    let s = script(
+        &backend,
+        vec![pass(elsewhere), pass("second turn")],
+        Duration::ZERO,
+    );
+    let _r = script(&peer, vec![pass("answered")], Duration::ZERO);
+    let first = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "g"}),
+        )])
+        .await;
+    assert!(first.iter().all(|o| o.result.get("error").is_none()));
+    // The chain must end on its own, so this message runs a pass rather than
+    // being held until the send ceiling.
+    let second = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "next", "client_id": "n"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(
+        until_passes(&s, 2).await,
+        "the next message was held: the chain never ended"
+    );
+    assert!(second.get("held").is_none(), "{second}");
+}
+
+/// Poll `cond` until it holds, with a deadline — a wait on the CONDITION, never a
+/// fixed sleep. Names `what` when the deadline passes.
+async fn until_true(what: &str, cond: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Wait until `n` messages are held behind the agent's chain.
+async fn until_held(backend: &AgentId, n: usize) {
+    until_true("a message to be held", || {
+        crate::state::state_for(backend)
+            .chain
+            .lock()
+            .unwrap()
+            .held
+            .len()
+            >= n
+    })
+    .await;
+}
+
+/// Whether the agent's store holds a `late` row (a reply recorded, not acted on).
+async fn has_late_row(kernel: &Arc<Kernel>, backend: &AgentId) -> bool {
+    let rows = fantastic_kernel::test_support::as_agent(
+        backend.clone(),
+        crate::memory::load_history(backend, kernel, false),
+    )
+    .await
+    .expect("store read");
+    rows.iter().any(|r| r["kind"] == "late")
+}
+
+/// Wait (with a deadline) for a `late` row.
+async fn until_late_row(kernel: &Arc<Kernel>, backend: &AgentId) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !has_late_row(kernel, backend).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no late row was recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+type HeldBehind = (
+    TempDir,
+    Arc<Kernel>,
+    AgentId,
+    Arc<MockScript>,
+    tokio::task::JoinHandle<Value>,
+    tokio::task::JoinHandle<Value>,
+);
+
+/// A slow first pass (1.5 s) with a second message held behind it. Returns the
+/// two sends' handles.
+async fn held_behind_a_slow_pass(tag: &str) -> HeldBehind {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, tag).await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::from_millis(1500),
+    );
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let second = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    (tmp, kernel, backend, s, first, second)
+}
+
+/// `end` (a verb to the agent, or `None` for a shutdown) ends the chain: the held
+/// sender is released at once with an error, not left to the send ceiling.
+async fn the_chain_ends_and_the_held_are_released(tag: &str, end: Option<Value>) {
+    let (_tmp, kernel, backend, _s, _first, second) = held_behind_a_slow_pass(tag).await;
+    match end {
+        Some(verb) => {
+            let _ = kernel.send(vec![Item::new(backend.clone(), verb)]).await;
+        }
+        None => crate::state::drop_state(&backend),
+    }
+    let out = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("the held sender was left waiting")
+        .expect("second send");
+    assert!(out["error"].is_string(), "{out}");
+    assert_eq!(out["held"], json!(true), "{out}");
+    assert!(
+        !crate::state::state_for(&backend).chain.lock().unwrap().alive,
+        "the chain is still alive"
+    );
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 2): a reboot ends the chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reboot_ends_the_chain_and_releases_the_held() {
+    the_chain_ends_and_the_held_are_released("rebootchain", Some(json!({"type": "boot"}))).await;
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 2): a context clear ends the chain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_context_clear_ends_the_chain_and_releases_the_held() {
+    the_chain_ends_and_the_held_are_released(
+        "clearchain",
+        Some(json!({"type": "context_clear", "why": "fresh start"})),
+    )
+    .await;
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 3): an agent that shuts down (`on_delete` drops
+/// its state through `drop_state`) releases its held senders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shutdown_releases_the_held_senders() {
+    the_chain_ends_and_the_held_are_released("shutchain", None).await;
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 3): a wake turn that cannot be delivered (the
+/// gate refuses it, the target is gone) ends the chain and releases the senders
+/// it was for. Here the target does not exist, so its `send` answers an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_that_cannot_be_delivered_releases_the_held_senders() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, _backend) = mk_kernel(&tmp, "wakerefused").await;
+    let ghost = AgentId::from("no_such_agent_for_the_wake");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let state = crate::state::state_for(&ghost);
+        let mut c = state.chain.lock().unwrap();
+        c.alive = true;
+        c.token = "tok".to_string();
+        c.held.push(crate::state::HeldMsg {
+            client_id: "h".to_string(),
+            send_id: "sid".to_string(),
+            reply: tx,
+        });
+    }
+    crate::route::deliver(
+        &kernel,
+        ghost.as_str(),
+        "wake",
+        "h",
+        None,
+        crate::state::incarnation(&ghost),
+        true,
+        "tok".to_string(),
+    )
+    .await;
+    let out = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("the held sender was left waiting")
+        .expect("sender dropped");
+    assert!(out["error"].is_string(), "{out}");
+    assert!(!crate::state::state_for(&ghost).chain.lock().unwrap().alive);
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 3): a wake that never reaches the FIFO lock
+/// within the ceiling releases the senders it was for (the watchdog).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "wakenever").await;
+    let state = crate::state::state_for(&backend);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let mut c = state.chain.lock().unwrap();
+        c.alive = true;
+        c.token = "tok".to_string();
+        c.held.push(crate::state::HeldMsg {
+            client_id: "h".to_string(),
+            send_id: "sid".to_string(),
+            reply: tx,
+        });
+    }
+    // The FIFO lock is taken, so the wake can never run.
+    let _busy = Arc::clone(&state.lock).lock_owned().await;
+    crate::route::chain_ended_within(&kernel, &backend, None, Duration::from_millis(200));
+    let out = tokio::time::timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("the held sender was left waiting past the ceiling")
+        .expect("sender dropped");
+    assert!(out["error"].is_string(), "{out}");
+    assert!(!state.chain.lock().unwrap().alive);
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 4): a routed reply carries the token of the
+/// chain that DECIDED it, read when it was decided — not the token a newer chain
+/// has when the delivery finally runs. Single-threaded, so nothing runs between
+/// the decision and the newer chain starting.
+#[tokio::test]
+async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "tokenwhen").await;
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let state = crate::state::state_for(&backend);
+    {
+        let mut c = state.chain.lock().unwrap();
+        c.alive = true;
+        c.token = "old".to_string();
+    }
+    crate::route::deliver_soon(&kernel, backend.as_str(), "an old reply", "cli", None, true);
+    {
+        // A NEW chain began before the delivery ran.
+        let mut c = state.chain.lock().unwrap();
+        c.token = "new".to_string();
+    }
+    // The old reply is held or recorded — never a turn of the new chain.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let held = !state.chain.lock().unwrap().held.is_empty();
+        if held || s.passes_served() > 0 || has_late_row(&kernel, &backend).await {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the old reply went nowhere");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(s.passes_served(), 0, "the old reply ran as a turn of the new chain");
+}
+
+/// ONE CHAIN PER AGENT (#227, bug 5): `stop` rotates the token, so a routed reply
+/// still in flight across the stop is recorded, not run — the chain does not
+/// resume after a stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_in_flight_across_a_stop_runs_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "stopinflight").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::from_millis(1500),
+    );
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    // A reply routed to the agent under this chain, decided now and still in
+    // flight (it waits on the FIFO lock the running pass holds).
+    crate::route::deliver_soon(
+        &kernel,
+        backend.as_str(),
+        "[reply to 1 · peer]\nanswered",
+        "cli",
+        None,
+        true,
+    );
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
+        .await;
+    let _ = first.await;
+    until_late_row(&kernel, &backend).await;
+    assert_eq!(s.passes_served(), 1, "the chain resumed after a stop");
+}
+
+/// ONE CHAIN PER AGENT (#227): a reply to an `await`ed call is routed UNTOKENED
+/// (the replier, not the agent, is the origin then), so a NEW chain that began
+/// meanwhile does not turn it into a `late` row: it is held for that chain's
+/// next pass, never dropped.
+#[tokio::test]
+async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let state = crate::state::state_for(&backend);
+    {
+        // An operator message started a NEW chain after the await.
+        let mut c = state.chain.lock().unwrap();
+        c.alive = true;
+        c.token = "new".to_string();
+    }
+    let k = Arc::clone(&kernel);
+    let target = backend.as_str().to_string();
+    let target = AgentId::from(target.as_str());
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    // The routed reply of an `await`ed call: the replier is the origin, so the
+    // delivery carries NO chain token. It goes through the kernel, so the
+    // handler runs as the TARGET (its store writes are its own).
+    tokio::spawn(fantastic_kernel::test_support::as_agent(
+        peer,
+        async move {
+            let _ = k
+                .send(vec![Item::new(
+                    target,
+                    json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
+                )])
+                .await;
+        },
+    ));
+    // The reply is read by a pass (or held for the live chain's next one) —
+    // either way it is acted on, never recorded as `late`.
+    until_true("the await's reply to be acted on", || {
+        s.passes_served() > 0 || !state.chain.lock().unwrap().held.is_empty()
+    })
+    .await;
+    assert!(
+        !has_late_row(&kernel, &backend).await,
+        "an await's reply was recorded as late instead of acted on"
+    );
+}
+
+/// ONE CHAIN PER AGENT (#227): an inquiry's ANSWER obeys the hold like any other
+/// message — read by the chain's next pass, never a second chain of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inquiry_answer_obeys_the_hold() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "inquiryhold").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::from_millis(1500),
+    );
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let _first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    // The agent is OWED an answer under this pid (as after an accepted inquiry).
+    crate::route::awaiting()
+        .lock()
+        .unwrap()
+        .entry(backend.as_str().to_string())
+        .or_default()
+        .insert("p9".to_string());
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let second = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "[reply to p9 · peer inquiry]\nyes", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    assert!(!second.is_finished(), "the answer ran a chain of its own");
+}
+
 /// A `<to>` list becomes ONE COPY PER RECIPIENT, and every copy carries the whole
 /// list — that is what lets a recipient answer the group instead of forking a
 /// private conversation the others never see.
@@ -5198,6 +5834,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         None,
         born,
         false,
+        String::new(),
     )
     .await;
     assert_eq!(s.passes_served(), 0, "no turn ran for the late reply");
@@ -5211,7 +5848,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     assert_eq!(last["kind"], "late");
     assert_eq!(
         last["content"],
-        "[late reply — answered a call made before this agent last booted; \
+        "[late reply — answered a call of a chain that has ended; \
          recorded, not acted on]\n[reply to 1 · n r]\nlate"
     );
     // A reply from THIS incarnation runs a turn.
@@ -5223,6 +5860,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
         None,
         born + 1,
         false,
+        String::new(),
     )
     .await;
     assert!(s.passes_served() >= 1, "a live reply is a turn");
