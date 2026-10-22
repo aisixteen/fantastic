@@ -867,19 +867,24 @@ async fn a_flood_after_the_viewer_stream_ends_pauses_the_reader() {
         json!({"type": "write", "job_id": jid, "data": format!("go{ENTER}")}),
     )
     .await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let mut text = String::new();
-    while tokio::time::Instant::now() < deadline && !text.contains("DONE1") {
-        text = printed(&k, "term_g4", jid).await;
+    // Wait on the observable state, not a fixed window: the reader pauses once
+    // it has read past HIGH with no viewer watching (ConPTY can deliver slowly).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut st = json!({});
+    loop {
+        st = call(
+            &k,
+            "term_g4",
+            json!({"type": "ack", "job_id": jid, "chars": 0}),
+        )
+        .await;
+        if st["paused"] == json!(true) || tokio::time::Instant::now() >= deadline {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let text = printed(&k, "term_g4", jid).await;
     assert!(!text.contains("DONE1"), "the reader ran past the flood");
-    let st = call(
-        &k,
-        "term_g4",
-        json!({"type": "ack", "job_id": jid, "chars": 0}),
-    )
-    .await;
     assert!(
         st["paused"] == json!(true)
             && st["unacked"].as_u64().unwrap() > crate::pty::HIGH_WATERMARK as u64,
