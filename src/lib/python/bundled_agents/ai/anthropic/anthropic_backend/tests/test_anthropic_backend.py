@@ -767,3 +767,144 @@ def test_the_backend_declares_provider_cache(monkeypatch):
     monkeypatch.setattr(tools, "build", lambda **kw: (seen.update(kw), real(**kw))[1])
     tools._build()
     assert seen["provider_cache"] is True
+
+
+# ─── usage priced per request, logged per request (#236) ─────────────────────
+
+
+async def test_a_request_over_the_long_context_line_is_billed_long():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    body = _sse(_usage_start(50, 50, 50), _text("ok"), *_usage_stop(10))
+    await _drain(_provider(_transport(body), usage=u, long_context_tokens=100))
+    assert (u.long_requests, u.requests) == (1, 0)
+    s = u.snapshot(1.0, 5.0, 2.0, 10.0)
+    assert s["long_context_requests"] == 1 and s["requests"] == 1
+    cost = (50 + 1.25 * 50 + 0.1 * 50) * 2.0 / 1e6 + 10 * 10.0 / 1e6
+    assert s["cost_usd"] == pytest.approx(cost, abs=1e-12)
+
+
+async def test_a_request_under_the_line_is_billed_base():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    body = _sse(_usage_start(50, 40, 0), _text("ok"), *_usage_stop(10))
+    await _drain(_provider(_transport(body), usage=u, long_context_tokens=100))
+    assert (u.long_requests, u.requests) == (0, 1)
+    s = u.snapshot(1.0, 5.0, 2.0, 10.0)
+    assert s["long_context_requests"] == 0
+    cost = (50 + 1.25 * 40) * 1.0 / 1e6 + 10 * 5.0 / 1e6
+    assert s["cost_usd"] == pytest.approx(cost, abs=1e-12)
+
+
+async def test_without_long_prices_the_long_bucket_uses_the_base_prices():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    body = _sse(_usage_start(50, 50, 50), _text("ok"), *_usage_stop(10))
+    await _drain(_provider(_transport(body), usage=u, long_context_tokens=100))
+    cost = (50 + 1.25 * 50 + 0.1 * 50) * 1.0 / 1e6 + 10 * 5.0 / 1e6
+    assert u.snapshot(1.0, 5.0)["cost_usd"] == pytest.approx(cost, abs=1e-12)
+    assert u.snapshot(1.0, 5.0, 2.0)["cost_usd"] == pytest.approx(cost, abs=1e-12)
+
+
+async def test_the_usage_log_gets_one_line_per_request(tmp_path):
+    from anthropic_backend.provider import Usage
+
+    path = tmp_path / "usage.jsonl"
+    u = Usage()
+    first = _sse(_usage_start(100, 400, 1000), _text("a"), *_usage_stop(35))
+    second = _sse(_usage_start(50, 0, 900), _text("b"), *_usage_stop(20))
+    kw = dict(usage=u, usage_log=str(path), agent_id="a1")
+    await _drain(_provider(_transport(first), **kw))
+    await _drain(_provider(_transport(second), **kw))
+    lines = [json.loads(x) for x in path.read_text().splitlines()]
+    assert len(lines) == 2
+    assert lines[0]["input_tokens"] == 100 and lines[0]["output_tokens"] == 35
+    assert lines[1]["input_tokens"] == 50 and lines[1]["cache_read_tokens"] == 900
+    assert lines[1]["output_tokens"] == 20
+    assert lines[1]["long_context"] is False
+    assert lines[1]["agent"] == "a1" and lines[1]["model"] == MODEL
+    assert list(lines[0]) == [
+        "ts",
+        "agent",
+        "model",
+        "input_tokens",
+        "cache_write_tokens",
+        "cache_read_tokens",
+        "output_tokens",
+        "long_context",
+    ]
+
+
+async def test_a_usage_log_that_cannot_be_written_is_reported_not_raised(tmp_path):
+    from anthropic_backend.provider import Usage
+
+    path = str(tmp_path / "no-such-dir" / "usage.jsonl")
+    u = Usage()
+    body = _sse(_usage_start(100, 0, 0), _text("ok"), *_usage_stop(5))
+    out = await _drain(_provider(_transport(body), usage=u, usage_log=path))
+    assert out == "ok"
+    assert u.snapshot()["usage_log_error"].startswith(path + ": ")
+    u.reset()
+    assert "usage_log_error" not in u.snapshot()
+
+
+def test_the_new_fields_are_validated():
+    def check(meta):
+        return validate_meta(meta, _rec())
+
+    assert (
+        check({"long_context_tokens": 0})
+        == "long_context_tokens must be a positive int"
+    )
+    assert (
+        check({"long_context_tokens": "x"})
+        == "long_context_tokens must be a positive int"
+    )
+    assert (
+        check({"long_context_tokens": True})
+        == "long_context_tokens must be a positive int"
+    )
+    assert check({"price_input_long_per_mtok": -1}) == (
+        "price_input_long_per_mtok must be a number, zero or more"
+    )
+    assert check({"price_output_long_per_mtok": "x"}) == (
+        "price_output_long_per_mtok must be a number, zero or more"
+    )
+    assert check({"usage_log": ""}) == "usage_log must be a non-empty string"
+    assert check({"usage_log": 3}) == "usage_log must be a non-empty string"
+    assert (
+        check(
+            {
+                "long_context_tokens": 200000,
+                "price_input_long_per_mtok": 6.0,
+                "price_output_long_per_mtok": 22.5,
+                "usage_log": "/tmp/usage.jsonl",
+            }
+        )
+        is None
+    )
+
+
+def test_make_provider_reads_the_tier_and_the_log(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_api([]))
+    import asyncio
+
+    asyncio.run(
+        _create(
+            seeded_kernel,
+            max_tokens=8000,
+            long_context_tokens=200000,
+            usage_log="/tmp/u.jsonl",
+        )
+    )
+    from anthropic_backend import tools
+
+    p = tools.make_provider("a1", seeded_kernel)
+    assert p._long_context_tokens == 200000
+    assert p._usage_log == "/tmp/u.jsonl"
+    assert p._agent_id == "a1"

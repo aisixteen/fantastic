@@ -30,6 +30,7 @@ What is Anthropic-specific here:
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -80,39 +81,93 @@ class Usage:
         self.cache_write_tokens = 0
         self.cache_read_tokens = 0
         self.output_tokens = 0
+        # Requests whose prompt was over the record's `long_context_tokens` (#236):
+        # their own bucket, priced at the long-context prices.
+        self.long_requests = 0
+        self.long_input_tokens = 0
+        self.long_cache_write_tokens = 0
+        self.long_cache_read_tokens = 0
+        self.long_output_tokens = 0
+        # The last usage-log write error, reported in `usage`.
+        self.log_error: str | None = None
 
-    def add_request(self, input_tokens: int, cache_write: int, cache_read: int) -> None:
-        self.requests += 1
-        self.input_tokens += input_tokens
-        self.cache_write_tokens += cache_write
-        self.cache_read_tokens += cache_read
+    def add_request(
+        self, input_tokens: int, cache_write: int, cache_read: int, long: bool = False
+    ) -> None:
+        if long:
+            self.long_requests += 1
+            self.long_input_tokens += input_tokens
+            self.long_cache_write_tokens += cache_write
+            self.long_cache_read_tokens += cache_read
+        else:
+            self.requests += 1
+            self.input_tokens += input_tokens
+            self.cache_write_tokens += cache_write
+            self.cache_read_tokens += cache_read
 
-    def snapshot(self, price_in=None, price_out=None) -> dict:
+    def add_output(self, n: int, long: bool = False) -> None:
+        """Output tokens of the request in flight, in its own bucket."""
+        if long:
+            self.long_output_tokens += n
+        else:
+            self.output_tokens += n
+
+    def snapshot(
+        self, price_in=None, price_out=None, long_in=None, long_out=None
+    ) -> dict:
         """The counts and what they derive to. `cost_usd` and `saved_usd` (USD per
         million tokens, from the record's prices) are reported only when BOTH prices
-        are set."""
-        prompt = self.input_tokens + self.cache_write_tokens + self.cache_read_tokens
-        saved = saved_tokens(self.cache_read_tokens, self.cache_write_tokens)
+        are set. `long_in` / `long_out` price the long-context bucket; unset (either
+        one), the base prices do."""
+        inp = self.input_tokens + self.long_input_tokens
+        cw = self.cache_write_tokens + self.long_cache_write_tokens
+        cr = self.cache_read_tokens + self.long_cache_read_tokens
+        prompt = inp + cw + cr
         out = {
-            "requests": self.requests,
-            "input_tokens": self.input_tokens,
-            "cache_write_tokens": self.cache_write_tokens,
-            "cache_read_tokens": self.cache_read_tokens,
-            "output_tokens": self.output_tokens,
+            "requests": self.requests + self.long_requests,
+            "input_tokens": inp,
+            "cache_write_tokens": cw,
+            "cache_read_tokens": cr,
+            "output_tokens": self.output_tokens + self.long_output_tokens,
             "prompt_tokens": prompt,
-            "hit_rate": self.cache_read_tokens / prompt if prompt else 0,
-            "saved_tokens": saved,
+            "hit_rate": cr / prompt if prompt else 0,
+            "saved_tokens": saved_tokens(cr, cw),
+            "long_context_requests": self.long_requests,
         }
+        if self.log_error is not None:
+            out["usage_log_error"] = self.log_error
         if price_in is not None and price_out is not None:
-            cost_in = (
-                self.input_tokens
-                + 1.25 * self.cache_write_tokens
-                + 0.1 * self.cache_read_tokens
+            if long_in is None or long_out is None:
+                long_in, long_out = price_in, price_out
+
+            def cost_of(i, w, r, o, pi, po):
+                return (i + 1.25 * w + 0.1 * r) * pi / 1e6 + o * po / 1e6
+
+            out["cost_usd"] = cost_of(
+                self.input_tokens,
+                self.cache_write_tokens,
+                self.cache_read_tokens,
+                self.output_tokens,
+                price_in,
+                price_out,
+            ) + cost_of(
+                self.long_input_tokens,
+                self.long_cache_write_tokens,
+                self.long_cache_read_tokens,
+                self.long_output_tokens,
+                long_in,
+                long_out,
             )
-            out["cost_usd"] = (
-                cost_in * price_in / 1e6 + self.output_tokens * price_out / 1e6
+            out["saved_usd"] = (
+                saved_tokens(self.cache_read_tokens, self.cache_write_tokens)
+                * price_in
+                / 1e6
+                + saved_tokens(
+                    self.long_cache_read_tokens, self.long_cache_write_tokens
+                )
+                * long_in
+                / 1e6
             )
-            out["saved_usd"] = saved * price_in / 1e6
         return out
 
 
@@ -207,6 +262,9 @@ class AnthropicProvider:
         caching: str = ai_caching.DEFAULT_MODE,
         usage: Usage | None = None,
         transport=None,
+        long_context_tokens: int | None = None,
+        usage_log: str | None = None,
+        agent_id: str = "",
     ):
         self._endpoint = endpoint.rstrip("/")
         self._model = model
@@ -219,6 +277,31 @@ class AnthropicProvider:
         # The agent's running counts; None = nothing is counted (a bare provider).
         self._usage = usage
         self._transport = transport
+        # Prompt tokens above which a request is billed at the long-context prices.
+        self._long_context_tokens = long_context_tokens
+        # The file each request appends one JSON usage line to (#236), and the agent
+        # id written into each line.
+        self._usage_log = usage_log
+        self._agent_id = agent_id
+
+    def _log_usage(self, counts: dict, long: bool) -> None:
+        """Append this request's own counts as one JSON line to the usage log. A
+        write error does not fail the turn: it is kept in `Usage` and reported."""
+        if not self._usage_log:
+            return
+        line = {
+            "ts": time.time(),
+            "agent": self._agent_id,
+            "model": self._model,
+            **counts,
+            "long_context": long,
+        }
+        try:
+            with open(self._usage_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(line) + "\n")
+        except OSError as e:
+            if self._usage is not None:
+                self._usage.log_error = f"{self._usage_log}: {e}"
 
     def body(self, messages: list[dict], max_tokens: int | None) -> dict:
         # Markers only in provider_cache: every other mode's body is the plain one.
@@ -256,6 +339,14 @@ class AnthropicProvider:
         stopped = False
         # The output tokens this stream has already billed to the agent's usage.
         billed_out = 0
+        # THIS request's own counts and tier (#236): its usage-log line.
+        counts = {
+            "input_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 0,
+        }
+        long = False
         try:
             async with (
                 httpx.AsyncClient(
@@ -296,8 +387,15 @@ class AnthropicProvider:
                             )
                         )
                         self.last_prompt_tokens = (inp + cw + cr) or None
+                        limit = self._long_context_tokens
+                        long = limit is not None and inp + cw + cr > limit
+                        counts.update(
+                            input_tokens=inp,
+                            cache_write_tokens=cw,
+                            cache_read_tokens=cr,
+                        )
                         if self._usage is not None:
-                            self._usage.add_request(inp, cw, cr)
+                            self._usage.add_request(inp, cw, cr, long=long)
                     elif kind == "content_block_delta":
                         delta = evt.get("delta") or {}
                         if delta.get("type") == "thinking_delta":
@@ -322,11 +420,14 @@ class AnthropicProvider:
                         if out:
                             self.last_completion_tokens = int(out)
                             # message_delta carries the running total: bill the step.
+                            step = int(out) - billed_out
                             if self._usage is not None:
-                                self._usage.output_tokens += int(out) - billed_out
+                                self._usage.add_output(step, long=long)
+                            counts["output_tokens"] += step
                             billed_out = int(out)
                     elif kind == "message_stop":
                         stopped = True
+                        self._log_usage(counts, long)
                     elif kind == "error":
                         err = evt.get("error") or {}
                         raise RuntimeError(

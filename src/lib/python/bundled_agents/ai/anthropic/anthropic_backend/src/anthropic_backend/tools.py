@@ -84,6 +84,28 @@ RECORD_SCHEMA = schema(
             "USD per million output tokens — with price_input_per_mtok, reflect and "
             "usage report cost_usd and saved_usd; no default price",
         ),
+        field(
+            "price_input_long_per_mtok",
+            "float",
+            "USD per million input tokens for a long-context request; unset = the "
+            "base price",
+        ),
+        field(
+            "price_output_long_per_mtok",
+            "float",
+            "USD per million output tokens for a long-context request; unset = the "
+            "base price",
+        ),
+        field(
+            "long_context_tokens",
+            "int",
+            "prompt tokens above which a request is billed at the long-context prices",
+        ),
+        field(
+            "usage_log",
+            "str",
+            "a file every request appends one JSON usage line to",
+        ),
         # the API key — optional on the record: absent, no key header goes out
         credentials_field(required=False),
     ],
@@ -109,10 +131,21 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     if t is not None and not _number(t):
         return "temperature must be a number"
 
-    for key in ("price_input_per_mtok", "price_output_per_mtok"):
+    for key in (
+        "price_input_per_mtok",
+        "price_output_per_mtok",
+        "price_input_long_per_mtok",
+        "price_output_long_per_mtok",
+    ):
         p = meta.get(key)
         if p is not None and (not _number(p) or p < 0):
             return f"{key} must be a number, zero or more"
+    t = meta.get("long_context_tokens")
+    if t is not None and not _positive_int(t):
+        return "long_context_tokens must be a positive int"
+    u = meta.get("usage_log")
+    if u is not None and not (isinstance(u, str) and u):
+        return "usage_log must be a non-empty string"
     budget, mx = merged.get("thinking_budget"), merged.get("max_tokens")
     if _positive_int(budget):
         if budget < THINKING_FLOOR:
@@ -159,6 +192,11 @@ def make_provider(id, kernel):
         thinking_budget=rec.get("thinking_budget") or None,
         caching=caching.mode_of(rec),
         usage=usage_of(id),
+        long_context_tokens=rec.get("long_context_tokens")
+        if _positive_int(rec.get("long_context_tokens"))
+        else None,
+        usage_log=rec.get("usage_log") or None,
+        agent_id=id,
     )
 
 
@@ -166,7 +204,10 @@ def _usage_now(id, kernel) -> dict:
     """The agent's counts, with the record's prices applied."""
     rec = kernel.get(id) or {}
     return usage_of(id).snapshot(
-        rec.get("price_input_per_mtok"), rec.get("price_output_per_mtok")
+        rec.get("price_input_per_mtok"),
+        rec.get("price_output_per_mtok"),
+        rec.get("price_input_long_per_mtok"),
+        rec.get("price_output_long_per_mtok"),
     )
 
 
