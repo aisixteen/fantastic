@@ -773,7 +773,9 @@ async fn a_receiver_stops_the_stream_and_the_turn_keeps_a_marker() {
         "{nxt:?}"
     );
     let answer = last_assistant(&fp, 1);
-    assert_eq!(answer, "partial words", "{answer}");
+    // the fake provider keeps streaming during the sleep: the visible text is a run
+    // of "partial words", never the bare marker; the stopped notice follows it.
+    assert!(answer.starts_with("partial words"), "{answer}");
 }
 
 #[tokio::test]
