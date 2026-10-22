@@ -267,7 +267,7 @@ async def _reflect(id, payload, kernel):
             "document EXACTLY ONCE. `edit` is a TRANSACTION over "
             "`edits:[{path, hunks, if_match?}]` — even one file rides the "
             "array; the blob holds every edit's hunks concatenated in `edits` "
-            "order, split by the per-edit `hunks` count; any failure anywhere "
+            "order, split by the per-edit `hunks` count — with ONE file, `hunks` may be left out and every block applies to it; any failure anywhere "
             "writes nothing"
         ),
         "compose": (
@@ -798,7 +798,7 @@ def _parse_hunks(text: str) -> list[tuple[str, str]]:
 
 
 async def _edit(id, payload, kernel):
-    """args: edits:[{path:str, hunks:int, if_match:str?}] (req — even for ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), dry_run:bool? — a TRANSACTION: every hunk of every edit verified before any write, any failure writes nothing (or restores what was written); {edited:true, edits:[{path,hunks,size,version}]}."""
+    """args: edits:[{path:str, hunks:int?, if_match:str?}] (hunks may be left out with exactly ONE file), bytes (req — ALL hunks concatenated; str is utf-8-encoded), dry_run:bool? — a TRANSACTION: every hunk of every edit verified before any write, any failure writes nothing (or restores what was written); {edited:true, edits:[{path,hunks,size,version}]}."""
     rec = kernel.get(id) or {}
     if err := _readonly_or_none(rec):
         return err
@@ -834,7 +834,9 @@ async def _edit(id, payload, kernel):
         ):
             return bad("edit", "edits", f"edit {i}: an object with a `path`")
         n = e.get("hunks")
-        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        if len(edits) == 1 and n is None:
+            n = len(hunks)
+        elif not isinstance(n, int) or isinstance(n, bool) or n < 1:
             return bad("edit", "edits", f"edit {i} ({e['path']!r}): `hunks` (int >= 1)")
         if any(_norm(p["path"]) == _norm(e["path"]) for p in plan):
             return bad(
@@ -853,12 +855,13 @@ async def _edit(id, payload, kernel):
         )
         cursor += n
     if cursor != len(hunks):
-        return bad(
-            "edit",
-            "edits",
+        msg = (
             f"hunk counts that sum to the blob's blocks — edits claim {cursor}, "
-            f"the patch holds {len(hunks)}",
+            f"the patch holds {len(hunks)}"
         )
+        if len(edits) == 1:
+            msg += " — with one file, leave hunks out and every block applies"
+        return bad("edit", "edits", msg)
     async with _held(id, *(_norm(e["path"]) for e in plan)):
         return _edit_txn(id, root, plan, bool(payload.get("dry_run")), _UNDO)
 
