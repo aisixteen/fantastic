@@ -200,6 +200,16 @@ def table_for(endpoint: str) -> SessionTable:
 # beside the tables — dropped by the bundle's `on_delete`.
 last_budgets: dict[str, int | None] = {}
 
+# agent id -> its token counts since the kernel started: requests, prompt_tokens,
+# output_tokens. Reflect and the `usage` verb report it; on_delete drops it.
+usage: dict[str, dict] = {}
+
+
+def _usage_of(agent_id: str) -> dict:
+    return usage.setdefault(
+        agent_id, {"requests": 0, "prompt_tokens": 0, "output_tokens": 0}
+    )
+
 
 def conversation_key(messages: list[dict]) -> str:
     """A conversation's identity: its system text + first user turn.
@@ -408,6 +418,11 @@ class VllmProvider:
                         self.last_prompt_tokens = int(usage["prompt_tokens"])
                     if isinstance(usage, dict) and usage.get("completion_tokens"):
                         self.last_completion_tokens = int(usage["completion_tokens"])
+                    if isinstance(usage, dict):
+                        u = _usage_of(self._agent_id)
+                        u["requests"] += 1
+                        u["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+                        u["output_tokens"] += int(usage.get("completion_tokens") or 0)
                     choices = obj.get("choices") or []
                     if not choices:
                         continue  # the usage-only final chunk
