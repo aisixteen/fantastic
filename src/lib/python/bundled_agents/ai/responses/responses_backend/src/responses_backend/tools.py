@@ -17,6 +17,7 @@ request shape and a different event stream.
 from __future__ import annotations
 
 from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
+from ai_core import caching
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 
@@ -48,8 +49,11 @@ RECORD_SCHEMA = schema(
 
 def validate_meta(meta: dict, record: dict) -> str | None:
     """Refuse, AT THE WRITE, a record missing a required field or naming an enum
-    value outside its set — every missing field named at once, from the schema."""
-    return validate(RECORD_SCHEMA, NAME, meta, record)
+    value outside its set — every missing field named at once, from the schema.
+    Then ai_core's caching refusal: this backend cannot do provider caching."""
+    return validate(RECORD_SCHEMA, NAME, meta, record) or caching.refusal(
+        meta, record, NAME, False
+    )
 
 
 def make_provider(id, kernel):
