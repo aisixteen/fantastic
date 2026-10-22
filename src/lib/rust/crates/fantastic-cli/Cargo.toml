@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 fantastic-bundle = { path = "../fantastic-bundle" }
 fantastic-kernel = { path = "../fantastic-kernel" }
+fantastic-host = { path = "../fantastic-host", default-features = false }
 fantastic-core = { path = "../bundles/fantastic-core" }
 fantastic-file = { path = "../bundles/fantastic-file" }
 fantastic-ram-store = { path = "../bundles/fantastic-ram-store" }
@@ -60,6 +61,7 @@ default = ["full"]
 full = [
     "dep:fantastic-exec-bridge",
     "dep:fantastic-py-agent",
+    "fantastic-host/full",
 ]
 
 # Sandboxed / embedded-library tier — must compile clean for iOS /
@@ -67,11 +69,11 @@ full = [
 # guarantee: no `std::process`, no `fork`, no dynamic library loading.
 # Building the CLI under this feature is unusual but supported (e.g.
 # an iOS-tier dev binary that refuses to register full-tier bundles).
-embedded = []
+embedded = ["fantastic-host/embedded"]
 
 # Compile the e2e scenario fixtures into the binary. `e2e/runners/host.py`
 # builds with this; nothing else does, so a default build carries none of it.
-scenario-probes = ["dep:fantastic-scenario-probes"]
+scenario-probes = ["dep:fantastic-scenario-probes", "fantastic-host/scenario-probes"]
 
 [dev-dependencies]
 tempfile = "3"

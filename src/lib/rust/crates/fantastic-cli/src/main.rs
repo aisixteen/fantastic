@@ -33,6 +33,11 @@ use std::sync::Arc;
 mod sys;
 
 fn register_default_bundles() -> BundleRegistry {
+    fantastic_host::default_bundles()
+}
+
+#[allow(dead_code)]
+fn _removed_register_default_bundles() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
 
     // ── Always-available bundles (work under both `desktop` and `embedded`).
@@ -730,37 +735,6 @@ mod parse_kv_tests {
         assert_eq!(parse_kv("hello"), json!("hello"));
         assert_eq!(parse_kv("a{b"), json!("a{b"));
         assert_eq!(parse_kv("web.tools"), json!("web.tools"));
-    }
-}
-
-/// The `bundles` catalog lists INSTALLABLE bundles only. python registers
-/// the e2e probes from `e2e/probes` with `register_unlisted` (no
-/// `fantastic.bundles` entry point), so they dispatch but never reach
-/// `reflect bundles=ids`.
-#[cfg(all(test, feature = "scenario-probes"))]
-mod catalog_tests {
-    use super::register_default_bundles;
-    use fantastic_scenario_probes as probes;
-
-    #[test]
-    fn scenario_probes_dispatch_but_are_not_in_the_catalog() {
-        let reg = register_default_bundles();
-        let listed: Vec<&str> = reg.catalog().map(|(hm, _)| hm).collect();
-        for hm in [
-            probes::DISPENSER_MODULE,
-            probes::PLANT_MODULE,
-            probes::PURCHASE_MODULE,
-            probes::USER_MODULE,
-            probes::ORACLE_MODULE,
-            probes::SLOW_MODULE,
-        ] {
-            assert!(reg.get(hm).is_some(), "{hm} must still dispatch");
-            assert!(
-                !listed.contains(&hm),
-                "{hm} is a fixture, not a bundle: {listed:?}"
-            );
-        }
-        assert!(listed.contains(&"file_bridge.tools"), "{listed:?}");
     }
 }
 

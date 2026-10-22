@@ -10,6 +10,7 @@ members = [
     "crates/fantastic-io-bridge",
     "crates/fantastic-bundle",
     "crates/fantastic-cli",
+    "crates/fantastic-host",
     "crates/bundles/fantastic-core",
     "crates/bundles/fantastic-web",
     "crates/bundles/fantastic-web-ws",

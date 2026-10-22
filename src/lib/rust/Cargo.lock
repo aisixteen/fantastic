@@ -445,6 +445,7 @@ dependencies = [
  "fantastic-exec-bridge",
  "fantastic-file",
  "fantastic-foundation-models-backend",
+ "fantastic-host",
  "fantastic-kernel",
  "fantastic-mcp-client",
  "fantastic-ollama-backend",
@@ -559,6 +560,34 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "fantastic-host"
+version = "0.1.0"
+dependencies = [
+ "fantastic-anthropic-backend",
+ "fantastic-bridge",
+ "fantastic-cabinet",
+ "fantastic-cli-bundle",
+ "fantastic-core",
+ "fantastic-credential-store",
+ "fantastic-exec-bridge",
+ "fantastic-file",
+ "fantastic-foundation-models-backend",
+ "fantastic-kernel",
+ "fantastic-mcp-client",
+ "fantastic-ollama-backend",
+ "fantastic-py-agent",
+ "fantastic-ram-store",
+ "fantastic-responses-backend",
+ "fantastic-scenario-probes",
+ "fantastic-scheduler",
+ "fantastic-static-loader",
+ "fantastic-vllm-backend",
+ "fantastic-web",
+ "fantastic-web-rest",
+ "fantastic-web-ws",
 ]
 
 [[package]]

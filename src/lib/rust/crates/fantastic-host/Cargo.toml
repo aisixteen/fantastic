@@ -1,0 +1,40 @@
+[package]
+name = "fantastic-host"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The default bundle set of a fantastic host — every binary that runs a fantastic kernel registers its bundles from here."
+
+[dependencies]
+fantastic-kernel = { path = "../fantastic-kernel" }
+fantastic-core = { path = "../bundles/fantastic-core" }
+fantastic-file = { path = "../bundles/fantastic-file" }
+fantastic-ram-store = { path = "../bundles/fantastic-ram-store" }
+fantastic-credential-store = { path = "../bundles/fantastic-credential-store" }
+fantastic-web = { path = "../bundles/fantastic-web" }
+fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
+fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
+fantastic-scheduler = { path = "../bundles/fantastic-scheduler" }
+fantastic-cabinet = { path = "../bundles/fantastic-cabinet" }
+fantastic-static-loader = { path = "../bundles/fantastic-static-loader" }
+fantastic-ollama-backend = { path = "../bundles/fantastic-ollama-backend" }
+fantastic-bridge = { path = "../bundles/fantastic-bridge" }
+fantastic-responses-backend = { path = "../bundles/fantastic-responses-backend" }
+fantastic-vllm-backend = { path = "../bundles/fantastic-vllm-backend" }
+fantastic-anthropic-backend = { path = "../bundles/fantastic-anthropic-backend" }
+fantastic-mcp-client = { path = "../bundles/fantastic-mcp-client" }
+fantastic-foundation-models-backend = { path = "../bundles/fantastic-foundation-models-backend" }
+fantastic-cli-bundle = { path = "../bundles/fantastic-cli-bundle" }
+fantastic-scenario-probes = { path = "../bundles/fantastic-scenario-probes", optional = true }
+fantastic-exec-bridge = { path = "../bundles/fantastic-exec-bridge", optional = true }
+fantastic-py-agent = { path = "../bundles/fantastic-py-agent", optional = true }
+
+[features]
+default = ["full"]
+full = [
+    "dep:fantastic-exec-bridge",
+    "dep:fantastic-py-agent",
+]
+embedded = []
+scenario-probes = ["dep:fantastic-scenario-probes"]
