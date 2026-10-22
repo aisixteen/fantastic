@@ -290,6 +290,78 @@ async def test_stop_kills_a_running_job(seeded_kernel):
     assert row["status"] != "running"
 
 
+async def test_status_wait_returns_when_the_job_ends(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(
+        seeded_kernel, "runner", PY, ["-c", "import time; time.sleep(0.5)"]
+    )
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    s = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "runner",
+                    "payload": {"type": "status", "job_id": r["job_id"], "wait_s": 10},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert loop.time() - t0 < 5
+    assert s["jobs"][0]["status"] != "running", s
+
+
+async def test_status_wait_gives_up_at_the_deadline(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, SLEEP)
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    s = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "runner",
+                    "payload": {"type": "status", "job_id": r["job_id"], "wait_s": 0.5},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert loop.time() - t0 < 3
+    assert s["jobs"][0]["status"] == "running", s
+    await seeded_kernel.send(
+        [{"target": "runner", "payload": {"type": "stop", "job_id": r["job_id"]}}]
+    )
+    await _wait_done(seeded_kernel, "runner", r["job_id"])
+
+
+async def test_status_wait_refuses_a_bad_value(seeded_kernel):
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, _say("ok"))
+    await _wait_done(seeded_kernel, "runner", r["job_id"])
+    for bad_wait in (-1, 500, "x"):
+        res = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "runner",
+                        "payload": {
+                            "type": "status",
+                            "job_id": r["job_id"],
+                            "wait_s": bad_wait,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert res["reason"] == "bad_arg" and res["arg"] == "wait_s", res
+    res = (
+        await seeded_kernel.send(
+            [{"target": "runner", "payload": {"type": "status", "wait_s": 1}}]
+        )
+    )[0]["result"]
+    assert res["reason"] == "bad_arg" and res["arg"] == "wait_s", res
+
+
 async def test_the_records_env_reaches_the_child(seeded_kernel):
     await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"], env={"MARK": "x42"})
     r = await _start(seeded_kernel, "runner", PY, ["-c", _PRINT_ENV + "show('MARK')"])

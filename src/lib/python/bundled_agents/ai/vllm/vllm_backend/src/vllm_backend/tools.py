@@ -21,9 +21,11 @@ bundle's cancel hook; `on_delete` is ai_core's, plus this backend's own table.
 from __future__ import annotations
 
 from ai_core import build, on_cancel, required_meta  # noqa: F401 — the cancel hook
+from ai_core import caching
 from ai_core import on_delete as _core_on_delete
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
+from kernel._refusal import bad
 
 from vllm_backend import server
 from vllm_backend.provider import (
@@ -34,8 +36,10 @@ from vllm_backend.provider import (
     READ_TIMEOUT,
     REASONING_EFFORTS,
     SAMPLING_DEFAULTS,
+    _usage_of,
     last_budgets,
     table_for,
+    usage,
 )
 
 NAME = "vllm_backend"
@@ -122,6 +126,7 @@ async def _reflect_extra(id, kernel):
             # shared by every vllm_backend agent on the same endpoint
             **(table_for(endpoint).view() if isinstance(endpoint, str) else {}),
         },
+        "usage": dict(_usage_of(id)),
     }
 
 
@@ -239,7 +244,8 @@ def _positive(v, *, integer: bool) -> bool:
 def validate_meta(meta: dict, record: dict) -> str | None:
     """Refuse a write this backend cannot honour, AT THE WRITE, naming the legal
     set. Checks the MERGED state, because `thinking_token_budget` and
-    `max_tokens` are only wrong together."""
+    `max_tokens` are only wrong together. Then ai_core's caching refusal: this
+    backend cannot do provider caching."""
     merged = {**record, **meta}
     for key in ("max_tokens", "context_window", "kv_slots"):
         if (
@@ -305,7 +311,9 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     # the fields it can see, and a record the write accepted but no turn could use
     # would fail only later, on every turn, far from the create that caused it.
     # Named ALL at once, from the schema, so one retry fixes the record.
-    return validate(RECORD_SCHEMA, NAME, meta, record)
+    return validate(RECORD_SCHEMA, NAME, meta, record) or caching.refusal(
+        meta, record, NAME, False
+    )
 
 
 async def on_delete(agent) -> None:
@@ -313,6 +321,19 @@ async def on_delete(agent) -> None:
     this backend's own — the agent's last-sent thinking budget."""
     await _core_on_delete(agent)
     last_budgets.pop(agent.id, None)
+    usage.pop(agent.id, None)
+
+
+async def _usage(id, payload, kernel):
+    """usage — args: reset? (bool). The agent's token usage since its kernel started: requests, prompt_tokens, output_tokens. reset: true returns the counts, then zeroes them."""
+    reset = payload.get("reset", False)
+    if not isinstance(reset, bool):
+        return bad("usage", "reset", "true or false")
+    u = _usage_of(id)
+    counts = dict(u)
+    if reset:
+        u.update({"requests": 0, "prompt_tokens": 0, "output_tokens": 0})
+    return counts
 
 
 def _build():
@@ -324,6 +345,7 @@ def _build():
         make_provider=make_provider,
         name=NAME,
         reflect_extra=_reflect_extra,
+        extra_verbs={"usage": _usage},
     )
 
     async def handler(id: str, payload: dict, kernel) -> dict | None:

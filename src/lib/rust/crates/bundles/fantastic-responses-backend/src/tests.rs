@@ -163,6 +163,37 @@ fn readme_is_python_verbatim() {
     assert_eq!(README, std::fs::read_to_string(&py).expect("python readme"));
 }
 
+/// The error a `chat` call returns when the endpoint answers `code` before any stream.
+async fn status_refusal(code: u16) -> ProviderError {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(code))
+        .mount(&server)
+        .await;
+    let p = provider(format!("{}/v1/responses", server.uri()), 900, Map::new());
+    match p.chat(&msgs(), None).await {
+        Ok(_) => panic!("chat must refuse an HTTP {code}"),
+        Err(e) => e,
+    }
+}
+
+#[tokio::test]
+async fn a_503_is_a_transport_failure_and_a_401_is_not() {
+    let overloaded = status_refusal(503).await;
+    assert!(
+        overloaded.transport,
+        "503 must be transport: {}",
+        overloaded.message
+    );
+    let unauthorized = status_refusal(401).await;
+    assert!(
+        !unauthorized.transport,
+        "401 must not be transport: {}",
+        unauthorized.message
+    );
+}
+
 #[test]
 fn to_responses_matches_python() {
     let (ins, items) = to_responses(&[

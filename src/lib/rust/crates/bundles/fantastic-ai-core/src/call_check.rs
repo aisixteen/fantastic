@@ -8,6 +8,11 @@
 //! answered only with the call-less reminder repeats the same shape until the
 //! chain gives up).
 //!
+//! A call that would run a destructive command (`risky`, #255) is shown with its
+//! command left out and a `careful:` line naming the pattern. This is Rust first;
+//! Python `ai_core/call_check.py` follows in #170. Until then this one report
+//! differs from Python's.
+//!
 //! The foreign syntaxes cannot be listed, so this checks the other way round: OUR
 //! grammar and OUR vocabulary are closed — `<call name="N">`, one child tag per
 //! argument, `</call>`; the call names ([`TOOLS`]) and the routing tags are known —
@@ -81,6 +86,119 @@ fn json_re() -> &'static Regex {
 fn close_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"</[^<>\n]{0,40}>").expect("close"))
+}
+
+/// The placeholder for a destructive command's `command` and `args` (#255).
+/// Copied as it is, exec refuses it, so no harm comes of it.
+const LEFT_OUT: &str = "LEFT OUT — write the command yourself";
+
+fn strip_tags_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"<[^<>]*>").expect("strip"))
+}
+
+/// Destructive git commands, by the label shown to the model (#255).
+fn git_risky_re() -> &'static [(&'static str, Regex)] {
+    static R: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    R.get_or_init(|| {
+        [
+            ("git stash", r"\bgit\b[^;&|\n]*?\sstash\b"),
+            (
+                "git reset --hard",
+                r"\bgit\b[^;&|\n]*?\sreset\b[^;&|\n]*\s--hard\b",
+            ),
+            (
+                "git clean -f",
+                r"\bgit\b[^;&|\n]*?\sclean\b[^;&|\n]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)\b",
+            ),
+            (
+                "git push --force",
+                r"\bgit\b[^;&|\n]*?\spush\b[^;&|\n]*\s(?:--force(?:-with-lease)?|-[A-Za-z]*f[A-Za-z]*)\b",
+            ),
+        ]
+        .into_iter()
+        .map(|(label, pat)| (label, Regex::new(pat).expect("git risky")))
+        .collect()
+    })
+}
+
+/// `rm` with both a recursive and a force flag, in any spelling (#255).
+fn rm_rf(line: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let re = R.get_or_init(|| Regex::new(r"\brm((?:\s+-[A-Za-z-]+)+)").expect("rm"));
+    re.captures_iter(line).any(|c| {
+        let flags: Vec<&str> = c[1].split_whitespace().collect();
+        let single = |f: &str| f.starts_with('-') && !f.starts_with("--");
+        let recursive = flags.iter().any(|&f| {
+            f == "--recursive" || (single(f) && f.chars().any(|ch| ch == 'r' || ch == 'R'))
+        });
+        let force = flags
+            .iter()
+            .any(|&f| f == "--force" || (single(f) && f.contains('f')));
+        recursive && force
+    })
+}
+
+fn flat(v: &Value) -> String {
+    match v {
+        Value::Array(xs) => xs.iter().map(|x| py_str(x)).collect::<Vec<_>>().join(" "),
+        other => py_str(other),
+    }
+}
+
+/// The label of the destructive pattern an exec `start`/`run` call holds, if any.
+/// Why: #255. The rewrite of an exec call is a ready-to-run call, so a destructive
+/// one must not come back whole.
+fn risky(args: &[(String, Value)]) -> Option<&'static str> {
+    let exec = args
+        .iter()
+        .any(|(k, v)| k.as_str() == "type" && matches!(flat(v).trim(), "start" | "run"));
+    if !exec {
+        return None;
+    }
+    let line = args
+        .iter()
+        .filter(|(k, _)| k.as_str() == "command" || k.as_str() == "args")
+        .map(|(_, v)| flat(v))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let line = strip_tags_re().replace_all(&line, " ").into_owned();
+    if let Some((label, _)) = git_risky_re().iter().find(|(_, re)| re.is_match(&line)) {
+        return Some(*label);
+    }
+    if rm_rf(&line) {
+        Some("rm -rf")
+    } else {
+        None
+    }
+}
+
+/// The lines for one call's rewrite: the form to write, or, for a destructive exec
+/// call, a `careful:` line with its command left out (#255).
+fn rewrite(name: &str, args: &[(String, Value)]) -> Vec<String> {
+    let what = match risky(args) {
+        None => {
+            return vec!["write it as:".to_string(), expected(name, args)];
+        }
+        Some(what) => what,
+    };
+    let shown: Vec<(String, Value)> = args
+        .iter()
+        .map(|(k, v)| {
+            if k.as_str() == "command" || k.as_str() == "args" {
+                (k.clone(), Value::String(LEFT_OUT.to_string()))
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect();
+    vec![
+        format!(
+            "careful: this command runs `{what}`, which changes state outside this task (a stash, reset, clean or force-push acts on the whole repository, and every worktree shares it; rm -rf deletes for good). It is left out of the form below: if you still mean it, write the command yourself, and prefer one that touches only your own files."
+        ),
+        "write it as:".to_string(),
+        expected(name, &shown),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -495,8 +613,7 @@ fn report(text: &str, masked: &str, call: &Call) -> String {
             last.push_str(" — delete it");
         }
     } else {
-        out.push("write it as:".to_string());
-        out.push(expected(&name, &args));
+        out.extend(rewrite(&name, &args));
     }
     if !notes.is_empty() {
         out.push(format!("also: {}.", notes.join("; ")));
@@ -543,8 +660,7 @@ fn wrapped_report(text: &str, env: &Envelope, end: usize, wrapper: &OpenTag) -> 
                 .into_iter()
                 .map(|(k, raw)| (k, Value::String(raw.trim().to_string())))
                 .collect();
-            out.push("write it as:".to_string());
-            out.push(expected(&call.name, &args));
+            out.extend(rewrite(&call.name, &args));
         }
         (Err(Malformed(fault)), _) | (_, Err(Malformed(fault))) => {
             out.push(format!("also: the call inside does not parse — {fault}."));
