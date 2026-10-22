@@ -329,6 +329,13 @@ pub async fn stop(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> 
     {
         c.stopped_by = Some(who.clone());
     }
+    // ONE CHAIN PER AGENT (#227): stop means stop. The chain ends and the held
+    // messages are dropped from the wake list (their rows stay stored); no wake.
+    {
+        let mut chain = state.chain.lock().expect("chain poisoned");
+        chain.alive = false;
+        chain.held.clear();
+    }
     let reached = kernel.cancel_task(&TaskId(pid)).await;
     // STOP REACHES THE TURN ITSELF (#177). When the task walk did not reach the
     // generation, the turn is still in flight: stop closes it here, so `status`
@@ -859,7 +866,7 @@ pub async fn send(
         _ => String::new(),
     };
     // AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
-    crate::route::settle_owed(agent_id.as_str(), &text);
+    let answered_owed = crate::route::settle_owed(agent_id.as_str(), &text);
     // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
     // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
     // inquiry arrives as bare prose and the receiver cannot tell it is being
@@ -971,6 +978,63 @@ pub async fn send(
     }
     let send_id = mint_send_id();
     let state = state_for(agent_id);
+    // ONE CHAIN PER AGENT (#227): a message that lands while this agent's chain
+    // is alive is HELD — stored as a row, read by the chain's next pass — unless
+    // it is one of the chain's own turns (it carries the chain token).
+    let chain_token = payload
+        .get("chain")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    // A message the agent sends to ITSELF is its own chain and is never held.
+    let chain_turn = (!chain_token.is_empty()
+        && state.chain.lock().expect("chain poisoned").token == chain_token)
+        || fantastic_kernel::current_origin().is_some_and(|o| o == *agent_id)
+        || answered_owed;
+    let chain_alive = state.chain.lock().expect("chain poisoned").alive;
+    if !chain_turn && chain_alive {
+        crate::memory::save_history(
+            agent_id,
+            kernel,
+            // The SAME row the normal incoming path stores (`incoming_row`), so a
+            // held message folds and recalls exactly like any other turn (#227).
+            &[crate::agent_loop::incoming_row(
+                &text,
+                kernel.mint_id(),
+                crate::agent_loop::incoming_parent(&text),
+                false,
+            )],
+        )
+        .await?;
+        // A held send RETURNS THE ANSWER of the pass that reads it (#227): its
+        // caller waits on the oneshot the answering pass sends into.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        state
+            .chain
+            .lock()
+            .expect("chain poisoned")
+            .held
+            .push(crate::state::HeldMsg {
+                client_id: client_id.clone(),
+                reply: reply_tx,
+            });
+        let mut detail = Map::new();
+        detail.insert("send_id".to_string(), json!(send_id));
+        detail.insert("ahead".to_string(), json!(0));
+        detail.insert("held".to_string(), json!(true));
+        emit_status(kernel, &state, agent_id, &client_id, "queued", detail).await;
+        let ceiling = send_timeout_secs();
+        return Ok(
+            match tokio::time::timeout(Duration::from_secs_f64(ceiling), reply_rx).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(_)) => json!({"held": true, "cancelled": true, "client_id": client_id}),
+                Err(_) => json!({
+                    "error": format!("send: timeout after {}s", py_float_repr(ceiling)),
+                    "client_id": client_id,
+                }),
+            },
+        );
+    }
 
     // Enqueue.
     let queued_at = now_secs();
@@ -1035,6 +1099,17 @@ pub async fn send(
     // Pop ourselves from the queue, become the in-flight entry — and disarm the
     // guard, whose job (the wait is over) is done.
     queued_guard.disarm();
+    // ONE CHAIN PER AGENT (#227): this pass owns the chain. A new chain mints its
+    // token; this pass TAKES the held messages (it reads their rows) and answers
+    // each of them with its own reply below.
+    let answering = {
+        let mut chain = state.chain.lock().expect("chain poisoned");
+        if !chain.alive {
+            chain.token = mint_send_id();
+        }
+        chain.alive = true;
+        std::mem::take(&mut chain.held)
+    };
     // Fired by `stop` ([`stop`]) — the generation below watches it.
     let abort = Arc::new(tokio::sync::Notify::new());
     {
@@ -1089,6 +1164,12 @@ pub async fn send(
         // Nothing is routed and nothing is stored here: `stop` wrote the marker row
         // and the `done` status. Clear the entry the stop left, release the lock.
         *state.current_meta.lock().expect("current poisoned") = None;
+        // ONE CHAIN PER AGENT (#227): a stopped chain ends and wakes nothing.
+        {
+            let mut chain = state.chain.lock().expect("chain poisoned");
+            chain.alive = false;
+            chain.held.clear();
+        }
         drop(_guard);
         return Ok(json!({"cancelled": true, "client_id": client_id}));
     };
@@ -1248,6 +1329,26 @@ pub async fn send(
     // follow-up takes this very guard, and the contention probe above must see a
     // free lock rather than reporting the chain as a queued rival.
     drop(_guard);
+
+    // ONE CHAIN PER AGENT (#227): a pass that is NOT routed ends its chain here,
+    // so messages held meanwhile are woken once (see `chain_ended`).
+    if reply.get("error").is_some() || raise.is_some() {
+        crate::route::chain_ended(kernel, agent_id, system_prompt_for_route.as_deref());
+    }
+
+    // ONE CHAIN PER AGENT (#227): the pass that read the held messages answers
+    // each of them with its own reply, under that sender's own client_id.
+    let answer = match &raise {
+        Some((_, msg)) => json!({"error": msg, "client_id": client_id}),
+        None => reply.clone(),
+    };
+    for held in answering {
+        let mut v = answer.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.insert("client_id".to_string(), json!(held.client_id));
+        }
+        let _ = held.reply.send(v);
+    }
 
     // The raise happens HERE, after the cleanup python does in its `finally`:
     // the entry is cleared and the lock is free before the failure leaves this

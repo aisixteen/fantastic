@@ -3522,6 +3522,217 @@ async fn await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it() {
     assert!(s.request(1).contains("two"), "{}", s.request(1));
 }
 
+/// ONE CHAIN PER AGENT (#227): a message that lands mid-chain joins the chain.
+/// It is held (not a second pass), and the chain's next pass reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_mid_chain_joins_the_chain() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "joins").await;
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    let ask = call_envelope(peer.as_str(), json!({"type": "send", "text": "ask"}), None);
+    let a = script(
+        &backend,
+        vec![pass(ask), pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let _r = script(&peer, vec![pass("answered")], Duration::from_millis(300));
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "go", "client_id": "g"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&a, 1).await, "the first pass never started");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // A held send RETURNS THE ANSWER of the pass that reads it (#227): it stays
+    // pending while held, so it runs as its own task.
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!second.is_finished(), "a held send waits for its answer");
+    let _ = first.await.expect("first send");
+    assert!(until_passes(&a, 2).await, "the reply never woke the chain");
+    let two = second.await.expect("second send");
+    assert!(
+        two.get("response").is_some(),
+        "the held send gets its answer: {two}"
+    );
+    assert!(a.request(1).contains("two"), "{}", a.request(1));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(a.passes_served(), 2, "a joined message is no extra pass");
+    // The peer's prose answer is nudged for a call (#227 test): its pass count is
+    // not what this test checks, so it is not asserted.
+}
+
+/// ONE CHAIN PER AGENT (#227): a chain that ends with a held message wakes ONCE
+/// for it, and that wake turn reads the held message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chain_that_ends_with_a_held_message_wakes_once() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "wakeonce").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::from_millis(300),
+    );
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!second.is_finished(), "a held send waits for its answer");
+    let _ = first.await.expect("first send");
+    assert!(
+        until_passes(&s, 2).await,
+        "the held message never woke the agent"
+    );
+    let two = second.await.expect("second send");
+    assert!(two.get("response").is_some(), "{two}");
+    let wake = s.request(1);
+    assert!(wake.contains("arrived while you were working"), "{wake}");
+    assert!(wake.contains("two"), "{wake}");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        s.passes_served(),
+        2,
+        "exactly one wake for the held message"
+    );
+}
+
+/// ONE CHAIN PER AGENT (#227): `stop` ends the chain and wakes nothing, even
+/// with a message held for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_ends_the_chain_and_wakes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "stopnowake").await;
+    let s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::from_millis(500),
+    );
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+    let _ = first.await;
+    // A held send whose chain was stopped gets the cancelled shape (#227).
+    let second_out = second.await.expect("second send");
+    assert_eq!(second_out["cancelled"], json!(true), "{second_out}");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(s.passes_served(), 1, "stop woke the held message");
+}
+
+/// ONE CHAIN PER AGENT (#227): a held send returns the answer of the pass that
+/// reads it, not a bare `held` acknowledgement.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "heldanswer").await;
+    let s = script(
+        &backend,
+        vec![
+            pass(r#"<call name="done"></call>"#),
+            pass("ANSWER-OF-THE-READING-PASS"),
+        ],
+        Duration::from_millis(300),
+    );
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let k2 = Arc::clone(&kernel);
+    let b2 = backend.clone();
+    let second = tokio::spawn(async move {
+        k2.send(vec![Item::new(
+            b2,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    let _ = first.await.expect("first send");
+    let out = second.await.expect("second send");
+    assert!(
+        out["response"]
+            .as_str()
+            .is_some_and(|r| r.contains("ANSWER-OF-THE-READING-PASS")),
+        "{out}"
+    );
+}
+
 /// A `<to>` list becomes ONE COPY PER RECIPIENT, and every copy carries the whole
 /// list — that is what lets a recipient answer the group instead of forking a
 /// private conversation the others never see.

@@ -106,6 +106,31 @@ pub struct BackendState {
     pub calib: Mutex<Option<f64>>,
     /// The endpoint's last reported prompt size — python `_reported`.
     pub reported: Mutex<Option<i64>>,
+    /// ONE CHAIN PER AGENT (#227): whether a chain is running, the token its
+    /// own turns carry, and the client_ids of messages held for its next pass.
+    pub chain: Mutex<ChainState>,
+}
+
+/// The agent's chain: `alive` while a pass or its routing is running.
+#[derive(Default)]
+pub struct ChainState {
+    /// A pass or its routing is running.
+    pub alive: bool,
+    /// The token this chain's own turns carry.
+    pub token: String,
+    /// Messages held for the chain's next pass, in order. Each holds the
+    /// oneshot its caller awaits, so a held send returns the answer of the
+    /// pass that reads it.
+    pub held: Vec<HeldMsg>,
+}
+
+/// A message held while its agent's chain is alive: its client_id, and the
+/// channel that hands its caller the reply of the pass that answers it.
+pub struct HeldMsg {
+    /// The held message's client_id.
+    pub client_id: String,
+    /// Hands the caller the reply of the pass that answers it.
+    pub reply: tokio::sync::oneshot::Sender<serde_json::Value>,
 }
 
 impl BackendState {
@@ -121,6 +146,7 @@ impl BackendState {
             view_source: Mutex::new(None),
             calib: Mutex::new(None),
             reported: Mutex::new(None),
+            chain: Mutex::new(ChainState::default()),
         })
     }
 }

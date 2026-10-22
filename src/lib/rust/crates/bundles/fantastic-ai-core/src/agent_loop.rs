@@ -196,6 +196,7 @@ pub async fn run_generation(
     }
     // A RECALL OWED FROM THE LAST FOLD BATCH (or from a boot) runs first, so this
     // turn is assembled over the head the recall chose — python `_recall_due`.
+
     let due = std::mem::take(&mut *state.recall_due.lock().expect("recall_due poisoned"));
     if due {
         crate::retrieval::context_recall(

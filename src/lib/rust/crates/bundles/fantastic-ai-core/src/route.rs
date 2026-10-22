@@ -193,6 +193,19 @@ pub(crate) async fn deliver(
     payload.insert("type".to_string(), json!("send"));
     payload.insert("text".to_string(), json!(text));
     payload.insert("client_id".to_string(), json!(client_id));
+    // ONE CHAIN PER AGENT (#227): a reply routed back to the agent whose chain
+    // is running is that chain's own turn — it carries the chain token, so it is
+    // never held.
+    // Harness self-turns (nudges, the held-message wake) are chain turns too.
+    if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
+        let token = state_for(&target_agent)
+            .chain
+            .lock()
+            .expect("chain poisoned")
+            .token
+            .clone();
+        payload.insert("chain".to_string(), json!(token));
+    }
     // HARNESS TEXT, NOT A MESSAGE: a turn this layer writes to
     // its own agent is stored as `kind: "notice"`, so a view can hide it; the model
     // still reads it as a user turn. Honoured only on a send to self. Python
@@ -539,11 +552,13 @@ pub(crate) fn awaiting() -> &'static Mutex<HashMap<String, HashSet<String>>> {
 
 /// Settle what `self_id` was owed: every `[reply to <pid> · <who> inquiry]` tag in
 /// an incoming message clears that pid. Python `_send`'s `_ANSWER_TAG` scan.
-pub(crate) fn settle_owed(self_id: &str, text: &str) {
+pub(crate) fn settle_owed(self_id: &str, text: &str) -> bool {
     let mut owed = awaiting().lock().expect("awaiting poisoned");
     let Some(set) = owed.get_mut(self_id) else {
-        return;
+        return false;
     };
+    // ONE CHAIN PER AGENT (#227): true when this message answered an owed inquiry.
+    let mut settled = false;
     for line in text.lines() {
         let Some(rest) = line.trim_start().strip_prefix("[reply to ") else {
             continue;
@@ -557,8 +572,10 @@ pub(crate) fn settle_owed(self_id: &str, text: &str) {
             .is_some_and(|t| t.ends_with(" inquiry"))
         {
             set.remove(pid);
+            settled = true;
         }
     }
+    settled
 }
 
 /// Close the inquiry this chain `(self_id, client_id)` is answering: hand `body`
@@ -769,7 +786,9 @@ pub async fn route_reply(
     // carries the dispatch identity into it (a bare tokio spawn would not):
     // dispatches, the binary carrier, and reply deliveries all attribute to the
     // AI agent.
-    route_reply_gated(
+    let (wake_kernel, wake_id, wake_sp) =
+        (Arc::clone(&kernel), self_id.clone(), system_prompt.clone());
+    let goes_on = route_reply_gated(
         self_id,
         kernel,
         text,
@@ -785,7 +804,40 @@ pub async fn route_reply(
         cut,
         launched,
     )
-    .await
+    .await;
+    if !goes_on {
+        chain_ended(&wake_kernel, &wake_id, wake_sp.as_deref());
+    }
+}
+
+/// ONE CHAIN PER AGENT (#227): the chain has ended. Messages held while it ran
+/// are answered by ONE wake turn; with none held, the chain is no longer alive.
+pub(crate) fn chain_ended(kernel: &Arc<Kernel>, self_id: &AgentId, system_prompt: Option<&str>) {
+    let state = state_for(self_id);
+    let held = {
+        let mut chain = state.chain.lock().expect("chain poisoned");
+        // The held senders STAY in `chain.held`: the wake pass takes and answers them.
+        let held: Vec<String> = chain.held.iter().map(|h| h.client_id.clone()).collect();
+        if held.is_empty() {
+            chain.alive = false;
+        }
+        held
+    };
+    if held.is_empty() {
+        return;
+    }
+    let text = format!(
+        "[{} message(s) arrived while you were working — they are above. Answer them.]",
+        held.len()
+    );
+    deliver_soon(
+        kernel,
+        self_id.as_str(),
+        &text,
+        &held[0],
+        system_prompt,
+        true,
+    );
 }
 
 /// Fires the route's launch signal however the route ends.
@@ -845,9 +897,11 @@ async fn route_reply_gated(
     call_streams: Vec<(String, String)>,
     cut: bool,
     launched: Option<Arc<fantastic_kernel::Signal>>,
-) {
+) -> bool {
     // However this route ends, the `send` waiting on its launch is released.
     let _release = FireOnDrop(launched.clone());
+    // ONE CHAIN PER AGENT (#227): true while the chain goes on (see the caller).
+    let mut goes_on = false;
     let sp = system_prompt.as_deref();
     // THE MATCH: a dispatched message carries the `stream_id`
     // of the part it was streamed as, so a consumer settles its draft on it.
@@ -1418,8 +1472,10 @@ async fn route_reply_gated(
         && any_blocks
         && silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await
     {
-        return;
+        return false;
     }
+    // The chain goes on only when a reply batch lands on this agent itself.
+    let to_self = blocks.iter().any(|b| b.dest == self_id.as_str());
     if any_blocks {
         deliver_grouped(
             &kernel,
@@ -1430,6 +1486,7 @@ async fn route_reply_gated(
             message_id,
         )
         .await;
+        goes_on = to_self;
     }
     if done_called {
         // AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
@@ -1451,7 +1508,7 @@ async fn route_reply_gated(
                 deliver_soon(&kernel, to, &text, &client_id, sp, false);
             }
         }
-        return;
+        return false;
     }
     if await_called {
         // EXPLICIT WAITING. The model stops and nothing reminds it: the next
@@ -1474,6 +1531,11 @@ async fn route_reply_gated(
             .get(self_id.as_str())
             .map_or(0, HashSet::len) as u64;
         let pending = inflight_count(self_id.as_str()) + queued + running + owed;
+        // ONE CHAIN PER AGENT (#227): messages held while this chain ran are
+        // answered by the wake turn, so this chain ends now.
+        if !st.chain.lock().expect("chain poisoned").held.is_empty() {
+            return false;
+        }
         // TODO — STALL DETECTION. A chain can stop with no error: calls
         // dispatched, then nothing. Three shapes:
         // (1) a call never settles (no timeout by default, its task stays in `ps`); (2) every
@@ -1486,12 +1548,14 @@ async fn route_reply_gated(
             detail.insert("reason".to_string(), json!("awaiting"));
             detail.insert("pending".to_string(), json!(pending));
             emit_status(&kernel, &st, &self_id, &client_id, "done", detail).await;
-            return;
+            // ONE CHAIN PER AGENT (#227): an await is not a running chain. Messages
+            // that land while it waits are held and wake it through `chain_ended`.
+            return false;
         }
         // Nothing to wait for: the chain ENDS, with a stored note the model and the
         // operator both read — never a silent end, never a turn nobody asked for (#177).
         note_empty_await(&self_id, &kernel, &client_id, message_id).await;
-        return;
+        return false;
     }
     if nudging {
         // TRY AGAIN — and a DEAD turn (only thinking, discarded unstored) is the
@@ -1504,7 +1568,7 @@ async fn route_reply_gated(
         // has nobody reading, so the status event is the record, and the next
         // tick starts a fresh chain with a fresh count.
         if silent_turn(&kernel, &self_id, &client_id, send_to.as_deref(), sp).await {
-            return;
+            return false;
         }
         let mut nudge = if dead_turn {
             format!("{DEAD_TURN_LINE}{NO_CALL_NUDGE}")
@@ -1527,10 +1591,10 @@ async fn route_reply_gated(
             ));
         }
         deliver_soon(&kernel, self_id.as_str(), &nudge, &client_id, sp, true);
-        return;
+        return true;
     }
     if any_calls {
-        return;
+        return true;
     }
     // No call of the model's own, so the CALLER's one-shot handoff applies: hand
     // this pass's TEXT to `send_to`, once. It must not propagate — a caller cannot
@@ -1538,6 +1602,7 @@ async fn route_reply_gated(
     if let Some(to) = send_to.as_deref() {
         deliver_soon(&kernel, to, &text, &client_id, sp, false);
     }
+    goes_on
 }
 
 /// An `await` with nothing in flight ends the chain VISIBLY (#177): the note is
