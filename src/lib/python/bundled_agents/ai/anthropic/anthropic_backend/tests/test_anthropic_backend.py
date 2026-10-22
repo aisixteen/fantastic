@@ -182,6 +182,80 @@ async def test_a_cut_main_turn_fails_and_a_cut_side_call_is_its_answer():
     assert p.last_stop_reason == "max_tokens"
 
 
+# ─── link failures are transport (#198) ──────────────────────────────────────
+
+
+class _BrokenStream(httpx.AsyncByteStream):
+    """A body that sends one event, then the link breaks mid-answer."""
+
+    def __init__(self, first: bytes):
+        self._first = first
+
+    async def __aiter__(self):
+        yield self._first
+        raise httpx.ReadError("the peer went away")
+
+
+def _raising(exc: Exception):
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise exc
+
+    return httpx.MockTransport(handler)
+
+
+async def _turn_error(p) -> Exception:
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    return e.value
+
+
+async def test_a_connect_failure_is_transport():
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_raising(httpx.ConnectError("refused"))))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert str(err) == f"anthropic_backend: could not connect to {ENDPOINT}"
+    err = await _turn_error(_provider(_raising(httpx.ConnectTimeout("slow"))))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert str(err) == f"anthropic_backend: no answer from {ENDPOINT} within 15s"
+
+
+async def test_a_stream_dropped_mid_answer_is_transport():
+    from ai_core.provider import ProviderError
+
+    first = _sse(START, _text("par")).encode()
+    t = httpx.MockTransport(
+        lambda req: httpx.Response(200, stream=_BrokenStream(first))
+    )
+    err = await _turn_error(_provider(t))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert "dropped the stream mid-answer" in str(err)
+
+
+@pytest.mark.parametrize("code", [502, 503, 504, 529])
+async def test_a_gateway_or_overloaded_status_is_transport(code):
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_transport("busy", status=code)))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert f"answered HTTP {code}: busy" in str(err)
+
+
+@pytest.mark.parametrize("code", [400, 401, 500])
+async def test_a_status_the_api_meant_is_not_transport(code):
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_transport("bad request", status=code)))
+    assert isinstance(err, ProviderError) and err.transport is False
+
+
+async def test_a_stream_without_message_stop_is_not_transport():
+    from ai_core.provider import ProviderError
+
+    err = await _turn_error(_provider(_transport(_sse(START, _text("x")))))
+    assert not isinstance(err, ProviderError) or err.transport is False
+
+
 # ─── the write ───────────────────────────────────────────────────────────────
 
 

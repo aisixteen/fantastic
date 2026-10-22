@@ -439,3 +439,69 @@ async def _listener():
 
     srv = await asyncio.start_server(handle, "127.0.0.1", 0)
     return srv, srv.sockets[0].getsockname()[1]
+
+
+# ── link failures are transport (#198) ──────────────────────────────────────
+
+
+class _BrokenStream(httpx.AsyncByteStream):
+    """One delta, then the link breaks mid-answer."""
+
+    async def __aiter__(self):
+        yield b'data: {"type": "response.output_text.delta", "delta": "par"}\n\n'
+        raise httpx.ReadError("the peer went away")
+
+
+def _raising(exc: Exception):
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise exc
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    "exc", [httpx.ConnectError("refused"), httpx.ConnectTimeout("slow")]
+)
+async def test_a_connect_failure_is_transport(exc):
+    from ai_core.provider import ProviderError
+
+    p = ResponsesProvider(endpoint=EP, model="m", key=_key, transport=_raising(exc))
+    with pytest.raises(ProviderError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+    assert str(e.value) == f"http: {exc}"
+
+
+async def test_a_stream_dropped_mid_answer_is_transport():
+    from ai_core.provider import ProviderError
+
+    t = httpx.MockTransport(lambda r: httpx.Response(200, stream=_BrokenStream()))
+    p = ResponsesProvider(endpoint=EP, model="m", key=_key, transport=t)
+    with pytest.raises(ProviderError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+    assert str(e.value) == "http: the peer went away"
+
+
+@pytest.mark.parametrize("code", [502, 503, 504])
+async def test_a_gateway_status_is_transport(code):
+    from ai_core.provider import ProviderError
+
+    sink: list = []
+    p = _seq_provider([(code, '{"error": "x"}', "application/json")], sink)
+    with pytest.raises(ProviderError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+    assert str(e.value) == f'responses {code}: {{"error": "x"}}'
+
+
+@pytest.mark.parametrize("code", [400, 401, 404, 500])
+async def test_a_status_the_endpoint_meant_is_not_transport(code):
+    from ai_core.provider import ProviderError
+
+    sink: list = []
+    p = _seq_provider([(code, "no", "text/plain")], sink)
+    with pytest.raises(ProviderError) as e:
+        await _drain(p)
+    assert e.value.transport is False
+    assert str(e.value) == f"responses {code}: no"
