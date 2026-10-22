@@ -126,16 +126,17 @@ async def _read_stream(reader, job, stream, owner, job_id, kernel):
     async for raw in reader:
         text = raw.decode("utf-8", errors="replace")
         job["lines"] += 1
-        job["last_line"] = text.rstrip("\n")
-        _line_ring_add(job, job["lines"], stream, job["last_line"])
-        _monitor.feed_line(job_id, text.rstrip("\n"))
+        line = text.rstrip(chr(10) + chr(13))
+        job["last_line"] = line
+        _line_ring_add(job, job["lines"], stream, line)
+        _monitor.feed_line(job_id, line)
         await kernel.emit(
             owner,
             {
                 "type": "progress",
                 "job_id": job_id,
                 "n": job["lines"],
-                "line": text.rstrip("\n"),
+                "line": line,
                 "stream": stream,
             },
         )
@@ -1125,6 +1126,43 @@ async def _status(id, payload, kernel):
     }
 
 
+async def _run(id, payload, kernel):
+    """args: command:str (req), args?, wait_s:float? (default 60, max 600), tail:int? (default 200) — start, wait, and return the output in ONE reply: {job_id, status, exit_code, lines}. Use run for short commands; a job still running at wait_s comes back running (continue with status / tail). Read files with files.read, not run."""
+    import asyncio
+
+    wait_s = payload.get("wait_s")
+    wait_s = 60 if wait_s is None else wait_s
+    if (
+        isinstance(wait_s, bool)
+        or not isinstance(wait_s, (int, float))
+        or not 0 <= wait_s <= 600
+    ):
+        return bad("run", "wait_s", "a number of seconds, 0 to 600")
+    tail = payload.get("tail")
+    tail = 200 if tail is None else tail
+    if isinstance(tail, bool) or not isinstance(tail, int) or not 1 <= tail <= 2000:
+        return bad("run", "tail", "a line count, 1 to 2000")
+    rest = {k: v for k, v in payload.items() if k not in ("wait_s", "tail")}
+    r = await _start(id, rest, kernel)
+    if "reason" in r:
+        return r
+    jid = r["job_id"]
+    job = _jobs[jid]
+    deadline = time.monotonic() + wait_s
+    while _alive(job) and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)
+    out = await _tail(id, {"job_id": jid, "lines": min(tail, MAX_LINES)}, kernel)
+    if "reason" in out:
+        return out
+    alive = _alive(job)
+    return {
+        "job_id": jid,
+        "status": "running" if alive else job["status"],
+        "exit_code": job["exit_code"],
+        "lines": out["lines"],
+    }
+
+
 async def _monitor_verb(id, payload, kernel):
     """args: job_id:int (req — a RUNNING job of this agent), notify:str (req — the agent told), match:str? (a regex; absent = every line), every:number? (seconds — at most one delivery per window; required without `match`), tail:int? (newest lines per delivery, default 100), label:str?. Watches the job's output AS IT ARRIVES and SENDS what matches to `notify` as a turn — it polls nothing. Returns {monitor_id, job_id, notify, match, every, tail, label}; kernel `cancel` (or `unmonitor`) ends it, and it ends with its job.
 
@@ -1549,6 +1587,7 @@ NOTES = {
 
 VERBS = {
     "start": _start,
+    "run": _run,
     "status": _status,
     "stop": _stop,
     "interrupt": _interrupt,
