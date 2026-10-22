@@ -6731,3 +6731,150 @@ async fn two_thinking_only_turns_escalate_the_nudge() {
     );
     assert!(nudge.contains("were only thinking"), "{nudge}");
 }
+
+/// Plant the driver's conversation. Returns the TASK row's id.
+async fn driver_store(kernel: &Arc<Kernel>, backend: &AgentId, clear_first: bool) -> i64 {
+    let mut prev = if clear_first {
+        let old = put_row(
+            kernel,
+            backend,
+            json!({"role":"user","content":"an old job"}),
+        )
+        .await;
+        let ans = put_row(
+            kernel,
+            backend,
+            json!({"role":"assistant","parent":old,"content":"done with the old job"}),
+        )
+        .await;
+        fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::retrieval::context_clear(backend, &json!({"why":"new job"}), kernel, 32768),
+        )
+        .await
+        .expect("clear");
+        ans
+    } else {
+        let hello = put_row(kernel, backend, json!({"role":"user","content":"hello"})).await;
+        put_row(
+            kernel,
+            backend,
+            json!({"role":"assistant","parent":hello,"content":"hi"}),
+        )
+        .await
+    };
+    let task = put_row(
+        kernel,
+        backend,
+        json!({"role":"user","content":"You are the DRIVER. ROLE-MARKER-218: when told 'start ais', start the AI workers."}),
+    )
+    .await;
+    let ack = put_row(
+        kernel,
+        backend,
+        json!({"role":"assistant","parent":task,"content":"Understood."}),
+    )
+    .await;
+    prev = ack;
+    for i in 0..60 {
+        let content = format!(
+            "Polling job {i}. {} <call name=\"send\"><target_id>exec</target_id><title>poll {i}</title><type>status</type><job_id>1</job_id></call>",
+            "still waiting on the workers. ".repeat(120)
+        );
+        let a = put_row(
+            kernel,
+            backend,
+            json!({"role":"assistant","parent":prev,"content":content}),
+        )
+        .await;
+        let pid = kernel.mint_id();
+        prev = put_row(
+            kernel,
+            backend,
+            json!({"role":"user","parent":a,"content": format!("[reply to {pid} · exec status · \"poll {i}\"]\nrunning")}),
+        )
+        .await;
+        if i % 10 == 0 {
+            put_row(kernel, backend, json!({"role":"user","content": format!("[from worker_1 · msg {i}]\nstill building")})).await;
+        }
+    }
+    task
+}
+
+#[test]
+fn standing_pins_the_task_the_live_root_and_the_newest_fold() {
+    let view = vec![
+        json!({"role":"user","id":1,"kind":"clear","content":"[cleared 1 · 3 rows]"}),
+        json!({"role":"user","id":2,"content":"TASK"}),
+        json!({"role":"assistant","id":3,"parent":2,"content":"ok"}),
+        json!({"role":"user","id":4,"parent":3,"content":"[reply to 9 · exec status]\nrunning"}),
+        json!({"role":"user","id":5,"content":"[from w1]\nprogress"}),
+        json!({"role":"user","id":6,"kind":"fold","refs":[3,4],"content":"[fold 6 · 2 refs] \"x\""}),
+        json!({"role":"user","id":7,"content":"a later note"}),
+        json!({"role":"assistant","id":8,"parent":7,"content":"ok"}),
+    ];
+    assert_eq!(crate::retrieval::standing(&view), vec![1, 6, 5, 4]);
+    let short = vec![
+        json!({"role":"user","id":1,"content":"TASK"}),
+        json!({"role":"assistant","id":2,"parent":1,"content":"ok"}),
+    ];
+    assert!(crate::retrieval::standing(&short).is_empty());
+}
+
+/// The restart, then the first turn after it: the model-view request of that turn.
+async fn restarted_turn_sees(clear_first: bool) -> String {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, if clear_first { "r218c" } else { "r218" }).await;
+    driver_store(&kernel, &backend, clear_first).await;
+    let sc = script(
+        &backend,
+        vec![
+            pass("{}"),
+            pass("noted <call name=\"done\"></call>"),
+            pass("<call name=\"done\"></call>"),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    // The restart: head cache dropped, new incarnation, recall due.
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "start ais", "client_id": "c218"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&sc, 2).await, "the turn did not run");
+    let reqs = sc.requests.lock().unwrap().clone();
+    reqs.iter()
+        .find(|m| {
+            m.first()
+                .and_then(|x| x.get("role"))
+                .and_then(Value::as_str)
+                == Some("system")
+        })
+        .map(|m| serde_json::to_string(m).unwrap())
+        .unwrap_or_else(|| panic!("no turn request among {} passes", reqs.len()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_agent_still_sees_the_turn_that_set_its_task() {
+    let t = restarted_turn_sees(false).await;
+    assert!(t.contains("ROLE-MARKER-218"), "{}", &t[..t.len().min(3000)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_after_a_clear_keeps_the_task_given_after_it() {
+    let t = restarted_turn_sees(true).await;
+    assert!(
+        t.contains("ROLE-MARKER-218"),
+        "{}",
+        t.chars().take(3000).collect::<String>()
+    );
+}
