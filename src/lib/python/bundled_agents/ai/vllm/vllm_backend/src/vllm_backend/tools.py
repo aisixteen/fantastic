@@ -21,6 +21,7 @@ bundle's cancel hook; `on_delete` is ai_core's, plus this backend's own table.
 from __future__ import annotations
 
 from ai_core import build, on_cancel, required_meta  # noqa: F401 — the cancel hook
+from ai_core import caching
 from ai_core import on_delete as _core_on_delete
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
@@ -254,7 +255,8 @@ def _positive(v, *, integer: bool) -> bool:
 def validate_meta(meta: dict, record: dict) -> str | None:
     """Refuse a write this backend cannot honour, AT THE WRITE, naming the legal
     set. Checks the MERGED state, because `thinking_token_budget` and
-    `max_tokens` are only wrong together."""
+    `max_tokens` are only wrong together. Then ai_core's caching refusal: this
+    backend cannot do provider caching."""
     merged = {**record, **meta}
     for key in ("max_tokens", "context_window", "kv_slots"):
         if (
@@ -328,7 +330,9 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     # the fields it can see, and a record the write accepted but no turn could use
     # would fail only later, on every turn, far from the create that caused it.
     # Named ALL at once, from the schema, so one retry fixes the record.
-    return validate(RECORD_SCHEMA, NAME, meta, record)
+    return validate(RECORD_SCHEMA, NAME, meta, record) or caching.refusal(
+        meta, record, NAME, False
+    )
 
 
 async def on_delete(agent) -> None:

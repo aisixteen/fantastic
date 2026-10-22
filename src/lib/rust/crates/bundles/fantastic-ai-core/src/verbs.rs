@@ -235,29 +235,39 @@ pub async fn close_stopped(
         .unwrap_or_else(|| "cancel".to_string());
     let in_id = kernel.mint_id();
     let in_parent = crate::agent_loop::incoming_parent(&entry.text);
-    let marker_id = kernel.mint_id();
-    crate::memory::save_history(
-        agent_id,
-        kernel,
-        &[
-            crate::agent_loop::incoming_row(&entry.text, in_id, in_parent, entry.notice),
-            {
-                let mut row = json!({
-                    "role": "assistant",
-                    "content": cut_marker(&entry.text_so_far, &format!("stopped by {who}"), &unsent),
-                    "id": marker_id,
-                    "parent": in_id,
-                });
-                if let Some(m) = row.as_object_mut() {
-                    m.extend(crate::think::thinking_fields(&entry.text_so_far));
-                }
-                row
-            },
-        ],
-    )
-    .await
-    // python's `str(e)` — the message alone, as the kernel's log line prints it.
-    .map_err(|e| BundleError::from(e.0))?;
+    let (shown, notice) = crate::stream_parts::stop_rows(&entry.text_so_far, &who, &unsent);
+    let mut rows = vec![crate::agent_loop::incoming_row(
+        &entry.text,
+        in_id,
+        in_parent,
+        entry.notice,
+    )];
+    let mut prev = in_id;
+    if let Some(text) = shown {
+        let answer_id = kernel.mint_id();
+        let mut row = json!({
+            "role": "assistant",
+            "content": text,
+            "id": answer_id,
+            "parent": prev,
+        });
+        if let Some(m) = row.as_object_mut() {
+            m.extend(crate::think::thinking_fields(&entry.text_so_far));
+        }
+        rows.push(row);
+        prev = answer_id;
+    }
+    rows.push(json!({
+        "role": "user",
+        "kind": "stopped",
+        "content": notice,
+        "id": kernel.mint_id(),
+        "parent": prev,
+    }));
+    crate::memory::save_history(agent_id, kernel, &rows)
+        .await
+        // python's `str(e)` — the message alone, as the kernel's log line prints it.
+        .map_err(|e| BundleError::from(e.0))?;
     let client_id = entry.client_id;
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("cancelled"));
