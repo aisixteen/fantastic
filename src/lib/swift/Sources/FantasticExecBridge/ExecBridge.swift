@@ -1598,8 +1598,9 @@
               `job_id`) does.
               Nothing respawns a terminal — `boot` starts nothing; a client that attaches and finds no
               live PTY job `start`s one.
-            - `status(job_id?)` → `{jobs:[…]}` — one job with its `cwd` (a PTY job: its
-              `cols`/`rows`), or every job of this agent as summaries.
+            - `status(job_id?, wait_s?)` → `{jobs:[…]}` — one job with its `cwd` (a PTY job: its
+              `cols`/`rows`), or every job of this agent as summaries. `wait_s` (0–120, with
+              `job_id`) returns as soon as the job is no longer running, or when the wait ends.
             - `stop(job_id?)` SIGKILL the job's whole session — the command and everything it
               launched (`server &`, a `nohup`, a shell's background jobs); deleting the agent or
               stopping the kernel does the same. A process that leaves the session on purpose
