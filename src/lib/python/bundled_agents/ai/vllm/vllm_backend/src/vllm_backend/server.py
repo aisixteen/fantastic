@@ -10,9 +10,10 @@ the record sets is used as set, never read.
 
 - `model` — the ONE model the server serves (`GET {endpoint}/models`); a server
   serving several names them, and the record must pick one.
-- `context_window` and `max_tokens` — that model's `max_model_len` (same list). The
-  same number for both: a main turn whose `max_tokens` reaches the window sends NO
-  `max_tokens`, so the server bounds the reply by what the prompt leaves.
+- `context_window` and `max_tokens` — that model's window: `max_model_len`, or, when
+  the entry names none, llama.cpp's `meta.n_ctx` (same list). The same number for
+  both: a main turn whose `max_tokens` reaches the window sends NO `max_tokens`, so
+  the server bounds the reply by what the prompt leaves.
 - `kv_slots` — how many full-length conversations the server's KV cache holds:
   `floor(kv_cache_max_concurrency)` of the `vllm:cache_config_info` line on the
   server's Prometheus page — vLLM's own figure for requests of `max_model_len`
@@ -114,11 +115,15 @@ def served_model(body: str, model: str | None, url: str, field: str) -> dict:
 
 def max_model_len(entry: dict, url: str, field: str) -> int:
     n = entry.get("max_model_len")
+    if n is None:
+        meta = entry.get("meta")
+        if isinstance(meta, dict):
+            n = meta.get("n_ctx")
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ServerReadError(
             field,
-            f"{field}: {url} names no max_model_len for {entry.get('id')!r}; set "
-            f"{field} on the record",
+            f"{field}: {url} names no max_model_len or meta.n_ctx for "
+            f"{entry.get('id')!r}; set {field} on the record",
         )
     return n
 
