@@ -701,11 +701,11 @@ pub(crate) fn forget(self_id: &str) {
         .remove(self_id);
 }
 
-/// What a caller is told when a chain gives up ([`MAX_SILENT_TURNS`] silent
+/// What a caller is told when a chain gives up (`limit` silent
 /// turns). Python `_GAVE_UP`, byte for byte.
-pub fn gave_up_text() -> String {
+pub fn gave_up_text(limit: usize) -> String {
     format!(
-        "The LLM was not able to answer — {MAX_SILENT_TURNS} turns in a row produced \
+        "The LLM was not able to answer — {limit} turns in a row produced \
          no call. Reiterate the inquiry."
     )
 }
@@ -1595,11 +1595,15 @@ async fn silent_turn(
         *e += 1;
         *e
     };
-    if streak < MAX_SILENT_TURNS {
+    let limit = crate::helpers::agent_meta(self_id, kernel)
+        .get("misfire_limit")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(MAX_SILENT_TURNS, |n| n as usize);
+    if streak < limit {
         return false;
     }
     silent().lock().expect("silent poisoned").remove(&chain);
-    let gave_up = gave_up_text();
+    let gave_up = gave_up_text(limit);
     let st = state_for(self_id);
     let mut detail = Map::new();
     detail.insert("reason".to_string(), json!("gave_up"));
