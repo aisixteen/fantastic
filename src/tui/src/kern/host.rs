@@ -128,16 +128,16 @@ fn registry(cwd: &std::path::Path) -> BundleRegistry {
     // CABINETS: a master AI opens subcanvases, each with one worker AI (the crate's bundle).
     reg.register(fantastic_cabinet::HANDLER_MODULE, fantastic_cabinet::CabinetBundle);
     reg.register(fantastic_mcp_client::HANDLER_MODULE, fantastic_mcp_client::McpClientBundle::default());
-    // The vLLM backend: linked by `--features vllm`.
+    // The vLLM backend: linked by default (feature `vllm`).
     #[cfg(feature = "vllm")]
     reg.register(fantastic_vllm_backend::HANDLER_MODULE, fantastic_vllm_backend::VllmBundle);
-    // The Anthropic Messages backend: linked by `--features anthropic`.
+    // The Anthropic Messages backend: linked by default (feature `anthropic`).
     #[cfg(feature = "anthropic")]
     reg.register(fantastic_anthropic_backend::HANDLER_MODULE, fantastic_anthropic_backend::AnthropicBundle);
-    // The Ollama backend: linked by `--features ollama`.
+    // The Ollama backend: linked by default (feature `ollama`).
     #[cfg(feature = "ollama")]
     reg.register(fantastic_ollama_backend::HANDLER_MODULE, fantastic_ollama_backend::OllamaBackendBundle);
-    // The OpenAI Responses backend: linked by `--features responses`.
+    // The OpenAI Responses backend: linked by default (feature `responses`).
     #[cfg(feature = "responses")]
     reg.register(
         fantastic_responses_backend::HANDLER_MODULE,
@@ -618,6 +618,20 @@ mod tests {
             "ui.tools",
         ] {
             assert!(reg.get(m).is_none(), "{m} was never asked for");
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "vllm", feature = "anthropic", feature = "ollama", feature = "responses"))]
+    fn the_default_build_links_the_four_ai_backends() {
+        let reg = registry(std::path::Path::new("."));
+        for m in [
+            "vllm_backend.tools",
+            "anthropic_backend.tools",
+            "ollama_backend.tools",
+            "responses_backend.tools",
+        ] {
+            assert!(reg.get(m).is_some(), "{m} must be in the default build");
         }
     }
 
