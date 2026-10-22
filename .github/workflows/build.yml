@@ -87,6 +87,12 @@ jobs:
         working-directory: src/lib/python
     steps:
       - uses: actions/checkout@v7
+      - name: trust roots (#280)
+        # fails if a lockfile brings back a bundle that trusts the compromised
+        # emSign root (webpki-roots < 1.0.10, certifi < 2026.10.19)
+        working-directory: .
+        shell: bash
+        run: sh scripts/check-trust-roots.sh
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
@@ -110,6 +116,12 @@ jobs:
         working-directory: src/lib/rust
     steps:
       - uses: actions/checkout@v7
+      - name: trust roots (#280)
+        # fails if a lockfile brings back a bundle that trusts the compromised
+        # emSign root (webpki-roots < 1.0.10, certifi < 2026.10.19)
+        working-directory: .
+        shell: bash
+        run: sh scripts/check-trust-roots.sh
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
