@@ -100,6 +100,7 @@ pub mod folds;
 pub mod helpers;
 pub mod history_view;
 pub mod memory;
+pub mod pause;
 pub mod projection;
 pub mod prompt_file;
 pub mod provider;
@@ -129,3 +130,5 @@ mod tests_credentials;
 mod tests_folds;
 #[cfg(test)]
 mod tests_model_window;
+#[cfg(test)]
+mod tests_pause;
