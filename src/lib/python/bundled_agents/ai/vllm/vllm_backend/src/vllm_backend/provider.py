@@ -42,6 +42,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
+from ai_core.provider import ProviderError
 
 log = logging.getLogger(__name__)
 
@@ -400,9 +401,10 @@ class VllmProvider:
                         if resp.status_code in (401, 403)
                         else ""
                     )
-                    raise RuntimeError(
+                    raise ProviderError(
                         f"vllm_backend: {self._endpoint} answered HTTP "
-                        f"{resp.status_code}{why}: {detail}"
+                        f"{resp.status_code}{why}: {detail}",
+                        transport=resp.status_code in (502, 503, 504),
                     )
                 async for line in resp.aiter_lines():
                     # `aiter_lines` reassembles lines a read split mid-JSON;
@@ -450,33 +452,38 @@ class VllmProvider:
                             yield THINK_CLOSE
                         yield content
         except httpx.ConnectTimeout as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: no answer from {self._endpoint} within "
                 f"connect_timeout={self._timeouts[0]:g}s — the instance is STOPPED "
-                "(its SYNs are dropped), or the tunnel/port is wrong"
+                "(its SYNs are dropped), or the tunnel/port is wrong",
+                transport=True,
             ) from e
         except httpx.ConnectError as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: {self._endpoint} refused the connection — the host is "
                 "up but vLLM is not listening yet (it loads for ~75 s after boot), or "
-                "the tunnel in front of it is down"
+                "the tunnel in front of it is down",
+                transport=True,
             ) from e
         except httpx.ReadTimeout as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: {self._endpoint} sent nothing for "
-                f"read_timeout={self._timeouts[1]:g}s"
+                f"read_timeout={self._timeouts[1]:g}s",
+                transport=True,
             ) from e
         except (httpx.ReadError, httpx.RemoteProtocolError) as e:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: {self._endpoint} dropped the stream mid-answer — "
-                "vLLM died or restarted; this turn is NOT complete"
+                "vLLM died or restarted; this turn is NOT complete",
+                transport=True,
             ) from e
         if thinking:
             yield THINK_CLOSE
         if not saw_finish:
-            raise RuntimeError(
+            raise ProviderError(
                 f"vllm_backend: the stream from {self._endpoint} ended without a "
-                "finish_reason — vLLM died mid-answer; this turn is NOT complete"
+                "finish_reason — vLLM died mid-answer; this turn is NOT complete",
+                transport=True,
             )
         # A CUT: a BOUNDED SIDE CALL (a fold summary, which passed its own
         # `max_tokens`) that stopped at its bound got what it asked for — an
