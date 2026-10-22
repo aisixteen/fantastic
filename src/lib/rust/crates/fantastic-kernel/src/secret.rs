@@ -7,6 +7,9 @@
 //! each marked value replaced by [`SHOWN`]. A path naming nothing is skipped;
 //! `type` cannot be marked (the verb is routing, not data). A handler reads the
 //! marks as [`current_secret`] and marks its own onward send the same way.
+//! A BUNDLE may name such paths too — of a call (`Bundle::payload_secret`, added
+//! to the item's marks) and of its reply (`Bundle::reply_secret`, carried as
+//! `Outcome::secret`, shown by `crate::ledger::stored_outcome`).
 
 use std::sync::Arc;
 

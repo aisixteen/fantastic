@@ -143,6 +143,22 @@ pub trait Bundle: Send + Sync {
         None
     }
 
+    /// SECRET PATHS of an incoming call (`crate::secret`): dotted paths into
+    /// `payload` whose values the kernel keeps and shows only as `[secret]` — the
+    /// call row, the state stream, every watcher's mirror — added to the item's
+    /// own `secret` marks. The handler still gets the payload as sent. Default: none.
+    fn payload_secret(&self, _payload: &Value) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// SECRET PATHS of a reply: dotted paths into `reply` (what the handler
+    /// answered to `payload`) that the kernel records — the settle row, the
+    /// `ledger` verb, the memory store — only as `[secret]`. The caller receives
+    /// the reply whole. Default: none.
+    fn reply_secret(&self, _payload: &Value, _reply: &Value) -> Vec<String> {
+        Vec::new()
+    }
+
     /// THE DISPATCH — the kernel calls this for EVERY call, a request body or
     /// not; python's one `handle`, whose reply dict may hold `bytes` at any key.
     /// Raw bytes flow in BOTH directions, never base64. `header` is the payload

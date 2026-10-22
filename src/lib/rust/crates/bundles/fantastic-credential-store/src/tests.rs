@@ -20,6 +20,20 @@ const KEY: &str = "sk-live-0123456789abcdef";
 const KEY2: &str = "sk-live-rotated-fedcba98";
 
 #[test]
+fn field_marks_names_each_field_or_the_whole_map() {
+    assert_eq!(
+        field_marks(Some(&json!({"api_key": "x", "user": "y"}))),
+        vec!["fields.api_key".to_string(), "fields.user".to_string()]
+    );
+    assert_eq!(
+        field_marks(Some(&json!({"a.b": "x"}))),
+        vec!["fields".to_string()]
+    );
+    assert_eq!(field_marks(Some(&json!("x"))), vec!["fields".to_string()]);
+    assert!(field_marks(None).is_empty());
+}
+
+#[test]
 fn readme_is_python_verbatim() {
     let py = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()

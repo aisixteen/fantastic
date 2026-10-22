@@ -390,6 +390,10 @@ pub struct Outcome {
     /// reply keeps the slot its frame named (`["data", "x.y"]` is the reply key
     /// `"x.y"`). The path is relative to `result`.
     pub body: Option<Blob>,
+    /// REPLY MARKS (`crate::secret`): dotted paths into `result` the kernel
+    /// records only as `[secret]` (`crate::ledger::stored_outcome`). `result`
+    /// itself stays whole — it is the caller's answer.
+    pub secret: Vec<String>,
 }
 
 impl Outcome {
@@ -402,6 +406,7 @@ impl Outcome {
             result,
             attempts: 1,
             body: None,
+            secret: Vec::new(),
         }
     }
 
@@ -410,6 +415,13 @@ impl Outcome {
     #[must_use]
     pub fn with_body(mut self, body: Option<Blob>) -> Self {
         self.body = body;
+        self
+    }
+
+    /// …whose reply values at `marks` are recorded as `[secret]`.
+    #[must_use]
+    pub fn with_secret(mut self, marks: Vec<String>) -> Self {
+        self.secret = marks;
         self
     }
 

@@ -2409,6 +2409,100 @@ async fn a_marked_value_is_shown_never_kept() {
     }
 }
 
+/// A BUNDLE names its own secret paths: `payload_secret` marks a `put`'s field
+/// (no `with_secret` on the item), `reply_secret` marks a `take`'s reply. The
+/// handler still sees and answers the values; the rows, the ledger and the state
+/// stream carry only `[secret]`.
+#[tokio::test]
+async fn a_bundle_names_its_own_secret_paths() {
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Vault;
+    #[async_trait::async_trait]
+    impl Bundle for Vault {
+        fn name(&self) -> &str {
+            "vault_probe"
+        }
+        fn payload_secret(&self, payload: &Value) -> Vec<String> {
+            if payload.get("type") == Some(&json!("put")) {
+                vec!["fields.api_key".into()]
+            } else {
+                Vec::new()
+            }
+        }
+        fn reply_secret(&self, payload: &Value, _reply: &Value) -> Vec<String> {
+            if payload.get("type") == Some(&json!("take")) {
+                vec!["token".into()]
+            } else {
+                Vec::new()
+            }
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            Ok(Some(match payload.get("type").and_then(Value::as_str) {
+                Some("put") => json!({"seen": payload["fields"]["api_key"]}),
+                _ => json!({"token": "tk-REAL", "host": "h"}),
+            }))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("vault_probe.tools", Vault);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    kernel.register(Agent::new(
+        AgentId::from("vp"),
+        Some("vault_probe.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("vp"),
+        true,
+    ));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&seen);
+    let _t = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _b| {
+        sink.lock().expect("sink poisoned").push(ev.clone());
+    }));
+    let put = kernel
+        .send(vec![Item::new(
+            "vp",
+            json!({"type": "put", "fields": {"api_key": "sk-REAL"}}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(put.result, json!({"seen": "sk-REAL"}));
+    let take = kernel
+        .send(vec![Item::new("vp", json!({"type": "take"})).with_id("t1")])
+        .await
+        .remove(0);
+    assert_eq!(take.result["token"], json!("tk-REAL"));
+    let rows = serde_json::to_string(&kernel.rows.all()).unwrap();
+    assert!(
+        !rows.contains("sk-REAL") && !rows.contains("tk-REAL"),
+        "a row kept a value"
+    );
+    assert!(rows.contains("[secret]"));
+    let ledger = kernel
+        .send(vec![Item::new("kernel", json!({"type": "ledger"}))])
+        .await
+        .remove(0);
+    assert!(
+        !ledger.result.to_string().contains("tk-REAL"),
+        "the ledger kept the reply"
+    );
+    let events = format!("{:?}", seen.lock().expect("sink poisoned"));
+    assert!(!events.contains("sk-REAL") && !events.contains("tk-REAL"));
+    // a second take with the same id is answered from RAM, whole, to the caller
+    let again = kernel
+        .send(vec![Item::new("vp", json!({"type": "take"})).with_id("t1")])
+        .await
+        .remove(0);
+    assert_eq!(again.result["token"], json!("tk-REAL"));
+}
+
 /// While draining, a FORK starting a send is new work: refused. A keepalive fork
 /// (a persister) still sends (python `drain_admits`).
 #[tokio::test]
