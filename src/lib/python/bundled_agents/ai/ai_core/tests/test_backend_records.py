@@ -44,6 +44,7 @@ _AI_TAIL = [
         ["none", "cleanup", "provider_cache"],
     ),
     ("cache_primer_until", "int", False, None, None),
+    ("misfire_limit", "int", False, 10, None),
     ("system_prompt", "str", False, None, None),
     ("file_bridge_id", "str", False, None, None),
     ("system_prompt_file", "str", False, None, None),
@@ -260,6 +261,16 @@ def test_an_enum_outside_its_set_is_refused_with_the_generic_text(backend):
         "context_strategy='zip' is not one of the legal values: "
         "compact, truncate, strip, fold"
     )
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_misfire_limit_is_validated(backend):
+    refusal = "misfire_limit must be an int from 2 to 50"
+    for bad in (1, 51, "x", True, 2.5):
+        assert _tools(backend).validate_meta({"misfire_limit": bad}, {}) == refusal, bad
+    for good in (2, 50, None):
+        err = _tools(backend).validate_meta({"misfire_limit": good}, {})
+        assert err != refusal, good
 
 
 #: A record each of the three backends accepts as it stands (its required fields).

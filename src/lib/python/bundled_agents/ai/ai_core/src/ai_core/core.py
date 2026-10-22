@@ -1360,11 +1360,25 @@ _open_inquiries: dict[tuple[str, str], dict] = {}
 _awaiting: dict[str, set[str]] = {}
 _ANSWER_TAG = re.compile(r"\[reply to (\S+) · \S+ inquiry\]")
 
-# What a caller is told when a chain gives up (MAX_SILENT_TURNS silent turns).
-_GAVE_UP = (
-    f"The LLM was not able to answer — {MAX_SILENT_TURNS} turns in a row produced "
-    "no call. Reiterate the inquiry."
-)
+
+def _gave_up(limit: int) -> str:
+    """What a caller is told when a chain gives up (`limit` silent turns in a row —
+    the record's `misfire_limit`, default MAX_SILENT_TURNS)."""
+    return (
+        f"The LLM was not able to answer — {limit} turns in a row produced "
+        "no call. Reiterate the inquiry."
+    )
+
+
+def _misfire_limit(kernel, self_id: str) -> int:
+    """The record's `misfire_limit` (#203): how many answers in a row may run
+    nothing before the chain gives up; unset, MAX_SILENT_TURNS."""
+    _get = getattr(kernel, "get", None)  # a bare test kernel has no record
+    v = ((_get(self_id) if _get else None) or {}).get("misfire_limit")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return v
+    return MAX_SILENT_TURNS
+
 
 # Prefixed to the reminder when the turn it answers was DEAD (only thinking).
 _DEAD_TURN_LINE = (
@@ -1419,21 +1433,23 @@ async def _silent_turn(kernel, self_id, client_id, send_to, system_prompt) -> bo
     inquiry is closed, a `send_to` is told — and True is returned."""
     chain = (self_id, client_id)
     streak = _silent[chain] = _silent.get(chain, 0) + 1
-    if streak < MAX_SILENT_TURNS:
+    limit = _misfire_limit(kernel, self_id)
+    if streak < limit:
         return False
     _silent.pop(chain, None)
+    gave_up = _gave_up(limit)
     await _emit_status(
         kernel,
         self_id,
         client_id,
         "done",
         reason="gave_up",
-        error=_GAVE_UP,
+        error=gave_up,
         silent_turns=streak,
     )
-    await _close_inquiry(kernel, self_id, client_id, {"error": _GAVE_UP})
+    await _close_inquiry(kernel, self_id, client_id, {"error": gave_up})
     if send_to is not None:
-        _deliver_soon(kernel, send_to, _GAVE_UP, client_id, system_prompt)
+        _deliver_soon(kernel, send_to, gave_up, client_id, system_prompt)
     return True
 
 

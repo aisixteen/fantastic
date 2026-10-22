@@ -39,7 +39,16 @@ async def test_stopped_turn_stores_partial_answer_and_notice_apart(
     try:
         turn = asyncio.ensure_future(
             seeded_kernel.send(
-                [{"target": aid, "payload": {"type": "send", "text": "the question", "client_id": "tab9"}}]
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "send",
+                            "text": "the question",
+                            "client_id": "tab9",
+                        },
+                    }
+                ]
             )
         )
         for _ in range(100):

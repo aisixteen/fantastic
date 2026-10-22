@@ -28,6 +28,7 @@ from __future__ import annotations
 from ai_core.constants import (
     DEFAULT_CONTEXT_WINDOW,
     DEFAULT_OUTPUT_RESERVE,
+    MAX_SILENT_TURNS,
     RECENT_N,
     RECENT_N_RANGE,
 )
@@ -62,6 +63,17 @@ def field(
         out["default"] = default
     out["hint"] = hint
     return out
+
+
+#: The `misfire_limit` field's hint (#203).
+MISFIRE_LIMIT_HINT = (
+    "answers in a row that ran nothing (wrapped, malformed, thinking-only, no call) "
+    "before the chain gives up; from the 2nd one on, the reply escalates (2–50, "
+    "default 10) (#203)"
+)
+
+#: The refusal for a `misfire_limit` the record cannot use (#203).
+MISFIRE_LIMIT_REFUSAL = "misfire_limit must be an int from 2 to 50"
 
 
 #: The fields EVERY ai_core agent takes, whatever its backend.
@@ -99,6 +111,7 @@ AI_FIELDS: tuple = (
     ),
     field("caching", "enum", CACHING_HINT, enum=MODES, default=DEFAULT_MODE),
     field("cache_primer_until", "int", CACHE_PRIMER_HINT),
+    field("misfire_limit", "int", MISFIRE_LIMIT_HINT, default=MAX_SILENT_TURNS),
     field(
         "system_prompt",
         "str",
@@ -197,6 +210,12 @@ def validate(sch: dict, backend: str, meta: dict, record: dict) -> str | None:
             )
         if f["type"] == "credentials" and v is not None and shape_error(v):
             return shape_error(v)
+    # `misfire_limit`: named on a write it is an int from 2 to 50 (#203).
+    ml = meta.get("misfire_limit")
+    if ml is not None and not (
+        isinstance(ml, int) and not isinstance(ml, bool) and 2 <= ml <= 50
+    ):
+        return MISFIRE_LIMIT_REFUSAL
     sp = meta.get("system_prompt")
     if sp is not None and not (isinstance(sp, str) and sp.strip()):
         return SYSTEM_PROMPT_REFUSAL
