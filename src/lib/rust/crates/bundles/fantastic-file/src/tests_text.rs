@@ -908,6 +908,103 @@ async fn one_file_with_a_wrong_hunks_count_names_the_fix() {
 }
 
 #[tokio::test]
+async fn named_blocks_split_a_two_file_edit_without_hunks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\n").await;
+    seed(&k, "b.txt", "y = 1\n").await;
+    let blob = "<<<<<<< SEARCH a.txt\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n<<<<<<< SEARCH b.txt\ny = 1\n=======\ny = 2\n>>>>>>> REPLACE\n";
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}, {"path": "b.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["edited"], true, "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 2\n");
+    assert_eq!(text_of(&tmp, "b.txt"), "y = 2\n");
+}
+
+#[tokio::test]
+async fn named_blocks_may_come_in_any_order() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "p = 1\nr = 1\n").await;
+    seed(&k, "b.txt", "q = 1\n").await;
+    let blob = "<<<<<<< SEARCH a.txt\np = 1\n=======\np = 2\n>>>>>>> REPLACE\n<<<<<<< SEARCH b.txt\nq = 1\n=======\nq = 2\n>>>>>>> REPLACE\n<<<<<<< SEARCH a.txt\nr = 1\n=======\nr = 2\n>>>>>>> REPLACE\n";
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}, {"path": "b.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["edited"], true, "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "p = 2\nr = 2\n");
+    assert_eq!(text_of(&tmp, "b.txt"), "q = 2\n");
+}
+
+#[tokio::test]
+async fn a_block_naming_a_file_outside_edits_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\n").await;
+    let blob = "<<<<<<< SEARCH c.txt\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n";
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("c.txt"), "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 1\n");
+}
+
+#[tokio::test]
+async fn named_and_unnamed_blocks_do_not_mix() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\ny = 1\n").await;
+    seed(&k, "b.txt", "z = 1\n").await;
+    let blob = "<<<<<<< SEARCH a.txt\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n<<<<<<< SEARCH\ny = 1\n=======\ny = 2\n>>>>>>> REPLACE\n";
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}, {"path": "b.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "bytes", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("every block or on none"), "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 1\ny = 1\n");
+}
+
+#[tokio::test]
+async fn a_stated_hunks_must_match_the_named_blocks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\ny = 1\n").await;
+    let blob = "<<<<<<< SEARCH a.txt\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n<<<<<<< SEARCH a.txt\ny = 1\n=======\ny = 2\n>>>>>>> REPLACE\n";
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt", "hunks": 1}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("leave hunks out"), "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 1\ny = 1\n");
+}
+
+#[tokio::test]
 async fn two_files_still_need_hunks() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = mk(&tmp, json!({})).await;

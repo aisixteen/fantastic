@@ -360,18 +360,22 @@ async fn append(
     json!({"path": path, "size": size, "version": version_of(&whole)})
 }
 
-/// SEARCH/REPLACE blocks → `(search, replace)` pairs, taken VERBATIM (the marker
-/// lines excluded). `Err` on a block that opens but does not close.
-fn parse_hunks(text: &str) -> Result<Vec<(String, String)>, String> {
+/// SEARCH/REPLACE blocks → `(file, search, replace)` triples, taken VERBATIM (the marker
+/// lines excluded). `file` is the path named on the opening line, if any. `Err` on a
+/// block that opens but does not close.
+fn parse_hunks(text: &str) -> Result<Vec<(Option<String>, String, String)>, String> {
     let lines: Vec<&str> = text.split('\n').collect();
-    let mut hunks: Vec<(String, String)> = Vec::new();
+    let mut hunks: Vec<(Option<String>, String, String)> = Vec::new();
     let n = lines.len();
     let mut i = 0;
     while i < n {
-        if lines[i] != H_START {
+        let opens = lines[i] == H_START || lines[i].starts_with(&format!("{H_START} "));
+        if !opens {
             i += 1;
             continue;
         }
+        let file = lines[i][H_START.len()..].trim();
+        let file = (!file.is_empty()).then(|| file.to_string());
         let mut j = i + 1;
         let mut search: Vec<&str> = Vec::new();
         while j < n && lines[j] != H_DIV {
@@ -390,7 +394,7 @@ fn parse_hunks(text: &str) -> Result<Vec<(String, String)>, String> {
         if j >= n {
             return Err("a block has no closing `>>>>>>> REPLACE`".to_string());
         }
-        hunks.push((search.join("\n"), replace.join("\n")));
+        hunks.push((file, search.join("\n"), replace.join("\n")));
         i = j + 1;
     }
     Ok(hunks)
@@ -448,10 +452,31 @@ async fn edit(
     let Ok(text) = std::str::from_utf8(&data) else {
         return rf::bad("edit", "bytes", "valid utf-8 (the patch is text)");
     };
-    let hunks = match parse_hunks(text) {
+    let parsed = match parse_hunks(text) {
         Ok(h) => h,
         Err(e) => return rf::bad("edit", "bytes", &format!("a well-formed patch — {e}")),
     };
+    let named = parsed.iter().filter(|(f, _, _)| f.is_some()).count();
+    if named != 0 && named != parsed.len() {
+        return rf::bad("edit", "bytes", "name the file on every block or on none");
+    }
+    if let Some(f) = parsed.iter().filter_map(|(f, _, _)| f.as_ref()).find(|f| {
+        !edits.iter().any(|e| {
+            e.get("path")
+                .and_then(Value::as_str)
+                .is_some_and(|p| norm(p) == norm(f))
+        })
+    }) {
+        return rf::bad(
+            "edit",
+            "bytes",
+            &format!("a block names {f}, which is not in edits"),
+        );
+    }
+    let hunks: Vec<(String, String)> = parsed
+        .iter()
+        .map(|(_, s, r)| (s.clone(), r.clone()))
+        .collect();
     if hunks.is_empty() {
         return rf::bad(
             "edit",
@@ -476,7 +501,35 @@ async fn edit(
         };
         // #206 — with exactly one file, `hunks` may be left out: every block of
         // the blob applies to it. With several files the split must be stated.
-        let n = if edits.len() == 1 && e.get("hunks").filter(|v| !v.is_null()).is_none() {
+        let picked: Vec<(String, String)> = if named != 0 {
+            let m: Vec<(String, String)> = parsed
+                .iter()
+                .filter(|(f, _, _)| f.as_ref().is_some_and(|f| norm(f) == norm(path)))
+                .map(|(_, s, r)| (s.clone(), r.clone()))
+                .collect();
+            if m.is_empty() {
+                return rf::bad(
+                    "edit",
+                    "edits",
+                    &format!("edit {i} ({}): no block names it", py_repr(path)),
+                );
+            }
+            if let Some(stated) = e.get("hunks").filter(|v| !v.is_null()) {
+                if stated.as_u64() != Some(m.len() as u64) {
+                    return rf::bad(
+                        "edit",
+                        "edits",
+                        &format!("edit {i} ({}): hunks says {stated}, the blob has {} block(s) naming it — leave hunks out", py_repr(path), m.len()),
+                    );
+                }
+            }
+            m
+        } else {
+            Vec::new()
+        };
+        let n = if named != 0 {
+            picked.len()
+        } else if edits.len() == 1 && e.get("hunks").filter(|v| !v.is_null()).is_none() {
             hunks.len()
         } else {
             let Some(n) = e.get("hunks").and_then(Value::as_u64).filter(|n| *n >= 1) else {
@@ -504,7 +557,11 @@ async fn edit(
         let hi = cursor.saturating_add(n).min(hunks.len());
         plan.push(Edit {
             path: path.to_string(),
-            hunks: hunks[lo..hi].to_vec(),
+            hunks: if named != 0 {
+                picked
+            } else {
+                hunks[lo..hi].to_vec()
+            },
             if_match: e.get("if_match").filter(|v| !v.is_null()).cloned(),
             before: Vec::new(),
             new: Vec::new(),
