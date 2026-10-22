@@ -167,7 +167,7 @@ async fn save_late(
             "parent": Value::Null,
             "kind": "late",
             "content": format!(
-                "[late reply — answered a call made before this agent last booted; \
+                "[late reply — answered a call of a chain that has ended; \
                  recorded, not acted on]\n{raw}"
             ),
         })],

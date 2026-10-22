@@ -49,9 +49,12 @@
 //!   under its own `client_id` — the whole pass's answer, shared by every sender
 //!   that pass read, not a reply to that message alone. It is released at once
 //!   with `{error, held:true}` when the agent reboots, clears its context, is
-//!   deleted, or the wake turn is refused or never runs, and with
-//!   `{held:true, cancelled:true}` on `stop`. The chain ends only when a reply
-//!   comes back to the agent itself; a turn whose calls all reply elsewhere
+//!   deleted, or the wake turn is refused (its delivery fails), and with
+//!   `{held:true, cancelled:true}` on `stop`. When the wake is accepted but
+//!   never runs, a watchdog frees the CHAIN (`alive`) at the send ceiling; a
+//!   held sender's own ceiling began earlier, so it times out on its own
+//!   first. The chain ends only when a reply comes back to the agent itself;
+//!   a turn whose calls all reply elsewhere
 //!   ends it. An inquiry's answer obeys the hold like any other message.
 //! - `stop` args `{stream_id:str?}` → `{stopped:bool}` — a receiver of this
 //!   agent's streaming parts stops the generation in flight (the provider stream

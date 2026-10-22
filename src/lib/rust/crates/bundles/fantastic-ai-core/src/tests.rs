@@ -4140,6 +4140,52 @@ async fn a_reply_in_flight_across_a_stop_runs_nothing() {
     assert_eq!(s.passes_served(), 1, "the chain resumed after a stop");
 }
 
+/// ONE CHAIN PER AGENT (#227): a reply to an `await`ed call is routed UNTOKENED
+/// (the replier, not the agent, is the origin then), so a NEW chain that began
+/// meanwhile does not turn it into a `late` row: it is held for that chain's
+/// next pass, never dropped.
+#[tokio::test]
+async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let state = crate::state::state_for(&backend);
+    {
+        // An operator message started a NEW chain after the await.
+        let mut c = state.chain.lock().unwrap();
+        c.alive = true;
+        c.token = "new".to_string();
+    }
+    let k = Arc::clone(&kernel);
+    let target = backend.as_str().to_string();
+    let target = AgentId::from(target.as_str());
+    let peer = add_peer(&kernel, &tmp, &backend).await;
+    // The routed reply of an `await`ed call: the replier is the origin, so the
+    // delivery carries NO chain token. It goes through the kernel, so the
+    // handler runs as the TARGET (its store writes are its own).
+    tokio::spawn(fantastic_kernel::test_support::as_agent(
+        peer,
+        async move {
+            let _ = k
+                .send(vec![Item::new(
+                    target,
+                    json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
+                )])
+                .await;
+        },
+    ));
+    // The reply is read by a pass (or held for the live chain's next one) —
+    // either way it is acted on, never recorded as `late`.
+    until_true("the await's reply to be acted on", || {
+        s.passes_served() > 0 || !state.chain.lock().unwrap().held.is_empty()
+    })
+    .await;
+    assert!(
+        !has_late_row(&kernel, &backend).await,
+        "an await's reply was recorded as late instead of acted on"
+    );
+}
+
 /// ONE CHAIN PER AGENT (#227): an inquiry's ANSWER obeys the hold like any other
 /// message — read by the chain's next pass, never a second chain of its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5802,7 +5848,7 @@ async fn a_reply_in_flight_across_a_reboot_is_recorded_not_acted_on() {
     assert_eq!(last["kind"], "late");
     assert_eq!(
         last["content"],
-        "[late reply — answered a call made before this agent last booted; \
+        "[late reply — answered a call of a chain that has ended; \
          recorded, not acted on]\n[reply to 1 · n r]\nlate"
     );
     // A reply from THIS incarnation runs a turn.
