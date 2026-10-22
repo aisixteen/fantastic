@@ -33,6 +33,8 @@ mod run;
 mod seen;
 mod send;
 mod share;
+#[cfg(test)]
+mod share_tests;
 mod store;
 mod sys;
 mod tags;

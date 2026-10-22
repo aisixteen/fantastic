@@ -360,18 +360,29 @@ async fn append(
     json!({"path": path, "size": size, "version": version_of(&whole)})
 }
 
-/// SEARCH/REPLACE blocks → `(search, replace)` pairs, taken VERBATIM (the marker
-/// lines excluded). `Err` on a block that opens but does not close.
-fn parse_hunks(text: &str) -> Result<Vec<(String, String)>, String> {
+/// SEARCH/REPLACE blocks → `(file, search, replace)` triples, taken VERBATIM (the
+/// marker lines excluded). A block may name its file on its opening line
+/// (`<<<<<<< SEARCH path/to/file`); then `file` is `Some`, otherwise `None`.
+/// `Err` on a block that opens but does not close.
+fn parse_hunks(text: &str) -> Result<Vec<(Option<String>, String, String)>, String> {
     let lines: Vec<&str> = text.split('\n').collect();
-    let mut hunks: Vec<(String, String)> = Vec::new();
+    let mut hunks: Vec<(Option<String>, String, String)> = Vec::new();
     let n = lines.len();
     let mut i = 0;
     while i < n {
-        if lines[i] != H_START {
+        // `<<<<<<< SEARCH` alone, or `<<<<<<< SEARCH <path>` naming the file.
+        let open = lines[i];
+        if open != H_START && !open.starts_with(&format!("{H_START} ")) {
             i += 1;
             continue;
         }
+        let file = match open.strip_prefix(H_START) {
+            Some(rest) => {
+                let rest = rest.trim();
+                (!rest.is_empty()).then(|| rest.to_string())
+            }
+            None => None,
+        };
         let mut j = i + 1;
         let mut search: Vec<&str> = Vec::new();
         while j < n && lines[j] != H_DIV {
@@ -390,7 +401,7 @@ fn parse_hunks(text: &str) -> Result<Vec<(String, String)>, String> {
         if j >= n {
             return Err("a block has no closing `>>>>>>> REPLACE`".to_string());
         }
-        hunks.push((search.join("\n"), replace.join("\n")));
+        hunks.push((file, search.join("\n"), replace.join("\n")));
         i = j + 1;
     }
     Ok(hunks)
@@ -460,6 +471,30 @@ async fn edit(
         );
     }
     let allow = allow_list(meta);
+    // #206 — a block may name its file on its opening line. Either every block
+    // names one or none does; named blocks are matched to `edits` by path, so the
+    // per-edit `hunks` counts are not needed.
+    let named = hunks.iter().any(|(f, _, _)| f.is_some());
+    if named {
+        if hunks.iter().any(|(f, _, _)| f.is_none()) {
+            return rf::bad("edit", "bytes", "name the file on every block or on none");
+        }
+        let known: Vec<Option<String>> = edits
+            .iter()
+            .filter_map(|e| e.get("path").and_then(Value::as_str))
+            .map(norm)
+            .collect();
+        for (file, _, _) in &hunks {
+            let Some(file) = file else { continue };
+            if !known.iter().any(|k| *k == norm(file)) {
+                return rf::bad(
+                    "edit",
+                    "bytes",
+                    &format!("a block names {file}, which is not in edits"),
+                );
+            }
+        }
+    }
     let mut plan: Vec<Edit> = Vec::new();
     let mut cursor = 0usize;
     for (i, e) in edits.iter().enumerate() {
@@ -474,6 +509,54 @@ async fn edit(
                 &format!("edit {i}: an object with a `path`"),
             );
         };
+        if plan.iter().any(|p| norm(&p.path) == norm(path)) {
+            return rf::bad(
+                "edit",
+                "edits",
+                "each path at most once — put all of a file's hunks in one edit",
+            );
+        }
+        if let Some(gate) = gate_path("edit", root, &allow, path) {
+            return gate;
+        }
+        if named {
+            let want = norm(path);
+            let mine: Vec<(String, String)> = hunks
+                .iter()
+                .filter(|(f, _, _)| f.as_deref().and_then(norm) == want)
+                .map(|(_, s, r)| (s.clone(), r.clone()))
+                .collect();
+            if mine.is_empty() {
+                return rf::bad(
+                    "edit",
+                    "edits",
+                    &format!("edit {i} ({}): no block names it", py_repr(path)),
+                );
+            }
+            if let Some(stated) = e.get("hunks").filter(|v| !v.is_null()) {
+                if stated.as_u64() != Some(mine.len() as u64) {
+                    return rf::bad(
+                        "edit",
+                        "edits",
+                        &format!(
+                            "edit {i} ({}): hunks says {stated}, the blob has {} \
+                             block(s) naming it — leave hunks out",
+                            py_repr(path),
+                            mine.len()
+                        ),
+                    );
+                }
+            }
+            cursor = cursor.saturating_add(mine.len());
+            plan.push(Edit {
+                path: path.to_string(),
+                hunks: mine,
+                if_match: e.get("if_match").filter(|v| !v.is_null()).cloned(),
+                before: Vec::new(),
+                new: Vec::new(),
+            });
+            continue;
+        }
         // #206 — with exactly one file, `hunks` may be left out: every block of
         // the blob applies to it. With several files the split must be stated.
         let n = if edits.len() == 1 && e.get("hunks").filter(|v| !v.is_null()).is_none() {
@@ -488,23 +571,16 @@ async fn edit(
             };
             usize::try_from(n).unwrap_or(usize::MAX)
         };
-        if plan.iter().any(|p| norm(&p.path) == norm(path)) {
-            return rf::bad(
-                "edit",
-                "edits",
-                "each path at most once — put all of a file's hunks in one edit",
-            );
-        }
-        if let Some(gate) = gate_path("edit", root, &allow, path) {
-            return gate;
-        }
         // python slices `hunks[cursor:cursor + n]` — it CLAMPS and keeps going,
         // so every edit is validated and `cursor` holds the full claim.
         let lo = cursor.min(hunks.len());
         let hi = cursor.saturating_add(n).min(hunks.len());
         plan.push(Edit {
             path: path.to_string(),
-            hunks: hunks[lo..hi].to_vec(),
+            hunks: hunks[lo..hi]
+                .iter()
+                .map(|(_, s, r)| (s.clone(), r.clone()))
+                .collect(),
             if_match: e.get("if_match").filter(|v| !v.is_null()).cloned(),
             before: Vec::new(),
             new: Vec::new(),

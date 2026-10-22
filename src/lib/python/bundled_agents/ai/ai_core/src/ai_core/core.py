@@ -54,6 +54,7 @@ from ai_core.context import (
     output_reserve,
     resolve_context_window,
 )
+from ai_core import caching
 from ai_core import prompt_file
 from ai_core.folds import anchors_of
 from ai_core.folds import expand_ids as expand_fold_ids
@@ -155,6 +156,10 @@ class Backend:
     name: str  # error-message prefix, e.g. "ollama_backend"
     extra_verbs: dict = field(default_factory=dict)
     reflect_extra: Callable[[str, Any], Awaitable[dict] | dict] | None = None
+    # THE CAPABILITY: this backend can run the provider's own cache markers
+    # (caching=provider_cache). A backend that cannot refuses a turn in that mode.
+    # Only anthropic declares it (task B).
+    provider_cache: bool = False
 
 
 # ─── status state helpers ───────────────────────────────────────
@@ -304,8 +309,15 @@ def _lock_for(self_id: str) -> asyncio.Lock:
 
 def _render_for_model(messages: list[dict]) -> list[dict]:
     """Project the message list to what the model actually reads — its role and
-    its text; every other key is stripped."""
-    return [{"role": m.get("role"), "content": m.get("content", "")} for m in messages]
+    its text; every other key is stripped. The cache flags travel with their message."""
+    out = []
+    for m in messages:
+        r = {"role": m.get("role"), "content": m.get("content", "")}
+        for flag in ("cache_primer", "cache_fold"):
+            if m.get(flag):
+                r[flag] = True
+        out.append(r)
+    return out
 
 
 # ─── persistence (the KERNEL ROW STORE — this bundle owns no files) ─────────
@@ -1368,6 +1380,35 @@ _NO_CALL_NUDGE = (
 )
 
 
+def _wrapper_tag(report: str) -> str:
+    """The tag a wrapped answer used, named in its report (default `tool_call`)."""
+    head = report.split("drop the wrapper", 1)[0]
+    quoted = re.findall(r"`([^`]*)`", head)
+    return quoted[-1].strip("<>") if quoted else "tool_call"
+
+
+def _escalation(n: int, kind: str, tag: str | None = None) -> str:
+    """The block a chain gets from its second answer in a row that ran nothing."""
+    if kind == "wrapped":
+        phrase, forbidden = f"put the call inside <{tag}>", f"<{tag}>"
+    elif kind == "malformed":
+        phrase = "had calls that did not parse"
+        forbidden = "any other markup around or inside the call"
+    elif kind == "thinking_only":
+        phrase = "were only thinking, with no answer"
+        forbidden = "a turn without a call: think briefly, then write the call"
+    else:
+        phrase = "had no call"
+        forbidden = 'an answer without a call (or <call name="done"></call> if the task is finished)'
+    return (
+        f"[no progress — {n} answers in a row ran nothing] Your last {n} answers "
+        f"{phrase}, so nothing ran.\n"
+        f'Your next answer must START with <call name="…"> — the very first characters '
+        f"of the answer — and contain {forbidden} nowhere.\n"
+        "Then continue with your current step."
+    )
+
+
 #: The calls that are not dispatches: they end, park or answer the chain.
 _CONTROL_CALLS = ("done", "await", "inquiry_answer")
 
@@ -1602,7 +1643,13 @@ async def _route_reply(
     # write instead (`call_check`). The answer's well-formed calls run as written,
     # and each report says how many did.
     ran = sum(1 for c in calls if c.get("name") not in _CONTROL_CALLS)
-    for report in [] if cut else check_calls(answer, ran=ran):
+    reports = [] if cut else check_calls(answer, ran=ran)
+    if reports and ran == 0:
+        n = _silent.get((self_id, client_id), 0) + 1
+        if n >= 2:
+            kind = "wrapped" if "drop the wrapper" in reports[-1] else "malformed"
+            reports[-1] += "\n" + _escalation(n, kind, _wrapper_tag(reports[-1]))
+    for report in reports:
         units.append((self_id, "-", "-", None, report))
     done_called = any(c.get("name") == "done" for c in calls)
     await_called = any(c.get("name") == "await" for c in calls)
@@ -2056,6 +2103,9 @@ async def _route_reply(
         if await _silent_turn(kernel, self_id, client_id, send_to, system_prompt):
             return
         nudge = (_DEAD_TURN_LINE + _NO_CALL_NUDGE) if dead_turn else _NO_CALL_NUDGE
+        n = _silent.get((self_id, client_id), 0)
+        if n >= 2:
+            nudge += "\n" + _escalation(n, "thinking_only" if dead_turn else "no_call")
         _deliver_soon(kernel, self_id, nudge, client_id, system_prompt, notice=True)
         return
     if calls:
@@ -2197,6 +2247,8 @@ async def _assemble(
     kernel,
     client_id: str,
     system_prompt: str | None = None,
+    *,
+    mode: str = caching.DEFAULT_MODE,
 ) -> tuple[list[dict], int]:
     """Build the message list. A caller-supplied `system_prompt` REPLACES the
     deterministic substrate prompt — absent, the record's own `system_prompt`
@@ -2225,6 +2277,14 @@ async def _assemble(
     # reflects reduced to a stub — the model's own distillation carries the facts.
     hist = await _load_history(self_id, kernel)
     store_len = len(hist)
+    clean = caching.cleans(mode)
+
+    def _trim(rows: list[dict]) -> list[dict]:
+        # caching=cleanup trims the tail; none and provider_cache keep it as stored.
+        if not clean:
+            return list(rows)
+        return drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(rows)))
+
     # THE VIEW ARRAY IS THE STATE. When one exists and every id it names still
     # resolves, the model sees exactly those rows at exactly those resolutions —
     # the same bytes before and after a restart. Otherwise (no array yet, or an
@@ -2241,12 +2301,10 @@ async def _assemble(
         # read it had just made and would restart its work in a circle.
         idx = {r.get("id"): i for i, r in enumerate(hist) if r.get("id")}
         newest = max(idx[e["id"]] for e in view["ids"])
-        messages.extend(
-            drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(hist[newest + 1 :])))
-        )
+        messages.extend(_trim(hist[newest + 1 :]))
         _view_source[self_id] = "array"
     else:
-        messages.extend(drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(hist))))
+        messages.extend(_trim(hist))
         _view_source[self_id] = (
             "store" if view is None or not view["ids"] else "store (stale array)"
         )
@@ -2735,11 +2793,17 @@ async def _run(
     system_prompt: str | None = None,
 ) -> dict:
     provider = await _build_provider(self_id, kernel, cfg)
+    # THE CACHING MODE IS CHECKED FIRST: a record that asks for provider caching on a
+    # backend that cannot cache is refused before any row is written — before the
+    # owed recall, which writes a view and a recall row.
+    mode, primer = caching.settings(kernel.get(self_id) or {})
+    if caching.marks(mode) and not cfg.provider_cache:
+        raise caching.unsupported(cfg.name)
     if self_id in _recall_due:
         _recall_due.discard(self_id)
         await _context_recall(self_id, {}, kernel, cfg, system_prompt, client_id)
     messages, store_len = await _assemble(
-        self_id, user_text, kernel, client_id, system_prompt
+        self_id, user_text, kernel, client_id, system_prompt, mode=mode
     )
     # Context-overflow projection: shape what the MODEL sees this turn to fit the
     # window via the agent's `context_strategy` (default compact). Done ONCE at turn
@@ -2758,6 +2822,10 @@ async def _run(
     if isinstance(projected, dict):  # too_small failsafe / config error
         return projected
     messages = projected
+    # THE PROVIDER'S MARKERS, flagged on the list it is handed: the primer's end and
+    # the last fold's. Only provider_cache asks for them.
+    if caching.marks(mode):
+        messages = caching.mark(messages, primer)
     # ONE provider pass — no tool loop. The provider streams pure text; every chunk
     # is a content token routed to the caller. Any tool convention is the caller's
     # (an authored agent reads this completion + drives its own loop).
@@ -4271,6 +4339,7 @@ def build(
     name: str,
     extra_verbs: dict | None = None,
     reflect_extra: Callable | None = None,
+    provider_cache: bool = False,
 ) -> tuple[dict, Callable]:
     """Bind one backend's config into a fresh `(VERBS, handler)` pair.
 
@@ -4297,6 +4366,8 @@ def build(
         carried are gone (keys come from the environment).
       reflect_extra: fn(id, kernel) -> dict (sync OR async), merged into
         the reflect reply (vllm: the effective sampling + the KV table).
+      provider_cache: the backend runs the provider's cache markers
+        (caching=provider_cache).
     """
     cfg = Backend(
         sentence=sentence,
@@ -4304,6 +4375,7 @@ def build(
         name=name,
         extra_verbs=extra_verbs or {},
         reflect_extra=reflect_extra,
+        provider_cache=provider_cache,
     )
 
     verbs: dict[str, Callable] = {

@@ -515,6 +515,71 @@ async def test_reflect_carries_the_usage_and_the_cache_flag(
     assert r["usage"]["requests"] == 0 and r["usage"]["hit_rate"] == 0
 
 
+def _models_api(status: int, body: str, seen: list | None = None):
+    def handler(req: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(str(req.url))
+        return httpx.Response(status, text=body)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_models_lists_the_keys_models(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    seen: list = []
+    body = json.dumps(
+        {
+            "data": [
+                {
+                    "id": "m1",
+                    "display_name": "M1",
+                    "max_input_tokens": 200000,
+                    "max_tokens": 64000,
+                },
+                {"id": "m2", "display_name": "M2", "max_input_tokens": 100000},
+            ]
+        }
+    )
+    mock_http(_models_api(200, body, seen))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert [m["id"] for m in got["models"]] == ["m1", "m2"]
+    assert got["models"][1]["max_tokens"] is None
+    assert "limit=1000" in seen[0]
+
+
+async def test_models_names_a_missing_key_on_401(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_models_api(401, "{}"))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "401" in got["error"] and "credentials" in got["error"]
+
+
+async def test_models_refuses_a_body_that_is_not_a_model_list(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_models_api(200, "<html>"))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "not a model list" in got["error"]
+
+    mock_http(_models_api(200, "{}"))
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "not a model list" in got["error"]
+
+
+async def test_reflect_lists_the_models_verb(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    mock_http(_api([]))
+    await _create(seeded_kernel)
+    got = await _call(seeded_kernel, "a1", {"type": "models"})
+    assert "not a model list" in got["error"]
+
+
 async def test_deleting_an_agent_drops_its_counts(
     seeded_kernel, mock_http, fake_providers, _fresh_usage
 ):

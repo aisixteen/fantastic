@@ -281,7 +281,7 @@ async fn run(
                     }
                     // THE TUI SOCKET: a second `fantastic` here is a thin client
                     // of THIS ViewModel.
-                    match crate::share::listen(input_tx.clone(), frames.subscribe()) {
+                    match crate::share::listen(input_tx.clone(), frames.subscribe(), boot.tui) {
                         Ok(s) => share = Some(s),
                         Err(e) => {
                             boot.say(&format!("fantastic: {e}"));

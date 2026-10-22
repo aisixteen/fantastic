@@ -191,7 +191,7 @@ class FakeCtx:
             out.append({"pid": None, "result": {}, "status": "completed"})
         return out
 
-    async def emit(self, target, payload):
+    async def emit(self, target, payload, **_kw):
         self.emitted.append((target, payload))
 
     # test conveniences

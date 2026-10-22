@@ -242,6 +242,47 @@ async def test_a_broken_call_is_reported_instead_of_the_no_call_reminder(
         fake_providers.pop(aid, None)
 
 
+WRAPPED = '<tool_call>\n<function=call name="done"></call>\n</tool_call>'
+REFLECT = '<call name="send"><target_id>kernel</target_id><type>reflect</type></call>'
+
+
+async def test_a_second_wrapped_answer_in_a_row_escalates(
+    seeded_kernel, fake_providers
+):
+    fp = _Script([WRAPPED, WRAPPED, '<call name="done"></call>'])
+    aid = "cc_esc"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        await seeded_kernel.send(
+            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+        )
+        await _settle(fp, 3)
+        assert "[no progress" not in fp.incoming[1], fp.incoming[1]
+        assert "[no progress — 2 answers in a row ran nothing]" in fp.incoming[2], (
+            fp.incoming[2]
+        )
+        assert "<tool_call>" in fp.incoming[2], fp.incoming[2]
+        assert "must START with <call" in fp.incoming[2], fp.incoming[2]
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_call_that_runs_resets_the_escalation(seeded_kernel, fake_providers):
+    fp = _Script([WRAPPED, REFLECT, WRAPPED, '<call name="done"></call>'])
+    aid = "cc_reset"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        await seeded_kernel.send(
+            [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+        )
+        await _settle(fp, 4)
+        assert "[no progress" not in fp.incoming[3], fp.incoming[3]
+    finally:
+        fake_providers.pop(aid, None)
+
+
 async def test_the_good_calls_run_and_the_broken_one_comes_back_beside_them(
     seeded_kernel, fake_providers
 ):

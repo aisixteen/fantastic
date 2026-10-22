@@ -926,3 +926,120 @@ async fn two_files_still_need_hunks() {
     assert!(err.contains("hunks"), "{r}");
     assert_eq!(text_of(&tmp, "a.py"), "x = 1\n");
 }
+
+// ─── #206: a multi-file edit's blocks may name their file ─────────
+
+fn named_block(path: &str, old: &str, new: &str) -> String {
+    format!("<<<<<<< SEARCH {path}\n{old}\n=======\n{new}\n>>>>>>> REPLACE")
+}
+
+#[tokio::test]
+async fn named_blocks_split_a_two_file_edit_without_hunks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\n").await;
+    seed(&k, "b.txt", "y = 1\n").await;
+    let blob =
+        named_block("a.txt", "x = 1", "x = 2") + "\n" + &named_block("b.txt", "y = 1", "y = 2");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}, {"path": "b.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["edited"], true, "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 2\n");
+    assert_eq!(text_of(&tmp, "b.txt"), "y = 2\n");
+}
+
+#[tokio::test]
+async fn named_blocks_may_come_in_any_order() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\nw = 3\n").await;
+    seed(&k, "b.txt", "y = 1\n").await;
+    let blob = named_block("a.txt", "x = 1", "x = 2")
+        + "\n"
+        + &named_block("b.txt", "y = 1", "y = 2")
+        + "\n"
+        + &named_block("a.txt", "w = 3", "w = 4");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}, {"path": "b.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["edited"], true, "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 2\nw = 4\n");
+    assert_eq!(text_of(&tmp, "b.txt"), "y = 2\n");
+}
+
+#[tokio::test]
+async fn a_block_naming_a_file_outside_edits_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\n").await;
+    let blob =
+        named_block("a.txt", "x = 1", "x = 2") + "\n" + &named_block("c.txt", "z = 9", "z = 10");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "bytes", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("c.txt"), "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 1\n");
+}
+
+#[tokio::test]
+async fn named_and_unnamed_blocks_do_not_mix() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\n").await;
+    seed(&k, "b.txt", "y = 1\n").await;
+    let blob = named_block("a.txt", "x = 1", "x = 2") + "\n" + &block("y = 1", "y = 2");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt"}, {"path": "b.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(r["arg"], "bytes", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("every block or on none"), "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 1\n");
+    assert_eq!(text_of(&tmp, "b.txt"), "y = 1\n");
+}
+
+#[tokio::test]
+async fn a_stated_hunks_must_match_the_named_blocks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "a.txt", "x = 1\nw = 3\n").await;
+    seed(&k, "b.txt", "y = 1\n").await;
+    let blob = named_block("a.txt", "x = 1", "x = 2")
+        + "\n"
+        + &named_block("a.txt", "w = 3", "w = 4")
+        + "\n"
+        + &named_block("b.txt", "y = 1", "y = 2");
+    let r = call(
+        &k,
+        json!({"type": "edit",
+               "edits": [{"path": "a.txt", "hunks": 1}, {"path": "b.txt"}],
+               "bytes": blob}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("leave hunks out"), "{r}");
+    assert_eq!(text_of(&tmp, "a.txt"), "x = 1\nw = 3\n");
+    assert_eq!(text_of(&tmp, "b.txt"), "y = 1\n");
+}
