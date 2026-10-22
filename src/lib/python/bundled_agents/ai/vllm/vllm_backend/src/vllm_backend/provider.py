@@ -362,6 +362,7 @@ class VllmProvider:
 
         thinking = False
         saw_finish = False
+        tool_calls: list[list[str]] = []
         key = await self._key(self._endpoint)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         connect, read = self._timeouts
@@ -431,6 +432,15 @@ class VllmProvider:
                             thinking = False
                             yield THINK_CLOSE
                         yield content
+                    for piece in delta.get("tool_calls") or []:
+                        i = max(0, int(piece.get("index") or 0))
+                        while len(tool_calls) <= i:
+                            tool_calls.append(["", ""])
+                        fn = piece.get("function") or {}
+                        if isinstance(fn.get("name"), str):
+                            tool_calls[i][0] += fn["name"]
+                        if isinstance(fn.get("arguments"), str):
+                            tool_calls[i][1] += fn["arguments"]
         except httpx.ConnectTimeout as e:
             raise RuntimeError(
                 f"vllm_backend: no answer from {self._endpoint} within "
@@ -455,6 +465,24 @@ class VllmProvider:
             ) from e
         if thinking:
             yield THINK_CLOSE
+        if tool_calls:
+            rendered = []
+            for name, args in tool_calls:
+                try:
+                    params = json.loads(args or "{}")
+                except json.JSONDecodeError:
+                    params = None
+                if not isinstance(params, dict):
+                    raise RuntimeError(
+                        f"vllm_backend: the server sent a native tool call '{name}' "
+                        f"whose arguments are not a JSON object: {args}"
+                    )
+                parts = []
+                for k, v in params.items():
+                    text = v if isinstance(v, str) else json.dumps(v)
+                    parts.append(f"<{k}>{text}</{k}>")
+                rendered.append(f'<call name="{name}">' + "".join(parts) + "</call>")
+            yield "\n".join(rendered)
         if not saw_finish:
             raise RuntimeError(
                 f"vllm_backend: the stream from {self._endpoint} ended without a "

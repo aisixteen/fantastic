@@ -166,8 +166,13 @@ def test_a_chrome_that_exits_before_its_port_fails_at_once_with_its_status(cases
     c = cases["exits"]
     assert c["tabs_calls"] == 0  # the port is never asked once Chrome has exited
     msg = c["exit"]
-    assert msg.splitlines()[0] == "Chrome exited with status 21 before opening its debugging port"
-    assert "last poll error: no poll yet" in msg  # Chrome exited before the first poll's error
+    assert (
+        msg.splitlines()[0]
+        == "Chrome exited with status 21 before opening its debugging port"
+    )
+    assert (
+        "last poll error: no poll yet" in msg
+    )  # Chrome exited before the first poll's error
     assert "    line 44" in msg
     assert "    line 4\n" not in msg + "\n"  # only the last TAIL lines
 
@@ -181,7 +186,9 @@ def test_a_chrome_that_exits_while_waiting_names_the_last_poll_error(cases):
     assert "    bye" in msg
 
 
-def test_a_chrome_that_never_answers_fails_at_the_deadline_with_the_last_error_and_output(cases):
+def test_a_chrome_that_never_answers_fails_at_the_deadline_with_the_last_error_and_output(
+    cases,
+):
     c = cases["silent"]
     assert c["tabs_calls"] >= 2
     assert c["polls"] >= 2  # Chrome is checked on every poll

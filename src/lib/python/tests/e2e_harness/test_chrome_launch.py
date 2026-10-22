@@ -16,7 +16,14 @@ from pathlib import Path
 
 import pytest
 
-E2E = next(p for p in Path(__file__).resolve().parents if (p / "e2e" / ".e2e-root").exists()) / "e2e"
+E2E = (
+    next(
+        p
+        for p in Path(__file__).resolve().parents
+        if (p / "e2e" / ".e2e-root").exists()
+    )
+    / "e2e"
+)
 sys.path.insert(0, str(E2E))
 
 from helpers import chrome as launch  # noqa: E402
@@ -89,7 +96,9 @@ def test_the_output_file_is_closed_when_chrome_cannot_start(tmp_path, fake_chrom
     assert seen["stdout"].closed
 
 
-def test_a_chrome_that_exits_early_fails_at_once_with_its_status_and_output(tmp_path, fake_chrome):
+def test_a_chrome_that_exits_early_fails_at_once_with_its_status_and_output(
+    tmp_path, fake_chrome
+):
     lines = "".join(f"line {i}\n" for i in range(TAIL + 5))
     fake_chrome(exit_after=0, status=21, output=lines)
     c = launch_fake(tmp_path)
@@ -112,7 +121,9 @@ def test_a_chrome_that_exits_early_fails_at_once_with_its_status_and_output(tmp_
     assert msg.endswith("    line 44")
 
 
-def test_a_chrome_that_never_answers_fails_at_the_deadline_with_the_last_error(tmp_path, fake_chrome):
+def test_a_chrome_that_never_answers_fails_at_the_deadline_with_the_last_error(
+    tmp_path, fake_chrome
+):
     fake_chrome(output="DevTools: bind failed: address in use\n")
     c = launch_fake(tmp_path)
     calls = []
@@ -131,7 +142,9 @@ def test_a_chrome_that_never_answers_fails_at_the_deadline_with_the_last_error(t
     assert "    DevTools: bind failed: address in use" in msg
 
 
-def test_a_chrome_that_exits_while_the_deadline_passes_says_it_exited(tmp_path, fake_chrome):
+def test_a_chrome_that_exits_while_the_deadline_passes_says_it_exited(
+    tmp_path, fake_chrome
+):
     fake_chrome(exit_after=1, status=3)
     c = launch_fake(tmp_path)
 
@@ -142,10 +155,16 @@ def test_a_chrome_that_exits_while_the_deadline_passes_says_it_exited(tmp_path, 
     assert "last poll error: OSError: down" in msg
 
 
-def test_a_poll_that_answers_after_http_and_socket_errors_returns_its_value(tmp_path, fake_chrome):
+def test_a_poll_that_answers_after_http_and_socket_errors_returns_its_value(
+    tmp_path, fake_chrome
+):
     fake_chrome()
     c = launch_fake(tmp_path)
-    failures = [http.client.IncompleteRead(b""), ConnectionResetError("reset"), KeyError("webSocketDebuggerUrl")]
+    failures = [
+        http.client.IncompleteRead(b""),
+        ConnectionResetError("reset"),
+        KeyError("webSocketDebuggerUrl"),
+    ]
     calls = []
 
     def probe():
@@ -154,7 +173,10 @@ def test_a_poll_that_answers_after_http_and_socket_errors_returns_its_value(tmp_
             raise failures.pop(0)
         return "ws://127.0.0.1:9222/devtools/page/1"
 
-    assert c.wait_port(probe, timeout=5, interval=0.001) == "ws://127.0.0.1:9222/devtools/page/1"
+    assert (
+        c.wait_port(probe, timeout=5, interval=0.001)
+        == "ws://127.0.0.1:9222/devtools/page/1"
+    )
     assert len(calls) == 4
 
 
