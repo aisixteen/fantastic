@@ -61,7 +61,8 @@ def envelopes(text: str) -> list[tuple[int, int, int | None]]:
             return out
         after = pos + len(OPEN)
         rest = text[after:]
-        if not (rest and rest[0].isspace()) or not rest.lstrip().startswith("name"):
+        s = rest.lstrip()
+        if not (rest and rest[0].isspace()) or not (s.startswith("name") and s[4:].lstrip(" ").startswith("=")):
             i = after
             continue
         end = find_close(text, after)

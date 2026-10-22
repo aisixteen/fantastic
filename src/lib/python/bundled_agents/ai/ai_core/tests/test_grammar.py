@@ -200,3 +200,9 @@ def test_envelope_is_a_dataclass_of_spans():
     env = Envelope(0, 5, 10, None)
     assert env == Envelope(0, 5, 10, None)
     assert env.wrapper is None
+
+
+def test_prose_mention_does_not_swallow_a_real_call():
+    text = 'the <call names are listed> and <call name="send">x</call>'
+    spans = envelopes(text)
+    assert [s for s, _, _ in spans] == [text.index('<call name="send">')]
