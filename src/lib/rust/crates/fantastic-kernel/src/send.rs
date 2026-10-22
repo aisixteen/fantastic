@@ -811,6 +811,12 @@ impl Kernel {
             )));
         };
 
+        // 9b. THE TARGET'S OWN SECRETS — its bundle names paths of this payload
+        // (`Bundle::payload_secret`: a credential store's `set` fields). They join the
+        // item's marks before ANY refusal below, so a refused call row, the state
+        // stream and every mirror show them as `[secret]` whoever sent the call.
+        let marks = self.with_bundle_marks(&target, &item.payload, marks);
+
         // 10. ── CALL GATE — two-sided, deny-all, explicit grants ──────
         // Trust boundary = who ORIGINATED the send. An operator send (no
         // dispatch running: the CLI, the cold bootstrap, a test driver, a
@@ -823,11 +829,6 @@ impl Kernel {
             }
         }
 
-        // 10b. THE TARGET'S OWN SECRETS — its bundle names paths of this payload
-        // (`Bundle::payload_secret`: a credential store's `set` fields); they join the
-        // item's marks, so the call row, the state stream and every mirror show them
-        // as `[secret]` whoever sent the call.
-        let marks = self.with_bundle_marks(&target, &item.payload, marks);
 
         // The UNNAMED `kernel` reflect fast path. python checks the
         // LITERAL reserved address the caller sent (`target_id == "kernel"`,
@@ -1285,7 +1286,10 @@ impl Kernel {
         let pid = pid?;
         let mut stamp = Map::new();
         stamp.insert("status".to_string(), Value::from(out.status.as_str()));
-        if let Some(res) = out.result.as_object() {
+        // review bug 3: the error text is read from the SHOWN result, so a value the
+        // bundle marked (`Outcome.secret`, e.g. an `error` path) never reaches the row.
+        let shown_result = crate::secret::shown(&out.result, &out.secret);
+        if let Some(res) = shown_result.as_object() {
             if let Some(err) = res.get("error").filter(|v| py_truthy(v)) {
                 stamp.insert(
                     "error".to_string(),

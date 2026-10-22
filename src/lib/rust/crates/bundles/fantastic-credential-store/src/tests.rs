@@ -1024,6 +1024,92 @@ async fn concurrent_sets_lose_no_ref() {
     );
 }
 
+/// The spec's end-to-end test: a real `set` and `get` through the store, then a
+/// flush. The value is in no row, no stored memory row; the caller still gets it.
+#[tokio::test]
+async fn a_set_and_a_get_leave_the_value_in_no_row_event_or_store() {
+    use fantastic_kernel::test_support::rows_about;
+    let f = mk(json!({})).await;
+    // a ram_store memory under the root, named by the root, so the flush lands in it
+    let root = f.k.root().expect("root").id.clone();
+    let made = op(
+        &f.k,
+        json!({"type": "create_agent", "parent_id": root.0, "id": "memory",
+               "handler_module": "ram_store.tools"}),
+    )
+    .await;
+    assert_eq!(made["id"], json!("memory"), "{made}");
+    let mut patch = Map::new();
+    patch.insert("memory_store_id".to_string(), json!("memory"));
+    f.k.update(&root, patch);
+    // the flusher runs only on a started kernel
+    let started = f.k.start(false).await;
+    assert_eq!(started["started"], json!(true), "{started}");
+
+    seed(&f.k).await;
+    let got = call(
+        &f.k,
+        json!({"type": "get", "ref": "openai/main"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(got.result["fields"], json!({"api_key": KEY}), "{}", got.result);
+
+    f.k.flush_executions().await;
+
+    // the memory store holds no value: its whole dump is free of KEY
+    let dumped = f
+        .k
+        .send(vec![Item::new(AgentId::from("memory"), json!({"type": "dump"}))])
+        .await
+        .remove(0)
+        .result
+        .to_string();
+    assert!(!dumped.contains(KEY), "{dumped}");
+    assert!(dumped.contains("[secret]"), "{dumped}");
+
+    // and no row of the store or its callers holds it
+    for who in ["creds", "alice", "bob", "kernel"] {
+        let rows = format!("{:?}", rows_about(&f.k, &AgentId::from(who)));
+        assert!(!rows.contains(KEY), "{who}: {rows}");
+    }
+}
+
+/// Review bug 2: a `set` refused by the CALL GATE (a caller the store does not
+/// admit) stores nothing, and its value is in no row of the kernel.
+#[tokio::test]
+async fn a_gate_refused_set_leaves_no_value_in_any_row() {
+    use fantastic_kernel::test_support::rows_about;
+    let f = mk(json!({})).await;
+    seed(&f.k).await;
+    // a registered agent with no grants: the store's callable_by does not name it
+    f.k.register(Agent::new(
+        AgentId::from("stranger"),
+        None,
+        Some(AgentId::from(root_of(&f.k))),
+        json!({}).as_object().cloned().unwrap(),
+        std::path::PathBuf::new(),
+        false,
+    ));
+    let refused = call(
+        &f.k,
+        json!({"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}}),
+        Some("stranger"),
+    )
+    .await;
+    assert_ne!(refused.status.as_str(), "completed", "{}", refused.result);
+    assert!(!refused.result.to_string().contains(KEY2), "{}", refused.result);
+    for who in ["creds", "stranger", "alice", "bob", "kernel"] {
+        let rows = format!("{:?}", rows_about(&f.k, &AgentId::from(who)));
+        assert!(!rows.contains(KEY2), "{who}: {rows}");
+    }
+    assert!(!std::fs::read_to_string(f.file()).unwrap().contains(KEY2));
+}
+
+fn root_of(k: &Arc<Kernel>) -> String {
+    k.root().expect("root").id.0.clone()
+}
+
 #[test]
 fn the_default_file_is_under_the_homes_user_credentials() {
     // FANTASTIC_HOME unset in the test process unless a runner set it
