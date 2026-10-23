@@ -31,7 +31,10 @@ fn readme_is_python_verbatim() {
 fn resolve_refuses_escape() {
     let tmp = tempfile::TempDir::new().unwrap();
     let err = fs::resolve(tmp.path(), "../escape").unwrap_err();
-    assert_eq!(err, "fs: path '../escape' escapes root");
+    assert!(
+        err.starts_with("fs: path '../escape' escapes root"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -47,7 +50,10 @@ fn resolve_refuses_absolute_path() {
     // python's `fs.resolve` refuses ANY leading '/', re-rooting nothing.
     let tmp = tempfile::TempDir::new().unwrap();
     let err = fs::resolve(tmp.path(), "/etc/passwd").unwrap_err();
-    assert_eq!(err, "fs: path '/etc/passwd' escapes root");
+    assert!(
+        err.starts_with("fs: path '/etc/passwd' escapes root"),
+        "{err}"
+    );
     // The agent layer answers the same shape with `bad_arg` BEFORE reaching fs.
     let r = read_stream_reply(&fb(), &at(tmp.path()), &json!({"path": "/etc/passwd"})).0;
     assert_eq!(r["reason"], "bad_arg");
@@ -462,7 +468,13 @@ fn an_in_root_symlink_pointing_outside_refuses() {
     // The lexical form is in-root; the canonical form is not.
     let (m, b) = read_stream_reply(&fb(), &r, &json!({"path": "docs/secret.txt"}));
     assert_eq!(m["reason"], "transport_error", "{m}");
-    assert_eq!(m["error"], "fs: path 'docs/secret.txt' escapes root");
+    assert!(
+        m["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("fs: path 'docs/secret.txt' escapes root"),
+        "{m}"
+    );
     assert_eq!(b, None);
     let l = list_reply(&fb(), &r, &json!({"path": "docs"}));
     assert_eq!(l["reason"], "transport_error", "{l}");
@@ -490,10 +502,22 @@ fn dangling_symlink_pointing_outside_root_refuses() {
     let r = at(&root);
     let w = write_stream_reply(&r, &json!({"path": "dangling"}), Some(b"x"), false);
     assert_eq!(w["reason"], "transport_error", "{w}");
-    assert_eq!(w["error"], "fs: path 'dangling' escapes root");
+    assert!(
+        w["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("fs: path 'dangling' escapes root"),
+        "{w}"
+    );
     assert!(!outside.join("gone.txt").exists());
     let (m, _) = read_stream_reply(&fb(), &r, &json!({"path": "dangling"}));
-    assert_eq!(m["error"], "fs: path 'dangling' escapes root", "{m}");
+    assert!(
+        m["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("fs: path 'dangling' escapes root"),
+        "{m}"
+    );
     // A dangling link pointing INSIDE the root is still a deletable name.
     symlink(root.join("gone.txt"), root.join("inside")).unwrap();
     let d = delete_reply(&r, &json!({"path": "inside"}), false);
@@ -711,7 +735,13 @@ fn refusal_texts_use_python_repr() {
     let reply = delete_reply(&r, &json!({"path": "nope"}), false);
     assert_eq!(reply["error"], "path 'nope' does not exist");
     let (reply, _) = read_stream_reply(&fb(), &r, &json!({"path": "nope"}));
-    assert_eq!(reply["error"], "file 'nope' not found");
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("file 'nope' not found"),
+        "{reply}"
+    );
     assert_eq!(reply["reason"], "not_found");
     // a path holding a quote quotes python's way
     let reply = list_reply(&fb(), &r, &json!({"path": "it's"}));

@@ -88,7 +88,11 @@ pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     if is_absolute(path) {
         // An absolute path is a hard escape — refused, never silently re-rooted
         // (a stripped slash would serve `/etc/passwd` as `root/etc/passwd`).
-        return Err(format!("fs: path {} escapes root", py_repr(path)));
+        return Err(format!(
+            "fs: path {} escapes root{}",
+            py_repr(path),
+            not_found_hint(&root_p, path)
+        ));
     }
     let target = if path.is_empty() {
         root_p.clone()
@@ -103,9 +107,35 @@ pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
             target.display(),
             root_p.display()
         );
-        return Err(format!("fs: path {} escapes root", py_repr(path)));
+        return Err(format!(
+            "fs: path {} escapes root{}",
+            py_repr(path),
+            not_found_hint(&root_p, path)
+        ));
     }
     Ok(target)
+}
+
+/// Hint appended to a `not found` refusal: names the root and the relative form
+/// of the path (issue #305). An absolute path inside the root shows its relative
+/// form; a path that repeats the root's own name shows it stripped.
+pub fn not_found_hint(root: &Path, path: &str) -> String {
+    let root_s = root.display().to_string();
+    if is_absolute(path) {
+        if let Ok(rel) = Path::new(path).strip_prefix(root) {
+            return format!(
+                " — paths are relative to the root {root_s}, e.g. {}",
+                rel.display()
+            );
+        }
+        return format!(" — paths are relative to the root {root_s}");
+    }
+    if let Some(base) = root.file_name().and_then(|n| n.to_str()) {
+        if let Some(stripped) = path.strip_prefix(&format!("{base}/")) {
+            return format!(" — paths are relative to the root {root_s}, e.g. {stripped}");
+        }
+    }
+    format!(" — paths are relative to the root {root_s}")
 }
 
 /// python `fs._lexical_leaf` — the UNRESOLVED leaf under a resolved parent, the

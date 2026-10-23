@@ -399,9 +399,15 @@ async fn a_manifest_outside_the_running_dir_is_refused_at_boot() {
     let kernel = mk_kernel();
     let rec = create_loader(&kernel, "sl3", json!("/etc/hosts")).await;
     assert!(rec.get("error").is_none(), "{rec}");
-    assert_eq!(
-        boot_loader(&kernel, "sl3").await["error"],
-        "static_loader: cannot read manifest '/etc/hosts': fs: path '/etc/hosts' escapes root"
+    let err = boot_loader(&kernel, "sl3").await["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.starts_with(
+            "static_loader: cannot read manifest '/etc/hosts': fs: path '/etc/hosts' escapes root"
+        ),
+        "{err}"
     );
 }
 
@@ -411,12 +417,13 @@ fn an_absolute_manifest_inside_cwd_is_refused() {
     let (fixture, rel) = write_manifest(MANIFEST);
     let abs = std::env::current_dir().unwrap().join(&rel);
     let agent = loader_with_meta(meta_of(&[("manifest", json!(abs.display().to_string()))]));
-    assert_eq!(
-        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
-        format!(
+    let err = load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err();
+    assert!(
+        err.starts_with(&format!(
             "static_loader: cannot read manifest {q}: fs: path {q} escapes root",
             q = fantastic_bundle::py_repr(&abs.to_string_lossy())
-        )
+        )),
+        "{err}"
     );
     drop(fixture);
 }
@@ -430,12 +437,13 @@ fn a_symlinked_manifest_escaping_cwd_is_refused() {
     symlink("/etc/hosts", &link).unwrap();
     let rel_link = link.display().to_string();
     let agent = loader_with_meta(meta_of(&[("manifest", json!(rel_link.clone()))]));
-    assert_eq!(
-        load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err(),
-        format!(
+    let err = load_manifest(&agent, &std::env::current_dir().unwrap()).unwrap_err();
+    assert!(
+        err.starts_with(&format!(
             "static_loader: cannot read manifest {q}: fs: path {q} escapes root",
             q = fantastic_bundle::py_repr(&rel_link)
-        )
+        )),
+        "{err}"
     );
     drop(fixture);
 }
