@@ -280,10 +280,47 @@ async fn compose(provider: &Arc<dyn Provider>, prompt: &str) -> String {
     without_thinking(&parts.join(""))
 }
 
+/// The most of a standing task a clear row carries.
+const STANDING_TASK_CAP: usize = 4000;
+
+/// The standing task of a thread: the `task` its opening clear row carried, else its
+/// first user message that is not a reply, a fold or bookkeeping. `None` when the
+/// thread has none yet.
+fn standing_task(rows: &[Value]) -> Option<String> {
+    for r in rows {
+        let kind = r.get("kind").and_then(Value::as_str);
+        if kind == Some("clear") {
+            if let Some(t) = r.get("task").and_then(Value::as_str) {
+                return Some(t.to_string());
+            }
+            continue;
+        }
+        if kind.is_some() || r.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let c = r
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if c.is_empty() || c.starts_with("[reply to ") {
+            continue;
+        }
+        let mut t: String = c.chars().take(STANDING_TASK_CAP).collect();
+        if c.chars().count() > STANDING_TASK_CAP {
+            t.push_str(" … (cut)");
+        }
+        return Some(t);
+    }
+    None
+}
+
 /// `context_clear`: a NEW THREAD on the same store — a CLEAR-FOLD: one row whose
 /// members are every row since the previous clear (no summary), and the model's
 /// view begins at its `[cleared <id> · N rows]` line. Nothing is deleted or
-/// forgotten: grep, recall and `history {fold: <id>}` reach every member.
+/// forgotten: grep, recall and `history {fold: <id>}` reach every member. The
+/// thread's standing task (its first message) is copied onto the clear row, so a
+/// restarted agent still has the message that set its role in view (#218).
 ///
 /// args: `why?` (a sentence, whitespace-collapsed and capped at 200). Returns
 /// `{cleared, rows}`. Mirrors python `_context_clear`.
@@ -294,8 +331,11 @@ pub async fn context_clear(
     model_window: i64,
 ) -> MemResult<Value> {
     let meta = agent_meta(agent_id, kernel);
-    let members: Vec<i64> = head(agent_id, kernel)
-        .await?
+    let rows = head(agent_id, kernel).await?;
+    // The standing task rides across the clear (#218): the thread's first message
+    // is what set the agent's role, and a restart must not lose it.
+    let task = standing_task(&rows);
+    let members: Vec<i64> = rows
         .iter()
         .filter(|r| {
             !r.get("kind")
@@ -329,10 +369,15 @@ pub async fn context_clear(
             "title": if why.is_empty() { "cleared" } else { why.as_str() },
             "content": format!(
                 "[cleared {rid} · {} rows]{} — a new thread; the rows before it are this \
-                 clear's members, reachable by id (grep, recall, history fold={rid}).",
+                 clear's members, reachable by id (grep, recall, history fold={rid}).{}",
                 members.len(),
-                if why.is_empty() { String::new() } else { format!(" {why}") }
+                if why.is_empty() { String::new() } else { format!(" {why}") },
+                task.as_deref().map_or_else(String::new, |t| format!(
+                    "\n\nStanding task — the first message of this agent's work, kept \
+                     across clears:\n{t}"
+                ))
             ),
+            "task": task.map_or(Value::Null, Value::from),
         })],
     )
     .await?;

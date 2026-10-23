@@ -6468,9 +6468,12 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
         Some(2),
         "the clear-fold's members are the earlier rows"
     );
+    // The thread's first message is its standing task (#218): it rides on the clear
+    // row, and nothing else of the old thread does.
+    assert_eq!(hist[0]["task"], "the codename is HALCYON");
     assert!(
-        !serde_json::to_string(&hist).unwrap().contains("HALCYON"),
-        "no old content in the new thread: {hist:?}"
+        !serde_json::to_string(&hist).unwrap().contains("noted"),
+        "no old content but the standing task in the new thread: {hist:?}"
     );
 
     // behind the boundary, everything is still there
@@ -6492,7 +6495,8 @@ async fn context_clear_starts_a_new_thread_without_deleting() {
         .await
         .remove(0)
         .result;
-    assert_eq!(r.get("total").and_then(Value::as_i64), Some(1), "{r}");
+    // The old row, and the clear row that now carries it as the standing task (#218).
+    assert_eq!(r.get("total").and_then(Value::as_i64), Some(2), "{r}");
     let g = kernel
         .send(vec![Item::new(
             backend.clone(),
@@ -6550,6 +6554,11 @@ mod fold_anchors;
 /// The operator's `context_fold` — a range of the view folded into one fold row.
 #[path = "tests_context_fold.rs"]
 mod context_fold;
+
+/// A `context_clear` carries the thread's standing task across the clear, so a
+/// restarted agent still has the message that set its role in view (#218).
+#[path = "tests_standing_task.rs"]
+mod standing_task;
 
 /// The record's `caching` modes: `cleanup` trims the view, `none` and `provider_cache`
 /// keep it append-only, `provider_cache` flags the primer and the last fold, and the
