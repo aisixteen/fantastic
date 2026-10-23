@@ -897,6 +897,10 @@ pub async fn send(
     kernel: &Arc<Kernel>,
     cfg: BackendConfig,
 ) -> Result<Value, BundleError> {
+    // PAUSED: the message is held in the store, in order, and not run (#219).
+    if let Some(held) = crate::pause::hold_if_paused(agent_id, payload, kernel).await? {
+        return Ok(held);
+    }
     let mut text = match payload.get("text") {
         Some(Value::String(s)) => s.clone(),
         // The tag grammar types a bare number; a number is text too (python).
@@ -1743,6 +1747,8 @@ where
         // THE ROW EVENT: this agent announces its own rows to its watchers.
         "watch" => watch(agent_id, payload, kernel).await?,
         "unwatch" => unwatch(agent_id, payload, kernel),
+        "pause" => crate::pause::pause(agent_id, payload, kernel).await?,
+        "resume" => crate::pause::resume(agent_id, payload, kernel).await?,
         _ => return Ok(None),
     };
     Ok(Some(reply))
