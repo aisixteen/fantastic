@@ -267,7 +267,7 @@ async def _reflect(id, payload, kernel):
             "document EXACTLY ONCE. `edit` is a TRANSACTION over "
             "`edits:[{path, hunks, if_match?}]` — even one file rides the "
             "array; the blob holds every edit's hunks concatenated in `edits` "
-            "order, split by the per-edit `hunks` count — with ONE file, `hunks` may be left out and every block applies to it; any failure anywhere "
+            "order, split by the per-edit `hunks` count — with ONE file, `hunks` may be left out and every block applies to it; with several files, a block may name its file on its first line (`<<<<<<< SEARCH path`), and then no hunks are needed; any failure anywhere "
             "writes nothing"
         ),
         "compose": (
@@ -768,16 +768,21 @@ async def _append(id, payload, kernel):
     return {"path": path, "size": size, "version": _version(whole)}
 
 
-def _parse_hunks(text: str) -> list[tuple[str, str]]:
-    """SEARCH/REPLACE blocks → (search, replace) pairs, taken VERBATIM (the marker
-    lines excluded). Raises ValueError on a block that opens but does not close."""
+def _parse_hunks(text: str) -> list[tuple[str | None, str, str]]:
+    """SEARCH/REPLACE blocks → (file, search, replace) triples, taken VERBATIM (the
+    marker lines excluded). A block may name its file on its opening line
+    (`<<<<<<< SEARCH path`); then `file` is that path, otherwise None. Raises
+    ValueError on a block that opens but does not close."""
     lines = text.split("\n")
-    hunks: list[tuple[str, str]] = []
+    hunks: list[tuple[str | None, str, str]] = []
     i, n = 0, len(lines)
     while i < n:
-        if lines[i] != _H_START:
+        # `<<<<<<< SEARCH` alone, or `<<<<<<< SEARCH <path>` naming the file.
+        open_line = lines[i]
+        if open_line != _H_START and not open_line.startswith(_H_START + " "):
             i += 1
             continue
+        file = open_line[len(_H_START) :].strip() or None
         j = i + 1
         search: list[str] = []
         while j < n and lines[j] != _H_DIV:
@@ -792,7 +797,7 @@ def _parse_hunks(text: str) -> list[tuple[str, str]]:
             j += 1
         if j >= n:
             raise ValueError("a block has no closing `>>>>>>> REPLACE`")
-        hunks.append(("\n".join(search), "\n".join(replace)))
+        hunks.append((file, "\n".join(search), "\n".join(replace)))
         i = j + 1
     return hunks
 
@@ -822,6 +827,21 @@ async def _edit(id, payload, kernel):
             "bytes",
             "at least one `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` block",
         )
+    # #206 — a block may name its file on its opening line. Either every block
+    # names one or none does; named blocks are matched to `edits` by path, so the
+    # per-edit `hunks` counts are not needed.
+    named = any(f is not None for f, _, _ in hunks)
+    if named:
+        if any(f is None for f, _, _ in hunks):
+            return bad("edit", "bytes", "name the file on every block or on none")
+        known = {
+            _norm(e["path"])
+            for e in edits
+            if isinstance(e, dict) and isinstance(e.get("path"), str)
+        }
+        for f, _, _ in hunks:
+            if _norm(f) not in known:
+                return bad("edit", "bytes", f"a block names {f}, which is not in edits")
     root = _root(kernel, rec)
     allow = _allow(rec)
     plan: list[dict] = []
@@ -833,11 +853,6 @@ async def _edit(id, payload, kernel):
             or not e["path"]
         ):
             return bad("edit", "edits", f"edit {i}: an object with a `path`")
-        n = e.get("hunks")
-        if len(edits) == 1 and n is None:
-            n = len(hunks)
-        elif not isinstance(n, int) or isinstance(n, bool) or n < 1:
-            return bad("edit", "edits", f"edit {i} ({e['path']!r}): `hunks` (int >= 1)")
         if any(_norm(p["path"]) == _norm(e["path"]) for p in plan):
             return bad(
                 "edit",
@@ -846,15 +861,39 @@ async def _edit(id, payload, kernel):
             )
         if gate := _gate_path("edit", root, allow, e["path"]):
             return gate
+        if named:
+            want = _norm(e["path"])
+            mine = [(s, r) for f, s, r in hunks if f is not None and _norm(f) == want]
+            if not mine:
+                return bad(
+                    "edit", "edits", f"edit {i} ({e['path']!r}): no block names it"
+                )
+            stated = e.get("hunks")
+            if stated is not None and stated != len(mine):
+                return bad(
+                    "edit",
+                    "edits",
+                    f"edit {i} ({e['path']!r}): hunks says {stated}, the blob has "
+                    f"{len(mine)} block(s) naming it — leave hunks out",
+                )
+            plan.append(
+                {"path": e["path"], "hunks": mine, "if_match": e.get("if_match")}
+            )
+            continue
+        n = e.get("hunks")
+        if len(edits) == 1 and n is None:
+            n = len(hunks)
+        elif not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            return bad("edit", "edits", f"edit {i} ({e['path']!r}): `hunks` (int >= 1)")
         plan.append(
             {
                 "path": e["path"],
-                "hunks": hunks[cursor : cursor + n],
+                "hunks": [(s, r) for _, s, r in hunks[cursor : cursor + n]],
                 "if_match": e.get("if_match"),
             }
         )
         cursor += n
-    if cursor != len(hunks):
+    if not named and cursor != len(hunks):
         msg = (
             f"hunk counts that sum to the blob's blocks — edits claim {cursor}, "
             f"the patch holds {len(hunks)}"
