@@ -5559,7 +5559,7 @@ fn a_null_context_strategy_is_refused_with_pythons_text() {
     let want = "(valid: ['compact', 'truncate', 'strip', 'fold'])";
     assert_eq!(
         fantastic_bundle::py_repr_value(&json!(crate::strategies::STRATEGY_NAMES)),
-        "['compact', 'truncate', 'strip', 'fold']"
+        "['compact', 'truncate', 'strip', 'fold', 'none']"
     );
     assert!(format!("x {want}").contains(want));
     assert_eq!(fantastic_bundle::py_repr_value(&json!(null)), "None");

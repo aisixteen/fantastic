@@ -164,7 +164,7 @@ pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
         Field::new(
             "context_strategy",
             "enum",
-            "how the conversation is fitted into the window",
+            "how the conversation is fitted into the window (none = never shrink: an over-budget turn is refused)",
         )
         .one_of(&STRATEGY_NAMES)
         .default(json!(DEFAULT_STRATEGY)),
@@ -519,7 +519,7 @@ mod tests {
         assert_eq!(
             validate(&sample(), "x", &obj(json!({"context_strategy": 3})), &rec).as_deref(),
             Some(
-                "context_strategy=3 is not one of the legal values: compact, truncate, strip, fold"
+                "context_strategy=3 is not one of the legal values: compact, truncate, strip, fold, none"
             )
         );
         // null is "not named" — never judged against the set

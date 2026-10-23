@@ -139,6 +139,8 @@ pub use verbs::{CANCEL_DOC, SEND_TIMEOUT_SECS};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_context_none;
+#[cfg(test)]
 mod tests_credentials;
 #[cfg(test)]
 mod tests_folds;
