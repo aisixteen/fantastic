@@ -1238,6 +1238,8 @@ fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_path_gate;
+#[cfg(test)]
 mod tests_pump_identity;
 #[cfg(test)]
 mod tests_text;
