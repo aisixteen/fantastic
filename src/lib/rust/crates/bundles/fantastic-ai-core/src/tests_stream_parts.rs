@@ -599,7 +599,17 @@ async fn stop_reaches_a_reply_woken_turn() {
     let target = ai.clone();
     let born = crate::state::incarnation(&ai);
     kernel.spawn_task(&ai, "deliver_reply", async move {
-        crate::route::deliver(&k, target.as_str(), "tool reply", "tab", None, born, false, String::new()).await;
+        crate::route::deliver(
+            &k,
+            target.as_str(),
+            "tool reply",
+            "tab",
+            None,
+            born,
+            false,
+            String::new(),
+        )
+        .await;
     });
     until_requests(&fp, 1).await;
     let out = as_agent(

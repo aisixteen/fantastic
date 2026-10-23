@@ -1133,8 +1133,8 @@ pub async fn send(
     // was decided under. If that chain has since ended (a stop, a reboot, a clear,
     // a lost wake) the token no longer matches: the reply is RECORDED, never a
     // turn, so it cannot resume or double the chain.
-    let stale = !chain_token.is_empty()
-        && state.chain.lock().expect("chain poisoned").token != chain_token;
+    let stale =
+        !chain_token.is_empty() && state.chain.lock().expect("chain poisoned").token != chain_token;
     if stale {
         save_late(agent_id, kernel, payload).await?;
         drop(_guard);

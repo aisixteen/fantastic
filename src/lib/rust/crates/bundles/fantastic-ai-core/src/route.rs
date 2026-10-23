@@ -126,12 +126,27 @@ pub(crate) fn deliver_soon(
     let born = crate::state::incarnation(&AgentId::from(target));
     // ONE CHAIN PER AGENT (#227 Bug 4): the chain token is read when the routing
     // decision is made, not when the delivery later runs.
-    let chain = if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
-        state_for(&AgentId::from(target)).chain.lock().expect("chain poisoned").token.clone()
-    } else {
-        String::new()
-    };
-    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born, notice, chain);
+    let chain =
+        if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
+            state_for(&AgentId::from(target))
+                .chain
+                .lock()
+                .expect("chain poisoned")
+                .token
+                .clone()
+        } else {
+            String::new()
+        };
+    deliver_soon_with_born(
+        kernel,
+        target,
+        text,
+        client_id,
+        system_prompt,
+        born,
+        notice,
+        chain,
+    );
 }
 
 /// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
@@ -1844,7 +1859,9 @@ async fn deliver_grouped(
             notice,
             // ONE CHAIN PER AGENT (#227 Bug 4): the token is read when this routing
             // decision is made, as in `deliver_soon`.
-            if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str()) {
+            if notice
+                || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str())
+            {
                 state_for(&AgentId::from(dest.as_str()))
                     .chain
                     .lock()
