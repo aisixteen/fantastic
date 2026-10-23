@@ -107,7 +107,13 @@ impl Drop for Held<'_> {
 pub(crate) fn version_of(data: &[u8]) -> String {
     let d = Sha256::digest(data);
     let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
-    hex[..16].to_string()
+    let mut v = hex[..16].to_string();
+    // A version that parses as a number would arrive as one and lose its digits;
+    // hex never starts with a non-digit number form, so 'a' breaks the parse.
+    if v.parse::<f64>().is_ok() {
+        v.replace_range(0..1, "a");
+    }
+    v
 }
 
 /// The lock / slot key of a path — its normalized form.
@@ -144,9 +150,26 @@ fn current(root: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
 /// The on-demand optimistic guard: a refusal when `if_match` names another
 /// version (an absent document has no version and never matches). `expected`
 /// echoes the caller's RAW value.
+/// Does the caller's `if_match` name this version? A string compares as text;
+/// a JSON number matches when its text form is the version, or when the version
+/// parses as the same JSON number (e.g. `12e45` arrives as f64 and was never
+/// the digits the caller meant).
+pub(crate) fn same_version(want: &Value, have: &str) -> bool {
+    match want {
+        Value::String(s) => s == have,
+        Value::Number(n) => {
+            n.to_string() == have
+                || serde_json::from_str::<Value>(have)
+                    .ok()
+                    .is_some_and(|v| v.as_number() == Some(n))
+        }
+        _ => false,
+    }
+}
+
 fn mismatch(path: &str, want: &Value, have_bytes: Option<&[u8]>) -> Option<Value> {
     let have = have_bytes.map(version_of);
-    if have.as_deref().is_some_and(|h| want.as_str() == Some(h)) {
+    if have.as_deref().is_some_and(|h| same_version(want, h)) {
         return None;
     }
     Some(json!({

@@ -472,6 +472,47 @@ async fn if_match_guards_write_and_edit() {
     assert_eq!(r["path"], "v.txt");
 }
 
+/// An all-digit version given as a JSON number still matches.
+#[tokio::test]
+async fn an_all_digit_version_matches_as_a_number() {
+    use crate::text::same_version;
+    assert!(same_version(
+        &json!(1234567890123456u64),
+        "1234567890123456"
+    ));
+    assert!(same_version(&json!("1234567890123456"), "1234567890123456"));
+    assert!(!same_version(
+        &json!(1234567890123457u64),
+        "1234567890123456"
+    ));
+}
+
+/// A version like `12e45` matches whether given as a number or a string.
+#[tokio::test]
+async fn an_exponent_like_version_matches() {
+    use crate::text::same_version;
+    assert!(same_version(&json!("12e45"), "12e45"));
+    for i in 0..5000u32 {
+        let v = crate::text::version_of(i.to_string().as_bytes());
+        assert!(v.parse::<f64>().is_err(), "{v}");
+    }
+}
+
+/// A numeric if_match that differs is still refused.
+#[tokio::test]
+async fn a_numeric_if_match_that_differs_is_refused() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "n.txt", "one\n").await;
+    let r = call(
+        &k,
+        json!({"type": "write", "path": "n.txt", "bytes": "x", "if_match": 1234567890123456u64}),
+    )
+    .await;
+    assert_eq!(r["reason"], "version_mismatch", "{r}");
+    assert_eq!(text_of(&tmp, "n.txt"), "one\n");
+}
+
 /// The per-edit mismatch keys come in python's order.
 #[tokio::test]
 async fn version_mismatch_key_order_is_pythons() {
