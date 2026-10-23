@@ -8,7 +8,7 @@ Verbs: `read(path,offset?,limit?)` · `write(path,bytes,if_match?)` · `edit(edi
 **Text documents** (any format — the bridge imposes none):
 - `read(path, offset=0, limit=200)` → a line-numbered page `{lines:[{n,text}], total, eof, version}`; refuses binary.
 - `write(path, bytes, if_match?)` → atomic whole-document write; `append(path, bytes)` → one chunk at the end.
-- `edit(edits:[{path, hunks, if_match?}], bytes)` → SEARCH/REPLACE hunks (`reflect` shows the grammar), a TRANSACTION over every listed file: any failure writes nothing.
+- `edit(edits:[{path, hunks, if_match?}], bytes)` → SEARCH/REPLACE hunks (`reflect` shows the grammar), a TRANSACTION over every listed file: any failure writes nothing. Text that holds conflict markers takes the 8-character fence: `<<<<<<<< SEARCH` / `========` / `>>>>>>>> REPLACE` (N `<`, `=`, `>` with N ≥ 8).
 - `version` = the document's hash; `if_match` refuses a write when the document changed since you read it.
 - `undo(path)` → swaps the document with what the last write/edit/append replaced (a second `undo` is redo). ONE slot per path, in RAM — lost on restart, nothing kept on disk.
 

@@ -1084,3 +1084,65 @@ async fn a_stated_hunks_must_match_the_named_blocks() {
     assert_eq!(text_of(&tmp, "a.txt"), "x = 1\nw = 3\n");
     assert_eq!(text_of(&tmp, "b.txt"), "y = 1\n");
 }
+
+fn block8(old: &str, new: &str) -> String {
+    format!("<<<<<<<< SEARCH\n{old}\n========\n{new}\n>>>>>>>> REPLACE")
+}
+
+#[tokio::test]
+async fn a_conflict_block_resolves_with_the_long_fence() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    let conflict = "<<<<<<< HEAD\nours = 1\n=======\ntheirs = 2\n>>>>>>> origin/main";
+    seed(&k, "c.txt", &format!("top = 0\n{conflict}\nbottom = 9\n")).await;
+    let blob = block8(conflict, "merged = 3");
+    let r = patch(&k, "c.txt", Some(&blob), json!({})).await;
+    assert!(r.get("reason").is_none(), "{r}");
+    assert_eq!(text_of(&tmp, "c.txt"), "top = 0\nmerged = 3\nbottom = 9\n");
+}
+
+#[tokio::test]
+async fn head_and_theirs_markers_without_a_bare_separator_work_with_the_normal_fence() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "d.txt", "<<<<<<< HEAD\nx = 1\n>>>>>>> origin/main\n").await;
+    let blob = block("<<<<<<< HEAD\nx = 1\n>>>>>>> origin/main", "x = 2");
+    let r = patch(&k, "d.txt", Some(&blob), json!({})).await;
+    assert!(r.get("reason").is_none(), "{r}");
+    assert_eq!(text_of(&tmp, "d.txt"), "x = 2\n");
+}
+
+#[tokio::test]
+async fn a_malformed_block_applies_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "e.txt", "a = 1\nb = 2\n").await;
+    let blob = block("a = 1", "a = 2") + "\n<<<<<<< SEARCH\nb = 2\n=======\nb = 3\n";
+    let r = patch(&k, "e.txt", Some(&blob), json!({})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    assert_eq!(text_of(&tmp, "e.txt"), "a = 1\nb = 2\n");
+}
+
+#[tokio::test]
+async fn the_refusal_names_the_long_fence() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "f.txt", "a\n=======\nb\n").await;
+    let blob = block("a\n=======\nb", "c");
+    let r = patch(&k, "f.txt", Some(&blob), json!({})).await;
+    assert_eq!(r["reason"], "bad_arg", "{r}");
+    let err = r["error"].as_str().unwrap_or_default();
+    assert!(err.contains("use the 8-character fence"), "{r}");
+    assert_eq!(text_of(&tmp, "f.txt"), "a\n=======\nb\n");
+}
+
+#[tokio::test]
+async fn mixed_fence_lengths_in_one_edit() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = mk(&tmp, json!({})).await;
+    seed(&k, "g.txt", "a = 1\nb = 2\n").await;
+    let blob = block("a = 1", "a = 2") + "\n" + &block8("b = 2", "b = 3");
+    let r = patch(&k, "g.txt", Some(&blob), json!({})).await;
+    assert!(r.get("reason").is_none(), "{r}");
+    assert_eq!(text_of(&tmp, "g.txt"), "a = 2\nb = 3\n");
+}
