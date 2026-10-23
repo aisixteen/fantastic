@@ -1182,24 +1182,74 @@ pub async fn send(
     // dropped, releasing the provider stream and the FIFO guard) — the backend
     // holds no task handle of its own.
     let timeout_secs = send_timeout_secs();
-    let outcome = tokio::select! {
-        biased;
-        // STOPPED: `stop` closed this turn already, and the generation below is
-        // dropped — its provider stream with it (#177).
-        _ = abort.notified() => None,
-        r = tokio::time::timeout(
-            Duration::from_secs_f64(timeout_secs),
-            run_generation(
-                &provider,
-                agent_id,
-                &state,
-                &text,
-                kernel,
-                &client_id,
-                cfg,
-                system_prompt,
-            ),
-        ) => Some(r),
+    // TRANSPORT RETRIES (#198 part 2): a pass that failed on the link is re-run,
+    // visibly, up to the agent's `transport_retries` (0 = off).
+    let retries = agent_meta(agent_id, kernel)
+        .get("transport_retries")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .clamp(0, 5) as u32;
+    let mut attempt: u32 = 0;
+    let outcome = loop {
+        let r = tokio::select! {
+            biased;
+            // STOPPED: `stop` closed this turn already, and the generation below is
+            // dropped — its provider stream with it (#177).
+            _ = abort.notified() => None,
+            r = tokio::time::timeout(
+                Duration::from_secs_f64(timeout_secs),
+                run_generation(
+                    &provider,
+                    agent_id,
+                    &state,
+                    &text,
+                    kernel,
+                    &client_id,
+                    cfg,
+                    system_prompt.clone(),
+                ),
+            ) => Some(r),
+        };
+        match r {
+            Some(Ok(Err(GenFailure::Provider(ref pe)))) if pe.transport && attempt < retries => {
+                attempt += 1;
+                let message = pe.message.clone();
+                // A visible row: the model and the operator both read the retry.
+                let _ = crate::memory::save_history(
+                    agent_id,
+                    kernel,
+                    &[json!({
+                        "role": "user",
+                        "parent": Value::Null,
+                        "kind": "notice",
+                        "content": format!(
+                            "[retry {attempt}/{retries}] the link dropped ({message}) — retrying the turn"
+                        ),
+                    })],
+                )
+                .await;
+                let mut detail = Map::new();
+                detail.insert("attempt".to_string(), json!(attempt));
+                detail.insert("of".to_string(), json!(retries));
+                detail.insert("error".to_string(), json!(message));
+                emit_status(kernel, &state, agent_id, &client_id, "retrying", detail).await;
+                // Backoff 2 s, 4 s, 8 s …; tests use a few milliseconds.
+                let wait = if cfg!(test) {
+                    Duration::from_millis(5)
+                } else {
+                    Duration::from_secs(1u64 << attempt)
+                };
+                let stopped = tokio::select! {
+                    biased;
+                    _ = abort.notified() => true,
+                    _ = tokio::time::sleep(wait) => false,
+                };
+                if stopped {
+                    break None;
+                }
+            }
+            other => break other,
+        }
     };
     let Some(outcome) = outcome else {
         // Nothing is routed and nothing is stored here: `stop` wrote the marker row
