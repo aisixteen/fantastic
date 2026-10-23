@@ -782,6 +782,9 @@ class Agent:
         marks, bad_secret = _secret.check(item)
         if bad_secret is not None:
             return outcome(None, FAILED, bad_secret)
+        # The target's OWN secret paths (its bundle's `payload_secret`) join the
+        # item's marks before any refusal below, so a refused call row shows them too.
+        marks = self._bundle_marks(self._resolve_agent(target_id), payload, marks)
         # A DYING TASK REGISTERS NO NEW WORK. `cancel_task` marks the whole
         # subtree before it aborts anything, because `on_cancel` hooks await —
         # so a doomed handler gets scheduling passes on its way out, and what it
@@ -984,6 +987,49 @@ class Agent:
                 ),
             )
         return None
+
+    def _bundle_marks(self, target, payload: dict, marks: tuple) -> tuple:
+        """The item's marks plus the paths the target's bundle names for this
+        payload (its module-level `payload_secret(payload)` hook), each once.
+        Malformed or `type` paths are dropped: the bundle hook never widens the
+        verb. An unknown target or a bundle without the hook returns `marks`."""
+        if target is None:
+            return marks
+        hook = target.module_hook("payload_secret")
+        if hook is None:
+            return marks
+        extra = []
+        for m in hook(payload) or ():
+            if (
+                isinstance(m, str)
+                and m
+                and m != "type"
+                and "" not in m.split(".")
+                and m not in marks
+                and m not in extra
+            ):
+                extra.append(m)
+        return tuple(marks) + tuple(extra) if extra else marks
+
+    def _reply_marks(self, target_id, payload, reply) -> tuple:
+        """The reply paths the target's bundle names (its module-level
+        `reply_secret(payload, reply)` hook). They are recorded as `[secret]` in
+        the settle row only; the caller still gets the reply whole."""
+        target = self._resolve_agent(target_id) if isinstance(target_id, str) else None
+        if (
+            target is None
+            or not isinstance(payload, dict)
+            or not isinstance(reply, dict)
+        ):
+            return ()
+        hook = target.module_hook("reply_secret")
+        if hook is None:
+            return ()
+        return tuple(
+            m
+            for m in (hook(payload, reply) or ())
+            if isinstance(m, str) and m and m != "type" and "" not in m.split(".")
+        )
 
     def _ledger_open(
         self, exec_id: int, target, payload, timeout, item, *, name, marks=()
@@ -1271,7 +1317,15 @@ class Agent:
                 "kind": "settle",
                 "parent": pid,
                 "settled": target,
-                "outcome": stored_outcome(out, bool((exe or {}).get("named"))),
+                "outcome": stored_outcome(
+                    out,
+                    bool((exe or {}).get("named")),
+                    self._reply_marks(
+                        (exe or {}).get("target"),
+                        (exe or {}).get("payload"),
+                        out.get("result"),
+                    ),
+                ),
                 "attempts": attempts,
             },
         )

@@ -380,6 +380,34 @@ async def _forget(id, payload, agent):
     return {"forgotten": True, "ref": ref}
 
 
+def _field_marks(fields) -> list[str]:
+    """The secret paths of a `fields` value: `fields.<name>` for each name of a
+    map; the whole `fields` when a name is empty or holds a dot, or `fields` is
+    not a map (mirrors the Rust port's `field_marks`). Absent ⇒ none."""
+    if fields is None:
+        return []
+    if isinstance(fields, dict) and all(
+        isinstance(k, str) and k and "." not in k for k in fields
+    ):
+        return [f"fields.{k}" for k in fields]
+    return ["fields"]
+
+
+def payload_secret(payload: dict) -> list[str]:
+    """A `set`'s field values are secret: recorded as `[secret]` by the kernel."""
+    if payload.get("type") != "set":
+        return []
+    return _field_marks(payload.get("fields"))
+
+
+def reply_secret(payload: dict, reply: dict) -> list[str]:
+    """A `get` reply's field values are secret: recorded as `[secret]`; the caller
+    gets them whole."""
+    if payload.get("type") != "get":
+        return []
+    return _field_marks(reply.get("fields") if isinstance(reply, dict) else None)
+
+
 VERBS = {
     "reflect": _reflect,
     "boot": _boot,
