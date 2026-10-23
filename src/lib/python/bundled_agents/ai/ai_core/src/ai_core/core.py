@@ -1404,21 +1404,34 @@ def _wrapper_tag(report: str) -> str:
 def _escalation(n: int, kind: str, tag: str | None = None) -> str:
     """The block a chain gets from its second answer in a row that ran nothing."""
     if kind == "wrapped":
-        phrase, forbidden = f"put the call inside <{tag}>", f"<{tag}>"
+        t = tag or "tool_call"
+        phrase = f"put the call inside <{t}>"
+        rule = (
+            'Your next answer must START with <call name="…"> — the very first characters '
+            f"of the answer — and contain <{t}> nowhere."
+        )
     elif kind == "malformed":
         phrase = "had calls that did not parse"
-        forbidden = "any other markup around or inside the call"
+        rule = (
+            'Your next answer must START with <call name="…"> — the very first characters '
+            "of the answer — with no other markup around or inside the call."
+        )
     elif kind == "thinking_only":
         phrase = "were only thinking, with no answer"
-        forbidden = "a turn without a call: think briefly, then write the call"
+        rule = (
+            "Keep your thinking to a few lines, then write the call in your answer, "
+            "after the thinking — a call inside the thinking does not run."
+        )
     else:
         phrase = "had no call"
-        forbidden = 'an answer without a call (or <call name="done"></call> if the task is finished)'
+        rule = (
+            'Your next answer must START with <call name="…"> — the very first characters '
+            'of the answer. If the task is finished, that call is <call name="done"></call>.'
+        )
     return (
         f"[no progress — {n} answers in a row ran nothing] Your last {n} answers "
         f"{phrase}, so nothing ran.\n"
-        f'Your next answer must START with <call name="…"> — the very first characters '
-        f"of the answer — and contain {forbidden} nowhere.\n"
+        f"{rule}\n"
         "Then continue with your current step."
     )
 
