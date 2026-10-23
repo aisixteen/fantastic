@@ -14,8 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fantastic_bundle::py_repr;
-use fantastic_kernel::refusal as rf;
 use fantastic_kernel::{AgentId, Kernel};
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -44,18 +42,24 @@ fn caller() -> String {
     fantastic_kernel::send::current_origin().map_or_else(|| "kernel".to_string(), |a| a.0)
 }
 
-fn parent_of(norm: &str) -> String {
-    match norm.rsplit_once('/') {
-        Some((p, _)) if !p.is_empty() => p.to_string(),
-        _ => ".".to_string(),
-    }
-}
-
 fn under(root: &Path, norm: &str) -> PathBuf {
     if norm == "." {
         root.to_path_buf()
     } else {
         root.join(norm)
+    }
+}
+
+/// The nearest existing folder above a missing target, and the missing tail
+/// below it (the part a later `added` event will name).
+fn nearest_existing(target: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut anc = target.parent()?.to_path_buf();
+    loop {
+        if anc.is_dir() {
+            let rest = target.strip_prefix(&anc).ok()?.to_path_buf();
+            return Some((anc, rest));
+        }
+        anc = anc.parent()?.to_path_buf();
     }
 }
 
@@ -75,25 +79,18 @@ impl Watches {
         let norm = crate::norm(path)
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| ".".into());
-        let parent = parent_of(&norm);
-        let is_dir = under(root, &norm).is_dir();
-        if !(is_dir || under(root, &parent).is_dir()) {
-            let mut r = rf::refusal(
-                rf::NOT_FOUND,
-                format!(
-                    "watch_path: no directory {} to watch {} in",
-                    py_repr(&parent),
-                    py_repr(path)
-                ),
-            );
-            rf::with(&mut r, "path", json!(path));
-            return r;
-        }
+        // A missing path is accepted and pending: rewatch arms its nearest
+        // existing ancestor until the path appears.
+        let pending = !under(root, &norm).exists();
         let mut all = self.by_bridge.lock().expect("watches");
         let held = all.entry(agent_id.0.clone()).or_default();
         held.paths.entry(norm.clone()).or_default().insert(caller());
         rewatch(agent_id, held, root, kernel);
-        json!({"watching": norm, "paths": paths_json(held)})
+        let mut out = json!({"watching": norm, "paths": paths_json(held)});
+        if pending {
+            out["pending"] = json!(true);
+        }
+        out
     }
 
     /// `unwatch_path {path}`: drop the caller's hold.
@@ -135,15 +132,24 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
     // canonical target → its path under the root
     let mut files: HashMap<PathBuf, String> = HashMap::new();
     let mut dirs: HashMap<PathBuf, String> = HashMap::new();
+    // ancestors armed recursively: a pending target's folders appear under them
+    let mut recursive: BTreeSet<PathBuf> = BTreeSet::new();
     for norm in held.paths.keys() {
         let target = under(root, norm);
         if target.is_dir() {
             if let Ok(c) = target.canonicalize() {
                 dirs.insert(c, norm.clone());
             }
-        } else if let (Some(parent), Some(name)) = (target.parent(), target.file_name()) {
-            if let Ok(c) = parent.canonicalize() {
-                files.insert(c.join(name), norm.clone());
+        } else if target.is_file() {
+            if let (Some(parent), Some(name)) = (target.parent(), target.file_name()) {
+                if let Ok(c) = parent.canonicalize() {
+                    files.insert(c.join(name), norm.clone());
+                }
+            }
+        } else if let Some((anc, rest)) = nearest_existing(&target) {
+            if let Ok(c) = anc.canonicalize() {
+                files.insert(c.join(&rest), norm.clone());
+                recursive.insert(c);
             }
         }
     }
@@ -157,16 +163,21 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
     };
     let targets: BTreeSet<PathBuf> = files
         .keys()
-        .filter_map(|f| f.parent().map(Path::to_path_buf))
+        .filter_map(|f| f.parent().filter(|p| p.is_dir()).map(Path::to_path_buf))
         .chain(dirs.keys().cloned())
         .collect();
     for t in &targets {
         let _ = watcher.watch(t, RecursiveMode::NonRecursive);
     }
+    for a in &recursive {
+        let _ = watcher.watch(a, RecursiveMode::Recursive);
+    }
     held.watcher = Some(watcher);
     let me = agent_id.clone();
     let k = Arc::clone(kernel);
     kernel.spawn_task(agent_id, "watch_path", async move {
+        // paths already announced as present in this watch
+        let mut present: BTreeSet<String> = BTreeSet::new();
         loop {
             let Some(first) = rx.recv().await else { return };
             let mut events = vec![first];
@@ -186,7 +197,11 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
                 for p in &ev.paths {
                     if let Some(rel) = relative(p, &files, &dirs) {
                         if let Some(kind) = kind_of(&ev.kind, p) {
-                            seen.insert(rel, kind);
+                            // a creation inside the batch wins over a trailing modify
+                            let e = seen.entry(rel).or_insert(kind);
+                            if kind == "added" {
+                                *e = "added";
+                            }
                         }
                     }
                 }
@@ -199,6 +214,19 @@ fn rewatch(agent_id: &AgentId, held: &mut Held, root: &Path, kernel: &Arc<Kernel
                 .map(|a| crate::allow_list(&a.record().meta))
                 .unwrap_or_default();
             for (rel, kind) in seen {
+                // a path already announced as present reads `modified` again, not `added`
+                let kind = match kind {
+                    "added" if present.contains(&rel) => "modified",
+                    "added" => {
+                        present.insert(rel.clone());
+                        "added"
+                    }
+                    "deleted" => {
+                        present.remove(&rel);
+                        "deleted"
+                    }
+                    other => other,
+                };
                 if crate::exposed(&allow, &rel) {
                     k.emit(&me, json!({"type": "changed", "path": rel, "kind": kind}))
                         .await;
