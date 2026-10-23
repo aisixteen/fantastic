@@ -3037,6 +3037,117 @@ async fn status_wait_gives_up_at_the_deadline() {
         .result;
 }
 
+/// `status` on a job this agent never had answers at once, even with `wait_s`:
+/// the reply is `not_found`, not a wait for a job that will never run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_of_an_unknown_job_answers_at_once() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let t0 = std::time::Instant::now();
+    let st = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": 999_999, "wait_s": 60}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let took = t0.elapsed();
+    assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+    assert_eq!(st["reason"], "not_found", "{st}");
+}
+
+/// A `status` wait on a job that is cleared (reaped) after it ended answers at
+/// once with `not_found`: the wait does not hang on a job that is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wait_ends_when_the_job_is_reaped() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let started = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(0.2)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = started["job_id"].as_i64().expect("job_id");
+    // Wait for it to end, then reap it.
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": jid, "wait_s": 10}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "clear", "job_id": jid}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let t0 = std::time::Instant::now();
+    let st = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": jid, "wait_s": 60}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let took = t0.elapsed();
+    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    assert_eq!(st["reason"], "not_found", "{st}");
+}
+
+/// A `wait_s` on a job that is still running waits up to `wait_s` (about one
+/// second here) before answering with the job still running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wait_on_a_running_job_still_waits_up_to_wait_s() {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let started = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            py_start(&py, "import time; time.sleep(30)", false),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let jid = started["job_id"].as_i64().expect("job_id");
+    let t0 = std::time::Instant::now();
+    let st = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "status", "job_id": jid, "wait_s": 1}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let took = t0.elapsed();
+    assert_eq!(st["jobs"][0]["status"], "running", "{st}");
+    assert!(
+        took >= std::time::Duration::from_millis(900),
+        "took {took:?}"
+    );
+    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    let _ = kernel
+        .send(vec![Item::new(
+            a.clone(),
+            json!({"type": "stop", "job_id": jid}),
+        )])
+        .await;
+}
+
 /// A `wait_s` that is not a number in 0..=120, or has no job to wait for, is a
 /// bad argument.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
