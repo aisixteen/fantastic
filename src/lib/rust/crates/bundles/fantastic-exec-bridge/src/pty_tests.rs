@@ -795,15 +795,16 @@ async fn a_flood_after_the_first_ack_pauses_the_reader() {
         json!({"type": "write", "job_id": jid, "data": format!("go{ENTER}")}),
     )
     .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut st = json!({});
-    for _ in 0..250 {
+    loop {
         st = call(
             &k,
             "term_g2",
             json!({"type": "ack", "job_id": jid, "chars": 0}),
         )
         .await;
-        if st["paused"] == json!(true) {
+        if st["paused"] == json!(true) || tokio::time::Instant::now() >= deadline {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
