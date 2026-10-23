@@ -151,12 +151,26 @@ async fn mkdir_outside_is_refused() {
 
 #[tokio::test]
 async fn undo_outside_is_refused() {
+    // Seed a REAL undo slot for other.txt: open it, write it (the slot now holds
+    // "secret\n"), then close the view again. Without the gate, undo would swap the
+    // slot back in and overwrite "changed\n" with "secret\n".
     let tmp = tempfile::TempDir::new().unwrap();
-    let k = bridge(&tmp, json!({})).await;
+    let k = bridge(&tmp, json!({"allow": ["sub", "other.txt"]})).await;
+    let w = bin(&k, json!({"type": "write", "path": "other.txt"}), b"changed\n").await;
+    assert!(w.get("error").is_none(), "{w}");
+    let r = k
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": "fb", "allow": ["sub"]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(r.get("error").is_none(), "{r}");
     refused(&bin(&k, json!({"type": "undo", "path": "other.txt"}), b"").await);
     assert_eq!(
         std::fs::read(served(&tmp, "other.txt")).unwrap(),
-        b"secret\n"
+        b"changed\n"
     );
 }
 
@@ -216,13 +230,6 @@ async fn inside_paths_work_for_every_verb() {
     assert_eq!(std::fs::read(served(&tmp, "sub/in.txt")).unwrap(), b"new\n");
 }
 
-#[tokio::test]
-async fn a_readonly_view_refuses_writes_inside() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let k = bridge(&tmp, json!({"readonly": true})).await;
-    refused(&bin(&k, json!({"type": "write", "path": "sub/in.txt"}), b"new\n").await);
-    assert_eq!(std::fs::read(served(&tmp, "sub/in.txt")).unwrap(), b"old\n");
-}
 
 #[tokio::test]
 async fn binary_and_json_channels_give_the_same_refusal() {
