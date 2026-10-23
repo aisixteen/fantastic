@@ -518,6 +518,7 @@ async def test_concurrent_sends_serialize_per_backend(
     in_flight = 0
     max_in_flight = 0
     order: list[str] = []
+    seen: list[list[str]] = []
 
     class _SerialProvider:
         async def chat(self, messages, max_tokens=None):
@@ -530,6 +531,7 @@ async def test_concurrent_sends_serialize_per_backend(
                 await asyncio.sleep(0.05)
                 user = messages[-1]["content"]
                 order.append(user)
+                seen.append([m["content"] for m in messages])
                 yield 'ok <call name="done"></call>'
             finally:
                 in_flight -= 1
@@ -555,7 +557,14 @@ async def test_concurrent_sends_serialize_per_backend(
             ),
         )
         assert max_in_flight == 1, f"saw {max_in_flight} concurrent generations"
-        assert order == ["first", "second"], f"FIFO order broke: {order}"
+        # ONE CHAIN PER AGENT (#227): "second" landed while the first chain was
+        # alive, so it was HELD — stored at once and read by the chain's one wake
+        # turn, which answers it under its own client_id.
+        assert order[0] == "first", order
+        assert order[1].startswith("[1 message(s) arrived while you were working"), (
+            order
+        )
+        assert "second" in seen[1], seen
         replies = [outs[0]["result"] for outs in results]
         assert all(r["final"].startswith("ok") for r in replies)
         assert {r["client_id"] for r in replies} == {"a", "b"}
@@ -674,6 +683,8 @@ async def test_queue_populated_and_drained_on_contention(
             )
         )
         await asyncio.sleep(0.05)
+        # ONE CHAIN PER AGENT (#227): a plain message mid-chain is HELD, not
+        # queued; a turn of the running chain (its token) waits in the queue.
         t2 = asyncio.create_task(
             seeded_kernel.send(
                 [
@@ -683,6 +694,7 @@ async def test_queue_populated_and_drained_on_contention(
                             "type": "send",
                             "text": "second",
                             "client_id": "bob",
+                            "chain": core._chains[oid]["token"],
                         },
                     }
                 ]
@@ -828,6 +840,9 @@ async def test_status_verb_privacy_filter(seeded_kernel, store_agent, fake_provi
                             "type": "send",
                             "text": "alice secret",
                             "client_id": "alice",
+                            # ONE CHAIN PER AGENT (#227): a turn of the running chain
+                            # (its token) waits in the queue; a plain message is held.
+                            "chain": core._chains[oid]["token"],
                         },
                     }
                 ]

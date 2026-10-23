@@ -113,6 +113,12 @@ _locks: dict[str, asyncio.Lock] = {}
 _queue: dict[str, list[dict]] = {}
 _current: dict[str, dict] = {}
 
+# ONE CHAIN PER AGENT (#227), per agent id: `alive` while a pass or its routing
+# is running, the `token` this chain's own turns carry, and the messages `held`
+# for its next pass — each `(client_id, future)`, the future handed the answer of
+# the pass that reads the message.
+_chains: dict[str, dict] = {}
+
 # Last context-overflow projection per agent — the PUBLIC summary surfaced by the
 # `context_status` verb. {fired:bool, strategy?, kept_messages?, dropped_messages?, summarized?,
 # too_small?}. Kept free of internal bookkeeping (see `_compaction_mark`).
@@ -206,6 +212,53 @@ def _set_current(self_id: str, entry: dict) -> None:
 
 def _clear_current(self_id: str) -> None:
     _current.pop(self_id, None)
+
+
+def _chain_of(self_id: str) -> dict:
+    """The agent's chain (#227) — created on first use."""
+    return _chains.setdefault(self_id, {"alive": False, "token": "", "held": []})
+
+
+def _answer_held(held: list, answer: dict) -> None:
+    """Hand each held sender `answer` under its own client_id (#227)."""
+    for cid, fut in held:
+        if not fut.done():
+            fut.set_result({**answer, "client_id": cid})
+
+
+def _end_chain(self_id: str) -> None:
+    """STOP MEANS STOP (#227): the chain ends and its held messages leave the wake
+    list (their rows stay stored); nothing is woken. Each held send returns the
+    cancelled shape."""
+    chain = _chain_of(self_id)
+    chain["alive"] = False
+    held, chain["held"] = chain["held"], []
+    _answer_held(held, {"held": True, "cancelled": True})
+
+
+#: The wake turn a chain that ended with held messages gets (#227).
+_HELD_WAKE = (
+    "[{n} message(s) arrived while you were working — they are above. Answer them.]"
+)
+
+
+def _chain_ended(kernel, self_id: str, system_prompt: str | None) -> None:
+    """ONE CHAIN PER AGENT (#227): the chain has ended. Messages held while it ran
+    are answered by ONE wake turn (their senders stay held: the wake pass takes and
+    answers them); with none held, the chain is no longer alive."""
+    chain = _chain_of(self_id)
+    held = [cid for cid, _ in chain["held"]]
+    if not held:
+        chain["alive"] = False
+        return
+    _deliver_soon(
+        kernel,
+        self_id,
+        _HELD_WAKE.format(n=len(held)),
+        held[0],
+        system_prompt,
+        notice=True,
+    )
 
 
 def _take_current_for_cancel(self_id: str, task_id: str) -> dict | None:
@@ -998,6 +1051,11 @@ async def _deliver(
     # message past the first. Honoured only on a send to self (see `_send`).
     if notice:
         payload["notice"] = True
+    # ONE CHAIN PER AGENT (#227): a reply routed back to the agent whose chain is
+    # running is that chain's own turn — it carries the chain token, so it is never
+    # held. Harness self-turns (nudges, the held-message wake) are chain turns too.
+    if notice or current_origin() == target:
+        payload["chain"] = _chain_of(target)["token"]
     if born is not None and _incarnation.get(target, 0) != born:
         # A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real data —
         # but it does not wake a turn: the agent that made the call is gone, and the
@@ -1593,6 +1651,17 @@ def _routing_clash(
     return [k for k in used if k in cache[key]]
 
 
+async def _route_then_settle(kernel, self_id: str, system_prompt, route) -> None:
+    """Run a pass's routing; where it sends nothing back to this agent the chain
+    has ended (ONE CHAIN PER AGENT, #227) and messages held meanwhile get ONE wake."""
+    goes_on = False
+    try:
+        goes_on = bool(await route)
+    finally:
+        if not goes_on:
+            _chain_ended(kernel, self_id, system_prompt)
+
+
 async def _route_reply(
     self_id,
     kernel,
@@ -1969,7 +2038,10 @@ async def _route_reply(
         # Only broken calls: their reports are the next turn — unless this chain
         # has now been silent MAX_SILENT_TURNS in a row, and gives up.
         if await _silent_turn(kernel, self_id, client_id, send_to, system_prompt):
-            return
+            return False
+    # ONE CHAIN PER AGENT (#227): the chain goes on only when a reply batch lands
+    # on this agent itself.
+    goes_on = False
     if units:
         # A STABLE TOKEN PER TURN — two batches are distinguishable at a
         # glance (bare "1 of 3" labels collide across turns). The PID still
@@ -2066,6 +2138,9 @@ async def _route_reply(
                 system_prompt,
                 notice=notice,
             )
+        # ONE CHAIN PER AGENT (#227): the batch landed on this agent itself, so the
+        # chain goes on.
+        goes_on = self_id in groups
     if await_called and not done_called:
         # AWAIT: "I am not finished, I am waiting for what is in flight; wake me
         # when it lands." No nudge, no reply expected, the chain stays open — the
@@ -2082,6 +2157,10 @@ async def _route_reply(
             + (1 if _lock_for(self_id).locked() else 0)
             + len(_awaiting.get(self_id, ()))  # answers to its inquiries, still to come
         )
+        # ONE CHAIN PER AGENT (#227): messages held while this chain ran are answered
+        # by the wake turn, so this chain ends now.
+        if _chain_of(self_id)["held"]:
+            return False
         # TODO — STALL DETECTION. A chain can stop with no error: calls dispatched, then
         # nothing. Three shapes:
         # (1) a call never settles (no timeout by default, its task stays in `ps`); (2) every
@@ -2093,11 +2172,14 @@ async def _route_reply(
             await _emit_status(
                 kernel, self_id, client_id, "done", reason="awaiting", pending=pending
             )
-            return
+            # ONE CHAIN PER AGENT (#227): an await is not a running chain. Messages
+            # that land while it waits wake it as any message does.
+            return False
         _deliver_soon(
             kernel, self_id, _AWAIT_REFUSED, client_id, system_prompt, notice=True
         )
-        return
+        # That refusal is a turn delivered to the agent itself: the chain goes on.
+        return True
     if done_called:
         # AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
         # the asker must not wait on an answer that will not come.
@@ -2112,7 +2194,7 @@ async def _route_reply(
         # text is what it asked to have delivered.
         if send_to is not None and not units:
             _deliver_soon(kernel, send_to, text, client_id, system_prompt)
-        return
+        return False
     if not calls and not units:
         # TRY AGAIN. Every turn, chained or not: a first turn from a person that answers in prose and emits
         # nothing is the same silence as a mid-chain one — the model ends it
@@ -2130,17 +2212,20 @@ async def _route_reply(
         # tick has nobody reading, so the status event is the record, and the
         # next tick starts a fresh chain with a fresh count.
         if await _silent_turn(kernel, self_id, client_id, send_to, system_prompt):
-            return
+            return False
         nudge = (_DEAD_TURN_LINE + _NO_CALL_NUDGE) if dead_turn else _NO_CALL_NUDGE
         n = _silent.get((self_id, client_id), 0)
         if n >= 2:
             nudge += "\n" + _escalation(n, "thinking_only" if dead_turn else "no_call")
         _deliver_soon(kernel, self_id, nudge, client_id, system_prompt, notice=True)
-        return
+        # The nudge is a turn delivered to the agent itself: the chain goes on.
+        return True
     if calls:
-        return  # the model routed its own work; a caller's hand-off does not apply
+        # the model routed its own work; a caller's hand-off does not apply
+        return True
     if send_to is not None:
         _deliver_soon(kernel, send_to, text, client_id, system_prompt)
+    return goes_on
 
 
 #: The fields of an agent's own reflect its system block shows.
@@ -3166,9 +3251,12 @@ def _make_send(cfg: Backend):
             send_to = None
         text = payload.get("text", "")
         # AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
+        # ONE CHAIN PER AGENT (#227): such an answer is a turn of the chain.
+        answered_owed = False
         if isinstance(text, str) and _awaiting.get(id):
             for owed in _ANSWER_TAG.findall(text):
                 _awaiting[id].discard(owed)
+                answered_owed = True
         # A message is TEXT whatever the caller typed: the tag grammar types a bare
         # number (`<text>586</text>` → 586), and "586" is a perfectly good message.
         if isinstance(text, (int, float)) and not isinstance(text, bool):
@@ -3195,6 +3283,40 @@ def _make_send(cfg: Backend):
                 parts.append(f"stream {payload.get('stream_id')}")
             text = f"[{' · '.join(parts)}]\n{text}"
         send_id = _new_send_id()
+        # ONE CHAIN PER AGENT (#227): a message that lands while this agent's chain
+        # is alive is HELD — stored as a row, read by the chain's next pass — unless
+        # it is one of the chain's own turns (it carries the chain token, the agent
+        # sent it to itself, or it answers an inquiry the agent is owed).
+        chain = _chain_of(id)
+        token = payload.get("chain")
+        chain_turn = (
+            (isinstance(token, str) and bool(token) and token == chain["token"])
+            or sender == id
+            or answered_owed
+        )
+        if chain["alive"] and not chain_turn:
+            # The SAME row the normal incoming path stores, so a held message folds
+            # and recalls exactly like any other turn.
+            in_id, in_parent = _row_ids_for_incoming(id, text, kernel)
+            await _save_history(
+                id,
+                kernel,
+                [{"role": "user", "content": text, "id": in_id, "parent": in_parent}],
+            )
+            # A held send RETURNS THE ANSWER of the pass that reads it.
+            fut = asyncio.get_running_loop().create_future()
+            chain["held"].append((client_id, fut))
+            await _emit_status(
+                kernel, id, client_id, "queued", send_id=send_id, ahead=0, held=True
+            )
+            try:
+                async with asyncio.timeout(SEND_TIMEOUT):
+                    return await fut
+            except TimeoutError:
+                return {
+                    "error": f"send: timeout after {SEND_TIMEOUT}s",
+                    "client_id": client_id,
+                }
         entry = {
             "client_id": client_id,
             "text": text,
@@ -3235,6 +3357,14 @@ def _make_send(cfg: Backend):
             # the started_at timestamp, and the kernel task id we run as.
             _dequeue_send(id, send_id)
             _set_current(id, entry)
+            # ONE CHAIN PER AGENT (#227): this pass owns the chain. A new chain mints
+            # its token; this pass TAKES the held messages (it reads their rows) and
+            # answers each of them with its own reply below.
+            chain = _chain_of(id)
+            if not chain["alive"]:
+                chain["token"] = _new_send_id()
+            chain["alive"] = True
+            answering, chain["held"] = chain["held"], []
             await _emit_status(kernel, id, client_id, "thinking")
             try:
                 # The generation runs INLINE in this dispatch — the backend spawns
@@ -3257,7 +3387,7 @@ def _make_send(cfg: Backend):
                     )
             except TimeoutError:
                 await _emit_status(kernel, id, client_id, "done", reason="timeout")
-                return {
+                reply = {
                     "error": f"send: timeout after {SEND_TIMEOUT}s",
                     "client_id": client_id,
                 }
@@ -3266,7 +3396,7 @@ def _make_send(cfg: Backend):
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
                 )
-                return {
+                reply = {
                     "error": str(e),
                     "reason": "memory_store",
                     "client_id": client_id,
@@ -3277,7 +3407,7 @@ def _make_send(cfg: Backend):
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
                 )
-                return {
+                reply = {
                     "error": str(e),
                     "reason": "fold_summary",
                     "client_id": client_id,
@@ -3288,11 +3418,17 @@ def _make_send(cfg: Backend):
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
                 )
-                return {
+                reply = {
                     "error": str(e),
                     "reason": "system_prompt_file",
                     "client_id": client_id,
                 }
+            except asyncio.CancelledError:
+                # ONE CHAIN PER AGENT (#227): a stopped chain ends and wakes nothing;
+                # the held sends this pass took get the cancelled shape.
+                _end_chain(id)
+                _answer_held(answering, {"held": True, "cancelled": True})
+                raise
             except Exception as e:
                 # THE TRACEBACK, on stderr, every time: a turn that ends in
                 # `reason='error'` with only `str(e)` is undiagnosable from a
@@ -3301,6 +3437,10 @@ def _make_send(cfg: Backend):
                 await _emit_status(
                     kernel, id, client_id, "done", reason="error", error=str(e)
                 )
+                # ONE CHAIN PER AGENT (#227): a pass that raised is not routed — its
+                # chain ends here, and the held sends it took get its error.
+                _answer_held(answering, {"error": str(e)})
+                _chain_ended(kernel, id, system_prompt)
                 raise
             finally:
                 # Idempotent: on the cancel path `on_cancel` already took the
@@ -3318,6 +3458,10 @@ def _make_send(cfg: Backend):
         # The closed call parts feed routing only — never the caller's reply.
         call_streams = reply.pop("call_streams", []) if isinstance(reply, dict) else []
         cut = bool(reply.pop("cut", False)) if isinstance(reply, dict) else False
+        # ONE CHAIN PER AGENT (#227): the pass that read the held messages answers
+        # each of them with its own reply, under that sender's own client_id.
+        if isinstance(reply, dict):
+            _answer_held(answering, reply)
         if isinstance(reply, dict) and not reply.get("error"):
             coro = _route_reply(
                 id,
@@ -3338,7 +3482,15 @@ def _make_send(cfg: Backend):
                 call_streams=call_streams,
                 cut=cut,
             )
-            kernel.ctx.spawn_task(id, "route_reply", coro)
+            # ONE CHAIN PER AGENT (#227): the routing reports whether the chain goes
+            # on; where it does not, the chain ends (and held messages get a wake).
+            kernel.ctx.spawn_task(
+                id, "route_reply", _route_then_settle(kernel, id, system_prompt, coro)
+            )
+        else:
+            # ONE CHAIN PER AGENT (#227): a pass that is NOT routed ends its chain
+            # here, so messages held meanwhile are woken once.
+            _chain_ended(kernel, id, system_prompt)
         return reply
 
     return _send
@@ -3468,6 +3620,9 @@ async def _stop(id, payload, kernel):
         if parts is None or sid not in {p["stream_id"] for p in parts[0].parts}:
             return {"stopped": False}
     cur["stopped_by"] = current_origin() or "operator"
+    # ONE CHAIN PER AGENT (#227): stop means stop. The chain ends and the held
+    # messages are dropped from the wake list (their rows stay stored); no wake.
+    _end_chain(id)
     await kernel.ctx.cancel_task(cur["task_id"])
     return {"stopped": True}
 
@@ -3581,6 +3736,7 @@ async def on_delete(agent) -> None:
         _reported,
         _inflight,
         _stripped,
+        _chains,
     ):
         table.pop(id, None)
     _recall_due.discard(id)
