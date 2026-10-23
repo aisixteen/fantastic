@@ -4,6 +4,7 @@ Ports the Rust tests of the same names: the scanner, the call checker and the st
 splitter all read the wrapper the same way (ai_core.grammar)."""
 
 from ai_core.call_check import check
+from ai_core.grammar import THINK_CLOSE, THINK_OPEN
 from ai_core.stream_parts import PartSplitter
 from ai_core.tool_parse import extract_tool_calls
 
@@ -40,9 +41,13 @@ def test_a_call_after_a_closed_tag_is_not_wrapped():
 
 
 def test_a_call_after_think_runs_and_one_inside_think_does_not():
-    answer = f"\n{SEND}"
+    answer = f"{THINK_OPEN}{SEND}{THINK_CLOSE}\n{DONE}"
     calls = extract_tool_calls(answer)
-    assert [c["name"] for c in calls] == ["send"]
+    assert [c["name"] for c in calls] == ["done"]
+    reports = check(answer, ran=1)
+    assert len(reports) == 1
+    assert "inside" in reports[0] and "think" in reports[0]
+    assert "The other call of this answer ran" in reports[0]
 
 
 def test_an_empty_wrapper_gets_the_wrapper_report():
@@ -88,7 +93,9 @@ def test_a_wrapped_closed_call_ends_not_ok_and_is_not_matched():
 
 def test_a_call_inside_think_is_not_extracted_and_one_after_it_is():
     splitter = PartSplitter("t")
-    events = splitter.feed(f"{SEND}")
+    events = splitter.feed(f"{THINK_OPEN}{SEND}{THINK_CLOSE}\n{DONE}")
     events += splitter.finish()
     calls = [e for e in events if e[0] == "end" and e[1]["kind"] == "call"]
     assert len(calls) == 1
+    assert calls[0][1]["name"] == "done"
+    assert len(splitter.closed_calls) == 1
