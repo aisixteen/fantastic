@@ -9,11 +9,14 @@ against a fake agent on a unix socket.
 """
 
 import base64
+import contextlib
+import itertools
 import json
 import socket
 import http.client
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -276,6 +279,20 @@ def send(conn, obj):
     conn.sendall(json.dumps(obj).encode() + b"\n")
 
 
+def guest_replies(replies):
+    """A guest agent: answers guest-sync, and each other command with replies(m) (None: silence)."""
+
+    def handler(conn, seen):
+        for m in lines(conn):
+            seen.append(m)
+            if m["execute"] == "guest-sync":
+                send(conn, {"return": m["arguments"]["id"]})
+            elif (reply := replies(m)) is not None:
+                send(conn, reply)
+
+    return handler
+
+
 def agent(conn, seen):
     """A guest agent that answers its first sync late, with a stale reply before it."""
     status_calls = 0
@@ -376,6 +393,118 @@ class Channels(unittest.TestCase):
         )
         with self.assertRaisesRegex(bc.Fail, "nope"):
             vm.qmp("bad")
+
+    def agent_vm(self, replies, name="qga.sock"):
+        guest = FakeGuest(self.dir / name, guest_replies(replies))
+        self.addCleanup(guest.close)
+        vm = self.vm()
+        vm.wait_agent(10)
+        self.addCleanup(vm._qga.close)  # ends the fake agent's loop
+        return vm
+
+    def test_ga_errors_are_failures(self):
+        vm = self.agent_vm(lambda m: {"error": {"desc": "denied"}})
+        with self.assertRaisesRegex(bc.Fail, "guest agent guest-exec: .*denied"):
+            vm.ga_run(["/bin/true"])
+
+    def test_ga_reply_that_never_comes_fails_in_30_s(self):
+        vm = self.agent_vm(lambda m: None)
+        real_recv = bc.Chan.recv
+
+        def recv_at_most_0_2_s(self, timeout):
+            return real_recv(self, min(timeout, 0.2))
+
+        with mock.patch.object(bc.Chan, "recv", recv_at_most_0_2_s):
+            with self.assertRaisesRegex(bc.Fail, "guest agent guest-exec: no reply within 30 s"):
+                vm.ga_run(["/bin/true"])
+
+    def test_ga_not_connected(self):
+        with self.assertRaisesRegex(bc.Fail, "the guest agent is not connected"):
+            self.vm().ga_run(["/bin/true"])
+
+    def test_ga_run_that_never_finishes_fails_at_its_timeout(self):
+        def running(m):
+            return {"return": {"pid": 5}} if m["execute"] == "guest-exec" else {"return": {"exited": False}}
+
+        vm = self.agent_vm(running)
+        with mock.patch.object(bc.time, "sleep"):
+            with self.assertRaisesRegex(bc.Fail, "not finished within 0.3 s"):
+                vm.ga_run(["/bin/sleep", "9"], timeout=0.3)
+
+    def test_ga_run_killed_by_a_signal_is_its_negative_number(self):
+        def killed(m):
+            return {"return": {"pid": 5}} if m["execute"] == "guest-exec" else {"return": {"exited": True, "signal": 9}}
+
+        vm = self.agent_vm(killed)
+        self.assertEqual(vm.ga_run(["/bin/sleep", "9"]), (-9, "", ""))
+
+    def test_qmp_no_greeting(self):
+        guest = FakeGuest(self.dir / "qmp.sock", lambda conn, seen: send(conn, {"return": {}}))
+        self.addCleanup(guest.close)
+        with self.assertRaisesRegex(bc.Fail, "qmp: no greeting"):
+            self.vm().qmp("query-status")
+
+    def test_qmp_no_reply_within_30_s(self):
+        def qmp_silent_on_bad(conn, seen):
+            send(conn, {"QMP": {"version": {}}})
+            for m in lines(conn):
+                seen.append(m)
+                if m["execute"] != "bad":
+                    send(conn, {"return": {}})
+
+        guest = FakeGuest(self.dir / "qmp.sock", qmp_silent_on_bad)
+        self.addCleanup(guest.close)
+        vm = self.vm()
+        vm.qmp("ok")  # the handshake, on the real clock
+        ticks = itertools.count()  # each clock read is one second later
+        with mock.patch.object(bc.Chan, "recv", lambda self, timeout: None), mock.patch.object(
+            bc.time, "monotonic", lambda: float(next(ticks))
+        ):
+            with self.assertRaisesRegex(bc.Fail, "qmp bad: no reply within 30 s"):
+                vm.qmp("bad")
+
+    def test_chan_not_connectable(self):
+        with self.assertRaisesRegex(bc.Fail, "missing.sock: not connectable within 0.3 s"):
+            bc.Chan(self.dir / "missing.sock", 0.3, lambda: None)
+
+
+class Framing(unittest.TestCase):
+    """Chan's line framing and its close, on a socket pair (no path, no QEMU)."""
+
+    def chan(self, alive=lambda: None):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        ch = bc.Chan.__new__(bc.Chan)  # no connect: the pair's end is the socket
+        ch.path, ch.alive, ch.buf, ch.sock = Path("qmp.sock"), alive, b"", a
+        return ch, b
+
+    def test_recv_frames_lines_split_across_chunks(self):
+        ch, peer = self.chan()
+
+        def write():
+            peer.sendall(b'{"retu')
+            time.sleep(0.05)
+            peer.sendall(b'rn": 1}\n\n{"return": 2}\n{"ret')  # a blank line, two lines, a split one
+            time.sleep(0.05)
+            peer.sendall(b'urn": 3}\n')
+
+        threading.Thread(target=write, daemon=True).start()
+        self.assertEqual(ch.recv(2), {"return": 1})
+        self.assertEqual(ch.recv(2), {"return": 2})
+        self.assertEqual(ch.recv(2), {"return": 3})
+
+    def test_recv_returns_none_on_timeout(self):
+        ch, _ = self.chan()
+        self.assertIsNone(ch.recv(0.2))
+
+    def test_a_socket_closed_by_qemu_fails(self):
+        alive = mock.Mock()
+        ch, peer = self.chan(alive)
+        peer.close()
+        with self.assertRaisesRegex(bc.Fail, "closed by QEMU"):
+            ch.recv(2)
+        alive.assert_called()
 
 
 class Until(unittest.TestCase):
@@ -489,6 +618,57 @@ class CanvasAndRestart(unittest.TestCase):
         with mock.patch.object(bc, "read_run_file", lambda vm: new):
             with self.assertRaisesRegex(bc.Fail, "NRestarts is 0, wanted 1"):
                 bc.check_restart(StubVm(("0", "0")), RUN, 99, 5)
+
+    @contextlib.contextmanager
+    def restart_env(self, comm_name="fantastic-app", home=refuses):
+        new = {"pid": 11, "port": 4001, "url": "http://127.0.0.1:4001/"}
+        with (
+            mock.patch.object(bc, "read_run_file", lambda vm: new),
+            mock.patch.object(bc, "comm", lambda vm, pid: comm_name),
+            mock.patch.object(bc, "wait_page"),
+            mock.patch.object(bc, "check_kernel"),
+            mock.patch.object(bc, "home_call", home),
+        ):
+            yield
+
+    @staticmethod
+    def home_listing(pid):
+        state = {
+            "type": "state",
+            "protocol": "fantastic.home",
+            "version": 1,
+            "seq": 4,
+            "rows": [{"path": bc.CANVAS_DIR, "status": "running", "pid": pid}],
+        }
+
+        async def answer(*_a):
+            return state
+
+        return answer
+
+    def test_canvas_must_be_adopted_with_the_same_pid(self):
+        with self.restart_env(home=self.home_listing(5)), mock.patch.object(bc, "check_keys") as keys:
+            with self.assertRaisesRegex(bc.Fail, "after the restart .* wanted running with pid 99"):
+                bc.check_restart(StubVm(), RUN, 99, 5)
+            keys.assert_not_called()
+        with self.restart_env(home=self.home_listing(99)), mock.patch.object(bc, "check_keys") as keys, mock.patch.object(
+            bc, "check_screen"
+        ) as screen:
+            bc.check_restart(StubVm(), RUN, 99, 5)
+        keys.assert_called_once()
+        screen.assert_called_once()
+
+    def test_old_app_must_be_gone(self):
+        vm = StubVm()
+        vm.ga_run = lambda argv, timeout=60: (1, "", "") if argv[-1] == "test ! -e /proc/10" else (0, "", "")
+        with self.restart_env(home=self.home_listing(99)):
+            with self.assertRaisesRegex(bc.Fail, r"the old app \(pid 10\) is still there"):
+                bc.check_restart(vm, RUN, 99, 5)
+
+    def test_new_pid_must_be_fantastic_app(self):
+        with self.restart_env(comm_name="bash", home=self.home_listing(99)):
+            with self.assertRaisesRegex(bc.Fail, "the new pid 11's comm is 'bash', not fantastic-app"):
+                bc.check_restart(StubVm(), RUN, 99, 5)
 
 
 if __name__ == "__main__":
