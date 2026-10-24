@@ -1034,3 +1034,73 @@ async def test_conclude_keeps_a_result_with_its_canvas_path_and_closes_the_rest(
     assert {cab, w, "keep_me", "drop_me", other} <= set(res["deleted"])
     assert not kept & set(res["deleted"])
     assert (await as_(k, MASTER, MANAGER, {"type": "cabinets"}))["count"] == 0
+
+
+# ─── _wire: grants merge atomically, then the other fields ──────────
+
+
+async def test_wire_does_not_drop_a_concurrent_callable_by_key(world, monkeypatch):
+    """`_wire` merges its keys into `callable_by` at the write, so another writer's key
+    landed while `_wire` is awaiting its field write (`view_i`) survives. The old shape
+    read the map, awaited the `update_agent`, then restated the whole stale map, which
+    dropped `view_i`. The send's own await is made a real yield point here (a wrapper
+    around the tree verb), since the send itself never suspends in-process."""
+    import cabinet.tools as tools
+
+    real_tree = tools._tree
+
+    async def yielding_tree(kernel, payload):
+        await asyncio.sleep(0)  # the await between `_wire`'s read and its write
+        return await real_tree(kernel, payload)
+
+    monkeypatch.setattr(tools, "_tree", yielding_tree)
+    k = world
+    mgr = k.ctx.agents[MANAGER]
+
+    async def concurrent_writer(i: int) -> None:
+        await asyncio.sleep(0)
+        k.ctx.edit_callable_by(
+            MASTER, lambda cb: (cb.__setitem__(f"view_{i}", ["*"]), True)[1]
+        )
+
+    for i in range(100):
+        with mgr._as_self():
+            res, _ = await asyncio.gather(
+                tools._wire(
+                    mgr,
+                    MASTER,
+                    callable_by={f"peer_{i}": ["*"]},
+                    description=f"round {i}",
+                ),
+                concurrent_writer(i),
+            )
+        assert res is None, res
+        cb = k.get(MASTER)["callable_by"]
+        assert f"peer_{i}" in cb, (i, cb)
+        assert f"view_{i}" in cb, (i, cb)
+
+
+async def test_wire_grants_then_fields(world):
+    from cabinet.tools import _wire
+
+    k = world
+    mgr = k.ctx.agents[MANAGER]
+    with mgr._as_self():
+        res = await _wire(
+            mgr,
+            MASTER,
+            can_call={"peer_x": ["ping"]},
+            callable_by={"peer_y": ["ping"]},
+            description="hello",
+        )
+    assert res is None, res
+    rec = k.get(MASTER)
+    assert rec["can_call"]["peer_x"] == ["ping"]
+    assert rec["callable_by"]["peer_y"] == ["ping"]
+    assert rec["description"] == "hello"
+
+    # a bad grant shape is refused: its error comes back, and the field is NOT written
+    with mgr._as_self():
+        res = await _wire(mgr, MASTER, can_call={"peer_x": "ping"}, description="nope")
+    assert res, res
+    assert k.get(MASTER)["description"] == "hello"
