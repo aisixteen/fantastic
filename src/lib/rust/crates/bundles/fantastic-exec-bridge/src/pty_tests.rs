@@ -621,27 +621,48 @@ impl std::fmt::Display for FloodEvidence {
     }
 }
 
+/// Like `FLOOD`, but the child is silent for 8 s first: the Windows (ConPTY) stall
+/// seen in #93, where a started child can print nothing for several seconds.
+const SLOW_FLOOD: &str = "import sys, time
+time.sleep(8)
+sys.stdout.write('x' * 150000 + '\\nDONE\\n')
+sys.stdout.flush()
+sys.stdin.readline()
+";
+
 /// A viewer that streamed but never acked (a reloaded page) leaves `unacked` past
 /// HIGH and the reader paused. The new viewer's `output` replay hands it everything
 /// so far, so it zeroes the count and resumes the reader — python
 /// `test_a_replay_clears_the_backlog_a_gone_viewer_left`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
+    replay_clears_the_backlog("term_f", FLOOD).await;
+}
+
+/// The same replay, when the child stays silent for a while before its flood
+/// (ConPTY's slow start, #93): the backlog must still pause the reader and the
+/// replay must still clear it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replay_clears_the_backlog_after_a_slow_start() {
+    replay_clears_the_backlog("term_h", SLOW_FLOOD).await;
+}
+
+async fn replay_clears_the_backlog(id: &str, program: &str) {
     let Some(py) = python() else { return };
     let tmp = TempDir::new().unwrap();
-    let k = kernel_with(&tmp, "term_f", json!({})).await;
-    let mut rx = k.ensure_inbox(&AgentId::from("term_f"));
+    let k = kernel_with(&tmp, id, json!({})).await;
+    let mut rx = k.ensure_inbox(&AgentId::from(id));
     let spawn = tokio::time::Instant::now();
     let r = call(
         &k,
-        "term_f",
-        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", FLOOD],
+        id,
+        json!({"type": "start", "command": py.to_string_lossy(), "args": ["-c", program],
                "pty": {"cols": 80, "rows": 24}}),
     )
     .await;
     let jid = r["job_id"].as_i64().unwrap();
     let pty = crate::jobs::jobs()
-        .get(&(AgentId::from("term_f"), fantastic_kernel::TaskId(jid)))
+        .get(&(AgentId::from(id), fantastic_kernel::TaskId(jid)))
         .and_then(|j| j.pty.clone())
         .expect("pty job row");
     let mut ev = FloodEvidence {
@@ -651,11 +672,14 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
         states: Vec::new(),
     };
     let probe = json!({"type": "ack", "job_id": jid, "chars": 0});
+    // Wait on the observable state, not a fixed window: a child on a slow start
+    // (ConPTY, #93) may print nothing for a long while before its flood lands.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut st = json!({});
-    for _ in 0..250 {
-        st = call(&k, "term_f", probe.clone()).await;
+    loop {
+        st = call(&k, id, probe.clone()).await;
         ev.sample(&st);
-        if st["paused"] == json!(true) {
+        if st["paused"] == json!(true) || tokio::time::Instant::now() >= deadline {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -665,8 +689,8 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
             && st["unacked"].as_u64().unwrap() > crate::pty::HIGH_WATERMARK as u64,
         "{st}; {ev}"
     );
-    call(&k, "term_f", json!({"type": "output", "job_id": jid})).await;
-    let st = call(&k, "term_f", probe).await;
+    call(&k, id, json!({"type": "output", "job_id": jid})).await;
+    let st = call(&k, id, probe).await;
     ev.sample(&st);
     // the count restarted at 0; the resumed reader may already have counted more
     assert!(
@@ -678,7 +702,7 @@ async fn a_replay_clears_the_backlog_a_gone_viewer_left() {
     output_until(&mut rx, |t| t.contains("DONE")).await;
     call(
         &k,
-        "term_f",
+        id,
         json!({"type": "write", "job_id": jid, "data": ENTER}),
     )
     .await;
