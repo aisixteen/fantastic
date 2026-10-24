@@ -728,13 +728,45 @@ pub(crate) fn awaiting() -> &'static Mutex<HashMap<String, HashSet<String>>> {
     AWAITING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Inquiry answers that arrived BEFORE their pid was owed, by agent. The answer
+/// can land first: the peer's reply runs on its own task while the asker's route
+/// is still between `kernel.send` and [`owe`]. Python has no such window only
+/// because its loop is single-threaded.
+fn settled_early() -> &'static Mutex<HashMap<String, HashSet<String>>> {
+    static SETTLED_EARLY: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+    SETTLED_EARLY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Early answers kept per agent. A pid is settled once, so the set stays small;
+/// the cap keeps stray inquiry-shaped tags from growing it without limit.
+const SETTLED_EARLY_CAP: usize = 64;
+
+/// Record that `self_id` is owed an answer under `pid`. An answer that already
+/// arrived under this pid (see [`settle_owed`]) cancels the debt instead, so the
+/// pid is never left owed.
+pub(crate) fn owe(self_id: &str, pid: &str) {
+    let mut owed = awaiting().lock().expect("awaiting poisoned");
+    let mut early = settled_early().lock().expect("settled early poisoned");
+    if let Some(set) = early.get_mut(self_id) {
+        if set.remove(pid) {
+            if set.is_empty() {
+                early.remove(self_id);
+            }
+            return;
+        }
+    }
+    owed.entry(self_id.to_string())
+        .or_default()
+        .insert(pid.to_string());
+}
+
 /// Settle what `self_id` was owed: every `[reply to <pid> · <who> inquiry]` tag in
-/// an incoming message clears that pid. Python `_send`'s `_ANSWER_TAG` scan.
+/// an incoming message clears that pid. An answer for a pid not yet owed is kept
+/// in [`settled_early`], so the later [`owe`] does not leave it outstanding.
+/// Python `_send`'s `_ANSWER_TAG` scan.
 pub(crate) fn settle_owed(self_id: &str, text: &str) {
     let mut owed = awaiting().lock().expect("awaiting poisoned");
-    let Some(set) = owed.get_mut(self_id) else {
-        return;
-    };
+    let mut early = settled_early().lock().expect("settled early poisoned");
     for line in text.lines() {
         let Some(rest) = line.trim_start().strip_prefix("[reply to ") else {
             continue;
@@ -742,12 +774,19 @@ pub(crate) fn settle_owed(self_id: &str, text: &str) {
         let Some((pid, tail)) = rest.split_once(" · ") else {
             continue;
         };
-        if tail
+        let is_inquiry = tail
             .split(']')
             .next()
-            .is_some_and(|t| t.ends_with(" inquiry"))
-        {
-            set.remove(pid);
+            .is_some_and(|t| t.ends_with(" inquiry"));
+        if !is_inquiry {
+            continue;
+        }
+        if owed.get_mut(self_id).is_some_and(|set| set.remove(pid)) {
+            continue;
+        }
+        let set = early.entry(self_id.to_string()).or_default();
+        if set.len() < SETTLED_EARLY_CAP {
+            set.insert(pid.to_string());
         }
     }
 }
@@ -893,6 +932,10 @@ pub(crate) fn forget(self_id: &str) {
     awaiting()
         .lock()
         .expect("awaiting poisoned")
+        .remove(self_id);
+    settled_early()
+        .lock()
+        .expect("settled early poisoned")
         .remove(self_id);
 }
 
@@ -1551,12 +1594,7 @@ async fn route_reply_gated(
                 || py_str(out.result.get("re").unwrap_or(&Value::Null)),
                 |p| p.0.to_string(),
             );
-            awaiting()
-                .lock()
-                .expect("awaiting poisoned")
-                .entry(self_id.as_str().to_string())
-                .or_default()
-                .insert(pid);
+            owe(self_id.as_str(), &pid);
         }
     }
 
