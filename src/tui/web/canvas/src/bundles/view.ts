@@ -36,6 +36,12 @@ export interface CanvasActions {
   openSetup(cell?: string, ai?: string): void;
   /** the first coding agent found on PATH, in a terminal next to view `near` */
   startCoding(near: string): Promise<void>;
+  /** host agent `agent` full screen (a chat card's ⤢): its cell, shown or made */
+  viewFull?(agent: string): void;
+  /** the kernel's `delete_agent` for `agent` (its lock gate refuses what is locked) */
+  deleteAgent?(agent: string): void;
+  /** a short message to the person */
+  toast?(message: string): void;
 }
 
 

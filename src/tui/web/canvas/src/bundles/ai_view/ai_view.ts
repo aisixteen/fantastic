@@ -1,7 +1,11 @@
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { Host } from "../../lib.ts";
-import { canvasNode } from "../canvas/host_views.ts";
-import { rectsOf, themeOf } from "../canvas/layout.ts";
+import type { Handler, Json } from "../../lib.ts";
+import { panelRelay } from "../panel_relay.ts";
+import { mountHostPanel } from "../agent_view/agent_view.ts";
+import { ChatCards, cardRows, isCardRow } from "./chat_card.ts";
+import { canvasNode, cellGrant, hostRecordFresh, viewOf } from "../canvas/host_views.ts";
+import { hiddenOf, rectsOf, setHidden, themeOf } from "../canvas/layout.ts";
 import { tint, tok } from "../skin/css.ts";
 
 // ai_view — inline, MULTI-MODE AI view (chat mode = provider-agnostic chat UI). Ported from
@@ -44,6 +48,17 @@ const CHAT_CSS = `
   .chat-view .c-clear:hover { border-color:${tok("color.accent.base")}; color:${tok("color.text.bright")}; }
   .chat-view .c-malformed { align-self:stretch; max-width:100%; text-align:left; white-space:pre-wrap; font:11.5px/1.45 ${tok("font.family.mono")}; color:${tok("color.status.warn")}; }
   .chat-view .msg.notice.too-small { color:${tok("color.status.error")}; background:${tint("color.status.error", 12)}; box-shadow:inset 0 0 0 1px ${tint("color.status.error", 22)}; }
+  .chat-view .c-card { flex:none; align-self:stretch; width:100%; box-sizing:border-box; border-radius:${tok("radius.card")}; background:${tok("color.surface.bubble")}; box-shadow:inset 0 0 0 1px ${tint("color.ink", 10)}; overflow:hidden; }
+  .chat-view .c-card-head { display:flex; align-items:center; gap:4px; padding:2px 6px 2px 10px; font:11px ${tok("font.family.mono")}; color:${tint("color.text.cool", 60)}; position:relative; }
+  .chat-view .c-card-title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chat-view .c-card-head button, .chat-view .c-card-show { font:inherit; color:inherit; background:transparent; border:0; cursor:pointer; padding:2px 6px; border-radius:${tok("radius.control")}; }
+  .chat-view .c-card-head button:hover, .chat-view .c-card-show:hover { background:${tint("color.ink", 10)}; color:${tok("color.text.bright")}; }
+  .chat-view .c-card-menu { display:none; position:absolute; right:6px; top:100%; z-index:2; flex-direction:column; background:${tok("color.surface.bubble")}; box-shadow:0 4px 14px ${tint("color.ink", 30)}; border-radius:${tok("radius.card")}; }
+  .chat-view .c-card-menu[data-open="1"] { display:flex; }
+  .chat-view .c-card-body { position:relative; width:100%; }
+  .chat-view .c-card-body iframe { position:absolute; inset:0; display:block; width:100%; height:100%; border:0; background:transparent; }
+  .chat-view .c-card-deleted { width:100%; font:12px ${tok("font.family.mono")}; color:${tok("color.status.warn")}; background:${tint("color.status.warn", 10)}; border:0; padding:10px; cursor:pointer; }
+  .chat-view .c-card-hiddenbar { display:flex; align-items:center; gap:6px; padding:4px 10px; font:11px ${tok("font.family.mono")}; color:${tint("color.text.cool", 55)}; }
   .chat-view .tool-block.recall .tool-verb { color:${tok("color.status.info")}; }
   .chat-view .tool-block { margin:6px 0; padding:6px 8px; border-radius:${tok("radius.card")}; background:${tok("color.surface.code")}; box-shadow:inset 0 0 0 1px ${tint("color.ink", 6)}; font-family:${tok("font.family.mono")}; font-size:12px; color:${tok("color.text.code")}; }
   .chat-view .tool-block .tool-head { display:flex; align-items:baseline; gap:6px; }
@@ -204,9 +219,13 @@ const REPLY_HEAD = /^\[reply to \d+ · ([^\]·]+?)(?: · [^\]]*)?\]/;
  *  the AI's own work. */
 export const CANVAS_SETUP =
   
-  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. A TOOL with its own panel is ONE host agent: create it with `create` on `{{node}}` — THIS canvas's host node (`create {record: {handler_module, …, view: {kind: html, bytes, calls: [the verbs its panel calls]}}}`) and show it with `place {backend_id, x, y}` on the view — the panel's grants follow from `calls`. A PYTHON agent is an instance of a BUNDLE (code in `.fantastic/bundles/<name>/`): editing the bundle's files changes EVERY instance at once; to change one alone, copy the folder to a new name first (`fantastic readme bundles`). A LIVE panel — a host agent that pushes updates into its own cell (streaming to its panel) — is the python_agent STARTER: `spawn {bundle: python_agent}` on `{{node}}` makes a new bundle and one instance; its `agent.py` sends `fa.emit({type, …})`, its `panel.html` redraws on `fantastic.watch(<agent id>, ev => …)`, and its `bundle.yaml` record carries the view (`view: {kind: html, bytes_file: panel.html, calls: [<verbs>, watch]}`); show it with `place {backend_id}`. Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
+  "[canvas setup] You are an AI agent on the HOST kernel: your record, memory and calls live there. A human sees you as a CELL on a CANVAS — a web page that is a SECOND kernel, connected as a peer: its agents are `<page guid>|<agent id>` (its kernel `<page guid>|kernel`). Reflect the host first (it lists the peers), then the page. To BUILD on the canvas, pull `docs of=<page guid>|view_root` first: the view places cells, and its doc carries the panel API. A TOOL with its own panel is ONE host agent: create it with `create` on `{{node}}` — THIS canvas's host node (`create {record: {handler_module, …, view: {kind: html, bytes, calls: [the verbs its panel calls]}}}`) and show it with `place {backend_id, x, y}` on the view — the panel's grants follow from `calls`. A PYTHON agent is an instance of a BUNDLE (code in `.fantastic/bundles/<name>/`): editing the bundle's files changes EVERY instance at once; to change one alone, copy the folder to a new name first (`fantastic readme bundles`). A LIVE panel — a host agent that pushes updates into its own cell (streaming to its panel) — is the python_agent STARTER: `spawn {bundle: python_agent}` on `{{node}}` makes a new bundle and one instance; its `agent.py` sends `fa.emit({type, …})`, its `panel.html` redraws on `fantastic.watch(<agent id>, ev => …)`, and its `bundle.yaml` record carries the view (`view: {kind: html, bytes_file: panel.html, calls: [<verbs>, watch]}`); show it with `place {backend_id}`. To show a host agent's panel INSIDE THIS CHAT instead (a chat card, 100% of the column wide, at most 1200 px tall), call `embed {id}` on your own agent — its docs say how to design the panel. Every user turn ends with [at X,Y], where it was typed (x grows right, y grows down).";
 /** The setup as the TRANSCRIPT carries it — hidden from the bubble. */
 const SETUP_BLOCK = /\n\[canvas setup\][\s\S]*$/;
+
+/** The chat cell's own verbs: only the relay of its cards' panels (a card's calls go out AS
+ *  the cell, judged by its `can_call`; the cell holds no content). */
+export const aiViewAgent: Handler = (_id, payload, kernel): Json | Promise<Json> => panelRelay(kernel, payload) ?? null;
 
 function ensureStyle(): void {
   if (document.getElementById("fantastic-chat-style")) return;
@@ -284,7 +303,7 @@ export const aiView: ViewBundle = {
   handles: ["ai_view.ts"],
   // Fronts a backend it never spawns; cancels a turn through the host root's
   // task table.
-  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "rows", "status", "send", "stop", "context_clear"], kernel: ["ps", "cancel"], [canvasNode()]: ["rename"] }),
+  grants: (backend) => ({ [backend]: ["watch", "reflect", "history", "rows", "status", "send", "stop", "context_clear", "unembed"], kernel: ["ps", "cancel"], [canvasNode()]: ["rename"] }),
 
   async mount(ctx: ViewContext): Promise<ViewHandle> {
     const { kernel, mount, selfId, backend, record } = ctx;
@@ -393,6 +412,40 @@ export const aiView: ViewBundle = {
         /* blocked storage */
       }
     }
+    // CHAT CARDS (#339): host agents' panels shown inline, where `embed` rows sit in the
+    // conversation. The cards' calls go out AS this cell, so each card's grant
+    // (`cellGrant`: the record's `view.calls`) is added to the cell's `can_call` as it mounts.
+    const chatView = (): string => kernel.get(selfId)?.parentId ?? "";
+    const cards = new ChatCards({
+      chat: selfId,
+      recordOf: (a) => hostRecordFresh(a),
+      mountPanel: (el, agent, rec, sizeKey) => {
+        const have = kernel.get(selfId)?.meta["can_call"];
+        kernel.updateMeta(selfId, { can_call: { ...(have !== null && typeof have === "object" ? (have as Dict) : {}), ...cellGrant(agent, viewOf(rec)) } } as never);
+        return mountHostPanel({ ...ctx, mount: el }, agent, { sizeKey, cellInbox: false });
+      },
+      hidden: {
+        has: (k) => hiddenOf(kernel, chatView()).has(k),
+        set: (k, on) => setHidden(kernel, chatView(), k, on),
+      },
+      unembed: (a) => host.call(backend, { type: "unembed", id: a } as never),
+      deleteAgent: (a) => ctx.actions?.deleteAgent?.(a),
+      expand: (a) => ctx.actions?.viewFull?.(a),
+      confirm: (m) => (typeof confirm === "function" ? confirm(m) : false),
+      toast: (m) => (ctx.actions?.toast !== undefined ? ctx.actions.toast(m) : console.warn("[chat]", m)),
+      notify: (text) => {
+        void host.call(backend, { type: "send", text, client_id: clientId } as never);
+      },
+    });
+    // an embed row is a card, an unembed row takes it out: applied in the order they came
+    const applyCardRow = (m: Dict): void => {
+      const agent = s(m, "head");
+      if (agent === "") return;
+      if (s(m, "kind") === "unembed") cards.remove(agent);
+      else if (!cards.has(agent)) dialogEl.appendChild(cards.draw(agent, true));
+    };
+    // a deleted agent: its card turns "deleted" at once (the host's lifecycle frame)
+    const offState = host.subscribeState((frame) => cards.onState(frame));
     const tpl = record && typeof record["saved"] === "string" ? (record["saved"] as string) : "";
     $<HTMLElement>(".c-agent").textContent = tpl ? `✦ ${tpl} · ${backend}` : `${selfId} (client ${clientId})`;
     // THE DIALOG'S NAME, in the header (owner 2026-10-12: no ephemeral chats —
@@ -554,6 +607,10 @@ export const aiView: ViewBundle = {
     };
     setPhase("idle");
 
+    // set once the card reader below exists (a tool reply drawn at mount comes before it)
+    let cardsSoonImpl: (() => void) | null = null;
+    const cardsSoon = (): void => cardsSoonImpl?.();
+
     const makeToolBlock = (tool: Dict): ToolHandle => {
       const el = document.createElement("div");
       el.className = "tool-block pending";
@@ -628,7 +685,12 @@ export const aiView: ViewBundle = {
         dialogEl.appendChild(handle.el);
         dialogEl.scrollTop = dialogEl.scrollHeight;
       }
-      if ("reply_preview" in tool) fillToolReply(handle, s(tool, "reply_preview"));
+      if ("reply_preview" in tool) {
+        fillToolReply(handle, s(tool, "reply_preview"));
+        // the AI's own `embed` / `unembed` just answered: its card row is in the history now —
+        // draw it at once, not when the turn ends
+        if (s(tool, "target") === backend && (s(tool, "verb") === "embed" || s(tool, "verb") === "unembed")) cardsSoon();
+      }
     };
 
     // lifecycle: drop stale inflight on disconnect (no `done` will arrive)
@@ -824,7 +886,14 @@ export const aiView: ViewBundle = {
     }
     // `kind: "notice"` rows are the AI layer's own turns to its model: not chat
     // — except the checker's report (isReport), which repeats fold to one ×N row
+    // CARDS: each agent on show is drawn at ITS embed row's place (a later unembed took it out)
+    const shown = cardRows(rows);
     for (const m of collapseReports(rows, isReport)) {
+      if (isCardRow(m)) {
+        const agent = s(m, "head");
+        if (s(m, "kind") === "embed" && shown.get(agent) === m["id"]) dialogEl.appendChild(cards.draw(agent));
+        continue;
+      }
       const t = typeof m["id"] === "number" ? thoughts.get(m["id"] as number) : undefined;
       if (t !== undefined) dialogEl.appendChild(thoughtBlock(t.text, t.cut));
       if (s(m, "kind") !== "notice" || isReport(m)) {
@@ -1033,7 +1102,8 @@ export const aiView: ViewBundle = {
       for (const m of fresh) {
         if (typeof m["id"] === "number") lastRow = Math.max(lastRow, m["id"] as number);
         if (typeof m["bytes"] === "number") convBytes += m["bytes"] as number;
-        if (s(m, "head").includes("[malformed call — nothing ran]")) addMsg("user", s(m, "head"), dialogEl);
+        if (isCardRow(m)) applyCardRow(m);
+        else if (s(m, "head").includes("[malformed call — nothing ran]")) addMsg("user", s(m, "head"), dialogEl);
       }
       showStats({});
     };
@@ -1056,6 +1126,15 @@ export const aiView: ViewBundle = {
         void checkInquiries();
         void checkReports();
       }, 250);
+    };
+    // the card rows after the last row seen, read soon (a burst of tool replies is one read)
+    let cardTimer: ReturnType<typeof setTimeout> | null = null;
+    cardsSoonImpl = (): void => {
+      if (cardTimer !== null) return;
+      cardTimer = setTimeout(() => {
+        cardTimer = null;
+        void checkReports();
+      }, 60);
     };
     // A TURN THAT FAILED: how to fix the agent — its settings, or a coding agent
     // started next to it to help (owner 2026-10-11)
@@ -1101,6 +1180,7 @@ export const aiView: ViewBundle = {
         ? [{ id: "settings", glyph: "⚙", title: "settings — this agent's provider, model and key", toggle: false, onClick: (): void => ctx.actions?.openSetup(selfId, backend) }]
         : [],
       unmount(): void {
+        if (cardTimer !== null) clearTimeout(cardTimer);
         stick.disconnect();
         offLifecycle();
         offQueued();
@@ -1111,6 +1191,8 @@ export const aiView: ViewBundle = {
         offAbort();
         offDone();
         offContext();
+        offState();
+        cards.dispose();
         host.unwatch(backend);
         window.removeEventListener("keydown", onEsc);
         if (elapsedTimer !== null) clearInterval(elapsedTimer);

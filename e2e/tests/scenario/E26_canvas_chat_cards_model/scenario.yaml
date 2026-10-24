@@ -1,0 +1,23 @@
+# INLINE AGENT VIEWS IN A CHAT (#339), with a REAL model (turns tier). The chat's AI
+# is the plug named by BACKEND (`e2e/backends/`); the task asks for a card. Skipped
+# (E2E-SKIP) when no plug is named or its requirements are unmet.
+
+id: canvas_chat_cards_model
+title: a real model, asked for a card, makes a panel designed for the chat window
+runtimes: [canvas_chat]
+costs: turns
+
+port_base: 18860
+window: {width: 1280, height: 900}
+mode: model
+
+task: >-
+  Show me a small status card in this chat: a title "Build status", three lines
+  (tests, lint, deploy), each with a green tick. Make it a card inside this chat, not a cell
+  on the canvas.
+
+limits:
+  idle_seconds: 240
+
+runs:
+  - model-card   # the card appears, fills the column's full width, has a defined height of at most 1200 px, and does not overflow

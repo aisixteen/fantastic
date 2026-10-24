@@ -16,13 +16,24 @@ export interface ContentSize {
 }
 
 const sizes = new Map<string, ContentSize>();
+const listeners = new Map<string, Set<(s: ContentSize) => void>>();
 const waiting = new Map<string, Array<(s: ContentSize) => void>>();
 
 /** A panel's report (its connector posts one on load and on every change). */
 export function reportSize(cell: string, s: ContentSize): void {
   if (!Number.isFinite(s.mw) || !Number.isFinite(s.h)) return;
   sizes.set(cell, s);
+  for (const l of [...(listeners.get(cell) ?? [])]) l(s);
   for (const r of waiting.get(cell)?.splice(0) ?? []) r(s);
+}
+
+/** Run `fn` on every report of `cell` (a chat card's height follows its panel);
+ *  returns the unsubscribe. */
+export function onSize(cell: string, fn: (s: ContentSize) => void): () => void {
+  const set = listeners.get(cell) ?? new Set<(s: ContentSize) => void>();
+  set.add(fn);
+  listeners.set(cell, set);
+  return () => set.delete(fn);
 }
 
 /** The last report of `cell`, or undefined (not a panel, or not drawn yet). */
@@ -51,6 +62,7 @@ export function nextSize(cell: string, ms: number): Promise<ContentSize | null> 
 export function forgetSize(cell: string): void {
   sizes.delete(cell);
   waiting.delete(cell);
+  listeners.delete(cell);
 }
 
 /** The smallest a fitted cell gets, and the largest when the call names none. */
