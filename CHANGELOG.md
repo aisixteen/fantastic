@@ -7,6 +7,20 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- The canvas's own file tree sidebar (#148): the file tree fused into the canvas page,
+  fixed to the viewport's left edge and beside the zoomed world, so a zoom or a pan
+  never moves it. Zoom far out and drag files, folders and agents from it onto the
+  canvas: each lands at the drop point, at any zoom (the drop is converted to world
+  coordinates). The sidebar and the tree cell draw and drag with one panel
+  (`files/tree_panel.ts`); the tree cell stays as the extra kind, a folder dropped on
+  the canvas opens a tree rooted at it. A `‹`/`›` button collapses the sidebar, and its
+  open state and tree state are kept per canvas across a reload. Its verbs are reached
+  through the root view: `tree {verb, path | agent}`, which the root view alone answers
+  (any other view refuses it, `bad_arg` on `view`). On a wide screen the canvas sits
+  beside the sidebar (its margin is the sidebar's width, so nothing is covered); a
+  narrow screen opens it as an overlay, when asked. Its tree is the project folder's
+  view (#150), bound on the bridge as the tree cell binds its folder, so every read goes
+  through that view agent; dispose lets it go.
 - File and folder agents: thin view agents over the file bridge (#150). A file or a
   folder is an agent shipped in the `file_bridge` bundle, scoped to one path.
   `open_view {kind: file|folder, path}` on a `file_bridge` returns the view of that
@@ -207,6 +221,10 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- A file dropped on the canvas (#134) opens its preview where it was dropped: the
+  layout rect was written before the preview cell existed, and the page's refresh
+  pruned it, so the preview landed on a free spot near the centre. The rect is written
+  after the cell (`openFile`, `openDir`).
 - Home on Windows: both running canvases flipped to unverified and reloaded at
   once (#79). A registry entry whose folder or `fantastic.yaml` failed to read
   (a transient sharing violation) vanished from the list for that look, which

@@ -1,0 +1,165 @@
+import type { Kernel, Payload } from "../../lib.ts";
+import { mountTreePanel } from "../files/tree_panel.ts";
+import type { TreePanel } from "../files/tree_panel.ts";
+import type { FilesState } from "../files/files_controller.ts";
+import { bindCellToView, release, said } from "../files/file_bridge.ts";
+
+// THE CANVAS'S OWN SIDEBAR (#148): the file tree, fused into the canvas page. It is
+// not an agent and not a cell: the canvas mounts it beside the zoomed world (never
+// inside it), fixed to the viewport's left edge, so a zoom or a pan never moves or
+// scales it. From a bird's-eye zoom its rows drag onto the canvas like the tree
+// cell's do: the same panel (`files/tree_panel.ts`), the same drop (`#canvas`).
+// Its open state and its tree's state are kept on the canvas's root view, so a
+// reload restores them. The tree is the PROJECT FOLDER'S VIEW (#150), as the tree
+// cell is: bound to the folder agent on the bridge, so every path it reads goes
+// through that agent (`file_bridge.ts`), not around it.
+
+/** The controller's id: the verbs of the tree answer to it (`controllers`), reached through the root view's `tree`. */
+export const SIDEBAR_ID = "canvas_tree";
+
+/** The key on the root view's meta that holds the sidebar's state. */
+export const SIDEBAR_KEY = "tree_sidebar";
+
+/** The page's classes for the sidebar's place: `tree-beside` on a wide screen (the canvas sits beside it), `tree-open` while it is open. */
+export const BESIDE = "tree-beside";
+export const OPEN = "tree-open";
+
+/** What is kept of the sidebar: whether it is open, and the tree's folders and selection. */
+export interface SidebarState {
+  open?: boolean;
+  expanded?: string[];
+  selected?: string;
+  /** the project folder's view agent on the bridge (#150): the tree serves its folder through it */
+  view_agent?: string;
+}
+
+/** The sidebar's saved state, from a view's meta (`{}` when none, or not one this reads). */
+export function sidebarSavedOf(meta: Record<string, unknown> | undefined): SidebarState {
+  const s = meta?.[SIDEBAR_KEY];
+  if (typeof s !== "object" || s === null || Array.isArray(s)) return {};
+  const o = s as Record<string, unknown>;
+  return {
+    ...(typeof o["open"] === "boolean" ? { open: o["open"] } : {}),
+    ...(Array.isArray(o["expanded"]) ? { expanded: o["expanded"].filter((x): x is string => typeof x === "string") } : {}),
+    ...(typeof o["selected"] === "string" ? { selected: o["selected"] } : {}),
+    ...(typeof o["view_agent"] === "string" ? { view_agent: o["view_agent"] } : {}),
+  };
+}
+
+/** Whether the sidebar is open: the saved choice; else open on a wide screen and closed on a narrow one. */
+export function sidebarOpenOf(saved: SidebarState, wide: boolean): boolean {
+  return saved.open ?? wide;
+}
+
+/** Merge `patch` into the sidebar's saved state on `view` (what is saved stays where the patch says nothing). */
+export function saveSidebar(kernel: Kernel, view: string, patch: SidebarState): void {
+  const cur = sidebarSavedOf(kernel.get(view)?.meta);
+  kernel.updateMeta(view, { [SIDEBAR_KEY]: { ...cur, ...patch } } as unknown as Payload);
+}
+
+/** The tree's state as the sidebar keeps it: its open folders, and the selection when there is one. */
+function treePatch(s: FilesState): SidebarState {
+  return { expanded: s.expanded, ...(typeof s.selected === "string" ? { selected: s.selected } : {}) };
+}
+
+export interface TreeSidebar {
+  /** the sidebar's element: its toggle, and the tree in its body */
+  readonly el: HTMLElement;
+  /** the tree, mounted in the body */
+  readonly tree: TreePanel;
+  readonly open: boolean;
+  /** open or collapse it; the choice is kept on the view */
+  setOpen(open: boolean): void;
+  /** the screen is wide (`true`: beside the canvas) or narrow (`false`: over it); the place follows a resize, the open state does not */
+  setWide(wide: boolean): void;
+  /** the sidebar's tree lets go of the project folder, and the element leaves the page */
+  dispose(): void;
+}
+
+/**
+ * Mount the sidebar into `mount` (the canvas's page, beside its zoomed world) for the
+ * canvas whose root view is `view`. `wide` is the screen's width test: the default
+ * open state when nothing is saved, and whether the canvas sits beside the sidebar
+ * (`tree-beside`: the canvas's margin is the sidebar's width) or under it (a narrow
+ * screen's overlay). `onPlace` runs after a change of the sidebar's width on the page (open
+ * or collapsed, beside or over): the canvas's box moves with it, so what reads the box follows.
+ */
+export function mountTreeSidebar(o: { kernel: Kernel; view: string; mount: HTMLElement; wide: boolean; onPlace?: () => void }): TreeSidebar {
+  const { kernel, view } = o;
+  const saved = sidebarSavedOf(kernel.get(view)?.meta);
+  let open = sidebarOpenOf(saved, o.wide);
+  let wide = o.wide;
+
+  const el = document.createElement("aside");
+  el.className = "tree-sidebar";
+  const toggle = document.createElement("button");
+  toggle.className = "ts-toggle";
+  toggle.type = "button";
+  const body = document.createElement("div");
+  body.className = "ts-body";
+  el.appendChild(toggle);
+  el.appendChild(body);
+  o.mount.appendChild(el);
+  const place = (): void => {
+    o.mount.classList.toggle(BESIDE, wide);
+  };
+  place();
+
+  const tree = mountTreePanel({
+    kernel,
+    selfId: SIDEBAR_ID,
+    root: "",
+    mount: body,
+    persist: (s) => saveSidebar(kernel, view, treePatch(s)),
+  });
+  // The tree is the project folder's view, bound now (a saved `view_agent` serves it again; one
+  // saved before views gets the view of the project). Its first listing waits for that, and a
+  // refusal is said on the tree, which stays open. As the tree cell does (`files_view.ts`).
+  let gone = false;
+  const bound = bindCellToView(kernel, "folder", "", saved.view_agent, (v) => saveSidebar(kernel, view, { view_agent: v }), SIDEBAR_ID).then((b) => {
+    if (!b.ok) tree.say(`${said(b.refusal)} — the sidebar is not the project's view`);
+    // disposed while it was binding: the path it took is let go now
+    if (gone) release(kernel, "", SIDEBAR_ID);
+  });
+  void bound.then(() => {
+    if (!gone) void tree.start({ expanded: saved.expanded ?? [], ...(saved.selected !== undefined ? { selected: saved.selected } : {}) });
+  });
+
+  const paint = (): void => {
+    el.classList.toggle("collapsed", !open);
+    o.mount.classList.toggle(OPEN, open);
+    toggle.textContent = open ? "‹" : "›";
+    toggle.title = open ? "hide the file tree" : "show the file tree";
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  const setOpen = (v: boolean): void => {
+    open = v;
+    paint();
+    saveSidebar(kernel, view, { open: v });
+    o.onPlace?.();
+  };
+  toggle.addEventListener("click", () => setOpen(!open));
+  paint();
+  const setWide = (v: boolean): void => {
+    wide = v;
+    place();
+    o.onPlace?.();
+  };
+
+  return {
+    el,
+    tree,
+    get open(): boolean {
+      return open;
+    },
+    setOpen,
+    setWide,
+    dispose(): void {
+      gone = true;
+      tree.dispose();
+      release(kernel, "", SIDEBAR_ID);
+      o.mount.classList.remove(BESIDE, OPEN);
+      el.remove();
+    },
+  };
+}

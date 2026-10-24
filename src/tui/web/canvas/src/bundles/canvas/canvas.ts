@@ -32,7 +32,8 @@ import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
 import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
-import { DRAG_MIME, decodeDrag, layoutAround } from "../files/drag.ts";
+import { DRAG_MIME, boxCentre, decodeDrag, dropPlan, worldAt, zoomAbout } from "../files/drag.ts";
+import { mountTreeSidebar } from "./tree_sidebar.ts";
 import { fileGrant, onStateFrame } from "../files/file_bridge.ts";
 import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
 import { previewView } from "../preview/preview_view.ts";
@@ -442,6 +443,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       glHost = await createGlHost({
         bg,
         view,
+        box: () => canvas.getBoundingClientRect(),
         host,
         kernel,
         selfId,
@@ -456,6 +458,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     applyView();
     // `auto` follows the width: crossing 768px switches the theme
     if (themeShown !== null && themeNow() !== themeShown) void refresh();
+    // and the sidebar's place: beside the canvas on a wide screen, over it on a narrow one
+    treeSidebar.setWide(innerWidth > 768);
   });
 
   // THE WORLD IS ITS OWN LAYER ONLY WHILE IT MOVES (owner 2026-10-09, the load
@@ -475,14 +479,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     ticking = false;
     if (view.z !== targetZ) {
       moving();
-      const cx = window.innerWidth / 2;
-      const cy = window.innerHeight / 2;
+      // about the canvas's own middle: beside the sidebar that is not the viewport's
+      const box = canvas.getBoundingClientRect();
       let nextZ = view.z + (targetZ - view.z) * ZOOM_LERP;
       if (Math.abs(targetZ - nextZ) < 0.0005) nextZ = targetZ;
-      const ratio = nextZ / view.z;
-      view.ox = cx - (cx - view.ox) * ratio;
-      view.oy = cy - (cy - view.oy) * ratio;
-      view.z = nextZ;
+      Object.assign(view, zoomAbout(view, { x: box.width / 2, y: box.height / 2 }, nextZ));
       applyView();
       zoomSoon();
     }
@@ -581,13 +582,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     return false;
   };
 
-  const screenToWorld = (clientX: number, clientY: number): { x: number; y: number } => {
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: (clientX - rect.left - view.ox) / view.z,
-      y: (clientY - rect.top - view.oy) / view.z,
-    };
-  };
+  const screenToWorld = (clientX: number, clientY: number): { x: number; y: number } => worldAt(clientX, clientY, canvas.getBoundingClientRect(), view);
 
   // ─── themes: where the cells sit (`layout.ts`) ────────────────────
   // A cell's rect is in its view's layout for the theme in use — never on the
@@ -1626,7 +1621,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     renderSoon();
   }
   // ── THE FILE TREE (`files/files_view.ts`): the project's files, every agent a folder ──
-  const centre = (): { x: number; y: number } => screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+  const centre = (): { x: number; y: number } => {
+    const mid = boxCentre(canvas.getBoundingClientRect());
+    return screenToWorld(mid.x, mid.y);
+  };
   // every AI cell on every view of this page
   const aiCells = (): Rec[] =>
     everyAgent()
@@ -1876,7 +1874,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
 
 
   // THE ACTION POPUP: a double click on empty canvas, or ⌘K / Ctrl-K at the pointer.
-  let pointer = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+  // the pointer before any move is the canvas's middle (read when it is needed: the box is laid out by then)
+  let pointer: { x: number; y: number } | null = null;
+  const pointerAt = (): { x: number; y: number } => pointer ?? boxCentre(canvas.getBoundingClientRect());
   canvas.addEventListener("mousemove", (e) => {
     pointer = { x: e.clientX, y: e.clientY };
   });
@@ -1928,7 +1928,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   // (its popup gone with the tab) is removed at load.
   for (const id of everyAgent()) if (kernel.get(id)?.record().handler_module === SELECTOR) kernel.remove(id);
   setSelectorHost({
-    open: (id, sx, sy, title, done) => spotAt(sx ?? pointer.x, sy ?? pointer.y, title, done, id),
+    open: (id, sx, sy, title, done) => spotAt(sx ?? pointerAt().x, sy ?? pointerAt().y, title, done, id),
     tiles: async (typed) => tiles(typed, await presets()).map((t) => ({ label: t.label, kind: t.pick.kind, section: t.section, hint: t.hint })),
   });
   const openSelector = (sx: number, sy: number): void => {
@@ -1959,14 +1959,14 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     e.preventDefault();
     const got = decodeDrag(e.dataTransfer.getData(DRAG_MIME));
     if ("error" in got) return toast(`✕ ${got.error}`);
-    // several items sit around the drop point, one slot each (no two overlap)
-    const spots = layoutAround(screenToWorld(e.clientX, e.clientY), got.items.length, DROP_SLOT);
+    // several items sit around the drop point, one slot each (no two overlap): the same
+    // plan for a drag from the tree cell and from the sidebar (#148)
+    const plan = dropPlan(got.items, e.clientX, e.clientY, canvas.getBoundingClientRect(), view, DROP_SLOT);
     void (async (): Promise<void> => {
-      for (const [i, it] of got.items.entries()) {
-        const at = spots[i]!;
+      for (const { item: it, x, y } of plan) {
         const what = it.kind === "agent" ? { agent: it.id } : { path: it.path };
         try {
-          const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x: at.x, y: at.y } as unknown as Payload }]))[0]?.result as Rec | null;
+          const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x, y } as unknown as Payload }]))[0]?.result as Rec | null;
           const err = r?.["error"];
           if (typeof err === "string") toast(`✕ ${err}`);
         } catch (err) {
@@ -1980,6 +1980,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     if ((e.target as Element).closest(".agent-frame")) return;
     openSelector(e.clientX, e.clientY);
   });
+  // THE CANVAS'S OWN SIDEBAR (#148): the file tree beside the zoomed world, never in it,
+  // so a zoom or a pan leaves it where it is. Its rows drag onto `#canvas` like the tree cell's.
+  // Mounted after `setFilesDeps` (the tree reads the canvas through it).
+  // (its open or its place moves the canvas's box: the GL camera reads that box, so it follows)
+  const treeSidebar = mountTreeSidebar({ kernel, view: ROOT_VIEW, mount, wide: innerWidth > 768, onPlace: () => glHost?.applyCamera() });
   // ESC LEAVES FULL VIEW (owner 2026-10-08: nothing floats, so this is the way
   // back): to the canvas's root view — unless the keyboard is in an editor (a
   // terminal, a text field), whose Esc is its own
@@ -1998,7 +2003,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   window.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      openSelector(pointer.x, pointer.y);
+      openSelector(pointerAt().x, pointerAt().y);
     }
   });
 

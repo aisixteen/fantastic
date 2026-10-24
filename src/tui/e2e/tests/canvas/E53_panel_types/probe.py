@@ -40,7 +40,9 @@ def main() -> bool:
                     "overlay_before": await pg.js("[...document.querySelectorAll('.term-stopped')].filter(o=>!o.hidden).map(o=>o.textContent.trim()).join(' | ')")}
             await spot(pg, 1250, 450, "stream")
             await asyncio.sleep(1)
-            await spot(pg, 250, 700, "AI agent")  # none set up: the wizard
+            # x 320, not 250: the tree sidebar is open beside the canvas on a wide screen (#148), a
+            # 300px column at the left edge; a double-click in it is not on the canvas
+            await spot(pg, 320, 700, "AI agent")  # none set up: the wizard
             await pg.until("!!document.querySelector('.wiz .tiles button')", 20)
             await asyncio.sleep(2)  # the loader's flush lands before any reload
             ids = lambda: pg.js("[...document.querySelectorAll('.agent-frame')].map(f=>f.dataset.id).sort()")

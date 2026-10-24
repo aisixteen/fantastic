@@ -9,6 +9,7 @@ import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
 import { fileGrant, isRefusal, kernelBridge, openViewAgent, said } from "../files/file_bridge.ts";
 import { agentIndex } from "../files/files_deps.ts";
+import { filesAgent } from "../files/files_controller.ts";
 import { isRefusalOf, resolveTarget } from "../files/drag.ts";
 import type { Look, Opened, Refusal, Target } from "../files/drag.ts";
 import { nameOf, norm, parentOf, wire } from "../files/paths.ts";
@@ -18,6 +19,7 @@ import { cellGrant, hostRecordFresh, viewOf } from "./host_views.ts";
 import type { Rec } from "./host_views.ts";
 import { hiddenOf, setHidden, setRect, tabWidth, themeOf, themesOf } from "./layout.ts";
 import { isCellHandler } from "./cell_menu.ts";
+import { SIDEBAR_ID } from "./tree_sidebar.ts";
 import { chromeOf, FIT_MAX, fitSize, nextSize, sizeOf } from "./fit.ts";
 import type { Rect } from "./layout.ts";
 
@@ -77,7 +79,7 @@ export const SETTABLE = ["display_name", "html", "gl_source", "trusted", "readme
 export const GEOMETRY = ["x", "y", "width", "height"] as const;
 
 /** Every view verb, for the grants that admit a caller. */
-export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "open", "theme", "terminal_renderer", "reflect"] as const;
+export const VIEW_VERBS = ["place", "move", "fit", "update", "wire", "remove", "hide", "show", "open", "tree", "theme", "terminal_renderer", "reflect"] as const;
 
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -331,6 +333,14 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
     }
     case "open":
       return openView(id, payload, kernel);
+    // THE TREE SIDEBAR (#148): its verbs, through the root view — `tree {verb, path | agent}`.
+    // The sidebar is the page's one, bound to the root view alone: any other view refuses it.
+    case "tree": {
+      if (id !== ROOT_VIEW) return { error: `view: tree — the sidebar is the canvas's own, on ${ROOT_VIEW}; ask that view`, reason: "bad_arg", arg: "view" };
+      const verb = str(payload, "verb");
+      if (verb === "") return { error: "view: tree needs verb (select | expand | collapse | reveal)", reason: "bad_arg", arg: "verb" };
+      return filesAgent(SIDEBAR_ID, { ...payload, type: verb }, kernel);
+    }
     case "theme": {
       // THE THEME: which layout the cells sit in (canvas | mobile), or `auto` —
       // per tab, mobile under 768px wide. No name: what it is.
@@ -475,13 +485,15 @@ async function openFile(view: string, path: string, at: { x: number; y: number }
   const agent = await openViewAgent(kernel, "file", path);
   if (isRefusal(agent)) return agent as unknown as Json;
   const aid = freshId("preview");
-  setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 520, height: 360 });
   kernel.register(new Agent({
     id: aid,
     parentId: view,
     handlerModule: "preview_view.ts",
     meta: { display_name: nameOf(path), pinned: path, follow: false, can_call: fileGrant(), view_agent: agent.view } as unknown as Payload,
   }));
+  // its rect AFTER the cell is there: the layout's write refreshes the page, and a refresh prunes
+  // the rect of a cell it does not hold yet (#148: the drop's point was lost to a free spot)
+  setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 520, height: 360 });
   return { opened: path, kind: "file", cell: aid, agent: agent.view, created: agent.created } as Json;
 }
 
@@ -490,13 +502,14 @@ async function openDir(view: string, path: string, at: { x: number; y: number },
   const agent = await openViewAgent(kernel, "folder", path);
   if (isRefusal(agent)) return agent as unknown as Json;
   const aid = freshId("files");
-  setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 320, height: 560 });
   kernel.register(new Agent({
     id: aid,
     parentId: view,
     handlerModule: "files_view.ts",
     meta: { display_name: path === "" ? "project" : nameOf(path), root: path, can_call: fileGrant(), view_agent: agent.view } as unknown as Payload,
   }));
+  // its rect after the cell is there (as `openFile`: a refresh prunes the rect of a cell not yet held)
+  setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 320, height: 560 });
   return { opened: path, kind: "dir", cell: aid, agent: agent.view, created: agent.created } as Json;
 }
 
