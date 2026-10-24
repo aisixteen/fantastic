@@ -268,6 +268,38 @@ impl Agent {
         self.record()
     }
 
+    /// BOTH grant maps under ONE write lock: `edit` gets `can_call`, `callable_by` and the
+    /// record, and says which of the two it changed (or refuses). Nothing is written unless
+    /// `edit` returns `Ok`; then each changed map is written.
+    pub(crate) fn edit_grants(
+        &self,
+        edit: impl FnOnce(
+            &mut Map<String, Value>,
+            &mut Map<String, Value>,
+            &Map<String, Value>,
+        ) -> Result<(bool, bool), String>,
+    ) -> Result<(bool, bool), String> {
+        let mut m = self.meta.write().expect("meta lock poisoned");
+        let mut cc = m
+            .get("can_call")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut cb = m
+            .get("callable_by")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let (cc_changed, cb_changed) = edit(&mut cc, &mut cb, &m)?;
+        if cc_changed {
+            m.insert("can_call".to_string(), Value::Object(cc));
+        }
+        if cb_changed {
+            m.insert("callable_by".to_string(), Value::Object(cb));
+        }
+        Ok((cc_changed, cb_changed))
+    }
+
     /// Whether the record's `delete_lock` is TRUTHY. Substrate refuses
     /// cascade-delete on locked agents. Python truthiness
     /// (`P/kernel/_agent.py` `_find_locked_descendant`): `1`, `"yes"` or a
