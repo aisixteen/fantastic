@@ -852,7 +852,16 @@ async fn a_request_over_the_long_context_line_is_billed_long() {
     let u = p.usage.lock().unwrap();
     assert_eq!(u.long_requests, 1);
     assert_eq!(u.requests, 0);
-    let s = u.snapshot(Some(1.0), Some(5.0), Some(2.0), Some(10.0));
+    let s = u.snapshot(
+        "",
+        &Prices {
+            input: Some(1.0),
+            output: Some(5.0),
+            input_long: Some(2.0),
+            output_long: Some(10.0),
+            ..Prices::default()
+        },
+    );
     assert_eq!(s["long_context_requests"], json!(1));
     let cost = (50.0 + 1.25 * 50.0 + 0.1 * 50.0) * 2.0 / 1e6 + 10.0 * 10.0 / 1e6;
     assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
@@ -870,7 +879,16 @@ async fn a_request_under_the_line_is_billed_base() {
     let u = p.usage.lock().unwrap();
     assert_eq!(u.long_requests, 0);
     assert_eq!(u.requests, 1);
-    let s = u.snapshot(Some(1.0), Some(5.0), Some(2.0), Some(10.0));
+    let s = u.snapshot(
+        "",
+        &Prices {
+            input: Some(1.0),
+            output: Some(5.0),
+            input_long: Some(2.0),
+            output_long: Some(10.0),
+            ..Prices::default()
+        },
+    );
     assert_eq!(s["long_context_requests"], json!(0));
     let cost = (50.0 + 1.25 * 40.0) * 1.0 / 1e6 + 10.0 * 5.0 / 1e6;
     assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
@@ -886,7 +904,16 @@ async fn without_long_prices_the_long_bucket_uses_the_base_prices() {
     p.long_context_tokens = Some(100);
     drain(&p, None).await.unwrap();
     let u = p.usage.lock().unwrap();
-    let s = u.snapshot(Some(1.0), Some(5.0), None, None);
+    let s = u.snapshot(
+        "",
+        &Prices {
+            input: Some(1.0),
+            output: Some(5.0),
+            input_long: None,
+            output_long: None,
+            ..Prices::default()
+        },
+    );
     let cost = (50.0 + 1.25 * 50.0 + 0.1 * 50.0) * 1.0 / 1e6 + 10.0 * 5.0 / 1e6;
     assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
 }
@@ -943,6 +970,10 @@ fn the_new_fields_are_validated() {
         check(json!({"usage_log": ""})).as_deref(),
         Some("usage_log must be a non-empty string")
     );
+    assert_eq!(
+        check(json!({"price_cache_write_1h_per_mtok": -1})).as_deref(),
+        Some("price_cache_write_1h_per_mtok must be a number, zero or more")
+    );
 }
 
 #[tokio::test]
@@ -994,7 +1025,7 @@ fn hit_rate_and_saved_tokens_follow_the_formulas() {
         output: 0,
         ..Usage::default()
     };
-    let s = u.snapshot(None, None, None, None);
+    let s = u.snapshot("", &Prices::default());
     assert_eq!(s["prompt_tokens"], json!(1500));
     assert_eq!(s["saved_tokens"], json!(800)); // 0.9*1000 - 0.25*400
     let hit = s["hit_rate"].as_f64().unwrap();
@@ -1006,12 +1037,12 @@ fn hit_rate_and_saved_tokens_follow_the_formulas() {
         cache_write: 400,
         ..Usage::default()
     };
-    let s = w.snapshot(None, None, None, None);
+    let s = w.snapshot("", &Prices::default());
     assert_eq!(s["saved_tokens"], json!(-100));
     assert_eq!(s["hit_rate"].as_f64(), Some(0.0));
     // nothing counted: no prompt, no hit rate
     assert_eq!(
-        Usage::default().snapshot(None, None, None, None)["hit_rate"],
+        Usage::default().snapshot("", &Prices::default())["hit_rate"],
         json!(0)
     );
     // halves round to even
@@ -1031,13 +1062,176 @@ fn prices_on_the_record_add_cost_and_saving_in_usd() {
         output: 50,
         ..Usage::default()
     };
-    let s = u.snapshot(Some(3.0), Some(15.0), None, None);
+    let s = u.snapshot(
+        "",
+        &Prices {
+            input: Some(3.0),
+            output: Some(15.0),
+            input_long: None,
+            output_long: None,
+            ..Prices::default()
+        },
+    );
     let cost = (100.0 + 1.25 * 400.0 + 0.1 * 1000.0) * 3.0 / 1e6 + 50.0 * 15.0 / 1e6;
     assert!((s["cost_usd"].as_f64().unwrap() - cost).abs() < 1e-12);
     assert!((s["saved_usd"].as_f64().unwrap() - 800.0 * 3.0 / 1e6).abs() < 1e-12);
     // one price without the other: neither field
-    let s = u.snapshot(Some(3.0), None, None, None);
+    let s = u.snapshot(
+        "",
+        &Prices {
+            input: Some(3.0),
+            output: None,
+            input_long: None,
+            output_long: None,
+            ..Prices::default()
+        },
+    );
     assert!(s.get("cost_usd").is_none() && s.get("saved_usd").is_none());
+}
+
+#[test]
+fn sonnet_cache_reads_bill_at_a_twentieth_of_input() {
+    let u = Usage {
+        requests: 1,
+        cache_read: 1_000_000,
+        ..Usage::default()
+    };
+    let p = Prices {
+        input: Some(3.0),
+        output: Some(15.0),
+        input_long: None,
+        output_long: None,
+        ..Prices::default()
+    };
+    let s = u.snapshot("claude-sonnet-5-5", &p);
+    assert!(
+        (s["cost_usd"].as_f64().unwrap() - 0.15).abs() < 1e-12,
+        "{s}"
+    );
+    // Opus 5.5 too, and a dated id is the same model
+    let s = u.snapshot("claude-opus-5-5-20260601", &p);
+    assert!(
+        (s["cost_usd"].as_f64().unwrap() - 0.15).abs() < 1e-12,
+        "{s}"
+    );
+}
+
+#[test]
+fn haiku_cache_reads_bill_at_a_tenth() {
+    let u = Usage {
+        requests: 1,
+        cache_read: 1_000_000,
+        ..Usage::default()
+    };
+    let p = Prices {
+        input: Some(1.0),
+        output: Some(5.0),
+        input_long: None,
+        output_long: None,
+        ..Prices::default()
+    };
+    let s = u.snapshot("claude-haiku-5-5", &p);
+    assert!(
+        (s["cost_usd"].as_f64().unwrap() - 0.10).abs() < 1e-12,
+        "{s}"
+    );
+    // the long-context bucket: every rate x5 with its own input price
+    let u = Usage {
+        requests: 1,
+        long_requests: 1,
+        long_cache_read: 1_000_000,
+        ..Usage::default()
+    };
+    let p = Prices {
+        input: Some(1.0),
+        output: Some(5.0),
+        input_long: Some(5.0),
+        output_long: Some(25.0),
+        ..Prices::default()
+    };
+    let s = u.snapshot("claude-haiku-5-5", &p);
+    assert!(
+        (s["cost_usd"].as_f64().unwrap() - 0.50).abs() < 1e-12,
+        "{s}"
+    );
+}
+
+#[test]
+fn one_hour_cache_writes_bill_at_twice_input() {
+    let p = Prices {
+        input: Some(3.0),
+        output: Some(15.0),
+        input_long: None,
+        output_long: None,
+        ..Prices::default()
+    };
+    let u = Usage {
+        requests: 1,
+        cache_write_1h: 1_000_000,
+        ..Usage::default()
+    };
+    let s = u.snapshot("claude-sonnet-5-5", &p);
+    assert!((s["cost_usd"].as_f64().unwrap() - 6.0).abs() < 1e-12, "{s}");
+    assert_eq!(s["cache_write_tokens"], json!(1_000_000));
+    let five = Usage {
+        requests: 1,
+        cache_write: 1_000_000,
+        ..Usage::default()
+    };
+    let s = five.snapshot("claude-sonnet-5-5", &p);
+    assert!(
+        (s["cost_usd"].as_f64().unwrap() - 3.75).abs() < 1e-12,
+        "{s}"
+    );
+}
+
+#[tokio::test]
+async fn a_one_hour_cache_write_is_counted_apart_from_the_five_minute_one() {
+    let mut start = usage_start(50, 100, 0);
+    start["message"]["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens": 60, "ephemeral_1h_input_tokens": 40});
+    let mut events = vec![start, text("ok")];
+    events.extend(usage_stop(10));
+    let (_s, ep) = api(200, sse(&events)).await;
+    let mut p = provider(&ep, Arc::new(NoKey));
+    p.usage = fresh_usage();
+    drain(&p, None).await.unwrap();
+    let u = p.usage.lock().unwrap();
+    assert_eq!((u.cache_write, u.cache_write_1h), (60, 40));
+    assert_eq!(
+        u.snapshot("", &Prices::default())["cache_write_tokens"],
+        json!(100)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_without_cache_prices_uses_the_model_defaults() {
+    let tmp = TempDir::new().unwrap();
+    let base = json!({"model": "claude-sonnet-5-5", "price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0});
+    let kernel = mk_with_id(
+        &tmp,
+        "http://unused.test/v1/messages",
+        base.clone(),
+        "f314a",
+    )
+    .await;
+    usage_of(&AgentId::from("f314a")).lock().unwrap().cache_read = 1_000_000;
+    let got = call(&kernel, "f314a", json!({"type": "usage"})).await;
+    assert!(
+        (got["cost_usd"].as_f64().unwrap() - 0.15).abs() < 1e-12,
+        "{got}"
+    );
+    // an explicit cache-read price on the record wins over the model default
+    let tmp2 = TempDir::new().unwrap();
+    let mut explicit = base;
+    explicit["price_cache_read_per_mtok"] = json!(0.30);
+    let kernel = mk_with_id(&tmp2, "http://unused.test/v1/messages", explicit, "f314b").await;
+    usage_of(&AgentId::from("f314b")).lock().unwrap().cache_read = 1_000_000;
+    let got = call(&kernel, "f314b", json!({"type": "usage"})).await;
+    assert!(
+        (got["cost_usd"].as_f64().unwrap() - 0.30).abs() < 1e-12,
+        "{got}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1599,4 +1793,19 @@ async fn a_corrupt_usage_file_starts_clean() {
     let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap())
         .expect("the turn rewrites a valid file");
     assert_eq!(written["requests"], json!(1), "{written}");
+}
+
+#[test]
+fn the_sidecar_keeps_the_one_hour_write_count() {
+    let u = Usage {
+        cache_write_1h: 40,
+        long_cache_write_1h: 7,
+        ..Usage::default()
+    };
+    let back = Usage::from_json(&u.to_json());
+    assert_eq!((back.cache_write_1h, back.long_cache_write_1h), (40, 7));
+    // A sidecar written before the field existed loads with 0.
+    let old = Usage::from_json(&json!({"requests": 3, "cache_write": 5}));
+    assert_eq!((old.requests, old.cache_write), (3, 5));
+    assert_eq!((old.cache_write_1h, old.long_cache_write_1h), (0, 0));
 }

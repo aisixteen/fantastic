@@ -219,6 +219,99 @@ pub fn saved_tokens(cache_read: i64, cache_write: i64) -> i64 {
     q
 }
 
+/// The record's prices, USD per million tokens; `None` = unset. The base input and
+/// output prices price the base bucket, the `_long` ones the long-context bucket (unset,
+/// the base). The cache prices are optional: unset, the model's default rates apply.
+#[derive(Default, Clone, Copy)]
+struct Prices {
+    input: Option<f64>,
+    output: Option<f64>,
+    input_long: Option<f64>,
+    output_long: Option<f64>,
+    cache_read: Option<f64>,
+    cache_write_5m: Option<f64>,
+    cache_write_1h: Option<f64>,
+}
+
+/// The three cache rates of one bucket, USD per million tokens.
+#[derive(Clone, Copy)]
+struct CacheRates {
+    read: f64,
+    write_5m: f64,
+    write_1h: f64,
+}
+
+/// The default cache rates of `model` at the input price `price_in`: a 5-minute write
+/// 1.25x, a 1-hour write 2x, a read 0.1x; Sonnet 5.5 and Opus 5.5 read at 0.05x. A
+/// model matches by its id or a dated form of it (`claude-sonnet-5-5-<date>`).
+#[must_use]
+fn model_cache_rates(model: &str, price_in: f64) -> CacheRates {
+    const CHEAP_READ: [&str; 2] = ["claude-sonnet-5-5", "claude-opus-5-5"];
+    let cheap_read = CHEAP_READ.iter().any(|id| {
+        model == *id
+            || model
+                .strip_prefix(id)
+                .is_some_and(|rest| rest.starts_with('-'))
+    });
+    CacheRates {
+        read: price_in * if cheap_read { 0.05 } else { 0.1 },
+        write_5m: price_in * 1.25,
+        write_1h: price_in * 2.0,
+    }
+}
+
+/// The rates one bucket bills at: the record's explicit cache price when set, else the
+/// model default at the bucket's input price `bucket_in`. An explicit price is USD at
+/// the base input price `base_in`, so the long-context bucket scales it by `bucket_in`
+/// over `base_in`.
+fn bucket_rates(model: &str, bucket_in: f64, base_in: f64, prices: &Prices) -> CacheRates {
+    let default = model_cache_rates(model, bucket_in);
+    let scale = |explicit: f64| {
+        if base_in > 0.0 {
+            explicit * bucket_in / base_in
+        } else {
+            explicit
+        }
+    };
+    CacheRates {
+        read: prices.cache_read.map_or(default.read, scale),
+        write_5m: prices.cache_write_5m.map_or(default.write_5m, scale),
+        write_1h: prices.cache_write_1h.map_or(default.write_1h, scale),
+    }
+}
+
+/// One price bucket's token counts.
+#[derive(Clone, Copy)]
+struct Tally {
+    input: i64,
+    write_5m: i64,
+    write_1h: i64,
+    read: i64,
+    output: i64,
+}
+
+/// A bucket's cost and saving in USD: every token at its rate, and the saving against
+/// the same tokens uncached (reads at the input price, writes at the input price).
+fn bucket_cost(
+    model: &str,
+    t: Tally,
+    pi: f64,
+    po: f64,
+    base_in: f64,
+    prices: &Prices,
+) -> (f64, f64) {
+    let r = bucket_rates(model, pi, base_in, prices);
+    let cost = t.input as f64 * pi
+        + t.write_5m as f64 * r.write_5m
+        + t.write_1h as f64 * r.write_1h
+        + t.read as f64 * r.read
+        + t.output as f64 * po;
+    let saved = t.read as f64 * (pi - r.read)
+        - t.write_5m as f64 * (r.write_5m - pi)
+        - t.write_1h as f64 * (r.write_1h - pi);
+    (cost / 1e6, saved / 1e6)
+}
+
 /// One agent's token counts: since this kernel process booted (RAM), or the running
 /// total a sidecar carries. `input` is the uncached remainder; the two cache counts
 /// are what the API reports for the prompt. Python `Usage`.
@@ -227,12 +320,14 @@ struct Usage {
     requests: i64,
     input: i64,
     cache_write: i64,
+    cache_write_1h: i64,
     cache_read: i64,
     output: i64,
     /// Requests whose prompt was over the record's `long_context_tokens`.
     long_requests: i64,
     long_input: i64,
     long_cache_write: i64,
+    long_cache_write_1h: i64,
     long_cache_read: i64,
     long_output: i64,
     /// The tier of the request in flight: its tokens land in the long bucket.
@@ -242,48 +337,54 @@ struct Usage {
 }
 
 /// The sidecar's keys, in the order [`Usage::counters`] lists the counts.
-const FIELDS: [&str; 10] = [
+const FIELDS: [&str; 12] = [
     "requests",
     "input",
     "cache_write",
+    "cache_write_1h",
     "cache_read",
     "output",
     "long_requests",
     "long_input",
     "long_cache_write",
+    "long_cache_write_1h",
     "long_cache_read",
     "long_output",
 ];
 
 impl Usage {
-    /// The ten persisted counts, the long-context buckets included.
-    fn counters(&self) -> [i64; 10] {
+    /// The twelve persisted counts, the long-context buckets included.
+    fn counters(&self) -> [i64; 12] {
         [
             self.requests,
             self.input,
             self.cache_write,
+            self.cache_write_1h,
             self.cache_read,
             self.output,
             self.long_requests,
             self.long_input,
             self.long_cache_write,
+            self.long_cache_write_1h,
             self.long_cache_read,
             self.long_output,
         ]
     }
 
-    fn from_counters(c: [i64; 10]) -> Usage {
+    fn from_counters(c: [i64; 12]) -> Usage {
         Usage {
             requests: c[0],
             input: c[1],
             cache_write: c[2],
-            cache_read: c[3],
-            output: c[4],
-            long_requests: c[5],
-            long_input: c[6],
-            long_cache_write: c[7],
-            long_cache_read: c[8],
-            long_output: c[9],
+            cache_write_1h: c[3],
+            cache_read: c[4],
+            output: c[5],
+            long_requests: c[6],
+            long_input: c[7],
+            long_cache_write: c[8],
+            long_cache_write_1h: c[9],
+            long_cache_read: c[10],
+            long_output: c[11],
             ..Usage::default()
         }
     }
@@ -292,7 +393,7 @@ impl Usage {
     /// the since-boot side that carries them.
     fn plus(&self, other: &Usage) -> Usage {
         let (a, b) = (self.counters(), other.counters());
-        let sum: [i64; 10] = std::array::from_fn(|i| a[i] + b[i]);
+        let sum: [i64; 12] = std::array::from_fn(|i| a[i] + b[i]);
         Usage {
             cur_long: other.cur_long,
             log_error: other.log_error.clone(),
@@ -300,7 +401,7 @@ impl Usage {
         }
     }
 
-    /// The sidecar's JSON: the ten counts, by [`FIELDS`].
+    /// The sidecar's JSON: the twelve counts, by [`FIELDS`].
     fn to_json(&self) -> Value {
         Value::Object(
             FIELDS
@@ -316,18 +417,14 @@ impl Usage {
         Usage::from_counters(FIELDS.map(|k| v.get(k).and_then(Value::as_i64).unwrap_or(0)))
     }
 
-    /// What the counts derive to, with the record's prices when BOTH are set (USD per
-    /// million tokens). Python `Usage.snapshot`.
-    /// `long_in` / `long_out` price the long-context bucket; unset, the base prices.
-    fn snapshot(
-        &self,
-        price_in: Option<f64>,
-        price_out: Option<f64>,
-        long_in: Option<f64>,
-        long_out: Option<f64>,
-    ) -> Value {
+    /// What the counts derive to, with the record's prices when BOTH base prices are set
+    /// (USD per million tokens). `model` picks the default cache rates. Python
+    /// `Usage.snapshot`.
+    fn snapshot(&self, model: &str, prices: &Prices) -> Value {
         let input = self.input + self.long_input;
-        let cache_write = self.cache_write + self.long_cache_write;
+        let cache_write_5m = self.cache_write + self.long_cache_write;
+        let cache_write_1h = self.cache_write_1h + self.long_cache_write_1h;
+        let cache_write = cache_write_5m + cache_write_1h;
         let cache_read = self.cache_read + self.long_cache_read;
         let output = self.output + self.long_output;
         let prompt = input + cache_write + cache_read;
@@ -350,34 +447,27 @@ impl Usage {
         if let Some(e) = &self.log_error {
             out.insert("usage_log_error".into(), json!(e));
         }
-        if let (Some(pin), Some(pout)) = (price_in, price_out) {
-            let (lin, lout) = match (long_in, long_out) {
-                (Some(a), Some(b)) => (a, b),
-                _ => (pin, pout),
+        if let (Some(pin), Some(pout)) = (prices.input, prices.output) {
+            let lin = prices.input_long.unwrap_or(pin);
+            let lout = prices.output_long.unwrap_or(pout);
+            let base = Tally {
+                input: self.input,
+                write_5m: self.cache_write,
+                write_1h: self.cache_write_1h,
+                read: self.cache_read,
+                output: self.output,
             };
-            let cost_of = |i: i64, w: i64, r: i64, o: i64, pi: f64, po: f64| {
-                let cost_in = i as f64 + 1.25 * w as f64 + 0.1 * r as f64;
-                cost_in * pi / 1e6 + o as f64 * po / 1e6
+            let long = Tally {
+                input: self.long_input,
+                write_5m: self.long_cache_write,
+                write_1h: self.long_cache_write_1h,
+                read: self.long_cache_read,
+                output: self.long_output,
             };
-            let cost = cost_of(
-                self.input,
-                self.cache_write,
-                self.cache_read,
-                self.output,
-                pin,
-                pout,
-            ) + cost_of(
-                self.long_input,
-                self.long_cache_write,
-                self.long_cache_read,
-                self.long_output,
-                lin,
-                lout,
-            );
-            let saved_usd = saved_tokens(self.cache_read, self.cache_write) as f64 * pin / 1e6
-                + saved_tokens(self.long_cache_read, self.long_cache_write) as f64 * lin / 1e6;
-            out.insert("cost_usd".into(), json!(cost));
-            out.insert("saved_usd".into(), json!(saved_usd));
+            let (c1, s1) = bucket_cost(model, base, pin, pout, pin, prices);
+            let (c2, s2) = bucket_cost(model, long, lin, lout, pin, prices);
+            out.insert("cost_usd".into(), json!(c1 + c2));
+            out.insert("saved_usd".into(), json!(s1 + s2));
         }
         Value::Object(out)
     }
@@ -786,6 +876,11 @@ impl SseState {
                     count("cache_creation_input_tokens"),
                     count("cache_read_input_tokens"),
                 );
+                // the 1-hour part of the write, priced apart; the rest is the 5-minute write
+                let write_1h = u["cache_creation"]["ephemeral_1h_input_tokens"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .clamp(0, write.max(0));
                 let total = input + write + read;
                 self.report.lock().expect("report poisoned").prompt_tokens =
                     (total > 0).then_some(total);
@@ -802,12 +897,14 @@ impl SseState {
                 if long {
                     usage.long_requests += 1;
                     usage.long_input += input;
-                    usage.long_cache_write += write;
+                    usage.long_cache_write += write - write_1h;
+                    usage.long_cache_write_1h += write_1h;
                     usage.long_cache_read += read;
                 } else {
                     usage.requests += 1;
                     usage.input += input;
-                    usage.cache_write += write;
+                    usage.cache_write += write - write_1h;
+                    usage.cache_write_1h += write_1h;
                     usage.cache_read += read;
                 }
                 drop(usage);
@@ -1019,12 +1116,20 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
 /// A count's snapshot with the record's prices applied (python `_usage_now`).
 fn priced(counts: &Usage, meta: &Map<String, Value>) -> Value {
     let price = |k: &str| meta.get(k).and_then(Value::as_f64);
-    counts.snapshot(
-        price("price_input_per_mtok"),
-        price("price_output_per_mtok"),
-        price("price_input_long_per_mtok"),
-        price("price_output_long_per_mtok"),
-    )
+    let model = meta
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let prices = Prices {
+        input: price("price_input_per_mtok"),
+        output: price("price_output_per_mtok"),
+        input_long: price("price_input_long_per_mtok"),
+        output_long: price("price_output_long_per_mtok"),
+        cache_read: price("price_cache_read_per_mtok"),
+        cache_write_5m: price("price_cache_write_5m_per_mtok"),
+        cache_write_1h: price("price_cache_write_1h_per_mtok"),
+    };
+    counts.snapshot(model, &prices)
 }
 
 /// The agent's counts since it was created: the sidecar's base plus this process's.
@@ -1172,6 +1277,9 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         "price_output_per_mtok",
         "price_input_long_per_mtok",
         "price_output_long_per_mtok",
+        "price_cache_read_per_mtok",
+        "price_cache_write_5m_per_mtok",
+        "price_cache_write_1h_per_mtok",
     ] {
         if let Some(p) = meta.get(key).filter(|v| !v.is_null()) {
             if !p.is_number() || p.as_f64().unwrap_or(0.0) < 0.0 {
@@ -1330,6 +1438,22 @@ pub fn record_schema() -> &'static Value {
                 "price_output_long_per_mtok",
                 "float",
                 "USD per million output tokens for a long-context request; unset = the base price",
+            ),
+            Field::new(
+                "price_cache_read_per_mtok",
+                "float",
+                "USD per million cache-read input tokens; unset = the model default (0.05x input for \
+                 claude-sonnet-5-5 and claude-opus-5-5, else 0.1x)",
+            ),
+            Field::new(
+                "price_cache_write_5m_per_mtok",
+                "float",
+                "USD per million 5-minute cache-write input tokens; unset = 1.25x input",
+            ),
+            Field::new(
+                "price_cache_write_1h_per_mtok",
+                "float",
+                "USD per million 1-hour cache-write input tokens; unset = 2x input",
             ),
             Field::new(
                 "long_context_tokens",
