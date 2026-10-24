@@ -56,6 +56,7 @@ from ai_core.context import (
 )
 from ai_core import caching
 from ai_core import prompt_file
+from ai_core import embed as _embed_mod
 from ai_core.provider import ProviderError
 from ai_core.folds import anchors_of, is_fold, member_anchor
 from ai_core.folds import expand_ids as expand_fold_ids
@@ -3794,6 +3795,18 @@ def _make_history(cfg: Backend):
         else:
             rows = await _load_history(id, kernel)
         digest = [_digest(r) for r in rows if r.get("id")]
+        # CHAT CARDS (#339): embed / unembed rows have no role, so `_load_history` drops
+        # them; the page redraws them from here, in their place among the turns.
+        card_count = 0
+        if payload.get("fold") is None:
+            cards = [
+                _digest(r)
+                for r in await _embed_mod.card_rows(id, kernel)
+                if r.get("id")
+            ]
+            card_count = len(cards)
+            if cards:
+                digest = sorted(digest + cards, key=lambda d: d["id"])
         try:
             limit = int(payload.get("limit") or 0)
         except (TypeError, ValueError):
@@ -3807,13 +3820,23 @@ def _make_history(cfg: Backend):
         out = {
             "rows": kept,
             "next": kept[-1]["id"] if truncated and kept else None,
-            "total": len(rows),
+            "total": len(rows) + card_count,
         }
         if head is not None:
             out["fold"] = head
         return out
 
     return _history
+
+
+async def _embed(id, payload, kernel):
+    """args: id:str (req) — a HOST agent that has a `view` record. Shows that agent's panel as a CARD in this chat, at this place in the conversation; the card is stored as a row, so it survives a page reload and a kernel restart, and `history` lists it as kind `embed` (the model's prompt never holds it). This is a chat card, not a canvas cell. When you create an agent to embed, design its panel FOR THE CHAT WINDOW: it fills 100% of the column width (don't set a width), define its height well, at most 1200 px (CHAT_CARD_MAX_HEIGHT). Readable at a glance: one purpose per card, no tiny text, no wide tables. Keep it live with events, not polling. HOW: create_agent {view: {kind: html, bytes_file: panel.html, calls: [get_html, watch]}, callable_by: {user: [get_html, watch]}}, then embed {id}. The same checks as the canvas's `place {backend_id}`: the agent must exist (`not_found`), have a `view` record (`no_view`: a default chat or terminal view is not a panel), and let the user call every verb its panel calls plus `watch` (`grants_missing: {<id>: [verbs]}` with the callable_by fix in `hint`). It creates nothing and moves nothing: the same agent can be a card here and a cell on a canvas at once. Embedding an agent already shown answers {already:true}. The reply carries the card's box, {width: '100%', max_height: 1200}; the chat page measures the panel it draws and, when it overflows or is taller than the cap, tells you to redo the panel. Returns {embedded:id, row, card, view, hint}."""
+    return await _embed_mod.embed(id, payload, kernel)
+
+
+async def _unembed(id, payload, kernel):
+    """args: id:str (req). Takes the card of agent `id` out of this chat: a tombstone row, so it stays gone after a reload (a later `embed` shows it again). Works the same for a live agent and a deleted one, so it also clears a '[deleted from canvas]' placeholder. It NEVER touches the agent — deleting it stays the kernel's `delete_agent`. Returns {unembedded:id} ({was_embedded:false} when no such card was shown)."""
+    return await _embed_mod.unembed(id, payload, kernel)
 
 
 # ─── the on_cancel bundle hook (shared by every backend) ────────
@@ -5091,6 +5114,9 @@ def build(
         # for humans — and AI-to-AI inquiry had no shape at all.
         "inquiry": _make_inquiry(cfg),
         "history": _make_history(cfg),
+        # Inline agent views in this chat (#339): a card row each way, no role, never a turn.
+        "embed": _embed,
+        "unembed": _unembed,
         **(extra_verbs or {}),
         "status": _status,
         "context_status": _context_status,

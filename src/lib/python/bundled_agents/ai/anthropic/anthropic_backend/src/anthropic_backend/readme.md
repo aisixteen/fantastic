@@ -31,6 +31,10 @@ and `price_input_per_mtok` / `price_output_per_mtok` (USD per million tokens, nu
 zero or more; no default price — see Usage). `caching` and `cache_primer_until` are
 ai_core's, on every AI agent — see Caching.
 
+## Chat cards
+
+To show a host agent's panel inline in a chat, `embed {id}` it (and `unembed {id}` to take it out) — `docs` of this agent carries how to design a card for the chat window.
+
 ## Caching
 
 `caching` is ai_core's mode: `none` | `cleanup` (default) | `provider_cache`, and this
