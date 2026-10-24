@@ -9,7 +9,7 @@ What is proven:
   confirming zero corruption end-to-end.
 - Individual zip members are pulled directly (no full unzip, no unpacked tree),
   consistent with the direct-pull discipline in the rest of the harness.
-- The contract holds on all three host runtimes: Python, Rust, and Swift.
+- The contract holds on all three host runtimes: Python and Rust.
 
 GENERATED scaffold — needs the built runtime binaries AND the frontend artifact;
 each skips cleanly when its prerequisite is absent. NOT run by the unit-test
@@ -100,10 +100,3 @@ async def test_rust_serves_frontend_bundle(rust_binary, rust_kernel, parity_tmp,
     )
 
 
-@pytest.mark.asyncio
-async def test_swift_serves_frontend_bundle(
-    swift_binary, swift_kernel, parity_tmp, free_port
-) -> None:
-    await _serves_frontend_bundle_via_file_bridge(
-        swift_binary, swift_kernel, parity_tmp, free_port, "swift_serve_frontend"
-    )

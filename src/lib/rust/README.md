@@ -86,7 +86,7 @@ a write through the loader) runs the handler directly, ungated. Lifecycle verbs:
 `kernel_start`, `shutdown_agents`, `kernel_stop`. Manual: `reflect kernel
 readme=memory`. A static `readme-contract` lint
 (`integration_tests/decoupling/test_readme_contract.py`) scans every host
-bundle's readme/sentence across python/rust/swift and fails on any
+bundle's readme/sentence across python/rust and fails on any
 client-intent word (iframe, transport.js, browser, …), so the host stays
 client-agnostic by construction.
 
@@ -122,15 +122,15 @@ Otherwise it exits silently.
 ## The on-device backend (macOS build)
 
 `fantastic-foundation-models-backend` (`foundation_models_backend.tools`) is the
-rust half of ONE implementation of Apple's Foundation Models calls: the swift
-`FantasticFMCore` (`../swift/Sources/FantasticFMCore`) is linked as the static
+Rust bundle over Apple's Foundation Models calls: the swift
+`FantasticFMCore` (`crates/bundles/fantastic-foundation-models-backend/swift/Sources/FantasticFMCore`) is linked as the static
 library `libFantasticFMBridge.a` through its C ABI
-(`../swift/Sources/FantasticFMBridge/fm_bridge.h`), so the swift and rust
-bundles run the same code and answer and refuse in the same words. Python has
-no such backend (Apple-only native).
+(`crates/bundles/fantastic-foundation-models-backend/swift/Sources/FantasticFMBridge/fm_bridge.h`). The swift package lives in
+the crate; it is the only swift left in the repo (the swift kernel runtime is
+retired). Python has no such backend (Apple-only native).
 
 - **macOS target:** the crate's `build.rs` runs `swift build -c release
-  --product FantasticFMBridge --arch <arm64|x86_64>` over `../swift` into
+  --product FantasticFMBridge --arch <arm64|x86_64>` over the crate's `swift/` package into
   `target/…/out/swift-build` (the swift package's own `.build` is untouched), and
   links the archive, the Foundation and FoundationModels frameworks and the
   Swift runtime (paths from `xcrun`). It needs Xcode with a macOS 26+ SDK. A
@@ -145,8 +145,7 @@ no such backend (Apple-only native).
 - **Every other target:** nothing is built or linked; the agent's `send` fails
   `the on-device model is unavailable: platform not macOS 26+ — this is <X>`.
 - **Both tiers:** registered in `full` and `embedded` (no subprocess and no
-  dlopen at run time — the sandboxed macOS tier may run it), as swift's registry
-  does on every platform.
+  dlopen at run time — the sandboxed macOS tier may run it).
 - **Tests:** the default suite uses a fake engine plus the real bridge's
   pre-model refusals (no prompt reaches the model); `FM_LIVE=1 cargo test -p
   fantastic-foundation-models-backend live_on_device_model -- --nocapture` runs

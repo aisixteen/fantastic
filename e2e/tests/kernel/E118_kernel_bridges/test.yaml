@@ -5,7 +5,7 @@ id: kernel_bridges
 group: kernel
 title: "two kernels bridged: ws_bridge both ways (remote reflect, send, raw bytes each way, read_stream to eof, watch_remote events, the remote's gate), a dead peer (bounded failure, explicit reconnect), relay_connector through a stub relay (store password, binary frames, live seal)"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

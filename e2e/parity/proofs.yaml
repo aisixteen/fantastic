@@ -160,23 +160,23 @@ by_selector:
 # Pass = the named twin EXISTS, `diff.py` greps its name in its file, and the
 # §5.9 suites are green. These are the items §5.5 lists.
 unit:
-  A0.1: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_repr", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyRepr"}
-  A0.2: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_str", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyStr"}
-  A0.3: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_truthy", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyTruthy"}
-  A0.4: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_json_dumps", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyJSONDumps"}
-  A0.5: {rust: "crates/fantastic-bundle/src/pyfmt.rs::os_error_str", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::osErrorStr"}
-  A0.6: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_int", swift: "Tests/FantasticJSONTests/PyFormatTests.swift::pyInt"}
-  A5.9: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs", swift: "Tests/FantasticSchedulerTests"}
-  A5.12: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs", swift: "Tests/FantasticSchedulerTests"}
-  A7.10: {rust: "crates/bundles/fantastic-bridge/src/tests.rs", swift: "Tests/FantasticBridgeTests"}
-  A7.24: {rust: "crates/bundles/fantastic-bridge/src/tests.rs", swift: "Tests/FantasticBridgeTests"}
-  A11.30: {rust: "crates/bundles/fantastic-web/src/tests.rs", swift: "Tests/FantasticWebTests"}
-  B2.10: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs", swift: "Tests/FantasticAICoreTests"}
-  B2.19: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs", swift: "Tests/FantasticAICoreTests"}
-  C44: {rust: "crates/fantastic-kernel/src/tests.rs", swift: "Tests/FantasticKernelTests", note: "records under 64 KiB in every capture"}
-  C49: {rust: "crates/fantastic-kernel/src/tests.rs", swift: "Tests/FantasticKernelTests"}
-  C51: {rust: "crates/fantastic-kernel/src/tests.rs", swift: "Tests/FantasticKernelTests"}
-  C82: {rust: "crates/fantastic-cli/src/tests.rs", swift: "Tests/FantasticCliBundleTests"}
+  A0.1: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_repr"}
+  A0.2: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_str"}
+  A0.3: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_truthy"}
+  A0.4: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_json_dumps"}
+  A0.5: {rust: "crates/fantastic-bundle/src/pyfmt.rs::os_error_str"}
+  A0.6: {rust: "crates/fantastic-bundle/src/pyfmt.rs::py_int"}
+  A5.9: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs"}
+  A5.12: {rust: "crates/bundles/fantastic-scheduler/src/tests.rs"}
+  A7.10: {rust: "crates/bundles/fantastic-bridge/src/tests.rs"}
+  A7.24: {rust: "crates/bundles/fantastic-bridge/src/tests.rs"}
+  A11.30: {rust: "crates/bundles/fantastic-web/src/tests.rs"}
+  B2.10: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs"}
+  B2.19: {rust: "crates/bundles/fantastic-ai-core/src/tests.rs"}
+  C44: {rust: "crates/fantastic-kernel/src/tests.rs", note: "records under 64 KiB in every capture"}
+  C49: {rust: "crates/fantastic-kernel/src/tests.rs"}
+  C51: {rust: "crates/fantastic-kernel/src/tests.rs"}
+  C82: {rust: "crates/fantastic-cli/src/tests.rs"}
 
 # ── proof: capture+unit — the capture may not reach it every run ─────────────
 capture_and_unit:

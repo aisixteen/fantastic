@@ -109,5 +109,4 @@ exercise:
 These specs run only against the Rust runtime — they assert things
 the Python kernel doesn't expose (the `FANTASTIC_PYTHON` env, the
 feature-gate compile matrix, round-trip workdir loading across
-both kernels, and the on-device backend python does not have — its
-swift twin is `../swift/selftest/foundation_models_backend.md`).
+both kernels, and the on-device backend python does not have).

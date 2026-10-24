@@ -1,6 +1,6 @@
 """kernel/recall_scale — a FRESH execution name vs the stored-call count. NO MODEL. Run SOLO.
 
-On the PACKAGED host of `RUNTIME` (python | rust | swift), every call through
+On the PACKAGED host of `RUNTIME` (python | rust), every call through
 `web_rest`:
 
   1. FILL the kernel's memory store with `call` rows: `reflect tree=none` on a small

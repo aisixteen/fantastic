@@ -5,7 +5,7 @@ id: docs_mechanics
 group: agentic
 title: it finds a deep agent and learns how to call it from `docs`, cutting the tree as it goes
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

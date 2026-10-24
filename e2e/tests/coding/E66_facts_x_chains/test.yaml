@@ -4,7 +4,7 @@ id: facts_x_chains
 group: coding
 title: "four roots sent over time, four clean reports, a question about an early one answered from the store"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 long: true  # > 8 min measured; at most 2 run at once (run.py LONG_LANES)
 limits:

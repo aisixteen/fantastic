@@ -48,7 +48,6 @@ CWDS = {
     "e2e": E2E,
     "pyroot": PYROOT,
     "rust": REPO / "src" / "lib" / "rust",
-    "swift": REPO / "src" / "lib" / "swift",
 }
 
 
@@ -100,7 +99,7 @@ LIMIT_ENV = (
 #: which is reachable over HTTP, so the same scenario would not be the same test
 #: on every runtime. Driving all three through one face keeps them comparable.
 #: The runtimes the host driver spawns — the ones with something to build.
-HOST_RUNTIMES = ("python", "rust", "swift")
+HOST_RUNTIMES = ("python", "rust")
 
 SCENARIO_RUNNERS = {
     # ABSOLUTE path: cwd is the python tree, where `runners/` does not exist.
@@ -113,11 +112,6 @@ SCENARIO_RUNNERS = {
         "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
         "cwd": "pyroot",
         "env": {"KERNEL": "rust"},
-    },
-    "swift": {
-        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/host.py")],
-        "cwd": "pyroot",
-        "env": {"KERNEL": "swift"},
     },
     # THE PRODUCT BINARY'S MCP FACE. Not a kernel runtime: `fantastic mcp`
     # hosts the rust kernel in-process and speaks MCP over stdio, and the runner
@@ -175,7 +169,7 @@ def load_suite() -> list[dict]:
     # scenario on every runtime.
     runtimes = [
         r.strip()
-        for r in os.environ.get("RUNTIMES", "python,rust,swift").split(",")
+        for r in os.environ.get("RUNTIMES", "python,rust").split(",")
         if r.strip()
     ]
     for sf in sorted(E2E.glob("tests/scenario/*/scenario.yaml")):
@@ -614,13 +608,13 @@ async def main() -> int:
         "--runtime",
         action="append",
         default=[],
-        help="python | rust | swift — narrow the cross-product",
+        help="python | rust — narrow the cross-product",
     )
     ap.add_argument(
         "--exclude-runtime",
         action="append",
         default=[],
-        help="drop one runtime's cells, keep everything else (CI: no swift on Windows)",
+        help="drop one runtime's cells, keep everything else (CI: a runtime a platform cannot build)",
     )
     ap.add_argument(
         "--free", action="store_true", help="include the free harness self-tests"
@@ -767,7 +761,7 @@ async def main() -> int:
     # BUILD EACH KERNEL ONCE, HERE — not once per cell.
     #
     # `ensure_runtime` inside every cell would run concurrent builds that
-    # serialise on the build lock (SwiftPM's, for swift), and that time would be
+    # serialise on the build lock (cargo's), and that time would be
     # charged to the cells — making a runtime look slower than its per-turn
     # latency, and failing long scenarios under many lanes.
     prebuilt = sorted(

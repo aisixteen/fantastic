@@ -14,5 +14,4 @@ covers the static truth table; this adds the wire, the tokens and pruning.
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id call_gate          # all three
-RUNTIME=swift uv run python ../../../e2e/tests/kernel/E114_call_gate/probe.py
 ```

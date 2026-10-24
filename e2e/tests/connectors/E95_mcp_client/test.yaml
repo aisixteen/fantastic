@@ -4,7 +4,7 @@ id: mcp_client
 group: connectors
 title: "a remote MCP server as an agent: discover + paged tools/list → per-agent verbs, every result mapping, the static key on every request; a legacy (2025-11-25) server through initialize, its session and version"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

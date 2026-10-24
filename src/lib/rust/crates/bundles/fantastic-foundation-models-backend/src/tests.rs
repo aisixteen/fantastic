@@ -1,9 +1,8 @@
 //! foundation_models_backend against a fake engine (no model, no macOS 26): the
 //! record it takes, what it refuses at the write, what reflect shows, how ai-core's
 //! messages become one FMCore request, whole turns through a kernel, and
-//! cancellation. Twin of swift's `Tests/FantasticFMTests/FoundationModelsBackendTests.swift`
-//! — the texts are pinned here AND checked against the swift sources
-//! ([`the_pinned_texts_are_the_swift_bundles_words`]).
+//! cancellation. The FMCore texts are pinned here AND checked against the swift
+//! `FMCore.swift` in this crate ([`the_pinned_texts_are_fmcores_words`]).
 
 use super::*;
 use crate::engine::{FmAvailability, FmReason, FM_CANCELLED};
@@ -738,11 +737,11 @@ async fn an_unknown_type_names_the_bundle() {
     );
 }
 
-// ── the readme, and the texts swift publishes ───────────────────────
+// ── the readme, and the texts FMCore publishes ──────────────────────
 
 fn swift_file(rel: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../swift")
+        .join("swift")
         .join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
@@ -780,93 +779,19 @@ fn joined(src: &str) -> String {
 }
 
 #[test]
-fn the_readme_is_the_swift_bundles_one_file() {
-    let file = swift_file("Sources/FantasticFoundationModelsBackend/Resources/readme.md");
-    assert_eq!(README, file);
-    assert_eq!(bundle(FakeEngine::new()).readme(), Some(file.as_str()));
+fn the_readme_is_the_bundles_one_file() {
+    assert_eq!(bundle(FakeEngine::new()).readme(), Some(README));
     assert!(README.starts_with("# foundation_models_backend — "));
 }
 
-/// EVERY text this bundle shows a caller, found verbatim in the swift sources
-/// and tests — so a rewording on either side fails here, not in production.
+/// The FMCore texts this crate spells itself, found verbatim in `FMCore.swift`
+/// — so a rewording on either side fails here, not in production.
 #[test]
-fn the_pinned_texts_are_the_swift_bundles_words() {
-    let bundle_src = joined(&swift_file(
-        "Sources/FantasticFoundationModelsBackend/FoundationModelsBackend.swift",
-    ));
+fn the_pinned_texts_are_fmcores_words() {
     let core_src = joined(&swift_file("Sources/FantasticFMCore/FMCore.swift"));
-    let tests_src = joined(&swift_file(
-        "Tests/FantasticFMTests/FoundationModelsBackendTests.swift",
-    ));
     let has = |src: &str, what: &str, text: &str| {
         assert!(src.contains(text), "swift {what} does not say: {text}");
     };
-    // the bundle
-    has(&bundle_src, "bundle", &format!("\"{HANDLER_MODULE}\""));
-    has(&bundle_src, "bundle", &format!("\"{NAME}\""));
-    has(&bundle_src, "bundle", SENTENCE);
-    has(&bundle_src, "bundle", &format!("\"{MODEL}\""));
-    has(
-        &bundle_src,
-        "bundle",
-        &format!(
-            "[{}]",
-            OFF_DEVICE_FIELDS
-                .iter()
-                .map(|f| format!("\"{f}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    );
-    has(
-        &bundle_src,
-        "bundle",
-        &OFF_DEVICE_REFUSAL
-            .replace("foundation_models_backend", "\\(NAME)")
-            .replace("{key}", "\\(key)"),
-    );
-    // the tests' exact expectations
-    has(
-        &tests_src,
-        "tests",
-        &OFF_DEVICE_REFUSAL.replace("{key}", "\\(key)"),
-    );
-    has(&tests_src, "tests", "\"temperature must be a number >= 0\"");
-    has(&tests_src, "tests", "\"max_tokens must be a positive int\"");
-    has(&tests_src, "tests", TOO_BIG_4096);
-    has(&tests_src, "tests", MISSING_STORE);
-    has(
-        &tests_src,
-        "tests",
-        &NOT_A_USER_TURN.replace("{role}", "assistant"),
-    );
-    has(
-        &tests_src,
-        "tests",
-        &NOT_A_USER_TURN.replace("{role}", "none"),
-    );
-    has(&tests_src, "tests", TEMPERATURE_HINT);
-    has(&tests_src, "tests", MAX_TOKENS_HINT);
-    has(&tests_src, "tests", SENTENCE);
-    has(
-        &tests_src,
-        "tests",
-        "\"RuntimeError: foundation_models_backend: the on-device model is unavailable: \"",
-    );
-    // the reflect extras, in swift's order
-    let at = |key: &str| {
-        bundle_src
-            .find(&format!("\"{key}\": "))
-            .unwrap_or_else(|| panic!("swift reflectExtra has no {key}"))
-    };
-    let order = [
-        "available",
-        "unavailable_reason",
-        "context_size",
-        "temperature",
-        "max_tokens",
-    ];
-    assert!(order.windows(2).all(|w| at(w[0]) < at(w[1])), "{order:?}");
     // FMCore's reason sentences and refusals — the ones this crate spells itself
     for reason in [
         FmReason::DEVICE_NOT_ELIGIBLE,

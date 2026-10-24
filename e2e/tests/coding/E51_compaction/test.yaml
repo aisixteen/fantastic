@@ -4,7 +4,7 @@ id: compaction
 group: coding
 title: the early fact survives compaction — recall pages it back
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

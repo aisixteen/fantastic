@@ -2,7 +2,7 @@
 
 Folder bundles (`bundle.yaml`, `base: py_agent`, a stdlib program importing the
 reference helper `fantastic_agent.py`) on the PACKAGED host of `RUNTIME`
-(python | rust | swift), every call through `web_rest`:
+(python | rust), every call through `web_rest`:
 
   1. COLD LOAD: folders written BEFORE boot are read by the root loader (rust and
      swift through the fs clamp); a seeded instance record resolves and answers;

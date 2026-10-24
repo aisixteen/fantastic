@@ -4,7 +4,7 @@ id: multiline_edit
 group: coding
 title: a MULTILINE, multi-hunk edit — whole blocks move, the rest byte-identical
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

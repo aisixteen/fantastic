@@ -50,11 +50,11 @@ rules:
       - cli intro_booting runtime token
       # …and `runtime=<name>` in TEXT. The root reflect is rendered into every
       # system prompt, so the token sits in every recorded request body.
-      - 'runtime=(python|rust|swift) as a whole token'
+      - 'runtime=(python|rust) as a whole token'
       # …and the same field as JSON INSIDE TEXT, quoted once or
       # more: `"runtime": "python"` in a cli stdout, `\"runtime\":\"python\"`
       # in a recorded REST body.
-      - '"runtime": "(python|rust|swift)" inside text, any quoting depth'
+      - '"runtime": "(python|rust)" inside text, any quoting depth'
     # A `stdout_bytes` whose stdout is recorded only as a HEAD (so
     # N10 cannot see the text it counts) is compared PAIRWISE and forgiven when it
     # differs by EXACTLY len(python name) − len(port name): the reflect it counts

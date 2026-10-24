@@ -3,7 +3,7 @@
 A send item may carry `secret: ["<dotted path>", …]` (paths into its payload).
 The HANDLER gets the payload as sent; everything the kernel keeps or shows of the
 call carries it AS SHOWN — each marked value `[secret]`. On the PACKAGED host of
-`RUNTIME` (python | rust | swift), every call through the wire faces:
+`RUNTIME` (python | rust), every call through the wire faces:
 
   1. REST `X-Fantastic-Secret: bytes` on a `file_bridge` write → the file on disk
      and a read-back hold the CLEAR value (the handler got it);

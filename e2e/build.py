@@ -1,7 +1,7 @@
 """BUILD THE E2E'S ARTIFACTS — for a run elsewhere (`E2E_ARTIFACTS=<dir>`).
 
     cd src/lib/python && uv run python ../../../e2e/build.py --out <dir> \\
-        [--profile release] [--target <triple>] [--exclude-runtime swift]
+        [--profile release] [--target <triple>] [--exclude-runtime rust]
 
 Writes into `<dir>` exactly what `run.py` takes when `E2E_ARTIFACTS=<dir>`:
 

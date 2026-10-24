@@ -4,7 +4,7 @@ id: scheduler_restart
 group: kernel
 title: "the scheduler fires on its own, fire_timeout bounds a hung fire (tick_now and scheduled) without blocking the others, a refused fire is recorded; schedules, paused flags and history survive a restart and fire after it"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

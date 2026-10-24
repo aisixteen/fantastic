@@ -4,7 +4,7 @@ id: provider_contract
 group: backends
 title: "what ai_core needs from a provider, through a live AI agent: stream, stripped thinking, a <call> that runs, a visible cut, a real cancel"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 90

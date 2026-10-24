@@ -4,7 +4,7 @@ id: job_mail
 group: coding
 title: the model steers a RUNNING job by mail mid-run
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

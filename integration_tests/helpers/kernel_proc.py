@@ -2,7 +2,7 @@
 
 Spawns either:
 - the Python kernel (`python/.venv/bin/fantastic`)
-- the Swift kernel (`swift/.build/debug/fantastic`)
+- the Rust kernel (`rust/target/debug/fantastic_kernel`)
 
 Both speak the same daemon CLI: no-args invocation in a workdir
 loads `.fantastic/agents/<id>/agent.json` files + boots web (if
@@ -41,7 +41,7 @@ class KernelProc:
     workdir: Path
     port: int  # the port the web agent was seeded with — we know it ahead of spawn
     proc: subprocess.Popen | None = None
-    label: str = ""  # human-readable tag for logs ("python" / "swift")
+    label: str = ""  # human-readable tag for logs ("python" / "rust")
     # Container mode: the container name + the engine that runs it (else None).
     container: str | None = None
     engine: str | None = None
@@ -67,10 +67,10 @@ class KernelProc:
         Raises `RuntimeError` if the kernel exits before becoming
         ready, or if the timeout elapses.
 
-        The ceiling is generous because the Swift DEBUG binary cold-starts
+        The ceiling is generous because a DEBUG binary cold-starts
         slowly (~20s measured; dyld + unoptimized boot), and the suite spawns
         several kernels under CPU contention — a tighter bound flakes on the
-        first cold Swift spawn of a run. A Swift RELEASE build cold-starts in
+        first cold spawn of a run. A RELEASE build cold-starts in
         well under a second; prefer it for CI to keep this fast. The poll
         returns the instant the port binds, so this ceiling only caps the
         worst case, it doesn't slow the common path.

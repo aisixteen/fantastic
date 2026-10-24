@@ -4,7 +4,7 @@ id: drain_lock
 group: kernel
 title: "one kernel per dir (a second exits naming the owner; a stale lock — dead pid or a live pid holding no lock — does not block); a drain over REST refuses new work, keeps the control surface, settles the call in flight into a dead letter; kernel_stop acks, exits 0, frees the port and the lock"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

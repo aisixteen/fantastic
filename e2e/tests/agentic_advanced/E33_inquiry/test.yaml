@@ -8,7 +8,7 @@ runner: probe.py
 # The inquiry protocol is taught in every runtime's prompt, but the subject here is
 # the protocol + the harness's answer path, which are runtime-shared — one
 # runtime keeps the two paid arms affordable.
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

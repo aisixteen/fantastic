@@ -4,7 +4,7 @@ id: fanout
 group: coding
 title: N independent lookups in ONE turn's batch, not N turns
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

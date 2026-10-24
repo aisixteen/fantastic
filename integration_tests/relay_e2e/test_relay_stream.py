@@ -44,7 +44,7 @@ from helpers.seeding import BASE, seed_create, seed_web, seed_web_ws  # noqa: E4
 from test_relay_matrix import RELAY_RUNTIMES, _HANDLER_MODULE, _relay_meta  # noqa: E402
 
 # A python driver streams to each host runtime's fs through the relay.
-TARGETS = [rt for rt in ("python", "rust", "swift") if rt in RELAY_RUNTIMES]
+TARGETS = [rt for rt in ("python", "rust") if rt in RELAY_RUNTIMES]
 
 # Non-UTF-8 bytes — proves the channel is raw, not text/base64.
 PAYLOAD = bytes([0x00, 0xFF, 0xCA, 0xFE, 0xBA, 0xBE, 0x10, 0x80]) * 1024  # 8 KiB

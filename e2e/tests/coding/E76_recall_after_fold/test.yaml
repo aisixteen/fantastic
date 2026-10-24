@@ -4,7 +4,7 @@ id: recall_after_fold
 group: coding
 title: "every fold batch is followed by a recall; grep answers inline; the marker under a fold comes back"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 long: true  # many lanes push turns past the 180 s proxy limit; at most 2 long run at once
 limits:

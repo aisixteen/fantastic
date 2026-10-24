@@ -4,7 +4,7 @@ id: nested_folds
 group: coding
 title: "long enough for folds of folds — every level summarized, grep finds a grandchild"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 long: true  # the live version runs > 8 min; the past is planted — re-measure before dropping this
 limits:

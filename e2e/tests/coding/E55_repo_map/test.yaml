@@ -4,7 +4,7 @@ id: repo_map
 group: coding
 title: an unfamiliar REPO is mapped by the model — organs only, weights can't answer
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

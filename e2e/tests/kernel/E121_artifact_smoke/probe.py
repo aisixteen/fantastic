@@ -1,6 +1,6 @@
 """kernel/artifact_smoke — the PACKAGED kernel boots and describes itself. NO MODEL.
 
-On the packaged artifact of `RUNTIME` (python | rust | swift):
+On the packaged artifact of `RUNTIME` (python | rust):
 
   1. ONE-SHOT IN AN EMPTY DIR: `<artifact> reflect` in a fresh empty directory
      exits 0 and prints the root reflect (`id: kernel_state`, `runtime: RUNTIME`);
@@ -44,16 +44,15 @@ RUNTIME = os.environ.get("RUNTIME", "")
 
 #: Kinds DOCUMENTED as runtime-specific: kind → the runtimes that ship it.
 #: `foundation_models_backend` — Apple's on-device model, one swift implementation
-#: rust links through a C ABI (src/lib/swift/README.md, src/lib/rust/README.md).
+#: rust links through a C ABI (src/lib/rust/README.md).
 #: `sqlite_store` — the durable memory store ships in the python kernel
 #: (`bundled_agents/memory/sqlite_store`, #59); rust has it only in the `fantastic`
 #: CLI product (`src/tui/bundles/fantastic-sqlite-store`), not in the headless
-#: kernel binary, and swift has none.
+#: kernel binary.
 RUNTIME_ONLY = {
-    "foundation_models_backend": {"rust", "swift"},
-    "apple_kvs": {"swift"},
+    "foundation_models_backend": {"rust"},
     "sqlite_store": {"python"},
-    "cabinet": {"python", "rust"},  # Swift not ported (its readme says so)
+    "cabinet": {"python", "rust"},
 }
 
 #: The distilled root reflect (kernel_state readme + CLAUDE.md "Universal patterns").

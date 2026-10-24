@@ -172,7 +172,7 @@ _progress_count = distinct_calls
 
 
 async def main():
-    # WHICH KERNEL is a plug (`RUNTIME=python|rust|swift`) — see E20_build.
+    # WHICH KERNEL is a plug (`RUNTIME=python|rust`) — see E20_build.
     # The ids this probe's FIXTURE builds, plus the peers it grants the AI —
     # declared before boot because a spawned kernel's legs are granted from
     # ABOVE and cannot raise their own authority. Ignored in process.

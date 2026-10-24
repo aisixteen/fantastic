@@ -7,7 +7,7 @@ id: recall_scale
 group: kernel
 title: "recall scale: a call with a FRESH execution name vs an unnamed call, at 0 / 10k / 50k / 100k calls in the kernel's memory store — fresh-name median at 100k ≤ 3 × unnamed + 5 ms"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 solo: true
 hard_stop_minutes: 120

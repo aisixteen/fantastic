@@ -4,7 +4,7 @@ id: file_edit
 group: coding
 title: the model EDITS a file with the file agent's edit verb — surgical, not a rewrite
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

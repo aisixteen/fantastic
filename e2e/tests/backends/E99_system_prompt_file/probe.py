@@ -2,7 +2,7 @@
 
 A scripted Responses endpoint (`runners/_responses_stub.py`: every turn answers
 `done`, every request body recorded — the system block is its `instructions`) and,
-on the PACKAGED host of `RUNTIME` (python | rust | swift), every call through
+on the PACKAGED host of `RUNTIME` (python | rust), every call through
 `web_rest`: a `file_bridge` exposing `prompt.md` and an AI agent whose record names
 `file_bridge_id` + `system_prompt_file` (a path on it). The agent reads the file
 THROUGH the bridge, as itself (both grant halves explicit), and watches it with

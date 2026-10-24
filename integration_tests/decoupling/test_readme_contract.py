@@ -6,7 +6,7 @@ describes what it DOES and its verb/event surface; the FRONTEND bundle is the
 one that declares which host capability it fronts.  An LLM weaves the pairing
 from those two self-descriptions.
 
-This is a pure STATIC scan across python/rust/swift sources (no kernel binary
+This is a pure STATIC scan across python/rust sources (no kernel binary
 needed) — it always runs and fails on a client-intent word.  Run:
     cd integration_tests && uv run pytest decoupling/test_readme_contract.py
 """
@@ -47,7 +47,6 @@ DENY = [
 EXEMPT_SUBSTR = [
     "loader/kernel_state/src/kernel_state/readme.md",  # python root
     "fantastic-core/src/readme.md",  # rust root
-    "RootReadme",  # swift root readme source
 ]
 
 # The `web` bundle genuinely serves vendored assets; tolerate the asset
@@ -69,9 +68,7 @@ def _is_web(path: Path) -> bool:
 def _readme_sources() -> list[tuple[Path, str]]:
     """Return (path, text) for every host readme.
 
-    Covers python and rust `readme.md` files under their bundle trees, and
-    swift inline `var readme: String? { ... }` literal blocks extracted from
-    `Fantastic*/**/*.swift` sources.
+    Covers python and rust `readme.md` files under their bundle trees.
     """
     out: list[tuple[Path, str]] = []
     for base in [
@@ -80,16 +77,12 @@ def _readme_sources() -> list[tuple[Path, str]]:
     ]:
         for f in base.glob("**/readme.md"):
             out.append((f, f.read_text(encoding="utf-8", errors="ignore")))
-    for f in (_REPO / "src" / "lib" / "swift" / "Sources").glob("Fantastic*/**/*.swift"):
-        txt = f.read_text(encoding="utf-8", errors="ignore")
-        for m in re.finditer(r"var readme:\s*String\?\s*\{(.*?)\n\s*\}", txt, re.S):
-            out.append((f, m.group(1)))
     return out
 
 
 def _sentence_lines() -> list[tuple[Path, int, str]]:
     """Return (path, lineno, line) for every source line that sets a `sentence`
-    literal across python/rust/swift runtimes.
+    literal across python/rust runtimes.
 
     These are the one-liners an LLM sees from a `reflect` call (without
     readme=true), so they must be equally client-agnostic.  Test fixtures and
@@ -99,7 +92,6 @@ def _sentence_lines() -> list[tuple[Path, int, str]]:
     globs = [
         (_REPO / "src" / "lib" / "python" / "bundled_agents", "**/tools.py"),
         (_REPO / "src" / "lib" / "rust" / "crates" / "bundles", "**/*.rs"),
-        (_REPO / "src" / "lib" / "swift" / "Sources", "Fantastic*/**/*.swift"),
     ]
     _TEST_MARKERS = ("/tests.rs", "/tests/", "/examples/", "test_", "Tests/")
     for base, g in globs:

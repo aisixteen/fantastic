@@ -7,7 +7,7 @@ title: it finishes a small task and ENDS its chain with an explicit done call
 runner: probe.py
 # Done is an explicit call in every runtime (the nudge reminds a silent
 # turn once), so the claim is cross-runtime.
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

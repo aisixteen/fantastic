@@ -4,7 +4,7 @@ id: call_gate
 group: kernel
 title: "two-sided call gate over the wire: egress/ingress halves, verb-level grants, $self/$parent/$subtree, no self-raise, grant shape at the write, delete prunes grants"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 60

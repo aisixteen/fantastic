@@ -2,7 +2,7 @@ id: program_tests
 group: coding
 title: the model runs the tests, FIXES the bug, and proves it green
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 90

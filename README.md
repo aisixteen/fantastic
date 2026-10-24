@@ -249,7 +249,6 @@ The kernel hosts run on their own too:
 ```sh
 cd src/lib/python && uv sync && uv run fantastic_kernel   # the Python reference kernel
 cd src/lib/rust   && cargo run --bin fantastic_kernel      # the Rust kernel host
-cd src/lib/swift  && swift run fantastic_kernel            # the Swift kernel (macOS 14+)
 ```
 
 Each runtime's build, test and lint commands are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
@@ -412,8 +411,6 @@ Three interchangeable hosts share one wire protocol and one `.fantastic/` workdi
 
 - [`src/lib/python/`](src/lib/python/): the reference; when runtimes disagree, Python is right
 - [`src/lib/rust/`](src/lib/rust/): server and CLI host
-- [`src/lib/swift/`](src/lib/swift/): Apple platforms (its retirement, keeping the
-  Foundation Models bridge, is [on the roadmap](https://github.com/aisixteen/fantastic/issues/53))
 - [`src/lib/ts/`](src/lib/ts/): the browser frontend kernel, served by any host
 
 A change to the protocol, the on-disk format or `reflect` lands in every host, and

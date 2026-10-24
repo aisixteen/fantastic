@@ -1,7 +1,7 @@
 """kernel/drain_lock — one kernel per directory, and a graceful stop over REST.
 NO MODEL.
 
-The PACKAGED host of `RUNTIME` (python | rust | swift), every call over `web_rest`:
+The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`:
 
   1. THE LOCK: `.fantastic/lock.yaml` names the serving kernel's pid; a second
      kernel started in the same directory exits non-zero naming that pid, and the

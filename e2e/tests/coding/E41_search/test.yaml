@@ -2,7 +2,7 @@ id: search
 group: coding
 title: the model FINDS a fact with the search organ and stores it
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

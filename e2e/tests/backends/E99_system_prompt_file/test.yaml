@@ -5,7 +5,7 @@ id: system_prompt_file
 group: backends
 title: "the system block from a FILE (file_bridge_id + system_prompt_file): placeholders filled, an editor's save / atomic save live next turn, precedence record > file > default; not set → default; set and unusable (missing, ungranted, no bridge) → the turn fails loud"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

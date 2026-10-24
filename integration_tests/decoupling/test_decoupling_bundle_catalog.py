@@ -1,4 +1,4 @@
-"""Decoupling guard — the rust + swift + python hosts no longer register the
+"""Decoupling guard — the rust + python hosts no longer register the
 view/webapp bundles that moved to the `ts/` frontend.
 
 After "part 1 — big decoupling" every host kernel is pure: UI lives in
@@ -67,15 +67,10 @@ async def test_rust_catalog_drops_views(rust_binary, rust_kernel, parity_tmp, fr
 
 
 @pytest.mark.asyncio
-async def test_swift_catalog_drops_views(swift_binary, swift_kernel, parity_tmp, free_port):
-    await _catalog_has_no_views(swift_binary, swift_kernel, parity_tmp, free_port, "swift_decouple")
-
-
-@pytest.mark.asyncio
 async def test_python_catalog_drops_views(python_binary, python_kernel, parity_tmp, free_port):
     # The 'kernel' alias passed to ws_call resolves to the root agent on every
     # runtime regardless of its literal id — python's root is `kernel_state`,
-    # rust/swift use `core`. The same helper covers all three runtimes because
+    # rust uses `core`. The same helper covers all three runtimes because
     # dispatch goes through the alias, never a hardcoded literal id.
     await _catalog_has_no_views(
         python_binary, python_kernel, parity_tmp, free_port, "python_decouple"

@@ -27,7 +27,7 @@ residuals:
   - id: R-L1-1
     decision: L1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "wire/handshakes.json"
     # A WS handshake RESPONSE's header table: name case (`Upgrade` vs `upgrade`),
     # count and the positions a missing header slides. Lines that name the
@@ -51,7 +51,7 @@ residuals:
     decision: D4
     state: accepted
     # ACCEPTED: library identity — http/ws header case and count.
-    runtimes: [rust, swift]
+    runtimes: [rust]
     # The stub writes one `requests.json` per provider family with the header
     # table of every request it was sent (`e2e/parity/stubs/__init__.py:55-66`).
     file_glob: "**/requests.json"
@@ -85,7 +85,7 @@ residuals:
     decision: D4
     state: accepted
     # ACCEPTED: library identity — http/ws header case and count.
-    runtimes: [rust, swift]
+    runtimes: [rust]
     # The SAME census, in the stub's OTHER record. `stubs/__init__.py` writes the
     # header table twice: into `requests.json` (R-D4-9) and into the `index.json`
     # summary beside it. Only `ai_paths/stub/` and `store/stub/` reach it, and
@@ -105,7 +105,7 @@ residuals:
     decision: D4
     state: accepted
     # ACCEPTED: library identity — http/ws header case and count.
-    runtimes: [rust, swift]
+    runtimes: [rust]
     # EVERY family's `http` census, not just `bundle_verbs`: the census is
     # written by the same recorder wherever a case records its HTTP exchange,
     # and the difference is the CLIENT's, so scoping it to one family would leave
@@ -134,7 +134,7 @@ residuals:
   - id: R-L1-2
     decision: L1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "providers/ollama/*/stub/req_*.bin"
     # The ollama SDK's request BODY, a single line: python's `ollama` client
     # writes `stream`/`options` before `messages` and appends `"tools": []`; the
@@ -154,7 +154,7 @@ residuals:
   - id: R-L1-3
     decision: L1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "**/kernel_log*.txt"
     # A python-ONLY log line (`other` empty) that is part of a traceback block:
     # the header, a `File "…", line N, in f` frame, its source line, its `^^^`
@@ -172,7 +172,7 @@ residuals:
   - id: R-L1-4
     decision: L1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "**/kernel_log*.txt"
     # The JSON parser's own message after a fixed kernel prefix.
     anchor: 'skipping malformed frame: bad text frame: '
@@ -187,7 +187,7 @@ residuals:
   - id: R-L1-5
     decision: L1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "bundle_verbs/create/runner_badre.json"
     anchor: "allowed contains a broken regex '\\(unclosed': "
     allowed_tail_regex: ".*"
@@ -200,7 +200,7 @@ residuals:
   - id: R-L1-6
     decision: L1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "wire/*"
     anchor: 'ws boot failed: (\[Errno [0-9]+\] Connect call failed|Connection errors: |[^"]*os error [0-9]+)'
     allowed_tail_regex: ".*"
@@ -211,43 +211,10 @@ residuals:
       ('127.0.0.1', 9)`, rust `… os error 61`, swift `Connection errors:
       SingleConnectionFailure(…)`.
 
-  - id: R-L1-7
-    decision: L1
-    state: accepted
-    runtimes: [swift]
-    file_glob: "cli/cli/call_create_coerce_parent_kernel*"
-    # The cli's k=v coercion of `big=12345678901234567890` (and a 30-digit one):
-    # python makes an int, swift keeps a STRING, and the stdout byte count moves
-    # by the two pairs of quotes (+4).
-    anchor: '12345678901234567890|"where": "\$\.stdout(_bytes)?"'
-    allowed_tail_regex: ".*"
-    items: [C74, A14.9]
-    note: >
-      Swift's JSON holds no integer past 64 bits, so its coercion leaves the
-      digits a string. The WIRE half of D13 does not apply (python refuses such a
-      value at the wire); this is the cli's argv coercion, which no
-      wire rule reaches. Scoped to the two captures that exist to test it; their
-      whole `$.stdout` field is covered too — the digits fall past the 400-char
-      excerpt a line carries, and the same text is compared line by line in the
-      `.stdout` capture beside it.
-
-  - id: R-L1-8
-    decision: L1
-    state: accepted
-    runtimes: [swift]
-    file_glob: "*"
-    anchor: "handler_module 'absent_bundle\\.tools' cannot be imported in this runtime: "
-    allowed_tail_regex: ".*"
-    items: [C24]
-    note: >
-      The tail after the kernel's fixed refusal names the loader's own error:
-      python `No module named 'absent_bundle'`, swift its bundle-registry text.
-
-
   - id: R-C1-1
     decision: C1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "*"
     # The NUMBERS derived from the ports' one extra catalog entry (N26): the
     # system prompt's token count, the recall budget (a field and in a recall
@@ -266,7 +233,7 @@ residuals:
   - id: R-L1-9
     decision: L1
     state: accepted
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "bridges/bridges/peer_frames.json"
     anchor: 'event.{1,12}open.{1,12}headers'
     allowed_tail_regex: ".*"
@@ -296,22 +263,10 @@ residuals:
 
   # ── D13 / D14 / D16 ──
 
-  - id: R-D13-1
-    decision: D13
-    state: pending-owner
-    runtimes: [swift]
-    file_glob: "**/*"
-    anchor: "123456789012345678901234567890|NaN|nan|inf|udcff"
-    allowed_tail_regex: ".*"
-    items: [C74, C18, A13.11, A14.9]
-    note: >
-      `serde_json::Value` has no arbitrary precision and swift's JSON turns an
-      over-Int64 int into a double and a non-finite double into null.
-
   - id: R-D16-1
     decision: D16
     state: accepted   # transport-library defaults
-    runtimes: [rust, swift]
+    runtimes: [rust]
     file_glob: "wire/**"
     anchor: "server|permessage-deflate|Sec-WebSocket-Extensions"
     allowed_tail_regex: ".*"

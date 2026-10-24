@@ -27,7 +27,6 @@ DOCS = [
     ("Main", "Root — Aisixteen Fantastic", "README.md"),
     ("Kernels", "python kernel", "src/lib/python/README.md"),
     ("Kernels", "rust kernel", "src/lib/rust/README.md"),
-    ("Kernels", "swift kernel", "src/lib/swift/README.md"),
     ("Kernels", "ts frontend kernel", "src/lib/ts/readme.md"),
     ("Containers", "container (this image)", "container/README.md"),
 ]

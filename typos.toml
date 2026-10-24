@@ -61,10 +61,8 @@ strat = "strat"
 extend-exclude = [
     "**/.fantastic/",
     "**/.build/",
-    "src/lib/swift/Sources/FantasticWeb/Resources/",
     # Rust mirror of the same vendored assets (Three.js `metalness`/`lod`/
-    # `LOD`, xterm minified two-letter symbols). The Swift copy is already
-    # excluded above; the Rust kernel restoration brought the same files in.
+    # `LOD`, xterm minified two-letter symbols).
     "src/lib/rust/crates/bundles/fantastic-web/src/assets/",
     # The canvas app's own copies of those vendored bundles
     # (Three.js `LOD`, xterm's minified `diposable`/`Sur`, …) — the

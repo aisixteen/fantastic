@@ -1,5 +1,5 @@
 //! The REAL engine. On macOS: the swift `FMCore` through the `FantasticFMBridge`
-//! C ABI (`src/lib/swift/Sources/FantasticFMBridge/fm_bridge.h`), linked
+//! C ABI (`swift/Sources/FantasticFMBridge/fm_bridge.h`), linked
 //! statically by `build.rs`. Everywhere else: a refusal naming the platform —
 //! nothing is built, nothing falls back.
 

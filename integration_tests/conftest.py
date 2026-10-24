@@ -3,10 +3,8 @@
 Provides:
 - `free_port()`            grab an OS-assigned ephemeral port
 - `python_binary`           path to the canonical Python kernel binary
-- `swift_binary`            path to the Swift kernel binary
 - `parity_tmp(name)`        per-test scratch dir under ./tmp/
 - `python_kernel(workdir, port)`    spawn a Python daemon
-- `swift_kernel(workdir, port)`     spawn a Swift daemon
 
 Each spawn fixture returns a `KernelProc` from
 `helpers.kernel_proc`. Tests are responsible for sequencing
@@ -40,7 +38,7 @@ from helpers.launcher import (  # noqa: E402
 _REPO_ROOT = _HERE.parent
 
 # Target selection — `local` (default) runs locally-built binaries; `container`
-# runs the universal image (python/rust/swift) so the SAME tests validate the
+# runs the universal image (python/rust) so the SAME tests validate the
 # shipped container. `FANTASTIC_IMAGE` overrides the image tag.
 _TARGET = __import__("os").environ.get("FANTASTIC_TARGET", "local").strip().lower()
 _IMAGE = __import__("os").environ.get("FANTASTIC_IMAGE", "fantastic:latest")
@@ -79,33 +77,6 @@ def python_binary():
     if not candidate.exists():
         pytest.skip(f"python kernel binary not built: {candidate} (run `cd python && uv sync`)")
     return LocalLauncher(candidate)
-
-
-@pytest.fixture(scope="session")
-def swift_binary():
-    """A launcher for the Swift kernel.
-
-    `FANTASTIC_TARGET=local` (default) → a `LocalLauncher` over the built
-    binary. `FANTASTIC_TARGET=container` → a `ContainerLauncher` running the
-    universal image's swift runtime (its web server is swift-nio, so it serves
-    HTTP on Linux at parity with python/rust). Locally it searches the canonical
-    `swift build` output plus the isolated dev-iteration path and picks whichever
-    is **newest by mtime** (avoids silently running a stale binary that masked
-    missing verbs before).
-    """
-    if _TARGET == "container":
-        return _container_launcher_or_skip("swift")
-    candidates = [
-        _REPO_ROOT / "src" / "lib" / "swift" / ".build" / "debug" / "fantastic_kernel",
-        Path("/tmp/swift-fm-build/debug/fantastic_kernel"),
-    ]
-    existing = [c for c in candidates if c.exists()]
-    if not existing:
-        pytest.skip(
-            f"swift kernel binary not built: tried {[str(c) for c in candidates]} "
-            f"(run `cd swift && swift build`)"
-        )
-    return LocalLauncher(max(existing, key=lambda p: p.stat().st_mtime))
 
 
 @pytest.fixture(scope="session")
@@ -204,23 +175,6 @@ async def python_kernel(python_binary):
 
     async def _spawn(workdir: Path, port: int) -> KernelProc:
         kp = python_binary.start_daemon(workdir, port, label="python")
-        spawned.append(kp)
-        await kp.wait_ready()
-        return kp
-
-    yield _spawn
-
-    for kp in spawned:
-        kp.terminate()
-
-
-@pytest.fixture
-async def swift_kernel(swift_binary):
-    """Mirror of `python_kernel` but for the Swift daemon."""
-    spawned: list[KernelProc] = []
-
-    async def _spawn(workdir: Path, port: int) -> KernelProc:
-        kp = swift_binary.start_daemon(workdir, port, label="swift")
         spawned.append(kp)
         await kp.wait_ready()
         return kp

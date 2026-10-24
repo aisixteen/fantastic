@@ -8,8 +8,9 @@
 Apple's on-device Foundation Models system model as an AI agent — no server, no
 endpoint, no key, no model choice. The rust bundle links the swift
 `FantasticFMCore` through the static C ABI `FantasticFMBridge`
-(`../swift/Sources/FantasticFMBridge/fm_bridge.h`), so the texts below are the
-swift bundle's too (its twin: `../swift/selftest/foundation_models_backend.md`).
+(`../crates/bundles/fantastic-foundation-models-backend/swift/Sources/FantasticFMBridge/fm_bridge.h`).
+The swift package's own suite (24 tests, a fake engine) runs with
+`swift test --package-path crates/bundles/fantastic-foundation-models-backend/swift`.
 
 ## Pre-flight
 
@@ -35,8 +36,8 @@ under a second. A fake engine drives the bundle (schema, write refusals, reflect
 the messages→request split, whole kernel turns, a kernel `cancel` reaching the
 on-device stream), and the REAL bridge answers the pre-model refusals (a
 malformed `request_json`, an invalid turn or option, the NULL / unknown-handle
-no-ops). `the_pinned_texts_are_the_swift_bundles_words` finds every refusal and
-the schema hints verbatim in the swift sources.
+no-ops). `the_pinned_texts_are_fmcores_words` finds the reason and cancel sentences
+verbatim in `FMCore.swift`.
 
 ### Test 2: the opt-in live test — tiny real prompts
 

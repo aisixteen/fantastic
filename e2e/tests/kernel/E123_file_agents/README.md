@@ -25,5 +25,4 @@ probe pins the kernel contract they stand on.
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id file_agents --lanes 3   # all three
-RUNTIME=swift uv run python ../../../e2e/tests/kernel/E123_file_agents/probe.py
 ```

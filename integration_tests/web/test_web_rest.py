@@ -1,4 +1,4 @@
-"""web_rest surface integration test — python + swift kernels.
+"""web_rest surface integration test — python + rust kernels.
 
 Proves the composable route-provider path end-to-end: a `web` host
 with a `web_rest` child, at daemon boot, pulls the child's `get_routes`
@@ -9,10 +9,10 @@ and mounts:
 Two assertions per runtime:
 1. POST /<rest>/kernel {type:list_agents} returns agents that include
    the seeded `web` agent. The reserved `kernel` address resolves to the root on
-   all runtimes (python root = `kernel_state`; rust/swift root = `core`).
+   all runtimes (python root = `kernel_state`; rust root = `core`).
 2. GET  /<rest>/_reflect/web returns a dict. We reflect `web` (not
    `core`) because `web` is guaranteed present after seeding on every
-   runtime, making the assertion portable across python/swift/rust.
+   runtime, making the assertion portable across python/rust.
 """
 
 from __future__ import annotations
@@ -60,6 +60,3 @@ async def test_web_rest_python(python_binary, python_kernel, parity_tmp, free_po
     await _rest_roundtrip(python_binary, python_kernel, parity_tmp, free_port, "py")
 
 
-@pytest.mark.asyncio
-async def test_web_rest_swift(swift_binary, swift_kernel, parity_tmp, free_port):
-    await _rest_roundtrip(swift_binary, swift_kernel, parity_tmp, free_port, "sw")

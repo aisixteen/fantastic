@@ -114,7 +114,7 @@ def root_id(binary: Launcher | Path, workdir: Path, *, timeout: float = 15.0) ->
 
 
 def runtime(binary: Path, workdir: Path, *, timeout: float = 15.0) -> str | None:
-    """Discover the runtime enum (`python`/`rust`/`swift`/`ts`) from the root
+    """Discover the runtime enum (`python`/`rust`/`ts`) from the root
     reflect. Cached alongside `root_id` (one reflect feeds both)."""
     key = f"{binary}|{workdir}"
     if key not in _RUNTIME_CACHE:
@@ -369,7 +369,6 @@ def seed_web_rest(binary: Path, workdir: Path, agent_id: str = "rest") -> str:
 _WS_BRIDGE_HANDLER_MODULE = {
     "python": "ws_bridge.tools",
     "rust": "ws_bridge.tools",
-    "swift": "ws_bridge.tools",
 }
 
 

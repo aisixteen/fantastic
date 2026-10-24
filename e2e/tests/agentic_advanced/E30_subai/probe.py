@@ -773,7 +773,7 @@ async def run(
 
     `brain_backend` lets `brain` be a DIFFERENT model from the builder.
     """
-    # WHICH KERNEL is a plug (`RUNTIME=python|rust|swift`) — see E20_build.
+    # WHICH KERNEL is a plug (`RUNTIME=python|rust`) — see E20_build.
     # The ids the FIXTURE builds — declared before boot, because a spawned
     # kernel's legs are granted from ABOVE and cannot raise their own authority.
     # `MINE` is that same set (minus the root ids it also carries), so the two
