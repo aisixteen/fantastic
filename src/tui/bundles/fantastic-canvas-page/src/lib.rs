@@ -58,7 +58,8 @@ fn files() -> &'static BTreeMap<String, Vec<u8>> {
             }
             let mut bytes = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut bytes).expect("inflate an entry of the embedded zip");
-            out.insert(entry.name().to_string(), bytes);
+            let name = entry.name().expect("an entry name of the embedded zip").to_string();
+            out.insert(name, bytes);
         }
         out.insert("index.html".into(), INDEX_HTML.as_bytes().to_vec());
         out.insert("home.html".into(), HOME_HTML.as_bytes().to_vec());
