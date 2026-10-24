@@ -541,7 +541,11 @@ fn read_stream_reply(
         Ok(false) => {
             let mut v = rf::refusal(
                 rf::NOT_FOUND,
-                format!("file {} not found", py_repr(path_str)),
+                format!(
+                    "file {} not found{}",
+                    py_repr(path_str),
+                    crate::fs::not_found_hint(root, path_str)
+                ),
             );
             rf::with(&mut v, "path", json!(path_str));
             return (v, None);
@@ -1239,9 +1243,12 @@ fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) 
 mod tests;
 #[cfg(test)]
 mod tests_path_gate;
+mod tests_paths;
 #[cfg(test)]
 mod tests_pump_identity;
 #[cfg(test)]
 mod tests_text;
 #[cfg(test)]
 mod tests_watch;
+#[cfg(test)]
+mod tests_watch_missing;

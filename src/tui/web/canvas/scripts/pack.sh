@@ -16,7 +16,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APP=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$APP"
 
-ZIP="dist/canvas.zip"
+# The output zip: arg 1 (build.rs passes a dir under OUT_DIR, so a cargo build
+# writes nothing into the tree); default dist/canvas.zip, relative to the app.
+ZIP="${1:-dist/canvas.zip}"
 sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" readme.md \
   --alias:three=./src/vendor/three.module.js \
   --alias:@xterm/xterm=./src/vendor/xterm.js \

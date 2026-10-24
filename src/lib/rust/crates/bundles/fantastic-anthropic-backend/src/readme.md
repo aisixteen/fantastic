@@ -65,10 +65,14 @@ byte on. A repeat within 5 minutes of the previous request reads the shared pref
 Always on, whether caching is on or off. Each response's stream reports its counts:
 `message_start` gives `input_tokens`, `cache_creation_input_tokens` and
 `cache_read_input_tokens`; `message_delta` gives `output_tokens`. These accumulate per
-agent, in the backend's RAM — they reset when the kernel restarts. The `reflect` reply
-carries them as `usage`, and the `usage` verb returns the same object:
-`{type: "usage"}`, or `{type: "usage", reset: true}` to return it and then zero the
-counts (`reset` must be a boolean).
+agent since it was created. They persist: each change rewrites the agent's own
+`usage.json` (beside its `agent.yaml`) with the running total, so a kernel restart keeps
+them. The `reflect` reply carries them as `usage`, with `usage_since_boot` beside it —
+the same counts over this kernel process only. The `usage` verb returns the same
+objects: `{type: "usage"}`, or `{type: "usage", reset: true}` to return it and then zero
+the since-boot counts (the total is kept; `reset` must be a boolean). The
+`{type: "usage_reset"}` verb returns the total, then zeroes it for good: the counts and
+the `usage.json` file. Deleting the agent drops them too.
 
 - `requests` — responses counted (side calls too)
 - `input_tokens` — the uncached remainder of the prompt

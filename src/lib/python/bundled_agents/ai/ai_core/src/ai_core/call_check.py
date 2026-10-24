@@ -26,6 +26,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from ai_core.grammar import envelopes_in, open_tags
 from ai_core.tool_parse import CLOSE, TOOLS, _ROUTING, _defang, _envelopes
 
 #: The argument tags a call carries that are ours by name: the routing fields and
@@ -289,6 +290,41 @@ def repair(answer: str) -> str:
     return answer
 
 
+def _wrapped_reports(answer: str) -> list[str]:
+    """One report per call written INSIDE a wrapper tag: refused, not dispatched.
+    The report names the wrapper and gives the bare call to write."""
+    out: list[str] = []
+    for env in envelopes_in(answer):
+        if env.wrapper is None or env.end is None:
+            continue
+        line = answer.count("\n", 0, env.wrapper.start) + 1
+        bare = "<" + "call" + answer[env.body : env.end] + CLOSE
+        out.append(
+            f"[malformed call — nothing ran] line {line}: a call inside "
+            f"`<{env.wrapper.name}>` is refused — drop the wrapper; write it at the top level:\n"
+            f"{bare}"
+        )
+    return out
+
+
+def _wrapper_only(answer: str) -> list[str]:
+    """An answer with no call envelope and an open wrapper that holds no call."""
+    if envelopes_in(answer):
+        return []
+    opens = open_tags(answer)
+    if not opens:
+        return []
+    w = opens[0]
+    line = answer.count("\n", 0, w.start) + 1
+    example = _expected("send", [("target_id", "agent id"), ("type", "verb")])
+    return [
+        f"[malformed call — nothing ran] line {line}: `<{w.name}>` holds no call — "
+        "write one at the top level, as <call name=\"…\">…</call>.\n"
+        "write it as:\n" + example + "\n"
+        "If it is finished, end the chain explicitly: <call name=\"done\"></call>"
+    ]
+
+
 def check(answer: str, *, ran: int) -> list[str]:
     """One report per call the answer wrote outside every `<call` envelope, in
     document order (at most `MAX_REPORTS`, then a count); `[]` when there is none.
@@ -296,9 +332,12 @@ def check(answer: str, *, ran: int) -> list[str]:
     so the model knows its well-formed calls are not to be written again."""
     masked = _mask(answer)
     calls = _calls(masked, _tokens(masked))
-    reports = [_report(answer, masked, c) for c in calls[:MAX_REPORTS]]
-    if len(calls) > MAX_REPORTS:
-        reports[-1] += f"\n({len(calls) - MAX_REPORTS} more malformed calls not shown.)"
+    found = [_report(answer, masked, c) for c in calls] + _wrapped_reports(answer)
+    if not found:
+        found = _wrapper_only(answer)
+    reports = found[:MAX_REPORTS]
+    if len(found) > MAX_REPORTS:
+        reports[-1] += f"\n({len(found) - MAX_REPORTS} more malformed calls not shown.)"
     if ran:
         tail = (
             "The other call of this answer ran — its reply is in this batch; do not "

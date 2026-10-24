@@ -156,7 +156,8 @@ def test_an_unterminated_call_is_not_a_call():
 def test_several_calls_in_order_and_a_call_inside_think():
     text = f"<think>first {WRITE}</think>then\n{PATCH}\n"
     calls = extract_tool_calls(text)
-    assert [c["arguments"]["payload"]["type"] for c in calls] == ["write", "patch"]
+    # A call inside a thinking block is not extracted (Rust #189); the one after it is.
+    assert [c["arguments"]["payload"]["type"] for c in calls] == ["patch"]
 
 
 def test_a_mention_in_prose_is_stepped_over_not_reported():

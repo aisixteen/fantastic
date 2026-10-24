@@ -208,8 +208,12 @@ fn transport(e: String) -> Value {
     rf::refusal(rf::TRANSPORT_ERROR, e)
 }
 
-fn not_found(path: &str) -> Value {
-    let mut v = rf::refusal(rf::NOT_FOUND, format!("file {} not found", py_repr(path)));
+fn not_found(root: &std::path::Path, path: &str) -> Value {
+    let hint = crate::fs::not_found_hint(root, path);
+    let mut v = rf::refusal(
+        rf::NOT_FOUND,
+        format!("file {} not found{hint}", py_repr(path)),
+    );
     rf::with(&mut v, "path", json!(path));
     v
 }
@@ -260,7 +264,7 @@ fn read(
     };
     let data = match current(root, path) {
         Ok(Some(d)) => d,
-        Ok(None) => return not_found(path),
+        Ok(None) => return not_found(root, path),
         Err(e) => return transport(e),
     };
     if data.contains(&0u8) {
@@ -665,7 +669,7 @@ fn edit_txn(
     for e in &mut plan {
         let raw = match current(root, &e.path) {
             Ok(Some(r)) => r,
-            Ok(None) => return not_found(&e.path),
+            Ok(None) => return not_found(root, &e.path),
             Err(err) => return transport(err),
         };
         if let Some(want) = &e.if_match {
