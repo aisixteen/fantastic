@@ -187,11 +187,14 @@ pub fn status(agent_id: &AgentId, payload: &Value) -> Value {
 /// nothing leaks: the FIFO lock and queue, the in-flight entry,
 /// the projection and its marks, the fold and recall counters, the calibration
 /// (the state slot), the routing count, the silent streaks, the strip set, and
-/// this kernel's head, bodies, grants and watchers. Python `on_delete`.
+/// this kernel's head, bodies, grants and watchers, and its rows in the memory
+/// store (`keep_memory:true` on the delete keeps those). Python `on_delete`.
 ///
 /// NOT the incarnation: it stays monotonic across a re-create, so a reply to a
 /// call the deleted agent made never becomes a live turn of the new one.
 pub async fn on_delete(agent_id: &AgentId, kernel: &Arc<Kernel>) {
+    // Its persisted rows go with it (unless `delete_agent keep_memory:true`).
+    crate::memory::purge(agent_id, kernel).await;
     crate::state::drop_state(agent_id);
     crate::route::forget(agent_id.as_str());
     crate::strategies::strip::forget(agent_id.as_str());

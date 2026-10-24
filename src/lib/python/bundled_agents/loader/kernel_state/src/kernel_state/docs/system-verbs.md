@@ -41,11 +41,13 @@ root alone, with `parent_id` required, it means one thing.
   included. The grant is the whole rule. A missing or non-string `id` (or
   `parent_id` for `create_agent`) gets the verb's own `missing_arg` refusal.
 
-`delete_agent` — args: `id:str`
+`delete_agent` — args: `id:str`, optional `keep_memory:bool`
 : **Cascades** — deletes that agent and its whole subtree, deepest first. Refuses
   with `{error, reason:'locked', id}` if any descendant carries `delete_lock`;
   clear it with `update_agent` first. Gated exactly as `update_agent` is: the
-  grant on the root, both ends, reaches any agent.
+  grant on the root, both ends, reaches any agent. Optional `keep_memory` (bool,
+  default false; only a literal `true` counts) keeps the deleted subtree's rows in
+  the memory store; otherwise they are purged with the agents.
 
 `list_agents` — no args
 : Every agent's record, flat. Records only — metadata, no descriptions. To learn

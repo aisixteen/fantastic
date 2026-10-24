@@ -351,6 +351,30 @@ pub async fn save_history(
     Ok(ids)
 }
 
+/// Purge a deleted agent's rows from its memory store ([`crate::verbs::on_delete`]),
+/// unless the delete asked to `keep_memory`. ONE gated `prune` of every row the
+/// agent owns (no `keep`: fold, view and bookkeeping rows go too; fold refs and
+/// the text index follow in the store). The hook runs AS the agent, so the
+/// store's key is the deleted agent's. Delete is not refusable: a store that is
+/// missing, already gone or refuses is logged and the cascade goes on.
+pub async fn purge(self_id: &AgentId, kernel: &Arc<Kernel>) {
+    if fantastic_kernel::lifecycle::keep_memory(kernel, self_id) {
+        return;
+    }
+    if store_of(self_id, kernel).is_err() {
+        return;
+    }
+    if let Err(e) = store_call(
+        self_id,
+        kernel,
+        json!({"type": "prune", "before_id": i64::MAX}),
+    )
+    .await
+    {
+        println!("  [cascade] {self_id} memory purge failed: {e}");
+    }
+}
+
 /// Drop a deleted agent's head, bodies and watchers on this kernel
 /// ([`crate::verbs::on_delete`]).
 pub fn forget(self_id: &AgentId, kernel: &Kernel) {

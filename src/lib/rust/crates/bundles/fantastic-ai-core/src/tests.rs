@@ -7621,3 +7621,204 @@ async fn pinning_stays_within_half_the_target_and_newest_rows_still_fill() {
     assert!(!t.contains("GIANT-218"), "an oversized root was pinned");
     assert!(t.contains("Polling job 59"), "the newest rows did not fill");
 }
+
+// ── delete_agent purges the agent's rows from its memory store (#309) ──
+
+/// Append rows to the memory store AS `agent`; returns their ids.
+async fn store_append(kernel: &Arc<Kernel>, agent: &AgentId, rows: Value) -> Vec<i64> {
+    let out = fantastic_kernel::test_support::as_agent(
+        agent.clone(),
+        kernel.send(vec![Item::new(
+            AgentId::from(MEMORY),
+            json!({"type": "append", "rows": rows}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result;
+    out["ids"]
+        .as_array()
+        .unwrap_or_else(|| panic!("append refused: {out}"))
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect()
+}
+
+/// The ram_store dump, narrowed to one owner suffix: (rows, fold_refs).
+async fn rows_of_owner(kernel: &Arc<Kernel>, agent: &str) -> (Vec<Value>, Vec<Value>) {
+    let out = kernel
+        .send(vec![Item::new(
+            AgentId::from(MEMORY),
+            json!({"type": "dump"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let suffix = format!("|{agent}");
+    let pick = |k: &str| -> Vec<Value> {
+        out["tables"][k]
+            .as_array()
+            .unwrap_or_else(|| panic!("dump: {out}"))
+            .iter()
+            .filter(|e| e["owner"].as_str().is_some_and(|o| o.ends_with(&suffix)))
+            .cloned()
+            .collect()
+    };
+    (pick("rows"), pick("fold_refs"))
+}
+
+/// Search the store AS `agent` (a re-created id reads the owner's own key).
+async fn search_as(kernel: &Arc<Kernel>, agent: &AgentId, query: &str) -> Value {
+    fantastic_kernel::test_support::as_agent(
+        agent.clone(),
+        kernel.send(vec![Item::new(
+            AgentId::from(MEMORY),
+            json!({"type": "search", "query": query}),
+        )]),
+    )
+    .await
+    .remove(0)
+    .result
+}
+
+/// Rows, a fold over them, and a searchable token for `agent`.
+async fn plant_memory(kernel: &Arc<Kernel>, agent: &AgentId, token: &str) {
+    let ids = store_append(
+        kernel,
+        agent,
+        json!([
+            {"role": "user", "content": format!("remember {token}")},
+            {"role": "assistant", "content": "ok"},
+        ]),
+    )
+    .await;
+    store_append(
+        kernel,
+        agent,
+        json!([{"kind": "fold", "content": "summary", "refs": ids}]),
+    )
+    .await;
+}
+
+async fn delete_agent_verb(kernel: &Arc<Kernel>, id: &AgentId, extra: Value) -> Value {
+    let mut payload = json!({"type": "delete_agent", "id": id.as_str()});
+    for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+        payload[k] = v;
+    }
+    kernel
+        .send(vec![Item::new(AgentId::from("kernel"), payload)])
+        .await
+        .remove(0)
+        .result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_agent_removes_its_rows_and_index() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "purge").await;
+    let id = backend.as_str().to_string();
+    plant_memory(&kernel, &backend, "zq-purge-token-77").await;
+    let (rows, folds) = rows_of_owner(&kernel, &id).await;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(folds.len(), 1, "{folds:?}");
+    assert_eq!(
+        search_as(&kernel, &backend, "zq-purge-token-77").await["total"],
+        json!(1)
+    );
+
+    let out = delete_agent_verb(&kernel, &backend, json!({})).await;
+    assert_eq!(out["deleted"], true, "{out}");
+
+    let (rows, folds) = rows_of_owner(&kernel, &id).await;
+    assert!(rows.is_empty(), "rows survived the delete: {rows:?}");
+    assert!(folds.is_empty(), "fold refs survived: {folds:?}");
+    // the same id re-created reads its own key: nothing to find
+    add_backend(&kernel, &id, &format!("ff_{id}")).await;
+    let hit = search_as(&kernel, &backend, "zq-purge-token-77").await;
+    assert_eq!(hit["total"], json!(0), "{hit}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_agent_keep_memory_keeps_them() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, kept) = mk_kernel(&tmp, "keepme").await;
+    let other = add_peer(&kernel, &tmp, &kept).await;
+    plant_memory(&kernel, &kept, "zq-keep-token-12").await;
+    plant_memory(&kernel, &other, "zq-other-token-34").await;
+
+    let out = delete_agent_verb(&kernel, &kept, json!({"keep_memory": true})).await;
+    assert_eq!(out["deleted"], true, "{out}");
+    let (rows, folds) = rows_of_owner(&kernel, kept.as_str()).await;
+    assert_eq!(rows.len(), 3, "keep_memory must keep the rows: {rows:?}");
+    assert_eq!(folds.len(), 1, "{folds:?}");
+    add_backend(&kernel, kept.as_str(), &format!("ff_{kept}")).await;
+    assert_eq!(
+        search_as(&kernel, &kept, "zq-keep-token-12").await["total"],
+        json!(1)
+    );
+
+    // a plain delete of the second agent purges it, the kept one stays
+    let out = delete_agent_verb(&kernel, &other, json!({})).await;
+    assert_eq!(out["deleted"], true, "{out}");
+    let (rows, folds) = rows_of_owner(&kernel, other.as_str()).await;
+    assert!(rows.is_empty() && folds.is_empty());
+    assert_eq!(rows_of_owner(&kernel, kept.as_str()).await.0.len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rows_of_other_agents_are_untouched() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, parent) = mk_kernel(&tmp, "tree").await;
+    let bystander = add_peer(&kernel, &tmp, &parent).await;
+    // a child AI under the parent, sharing the same store
+    let child_id = format!("{parent}_kid");
+    let mut create = json!({
+        "type": "create_agent", "parent_id": parent.as_str(),
+        "handler_module": HANDLER_MODULE, "id": child_id,
+        "model": "test-model", "context_window": 32768,
+    });
+    for (k, v) in
+        fantastic_ram_store::test_support::memory_meta(&kernel, &child_id, json!({})).await
+    {
+        create[k] = v;
+    }
+    let made = kernel
+        .send(vec![Item::new(AgentId::from("kernel_state"), create)])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!(child_id), "{made}");
+    let child = AgentId::from(child_id.as_str());
+
+    plant_memory(&kernel, &parent, "zq-parent-1").await;
+    plant_memory(&kernel, &child, "zq-child-2").await;
+    plant_memory(&kernel, &bystander, "zq-bystander-3").await;
+    let op = kernel
+        .send(vec![Item::new(
+            AgentId::from(MEMORY),
+            json!({"type": "append", "rows": [{"role": "user", "content": "operator zq-op-4"}]}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(op["appended"], json!(1), "{op}");
+    let before = (
+        rows_of_owner(&kernel, bystander.as_str()).await,
+        rows_of_owner(&kernel, "kernel").await,
+        search_as(&kernel, &bystander, "zq-bystander-3").await,
+    );
+    assert_eq!(before.0 .0.len(), 3);
+
+    let out = delete_agent_verb(&kernel, &parent, json!({})).await;
+    assert_eq!(out["deleted"], true, "{out}");
+    for gone in [parent.as_str(), child.as_str()] {
+        let (rows, folds) = rows_of_owner(&kernel, gone).await;
+        assert!(rows.is_empty() && folds.is_empty(), "{gone}: {rows:?}");
+    }
+    let after = (
+        rows_of_owner(&kernel, bystander.as_str()).await,
+        rows_of_owner(&kernel, "kernel").await,
+        search_as(&kernel, &bystander, "zq-bystander-3").await,
+    );
+    assert_eq!(before, after, "another agent's memory changed");
+}

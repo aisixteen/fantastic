@@ -601,6 +601,8 @@ impl SqliteStoreBundle {
         let c = Connection::open(&path).map_err(db_err)?;
         c.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
         c.pragma_update(None, "synchronous", "NORMAL").map_err(db_err)?;
+        // A deleted row's bytes are zeroed in place, not left in a free page.
+        c.pragma_update(None, "secure_delete", "ON").map_err(db_err)?;
         c.busy_timeout(std::time::Duration::from_secs(5)).map_err(db_err)?;
         c.execute_batch(SCHEMA).map_err(db_err)?;
         let c = Arc::new(Mutex::new(c));
@@ -923,7 +925,7 @@ impl SqliteStoreBundle {
         let wanted: HashSet<Option<i64>> = want.map(|w| w.iter().map(as_id).collect()).unwrap_or_default();
         let keep: Vec<Value> = payload.get("keep").and_then(Value::as_array).cloned().unwrap_or_default();
         let has_want = want.is_some();
-        self.tx(id, kernel, |db| {
+        let out = self.tx(id, kernel, |db| {
             let rows = db.all_rows(&owner).map_err(db_err)?;
             let mut doomed: HashSet<i64> = HashSet::new();
             for i in db.ids(&owner).map_err(db_err)? {
@@ -937,7 +939,16 @@ impl SqliteStoreBundle {
             }
             let n = db.delete(&owner, &doomed).map_err(db_err)?;
             Ok(json!({"pruned": n}))
-        })
+        });
+        // The WAL still holds the old frames: fold them into the file and
+        // truncate it, so the pruned text is gone from disk.
+        if out.get("pruned").and_then(Value::as_u64).is_some_and(|n| n > 0) {
+            if let Ok(c) = self.conn(id, kernel) {
+                let c = c.lock().expect("sqlite_store connection poisoned");
+                let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+            }
+        }
+        out
     }
 
     fn inject(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {

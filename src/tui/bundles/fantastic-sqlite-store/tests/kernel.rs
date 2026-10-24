@@ -86,6 +86,10 @@ impl Bundle for CannedAi {
         .await?;
         Ok(Some(out.unwrap_or_else(|| json!({"reason": "unhandled"}))))
     }
+    async fn on_delete(&self, id: &AgentId, k: &Arc<Kernel>) -> Result<(), BundleError> {
+        fantastic_ai_core::verbs::on_delete(id, k).await;
+        Ok(())
+    }
 }
 
 // ── wiring ──────────────────────────────────────────────────────────────
@@ -410,4 +414,74 @@ async fn a_stop_keeps_the_file_and_delete_agent_removes_it() {
     }
     assert!(dir.join("mem.db").is_file(), "only the deleted store's file goes");
     k.shutdown().await;
+}
+
+// ── delete_agent purges the agent's rows, and the bytes ─────────────────
+
+fn has_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+#[tokio::test]
+async fn delete_agent_purges_rows_and_overwrites_bytes() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let k = in_dir(&dir, &["alice"]).await;
+    let marker = "zqxv7k2m9wprt4hn8ycb3ujd5fsle6go";
+    let (a, b, fold) = (k.mint_id(), k.mint_id(), k.mint_id());
+    let r = call_as(&k, "ai", "memory", json!({"type": "append", "rows": [
+        {"id": a, "role": "user", "content": format!("the secret is {marker}")},
+        {"id": b, "role": "assistant", "content": "noted"},
+        {"id": fold, "kind": "fold", "content": "summary", "refs": [a, b]}]})).await;
+    assert!(r.get("reason").is_none(), "{r}");
+    // a bystander's row must survive
+    let keep = k.mint_id();
+    let r = call_as(&k, "alice", "memory", json!({"type": "append", "rows": [{"id": keep, "content": "bystander"}]})).await;
+    assert!(r.get("reason").is_none(), "{r}");
+    let owner = format!("{}|ai", guid(&k));
+    let alice = format!("{}|alice", guid(&k));
+    let n = |db: &rusqlite::Connection, table: &str| {
+        db.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE owner = ?1"), [&owner], |r| r.get::<_, i64>(0)).unwrap()
+    };
+    let db = open_db(&dir);
+    assert_eq!(n(&db, "rows"), 3);
+    assert_eq!(n(&db, "ref_lists"), 1);
+    assert_eq!(n(&db, "fold_refs"), 2);
+    assert_eq!(n(&db, "text_idx"), 3);
+    drop(db);
+    k.shutdown().await;
+    assert!(fantastic_sqlite_store::close_all(&k).is_empty());
+    // The kernel's own execution ledger logged the append CALL, payload and all —
+    // that is the ledger's record, not the agent's memory. Scrub it from the file
+    // so the marker is left ONLY in the agent's rows.
+    let db = open_db(&dir);
+    db.pragma_update(None, "secure_delete", "ON").unwrap();
+    db.execute("DELETE FROM rows WHERE owner = ?1", [format!("{}|kernel", guid(&k))]).unwrap();
+    db.execute("INSERT INTO text_idx (text_idx) VALUES ('optimize')", []).unwrap();
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(())).unwrap();
+    drop(db);
+    let on_disk = |dir: &Path| {
+        ["mem.db", "mem.db-wal"].iter().any(|f| std::fs::read(dir.join(f)).is_ok_and(|b| has_bytes(&b, marker.as_bytes())))
+    };
+    assert!(on_disk(&dir), "the text is in the file while the agent lives");
+
+    // a new process over the same dir deletes the agent
+    let k = boot(&dir);
+    let out = k.start(false).await;
+    assert_eq!(out["started"], json!(true), "{out}");
+    let r = call(&k, "kernel", json!({"type": "delete_agent", "id": "ai"})).await;
+    assert_eq!(r.result["deleted"], json!(true), "{}", r.result);
+
+    let db = open_db(&dir);
+    for table in ["rows", "ref_lists", "fold_refs", "text_idx"] {
+        assert_eq!(n(&db, table), 0, "{table} still holds the deleted agent's data");
+    }
+    let left: i64 = db.query_row("SELECT COUNT(*) FROM rows WHERE owner = ?1", [&alice], |r| r.get(0)).unwrap();
+    assert_eq!(left, 1, "another agent's row is untouched");
+    drop(db);
+    // the bytes: neither the file nor its WAL still holds the text
+    assert!(!on_disk(&dir), "the deleted text is still in mem.db or its WAL");
+    k.shutdown().await;
+    assert!(fantastic_sqlite_store::close_all(&k).is_empty());
+    assert!(!on_disk(&dir), "the deleted text is back after close");
 }
