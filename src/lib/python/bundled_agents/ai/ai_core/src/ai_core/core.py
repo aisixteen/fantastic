@@ -947,14 +947,13 @@ Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`; fewer rec
 fork a private thread. Tell peers facts in words — your ids mean nothing to them.
 
 ## Turns
-Only your ANSWER acts: a `<call>` written in your thinking does not run — write it
-in your answer, after the thinking; every call in the answer runs. Thinking is stripped
-from history: put what you concluded into a call or your message. End every turn with a
-call, with `<call name="await"></call>`
-(stop until the next message wakes you — what you wait for is in flight, not lost;
-refused when nothing of yours is pending) or with `<call name="done"></call>` (the work
-is finished). A turn with no call is reminded and rerolled; turn after turn of none and
-the chain gives up, telling your caller you could not answer.
+Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your
+answer, after thinking; every call in it runs. Thinking is stripped from history: put
+conclusions in a call or your message. End every turn with a call, with `<call name="await"></call>`
+(stop until the next message wakes you; what you wait for is in flight, not lost, and a
+job from `exec start` wakes you with `job_done`; refused when nothing is pending) or with
+`<call name="done"></call>` (work done). A turn with no call is reminded and rerolled;
+turn after turn of none and the chain gives up, telling your caller you could not answer.
 
 ## Inquiries
 When a decision is not yours to make, `send` whoever owns it an `inquiry` (`<text>`,
@@ -1026,6 +1025,90 @@ def _deliver_soon(
         kernel, target, text, client_id, system_prompt, born=born, notice=notice
     )
     _ctx(kernel).spawn_task(target, "deliver_reply", coro)
+
+
+def _watch_job(kernel, owner, exec_id, job_id, client_id, system_prompt) -> None:
+    """Record an exec job `owner`'s own batch started (`exec start` answered running),
+    and spawn ONE watcher on the owner for it (#306). The watcher waits on the exec
+    agent's `status` until the job is no longer `running`/`stopping`, forgets the job,
+    then wakes the owner once with `job_done {job_id, exit_code, tail}`. Rust:
+    `watch_job` in route.rs. Only this batch's own replies are watched, so another
+    agent's job never counts against this one."""
+    _running_jobs.setdefault(owner, []).append((job_id, exec_id))
+    _ctx(kernel).spawn_task(
+        owner,
+        "job_watch",
+        _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt),
+    )
+
+
+def _job_field(result, key):
+    """A field of the job a `status` or `tail` reply is about: the first of `jobs`, or
+    the reply itself when the exec agent answers flat."""
+    if not isinstance(result, dict):
+        return None
+    jobs = result.get("jobs")
+    if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict):
+        if key in jobs[0]:
+            return jobs[0][key]
+    return result.get(key)
+
+
+def _drop_job(owner, job_id, exec_id) -> None:
+    """Forget one job; the owner's key goes with its last one."""
+    jobs = _running_jobs.get(owner)
+    if jobs is None:
+        return
+    if (job_id, exec_id) in jobs:
+        jobs.remove((job_id, exec_id))
+    if not jobs:
+        _running_jobs.pop(owner, None)
+
+
+async def _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt) -> None:
+    last = None
+    try:
+        while True:
+            out = await kernel.send(
+                [
+                    {
+                        "target": exec_id,
+                        "payload": {"type": "status", "job_id": job_id, "wait_s": 100},
+                    }
+                ]
+            )
+            last = out[0].get("result") if out else None
+            # An error or unknown-job reply has no status, so it ends the wait too.
+            if _job_field(last, "status") not in ("running", "stopping"):
+                break
+        t = await kernel.send(
+            [
+                {
+                    "target": exec_id,
+                    "payload": {"type": "tail", "job_id": job_id, "lines": 20},
+                }
+            ]
+        )
+        result = (t[0].get("result") if t else None) or {}
+        lines = result.get("lines") if isinstance(result, dict) else None
+        tail = (
+            "\n".join(
+                str(line["line"])
+                for line in lines[-20:]
+                if isinstance(line, dict) and "line" in line
+            )
+            if isinstance(lines, list)
+            else ""
+        )
+        exit_code = _job_field(last, "exit_code")
+    finally:
+        # Forget the job BEFORE the wake (and on cancellation), so the woken turn's
+        # `pending` no longer counts it.
+        _drop_job(owner, job_id, exec_id)
+    text = "job_done " + json.dumps(
+        {"job_id": job_id, "exit_code": exit_code, "tail": tail}
+    )
+    _deliver_soon(kernel, owner, text, client_id, system_prompt, notice=False)
 
 
 async def _deliver(
@@ -1427,6 +1510,10 @@ _open_inquiries: dict[tuple[str, str], dict] = {}
 # flight, so `await` is honest while one is out.
 _awaiting: dict[str, set[str]] = {}
 _ANSWER_TAG = re.compile(r"\[reply to (\S+) · \S+ inquiry\]")
+# EXEC JOBS an agent started and has not yet heard end (#306), by owner: `(raw job_id,
+# exec agent id)`. An owner with any is awaiting its own work; each one ends in ONE
+# `job_done` wake, after which it is dropped here. Rust: `running_jobs` in route.rs.
+_running_jobs: dict[str, list[tuple[Any, str]]] = {}
 
 
 def _gave_up(limit: int) -> str:
@@ -2042,6 +2129,24 @@ async def _route_reply(
     finally:
         if items:
             _inflight[self_id] = max(0, _inflight.get(self_id, 0) - 1)
+    # A JOB this agent started (#306): an `exec start` answered `running` is watched, and
+    # its end wakes this agent once. Only this batch's own replies are read.
+    for item, out in zip(items, outcomes):
+        res = out.get("result")
+        if (
+            (item.get("payload") or {}).get("type") == "start"
+            and isinstance(res, dict)
+            and res.get("status") == "running"
+            and res.get("job_id") is not None
+        ):
+            _watch_job(
+                kernel,
+                self_id,
+                item["target"],
+                res["job_id"],
+                client_id,
+                system_prompt,
+            )
     # AN ACCEPTED INQUIRY IS OWED AN ANSWER — counted until a message under its pid
     # arrives (`_send` clears it).
     for item, out in zip(items, outcomes):
@@ -2176,6 +2281,9 @@ async def _route_reply(
             + len(_queue.get(self_id, []))
             + (1 if _lock_for(self_id).locked() else 0)
             + len(_awaiting.get(self_id, ()))  # answers to its inquiries, still to come
+            # ...and the exec jobs it started that are still running (#306): their end
+            # wakes it.
+            + len(_running_jobs.get(self_id, ()))
         )
         # ONE CHAIN PER AGENT (#227): messages held while this chain ran are answered
         # by the wake turn, so this chain ends now.
@@ -3927,6 +4035,7 @@ async def on_delete(agent) -> None:
         _inflight,
         _stripped,
         _chains,
+        _running_jobs,
     ):
         table.pop(id, None)
     _recall_due.discard(id)
