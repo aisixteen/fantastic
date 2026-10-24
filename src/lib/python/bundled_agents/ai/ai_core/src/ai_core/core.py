@@ -271,6 +271,23 @@ def _chain_ended(kernel, self_id: str, system_prompt: str | None) -> None:
     )
 
 
+def _push_held_or_wake(
+    kernel, self_id: str, client_id: str, fut, system_prompt: str | None
+) -> None:
+    """ONE CHAIN PER AGENT (#227, Rust #330): hold a message on the chain. The
+    chain may have ended while the message's row was being stored (the held send
+    read `alive` before that await): the push and the `alive` read are one step
+    with no await between them, and a message pushed onto a dead chain revives it
+    and wakes it, or no pass would ever read the message."""
+    chain = _chain_of(self_id)
+    chain["held"].append((client_id, fut))
+    if not chain["alive"]:
+        chain["alive"] = True
+        if not chain["token"]:
+            chain["token"] = _new_send_id()
+        _chain_ended(kernel, self_id, system_prompt)
+
+
 def _take_current_for_cancel(self_id: str, task_id: str) -> dict | None:
     """Hand the in-flight entry over to `on_cancel` — but ONLY if `task_id`
     names the generation itself. Clears `_current` (so `status`/`reflect` stop
@@ -3443,6 +3460,8 @@ def _make_send(cfg: Backend):
         text = payload.get("text", "")
         # AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
         # ONE CHAIN PER AGENT (#227): such an answer is a turn of the chain.
+        # The settle happens before the row save and is safe in Python: an owed
+        # answer is a chain_turn, never held, so no held message carries it.
         answered_owed = False
         if isinstance(text, str) and _awaiting.get(id):
             for owed in _ANSWER_TAG.findall(text):
@@ -3496,7 +3515,7 @@ def _make_send(cfg: Backend):
             )
             # A held send RETURNS THE ANSWER of the pass that reads it.
             fut = asyncio.get_running_loop().create_future()
-            chain["held"].append((client_id, fut))
+            _push_held_or_wake(kernel, id, client_id, fut, system_prompt)
             await _emit_status(
                 kernel, id, client_id, "queued", send_id=send_id, ahead=0, held=True
             )

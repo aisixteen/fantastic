@@ -6,8 +6,11 @@ no pass of its own. A chain that ends with a message held wakes ONCE for it;
 from __future__ import annotations
 
 import asyncio
+import time
 
 from _testkit import memory_meta
+
+from ai_core import core
 
 DONE = '<call name="done"></call>'
 REFLECT = '<call name="send"><target_id>kernel</target_id><type>reflect</type></call>'
@@ -157,3 +160,97 @@ async def test_a_held_send_returns_the_answer_of_the_pass_that_reads_it(
         assert "ANSWER-OF-THE-READING-PASS" in out["response"]
     finally:
         fake_providers.pop(aid, None)
+
+
+async def test_a_message_held_on_a_chain_that_just_ended_wakes_it(
+    seeded_kernel, fake_providers, monkeypatch
+):
+    """The chain ends while the held message's row is being stored: the late push
+    must revive the chain and wake it, or the sender waits out SEND_TIMEOUT."""
+    aid = "oc_dead"
+    fp = _Script([DONE, DONE], delay=0.3)
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    monkeypatch.setattr(core, "SEND_TIMEOUT", 3.0)
+    real_save = core._save_history
+
+    async def slow_save(self_id, kernel, rows):
+        # the row save for the held message outlasts the first pass, which ends
+        # the chain (nothing held yet) while this await is still running
+        if any("two" in str(r.get("content")) for r in rows):
+            await asyncio.sleep(0.8)
+        await real_save(self_id, kernel, rows)
+
+    monkeypatch.setattr(core, "_save_history", slow_save)
+    try:
+        first = _send(seeded_kernel, aid, "one", "o")
+        await _settle(fp, 1)
+        t0 = time.monotonic()
+        second = _send(seeded_kernel, aid, "two", "t")
+        await first
+        out = (await second)[0]["result"]
+        assert "response" in out, f"held send was not answered: {out}"
+        assert time.monotonic() - t0 < 3.0, "answered only after SEND_TIMEOUT"
+        await _settle(fp, 2)
+        assert "arrived while you were working" in fp.incoming[1]
+        assert _read(fp, 1, "two")
+        await asyncio.sleep(0.3)
+        assert fp.calls == 2, "exactly one wake"
+        chain = core._chain_of(aid)
+        assert chain["alive"] is False
+        assert chain["held"] == []
+    finally:
+        fake_providers.pop(aid, None)
+        monkeypatch.setattr(core, "_save_history", real_save)
+
+
+async def test_a_late_push_revives_the_dead_chain_with_a_token(
+    seeded_kernel, monkeypatch
+):
+    aid = "oc_late_push"
+    _agent(seeded_kernel, aid)
+    woken = []
+    monkeypatch.setattr(
+        core,
+        "_deliver_soon",
+        lambda kernel, target, text, client_id, system_prompt, **kw: woken.append(
+            (target, text, client_id, system_prompt)
+        ),
+    )
+    chain = core._chain_of(aid)
+    chain["alive"] = False
+    chain["token"] = ""
+    chain["held"] = []
+    fut = asyncio.get_running_loop().create_future()
+    core._push_held_or_wake(seeded_kernel, aid, "h", fut, None)
+    assert chain["alive"] is True
+    assert chain["token"] != ""
+    assert len(woken) == 1, "the late message was not handed to a wake"
+    assert woken[0][0] == aid
+    assert woken[0][2] == "h"
+    # the stub wake takes nothing: the message stays held until a pass takes it
+    assert len(chain["held"]) == 1
+    assert not fut.done()
+    core._chains.pop(aid, None)
+
+
+async def test_a_push_onto_a_live_chain_does_not_wake(seeded_kernel, monkeypatch):
+    aid = "oc_live_push"
+    _agent(seeded_kernel, aid)
+    woken = []
+    monkeypatch.setattr(
+        core,
+        "_deliver_soon",
+        lambda *a, **kw: woken.append(a),
+    )
+    chain = core._chain_of(aid)
+    chain["alive"] = True
+    chain["token"] = "tok"
+    chain["held"] = []
+    fut = asyncio.get_running_loop().create_future()
+    core._push_held_or_wake(seeded_kernel, aid, "h", fut, None)
+    assert chain["alive"] is True
+    assert chain["token"] == "tok"
+    assert len(chain["held"]) == 1
+    assert woken == [], "a push onto a live chain woke it twice"
+    core._chains.pop(aid, None)
