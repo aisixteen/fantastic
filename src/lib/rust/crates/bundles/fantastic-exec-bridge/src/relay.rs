@@ -62,9 +62,31 @@ pub(crate) const REFUSED_CAP: usize = 256;
 /// of mail must be carried from the handler to the drain: a drain that re-reads the
 /// live record when it dequeues would deliver refused mail if the leg was reopened in
 /// between.
-static REFUSED: OnceLock<Mutex<HashMap<AgentId, VecDeque<Value>>>> = OnceLock::new();
+static REFUSED: OnceLock<Mutex<HashMap<AgentId, Ledger>>> = OnceLock::new();
 
-fn refused() -> &'static Mutex<HashMap<AgentId, VecDeque<Value>>> {
+/// One owner's ledger. `noted` holds refusals the handler recorded that the drain has
+/// not consumed yet. `early` holds items the drain already dropped on its own live
+/// gate BEFORE the handler got to note them: the handler's note then cancels against
+/// one of these instead of leaving an entry nobody will consume (which would drop a
+/// later, legitimate mail with an identical payload).
+#[derive(Default)]
+struct Ledger {
+    noted: VecDeque<Value>,
+    early: VecDeque<Value>,
+}
+
+fn push_capped(q: &mut VecDeque<Value>, v: &Value) {
+    if q.len() >= REFUSED_CAP {
+        q.pop_front();
+    }
+    q.push_back(v.clone());
+}
+
+fn remove_eq(q: &mut VecDeque<Value>, v: &Value) -> bool {
+    q.iter().position(|x| x == v).map(|i| q.remove(i)).is_some()
+}
+
+fn refused() -> &'static Mutex<HashMap<AgentId, Ledger>> {
     REFUSED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -77,26 +99,29 @@ pub(crate) fn has_owner_inbox(owner: &AgentId) -> bool {
 }
 
 /// Record that `payload`, sent to `owner`, was refused. Bounded by [`REFUSED_CAP`].
+/// If the drain already dropped this very item, the two cancel and nothing is kept.
 pub(crate) fn note_refused(owner: &AgentId, payload: &Value) {
     let mut g = refused().lock().expect("REFUSED");
-    let q = g.entry(owner.clone()).or_default();
-    if q.len() >= REFUSED_CAP {
-        q.pop_front();
+    let l = g.entry(owner.clone()).or_default();
+    if !remove_eq(&mut l.early, payload) {
+        push_capped(&mut l.noted, payload);
     }
-    q.push_back(payload.clone());
 }
 
 /// Remove ONE noted refusal equal to `payload`; true when there was one.
 pub(crate) fn take_refused(owner: &AgentId, payload: &Value) -> bool {
     let mut g = refused().lock().expect("REFUSED");
-    let Some(q) = g.get_mut(owner) else {
+    let Some(l) = g.get_mut(owner) else {
         return false;
     };
-    let hit = q.iter().position(|v| v == payload).map(|i| q.remove(i));
-    if q.is_empty() {
-        g.remove(owner);
-    }
-    hit.is_some()
+    remove_eq(&mut l.noted, payload)
+}
+
+/// The drain dropped `payload` on its own gate with no noted refusal: remember it so
+/// the handler's late [`note_refused`] cancels instead of lingering.
+fn note_dropped_early(owner: &AgentId, payload: &Value) {
+    let mut g = refused().lock().expect("REFUSED");
+    push_capped(&mut g.entry(owner.clone()).or_default().early, payload);
 }
 
 fn clear_refused(owner: &AgentId) {
@@ -109,7 +134,7 @@ pub(crate) fn refused_len(owner: &AgentId) -> usize {
         .lock()
         .expect("REFUSED")
         .get(owner)
-        .map_or(0, VecDeque::len)
+        .map_or(0, |l| l.noted.len())
 }
 
 /// Register an owner inbox row with no drain task, so a test can pull the queued
@@ -273,6 +298,12 @@ fn inbox_framer(p: &Value, owner: &AgentId, job_id: TaskId, kernel: &Kernel) -> 
     Some(json!({"op": "inbox", "payload": p}))
 }
 
+fn gate_refuses(p: &Value, owner: &AgentId, kernel: &Kernel) -> bool {
+    let verb = p.get("type").and_then(Value::as_str).unwrap_or("");
+    !matches!(verb, "reflect" | "connector")
+        && crate::gate(&crate::snapshot_meta(owner, kernel), owner, verb).is_some()
+}
+
 /// The drain's verdict on ONE queued item: the frame to write, or `None` to drop it.
 /// Mail the handler refused at send time ([`note_refused`]) is dropped whatever the
 /// record says now; the live gate in [`inbox_framer`] still catches an item the
@@ -287,9 +318,10 @@ pub(crate) fn drain_verdict(
         return None;
     }
     let f = inbox_framer(p, owner, job_id, kernel);
-    if f.is_none() {
-        // dropped by its own gate: leave no entry behind for it
-        take_refused(owner, p);
+    if f.is_none() && gate_refuses(p, owner, kernel) {
+        // Dropped on the live gate before the handler noted it (the handler runs
+        // after the fanout): let its late note cancel against this.
+        note_dropped_early(owner, p);
     }
     f
 }

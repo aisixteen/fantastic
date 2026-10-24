@@ -1689,6 +1689,52 @@ async fn the_refused_ledger_is_released_with_the_owner_inbox() {
     assert_eq!(crate::relay::refused_len(&a), 0);
 }
 
+/// A refused DRIVE verb (`write` with no job_id) is mirrored too, and the framer's
+/// job_id filter does not drop it: it must be bound to the send-time rule as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_drive_verb_is_dropped_even_if_the_leg_reopens_before_the_drain_runs() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = manual_owner_inbox(&kernel, &a, 9104);
+    assert!(kernel
+        .watch(&a, AgentId::from("_xbself_9104"))
+        .await
+        .is_none());
+    set_rule(&kernel, &a, "deny_ingress").await;
+    let w = json!({"type": "write", "data": "rm -rf\n"});
+    let out = send_to(&kernel, &a, w.clone()).await;
+    assert_eq!(out["reason"], "unauthorized", "{out}");
+    set_rule(&kernel, &a, "allow_all_ingress").await;
+    let job = TaskId(9104);
+    let it = rx.recv().await.expect("write queued");
+    assert_eq!(
+        crate::relay::drain_verdict(&it.payload, &a, job, &kernel),
+        None
+    );
+}
+
+/// The drain may dequeue and drop an item BEFORE the handler notes its refusal; the
+/// late note must not linger and swallow a later, legitimate identical mail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_refusal_note_does_not_swallow_later_identical_mail() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let _rx = manual_owner_inbox(&kernel, &a, 9105);
+    let mail = json!({"type": "probe_mail", "x": 7});
+    set_rule(&kernel, &a, "deny_ingress").await;
+    let job = TaskId(9105);
+    // the drain wins: live gate drops it, nothing noted yet
+    assert_eq!(crate::relay::drain_verdict(&mail, &a, job, &kernel), None);
+    // the handler then refuses the same send and notes it late
+    crate::relay::note_refused(&a, &mail);
+    assert_eq!(crate::relay::refused_len(&a), 0);
+    set_rule(&kernel, &a, "allow_all_ingress").await;
+    assert_eq!(
+        crate::relay::drain_verdict(&mail, &a, job, &kernel),
+        Some(json!({"op": "inbox", "payload": mail}))
+    );
+}
+
 #[test]
 fn the_refused_ledger_is_bounded() {
     let owner = AgentId::from("ledger_bound_owner");

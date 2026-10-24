@@ -458,10 +458,10 @@ impl Bundle for ExecBridgeBundle {
         if !matches!(verb, "reflect" | "connector") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, verb) {
-                // The fanout has queued a copy of MAIL for the program already: note
+                // The fanout has queued a copy of this payload for the program already: note
                 // the refusal now so the drain drops it whatever the record says
                 // when it dequeues.
-                if !OWNED_VERBS.contains(&verb) && relay::has_owner_inbox(agent_id) {
+                if relay::has_owner_inbox(agent_id) {
                     relay::note_refused(agent_id, payload);
                 }
                 return Ok(Some(denied));
@@ -543,6 +543,9 @@ impl Bundle for ExecBridgeBundle {
         if header.get("type").and_then(Value::as_str) == Some("paste_image") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, "paste_image") {
+                if relay::has_owner_inbox(agent_id) {
+                    relay::note_refused(agent_id, &header);
+                }
                 return Ok((Some(denied), None));
             }
             let reply = match body_at(body.as_ref(), "data") {
@@ -554,6 +557,9 @@ impl Bundle for ExecBridgeBundle {
         if header.get("type").and_then(Value::as_str) == Some("write") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, "write") {
+                if relay::has_owner_inbox(agent_id) {
+                    relay::note_refused(agent_id, &header);
+                }
                 return Ok((Some(denied), None));
             }
             let reply = pty::write_reply(agent_id, &header, body_at(body.as_ref(), "bytes")).await;
@@ -612,29 +618,6 @@ impl Bundle for ExecBridgeBundle {
         Ok(())
     }
 }
-
-/// The verbs this bundle answers itself; any other type is mail for the program.
-const OWNED_VERBS: [&str; 19] = [
-    "reflect",
-    "start",
-    "run",
-    "boot",
-    "status",
-    "clear",
-    "interrupt",
-    "stop",
-    "write",
-    "resize",
-    "ack",
-    "output",
-    "tail",
-    "grep",
-    "monitor",
-    "monitors",
-    "unmonitor",
-    "paste_image",
-    "connector",
-];
 
 // ── the auth gate (io_bridge leg — SEALED by default) ───────────────
 
