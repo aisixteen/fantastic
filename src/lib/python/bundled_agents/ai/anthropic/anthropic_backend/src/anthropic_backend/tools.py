@@ -13,9 +13,16 @@ credential-store ref, sent as `x-api-key` when named.
 
 `on_cancel` is re-exported from `ai_core`; `on_delete` wraps ai_core's and also
 drops the agent's usage counts. These are the bundle's hooks.
+
+The usage counts survive a kernel restart (#308, Rust #319): the agent's total is
+kept in `usage.json` beside its agent.yaml. The process's own counts (`usage_of`)
+are since boot; `base_of` is the sidecar's counts from before this process.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from ai_core import build, on_cancel, required_meta  # noqa: F401 — the hooks
 from ai_core import on_delete as _core_on_delete
@@ -25,19 +32,62 @@ from ai_core.schema import credentials_field, field, schema, validate
 from kernel._refusal import BAD_ARG, refusal
 
 from anthropic_backend import server
-from anthropic_backend.provider import THINKING_FLOOR, Usage
+from anthropic_backend.provider import (
+    THINKING_FLOOR,
+    USAGE_FILE,
+    Usage,
+    write_usage_file,
+)
 
 NAME = "anthropic_backend"
 
-#: Each agent's token counts, keyed by id. RAM: a kernel restart zeroes them.
+#: Each agent's counts since this kernel process booted, keyed by id.
 _USAGE: dict[str, Usage] = {}
+#: Each agent's counts from before this process, keyed by id: loaded once from its
+#: usage.json, the base the since-boot counts add to.
+_BASE: dict[str, Usage] = {}
 
 
 def usage_of(id: str) -> Usage:
-    """The agent's running counts — created on first use."""
+    """The agent's counts since this kernel process booted — created on first use."""
     if id not in _USAGE:
         _USAGE[id] = Usage()
     return _USAGE[id]
+
+
+def usage_file_of(id: str, kernel) -> Path | None:
+    """The agent's usage.json, in its own dir beside its agent.yaml. None for an
+    agent with no dir (an in-memory one) or one that is not live. A relative dir
+    resolves against the working directory."""
+    agent = kernel.ctx.get_agent(id)
+    root = getattr(agent, "_root_path", None)
+    if root is None or str(root) in ("", "."):
+        return None
+    root = Path(root)
+    return (root if root.is_absolute() else Path.cwd() / root) / USAGE_FILE
+
+
+def _read_usage_file(path: Path) -> Usage:
+    """The counts a usage.json holds. A missing or unreadable file reads as zero."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return Usage()
+    return Usage.from_json(data)
+
+
+def base_of(id: str, kernel) -> Usage:
+    """The agent's counts from before this process — read from its usage.json the
+    first time this process asks."""
+    if id not in _BASE:
+        path = usage_file_of(id, kernel)
+        _BASE[id] = _read_usage_file(path) if path is not None else Usage()
+    return _BASE[id]
+
+
+def total_counts(id: str, kernel) -> Usage:
+    """The agent's counts since it was created: the base plus this process's."""
+    return base_of(id, kernel).plus(usage_of(id))
 
 
 _FROM_API = "; left out, read from the API before a turn and written here"
@@ -192,6 +242,8 @@ def make_provider(id, kernel):
         thinking_budget=rec.get("thinking_budget") or None,
         caching=caching.mode_of(rec),
         usage=usage_of(id),
+        base=base_of(id, kernel),
+        persist_to=usage_file_of(id, kernel),
         long_context_tokens=rec.get("long_context_tokens")
         if _positive_int(rec.get("long_context_tokens"))
         else None,
@@ -200,15 +252,25 @@ def make_provider(id, kernel):
     )
 
 
-def _usage_now(id, kernel) -> dict:
-    """The agent's counts, with the record's prices applied."""
+def _priced(counts: Usage, id, kernel) -> dict:
+    """The counts, with the record's prices applied."""
     rec = kernel.get(id) or {}
-    return usage_of(id).snapshot(
+    return counts.snapshot(
         rec.get("price_input_per_mtok"),
         rec.get("price_output_per_mtok"),
         rec.get("price_input_long_per_mtok"),
         rec.get("price_output_long_per_mtok"),
     )
+
+
+def _usage_now(id, kernel) -> dict:
+    """The agent's counts since it was created, with the record's prices applied."""
+    return _priced(total_counts(id, kernel), id, kernel)
+
+
+def _usage_since_boot_now(id, kernel) -> dict:
+    """The counts this kernel process has seen since it booted, priced the same way."""
+    return _priced(usage_of(id), id, kernel)
 
 
 async def _reflect_extra(id, kernel):
@@ -225,20 +287,42 @@ async def _reflect_extra(id, kernel):
     if rec.get("cache_primer_until") is not None:
         out["cache_primer_until"] = rec["cache_primer_until"]
     out["usage"] = _usage_now(id, kernel)
+    out["usage_since_boot"] = _usage_since_boot_now(id, kernel)
     return out
 
 
 async def _usage(id, payload, kernel):
-    """usage — args: reset? (bool). The agent's token usage since its kernel started:
+    """usage — args: reset? (bool). The agent's token usage since it was created:
     requests, input, cache write and read, output, the derived prompt_tokens, hit_rate
-    and saved_tokens (cost_usd and saved_usd when the record has both prices). reset:
-    true returns the counts, then zeroes them."""
+    and saved_tokens (cost_usd and saved_usd when the record has both prices), and
+    usage_since_boot: the same counts over this kernel process only. reset: true
+    returns the counts, then zeroes the since-boot counts (the total is kept: see
+    usage_reset)."""
     reset = payload.get("reset", False)
     if not isinstance(reset, bool):
         return refusal(BAD_ARG, "usage: reset must be true or false", arg="reset")
     out = _usage_now(id, kernel)
+    out["usage_since_boot"] = _usage_since_boot_now(id, kernel)
     if reset:
         usage_of(id).reset()
+    return out
+
+
+async def _usage_reset(id, payload, kernel):
+    """usage_reset — no args. Returns the agent's token usage since it was created (as
+    `usage` does), then zeroes it for good: the counts in the agent's usage.json are
+    rewritten as zeros. Deleting the agent drops them too."""
+    out = _usage_now(id, kernel)
+    base = base_of(id, kernel)
+    boot = usage_of(id)
+    base.reset()
+    boot.reset()
+    path = usage_file_of(id, kernel)
+    if path is not None:
+        try:
+            write_usage_file(path, Usage())
+        except OSError as e:
+            boot.log_error = f"{path}: {e}"
     return out
 
 
@@ -259,8 +343,10 @@ async def _models(id, payload, kernel):
 
 
 async def on_delete(agent) -> None:
-    """The shared teardown, and this agent's counts dropped with it."""
+    """The shared teardown, and this agent's counts dropped with it (its usage.json
+    goes with its dir)."""
     _USAGE.pop(agent.id, None)
+    _BASE.pop(agent.id, None)
     await _core_on_delete(agent)
 
 
@@ -269,7 +355,7 @@ def _build():
         sentence="Anthropic Messages-API LLM agent (raw prompt-and-parse tool-calling).",
         make_provider=make_provider,
         name=NAME,
-        extra_verbs={"usage": _usage, "models": _models},
+        extra_verbs={"usage": _usage, "usage_reset": _usage_reset, "models": _models},
         reflect_extra=_reflect_extra,
         provider_cache=True,
     )
