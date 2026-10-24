@@ -111,3 +111,10 @@ FOLD_RUN = 3
 # no more reminders, the caller is told the model could not answer (neither a single
 # dead turn ending a long chain nor an unbounded reminder loop).
 MAX_SILENT_TURNS = 10
+
+# ─── inline agent views (#339) ──────────────────────────────────────────
+
+# The tallest a chat card may be, CSS px (the column's full width is the card's width).
+# Rust twin: constants.rs CHAT_CARD_MAX_HEIGHT; the canvas's TS twin (chat_card.ts) says
+# the same 1200 — a test reads both.
+CHAT_CARD_MAX_HEIGHT = 1200
