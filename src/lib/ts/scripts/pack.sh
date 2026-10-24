@@ -31,7 +31,9 @@ fi
 
 # ── the caller's paths, made absolute before anything moves ─────────────────
 CALLER=$(pwd)
-abs() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "$CALLER/$1" ;; esac; }
+# A drive-letter path (Windows, from build.rs) is absolute too; its backslashes
+# become slashes so Git-for-Windows' sh and esbuild both read D:/a/b.
+abs() { case "$1" in /*) printf '%s\n' "$1" ;; [A-Za-z]:[/\\]*) printf '%s\n' "$1" | tr '\\' '/' ;; *) printf '%s\n' "$CALLER/$1" ;; esac; }
 ENTRY=$(abs "$1")
 ZIP=$(abs "$2")
 README=$(abs "$3")

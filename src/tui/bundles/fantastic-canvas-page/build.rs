@@ -23,7 +23,8 @@ fn main() {
     let zip = pack_dir.join("canvas.zip");
     let out = Command::new("sh")
         .arg("scripts/pack.sh")
-        .arg(&zip)
+        // Forward slashes: Git-for-Windows sh mangles `D:\…` (the lib script makes it absolute).
+        .arg(zip.to_string_lossy().replace('\\', "/"))
         .current_dir(&app)
         .output()
         .expect("sh runs");
