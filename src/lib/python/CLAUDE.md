@@ -572,6 +572,7 @@ they did not register.
   own". **`"*"` covers EVERY verb** — there is no
   verb list the gate consults, and NO verb is exempt by name: `docs`, `reflect`, `watch`, `emit`, `state_subscribe` are verbs like any other —
   a caller reads docs with a `docs` grant on the root.
+  **Editing a grant map from a bundle** — `Kernel.edit_grants(id, edit)` (or `edit_callable_by` / `edit_can_call`): the maps are read AT THE WRITE and edited in one synchronous step, the write-time checks run once over what changed, a refusal writes neither, one `updated` event; never read a map, await, then restate it whole (a concurrent writer's key is lost).
   **Baseline:** `{"$self": "*"}` on BOTH fields, stamped + merged on every agent —
   nothing else. Every other edge is an explicit grant.
   **Kernel verbs answered by the root** (`create_agent`, `ps`, `cancel`, `ledger`,
