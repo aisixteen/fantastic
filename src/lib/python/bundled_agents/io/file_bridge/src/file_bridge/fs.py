@@ -113,6 +113,25 @@ def is_absolute(path: str) -> bool:
     return _sys.is_absolute(path)
 
 
+def not_found_hint(root_p: Path, path: str) -> str:
+    """Hint appended to a `not found` or `escapes root` refusal: names the root and
+    the relative form of the path (issue #305). An absolute path inside the root
+    shows its relative form; a path that repeats the root's own name shows it
+    stripped. `root_p` is the resolved root."""
+    root_s = str(root_p)
+    if is_absolute(path):
+        try:
+            rel = Path(path).relative_to(root_p)
+        except ValueError:
+            return f" — paths are relative to the root {root_s}"
+        return f" — paths are relative to the root {root_s}, e.g. {rel}"
+    base = root_p.name
+    if base and path.startswith(f"{base}/"):
+        stripped = path[len(base) + 1 :]
+        return f" — paths are relative to the root {root_s}, e.g. {stripped}"
+    return f" — paths are relative to the root {root_s}"
+
+
 def resolve(
     root: Root | str | Path, path: str | Path, *, external: bool = False
 ) -> Path:
@@ -126,12 +145,14 @@ def resolve(
         # (a stripped slash would serve `/etc/passwd` as `root/etc/passwd`, and
         # the docstring above promised the opposite). The agent layer answers
         # this with `bad(verb, "path", …)` BEFORE reaching here.
-        raise ValueError(f"fs: path {path!r} escapes root")
+        raise ValueError(f"fs: path {path!r} escapes root{not_found_hint(root_p, rel)}")
     target = (root_p / rel).resolve() if rel else root_p
     try:
         target.relative_to(root_p)
     except ValueError:
-        raise ValueError(f"fs: path {path!r} escapes root") from None
+        raise ValueError(
+            f"fs: path {path!r} escapes root{not_found_hint(root_p, rel)}"
+        ) from None
     return target
 
 

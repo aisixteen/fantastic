@@ -826,3 +826,80 @@ async def test_a_numeric_if_match_equal_to_the_version_passes(monkeypatch):
     assert refusal is not None and refusal["reason"] == "version_mismatch"
     assert refusal["expected"] == 1234567890123457
     assert refusal["actual"] == "1234567890123456"
+
+
+# ─── issue #277: the edit grammar works on text with conflict markers ───
+
+
+def _fenced(width, old, new):
+    """A block fenced by `width` `<` / `=` / `>` (7 is the default fence)."""
+    return f"{'<' * width} SEARCH\n{old}\n{'=' * width}\n{new}\n{'>' * width} REPLACE"
+
+
+async def test_a_conflict_block_resolves_with_the_long_fence(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(
+        seeded_kernel,
+        ed,
+        "m.py",
+        "top = 0\n<<<<<<< HEAD\nours = 1\n=======\ntheirs = 2\n>>>>>>> origin/main\nbottom = 9\n",
+    )
+    search = "<<<<<<< HEAD\nours = 1\n=======\ntheirs = 2\n>>>>>>> origin/main"
+    r = await _patch(seeded_kernel, ed, "m.py", _fenced(8, search, "merged = 3"))
+    assert "edited" in r, r
+    assert (tmp_path / "sd" / "m.py").read_text(encoding="utf-8") == (
+        "top = 0\nmerged = 3\nbottom = 9\n"
+    )
+
+
+async def test_head_and_theirs_markers_without_a_bare_separator_work_with_the_normal_fence(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "m.py", "<<<<<<< HEAD\nx = 1\n>>>>>>> origin/main\n")
+    search = "<<<<<<< HEAD\nx = 1\n>>>>>>> origin/main"
+    r = await _patch(seeded_kernel, ed, "m.py", _fenced(7, search, "x = 2"))
+    assert "edited" in r, r
+    assert (tmp_path / "sd" / "m.py").read_text(encoding="utf-8") == "x = 2\n"
+
+
+async def test_a_malformed_block_applies_nothing(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "m.py", "a = 1\nb = 2\n")
+    patch = (
+        "<<<<<<< SEARCH\na = 1\n=======\na = 9\n>>>>>>> REPLACE\n"
+        "<<<<<<< SEARCH\nb = 2\n=======\nb = 9\n"  # the second block never closes
+    )
+    r = await _patch(seeded_kernel, ed, "m.py", patch)
+    assert "edited" not in r and r["reason"] == "bad_arg"
+    assert (tmp_path / "sd" / "m.py").read_text(encoding="utf-8") == "a = 1\nb = 2\n"
+
+
+async def test_the_refusal_names_the_long_fence(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "m.py", "a = 1\n")
+    # a 7-char block whose REPLACE holds a bare `=======`: the old parser took it
+    # as text; the fence rule refuses it and names the 8-character fence.
+    patch = "<<<<<<< SEARCH\na = 1\n=======\nb = 1\n=======\nc = 1\n>>>>>>> REPLACE"
+    r = await _patch(seeded_kernel, ed, "m.py", patch)
+    assert "edited" not in r and r["reason"] == "bad_arg"
+    assert "use the 8-character fence" in r["error"], r
+    assert (tmp_path / "sd" / "m.py").read_text(encoding="utf-8") == "a = 1\n"
+
+
+async def test_mixed_fence_lengths_in_one_edit(seeded_kernel, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "m.py", "a = 1\nb = 2\n")
+    patch = _fenced(7, "a = 1", "A = 1") + "\n" + _fenced(8, "b = 2", "B = 2")
+    r = await _patch(seeded_kernel, ed, "m.py", patch, hunks=2)
+    assert "edited" in r, r
+    assert (tmp_path / "sd" / "m.py").read_text(encoding="utf-8") == "A = 1\nB = 2\n"
+    grammar = (await _call(seeded_kernel, ed, {"type": "reflect"}))["edit_grammar"]
+    assert "8-character fence" in grammar

@@ -23,15 +23,20 @@ What is Anthropic-specific here:
   markers: on the `system` block, on the block that ends the primer row, on the
   block that ends the last fold, and the top-level automatic one. At most four.
   Every other mode sends none, and the body is unchanged.
-- USAGE: each stream's token counts accumulate into the agent's `Usage` (RAM; the
-  `usage` verb and `reflect` read it), side calls included.
+- USAGE: each stream's token counts accumulate into the agent's `Usage` (the
+  `usage` verb and `reflect` read it), side calls included. The running total is
+  kept across a kernel restart in the agent's `usage.json` (#308, Rust #319): every
+  count change rewrites it (`persist_to`), so a stream that dies mid-answer keeps
+  what it billed.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import httpx
 from ai_core.provider import ProviderError
@@ -68,13 +73,73 @@ def saved_tokens(cache_read: int, cache_write: int) -> int:
     return q
 
 
+#: The attributes of a `Usage` that are counts, in the order `counters()` lists them.
+_COUNT_ATTRS = (
+    "requests",
+    "input_tokens",
+    "cache_write_tokens",
+    "cache_read_tokens",
+    "output_tokens",
+    "long_requests",
+    "long_input_tokens",
+    "long_cache_write_tokens",
+    "long_cache_read_tokens",
+    "long_output_tokens",
+)
+#: The usage.json keys, one per count, the same names as Rust's sidecar.
+FIELDS = (
+    "requests",
+    "input",
+    "cache_write",
+    "cache_read",
+    "output",
+    "long_requests",
+    "long_input",
+    "long_cache_write",
+    "long_cache_read",
+    "long_output",
+)
+#: The sidecar's file name, beside the agent's agent.yaml.
+USAGE_FILE = "usage.json"
+
+
 class Usage:
-    """One agent's token counts since its kernel started (RAM — a restart zeroes
-    them). `input_tokens` is the uncached remainder; the two cache counts are what
-    the API reports for the prompt."""
+    """One agent's token counts: since this kernel process booted, or the running
+    total a `usage.json` sidecar carries. `input_tokens` is the uncached remainder;
+    the two cache counts are what the API reports for the prompt."""
 
     def __init__(self):
         self.reset()
+
+    def counters(self) -> list[int]:
+        """The ten counts, in `FIELDS` order."""
+        return [getattr(self, a) for a in _COUNT_ATTRS]
+
+    def plus(self, other: Usage) -> Usage:
+        """This usage's counts plus `other`'s. The log error comes from `other`, the
+        since-boot side that carries it."""
+        out = Usage()
+        for attr, mine, theirs in zip(_COUNT_ATTRS, self.counters(), other.counters()):
+            setattr(out, attr, mine + theirs)
+        out.log_error = other.log_error
+        return out
+
+    def to_json(self) -> dict:
+        """The sidecar's JSON: the ten counts, by `FIELDS`."""
+        return dict(zip(FIELDS, self.counters()))
+
+    @classmethod
+    def from_json(cls, data) -> Usage:
+        """The counts a sidecar holds. A missing or non-integer key reads as 0, and a
+        value that is not an object reads as all zeros."""
+        out = cls()
+        if not isinstance(data, dict):
+            return out
+        for attr, key in zip(_COUNT_ATTRS, FIELDS):
+            v = data.get(key)
+            if isinstance(v, int) and not isinstance(v, bool):
+                setattr(out, attr, v)
+        return out
 
     def reset(self) -> None:
         self.requests = 0
@@ -172,6 +237,15 @@ class Usage:
         return out
 
 
+def write_usage_file(path: str | Path, total: Usage) -> None:
+    """Rewrite a usage.json with `total`: a temp file, then a rename, so a crash
+    leaves the old file or the new one, never half of one. Raises OSError."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(total.to_json(), f)
+    os.replace(tmp, path)
+
+
 def to_messages(messages: list[dict]) -> tuple[str, list[dict]]:
     """ai_core's messages → (`system`, the user/assistant turns). Every system
     message joins the one `system` string; consecutive turns of one role are merged
@@ -262,6 +336,8 @@ class AnthropicProvider:
         thinking_budget: int | None = None,
         caching: str = ai_caching.DEFAULT_MODE,
         usage: Usage | None = None,
+        base: Usage | None = None,
+        persist_to: str | Path | None = None,
         transport=None,
         long_context_tokens: int | None = None,
         usage_log: str | None = None,
@@ -277,6 +353,10 @@ class AnthropicProvider:
         self._marks = ai_caching.marks(caching)
         # The agent's running counts; None = nothing is counted (a bare provider).
         self._usage = usage
+        # The counts from before this kernel process (the sidecar's), and the file
+        # the running total is written to after each count change. None = not kept.
+        self._base = base
+        self._persist_to = persist_to
         self._transport = transport
         # Prompt tokens above which a request is billed at the long-context prices.
         self._long_context_tokens = long_context_tokens
@@ -284,6 +364,20 @@ class AnthropicProvider:
         # id written into each line.
         self._usage_log = usage_log
         self._agent_id = agent_id
+
+    def _persist(self) -> None:
+        """Rewrite the agent's usage.json with the running total: the base plus this
+        process's counts. A write error does not fail the turn: it is kept in `Usage`
+        and reported. A no-op when no file is named (an in-memory agent)."""
+        if self._persist_to is None:
+            return
+        base = self._base if self._base is not None else Usage()
+        boot = self._usage if self._usage is not None else Usage()
+        try:
+            write_usage_file(self._persist_to, base.plus(boot))
+        except OSError as e:
+            if self._usage is not None:
+                self._usage.log_error = f"{self._persist_to}: {e}"
 
     def _log_usage(self, counts: dict, long: bool) -> None:
         """Append this request's own counts as one JSON line to the usage log. A
@@ -399,6 +493,7 @@ class AnthropicProvider:
                         )
                         if self._usage is not None:
                             self._usage.add_request(inp, cw, cr, long=long)
+                            self._persist()
                     elif kind == "content_block_delta":
                         delta = evt.get("delta") or {}
                         if delta.get("type") == "thinking_delta":
@@ -426,6 +521,7 @@ class AnthropicProvider:
                             step = int(out) - billed_out
                             if self._usage is not None:
                                 self._usage.add_output(step, long=long)
+                                self._persist()
                             counts["output_tokens"] += step
                             billed_out = int(out)
                     elif kind == "message_stop":

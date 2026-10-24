@@ -75,6 +75,16 @@ MISFIRE_LIMIT_HINT = (
 #: The refusal for a `misfire_limit` the record cannot use (#203).
 MISFIRE_LIMIT_REFUSAL = "misfire_limit must be an int from 2 to 50"
 
+#: The `transport_retries` field's hint (#198 part 2; verbatim from the Rust).
+TRANSPORT_RETRIES_HINT = (
+    "how many times a turn whose link dropped (connect failed, the stream cut or "
+    "stalled, HTTP 502/503/504) is retried before it fails, with a 2 s, 4 s, 8 s… "
+    "backoff; each retry is a visible row; 0–5, 0 = off"
+)
+
+#: The refusal for a `transport_retries` the record cannot use (#198 part 2).
+TRANSPORT_RETRIES_REFUSAL = "transport_retries must be an int from 0 to 5"
+
 
 #: The fields EVERY ai_core agent takes, whatever its backend.
 AI_FIELDS: tuple = (
@@ -99,7 +109,7 @@ AI_FIELDS: tuple = (
     field(
         "context_strategy",
         "enum",
-        "how the conversation is fitted into the window",
+        "how the conversation is fitted into the window (none = never shrink: an over-budget turn is refused)",
         enum=strategy_names(),
         default=DEFAULT_STRATEGY,
     ),
@@ -111,6 +121,7 @@ AI_FIELDS: tuple = (
     ),
     field("caching", "enum", CACHING_HINT, enum=MODES, default=DEFAULT_MODE),
     field("cache_primer_until", "int", CACHE_PRIMER_HINT),
+    field("transport_retries", "int", TRANSPORT_RETRIES_HINT, default=0),
     field("misfire_limit", "int", MISFIRE_LIMIT_HINT, default=MAX_SILENT_TURNS),
     field(
         "system_prompt",
@@ -216,6 +227,12 @@ def validate(sch: dict, backend: str, meta: dict, record: dict) -> str | None:
         isinstance(ml, int) and not isinstance(ml, bool) and 2 <= ml <= 50
     ):
         return MISFIRE_LIMIT_REFUSAL
+    # `transport_retries`: named on a write it is an int from 0 to 5 (#198 part 2).
+    tr = meta.get("transport_retries")
+    if tr is not None and not (
+        isinstance(tr, int) and not isinstance(tr, bool) and 0 <= tr <= 5
+    ):
+        return TRANSPORT_RETRIES_REFUSAL
     sp = meta.get("system_prompt")
     if sp is not None and not (isinstance(sp, str) and sp.strip()):
         return SYSTEM_PROMPT_REFUSAL

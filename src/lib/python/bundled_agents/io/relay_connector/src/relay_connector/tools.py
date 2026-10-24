@@ -37,6 +37,7 @@ from __future__ import annotations
 from io_bridge import _state, dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
 from io_bridge import EMITS  # noqa: F401  (`docs` tier detailed)
+from io_bridge import forward_payload_secret
 from io_bridge import validate_meta as _bridge_validate_meta
 from kernel._refusal import NOT_CONNECTED, bad, refusal
 from relay_connector._relay import (
@@ -67,6 +68,14 @@ VERBS = make_verbs(
     reflect_fields=reflect_fields,
     default_kind="relay",
 )
+
+
+def payload_secret(payload: dict) -> list[str]:
+    """A forwarded `set`'s fields are secret in THIS kernel's records (the call row,
+    the ledger, the state stream): `payload.fields.<name>` per field, or the whole
+    `payload.fields` for a name that is empty or dotted (`io_bridge`)."""
+    return forward_payload_secret(payload)
+
 
 # ── directory surface (relay-specific; the relay's own `relay` agent) ──
 

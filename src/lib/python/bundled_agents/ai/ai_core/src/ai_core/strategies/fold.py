@@ -129,14 +129,31 @@ class FoldSummaryError(RuntimeError):
     `SUMMARY_RETRIES` re-summarises — the fold fails the turn, loud."""
 
 
+def _lines(text: str) -> list[str]:
+    """The non-empty lines of `text`, each stripped."""
+    return [ln for ln in (ln.strip() for ln in text.splitlines()) if ln]
+
+
+def _title_of(line: str) -> str:
+    """A title read off a line: quotes, then `*` and `#` marks, then whitespace go,
+    and it is cut to `MAX_TITLE`."""
+    return line.strip('"').strip("*#").strip()[:MAX_TITLE]
+
+
+def summary_title(text: str) -> str:
+    """The title of an operator-given summary: its first non-empty line, read the way
+    `_split` reads a summarised one's. `(untitled)` when nothing is left."""
+    lines = _lines(text)
+    return (_title_of(lines[0]) if lines else "") or "(untitled)"
+
+
 def _split(text: str) -> tuple[str, str] | None:
-    lines = [ln.strip() for ln in text.splitlines()]
-    lines = [ln for ln in lines if ln]
+    lines = _lines(text)
     if not lines or lines[0].startswith("<think"):
         return None
-    title = lines[0].strip('"').strip("*#").strip()
+    title = _title_of(lines[0])
     body = "\n".join(lines[1:]).strip()
-    return title[:MAX_TITLE] or "(untitled)", body or title
+    return title or "(untitled)", body or lines[0].strip('"').strip("*#").strip()
 
 
 async def _summarize(
@@ -197,6 +214,56 @@ async def _summarize(
     return parts[0], parts[1], False
 
 
+async def summarize_span(
+    ctx: ProjectionCtx, rows: list[dict], idxs: list[int]
+) -> tuple[str, str, bool]:
+    """(title, text, degraded) of the span `rows[idxs]`, the mechanical index riding
+    beside the summary. Shared by the automatic fold and `context_fold`. Needs only a
+    ctx with `summarize` (None: the titles path)."""
+    # THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
+    index = mechanical_index(rows, idxs)
+    title, text, degraded = await _summarize(ctx, rows, idxs)
+    if index:
+        text = f"{text}\n\n{index}"
+    return title, text, degraded
+
+
+async def append_fold(
+    self_id: str,
+    kernel,
+    rows: list[dict],
+    idxs: list[int],
+    anchor: int,
+    title: str,
+    body: str,
+    degraded: bool,
+) -> dict:
+    """Append ONE fold row over `rows[idxs]` carrying `title` and `body` as given,
+    placed at `anchor` (the smallest leaf id it covers). The one writer both folds
+    share: the automatic fold, after its summarizer, and `context_fold`."""
+    from ai_core.core import _ctx, _save_history  # lazy: core imports this package
+
+    ids = [rows[i].get("id") for i in idxs]
+    lvl = 1 + max((level(rows, rows[i]) for i in idxs if is_fold(rows[i])), default=0)
+    if kernel is None:
+        raise RuntimeError("fold: no kernel to mint the fold's id from")
+    fr = make_fold(
+        self_id,
+        ids,
+        title,
+        body,
+        degraded,
+        id=_ctx(kernel).mint_id(),
+        anchor=anchor,
+        lvl=lvl,
+        parent=rows[idxs[0]].get("parent"),
+    )
+    # A fold is a MARK that must persist — written whoever the projection is for (a
+    # turn's caller, or a `context_recall` with none).
+    await _save_history(self_id, kernel, [fr])
+    return fr
+
+
 async def write_fold(
     ctx: ProjectionCtx, rows: list[dict], idxs: list[int], anchors: dict[int, int]
 ) -> dict:
@@ -204,35 +271,11 @@ async def write_fold(
     raises `FoldSummaryError`). A fold row in `idxs` is just a member —
     that is how folds nest: the next fold over this stretch of the view takes the
     earlier fold as one of its rows, and its level is one above the deepest member."""
-    from ai_core.core import _save_history  # lazy: core imports this package
-
-    ids = [rows[i].get("id") for i in idxs]
     anchor = member_anchor(rows, idxs, anchors)
-    lvl = 1 + max((level(rows, rows[i]) for i in idxs if is_fold(rows[i])), default=0)
-    # THE INDEX RIDES BESIDE THE SUMMARY, outside its budget.
-    index = mechanical_index(rows, idxs)
-    title, text, degraded = await _summarize(ctx, rows, idxs)
-    if index:
-        text = f"{text}\n\n{index}"
-    from ai_core.core import _ctx  # lazy: core imports this package
-
-    if ctx.kernel is None:
-        raise RuntimeError("fold: no kernel to mint the fold's id from")
-    fr = make_fold(
-        ctx.self_id,
-        ids,
-        title,
-        text,
-        degraded,
-        id=_ctx(ctx.kernel).mint_id(),
-        anchor=anchor,
-        lvl=lvl,
-        parent=rows[idxs[0]].get("parent"),
+    title, text, degraded = await summarize_span(ctx, rows, idxs)
+    return await append_fold(
+        ctx.self_id, ctx.kernel, rows, idxs, anchor, title, text, degraded
     )
-    # A fold is a MARK that must persist — written whoever the projection is for (a
-    # turn's caller, or a `context_recall` with none).
-    await _save_history(ctx.self_id, ctx.kernel, [fr])
-    return fr
 
 
 def next_span(

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from kernel import note_reply_secret
 from kernel._refusal import bad
 
 
@@ -27,7 +28,12 @@ async def inbound_call(id: str, payload: dict, kernel: Any):
     item = payload.get("item")
     if not isinstance(item, dict):
         return bad("inbound_call", "item", "a batch item {target, payload, id?}")
-    return (await kernel.send([item]))[0]["result"]
+    out = (await kernel.send([item]))[0]
+    # The onward reply's own secret paths (a credential store's `get` fields) are
+    # noted on this call too: the leg's own settle row shows them as `[secret]`,
+    # and the transport reads them off the hand-in's outcome (`hand_in_outcome`).
+    note_reply_secret(out.get("secret") or [])
+    return out["result"]
 
 
 async def inbound_emit(id: str, payload: dict, kernel: Any):
@@ -65,6 +71,13 @@ async def hand_in(kernel: Any, leg_id: str, payload: dict):
     inbound verb and return the leg's reply. Made from the transport's loop —
     outside every dispatch, so it is the operator's (`kernel` is any agent of the
     tree; the send's identity is the context's, and here there is none)."""
+    return (await hand_in_outcome(kernel, leg_id, payload))["result"]
+
+
+async def hand_in_outcome(kernel: Any, leg_id: str, payload: dict) -> dict:
+    """`hand_in`, returning the WHOLE outcome of the hand-in send: `result` plus the
+    reply's `secret` marks when the leg's onward reply named any (absent otherwise).
+    A transport that puts the reply on a wire sends those marks with it."""
     hand = {"target": leg_id, "payload": payload}
     # An inbound call's `secret` marks (paths into ITS payload) mark the hand-in
     # too: the leg's own call row holds the item, so its values are shown as the
@@ -76,4 +89,4 @@ async def hand_in(kernel: Any, leg_id: str, payload: dict):
     )
     if isinstance(marks, list) and all(isinstance(m, str) for m in marks):
         hand["secret"] = [f"item.payload.{m}" for m in marks]
-    return (await kernel.send([hand]))[0]["result"]
+    return (await kernel.send([hand]))[0]

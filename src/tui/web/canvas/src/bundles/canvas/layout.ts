@@ -316,7 +316,11 @@ export function framesToRemove(frames: Iterable<string>, drawn: Set<string>, exi
 
 /** Drop every rect of cells no longer in `view` (all themes). */
 export function prune(kernel: Kernel, view: string, live: Set<string>): void {
-  for (const h of hiddenOf(kernel, view)) if (!live.has(h)) setHidden(kernel, view, h, false);
+  for (const h of hiddenOf(kernel, view)) {
+    // a chat card's hide (`embed:<chat cell>:<agent>`, #339) lives while its chat cell does
+    const chat = /^embed:([^:]+):/.exec(h)?.[1];
+    if (!live.has(chat ?? h)) setHidden(kernel, view, h, false);
+  }
   // every layout the view holds (a deleted theme's too)
   const themes = [...(kernel.get(view)?.children.values() ?? [])]
     .filter((a) => a.record().handler_module === LAYOUT)

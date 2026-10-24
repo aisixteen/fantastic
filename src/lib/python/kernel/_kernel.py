@@ -138,6 +138,26 @@ def current_secret() -> tuple:
     return _current_secret.get()
 
 
+#: The reply marks a dispatch has noted (`note_reply_secret`): a list the dispatch
+#: owns, one per attempt. None outside a dispatch that collects them.
+_reply_sink: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "_reply_sink", default=None
+)
+
+
+def note_reply_secret(marks) -> None:
+    """Note the secret paths of the REPLY this dispatch is returning: dotted paths
+    into its reply (`fields.api_key`). The kernel records the settle row, the ledger
+    and the state stream with those values as `[secret]`; the caller still gets the
+    reply whole. A handler that relays a reply from another kernel (a bridge's
+    forward) notes the marks that kernel sent with it. No-op outside a dispatch.
+    Malformed paths are dropped when the outcome is settled."""
+    sink = _reply_sink.get()
+    if sink is None or not isinstance(marks, (list, tuple)):
+        return
+    sink.extend(marks)
+
+
 def current_origin() -> str | None:
     """The id that ORIGINATED this dispatch, or None for an operator send.
 
@@ -1529,6 +1549,69 @@ class Kernel:
         if self.root is None:
             return None
         return self.root.update(agent_id, **meta)
+
+    def edit_grants(
+        self,
+        agent_id: str,
+        edit: Callable[[dict, dict], tuple[bool, bool]],
+    ) -> tuple[bool, str | None]:
+        """Edit BOTH grant maps (`can_call`, `callable_by`) as ONE step (mirror Rust
+        `Kernel::edit_grants`). `edit(can_call, callable_by)` mutates the copies it is
+        given and returns `(can_call_changed, callable_by_changed)`. The maps are read
+        here, at the write: the edit runs synchronously and nothing awaits between that
+        read and the write below, so a key another writer put there survives.
+
+        The write-time checks (`Agent._bad_grant_shape`, the bundle's `validate_meta`)
+        run ONCE over the maps that changed; a refusal writes NEITHER map. A change
+        publishes ONE `updated` event naming the changed maps.
+
+        Returns `(changed, error)`: `error` is the refusal text, or `"no such agent"`,
+        or `None`. `changed` is True only when a map was written."""
+        from kernel._agent import Agent  # local: `_agent` imports this module
+
+        agent = self.agents.get(agent_id)
+        if agent is None:
+            return False, "no such agent"
+        cc = dict(agent._meta.get("can_call") or {})
+        cb = dict(agent._meta.get("callable_by") or {})
+        cc_edited, cb_edited = edit(cc, cb)
+        if not cc_edited and not cb_edited:
+            return False, None
+        patch: dict = {}
+        if cc_edited:
+            patch["can_call"] = cc
+        if cb_edited:
+            patch["callable_by"] = cb
+        why = Agent._bad_grant_shape(patch) or Agent._refuse_meta(
+            agent.handler_module, patch, agent.record
+        )
+        if why:
+            return False, why
+        changed: list[str] = []
+        if cc_edited:
+            agent._meta["can_call"] = cc
+            changed.append("can_call")
+        if cb_edited:
+            agent._meta["callable_by"] = cb
+            changed.append("callable_by")
+        self.publish_state(
+            {"agent_id": agent_id, "kind": "updated", "changed": changed}
+        )
+        return True, None
+
+    def edit_callable_by(
+        self, agent_id: str, edit: Callable[[dict], bool]
+    ) -> tuple[bool, str | None]:
+        """`callable_by` alone, merged under the same lock-free single step as
+        `edit_grants` (`can_call` untouched). Returns `(changed, error)`."""
+        return self.edit_grants(agent_id, lambda cc, cb: (False, edit(cb)))
+
+    def edit_can_call(
+        self, agent_id: str, edit: Callable[[dict], bool]
+    ) -> tuple[bool, str | None]:
+        """`can_call` alone, the same single step as `edit_callable_by`. Returns
+        `(changed, error)`."""
+        return self.edit_grants(agent_id, lambda cc, cb: (edit(cc), False))
 
     def list(self) -> list[dict]:
         """Flat list of every agent's record."""

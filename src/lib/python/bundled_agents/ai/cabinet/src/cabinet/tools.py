@@ -19,8 +19,10 @@ Roles, on the record (`cabinet_role`):
 NOTHING IS MADE OR CHANGED BEHIND A GRANT. The manager makes and edits every record
 by a gated send to the ROOT (`create_agent`, `update_agent`, `delete_agent`), as itself:
 the operator must grant the manager those three verbs on the root, and the root must
-name the manager in its `callable_by`. Each record's grants are restated whole, because
-`update_agent` replaces a dict field (a grant map included), never merges it. The
+name the manager in its `callable_by`. A record's grants are EDITED key by key at the write
+(`_wire` -> `Kernel.edit_grants`), never restated whole from a read taken earlier, so a key
+another writer put there meanwhile survives; `update_agent` itself still replaces a dict
+field whole, and the other fields go through it. The
 manager also asks the spawning canvas for `new_canvas`, granted as the wiring of
 `open` does (its own `can_call`, the canvas's `callable_by`).
 
@@ -176,26 +178,38 @@ async def _tree(kernel, payload: dict) -> dict:
 async def _wire(
     kernel, holder: str, *, can_call=None, callable_by=None, **fields
 ) -> str | None:
-    """Edit `holder`'s grants and fields in ONE update. `can_call` / `callable_by` map
-    `key -> verbs` (None removes the key); the whole maps are restated, because
-    `update_agent` replaces them. Returns the refusal's error, or None."""
-    rec = kernel.get(holder)
-    if rec is None:
+    """Edit `holder`'s grants, then its other fields. `can_call` / `callable_by` map
+    `key -> verbs` (None removes the key). Both grant maps merge in ONE step under the
+    record's lock (`Kernel.edit_grants`): each key is set or removed in the map AS IT IS
+    at the write, and a shape refused in either map writes neither (returned here). The
+    other fields then go in one `update_agent`. Returns the refusal's error, or None."""
+    if kernel.get(holder) is None:
         return f"`{holder}` does not exist"
-    upd: dict = {"type": "update_agent", "id": holder, **fields}
-    for field, changes in (("can_call", can_call), ("callable_by", callable_by)):
-        if not changes:
-            continue
-        grant = dict(rec.get(field) or {})
-        for key, verbs in changes.items():
-            if verbs is None:
-                grant.pop(key, None)
-            else:
-                grant[key] = verbs
-        upd[field] = grant
-    if set(upd) == {"type", "id"}:
+    if can_call or callable_by:
+
+        def merge(grant: dict, changes) -> bool:
+            changed = False
+            for key, verbs in (changes or {}).items():
+                if verbs is None:
+                    if key in grant:
+                        del grant[key]
+                        changed = True
+                elif grant.get(key) != verbs:
+                    grant[key] = verbs
+                    changed = True
+            return changed
+
+        _, err = kernel.ctx.edit_grants(
+            holder,
+            lambda cc, cb: (merge(cc, can_call), merge(cb, callable_by)),
+        )
+        if err:
+            return err
+    if not fields:
         return None
-    return (await _tree(kernel, upd)).get("error")
+    return (await _tree(kernel, {"type": "update_agent", "id": holder, **fields})).get(
+        "error"
+    )
 
 
 def _lock_of(manager) -> asyncio.Lock:

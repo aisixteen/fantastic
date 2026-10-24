@@ -3,6 +3,7 @@ import type { Handler, Json } from "../../lib.ts";
 import { str } from "../../lib.ts";
 import { panelRelay } from "../panel_relay.ts";
 import { mountPanel } from "../html_agent/html_view.ts";
+import type { PanelOptions } from "../html_agent/html_view.ts";
 import { Host } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
 import { hostRecordOf, onViewChange, viewOf } from "../canvas/host_views.ts";
@@ -72,24 +73,30 @@ async function bodyOf(host: Host, agent: string): Promise<string> {
   return `<pre>${agent} declares no view body</pre>`;
 }
 
+/** A host agent's panel drawn into `ctx.mount`: its body from its record, re-drawn
+ *  when its `view` changes. The agent's own cell mounts it (`agentViewBundle`), and so
+ *  does a CHAT CARD (`ai_view`): the panel is the same, only the frame around it differs.
+ *  `agent` is the host agent shown; calls go out AS `ctx.selfId`, whose `can_call` names
+ *  them (`cellGrant`). */
+export function mountHostPanel(ctx: ViewContext, agent: string, opts: PanelOptions = {}): ViewHandle {
+  const host = new Host(ctx.kernel, ctx.selfId);
+  const panel = mountPanel(ctx, () => bodyOf(host, agent), opts);
+  // the agent's `view` changed on the host → render again (the registry says so)
+  const off = onViewChange(agent, () => panel.reload());
+  return {
+    unmount(): void {
+      off();
+      panel.unmount();
+    },
+  };
+}
+
 export const agentViewBundle: ViewBundle = {
   handles: [AGENT_VIEW],
   // the grant comes from the agent's record (`view.calls`), set when placed
   grants: () => ({}),
 
   mount(ctx: ViewContext): ViewHandle {
-    const agent = ctx.backend;
-    const host = new Host(ctx.kernel, ctx.selfId);
-    const panel = mountPanel(ctx, () => bodyOf(host, agent));
-    // the agent's `view` changed on the host → render again (the registry says so)
-    const off = onViewChange(agent, () => {
-      void ctx.kernel.emit(ctx.selfId, { type: "reload_html" } as never);
-    });
-    return {
-      unmount(): void {
-        off();
-        panel.unmount();
-      },
-    };
+    return mountHostPanel(ctx, ctx.backend);
   },
 };

@@ -350,6 +350,8 @@ def _conn(agent) -> sqlite3.Connection | dict:
         c = sqlite3.connect(path, isolation_level=None)
         c.execute("PRAGMA journal_mode = WAL")
         c.execute("PRAGMA synchronous = NORMAL")
+        # A freed page is zeroed, not left holding the deleted text.
+        c.execute("PRAGMA secure_delete = ON")
         c.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         c.executescript(SCHEMA)
     except (OSError, sqlite3.Error) as e:
@@ -683,7 +685,18 @@ async def _prune(id, payload, agent):
                 doomed.add(i)
         return {"pruned": db.delete(owner, doomed)}
 
-    return _tx(agent, run)
+    out = _tx(agent, run)
+    if out.get("pruned", 0) > 0:
+        # The deleted rows are still in the -wal file until a checkpoint moves
+        # the pages into memory.db and truncates the log: do it now, so a prune
+        # leaves no bytes behind. Best effort, like the close's checkpoint.
+        c = getattr(agent, "_sqlite_conn", None)
+        if c is not None:
+            try:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
+    return out
 
 
 async def _inject(id, payload, agent):

@@ -57,15 +57,15 @@ def test_relay_rule_maps_a_file_and_a_folder():
     assert root_rule({"path": "top.md", "kind": "added"})["type"] == "added"
 
 
-def test_a_change_is_judged_by_the_disk_as_it_is(tmp_path):
-    gone = str(tmp_path / "gone.md")
-    assert tools._kind(gone, "added") == "deleted"  # a spurious `added` after unlink
+def test_a_change_is_judged_by_the_stamp_not_the_event_name(tmp_path):
     here = tmp_path / "here.md"
     here.write_text("x")
-    assert tools._kind(str(here), "added") == "added"
-    assert tools._kind(str(here), "modified") == "modified"
-    assert tools._kind(str(here), "deleted") == "modified"  # present now: not gone
-    assert os.path.lexists(str(here))
+    last = tools._stamp(str(here))
+    assert tools._judge(last, tools._stamp(str(here))) is None  # a replay, no change
+    here.write_text("xy")
+    assert tools._judge(last, tools._stamp(str(here))) == "modified"
+    os.remove(here)
+    assert tools._judge(last, tools._stamp(str(here))) == "deleted"
 
 
 class _Parent:
