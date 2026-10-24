@@ -93,6 +93,41 @@ fn bootstrap_hydrates_persisted_children() {
 }
 
 #[test]
+fn edit_grants_publishes_one_updated_event_only_when_something_changed() {
+    let kernel = Kernel::new();
+    kernel.register(Agent::new(
+        AgentId::from("evt"),
+        None,
+        None,
+        Map::new(),
+        std::path::PathBuf::from("/nonexistent"),
+        false,
+    ));
+    let id = AgentId::from("evt");
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let e2 = std::sync::Arc::clone(&events);
+    let _tap = kernel.add_state_subscriber(std::sync::Arc::new(move |ev, _body| {
+        if ev["kind"] == "updated" {
+            e2.lock().unwrap().push(ev.clone());
+        }
+    }));
+    kernel
+        .edit_callable_by(&id, |cb| {
+            cb.insert("v".to_string(), json!(["*"]));
+            true
+        })
+        .unwrap();
+    {
+        let evs = events.lock().unwrap();
+        assert_eq!(evs.len(), 1, "{evs:?}");
+        assert_eq!(evs[0]["agent_id"], "evt");
+        assert_eq!(evs[0]["changed"], json!(["callable_by"]));
+    }
+    kernel.edit_callable_by(&id, |_| false).unwrap();
+    assert_eq!(events.lock().unwrap().len(), 1, "a no-change edit publishes nothing");
+}
+
+#[test]
 fn edit_grants_persists_both_keys_across_a_restart() {
     let tmp = TempDir::new().unwrap();
     let store_root = tmp.path().join(".fantastic");

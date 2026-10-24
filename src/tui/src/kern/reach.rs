@@ -205,6 +205,10 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
         writers.push((CANVAS_LEG.to_string(), false));
     }
     for (holder, full) in writers {
+        // a holder that is not an agent here has no record to write (the old read-then-write skipped it too)
+        if !exists(h, &holder) {
+            continue;
+        }
         h.kernel
             .edit_can_call(&fantastic_kernel::AgentId::from(holder.as_str()), |cc| {
                 let mut changed = false;
@@ -266,6 +270,9 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
     };
     // the holders' side: who may send to them
     for holder in &holders {
+        if !exists(h, holder) {
+            continue;
+        }
         let xs = pairs(holder);
         h.kernel
             .edit_callable_by(&fantastic_kernel::AgentId::from(holder.as_str()), |cb| {
@@ -554,24 +561,35 @@ mod tests {
     async fn a_grant_and_a_concurrent_callable_by_edit_on_one_agent_both_survive() {
         let h = host_with_leg("grant-race").await;
         let k = &h.kernel;
-        for round in 0..100 {
+        for round in 0..20 {
             let id = format!("helper{round}");
             put(k, &id, Some("kernel"), json!({}));
-            let view = format!("viewer{round}");
-            let (h2, k2) = (Host { kernel: std::sync::Arc::clone(k), cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() }, std::sync::Arc::clone(k));
-            let (id1, id2, v) = (id.clone(), id.clone(), view.clone());
-            let a = tokio::spawn(async move { grant(&h2, &[id1]).await });
-            let b = tokio::spawn(async move {
-                k2.edit_callable_by(&AgentId::from(id2.as_str()), |cb| {
-                    cb.insert(v, json!(["*"]));
-                    true
-                })
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            // the competing writer adds 50 distinct keys while grant() runs on another thread
+            let (k2, id2, b2) = (std::sync::Arc::clone(k), id.clone(), std::sync::Arc::clone(&barrier));
+            let writer = std::thread::spawn(move || {
+                b2.wait();
+                for n in 0..50 {
+                    k2.edit_callable_by(&AgentId::from(id2.as_str()), |cb| {
+                        cb.insert(format!("viewer{n}"), json!(["*"]));
+                        true
+                    })
+                    .unwrap();
+                }
             });
-            a.await.unwrap().unwrap();
-            b.await.unwrap().unwrap();
+            let h2 = Host { kernel: std::sync::Arc::clone(k), cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+            let id1 = id.clone();
+            let granter = tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                tokio::runtime::Handle::current().block_on(grant(&h2, &[id1]))
+            });
+            granter.await.unwrap().unwrap();
+            writer.join().unwrap();
             let cb = k.agents.get(&AgentId::from(id.as_str())).unwrap().record().meta.get("callable_by").cloned().unwrap_or(Value::Null);
             assert_eq!(cb.get(crate::env::HUMAN), Some(&json!(["*"])), "round {round}: {cb}");
-            assert_eq!(cb.get(&view), Some(&json!(["*"])), "round {round}: {cb}");
+            for n in 0..50 {
+                assert_eq!(cb.get(format!("viewer{n}")), Some(&json!(["*"])), "round {round} viewer{n}: {cb}");
+            }
         }
     }
 }
