@@ -40,6 +40,7 @@ from io_bridge._base import Action, Decision, EgressRule, IngressRule, describe
 from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import resolve_ingress, unknown_ingress_refusal
 from io_bridge.egress_rules import resolve_egress
+from kernel import note_reply_secret
 from kernel._refusal import NOT_CONNECTED, UNHANDLED, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
@@ -161,6 +162,39 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     return unknown_ingress_refusal(meta)
 
 
+def forward_payload_secret(payload: Any) -> list[str]:
+    """The secret paths of a FORWARDED call (the module-level `payload_secret` hook
+    of `ws_bridge` and `relay_connector`): a `forward` of a `set` marks each
+    `payload.fields.<name>`; a name that is empty or holds a dot marks the whole
+    `payload.fields`. The caller cannot know the far bundle before sending, so this
+    is deliberate over-redaction in the CALLER's records for every forwarded `set`:
+    the far kernel's own record is exact. A `get`'s reply marks come back on the
+    reply frame instead (`secret`). Mirrors the Rust `forward_payload_secret`."""
+    if not isinstance(payload, dict) or payload.get("type") != "forward":
+        return []
+    inner = payload.get("payload")
+    if not isinstance(inner, dict) or inner.get("type") != "set":
+        return []
+    fields = inner.get("fields")
+    if not isinstance(fields, dict):
+        return []
+    if all(isinstance(k, str) and k and "." not in k for k in fields):
+        return [f"payload.fields.{k}" for k in fields]
+    return ["payload.fields"]
+
+
+def _wire_marks(value: Any) -> list[str]:
+    """A reply frame's optional `secret`, validated: a list of non-empty dotted
+    paths (no empty segment, never `type`). Anything else is NO marks; the reply
+    is still delivered."""
+    if not isinstance(value, list):
+        return []
+    for m in value:
+        if not (isinstance(m, str) and m and "" not in m.split(".") and m != "type"):
+            return []
+    return list(value)
+
+
 async def _serve_inbound_call(
     st: "_BridgeState", transport: _BaseTransport, kernel: Any, frame: dict
 ) -> None:
@@ -179,6 +213,7 @@ async def _serve_inbound_call(
     """
     target = frame.get("target")
     payload = frame.get("payload") or {}
+    reply_marks: list[str] = []  # the reply's own secret paths, sent with it
     rec = kernel.get(kernel.id) or {}
     # AUTH GATE — the single shared choke point (`gate_inbound`, also used by the
     # web inbound legs). The leg's INGRESS rule — read off the LIVE record, per
@@ -208,9 +243,14 @@ async def _serve_inbound_call(
         fid = frame.get("id")
         if isinstance(fid, str) and fid:
             item["id"] = fid
-        reply = (await kernel.send([item]))[0]["result"]
+        out = (await kernel.send([item]))[0]
+        reply = out["result"]
+        reply_marks = list(out.get("secret") or [])
+    frame_out: dict = {"type": "reply", "id": frame.get("id"), "data": reply}
+    if reply_marks:
+        frame_out["secret"] = reply_marks
     try:
-        await transport.send({"type": "reply", "id": frame.get("id"), "data": reply})
+        await transport.send(frame_out)
     except ConnectionClosed:
         pass  # the peer went away mid-dispatch; the read loop already knows
 
@@ -256,11 +296,16 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 fid = frame.get("id")
                 fut = st.pending.pop(fid, None) if isinstance(fid, str) else None
                 if fut is not None and not fut.done():
-                    fut.set_result(
-                        frame.get("data")
-                        if ftype == "reply"
-                        else {"error": f"remote error: {frame.get('error')}"}
-                    )
+                    if ftype == "reply":
+                        # the reply's optional `secret` names dotted paths into
+                        # its data (the far bundle's reply marks)
+                        fut.set_result(
+                            (frame.get("data"), _wire_marks(frame.get("secret")))
+                        )
+                    else:
+                        fut.set_result(
+                            ({"error": f"remote error: {frame.get('error')}"}, [])
+                        )
             elif ftype == "event":
                 # The `watch_remote` RETURN half: re-emitted on the bridge's OWN inbox
                 # for local watchers ONLY when its `src` is a remote agent this leg
@@ -427,12 +472,17 @@ async def _forward(id, payload, kernel):
         return {"error": f"bridge.forward: send failed: {e}"}
 
     try:
-        return await asyncio.wait_for(fut, timeout=timeout)
+        data, marks = await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:
         st.pending.pop(corr, None)
         return {"error": f"bridge.forward: timeout after {timeout}s"}
     except ConnectionError as e:
         return {"error": f"bridge.forward: {e}"}
+    # The far reply's marks, rooted at this reply: the calling kernel records the
+    # forward as `[secret]` there (this runs inside the forward's own dispatch);
+    # the caller gets `data` whole.
+    note_reply_secret(marks)
+    return data
 
 
 async def _watch_remote(id, payload, kernel):

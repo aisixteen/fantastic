@@ -10,3 +10,5 @@ Emits: `bridge_up` · `bridge_down` · remote events for a `watch_remote` subscr
 Inbound calls (a paired transport) are served AS THIS LEG: its `can_call` and the target's `callable_by` decide.
 
 Frame ids are `<leg id>-<boot nonce>-<n>` — fresh per boot, so a restarted sender never names an execution the peer already settled.
+
+Reply frames: `{type:"reply", id, data, secret?}`. `secret` lists dotted paths into `data` (the far bundle's reply marks); a forward notes them, so the calling kernel records the forward's reply as `[secret]` while the caller gets `data` whole. A malformed `secret` is ignored and the reply still delivered. A forwarded `set` marks its own `payload.fields.<name>` in the caller's records (`payload_secret`).

@@ -92,6 +92,7 @@ from kernel._kernel import (
     _current_secret,
     _current_sender,
     _current_task,
+    _reply_sink,
     _summarize_payload,
     outcome,
     stored_outcome,
@@ -289,6 +290,9 @@ class _Dispatched:
     name: str | None = None
     # The item's `secret` marks (`kernel/_secret`), carried to every attempt.
     marks: tuple = ()
+    # The reply marks this dispatch noted (`note_reply_secret`): the list its
+    # current attempt owns. None for a joiner or a fast path (nothing ran).
+    sink: list | None = None
 
 
 class RemoteTarget:
@@ -316,7 +320,12 @@ class RemoteTarget:
         self.handler_module = None
 
     async def _dispatch_task(
-        self, task_id, payload: dict, origin: str | None = None, marks: tuple = ()
+        self,
+        task_id,
+        payload: dict,
+        origin: str | None = None,
+        marks: tuple = (),
+        sink: list | None = None,
     ):
         _current_task.set(task_id)
         calls = [
@@ -941,8 +950,9 @@ class Agent:
                     )
                 )
                 return None
+            sink: list = []
             pid, task = self._spawn_dispatch(
-                target, payload, task_id=exec_id, marks=marks
+                target, payload, task_id=exec_id, marks=marks, sink=sink
             )
             dispatched.append(
                 _Dispatched(
@@ -955,6 +965,7 @@ class Agent:
                     exec_fut=fut,
                     name=name,
                     marks=marks,
+                    sink=sink,
                 )
             )
             return None
@@ -975,10 +986,21 @@ class Agent:
         )
         if bad is not None:
             return bad
-        pid, task = self._spawn_dispatch(target, payload, task_id=pid, marks=marks)
+        sink: list = []
+        pid, task = self._spawn_dispatch(
+            target, payload, task_id=pid, marks=marks, sink=sink
+        )
         dispatched.append(
             _Dispatched(
-                index, pid, task, timeout, target, payload, exec_fut=fut, marks=marks
+                index,
+                pid,
+                task,
+                timeout,
+                target,
+                payload,
+                exec_fut=fut,
+                marks=marks,
+                sink=sink,
             )
         )
         return None
@@ -1101,7 +1123,13 @@ class Agent:
         return fut, None
 
     def _spawn_dispatch(
-        self, target: "Agent", payload: dict, *, task_id: int, marks: tuple = ()
+        self,
+        target: "Agent",
+        payload: dict,
+        *,
+        task_id: int,
+        marks: tuple = (),
+        sink: list | None = None,
     ) -> tuple[int, "asyncio.Task"]:
         """Start ONE dispatch as a registered asyncio.Task — the unit of the task
         table — under the message id its call row was opened with. Tasks never
@@ -1112,7 +1140,9 @@ class Agent:
         # target's own id — this is the same value the gate just authorized.
         origin = _current_sender.get()
         task = asyncio.create_task(
-            target._dispatch_task(task_id, payload, origin, marks),
+            target._dispatch_task(
+                task_id, payload, origin, marks, sink=[] if sink is None else sink
+            ),
             name=f"fantastic:{task_id}",
         )
         ctx.register_task(
@@ -1149,8 +1179,9 @@ class Agent:
             # forget_task has already dropped the previous attempt's row, so the
             # SAME task id is free to register again — one id, one `cancel`
             # handle, attempt after attempt.
+            d.sink = []  # a fresh attempt notes its own reply marks
             _pid, task = self._spawn_dispatch(
-                d.target, d.payload, task_id=d.pid, marks=d.marks
+                d.target, d.payload, task_id=d.pid, marks=d.marks, sink=d.sink
             )
             d.task = task
 
@@ -1273,7 +1304,14 @@ class Agent:
         handle — cancelling the id kills the current attempt AND the loop).
         `completed` never retries; `cancelled` never retries — a cancel is an
         absorbing human decision, not a transient. Joiners and re-senders only
-        ever see the FINAL outcome: the future settles once, at the end."""
+        ever see the FINAL outcome: the future settles once, at the end.
+
+        THE REPLY MARKS are settled here too (`_settle_marks`): an outcome that
+        names secret paths in its reply carries them as `secret`, so the caller
+        that forwarded the call can record the same paths. Omitted when none."""
+        marks = self._settle_marks(d, out)
+        if marks:
+            out = {**out, "secret": marks}
         if d.exec_fut is None:
             return out
         row = self.ctx.executions.get(d.pid)
@@ -1291,6 +1329,25 @@ class Agent:
             d.exec_fut.set_result(out)
             self._stamp_call(d.pid, out)
         return out
+
+    def _settle_marks(self, d: "_Dispatched", out: dict) -> list:
+        """The reply marks an outcome settles with: the target bundle's
+        `reply_secret` names plus the marks the dispatch noted
+        (`note_reply_secret`), well-formed (a str, not `type`, no empty segment),
+        each once, in order."""
+        raw = list(self._reply_marks(d.target.id, d.payload, out.get("result")))
+        raw.extend(d.sink or ())
+        marks: list = []
+        for m in raw:
+            if (
+                isinstance(m, str)
+                and m
+                and m != "type"
+                and "" not in m.split(".")
+                and m not in marks
+            ):
+                marks.append(m)
+        return marks
 
     def _stamp_call(self, pid: int | None, out: dict) -> None:
         """Settle the call: append a `settle` row carrying what the kernel KEEPS of
@@ -1332,11 +1389,7 @@ class Agent:
                 "outcome": stored_outcome(
                     out,
                     bool((exe or {}).get("named")),
-                    self._reply_marks(
-                        (exe or {}).get("target"),
-                        (exe or {}).get("payload"),
-                        out.get("result"),
-                    ),
+                    out.get("secret") or (),
                 ),
                 "attempts": attempts,
             },
@@ -2050,7 +2103,12 @@ class Agent:
     # ─── dispatch (internal) ───────────────────────────────────
 
     async def _dispatch_task(
-        self, task_id: str, payload: dict, origin: str | None = None, marks: tuple = ()
+        self,
+        task_id: str,
+        payload: dict,
+        origin: str | None = None,
+        marks: tuple = (),
+        sink: list | None = None,
     ) -> dict | None:
         """The body of a registered task: stamp `_current_task` so nested sends
         become CHILDREN of this task, then dispatch. The contextvar is set (not
@@ -2063,6 +2121,7 @@ class Agent:
         # about to become this agent's own id, which is why this is separate.
         _current_origin.set(origin)
         _current_secret.set(marks)
+        _reply_sink.set(sink)
         try:
             return await self._dispatch(payload)
         except SystemExit as e:
@@ -2095,9 +2154,11 @@ class Agent:
         origin — no caller asked; the kernel did. A raise propagates."""
         token = _current_origin.set(None)
         stoken = _current_secret.set(())
+        rtoken = _reply_sink.set(None)
         try:
             return await self._dispatch(payload)
         finally:
+            _reply_sink.reset(rtoken)
             _current_secret.reset(stoken)
             _current_origin.reset(token)
 

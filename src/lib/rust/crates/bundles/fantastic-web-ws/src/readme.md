@@ -21,7 +21,9 @@ are one caller's. Everyone admitted to one leg is one tenant.
 kernel) sends `{type:"hello", guid}`; this leg then registers that guid with the host
 kernel, which routes `send`s to `<guid>|<agent>` over this socket as
 `{type:"call", id, target, payload}` frames — answered by
-`{type:"reply"|"error", id, data}`. One guid per connection (pinned by the first
+`{type:"reply"|"error", id, data, secret?}` — `secret` (present only when the leg's
+onward reply named secret paths) lists dotted paths into `data` that the far end
+records as `[secret]`; `data` is always whole. One guid per connection (pinned by the first
 hello); a sealed leg carries no peer. **The tabs of one identity are one principal**:
 a guid already live on another connection is another tab of it,
 and this connection joins it — a host call to `<guid>|<agent>` goes to EVERY live

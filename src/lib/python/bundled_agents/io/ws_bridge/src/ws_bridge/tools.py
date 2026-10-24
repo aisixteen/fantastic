@@ -29,6 +29,7 @@ from __future__ import annotations
 from io_bridge import dispatch, make_verbs
 from io_bridge import on_delete as _engine_on_delete
 from io_bridge import EMITS  # noqa: F401  (`docs` tier detailed)
+from io_bridge import forward_payload_secret
 from io_bridge import validate_meta  # noqa: F401  (the `ingress_rule` write check)
 from ws_bridge._ws import SENTENCE, build_transport, reflect_fields
 
@@ -42,6 +43,13 @@ VERBS = make_verbs(
 
 async def handler(id: str, payload: dict, kernel) -> dict | None:
     return await dispatch(VERBS, id, payload, kernel)
+
+
+def payload_secret(payload: dict) -> list[str]:
+    """A forwarded `set`'s fields are secret in THIS kernel's records (the call row,
+    the ledger, the state stream): `payload.fields.<name>` per field, or the whole
+    `payload.fields` for a name that is empty or dotted (`io_bridge`)."""
+    return forward_payload_secret(payload)
 
 
 async def on_delete(agent):
