@@ -23,6 +23,8 @@ sys.path.insert(0, str(E2E))
 from backends import backend  # noqa: E402
 from helpers import creds, meter  # noqa: E402
 from mocks.anthropic import AnthropicMock  # noqa: E402
+import preflight  # noqa: E402
+import socket  # noqa: E402
 
 ENDPOINT = "https://api.example.test/v1/messages"
 KEY = "sk-ant-TEST-KEY-DO-NOT-LOG"
@@ -94,11 +96,67 @@ def test_preflight_names_missing_anthropic_key_and_endpoint_before_the_model(tmp
     # no key, no endpoint — all three are named, and the run is not ready.
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path),
            "BACKEND": "anthropic"}
+    # the OS essentials a Windows child needs to start its sockets (winsock reads
+    # SYSTEMROOT) and to run a console (COMSPEC, PATHEXT); nothing else, no *_KEY
+    for var in ("SYSTEMROOT", "COMSPEC", "TEMP", "TMP", "PATHEXT", "WINDIR"):
+        if var in os.environ:
+            env[var] = os.environ[var]
     out = subprocess.run([sys.executable, str(E2E / "preflight.py")], env=env,
                          capture_output=True, text=True, timeout=120)
     assert out.returncode == 1
     for needle in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENDPOINT", "FANTASTIC_AI_MODEL"):
         assert needle in out.stdout, out.stdout
+
+
+class _Boom:
+    def __init__(self, *args, **kwargs):
+        raise OSError("winsock")
+
+
+class _RefusedSocket:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def settimeout(self, _seconds):
+        pass
+
+    def connect_ex(self, _addr):
+        raise OSError("connect refused by the stack")
+
+
+def test_listening_is_false_when_the_socket_cannot_be_created(monkeypatch):
+    # Windows without SYSTEMROOT: winsock cannot start, so socket.socket() raises
+    monkeypatch.setattr(preflight.socket, "socket", _Boom)
+    assert preflight._listening("127.0.0.1", 11434) is False
+
+
+def test_listening_is_false_when_connect_raises(monkeypatch):
+    monkeypatch.setattr(preflight.socket, "socket", lambda *a, **k: _RefusedSocket())
+    assert preflight._listening("127.0.0.1", 11434) is False
+
+
+def test_listening_true_for_an_open_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        assert preflight._listening("127.0.0.1", port) is True
+
+
+def test_preflight_still_names_missing_inputs_when_sockets_fail(monkeypatch, capsys):
+    # in process, deterministic on any OS: no sockets, no `which`, no model, no key
+    monkeypatch.setattr(preflight.socket, "socket", _Boom)
+    monkeypatch.setattr(preflight, "_which", lambda binary: None)
+    for var in ("FANTASTIC_AI_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_ENDPOINT", "LANES"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("BACKEND", "anthropic")
+    assert preflight.main() == 1
+    out = capsys.readouterr().out
+    for needle in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENDPOINT", "FANTASTIC_AI_MODEL"):
+        assert needle in out, out
 
 
 def test_meter_parses_anthropic_usage(plug_env):

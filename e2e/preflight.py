@@ -30,9 +30,14 @@ OK, BAD, WARN = "  ok ", "  NO ", " warn"
 
 
 def _listening(host: str, port: int) -> bool:
-    with socket.socket() as s:
-        s.settimeout(0.4)
-        return s.connect_ex((host, port)) == 0
+    # a socket that cannot be made (Windows without SYSTEMROOT: winsock will not
+    # start) is "not listening", not a crash: the check names what is missing
+    try:
+        with socket.socket() as s:
+            s.settimeout(0.4)
+            return s.connect_ex((host, port)) == 0
+    except OSError:
+        return False
 
 
 def _which(binary: str) -> str | None:
