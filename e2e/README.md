@@ -10,7 +10,7 @@ self-description, actually use it?*
 ```
 e2e/
   run.py                the launcher: picks a backend, runs N tests in parallel
-  backends/             THE PLUG — which model, reached how (ollama|responses|vllm)
+  backends/             THE PLUG — which model, reached how (ollama|responses|vllm|anthropic)
   helpers/              the shared machinery: bootstrap · proxy reader · AI connector · verdict
   preflight.py          free, instant: would a run fail for a reason that is not the substrate?
   tests/<group>/<id>/   one folder per test
@@ -94,10 +94,54 @@ shared with production.
 The OpenAI Responses wire is `BACKEND=responses` with `RESPONSES_ENDPOINT` (the full
 `…/v1/responses` URL) and `OPENAI_API_KEY`; a local ollama is `BACKEND=ollama`.
 
+### Anthropic (the Messages API)
+
+`BACKEND=anthropic` runs the turns tier against the Anthropic Messages API, with no
+GPU. Nothing is guessed: name the full `…/v1/messages` URL, the model, and the key the
+store reads:
+
+```sh
+cd src/lib/python && \
+BACKEND=anthropic \
+ANTHROPIC_ENDPOINT=https://api.anthropic.com/v1/messages \
+ANTHROPIC_API_KEY=… \
+FANTASTIC_AI_MODEL=<the model id> \
+ANTHROPIC_CACHING=provider_cache \
+ANTHROPIC_PRICE_INPUT_PER_MTOK=<USD per MTok in> \
+ANTHROPIC_PRICE_OUTPUT_PER_MTOK=<USD per MTok out> \
+E2E_METER=1 \
+uv run python ../../../e2e/run.py --group agentic --lanes 1
+```
+
+- `ANTHROPIC_CACHING` is `none`, `cleanup` or `provider_cache` (default
+  `provider_cache`, so a long run reuses its prompt prefix).
+- The two prices are optional, but without them the report has no cost column. Add
+  `ANTHROPIC_PRICE_CACHE_READ_PER_MTOK`, `ANTHROPIC_PRICE_CACHE_WRITE_PER_MTOK` and,
+  for a model with a long-context tier, `ANTHROPIC_LONG_CONTEXT_THRESHOLD_TOKENS` with
+  `ANTHROPIC_PRICE_INPUT_LONG_PER_MTOK` / `ANTHROPIC_PRICE_OUTPUT_LONG_PER_MTOK`.
+- `MAX_TOKENS` overrides the output cap (default 32000 in `backends/__init__.py`).
+- `E2E_METER=1` writes `meter.jsonl` and `turns/` beside the run's logs; the key is
+  forwarded as a header and never written there. `helpers/meter_report.py` prints the
+  per-test tokens and dollars.
+- The key is read by the `creds` store under the ref `anthropic`, bound to the host of
+  `ANTHROPIC_ENDPOINT`; the record names `credentials: {store: creds, ref: anthropic}`
+  and never the value.
+
+### Measured cost of one full run
+
+> **PLACEHOLDER — not measured yet.** Fill this in from one paid smoke run on the
+> maintainer's key: run one `agentic/` test with `BACKEND=anthropic` and `E2E_METER=1`,
+> then read the `usd` column of `helpers/meter_report.py`, and record the model, the
+> test, the tokens and the dollars here.
+
+| model | test | requests | prompt tokens | completion tokens | USD |
+|---|---|---|---|---|---|
+| _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+
 **Keys never reach a backend from the environment.** Every e2e kernel carries a
 `creds` credential_store with the `env` backend (`helpers/creds.py`): the key
 variable you export is read BY THE STORE, one ref per keyed plug (`responses`,
-`vllm`) bound to that plug's endpoint host, and every keyed AI record names
+`vllm`, `anthropic`) bound to that plug's endpoint host, and every keyed AI record names
 `credentials: {store: creds, ref: <plug>}`. The root holds a heritable `get` grant
 on the store, so an agent a MODEL creates reads its key the same way.
 

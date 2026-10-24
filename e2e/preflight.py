@@ -30,9 +30,14 @@ OK, BAD, WARN = "  ok ", "  NO ", " warn"
 
 
 def _listening(host: str, port: int) -> bool:
-    with socket.socket() as s:
-        s.settimeout(0.4)
-        return s.connect_ex((host, port)) == 0
+    # a socket that cannot be made (Windows without SYSTEMROOT: winsock will not
+    # start) is "not listening", not a crash: the check names what is missing
+    try:
+        with socket.socket() as s:
+            s.settimeout(0.4)
+            return s.connect_ex((host, port)) == 0
+    except OSError:
+        return False
 
 
 def _which(binary: str) -> str | None:
@@ -46,6 +51,9 @@ def _which(binary: str) -> str | None:
 
 
 def main() -> int:
+    # a Windows console is cp1252, which has no box-drawing characters
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print("live-probe preflight — nothing is sent to a model\n")
     blockers: list[str] = []
     notes: list[str] = []
@@ -53,7 +61,11 @@ def main() -> int:
     # ── which backend is being asked for ────────────────────────
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
-    from backends import REGISTRY, backend as resolve_backend
+    from backends import (
+        REGISTRY,
+        anthropic_endpoint_problem,
+        backend as resolve_backend,
+    )
     from helpers.creds import KEYED
 
     backend = os.environ.get("BACKEND")
@@ -67,9 +79,24 @@ def main() -> int:
     else:
         print(f"{OK} BACKEND={backend}")
         # THE PLUG names what it needs (its endpoint, its required fields, its
-        # key) — asked here, never restated, so the two cannot drift.
-        if os.environ.get("FANTASTIC_AI_MODEL"):
-            blockers += resolve_backend(backend).blockers()
+        # key) — asked here, never restated, so the two cannot drift. A plug that
+        # cannot be built (no model, a bad caching mode) names that instead.
+        try:
+            plug = resolve_backend(backend)
+        except SystemExit as why:
+            plug = None
+            if "FANTASTIC_AI_MODEL is unset" not in str(why):
+                blockers.append(str(why))
+        if plug is not None:
+            blockers += plug.blockers()
+        elif backend == "anthropic":
+            # no model yet: the key and the endpoint are still named, not hidden behind it
+            for var in KEYED["anthropic"]:
+                if not os.environ.get(var):
+                    blockers.append(f"{var} is unset — the plug needs it")
+        if backend == "anthropic" and os.environ.get("ANTHROPIC_ENDPOINT"):
+            if problem := anthropic_endpoint_problem(os.environ["ANTHROPIC_ENDPOINT"]):
+                blockers.append(problem)
 
     # ── CONCURRENCY: the GPU is shared ──────────────────────────
     # The vLLM GPU holds a fixed number of sequences and production
@@ -101,10 +128,12 @@ def main() -> int:
         v = os.environ.get(var)
         print(f"{OK if v else WARN} {var:<26} {v or '(unset — probe default applies)'}")
     if backend and not os.environ.get("FANTASTIC_AI_MODEL"):
-        blockers.append(
+        msg = (
             "FANTASTIC_AI_MODEL is unset — the substrate refuses to guess a model, "
             "and so does this"
         )
+        if msg not in blockers:
+            blockers.append(msg)
 
     # ── the probes themselves ───────────────────────────────────
     probes = sorted(HERE.glob("live_*.py"))

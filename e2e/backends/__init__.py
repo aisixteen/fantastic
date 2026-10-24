@@ -212,6 +212,70 @@ def _vllm() -> Backend:
     )
 
 
+#: The Anthropic output cap when `MAX_TOKENS` is unset. Hosted Claude models accept
+#: far more output than this, so the cap is a per-run budget, not a model limit;
+#: the operator names the real one with `MAX_TOKENS` for a model that needs it.
+ANTHROPIC_OUTPUT_CAP = 32_000
+
+#: The caching modes the anthropic backend takes (`cleanup` clears the cache
+#: between turns, `provider_cache` reuses the prompt prefix the provider caches).
+ANTHROPIC_CACHING = ("none", "cleanup", "provider_cache")
+
+
+def anthropic_endpoint_problem(endpoint: str) -> str | None:
+    """Why an Anthropic endpoint is wrong, or None when it is the Messages URL.
+    The backend posts to the endpoint as given, so it must be the full
+    `…/v1/messages` URL over http(s)."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(endpoint)
+    except ValueError as why:
+        return f"ANTHROPIC_ENDPOINT does not parse ({why})"
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return f"ANTHROPIC_ENDPOINT must be an http(s) URL, got {endpoint!r}"
+    if not parts.path.rstrip("/").endswith("/v1/messages"):
+        return (
+            f"ANTHROPIC_ENDPOINT must be the full …/v1/messages URL, got {endpoint!r}"
+        )
+    return None
+
+
+def _anthropic() -> Backend:
+    # The Anthropic Messages wire (`…/v1/messages`). The URL is the operator's to
+    # name; the key is read by the `creds` store (`ANTHROPIC_API_KEY`) at use time.
+    extra: dict[str, Any] = {
+        "max_tokens": int(os.environ.get("MAX_TOKENS") or ANTHROPIC_OUTPUT_CAP),
+        # Prompt caching: reuse the prefix of a long run unless told otherwise.
+        "caching": os.environ.get("ANTHROPIC_CACHING") or "provider_cache",
+    }
+    if extra["caching"] not in ANTHROPIC_CACHING:
+        raise SystemExit(
+            f"ANTHROPIC_CACHING={extra['caching']!r} is not a caching mode; "
+            f"one of {' | '.join(ANTHROPIC_CACHING)}"
+        )
+    if ep := os.environ.get("ANTHROPIC_ENDPOINT"):
+        extra["endpoint"] = ep
+    # Prices are the operator's to name, per model: the backend has no default.
+    for var, field_ in (
+        ("ANTHROPIC_PRICE_INPUT_PER_MTOK", "price_input_per_mtok"),
+        ("ANTHROPIC_PRICE_OUTPUT_PER_MTOK", "price_output_per_mtok"),
+    ):
+        if (v := os.environ.get(var)) is not None and v != "":
+            extra[field_] = float(v)
+    return Backend(
+        name="anthropic",
+        handler_module="anthropic_backend.tools",
+        model=_model_or_die("anthropic"),
+        extra=extra,
+        key_ref="anthropic",
+        requires=(
+            ("ANTHROPIC_ENDPOINT", "the full …/v1/messages URL; no host is guessed"),
+            (KEYED["anthropic"][0], "the `creds` store reads the key from it"),
+        ),
+    )
+
+
 class _FoundationModels(Backend):
     """Apple's on-device model (rust + swift only — python has no FM backend). Its
     record names no model, endpoint or key: the backend refuses them."""
@@ -246,6 +310,7 @@ REGISTRY = {
     "ollama": _ollama,
     "responses": _responses,
     "vllm": _vllm,
+    "anthropic": _anthropic,
     "foundation_models": _foundation_models,
 }
 
