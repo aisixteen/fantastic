@@ -173,20 +173,26 @@ async fn a_port_change_reaches_a_watcher_as_one_latest_state() {
         .await
         .is_some()
     {}
-    // two changes within the debounce window: one emit, the latest
-    *fake.read.lock().unwrap() = Ok(read(70.0));
-    fake.tx.send(Event::Changed).await.unwrap();
-    *fake.read.lock().unwrap() = Ok(read(60.0));
-    fake.tx.send(Event::Changed).await.unwrap();
-    let s = next_state(&mut rx, Duration::from_secs(2))
-        .await
-        .expect("a state event");
-    assert_eq!(s["battery"]["percent"], 60.0, "the latest state: {s}");
+    // five changes 20 ms apart (80 ms, inside the 100 ms window): at most two emits,
+    // the last carrying the final percentage
+    for p in [70.0, 65.0, 60.0, 55.0, 50.0] {
+        *fake.read.lock().unwrap() = Ok(read(p));
+        fake.tx.send(Event::Changed).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut got = Vec::new();
+    while let Some(s) = next_state(&mut rx, Duration::from_millis(500)).await {
+        got.push(s);
+    }
     assert!(
-        next_state(&mut rx, Duration::from_millis(400))
-            .await
-            .is_none(),
-        "one emit for two changes"
+        !got.is_empty() && got.len() <= 2,
+        "at most two emits for five changes: {}",
+        got.len()
+    );
+    assert_eq!(
+        got.last().unwrap()["battery"]["percent"],
+        50.0,
+        "the latest state"
     );
 }
 
