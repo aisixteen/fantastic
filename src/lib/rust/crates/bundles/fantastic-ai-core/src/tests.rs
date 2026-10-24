@@ -55,6 +55,13 @@ pub(crate) struct MockScript {
     /// Answers a request before the queue does when it returns `Some` — python's
     /// mock `responder` (a fold's summary side call, answered in its own shape).
     responder: std::sync::Mutex<Option<Responder>>,
+    /// Fired (one permit) each time a request is served, so [`until_passes`]
+    /// wakes on the event instead of polling a clock.
+    served: tokio::sync::Notify,
+    /// When set, the NEXT request waits on this before it answers, then the gate
+    /// is spent. A test holds a peer's answer until the ordering it needs has
+    /// happened — no sleep decides the order.
+    gate: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 /// A request's messages → the completion for it, or `None` to serve the queue.
@@ -102,6 +109,11 @@ impl Provider for MockProvider {
         _max_tokens: Option<i64>,
     ) -> Result<ProviderStream, ProviderError> {
         self.script.requests.lock().unwrap().push(messages.to_vec());
+        self.script.served.notify_one();
+        let gate = self.script.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         if !self.script.delay.is_zero() {
             tokio::time::sleep(self.script.delay).await;
         }
@@ -182,6 +194,8 @@ fn script(agent: &AgentId, passes: Vec<Vec<ScriptEvent>>, delay: Duration) -> Ar
         requests: std::sync::Mutex::new(Vec::new()),
         delay,
         responder: std::sync::Mutex::new(None),
+        served: tokio::sync::Notify::new(),
+        gate: std::sync::Mutex::new(None),
     });
     scripts().insert(agent.as_str().to_string(), Arc::clone(&s));
     s
@@ -197,6 +211,8 @@ fn script_for(agent: &AgentId) -> Arc<MockScript> {
             requests: std::sync::Mutex::new(Vec::new()),
             delay: Duration::ZERO,
             responder: std::sync::Mutex::new(None),
+            served: tokio::sync::Notify::new(),
+            gate: std::sync::Mutex::new(None),
         })
     }))
 }
@@ -205,13 +221,20 @@ fn script_for(agent: &AgentId) -> Arc<MockScript> {
 /// asynchronous, so a test polls; failing FAST is the point, since a stalled
 /// chain would otherwise wait out the 180s send ceiling.
 async fn until_passes(script: &Arc<MockScript>, n: usize) -> bool {
-    for _ in 0..250 {
-        if script.passes_served() >= n {
-            return true;
+    // Each served request stores one permit on `served`, so a request that lands
+    // between the check and the wait is not lost. The timeout is only the failure
+    // bound (a stalled chain), never the ordering.
+    let served = async {
+        loop {
+            if script.passes_served() >= n {
+                return true;
+            }
+            script.served.notified().await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    false
+    };
+    tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .unwrap_or(false)
 }
 
 /// A `<call>` exactly as [`crate::assembly::SEND_TO_HOWTO`] teaches it, BUILT BY
@@ -3799,7 +3822,10 @@ async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
     until_held(&backend, 1).await;
     let _ = first.await.expect("first send");
     // The held message is READ by the chain's next pass, which says so in its request.
-    assert!(until_passes(&s, 2).await, "the held message never got its pass");
+    assert!(
+        until_passes(&s, 2).await,
+        "the held message never got its pass"
+    );
     let reading = s.request(1);
     assert!(
         reading.contains("arrived while you were working") && reading.contains("two"),
@@ -3969,7 +3995,11 @@ async fn the_chain_ends_and_the_held_are_released(tag: &str, end: Option<Value>)
     assert!(out["error"].is_string(), "{out}");
     assert_eq!(out["held"], json!(true), "{out}");
     assert!(
-        !crate::state::state_for(&backend).chain.lock().unwrap().alive,
+        !crate::state::state_for(&backend)
+            .chain
+            .lock()
+            .unwrap()
+            .alive,
         "the chain is still alive"
     );
 }
@@ -4073,7 +4103,11 @@ async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
 async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "tokenwhen").await;
-    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
     let state = crate::state::state_for(&backend);
     {
         let mut c = state.chain.lock().unwrap();
@@ -4093,10 +4127,17 @@ async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
         if held || s.passes_served() > 0 || has_late_row(&kernel, &backend).await {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "the old reply went nowhere");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the old reply went nowhere"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(s.passes_served(), 0, "the old reply ran as a turn of the new chain");
+    assert_eq!(
+        s.passes_served(),
+        0,
+        "the old reply ran as a turn of the new chain"
+    );
 }
 
 /// ONE CHAIN PER AGENT (#227, bug 5): `stop` rotates the token, so a routed reply
@@ -4151,7 +4192,11 @@ async fn a_reply_in_flight_across_a_stop_runs_nothing() {
 async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
-    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
     let state = crate::state::state_for(&backend);
     {
         // An operator message started a NEW chain after the await.
@@ -4166,17 +4211,14 @@ async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     // The routed reply of an `await`ed call: the replier is the origin, so the
     // delivery carries NO chain token. It goes through the kernel, so the
     // handler runs as the TARGET (its store writes are its own).
-    tokio::spawn(fantastic_kernel::test_support::as_agent(
-        peer,
-        async move {
-            let _ = k
+    tokio::spawn(fantastic_kernel::test_support::as_agent(peer, async move {
+        let _ = k
                 .send(vec![Item::new(
                     target,
                     json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
                 )])
                 .await;
-        },
-    ));
+    }));
     // The reply is read by a pass (or held for the live chain's next one) —
     // either way it is acted on, never recorded as `late`.
     until_true("the await's reply to be acted on", || {
@@ -5416,10 +5458,30 @@ fn inquiry_turn_text_uses_python_str_and_json_dumps() {
 /// primary asks its peer; the inquiry is ACCEPTED at once, the peer answers in a
 /// LATER turn of its own chain, and the answer reaches the primary as a message
 /// under the inquiry's pid. `steps` are the peer's passes after the question.
+/// The normal order: the peer's answer is held until the asker's second pass has
+/// been requested, which is after its route registered the inquiry as owed.
 async fn inquiry_round(
     tag: &str,
     peer_passes: Vec<String>,
 ) -> (TempDir, Arc<MockScript>, Arc<MockScript>) {
+    let (tmp, a, r, _) = inquiry_round_with(tag, peer_passes, true).await;
+    (tmp, a, r)
+}
+
+/// The race: the peer answers as soon as it is asked, with no gate, so its answer
+/// can land before the asker's route has registered the owed pid.
+async fn inquiry_round_racing(
+    tag: &str,
+    peer_passes: Vec<String>,
+) -> (TempDir, Arc<MockScript>, Arc<MockScript>, AgentId) {
+    inquiry_round_with(tag, peer_passes, false).await
+}
+
+async fn inquiry_round_with(
+    tag: &str,
+    peer_passes: Vec<String>,
+    gated: bool,
+) -> (TempDir, Arc<MockScript>, Arc<MockScript>, AgentId) {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, tag).await;
     let peer = add_peer(&kernel, &tmp, &backend).await;
@@ -5440,8 +5502,22 @@ async fn inquiry_round(
     let r = script(
         &peer,
         peer_passes.into_iter().map(pass).collect(),
-        Duration::from_millis(150),
+        Duration::ZERO,
     );
+    let release = gated.then(|| {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *r.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        gate
+    });
+    if let Some(gate) = release {
+        // The asker's second pass is requested only after its route has
+        // registered the owed pid, so releasing the gate here fixes the order.
+        let asker = Arc::clone(&a);
+        tokio::spawn(async move {
+            until_passes(&asker, 2).await;
+            gate.notify_one();
+        });
+    }
     let _ = kernel
         .send(vec![Item::new(
             backend.clone(),
@@ -5454,11 +5530,80 @@ async fn inquiry_round(
         until_passes(&a, 3).await,
         "the answer never reached the asker"
     );
-    (tmp, a, r)
+    (tmp, a, r, backend)
 }
 
 fn answer_call(text: &str) -> String {
     format!("<call name=\"inquiry_answer\"><answer>{text}</answer></call>")
+}
+
+/// An answer that beats the owed registration is settled BEFORE `owe` runs; the
+/// pid must not be left owed afterwards (the stale count that made `await` lie).
+/// The pids `me` is owed right now, copied out so no test panics holding the
+/// process-wide lock (a poisoned `awaiting()` would fail unrelated tests).
+fn owed_under(me: &str) -> Vec<String> {
+    let mut pids: Vec<String> = crate::route::awaiting()
+        .lock()
+        .unwrap()
+        .get(me)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    pids.sort();
+    pids
+}
+
+#[test]
+fn an_answer_that_beats_the_owed_registration_leaves_nothing_owed() {
+    let me = "owe_beat_asker";
+    crate::route::settle_owed(me, "[reply to 7 · peer inquiry]");
+    crate::route::owe(me, "7");
+    let owed = owed_under(me);
+    assert!(owed.is_empty(), "the early answer left {owed:?} owed");
+}
+
+/// The normal order: owed first, then the answer clears it.
+#[test]
+fn an_answer_after_registration_still_clears_the_owed_pid() {
+    let me = "owe_after_asker";
+    crate::route::owe(me, "7");
+    crate::route::settle_owed(me, "[reply to 7 · peer inquiry]");
+    let owed = owed_under(me);
+    assert!(owed.is_empty(), "the answered pid is still owed: {owed:?}");
+}
+
+/// Only inquiry tags count as early answers: a reply to a plain send settles
+/// nothing, so a later owed registration for that pid is kept.
+#[test]
+fn an_early_settle_for_a_non_inquiry_reply_is_not_recorded() {
+    let me = "owe_send_asker";
+    crate::route::settle_owed(me, "[reply to 9 · peer send]");
+    crate::route::owe(me, "9");
+    let owed = owed_under(me);
+    assert_eq!(
+        owed,
+        vec!["9".to_string()],
+        "a send reply was recorded early"
+    );
+}
+
+/// The race, end to end: the answer may land before the asker registers the owed
+/// pid. Either way the asker wakes once, with the answer, and owes nothing after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_early_answer_still_wakes_the_asker_exactly_once() {
+    let (_tmp, a, _r, asker) =
+        inquiry_round_racing("inq_early", vec![answer_call("ship it")]).await;
+    let third = a.request(2);
+    assert_eq!(
+        third.matches("<answer>ship it</answer>").count(),
+        1,
+        "{third}"
+    );
+    assert!(!third.contains("nothing to wait for"), "{third}");
+    let owed = owed_under(asker.as_str());
+    assert!(
+        owed.is_empty(),
+        "the asker is still owed an answer it already has: {owed:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
