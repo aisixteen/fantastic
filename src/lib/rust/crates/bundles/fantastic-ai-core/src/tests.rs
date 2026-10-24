@@ -3799,7 +3799,10 @@ async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
     until_held(&backend, 1).await;
     let _ = first.await.expect("first send");
     // The held message is READ by the chain's next pass, which says so in its request.
-    assert!(until_passes(&s, 2).await, "the held message never got its pass");
+    assert!(
+        until_passes(&s, 2).await,
+        "the held message never got its pass"
+    );
     let reading = s.request(1);
     assert!(
         reading.contains("arrived while you were working") && reading.contains("two"),
@@ -3969,7 +3972,11 @@ async fn the_chain_ends_and_the_held_are_released(tag: &str, end: Option<Value>)
     assert!(out["error"].is_string(), "{out}");
     assert_eq!(out["held"], json!(true), "{out}");
     assert!(
-        !crate::state::state_for(&backend).chain.lock().unwrap().alive,
+        !crate::state::state_for(&backend)
+            .chain
+            .lock()
+            .unwrap()
+            .alive,
         "the chain is still alive"
     );
 }
@@ -4073,7 +4080,11 @@ async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
 async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "tokenwhen").await;
-    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
     let state = crate::state::state_for(&backend);
     {
         let mut c = state.chain.lock().unwrap();
@@ -4093,10 +4104,17 @@ async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
         if held || s.passes_served() > 0 || has_late_row(&kernel, &backend).await {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "the old reply went nowhere");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the old reply went nowhere"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(s.passes_served(), 0, "the old reply ran as a turn of the new chain");
+    assert_eq!(
+        s.passes_served(),
+        0,
+        "the old reply ran as a turn of the new chain"
+    );
 }
 
 /// ONE CHAIN PER AGENT (#227, bug 5): `stop` rotates the token, so a routed reply
@@ -4151,7 +4169,11 @@ async fn a_reply_in_flight_across_a_stop_runs_nothing() {
 async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
-    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
+    let s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
     let state = crate::state::state_for(&backend);
     {
         // An operator message started a NEW chain after the await.
@@ -4166,17 +4188,14 @@ async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     // The routed reply of an `await`ed call: the replier is the origin, so the
     // delivery carries NO chain token. It goes through the kernel, so the
     // handler runs as the TARGET (its store writes are its own).
-    tokio::spawn(fantastic_kernel::test_support::as_agent(
-        peer,
-        async move {
-            let _ = k
+    tokio::spawn(fantastic_kernel::test_support::as_agent(peer, async move {
+        let _ = k
                 .send(vec![Item::new(
                     target,
                     json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
                 )])
                 .await;
-        },
-    ));
+    }));
     // The reply is read by a pass (or held for the live chain's next one) —
     // either way it is acted on, never recorded as `late`.
     until_true("the await's reply to be acted on", || {
@@ -7447,4 +7466,164 @@ async fn two_thinking_only_turns_escalate_the_nudge() {
         "{nudge}"
     );
     assert!(nudge.contains("were only thinking"), "{nudge}");
+}
+
+const DRIVER_TASK: &str =
+    "You are the DRIVER. ROLE-MARKER-218: when told 'start ais', start the AI workers.";
+
+/// Plant the driver's conversation. Returns the TASK row's id.
+async fn driver_store(
+    kernel: &Arc<Kernel>,
+    backend: &AgentId,
+    clear_first: bool,
+    task_text: &str,
+) -> i64 {
+    if clear_first {
+        let old = put_row(
+            kernel,
+            backend,
+            json!({"role":"user","content":"an old job"}),
+        )
+        .await;
+        put_row(
+            kernel,
+            backend,
+            json!({"role":"assistant","parent":old,"content":"done with the old job"}),
+        )
+        .await;
+        fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::retrieval::context_clear(backend, &json!({"why":"new job"}), kernel, 32768),
+        )
+        .await
+        .expect("clear");
+    } else {
+        let hello = put_row(kernel, backend, json!({"role":"user","content":"hello"})).await;
+        put_row(
+            kernel,
+            backend,
+            json!({"role":"assistant","parent":hello,"content":"hi"}),
+        )
+        .await;
+    }
+    let task = put_row(kernel, backend, json!({"role":"user","content": task_text})).await;
+    let ack = put_row(
+        kernel,
+        backend,
+        json!({"role":"assistant","parent":task,"content":"Understood."}),
+    )
+    .await;
+    let mut prev = ack;
+    for i in 0..60 {
+        let content = format!(
+            "Polling job {i}. {} <call name=\"send\"><target_id>exec</target_id><title>poll {i}</title><type>status</type><job_id>1</job_id></call>",
+            "still waiting on the workers. ".repeat(120)
+        );
+        let a = put_row(
+            kernel,
+            backend,
+            json!({"role":"assistant","parent":prev,"content":content}),
+        )
+        .await;
+        let pid = kernel.mint_id();
+        prev = put_row(
+            kernel,
+            backend,
+            json!({"role":"user","parent":a,"content": format!("[reply to {pid} · exec status · \"poll {i}\"]\nrunning")}),
+        )
+        .await;
+        if i % 10 == 0 {
+            put_row(kernel, backend, json!({"role":"user","content": format!("[from worker_1 · msg {i}]\nstill building")})).await;
+        }
+    }
+    task
+}
+
+#[test]
+fn standing_pins_the_task_the_live_root_and_the_newest_fold() {
+    let view = vec![
+        json!({"role":"user","id":1,"kind":"clear","content":"[cleared 1 · 3 rows]"}),
+        json!({"role":"user","id":2,"content":"TASK"}),
+        json!({"role":"assistant","id":3,"parent":2,"content":"ok"}),
+        json!({"role":"user","id":4,"parent":3,"content":"[reply to 9 · exec status]\nrunning"}),
+        json!({"role":"user","id":5,"content":"[from w1]\nprogress"}),
+        json!({"role":"user","id":6,"kind":"fold","refs":[3,4],"content":"[fold 6 · 2 refs] \"x\""}),
+        json!({"role":"user","id":7,"content":"a later note"}),
+        json!({"role":"assistant","id":8,"parent":7,"content":"ok"}),
+    ];
+    assert_eq!(crate::retrieval::standing(&view), vec![1, 6, 5, 4]);
+    let short = vec![
+        json!({"role":"user","id":1,"content":"TASK"}),
+        json!({"role":"assistant","id":2,"parent":1,"content":"ok"}),
+    ];
+    assert!(crate::retrieval::standing(&short).is_empty());
+}
+
+/// The restart, then the first turn after it: the model-view request of that turn.
+async fn restarted_turn_sees(clear_first: bool, task_text: &str) -> String {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, if clear_first { "r218c" } else { "r218" }).await;
+    driver_store(&kernel, &backend, clear_first, task_text).await;
+    let sc = script(
+        &backend,
+        vec![
+            pass("{}"),
+            pass("noted <call name=\"done\"></call>"),
+            pass("<call name=\"done\"></call>"),
+            pass("<call name=\"done\"></call>"),
+        ],
+        Duration::ZERO,
+    );
+    // The restart: head cache dropped, new incarnation, recall due.
+    let _ = kernel
+        .send(vec![Item::new(backend.clone(), json!({"type": "boot"}))])
+        .await
+        .remove(0)
+        .result;
+    let _ = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "start ais", "client_id": "c218"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&sc, 2).await, "the turn did not run");
+    let reqs = sc.requests.lock().unwrap().clone();
+    reqs.iter()
+        .find(|m| {
+            m.first()
+                .and_then(|x| x.get("role"))
+                .and_then(Value::as_str)
+                == Some("system")
+        })
+        .map(|m| serde_json::to_string(m).unwrap())
+        .unwrap_or_else(|| panic!("no turn request among {} passes", reqs.len()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restarted_agent_still_sees_the_turn_that_set_its_task() {
+    let t = restarted_turn_sees(false, DRIVER_TASK).await;
+    assert!(t.contains("ROLE-MARKER-218"), "{}", &t[..t.len().min(3000)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_after_a_clear_keeps_the_task_given_after_it() {
+    let t = restarted_turn_sees(true, DRIVER_TASK).await;
+    assert!(
+        t.contains("ROLE-MARKER-218"),
+        "{}",
+        t.chars().take(3000).collect::<String>()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinning_stays_within_half_the_target_and_newest_rows_still_fill() {
+    // A task root far bigger than any pin cap is NOT pinned (the cap holds), so it
+    // cannot starve the newest-first fill: the newest polling row still reaches the
+    // first turn after the restart, and the giant root does not.
+    let giant = format!("GIANT-218 {}", "y".repeat(1_000_000));
+    let t = restarted_turn_sees(false, &giant).await;
+    assert!(!t.contains("GIANT-218"), "an oversized root was pinned");
+    assert!(t.contains("Polling job 59"), "the newest rows did not fill");
 }

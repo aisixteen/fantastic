@@ -734,6 +734,60 @@ pub async fn context_forget(
     Ok(json!({"pruned": pruned, "kept_folds": left.len(), "unanchored": lost}))
 }
 
+/// The share of the recall's target that the standing rows may take before the
+/// newest-first fill (#218).
+const PIN_SHARE: f64 = 0.5;
+
+/// A task root: a user turn with no parent, of plain kind (none, `""` or `"user"`),
+/// that is not a reply. A person or a peer sent it, and it sets or changes the task.
+fn is_task_root(r: &Value) -> bool {
+    r.get("role").and_then(Value::as_str) == Some("user")
+        // python `not r.get("parent")`: a 0 parent is falsy too.
+        && !r.get("parent").is_some_and(py_truthy)
+        // python `r.get("kind") in (None, "", "user")` — EXACTLY those three.
+        && matches!(
+            r.get("kind"),
+            None | Some(Value::Null) | Some(Value::String(_))
+        )
+        && r.get("kind")
+            .and_then(Value::as_str)
+            .is_none_or(|k| k.is_empty() || k == "user")
+        && parse_reply_tag(row_content(r)).is_none()
+}
+
+fn push_new(out: &mut Vec<usize>, i: usize) {
+    if i != 0 && !out.contains(&i) {
+        out.push(i);
+    }
+}
+
+/// The rows of a rebuilt view kept before anything else (#218), in priority order,
+/// unique, never `0` (the goal turn is always kept): the FIRST task root (the turn
+/// that set this thread's task), the LAST task root (the live one), the newest fold,
+/// then every other task root, newest first.
+pub(crate) fn standing(view: &[Value]) -> Vec<usize> {
+    let roots: Vec<usize> = (1..view.len())
+        .filter(|&i| is_task_root(&view[i]))
+        .collect();
+    let mut out = Vec::new();
+    if let Some(&first) = roots.first() {
+        push_new(&mut out, first);
+    }
+    if let Some(&last) = roots.last() {
+        push_new(&mut out, last);
+    }
+    if let Some(i) = (1..view.len())
+        .rev()
+        .find(|&i| crate::folds::is_fold(&view[i]))
+    {
+        push_new(&mut out, i);
+    }
+    for &i in roots.iter().rev() {
+        push_new(&mut out, i);
+    }
+    out
+}
+
 /// `context_recall`: rebuild this agent's VIEW from its store — with
 /// `context_strategy` fold, a head longer than the budget is FOLDED first (oldest
 /// spans into fold rows, as a turn's projection folds); then fit the head to the
@@ -820,10 +874,24 @@ pub async fn context_recall(
             "content": row_content(r),
         }))
     };
-    // 1. MECHANICAL FIT — never fails. The goal turn always in; then newest first.
+    // 1. MECHANICAL FIT — never fails. The goal turn always in; then the STANDING
+    // rows (#218) — the turn that set the task, the live one, the newest fold, the
+    // other roots — within PIN_SHARE of the target, so a reboot after a long run of
+    // polling still sees why it is running; then newest first.
     let mut picked: HashSet<usize> = HashSet::from([0]);
     let mut used = cost(&digest(&view[0]));
+    let pin_cap = (target as f64 * PIN_SHARE) as i64;
+    for i in standing(&view) {
+        let c = cost(&digest(&view[i]));
+        if used + c <= pin_cap {
+            picked.insert(i);
+            used += c;
+        }
+    }
     for i in (1..view.len()).rev() {
+        if picked.contains(&i) {
+            continue;
+        }
         let c = cost(&digest(&view[i]));
         if used + c > target {
             break;
@@ -969,20 +1037,7 @@ pub async fn context_recall(
     // and call done. The newest root is
     // what is live; say so. Over the STORE, not the folded render: a root a fold
     // collapsed is still the live one if nothing newer came.
-    let live = rows.iter().rev().find(|r| {
-        r.get("role").and_then(Value::as_str) == Some("user")
-            // python `not r.get("parent")`: a 0 parent is falsy too.
-            && !r.get("parent").is_some_and(py_truthy)
-            // python `r.get("kind") in (None, "", "user")` — EXACTLY those three.
-            && matches!(
-                r.get("kind"),
-                None | Some(Value::Null) | Some(Value::String(_))
-            )
-            && r.get("kind")
-                .and_then(Value::as_str)
-                .is_none_or(|k| k.is_empty() || k == "user")
-            && parse_reply_tag(row_content(r)).is_none()
-    });
+    let live = rows.iter().rev().find(|r| is_task_root(r));
     let live_txt = live.map_or(String::new(), |l| {
         let text: String = py_split_whitespace(row_content(l))
             .join(" ")
