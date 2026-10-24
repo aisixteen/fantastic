@@ -139,6 +139,85 @@ async def test_a_stream_without_finish_reason_is_transport():
     assert e.value.transport is True
 
 
+class _Broken(httpx.AsyncByteStream):
+    """A body that yields the given SSE bytes, then fails the way a socket does."""
+
+    def __init__(self, sse: str, exc: Exception):
+        self._sse = sse.encode()
+        self._exc = exc
+
+    async def __aiter__(self):
+        yield self._sse
+        raise self._exc
+
+
+def _breaking_transport(sse: str, exc: Exception):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_Broken(sse, exc))
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [httpx.ReadError("reset"), httpx.RemoteProtocolError("reset")],
+)
+async def test_a_body_error_after_finish_reason_is_a_normal_answer(exc):
+    # the tunnel closes the chunked body after vLLM said the answer was finished
+    sse = _sse(
+        _delta(content="answer"),
+        _delta(finish="stop"),
+        {"choices": [], "usage": {"prompt_tokens": 42}},
+        done=False,
+    )
+    p = _provider(_breaking_transport(sse, exc))
+    assert await _drain(p) == "answer"
+    assert (p.last_stop_reason, p.last_prompt_tokens) == ("stop", 42)
+
+
+async def test_a_main_turn_cut_still_fails_when_the_body_errors_after_length_finish():
+    sse = _sse(_delta(content="half"), _delta(finish="length"), done=False)
+    p = _provider(_breaking_transport(sse, httpx.ReadError("reset")))
+    with pytest.raises(RuntimeError, match=r"cut at max_tokens=8000"):
+        await _drain(p)
+    assert p.last_stop_reason == "max_tokens"
+
+
+async def test_a_bounded_side_call_cut_after_length_finish_is_still_its_answer():
+    sse = _sse(_delta(content="half"), _delta(finish="length"), done=False)
+    p = _provider(_breaking_transport(sse, httpx.ReadError("reset")))
+    assert await _drain(p, max_tokens=50) == "half"
+    assert p.last_stop_reason == "max_tokens"
+
+
+async def test_a_body_error_before_finish_reason_still_drops():
+    sse = _sse(_delta(content="partial"), done=False)
+    p = _provider(_breaking_transport(sse, httpx.ReadError("reset")))
+    with pytest.raises(RuntimeError, match="died or restarted") as e:
+        await _drain(p)
+    assert e.value.transport is True
+
+
+async def test_a_dropped_stream_names_its_cause():
+    sse = _sse(_delta(content="partial"), done=False)
+    err = httpx.ReadError("connection reset by peer")
+    p = _provider(_breaking_transport(sse, err))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert "(cause: connection reset by peer)" in str(e.value)
+    assert "; this turn is NOT complete" in str(e.value)
+
+
+async def test_a_timeout_after_finish_reason_is_still_a_stall():
+    sse = _sse(_delta(content="answer"), _delta(finish="stop"), done=False)
+    p = _provider(_breaking_transport(sse, httpx.ReadTimeout("slow")))
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert str(e.value) == (
+        "vllm_backend: http://vllm.test/v1 sent nothing for read_timeout=900s"
+    )
+
+
 @pytest.mark.parametrize("code", [502, 503, 504])
 async def test_a_gateway_status_is_transport(code):
     p = _provider(_transport('{"error":"down"}', status=code))
@@ -709,7 +788,7 @@ async def test_a_turn_that_finishes_inside_the_thought_closes_the_wrapper():
         (
             httpx.ReadError("gone"),
             "vllm_backend: http://vllm.test/v1 dropped the stream mid-answer — "
-            "vLLM died or restarted; this turn is NOT complete",
+            "vLLM died or restarted (cause: gone); this turn is NOT complete",
         ),
         (
             httpx.ConnectTimeout("syn"),
