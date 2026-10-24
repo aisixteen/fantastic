@@ -1,13 +1,10 @@
 //! foundation_models_backend — an LLM agent on Apple's on-device Foundation
 //! Models system model.
 //!
-//! This backend exists in BOTH swift and rust, with ONE
-//! implementation of the FoundationModels calls — the swift `FantasticFMCore`.
-//! The swift bundle calls it directly; this crate links it as a static library
-//! through `FantasticFMBridge`'s C ABI (`build.rs`, [`system`]). Python has none
-//! (Apple-only native), so parity is swift <-> rust: the same bundle name, record
-//! schema, reflect shape and refusal texts, byte for byte, and ONE readme file
-//! (`src/lib/swift/Sources/FantasticFoundationModelsBackend/Resources/readme.md`).
+//! The FoundationModels calls live in ONE implementation, the swift
+//! `FantasticFMCore` in this crate's `swift/` package; this crate links it as a
+//! static library through `FantasticFMBridge`'s C ABI (`build.rs`, [`system`]).
+//! Python has none (Apple-only native). The bundle's readme is `src/readme.md`.
 //!
 //! A thin shell over `fantastic-ai-core`, like every backend: this crate supplies
 //! the [`Provider`] (messages -> one FMCore request, raw text out) and the
@@ -54,12 +51,10 @@ pub const HANDLER_MODULE: &str = "foundation_models_backend.tools";
 /// The bundle's name — the prefix of every refusal it raises.
 pub const NAME: &str = "foundation_models_backend";
 
-/// readme.md seeded into the agent's dir — THE file the swift bundle serves too.
-pub const README: &str = include_str!(
-    "../../../../../swift/Sources/FantasticFoundationModelsBackend/Resources/readme.md"
-);
+/// readme.md seeded into the agent's dir — the bundle's one readme.
+pub const README: &str = include_str!("readme.md");
 
-/// What `reflect` says this agent IS — swift's sentence, verbatim.
+/// What `reflect` says this agent IS — the sentence the kernels have always shown.
 pub const SENTENCE: &str = "Apple Foundation Models LLM agent — the on-device system model (raw prompt-and-parse tool-calling; no endpoint, no model choice, no key).";
 
 /// The fields an on-device record must NOT carry — there is nothing for them to
