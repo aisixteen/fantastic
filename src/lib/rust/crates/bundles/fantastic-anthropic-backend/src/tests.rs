@@ -125,6 +125,8 @@ fn provider_idle(
         thinking_display: None,
         caching: Caching::Cleanup,
         usage: Arc::new(Mutex::new(Usage::default())),
+        base: Arc::new(Mutex::new(Usage::default())),
+        usage_file: None,
         report: ReportCell::default(),
         stream_idle,
         long_context_tokens: None,
@@ -1630,4 +1632,180 @@ fn thinking_budget_is_refused_for_a_5x_model() {
         ),
         None
     );
+}
+
+// ─── the counts across a restart (#308) ─────────────────────────────────────
+
+/// A disk-backed kernel on `tmp`, booted the way a daemon boots (lockless): the
+/// root loader, the record writer and a store wired for records. The first boot
+/// seeds the root; a later one reads what the first left on disk.
+async fn boot_disk(tmp: &TempDir) -> Arc<Kernel> {
+    let store = tmp.path().join(".fantastic");
+    let mut reg = fantastic_kernel::BundleRegistry::new();
+    fantastic_kernel::test_support::register_root_loader(&mut reg);
+    fantastic_kernel::test_support::register_fake_store(&mut reg, &store);
+    reg.register(HANDLER_MODULE, AnthropicBundle);
+    let mut booted = fantastic_kernel::bootstrap::bootstrap(
+        reg,
+        fantastic_kernel::bootstrap::BootstrapOptions::one_shot(tmp.path()),
+    )
+    .expect("boot");
+    booted.write_seed().expect("seed");
+    let kernel = booted.kernel;
+    fantastic_kernel::test_support::boot_root(&kernel).await;
+    if !kernel.agent_ids().iter().any(|id| id.as_str() == "store") {
+        fantastic_kernel::test_support::wire_fake_store(&kernel, &store).await;
+    }
+    kernel
+}
+
+/// Creates agent `id` on a disk kernel, pointed at `endpoint`, and writes it down.
+async fn create_disk_agent(kernel: &Arc<Kernel>, id: &str, endpoint: &str, extra: Value) {
+    let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": id});
+    let mut record = rec(json!({"max_tokens": 8000}));
+    record.extend(extra.as_object().cloned().unwrap_or_default());
+    record.insert("endpoint".into(), json!(endpoint));
+    for (k, v) in record {
+        payload[k] = v;
+    }
+    let r = call(kernel, "kernel_state", payload).await;
+    assert_eq!(r["id"], json!(id), "{r}");
+    kernel.flush_records().await;
+}
+
+/// A restart, in-process: the counts this process held for `id` are gone, and a
+/// fresh boot of the same dir reads what the disk kept.
+async fn restart(tmp: &TempDir, id: &str) -> Arc<Kernel> {
+    forget_counts(id);
+    boot_disk(tmp).await
+}
+
+/// One request's stream: 100 uncached input, 400 written, 1000 read, `out` output.
+fn turn_events(out: i64) -> String {
+    let mut ev = vec![usage_start(100, 400, 1000), text("ok")];
+    ev.extend(usage_stop(out));
+    sse(&ev)
+}
+
+/// One turn through the agent's own provider, as a send runs it, stream drained.
+async fn turn(kernel: &Arc<Kernel>, id: &str) {
+    let p = build_provider(&AgentId::from(id), kernel);
+    let msgs = [json!({"role": "user", "content": "hi"})];
+    let mut s = p
+        .chat(&msgs, None)
+        .await
+        .unwrap_or_else(|e| panic!("{}", e.message));
+    while let Some(ev) = s.next().await {
+        ev.unwrap_or_else(|e| panic!("{}", e.message));
+    }
+}
+
+fn priced() -> Value {
+    json!({"price_input_per_mtok": 3.0, "price_output_per_mtok": 15.0})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_survives_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events(35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "u_restart", &ep, json!({})).await;
+    turn(&kernel, "u_restart").await;
+    let agent_dir = tmp.path().join(".fantastic/agents/u_restart");
+    assert!(
+        agent_dir.join("usage.json").is_file(),
+        "no sidecar in {agent_dir:?}"
+    );
+    let kernel = restart(&tmp, "u_restart").await;
+    let got = call(&kernel, "u_restart", json!({"type": "usage"})).await;
+    assert_eq!(got["requests"], json!(1), "{got}");
+    assert_eq!(got["output_tokens"], json!(35), "{got}");
+    assert_eq!(got["cache_read_tokens"], json!(1000), "{got}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_since_boot_starts_at_zero() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events(35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "u_since", &ep, json!({})).await;
+    turn(&kernel, "u_since").await;
+    let kernel = restart(&tmp, "u_since").await;
+    let r = call(&kernel, "u_since", json!({"type": "reflect"})).await;
+    assert_eq!(r["usage"]["requests"], json!(1), "{r}");
+    assert_eq!(r["usage_since_boot"]["requests"], json!(0), "{r}");
+    turn(&kernel, "u_since").await;
+    let r = call(&kernel, "u_since", json!({"type": "reflect"})).await;
+    assert_eq!(r["usage"]["requests"], json!(2), "{r}");
+    assert_eq!(r["usage_since_boot"]["requests"], json!(1), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_reset_clears_it() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events(35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "u_reset", &ep, priced()).await;
+    turn(&kernel, "u_reset").await;
+    let pre = call(&kernel, "u_reset", json!({"type": "usage_reset"})).await;
+    assert_eq!(pre["requests"], json!(1), "{pre}");
+    let now = call(&kernel, "u_reset", json!({"type": "usage"})).await;
+    assert_eq!(now["requests"], json!(0), "{now}");
+    assert_eq!(now["cost_usd"].as_f64(), Some(0.0), "{now}");
+    let kernel = restart(&tmp, "u_reset").await;
+    let after = call(&kernel, "u_reset", json!({"type": "usage"})).await;
+    assert_eq!(after["requests"], json!(0), "{after}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cost_usd_accumulates_across_a_restart() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events(35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "u_cost", &ep, priced()).await;
+    turn(&kernel, "u_cost").await;
+    let one = call(&kernel, "u_cost", json!({"type": "usage"})).await["cost_usd"]
+        .as_f64()
+        .expect("cost_usd");
+    let kernel = restart(&tmp, "u_cost").await;
+    turn(&kernel, "u_cost").await;
+    let two = call(&kernel, "u_cost", json!({"type": "usage"})).await["cost_usd"]
+        .as_f64()
+        .expect("cost_usd");
+    // One request: 700 input-side units at $3/Mtok plus 35 output at $15/Mtok.
+    assert!((one - 0.002625).abs() < 1e-9, "{one}");
+    assert!((two - 2.0 * one).abs() < 1e-12, "{two} vs {one}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_corrupt_usage_file_starts_clean() {
+    let tmp = TempDir::new().unwrap();
+    let (_srv, ep) = api(200, turn_events(35)).await;
+    let kernel = boot_disk(&tmp).await;
+    create_disk_agent(&kernel, "u_corrupt", &ep, json!({})).await;
+    let file = tmp.path().join(".fantastic/agents/u_corrupt/usage.json");
+    std::fs::write(&file, "{ not json \u{0}").unwrap();
+    let kernel = restart(&tmp, "u_corrupt").await;
+    let got = call(&kernel, "u_corrupt", json!({"type": "usage"})).await;
+    assert!(got.get("reason").is_none(), "{got}");
+    assert_eq!(got["requests"], json!(0), "{got}");
+    turn(&kernel, "u_corrupt").await;
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap())
+        .expect("the turn rewrites a valid file");
+    assert_eq!(written["requests"], json!(1), "{written}");
+}
+
+#[test]
+fn the_sidecar_keeps_the_one_hour_write_count() {
+    let u = Usage {
+        cache_write_1h: 40,
+        long_cache_write_1h: 7,
+        ..Usage::default()
+    };
+    let back = Usage::from_json(&u.to_json());
+    assert_eq!((back.cache_write_1h, back.long_cache_write_1h), (40, 7));
+    // A sidecar written before the field existed loads with 0.
+    let old = Usage::from_json(&json!({"requests": 3, "cache_write": 5}));
+    assert_eq!((old.requests, old.cache_write), (3, 5));
+    assert_eq!((old.cache_write_1h, old.long_cache_write_1h), (0, 0));
 }

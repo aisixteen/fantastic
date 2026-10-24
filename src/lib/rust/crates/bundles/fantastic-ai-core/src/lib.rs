@@ -149,3 +149,5 @@ mod tests_folds;
 mod tests_model_window;
 #[cfg(test)]
 mod tests_pause;
+#[cfg(test)]
+mod tests_st306;

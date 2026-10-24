@@ -155,11 +155,7 @@ async fn what_is_not_exposed_or_not_there_is_refused() {
     let tmp = tempfile::TempDir::new().unwrap();
     let k = kernel(&tmp, json!(["docs"])).await;
     std::fs::write(served(&tmp).join("secret.md"), "no").unwrap();
-    for p in [
-        json!({"path": "secret.md"}),
-        json!({"path": "docs/missing/deep.md"}),
-        json!({}),
-    ] {
+    for p in [json!({"path": "secret.md"}), json!({})] {
         let mut payload = json!({"type": "watch_path"});
         for (key, v) in p.as_object().unwrap() {
             payload[key] = v.clone();

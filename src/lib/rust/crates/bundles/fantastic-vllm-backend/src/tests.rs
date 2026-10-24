@@ -193,6 +193,197 @@ async fn a_stream_that_ends_without_finish_reason_is_an_error() {
     assert!(e.message.contains("without a finish_reason"), "{e}");
 }
 
+/// A raw HTTP server writing `pieces` as separate TCP writes, then closing.
+/// Reads the whole request first so the close is clean.
+async fn raw_server(pieces: Vec<Vec<u8>>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut req = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = sock.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+            if let Some(h) = req.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&req[..h]).to_lowercase();
+                let len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if req.len() >= h + 4 + len {
+                    break;
+                }
+            }
+        }
+        sock.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        for p in pieces {
+            sock.write_all(&p).await.unwrap();
+            sock.flush().await.unwrap();
+        }
+        sock.shutdown().await.ok();
+    });
+    format!("http://{addr}/v1")
+}
+
+fn long_reasoning(n: usize) -> Vec<Value> {
+    (0..n)
+        .map(|_| delta(None, json!({"reasoning_content": "t"})))
+        .collect()
+}
+
+#[tokio::test]
+async fn llama_final_chunk_with_timings() {
+    // llama.cpp: the finish chunk has an empty delta plus timings and usage
+    let body = sse(
+        &[
+            delta(None, json!({"content": "ok"})),
+            json!({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                   "timings": {"predicted_n": 1},
+                   "usage": {"prompt_tokens": 5, "completion_tokens": 1}}),
+        ],
+        true,
+    );
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    assert_eq!(drain(&p, &hi(), None).await.expect("stream"), "ok");
+    assert_eq!(p.report().stop_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn llama_usage_chunk_with_empty_choices_after_finish() {
+    let body = sse(
+        &[
+            delta(None, json!({"content": "ok"})),
+            delta(Some("stop"), json!({})),
+            json!({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}}),
+        ],
+        true,
+    );
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    assert_eq!(drain(&p, &hi(), None).await.expect("stream"), "ok");
+    assert_eq!(p.report().stop_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn llama_long_reasoning_run() {
+    let mut chunks = long_reasoning(12_000);
+    chunks.push(delta(None, json!({"content": "done"})));
+    chunks.push(delta(Some("stop"), json!({})));
+    let (_server, endpoint) = server_with(sse(&chunks, true), 200).await;
+    let p = provider(&endpoint);
+    let out = drain(&p, &hi(), None).await.expect("stream");
+    assert_eq!(
+        out,
+        format!("{THINK_OPEN}{}{THINK_CLOSE}done", "t".repeat(12_000))
+    );
+    assert_eq!(p.report().stop_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn llama_issue_208_synthetic_stream() {
+    // the issue's shape: 8,892 one-token reasoning deltas, content, a finish
+    // chunk with timings and usage, [DONE], delivered in uneven TCP writes
+    let mut chunks = long_reasoning(8_892);
+    chunks.push(delta(None, json!({"content": "answer"})));
+    chunks.push(json!({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                       "timings": {"predicted_n": 8_893},
+                       "usage": {"prompt_tokens": 120, "completion_tokens": 8_893}}));
+    let bytes = sse(&chunks, true).into_bytes();
+    let mut pieces = Vec::new();
+    let (mut i, mut step) = (0usize, 1usize);
+    while i < bytes.len() {
+        let end = (i + step).min(bytes.len());
+        pieces.push(bytes[i..end].to_vec());
+        i = end;
+        step = step * 7 % 997 + 1;
+    }
+    let endpoint = raw_server(pieces).await;
+    let p = provider(&endpoint);
+    let out = drain(&p, &hi(), None).await.expect("stream");
+    assert!(out.ends_with("answer"), "{out}");
+    assert_eq!(p.report().stop_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn llama_large_and_split_chunks() {
+    let bytes = sse(
+        &[
+            delta(None, json!({"content": "ab"})),
+            delta(None, json!({"content": "cd"})),
+            delta(Some("stop"), json!({})),
+        ],
+        true,
+    )
+    .into_bytes();
+    // one event split across TCP writes mid-line
+    let split = raw_server(vec![bytes[..15].to_vec(), bytes[15..].to_vec()]).await;
+    let p = provider(&split);
+    assert_eq!(drain(&p, &hi(), None).await.expect("split"), "abcd");
+    // several events in one write
+    let whole = raw_server(vec![bytes.clone()]).await;
+    let p = provider(&whole);
+    assert_eq!(drain(&p, &hi(), None).await.expect("whole"), "abcd");
+}
+
+#[tokio::test]
+async fn llama_keepalive_comments() {
+    let c1 = delta(None, json!({"content": "o"})).to_string();
+    let c2 = delta(None, json!({"content": "k"})).to_string();
+    let c3 = delta(Some("stop"), json!({})).to_string();
+    let body =
+        format!("data: {c1}\n\n: ping\n\ndata: {c2}\n\n: ping\n\ndata: {c3}\n\ndata: [DONE]\n\n");
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    assert_eq!(drain(&p, &hi(), None).await.expect("stream"), "ok");
+}
+
+#[tokio::test]
+async fn llama_clean_close_without_trailing_blank_line() {
+    let c1 = delta(None, json!({"content": "ok"})).to_string();
+    let c2 = delta(Some("stop"), json!({})).to_string();
+    let body = format!("data: {c1}\n\ndata: {c2}\n\ndata: [DONE]");
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    assert_eq!(drain(&p, &hi(), None).await.expect("stream"), "ok");
+    assert_eq!(p.report().stop_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn llama_crlf_line_endings() {
+    let body = sse(
+        &[
+            delta(None, json!({"content": "ok"})),
+            delta(Some("stop"), json!({})),
+        ],
+        true,
+    )
+    .replace('\n', "\r\n");
+    let (_server, endpoint) = server_with(body, 200).await;
+    let p = provider(&endpoint);
+    assert_eq!(drain(&p, &hi(), None).await.expect("stream"), "ok");
+}
+
+#[tokio::test]
+async fn a_stream_cut_before_finish_is_still_dropped() {
+    // a truly cut body: no finish, no [DONE] — still the dropped error, transport
+    let cut = format!("data: {}\n\n", delta(None, json!({"content": "partial"})));
+    let endpoint = raw_server(vec![cut.into_bytes()]).await;
+    let p = provider(&endpoint);
+    let e = drain(&p, &hi(), None).await.expect_err("cut stream");
+    assert!(e.message.contains("without a finish_reason"), "{e}");
+    assert!(e.transport, "{e}");
+}
+
 #[tokio::test]
 async fn an_http_error_names_the_endpoint_and_the_body() {
     let (_server, endpoint) = server_with("{\"error\":\"bad effort\"}".to_string(), 400).await;
