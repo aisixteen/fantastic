@@ -3799,10 +3799,7 @@ async fn a_held_send_returns_the_answer_of_the_pass_that_reads_it() {
     until_held(&backend, 1).await;
     let _ = first.await.expect("first send");
     // The held message is READ by the chain's next pass, which says so in its request.
-    assert!(
-        until_passes(&s, 2).await,
-        "the held message never got its pass"
-    );
+    assert!(until_passes(&s, 2).await, "the held message never got its pass");
     let reading = s.request(1);
     assert!(
         reading.contains("arrived while you were working") && reading.contains("two"),
@@ -3972,11 +3969,7 @@ async fn the_chain_ends_and_the_held_are_released(tag: &str, end: Option<Value>)
     assert!(out["error"].is_string(), "{out}");
     assert_eq!(out["held"], json!(true), "{out}");
     assert!(
-        !crate::state::state_for(&backend)
-            .chain
-            .lock()
-            .unwrap()
-            .alive,
+        !crate::state::state_for(&backend).chain.lock().unwrap().alive,
         "the chain is still alive"
     );
 }
@@ -4080,11 +4073,7 @@ async fn a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling() {
 async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "tokenwhen").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
     let state = crate::state::state_for(&backend);
     {
         let mut c = state.chain.lock().unwrap();
@@ -4104,17 +4093,10 @@ async fn a_routed_reply_carries_the_token_read_when_it_was_decided() {
         if held || s.passes_served() > 0 || has_late_row(&kernel, &backend).await {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the old reply went nowhere"
-        );
+        assert!(std::time::Instant::now() < deadline, "the old reply went nowhere");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(
-        s.passes_served(),
-        0,
-        "the old reply ran as a turn of the new chain"
-    );
+    assert_eq!(s.passes_served(), 0, "the old reply ran as a turn of the new chain");
 }
 
 /// ONE CHAIN PER AGENT (#227, bug 5): `stop` rotates the token, so a routed reply
@@ -4169,11 +4151,7 @@ async fn a_reply_in_flight_across_a_stop_runs_nothing() {
 async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     let tmp = TempDir::new().unwrap();
     let (kernel, backend) = mk_kernel(&tmp, "awaitnew").await;
-    let s = script(
-        &backend,
-        vec![pass(r#"<call name="done"></call>"#)],
-        Duration::ZERO,
-    );
+    let s = script(&backend, vec![pass(r#"<call name="done"></call>"#)], Duration::ZERO);
     let state = crate::state::state_for(&backend);
     {
         // An operator message started a NEW chain after the await.
@@ -4188,14 +4166,17 @@ async fn an_await_reply_after_a_new_chain_began_is_held_not_dropped() {
     // The routed reply of an `await`ed call: the replier is the origin, so the
     // delivery carries NO chain token. It goes through the kernel, so the
     // handler runs as the TARGET (its store writes are its own).
-    tokio::spawn(fantastic_kernel::test_support::as_agent(peer, async move {
-        let _ = k
+    tokio::spawn(fantastic_kernel::test_support::as_agent(
+        peer,
+        async move {
+            let _ = k
                 .send(vec![Item::new(
                     target,
                     json!({"type": "send", "text": "[reply to 1 · peer]\nanswered", "client_id": "cli"}),
                 )])
                 .await;
-    }));
+        },
+    ));
     // The reply is read by a pass (or held for the live chain's next one) —
     // either way it is acted on, never recorded as `late`.
     until_true("the await's reply to be acted on", || {
@@ -7557,6 +7538,19 @@ fn standing_pins_the_task_the_live_root_and_the_newest_fold() {
         json!({"role":"assistant","id":2,"parent":1,"content":"ok"}),
     ];
     assert!(crate::retrieval::standing(&short).is_empty());
+    // one root past index 0: the first and the last root are the same row, pinned once
+    let single = vec![
+        json!({"role":"assistant","id":1,"content":"ok"}),
+        json!({"role":"user","id":2,"content":"ONLY ROOT"}),
+        json!({"role":"assistant","id":3,"parent":2,"content":"ok"}),
+    ];
+    assert_eq!(crate::retrieval::standing(&single), vec![1]);
+    // no root past index 0 (a reply and a non-root only): nothing is standing
+    let no_roots = vec![
+        json!({"role":"assistant","id":1,"content":"ok"}),
+        json!({"role":"user","id":2,"parent":1,"content":"[reply to 9 · exec status]\nrunning"}),
+    ];
+    assert!(crate::retrieval::standing(&no_roots).is_empty());
 }
 
 /// The restart, then the first turn after it: the model-view request of that turn.

@@ -745,13 +745,11 @@ fn is_task_root(r: &Value) -> bool {
         // python `not r.get("parent")`: a 0 parent is falsy too.
         && !r.get("parent").is_some_and(py_truthy)
         // python `r.get("kind") in (None, "", "user")` — EXACTLY those three.
-        && matches!(
-            r.get("kind"),
-            None | Some(Value::Null) | Some(Value::String(_))
-        )
-        && r.get("kind")
-            .and_then(Value::as_str)
-            .is_none_or(|k| k.is_empty() || k == "user")
+        && match r.get("kind") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(k)) => k.is_empty() || k == "user",
+            Some(_) => false,
+        }
         && parse_reply_tag(row_content(r)).is_none()
 }
 
