@@ -1,0 +1,67 @@
+# The fantastic server: one headless canvas in a container (Phase 12, #158).
+#
+# Built by scripts/build/container.sh, with docker or podman (OCI instructions
+# only, no BuildKit syntax). The build context is the repository root. The
+# binary is the `fantastic` CLI of the release archive, staged by container.sh at
+# dist/container/<amd64|arm64>/fantastic: the bytes the fantastic-app .deb carries
+# as /usr/bin/fantastic (deb.sh checks that), so the server and the kiosk run one
+# build.
+#
+# Same base as the kiosk (os/): Debian 13 "trixie", pinned by digest. The digest
+# is the one .github/workflows/build.yml names (TRIXIE_SLIM); a multi-arch index,
+# so each platform pulls its own architecture.
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+
+# Filled in by the build (container.sh, the publish workflow): the release's version.
+ARG FANTASTIC_VERSION=dev
+# Set by the engine for each platform: amd64 or arm64.
+ARG TARGETARCH
+
+# What the image adds to the base, and why:
+#   bash             the terminals and the agents run the user's shell ($SHELL)
+#   ca-certificates  TLS for the AI backends the canvas reaches
+#   coreutils        the base already has it; named so a slimmer base still works
+#   git              the agents and the canvas's projects use it
+#   tini             PID 1: forwards SIGTERM to the kernel and reaps the children
+#                    the canvases spawn
+RUN apt-get update -q \
+    && apt-get install -y -q --no-install-recommends bash ca-certificates coreutils git tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 1000 --create-home --shell /bin/bash fantastic \
+    && mkdir -p /home/fantastic/.fantastic /work \
+    && chown fantastic:fantastic /home/fantastic/.fantastic /work
+
+COPY dist/container/${TARGETARCH}/fantastic /usr/bin/fantastic
+RUN chmod 0755 /usr/bin/fantastic
+COPY os/container/fantastic-server /usr/local/bin/fantastic-server
+RUN chmod 0755 /usr/local/bin/fantastic-server
+
+LABEL org.opencontainers.image.title="fantastic server" \
+      org.opencontainers.image.source="https://github.com/aisixteen/fantastic" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.version="${FANTASTIC_VERSION}"
+
+# The user the server runs as, and where it keeps its state: the home
+# (`FANTASTIC_HOME`, the saved set-ups and the shared stores) and the canvas
+# folder /work (its `.fantastic`, the canvas's records). Both are volumes, so a
+# new container on the same volumes keeps the state.
+ENV SHELL=/bin/bash \
+    HOME=/home/fantastic \
+    FANTASTIC_HOME=/home/fantastic/.fantastic \
+    FANTASTIC_PORT=8088
+USER fantastic
+WORKDIR /work
+VOLUME ["/home/fantastic/.fantastic", "/work"]
+EXPOSE 8088
+
+# The canvas's page is served on the port inside the container. The server binds
+# 0.0.0.0 (fantastic-server), and the Host guard (fantastic-web) judges by its
+# loopback identity, so it admits the loopback spellings on that port: the check
+# connects to loopback and sends `Host: localhost:<port>`, the Host a browser at
+# the port map sends (os/README.md).
+# HEALTHCHECK is kept only in docker's image format: container.sh passes
+# `--format docker` to podman, whose default OCI format drops it.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${FANTASTIC_PORT} && printf 'GET /canvas_page/file/index.html HTTP/1.0\\r\\nHost: localhost:%s\\r\\n\\r\\n' \"$FANTASTIC_PORT\" >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/fantastic-server"]

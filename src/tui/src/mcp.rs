@@ -179,7 +179,7 @@ async fn serve(paths: Paths, fresh: bool, std_out: std::fs::File, err_out: &mut 
     }
 
     // ── boot / rehydrate ─────────────────────────────────────────────────────
-    let host = match Host::boot(&paths, false, None).await {
+    let host = match Host::boot(&paths, false, None, None).await {
         Ok(h) => Arc::new(h),
         Err(e) => return fatal(err_out, &format!("{e}")),
     };

@@ -286,7 +286,7 @@ the kernel's own.
 
 ```sh
 fantastic                         # the terminal UI; a fresh folder is seeded on launch
-fantastic canvas [--port N]       # the browser canvas, headless; the kernel's message stream on stdout
+fantastic canvas [--port N] [--host ADDR]  # the browser canvas, headless; the kernel's message stream on stdout
 fantastic --headless              # no UI, no canvas: the message stream only
 fantastic [canvas] ai BACKEND     # the root AI `ai`: vllm -p PORT | ollama -p PORT | responses|anthropic --model M
 fantastic [canvas] run CMD [ARGS] # your own program from $PATH in a terminal (with canvas: a terminal cell)
@@ -298,6 +298,9 @@ fantastic readme [key]            # the docs
 
 These words are **recipes**: each adds its agents only if they are missing, then
 runs them. `--port` is recorded on the first `canvas` and reused after that.
+`--host` is the address the canvas binds (`127.0.0.1` unless named; `0.0.0.0`
+publishes it, as the server container does), recorded on `web` as its `bind`. The canvas
+has terminals: bind a public interface only on a machine you trust.
 
 ### The canvas
 
