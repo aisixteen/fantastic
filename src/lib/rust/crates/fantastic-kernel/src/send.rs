@@ -829,7 +829,6 @@ impl Kernel {
             }
         }
 
-
         // The UNNAMED `kernel` reflect fast path. python checks the
         // LITERAL reserved address the caller sent (`target_id == "kernel"`,
         // not the resolved root id — a call spelling the root's real id
@@ -1045,6 +1044,7 @@ impl Kernel {
         let mut fast_first = named_fast_reflect;
         // The pid of the attempt that actually SETTLED — a retry re-dispatches
         // under a fresh row, so the last one is what the outcome names.
+        let mut noted_marks: Vec<String> = Vec::new();
         let (pid, reply, status, body) = loop {
             let attempts = self.ledger.attempt(exec_id);
             if attempts > 1 {
@@ -1076,6 +1076,8 @@ impl Kernel {
                 continue;
             }
             let mut this_pid: Option<TaskId> = None;
+            // Reply marks the handler notes (`crate::secret::note_reply_secret`).
+            let sink = crate::secret::ReplySink::default();
             let (mut reply, mut status, body) = self
                 .run_dispatch(
                     &target,
@@ -1087,8 +1089,10 @@ impl Kernel {
                     binary.clone(),
                     caller.clone(),
                     Arc::clone(&marks),
+                    Arc::clone(&sink),
                 )
                 .await;
+            noted_marks = sink.lock().map(|m| m.clone()).unwrap_or_default();
             // Universal post-process, PER ATTEMPT (python applies it inside
             // `_settle_once`, before `_record` weighs a retry): compose every
             // reflect reply with the tree/bundles/readme/more flags. A roster
@@ -1132,6 +1136,9 @@ impl Kernel {
             .local_bundle(&target)
             .map(|b| b.reply_secret(&payload, &reply))
             .unwrap_or_default();
+        // plus the ones the handler noted for a reply it relayed from a connected
+        // kernel's store.
+        let reply_marks = crate::secret::well_formed(reply_marks, &noted_marks);
         let out = self.ledger.settle(
             exec_id,
             Outcome::new(pid, status, reply)
@@ -1187,6 +1194,7 @@ impl Kernel {
                 None,
                 caller,
                 Arc::new(Vec::new()),
+                crate::secret::ReplySink::default(),
             )
             .await;
         (reply, status)
@@ -1418,6 +1426,7 @@ impl Kernel {
         binary: Option<crate::outcome::Blob>,
         caller: Option<AgentId>,
         marks: Arc<Vec<String>>,
+        sink: crate::secret::ReplySink,
     ) -> (Value, Status, Option<crate::outcome::Blob>) {
         // The pid was minted in the SYNCHRONOUS launch phase and IS the ledger
         // key — minting a second one here would split the two apart, so the row
@@ -1508,42 +1517,45 @@ impl Kernel {
                 STATE_QUIET
                     .scope(
                         quiet,
-                        crate::secret::CURRENT_SECRET.scope(
-                            marks,
-                            CURRENT_ORIGIN.scope(
-                                origin,
-                                CURRENT_SENDER.scope(
-                                    Some(sender),
-                                    CURRENT_TASK.scope(
-                                        tid,
-                                        CURRENT_KILLED.scope(killed, async move {
-                                            tokio::select! {
-                                                biased;
-                                                // Stopped: DROP the dispatch future — the
-                                                // abort half of `cancel`.
-                                                _ = cancel.notified() => None,
-                                                // A request body rides under this same
-                                                // row/ledger/timeout, and ANY REPLY BODY
-                                                // comes back with it: the batch IS
-                                                // the carrier for bytes, so any verb
-                                                // through `send` returns its chunk the
-                                                // way python's reply dict holds one.
-                                                v = async {
-                                                    // ANOTHER KERNEL'S AGENT: the call
-                                                    // goes to its peer's route, bytes
-                                                    // and all; no handler runs here.
-                                                    // Its reply is that kernel's answer,
-                                                    // relayed verbatim: never a raise here.
-                                                    if let Some(remote) = tgt.remote.as_ref() {
-                                                        return Ok(crate::peers::call_peer(
-                                                            remote, payload, binary,
-                                                        )
-                                                        .await);
-                                                    }
-                                                    dispatch(kernel, tgt, payload, binary).await
-                                                } => Some(v),
-                                            }
-                                        }),
+                        crate::secret::REPLY_SECRET.scope(
+                            sink,
+                            crate::secret::CURRENT_SECRET.scope(
+                                marks,
+                                CURRENT_ORIGIN.scope(
+                                    origin,
+                                    CURRENT_SENDER.scope(
+                                        Some(sender),
+                                        CURRENT_TASK.scope(
+                                            tid,
+                                            CURRENT_KILLED.scope(killed, async move {
+                                                tokio::select! {
+                                                    biased;
+                                                    // Stopped: DROP the dispatch future — the
+                                                    // abort half of `cancel`.
+                                                    _ = cancel.notified() => None,
+                                                    // A request body rides under this same
+                                                    // row/ledger/timeout, and ANY REPLY BODY
+                                                    // comes back with it: the batch IS
+                                                    // the carrier for bytes, so any verb
+                                                    // through `send` returns its chunk the
+                                                    // way python's reply dict holds one.
+                                                    v = async {
+                                                        // ANOTHER KERNEL'S AGENT: the call
+                                                        // goes to its peer's route, bytes
+                                                        // and all; no handler runs here.
+                                                        // Its reply is that kernel's answer,
+                                                        // relayed verbatim: never a raise here.
+                                                        if let Some(remote) = tgt.remote.as_ref() {
+                                                            return Ok(crate::peers::call_peer(
+                                                                remote, payload, binary,
+                                                            )
+                                                            .await);
+                                                        }
+                                                        dispatch(kernel, tgt, payload, binary).await
+                                                    } => Some(v),
+                                                }
+                                            }),
+                                        ),
                                     ),
                                 ),
                             ),

@@ -2561,6 +2561,61 @@ async fn a_call_error_echoing_a_secret_is_shown_in_the_row() {
     assert!(rows.contains("[secret]"), "{rows}");
 }
 
+/// A handler that relayed a reply from a connected kernel's store notes the reply's
+/// secret paths (`note_reply_secret`): the caller gets the reply whole, the settle
+/// row, the ledger and the state stream carry `[secret]`.
+#[tokio::test]
+async fn a_handler_noting_reply_secret_marks_its_settle_row() {
+    use crate::bundle::{Bundle, BundleError, BundleRegistry, Reply};
+    struct Relay;
+    #[async_trait::async_trait]
+    impl Bundle for Relay {
+        fn name(&self) -> &str {
+            "relay_probe"
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            _payload: &Value,
+            _kernel: &Arc<Kernel>,
+        ) -> Result<Reply, BundleError> {
+            crate::note_reply_secret(["fields.k".to_string(), "type".to_string(), "a..b".to_string()]);
+            Ok(Some(json!({"fields": {"k": "sk-RELAYED", "n": "keep"}})))
+        }
+    }
+    let mut kernel = Kernel::new();
+    let mut reg = BundleRegistry::new();
+    reg.register("relay_probe.tools", Relay);
+    kernel.bundles = reg;
+    let kernel = Arc::new(kernel);
+    kernel.register(Agent::new(
+        AgentId::from("rp"),
+        Some("relay_probe.tools".to_string()),
+        None,
+        Map::new(),
+        Path::new("/tmp/nowhere").join("rp"),
+        true,
+    ));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&seen);
+    let _t = kernel.add_state_subscriber(Arc::new(move |ev: &Value, _b| {
+        sink.lock().expect("sink poisoned").push(ev.clone());
+    }));
+    let out = kernel
+        .send(vec![Item::new("rp", json!({"type": "get"})).with_id("r1")])
+        .await
+        .remove(0);
+    assert_eq!(out.result["fields"]["k"], json!("sk-RELAYED"), "{}", out.result);
+    assert_eq!(out.secret, vec!["fields.k".to_string()]);
+    let rows = serde_json::to_string(&kernel.rows.all()).unwrap();
+    assert!(!rows.contains("sk-RELAYED"), "a row kept the value: {rows}");
+    let ledger = serde_json::to_string(&kernel.ledger.entries()).unwrap();
+    assert!(!ledger.contains("sk-RELAYED"), "{ledger}");
+    assert!(ledger.contains("[secret]") && ledger.contains("keep"), "{ledger}");
+    let events = format!("{:?}", seen.lock().expect("sink poisoned"));
+    assert!(!events.contains("sk-RELAYED"), "{events}");
+}
+
 /// While draining, a FORK starting a send is new work: refused. A keepalive fork
 /// (a persister) still sends (python `drain_admits`).
 #[tokio::test]

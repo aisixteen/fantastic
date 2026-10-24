@@ -55,10 +55,10 @@
 //! `reply_secret`), so the ledger, the memory store and the state stream never
 //! hold them; the caller receives them whole.
 //!
-//! KNOWN GAP (issue #285): this holds for a store on THIS kernel. A store on a
-//! CONNECTED kernel is recorded in clear by the caller — the calling kernel
-//! writes the `set` payload and the `get` reply into its own ledger and memory
-//! store, and it cannot see the remote store's secret marks.
+//! A store on a CONNECTED kernel is covered through a bridge `forward`: the
+//! calling kernel marks a forwarded `set`'s fields, and the far kernel sends the
+//! `get` reply's marks back on the reply frame (`secret`), which the caller
+//! records as `[secret]` too (issue #285).
 //!
 //! WHO MAY CALL is the kernel's call gate alone.
 //!
