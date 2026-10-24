@@ -1051,6 +1051,164 @@ def test_make_provider_reads_the_tier_and_the_log(
     assert p._agent_id == "a1"
 
 
+# ─── cache prices per model, 1-hour writes apart (#314 port) ─────────────────
+
+
+def test_sonnet_cache_reads_bill_at_a_twentieth_of_input():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    u.add_request(0, 0, 1_000_000)
+    s = u.snapshot(3.0, 15.0, model="claude-sonnet-5-5")
+    assert s["cost_usd"] == pytest.approx(0.15, abs=1e-12)
+    assert s["saved_usd"] == pytest.approx(1_000_000 * (3.0 - 0.15) / 1e6, abs=1e-12)
+
+
+def test_haiku_cache_reads_bill_at_a_tenth_and_only_dated_ids_match_sonnet():
+    from anthropic_backend.provider import Usage
+
+    def read_cost(model: str) -> float:
+        u = Usage()
+        u.add_request(0, 0, 1_000_000)
+        return u.snapshot(3.0, 15.0, model=model)["cost_usd"]
+
+    assert read_cost("claude-haiku-5-5") == pytest.approx(0.30, abs=1e-12)
+    # a dated id of the cheap-read model matches; a longer version number does not
+    assert read_cost("claude-sonnet-5-5-20261001") == pytest.approx(0.15, abs=1e-12)
+    assert read_cost("claude-sonnet-5-50") == pytest.approx(0.30, abs=1e-12)
+    assert read_cost("claude-opus-5-5") == pytest.approx(0.15, abs=1e-12)
+
+
+def test_one_hour_cache_writes_bill_at_twice_input():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    u.add_request(0, 1_000_000, 0, cache_write_1h=1_000_000)
+    s = u.snapshot(3.0, 15.0)
+    assert s["cache_write_tokens"] == 1_000_000
+    assert s["cost_usd"] == pytest.approx(6.0, abs=1e-12)
+    # a 1-hour write that is never read costs more than no cache: negative saving
+    assert s["saved_usd"] == pytest.approx(-3.0, abs=1e-12)
+
+
+async def test_a_one_hour_cache_write_is_counted_apart_from_the_five_minute_one():
+    from anthropic_backend.provider import Usage
+
+    start = {
+        "type": "message_start",
+        "message": {
+            "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 500,
+                "cache_read_input_tokens": 0,
+                "cache_creation": {"ephemeral_1h_input_tokens": 200},
+            }
+        },
+    }
+    u = Usage()
+    await _drain(_provider(_transport(_sse(start, _text("ok"), *_stop())), usage=u))
+    assert u.cache_write_tokens == 300 and u.cache_write_1h_tokens == 200
+    s = u.snapshot(3.0, 15.0)
+    assert s["cache_write_tokens"] == 500
+    # 300 at 1.25x of 3.0, 200 at 2x, output 5 at 15.0
+    cost = (300 * 3.75 + 200 * 6.0 + 5 * 15.0) / 1e6
+    assert s["cost_usd"] == pytest.approx(cost, abs=1e-12)
+
+    # the long-context bucket splits the same way
+    u = Usage()
+    body = _sse(
+        {
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 50,
+                    "cache_creation_input_tokens": 200,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation": {"ephemeral_1h_input_tokens": 100},
+                }
+            },
+        },
+        _text("ok"),
+        *_stop(),
+    )
+    await _drain(_provider(_transport(body), usage=u, long_context_tokens=100))
+    assert (u.long_requests, u.long_cache_write_tokens) == (1, 100)
+    assert u.long_cache_write_1h_tokens == 100
+    s = u.snapshot(3.0, 15.0)
+    assert s["cache_write_tokens"] == 200
+    cost = (50 * 3.0 + 100 * 3.75 + 100 * 6.0 + 5 * 15.0) / 1e6
+    assert s["cost_usd"] == pytest.approx(cost, abs=1e-12)
+
+
+def test_the_record_refuses_a_bad_cache_price():
+    check = lambda meta: validate_meta(meta, _rec())  # noqa: E731
+    assert check({"price_cache_read_per_mtok": 0.3}) is None
+    assert check({"price_cache_write_5m_per_mtok": 3.75}) is None
+    assert check({"price_cache_write_1h_per_mtok": 6.0}) is None
+    assert check({"price_cache_read_per_mtok": -1}) == (
+        "price_cache_read_per_mtok must be a number, zero or more"
+    )
+    assert check({"price_cache_read_per_mtok": "x"}) == (
+        "price_cache_read_per_mtok must be a number, zero or more"
+    )
+    assert check({"price_cache_write_1h_per_mtok": True}) == (
+        "price_cache_write_1h_per_mtok must be a number, zero or more"
+    )
+    names = {f["name"] for f in RECORD_SCHEMA["fields"]}
+    assert {
+        "price_cache_read_per_mtok",
+        "price_cache_write_5m_per_mtok",
+        "price_cache_write_1h_per_mtok",
+    } <= names
+
+
+async def _create_as(kernel, agent_id: str, **meta):
+    return await _call(
+        kernel,
+        kernel.id,
+        {
+            "type": "create_agent",
+            "parent_id": kernel.id,
+            "handler_module": "anthropic_backend.tools",
+            "id": agent_id,
+            **_rec(**meta),
+        },
+    )
+
+
+async def test_a_record_without_cache_prices_uses_the_model_defaults(
+    seeded_kernel, mock_http, fake_providers, _fresh_usage
+):
+    from anthropic_backend import tools
+
+    mock_http(_api([]))
+    base = dict(
+        model="claude-sonnet-5-5", price_input_per_mtok=3.0, price_output_per_mtok=15.0
+    )
+    await _create_as(seeded_kernel, "a1", **base)
+    await _create_as(
+        seeded_kernel,
+        "b1",
+        **base,
+        price_cache_read_per_mtok=1.0,
+        price_input_long_per_mtok=6.0,
+        price_output_long_per_mtok=15.0,
+    )
+    tools.usage_of("a1").add_request(0, 0, 1_000_000)
+    tools.usage_of("b1").add_request(0, 0, 1_000_000)
+    # no cache prices: the Sonnet 5.5 default, 0.05x of 3.0
+    assert tools._usage_now("a1", seeded_kernel)["cost_usd"] == pytest.approx(0.15)
+    # an explicit read price is USD at the base input price: 1.0 per million
+    assert tools._usage_now("b1", seeded_kernel)["cost_usd"] == pytest.approx(1.0)
+    # the long bucket scales the explicit price by long_in/base_in (6.0 / 3.0)
+    tools.usage_of("a1").add_request(0, 0, 1_000_000, long=True)
+    tools.usage_of("b1").add_request(0, 0, 1_000_000, long=True)
+    # a1: no long prices, so the base 3.0 and the default 0.05x: 0.15 more
+    assert tools._usage_now("a1", seeded_kernel)["cost_usd"] == pytest.approx(0.30)
+    # b1: the long bucket at 2.0 per million reads (1.0 scaled by 6.0 / 3.0) on top
+    assert tools._usage_now("b1", seeded_kernel)["cost_usd"] == pytest.approx(3.0)
+
+
 # ─── usage across a kernel restart (#308, Rust #319) ─────────────────────────
 
 
