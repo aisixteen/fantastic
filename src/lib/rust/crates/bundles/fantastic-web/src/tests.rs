@@ -3452,3 +3452,46 @@ async fn deleting_one_web_agent_frees_only_its_own_listener() {
 // the body is bounded by the one frame cap.
 #[path = "tests_rest_ingress_order.rs"]
 mod rest_ingress_order;
+
+/// The listener's address is the record's `bind`, else its `host`, else loopback; the
+/// guard's identity (`host`) is not moved by a `bind`.
+#[test]
+fn the_listener_binds_the_bind_field_and_the_guard_keeps_the_host() {
+    let rec = |v: Value| v.as_object().cloned().unwrap();
+    assert_eq!(listen_host(&rec(json!({}))), "127.0.0.1");
+    assert_eq!(
+        listen_host(&rec(json!({"host": "192.168.1.5"}))),
+        "192.168.1.5"
+    );
+    assert_eq!(listen_host(&rec(json!({"bind": "0.0.0.0"}))), "0.0.0.0");
+    // a bind beats a host: the publish is the listener, the host stays the guard's identity
+    let both = rec(json!({"bind": "0.0.0.0", "host": "192.168.1.5"}));
+    assert_eq!(listen_host(&both), "0.0.0.0");
+    assert_eq!(origin::effective_host(&both), "192.168.1.5");
+    // an empty bind is no bind (python's `rec.get("bind") or ...`)
+    assert_eq!(
+        listen_host(&rec(json!({"bind": "", "host": "0.0.0.0"}))),
+        "0.0.0.0"
+    );
+}
+
+/// The container's listener (#158 decision 4): a `bind` of `0.0.0.0` keeps the
+/// loopback identity, so a browser at `localhost:<port>` is admitted by the Host
+/// guard and a LAN name is refused with 403.
+#[test]
+fn wildcard_bind_guard_admits_loopback_host() {
+    let rec = json!({"bind": "0.0.0.0", "port": 8088})
+        .as_object()
+        .cloned()
+        .unwrap();
+    let req = |host: &str| {
+        Request::builder()
+            .uri("/web_x/ws")
+            .header("host", host)
+            .body(Body::empty())
+            .unwrap()
+    };
+    assert!(origin::guard("web_x", &rec, &req("localhost:8088")).is_none());
+    let refused = origin::guard("web_x", &rec, &req("192.168.1.5:8088")).expect("LAN host refused");
+    assert_eq!(refused.status(), 403);
+}

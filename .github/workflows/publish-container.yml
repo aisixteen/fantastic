@@ -1,0 +1,137 @@
+# PUBLISH THE SERVER'S IMAGE (Phase 12, #158) — run BY HAND, never on a push or a
+# tag: `gh workflow run publish-container.yml -f commit=<sha> -f version=X.Y.Z`
+# (add `-f latest=true` for the newest release only).
+#
+#   guard    the commit is on main, and a GREEN FULL `ci.yml` run (`ci · full`) is
+#            on it: its `container` job built the image of exactly that commit for
+#            each arch, and smoke-tested it under Docker and Podman. Run this only
+#            after such a run. (none → start one: `gh workflow run ci.yml --ref <sha> -f e2e=true`)
+#   publish  the `container-image-<arch>` artifacts of that run (the `docker save`
+#            of each TESTED image and its id, kept 30 days) are loaded, their ids
+#            checked, and each pushed under `$SHA-<arch>`. The multi-arch manifest
+#            (tags X.Y.Z, the commit's sha, and `latest` when asked) is then made
+#            from those two pushed images with `docker buildx imagetools create`.
+#            Nothing is rebuilt: the bytes pushed are the bytes the smoke test ran.
+#            The version must match the image's own version label.
+#   extra    `$SHA-amd64` and `$SHA-arm64` stay on GHCR beside the manifest, as the
+#            per-arch images it is made of.
+#
+# No secret is stored: the push uses GITHUB_TOKEN with `packages: write`. The
+# first push of a package makes it; set its visibility to public once, on GitHub.
+
+name: publish-container
+run-name: publish container · ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "The commit to publish: on main, with a green full ci.yml run (`ci · full`)."
+        type: string
+        required: true
+      version:
+        description: "The release version, X.Y.Z (no leading v). Must be the image's version label."
+        type: string
+        required: true
+      latest:
+        description: "Also tag `latest` (the newest release only)."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-container-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: ghcr.io/aisixteen/fantastic
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      ci_run: ${{ steps.check.outputs.ci_run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+      - id: check
+        name: the commit is on main, and CI passed on it in full
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git rev-parse --verify "${{ inputs.commit }}^{commit}") \
+            || { echo "::error::no commit ${{ inputs.commit }}"; exit 1; }
+          [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::version must be X.Y.Z, got '${{ inputs.version }}'"; exit 1; }
+          git merge-base --is-ancestor "$sha" origin/main \
+            || { echo "::error::$sha is not on main"; exit 1; }
+          run=$(gh run list --workflow ci.yml --commit "$sha" --status success \
+            --json databaseId,displayTitle \
+            --jq '[.[] | select(.displayTitle == "ci · full")][0].databaseId // empty')
+          [ -n "$run" ] \
+            || { echo "::error::no green full ci.yml run on $sha — start one: gh workflow run ci.yml --ref $sha -f e2e=true"; exit 1; }
+          echo "ci run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "ci_run=$run" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      SHA: ${{ needs.guard.outputs.sha }}
+      VERSION: ${{ inputs.version }}
+      LATEST: ${{ inputs.latest }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          run-id: ${{ needs.guard.outputs.ci_run }}
+          github-token: ${{ github.token }}
+          pattern: container-image-*
+          path: images
+      - name: the tested images and their ids
+        run: find images -type f | sort
+      - uses: docker/setup-buildx-action@v3
+      - name: log in to GHCR (GITHUB_TOKEN)
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: push each tested arch image, as loaded (no rebuild)
+        run: |
+          for arch in amd64 arm64; do
+            dir="images/container-image-$arch"
+            docker load -i "$dir/image.tar"
+            id=$(docker image inspect fantastic-server:ci --format '{{.Id}}')
+            [ "$id" = "$(cat "$dir/image-id.txt")" ] \
+              || { echo "::error::$arch: the loaded image $id is not the tested one"; exit 1; }
+            got=$(docker image inspect fantastic-server:ci --format '{{.Architecture}}')
+            [ "$got" = "$arch" ] || { echo "::error::$arch: the image is $got"; exit 1; }
+            label=$(docker image inspect fantastic-server:ci --format '{{index .Config.Labels "org.opencontainers.image.version"}}')
+            [ "$label" = "$VERSION" ] || { echo "::error::$arch: the image is version '$label', publish asked '$VERSION'"; exit 1; }
+            docker tag fantastic-server:ci "$IMAGE:$SHA-$arch"
+            docker push "$IMAGE:$SHA-$arch"
+            docker rmi fantastic-server:ci >/dev/null
+          done
+      - name: the multi-arch manifest, from the two pushed images
+        run: |
+          tags=(--tag "$IMAGE:$VERSION" --tag "$IMAGE:$SHA")
+          if [ "$LATEST" = true ]; then tags+=(--tag "$IMAGE:latest"); fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE:$SHA-amd64" "$IMAGE:$SHA-arm64"
+      - name: the pushed manifest
+        run: docker buildx imagetools inspect "$IMAGE:$VERSION" | tee -a "$GITHUB_STEP_SUMMARY"

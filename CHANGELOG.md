@@ -21,6 +21,19 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   narrow screen opens it as an overlay, when asked. Its tree is the project folder's
   view (#150), bound on the bridge as the tree cell binds its folder, so every read goes
   through that view agent; dispose lets it go.
+- The fantastic server: a headless container image of one canvas (#158), for
+  Docker and Podman (rootless), amd64 and arm64, from
+  `ghcr.io/aisixteen/fantastic`. Debian 13 "trixie", the kiosk's base; the same
+  `fantastic` binary as the `.deb`; non-root uid 1000; state on the volumes
+  `/home/fantastic/.fantastic` and `/work`; tini as PID 1; SIGTERM stops it in
+  order. `fantastic canvas --host ADDR` is the bind address it needs (`127.0.0.1`
+  unless named; the container names `0.0.0.0`). It sets only the listener (the
+  record's `bind`): the Host guard keeps its loopback identity, so a `0.0.0.0` bind
+  admits `localhost`, `127.0.0.1` and `[::1]` on its port, and the canvas opens at
+  `http://localhost:<port>/canvas_page/file/index.html`. A LAN address binds and
+  admits itself. CI builds both architectures and smoke-tests them under Docker and
+  rootless Podman (`os/ci/container_check.py`); `publish-container.yml` pushes the manifest
+  by hand, from a green full run, with GITHUB_TOKEN.
 - File and folder agents: thin view agents over the file bridge (#150). A file or a
   folder is an agent shipped in the `file_bridge` bundle, scoped to one path.
   `open_view {kind: file|folder, path}` on a `file_bridge` returns the view of that
