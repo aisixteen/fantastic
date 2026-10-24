@@ -312,6 +312,101 @@ impl Kernel {
         Some(rec)
     }
 
+    /// Edit an agent's `callable_by` as ONE step under the record's lock: `edit` reads
+    /// the map as it is at the write (not as a plan read it earlier) and returns whether
+    /// it changed it. Merging one key this way keeps every other key another writer put
+    /// there, which a whole-key `update` does not. `None` when no such agent; a change
+    /// publishes the `updated` event that drives the root loader's persist.
+    pub fn edit_callable_by(
+        &self,
+        id: &AgentId,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
+    ) -> Result<bool, String> {
+        self.edit_grant(id, "callable_by", edit)
+    }
+
+    /// `can_call`, merged the same way as `edit_callable_by`.
+    pub fn edit_can_call(
+        &self,
+        id: &AgentId,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
+    ) -> Result<bool, String> {
+        self.edit_grant(id, "can_call", edit)
+    }
+
+    /// One grant map of [`Kernel::edit_grants`]: `field` is the record key.
+    fn edit_grant(
+        &self,
+        id: &AgentId,
+        field: &str,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>) -> bool,
+    ) -> Result<bool, String> {
+        self.edit_grants(id, |cc, cb| {
+            if field == "can_call" {
+                (edit(cc), false)
+            } else {
+                (false, edit(cb))
+            }
+        })
+    }
+
+    /// BOTH grant maps as ONE step: `edit` gets `can_call` and `callable_by` as they are at
+    /// the write and returns which of the two it changed. One record lock, one run of the
+    /// write-time checks (`bad_grant_shape`, the bundle's `validate_meta`) over what changed,
+    /// one `updated` event: a shape refused in either map writes neither.
+    pub fn edit_grants(
+        &self,
+        id: &AgentId,
+        edit: impl FnOnce(&mut serde_json::Map<String, Value>, &mut serde_json::Map<String, Value>) -> (bool, bool),
+    ) -> Result<bool, String> {
+        let agent = self
+            .agents
+            .get(id)
+            .map(|e| Arc::clone(&e))
+            .ok_or_else(|| "no such agent".to_string())?;
+        let handler = agent.handler_module.clone();
+        let (cc_changed, cb_changed) = agent.edit_grants(|cc, cb, meta| {
+            let (cc_edited, cb_edited) = edit(cc, cb);
+            if !cc_edited && !cb_edited {
+                return Ok((false, false));
+            }
+            // the same write-time checks update_agent makes, on the edited maps
+            let mut patch = serde_json::Map::new();
+            if cc_edited {
+                patch.insert("can_call".to_string(), Value::Object(cc.clone()));
+            }
+            if cb_edited {
+                patch.insert("callable_by".to_string(), Value::Object(cb.clone()));
+            }
+            if let Some(why) = crate::lifecycle::bad_grant_shape(&patch) {
+                return Err(why.to_string());
+            }
+            if let Some(hm) = handler.as_deref() {
+                if let Some(bundle) = self.bundles.get(hm) {
+                    if let Some(why) = bundle.validate_meta(&patch, meta) {
+                        return Err(why.to_string());
+                    }
+                }
+            }
+            Ok((cc_edited, cb_edited))
+        })?;
+        if cc_changed || cb_changed {
+            let mut changed = Vec::new();
+            if cc_changed {
+                changed.push(Value::String("can_call".to_string()));
+            }
+            if cb_changed {
+                changed.push(Value::String("callable_by".to_string()));
+            }
+            let mut ev = serde_json::Map::new();
+            ev.insert("agent_id".to_string(), Value::String(id.0.clone()));
+            ev.insert("kind".to_string(), Value::String("updated".to_string()));
+            ev.insert("changed".to_string(), Value::Array(changed));
+            self.publish_state(&Value::Object(ev));
+        }
+        Ok(cc_changed || cb_changed)
+    }
+
     /// THE COUNTER COMES BACK WITH THE GUID: the root record's reserved bound
     /// (`next_id`) is where this run starts, and this run's first block is
     /// reserved in memory. Never edits a record (save → load → save is

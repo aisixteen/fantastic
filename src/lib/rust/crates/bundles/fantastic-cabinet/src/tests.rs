@@ -1346,3 +1346,32 @@ async fn a_waiting_holder_keeps_the_manager_lock_in_the_table() {
     waiter.await.unwrap();
     assert!(!MANAGER_LOCKS.lock().unwrap().contains_key(id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wire_does_not_drop_a_concurrent_callable_by_key() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, _log) = world(&tmp).await;
+    let id = AgentId::from(MASTER);
+    for round in 0..100 {
+        let (k1, k2) = (Arc::clone(&kernel), Arc::clone(&kernel));
+        let key = format!("wired_{round}");
+        let view = format!("view_{round}");
+        let (k, v) = (key.clone(), view.clone());
+        let a =
+            tokio::spawn(async move { wire(&k1, MASTER, &[], &[(k, json!(["*"]))], &[]).await });
+        let id2 = id.clone();
+        let b = tokio::spawn(async move {
+            k2.edit_callable_by(&id2, |cb| {
+                cb.insert(v, json!(["*"]));
+                true
+            })
+        });
+        assert_eq!(a.await.unwrap(), None);
+        b.await.unwrap().unwrap();
+        let cb = meta(&kernel, MASTER, "callable_by");
+        assert!(
+            cb.get(&key).is_some() && cb.get(&view).is_some(),
+            "round {round}: {cb}"
+        );
+    }
+}
