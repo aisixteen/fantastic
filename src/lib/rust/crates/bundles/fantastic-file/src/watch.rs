@@ -27,6 +27,8 @@ use notify::event::EventKind;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 
+use crate::views;
+
 /// A burst of disk events (an editor's save) inside this window is one `changed`
 /// per path (python `WATCH_DEBOUNCE_MS`).
 const DEBOUNCE: Duration = Duration::from_millis(50);
@@ -124,6 +126,13 @@ pub(crate) struct Watches {
 /// Who holds a watch: the sending agent, or the operator.
 fn caller() -> String {
     fantastic_kernel::send::current_origin().map_or_else(|| "kernel".to_string(), |a| a.0)
+}
+
+fn parent_of(norm: &str) -> String {
+    match norm.rsplit_once('/') {
+        Some((p, _)) if !p.is_empty() => p.to_string(),
+        _ => ".".to_string(),
+    }
 }
 
 fn under(root: &Path, norm: &str) -> PathBuf {
@@ -379,6 +388,9 @@ fn rewatch(
     held.watcher = Some(watcher);
     let me = agent_id.clone();
     let k = Arc::clone(kernel);
+    // The holders as they stand now: every watch change re-arms this task, so the
+    // snapshot is the holders of this watcher's life.
+    let holders = held.paths.clone();
     let root = root.to_path_buf();
     kernel.spawn_task(agent_id, "watch_path", async move {
         let mut batch: Vec<notify::Event> = Vec::new();
@@ -449,6 +461,7 @@ fn rewatch(
                 if crate::exposed(&allow, &rel) {
                     k.emit(&me, json!({"type": "changed", "path": rel, "kind": kind}))
                         .await;
+                    relay_to_views(&k, &me, &holders, &rel, kind);
                 }
             }
             if closed {
@@ -457,6 +470,33 @@ fn rewatch(
         }
     });
     Ok(missing)
+}
+
+/// python `tools._relay_to_views`: push one change to each VIEW caller whose watch
+/// covers it, and only where its scope on this bridge admits it (its `callable_by` entry
+/// here). The kernel's own watch would mirror every change to a watcher, so a view is
+/// never a kernel watcher of its bridge.
+pub(crate) fn relay_to_views(
+    kernel: &Arc<Kernel>,
+    bridge: &AgentId,
+    holders: &BTreeMap<String, BTreeSet<String>>,
+    rel: &str,
+    kind: &str,
+) {
+    let ev = json!({"type": "changed", "path": rel, "kind": kind});
+    for (norm, callers) in holders {
+        if rel != norm && parent_of(rel) != *norm {
+            continue;
+        }
+        for caller in callers {
+            let caller = AgentId::from(caller.as_str());
+            if let Some((scope_kind, own)) = views::caller_scope(kernel, &bridge.0, Some(&caller)) {
+                if views::inside(&scope_kind, &own, rel) {
+                    views::deliver(kernel, &caller.0, ev.clone());
+                }
+            }
+        }
+    }
 }
 
 /// An event path → the watched path it belongs to (a file, or a watched

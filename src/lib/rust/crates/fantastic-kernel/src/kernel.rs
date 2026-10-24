@@ -538,10 +538,12 @@ impl Kernel {
         else {
             return false;
         };
-        bundle
-            .verb_docs()
-            .as_object()
-            .is_some_and(|v| v.contains_key(verb))
+        // PER-INSTANCE first, as `docs` reads it: an agent whose bundle names its own
+        // table answers that table (python `advertises` reads `instance_verbs`).
+        let table = bundle
+            .instance_verb_docs(&agent)
+            .unwrap_or_else(|| bundle.verb_docs());
+        table.as_object().is_some_and(|v| v.contains_key(verb))
     }
 
     /// DEPTH-FIRST `on_shutdown`, children before their parent. A hook that
