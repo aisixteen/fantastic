@@ -196,6 +196,30 @@ async fn a_stream_that_ends_without_finish_reason_is_an_error() {
 /// A raw HTTP server writing `pieces` as separate TCP writes, then closing.
 /// Reads the whole request first so the close is clean.
 async fn raw_server(pieces: Vec<Vec<u8>>) -> String {
+    raw_server_with_head(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+        pieces,
+        true,
+    )
+    .await
+}
+
+/// A chunked 200 head: the body is framed by hand with [`http_chunk`].
+const CHUNKED_HEAD: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+    transfer-encoding: chunked\r\nconnection: close\r\n\r\n";
+
+/// One HTTP/1.1 chunk: its size in hex, the payload, the CRLF.
+fn http_chunk(payload: &str) -> Vec<u8> {
+    format!("{:x}\r\n{payload}\r\n", payload.len()).into_bytes()
+}
+
+/// A raw HTTP server writing `head` then `pieces` as separate TCP writes. With
+/// `then_close` the socket closes after them; without it the server goes silent.
+async fn raw_server_with_head(
+    head: &'static [u8],
+    pieces: Vec<Vec<u8>>,
+    then_close: bool,
+) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -220,16 +244,16 @@ async fn raw_server(pieces: Vec<Vec<u8>>) -> String {
                 }
             }
         }
-        sock.write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
-        )
-        .await
-        .unwrap();
+        sock.write_all(head).await.unwrap();
         for p in pieces {
             sock.write_all(&p).await.unwrap();
             sock.flush().await.unwrap();
         }
-        sock.shutdown().await.ok();
+        if then_close {
+            sock.shutdown().await.ok();
+        } else {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        }
     });
     format!("http://{addr}/v1")
 }
@@ -422,11 +446,93 @@ async fn a_stream_dropped_mid_answer_says_vllm_died() {
     let p = provider(&format!("http://{addr}/v1"));
     let e = drain(&p, &hi(), None).await.expect_err("dropped");
     assert!(e.message.contains("died or restarted"), "{e}");
+    // the underlying socket error is named, so a gym log can say what broke
+    assert!(e.message.contains("(cause:"), "{e}");
+}
+
+#[tokio::test]
+async fn a_body_error_after_finish_reason_is_a_normal_answer() {
+    // vLLM said the answer was finished, then the tunnel closed the chunked body
+    // without its terminating 0-chunk: the answer is complete, not a dropped stream
+    let finished = format!(
+        "data: {}\n\n",
+        delta(Some("stop"), json!({"content": "answer"}))
+    );
+    let timings = format!(
+        "data: {}\n\n",
+        json!({"choices": [], "timings": {"predicted_n": 3}})
+    );
+    let endpoint = raw_server_with_head(
+        CHUNKED_HEAD,
+        vec![http_chunk(&finished), http_chunk(&timings)],
+        true,
+    )
+    .await;
+    let p = provider(&endpoint);
+    assert_eq!(
+        drain(&p, &hi(), None).await.expect("a complete answer"),
+        "answer"
+    );
+    assert_eq!(p.report().stop_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn a_main_turn_cut_still_fails_when_the_body_errors_after_length_finish() {
+    // the same abrupt close after finish_reason `length`: the turn was cut at its
+    // bound, so the cut error stands — the swallowed close must not turn it into an answer
+    let cut = format!(
+        "data: {}\n\n",
+        delta(Some("length"), json!({"content": "half"}))
+    );
+    let endpoint = raw_server_with_head(CHUNKED_HEAD, vec![http_chunk(&cut)], true).await;
+    let p = provider(&endpoint);
+    let e = drain(&p, &hi(), None)
+        .await
+        .expect_err("a cut main turn fails");
+    assert!(e.message.contains("cut at max_tokens=8000"), "{e}");
+}
+
+#[tokio::test]
+async fn a_last_data_line_without_newline_is_decoded() {
+    // the finish chunk arrives as the last bytes, with no newline, and the body
+    // closes cleanly: the line is still decoded and the answer ends normally
+    let last = format!(
+        "data: {}",
+        delta(Some("stop"), json!({"content": "answer"}))
+    );
+    let endpoint = raw_server(vec![last.into_bytes()]).await;
+    let p = provider(&endpoint);
+    assert_eq!(
+        drain(&p, &hi(), None).await.expect("a complete answer"),
+        "answer"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_after_finish_is_still_a_stall() {
+    // a finished answer followed by silence is still a stall on the read clock
+    let finished = format!(
+        "data: {}\n\n",
+        delta(Some("stop"), json!({"content": "answer"}))
+    );
+    let ep = raw_server_with_head(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n",
+        vec![finished.into_bytes()],
+        false,
+    )
+    .await;
+    let mut p = provider(&ep);
+    p.read_clock = 0.2;
+    let e = drain(&p, &hi(), None).await.expect_err("stalled");
+    assert!(e.message.contains("stream_stalled"), "{e}");
+    assert!(e.message.contains("sent no bytes for 0.2s"), "{e}");
 }
 
 #[test]
 fn each_connection_failure_says_what_it_means() {
-    let t = |connect, timeout| classify(connect, timeout, "http://gpu:8000/v1", 5.0, 900.0).message;
+    let t = |connect, timeout| {
+        classify(connect, timeout, "http://gpu:8000/v1", 5.0, 900.0, None).message
+    };
     assert!(t(true, true).contains("within connect_timeout=5s — the instance is STOPPED"));
     assert!(t(true, false).contains("not listening yet"));
     assert!(t(false, true)
