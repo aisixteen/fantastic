@@ -546,8 +546,22 @@ impl VllmProvider {
             &self.endpoint,
             self.connect_timeout,
             self.read_clock,
+            None,
         )
     }
+}
+
+/// The socket error and every cause under it, said in one line — what a log
+/// needs to tell a reset from a bad chunk from a timeout.
+fn error_chain(e: &reqwest::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 /// The four connection-failure sentences, chosen from what the error IS.
@@ -557,6 +571,7 @@ fn classify(
     endpoint: &str,
     connect_timeout: f64,
     read_clock: f64,
+    cause: Option<&str>,
 ) -> ProviderError {
     // every branch here is the LINK failing, not the model or the request (#198)
     if connect && timeout {
@@ -581,9 +596,10 @@ fn classify(
             .message,
         )
     } else {
+        let why = cause.map(|c| format!(" (cause: {c})")).unwrap_or_default();
         ProviderError::transport(format!(
             "{NAME}: {endpoint} dropped the stream mid-answer — vLLM died or \
-             restarted; this turn is NOT complete"
+             restarted{why}; this turn is NOT complete"
         ))
     }
 }
@@ -728,44 +744,69 @@ fn consume_sse(
                     return None;
                 }
                 let Some(chunk_res) = inner.next().await else {
-                    // EOF without `[DONE]`: the same ending checks apply.
+                    // EOF without `[DONE]`: the same ending checks apply, and a
+                    // last data line with no newline is still decoded.
                     finished = true;
-                    st.end(&mut pending);
+                    match st.decode_buffered(true, &mut pending) {
+                        Ok(_) => st.end(&mut pending),
+                        Err(e) => pending.push_back(Err(e)),
+                    }
                     continue;
                 };
                 match chunk_res {
                     Ok(bytes) => st.buf.extend_from_slice(&bytes),
                     Err(e) => {
-                        // a failure mid-stream: said in words, no closing marker
-                        // (python raises straight out of the generator)
                         finished = true;
-                        pending.push_back(Err(classify(
-                            false,
-                            e.is_timeout(),
-                            &st.endpoint,
-                            st.timeouts.0,
-                            st.timeouts.1,
-                        )));
+                        if e.is_timeout() {
+                            // the stall, said as every stream backend says it (#177)
+                            pending.push_back(Err(classify(
+                                false,
+                                true,
+                                &st.endpoint,
+                                st.timeouts.0,
+                                st.timeouts.1,
+                                None,
+                            )));
+                        } else if st.saw_finish {
+                            // vLLM already said the answer was finished; the body
+                            // broke after that (a tunnel closing the socket on a
+                            // clean completion). The answer is complete: end it as
+                            // a clean close, and log what broke.
+                            tracing::warn!(
+                                "{NAME}: the stream from {} broke after its finish_reason — \
+                                 the answer is complete: {}",
+                                st.endpoint,
+                                error_chain(&e)
+                            );
+                            // the cut tail may be half a line: it is ignored, not an error
+                            if let Err(tail) = st.decode_buffered(true, &mut pending) {
+                                tracing::warn!("{NAME}: ignoring the cut tail: {}", tail.message);
+                            }
+                            st.end(&mut pending);
+                        } else {
+                            // a failure before the finish: said in words, no closing
+                            // marker (python raises straight out of the generator)
+                            pending.push_back(Err(classify(
+                                false,
+                                false,
+                                &st.endpoint,
+                                st.timeouts.0,
+                                st.timeouts.1,
+                                Some(&error_chain(&e)),
+                            )));
+                        }
                         continue;
                     }
                 }
-                while let Some(nl) = st.buf.iter().position(|b| *b == b'\n') {
-                    let line_bytes: Vec<u8> = st.buf.drain(..=nl).collect();
-                    let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
-                        .trim_end_matches('\r')
-                        .to_string();
-                    match st.decode_line(&line, &mut pending) {
-                        Ok(false) => {}
-                        Ok(true) => {
-                            finished = true;
-                            st.end(&mut pending);
-                            break;
-                        }
-                        Err(e) => {
-                            finished = true;
-                            pending.push_back(Err(e));
-                            break;
-                        }
+                match st.decode_buffered(false, &mut pending) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        finished = true;
+                        st.end(&mut pending);
+                    }
+                    Err(e) => {
+                        finished = true;
+                        pending.push_back(Err(e));
                     }
                 }
             }
@@ -812,6 +853,33 @@ impl SseState {
             main_turn_max,
             tool_calls: Vec::new(),
         }
+    }
+
+    /// Decode every complete line in the buffer; with `tail`, also the rest of
+    /// the buffer, which has no newline yet. `Ok(true)` = `[DONE]`: the stream
+    /// is over.
+    fn decode_buffered(
+        &mut self,
+        tail: bool,
+        out: &mut VecDeque<Result<ProviderEvent, ProviderError>>,
+    ) -> Result<bool, ProviderError> {
+        while let Some(nl) = self.buf.iter().position(|b| *b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1])
+                .trim_end_matches('\r')
+                .to_string();
+            if self.decode_line(&line, out)? {
+                return Ok(true);
+            }
+        }
+        if tail && !self.buf.is_empty() {
+            let rest = std::mem::take(&mut self.buf);
+            let line = String::from_utf8_lossy(&rest)
+                .trim_end_matches('\r')
+                .to_string();
+            return self.decode_line(&line, out);
+        }
+        Ok(false)
     }
 
     /// Decode ONE line. `Ok(true)` = `[DONE]`: the stream is over.
