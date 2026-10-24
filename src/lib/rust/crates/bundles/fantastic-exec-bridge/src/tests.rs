@@ -711,6 +711,26 @@ async fn until(
     None
 }
 
+/// Waits until the running program's `_xbself_` drain is a live task row. `serve`
+/// registers `inbox_drain` only after `ensure_inbox` and `kernel.watch` both
+/// succeeded, so its presence proves mail sent now reaches the program.
+async fn wait_inbox_ready(kernel: &Arc<Kernel>, owner: &AgentId, secs: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let rows = kernel.tasks.rows();
+        if rows
+            .iter()
+            .any(|r| r["verb"] == "inbox_drain" && r["agent"] == owner.as_str())
+        {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("inbox_drain never registered for {owner}: {rows:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// A bare command is found on the CHILD's `PATH` only (python `proc.resolve`): no
 /// `PATH` in the child env refuses naming it, and the kernel's own PATH is never
 /// searched — std's own lookup would fall back to it, or to `/usr/bin:/bin`.
@@ -891,8 +911,10 @@ async fn an_unknown_verb_is_queued_to_the_running_program() {
     let tmp = TempDir::new().unwrap();
     let (kernel, a) = mk_kernel(&tmp).await;
     let mut rx = inbox(&kernel, &a);
+    // A slow cold start: the program registers its handler ~2.5 s after spawn.
     let code = r#"
-import threading
+import threading, time
+time.sleep(2.5)
 seen = []
 def _on(m):
     if m.get('type') == 'ping':
@@ -906,7 +928,7 @@ threading.Event().wait()
         .await
         .remove(0)
         .result;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    wait_inbox_ready(&kernel, &a, 30).await;
     let ack = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
         .await
@@ -917,6 +939,59 @@ threading.Event().wait()
         .await
         .expect("program never received the message");
     assert_eq!(pong["count"], 1, "delivered more than once: {pong}");
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
+        .await
+        .remove(0)
+        .result;
+}
+
+/// The ack is not delivery. Mail sent before the program has registered its
+/// `on_message` handler is ACKed `{queued:true}` and dropped: no `_xbself_`
+/// watcher exists yet, so the fanout mirrors it to nobody. This pins the
+/// deterministic cause behind the slow-start flake of
+/// `an_unknown_verb_is_queued_to_the_running_program`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mail_sent_before_on_message_registers_is_not_delivered_and_the_ack_does_not_prove_delivery(
+) {
+    let Some(py) = find_real_python() else {
+        return;
+    };
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = inbox(&kernel, &a);
+    let code = r#"
+import threading, time
+time.sleep(2.5)
+seen = []
+def _on(m):
+    if m.get('type') == 'ping':
+        seen.append(1)
+        kernel.emit({'type': 'pong', 'count': len(seen)})
+kernel.on_message(_on)
+threading.Event().wait()
+"#;
+    let _ = kernel
+        .send(vec![Item::new(a.clone(), py_start(&py, code, true))])
+        .await
+        .remove(0)
+        .result;
+    // Sent immediately: the program is still in its 2.5 s startup sleep.
+    let ack = kernel
+        .send(vec![Item::new(a.clone(), json!({"type": "ping"}))])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(ack["queued"], true, "not queued: {ack}");
+    let rows = kernel.tasks.rows();
+    assert!(
+        !rows.iter().any(|r| r["verb"] == "inbox_drain"),
+        "the drain registered too early for this test: {rows:?}"
+    );
+    assert!(
+        until(&mut rx, |v| v["type"] == "pong", 1).await.is_none(),
+        "a ping sent before on_message was delivered"
+    );
     let _ = kernel
         .send(vec![Item::new(a.clone(), json!({"type": "stop"}))])
         .await
