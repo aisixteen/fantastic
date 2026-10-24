@@ -124,7 +124,11 @@ fn edit_grants_publishes_one_updated_event_only_when_something_changed() {
         assert_eq!(evs[0]["changed"], json!(["callable_by"]));
     }
     kernel.edit_callable_by(&id, |_| false).unwrap();
-    assert_eq!(events.lock().unwrap().len(), 1, "a no-change edit publishes nothing");
+    assert_eq!(
+        events.lock().unwrap().len(),
+        1,
+        "a no-change edit publishes nothing"
+    );
 }
 
 #[test]
@@ -145,6 +149,8 @@ fn edit_grants_persists_both_keys_across_a_restart() {
                 .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":"child_m"}))])
                 .await.remove(0).result;
             let id = AgentId::from("child_m");
+            // settle the create's own write, so only the edits can make the record dirty again
+            kernel.flush_records().await;
             let _ = kernel.edit_callable_by(&id, |cb| {
                 cb.insert("view_a".to_string(), json!(["*"]));
                 true
@@ -154,6 +160,28 @@ fn edit_grants_persists_both_keys_across_a_restart() {
                 true
             });
             kernel.flush_records().await;
+            // on disk NOW, before any shutdown flush could persist it regardless
+            fn find_record(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+                for e in std::fs::read_dir(dir).ok()?.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        if p.ends_with("child_m") && p.join("agent.yaml").is_file() {
+                            return Some(p.join("agent.yaml"));
+                        }
+                        if let Some(f) = find_record(&p) {
+                            return Some(f);
+                        }
+                    }
+                }
+                None
+            }
+            let on_disk = find_record(&store_root)
+                .map(|f| std::fs::read_to_string(f).unwrap_or_default())
+                .unwrap_or_default();
+            assert!(
+                on_disk.contains("view_a") && on_disk.contains("view_b"),
+                "the edit alone persisted both keys: {on_disk:?}"
+            );
         });
         shutdown(tmp.path()).unwrap();
     }

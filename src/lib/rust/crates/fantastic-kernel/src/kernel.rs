@@ -315,7 +315,7 @@ impl Kernel {
     /// Edit an agent's `callable_by` as ONE step under the record's lock: `edit` reads
     /// the map as it is at the write (not as a plan read it earlier) and returns whether
     /// it changed it. Merging one key this way keeps every other key another writer put
-    /// there, which a whole-key `update` does not. `None` when no such agent; a change
+    /// there, which a whole-key `update` does not. `Err` when there is no such agent or a write-time check refuses the shape; a change
     /// publishes the `updated` event that drives the root loader's persist.
     pub fn edit_callable_by(
         &self,
@@ -357,7 +357,10 @@ impl Kernel {
     pub fn edit_grants(
         &self,
         id: &AgentId,
-        edit: impl FnOnce(&mut serde_json::Map<String, Value>, &mut serde_json::Map<String, Value>) -> (bool, bool),
+        edit: impl FnOnce(
+            &mut serde_json::Map<String, Value>,
+            &mut serde_json::Map<String, Value>,
+        ) -> (bool, bool),
     ) -> Result<bool, String> {
         let agent = self
             .agents
