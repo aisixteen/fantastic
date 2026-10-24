@@ -403,8 +403,9 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
         env["E2E_RUN_DIR"] = str(logdir)
         # THE METER (E2E_METER=1): this test's model traffic goes through the
         # run's forwarder under the test's own name — see helpers/meter.py.
-        if meter := os.environ.get("E2E_METER_URL"):
-            env["VLLM_ENDPOINT"] = f"{meter}/m/{name}"
+        if (meter := os.environ.get("E2E_METER_URL")) and bk.name in METERED_ENDPOINT:
+            var = METERED_ENDPOINT[bk.name]
+            env[var] = metered_endpoint(meter, name, os.environ[var])
         began = time.monotonic()
         stop_s = int(t.get("hard_stop_minutes") or HARD_STOP_S // 60) * 60
         results[name] = {"state": "running", "since": began}
@@ -533,15 +534,35 @@ class _NoBackend:
         return []
 
 
-async def start_meter(logdir: Path):
-    """Spawn helpers/meter.py in front of `VLLM_ENDPOINT`; per-request usage
-    lands in `<logdir>/meter.jsonl`. Opt-in (`E2E_METER=1`), vLLM only."""
+#: The plugs the meter can front, and the env var each one reads its endpoint from.
+METERED_ENDPOINT = {"vllm": "VLLM_ENDPOINT", "anthropic": "ANTHROPIC_ENDPOINT"}
+
+
+def metered_endpoint(meter: str, name: str, upstream: str) -> str:
+    """A test's endpoint through the meter: `<meter>/m/<name>` plus the endpoint's own
+    path, so the client's request path (`v1/messages`, `v1/chat/completions`) lands
+    under the meter's route and is forwarded to the origin with that path."""
+    from urllib.parse import urlsplit
+
+    return f"{meter}/m/{name}{urlsplit(upstream).path.rstrip('/')}"
+
+
+async def start_meter(logdir: Path, bk):
+    """Spawn helpers/meter.py in front of the active plug's endpoint (`METERED_ENDPOINT`);
+    per-request usage lands in `<logdir>/meter.jsonl`. Opt-in (`E2E_METER=1`)."""
     import socket
     import urllib.request
+    from urllib.parse import urlsplit
 
-    upstream = os.environ.get("VLLM_ENDPOINT")
-    if not upstream:
-        raise SystemExit("E2E_METER=1 needs VLLM_ENDPOINT — the meter forwards to it")
+    var = METERED_ENDPOINT.get(bk.name)
+    if not var:
+        raise SystemExit(f"E2E_METER=1 has no endpoint to front for BACKEND={bk.name}")
+    full = os.environ.get(var)
+    if not full:
+        raise SystemExit(f"E2E_METER=1 needs {var} — the meter forwards to it")
+    parts = urlsplit(full)
+    # The meter forwards to the origin; the endpoint's path rides in the test's URL.
+    upstream = f"{parts.scheme}://{parts.netloc}"
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -752,7 +773,7 @@ async def main() -> int:
         print(f"═══ built {rt} in {time.monotonic() - t0:.1f}s", flush=True)
     meter = None
     if os.environ.get("E2E_METER") == "1":
-        meter = await start_meter(logdir)
+        meter = await start_meter(logdir, bk)
     if prebuilt:
         # Cells inherit this and skip their own build; a missing binary still
         # fails loud there rather than being silently tolerated.
