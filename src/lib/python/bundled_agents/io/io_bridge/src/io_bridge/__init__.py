@@ -43,6 +43,7 @@ from io_bridge._engine import (
     _test_transport_inject,
     boot,
     dispatch,
+    forward_payload_secret,
     gate_inbound,
     make_verbs,
     on_delete,
@@ -51,6 +52,7 @@ from io_bridge._engine import (
 )
 from io_bridge._inbound import (
     hand_in,
+    hand_in_outcome,
     inbound_call,
     inbound_emit,
     inbound_state_subscribe,
@@ -111,6 +113,8 @@ __all__ = [
     "_test_transport_inject",
     # the inbound verbs of a wire leg + the transport's one hand-in
     "hand_in",
+    "forward_payload_secret",
+    "hand_in_outcome",
     "inbound_call",
     "inbound_emit",
     "inbound_watch",

@@ -138,6 +138,26 @@ def current_secret() -> tuple:
     return _current_secret.get()
 
 
+#: The reply marks a dispatch has noted (`note_reply_secret`): a list the dispatch
+#: owns, one per attempt. None outside a dispatch that collects them.
+_reply_sink: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "_reply_sink", default=None
+)
+
+
+def note_reply_secret(marks) -> None:
+    """Note the secret paths of the REPLY this dispatch is returning: dotted paths
+    into its reply (`fields.api_key`). The kernel records the settle row, the ledger
+    and the state stream with those values as `[secret]`; the caller still gets the
+    reply whole. A handler that relays a reply from another kernel (a bridge's
+    forward) notes the marks that kernel sent with it. No-op outside a dispatch.
+    Malformed paths are dropped when the outcome is settled."""
+    sink = _reply_sink.get()
+    if sink is None or not isinstance(marks, (list, tuple)):
+        return
+    sink.extend(marks)
+
+
 def current_origin() -> str | None:
     """The id that ORIGINATED this dispatch, or None for an operator send.
 

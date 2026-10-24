@@ -34,6 +34,7 @@ from kernel._kernel import (
     _summarize_payload,
     current_origin,
     current_secret,
+    note_reply_secret,
     current_task,
     page,
 )
@@ -58,6 +59,7 @@ __all__ = [
     "page",
     "current_origin",
     "current_secret",
+    "note_reply_secret",
     "current_task",
     "_current_sender",
     "_summarize_payload",
