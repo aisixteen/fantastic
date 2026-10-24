@@ -548,6 +548,26 @@ async def _store_call(self_id: str, kernel, payload: dict) -> dict:
     return res if isinstance(res, dict) else {}
 
 
+async def _purge(self_id: str, kernel) -> None:
+    """Purge a deleted agent's rows from its memory store (`on_delete`), unless the
+    delete asked `keep_memory:true`. ONE gated `prune` of every row the agent owns
+    (no `keep`: the fold, view and bookkeeping rows go too; fold refs and the text
+    index follow in the store). Delete is not refusable: a store that is missing,
+    already gone or refuses is logged and the cascade goes on."""
+    from kernel._agent import keep_memory
+
+    if keep_memory(kernel, self_id):
+        return
+    try:
+        _store_of(self_id, kernel)
+    except MemoryStoreError:
+        return
+    try:
+        await _store_call(self_id, kernel, {"type": "prune", "before_id": 2**63 - 1})
+    except Exception as e:
+        print(f"  [cascade] {self_id} memory purge failed: {e}")
+
+
 # The store holds this agent's conversation AND its view rows. The CONVERSATION a
 # reader sees is everything but the view and the recorded fold anchors (an allow-list
 # of kinds to HIDE: a kind forgotten here lands in the model's prompt).
@@ -4012,16 +4032,18 @@ async def on_delete(agent) -> None:
     """The `on_delete` bundle hook, SHARED by every backend (each re-exports it,
     like `on_cancel`; vllm wraps it to drop its own table too). Drops every row
     this module keeps for the deleted id, so an id re-created later starts clean
-    and nothing leaks: the FIFO lock and queue, the in-flight
-    entry, the projection and its marks, the fold and recall counters, the
-    calibration, the silent streaks, the strip set, and this kernel's head,
-    bodies and watchers.
+    and nothing leaks: its rows in the memory store (its conversation, folds and
+    search index; `delete_agent keep_memory:true` keeps those), the FIFO lock and
+    queue, the in-flight entry, the projection and its marks, the fold and recall
+    counters, the calibration, the silent streaks, the strip set, and this
+    kernel's head, bodies and watchers.
 
     NOT `_incarnation`: it stays monotonic across a re-create, so a reply to a
     call the deleted agent made never becomes a live turn of the new one."""
     from ai_core.strategies.strip import _stripped
 
     id = agent.id
+    await _purge(id, agent)
     for table in (
         _locks,
         _queue,
