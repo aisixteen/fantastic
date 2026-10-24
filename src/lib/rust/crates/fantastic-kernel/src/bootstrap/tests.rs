@@ -766,6 +766,13 @@ fn edit_grants_refused_in_one_map_writes_neither() {
             .record()
             .meta
     };
+    let updated = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let u = std::sync::Arc::clone(&updated);
+    let _tap = kernel.add_state_subscriber(std::sync::Arc::new(move |ev, _body| {
+        if ev["kind"] == "updated" {
+            u.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }));
     let before = meta(&kernel);
     // a good can_call entry and a malformed callable_by one: the whole step is refused
     let refused = kernel.edit_grants(&id, |cc, cb| {
@@ -782,6 +789,11 @@ fn edit_grants_refused_in_one_map_writes_neither() {
     );
     assert_eq!(m.get("callable_by"), before.get("callable_by"), "{m:?}");
     assert!(m["can_call"].get("peer").is_none(), "{m:?}");
+    assert_eq!(
+        updated.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a refused edit publishes no updated event"
+    );
     // the same step with a good callable_by writes both
     let ok = kernel.edit_grants(&id, |cc, cb| {
         cc.insert("peer".to_string(), json!(["*"]));
