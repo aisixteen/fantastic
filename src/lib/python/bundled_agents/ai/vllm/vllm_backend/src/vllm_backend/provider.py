@@ -17,7 +17,8 @@ What is vLLM-specific here, and why each piece exists:
 - ONE system message, at index 0 — Qwen's chat template raises "System message
   must be at the beginning" otherwise.
 - A stream that ends with NO `finish_reason` means vLLM died mid-answer; that
-  is an error, never a completion.
+  is an error, never a completion. A read/protocol error AFTER a `finish_reason`
+  is a tunnel closing a finished body: the answer is complete, logged.
 - The KV-cache SESSION TABLE (`SessionTable`): vLLM's prefix cache makes a warm
   conversation answer ~6.5× faster (318 ms vs 2056 ms time-to-first-token on a
   ~16k prompt); past the server's KV capacity it preempts and a preempted
@@ -242,6 +243,19 @@ def one_system_message(messages: list[dict]) -> list[dict]:
     if not systems:
         return rest
     return [{"role": "system", "content": "\n\n".join(systems)}, *rest]
+
+
+def error_chain(exc: BaseException) -> str:
+    """The error and every cause under it, said in one line — what a log needs
+    to tell a reset from a bad chunk from a timeout."""
+    parts = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(str(cur) or type(cur).__name__)
+        cur = cur.__cause__ or cur.__context__
+    return ": ".join(parts)
 
 
 class VllmProvider:
@@ -493,11 +507,22 @@ class VllmProvider:
                 transport=True,
             ) from e
         except (httpx.ReadError, httpx.RemoteProtocolError) as e:
-            raise ProviderError(
-                f"vllm_backend: {self._endpoint} dropped the stream mid-answer — "
-                "vLLM died or restarted; this turn is NOT complete",
-                transport=True,
-            ) from e
+            if not saw_finish:
+                raise ProviderError(
+                    f"vllm_backend: {self._endpoint} dropped the stream mid-answer — "
+                    f"vLLM died or restarted (cause: {error_chain(e)}); "
+                    "this turn is NOT complete",
+                    transport=True,
+                ) from e
+            # vLLM already said the answer was finished; the body broke after
+            # that (a tunnel closing a clean completion). The answer is complete:
+            # fall through to the usual end checks, and log what broke.
+            log.warning(
+                "vllm_backend: the stream from %s broke after its finish_reason — "
+                "the answer is complete: %s",
+                self._endpoint,
+                error_chain(e),
+            )
         if thinking:
             yield THINK_CLOSE
         if tool_calls:

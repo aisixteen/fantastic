@@ -119,5 +119,5 @@ so a vLLM started without `--api-key` works as it is.
 - connection refused → vLLM is not listening yet (it loads for ~75 s after boot), or the tunnel is down
 - no answer within `connect_timeout` → the instance is stopped, or the tunnel/port is wrong
 - HTTP 401/403 → the door wants a key: name it in `credentials` (`{store, ref}`)
-- the stream drops, or ends without a `finish_reason` → vLLM died mid-answer; the turn is not complete
+- the stream drops, or ends without a `finish_reason` → vLLM died mid-answer; the turn is not complete (a read/protocol error after a `finish_reason` is a complete answer: logged, the turn ends normally)
 - `finish_reason: length` → a cut (`last_stop_reason: max_tokens`), so the caller can continue
