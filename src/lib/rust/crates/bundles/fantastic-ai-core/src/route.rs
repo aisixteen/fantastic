@@ -126,27 +126,12 @@ pub(crate) fn deliver_soon(
     let born = crate::state::incarnation(&AgentId::from(target));
     // ONE CHAIN PER AGENT (#227 Bug 4): the chain token is read when the routing
     // decision is made, not when the delivery later runs.
-    let chain =
-        if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
-            state_for(&AgentId::from(target))
-                .chain
-                .lock()
-                .expect("chain poisoned")
-                .token
-                .clone()
-        } else {
-            String::new()
-        };
-    deliver_soon_with_born(
-        kernel,
-        target,
-        text,
-        client_id,
-        system_prompt,
-        born,
-        notice,
-        chain,
-    );
+    let chain = if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == target) {
+        state_for(&AgentId::from(target)).chain.lock().expect("chain poisoned").token.clone()
+    } else {
+        String::new()
+    };
+    deliver_soon_with_born(kernel, target, text, client_id, system_prompt, born, notice, chain);
 }
 
 /// NOT AWAITED. A `send` to an AI agent takes that agent's FIFO lock and does
@@ -743,17 +728,17 @@ pub(crate) fn awaiting() -> &'static Mutex<HashMap<String, HashSet<String>>> {
     AWAITING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Inquiry answers that arrived BEFORE their pid was registered as owed, by
-/// agent. The answer can land first: the peer's reply runs on its own task while
-/// the asker's route is still between `kernel.send` and [`owe`]. Python has no
-/// such window only because its loop is single-threaded.
+/// Inquiry answers that arrived BEFORE their pid was owed, by agent. The answer
+/// can land first: the peer's reply runs on its own task while the asker's route
+/// is still between `kernel.send` and [`owe`]. Python has no such window only
+/// because its loop is single-threaded.
 fn settled_early() -> &'static Mutex<HashMap<String, HashSet<String>>> {
     static SETTLED_EARLY: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
     SETTLED_EARLY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Early answers kept per agent. A pid is only ever settled once, so the set
-/// stays small; the cap keeps stray inquiry-shaped tags from growing it.
+/// Early answers kept per agent. A pid is settled once, so the set stays small;
+/// the cap keeps stray inquiry-shaped tags from growing it without limit.
 const SETTLED_EARLY_CAP: usize = 64;
 
 /// Record that `self_id` is owed an answer under `pid`. An answer that already
@@ -2050,9 +2035,7 @@ async fn deliver_grouped(
             notice,
             // ONE CHAIN PER AGENT (#227 Bug 4): the token is read when this routing
             // decision is made, as in `deliver_soon`.
-            if notice
-                || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str())
-            {
+            if notice || fantastic_kernel::current_origin().is_some_and(|o| o.as_str() == dest.as_str()) {
                 state_for(&AgentId::from(dest.as_str()))
                     .chain
                     .lock()
