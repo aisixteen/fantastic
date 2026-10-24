@@ -13,6 +13,7 @@
 //! | `canvas` | `web` (the HTTP host), the canvas (`canvas_page`, `canvas_ws` + its helpers) | `web`, and serves the canvas |
 //! | `ai` | with a BACKEND: the ROOT AI `ai` on it (`kern/root_ai`) — made, re-pointed, or remade on a new backend | the root AI, composer focused; with none, the set-up page |
 //! | `run COMMAND [ARGS…]` | a terminal running exactly that command, from `$PATH`, as is (`kern/terminal`) — the user's own program at their discretion | the terminal (with `canvas`: a terminal cell) |
+//! | `system` | the machine's agents under `user` (`kern/system`): `power` (Linux with D-Bus only; refused elsewhere) | nothing of its own — only when it is the sole recipe, the first system agent |
 //!
 //! `ai` BACKENDS (the word names the server it talks to):
 //! - `vllm -p PORT [--host H] [--kv-overflow evict|reject]` — the rest is read from the server
@@ -40,6 +41,8 @@ pub enum Recipe {
     Canvas,
     Ai,
     Run,
+    /// The machine's agents (fantastic OS, Linux).
+    System,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,13 +63,18 @@ impl Opts {
         self.recipes.contains(&Recipe::Canvas)
     }
 
-    /// What the screen opens on: the last recipe named.
+    pub fn system(&self) -> bool {
+        self.recipes.contains(&Recipe::System)
+    }
+
+    /// What the screen opens on: the last recipe named. `system` shows nothing
+    /// of its own: it opens the screen only as the sole recipe.
     pub fn shows(&self) -> Option<Recipe> {
-        self.recipes.last().copied()
+        self.recipes.iter().rev().find(|r| **r != Recipe::System).or(self.recipes.last()).copied()
     }
 }
 
-const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …]`, `fantastic mcp`, `fantastic send <item>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
+const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …] [system]`, `fantastic mcp`, `fantastic send <item>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))
@@ -124,7 +132,15 @@ fn backend(word: &str, f: AiFlags) -> Result<Backend, String> {
     }
 }
 
+/// Why `system` is refused off Linux.
+const SYSTEM_NEEDS_LINUX: &str = "`system` needs Linux with D-Bus: the system agents are fantastic OS's";
+
 pub fn parse(args: &[String]) -> Result<Opts, String> {
+    parse_on(args, cfg!(target_os = "linux"))
+}
+
+/// [`parse`], told whether this OS is Linux (the `system` word's one need).
+fn parse_on(args: &[String], linux: bool) -> Result<Opts, String> {
     let mut o = Opts { recipes: Vec::new(), port: None, bind: None, headless: false, ai: None, run: None };
     let mut i = 0;
     let next = |i: &mut usize, what: &str| -> Result<String, String> {
@@ -137,11 +153,17 @@ pub fn parse(args: &[String]) -> Result<Opts, String> {
             "--port" => o.port = Some(port_of(&next(&mut i, "--port needs a number")?, "--port")?),
             "--host" => o.bind = Some(bind_of(&next(&mut i, "--host needs an IP address")?)?),
             "canvas" => push(&mut o.recipes, Recipe::Canvas),
+            "system" => {
+                if !linux {
+                    return Err(SYSTEM_NEEDS_LINUX.into());
+                }
+                push(&mut o.recipes, Recipe::System)
+            }
             "ai" => {
                 push(&mut o.recipes, Recipe::Ai);
                 let word = match args.get(i + 1).map(String::as_str) {
                     Some(w @ ("vllm" | "ollama" | "responses" | "anthropic")) => w.to_string(),
-                    Some(w) if !w.starts_with('-') && !matches!(w, "canvas" | "run" | "ai") => {
+                    Some(w) if !w.starts_with('-') && !matches!(w, "canvas" | "run" | "ai" | "system") => {
                         return Err(format!("`ai` takes vllm, ollama, responses or anthropic, got `{w}`"))
                     }
                     _ => {
@@ -298,6 +320,35 @@ mod tests {
         assert!(p("ai vllm -p 1 --model m").is_err(), "a flag the backend does not take is refused");
         assert!(p("ai vllm -p 1 --kv-overflow drop").is_err());
         assert_eq!(p("ai vllm -p 1 canvas").unwrap().recipes, vec![Recipe::Ai, Recipe::Canvas], "flags end at the next recipe");
+    }
+
+    fn p_on(s: &str, linux: bool) -> Result<Opts, String> {
+        parse_on(&s.split_whitespace().map(str::to_string).collect::<Vec<_>>(), linux)
+    }
+
+    #[test]
+    fn system_recipe_parses_and_is_refused_off_linux() {
+        let o = p_on("system", true).unwrap();
+        assert_eq!(o.recipes, vec![Recipe::System]);
+        assert!(o.system() && !o.canvas() && !o.headless, "the terminal is the View");
+        let c = p_on("canvas system", true).unwrap();
+        assert!(c.system() && c.canvas() && c.headless, "`canvas system` is the system canvas");
+        assert_eq!(p_on("system canvas", true).unwrap().recipes, vec![Recipe::System, Recipe::Canvas]);
+        assert!(p_on("canvas system --port 8123", true).unwrap().port == Some(8123));
+        assert_eq!(p_on("ai vllm -p 1 system", true).unwrap().recipes, vec![Recipe::Ai, Recipe::System], "flags end at the next recipe");
+        let e = p_on("system", false).unwrap_err();
+        assert_eq!(e, "`system` needs Linux with D-Bus: the system agents are fantastic OS's");
+        assert!(p_on("canvas system", false).is_err());
+        assert!(!p("canvas").unwrap().system());
+    }
+
+    #[test]
+    fn system_shows_only_when_sole_recipe() {
+        assert_eq!(p_on("system", true).unwrap().shows(), Some(Recipe::System));
+        assert_eq!(p_on("canvas system", true).unwrap().shows(), Some(Recipe::Canvas));
+        assert_eq!(p_on("system canvas", true).unwrap().shows(), Some(Recipe::Canvas));
+        assert_eq!(p_on("canvas system ai", true).unwrap().shows(), Some(Recipe::Ai));
+        assert_eq!(p_on("ai system", true).unwrap().shows(), Some(Recipe::Ai));
     }
 
     #[test]

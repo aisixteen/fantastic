@@ -1,0 +1,54 @@
+<style>
+  body { margin: 0; padding: 14px 16px; font: 13px/1.45 ui-sans-serif, -apple-system, system-ui, sans-serif; color: #d8d8e4; background: transparent; }
+  h2 { margin: 14px 0 6px; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .6px; text-transform: uppercase; color: rgba(255,255,255,.55); }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); min-width: 0; }
+  .grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dim { color: rgba(255,255,255,.45); font-size: 11px; }
+  code { font: 12px ui-monospace, SFMono-Regular, monospace; }
+  button { font: inherit; font-size: 12px; color: #e6dcff; background: rgba(183,140,255,.16); border: 1px solid rgba(183,140,255,.45); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  button:hover { background: rgba(183,140,255,.32); color: #fff; }
+  button:disabled { opacity: .35; cursor: default; }
+  .empty { color: rgba(255,255,255,.35); padding: 4px 0; }
+  .err { color: #f7768e; }
+  .bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; margin: 4px 0; }
+  .bar > i { display: block; height: 100%; background: #7ee2a8; }
+</style>
+<h2>Battery</h2>
+<div id="battery"></div>
+<h2>Power</h2>
+<div id="line" class="dim"></div>
+<div id="buttons" class="row"></div>
+<div id="err" class="err"></div>
+<script>
+const ID = "power";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const VERBS = ["power_off", "reboot", "suspend", "hibernate"];
+const dur = (s) => (s > 0 ? `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min` : "");
+function draw(st) {
+  if (!st) return;
+  if (!st.available) {
+    $("battery").innerHTML = `<div class="empty">${esc(st.why || "not available")}</div>`;
+    $("line").textContent = "";
+  } else if (!st.battery) {
+    $("battery").innerHTML = `<div class="empty">no battery</div>`;
+  } else {
+    const b = st.battery;
+    const left = b.state === "discharging" ? dur(b.time_to_empty_s) : b.state === "charging" ? dur(b.time_to_full_s) : "";
+    $("battery").innerHTML = `<div class="row"><b class="grow">${Math.round(b.percent)}%</b><span class="dim">${esc(b.state.replace(/_/g, " "))}${left ? " · " + esc(left) : ""}</span></div>` +
+      `<div class="bar"><i style="width:${Math.max(0, Math.min(100, b.percent))}%"></i></div>` +
+      (b.warning === "none" || b.warning === "unknown" ? "" : `<div class="err">${esc(b.warning)}</div>`);
+  }
+  if (st.available) {
+    $("line").textContent = [st.on_battery ? "on battery" : "on mains", st.lid_closed === null ? "" : st.lid_closed ? "lid closed" : "lid open", st.sleeping ? "sleeping" : ""].filter(Boolean).join(" · ");
+  }
+  $("buttons").innerHTML = VERBS.map((v) => `<button data-v="${v}"${st.available && st.can[v] === "yes" ? "" : " disabled"} title="${esc(st.can[v])}">${v.replace("_", " ")}</button>`).join("");
+  for (const x of $("buttons").querySelectorAll("button")) x.onclick = async () => {
+    const r = await fantastic.send(ID, { type: x.dataset.v });
+    $("err").textContent = r && r.error ? r.error : "";
+  };
+}
+fantastic.watch(ID, (ev) => { if (ev && ev.type === "state") draw(ev.state); });
+fantastic.send(ID, { type: "state" }).then(draw);
+</script>

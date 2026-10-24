@@ -105,6 +105,8 @@ pub struct Boot {
     pub ai: Option<crate::kern::root_ai::Backend>,
     /// `run COMMAND…`: the program the terminal (or a canvas cell) runs.
     pub run: Option<Vec<String>>,
+    /// The `system` recipe: the machine's agents (`kern/system`).
+    pub system: bool,
     /// A terminal View is attached (it sizes the ViewModel).
     pub tui: bool,
     /// HEADLESS ONLY: where to say the page's URL, or why there is none. The
@@ -234,6 +236,20 @@ async fn run(
                             }
                         }
                     }
+                    // THE MACHINE'S AGENTS (`system`): made, their grants written here too
+                    if boot.system {
+                        match crate::kern::system::ensure(&h).await {
+                            Ok(()) => {
+                                if let Err(e) = crate::kern::reach::grant_all(&h).await {
+                                    app.note(e);
+                                }
+                            }
+                            Err(e) => {
+                                boot.say(&format!("fantastic: {e}"));
+                                app.note(e);
+                            }
+                        }
+                    }
                     // THE GRANT WATCH, once the boot's own grant writes (the canvas's
                     // above) are done; `ai` and `run` below wait on its grants
                     if let Err(e) = crate::kern::reach::start(&h).await {
@@ -291,9 +307,13 @@ async fn run(
                         }
                     }
                     // THE MCP SOCKET: a coding CLI's `fantastic mcp` attaches here.
-                    if let Err(e) = crate::mcp::listen(crate::mcp::Served::new(Arc::clone(&h))) {
-                        boot.say(&format!("fantastic: {e}"));
-                        app.note(e);
+                    match crate::mcp::listen(crate::mcp::Served::new(Arc::clone(&h))) {
+                        // serving, and the MCP socket listens: ready, for a `Type=notify` unit
+                        Ok(_) => crate::sys::notify_ready(),
+                        Err(e) => {
+                            boot.say(&format!("fantastic: {e}"));
+                            app.note(e);
+                        }
                     }
                     host = Some(h);
                     for c in [Cmd::RootReflect, Cmd::Tree, Cmd::Agents, Cmd::Ps] {

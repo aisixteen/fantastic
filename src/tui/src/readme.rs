@@ -13,11 +13,12 @@ This is `fantastic` without a terminal, so it only prints this readme: it starts
 \x20\x20fantastic canvas [ai] --port N     the browser canvas, headless: the kernel's message stream on stdout (--port the first time only)\n\
 \x20\x20fantastic [canvas] ai vllm -p PORT  the root AI `ai` on a backend (also `ai ollama -p PORT`, `ai responses|anthropic --model M`)\n\
 \x20\x20fantastic [canvas] run CMD [ARGS]   your own program from $PATH, as is, in the terminal (or a canvas cell)\n\
+\x20\x20fantastic [canvas] system           the machine's network, audio, power, displays, notifications and lock as agents (Linux)\n\
 \x20\x20fantastic --headless               no screen, no canvas: the kernel's message stream on stdout\n\
 \x20\x20fantastic mcp                      MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)\n\
 \x20\x20fantastic send '<item json>'       one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
 \x20\x20fantastic migrate-home [--dry-run]  move the files of an older layout (~/.config/fantastic, ~/.fantastic/credentials) into ~/.fantastic; --dry-run only prints the moves\n\
-\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, and the kernel's own)\n\
+\x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, `system`, and the kernel's own)\n\
 \n";
 
 /// The CLI's own docs, beside the kernel's embedded tree
@@ -29,6 +30,7 @@ const CLI_DOCS: &[(&str, &str)] = &[
     ("setup", include_str!("../docs/setup.md")),
     ("bundles", include_str!("../docs/bundles.md")),
     ("skins", include_str!("../docs/skins.md")),
+    ("system", include_str!("../docs/system.md")),
 ];
 
 /// Every doc, the CLI's first: `(key, text)`.

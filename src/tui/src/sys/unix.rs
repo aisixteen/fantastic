@@ -101,3 +101,81 @@ pub(crate) fn process_table() -> Option<String> {
     let out = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,pgid=,tpgid=,args="]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
+
+/// `READY=1` to systemd (`sd_notify(3)`), when `NOTIFY_SOCKET` names its socket
+/// (a `Type=notify` unit): one datagram to a path (`/…`) or, on Linux, the
+/// abstract namespace (`@…`). Unset: nothing. A failed send is said on stderr,
+/// and systemd's start timeout fails the unit.
+pub(crate) fn notify_ready() {
+    let Some(addr) = std::env::var_os("NOTIFY_SOCKET").filter(|v| !v.is_empty()) else { return };
+    if let Err(e) = notify_to(&addr) {
+        eprintln!("fantastic: NOTIFY_SOCKET: {e}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn notify_to(addr: &std::ffi::OsStr) -> io::Result<()> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    let bytes = addr.as_bytes();
+    let to = match bytes.first() {
+        Some(b'/') => SocketAddr::from_pathname(addr)?,
+        Some(b'@') => SocketAddr::from_abstract_name(&bytes[1..])?,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "neither a path nor an abstract address")),
+    };
+    UnixDatagram::unbound()?.send_to_addr(b"READY=1", &to)?;
+    Ok(())
+}
+
+/// Only systemd sets `NOTIFY_SOCKET`: another Unix has nothing to tell.
+#[cfg(not(target_os = "linux"))]
+fn notify_to(_addr: &std::ffi::OsStr) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod notify_tests {
+    use super::*;
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// `NOTIFY_SOCKET` is the process's: the tests take turns.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    fn heard(sock: &UnixDatagram) -> Option<String> {
+        sock.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut buf = [0u8; 64];
+        sock.recv(&mut buf).ok().map(|n| String::from_utf8_lossy(&buf[..n]).into_owned())
+    }
+
+    #[test]
+    fn notify_ready_sends_ready_to_a_bound_datagram() {
+        let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+        // a path
+        let dir = std::env::temp_dir().join(format!("fantastic_notify_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notify");
+        let sock = UnixDatagram::bind(&path).unwrap();
+        std::env::set_var("NOTIFY_SOCKET", &path);
+        notify_ready();
+        assert_eq!(heard(&sock).as_deref(), Some("READY=1"));
+        // the abstract namespace
+        let name = format!("fantastic-notify-{}", std::process::id());
+        let abs = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap()).unwrap();
+        std::env::set_var("NOTIFY_SOCKET", format!("@{name}"));
+        notify_ready();
+        assert_eq!(heard(&abs).as_deref(), Some("READY=1"));
+        // unset sends nothing
+        std::env::remove_var("NOTIFY_SOCKET");
+        notify_ready();
+        assert_eq!(heard(&sock), None);
+        assert_eq!(heard(&abs), None);
+        // a socket nobody listens on is an error, said, not a panic
+        assert!(notify_to(std::ffi::OsStr::new("/nonexistent/fantastic/notify")).is_err());
+        assert!(notify_to(std::ffi::OsStr::new("relative")).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

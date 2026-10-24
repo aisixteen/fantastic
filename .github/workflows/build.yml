@@ -166,6 +166,12 @@ jobs:
         run: cargo build --locked $CARGO_PROFILE
       - name: unit tests
         run: cargo test --locked --no-fail-fast $CARGO_PROFILE
+      # the system agents on a fake bus: dbus-daemon is on the runner, dbusmock is not
+      - name: system agents on a fake bus (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q python3-dbusmock
+          cargo test --locked $CARGO_PROFILE -p fantastic-system-agents -- --ignored
       - name: the desktop app's libraries (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
@@ -710,12 +716,20 @@ jobs:
             id fantastic
             test -L /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
             systemd-analyze verify /usr/lib/systemd/system/fantastic-kiosk.service
+            # the system canvas: its user unit enabled for every user manager, its folder, the polkit rule
+            test -f /usr/lib/systemd/user/fantastic-system.service
+            test -L /etc/systemd/user/default.target.wants/fantastic-system.service
+            test -f /usr/share/polkit-1/rules.d/50-fantastic-session.rules
+            test "$(stat -c "%U:%G %a" /home/fantastic/system)" = "fantastic:fantastic 700"
             apt-get remove -y -q fantastic-session
             test "$(readlink /etc/systemd/system/fantastic-kiosk.service)" = /dev/null
             apt-get purge -y -q fantastic-session
             test ! -e /etc/systemd/system/fantastic-kiosk.service
             test ! -e /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
             test ! -e /etc/pam.d/fantastic-kiosk
+            test ! -e /etc/systemd/user/default.target.wants/fantastic-system.service
+            test ! -e /usr/share/polkit-1/rules.d/50-fantastic-session.rules
+            test -d /home/fantastic/system
             id fantastic'
       - name: keep the packages
         uses: actions/upload-artifact@v7

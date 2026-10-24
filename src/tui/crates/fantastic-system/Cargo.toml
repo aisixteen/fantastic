@@ -1,0 +1,13 @@
+[package]
+name = "fantastic-system"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The fantastic OS system agents' models and ViewModels (power first): OS reads, changes and intents as events in, effects out. Pure: no OS, no I/O, no clock."
+
+# Plain data only: no kernel crate, no runtime, no OS crate. `tests/purity.rs`
+# holds the sources to that.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -210,3 +210,6 @@ fn failed(pid: u32, step: &str) -> ! {
 pub(crate) fn process_table() -> Option<String> {
     None
 }
+
+/// systemd's readiness message: there is no systemd here.
+pub(crate) fn notify_ready() {}

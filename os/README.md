@@ -158,11 +158,46 @@ belongs to the app.
 | the app | `/usr/bin/fantastic-app --kiosk` | the home kernel in-process, its web host on 127.0.0.1, the run file `~/.fantastic/app/home.yaml`, the Home page in one window |
 | the canvases | `/usr/bin/fantastic`, the app's sidecar | each opened folder's kernel and page, on 127.0.0.1; they outlive a restart of the kiosk (`KillUserProcesses=no`) |
 | no blanking | kernel default, `consoleblank=0`, logind `IdleAction=ignore` | the screen stays on |
+| the system canvas | `fantastic-system.service`, a user unit (`ConditionUser=fantastic`, `Type=notify`), `upower` | the machine's agents (`fantastic canvas system`), see below |
 
 `Restart=always` brings the kiosk back 2 s after the app quits or crashes, with
 no start-rate limit. The unit sets `SHELL` through the user's passwd entry
 (`/bin/bash`); the home starts every canvas in the login environment `$SHELL`
 prints, and fails without it.
+
+### The system canvas
+
+The machine's basics as agents an AI calls like any other (`power` so far:
+battery and lid over UPower, power off / reboot / suspend / hibernate over
+logind; `fantastic readme system`) live in one ordinary fantastic folder,
+`/home/fantastic/system`, whose kernel runs `fantastic canvas system` as a
+systemd **user** unit, `fantastic-system.service`. The Home lists it as `system`;
+its page holds the cells, placed from the host tiles.
+
+- **Why a unit, not the Home.** It runs from boot with nobody at the screen; systemd
+  supervises it and restarts it; and it is in no logind session, so a kiosk restart
+  leaves no stale session behind it (logind resolves `session/auto` to the caller's
+  own session, else the user's `Display`). Its environment is in the unit
+  (`DBUS_SESSION_BUS_ADDRESS`, `WAYLAND_DISPLAY`; `XDG_RUNTIME_DIR` comes from the
+  user manager), not from a login shell.
+- **Readiness.** `Type=notify`: the CLI sends `READY=1` to `$NOTIFY_SOCKET` once the
+  canvas serves and its MCP socket listens. Then `ExecStartPost=` lists it in the
+  Home (`register_home_folder`) through `fantastic send`.
+- **Files.** `usr/lib/systemd/user/fantastic-system.service` (enabled for every
+  user's manager by the maintainer scripts, `deb-systemd-helper --user`; it runs in
+  the kiosk user's only), `usr/lib/tmpfiles.d/fantastic-session.conf` (the folder,
+  `fantastic:fantastic` 0700, made at every boot), and
+  `usr/share/polkit-1/rules.d/50-fantastic-session.rules`.
+- **Polkit.** There is no polkit agent, so every `auth_*` answer is a refusal. The
+  rule grants the user `fantastic`, whatever the state of the kiosk session,
+  NetworkManager's actions and logind's power off, reboot, suspend and hibernate.
+- **Purge** removes the unit's link and keeps `/home/fantastic/system`: it is the
+  user's data, like the user.
+- **The Home's actions on this row.** `stop` is a restart (SIGTERM; systemd starts it
+  2 s later). `remove` lasts until the unit next starts; to drop it for good:
+  `systemctl --user disable --now fantastic-system`, then `remove`. `start` is not
+  for it: in those 2 s it would make a second host in the kiosk's session, holding
+  the folder while systemd retries.
 
 ### No blanking, all of it
 

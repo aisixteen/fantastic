@@ -5,7 +5,7 @@
 # app under `app` (its own workspace and lockfile: Tauri never enters this one)
 # are excluded.
 [workspace]
-members = ["tui", "tui/bundles/fantastic-web-mcp", "tui/bundles/fantastic-sqlite-store", "tui/bundles/fantastic-canvas-page", "tui/bundles/fantastic-user-home-store", "tui/bundles/fantastic-user", "tui/crates/fantastic-home", "tui/crates/fantastic-home-kernel"]
+members = ["tui", "tui/bundles/fantastic-web-mcp", "tui/bundles/fantastic-sqlite-store", "tui/bundles/fantastic-canvas-page", "tui/bundles/fantastic-user-home-store", "tui/bundles/fantastic-user", "tui/crates/fantastic-home", "tui/crates/fantastic-home-kernel", "tui/crates/fantastic-system", "tui/bundles/fantastic-system-agents"]
 exclude = ["lib", "app"]
 resolver = "2"
 

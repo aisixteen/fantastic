@@ -7,6 +7,12 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- System agents (Linux, `fantastic [canvas] system`): the machine's basics as
+  agents an AI calls like any other, each with its view as a canvas cell — first
+  `power` (battery over UPower; power off, reboot, suspend over logind). The model
+  and ViewModel are pure (`fantastic-system`); every OS call is in the bundle's
+  `sys/linux`. On fantastic OS they run in the system canvas `/home/fantastic/system`,
+  the user service `fantastic-system`, which the Home lists.
 - The canvas's own file tree sidebar (#148): the file tree fused into the canvas page,
   fixed to the viewport's left edge and beside the zoomed world, so a zoom or a pan
   never moves it. Zoom far out and drag files, folders and agents from it onto the

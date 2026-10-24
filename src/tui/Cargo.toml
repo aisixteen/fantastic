@@ -59,6 +59,9 @@ fantastic-exec-bridge = { path = "../lib/rust/crates/bundles/fantastic-exec-brid
 # kernel's public API only. Compile-time linked; `src/lib` is not edited.
 fantastic-web-mcp = { path = "bundles/fantastic-web-mcp" }
 fantastic-user = { path = "bundles/fantastic-user" }
+# THE MACHINE'S AGENTS (`fantastic [canvas] system`, Linux): power so far.
+fantastic-system-agents = { path = "bundles/fantastic-system-agents" }
+fantastic-system = { path = "crates/fantastic-system" }
 fantastic-sqlite-store = { path = "bundles/fantastic-sqlite-store" }
 fantastic-ram-store = { path = "../lib/rust/crates/bundles/fantastic-ram-store" }
 # THE AI AGENT'S SAVED SET-UPS: named agent blueprints in the home dir (FANTASTIC_HOME

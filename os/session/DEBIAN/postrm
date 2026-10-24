@@ -9,5 +9,7 @@ fi
 if [ "$1" = purge ] && [ -x /usr/bin/deb-systemd-helper ]; then
   deb-systemd-helper purge fantastic-kiosk.service >/dev/null || true
   deb-systemd-helper unmask fantastic-kiosk.service >/dev/null || true
+  # the user unit's link; the folder /home/fantastic/system is the user's data and stays
+  deb-systemd-helper --user purge fantastic-system.service >/dev/null || true
 fi
 exit 0
