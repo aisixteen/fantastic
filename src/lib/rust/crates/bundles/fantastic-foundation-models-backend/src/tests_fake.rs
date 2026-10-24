@@ -1,6 +1,6 @@
 //! The unit suite's on-device model: an [`FmEngine`] that answers from a script,
 //! so nothing in the default suite needs FoundationModels, Apple Intelligence or
-//! macOS 26. Swift's `Tests/FantasticFMTests/FakeEngine.swift`, step for step:
+//! macOS 26. The `swift/Tests/FantasticFMTests/FakeEngine.swift`, step for step:
 //! an unavailable engine ends every stream with FMCore's refusal; a pass streams
 //! its script's texts, then ends (`failure` / `hang` as configured).
 

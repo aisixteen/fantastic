@@ -10,7 +10,6 @@ src/lib/rust/target
 **/node_modules
 **/.fantastic
 integration_tests/tmp
-src/lib/swift/.build
 # the CLI's and the app's build trees (a laptop's are large); the server image
 # copies one binary, staged at dist/container/ by scripts/build/container.sh
 src/target
@@ -18,10 +17,6 @@ src/app/target
 src/app/node_modules
 dist/*
 !dist/container
-# swift/Tests is NOT excluded: `swift build` (the swift-build stage) validates
-# that every target declared in Package.swift has its source dir present —
-# including testTargets — so stripping Tests/ breaks the build. The final image
-# copies only the built binary, never the test sources.
 .claude
 # ts/dist is large + regenerated; the image copies ONLY the prebuilt bundle.
 src/lib/ts/dist/*

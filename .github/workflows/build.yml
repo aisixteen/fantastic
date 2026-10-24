@@ -132,6 +132,11 @@ jobs:
         # every crate's tests, even after one fails: a Windows run otherwise
         # stopped at the first failing crate and hid the rest
         run: cargo test --workspace --locked --no-fail-fast $CARGO_PROFILE
+      - name: Foundation Models bridge (swift tests)
+        # the swift package inside the on-device backend crate: its own suite,
+        # against a fake engine (no model, no macOS 26)
+        if: runner.os == 'macOS'
+        run: swift test -c ${{ inputs.profile }} --package-path crates/bundles/fantastic-foundation-models-backend/swift
 
   cli:
     if: inputs.units

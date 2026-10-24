@@ -5,7 +5,7 @@
 //! else. The unit suite injects a fake through [`FmEngine`], so the default suite
 //! never needs the model, Apple Intelligence or macOS 26.
 //!
-//! The words here are FMCore's (`src/lib/swift/Sources/FantasticFMCore/FMCore.swift`),
+//! The words here are FMCore's (`swift/Sources/FantasticFMCore/FMCore.swift`),
 //! spelled once: the bridge sends them across the C ABI, and the few this crate
 //! must produce itself (a platform the bridge is not built for) use the same
 //! sentences.

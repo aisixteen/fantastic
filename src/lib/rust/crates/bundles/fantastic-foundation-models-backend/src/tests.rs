@@ -741,7 +741,7 @@ async fn an_unknown_type_names_the_bundle() {
 
 fn swift_file(rel: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../swift")
+        .join("swift")
         .join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }

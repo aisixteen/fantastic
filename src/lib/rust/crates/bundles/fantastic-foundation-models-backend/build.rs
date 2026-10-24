@@ -1,11 +1,10 @@
 //! Builds and links the swift `FantasticFMBridge` static library — the C ABI over
 //! `FantasticFMCore`, THE ONE implementation of the Apple Foundation Models
-//! calls. The swift `foundation_models_backend` calls the same core
-//! directly, so both kernels run one implementation.
+//! calls. The package is this crate's own `swift/` directory.
 //!
 //! ON A macOS TARGET ONLY:
 //!   1. `swift build -c release --product FantasticFMBridge` over
-//!      `src/lib/swift`, into `$OUT_DIR/swift-build` (`--scratch-path`) — the
+//!      the crate's `swift/` package, into `$OUT_DIR/swift-build` (`--scratch-path`) — the
 //!      swift package's own `.build` is never touched;
 //!   2. the archive is linked statically, with the Foundation and
 //!      FoundationModels frameworks and the Swift runtime. Paths come from the
@@ -28,17 +27,16 @@ use std::process::Command;
 const MACOS_MIN: u32 = 14;
 
 /// The swift sources the bridge is built from, relative to the swift package.
-const SWIFT_INPUTS: [&str; 4] = [
+const SWIFT_INPUTS: [&str; 3] = [
     "Sources/FantasticFMBridge",
     "Sources/FantasticFMCore",
     "Package.swift",
-    "Package.resolved",
 ];
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    // crates/bundles/<this> -> src/lib/rust -> src/lib -> src/lib/swift
-    let swift_pkg = manifest.join("../../../../swift");
+    // the swift package lives in this crate: crates/bundles/<this>/swift
+    let swift_pkg = manifest.join("swift");
     for rel in SWIFT_INPUTS {
         println!("cargo:rerun-if-changed={}", swift_pkg.join(rel).display());
     }
