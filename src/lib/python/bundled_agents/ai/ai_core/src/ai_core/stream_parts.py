@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import secrets
 
+from ai_core.grammar import open_tags
 from ai_core.tool_parse import BYTES_CLOSE, BYTES_OPEN, CLOSE, OPEN, parses
 
 THINK_OPEN = "<think>"
@@ -66,6 +67,10 @@ class PartSplitter:
         # provider had already handed over may still be fed — it opens no part
         # after the aborts.
         self._stopped = False
+        # The answer's text outside thinking and outside calls, as the router reads it:
+        # the tags a call written now would sit inside (`open_tags`).
+        self._outside = ""
+        self._call_wrapped = False
 
     # ── public ──
     def feed(self, chunk: str) -> list[tuple]:
@@ -134,6 +139,8 @@ class PartSplitter:
         """Prose or thought, outside any call."""
         if not text:
             return
+        if not self._in_think:
+            self._outside += text
         kind = "thinking" if self._in_think else "text"
         if self._part is None:
             if kind == "text" and not text.strip():
@@ -188,6 +195,8 @@ class PartSplitter:
                 return False
             self._close_text_part(out)
             self._call = self._new("call", name=head[len(_NAME_HEAD) : q])
+            # The same test the scanner runs: a tag still open before the call wraps it.
+            self._call_wrapped = bool(open_tags(self._outside))
             self._call_body = ""
             self._call_started = False
             self._call_pending = ""
@@ -264,8 +273,13 @@ class PartSplitter:
             if self._call_pending:
                 out.append(("delta", self._call, self._call_pending))
         self._call_pending = ""
-        ok = parses(f' name="{self._call["name"]}">{self._call_body}')
-        self.closed_calls.append((self._call["stream_id"], self._call_body))
+        # A wrapped call is refused, not dispatched: it ends not ok and is not pushed
+        # to closed_calls, so a refused copy never takes a dispatched call's stream id.
+        ok = not self._call_wrapped and parses(
+            f' name="{self._call["name"]}">{self._call_body}'
+        )
+        if not self._call_wrapped:
+            self.closed_calls.append((self._call["stream_id"], self._call_body))
         out.append(("end", self._call, {"ok": ok}))
         self._call = None
 
