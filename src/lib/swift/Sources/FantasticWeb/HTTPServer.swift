@@ -141,6 +141,14 @@ public func webHost(_ rec: JSON) -> String {
     return pyTruthy(v) ? (v.asString ?? pyStr(v)) : WEB_DEFAULT_HOST
 }
 
+/// python `listen_host(rec)`: the address the listener binds — the record's `bind` when
+/// it names one (the container's `0.0.0.0`), else its `host` (`webHost`). The Host/Origin
+/// guard judges by `host` alone, so a wildcard `bind` leaves the guard's identity alone.
+public func webListenHost(_ rec: JSON) -> String {
+    let v = rec["bind"]
+    return pyTruthy(v) ? (v.asString ?? pyStr(v)) : webHost(rec)
+}
+
 /// python `own_origins(rec)`: `http://<host>:<port>`, plus both loopback spellings
 /// when it binds loopback. Never derived from the request's Host header (a
 /// DNS-rebinding page controls it).
@@ -262,9 +270,12 @@ public final class WebServer: @unchecked Sendable {
         self.kernel = kernel
         self.agentId = agentId
         self.port = port
-        // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
-        self.host = webHost(
-            .object(["host": kernel.agent(agentId)?.metaValue(forKey: "host") ?? .null]))
+        // LOOPBACK unless the record names a bind or a host (`bind: "0.0.0.0"` to publish).
+        self.host = webListenHost(
+            .object([
+                "bind": kernel.agent(agentId)?.metaValue(forKey: "bind") ?? .null,
+                "host": kernel.agent(agentId)?.metaValue(forKey: "host") ?? .null,
+            ]))
     }
 
     /// Mount `specs` as the owner's routes — python's

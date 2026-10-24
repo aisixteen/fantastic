@@ -27,6 +27,10 @@
 #                      kiosk image of them, and its boot in QEMU. Beside the
 #                      e2e: it neither gates them nor waits for them (full
 #                      runs only)
+#   container release  the fantastic server's image (Phase 12, #158), amd64 and
+#                      arm64 on native runners, smoke-tested under Docker and
+#                      rootless Podman (`os/ci/container_check.py`). Beside the
+#                      e2e, the same way: full runs only
 #
 # The run's title says which it was (`ci · units` / `ci · full`). A green FULL
 # run is what `release.yml` publishes for its commit.
@@ -80,3 +84,63 @@ jobs:
     with:
       profile: release
       os: true
+
+  # The fantastic server's image (Phase 12, #158): the same Containerfile on both
+  # architectures, built on the native free runners (no emulation), and the same
+  # smoke test under Docker and under rootless Podman. Beside the e2e: it gates
+  # nothing, and it needs only the release binaries of its own architecture.
+  # Nothing is published from here (publish-container.yml, by hand).
+  container:
+    if: inputs.e2e
+    needs: [binaries]
+    name: container · ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: amd64, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, arch: arm64, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # container.sh reads the version from the last tag
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - name: the check's python (websockets)
+        run: (cd src/lib/python && uv sync --locked)
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist
+      - name: rootless Podman
+        # the runner's user is not root: rootless needs unprivileged user
+        # namespaces, which Ubuntu 24.04 restricts by AppArmor (as the e2e's Chrome)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q podman
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          podman info --format '{{.Host.Arch}} rootless={{.Host.Security.Rootless}}'
+      - name: the image, built with Docker
+        # one build feeds both smoke tests: Docker's image is copied to Podman below
+        run: ENGINE=docker sh scripts/build/container.sh --arch ${{ matrix.arch }} --tag fantastic-server:ci
+      - name: the image's platform and labels
+        run: |
+          docker image inspect fantastic-server:ci --format 'platform={{.Os}}/{{.Architecture}} version={{index .Config.Labels "org.opencontainers.image.version"}}' | tee -a "$GITHUB_STEP_SUMMARY"
+          docker image inspect fantastic-server:ci --format '{{.Architecture}}' | grep -qx '${{ matrix.arch }}'
+      - name: smoke test, Docker
+        run: uv run --project src/lib/python python os/ci/container_check.py --engine docker --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/docker
+      - name: the image into Podman
+        run: docker save fantastic-server:ci | podman load
+      - name: smoke test, rootless Podman
+        run: uv run --project src/lib/python python os/ci/container_check.py --engine podman --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/podman
+      - name: keep the checks (logs)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: container-check-${{ matrix.arch }}
+          path: container-check/
+          if-no-files-found: ignore
+          retention-days: 14

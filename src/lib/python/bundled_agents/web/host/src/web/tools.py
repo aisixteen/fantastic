@@ -42,6 +42,14 @@ from kernel._refusal import UNHANDLED, refusal
 
 logger = logging.getLogger(__name__)
 
+
+def listen_host(rec: dict) -> str:
+    """The address the listener binds: the record's `bind` when it names one (the
+    container's `0.0.0.0`), else its `host`, else loopback. The Host/Origin guard
+    judges by `host` alone (`app.own_origins`), so a wildcard `bind` leaves the
+    guard's identity where it was. Rust `listen_host` and Swift `webListenHost` agree."""
+    return rec.get("bind") or rec.get("host") or DEFAULT_HOST
+
 _servers: dict[str, "_ServerHandle"] = {}
 
 
@@ -169,8 +177,8 @@ async def _spawn(agent_id: str, kernel) -> _ServerHandle | None:
     app = make_app(agent_id, kernel)
     config = uvicorn.Config(
         app,
-        # LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
-        host=rec.get("host") or DEFAULT_HOST,
+        # LOOPBACK unless the record names a bind or a host (`bind: "0.0.0.0"` to publish).
+        host=listen_host(rec),
         port=port,
         log_level="warning",
         loop="asyncio",

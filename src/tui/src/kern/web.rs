@@ -217,6 +217,24 @@ pub struct Urls {
     pub port: u16,
 }
 
+/// A wildcard listener address (`0.0.0.0`, `::`): it listens on every address, and a
+/// browser cannot dial it.
+pub fn is_wildcard(host: &str) -> bool {
+    matches!(host, "0.0.0.0" | "::")
+}
+
+/// The authority a browser dials for a `web` listening at `host` on `port`. A wildcard
+/// is reached at `localhost`, which the Host guard admits on the loopback identity
+/// (`fantastic_web`'s `origin.rs`); an IPv6 literal is bracketed, as a URL spells it;
+/// any other address is itself.
+pub fn canvas_authority(host: &str, port: u16) -> String {
+    match host {
+        h if is_wildcard(h) => format!("localhost:{port}"),
+        h if h.contains(':') => format!("[{h}]:{port}"),
+        h => format!("{h}:{port}"),
+    }
+}
+
 /// THE RUN FILE (owner 2026-10-16, for a local manager of fantastics): while this
 /// process serves the canvas, `{pid, port, url}` — written once it serves,
 /// removed at a clean exit. Under the project dir. A killed process leaves it
@@ -234,9 +252,18 @@ pub fn remove_run_file(dir: &std::path::Path) {
     let _ = std::fs::remove_file(dir.join(RUN_FILE));
 }
 
-/// Create what is missing, grant, boot, mount. Returns the pages' URLs.
-pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
+/// Create what is missing, grant, boot, mount. Returns the pages' URLs. `bind` is
+/// `--host`: a fresh `web` binds it; a recorded `web` must already bind it (`Host::boot`
+/// set it before the listener booted).
+pub async fn ensure(h: &Host, port: Option<u16>, bind: Option<&str>) -> Result<Urls, String> {
     let recorded = meta(h, WEB_ID).get("port").and_then(Value::as_u64).map(|p| p as u16);
+    // the address the recorded `web` listens on (its `bind`, else its `host`)
+    let bound = exists(h, WEB_ID).then(|| fantastic_web::listen_host(&meta(h, WEB_ID)));
+    if let (true, Some(b)) = (exists(h, WEB_ID), bind) {
+        if bound.as_deref() != Some(b) {
+            return Err(format!("--host {b}: the `web` leg still binds {}", bound.as_deref().unwrap_or(fantastic_web::DEFAULT_HOST)));
+        }
+    }
     let port = match (exists(h, WEB_ID), port) {
         // Repeating the recorded port changes nothing, so it is not a conflict.
         (true, Some(p)) if recorded == Some(p) => p,
@@ -260,7 +287,7 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
     // (measured). So `web` is booted only when it is created here.
     let fresh_host = !exists(h, WEB_ID);
     if fresh_host {
-        create(h, json!({"parent_id": user, "id": WEB_ID, "handler_module": fantastic_web::HANDLER_MODULE, "port": port})).await?;
+        create(h, web_record(user, port, bind)).await?;
     }
 
     // THE CANVAS.
@@ -332,10 +359,28 @@ pub async fn ensure(h: &Host, port: Option<u16>) -> Result<Urls, String> {
     // GOD MODE, by grants: `user` and the canvas's AIs reach every agent, both edges
     // (`kern/reach`); the watch for agents added later starts after this (`vm.rs`)
     crate::kern::reach::grant_all(h).await?;
+    // the address the web binds: the recorded one (a recorded `web` already binds
+    // it, checked above), else `--host` for a fresh one, else the default
+    let host = bound.or_else(|| bind.map(str::to_string)).unwrap_or_else(|| fantastic_web::DEFAULT_HOST.to_string());
     Ok(Urls {
-        canvas: format!("http://127.0.0.1:{port}/{CANVAS_PAGE_ID}/file/index.html"),
+        canvas: format!("http://{}/{CANVAS_PAGE_ID}/file/index.html", canvas_authority(&host, port)),
         port,
     })
+}
+
+/// The `web` record a fresh canvas creates: its port, and its address only when
+/// `--host` names one (the default is loopback, which the record leaves unsaid). The
+/// listener's address is `bind`; `host`, the guard's identity, is set only for a
+/// concrete address, so a wildcard publish keeps the loopback identity.
+fn web_record(user: &str, port: u16, bind: Option<&str>) -> Value {
+    let mut rec = json!({"parent_id": user, "id": WEB_ID, "handler_module": fantastic_web::HANDLER_MODULE, "port": port});
+    if let Some(b) = bind {
+        rec["bind"] = json!(b);
+        if !is_wildcard(b) {
+            rec["host"] = json!(b);
+        }
+    }
+    rec
 }
 
 #[cfg(test)]
@@ -361,6 +406,39 @@ mod tests {
     }
 
     #[test]
+    fn a_wildcard_bind_is_reached_at_localhost_and_other_addresses_are_themselves() {
+        // a browser cannot dial a wildcard: the guard admits `localhost` for it
+        assert_eq!(canvas_authority("0.0.0.0", 8088), "localhost:8088");
+        assert_eq!(canvas_authority("::", 8088), "localhost:8088");
+        // a loopback bind keeps the address it names
+        assert_eq!(canvas_authority("127.0.0.1", 8123), "127.0.0.1:8123");
+        assert_eq!(canvas_authority("localhost", 8123), "localhost:8123");
+        // a LAN address answers itself; an IPv6 literal is bracketed as a URL spells it
+        assert_eq!(canvas_authority("192.168.1.5", 8088), "192.168.1.5:8088");
+        assert_eq!(canvas_authority("::1", 8088), "[::1]:8088");
+    }
+
+    #[test]
+    fn a_fresh_web_record_names_its_host_only_when_the_bind_is_given() {
+        // a wildcard publish: its listener is `bind`, and the guard's `host` stays unsaid
+        let named = web_record("user", 8088, Some("0.0.0.0"));
+        assert_eq!(named["bind"], json!("0.0.0.0"));
+        assert!(named.get("host").is_none(), "{named}");
+        assert_eq!(named["port"], json!(8088));
+        assert_eq!(named["parent_id"], json!("user"));
+        assert_eq!(named["id"], json!(WEB_ID));
+        assert_eq!(named["handler_module"], json!(fantastic_web::HANDLER_MODULE));
+        // a concrete address is both the listener and the guard's identity
+        let lan = web_record("user", 8088, Some("192.168.1.5"));
+        assert_eq!(lan["bind"], json!("192.168.1.5"));
+        assert_eq!(lan["host"], json!("192.168.1.5"));
+        // no --host: the record says nothing about the address, so the default (loopback) holds
+        let plain = web_record("user", 8088, None);
+        assert!(plain.get("host").is_none() && plain.get("bind").is_none(), "{plain}");
+        assert_eq!(plain["port"], json!(8088));
+    }
+
+    #[test]
     fn the_run_file_names_this_process_its_port_and_url_until_a_clean_exit() {
         let d = std::env::temp_dir().join(format!("fc-runfile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -380,7 +458,7 @@ mod tests {
 /// anywhere, deleting a canvas deletes the canvases it spawned, and the listing reaches
 /// nested and flat peer canvases alike.
 #[cfg(test)]
-mod canvas_tree_tests {
+pub(crate) mod canvas_tree_tests {
     use super::*;
     use crate::env::ClientCfg;
     use fantastic_kernel::{Agent, AgentId as KernelId, Kernel};
@@ -396,7 +474,7 @@ mod canvas_tree_tests {
     }
 
     /// A host whose root is `kernel` (the kernel-state root the canvas tree is made under).
-    fn harness(dir: &Path) -> Host {
+    pub(crate) fn harness(dir: &Path) -> Host {
         let mut kernel = Kernel::new();
         kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
         kernel.bundles.register(crate::kern::backend::HANDLER_MODULE, crate::kern::backend::BackendBundle);
@@ -471,6 +549,41 @@ mod canvas_tree_tests {
         assert!(err.contains("canvas_root") && err.contains("already exists"), "{err}");
         assert_eq!(h.kernel.agents.iter().filter(|a| a.key().0 == "canvas_research_loader").count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `web` record as a recorded run left it: its port, and its `bind` (or `host`) when `--host` named one.
+    /// Kernel-state handled, so the tree boots no listener here.
+    async fn recorded_web(h: &Host, extra: Value) {
+        let mut spec = json!({"parent_id": "kernel", "id": WEB_ID, "handler_module": fantastic_core::HANDLER_MODULE, "port": 8088});
+        for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+            spec[k] = v;
+        }
+        create(h, spec).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_recorded_web_refuses_a_bind_it_does_not_hold() {
+        let dir = scratch("bind-refused");
+        let h = harness(&dir);
+        recorded_web(&h, json!({"bind": "0.0.0.0"})).await;
+        // another bind than the record's: refused before anything is created or booted
+        let Err(err) = ensure(&h, None, Some("127.0.0.1")).await else { panic!("a bind the record does not hold is refused") };
+        assert!(err.contains("--host 127.0.0.1") && err.contains("still binds 0.0.0.0"), "{err}");
+        // a recorded web with no host binds the default: `--host 0.0.0.0` is refused against it
+        let plain = scratch("bind-refused-default");
+        let h2 = harness(&plain);
+        recorded_web(&h2, json!({})).await;
+        let Err(err) = ensure(&h2, None, Some("0.0.0.0")).await else { panic!("refused") };
+        assert!(err.contains("--host 0.0.0.0") && err.contains("still binds 127.0.0.1"), "{err}");
+        // a record from before `bind` names its listener in `host`, and that is the bind it holds
+        let legacy = scratch("bind-refused-legacy");
+        let h3 = harness(&legacy);
+        recorded_web(&h3, json!({"host": "0.0.0.0"})).await;
+        let Err(err) = ensure(&h3, None, Some("127.0.0.1")).await else { panic!("refused") };
+        assert!(err.contains("still binds 0.0.0.0"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&plain);
+        let _ = std::fs::remove_dir_all(&legacy);
     }
 
     #[tokio::test]
