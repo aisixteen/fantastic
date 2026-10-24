@@ -4,7 +4,7 @@ id: file_clamp
 group: kernel
 title: "file_bridge clamp + allow: `..`/absolute/symlink escapes refused, writes never follow a (swapped) link out, atomic write leaves no tmp, `allow` read live by every verb and by watch_path, raw-bytes stream round trip"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

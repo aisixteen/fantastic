@@ -38,7 +38,7 @@ R=/Users/oleksandr/Projects/fantastic_canvas
 PY=$R/src/lib/python/.venv/bin/python
 
 # 1. preflight — fails loud, repairs nothing
-$PY $R/e2e/parity/run.py preflight --runtimes python,rust,swift
+$PY $R/e2e/parity/run.py preflight --runtimes python,rust
 
 # 2. only after a fix lands (this is the ONLY thing that builds)
 $PY $R/e2e/parity/run.py stage --runtime rust      # or swift

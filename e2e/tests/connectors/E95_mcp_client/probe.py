@@ -3,7 +3,7 @@
 A scripted fake MCP server (protocol 2026-07-28, Streamable HTTP — it enforces what
 the spec makes a server enforce: headers mirror the body, `_meta` on every request,
 the Bearer key) and the kernel's own `mcp_client` agent, on the PACKAGED host of
-`RUNTIME` (python | rust | swift), every call through `web_rest`:
+`RUNTIME` (python | rust), every call through `web_rest`:
 
   1. boot: `server/discover`, then `tools/list` page by page (by cursor) → the
      agent's verbs; tools it cannot serve are skipped and named;

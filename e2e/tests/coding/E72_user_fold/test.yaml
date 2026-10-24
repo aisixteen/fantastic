@@ -4,7 +4,7 @@ id: user_fold
 group: coding
 title: "the human folds the agent's finished work mid-run through the verb — and the rules still hold"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

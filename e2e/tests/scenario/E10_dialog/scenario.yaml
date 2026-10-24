@@ -2,7 +2,7 @@
 #
 # This is the same idea as `contract/agentic/`: a scenario is a DECLARED fixture
 # plus a task plus what must become true. One runner drives every runtime over
-# REST (python, rust, swift), and the scenario is shared. Three
+# REST (python, rust), and the scenario is shared. Three
 # copies differing only in how the store gets registered is duplication that
 # drifts the first time the task changes — and then the results stop being
 # comparable, which is the only reason to run it on four kernels at all.

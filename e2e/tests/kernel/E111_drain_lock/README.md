@@ -24,5 +24,4 @@ A drain waits out the kernel's quiet window (10 s), so this runs ~30 s.
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id drain_lock --lanes 3
-RUNTIME=swift uv run python ../../../e2e/tests/kernel/E111_drain_lock/probe.py
 ```

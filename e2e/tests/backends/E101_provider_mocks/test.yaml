@@ -4,7 +4,7 @@ id: provider_mocks
 group: backends
 title: "the provider mocks (vllm, ollama, responses, anthropic) answer each backend for real: a turn's text, the probes a record leaves to the server, the key on every request, an HTTP error and a refused key fail the turn loud"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

@@ -408,7 +408,7 @@ async def run(
     # import — the free selftest imports this module for its fixture and scoring
     # and reaches no model, so it must never need BACKEND.
     bk = _resolve_backend()
-    # WHICH KERNEL is a plug (`RUNTIME=python|rust|swift`), exactly as the
+    # WHICH KERNEL is a plug (`RUNTIME=python|rust`), exactly as the
     # model is a plug in `backends/`. In process for python; spawned and driven
     # over REST otherwise. `core` is None on the wire and the connector reads
     # the transcript from the agent's history instead of wrapping a provider.

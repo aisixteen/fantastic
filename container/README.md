@@ -5,11 +5,7 @@ a `container`-backend node. Same recipe under **podman and docker**, shipped as
 **two separate per-arch image tags** (`:amd64` + `:arm64`) — pick the one for your
 machine (no merged manifest).
 
-- **Three execution runtimes:** `python` (canonical) + `rust` (prebuilt binary)
-  + `swift` (prebuilt Linux binary). Swift is a **full runtime** at parity with
-  the others — its HTTP + WS server is **swift-nio** (cross-platform), so it
-  serves on Linux; built `--static-swift-stdlib` so the slim final image needs no
-  Swift libs.
+- **Two execution runtimes:** `python` (canonical) + `rust` (prebuilt binary).
 - **One bundled runtime:** the static `js_kernel.zip` (the browser frontend),
   copied prebuilt from `ts/` and discovered at runtime — **no JS engine** runs it
   (no node/bun/deno, by security decision).
@@ -204,7 +200,7 @@ The **descriptive head** is the all-readmes page (main → kernels → container
 GitHub URL), baked at `/opt/fantastic/head/index.html`. On EVERY runtime the web's
 `/` is a **404** — the kernel's own web renders nothing and owns no `fs` surface, so
 there is no `FANTASTIC_WEB_INDEX`/`FANTASTIC_HEAD` env that reads a landing file off
-disk (deleted to match Python; what Python deletes, rust + swift delete). To show
+disk (deleted to match Python; what Python deletes, rust deletes). To show
 the head, serve it the one gated way — a read-only `file_bridge`. The fs edge clamps
 every root INSIDE the running dir, so copy the baked head into the workdir first,
 then root the bridge at the relative dir:

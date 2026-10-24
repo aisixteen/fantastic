@@ -2,7 +2,7 @@
 """The acceptance harness: `preflight | stage | capture`.
 
     PY=$R/src/lib/python/.venv/bin/python
-    $PY $R/e2e/parity/run.py preflight --runtimes python,rust,swift
+    $PY $R/e2e/parity/run.py preflight --runtimes python,rust
     $PY $R/e2e/parity/run.py stage --runtime rust          # the ONLY path that builds
     $PY $R/e2e/parity/run.py capture --runtime rust --families all --out <dir>
 
@@ -238,7 +238,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("preflight")
-    p.add_argument("--runtimes", default="python,rust,swift")
+    p.add_argument("--runtimes", default="python,rust")
 
     s = sub.add_parser("stage")
     s.add_argument("--runtime", required=True)

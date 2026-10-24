@@ -4,7 +4,7 @@ id: secret_marks
 group: kernel
 title: "secret marks: the handler gets the clear value (REST header, ws frame, nested path); call rows, state stream and inbox mirror show [secret]; malformed or `type` marks are bad_arg"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 60

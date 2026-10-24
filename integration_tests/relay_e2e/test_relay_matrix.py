@@ -35,24 +35,20 @@ from helpers.kernel_proc import KernelProc  # noqa: E402
 from helpers.seeding import seed_web, seed_web_ws  # noqa: E402
 
 # Runtimes that ship a relay_connector transport today.
-RELAY_RUNTIMES = {"python", "rust", "swift"}
+RELAY_RUNTIMES = {"python", "rust"}
 
 # `handler_module` for the relay_connector agent — same name across all three host
 # runtimes (the relay-kernel-router derivation of io_bridge).
 _HANDLER_MODULE = {
     "python": "relay_connector.tools",
     "rust": "relay_connector.tools",
-    "swift": "relay_connector.tools",
 }
 
 # 3 host canvases × 2 → all unordered pairs (any-to-any) PLUS same-kind.
 PAIRS = [
     ("python", "python"),
     ("python", "rust"),
-    ("python", "swift"),
     ("rust", "rust"),
-    ("rust", "swift"),
-    ("swift", "swift"),
 ]
 
 
@@ -300,7 +296,7 @@ async def test_relay_password_group_member(
 
 
 # B = each runtime in turn (the enforcing receiver); A = python presents a token.
-_REJECT_PAIRS = [("python", "python"), ("python", "rust"), ("python", "swift")]
+_REJECT_PAIRS = [("python", "python"), ("python", "rust")]
 
 
 @pytest.mark.parametrize("rt_a,rt_b", _REJECT_PAIRS, ids=[f"{a}-{b}" for a, b in _REJECT_PAIRS])
@@ -407,7 +403,7 @@ async def test_relay_asymmetric_rules(rt_a: str, rt_b: str, request, parity_tmp,
 # ── directory surface (list_peers + watch) ──────────────────────
 
 
-@pytest.mark.parametrize("rt", ["python", "rust", "swift"])
+@pytest.mark.parametrize("rt", ["python", "rust"])
 @pytest.mark.asyncio
 async def test_relay_directory(rt, request, parity_tmp, free_port) -> None:
     """A connector reads the LIVE relay directory: `list_peers` returns the
@@ -468,7 +464,7 @@ async def test_relay_directory(rt, request, parity_tmp, free_port) -> None:
 # ── kernelgroup directory typing (manager / owned-kernel) ───────
 
 
-@pytest.mark.parametrize("rt", ["python", "rust", "swift"])
+@pytest.mark.parametrize("rt", ["python", "rust"])
 @pytest.mark.asyncio
 async def test_relay_kernelgroup_typing(rt, request, parity_tmp, free_port) -> None:
     """A manager peer and an owned kernel join; `list_peers` carries each peer's

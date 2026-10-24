@@ -17,14 +17,13 @@ still looking like one table.
 
 The roster names a ROLE; each runner supplies whatever its kernel has:
 
-| role | python | rust | swift |
-|---|---|---|---|
-| `memory` | `file_bridge` data store | `file_bridge` data store | `file_bridge` data store |
-| `flaky_plant` | `plant_probe` (test-only) | `plant_probe` (test-only) | `plant_probe` (test-only) |
-| `render_sink` | `cli` | `cli` bundle | `cli` bundle |
+| role | python | rust |
+|---|---|---|
+| `memory` | `file_bridge` data store | `file_bridge` data store |
+| `flaky_plant` | `plant_probe` (test-only) | `plant_probe` (test-only) |
+| `render_sink` | `cli` | `cli` bundle |
 
-`plant_probe` is a TEST-ONLY bundle on every runtime (a rust feature `scenario-probes`, a
-swift define `SCENARIO_PROBES`, the `e2e/probes/scenario_probes.py` launcher that registers it
+`plant_probe` is a TEST-ONLY bundle on every runtime (a rust feature `scenario-probes`, the `e2e/probes/scenario_probes.py` launcher that registers it
 for python); a default build
 carries none of it.
 
@@ -33,7 +32,6 @@ carries none of it.
 ```sh
 cd src/lib/python && KERNEL=python uv run python ../../../e2e/runners/host.py deadletter
 cd src/lib/python && KERNEL=rust  uv run python ../../../e2e/runners/host.py deadletter
-cd src/lib/python && KERNEL=swift uv run python ../../../e2e/runners/host.py deadletter
 ```
 
 …or the whole cross-product through the launcher:

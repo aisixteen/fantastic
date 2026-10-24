@@ -1,7 +1,7 @@
 """kernel/file_agents — the file and folder AGENTS over a file_bridge. NO MODEL.
 
 The kernel's own `file_bridge` (root `box/`, `allow: [docs, top.txt]`) on the packaged
-host of `RUNTIME` (python | rust | swift), every call over `web_rest`, the live events
+host of `RUNTIME` (python | rust), every call over `web_rest`, the live events
 over the `ws` face. A file or a folder is a VIEW AGENT of the bridge (`open_view`), one
 agent per path. The harness picks the view ids and declares them in `reach` at boot, so
 the ws leg may watch them:

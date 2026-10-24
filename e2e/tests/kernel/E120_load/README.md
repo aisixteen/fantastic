@@ -14,5 +14,4 @@ Every number is printed (`NUMBERS <runtime>: {...}`); the bounds in `probe.py`
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id kernel_load --lanes 1            # all three, serially
-RUNTIME=swift uv run python ../../../e2e/tests/kernel/E120_load/probe.py
 ```

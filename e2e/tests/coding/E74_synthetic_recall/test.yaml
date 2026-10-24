@@ -4,7 +4,7 @@ id: synthetic_recall
 group: coding
 title: "a store planted from above; the agent boots, recalls its own view, and works from it"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

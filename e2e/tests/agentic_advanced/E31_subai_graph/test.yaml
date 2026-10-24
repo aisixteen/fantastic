@@ -7,9 +7,9 @@ title: the same build, scored as a GRAPH — edges, not just nodes
 runner: probe.py
 # ONE probe, three kernels. `RUNTIME` is the plug the probe reads; the same
 # assertions run against each. python is in-process (its asserts read the live
-# tree); rust and swift are spawned and driven over REST.
+# tree); rust is spawned and driven over REST.
 # PYTHON ONLY while the human-as-agent conversion rolls out.
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 # 30 min: it builds live agents, and every `docs` reply leaves the view after one
 # message, so planning re-pulls docs; 15 min can stop it mid-build.

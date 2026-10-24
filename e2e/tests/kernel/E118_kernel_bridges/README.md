@@ -29,5 +29,4 @@ tunneled call `unauthorized` live, and reopening serves again.
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id kernel_bridges --lanes 3   # all three
-RUNTIME=swift uv run python ../../../e2e/tests/kernel/E118_kernel_bridges/probe.py
 ```

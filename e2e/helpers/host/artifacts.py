@@ -61,7 +61,6 @@ def prebuilt_dir() -> Path | None:
 WATCH = {
     "python": ["src/lib/python"],
     "rust": ["src/lib/rust/crates", "src/lib/rust/Cargo.toml"],
-    "swift": ["src/lib/swift/Sources", "src/lib/swift/Package.swift"],
 }
 
 #: The scenario-probe switches. Additive and deliberately NOT in a release: a
@@ -69,7 +68,6 @@ WATCH = {
 #: (see the driver's `cmd`), so it has no build switch here.
 PROBE_ENV = {
     "rust": {"FANTASTIC_BUILD_FEATURES": "scenario-probes"},
-    "swift": {"FANTASTIC_BUILD_SWIFTC": "-DSCENARIO_PROBES"},
 }
 
 _SKIP_DIRS = {

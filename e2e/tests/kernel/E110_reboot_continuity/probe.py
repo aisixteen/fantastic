@@ -1,7 +1,7 @@
 """kernel/reboot_continuity — the tree a kernel built comes back whole on the
 next boot of the same directory. NO MODEL.
 
-The PACKAGED host of `RUNTIME` (python | rust | swift), every call over `web_rest`:
+The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`:
 
   1. BUILD: a three-level chain of agents under the leg (`top` → `mid` → `leaf`),
      records carrying extra fields (str, int, float, bool, list, nested map,

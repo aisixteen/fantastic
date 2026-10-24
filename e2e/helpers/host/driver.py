@@ -1,7 +1,7 @@
 """Drive a kernel over its REST surface, FROM e2e.
 
 The scenario is data (`e2e/tests/scenario/E*/scenario.yaml`); this is the e2e
-runner's transport for EVERY host runtime — python, rust and swift alike.
+runner's transport for EVERY host runtime — python and rust alike.
 
 ONE FACE FOR EVERY RUNTIME. An in-process runner can call `root.send(...)`
 directly — name an execution, impersonate the operator, register bespoke
@@ -19,7 +19,7 @@ THE ONE REMAINING LIMIT, stated rather than worked around:
 Fixtures are NOT bespoke: `memory` is the shipped `file_bridge` and `compute`
 the shipped `exec_bridge` on every runtime. The three stateful roles come from
 a TEST-ONLY probe bundle that a default build does not carry — a rust feature,
-a swift define, and a launcher that registers them (`probes/scenario_probes.py`).
+and a launcher that registers them (`probes/scenario_probes.py`).
 A role with no implementation is REFUSED by name, never approximated.
 """
 
@@ -88,13 +88,6 @@ RUNTIMES = {
                   "--features", "scenario-probes"],
         "build_cwd": "src/lib/rust",
     },
-    "swift": {
-        "cmd": ["src/lib/swift/.build/debug/fantastic_kernel"],
-        "root_id": "kernel_state",
-        "build": ["swift", "build", "--product", "fantastic_kernel",
-                  "-Xswiftc", "-DSCENARIO_PROBES"],
-        "build_cwd": "src/lib/swift",
-    },
 }
 
 
@@ -133,7 +126,7 @@ def ensure_runtime(repo, name: str) -> dict:
     _, spec = runtime(repo, name)
     # ALREADY STAGED BY THE LAUNCHER. `run.py` stages each kernel once before it
     # dispatches any cell; without this the cells rebuilt concurrently and
-    # serialised on the toolchain's build lock (swift: 4-6s per cell for a
+    # serialised on the toolchain's build lock (a
     # NO-OP build, ~11s when the tree changed), time that was then charged to
     # the test. Staging is idempotent, so this is a stat walk when it is a no-op.
     spec = artifacts.stage(repo, name, spec)

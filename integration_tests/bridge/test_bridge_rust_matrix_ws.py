@@ -4,7 +4,7 @@ Proves that the rust `ws_bridge` agent interoperates correctly across all
 runtime pairs. Five forward/reflect test cases cover every directed edge where
 rust is involved:
 
-  rust→rust · rust→python · python→rust · rust→swift · swift→rust
+  rust→rust · rust→python · python→rust
 
 Plus one rust↔rust `watch_remote` streaming test.
 
@@ -14,7 +14,7 @@ boot), then `boot` is an idempotent connect guard.
 
 Root-id note: `_forward_reflect` dispatches via peer_id='kernel' and
 target='kernel' — the `kernel` alias resolves to the real root on any runtime
-(kernel_state for Python, core for rust/swift), so no forward test hardcodes a
+(kernel_state for Python, core for rust), so no forward test hardcodes a
 runtime-specific root id.
 
 The stream test uses peer_id='core' literally because watch/emit do a literal
@@ -73,7 +73,7 @@ async def _forward_reflect(
     seed_web(client_bin, wa, pa)
     seed_web_ws(client_bin, wa)
     # peer_id='kernel' selects the WS path on B using the runtime alias —
-    # resolves to 'kernel_state' (python) or 'core' (rust/swift) transparently.
+    # resolves to 'kernel_state' (python) or 'core' (rust) transparently.
     seed_bridge_ws(client_bin, wa, agent_id="bridge", peer_id="kernel", peer_port=pb)
 
     seed_web(server_bin, wb, pb)
@@ -133,36 +133,6 @@ async def test_python_rust_ws_forward(
         parity_tmp,
         free_port,
         "python_rust",
-    )
-
-
-@pytest.mark.asyncio
-async def test_rust_swift_ws_forward(
-    rust_binary, rust_kernel, swift_binary, swift_kernel, parity_tmp, free_port
-):
-    await _forward_reflect(
-        rust_binary,
-        rust_kernel,
-        swift_binary,
-        swift_kernel,
-        parity_tmp,
-        free_port,
-        "rust_swift",
-    )
-
-
-@pytest.mark.asyncio
-async def test_swift_rust_ws_forward(
-    swift_binary, swift_kernel, rust_binary, rust_kernel, parity_tmp, free_port
-):
-    await _forward_reflect(
-        swift_binary,
-        swift_kernel,
-        rust_binary,
-        rust_kernel,
-        parity_tmp,
-        free_port,
-        "swift_rust",
     )
 
 

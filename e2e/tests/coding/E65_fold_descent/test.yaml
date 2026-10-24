@@ -4,7 +4,7 @@ id: fold_descent
 group: coding
 title: "after folds fire, the answer lives inside a folded chain — go in and get it"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

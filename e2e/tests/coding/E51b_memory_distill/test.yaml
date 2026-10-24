@@ -4,7 +4,7 @@ id: memory_distill
 group: coding
 title: salient facts distilled to a file survive a COLD session
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

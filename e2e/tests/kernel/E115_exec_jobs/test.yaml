@@ -4,7 +4,7 @@ id: exec_jobs
 group: kernel
 title: "exec_bridge jobs: the allowlist (a broken regex permits nothing), job_done's exact shape, tail/grep over the 256 KiB line ring, a PTY job, kernel cancel of a running job, status shape"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

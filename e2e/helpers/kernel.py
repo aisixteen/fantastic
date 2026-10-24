@@ -21,7 +21,7 @@ from helpers import e2e_root
 
 #: Runtimes that are SPAWNED and driven over REST. python runs in-process
 #: because a probe's own asserts read the live tree directly.
-SPAWNED = ("rust", "swift")
+SPAWNED = ("rust",)
 
 #: THE PROVIDER SEAM, in process only. ai_core builds an AI agent's provider for
 #: every turn from its live record (`core._build_provider`); `seat_providers`

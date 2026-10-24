@@ -4,7 +4,7 @@ id: kernel_restart
 group: coding
 title: "work, folds, shutdown, a NEW kernel on the same dir: two AI agents each continue from their own hydrated rows"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

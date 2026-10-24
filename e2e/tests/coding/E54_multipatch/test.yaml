@@ -4,7 +4,7 @@ id: multipatch
 group: coding
 title: ONE edit transaction edits TWO files — coordinated, atomic, self-cleaning
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

@@ -4,7 +4,7 @@ id: cancel
 group: coding
 title: the model ABORTS a running job — ps finds it, cancel kills it, the process dies
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

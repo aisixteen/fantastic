@@ -10,5 +10,4 @@ docstring and the group README.
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id mcp_client          # all three
-RUNTIME=swift uv run python ../../../e2e/tests/connectors/E95_mcp_client/probe.py
 ```

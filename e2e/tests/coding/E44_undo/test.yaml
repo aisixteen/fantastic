@@ -4,7 +4,7 @@ id: undo
 group: coding
 title: the model edits, then takes it back with undo
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

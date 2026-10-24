@@ -3,7 +3,7 @@
 An AGENT send passes only when the SENDER's `can_call` grants `(target, verb)`
 (egress) AND the TARGET's `callable_by` grants `(sender, verb)` (ingress); a
 denial is `reason: unauthorized` naming the `side`, egress first. On the PACKAGED
-host of `RUNTIME` (python | rust | swift), driven over `web_rest` — the agents
+host of `RUNTIME` (python | rust), driven over `web_rest` — the agents
 under test are `user_probe` agents whose `send` dispatches AS THEMSELVES, so the
 sender is a real agent, not the REST leg:
 

@@ -4,7 +4,7 @@ id: grep_finds
 group: coding
 title: "FIND the line: one of eight identical fillers carries a marker — grep, then pull only the hit"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

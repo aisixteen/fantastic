@@ -4,7 +4,7 @@ id: reboot_continuity
 group: kernel
 title: "a tree built over REST (nested agents, fields, grants, files, deletes) comes back whole on the next boot of the same dir; an agent deleted and re-created on its id keeps its store rows and its files"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

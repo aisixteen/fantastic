@@ -12,10 +12,7 @@ care whether the peer is a local container, a remote container, or a bare host).
 Runs ONLY under `FANTASTIC_TARGET=container` (skips otherwise — locally the
 `test_bridge_python_python_ws` forward path covers the same bridge surface).
 
-Parametrized over `python` AND `swift`: the swift leg proves the swift bridge's
-swift-nio WebSocket CLIENT (NIOWebSocketClient, which replaced the Apple-only
-URLSessionWebSocketTask) actually dials a peer over a real network ON LINUX —
-the one path the local-loopback swift bridge tests can't exercise in-container.
+Parametrized over `python` only (the swift runtime, its other leg, is retired).
 """
 
 from __future__ import annotations
@@ -56,12 +53,11 @@ def _launcher_or_skip(runtime: str) -> ContainerLauncher:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("runtime", ["python", "swift"])
+@pytest.mark.parametrize("runtime", ["python"])
 async def test_container_to_container_bridge_forward(parity_tmp, runtime) -> None:
     """A container's bridge forwards a call to ANOTHER container via the host
     gateway — published ports only, no shared network. Both containers run the
-    SAME runtime (`python` or `swift`); the swift leg proves the swift-nio WS
-    client dials cross-container on Linux."""
+    SAME runtime (`python`)."""
     launcher = _launcher_or_skip(runtime)
     base = parity_tmp("ct2ct")
     wa = base / "A"

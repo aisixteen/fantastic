@@ -1,8 +1,7 @@
-"""Run a SHARED scenario against a compiled kernel (rust | swift), FROM e2e.
+"""Run a SHARED scenario against a compiled kernel (rust), FROM e2e.
 
 The peer of `inproc_js.mjs`: same scenario file, same
-assertions, different substrate. Which kernel is a PLUG — `KERNEL=rust` or
-`KERNEL=swift` — exactly as the model is a plug in `backends/`.
+assertions, different substrate. Which kernel is a PLUG — `KERNEL=rust` — exactly as the model is a plug in `backends/`.
 
 ROLES, NOT BUNDLE NAMES. A compiled kernel runs only what is compiled into it,
 so `memory` is a `file_bridge` data store here while js registers a handler in
@@ -40,8 +39,7 @@ ROLE_BUNDLE = {
     "render_sink": "cli.tools",
     "compute": "exec_bridge.tools",
     # STATEFUL FIXTURES. TEST-ONLY on every runtime, and gated so a default
-    # build carries none of them: a rust feature (`scenario-probes`), a swift
-    # define (`SCENARIO_PROBES`), the registering launcher for python
+    # build carries none of them: a rust feature (`scenario-probes`), the registering launcher for python
     # (`probes/scenario_probes.py`). The MODULE NAMES are shared, which is what
     # lets one map serve all three.
     "dispenser": "dispenser_probe.tools",
@@ -111,7 +109,7 @@ def main(scenario_id: str) -> int:
     missing = sorted({e["role"] for e in roster if e["role"] not in ROLE_BUNDLE})
     if missing:
         print(f"  SKIP — no compiled-kernel bundle plays {missing}.")
-        print("  python and js register these in process; rust and swift would")
+        print("  python and js register these in process; rust would")
         print("  need a probe bundle compiled in.")
         print(f"\nE2E-SKIP: {rt} cannot play {missing}")
         return 0

@@ -29,9 +29,8 @@
 # `-xlarge` label is billed even on a public repo; never name one here.
 #
 # macOS is `xcode-27` (macOS 27 + Xcode 27, a preview image): the Apple
-# Foundation Models bridge the rust kernel links needs the macOS 27 SDK. Swift is
-# the Apple app's kernel: it builds and tests on macOS only, and the e2e on Linux
-# and Windows runs every runtime but swift. (Swift is off everywhere now.)
+# Foundation Models bridge the rust kernel links needs the macOS 27 SDK. The
+# swift kernel runtime is retired (#53); only the bridge package stays.
 
 name: build
 
@@ -181,24 +180,6 @@ jobs:
           cp ../target/${{ inputs.profile }}/fantastic$X binaries/fantastic-$t$X
           cargo test --locked --no-fail-fast
 
-  # SWIFT IS OFF (maintainer, 2026-10-22: Swift is deprecated, no new parity).
-  # Its code and tests stay in the repo, untouched, until it is retired (#53);
-  # CI no longer builds, tests or gates on it. Back on: `if: inputs.units`.
-  swift:
-    if: false
-    name: swift · xcode-27
-    runs-on: xcode-27
-    timeout-minutes: 60
-    defaults:
-      run:
-        working-directory: src/lib/swift
-    steps:
-      - uses: actions/checkout@v7
-      - name: build
-        run: swift build -c ${{ inputs.profile }}
-      - name: unit tests
-        run: swift test -c ${{ inputs.profile }}
-
   ts:
     if: inputs.units
     name: ts · ${{ matrix.os }}
@@ -276,8 +257,7 @@ jobs:
         working-directory: src/lib/python
         run: |
           uv run python ../../../e2e/build.py --out ../../../dist/e2e \
-            --profile ${{ inputs.profile }} --target ${{ matrix.target }} \
-            --exclude-runtime swift
+            --profile ${{ inputs.profile }} --target ${{ matrix.target }}
           # one tar: upload-artifact drops the executable bit
           tar -cf ../../../dist/e2e.tar -C ../../../dist/e2e .
       - name: the CLI
@@ -519,13 +499,10 @@ jobs:
         # their hosts on its 4 vCPUs pushed the canvas waits past their bounds.
         include:
           - os: ubuntu-latest
-            skip: "--exclude-runtime swift"
             lanes: 2
           - os: xcode-27
-            skip: "--exclude-runtime swift"
             lanes: 2
           - os: windows-latest
-            skip: "--exclude-runtime swift"
             lanes: 1
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
@@ -588,7 +565,7 @@ jobs:
           E2E_TUI_FRAMES: ${{ github.workspace }}/e2e/runs/tui-frames
           E2E_ARTIFACTS: ${{ github.workspace }}/dist/e2e
           E2E_PROFILE: ${{ inputs.profile }}
-        run: uv run python ../../../e2e/run.py --only-free --lanes ${{ matrix.lanes }} --shard ${{ matrix.shard }}/3 ${{ matrix.skip }}
+        run: uv run python ../../../e2e/run.py --only-free --lanes ${{ matrix.lanes }} --shard ${{ matrix.shard }}/3
       - name: the failures' logs, here
         if: failure()
         run: |

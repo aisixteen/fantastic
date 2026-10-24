@@ -4,7 +4,7 @@ id: context_clear
 group: coding
 title: "context_clear is a BOUNDARY, not a deletion: chat/clear/chat, chat/fold/clear/chat, and a clear that survives a kernel restart"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

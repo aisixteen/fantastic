@@ -56,7 +56,7 @@ runtimes × 2** — every unordered pair (**any-to-any**) plus **same-kind**:
 
 | pairs |
 |---|
-| python↔python · python↔rust · python↔swift · rust↔rust · rust↔swift · swift↔swift |
+| python↔python · python↔rust · rust↔rust |
 
 All three host runtimes ship a `relay_connector` transport (same `handler_module`,
 `relay_connector.tools`) and interop any-to-any over the same relay. A pair skips
@@ -82,7 +82,7 @@ only if a runtime's binary isn't built (clear skip reason).
   (`ingress_rule="deny_ingress"` + `egress_rule="password_egress"`), B a group member.
   A→B round-trips (A's egress presents, B's ingress checks); B→A is denied (A's
   ingress). Independent per-direction rules, identical wire shape everywhere.
-- **`test_relay_directory[python|rust|swift]`** — two connectors of the runtime
+- **`test_relay_directory[python|rust]`** — two connectors of the runtime
   both connect, then `list_peers` (addressed to the relay's own `relay` agent,
   `target:"relay"`) returns BOTH peers with `status:"green"`, and
   `watch_directory` acks. (The live event-surfacing onto the connector inbox is
@@ -91,12 +91,12 @@ only if a runtime's binary isn't built (clear skip reason).
   `reconnect=1` forwards, the relay is killed + restarted on the SAME port, the
   leg re-dials with its backoff, and a forward round-trips again over the healed
   connection. The reconnect logic is shared/mirrored across runtimes.
-- **`test_relay_kernelgroup_typing[python|rust|swift]`** — a manager peer + an
+- **`test_relay_kernelgroup_typing[python|rust]`** — a manager peer + an
   owned kernel join; `list_peers` carries each peer's `announce`d attrs blob
   (`attrs.role`/`owner_guid`/`exposes`, stored verbatim by the relay) and
   `set_identity` live-updates it. `owner_guid` is the manager's kernel-instance
   guid (its root reflect's `guid`), not its relay-leg guid.
-- **`test_relay_streams_raw_bytes[python|rust|swift]`** (`test_relay_stream.py`) —
+- **`test_relay_streams_raw_bytes[python|rust]`** (`test_relay_stream.py`) —
   a python A writes raw (non-UTF-8) bytes over a binary web_ws frame → its leg →
   the relay → B's leg → B's `fs`, they land verbatim on B's disk, and `read_stream`
   brings them back byte-identical over the same chain.

@@ -78,7 +78,7 @@ def set_slot(slot: str) -> None:
 #: Staged artifacts. `capture` NEVER builds — `run.py stage` is the only path.
 DIST = REPO / "e2e/dist"
 
-RUNTIMES = ("python", "rust", "swift")
+RUNTIMES = ("python", "rust")
 
 
 def kernel_cmd(rt: str) -> list[str]:
@@ -94,7 +94,7 @@ def kernel_cmd(rt: str) -> list[str]:
             str(REPO / "src/lib/python/.venv/bin/python"),
             str(REPO / "e2e/probes/scenario_probes.py"),
         ]
-    if rt in ("rust", "swift"):
+    if rt == "rust":
         return [str(DIST / rt / "fantastic_kernel")]
     raise SystemExit(f"unknown runtime {rt!r} — one of {', '.join(RUNTIMES)}")
 

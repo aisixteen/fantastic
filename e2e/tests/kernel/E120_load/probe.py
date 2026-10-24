@@ -1,6 +1,6 @@
 """kernel/load — hydration and batch throughput at scale. NO MODEL. Run SOLO.
 
-On the PACKAGED host of `RUNTIME` (python | rust | swift), every call through
+On the PACKAGED host of `RUNTIME` (python | rust), every call through
 `web_rest`:
 
   1. BASELINE: the driver's seed alone boots (spawn → serving) in `t0`;

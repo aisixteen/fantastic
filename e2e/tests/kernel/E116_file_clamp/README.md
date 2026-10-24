@@ -24,5 +24,4 @@ What it proves (details in `probe.py`'s docstring):
 ```sh
 cd src/lib/python
 uv run python ../../../e2e/run.py --only-free --id file_clamp --lanes 3   # all three
-RUNTIME=swift uv run python ../../../e2e/tests/kernel/E116_file_clamp/probe.py
 ```

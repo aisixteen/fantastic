@@ -4,7 +4,7 @@ id: two_roots_live
 group: coding
 title: "the human sends a second task mid-run — two chains interleave, two reports, no cross-talk"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 long: true  # many lanes push turns past the 180 s proxy limit; at most 2 long run at once
 limits:

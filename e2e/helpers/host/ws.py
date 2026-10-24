@@ -9,7 +9,7 @@ What it is FOR: a failed pass announces itself as a `status` event with
 `detail.error` on the agent's own stream. In process the connector taps
 `root.ctx.inboxes`; over a socket the same events arrive here. Without it a
 chain that died mid-flight is indistinguishable from a model that chose to
-stop — which is exactly how `agentic.build:swift` read: seven good turns, then
+stop — which is exactly how `agentic.build:rust` read: seven good turns, then
 silence, and no way to say why.
 """
 

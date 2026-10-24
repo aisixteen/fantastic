@@ -4,7 +4,7 @@ id: folder_bundles
 group: kernel
 title: "a folder bundle under .fantastic/bundles/ is a creatable kind: cold-loaded at boot, listed, documented, its verbs answer; reload_bundle hot-loads a new folder and restarts live instances on an edited program; a malformed or reserved-verb bundle.yaml is listed with its error, never fatal"
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: free
 limits:
   idle_seconds: 120

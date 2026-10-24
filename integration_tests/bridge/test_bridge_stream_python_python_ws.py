@@ -55,7 +55,7 @@ async def test_python_python_ws_watch_remote_streams_event(
     port_b = free_port()
 
     # B is the watched/emitted kernel — resolve its LITERAL root id before seeding.
-    # Python's root is "kernel_state"; rust/swift use "core". Never hardcode either.
+    # Python's root is "kernel_state"; rust uses "core". Never hardcode either.
     server_root = root_id(python_binary, workdir_b)
 
     # Seed B (server) first: web HTTP listener + web_ws WS route (opt-in).

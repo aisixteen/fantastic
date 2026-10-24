@@ -4,7 +4,7 @@ id: gated_write
 group: coding
 title: denied, the writer asks a PEER agent who opens the gate
 runner: probe.py
-runtimes: [python, rust, swift]
+runtimes: [python, rust]
 costs: turns
 limits:
   idle_seconds: 60

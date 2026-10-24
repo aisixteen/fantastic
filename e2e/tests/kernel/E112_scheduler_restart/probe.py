@@ -1,7 +1,7 @@
 """kernel/scheduler_restart — the scheduler fires, bounds a fire, and keeps its
 schedules across a restart. NO MODEL.
 
-The PACKAGED host of `RUNTIME` (python | rust | swift), every call over `web_rest`;
+The PACKAGED host of `RUNTIME` (python | rust), every call over `web_rest`;
 the scheduler `sch` fires AS ITSELF at the `slow` probe agent `tgt` (the edge
 granted on both ends):
 

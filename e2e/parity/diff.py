@@ -160,17 +160,17 @@ class Norm:
         # system prompt the same reflect is rendered into, which put the token in
         # every one of the ctx family's 453 files.
         for pat, rep in (
-            (r"(?<![\w.])runtime=(python|rust|swift)(?![\w.-])", "runtime=<RUNTIME>"),
+            (r"(?<![\w.])runtime=(python|rust)(?![\w.-])", "runtime=<RUNTIME>"),
             # …and the cli intro banner, whose SHAPE is A9.5 and whose first
             # field is the runtime naming itself.
-            (r"(\[fantastic\] )(python|rust|swift)( ·)", r"\1<RUNTIME>\3"),
+            (r"(\[fantastic\] )(python|rust)( ·)", r"\1<RUNTIME>\3"),
             # …and the same reflect field as JSON INSIDE TEXT — a cli stdout, a
             # REST body recorded as a string — quoted once or more
             # (`"runtime": "python"` in a cli stdout; `\"runtime\":\"python\"`
             # in a `wire/rest` body). The key-based pass
             # already gives the parsed field `<RUNTIME>`; this is the same value
             # where nothing parsed it.
-            (r'(\\*"runtime\\*"\s*:\s*\\*")(python|rust|swift)(\\*")', r"\1<RUNTIME>\3"),
+            (r'(\\*"runtime\\*"\s*:\s*\\*")(python|rust)(\\*")', r"\1<RUNTIME>\3"),
         ):
             new = re.sub(pat, rep, out)
             if new != out:
@@ -1436,7 +1436,7 @@ def _name_length_delta(key: str, va, vb, na: "Norm", nb: "Norm") -> bool:
         return False
     if len(va) != 2 or len(vb) != 2 or va[0] != "int" or vb[0] != "int":
         return False
-    if na.runtime not in ("python", "rust", "swift") or nb.runtime not in ("python", "rust", "swift"):
+    if na.runtime not in ("python", "rust") or nb.runtime not in ("python", "rust"):
         return False
     return va[1] - vb[1] == len(na.runtime) - len(nb.runtime) != 0
 
