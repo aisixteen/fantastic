@@ -151,6 +151,14 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Fixed
 
+- Home on Windows: both running canvases flipped to unverified and reloaded at
+  once (#79). A registry entry whose folder or `fantastic.yaml` failed to read
+  (a transient sharing violation) vanished from the list for that look, which
+  dropped its verification; the read is now retried, and a read that still fails
+  is a registry problem that keeps the rows as they were. A running row whose
+  look failed (its guid, lock or folder read) is ridden out for the same two polls
+  as a missed canvas answer; a clean answer still shows at once.
+
 - S4: the desktop app's shell flag (`__FANTASTIC_SHELL__`) reaches the canvas
   on macOS and Linux too: it is set in every frame, so the canvas (a frame of
   the Home page) knows its webview and backdrop; only the top frame gets

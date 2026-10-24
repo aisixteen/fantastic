@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use fantastic_home::Canvas;
 use fantastic_kernel::lock;
+use fantastic_user_home_store::user_store::{fantastics_dir, INFO};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -90,6 +91,75 @@ fn is_fantastic_names_a_look_that_failed() {
         let err = is_fantastic(&blocked.display().to_string()).expect_err("a file has no children");
         assert!(err.contains("plain.txt"), "{err}");
     }
+}
+
+#[test]
+fn a_registry_entry_that_cannot_be_read_is_an_error_not_a_vanished_row() {
+    let (_d, home) = temp();
+    let registry = fantastics_dir(&home);
+    let folder = registry.join("a");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join(INFO), "guid: g1\npath: /w/a\n").unwrap();
+    assert_eq!(
+        read_registry(&home).unwrap(),
+        vec![("a".to_string(), "guid: g1\npath: /w/a\n".to_string())]
+    );
+    // A folder with no fantastic.yaml is not an entry: absent, not an error.
+    std::fs::create_dir_all(registry.join("bare")).unwrap();
+    assert_eq!(read_registry(&home).unwrap().len(), 1);
+    // An entry whose fantastic.yaml cannot be read is an error naming the file.
+    // A directory where the file is makes the read fail on every OS.
+    let broken = registry.join("broken");
+    std::fs::create_dir_all(broken.join(INFO)).unwrap();
+    let err = read_registry(&home).expect_err("an unreadable entry");
+    assert!(
+        err.contains(&broken.join(INFO).display().to_string()),
+        "{err}"
+    );
+    // An entry that is gone is just absent again.
+    std::fs::remove_dir_all(&broken).unwrap();
+    assert_eq!(read_registry(&home).unwrap().len(), 1);
+}
+
+#[test]
+fn a_registry_read_retries_a_transient_failure() {
+    let (_d, home) = temp();
+    let folder = home.join("a");
+    std::fs::create_dir_all(&folder).unwrap();
+    let transient =
+        || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "sharing violation");
+    // Two failed tries, then the file reads: the entry is returned.
+    let mut calls = 0;
+    let text = registry_entry(&folder, |_| {
+        calls += 1;
+        if calls <= 2 {
+            Err(transient())
+        } else {
+            Ok(b"guid: g1\n".to_vec())
+        }
+    });
+    assert_eq!(text, Ok(Some("guid: g1\n".to_string())));
+    assert_eq!(calls, 3);
+    // Every try fails: the retries run out, and the error names the file.
+    let mut tries = 0;
+    let err = registry_entry(&folder, |_| {
+        tries += 1;
+        Err(transient())
+    })
+    .expect_err("out of retries");
+    assert_eq!(tries, READ_TRIES);
+    assert!(
+        err.contains(&folder.join(INFO).display().to_string()),
+        "{err}"
+    );
+    // A file that is not there is an answer, not a failure: no retry.
+    let mut gone = 0;
+    let absent = registry_entry(&folder, |_| {
+        gone += 1;
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    });
+    assert_eq!(absent, Ok(None));
+    assert_eq!(gone, 1);
 }
 
 #[test]
