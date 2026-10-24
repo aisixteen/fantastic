@@ -584,6 +584,142 @@ pub(crate) fn open_inquiries() -> &'static Mutex<HashMap<(String, String), OpenI
     OPEN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// The jobs an agent has started and not yet heard end, by owner.
+type RunningJobs = HashMap<String, Vec<(Value, String)>>;
+
+/// Exec jobs an agent started and has not yet heard end, by owner: `(raw job_id, exec
+/// agent)`. An owner with any is awaiting its own work (#306); each one ends in ONE
+/// `job_done` wake, after which it is dropped from here.
+pub(crate) fn running_jobs() -> &'static Mutex<RunningJobs> {
+    static JOBS: OnceLock<Mutex<RunningJobs>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn running_jobs_count(self_id: &str) -> u64 {
+    running_jobs()
+        .lock()
+        .expect("jobs poisoned")
+        .get(self_id)
+        .map_or(0, Vec::len) as u64
+}
+
+/// Drops one job from [`running_jobs`] when it goes out of scope, so a watcher that is
+/// cancelled (its agent stopped or deleted) stops counting the job as pending.
+struct RunningJob {
+    owner: String,
+    job: Value,
+    exec: String,
+}
+
+impl Drop for RunningJob {
+    fn drop(&mut self) {
+        if let Ok(mut jobs) = running_jobs().lock() {
+            let empty = match jobs.get_mut(&self.owner) {
+                Some(list) => {
+                    list.retain(|(j, e)| !(j == &self.job && e == &self.exec));
+                    list.is_empty()
+                }
+                None => false,
+            };
+            if empty {
+                jobs.remove(&self.owner);
+            }
+        }
+    }
+}
+
+/// A field of the job a `status` or `tail` reply is about: the first of `jobs`, or the
+/// reply itself when the exec agent answers flat.
+fn job_field<'a>(result: &'a Value, key: &str) -> Option<&'a Value> {
+    result
+        .get("jobs")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|j| j.get(key))
+        .or_else(|| result.get(key))
+}
+
+/// Record a job an agent's `exec start` left running, and spawn ONE watcher task for it
+/// on the owner. The watcher waits on the exec agent's `status` until the job is no
+/// longer live (`running` or `stopping`), forgets the job, then wakes the owner once with
+/// `job_done {job_id, exit_code, tail}`. The exit key is `exit_code`, as the exec bridge
+/// names it, not `exit`.
+pub(crate) fn watch_job(
+    kernel: &Arc<Kernel>,
+    owner: &str,
+    exec: &str,
+    job_id: &Value,
+    client_id: &str,
+) {
+    running_jobs()
+        .lock()
+        .expect("jobs poisoned")
+        .entry(owner.to_string())
+        .or_default()
+        .push((job_id.clone(), exec.to_string()));
+    let work = Arc::clone(kernel);
+    let (owner_s, exec_s, job, cid) = (
+        owner.to_string(),
+        exec.to_string(),
+        job_id.clone(),
+        client_id.to_string(),
+    );
+    kernel.spawn_task(&AgentId::from(owner), "job_watch", async move {
+        let entry = RunningJob {
+            owner: owner_s.clone(),
+            job: job.clone(),
+            exec: exec_s.clone(),
+        };
+        let exec_id = AgentId::from(exec_s.as_str());
+        let mut last;
+        loop {
+            let out = work
+                .send(vec![Item::new(
+                    exec_id.clone(),
+                    json!({"type": "status", "job_id": job.clone(), "wait_s": 100}),
+                )])
+                .await;
+            last = out.first().map_or(Value::Null, |o| o.result.clone());
+            let state = job_field(&last, "status")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            // An error or unknown-job reply has no status, so it ends the wait too.
+            if state != "running" && state != "stopping" {
+                break;
+            }
+        }
+        let t = work
+            .send(vec![Item::new(
+                exec_id,
+                json!({"type": "tail", "job_id": job.clone(), "lines": 20}),
+            )])
+            .await;
+        let tail = t
+            .first()
+            .and_then(|o| o.result.get("lines"))
+            .and_then(Value::as_array)
+            .map(|ls| {
+                let skip = ls.len().saturating_sub(20);
+                ls[skip..]
+                    .iter()
+                    .filter_map(|l| l.get("line").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let exit = job_field(&last, "exit_code")
+            .cloned()
+            .unwrap_or(Value::Null);
+        // Forget the job BEFORE the wake, so the woken turn's `pending` no longer counts it.
+        drop(entry);
+        let text = format!(
+            "job_done {}",
+            json!({"job_id": job, "exit_code": exit, "tail": tail})
+        );
+        deliver_soon(&work, &owner_s, &text, &cid, None, false);
+    });
+}
+
 /// Answers an agent is still OWED, by inquiry pid: added when its inquiry comes
 /// back `accepted`, cleared when a message under that pid arrives. They count as
 /// work in flight, so `await` is honest while one is out. Python `_awaiting`.
@@ -741,6 +877,10 @@ pub(crate) fn forget(self_id: &str) {
     inflight()
         .lock()
         .expect("inflight poisoned")
+        .remove(self_id);
+    running_jobs()
+        .lock()
+        .expect("jobs poisoned")
         .remove(self_id);
     silent()
         .lock()
@@ -1391,6 +1531,17 @@ async fn route_reply_gated(
         out
     };
 
+    // A JOB this agent started (#306): an `exec start` answered `running` is watched, and
+    // its end wakes this agent once. Only this batch's own replies are read, so a job
+    // another agent started never registers against this one.
+    for ((exec, sent), out) in payloads.iter().zip(outcomes.iter()) {
+        let started = sent.get("type").and_then(Value::as_str) == Some("start")
+            && out.result.get("status").and_then(Value::as_str) == Some("running");
+        match out.result.get("job_id").filter(|v| !v.is_null()) {
+            Some(job) if started => watch_job(&kernel, self_id.as_str(), exec, job, &client_id),
+            _ => {}
+        }
+    }
     // AN ACCEPTED INQUIRY IS OWED AN ANSWER — counted until a message under its pid
     // arrives (`settle_owed`). Python: the same loop after `kernel.send(items)`.
     for ((_, sent), out) in payloads.iter().zip(outcomes.iter()) {
@@ -1600,7 +1751,9 @@ async fn route_reply_gated(
             .expect("awaiting poisoned")
             .get(self_id.as_str())
             .map_or(0, HashSet::len) as u64;
-        let pending = inflight_count(self_id.as_str()) + queued + running + owed;
+        // ...and the exec jobs it started that are still running (#306): their end wakes it.
+        let jobs = running_jobs_count(self_id.as_str());
+        let pending = inflight_count(self_id.as_str()) + queued + running + owed + jobs;
         // ONE CHAIN PER AGENT (#227): messages held while this chain ran are
         // answered by the wake turn, so this chain ends now.
         if !st.chain.lock().expect("chain poisoned").held.is_empty() {
