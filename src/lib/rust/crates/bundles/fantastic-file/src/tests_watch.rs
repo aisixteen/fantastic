@@ -193,3 +193,95 @@ async fn a_path_the_bridge_stops_exposing_reports_nothing() {
     std::fs::write(served(&tmp).join("notes/a.md"), "y").unwrap();
     assert!(next_changed(&mut rx, "notes/a.md", 1).await.is_none());
 }
+
+/// Every `changed` for `path` within `secs`, in order of arrival (other paths
+/// and other events skipped).
+async fn changes_for(
+    rx: &mut fantastic_kernel::inbox::InboxReceiver,
+    path: &str,
+    secs: u64,
+) -> Vec<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    let mut kinds = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+        match tokio::time::timeout(left, rx.recv()).await {
+            Ok(Some(item)) if item.payload["type"] == "changed" && item.payload["path"] == path => {
+                kinds.push(
+                    item.payload["kind"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+            }
+            Ok(Some(_)) => {}
+            _ => break,
+        }
+    }
+    kinds
+}
+
+/// A file that exists when it is watched: one write is ONE `modified`. The
+/// create that a platform may replay after the arm (FSEvents replays the events
+/// of the stream's start) must not read as an `added` for the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_arm_write_gives_exactly_one_modified() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp, json!(["."])).await;
+    std::fs::write(served(&tmp).join("f.md"), "one").unwrap();
+    let mut rx = inbox(&k).await;
+    call(&k, json!({"type": "watch_path", "path": "f.md"})).await;
+    std::fs::write(served(&tmp).join("f.md"), "two, longer").unwrap();
+    let kinds = changes_for(&mut rx, "f.md", 1).await;
+    assert_eq!(kinds, vec!["modified".to_string()], "one write, one event");
+}
+
+/// An atomic save (a temp file renamed over the path) is a NEW inode: `added`,
+/// once. A later open-and-close with no write changes nothing on disk, so it
+/// reports nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_atomic_save_after_arm_gives_added_and_a_no_op_event_gives_nothing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp, json!(["."])).await;
+    std::fs::write(served(&tmp).join("f.md"), "one").unwrap();
+    let mut rx = inbox(&k).await;
+    call(&k, json!({"type": "watch_path", "path": "f.md"})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(served(&tmp).join(".f.md.tmp"), "two").unwrap();
+    std::fs::rename(served(&tmp).join(".f.md.tmp"), served(&tmp).join("f.md")).unwrap();
+    let kinds = changes_for(&mut rx, "f.md", 1).await;
+    assert_eq!(
+        kinds,
+        vec!["added".to_string()],
+        "an atomic save is one added"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // opened for writing and closed again: no byte, no stamp change
+    drop(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(served(&tmp).join("f.md"))
+            .unwrap(),
+    );
+    let kinds = changes_for(&mut rx, "f.md", 1).await;
+    assert!(kinds.is_empty(), "a no-op event reported {kinds:?}");
+}
+
+/// A held path the watch cannot arm is refused: an error reply, no `watching`,
+/// and no hold left behind. A directory that cannot be read cannot be watched
+/// by inotify (its `inotify_add_watch` is EACCES); the test is Linux-only.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_that_cannot_arm_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp, json!(["."])).await;
+    let locked = served(&tmp).join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let r = call(&k, json!({"type": "watch_path", "path": "locked"})).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(r["watching"].is_null(), "a watch that did not arm: {r}");
+    assert!(r["error"].is_string(), "a refusal carries an error: {r}");
+    let r = call(&k, json!({"type": "unwatch_path", "path": "locked"})).await;
+    assert_eq!(r, json!({"watching": false, "paths": []}), "no hold left");
+}

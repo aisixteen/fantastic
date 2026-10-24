@@ -21,14 +21,91 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use fantastic_kernel::{AgentId, Kernel};
-use notify::event::{EventKind, ModifyKind};
+use fantastic_bundle::py_repr;
+use fantastic_kernel::{refusal as rf, AgentId, Kernel};
+use notify::event::EventKind;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 
 /// A burst of disk events (an editor's save) inside this window is one `changed`
 /// per path (python `WATCH_DEBOUNCE_MS`).
 const DEBOUNCE: Duration = Duration::from_millis(50);
+
+/// What a path looked like on disk when it was last judged: enough to tell the
+/// same file changed (size, times) from a different file at the same path (a
+/// new inode: an atomic save, a restore, a copy over). The platform's event
+/// names are not used for this, because a replayed event can carry a stale name.
+#[derive(Debug, Clone, PartialEq)]
+struct Stamp {
+    ino: u64,
+    ctime_ns: i128,
+    mtime_ns: i128,
+    size: u64,
+}
+
+/// The stamp of the path now, or `None` when nothing is there.
+#[cfg(unix)]
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::metadata(path).ok()?;
+    Some(Stamp {
+        ino: md.ino(),
+        ctime_ns: i128::from(md.ctime()) * 1_000_000_000 + i128::from(md.ctime_nsec()),
+        mtime_ns: i128::from(md.mtime()) * 1_000_000_000 + i128::from(md.mtime_nsec()),
+        size: md.size(),
+    })
+}
+
+/// The stamp of the path now. The identity is the volume's file index, read from
+/// an open handle (a directory is opened with backup semantics so it can be read
+/// too). The times are the last write time: the handle API does not give a
+/// change time here, so a metadata-only change on Windows is not seen.
+#[cfg(windows)]
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let md = std::fs::metadata(path).ok()?;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    // SAFETY: an all-zero BY_HANDLE_FILE_INFORMATION is a valid out-parameter,
+    // and the handle is open for the duration of the call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `f` owns a live handle; `info` is a valid, writable struct.
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
+        return None;
+    }
+    let ino = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    // FILETIME: 100 ns ticks; the same value stands for both times here.
+    let written = i128::from(md.last_write_time()) * 100;
+    Some(Stamp {
+        ino,
+        ctime_ns: written,
+        mtime_ns: written,
+        size: md.file_size(),
+    })
+}
+
+/// The judgement of one path between its last stamp and its stamp now (python
+/// `watchfiles.Change` names). A different inode is `added` (a new file at the
+/// path); the same inode with any other field changed is `modified`; the same
+/// stamp, or no file either time, is no change.
+fn judge(last: Option<&Stamp>, now: Option<&Stamp>) -> Option<&'static str> {
+    match (last, now) {
+        (None, None) => None,
+        (None, Some(_)) => Some("added"),
+        (Some(_), None) => Some("deleted"),
+        (Some(a), Some(b)) if a.ino != b.ino => Some("added"),
+        (Some(a), Some(b)) if a == b => None,
+        (Some(_), Some(_)) => Some("modified"),
+    }
+}
 
 /// What one bridge holds: each watched path and who holds it, and the live
 /// watcher (dropping it ends its task: the task keeps only a `Weak` to it).
@@ -121,13 +198,15 @@ fn layout(root: &Path, norms: &[String]) -> Layout {
 /// Watch every directory the held paths need, then describe the disk again.
 /// Repeats until the description needs nothing new, so the returned layout was
 /// computed after every directory it names was armed: a change after that point
-/// is an event, and a change before it is in the layout.
+/// is an event, and a change before it is in the layout. A directory that cannot
+/// be armed while it still exists is an error (the first one, as text); a
+/// directory that vanished meanwhile is not.
 fn settle(
     root: &Path,
     norms: &[String],
     watcher: &Weak<Mutex<RecommendedWatcher>>,
     armed: &mut BTreeSet<PathBuf>,
-) -> Layout {
+) -> Result<Layout, String> {
     loop {
         let lay = layout(root, norms);
         let fresh: Vec<PathBuf> = lay
@@ -137,18 +216,51 @@ fn settle(
             .cloned()
             .collect();
         if fresh.is_empty() {
-            return lay;
+            return Ok(lay);
         }
         if let Some(w) = watcher.upgrade() {
             if let Ok(mut w) = w.lock() {
                 for d in &fresh {
-                    // a directory that vanished meanwhile is simply not armed
-                    let _ = w.watch(d, RecursiveMode::NonRecursive);
+                    if let Err(e) = w.watch(d, RecursiveMode::NonRecursive) {
+                        if d.exists() {
+                            return Err(format!("{}: {e}", d.display()));
+                        }
+                    }
                 }
             }
         }
         armed.extend(fresh);
     }
+}
+
+/// The stamp of every held path that exists now, as the seed of the judgement:
+/// a held file, and every current entry of a held directory (one level, the watch
+/// is not recursive). Taken right after the arm, so a later event is judged
+/// against what the disk held when the watch went live.
+fn seed(root: &Path, norms: &[String]) -> HashMap<String, Stamp> {
+    let mut stamps = HashMap::new();
+    for norm in norms {
+        let target = under(root, norm);
+        if let Some(s) = stamp_of(&target) {
+            stamps.insert(norm.clone(), s);
+        }
+        if target.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&target) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let rel = if norm == "." {
+                        name
+                    } else {
+                        format!("{norm}/{name}")
+                    };
+                    if let Some(s) = stamp_of(&under(root, &rel)) {
+                        stamps.insert(rel, s);
+                    }
+                }
+            }
+        }
+    }
+    stamps
 }
 
 impl Watches {
@@ -165,10 +277,38 @@ impl Watches {
             .unwrap_or_else(|| ".".into());
         let mut all = self.by_bridge.lock().expect("watches");
         let held = all.entry(agent_id.0.clone()).or_default();
-        held.paths.entry(norm.clone()).or_default().insert(caller());
+        let me = caller();
+        let was_holder = held.paths.get(&norm).is_some_and(|h| h.contains(&me));
+        held.paths
+            .entry(norm.clone())
+            .or_default()
+            .insert(me.clone());
         // A missing path is accepted and pending: its nearest existing ancestor
         // is armed until the path appears.
-        let missing = rewatch(agent_id, held, root, kernel);
+        let missing = match rewatch(agent_id, held, root, kernel) {
+            Ok(missing) => missing,
+            Err(e) => {
+                // a watch that did not arm is not a watch: roll this caller's new
+                // hold back, and re-arm what the others still hold
+                if !was_holder {
+                    if let Some(h) = held.paths.get_mut(&norm) {
+                        h.remove(&me);
+                        if h.is_empty() {
+                            held.paths.remove(&norm);
+                        }
+                    }
+                }
+                let _ = rewatch(agent_id, held, root, kernel);
+                return rf::refusal_hint(
+                    rf::TRANSPORT_ERROR,
+                    format!(
+                        "watch_path {}: the disk watch cannot be armed: {e}",
+                        py_repr(&norm)
+                    ),
+                    "check that the path and its folder are readable",
+                );
+            }
+        };
         let mut out = json!({"watching": norm, "paths": paths_json(held)});
         if missing.contains(&norm) {
             out["pending"] = json!(true);
@@ -195,7 +335,9 @@ impl Watches {
                 held.paths.remove(&norm);
             }
         }
-        rewatch(agent_id, held, root, kernel);
+        // what is left was armed before; a re-arm that fails now leaves no watch
+        // for it, and the reply still reports the hold as dropped
+        let _ = rewatch(agent_id, held, root, kernel);
         json!({"watching": false, "paths": paths_json(held)})
     }
 
@@ -207,48 +349,40 @@ impl Watches {
 
 /// (Re)start the ONE disk watcher a bridge runs, over the paths held now. The old
 /// watcher is dropped first: its channel closes and its task ends. Returns the
-/// held paths that are missing (pending) at arming time.
+/// held paths that are missing (pending) at arming time, or why the watch could
+/// not be armed.
 fn rewatch(
     agent_id: &AgentId,
     held: &mut Held,
     root: &Path,
     kernel: &Arc<Kernel>,
-) -> BTreeSet<String> {
+) -> Result<BTreeSet<String>, String> {
     held.watcher = None;
     if held.paths.is_empty() {
-        return BTreeSet::new();
+        return Ok(BTreeSet::new());
     }
     let norms: Vec<String> = held.paths.keys().cloned().collect();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
-    let Ok(watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+    let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
             let _ = tx.send(ev);
         }
-    }) else {
-        return BTreeSet::new();
-    };
+    })
+    .map_err(|e| format!("the disk watcher did not start: {e}"))?;
     let watcher = Arc::new(Mutex::new(watcher));
     let weak = Arc::downgrade(&watcher);
     let mut armed = BTreeSet::new();
-    let first = settle(root, &norms, &weak, &mut armed);
-    let missing = first.missing.clone();
-    // a held path that exists now is already present: its create-like events
-    // (an overwrite may read as one) are `modified`, not a new `added`
-    let existing: BTreeSet<String> = norms
-        .iter()
-        .filter(|n| !missing.contains(*n))
-        .cloned()
-        .collect();
-    let mut waiting = first.missing;
+    let mut lay = settle(root, &norms, &weak, &mut armed)?;
+    let missing = lay.missing.clone();
+    // the stamps the judgement starts from: what the disk holds at the arm
+    let mut stamps = seed(root, &norms);
     held.watcher = Some(watcher);
     let me = agent_id.clone();
     let k = Arc::clone(kernel);
     let root = root.to_path_buf();
     kernel.spawn_task(agent_id, "watch_path", async move {
-        // paths already present in this watch (announced, or there at arming)
-        let mut present = existing;
         let mut batch: Vec<notify::Event> = Vec::new();
-        // the first pass has no events: it checks the disk as armed
+        // the first pass has no events: it judges the pending paths as armed
         let mut first_pass = true;
         loop {
             let mut closed = false;
@@ -267,28 +401,41 @@ fn rewatch(
                 }
             }
             first_pass = false;
-            // re-arm closer to any held path whose folders have appeared since
-            let lay = settle(&root, &norms, &weak, &mut armed);
-            let mut seen: BTreeMap<String, &'static str> = BTreeMap::new();
+            // re-arm closer to any held path whose folders have appeared since; a
+            // failed re-arm keeps the layout the watch already has
+            if let Ok(l) = settle(&root, &norms, &weak, &mut armed) {
+                lay = l;
+            }
+            // the paths to judge: the path of every event (an access is no
+            // change), and every held path with no stamp (a pending one)
+            let mut touched: BTreeSet<String> = BTreeSet::new();
             for ev in &batch {
+                if matches!(ev.kind, EventKind::Access(_)) {
+                    continue;
+                }
                 for p in &ev.paths {
                     if let Some(rel) = relative(p, &lay.files, &lay.dirs) {
-                        if let Some(kind) = kind_of(&ev.kind, p) {
-                            // a creation inside the batch wins over a trailing modify
-                            let e = seen.entry(rel).or_insert(kind);
-                            if kind == "added" {
-                                *e = "added";
-                            }
-                        }
+                        touched.insert(rel);
                     }
                 }
             }
             batch.clear();
-            // a waiting path that exists now has appeared, whether or not its
-            // create event was delivered; a present one is already announced
-            for rel in &waiting {
-                if !present.contains(rel) && under(&root, rel).exists() {
-                    seen.insert(rel.clone(), "added");
+            touched.extend(norms.iter().filter(|n| !stamps.contains_key(*n)).cloned());
+            // each is judged against its LAST stamp, never the arm stamp, and the
+            // stamp is kept current even when the path is not exposed
+            let mut changes: Vec<(String, &'static str)> = Vec::new();
+            for rel in touched {
+                let now = stamp_of(&under(&root, &rel));
+                if let Some(kind) = judge(stamps.get(&rel), now.as_ref()) {
+                    changes.push((rel.clone(), kind));
+                }
+                match now {
+                    Some(s) => {
+                        stamps.insert(rel, s);
+                    }
+                    None => {
+                        stamps.remove(&rel);
+                    }
                 }
             }
             // `allow` is read LIVE: a path the bridge stopped exposing after the
@@ -298,24 +445,7 @@ fn rewatch(
                 .get(&me)
                 .map(|a| crate::allow_list(&a.record().meta))
                 .unwrap_or_default();
-            for (rel, kind) in seen {
-                // a path already announced as present reads `modified` again, not `added`
-                let kind = match kind {
-                    "added" if present.contains(&rel) => "modified",
-                    "added" => {
-                        present.insert(rel.clone());
-                        "added"
-                    }
-                    "deleted" => {
-                        present.remove(&rel);
-                        waiting.insert(rel.clone());
-                        "deleted"
-                    }
-                    other => other,
-                };
-                if kind == "added" {
-                    waiting.remove(&rel);
-                }
+            for (rel, kind) in changes {
                 if crate::exposed(&allow, &rel) {
                     k.emit(&me, json!({"type": "changed", "path": rel, "kind": kind}))
                         .await;
@@ -326,7 +456,7 @@ fn rewatch(
             }
         }
     });
-    missing
+    Ok(missing)
 }
 
 /// An event path → the watched path it belongs to (a file, or a watched
@@ -352,16 +482,63 @@ fn relative(
     })
 }
 
-/// python `watchfiles.Change`'s names: `added`, `modified`, `deleted`. A rename
-/// reads as whichever the path now is; a mere access is no change.
-fn kind_of(kind: &EventKind, p: &Path) -> Option<&'static str> {
-    match kind {
-        EventKind::Access(_) => None,
-        EventKind::Create(_) => Some("added"),
-        EventKind::Remove(_) => Some("deleted"),
-        EventKind::Modify(ModifyKind::Name(_)) => {
-            Some(if p.exists() { "added" } else { "deleted" })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn st(ino: u64, ctime_ns: i128, mtime_ns: i128, size: u64) -> Stamp {
+        Stamp {
+            ino,
+            ctime_ns,
+            mtime_ns,
+            size,
         }
-        _ => Some(if p.exists() { "modified" } else { "deleted" }),
+    }
+
+    #[test]
+    fn judge_covers_every_row_of_the_table() {
+        let a = st(1, 10, 10, 4);
+        assert_eq!(judge(None, Some(&a)), Some("added"));
+        assert_eq!(judge(Some(&a), None), Some("deleted"));
+        assert_eq!(judge(Some(&a), Some(&st(2, 10, 10, 4))), Some("added"));
+        assert_eq!(judge(Some(&a), Some(&st(1, 10, 10, 5))), Some("modified"));
+        assert_eq!(judge(Some(&a), Some(&st(1, 10, 11, 4))), Some("modified"));
+        assert_eq!(judge(Some(&a), Some(&st(1, 11, 10, 4))), Some("modified"));
+        assert_eq!(judge(Some(&a), Some(&a)), None);
+        assert_eq!(judge(None, None), None);
+    }
+
+    #[test]
+    fn judge_reports_delete_then_restore_with_a_preserved_stamp() {
+        // the comparison is against the LAST stamp: a delete clears it, and the
+        // same stamp back is a new file at the path
+        let s = st(7, 100, 100, 3);
+        let mut stamps: HashMap<&str, Stamp> = HashMap::new();
+        stamps.insert("f", s.clone());
+        assert_eq!(judge(stamps.get("f"), None), Some("deleted"));
+        stamps.remove("f");
+        assert_eq!(judge(stamps.get("f"), Some(&s)), Some("added"));
+        stamps.insert("f", s.clone());
+        assert_eq!(judge(stamps.get("f"), Some(&s)), None);
+    }
+
+    #[test]
+    fn judge_chmod_only_is_modified_and_a_replay_is_dropped() {
+        // same inode, mtime and size; only the change time moved (a chmod)
+        let a = st(3, 100, 50, 9);
+        assert_eq!(judge(Some(&a), Some(&st(3, 101, 50, 9))), Some("modified"));
+        // a replayed event for an unchanged entry carries the same stamp
+        assert_eq!(judge(Some(&a), Some(&a.clone())), None);
+    }
+
+    #[test]
+    fn stamp_of_reads_a_file_and_nothing_at_a_missing_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("f");
+        assert_eq!(stamp_of(&f), None);
+        std::fs::write(&f, "abc").unwrap();
+        let s = stamp_of(&f).expect("a stamp for an existing file");
+        assert_eq!(s.size, 3);
+        assert_eq!(stamp_of(&f), Some(s));
     }
 }
