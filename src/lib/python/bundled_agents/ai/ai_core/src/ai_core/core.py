@@ -3268,6 +3268,13 @@ def _make_send(cfg: Backend):
             _store_of(id, kernel)
         except MemoryStoreError as e:
             return {"error": str(e), "reason": "missing_arg", "client_id": client_id}
+        # PAUSED: the message is held in the store, in order, and not run (#219).
+        try:
+            held = await _hold_if_paused(id, payload, kernel)
+        except MemoryStoreError as e:
+            return {"error": str(e), "reason": "memory_store", "client_id": client_id}
+        if held is not None:
+            return held
         if payload.get("late"):
             # A reply to a call a PREVIOUS incarnation made (see `_deliver`): recorded
             # in this agent's own store, never a turn.
@@ -3666,6 +3673,89 @@ async def _stop(id, payload, kernel):
     _end_chain(id)
     await kernel.ctx.cancel_task(cur["task_id"])
     return {"stopped": True}
+
+
+# ── PAUSE / RESUME (#219) ───────────────────────────────────────────────────
+# A paused agent stops its generation and HOLDS every incoming message, in order,
+# in its memory store. The state is rows: `{kind:"pause", paused_since, reason}`,
+# one `{kind:"held", payload}` per held message, and `{kind:"resume", role:"user"}`
+# once they are released. The rows live in the store, so a restart reads them back.
+
+
+async def _pause_view(self_id: str, kernel) -> tuple[bool, float | None, list]:
+    """(paused, paused_since, held payloads) read off the store head. The last
+    `pause`/`resume` row decides whether the agent is paused; the `held` rows after
+    the last `resume` are the queue, in arrival order."""
+    paused, since, held = False, None, []
+    for r in await _refresh_head(self_id, kernel):
+        kind = r.get("kind")
+        if kind == "pause":
+            paused, since = True, r.get("paused_since")
+        elif kind == "resume":
+            paused, since, held = False, None, []
+        elif kind == "held" and "payload" in r:
+            held.append(r["payload"])
+    return paused, since, held
+
+
+async def _hold_if_paused(self_id: str, payload: dict, kernel) -> dict | None:
+    """THE HOLD CHECK at the top of message intake. Paused: the message is appended to
+    the held queue (a row) and not run — its reply is returned. Not paused: None."""
+    paused, _since, held = await _pause_view(self_id, kernel)
+    if not paused:
+        return None
+    await _save_history(self_id, kernel, [{"kind": "held", "payload": payload}])
+    return {"held": len(held) + 1, "paused": True}
+
+
+async def _pause(id, payload, kernel):
+    """args: reason:str? (why — kept on the pause row). PAUSE this agent: stop its in-flight generation and HOLD every message sent to it, in order, until `resume`. Already paused: a no-op. Returns {paused:bool, held:int}."""
+    paused, _since, held = await _pause_view(id, kernel)
+    if paused:
+        return {"paused": True, "held": len(held)}
+    # The stop writes the `[stopped by …]` marker and closes the open parts.
+    await _stop(id, {}, kernel)
+    await _save_history(
+        id,
+        kernel,
+        [
+            {
+                "kind": "pause",
+                "paused_since": time.time(),
+                "reason": payload.get("reason"),
+            }
+        ],
+    )
+    return {"paused": True, "held": 0}
+
+
+async def _resume(id, payload, kernel):
+    """args: note:str? (text added to the resumed row). RESUME this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Not paused: a no-op. Returns {resumed:bool, released:int}."""
+    paused, since, held = await _pause_view(id, kernel)
+    if not paused:
+        return {"resumed": False, "released": 0}
+    started = since if isinstance(since, (int, float)) else time.time()
+    secs = max(0.0, time.time() - started)
+    content = f"[resumed after a pause of {secs:.0f}s]"
+    note = payload.get("note")
+    if isinstance(note, str):
+        content += " " + note
+    await _save_history(
+        id, kernel, [{"kind": "resume", "role": "user", "content": content}]
+    )
+
+    async def _release() -> None:
+        # Each held message is a turn of its own, in arrival order, after the
+        # resumed row. Released as a kernel task so this dispatch returns at once;
+        # a send takes the per-agent FIFO lock and must not be awaited here.
+        for p in held:
+            try:
+                await kernel.send([{"target": id, "payload": p}])
+            except Exception:  # one held turn failing must not drop the rest
+                continue
+
+    _ctx(kernel).spawn_task(id, "resume_release", _release())
+    return {"resumed": True, "released": len(held)}
 
 
 async def on_cancel(id, task_id, kernel):
@@ -4780,6 +4870,10 @@ def build(
         "reflect": _make_reflect(cfg),
         "send": _make_send(cfg),
         "stop": _stop,
+        # Hold every incoming message in the store; release them, in order, after a
+        # resumed row. Both survive a restart: the state is rows, not RAM.
+        "pause": _pause,
+        "resume": _resume,
         "rows": _rows,
         # ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `question` and so does
         # a peer AI: the asker writes the same call either way and reads the
