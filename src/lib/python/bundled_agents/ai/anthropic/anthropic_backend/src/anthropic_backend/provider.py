@@ -68,6 +68,85 @@ def saved_tokens(cache_read: int, cache_write: int) -> int:
     return q
 
 
+#: Models whose cache reads bill at 0.05x the input price; every other model reads at
+#: 0.1x. A dated id of one of these (`claude-sonnet-5-5-<date>`) matches too.
+CHEAP_READ_MODELS = ("claude-sonnet-5-5", "claude-opus-5-5")
+
+
+class CacheRates:
+    """The three cache rates of one price bucket, USD per million tokens."""
+
+    __slots__ = ("read", "write_5m", "write_1h")
+
+    def __init__(self, read: float, write_5m: float, write_1h: float):
+        self.read = read
+        self.write_5m = write_5m
+        self.write_1h = write_1h
+
+
+class CachePrices:
+    """The record's explicit cache prices, USD per million tokens; `None` = unset."""
+
+    __slots__ = ("read", "write_5m", "write_1h")
+
+    def __init__(self, read=None, write_5m=None, write_1h=None):
+        self.read = read
+        self.write_5m = write_5m
+        self.write_1h = write_1h
+
+
+def model_cache_rates(model: str, price_in: float) -> CacheRates:
+    """The default cache rates of `model` at the input price `price_in`: a 5-minute
+    write 1.25x, a 1-hour write 2x, a read 0.1x (0.05x for the CHEAP_READ_MODELS)."""
+    cheap = any(model == m or model.startswith(m + "-") for m in CHEAP_READ_MODELS)
+    return CacheRates(
+        read=price_in * (0.05 if cheap else 0.1),
+        write_5m=price_in * 1.25,
+        write_1h=price_in * 2.0,
+    )
+
+
+def bucket_rates(
+    model: str, bucket_in: float, base_in: float, prices: CachePrices
+) -> CacheRates:
+    """The rates one bucket bills at: the record's explicit cache price when set, else
+    the model default at the bucket's input price `bucket_in`. An explicit price is USD
+    at the base input price `base_in`, so the long-context bucket scales it by
+    `bucket_in / base_in` (unscaled when `base_in` is not positive)."""
+    default = model_cache_rates(model, bucket_in)
+
+    def scaled(explicit: float) -> float:
+        return explicit * bucket_in / base_in if base_in > 0 else explicit
+
+    return CacheRates(
+        read=default.read if prices.read is None else scaled(prices.read),
+        write_5m=default.write_5m
+        if prices.write_5m is None
+        else scaled(prices.write_5m),
+        write_1h=default.write_1h
+        if prices.write_1h is None
+        else scaled(prices.write_1h),
+    )
+
+
+def bucket_cost(
+    model: str,
+    tokens: tuple,
+    pi: float,
+    po: float,
+    base_in: float,
+    prices: CachePrices,
+) -> tuple[float, float]:
+    """A bucket's (cost, saved) in USD. `tokens` is (input, 5-minute write, 1-hour
+    write, read, output). Cost: every token at its rate. Saved: the same tokens
+    against no cache, reads and writes at the input price."""
+    inp, w5, w1, rd, out = tokens
+    r = bucket_rates(model, pi, base_in, prices)
+    cost = inp * pi + w5 * r.write_5m + w1 * r.write_1h + rd * r.read + out * po
+    saved = rd * (pi - r.read) - w5 * (r.write_5m - pi) - w1 * (r.write_1h - pi)
+    return cost / 1e6, saved / 1e6
+
+
 class Usage:
     """One agent's token counts since its kernel started (RAM — a restart zeroes
     them). `input_tokens` is the uncached remainder; the two cache counts are what
@@ -79,7 +158,10 @@ class Usage:
     def reset(self) -> None:
         self.requests = 0
         self.input_tokens = 0
+        # cache_write_tokens is the 5-minute part of the writes; the 1-hour part is
+        # counted apart (its own price). snapshot reports the total of both.
         self.cache_write_tokens = 0
+        self.cache_write_1h_tokens = 0
         self.cache_read_tokens = 0
         self.output_tokens = 0
         # Requests whose prompt was over the record's `long_context_tokens` (#236):
@@ -87,23 +169,34 @@ class Usage:
         self.long_requests = 0
         self.long_input_tokens = 0
         self.long_cache_write_tokens = 0
+        self.long_cache_write_1h_tokens = 0
         self.long_cache_read_tokens = 0
         self.long_output_tokens = 0
         # The last usage-log write error, reported in `usage`.
         self.log_error: str | None = None
 
     def add_request(
-        self, input_tokens: int, cache_write: int, cache_read: int, long: bool = False
+        self,
+        input_tokens: int,
+        cache_write: int,
+        cache_read: int,
+        long: bool = False,
+        cache_write_1h: int = 0,
     ) -> None:
+        """One request's counts. `cache_write` is the whole write, the 1-hour part
+        (`cache_write_1h`) included; the 5-minute rest is what the write counts keep."""
+        write_5m = cache_write - cache_write_1h
         if long:
             self.long_requests += 1
             self.long_input_tokens += input_tokens
-            self.long_cache_write_tokens += cache_write
+            self.long_cache_write_tokens += write_5m
+            self.long_cache_write_1h_tokens += cache_write_1h
             self.long_cache_read_tokens += cache_read
         else:
             self.requests += 1
             self.input_tokens += input_tokens
-            self.cache_write_tokens += cache_write
+            self.cache_write_tokens += write_5m
+            self.cache_write_1h_tokens += cache_write_1h
             self.cache_read_tokens += cache_read
 
     def add_output(self, n: int, long: bool = False) -> None:
@@ -114,14 +207,29 @@ class Usage:
             self.output_tokens += n
 
     def snapshot(
-        self, price_in=None, price_out=None, long_in=None, long_out=None
+        self,
+        price_in=None,
+        price_out=None,
+        long_in=None,
+        long_out=None,
+        model="",
+        cache_read=None,
+        cache_write_5m=None,
+        cache_write_1h=None,
     ) -> dict:
         """The counts and what they derive to. `cost_usd` and `saved_usd` (USD per
-        million tokens, from the record's prices) are reported only when BOTH prices
-        are set. `long_in` / `long_out` price the long-context bucket; unset (either
-        one), the base prices do."""
+        million tokens, from the record's prices) are reported only when BOTH base
+        prices are set. `long_in` / `long_out` price the long-context bucket; unset
+        (either one), the base prices do. `model` picks the default cache rates;
+        `cache_read` / `cache_write_5m` / `cache_write_1h` override them (USD per
+        million tokens at the base input price)."""
         inp = self.input_tokens + self.long_input_tokens
-        cw = self.cache_write_tokens + self.long_cache_write_tokens
+        cw = (
+            self.cache_write_tokens
+            + self.cache_write_1h_tokens
+            + self.long_cache_write_tokens
+            + self.long_cache_write_1h_tokens
+        )
         cr = self.cache_read_tokens + self.long_cache_read_tokens
         prompt = inp + cw + cr
         out = {
@@ -140,35 +248,25 @@ class Usage:
         if price_in is not None and price_out is not None:
             if long_in is None or long_out is None:
                 long_in, long_out = price_in, price_out
-
-            def cost_of(i, w, r, o, pi, po):
-                return (i + 1.25 * w + 0.1 * r) * pi / 1e6 + o * po / 1e6
-
-            out["cost_usd"] = cost_of(
+            prices = CachePrices(cache_read, cache_write_5m, cache_write_1h)
+            base = (
                 self.input_tokens,
                 self.cache_write_tokens,
+                self.cache_write_1h_tokens,
                 self.cache_read_tokens,
                 self.output_tokens,
-                price_in,
-                price_out,
-            ) + cost_of(
+            )
+            long = (
                 self.long_input_tokens,
                 self.long_cache_write_tokens,
+                self.long_cache_write_1h_tokens,
                 self.long_cache_read_tokens,
                 self.long_output_tokens,
-                long_in,
-                long_out,
             )
-            out["saved_usd"] = (
-                saved_tokens(self.cache_read_tokens, self.cache_write_tokens)
-                * price_in
-                / 1e6
-                + saved_tokens(
-                    self.long_cache_read_tokens, self.long_cache_write_tokens
-                )
-                * long_in
-                / 1e6
-            )
+            c1, s1 = bucket_cost(model, base, price_in, price_out, price_in, prices)
+            c2, s2 = bucket_cost(model, long, long_in, long_out, price_in, prices)
+            out["cost_usd"] = c1 + c2
+            out["saved_usd"] = s1 + s2
         return out
 
 
@@ -389,6 +487,14 @@ class AnthropicProvider:
                                 "cache_read_input_tokens",
                             )
                         )
+                        # the 1-hour part of the write, priced apart; the rest is 5-minute
+                        cw1 = int(
+                            (u.get("cache_creation") or {}).get(
+                                "ephemeral_1h_input_tokens"
+                            )
+                            or 0
+                        )
+                        cw1 = min(max(cw1, 0), cw)
                         self.last_prompt_tokens = (inp + cw + cr) or None
                         limit = self._long_context_tokens
                         long = limit is not None and inp + cw + cr > limit
@@ -398,7 +504,9 @@ class AnthropicProvider:
                             cache_read_tokens=cr,
                         )
                         if self._usage is not None:
-                            self._usage.add_request(inp, cw, cr, long=long)
+                            self._usage.add_request(
+                                inp, cw, cr, long=long, cache_write_1h=cw1
+                            )
                     elif kind == "content_block_delta":
                         delta = evt.get("delta") or {}
                         if delta.get("type") == "thinking_delta":

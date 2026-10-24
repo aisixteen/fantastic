@@ -97,6 +97,22 @@ RECORD_SCHEMA = schema(
             "base price",
         ),
         field(
+            "price_cache_read_per_mtok",
+            "float",
+            "USD per million cache-read input tokens; unset = the model default (0.05x "
+            "input for claude-sonnet-5-5 and claude-opus-5-5, else 0.1x)",
+        ),
+        field(
+            "price_cache_write_5m_per_mtok",
+            "float",
+            "USD per million 5-minute cache-write input tokens; unset = 1.25x input",
+        ),
+        field(
+            "price_cache_write_1h_per_mtok",
+            "float",
+            "USD per million 1-hour cache-write input tokens; unset = 2x input",
+        ),
+        field(
             "long_context_tokens",
             "int",
             "prompt tokens above which a request is billed at the long-context prices",
@@ -136,6 +152,9 @@ def validate_meta(meta: dict, record: dict) -> str | None:
         "price_output_per_mtok",
         "price_input_long_per_mtok",
         "price_output_long_per_mtok",
+        "price_cache_read_per_mtok",
+        "price_cache_write_5m_per_mtok",
+        "price_cache_write_1h_per_mtok",
     ):
         p = meta.get(key)
         if p is not None and (not _number(p) or p < 0):
@@ -208,6 +227,10 @@ def _usage_now(id, kernel) -> dict:
         rec.get("price_output_per_mtok"),
         rec.get("price_input_long_per_mtok"),
         rec.get("price_output_long_per_mtok"),
+        model=rec.get("model") or "",
+        cache_read=rec.get("price_cache_read_per_mtok"),
+        cache_write_5m=rec.get("price_cache_write_5m_per_mtok"),
+        cache_write_1h=rec.get("price_cache_write_1h_per_mtok"),
     )
 
 

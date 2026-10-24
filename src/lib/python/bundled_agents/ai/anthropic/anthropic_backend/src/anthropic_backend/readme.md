@@ -84,11 +84,23 @@ counts (`reset` must be a boolean).
 
 With BOTH `price_input_per_mtok` and `price_output_per_mtok` on the record (USD per
 million tokens):
-- `cost_usd` = (`input_tokens` + 1.25 × `cache_write_tokens` + 0.1 ×
-  `cache_read_tokens`) × price_in / 1e6 + `output_tokens` × price_out / 1e6
-- `saved_usd` = `saved_tokens` × price_in / 1e6
+- `cost_usd` = Σ over the buckets of (`input_tokens` × price_in + `cache_write_tokens`
+  5-minute part × write_5m + 1-hour part × write_1h + `cache_read_tokens` × read +
+  `output_tokens` × price_out) / 1e6. The long-context bucket bills at its own input/output
+  prices, its cache rates scaled by that input price over the base one.
+- `saved_usd` = Σ over the buckets of (read × (price_in − read) − write_5m × (write_5m −
+  price_in) − write_1h × (write_1h − price_in)) / 1e6: what caching saved against the same
+  tokens uncached. `saved_tokens` above is kept as the token-equivalent at the 0.1× / 1.25×
+  convention, so it can differ from `saved_usd` for Sonnet and Opus 5.5 (0.05× reads).
 
-Without both prices, `cost_usd` and `saved_usd` are absent. No price is assumed.
+Cache rates default per model from the base input price: a read 0.1×, except
+`claude-sonnet-5-5` and `claude-opus-5-5` (and their dated ids), which read at 0.05×; a
+5-minute write 1.25×; a 1-hour write 2× (`usage.cache_creation.ephemeral_1h_input_tokens`
+of the API reply). `price_cache_read_per_mtok`, `price_cache_write_5m_per_mtok` and
+`price_cache_write_1h_per_mtok` on the record (USD per million tokens) override them.
+
+`cost_usd` and `saved_usd` need BOTH `price_input_per_mtok` and `price_output_per_mtok`;
+without both they are absent. No base price is assumed.
 
 ## The key
 
