@@ -271,7 +271,9 @@ async def _reflect(id, payload, kernel):
             "`edits:[{path, hunks, if_match?}]` — even one file rides the "
             "array; the blob holds every edit's hunks concatenated in `edits` "
             "order, split by the per-edit `hunks` count — with ONE file, `hunks` may be left out and every block applies to it; with several files, a block may name its file on its first line (`<<<<<<< SEARCH path`), and then no hunks are needed; any failure anywhere "
-            "writes nothing"
+            "writes nothing. Text that holds conflict markers takes the "
+            "8-character fence instead: `<<<<<<<< SEARCH` / `========` / "
+            "`>>>>>>>> REPLACE` (N `<`, `=`, `>` with N ≥ 8)."
         ),
         "compose": (
             "every content-carrying verb (`write`, `edit`, `append`) takes its "
@@ -426,7 +428,9 @@ async def _read_stream(id, payload, kernel):
         return err
     try:
         if not fs.is_file(root, path):
-            return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
+            return refusal(
+                NOT_FOUND, f"file {path!r} not found{_hint(root, path)}", path=path
+            )
         chunk, size = fs.read_chunk(root, path, offset, length)
     except (ValueError, OSError) as e:
         return refusal(TRANSPORT_ERROR, str(e))
@@ -581,7 +585,6 @@ async def _pump(id, payload, kernel):
 
 #: lines per `read` page when the caller names no `limit`.
 READ_LIMIT = 200
-_H_START, _H_DIV, _H_END = "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"
 
 #: ONE undo slot per (bridge, path): the bytes the last `write`/`edit`/`append`
 #: replaced (None = the file did not exist). `undo` swaps file ↔ slot, so a
@@ -696,7 +699,9 @@ async def _read(id, payload, kernel):
     except (ValueError, OSError) as e:
         return refusal(TRANSPORT_ERROR, str(e))
     if data is None:
-        return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
+        return refusal(
+            NOT_FOUND, f"file {path!r} not found{_hint(root, path)}", path=path
+        )
     if b"\x00" in data:
         return bad("read", "path", "a text file (this one is binary)")
     try:
@@ -773,35 +778,68 @@ async def _append(id, payload, kernel):
     return {"path": path, "size": size, "version": _version(whole)}
 
 
+def _fence_open(line: str) -> tuple[int, str | None] | None:
+    """An opener: N `<` (N ≥ 7), then ` SEARCH`, then optionally ` <path>`.
+    Returns the fence width N and the named file, if any; None when the line is
+    not an opener."""
+    width = len(line) - len(line.lstrip("<"))
+    if width < 7:
+        return None
+    rest = line[width:]
+    if not rest.startswith(" SEARCH"):
+        return None
+    rest = rest[len(" SEARCH") :]
+    if rest == "":
+        return width, None
+    if not rest.startswith(" "):
+        return None
+    path = rest[1:].strip()
+    return width, (path or None)
+
+
+def _hint(root: fs.Root, path: str) -> str:
+    """The root and relative-form hint a not-found refusal carries (issue #305)."""
+    return fs.not_found_hint(fs.resolve_root(root), path)
+
+
 def _parse_hunks(text: str) -> list[tuple[str | None, str, str]]:
     """SEARCH/REPLACE blocks → (file, search, replace) triples, taken VERBATIM (the
     marker lines excluded). A block may name its file on its opening line
-    (`<<<<<<< SEARCH path`); then `file` is that path, otherwise None. Raises
-    ValueError on a block that opens but does not close."""
+    (`<<<<<<< SEARCH path`); then `file` is that path, otherwise None. A block is
+    fenced by N `<` (N ≥ 7; use 8 when the text holds conflict markers): its
+    divider is exactly N `=` and its close exactly N `>` + ` REPLACE`. Raises
+    ValueError on a block that opens but does not close, or whose REPLACE holds
+    a bare divider line."""
     lines = text.split("\n")
     hunks: list[tuple[str | None, str, str]] = []
     i, n = 0, len(lines)
     while i < n:
-        # `<<<<<<< SEARCH` alone, or `<<<<<<< SEARCH <path>` naming the file.
-        open_line = lines[i]
-        if open_line != _H_START and not open_line.startswith(_H_START + " "):
+        opened = _fence_open(lines[i])
+        if opened is None:
             i += 1
             continue
-        file = open_line[len(_H_START) :].strip() or None
+        width, file = opened
+        divider = "=" * width
+        close = ">" * width + " REPLACE"
         j = i + 1
         search: list[str] = []
-        while j < n and lines[j] != _H_DIV:
+        while j < n and lines[j] != divider:
             search.append(lines[j])
             j += 1
         if j >= n:
-            raise ValueError("a SEARCH block has no `=======` divider")
+            raise ValueError(f"a SEARCH block has no `{divider}` divider")
         j += 1
         replace: list[str] = []
-        while j < n and lines[j] != _H_END:
+        while j < n and lines[j] != close:
+            if lines[j] == divider:
+                raise ValueError(
+                    f"a block has a second `{divider}` line; the text contains "
+                    "conflict markers: use the 8-character fence"
+                )
             replace.append(lines[j])
             j += 1
         if j >= n:
-            raise ValueError("a block has no closing `>>>>>>> REPLACE`")
+            raise ValueError(f"a block has no closing `{close}`")
         hunks.append((file, "\n".join(search), "\n".join(replace)))
         i = j + 1
     return hunks
@@ -919,7 +957,9 @@ def _edit_txn(id: str, root: fs.Root, plan: list[dict], dry_run: bool, slots: di
             raw = _current(root, e["path"])
             if raw is None:
                 return refusal(
-                    NOT_FOUND, f"file {e['path']!r} not found", path=e["path"]
+                    NOT_FOUND,
+                    f"file {e['path']!r} not found{_hint(root, e['path'])}",
+                    path=e["path"],
                 )
             if e["if_match"] is not None and (
                 err := _mismatch(e["path"], e["if_match"], raw)

@@ -138,7 +138,7 @@ def test_cold_walk_refuses_an_escaping_children_dir(tmp_path):
     try:
         read_tree(fs.Root(work, ".fantastic"))
     except ValueError as e:
-        assert str(e) == "fs: path '../sibling' escapes root"
+        assert str(e).startswith("fs: path '../sibling' escapes root")
     else:
         raise AssertionError("an escaping children_dir must refuse")
 
@@ -152,7 +152,7 @@ def test_cold_walk_refuses_an_outward_symlinked_entry(tmp_path):
     try:
         read_tree(fs.Root(work, ".fantastic"))
     except ValueError as e:
-        assert str(e) == "fs: path 'agents/evil/agent.yaml' escapes root"
+        assert str(e).startswith("fs: path 'agents/evil/agent.yaml' escapes root")
     else:
         raise AssertionError("an entry linked outside .fantastic must refuse")
 
