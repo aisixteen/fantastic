@@ -89,9 +89,7 @@ async def _until(cond, timeout=5.0):
 
 async def _say(kernel, aid, text="go"):
     return (
-        await kernel.send(
-            [{"target": aid, "payload": {"type": "send", "text": text}}]
-        )
+        await kernel.send([{"target": aid, "payload": {"type": "send", "text": text}}])
     )[0]
 
 
@@ -139,10 +137,15 @@ async def test_await_with_a_running_job_waits_for_it(
         await _say(k, "jw_owner")
         await _until(
             lambda: any(
-                s == "jw_owner" and d.get("reason") == "awaiting" for s, _, d in statuses
+                s == "jw_owner" and d.get("reason") == "awaiting"
+                for s, _, d in statuses
             )
         )
-        awaiting = [d for s, _, d in statuses if s == "jw_owner" and d.get("reason") == "awaiting"]
+        awaiting = [
+            d
+            for s, _, d in statuses
+            if s == "jw_owner" and d.get("reason") == "awaiting"
+        ]
         assert awaiting and awaiting[-1].get("pending", 0) >= 1, statuses
         # no refusal, and no job_done wake while the job still runs (the start's own
         # reply may arrive as a turn; that is not a wake)
