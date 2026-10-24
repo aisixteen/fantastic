@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: the kernel's file_bridge and its
+# file and folder VIEW agents (open_view), driven over web_rest (events over the ws face).
+id: file_agents
+group: kernel
+title: "file and folder agents over a file_bridge: open_view makes or reuses one agent per path under a chosen id (an unexposed or escaping path makes none), a file view reads and writes its own path against the version read, a folder view lists inside itself and reveals, a view's watch arms its relay once, and the relay emits live over ws (a file's changed on an edit; a folder's added and removed)"
+runner: probe.py
+runtimes: [python, rust, swift]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

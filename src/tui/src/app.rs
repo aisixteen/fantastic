@@ -802,6 +802,12 @@ impl App {
                 }
                 self.dirty = true;
             }
+            Got::Opened { from, reply } => match reply.get("id").and_then(Value::as_str) {
+                // the view is the selection: its panel asks what it is, then serves it
+                Some(id) if reply.get("error").is_none() => self.goto(id.into()),
+                // a refusal is the answer of the panel that asked for the view
+                _ => self.on_reply(&from, &reply),
+            },
             Got::Created(r) => {
                 if let Some(p) = self.panels.get_mut(SETUP_ID) {
                     if let Some(s) = p.as_any_mut().downcast_mut::<SetupPanel>() {

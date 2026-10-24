@@ -45,13 +45,14 @@ mod sys;
 #[doc(hidden)]
 pub mod test_support;
 mod text;
+mod views;
 mod watch;
 
 use async_trait::async_trait;
 use fantastic_bundle::{is_absolute, py_repr, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal as rf;
-use fantastic_kernel::{body_at, AgentId, Blob, Item, Kernel};
+use fantastic_kernel::{body_at, current_origin, AgentId, Blob, Item, Kernel};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -64,7 +65,7 @@ pub const README: &str = include_str!("readme.md");
 
 /// The verb table, in python's `VERBS` order — reflect's `verbs` map, the
 /// unknown-verb refusal and the gate all read it.
-const VERBS: [(&str, &str); 16] = [
+const VERBS: [(&str, &str); 17] = [
     (
         "reflect",
         "Identity + filesystem root + readonly flag + auth posture (ingress/egress/sealed/see). No args.",
@@ -126,6 +127,10 @@ const VERBS: [(&str, &str); 16] = [
         "unwatch_path",
         "args: path:str (req). Stop YOUR watch of a path; the disk watch ends when no caller holds a path. Returns {watching:false, paths}.",
     ),
+    (
+        "open_view",
+        "args: kind:str (req — `file` or `folder`), path:str (req — root-relative, exposed by `allow`; `.` = the whole root, folders only). Reuses the view of that path or makes it: {id, kind, path, created}. The new view's grant on THIS bridge is its own verbs only (views.GRANTS).",
+    ),
 ];
 
 /// Discovery must work on a sealed bridge — python's `UNGATED`.
@@ -137,6 +142,7 @@ const UNGATED: [&str; 1] = ["reflect"];
 pub struct FileBundle {
     text: text::TextState,
     watch: watch::Watches,
+    views: views::Relays,
 }
 
 /// A readonly leg refuses every mutating verb — in THE ONE REFUSAL SHAPE.
@@ -169,6 +175,9 @@ impl Bundle for FileBundle {
         meta: &Map<String, Value>,
         _record: &Map<String, Value>,
     ) -> Option<String> {
+        if let Some(bad) = views::view_refusal(meta) {
+            return Some(bad);
+        }
         if let Some(a) = meta.get("allow") {
             let ok = a.as_array().is_some_and(|items| {
                 items.iter().all(|x| {
@@ -201,6 +210,12 @@ impl Bundle for FileBundle {
             verbs.insert(name.to_string(), json!(doc));
         }
         Value::Object(verbs)
+    }
+
+    /// A VIEW answers its own verbs, so `docs of=<view>` serves its table (python
+    /// `instance_verbs`); every other record keeps the bridge's.
+    fn instance_verb_docs(&self, agent: &fantastic_kernel::Agent) -> Option<Value> {
+        views::verb_docs_of(&agent.record().meta)
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -245,11 +260,20 @@ impl Bundle for FileBundle {
                 return Ok(Some(denied));
             }
         }
+        // THE PATH GATE FOR A VIEW CALLER — python `tools._view_scope`, after the gate.
+        if SCOPED_VERBS.contains(&verb) {
+            if let Some(refused) =
+                view_scope(kernel, agent_id, current_origin().as_ref(), verb, payload)
+            {
+                return Ok(Some(refused));
+            }
+        }
         let base = kernel.workdir();
         let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
         let reply = match verb {
             "reflect" => reflect_reply(agent_id, &meta, &base),
             "boot" => Value::Null,
+            "open_view" => views::open_view_verb(kernel, &meta, agent_id, payload).await,
             v if text::TEXT_VERBS.contains(&v) => {
                 let root = clamp_root(&meta, &base);
                 text::dispatch(
@@ -343,6 +367,19 @@ impl Bundle for FileBundle {
     ) -> Result<(Reply, Option<Blob>), BundleError> {
         let verb = header.get("type").and_then(Value::as_str).unwrap_or("");
         let chunk = body_at(body.as_ref(), "bytes");
+        // A VIEW is answered by its own verbs, before the bridge's table and gate (python
+        // `file_bridge.tools.handler`): a view is not sealed, its gate is its grant.
+        let view = kernel.agents.get(agent_id).and_then(|a| {
+            a.record()
+                .meta
+                .get("view")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        if let Some(kind) = view {
+            let reply = views::dispatch(kernel, &self.views, agent_id, &kind, verb, &header).await;
+            return Ok((Some(reply), None));
+        }
         if text::TEXT_VERBS.contains(&verb) {
             // THE BODY AT `bytes` IS THE `bytes` ARGUMENT, present even when
             // empty — the bytes-typed carrier a model's `<bytes>` document rides.
@@ -353,6 +390,15 @@ impl Bundle for FileBundle {
             let meta = agent.meta.read().expect("meta poisoned").clone();
             if let Some(denied) = gate(&meta, agent_id, verb) {
                 return Ok((Some(denied), None));
+            }
+            // THE PATH GATE FOR A VIEW CALLER, as `handle` runs it after the gate: the
+            // binary channel is no way round it (python's single `handler` gates every entry).
+            if SCOPED_VERBS.contains(&verb) {
+                if let Some(refused) =
+                    view_scope(kernel, agent_id, current_origin().as_ref(), verb, &header)
+                {
+                    return Ok((Some(refused), None));
+                }
             }
             let readonly = py_truthy(meta.get("readonly").unwrap_or(&Value::Null));
             let root = clamp_root(&meta, &kernel.workdir());
@@ -432,16 +478,62 @@ impl Bundle for FileBundle {
         }
     }
 
-    /// The bridge is going away — its undo slots and its disk watch go with it.
-    async fn on_delete(
-        &self,
-        agent_id: &AgentId,
-        _kernel: &Arc<Kernel>,
-    ) -> Result<(), BundleError> {
+    /// The bridge is going away — its undo slots and its disk watch go with it. A
+    /// VIEW going away ends its own relay and lets go of its bridge's watch.
+    async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
+        let is_view = kernel
+            .agents
+            .get(agent_id)
+            .is_some_and(|a| a.record().meta.get("view").is_some());
+        if is_view {
+            views::stop(kernel, &self.views, agent_id).await;
+            return Ok(());
+        }
         self.text.drop_slots(&agent_id.0);
         self.watch.drop_bridge(agent_id);
         Ok(())
     }
+}
+
+/// The verbs a view may send its bridge that name one path of the disk (python
+/// `tools.SCOPED_VERBS`).
+const SCOPED_VERBS: [&str; 5] = ["read", "write", "list", "watch_path", "unwatch_path"];
+
+/// python `tools._view_scope`: a VIEW caller reaches only inside its own path, whatever
+/// its grant names. None admits; a refusal is returned. An operator or a plain agent is
+/// not path-scoped here.
+fn view_scope(
+    kernel: &Arc<Kernel>,
+    agent_id: &AgentId,
+    origin: Option<&AgentId>,
+    verb: &str,
+    payload: &Value,
+) -> Option<Value> {
+    let (kind, own) = views::caller_scope(kernel, &agent_id.0, origin)?;
+    let rel = match payload.get("path") {
+        None | Some(Value::Null) => "",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Some(rf::bad(verb, "path", "a string")),
+    };
+    let inside = norm(rel).is_some_and(|p| !own.is_empty() && views::inside(&kind, &own, &p));
+    if inside {
+        return None;
+    }
+    let mut r = rf::refusal(
+        rf::UNAUTHORIZED,
+        format!(
+            "{verb}: {} is outside this {kind} view's path {}",
+            py_repr(rel),
+            py_repr(&own)
+        ),
+    );
+    rf::with(
+        &mut r,
+        "hint",
+        json!("a view reaches only its own path; open a view of that path (open_view)"),
+    );
+    rf::with(&mut r, "path", json!(rel));
+    Some(r)
 }
 
 /// The sealed-by-default GATE — the fs edge is an io_bridge leg. Mirrors py
@@ -1248,6 +1340,8 @@ mod tests_paths;
 mod tests_pump_identity;
 #[cfg(test)]
 mod tests_text;
+#[cfg(test)]
+mod tests_views;
 #[cfg(test)]
 mod tests_watch;
 #[cfg(test)]

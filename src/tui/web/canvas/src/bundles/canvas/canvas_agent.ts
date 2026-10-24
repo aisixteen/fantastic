@@ -7,7 +7,7 @@ import { readShell } from "../shell.ts";
 import { bodyText } from "../body_text.ts";
 import { htmlRefusal } from "../html_check.ts";
 import { aiView } from "../ai_view/ai_view.ts";
-import { fileGrant, isRefusal, kernelBridge, said } from "../files/file_bridge.ts";
+import { fileGrant, isRefusal, kernelBridge, openViewAgent, said } from "../files/file_bridge.ts";
 import { agentIndex } from "../files/files_deps.ts";
 import { isRefusalOf, resolveTarget } from "../files/drag.ts";
 import type { Look, Opened, Refusal, Target } from "../files/drag.ts";
@@ -377,8 +377,8 @@ export const viewAgent: Handler = (id, payload, kernel): Json | Promise<Json> =>
 
 const freshId = (prefix: string): string => `${prefix}_${Math.random().toString(16).slice(2, 10)}`;
 
-/** The file bridge verbs the VIEW asks: `list`, to tell a file from a folder by its parent's listing. A handler's host call is its own grant, and an agent never raises its own: the canvas writes this onto the root view at mount (`grantViewLists`). */
-export const VIEW_LISTS = { files: ["list"] } as const;
+/** The file bridge verbs the VIEW asks: `list`, to tell a file from a folder by its parent's listing, and `open_view`, to make or reuse the file or folder agent a drop names (#150). A handler's host call is its own grant, and an agent never raises its own: the canvas writes this onto the root view at mount (`grantViewLists`). */
+export const VIEW_LISTS = { files: ["list", "open_view"] } as const;
 
 /** Grant every view (the root and each nested one) the listings `open` needs: the canvas is the view's parent, so its grants come from above. Idempotent: a view already granted is left alone. */
 export function grantViewLists(kernel: Kernel): void {
@@ -470,30 +470,34 @@ async function openAgent(view: string, agent: string, at: { x: number; y: number
   return { opened: agent, kind: "agent", cell: got["placed"], placed: true } as Json;
 }
 
-/** A file: a preview cell pinned to it (it shows the file live, and does not follow the tree). */
-function openFile(view: string, path: string, at: { x: number; y: number }, kernel: Kernel): Json {
+/** A file: a preview cell pinned to it, as the view of the file's agent (made or reused on the bridge: one agent per path). It shows the file live, and does not follow the tree. */
+async function openFile(view: string, path: string, at: { x: number; y: number }, kernel: Kernel): Promise<Json> {
+  const agent = await openViewAgent(kernel, "file", path);
+  if (isRefusal(agent)) return agent as unknown as Json;
   const aid = freshId("preview");
   setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 520, height: 360 });
   kernel.register(new Agent({
     id: aid,
     parentId: view,
     handlerModule: "preview_view.ts",
-    meta: { display_name: nameOf(path), pinned: path, follow: false, can_call: fileGrant() } as unknown as Payload,
+    meta: { display_name: nameOf(path), pinned: path, follow: false, can_call: fileGrant(), view_agent: agent.view } as unknown as Payload,
   }));
-  return { opened: path, kind: "file", cell: aid } as Json;
+  return { opened: path, kind: "file", cell: aid, agent: agent.view, created: agent.created } as Json;
 }
 
-/** A folder: a file tree cell rooted at it (nothing above it is shown). */
-function openDir(view: string, path: string, at: { x: number; y: number }, kernel: Kernel): Json {
+/** A folder: a file tree cell rooted at it (nothing above it is shown), as the view of the folder's agent (made or reused on the bridge). */
+async function openDir(view: string, path: string, at: { x: number; y: number }, kernel: Kernel): Promise<Json> {
+  const agent = await openViewAgent(kernel, "folder", path);
+  if (isRefusal(agent)) return agent as unknown as Json;
   const aid = freshId("files");
   setRect(kernel, view, themeOf(kernel, view, tabWidth()), aid, { x: at.x, y: at.y, width: 320, height: 560 });
   kernel.register(new Agent({
     id: aid,
     parentId: view,
     handlerModule: "files_view.ts",
-    meta: { display_name: path === "" ? "project" : nameOf(path), root: path, can_call: fileGrant() } as unknown as Payload,
+    meta: { display_name: path === "" ? "project" : nameOf(path), root: path, can_call: fileGrant(), view_agent: agent.view } as unknown as Payload,
   }));
-  return { opened: path, kind: "dir", cell: aid } as Json;
+  return { opened: path, kind: "dir", cell: aid, agent: agent.view, created: agent.created } as Json;
 }
 
 /** `update` on the view itself: any fields. */

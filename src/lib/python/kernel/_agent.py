@@ -1333,14 +1333,19 @@ class Agent:
             self.ctx.announce_deadletter(pid, out, attempts)
 
     def advertises(self, verb: str) -> bool:
-        """Whether this agent's bundle answers `verb` (its `VERBS` table)."""
+        """Whether this agent answers `verb`: its bundle's `VERBS` table, or the
+        agent's own table when the bundle names one through `instance_verbs(agent)`
+        (the same per-instance rule `docs` follows)."""
         if not self.handler_module:
             return False
         try:
             mod = import_handler(self.handler_module)
         except Exception:  # noqa: BLE001 — an unimportable bundle advertises nothing
             return False
-        verbs = getattr(mod, "VERBS", None)
+        own = getattr(mod, "instance_verbs", None)
+        verbs = own(self) if callable(own) else None
+        if verbs is None:
+            verbs = getattr(mod, "VERBS", None)
         return isinstance(verbs, dict) and verb in verbs
 
     def module_hook(self, name: str):
