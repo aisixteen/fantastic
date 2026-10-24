@@ -889,3 +889,93 @@ async fn a_deleted_id_leaves_every_grant() {
     assert_eq!(cb("vault"), json!({"$self": "*"}));
     assert_eq!(cb("other"), json!({"$self": "*", "vault": "*"}));
 }
+
+/// Records what `keep_memory` said inside each `on_delete` hook.
+struct KeepProbe {
+    seen: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+}
+#[async_trait]
+impl crate::Bundle for KeepProbe {
+    fn name(&self) -> &str {
+        "keep_probe"
+    }
+    async fn handle(
+        &self,
+        _id: &AgentId,
+        _payload: &Value,
+        _k: &Arc<Kernel>,
+    ) -> Result<crate::Reply, crate::bundle::BundleError> {
+        Ok(None)
+    }
+    async fn on_delete(
+        &self,
+        id: &AgentId,
+        k: &Arc<Kernel>,
+    ) -> Result<(), crate::bundle::BundleError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((id.0.clone(), keep_memory(k, id)));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn delete_agent_keep_memory_flag_is_scoped_to_one_delete() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(
+        "keep_probe.tools",
+        KeepProbe {
+            seen: Arc::clone(&seen),
+        },
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().to_path_buf(),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    for (id, parent) in [("p_1", "kernel"), ("c_1", "p_1"), ("q_1", "kernel")] {
+        let _ = kernel
+            .send(vec![Item::new(
+                AgentId::from("kernel"),
+                json!({"type": "create_agent", "parent_id": parent,
+                       "handler_module": "keep_probe.tools", "id": id}),
+            )])
+            .await
+            .remove(0)
+            .result;
+    }
+    let del = |payload: Value| {
+        let kernel = Arc::clone(&kernel);
+        async move {
+            kernel
+                .send(vec![Item::new(AgentId::from("kernel_state"), payload)])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    let out = del(json!({"type": "delete_agent", "id": "p_1", "keep_memory": true})).await;
+    assert_eq!(out["deleted"], true, "{out}");
+    {
+        let mut s = seen.lock().unwrap();
+        s.sort();
+        assert_eq!(
+            *s,
+            vec![("c_1".to_string(), true), ("p_1".to_string(), true)]
+        );
+        s.clear();
+    }
+    assert!(!keep_memory(&kernel, &AgentId::from("p_1")), "cleared");
+    let out = del(json!({"type": "delete_agent", "id": "q_1"})).await;
+    assert_eq!(out["deleted"], true, "{out}");
+    assert_eq!(*seen.lock().unwrap(), vec![("q_1".to_string(), false)]);
+}

@@ -11,6 +11,10 @@
 //! Otherwise it walks the subtree depth-first, calls each bundle's
 //! `on_delete` hook BEFORE unregistering from `kernel.agents`, and
 //! rmtrees the dir (unless the agent is ephemeral).
+//!
+//! `delete_agent keep_memory:true` tells the subtree's hooks to leave the
+//! agents' persisted memory-store rows ([`keep_memory`]); by default an AI
+//! agent's rows are purged with it.
 
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
@@ -357,6 +361,24 @@ fn find_locked_descendant(kernel: &Kernel, target: &Arc<Agent>) -> Option<AgentI
     None
 }
 
+const KEEP_MEMORY_KEY: &str = "lifecycle.keep_memory";
+
+/// The ids of the delete in flight that asked to keep their persisted memory.
+#[derive(Default)]
+pub struct KeepMemory(std::sync::Mutex<std::collections::HashSet<AgentId>>);
+
+/// True while `id` is being deleted by a `delete_agent keep_memory:true`: the
+/// `on_delete` hook of a memory-owning bundle then leaves its store rows.
+#[must_use]
+pub fn keep_memory(kernel: &Kernel, id: &AgentId) -> bool {
+    kernel
+        .extension::<KeepMemory>(KEEP_MEMORY_KEY)
+        .0
+        .lock()
+        .expect("keep_memory poisoned")
+        .contains(id)
+}
+
 /// Implementation of the `delete_agent` system verb.
 pub(crate) async fn delete_from_payload(
     kernel: &Arc<Kernel>,
@@ -428,7 +450,24 @@ pub(crate) async fn delete_from_payload(
     }
     let mut gone = Vec::new();
     subtree_ids(kernel, &target, &mut gone);
+    // `keep_memory:true` (only the literal) tells every `on_delete` hook of this
+    // subtree to leave the agent's persisted memory alone. The hook has no
+    // payload, so the flag rides kernel state, set for this one delete.
+    let keep = payload.get("keep_memory") == Some(&Value::Bool(true));
+    let kept = kernel.extension::<KeepMemory>(KEEP_MEMORY_KEY);
+    if keep {
+        kept.0
+            .lock()
+            .expect("keep_memory poisoned")
+            .extend(gone.iter().cloned());
+    }
     cascade_delete(kernel, &target).await;
+    if keep {
+        let mut set = kept.0.lock().expect("keep_memory poisoned");
+        for g in &gone {
+            set.remove(g);
+        }
+    }
     prune_grants(kernel, &gone);
     // Emit `agent_deleted` on the caller's inbox so watchers refresh
     // (canvas frame chrome, etc.). Mirrors Python's
