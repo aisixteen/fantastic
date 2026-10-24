@@ -149,10 +149,16 @@ def main() -> bool:
             r["8c unsaved edits are marked"] = bool(await pg.until(f"!!{frame(PIN)}?.querySelector('.pv-unsaved')", 10))
             await pg.cdp("Input.dispatchKeyEvent", type="keyDown", key="s", code="KeyS", windowsVirtualKeyCode=83, modifiers=mod)
             await pg.cdp("Input.dispatchKeyEvent", type="keyUp", key="s", code="KeyS", windowsVirtualKeyCode=83, modifiers=mod)
-            r["8 the save reaches the disk"] = await disk_is(src / "one.txt", "two three")
+            disk_ok = await disk_is(src / "one.txt", "two three")
+            r["8 the save reaches the disk"] = disk_ok
+            # diagnostic only: what the PIN cell shows when the save did not land
+            info["8_note"] = await pg.js(f"{frame(PIN)}?.querySelector('.pv-note')?.textContent || ''")
+            if not disk_ok:
+                info["8_note"] = {"dom": info["8_note"], "save": await call(PIN, {"type": "save"})}
             s = await call(TREE, {"type": "select", "path": "src/one.txt"})
             info["8_select"] = s
             r["8d another preview of the file shows it"] = bool(await pg.until(f"({code(FOLLOW)}).includes('two three')", 15))
+            info["8d_follow"] = await pg.js(code(FOLLOW))
             # 9 a change on disk under unsaved edits: loud, nothing overwritten
             await type_at_end(PIN, " four")
             r["9a unsaved again"] = bool(await pg.until(f"!!{frame(PIN)}?.querySelector('.pv-unsaved')", 10))

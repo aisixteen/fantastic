@@ -291,7 +291,11 @@ pub fn write_bytes(
             let _ = sys::unlink(&tmp);
             return Err(e);
         }
-        std::fs::rename(&tmp, &target).map_err(|e| io_error_str(&e, &target))
+        if let Err(e) = rename_replace(&tmp, &target) {
+            let _ = sys::unlink(&tmp);
+            return Err(io_error_str(&e, &target));
+        }
+        Ok(())
     } else {
         if mode.is_some() {
             return Err("fs: `mode` needs an atomic write".to_string());
@@ -528,4 +532,125 @@ pub fn file_name(p: &Path) -> String {
         .unwrap_or_else(|| OsStr::new(""))
         .to_string_lossy()
         .into_owned()
+}
+
+/// The commit of an atomic write: `tmp` renamed over `target`. Windows can
+/// refuse the replace while another handle (a watcher, a reader) holds the
+/// target open for a moment, so a transient refusal is retried; see
+/// [`rename_replace_with`].
+fn rename_replace(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    rename_replace_with(|| std::fs::rename(tmp, target), RENAME_TRIES, RENAME_PAUSE)
+}
+
+/// Attempts the atomic commit makes before it gives up.
+const RENAME_TRIES: u32 = 8;
+/// Pause between two attempts: 7 pauses, under a second in all.
+const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Runs `op` up to `tries` times. Only a transient refusal is tried again (see
+/// [`transient_rename_error`]); any other error is returned at once.
+fn rename_replace_with(
+    mut op: impl FnMut() -> std::io::Result<()>,
+    tries: u32,
+    pause: std::time::Duration,
+) -> std::io::Result<()> {
+    let mut left = tries.max(1);
+    loop {
+        match op() {
+            Ok(()) => return Ok(()),
+            Err(e) if left > 1 && transient_rename_error(&e) => {
+                left -= 1;
+                std::thread::sleep(pause);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// A refusal that another handle on the target can clear: access denied, a
+/// sharing violation or a lock violation (Windows `ERROR_ACCESS_DENIED` 5,
+/// `ERROR_SHARING_VIOLATION` 32, `ERROR_LOCK_VIOLATION` 33). The raw codes are
+/// read on Windows only; elsewhere `PermissionDenied` is the whole test.
+fn transient_rename_error(e: &std::io::Error) -> bool {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::{Error, ErrorKind};
+    use std::time::Duration;
+
+    fn denied() -> std::io::Result<()> {
+        Err(Error::from(ErrorKind::PermissionDenied))
+    }
+
+    #[test]
+    fn rename_retries_transient_denial_then_succeeds() {
+        let calls = Cell::new(0u32);
+        let r = rename_replace_with(
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    denied()
+                } else {
+                    Ok(())
+                }
+            },
+            RENAME_TRIES,
+            Duration::ZERO,
+        );
+        assert!(r.is_ok());
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn rename_gives_up_after_bounded_tries() {
+        let calls = Cell::new(0u32);
+        let r = rename_replace_with(
+            || {
+                calls.set(calls.get() + 1);
+                denied()
+            },
+            4,
+            Duration::ZERO,
+        );
+        assert_eq!(r.unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn rename_does_not_retry_other_errors() {
+        let calls = Cell::new(0u32);
+        let r = rename_replace_with(
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::from(ErrorKind::NotFound))
+            },
+            RENAME_TRIES,
+            Duration::ZERO,
+        );
+        assert_eq!(r.unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn write_bytes_atomic_leaves_no_tmp_on_rename_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // a non-empty directory where the file should land: the rename fails
+        std::fs::create_dir_all(root.join("d/blocker")).unwrap();
+        std::fs::write(root.join("d/blocker/keep"), b"x").unwrap();
+        assert!(write_bytes(root, "d/blocker", b"new", true, None).is_err());
+        let leaked: Vec<_> = std::fs::read_dir(root.join("d"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(leaked.is_empty(), "leaked tmp: {leaked:?}");
+    }
 }
