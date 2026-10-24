@@ -454,7 +454,7 @@ they did not register.
 - **A backend KIND's record schema** (`ai_core/schema.py`): each AI backend
   module publishes `RECORD_SCHEMA` — its own fields, then the ones every ai_core
   agent takes (`memory_store_id` required; `context_window`, `output_reserve`,
-  `context_strategy`, `recent_n` defaulted; `system_prompt` optional — set, it
+  `context_strategy` (compact, truncate, strip, fold, or none = never shrink: an over-budget turn is refused) and `recent_n` defaulted; `system_prompt` optional — set, it
   REPLACES the default system block on every turn of that agent, main, nudge and
   reply-woken alike, read live; the per-call `send` argument beats it for that
   delivery; a non-string or blank value is refused at the write, `null` clears

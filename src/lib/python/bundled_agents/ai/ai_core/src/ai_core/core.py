@@ -2801,6 +2801,14 @@ async def _project_context(
             "error": f"{cfg.name}: unknown context_strategy {strat_name!r} "
             f"(valid: {strategy_names()})"
         }
+    # `none`: never shrink. Refused HERE, before ProjectionCtx, any summarizer or model
+    # call, and before any row or event is written, so nothing is dropped. The caller
+    # returns this dict straight out of the turn.
+    if strat_name == "none":
+        return {
+            "error": f"{cfg.name}: context full: {estimate_tokens(messages) // 1000}k of "
+            f"{b // 1000}k tokens — clear, fold by hand, or raise context_window"
+        }
     ctx = ProjectionCtx(
         budget=body_budget,
         recent_n=_recent_n(rec),

@@ -136,7 +136,7 @@ def test_window_and_reserve_digit_strings_parse_what_they_check(v, window, reser
 
 def test_registry_no_memgpt():
     # memgpt collapsed into the universal seam notice — it is no longer a strategy.
-    assert set(strategy_names()) == {"compact", "truncate", "strip", "fold"}
+    assert set(strategy_names()) == {"compact", "truncate", "strip", "fold", "none"}
     assert DEFAULT_STRATEGY == "compact"
     assert get_strategy("memgpt") is None
     assert get_strategy("nope") is None  # unknown ⇒ None (caller errors), no default
@@ -645,7 +645,8 @@ def test_a_turn_whose_every_block_is_superseded_drops_entirely():
 # ── the SEAM must not undo what the strategies pinned ────────────────
 
 
-@pytest.mark.parametrize("strategy", sorted(strategy_names()))
+# `none` is refused by the seam (test_context_none.py), so it has no projection to pin.
+@pytest.mark.parametrize("strategy", sorted(n for n in strategy_names() if n != "none"))
 @pytest.mark.parametrize("window", [300, 400, 500, 700, 900, 1200])
 async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
     """`test_every_strategy_keeps_the_goal_when_the_body_overflows` calls the

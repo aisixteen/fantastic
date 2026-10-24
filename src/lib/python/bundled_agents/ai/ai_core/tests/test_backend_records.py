@@ -33,7 +33,7 @@ _AI_TAIL = [
         "enum",
         False,
         "compact",
-        ["compact", "truncate", "strip", "fold"],
+        ["compact", "truncate", "strip", "fold", "none"],
     ),
     ("recent_n", "int", False, 6, None),
     (
@@ -263,7 +263,7 @@ def test_an_enum_outside_its_set_is_refused_with_the_generic_text(backend):
     err = _tools(backend).validate_meta({"context_strategy": "zip"}, {})
     assert err == (
         "context_strategy='zip' is not one of the legal values: "
-        "compact, truncate, strip, fold"
+        "compact, truncate, strip, fold, none"
     )
 
 

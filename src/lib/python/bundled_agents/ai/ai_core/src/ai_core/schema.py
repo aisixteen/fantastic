@@ -99,7 +99,7 @@ AI_FIELDS: tuple = (
     field(
         "context_strategy",
         "enum",
-        "how the conversation is fitted into the window",
+        "how the conversation is fitted into the window (none = never shrink: an over-budget turn is refused)",
         enum=strategy_names(),
         default=DEFAULT_STRATEGY,
     ),
