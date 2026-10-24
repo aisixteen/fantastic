@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import posixpath
 from contextlib import asynccontextmanager
@@ -627,8 +628,38 @@ async def _held(bridge: str, *paths: str):
 
 
 def _version(data: bytes) -> str:
-    """The on-demand version: a content hash, computed, never stored."""
-    return hashlib.sha256(data).hexdigest()[:16]
+    """The on-demand version: a content hash, computed, never stored. A version
+    that parses as a number would arrive as one (JSON) and lose its digits, so
+    'a' replaces the first char then; hex never starts a number form otherwise.
+    Same rule as the Rust runtime's `version_of`, so versions match across runtimes."""
+    v = hashlib.sha256(data).hexdigest()[:16]
+    try:
+        float(v)
+    except ValueError:
+        return v
+    return "a" + v[1:]
+
+
+def _same_version(want, have: str) -> bool:
+    """Does the caller's `if_match` name this version? A str compares as text; a
+    JSON number matches when its text form is the version, or when the version
+    parses as the same JSON number (`12e45` arrives as a float and was never the
+    digits the caller meant). A bool is not a number here."""
+    if isinstance(want, str):
+        return want == have
+    if isinstance(want, bool) or not isinstance(want, (int, float)):
+        return False
+    if str(want) == have:
+        return True
+    try:
+        parsed = json.loads(have)
+    except ValueError:
+        return False
+    return (
+        isinstance(parsed, (int, float))
+        and not isinstance(parsed, bool)
+        and parsed == want
+    )
 
 
 def _doc(verb: str, payload: dict, what: str):
@@ -652,7 +683,7 @@ def _mismatch(path: str, want: str, have_bytes: bytes | None) -> dict | None:
     """The on-demand optimistic guard: a refusal when `if_match` names another
     version (an absent document has no version and never matches)."""
     have = None if have_bytes is None else _version(have_bytes)
-    if have == want:
+    if have is not None and _same_version(want, have):
         return None
     return {
         "error": "version mismatch — the document changed since you read it",
