@@ -108,6 +108,18 @@ from kernel._bundles import (
 from kernel import _docs, _secret, _sys
 
 
+_KEEP_MEMORY = "_keep_memory"
+
+
+def keep_memory(ctx_or_agent, id: str) -> bool:
+    """True while `id` is being deleted by a `delete_agent keep_memory:true`. An
+    `on_delete` hook (which gets no payload) reads it: a memory-owning bundle then
+    leaves its persisted rows. Set for ONE delete only (see `Agent.delete`)."""
+    ctx = getattr(ctx_or_agent, "ctx", ctx_or_agent)
+    kept = getattr(ctx, _KEEP_MEMORY, None)
+    return bool(kept) and id in kept
+
+
 # System verbs answered natively by every Agent for its own children.
 # When a payload with `type` in this set is dispatched, Agent answers
 # directly without consulting `handler_module`. Domain verbs (anything
@@ -1942,12 +1954,16 @@ class Agent:
             return existing.record
         return self.create(handler_module, id=id, **meta)
 
-    async def delete(self, agent_id: str) -> dict:
+    async def delete(self, agent_id: str, *, keep_memory: bool = False) -> dict:
         """Cascade-delete an agent and its entire subtree. Returns:
         - {"deleted": True, "id": agent_id} on success
         - {"locked": True, "blocked_by": <id>, "id": agent_id} if any
           descendant has delete_lock=true (no mutations)
         - {"error": "..."} on bad input
+
+        `keep_memory=True` tells every `on_delete` hook of the subtree to leave
+        the agents' persisted memory alone (see `keep_memory`); it lasts for this
+        one delete.
 
         Cascade is depth-first: deepest descendants run their
         `_shutdown` hook (kernel-routed, so process state tears down)
@@ -1984,7 +2000,16 @@ class Agent:
                 id=agent_id,
             )
         gone = set(target._subtree_ids())
-        await target._cascade_delete()
+        kept = getattr(self.ctx, _KEEP_MEMORY, None)
+        if kept is None:
+            kept = set()
+            setattr(self.ctx, _KEEP_MEMORY, kept)
+        added = (gone - kept) if keep_memory else set()
+        kept.update(added)
+        try:
+            await target._cascade_delete()
+        finally:
+            kept.difference_update(added)
         self._prune_grants(gone)
         return {"deleted": True, "id": agent_id}
 
@@ -2735,7 +2760,10 @@ class Agent:
         target_id = payload.get("id")
         if not isinstance(target_id, str) or not target_id:
             return missing("delete_agent", "id")
-        result = await self.delete(target_id)
+        # Only the literal `true` keeps the memory (a string is not a yes).
+        result = await self.delete(
+            target_id, keep_memory=payload.get("keep_memory") is True
+        )
         if result.get("deleted"):
             await self.emit(self.id, {"type": "agent_deleted", "id": target_id})
         return result
