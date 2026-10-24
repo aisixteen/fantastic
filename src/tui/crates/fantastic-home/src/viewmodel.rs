@@ -45,14 +45,32 @@ use crate::probe::{is_active, Mode, Probe, Status, Target};
 /// The prefix of a folder-being-added's entry id.
 const ADDING: &str = "adding:";
 
-/// The missed canvas answer, in a row, at which a running row shows what the
-/// probe found. Before it, a probe that finds the SAME run (holder, canvas)
-/// whose canvas did not answer in time keeps the row running: misses 1 and 2
+/// The missed look, in a row, at which a running row shows what the probe
+/// found. Before it, a probe that finds the SAME run (holder, canvas) keeps the
+/// row running while the look missed (see `ride_out_a_miss`): misses 1 and 2
 /// are ridden out, the 3rd shows — about 6 s at the 2 s poll. A loaded machine
-/// misses answers (the canvas check's timeout), and every page would drop its
-/// live canvas for each. A gone holder, another run or another canvas shows at
-/// once; an answer resets the count.
+/// misses answers (the canvas check's timeout, a read that fails), and every
+/// page would drop its live canvas for each. A gone holder, another run or
+/// another canvas shows at once; a clean answer resets the count.
 const MISS_SHOWN: u32 = 3;
+
+/// Does `probe` stand for the run `last` showed, though a question of its look
+/// failed. Only a probe with errors can be one. Each identity field is either
+/// the one `last` had, or the fallback its failed question leaves: `is_fantastic`
+/// false, no holder, no owned entry, no canvas.
+fn failed_look_of_same_run(probe: &Probe, last: &Probe) -> bool {
+    if probe.errors.is_empty() {
+        return false;
+    }
+    let failed = |what: &str| probe.errors.iter().any(|e| e.what == what);
+    let is_fantastic =
+        probe.is_fantastic == last.is_fantastic || (!probe.is_fantastic && failed("is_fantastic"));
+    let holder_failed = failed("is_fantastic") || failed("lock_holder");
+    let holder = probe.holder == last.holder || (probe.holder.is_none() && holder_failed);
+    let owns_entry = probe.owns_entry == last.owns_entry || (!probe.owns_entry && holder_failed);
+    let canvas = probe.canvas == last.canvas || (probe.canvas.is_none() && holder_failed);
+    is_fantastic && holder && owns_entry && canvas
+}
 
 /// Why a folder being added cannot be added while it runs as it does.
 const NO_CANVAS: &str =
@@ -535,9 +553,12 @@ impl Home {
     }
 
     /// The probe to keep for `guid`: the last one while a running row's run is
-    /// unchanged and only its canvas missed an answer, until the `MISS_SHOWN`th
-    /// polls in a row; else `probe`. A stopped holder, another run or another
-    /// canvas shows at once.
+    /// unchanged and the look missed, until the `MISS_SHOWN`th polls in a row;
+    /// else `probe`. A look missed when its canvas did not answer, or when the OS
+    /// layer failed a question (`Probe.errors`) and the answer it used in its
+    /// place is the run's own or a no-answer fallback (`failed_look_of_same_run`).
+    /// A clean answer shows at once: a stopped holder, another run, another
+    /// canvas or a guid that does not match.
     fn ride_out_a_miss(&mut self, guid: &str, probe: Probe) -> Probe {
         let running = |p: &Probe| {
             p.is_fantastic
@@ -555,11 +576,12 @@ impl Home {
             self.missed.remove(guid);
             return probe;
         };
-        let same_run = probe.is_fantastic
+        let same_run = (probe.is_fantastic
             && probe.holder == last.holder
             && probe.owns_entry
             && probe.canvas == last.canvas
-            && !probe.canvas_up;
+            && !probe.canvas_up)
+            || failed_look_of_same_run(&probe, last);
         let misses = self.missed.get(guid).copied().unwrap_or(0) + 1;
         if same_run && misses < MISS_SHOWN {
             self.missed.insert(guid.to_string(), misses);
@@ -1317,6 +1339,95 @@ mod tests {
         probed(&mut h, 2_000, vec![("g1", missed)]);
         assert_eq!(status(&h, "g1", 2_000), Status::Running(canvas(8100)));
         assert_eq!(h.take_demotions(), vec![], "ridden out: nothing recorded");
+    }
+
+    #[test]
+    fn a_failed_guid_read_is_ridden_out() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        // The canvas answers, but the guid ask failed: its fallback is no match.
+        let mut failed = running(7, 8100);
+        failed.guid_matches = false;
+        failed.errors.push(ProbeError {
+            what: "guid",
+            error: "127.0.0.1:8100: timed out".into(),
+        });
+        probed(&mut h, 2_000, vec![("g1", failed.clone())]);
+        probed(&mut h, 4_000, vec![("g1", failed.clone())]);
+        assert_eq!(status(&h, "g1", 4_000), Status::Running(canvas(8100)));
+        assert_eq!(h.take_demotions(), vec![], "ridden out: nothing recorded");
+        // The 3rd in a row: what the probe found.
+        probed(&mut h, 6_000, vec![("g1", failed.clone())]);
+        assert_eq!(status(&h, "g1", 6_000), Status::Unverified);
+        assert_eq!(
+            h.take_demotions(),
+            vec![Demotion {
+                at_ms: 6_000,
+                guid: "g1".into(),
+                path: "/w/a".into(),
+                probe: failed,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_failed_lock_read_is_ridden_out_but_a_clean_no_holder_shows_at_once() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        // The lock could not be read: its fallback is no holder.
+        let unread = Probe {
+            errors: vec![ProbeError {
+                what: "lock_holder",
+                error: "/w/a/.fantastic/lock.yaml: Access is denied".into(),
+            }],
+            ..stopped()
+        };
+        probed(&mut h, 2_000, vec![("g1", unread)]);
+        assert_eq!(status(&h, "g1", 2_000), Status::Running(canvas(8100)));
+        assert_eq!(h.take_demotions(), vec![], "ridden out: nothing recorded");
+
+        // The same no-holder answer, read cleanly, shows at once.
+        let mut clean = home(Mode::Lock);
+        read(
+            &mut clean,
+            0,
+            vec![entry("g1", "/w/a", Some(7), Some(8100), 0)],
+        );
+        probed(&mut clean, 0, vec![("g1", running(7, 8100))]);
+        probed(&mut clean, 2_000, vec![("g1", stopped())]);
+        assert_eq!(status(&clean, "g1", 2_000), Status::Stopped);
+        assert_eq!(clean.take_demotions().len(), 1);
+    }
+
+    #[test]
+    fn a_registry_failure_keeps_running_rows_and_their_verification() {
+        let mut h = home(Mode::Lock);
+        read(&mut h, 0, vec![entry("g1", "/w/a", Some(7), Some(8100), 0)]);
+        probed(&mut h, 0, vec![("g1", running(7, 8100))]);
+        h.reduce(Event::RegistryFailed {
+            error: "/h/fantastics/a/fantastic.yaml: sharing violation".into(),
+        });
+        assert_eq!(status(&h, "g1", 1_000), Status::Running(canvas(8100)));
+        assert_eq!(h.verified.len(), 1, "the run stays verified");
+        // The next look finds the entry again: its guid is not asked again.
+        let next = read(
+            &mut h,
+            2_000,
+            vec![entry("g1", "/w/a", Some(7), Some(8100), 0)],
+        );
+        assert_eq!(next.len(), 1);
+        let answered = Prober::new(next[0].target.clone(), next[0].mode).run(|ask| match ask {
+            Ask::IsFantastic { .. } => Answer::IsFantastic(true),
+            Ask::LockHolder { .. } => Answer::LockHolder(Some(7)),
+            Ask::RunFile { .. } => Answer::RunFile(None),
+            Ask::CanvasUp { .. } => Answer::CanvasUp(true),
+            Ask::Guid { .. } => panic!("a verified run was asked its guid again"),
+        });
+        assert!(answered.guid_matches);
+        probed(&mut h, 2_000, vec![("g1", answered)]);
+        assert_eq!(status(&h, "g1", 2_000), Status::Running(canvas(8100)));
     }
 
     #[test]

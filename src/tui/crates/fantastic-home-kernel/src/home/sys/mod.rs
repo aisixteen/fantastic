@@ -96,8 +96,53 @@ pub fn free_port() -> Result<u16, String> {
         .map_err(|e| format!("no free port to pick: {e}"))
 }
 
+/// Tries a read at most this many times: a failure other than "not there" may
+/// be transient (a sharing violation while the file is replaced, a scan).
+const READ_TRIES: u32 = 3;
+/// The wait between two tries of [`retry_read`].
+const READ_RETRY_WAIT: Duration = Duration::from_millis(20);
+
+/// `op`, tried up to `READ_TRIES` times, `READ_RETRY_WAIT` apart. `NotFound` is an
+/// answer, not a failure, so it is returned at once.
+fn retry_read<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut tries = 1;
+    loop {
+        match op() {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound && tries < READ_TRIES => {
+                tries += 1;
+                std::thread::sleep(READ_RETRY_WAIT);
+            }
+            done => return done,
+        }
+    }
+}
+
+/// The `fantastic.yaml` text of the registry folder `folder`, its bytes read with
+/// `read_yaml`. `None` when the folder is not an entry: it is gone, not a
+/// directory, has no `fantastic.yaml`, or the file is not UTF-8. Any other failure
+/// to look is an `Err` naming the path, after `READ_TRIES` tries.
+fn registry_entry(
+    folder: &Path,
+    mut read_yaml: impl FnMut(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<Option<String>, String> {
+    match retry_read(|| std::fs::metadata(folder)) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", folder.display())),
+    }
+    let file = folder.join(INFO);
+    match retry_read(|| read_yaml(&file)) {
+        Ok(bytes) => Ok(String::from_utf8(bytes).ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", file.display())),
+    }
+}
+
 /// The registry's `(folder name, fantastic.yaml text)` entries. No registry dir
-/// is an empty registry; a folder without a readable UTF-8 file is skipped.
+/// is an empty registry; a folder that is not an entry (see [`registry_entry`])
+/// is skipped. A read that fails for any other reason is an `Err`: the entry is
+/// not known to be gone, so the caller keeps what it knew.
 pub fn read_registry(home: &Path) -> Result<Vec<(String, String)>, String> {
     let dir = fantastics_dir(home);
     let read = match std::fs::read_dir(&dir) {
@@ -109,19 +154,12 @@ pub fn read_registry(home: &Path) -> Result<Vec<(String, String)>, String> {
     for entry in read {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
         let Some(name) = entry.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        let Ok(bytes) = std::fs::read(path.join(INFO)) else {
-            continue;
-        };
-        let Ok(text) = String::from_utf8(bytes) else {
-            continue;
-        };
-        out.push((name, text));
+        if let Some(text) = registry_entry(&path, |file| std::fs::read(file))? {
+            out.push((name, text));
+        }
     }
     Ok(out)
 }

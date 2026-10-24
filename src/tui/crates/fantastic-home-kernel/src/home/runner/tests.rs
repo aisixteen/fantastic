@@ -526,7 +526,8 @@ async fn a_demotion_carries_the_read_error_that_came_with_its_probe() {
     t.os.set_registry(vec![entry("g3", "/w/c", Some(7), Some(8100))]);
     t.running("/w/c", 7, 8100, "g3");
     assert_eq!(status(&t.look().await, "g3"), "running");
-    // its lock cannot be read: no holder is seen, so the row shows stopped at once
+    // its lock cannot be read: no holder is seen, a failed look that is ridden
+    // out for two polls, and shown on the third
     t.os.set_folder(
         "/w/c",
         Folder {
@@ -540,6 +541,8 @@ async fn a_demotion_carries_the_read_error_that_came_with_its_probe() {
         "lock_holder",
         "/w/c: the lock: Access is denied (os error 5)",
     );
+    assert_eq!(status(&t.look().await, "g3"), "running");
+    assert_eq!(status(&t.look().await, "g3"), "running");
     let s = t.look().await;
     assert_eq!(status(&s, "g3"), "stopped");
     let events = diagnostics(&t);

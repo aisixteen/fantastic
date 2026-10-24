@@ -43,12 +43,16 @@ pub struct Probe {
     /// The kernel behind that canvas has the registered guid.
     pub guid_matches: bool,
     /// The read errors the OS layer met asking, one per failed question. Evidence
-    /// only: `Status::of` never reads it, so an error changes no status.
+    /// only: `Status::of` never reads it, so an error changes no status. The
+    /// viewmodel reads it in one case: a running row's failed look may be ridden
+    /// out (`viewmodel::ride_out_a_miss`).
     pub errors: Vec<ProbeError>,
 }
 
 /// A question the OS layer could not answer cleanly, and why. The answer it
-/// gave in its place is the one the procedure used.
+/// gave in its place is the one the procedure used. A failed read is not a
+/// clean "no": the viewmodel tells them apart, so a running row whose look
+/// failed is ridden out where a clean answer would show at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProbeError {
     /// The question's name (`Ask::name`).
