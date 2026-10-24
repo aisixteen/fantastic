@@ -15,6 +15,7 @@ import json
 import socket
 import struct
 import sys
+import time
 
 from _testkit import child_env, child_environ, command_rx, per_os
 
@@ -98,6 +99,23 @@ async def _until(pred, secs=5.0, what="condition"):
             return
         await asyncio.sleep(0.02)
     raise AssertionError(f"{what} never held within {secs}s")
+
+
+async def _inbox_ready(kernel, agent_id, secs=10.0):
+    """Wait for the THING that proves a job's onmessage is registered: the relay's
+    `inbox_drain` task row for the owner, which it spawns only after `ensure_inbox`
+    and `kernel.watch` succeed (#144). Mail sent after this is delivered; a fixed
+    sleep was a guess about a child's cold start."""
+    rows = []
+    for _ in range(int(secs / 0.02)):
+        ps = (await kernel.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0][
+            "result"
+        ]
+        rows = ps["tasks"]
+        if any(t["verb"] == "inbox_drain" and t["agent"] == agent_id for t in rows):
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no inbox_drain row for {agent_id} within {secs}s: {rows}")
 
 
 # ─── speaking the control wire directly ─────────────────────────
@@ -222,6 +240,96 @@ async def test_an_unknown_job_id_is_not_found_on_every_verb(seeded_kernel):
         )[0]["result"]
         assert r["reason"] == "not_found", (verb, r)
         assert r["job_id"] == 999999, (verb, r)
+
+
+async def test_status_of_an_unknown_job_answers_at_once(seeded_kernel):
+    """#310 (Python was already correct; this test pins it). An unknown job id is
+    refused `not_found` before any wait loop runs, so a `wait_s` on a job that does
+    not exist never burns the wait. Mirrors Rust PR #311."""
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} .*"])
+    t0 = time.monotonic()
+    r = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "runner",
+                    "payload": {"type": "status", "job_id": 999999, "wait_s": 60},
+                }
+            ]
+        )
+    )[0]["result"]
+    elapsed = time.monotonic() - t0
+    assert r["reason"] == "not_found", r
+    assert r["job_id"] == 999999, r
+    assert elapsed < 1, elapsed
+
+
+async def test_a_wait_ends_when_the_job_is_reaped(seeded_kernel):
+    """#310 (Python was already correct; this test pins it). A job that finishes
+    ends its `wait_s`; after `clear` removes the row, a wait on the same id answers
+    `not_found` at once instead of waiting out `wait_s`. Mirrors Rust PR #311."""
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(
+        seeded_kernel, "runner", PY, ["-c", "import time; time.sleep(0.2)"]
+    )
+    jid = r["job_id"]
+    s = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "runner",
+                    "payload": {"type": "status", "job_id": jid, "wait_s": 10},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert s["jobs"][0]["status"] != "running", s
+    c = (
+        await seeded_kernel.send(
+            [{"target": "runner", "payload": {"type": "clear", "job_id": jid}}]
+        )
+    )[0]["result"]
+    assert c == {"cleared": 1}, c
+    t0 = time.monotonic()
+    r2 = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "runner",
+                    "payload": {"type": "status", "job_id": jid, "wait_s": 60},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert r2["reason"] == "not_found" and r2["job_id"] == jid, r2
+    assert time.monotonic() - t0 < 5
+
+
+async def test_a_wait_on_a_running_job_still_waits_up_to_wait_s(seeded_kernel):
+    """#310 (Python was already correct; this test pins it). The fast refusal above
+    is for unknown jobs only: a RUNNING job's wait really waits, for the whole
+    `wait_s`, then answers the job as it stands. Mirrors Rust PR #311."""
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, SLEEP)
+    jid = r["job_id"]
+    t0 = time.monotonic()
+    s = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "runner",
+                    "payload": {"type": "status", "job_id": jid, "wait_s": 1},
+                }
+            ]
+        )
+    )[0]["result"]
+    elapsed = time.monotonic() - t0
+    assert s["jobs"][0]["status"] == "running", s
+    assert 0.9 <= elapsed < 5, elapsed
+    await seeded_kernel.send(
+        [{"target": "runner", "payload": {"type": "stop", "job_id": jid}}]
+    )
+    await _wait_done(seeded_kernel, "runner", jid)
 
 
 async def test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it(seeded_kernel):
@@ -538,6 +646,7 @@ _WIRE_CHILD = (
     "s=socket.socket(fileno=fd)\n"
     "def frame(o):\n"
     "  b=b'T'+json.dumps(o).encode(); s.sendall(struct.pack('>I',len(b))+b)\n"
+    "import time; time.sleep(1.5)\n"  # a slow cold start: mail must wait for the frame
     "frame({'op':'onmessage'})\n"
     "hdr=s.recv(4); n=struct.unpack('>I',hdr)[0]; m=json.loads(s.recv(n)[1:])\n"
     "print('got', m['payload']['type']); sys.stdout.flush()\n"
@@ -550,7 +659,7 @@ async def test_mail_reaches_a_live_job_over_the_wire(seeded_kernel):
     the whole point of the general-purpose runner."""
     await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
     r = await _start(seeded_kernel, "runner", PY, ["-c", _WIRE_CHILD])
-    await asyncio.sleep(0.4)  # let it register on_message
+    await _inbox_ready(seeded_kernel, "runner")  # on_message is registered now
     ack = (
         await seeded_kernel.send([{"target": "runner", "payload": {"type": "ping"}}])
     )[0]["result"]
