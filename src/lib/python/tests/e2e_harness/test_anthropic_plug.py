@@ -189,12 +189,26 @@ def test_meter_forwards_to_anthropic_endpoint_and_keeps_key_out_of_logs(plug_env
 
     lines = out.read_text().splitlines()
     assert len(lines) == 1
-    assert json.loads(lines[0])["tag"] == "case-one"
+    logged = json.loads(lines[0])
+    assert logged["tag"] == "case-one"
+    # the top-level `system` counts into the logged chars, next to the block-list message
+    assert logged["messages"] == 1
+    assert logged["content_chars"] == len("be brief") + len("ping")
     # the key is written nowhere under the run's dir
     for path in tmp_path.rglob("*"):
         if path.is_file():
             assert KEY not in path.read_text(errors="replace"), path
     assert (tmp_path / "turns" / "case-one" / "001.txt").exists()
+
+
+def test_metered_endpoint_keeps_the_endpoint_path_under_the_meter():
+    import run
+
+    # the Messages URL: the client's path lands under the meter's route
+    assert run.metered_endpoint("http://m", "t", "https://h/v1/messages") == "http://m/m/t/v1/messages"
+    # a vLLM OpenAI-compatible base: the path is kept, the trailing slash is not doubled
+    assert run.metered_endpoint("http://m", "t", "http://h:8000/v1") == "http://m/m/t/v1"
+    assert run.metered_endpoint("http://m", "t", "http://h:8000/v1/") == "http://m/m/t/v1"
 
 
 def test_meter_report_prices_a_request_from_the_environment(plug_env):
