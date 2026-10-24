@@ -56,11 +56,17 @@ from ai_core.context import (
 )
 from ai_core import caching
 from ai_core import prompt_file
-from ai_core.folds import anchors_of
+from ai_core.provider import ProviderError
+from ai_core.folds import anchors_of, is_fold, member_anchor
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
-from ai_core.strategies.fold import FoldSummaryError
+from ai_core.strategies.fold import (
+    FoldSummaryError,
+    append_fold,
+    summarize_span,
+    summary_title,
+)
 
 # TWO live consumers. The agentic LOOP is still emergent — the backend does ONE
 # provider pass per send and never iterates — but `_route_reply` DOES parse this
@@ -78,7 +84,7 @@ from ai_core.tool_parse import (
     render_reply,
 )
 from kernel import current_origin, current_task
-from kernel._refusal import UNHANDLED, refusal
+from kernel._refusal import BAD_ARG, LOCKED, UNHANDLED, refusal
 from kernel._refusal import bad as bad_arg
 from ai_core.constants import (  # noqa: F401 — re-exported seams
     DEFAULT_CLIENT_ID,
@@ -90,6 +96,10 @@ from ai_core.constants import (  # noqa: F401 — re-exported seams
     SEND_TIMEOUT,
     TRIGGER,
 )
+
+# The first transport retry waits this many seconds, the next twice that: 2 s, 4 s, 8 s
+# (#198 part 2). Read live, so a test can shorten it.
+RETRY_BACKOFF_BASE = 2.0
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
@@ -259,6 +269,23 @@ def _chain_ended(kernel, self_id: str, system_prompt: str | None) -> None:
         system_prompt,
         notice=True,
     )
+
+
+def _push_held_or_wake(
+    kernel, self_id: str, client_id: str, fut, system_prompt: str | None
+) -> None:
+    """ONE CHAIN PER AGENT (#227, Rust #330): hold a message on the chain. The
+    chain may have ended while the message's row was being stored (the held send
+    read `alive` before that await): the push and the `alive` read are one step
+    with no await between them, and a message pushed onto a dead chain revives it
+    and wakes it, or no pass would ever read the message."""
+    chain = _chain_of(self_id)
+    chain["held"].append((client_id, fut))
+    if not chain["alive"]:
+        chain["alive"] = True
+        if not chain["token"]:
+            chain["token"] = _new_send_id()
+        _chain_ended(kernel, self_id, system_prompt)
 
 
 def _take_current_for_cancel(self_id: str, task_id: str) -> dict | None:
@@ -536,6 +563,26 @@ async def _store_call(self_id: str, kernel, payload: dict) -> dict:
             + (f" (hint: {hint})" if hint else "")
         )
     return res if isinstance(res, dict) else {}
+
+
+async def _purge(self_id: str, kernel) -> None:
+    """Purge a deleted agent's rows from its memory store (`on_delete`), unless the
+    delete asked `keep_memory:true`. ONE gated `prune` of every row the agent owns
+    (no `keep`: the fold, view and bookkeeping rows go too; fold refs and the text
+    index follow in the store). Delete is not refusable: a store that is missing,
+    already gone or refuses is logged and the cascade goes on."""
+    from kernel._agent import keep_memory
+
+    if keep_memory(kernel, self_id):
+        return
+    try:
+        _store_of(self_id, kernel)
+    except MemoryStoreError:
+        return
+    try:
+        await _store_call(self_id, kernel, {"type": "prune", "before_id": 2**63 - 1})
+    except Exception as e:
+        print(f"  [cascade] {self_id} memory purge failed: {e}")
 
 
 # The store holds this agent's conversation AND its view rows. The CONVERSATION a
@@ -937,14 +984,13 @@ Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`; fewer rec
 fork a private thread. Tell peers facts in words — your ids mean nothing to them.
 
 ## Turns
-Only your ANSWER acts: a `<call>` written in your thinking does not run — write it
-in your answer, after the thinking; every call in the answer runs. Thinking is stripped
-from history: put what you concluded into a call or your message. End every turn with a
-call, with `<call name="await"></call>`
-(stop until the next message wakes you — what you wait for is in flight, not lost;
-refused when nothing of yours is pending) or with `<call name="done"></call>` (the work
-is finished). A turn with no call is reminded and rerolled; turn after turn of none and
-the chain gives up, telling your caller you could not answer.
+Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your
+answer, after thinking; every call in it runs. Thinking is stripped from history: put
+conclusions in a call or your message. End every turn with a call, with `<call name="await"></call>`
+(stop until the next message wakes you; what you wait for is in flight, not lost, and a
+job from `exec start` wakes you with `job_done`; refused when nothing is pending) or with
+`<call name="done"></call>` (work done). A turn with no call is reminded and rerolled;
+turn after turn of none and the chain gives up, telling your caller you could not answer.
 
 ## Inquiries
 When a decision is not yours to make, `send` whoever owns it an `inquiry` (`<text>`,
@@ -1016,6 +1062,90 @@ def _deliver_soon(
         kernel, target, text, client_id, system_prompt, born=born, notice=notice
     )
     _ctx(kernel).spawn_task(target, "deliver_reply", coro)
+
+
+def _watch_job(kernel, owner, exec_id, job_id, client_id, system_prompt) -> None:
+    """Record an exec job `owner`'s own batch started (`exec start` answered running),
+    and spawn ONE watcher on the owner for it (#306). The watcher waits on the exec
+    agent's `status` until the job is no longer `running`/`stopping`, forgets the job,
+    then wakes the owner once with `job_done {job_id, exit_code, tail}`. Rust:
+    `watch_job` in route.rs. Only this batch's own replies are watched, so another
+    agent's job never counts against this one."""
+    _running_jobs.setdefault(owner, []).append((job_id, exec_id))
+    _ctx(kernel).spawn_task(
+        owner,
+        "job_watch",
+        _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt),
+    )
+
+
+def _job_field(result, key):
+    """A field of the job a `status` or `tail` reply is about: the first of `jobs`, or
+    the reply itself when the exec agent answers flat."""
+    if not isinstance(result, dict):
+        return None
+    jobs = result.get("jobs")
+    if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict):
+        if key in jobs[0]:
+            return jobs[0][key]
+    return result.get(key)
+
+
+def _drop_job(owner, job_id, exec_id) -> None:
+    """Forget one job; the owner's key goes with its last one."""
+    jobs = _running_jobs.get(owner)
+    if jobs is None:
+        return
+    if (job_id, exec_id) in jobs:
+        jobs.remove((job_id, exec_id))
+    if not jobs:
+        _running_jobs.pop(owner, None)
+
+
+async def _job_watch(kernel, owner, exec_id, job_id, client_id, system_prompt) -> None:
+    last = None
+    try:
+        while True:
+            out = await kernel.send(
+                [
+                    {
+                        "target": exec_id,
+                        "payload": {"type": "status", "job_id": job_id, "wait_s": 100},
+                    }
+                ]
+            )
+            last = out[0].get("result") if out else None
+            # An error or unknown-job reply has no status, so it ends the wait too.
+            if _job_field(last, "status") not in ("running", "stopping"):
+                break
+        t = await kernel.send(
+            [
+                {
+                    "target": exec_id,
+                    "payload": {"type": "tail", "job_id": job_id, "lines": 20},
+                }
+            ]
+        )
+        result = (t[0].get("result") if t else None) or {}
+        lines = result.get("lines") if isinstance(result, dict) else None
+        tail = (
+            "\n".join(
+                str(line["line"])
+                for line in lines[-20:]
+                if isinstance(line, dict) and "line" in line
+            )
+            if isinstance(lines, list)
+            else ""
+        )
+        exit_code = _job_field(last, "exit_code")
+    finally:
+        # Forget the job BEFORE the wake (and on cancellation), so the woken turn's
+        # `pending` no longer counts it.
+        _drop_job(owner, job_id, exec_id)
+    text = "job_done " + json.dumps(
+        {"job_id": job_id, "exit_code": exit_code, "tail": tail}
+    )
+    _deliver_soon(kernel, owner, text, client_id, system_prompt, notice=False)
 
 
 async def _deliver(
@@ -1417,6 +1547,10 @@ _open_inquiries: dict[tuple[str, str], dict] = {}
 # flight, so `await` is honest while one is out.
 _awaiting: dict[str, set[str]] = {}
 _ANSWER_TAG = re.compile(r"\[reply to (\S+) · \S+ inquiry\]")
+# EXEC JOBS an agent started and has not yet heard end (#306), by owner: `(raw job_id,
+# exec agent id)`. An owner with any is awaiting its own work; each one ends in ONE
+# `job_done` wake, after which it is dropped here. Rust: `running_jobs` in route.rs.
+_running_jobs: dict[str, list[tuple[Any, str]]] = {}
 
 
 def _gave_up(limit: int) -> str:
@@ -1436,6 +1570,16 @@ def _misfire_limit(kernel, self_id: str) -> int:
     if isinstance(v, int) and not isinstance(v, bool):
         return v
     return MAX_SILENT_TURNS
+
+
+def _transport_retries(kernel, self_id: str) -> int:
+    """The record's `transport_retries` (#198 part 2): how many times a turn whose
+    link dropped is re-run, 0..5; unset, missing or invalid, 0 (off)."""
+    _get = getattr(kernel, "get", None)  # a bare test kernel has no record
+    v = ((_get(self_id) if _get else None) or {}).get("transport_retries")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return min(max(v, 0), 5)
+    return 0
 
 
 # Prefixed to the reminder when the turn it answers was DEAD (only thinking).
@@ -2022,6 +2166,24 @@ async def _route_reply(
     finally:
         if items:
             _inflight[self_id] = max(0, _inflight.get(self_id, 0) - 1)
+    # A JOB this agent started (#306): an `exec start` answered `running` is watched, and
+    # its end wakes this agent once. Only this batch's own replies are read.
+    for item, out in zip(items, outcomes):
+        res = out.get("result")
+        if (
+            (item.get("payload") or {}).get("type") == "start"
+            and isinstance(res, dict)
+            and res.get("status") == "running"
+            and res.get("job_id") is not None
+        ):
+            _watch_job(
+                kernel,
+                self_id,
+                item["target"],
+                res["job_id"],
+                client_id,
+                system_prompt,
+            )
     # AN ACCEPTED INQUIRY IS OWED AN ANSWER — counted until a message under its pid
     # arrives (`_send` clears it).
     for item, out in zip(items, outcomes):
@@ -2156,6 +2318,9 @@ async def _route_reply(
             + len(_queue.get(self_id, []))
             + (1 if _lock_for(self_id).locked() else 0)
             + len(_awaiting.get(self_id, ()))  # answers to its inquiries, still to come
+            # ...and the exec jobs it started that are still running (#306): their end
+            # wakes it.
+            + len(_running_jobs.get(self_id, ()))
         )
         # ONE CHAIN PER AGENT (#227): messages held while this chain ran are answered
         # by the wake turn, so this chain ends now.
@@ -2355,6 +2520,49 @@ async def _inner_system_content(
     return await _default_system_content(self_id, kernel)
 
 
+def _listed(hist: list[dict], view: dict | None) -> list[dict] | None:
+    """The view array's entries when there is a usable one: non-empty, and every id it
+    names still a row of the store. Otherwise None (no array, or a stale one)."""
+    if not view or not view["ids"]:
+        return None
+    known = {r.get("id") for r in hist}
+    if all(e.get("id") in known for e in view["ids"]):
+        return view["ids"]
+    return None
+
+
+def _render_tail(
+    hist: list[dict], frm: int, clean: bool
+) -> list[tuple[int, str, dict]]:
+    """The rows of `hist` from `frm` on, each as (store index, res, message). Under
+    `clean` they run through the trimmers: a trimmed row keeps its id, a dropped one is
+    absent. Otherwise every row is kept as stored."""
+    if not clean:
+        return [(i, _res_of(hist[i]), hist[i]) for i in range(frm, len(hist))]
+    at = {r.get("id"): i for i, r in enumerate(hist) if i >= frm}
+    kept = drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(hist[frm:])))
+    return [(at[r.get("id")], _res_of(r), r) for r in kept]
+
+
+def _render_history(
+    hist: list[dict], view: dict | None, clean: bool
+) -> list[tuple[int, str, dict]]:
+    """The history part of the model view (no system block, no user turn), as
+    (store index, res, message): the view array's entries each at its recorded
+    resolution, then the rows after the newest of them (trimmed under `clean`); with no
+    usable array, the whole store, trimmed under `clean`."""
+    listed = _listed(hist, view)
+    if listed is None:
+        return _render_tail(hist, 0, clean)
+    pos = {r.get("id"): i for i, r in enumerate(hist)}
+    out = []
+    for e in listed:
+        i = pos[e["id"]]
+        res = e.get("res", "full")
+        out.append((i, res, _apply_res(hist[i], res)))
+    return out + _render_tail(hist, max(pos[e["id"]] for e in listed) + 1, clean)
+
+
 async def _assemble(
     self_id: str,
     user_text: str,
@@ -2391,34 +2599,19 @@ async def _assemble(
     # reflects reduced to a stub — the model's own distillation carries the facts.
     hist = await _load_history(self_id, kernel)
     store_len = len(hist)
-    clean = caching.cleans(mode)
-
-    def _trim(rows: list[dict]) -> list[dict]:
-        # caching=cleanup trims the tail; none and provider_cache keep it as stored.
-        if not clean:
-            return list(rows)
-        return drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(rows)))
-
     # THE VIEW ARRAY IS THE STATE. When one exists and every id it names still
-    # resolves, the model sees exactly those rows at exactly those resolutions —
-    # the same bytes before and after a restart. Otherwise (no array yet, or an
-    # id that no longer resolves) the view is the trimmed store, as before.
+    # resolves, the model sees exactly those rows at exactly those resolutions — the
+    # same bytes before and after a restart. The rows after its newest entry ride
+    # behind it in full (trimmed under cleanup). Otherwise the view is the trimmed
+    # store, as before. `_render_history` is the one implementation, shared with
+    # `context_fold`, which persists exactly what this renders.
     view = await _load_view(self_id, kernel)
-    by_id = {r.get("id"): r for r in hist if r.get("id")}
-    if view and view["ids"] and all(e.get("id") in by_id for e in view["ids"]):
-        messages.extend(
-            _apply_res(by_id[e["id"]], e.get("res", "full")) for e in view["ids"]
-        )
-        # THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every row
-        # appended since — the model's own turns, the replies that landed — rides
-        # behind it in full. Served the array alone, the model would never see the
-        # read it had just made and would restart its work in a circle.
-        idx = {r.get("id"): i for i, r in enumerate(hist) if r.get("id")}
-        newest = max(idx[e["id"]] for e in view["ids"])
-        messages.extend(_trim(hist[newest + 1 :]))
+    messages.extend(
+        msg for _, _, msg in _render_history(hist, view, caching.cleans(mode))
+    )
+    if _listed(hist, view) is not None:
         _view_source[self_id] = "array"
     else:
-        messages.extend(_trim(hist))
         _view_source[self_id] = (
             "store" if view is None or not view["ids"] else "store (stale array)"
         )
@@ -2551,7 +2744,7 @@ async def _emit_status(
 ) -> None:
     """Broadcast a structured `status` event AND update _current's phase
     so the on-demand `status` verb stays in sync. Phases:
-        queued, thinking, streaming, tool_calling, done.
+        queued, thinking, streaming, tool_calling, retrying, done.
     UI subscribes for live phase transitions (animate a pulse indicator
     while phase is thinking/tool_calling), and calls the `status` verb
     on page boot to rebuild lost state.
@@ -2767,6 +2960,14 @@ async def _project_context(
         return {
             "error": f"{cfg.name}: unknown context_strategy {strat_name!r} "
             f"(valid: {strategy_names()})"
+        }
+    # `none`: never shrink. Refused HERE, before ProjectionCtx, any summarizer or model
+    # call, and before any row or event is written, so nothing is dropped. The caller
+    # returns this dict straight out of the turn.
+    if strat_name == "none":
+        return {
+            "error": f"{cfg.name}: context full: {estimate_tokens(messages) // 1000}k of "
+            f"{b // 1000}k tokens — clear, fold by hand, or raise context_window"
         }
     ctx = ProjectionCtx(
         budget=body_budget,
@@ -3227,6 +3428,13 @@ def _make_send(cfg: Backend):
             _store_of(id, kernel)
         except MemoryStoreError as e:
             return {"error": str(e), "reason": "missing_arg", "client_id": client_id}
+        # PAUSED: the message is held in the store, in order, and not run (#219).
+        try:
+            held = await _hold_if_paused(id, payload, kernel)
+        except MemoryStoreError as e:
+            return {"error": str(e), "reason": "memory_store", "client_id": client_id}
+        if held is not None:
+            return held
         if payload.get("late"):
             # A reply to a call a PREVIOUS incarnation made (see `_deliver`): recorded
             # in this agent's own store, never a turn.
@@ -3252,6 +3460,8 @@ def _make_send(cfg: Backend):
         text = payload.get("text", "")
         # AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
         # ONE CHAIN PER AGENT (#227): such an answer is a turn of the chain.
+        # The settle happens before the row save and is safe in Python: an owed
+        # answer is a chain_turn, never held, so no held message carries it.
         answered_owed = False
         if isinstance(text, str) and _awaiting.get(id):
             for owed in _ANSWER_TAG.findall(text):
@@ -3305,7 +3515,7 @@ def _make_send(cfg: Backend):
             )
             # A held send RETURNS THE ANSWER of the pass that reads it.
             fut = asyncio.get_running_loop().create_future()
-            chain["held"].append((client_id, fut))
+            _push_held_or_wake(kernel, id, client_id, fut, system_prompt)
             await _emit_status(
                 kernel, id, client_id, "queued", send_id=send_id, ahead=0, held=True
             )
@@ -3376,15 +3586,59 @@ def _make_send(cfg: Backend):
                 # substrate resolves the blocked caller's `send` to
                 # `{"cancelled": True}`. Closing the turn out for the CLIENT is the
                 # one thing the abort cannot do — that is `on_cancel`'s job.
-                async with asyncio.timeout(SEND_TIMEOUT):
-                    reply = await _run(
-                        id,
-                        text,
-                        kernel,
-                        client_id,
-                        cfg,
-                        system_prompt,
-                    )
+                # TRANSPORT RETRIES (#198 part 2): a pass that failed on the LINK is
+                # re-run, visibly, up to the record's `transport_retries`; every other
+                # failure is raised to the handlers below untouched. The timeout is per
+                # pass, as in Rust.
+                retries = _transport_retries(kernel, id)
+                attempt = 0
+                while True:
+                    try:
+                        async with asyncio.timeout(SEND_TIMEOUT):
+                            reply = await _run(
+                                id,
+                                text,
+                                kernel,
+                                client_id,
+                                cfg,
+                                system_prompt,
+                            )
+                        break
+                    except ProviderError as e:
+                        if not (e.transport and attempt < retries):
+                            raise
+                        attempt += 1
+                        # The failed pass's partial stream is not the next pass's text.
+                        if id in _current:
+                            _current[id]["text_so_far"] = ""
+                        # A visible row: the model and the operator both read the retry.
+                        await _save_history(
+                            id,
+                            kernel,
+                            [
+                                {
+                                    "role": "user",
+                                    "kind": "notice",
+                                    "parent": None,
+                                    "content": (
+                                        f"[retry {attempt}/{retries}] the link dropped "
+                                        f"({e}) — retrying the turn"
+                                    ),
+                                }
+                            ],
+                        )
+                        await _emit_status(
+                            kernel,
+                            id,
+                            client_id,
+                            "retrying",
+                            attempt=attempt,
+                            of=retries,
+                            error=str(e),
+                        )
+                        # Backoff 2 s, 4 s, 8 s …; a cancel lands in this sleep and
+                        # unwinds through the handlers below.
+                        await asyncio.sleep(RETRY_BACKOFF_BASE * 2 ** (attempt - 1))
             except TimeoutError:
                 await _emit_status(kernel, id, client_id, "done", reason="timeout")
                 reply = {
@@ -3579,7 +3833,7 @@ CANCEL = (
 
 EMITS = {
     "token": "{type:'token', text:str, source, client_id} — streaming chunk, routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (a browser filters by client_id).",
-    "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...}} — the one channel for phase transitions. On done, detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS call-less turns in a row; detail.error says so). On queued, detail.ahead.",
+    "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'retrying'|'done', detail:{send_id, started_at, queue_depth, ...}} — the one channel for phase transitions. On done, detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS call-less turns in a row; detail.error says so). On queued, detail.ahead. On retrying, detail.attempt, detail.of and detail.error: a transport failure is re-run (transport_retries), each retry a visible row.",
     "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail} — compacted: {strategy, dropped_messages, kept_messages, summarized}, the view was cut to fit the window; too_small: {context_window, system_tokens, hint}, even the system block + one turn won't fit and the model is NOT called. Pull counterpart: `context_status`.",
 }
 
@@ -3625,6 +3879,89 @@ async def _stop(id, payload, kernel):
     _end_chain(id)
     await kernel.ctx.cancel_task(cur["task_id"])
     return {"stopped": True}
+
+
+# ── PAUSE / RESUME (#219) ───────────────────────────────────────────────────
+# A paused agent stops its generation and HOLDS every incoming message, in order,
+# in its memory store. The state is rows: `{kind:"pause", paused_since, reason}`,
+# one `{kind:"held", payload}` per held message, and `{kind:"resume", role:"user"}`
+# once they are released. The rows live in the store, so a restart reads them back.
+
+
+async def _pause_view(self_id: str, kernel) -> tuple[bool, float | None, list]:
+    """(paused, paused_since, held payloads) read off the store head. The last
+    `pause`/`resume` row decides whether the agent is paused; the `held` rows after
+    the last `resume` are the queue, in arrival order."""
+    paused, since, held = False, None, []
+    for r in await _refresh_head(self_id, kernel):
+        kind = r.get("kind")
+        if kind == "pause":
+            paused, since = True, r.get("paused_since")
+        elif kind == "resume":
+            paused, since, held = False, None, []
+        elif kind == "held" and "payload" in r:
+            held.append(r["payload"])
+    return paused, since, held
+
+
+async def _hold_if_paused(self_id: str, payload: dict, kernel) -> dict | None:
+    """THE HOLD CHECK at the top of message intake. Paused: the message is appended to
+    the held queue (a row) and not run — its reply is returned. Not paused: None."""
+    paused, _since, held = await _pause_view(self_id, kernel)
+    if not paused:
+        return None
+    await _save_history(self_id, kernel, [{"kind": "held", "payload": payload}])
+    return {"held": len(held) + 1, "paused": True}
+
+
+async def _pause(id, payload, kernel):
+    """args: reason:str? (why — kept on the pause row). PAUSE this agent: stop its in-flight generation and HOLD every message sent to it, in order, until `resume`. Already paused: a no-op. Returns {paused:bool, held:int}."""
+    paused, _since, held = await _pause_view(id, kernel)
+    if paused:
+        return {"paused": True, "held": len(held)}
+    # The stop writes the `[stopped by …]` marker and closes the open parts.
+    await _stop(id, {}, kernel)
+    await _save_history(
+        id,
+        kernel,
+        [
+            {
+                "kind": "pause",
+                "paused_since": time.time(),
+                "reason": payload.get("reason"),
+            }
+        ],
+    )
+    return {"paused": True, "held": 0}
+
+
+async def _resume(id, payload, kernel):
+    """args: note:str? (text added to the resumed row). RESUME this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Not paused: a no-op. Returns {resumed:bool, released:int}."""
+    paused, since, held = await _pause_view(id, kernel)
+    if not paused:
+        return {"resumed": False, "released": 0}
+    started = since if isinstance(since, (int, float)) else time.time()
+    secs = max(0.0, time.time() - started)
+    content = f"[resumed after a pause of {secs:.0f}s]"
+    note = payload.get("note")
+    if isinstance(note, str):
+        content += " " + note
+    await _save_history(
+        id, kernel, [{"kind": "resume", "role": "user", "content": content}]
+    )
+
+    async def _release() -> None:
+        # Each held message is a turn of its own, in arrival order, after the
+        # resumed row. Released as a kernel task so this dispatch returns at once;
+        # a send takes the per-agent FIFO lock and must not be awaited here.
+        for p in held:
+            try:
+                await kernel.send([{"target": id, "payload": p}])
+            except Exception:  # one held turn failing must not drop the rest
+                continue
+
+    _ctx(kernel).spawn_task(id, "resume_release", _release())
+    return {"resumed": True, "released": len(held)}
 
 
 async def on_cancel(id, task_id, kernel):
@@ -3714,16 +4051,18 @@ async def on_delete(agent) -> None:
     """The `on_delete` bundle hook, SHARED by every backend (each re-exports it,
     like `on_cancel`; vllm wraps it to drop its own table too). Drops every row
     this module keeps for the deleted id, so an id re-created later starts clean
-    and nothing leaks: the FIFO lock and queue, the in-flight
-    entry, the projection and its marks, the fold and recall counters, the
-    calibration, the silent streaks, the strip set, and this kernel's head,
-    bodies and watchers.
+    and nothing leaks: its rows in the memory store (its conversation, folds and
+    search index; `delete_agent keep_memory:true` keeps those), the FIFO lock and
+    queue, the in-flight entry, the projection and its marks, the fold and recall
+    counters, the calibration, the silent streaks, the strip set, and this
+    kernel's head, bodies and watchers.
 
     NOT `_incarnation`: it stays monotonic across a re-create, so a reply to a
     call the deleted agent made never becomes a live turn of the new one."""
     from ai_core.strategies.strip import _stripped
 
     id = agent.id
+    await _purge(id, agent)
     for table in (
         _locks,
         _queue,
@@ -3737,6 +4076,7 @@ async def on_delete(agent) -> None:
         _inflight,
         _stripped,
         _chains,
+        _running_jobs,
     ):
         table.pop(id, None)
     _recall_due.discard(id)
@@ -4291,6 +4631,164 @@ async def _context_clear(id, payload, kernel):
     return {"cleared": rid, "rows": len(members)}
 
 
+def _is_boundary(row: dict) -> bool:
+    """A fold or a clear: the rows a `context_fold` span may not cross."""
+    return is_fold(row) or row.get("kind") == "clear"
+
+
+async def _context_fold(id, payload, kernel, cfg: Backend):
+    """args: from:int?, to:int? (row ids, inclusive, consecutive in the view; default `from` = the first row after the last fold or clear in the view, default `to` = the last row), summary:str? (the fold's text, used verbatim; absent, the fold summarizer writes it). Operator only — fold a chosen stretch of this agent's VIEW into ONE fold row, the same kind and shape an automatic fold writes (members in `refs`, reachable by `history {fold}`, `recall`, `grep`). Nothing is deleted; the view becomes the rows before the range (unchanged), the fold, then the rows after. Returns {folded, rows, summarized}; `summarized` is false only when the summarizer gave nothing and the fold carries its titles. Refused, with the reason named: an empty range, an id not in the view, a range crossing a fold or clear row, a range that starts at or before the cache primer, a turn running for this agent."""
+    # A turn holds the per-agent lock for its whole run: the view must not move under it.
+    if _lock_for(id).locked():
+        return refusal(
+            LOCKED,
+            f"context_fold: a turn is running for {id}",
+            hint="fold once the running turn has answered",
+        )
+    async with _lock_for(id):
+        return await _fold_range(id, payload, kernel, cfg)
+
+
+async def _fold_range(id, payload, kernel, cfg: Backend):
+    """`context_fold`'s body, run under the agent's lock (see `_context_fold`)."""
+    verb = "context_fold"
+    rec = kernel.get(id) or {}
+    # The view is rendered as the record's caching mode renders it, so the fold
+    # persists exactly the view the next turn will send. A primer pins its prefix.
+    try:
+        mode, primer = caching.settings(rec)
+    except ValueError as why:
+        return refusal(
+            BAD_ARG,
+            f"{verb}: {why}",
+            hint="set caching to none, cleanup or provider_cache",
+            arg="caching",
+        )
+
+    # `from` / `to`: absent or null is the default; anything else must be an id.
+    def id_arg(key: str):
+        raw = payload.get(key)
+        if raw is None:
+            return None, None
+        v = _as_id(raw)
+        return (
+            (v, None) if v is not None else (None, bad_arg(verb, key, "a row id (int)"))
+        )
+
+    from_id, err = id_arg("from")
+    if err is not None:
+        return err
+    to_id, err = id_arg("to")
+    if err is not None:
+        return err
+    # `summary`: absent or null writes the summarizer's; a given one is the text.
+    raw_summary = payload.get("summary")
+    if raw_summary is None:
+        summary = None
+    elif isinstance(raw_summary, str) and raw_summary.strip():
+        summary = raw_summary
+    else:
+        return bad_arg(verb, "summary", "a non-empty string")
+
+    rows = await _load_history(id, kernel)
+    anchors = anchors_of(await _head(id, kernel))
+    view = _render_history(rows, await _load_view(id, kernel), caching.cleans(mode))
+    pos: dict = {}
+    for p, (idx, _, _) in enumerate(view):
+        pos.setdefault(rows[idx].get("id"), p)
+
+    def empty(arg: str, why: str) -> dict:
+        return refusal(
+            BAD_ARG,
+            f"{verb}: the range is empty — {why}",
+            hint="name a range of rows that are in the view, from first to last",
+            arg=arg,
+        )
+
+    if not view:
+        return empty("from", "the view holds no rows")
+    # The default `from` is the row after the last fold or clear in the view.
+    default_from = max(
+        (p + 1 for p, (idx, _, _) in enumerate(view) if _is_boundary(rows[idx])),
+        default=0,
+    )
+    if from_id is None:
+        from_p = default_from
+    elif from_id in pos:
+        from_p = pos[from_id]
+    else:
+        return bad_arg(verb, "from", "a row id in this agent's view")
+    if to_id is None:
+        to_p = len(view) - 1
+    elif to_id in pos:
+        to_p = pos[to_id]
+    else:
+        return bad_arg(verb, "to", "a row id in this agent's view")
+    if from_p > to_p:
+        return empty("to", "to comes before from")
+    # THE PRIMER IS PINNED: the cached prefix ends at its row, so a range that starts at
+    # or before that row would move bytes the provider has cached. A primer not in this
+    # view pins nothing.
+    if primer is not None and primer in pos and from_p <= pos[primer]:
+        return refusal(
+            BAD_ARG,
+            f"{verb}: the primer is pinned — row {primer} ends the cached prefix, so a "
+            "range may not start at or before it",
+            hint="fold rows after the primer; the primer and the rows before it stay as they are",
+            arg="from",
+        )
+    span = [idx for idx, _, _ in view[from_p : to_p + 1]]
+    if any(_is_boundary(rows[i]) for i in span):
+        return refusal(
+            BAD_ARG,
+            f"{verb}: the range crosses a fold or clear row",
+            hint="fold the rows on each side of it separately; a fold row is never folded again by a range",
+            arg="from",
+        )
+    anchor = member_anchor(rows, span, anchors)
+    if summary is not None:
+        # Verbatim: the body IS the given text, its first line the title. No provider.
+        title, body, degraded = summary_title(summary), summary, False
+    else:
+        try:
+            provider = await _build_provider(id, kernel, cfg)
+        except Exception:
+            provider = None
+        ctx = ProjectionCtx(
+            budget=budget(rec),
+            recent_n=_recent_n(rec),
+            summarize=_make_summarizer(provider) if provider is not None else None,
+            self_id=id,
+            kernel=kernel,
+            client_id=None,
+            anchors=anchors,
+        )
+        title, body, degraded = await summarize_span(ctx, rows, span)
+    summarized = not degraded
+    fold = await append_fold(id, kernel, rows, span, anchor, title, body, degraded)
+    fid = fold["id"]
+    # THE NEW VIEW: the rows before the range as they were rendered, the fold where the
+    # range began, then the rows after. The fold is the newest row, so the array carries
+    # every kept row.
+    ids: list[dict] = []
+    for p, (idx, res, _) in enumerate(view):
+        if p == from_p:
+            ids.append({"id": fid, "res": "fold"})
+        if from_p <= p <= to_p:
+            continue
+        ids.append({"id": rows[idx]["id"], "res": res})
+    await _save_view(id, kernel, ids, budget_=budget(rec), why="context_fold")
+    return {"folded": fid, "rows": len(span), "summarized": summarized}
+
+
+def _make_context_fold(cfg: Backend):
+    async def _verb(id, payload, kernel):
+        return await _context_fold(id, payload, kernel, cfg)
+
+    _verb.__doc__ = _context_fold.__doc__
+    return _verb
+
+
 async def _context_forget(id, payload, kernel):
     """args: include_cleared:bool? (default false). Compacts this agent's OWN store: drops the rows the model can no longer see and keeps every fold. In ONE `prune` it removes every non-fold row covered by a fold whose place is known, every `view` row but the newest one after the last clear, and with `include_cleared` every row before the last `clear` (the clear row stays). Kept: every fold at every level, every row of an open chain, every row no fold covers, the members of a fold whose place cannot be known, and the newest `anchors` row a kept fold needs — a fold written without an `anchor` has its place recorded first, in one appended `anchors` row. Waits for a running turn. The next prompt is the same before and after. Afterwards `recall`, `grep` and `history {fold}` do not find a pruned id; `history {fold}` still returns the fold's title and summary. Returns {pruned, kept_folds, unanchored}."""
     from ai_core.folds import chains, is_fold, is_open, recorded_anchors
@@ -4581,6 +5079,10 @@ def build(
         "reflect": _make_reflect(cfg),
         "send": _make_send(cfg),
         "stop": _stop,
+        # Hold every incoming message in the store; release them, in order, after a
+        # resumed row. Both survive a restart: the state is rows, not RAM.
+        "pause": _pause,
+        "resume": _resume,
         "rows": _rows,
         # ONE INQUIRY VERB, WHOEVER RECEIVES IT. A person answers `question` and so does
         # a peer AI: the asker writes the same call either way and reads the
@@ -4599,6 +5101,8 @@ def build(
         "context_recall": _make_context_recall(cfg),
         # A new thread on the same store: the view starts here, nothing is deleted.
         "context_clear": _context_clear,
+        # Operator only: fold a chosen stretch of the view into one fold row.
+        "context_fold": _make_context_fold(cfg),
         # Compact the store: drop the rows the folds already summarise.
         "context_forget": _context_forget,
         # THE ROW EVENT: this agent announces its own rows to its watchers.

@@ -273,3 +273,32 @@ async def test_verb_docs_are_ram_stores_but_boot(kernel, mem):
         k: v for k, v in ram.items() if k != "boot"
     }
     assert "SQLite file" in sql["boot"]
+
+
+# ── a prune leaves no bytes behind ──────────────────────────────────────
+
+
+async def test_prune_overwrites_bytes_and_truncates_wal(kernel, mem):
+    """A pruned row's text must leave the file and the WAL without a close: the
+    connection zeroes freed pages (secure_delete) and a prune checkpoints the WAL
+    with TRUNCATE, so the bytes are gone from memory.db and memory.db-wal alike."""
+    token = "zq9pruneTOKEN4471"
+    await _call(
+        kernel,
+        "mem",
+        {"type": "append", "rows": [{"id": 1, "role": "user", "content": token}]},
+        as_="alice",
+    )
+    c = kernel.ctx.agents["mem"]._sqlite_conn
+    assert c.execute("PRAGMA secure_delete").fetchone()[0] == 1
+    wal = Path(DB + "-wal")
+    db = Path(DB)
+    assert token.encode() in db.read_bytes() + wal.read_bytes(), "row is on disk"
+    out = (
+        await _call(kernel, "mem", {"type": "prune", "before_id": 10**9}, as_="alice")
+    )["result"]
+    assert out == {"pruned": 1}, out
+    assert token.encode() not in db.read_bytes(), "pruned text left in memory.db"
+    assert not wal.exists() or token.encode() not in wal.read_bytes(), (
+        "pruned text left in the WAL"
+    )

@@ -17,7 +17,7 @@ writes and reads its OWN rows; there is no `owner` field to forge.
 | `append {rows}` | add rows under your key, all or none; ids are the kernel's |
 | `read {after?, limit?, kinds?, match?, from_last_kind?, order?}` | your rows |
 | `search {query, ids?}` | the LINES that mention something (FTS5 trigram index, substring semantics) |
-| `prune {before_id \| ids, keep?}` | delete your rows; fold refs on them go too |
+| `prune {before_id \| ids, keep?}` | delete your rows; fold refs on them go too. The bytes are overwritten (`secure_delete`) and the WAL is checkpointed and truncated, so the text leaves `memory.db` and its `-wal` at once |
 | `inject {tables}` · `dump` | replace / capture the whole store (a `ram_store` dump injects here and back) |
 
 **Access:** a caller reads and writes its own rows. Who may call any verb —

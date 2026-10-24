@@ -7,7 +7,10 @@ Two on-the-wire formats, picked automatically by payload content:
     C->S {type:"emit",   target, payload}         -> the leg emits it (no reply)
     C->S {type:"watch",  src}                     -> mirror src's inbox into ours
     C->S {type:"unwatch", src}
-    S->C {type:"reply",  id, data}                -> reply for a prior call
+    S->C {type:"reply",  id, data, secret?}       -> reply for a prior call
+                                                     (`secret`: dotted paths into
+                                                     `data` the leg's onward reply
+                                                     marked; absent when none)
     S->C {type:"error",  id, error}               -> reply error
     S->C {type:"event",  src, payload}            -> an event from a watched agent
                                                      (`src` = the name the client watched)
@@ -55,6 +58,7 @@ from io_bridge import (
     sendable,
     gate_inbound,
     hand_in,
+    hand_in_outcome,
     resolve_ingress,
 )
 
@@ -223,15 +227,21 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
             item["id"] = fid
         if "secret" in frame:  # paths into `payload`, shown as `[secret]`
             item["secret"] = frame["secret"]
-        reply = await hand_in(
+        out = await hand_in_outcome(
             kernel, web_agent_id, {"type": "inbound_call", "item": item}
         )
-        await _answer(fid, reply)
+        # the reply's own secret paths ride the frame (absent when none): the far
+        # end records them as `[secret]`; the data itself goes whole
+        await _answer(fid, out["result"], out.get("secret") or None)
 
-    async def _answer(fid, data) -> None:
+    async def _answer(fid, data, secret=None) -> None:
         """Reply to THIS connection, then mirror the reply to every OTHER live
-        connection that said hello with this one's guid."""
-        await _send_envelope({"type": "reply", "id": fid, "data": data})
+        connection that said hello with this one's guid. `secret` (dotted paths
+        into `data`) rides THIS connection's reply only, when non-empty."""
+        env = {"type": "reply", "id": fid, "data": data}
+        if secret:
+            env["secret"] = list(secret)
+        await _send_envelope(env)
         if peer["guid"] is None:
             return
         # TODO: DESYNC between the tabs of one identity is envisioned

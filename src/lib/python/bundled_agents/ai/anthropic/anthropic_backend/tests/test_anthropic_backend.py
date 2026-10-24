@@ -4,9 +4,11 @@ the record leaves it out, and the optional key."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
+from _testkit import boot_root, persist
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 from anthropic_backend import server
 from anthropic_backend.provider import AnthropicProvider, to_messages
@@ -1205,3 +1207,139 @@ async def test_a_record_without_cache_prices_uses_the_model_defaults(
     assert tools._usage_now("a1", seeded_kernel)["cost_usd"] == pytest.approx(0.30)
     # b1: the long bucket at 2.0 per million reads (1.0 scaled by 6.0 / 3.0) on top
     assert tools._usage_now("b1", seeded_kernel)["cost_usd"] == pytest.approx(3.0)
+
+
+# ─── usage across a kernel restart (#308, Rust #319) ─────────────────────────
+
+
+@pytest.fixture
+def _process():
+    """A fresh kernel process: no counts in RAM from an earlier one."""
+    from anthropic_backend import tools
+
+    tools._USAGE.clear()
+    tools._BASE.clear()
+    yield
+    tools._USAGE.clear()
+    tools._BASE.clear()
+
+
+def _restart(root):
+    """A kernel restart: the records go to disk, the process's counts are dropped,
+    and a fresh bootstrap reads the tree back."""
+    from anthropic_backend import tools
+
+    persist(root)
+    tools._USAGE.clear()
+    tools._BASE.clear()
+    return boot_root()
+
+
+async def _turn(kernel, mock_http, body: str = "") -> None:
+    """One turn through the agent's own provider, drained (as Rust's turn() does)."""
+    from anthropic_backend import tools
+
+    body = body or _sse(_usage_start(100, 400, 1000), _text("ok"), *_usage_stop(35))
+    mock_http(_transport(body))
+    await _drain(tools.make_provider("a1", kernel))
+
+
+def _sidecar(kernel) -> Path:
+    """The agent's usage.json, beside its agent.yaml."""
+    agent = kernel.ctx.get_agent("a1")
+    return Path(kernel.ctx.workdir) / agent._root_path / "usage.json"
+
+
+async def test_usage_survives_a_restart(seeded_kernel, mock_http, _process):
+    mock_http(_api([]))
+    await _create(seeded_kernel, max_tokens=8000)
+    persist(seeded_kernel)  # the loader's flush: the agent's dir exists now
+    await _turn(seeded_kernel, mock_http)
+    assert _sidecar(seeded_kernel).is_file()
+    k2 = _restart(seeded_kernel)
+    got = await _call(k2, "a1", {"type": "usage"})
+    assert got["requests"] == 1, got
+    assert got["output_tokens"] == 35 and got["cache_read_tokens"] == 1000, got
+
+
+async def test_usage_since_boot_starts_at_zero(seeded_kernel, mock_http, _process):
+    mock_http(_api([]))
+    await _create(seeded_kernel, max_tokens=8000)
+    persist(seeded_kernel)  # the loader's flush: the agent's dir exists now
+    await _turn(seeded_kernel, mock_http)
+    k2 = _restart(seeded_kernel)
+    r = await _call(k2, "a1", {"type": "reflect"})
+    assert r["usage"]["requests"] == 1, r
+    assert r["usage_since_boot"]["requests"] == 0, r
+    await _turn(k2, mock_http)
+    r = await _call(k2, "a1", {"type": "reflect"})
+    assert r["usage"]["requests"] == 2, r
+    assert r["usage_since_boot"]["requests"] == 1, r
+
+
+async def test_usage_reset_clears_it(seeded_kernel, mock_http, _process):
+    mock_http(_api([]))
+    await _create(
+        seeded_kernel,
+        max_tokens=8000,
+        price_input_per_mtok=3.0,
+        price_output_per_mtok=15.0,
+    )
+    persist(seeded_kernel)  # the loader's flush: the agent's dir exists now
+    await _turn(seeded_kernel, mock_http)
+    got = await _call(seeded_kernel, "a1", {"type": "usage_reset"})
+    assert got["requests"] == 1 and got["cost_usd"] > 0, got
+    zero = await _call(seeded_kernel, "a1", {"type": "usage"})
+    assert zero["requests"] == 0 and zero["cost_usd"] == 0.0, zero
+    k2 = _restart(seeded_kernel)
+    again = await _call(k2, "a1", {"type": "usage"})
+    assert again["requests"] == 0 and again["cost_usd"] == 0.0, again
+
+
+async def test_usage_reset_true_zeroes_only_since_boot(
+    seeded_kernel, mock_http, _process
+):
+    mock_http(_api([]))
+    await _create(seeded_kernel, max_tokens=8000)
+    persist(seeded_kernel)  # the loader's flush: the agent's dir exists now
+    await _turn(seeded_kernel, mock_http)
+    k2 = _restart(seeded_kernel)
+    await _turn(k2, mock_http)
+    got = await _call(k2, "a1", {"type": "usage", "reset": True})
+    assert got["requests"] == 2 and got["usage_since_boot"]["requests"] == 1, got
+    after = await _call(k2, "a1", {"type": "usage"})
+    assert after["usage_since_boot"]["requests"] == 0, after
+
+
+async def test_cost_usd_accumulates_across_a_restart(
+    seeded_kernel, mock_http, _process
+):
+    mock_http(_api([]))
+    await _create(
+        seeded_kernel,
+        max_tokens=8000,
+        price_input_per_mtok=3.0,
+        price_output_per_mtok=15.0,
+    )
+    persist(seeded_kernel)  # the loader's flush: the agent's dir exists now
+    await _turn(seeded_kernel, mock_http)
+    first = (await _call(seeded_kernel, "a1", {"type": "usage"}))["cost_usd"]
+    assert first == pytest.approx(0.002625), first
+    k2 = _restart(seeded_kernel)
+    await _turn(k2, mock_http)
+    got = await _call(k2, "a1", {"type": "usage"})
+    assert got["cost_usd"] == pytest.approx(2 * first), got
+
+
+async def test_a_corrupt_usage_file_starts_clean(seeded_kernel, mock_http, _process):
+    mock_http(_api([]))
+    await _create(seeded_kernel, max_tokens=8000)
+    persist(seeded_kernel)  # the loader's flush: the agent's dir exists now
+    await _turn(seeded_kernel, mock_http)
+    _sidecar(seeded_kernel).write_text("{not json")
+    k2 = _restart(seeded_kernel)
+    got = await _call(k2, "a1", {"type": "usage"})
+    assert got["requests"] == 0 and "usage_log_error" not in got, got
+    await _turn(k2, mock_http)
+    saved = json.loads(_sidecar(k2).read_text())
+    assert saved["requests"] == 1, saved

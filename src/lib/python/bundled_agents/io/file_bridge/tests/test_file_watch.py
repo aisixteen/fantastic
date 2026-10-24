@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
+
+import pytest
 
 
 async def _call(k, target, payload):
@@ -38,6 +41,22 @@ async def _quiet(q, path: str, wait: float = 0.6) -> bool:
     except (AssertionError, asyncio.TimeoutError):
         return True
     return False
+
+
+async def _changes_for(q, path: str, secs: float = 1.0) -> list[str]:
+    """The kinds of every `changed` for `path` that arrive within `secs`, in arrival order."""
+    kinds: list[str] = []
+    end = asyncio.get_event_loop().time() + secs
+    while True:
+        left = end - asyncio.get_event_loop().time()
+        if left <= 0:
+            return kinds
+        try:
+            ev = await asyncio.wait_for(q.get(), left)
+        except asyncio.TimeoutError:
+            return kinds
+        if ev.get("type") == "changed" and ev.get("path") == path:
+            kinds.append(ev["kind"])
 
 
 async def test_a_direct_write_an_atomic_save_and_a_bridge_write_are_seen(
@@ -159,3 +178,96 @@ async def test_a_path_the_bridge_stops_exposing_reports_nothing(
         q.get_nowait()
     Path("notes/a.md").write_text("y")
     assert await _quiet(q, "notes/a.md")
+
+
+async def test_create_arm_write_gives_exactly_one_modified(seeded_kernel, file_bridge):
+    """A file created before the arm, then written after it: one `modified`. The
+    platform may replay the create (macOS FSEvents), which must not read as `added`."""
+    k, fb = seeded_kernel, file_bridge
+    Path("f.md").write_text("one\n")
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "f.md"})
+    await asyncio.sleep(0.3)
+    Path("f.md").write_text("one, written longer\n")
+    assert await _changes_for(q, "f.md") == ["modified"]
+
+
+async def test_an_atomic_save_after_arm_gives_added_and_a_no_op_event_gives_nothing(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    Path("f.md").write_text("one\n")
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "f.md"})
+    await asyncio.sleep(0.3)
+    Path(".f.md.tmp").write_text("two\n")
+    os.replace(".f.md.tmp", "f.md")  # a new inode at the path
+    assert await _changes_for(q, "f.md") == ["added"]
+    with open("f.md", "r+b"):  # an open and a close, no write
+        pass
+    assert await _quiet(q, "f.md")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="needs a posix permission check that root does not fail",
+)
+async def test_a_watch_that_cannot_arm_is_refused(seeded_kernel, file_bridge):
+    k, fb = seeded_kernel, file_bridge
+    locked = Path("locked")
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        r = await _call(k, fb, {"type": "watch_path", "path": "locked"})
+        assert r.get("reason") == "transport_error", r
+        assert "watching" not in r, r
+        u = await _call(k, fb, {"type": "unwatch_path", "path": "locked"})
+        assert u == {"watching": False, "paths": []}, u
+    finally:
+        locked.chmod(0o755)
+
+
+def test_judge_covers_every_row():
+    from file_bridge.tools import _judge
+
+    a = (1, 10, 10, 4)
+    assert _judge(None, a) == "added"
+    assert _judge(a, None) == "deleted"
+    assert _judge(a, (2, 10, 10, 4)) == "added"  # a different inode
+    assert _judge(a, (1, 10, 10, 5)) == "modified"  # size
+    assert _judge(a, (1, 10, 11, 4)) == "modified"  # mtime
+    assert _judge(a, (1, 11, 10, 4)) == "modified"  # ctime
+    assert _judge(a, a) is None
+    assert _judge(None, None) is None
+
+
+def test_stamp_reads_a_file_and_nothing_at_a_missing_path(tmp_path):
+    from file_bridge.tools import _stamp
+
+    f = tmp_path / "abc.txt"
+    f.write_text("abc")
+    s = _stamp(str(f))
+    assert s is not None and s[3] == 3, s
+    assert _stamp(str(f)) == s
+    assert _stamp(str(tmp_path / "missing.txt")) is None
+
+
+async def test_a_rearm_drops_the_old_stream(seeded_kernel, file_bridge):
+    from file_bridge.tools import _WATCH
+
+    k, fb = seeded_kernel, file_bridge
+    for name in ("a.md", "b.md", "c.md"):
+        Path(name).write_text(name)
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "a.md"})
+    await _call(k, fb, {"type": "watch_path", "path": "b.md"})
+    await asyncio.sleep(0.3)
+    old = _WATCH[fb]["task"]
+    await _call(k, fb, {"type": "watch_path", "path": "c.md"})  # a re-arm
+    new = _WATCH[fb]["task"]
+    assert new is not old
+    await asyncio.sleep(0.1)
+    assert old.cancelled() or old.done()
+    await asyncio.sleep(0.3)
+    Path("a.md").write_text("a, written again")
+    assert await _changes_for(q, "a.md") == ["modified"]

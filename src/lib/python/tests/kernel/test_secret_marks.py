@@ -105,3 +105,62 @@ async def test_a_path_naming_nothing_is_skipped(seeded_kernel):
     )[0]
     assert out["status"] == "completed"
     assert seeded_kernel.ctx.rows[out["pid"]]["payload"] == {"type": "set", "x": 1}
+
+
+# ─── reply marks: a handler notes the secret paths of the reply it relayed ───
+
+
+async def _noting_handler(id, payload, kernel):
+    if payload.get("type") in ("boot", "shutdown"):
+        return None
+    if payload.get("type") == "reflect":
+        return {"id": id}
+    from kernel import note_reply_secret  # noqa: PLC0415
+
+    note_reply_secret(["fields.k", "type", "a..b"])
+    return {"fields": {"k": "v"}}
+
+
+_note_mod = types.ModuleType("secret_note_agent.tools")
+_note_mod.handler = _noting_handler
+_note_mod.VERBS = {}
+register_unlisted("secret_note_agent.tools", _note_mod)
+
+
+async def test_a_handler_noting_reply_secret_marks_its_settle_row(seeded_kernel):
+    out_id = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": seeded_kernel.id,
+                        "handler_module": "secret_note_agent.tools",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]["id"]
+    out = (
+        await seeded_kernel.send(
+            [{"target": out_id, "payload": {"type": "get", "ref": "r"}, "id": "note-1"}]
+        )
+    )[0]
+    # the caller gets the reply whole
+    assert out["result"] == {"fields": {"k": "v"}}, out
+    # only the well-formed, non-`type` path is a reply mark
+    assert out["secret"] == ["fields.k"], out
+    # the settle row (named: it keeps the result) shows the marked value as [secret]
+    settles = [
+        r
+        for r in seeded_kernel.ctx.rows.values()
+        if r.get("kind") == "settle" and r.get("parent") == out["pid"]
+    ]
+    assert settles, "no settle row"
+    kept = settles[0]["outcome"]["result"]
+    assert kept == {"fields": {"k": "[secret]"}}, kept
+    # an unmarked call's outcome carries no `secret` key
+    probe = await _mk(seeded_kernel)
+    plain = (await seeded_kernel.send([{"target": probe, "payload": {"type": "x"}}]))[0]
+    assert plain["result"] == {"ok": True} and "secret" not in plain, plain

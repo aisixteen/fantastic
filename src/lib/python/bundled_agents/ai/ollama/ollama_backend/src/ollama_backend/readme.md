@@ -66,6 +66,10 @@ answer: `[stopped by <receiver>]` or `[model stopped generating]` (`… while th
 when cut inside a thought), then the visible text, then `[a <tool> call to <target> was
 not sent]` for every call of the pass.
 
+`pause {reason?}` stops your in-flight generation and HOLDS every message sent to you, in
+order, in your store; `resume {note?}` writes one resumed row and runs the held messages
+after it. Both survive a restart: the pause state and the held queue are rows.
+
 `rows {after?, limit?}` is a VIEW of your conversation exactly as you hold it in
 memory — no store read, no transform; before your first turn you hold nothing
 (`loaded:false`).

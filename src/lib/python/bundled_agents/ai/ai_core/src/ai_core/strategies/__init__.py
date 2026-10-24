@@ -7,6 +7,7 @@ from __future__ import annotations
 from ai_core.strategies.base import STRATEGY
 from ai_core.strategies.compact import compact
 from ai_core.strategies.fold import fold
+from ai_core.strategies.none import none
 from ai_core.strategies.strip import strip
 from ai_core.strategies.truncate import truncate
 
@@ -27,6 +28,9 @@ _STRATEGIES: dict[str, STRATEGY] = {
     # refs) the model can descend into; then strip, then cut. The only strategy that
     # writes, because a mark that does not persist is a prefix that rewrites every turn.
     "fold": fold,
+    # `none` is LAST and never shrinks: the seam refuses an over-budget turn before it
+    # is called (see core._project_context). Order matches the Rust STRATEGY_NAMES.
+    "none": none,
 }
 
 

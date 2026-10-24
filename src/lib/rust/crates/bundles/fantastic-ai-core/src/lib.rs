@@ -62,6 +62,12 @@
 //! - `history` args `{client_id:str?}` → `{messages, client_id}`.
 //! - `recall` args `{client_id:str?, query:str?, limit:int?, before:int?}`.
 //! - `context_status` → the budget posture + last compaction + reaction.
+//! - `embed` args `{id:str}` → `{embedded:id, row, card, view, hint}` — show the host
+//!   agent `id`'s panel as a card in this chat (a stored row, replayed by `history`
+//!   as kind `embed`, never part of the prompt). Refused as `not_found`, `no_view` or
+//!   `grants_missing`. `unembed` args `{id:str}` → `{unembedded:id}` takes the card
+//!   out (a tombstone row; the agent is never touched). The card is 100% of the
+//!   column wide and at most [`constants::CHAT_CARD_MAX_HEIGHT`] tall (see [`embed`]).
 //! - `reflect`, `boot`, `shutdown`, `status`.
 //!
 //! There is NO `interrupt` verb: a `send` IS a kernel task, so an in-flight
@@ -110,6 +116,7 @@ pub mod call_check;
 pub mod constants;
 pub mod context;
 pub mod credentials;
+pub mod embed;
 pub mod events;
 pub mod folds;
 pub mod helpers;
@@ -131,6 +138,7 @@ pub mod verbs;
 pub mod view;
 
 pub use agent_loop::{run_generation, BackendConfig};
+pub use constants::CHAT_CARD_MAX_HEIGHT;
 pub use helpers::DEFAULT_CLIENT_ID;
 pub use provider::{Provider, ProviderEvent, ProviderStream};
 pub use route::route_reply;

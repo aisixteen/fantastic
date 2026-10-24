@@ -271,7 +271,9 @@ async def _reflect(id, payload, kernel):
             "`edits:[{path, hunks, if_match?}]` — even one file rides the "
             "array; the blob holds every edit's hunks concatenated in `edits` "
             "order, split by the per-edit `hunks` count — with ONE file, `hunks` may be left out and every block applies to it; with several files, a block may name its file on its first line (`<<<<<<< SEARCH path`), and then no hunks are needed; any failure anywhere "
-            "writes nothing"
+            "writes nothing. Text that holds conflict markers takes the "
+            "8-character fence instead: `<<<<<<<< SEARCH` / `========` / "
+            "`>>>>>>>> REPLACE` (N `<`, `=`, `>` with N ≥ 8)."
         ),
         "compose": (
             "every content-carrying verb (`write`, `edit`, `append`) takes its "
@@ -426,7 +428,9 @@ async def _read_stream(id, payload, kernel):
         return err
     try:
         if not fs.is_file(root, path):
-            return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
+            return refusal(
+                NOT_FOUND, f"file {path!r} not found{_hint(root, path)}", path=path
+            )
         chunk, size = fs.read_chunk(root, path, offset, length)
     except (ValueError, OSError) as e:
         return refusal(TRANSPORT_ERROR, str(e))
@@ -581,7 +585,6 @@ async def _pump(id, payload, kernel):
 
 #: lines per `read` page when the caller names no `limit`.
 READ_LIMIT = 200
-_H_START, _H_DIV, _H_END = "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE"
 
 #: ONE undo slot per (bridge, path): the bytes the last `write`/`edit`/`append`
 #: replaced (None = the file did not exist). `undo` swaps file ↔ slot, so a
@@ -696,7 +699,9 @@ async def _read(id, payload, kernel):
     except (ValueError, OSError) as e:
         return refusal(TRANSPORT_ERROR, str(e))
     if data is None:
-        return refusal(NOT_FOUND, f"file {path!r} not found", path=path)
+        return refusal(
+            NOT_FOUND, f"file {path!r} not found{_hint(root, path)}", path=path
+        )
     if b"\x00" in data:
         return bad("read", "path", "a text file (this one is binary)")
     try:
@@ -773,35 +778,68 @@ async def _append(id, payload, kernel):
     return {"path": path, "size": size, "version": _version(whole)}
 
 
+def _fence_open(line: str) -> tuple[int, str | None] | None:
+    """An opener: N `<` (N ≥ 7), then ` SEARCH`, then optionally ` <path>`.
+    Returns the fence width N and the named file, if any; None when the line is
+    not an opener."""
+    width = len(line) - len(line.lstrip("<"))
+    if width < 7:
+        return None
+    rest = line[width:]
+    if not rest.startswith(" SEARCH"):
+        return None
+    rest = rest[len(" SEARCH") :]
+    if rest == "":
+        return width, None
+    if not rest.startswith(" "):
+        return None
+    path = rest[1:].strip()
+    return width, (path or None)
+
+
+def _hint(root: fs.Root, path: str) -> str:
+    """The root and relative-form hint a not-found refusal carries (issue #305)."""
+    return fs.not_found_hint(fs.resolve_root(root), path)
+
+
 def _parse_hunks(text: str) -> list[tuple[str | None, str, str]]:
     """SEARCH/REPLACE blocks → (file, search, replace) triples, taken VERBATIM (the
     marker lines excluded). A block may name its file on its opening line
-    (`<<<<<<< SEARCH path`); then `file` is that path, otherwise None. Raises
-    ValueError on a block that opens but does not close."""
+    (`<<<<<<< SEARCH path`); then `file` is that path, otherwise None. A block is
+    fenced by N `<` (N ≥ 7; use 8 when the text holds conflict markers): its
+    divider is exactly N `=` and its close exactly N `>` + ` REPLACE`. Raises
+    ValueError on a block that opens but does not close, or whose REPLACE holds
+    a bare divider line."""
     lines = text.split("\n")
     hunks: list[tuple[str | None, str, str]] = []
     i, n = 0, len(lines)
     while i < n:
-        # `<<<<<<< SEARCH` alone, or `<<<<<<< SEARCH <path>` naming the file.
-        open_line = lines[i]
-        if open_line != _H_START and not open_line.startswith(_H_START + " "):
+        opened = _fence_open(lines[i])
+        if opened is None:
             i += 1
             continue
-        file = open_line[len(_H_START) :].strip() or None
+        width, file = opened
+        divider = "=" * width
+        close = ">" * width + " REPLACE"
         j = i + 1
         search: list[str] = []
-        while j < n and lines[j] != _H_DIV:
+        while j < n and lines[j] != divider:
             search.append(lines[j])
             j += 1
         if j >= n:
-            raise ValueError("a SEARCH block has no `=======` divider")
+            raise ValueError(f"a SEARCH block has no `{divider}` divider")
         j += 1
         replace: list[str] = []
-        while j < n and lines[j] != _H_END:
+        while j < n and lines[j] != close:
+            if lines[j] == divider:
+                raise ValueError(
+                    f"a block has a second `{divider}` line; the text contains "
+                    "conflict markers: use the 8-character fence"
+                )
             replace.append(lines[j])
             j += 1
         if j >= n:
-            raise ValueError("a block has no closing `>>>>>>> REPLACE`")
+            raise ValueError(f"a block has no closing `{close}`")
         hunks.append((file, "\n".join(search), "\n".join(replace)))
         i = j + 1
     return hunks
@@ -919,7 +957,9 @@ def _edit_txn(id: str, root: fs.Root, plan: list[dict], dry_run: bool, slots: di
             raw = _current(root, e["path"])
             if raw is None:
                 return refusal(
-                    NOT_FOUND, f"file {e['path']!r} not found", path=e["path"]
+                    NOT_FOUND,
+                    f"file {e['path']!r} not found{_hint(root, e['path'])}",
+                    path=e["path"],
                 )
             if e["if_match"] is not None and (
                 err := _mismatch(e["path"], e["if_match"], raw)
@@ -1064,10 +1104,9 @@ def _caller() -> str:
 
 
 async def _watch_path(id, payload, kernel):
-    """args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}.
+    """args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}; refused with transport_error when the disk watch cannot be armed.
 
-    `kind` is `added`, `modified` or `deleted` as the disk reported it — treat any
-    `changed` as "read it again". A directory reports its entries (not recursive).
+    `kind` is `added`, `modified` or `deleted`, judged from each path's stamp (inode, ctime, mtime, size) against its last stamp, not from the platform's event name — treat any `changed` as "read it again". A directory reports its entries (not recursive).
     Held per caller until `unwatch_path`; RAM only."""
     rec = kernel.get(id) or {}
     root = _root(kernel, rec)
@@ -1089,8 +1128,28 @@ async def _watch_path(id, payload, kernel):
     except (ValueError, OSError) as e:
         return refusal(TRANSPORT_ERROR, str(e))
     st = _WATCH.setdefault(id, {"paths": {}, "task": None})
-    st["paths"].setdefault(norm, set()).add(_caller())
-    _rewatch(id, kernel, root)
+    me = _caller()
+    was_holder = me in st["paths"].get(norm, set())
+    st["paths"].setdefault(norm, set()).add(me)
+    armed_err = _rewatch(id, kernel, root)
+    if armed_err is not None:
+        # a watch that did not arm is not a watch: roll this caller's new hold back,
+        # and re-arm what the others still hold
+        if not was_holder:
+            holders = st["paths"].get(norm)
+            if holders is not None:
+                holders.discard(me)
+                if not holders:
+                    del st["paths"][norm]
+        if st["paths"]:
+            _rewatch(id, kernel, root)
+        else:
+            _WATCH.pop(id, None)
+        return refusal(
+            TRANSPORT_ERROR,
+            f"watch_path {norm!r}: the disk watch cannot be armed: {armed_err}",
+            path=path,
+        )
     return {"watching": norm, "paths": sorted(st["paths"])}
 
 
@@ -1107,20 +1166,24 @@ async def _unwatch_path(id, payload, kernel):
         holders.discard(_caller())
         if not holders:
             del st["paths"][norm]
+    # what is left was armed before; a re-arm that fails now leaves no watch for it,
+    # and the reply still reports the hold as dropped
     _rewatch(id, kernel, _root(kernel, rec))
     return {"watching": False, "paths": sorted(st["paths"])}
 
 
-def _rewatch(id: str, kernel, root: fs.Root) -> None:
-    """(Re)start the one disk watcher this bridge runs, over the paths held now."""
+def _rewatch(id: str, kernel, root: fs.Root) -> str | None:
+    """(Re)start the one disk watcher this bridge runs, over the paths held now. The old
+    task is cancelled first. Returns None when armed (or nothing is held), else why the
+    watch could not be armed."""
     st = _WATCH.get(id)
     if st is None:
-        return
+        return None
     if st["task"] is not None:
         st["task"].cancel()
         st["task"] = None
     if not st["paths"]:
-        return
+        return None
     files: dict[str, str] = {}  # absolute file → its path under the root
     dirs: dict[str, str] = {}  # absolute dir → its path under the root
     for norm in st["paths"]:
@@ -1129,44 +1192,136 @@ def _rewatch(id: str, kernel, root: fs.Root) -> None:
             dirs[str(target)] = norm
         else:
             files[str(target)] = norm
-    tid = kernel.ctx.spawn_task(id, "watch_path", _watch_loop(id, kernel, files, dirs))
+    err = _arm_error(files, dirs)
+    if err is not None:
+        return err
+    # the stamps the judgement starts from: what the disk holds at the arm
+    stamps = _seed(root, list(st["paths"]))
+    tid = kernel.ctx.spawn_task(
+        id, "watch_path", _watch_loop(id, kernel, files, dirs, stamps)
+    )
     st["task"] = kernel.ctx.tasks[tid]["_task"]
+    return None
 
 
-def _kind(p: str, reported: str) -> str:
-    """The kind of one disk change, judged by the disk as it IS now. A batch can carry
-    a path twice (macOS FSEvents: `deleted` then a spurious `added` for one unlink), and
-    the last report would wrongly read as the file's state. Gone is `deleted`; present
-    is `added` only when the batch says the path was created, else `modified`."""
-    if not os.path.lexists(p):
+def _arm_error(files: dict[str, str], dirs: dict[str, str]) -> str | None:
+    """Why the watch over these targets cannot start, or None. The watcher must import,
+    and every target folder that exists must be readable and searchable (a missing one
+    is pending, not an error)."""
+    try:
+        import watchfiles  # noqa: F401
+    except Exception as e:
+        return f"the disk watcher did not start: {e}"
+    for target in sorted({os.path.dirname(f) for f in files} | set(dirs)):
+        if os.path.exists(target) and not os.access(target, os.R_OK | os.X_OK):
+            return f"{target}: not readable"
+    return None
+
+
+def _stamp(path: str) -> tuple | None:
+    """What a path looks like on disk now: (inode, ctime_ns, mtime_ns, size), or None when
+    nothing is there. The platform's event names are not used for the kind, because a
+    replayed event can carry a stale name."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_ctime_ns, st.st_mtime_ns, st.st_size)
+
+
+def _judge(last: tuple | None, now: tuple | None) -> str | None:
+    """The judgement of one path between its last stamp and its stamp now. A different
+    inode is `added` (a new file at the path); the same inode with any other field changed
+    is `modified`; the same stamp, or no file either time, is no change."""
+    if last is None and now is None:
+        return None
+    if last is None:
+        return "added"
+    if now is None:
         return "deleted"
-    return "added" if reported == "added" else "modified"
+    if last[0] != now[0]:
+        return "added"
+    if last == now:
+        return None
+    return "modified"
 
 
-async def _watch_loop(id: str, kernel, files: dict[str, str], dirs: dict[str, str]):
+def _seed(root: fs.Root, norms: list[str]) -> dict[str, tuple]:
+    """The stamp of every held path that exists now: a held file, and every current entry
+    of a held directory (one level, the watch is not recursive). Keyed by the root-relative
+    path. Taken right after the arm, so a later event is judged against what the disk held
+    when the watch went live."""
+    stamps: dict[str, tuple] = {}
+    for norm in norms:
+        target = str(fs.resolve(root, "" if norm == "." else norm))
+        s = _stamp(target)
+        if s is not None:
+            stamps[norm] = s
+        if os.path.isdir(target):
+            try:
+                entries = list(os.scandir(target))
+            except OSError:
+                continue
+            for entry in entries:
+                rel = entry.name if norm == "." else f"{norm}/{entry.name}"
+                es = _stamp(os.path.join(target, entry.name))
+                if es is not None:
+                    stamps[rel] = es
+    return stamps
+
+
+async def _watch_loop(
+    id: str,
+    kernel,
+    files: dict[str, str],
+    dirs: dict[str, str],
+    stamps: dict[str, tuple],
+):
+    """Watch the targets until cancelled. A batch of events only picks the paths to judge;
+    each is judged against its own last stamp (`_judge`), so a replayed or no-op event is
+    not reported. A held path with no stamp yet (pending) is judged on every batch."""
     import watchfiles
 
     targets = sorted({os.path.dirname(f) for f in files} | set(dirs))
-    async for changes in watchfiles.awatch(
-        *targets, recursive=False, debounce=WATCH_DEBOUNCE_MS, raise_interrupt=False
-    ):
-        seen: dict[str, str] = {}
-        for change, raw in changes:
-            p = os.path.realpath(raw)
-            if p in files:
-                seen[files[p]] = _kind(p, change.name)
-                continue
-            d = dirs.get(os.path.dirname(p))
-            if d is not None:
-                name = os.path.basename(p)
-                seen[name if d == "." else f"{d}/{name}"] = _kind(p, change.name)
-        # `allow` is read LIVE: a path the bridge stopped exposing after the watch
-        # was armed reports nothing more.
-        allow = _allow(kernel.get(id) or {})
-        for rel, kind in seen.items():
-            if _exposed(allow, rel):
-                await kernel.emit(id, {"type": "changed", "path": rel, "kind": kind})
-                _relay_to_views(id, kernel, rel, kind)
+    held_abs = {rel: path for path, rel in {**files, **dirs}.items()}
+    try:
+        async for changes in watchfiles.awatch(
+            *targets,
+            recursive=False,
+            debounce=WATCH_DEBOUNCE_MS,
+            raise_interrupt=False,
+        ):
+            touched: dict[str, str] = {}  # rel path → absolute path to judge
+            for _change, raw in changes:
+                p = os.path.realpath(raw)
+                if p in files:
+                    touched[files[p]] = p
+                    continue
+                d = dirs.get(os.path.dirname(p))
+                if d is not None:
+                    name = os.path.basename(p)
+                    touched[name if d == "." else f"{d}/{name}"] = p
+            for rel, path in held_abs.items():
+                if rel not in stamps:
+                    touched.setdefault(rel, path)
+            # `allow` is read LIVE: a path the bridge stopped exposing after the watch
+            # was armed reports nothing more.
+            allow = _allow(kernel.get(id) or {})
+            for rel, path in touched.items():
+                now = _stamp(path)
+                kind = _judge(stamps.get(rel), now)
+                # the stamp is kept current even when the path is not exposed
+                if now is None:
+                    stamps.pop(rel, None)
+                else:
+                    stamps[rel] = now
+                if kind is not None and _exposed(allow, rel):
+                    await kernel.emit(
+                        id, {"type": "changed", "path": rel, "kind": kind}
+                    )
+                    _relay_to_views(id, kernel, rel, kind)
+    except Exception:
+        return  # the watch ends quietly; a re-arm starts a new one
 
 
 def _relay_to_views(id: str, kernel, rel: str, kind: str) -> None:

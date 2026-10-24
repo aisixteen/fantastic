@@ -171,3 +171,57 @@ async def test_cascade_through_nested_member_kills_backend(seeded_kernel):
     assert parent_id not in seeded_kernel.ctx.agents
     assert backend_id not in seeded_kernel.ctx.agents
     assert await asyncio.wait_for(proc.wait(), timeout=5) != 0, "the PTY job was killed"
+
+
+# ── delete_agent keep_memory: a flag that rides kernel state, for one delete ──
+
+
+def _keep_probe(name: str, seen: list) -> None:
+    """A bundle whose `on_delete` records what `keep_memory` says for its agent."""
+    import types
+
+    from kernel import register_unlisted
+    from kernel._agent import keep_memory
+
+    mod = types.ModuleType(name)
+    mod.VERBS = {}
+
+    async def handler(id, payload, kernel):
+        return {"ok": id}
+
+    async def on_delete(agent):
+        seen.append((agent.id, keep_memory(agent.ctx, agent.id)))
+
+    mod.handler = handler
+    mod.on_delete = on_delete
+    register_unlisted(name, mod)
+
+
+async def _delete_verb(k, payload: dict) -> dict:
+    out = await k.send(
+        [{"target": k.id, "payload": {"type": "delete_agent", **payload}}]
+    )
+    return out[0]["result"]
+
+
+async def test_delete_agent_keep_memory_flag_is_scoped_to_one_delete(seeded_kernel):
+    from kernel._agent import keep_memory
+
+    seen: list = []
+    _keep_probe("keep_probe_mod", seen)
+    seeded_kernel.create("keep_probe_mod", id="P")
+    seeded_kernel.ctx.agents["P"].create("keep_probe_mod", id="C")
+
+    out = await _delete_verb(seeded_kernel, {"id": "P", "keep_memory": True})
+    assert out == {"deleted": True, "id": "P"}
+    assert sorted(seen) == [("C", True), ("P", True)], "the flag reaches every hook"
+    assert keep_memory(seeded_kernel.ctx, "P") is False, "cleared after the delete"
+
+    seeded_kernel.create("keep_probe_mod", id="Q")
+    await _delete_verb(seeded_kernel, {"id": "Q"})
+    assert seen[-1] == ("Q", False), "a plain delete does not keep"
+
+    seeded_kernel.create("keep_probe_mod", id="R")
+    await _delete_verb(seeded_kernel, {"id": "R", "keep_memory": "true"})
+    assert seen[-1] == ("R", False), "only the literal true is honoured"
+    assert not keep_memory(seeded_kernel.ctx, "R")

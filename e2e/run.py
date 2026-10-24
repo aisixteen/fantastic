@@ -151,6 +151,12 @@ SCENARIO_RUNNERS = {
         "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/canvas_user.py")],
         "cwd": "pyroot",
     },
+    # INLINE AGENT VIEWS IN A CHAT (#339): the canvas's chat cell in a real headless
+    # Chrome, a scripted model (E25) or a real one (E26, turns tier).
+    "canvas_chat": {
+        "cmd": ["uv", "run", "python", "-u", str(E2E / "runners/canvas_chat.py")],
+        "cwd": "pyroot",
+    },
 }
 
 

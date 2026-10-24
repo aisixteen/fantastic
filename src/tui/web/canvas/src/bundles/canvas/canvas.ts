@@ -1481,6 +1481,23 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       const at = cell !== undefined ? spotOf(cell) : { ...centre(), w: 0, h: 0 };
       openSetupAt({ x: at.x + at.w + 40, y: at.y }, { ...(cell !== undefined ? { target_cell: cell } : {}), ...(ai !== undefined ? { edit_ai: ai } : {}) });
     },
+    // a chat card's ⤢ (#339): the agent's own cell full screen — the one that shows it, else a new one
+    viewFull(agent) {
+      const shows = everyAgent().find((id) => (kernel.get(id)?.record() as Rec | undefined)?.["backend_id"] === agent);
+      if (shows !== undefined) {
+        showPicked(shows);
+        return setViewed(shows);
+      }
+      const rec = registry.get(agent);
+      if (rec === undefined) return toast(`✕ no agent ${agent}`);
+      const { handler, meta } = hostViewCell(agent, rec);
+      const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
+      const w = centre();
+      registerCell(new Agent({ id: viewId, parentId: containerNow(), handlerModule: handler, meta: { ...meta, x: Math.round(w.x - 240), y: Math.round(w.y - 180), width: 480, height: 360 } as unknown as Payload }));
+      setViewed(viewId);
+    },
+    deleteAgent,
+    toast,
     async startCoding(near) {
       const found = (await codingAgents()).filter((a) => a.name !== "fantastic"); // a coding AGENT to help — not the shell itself
       const first = found[0];

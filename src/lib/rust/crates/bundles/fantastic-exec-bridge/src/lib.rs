@@ -458,6 +458,12 @@ impl Bundle for ExecBridgeBundle {
         if !matches!(verb, "reflect" | "connector") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, verb) {
+                // The fanout has queued a copy of this payload for the program already: note
+                // the refusal now so the drain drops it whatever the record says
+                // when it dequeues.
+                if relay::has_owner_inbox(agent_id) {
+                    relay::note_refused(agent_id, payload);
+                }
                 return Ok(Some(denied));
             }
         }
@@ -537,6 +543,9 @@ impl Bundle for ExecBridgeBundle {
         if header.get("type").and_then(Value::as_str) == Some("paste_image") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, "paste_image") {
+                if relay::has_owner_inbox(agent_id) {
+                    relay::note_refused(agent_id, &header);
+                }
                 return Ok((Some(denied), None));
             }
             let reply = match body_at(body.as_ref(), "data") {
@@ -548,6 +557,9 @@ impl Bundle for ExecBridgeBundle {
         if header.get("type").and_then(Value::as_str) == Some("write") {
             let meta = snapshot_meta(agent_id, kernel);
             if let Some(denied) = gate(&meta, agent_id, "write") {
+                if relay::has_owner_inbox(agent_id) {
+                    relay::note_refused(agent_id, &header);
+                }
                 return Ok((Some(denied), None));
             }
             let reply = pty::write_reply(agent_id, &header, body_at(body.as_ref(), "bytes")).await;

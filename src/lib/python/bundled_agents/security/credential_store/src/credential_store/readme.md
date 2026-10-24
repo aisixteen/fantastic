@@ -54,7 +54,9 @@ memory store, the state stream — as `[secret]`; the caller gets the value whol
 prompt — give it to a bundle that sends it (an AI backend reads its own key this
 way, as itself).
 
-**Known gap (issue #285):** a store on a CONNECTED kernel is recorded in clear by
-the caller — the calling kernel writes the `set` payload and the `get` reply into
-its own ledger and memory store, because it cannot see the remote store's secret
-marks.
+**Connected kernels (issue #285):** a `set` forwarded through a `ws_bridge` or
+`relay_connector` is recorded by the CALLER with its `fields` marked (the bridge's
+`payload_secret` hook), and the far store's `get` reply marks ride the reply frame
+(`secret`) back, so the calling kernel records the reply as `[secret]` too. The
+caller still gets the values whole. The page-peer route (`<guid>|agent` over a
+web_ws hello) is not covered; it only reaches browser kernels, which hold no store.

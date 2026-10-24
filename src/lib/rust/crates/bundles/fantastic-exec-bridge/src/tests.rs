@@ -1558,6 +1558,8 @@ async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
     for p in [
         json!({"type": "status"}),
         json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL"}),
+        json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL"}),
+        json!({"type": "probe_mail", "x": "TEST-VALUE-MAIL-2"}),
     ] {
         let out = kernel
             .send(vec![Item::new(a.clone(), p.clone())])
@@ -1580,6 +1582,175 @@ async fn a_sealed_leg_refuses_mail_and_relays_nothing() {
         .await
         .expect("relay did not stop")
         .expect("relay");
+}
+
+/// A hand-registered owner inbox with NO drain task: the test pulls the queued items
+/// itself, so the drain's timing is the test's.
+fn manual_owner_inbox(
+    kernel: &Arc<Kernel>,
+    owner: &AgentId,
+    job: i64,
+) -> fantastic_kernel::inbox::InboxReceiver {
+    let proxy = AgentId::from(format!("_xbself_{job}").as_str());
+    let rx = kernel.ensure_inbox(&proxy);
+    crate::relay::register_owner_inbox_for_test(owner, TaskId(job), &proxy);
+    rx
+}
+
+async fn set_rule(kernel: &Arc<Kernel>, owner: &AgentId, r: &str) {
+    let up = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": owner.as_str(), "ingress_rule": r}),
+        )])
+        .await
+        .remove(0);
+    assert_eq!(up.result["updated"], true, "{}", up.result);
+}
+
+async fn send_to(kernel: &Arc<Kernel>, owner: &AgentId, p: Value) -> Value {
+    kernel
+        .send(vec![Item::new(owner.clone(), p)])
+        .await
+        .remove(0)
+        .result
+}
+
+/// The refusal is bound to the SEND-time rule: a leg reopened before the drain
+/// dequeues the refused item must not deliver it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = manual_owner_inbox(&kernel, &a, 9101);
+    let proxy = AgentId::from("_xbself_9101");
+    assert!(kernel.watch(&a, proxy).await.is_none());
+    set_rule(&kernel, &a, "deny_ingress").await;
+    let out = send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
+    assert_eq!(out["reason"], "unauthorized", "{out}");
+    set_rule(&kernel, &a, "allow_all_ingress").await;
+    send_to(&kernel, &a, json!({"type": "after"})).await;
+    let job = TaskId(9101);
+    let first = rx.recv().await.expect("probe_mail queued");
+    let second = rx.recv().await.expect("after queued");
+    assert_eq!(first.payload, json!({"type": "probe_mail"}));
+    assert_eq!(
+        crate::relay::drain_verdict(&first.payload, &a, job, &kernel),
+        None,
+        "refused mail must not reach the fd"
+    );
+    assert_eq!(
+        crate::relay::drain_verdict(&second.payload, &a, job, &kernel),
+        Some(json!({"op": "inbox", "payload": {"type": "after"}}))
+    );
+}
+
+/// One ledger entry per refused copy: only the copy sent after the reopen is delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_mail_entry_is_consumed_once() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = manual_owner_inbox(&kernel, &a, 9102);
+    assert!(kernel
+        .watch(&a, AgentId::from("_xbself_9102"))
+        .await
+        .is_none());
+    let mail = json!({"type": "probe_mail", "x": 1});
+    set_rule(&kernel, &a, "deny_ingress").await;
+    send_to(&kernel, &a, mail.clone()).await;
+    send_to(&kernel, &a, mail.clone()).await;
+    set_rule(&kernel, &a, "allow_all_ingress").await;
+    send_to(&kernel, &a, mail.clone()).await;
+    let job = TaskId(9102);
+    let mut verdicts = Vec::new();
+    for _ in 0..3 {
+        let it = rx.recv().await.expect("queued");
+        verdicts.push(crate::relay::drain_verdict(&it.payload, &a, job, &kernel));
+    }
+    assert_eq!(
+        verdicts,
+        vec![None, None, Some(json!({"op": "inbox", "payload": mail}))]
+    );
+}
+
+/// Tearing the owner inbox down leaves no stale refusal behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_refused_ledger_is_released_with_the_owner_inbox() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let _rx = manual_owner_inbox(&kernel, &a, 9103);
+    set_rule(&kernel, &a, "deny_ingress").await;
+    send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
+    assert_eq!(crate::relay::refused_len(&a), 1);
+    crate::relay::release_owner_inbox(&kernel, &a, TaskId(9103)).await;
+    assert_eq!(crate::relay::refused_len(&a), 0);
+    // and with no inbox registered nothing is noted at all
+    send_to(&kernel, &a, json!({"type": "probe_mail"})).await;
+    assert_eq!(crate::relay::refused_len(&a), 0);
+}
+
+/// A refused DRIVE verb (`write` with no job_id) is mirrored too, and the framer's
+/// job_id filter does not drop it: it must be bound to the send-time rule as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_drive_verb_is_dropped_even_if_the_leg_reopens_before_the_drain_runs() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let mut rx = manual_owner_inbox(&kernel, &a, 9104);
+    assert!(kernel
+        .watch(&a, AgentId::from("_xbself_9104"))
+        .await
+        .is_none());
+    set_rule(&kernel, &a, "deny_ingress").await;
+    let w = json!({"type": "write", "data": "rm -rf\n"});
+    let out = send_to(&kernel, &a, w.clone()).await;
+    assert_eq!(out["reason"], "unauthorized", "{out}");
+    set_rule(&kernel, &a, "allow_all_ingress").await;
+    let job = TaskId(9104);
+    let it = rx.recv().await.expect("write queued");
+    assert_eq!(
+        crate::relay::drain_verdict(&it.payload, &a, job, &kernel),
+        None
+    );
+}
+
+/// The drain may dequeue and drop an item BEFORE the handler notes its refusal; the
+/// late note must not linger and swallow a later, legitimate identical mail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_refusal_note_does_not_swallow_later_identical_mail() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, a) = mk_kernel(&tmp).await;
+    let _rx = manual_owner_inbox(&kernel, &a, 9105);
+    let mail = json!({"type": "probe_mail", "x": 7});
+    set_rule(&kernel, &a, "deny_ingress").await;
+    let job = TaskId(9105);
+    // the drain wins: live gate drops it, nothing noted yet
+    assert_eq!(crate::relay::drain_verdict(&mail, &a, job, &kernel), None);
+    // the handler then refuses the same send and notes it late
+    crate::relay::note_refused(&a, &mail);
+    assert_eq!(crate::relay::refused_len(&a), 0);
+    set_rule(&kernel, &a, "allow_all_ingress").await;
+    assert_eq!(
+        crate::relay::drain_verdict(&mail, &a, job, &kernel),
+        Some(json!({"op": "inbox", "payload": mail}))
+    );
+}
+
+#[test]
+fn the_refused_ledger_is_bounded() {
+    let owner = AgentId::from("ledger_bound_owner");
+    for i in 0..crate::relay::REFUSED_CAP + 50 {
+        crate::relay::note_refused(&owner, &json!({"type": "m", "i": i}));
+    }
+    assert_eq!(crate::relay::refused_len(&owner), crate::relay::REFUSED_CAP);
+    // the oldest was evicted, the newest kept
+    assert!(!crate::relay::take_refused(
+        &owner,
+        &json!({"type": "m", "i": 0})
+    ));
+    assert!(crate::relay::take_refused(
+        &owner,
+        &json!({"type": "m", "i": crate::relay::REFUSED_CAP + 49})
+    ));
 }
 
 /// The fanout mirrors every payload sent to the leg into the owner
