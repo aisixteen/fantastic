@@ -16,7 +16,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APP=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 cd "$APP"
 
-ZIP="dist/canvas.zip"
+# The output zip: arg 1 (build.rs passes a dir under OUT_DIR, so a cargo build
+# writes nothing into the tree); default dist/canvas.zip, relative to the app.
+ZIP="${1:-dist/canvas.zip}"
 sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" readme.md \
   --alias:three=./src/vendor/three.module.js \
   --alias:@xterm/xterm=./src/vendor/xterm.js \
@@ -25,7 +27,11 @@ sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" readme.md \
   --loader:.css=text \
   --loader:.html=text
 
-BUNDLE="dist/pack/bundle.min.js"
+# The bundle sits in the zip's staging dir (the library stages in $(dirname ZIP)/pack).
+# Make ZIP absolute the same way the library does (POSIX or drive-letter).
+case "$ZIP" in /*|[A-Za-z]:[/\\]*) ZABS=$ZIP ;; *) ZABS="$APP/$ZIP" ;; esac
+BUNDLE="$(dirname "$ZABS")/pack/bundle.min.js"
+[ -f "$BUNDLE" ] || { echo "pack.sh: no bundle at $BUNDLE — the library did not pack." >&2; exit 1; }
 
 # ── no residual bare vendor imports (all must be inlined) ───────────────────
 if grep -Eq 'import\(["'\''](three|@xterm/)' "$BUNDLE" \

@@ -17,8 +17,14 @@ fn main() {
         println!("cargo:rerun-if-changed={}", dir.display());
     }
     println!("cargo:rerun-if-changed={}", app.join("readme.md").display());
+    // Pack into OUT_DIR, never the source tree: parallel builds of one checkout must not race.
+    let pack_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets it")).join("canvas-pack");
+    std::fs::create_dir_all(&pack_dir).expect("create the pack dir under OUT_DIR");
+    let zip = pack_dir.join("canvas.zip");
     let out = Command::new("sh")
         .arg("scripts/pack.sh")
+        // Forward slashes: Git-for-Windows sh mangles `D:\…` (the lib script makes it absolute).
+        .arg(zip.to_string_lossy().replace('\\', "/"))
         .current_dir(&app)
         .output()
         .expect("sh runs");
@@ -30,5 +36,5 @@ fn main() {
         );
     }
     let dest = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets it")).join("canvas.zip");
-    std::fs::copy(app.join("dist/canvas.zip"), &dest).expect("copy canvas.zip into OUT_DIR");
+    std::fs::copy(&zip, &dest).expect("copy canvas.zip into OUT_DIR");
 }

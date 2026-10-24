@@ -19,8 +19,10 @@
 //!   markers: on the `system` block, on the block that ends the primer row, on the
 //!   block that ends the last fold, and the top-level automatic one. At most four.
 //!   Every other mode sends none, and the body is unchanged.
-//! - USAGE: each stream's token counts accumulate into the agent's [`Usage`] (RAM;
-//!   the `usage` verb and `reflect` read it), side calls included.
+//! - USAGE: each stream's token counts accumulate into the agent's [`Usage`], side
+//!   calls included. The counts persist: every change rewrites the agent's own
+//!   `usage.json` with the running total, so a restart keeps them (#308). The
+//!   `usage` verb and `reflect` read them; `usage_reset` zeroes them.
 
 #![deny(missing_docs)]
 
@@ -55,7 +57,11 @@ pub const README: &str = include_str!("readme.md");
 const NAME: &str = "anthropic_backend";
 
 /// The `usage` verb's doc — python `_usage`'s docstring, the verb's own.
-const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since its kernel started:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices). reset:\ntrue returns the counts, then zeroes them.";
+const USAGE_DOC: &str = "usage — args: reset? (bool). The agent's token usage since it was created:\nrequests, input, cache write and read, output, the derived prompt_tokens, hit_rate\nand saved_tokens (cost_usd and saved_usd when the record has both prices), and\nusage_since_boot: the same counts over this kernel process only. reset: true returns\nthe counts, then zeroes the since-boot counts (the total is kept: see usage_reset).";
+/// The `usage_reset` verb's doc.
+const USAGE_RESET_DOC: &str = "usage_reset — no args. Returns the agent's token usage since it was created (as\n`usage` does), then zeroes it for good: the counts in the agent's usage.json are\nrewritten as zeros. Deleting the agent drops them too.";
+/// The agent's sidecar of persisted counts, in its own dir beside `agent.yaml`.
+const USAGE_FILE: &str = "usage.json";
 
 /// The `models` verb's doc.
 const MODELS_DOC: &str = "models — args: none. The models this agent's key can use: [{id, display_name, max_input_tokens, max_tokens}], read from the API.";
@@ -213,20 +219,115 @@ pub fn saved_tokens(cache_read: i64, cache_write: i64) -> i64 {
     q
 }
 
-/// One agent's token counts since its kernel started (RAM — a restart zeroes them).
-/// `input` is the uncached remainder; the two cache counts are what the API reports
-/// for the prompt. Python `Usage`.
+/// The record's prices, USD per million tokens; `None` = unset. The base input and
+/// output prices price the base bucket, the `_long` ones the long-context bucket (unset,
+/// the base). The cache prices are optional: unset, the model's default rates apply.
+#[derive(Default, Clone, Copy)]
+struct Prices {
+    input: Option<f64>,
+    output: Option<f64>,
+    input_long: Option<f64>,
+    output_long: Option<f64>,
+    cache_read: Option<f64>,
+    cache_write_5m: Option<f64>,
+    cache_write_1h: Option<f64>,
+}
+
+/// The three cache rates of one bucket, USD per million tokens.
+#[derive(Clone, Copy)]
+struct CacheRates {
+    read: f64,
+    write_5m: f64,
+    write_1h: f64,
+}
+
+/// The default cache rates of `model` at the input price `price_in`: a 5-minute write
+/// 1.25x, a 1-hour write 2x, a read 0.1x; Sonnet 5.5 and Opus 5.5 read at 0.05x. A
+/// model matches by its id or a dated form of it (`claude-sonnet-5-5-<date>`).
+#[must_use]
+fn model_cache_rates(model: &str, price_in: f64) -> CacheRates {
+    const CHEAP_READ: [&str; 2] = ["claude-sonnet-5-5", "claude-opus-5-5"];
+    let cheap_read = CHEAP_READ.iter().any(|id| {
+        model == *id
+            || model
+                .strip_prefix(id)
+                .is_some_and(|rest| rest.starts_with('-'))
+    });
+    CacheRates {
+        read: price_in * if cheap_read { 0.05 } else { 0.1 },
+        write_5m: price_in * 1.25,
+        write_1h: price_in * 2.0,
+    }
+}
+
+/// The rates one bucket bills at: the record's explicit cache price when set, else the
+/// model default at the bucket's input price `bucket_in`. An explicit price is USD at
+/// the base input price `base_in`, so the long-context bucket scales it by `bucket_in`
+/// over `base_in`.
+fn bucket_rates(model: &str, bucket_in: f64, base_in: f64, prices: &Prices) -> CacheRates {
+    let default = model_cache_rates(model, bucket_in);
+    let scale = |explicit: f64| {
+        if base_in > 0.0 {
+            explicit * bucket_in / base_in
+        } else {
+            explicit
+        }
+    };
+    CacheRates {
+        read: prices.cache_read.map_or(default.read, scale),
+        write_5m: prices.cache_write_5m.map_or(default.write_5m, scale),
+        write_1h: prices.cache_write_1h.map_or(default.write_1h, scale),
+    }
+}
+
+/// One price bucket's token counts.
+#[derive(Clone, Copy)]
+struct Tally {
+    input: i64,
+    write_5m: i64,
+    write_1h: i64,
+    read: i64,
+    output: i64,
+}
+
+/// A bucket's cost and saving in USD: every token at its rate, and the saving against
+/// the same tokens uncached (reads at the input price, writes at the input price).
+fn bucket_cost(
+    model: &str,
+    t: Tally,
+    pi: f64,
+    po: f64,
+    base_in: f64,
+    prices: &Prices,
+) -> (f64, f64) {
+    let r = bucket_rates(model, pi, base_in, prices);
+    let cost = t.input as f64 * pi
+        + t.write_5m as f64 * r.write_5m
+        + t.write_1h as f64 * r.write_1h
+        + t.read as f64 * r.read
+        + t.output as f64 * po;
+    let saved = t.read as f64 * (pi - r.read)
+        - t.write_5m as f64 * (r.write_5m - pi)
+        - t.write_1h as f64 * (r.write_1h - pi);
+    (cost / 1e6, saved / 1e6)
+}
+
+/// One agent's token counts: since this kernel process booted (RAM), or the running
+/// total a sidecar carries. `input` is the uncached remainder; the two cache counts
+/// are what the API reports for the prompt. Python `Usage`.
 #[derive(Default)]
 struct Usage {
     requests: i64,
     input: i64,
     cache_write: i64,
+    cache_write_1h: i64,
     cache_read: i64,
     output: i64,
     /// Requests whose prompt was over the record's `long_context_tokens`.
     long_requests: i64,
     long_input: i64,
     long_cache_write: i64,
+    long_cache_write_1h: i64,
     long_cache_read: i64,
     long_output: i64,
     /// The tier of the request in flight: its tokens land in the long bucket.
@@ -235,19 +336,95 @@ struct Usage {
     log_error: Option<String>,
 }
 
+/// The sidecar's keys, in the order [`Usage::counters`] lists the counts.
+const FIELDS: [&str; 12] = [
+    "requests",
+    "input",
+    "cache_write",
+    "cache_write_1h",
+    "cache_read",
+    "output",
+    "long_requests",
+    "long_input",
+    "long_cache_write",
+    "long_cache_write_1h",
+    "long_cache_read",
+    "long_output",
+];
+
 impl Usage {
-    /// What the counts derive to, with the record's prices when BOTH are set (USD per
-    /// million tokens). Python `Usage.snapshot`.
-    /// `long_in` / `long_out` price the long-context bucket; unset, the base prices.
-    fn snapshot(
-        &self,
-        price_in: Option<f64>,
-        price_out: Option<f64>,
-        long_in: Option<f64>,
-        long_out: Option<f64>,
-    ) -> Value {
+    /// The twelve persisted counts, the long-context buckets included.
+    fn counters(&self) -> [i64; 12] {
+        [
+            self.requests,
+            self.input,
+            self.cache_write,
+            self.cache_write_1h,
+            self.cache_read,
+            self.output,
+            self.long_requests,
+            self.long_input,
+            self.long_cache_write,
+            self.long_cache_write_1h,
+            self.long_cache_read,
+            self.long_output,
+        ]
+    }
+
+    fn from_counters(c: [i64; 12]) -> Usage {
+        Usage {
+            requests: c[0],
+            input: c[1],
+            cache_write: c[2],
+            cache_write_1h: c[3],
+            cache_read: c[4],
+            output: c[5],
+            long_requests: c[6],
+            long_input: c[7],
+            long_cache_write: c[8],
+            long_cache_write_1h: c[9],
+            long_cache_read: c[10],
+            long_output: c[11],
+            ..Usage::default()
+        }
+    }
+
+    /// `self`'s counts plus `other`'s. The tier and the log error come from `other`,
+    /// the since-boot side that carries them.
+    fn plus(&self, other: &Usage) -> Usage {
+        let (a, b) = (self.counters(), other.counters());
+        let sum: [i64; 12] = std::array::from_fn(|i| a[i] + b[i]);
+        Usage {
+            cur_long: other.cur_long,
+            log_error: other.log_error.clone(),
+            ..Usage::from_counters(sum)
+        }
+    }
+
+    /// The sidecar's JSON: the twelve counts, by [`FIELDS`].
+    fn to_json(&self) -> Value {
+        Value::Object(
+            FIELDS
+                .iter()
+                .zip(self.counters())
+                .map(|(k, v)| ((*k).to_string(), json!(v)))
+                .collect(),
+        )
+    }
+
+    /// The counts a sidecar holds. A missing or non-integer key reads as 0.
+    fn from_json(v: &Value) -> Usage {
+        Usage::from_counters(FIELDS.map(|k| v.get(k).and_then(Value::as_i64).unwrap_or(0)))
+    }
+
+    /// What the counts derive to, with the record's prices when BOTH base prices are set
+    /// (USD per million tokens). `model` picks the default cache rates. Python
+    /// `Usage.snapshot`.
+    fn snapshot(&self, model: &str, prices: &Prices) -> Value {
         let input = self.input + self.long_input;
-        let cache_write = self.cache_write + self.long_cache_write;
+        let cache_write_5m = self.cache_write + self.long_cache_write;
+        let cache_write_1h = self.cache_write_1h + self.long_cache_write_1h;
+        let cache_write = cache_write_5m + cache_write_1h;
         let cache_read = self.cache_read + self.long_cache_read;
         let output = self.output + self.long_output;
         let prompt = input + cache_write + cache_read;
@@ -270,41 +447,42 @@ impl Usage {
         if let Some(e) = &self.log_error {
             out.insert("usage_log_error".into(), json!(e));
         }
-        if let (Some(pin), Some(pout)) = (price_in, price_out) {
-            let (lin, lout) = match (long_in, long_out) {
-                (Some(a), Some(b)) => (a, b),
-                _ => (pin, pout),
+        if let (Some(pin), Some(pout)) = (prices.input, prices.output) {
+            let lin = prices.input_long.unwrap_or(pin);
+            let lout = prices.output_long.unwrap_or(pout);
+            let base = Tally {
+                input: self.input,
+                write_5m: self.cache_write,
+                write_1h: self.cache_write_1h,
+                read: self.cache_read,
+                output: self.output,
             };
-            let cost_of = |i: i64, w: i64, r: i64, o: i64, pi: f64, po: f64| {
-                let cost_in = i as f64 + 1.25 * w as f64 + 0.1 * r as f64;
-                cost_in * pi / 1e6 + o as f64 * po / 1e6
+            let long = Tally {
+                input: self.long_input,
+                write_5m: self.long_cache_write,
+                write_1h: self.long_cache_write_1h,
+                read: self.long_cache_read,
+                output: self.long_output,
             };
-            let cost = cost_of(
-                self.input,
-                self.cache_write,
-                self.cache_read,
-                self.output,
-                pin,
-                pout,
-            ) + cost_of(
-                self.long_input,
-                self.long_cache_write,
-                self.long_cache_read,
-                self.long_output,
-                lin,
-                lout,
-            );
-            let saved_usd = saved_tokens(self.cache_read, self.cache_write) as f64 * pin / 1e6
-                + saved_tokens(self.long_cache_read, self.long_cache_write) as f64 * lin / 1e6;
-            out.insert("cost_usd".into(), json!(cost));
-            out.insert("saved_usd".into(), json!(saved_usd));
+            let (c1, s1) = bucket_cost(model, base, pin, pout, pin, prices);
+            let (c2, s2) = bucket_cost(model, long, lin, lout, pin, prices);
+            out.insert("cost_usd".into(), json!(c1 + c2));
+            out.insert("saved_usd".into(), json!(s1 + s2));
         }
         Value::Object(out)
     }
 }
 
-/// Each agent's counts, keyed by id: the provider adds to it, the verbs read it.
+/// Each agent's counts since this process booted, keyed by id: the provider adds to
+/// it, the verbs read it (`usage_since_boot`).
 fn usage_table() -> &'static Mutex<HashMap<String, Arc<Mutex<Usage>>>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, Arc<Mutex<Usage>>>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Each agent's counts from before this process, keyed by id: loaded once from its
+/// sidecar, the base the since-boot counts add to.
+fn usage_base_table() -> &'static Mutex<HashMap<String, Arc<Mutex<Usage>>>> {
     static TABLE: OnceLock<Mutex<HashMap<String, Arc<Mutex<Usage>>>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -319,6 +497,64 @@ fn usage_of(agent_id: &AgentId) -> Arc<Mutex<Usage>> {
     )
 }
 
+/// The agent's base counts, read from its sidecar the first time this process asks.
+fn base_of(agent_id: &AgentId, kernel: &Kernel) -> Arc<Mutex<Usage>> {
+    let mut table = usage_base_table().lock().expect("usage base poisoned");
+    if let Some(base) = table.get(agent_id.as_str()) {
+        return Arc::clone(base);
+    }
+    let loaded =
+        usage_file_of(agent_id, kernel).map_or_else(Usage::default, |p| read_usage_file(&p));
+    let base = Arc::new(Mutex::new(loaded));
+    table.insert(agent_id.as_str().to_string(), Arc::clone(&base));
+    base
+}
+
+/// The agent's sidecar file, in its own dir. None for an in-memory kernel, whose
+/// agents have no dir.
+fn usage_file_of(agent_id: &AgentId, kernel: &Kernel) -> Option<std::path::PathBuf> {
+    let agent = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
+    let root = &agent.root_path;
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    let dir = if root.is_absolute() {
+        root.clone()
+    } else {
+        std::env::current_dir().ok()?.join(root)
+    };
+    Some(dir.join(USAGE_FILE))
+}
+
+/// The counts a sidecar holds; a missing or unreadable file reads as zero.
+fn read_usage_file(path: &std::path::Path) -> Usage {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map_or_else(Usage::default, |v| Usage::from_json(&v))
+}
+
+/// Rewrite the sidecar with `total`: a temp file, then a rename, so a crash leaves
+/// the old file or the new one, never half of one.
+fn write_usage_file(path: &std::path::Path, total: &Usage) -> Result<(), String> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, total.to_json().to_string())
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Forget an agent's counts in this process: the since-boot ones and the base.
+fn forget_counts(agent_id: &str) {
+    usage_table()
+        .lock()
+        .expect("usage table poisoned")
+        .remove(agent_id);
+    usage_base_table()
+        .lock()
+        .expect("usage base poisoned")
+        .remove(agent_id);
+}
+
 /// The Messages provider. PURE RAW TEXT.
 struct AnthropicProvider {
     endpoint: String,
@@ -330,7 +566,12 @@ struct AnthropicProvider {
     effort: Option<String>,
     thinking_display: Option<String>,
     caching: Caching,
+    /// The since-boot counts this process adds to.
     usage: Arc<Mutex<Usage>>,
+    /// The counts from before this process, which the sidecar keeps.
+    base: Arc<Mutex<Usage>>,
+    /// The agent's sidecar file, where the running total is written.
+    usage_file: Option<std::path::PathBuf>,
     report: ReportCell,
     /// The read clock: the longest the API may go without a byte, headers
     /// included ([`within`]).
@@ -480,6 +721,8 @@ impl Provider for AnthropicProvider {
                 path: self.usage_log.clone(),
                 agent_id: self.agent_id.clone(),
                 model: self.model.clone(),
+                base: Arc::clone(&self.base),
+                persist_to: self.usage_file.clone(),
             },
         ))
     }
@@ -574,6 +817,11 @@ struct StreamLog {
     path: Option<std::path::PathBuf>,
     agent_id: String,
     model: String,
+    /// The counts from before this process: the sidecar's total is this plus the
+    /// since-boot counts.
+    base: Arc<Mutex<Usage>>,
+    /// The sidecar the running total is written to, when the agent has a dir.
+    persist_to: Option<std::path::PathBuf>,
 }
 
 /// One request's own counts, as the stream sees them (the usage log's line).
@@ -628,6 +876,11 @@ impl SseState {
                     count("cache_creation_input_tokens"),
                     count("cache_read_input_tokens"),
                 );
+                // the 1-hour part of the write, priced apart; the rest is the 5-minute write
+                let write_1h = u["cache_creation"]["ephemeral_1h_input_tokens"]
+                    .as_i64()
+                    .unwrap_or(0)
+                    .clamp(0, write.max(0));
                 let total = input + write + read;
                 self.report.lock().expect("report poisoned").prompt_tokens =
                     (total > 0).then_some(total);
@@ -644,14 +897,18 @@ impl SseState {
                 if long {
                     usage.long_requests += 1;
                     usage.long_input += input;
-                    usage.long_cache_write += write;
+                    usage.long_cache_write += write - write_1h;
+                    usage.long_cache_write_1h += write_1h;
                     usage.long_cache_read += read;
                 } else {
                     usage.requests += 1;
                     usage.input += input;
-                    usage.cache_write += write;
+                    usage.cache_write += write - write_1h;
+                    usage.cache_write_1h += write_1h;
                     usage.cache_read += read;
                 }
+                drop(usage);
+                self.persist();
             }
             "content_block_delta" => {
                 let delta = &evt["delta"];
@@ -702,6 +959,7 @@ impl SseState {
                     }
                     self.cur.output += step;
                     self.billed_out = n;
+                    self.persist();
                 }
             }
             "message_stop" => {
@@ -720,6 +978,24 @@ impl SseState {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Rewrite the agent's sidecar with the running total: the base plus this
+    /// process's counts. Every count change is persisted by the event that makes it,
+    /// so a stream that dies mid-answer keeps what it had billed. A write error does
+    /// not fail the turn: it is kept in `Usage` and reported, as the usage log's is.
+    fn persist(&self) {
+        let Some(path) = &self.log.persist_to else {
+            return;
+        };
+        let total = {
+            let base = self.log.base.lock().expect("usage base poisoned");
+            let boot = self.usage.lock().expect("usage poisoned");
+            base.plus(&boot)
+        };
+        if let Err(e) = write_usage_file(path, &total) {
+            self.usage.lock().expect("usage poisoned").log_error = Some(e);
+        }
     }
 
     /// Append this request's own counts as one JSON line to the usage log. A write
@@ -818,6 +1094,8 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
                 .map(String::from),
             caching: caching::mode_of(&meta).map_err(ProviderError::value_error)?,
             usage: usage_of(agent_id),
+            base: base_of(agent_id, kernel),
+            usage_file: usage_file_of(agent_id, kernel),
             report: ReportCell::default(),
             stream_idle: stream_idle_of(&meta)?,
             long_context_tokens: positive_int(meta.get("long_context_tokens")),
@@ -835,22 +1113,52 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
     }
 }
 
-/// The counts with the record's prices applied (python `_usage_now`).
-fn usage_now(agent_id: &AgentId, kernel: &Kernel) -> Value {
-    let meta = helpers::agent_meta(agent_id, kernel);
+/// A count's snapshot with the record's prices applied (python `_usage_now`).
+fn priced(counts: &Usage, meta: &Map<String, Value>) -> Value {
     let price = |k: &str| meta.get(k).and_then(Value::as_f64);
-    let counts = usage_of(agent_id);
-    let usage = counts.lock().expect("usage poisoned");
-    usage.snapshot(
-        price("price_input_per_mtok"),
-        price("price_output_per_mtok"),
-        price("price_input_long_per_mtok"),
-        price("price_output_long_per_mtok"),
-    )
+    let model = meta
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let prices = Prices {
+        input: price("price_input_per_mtok"),
+        output: price("price_output_per_mtok"),
+        input_long: price("price_input_long_per_mtok"),
+        output_long: price("price_output_long_per_mtok"),
+        cache_read: price("price_cache_read_per_mtok"),
+        cache_write_5m: price("price_cache_write_5m_per_mtok"),
+        cache_write_1h: price("price_cache_write_1h_per_mtok"),
+    };
+    counts.snapshot(model, &prices)
 }
 
-/// `usage` — args: reset? (bool). The agent's token usage since its kernel started.
-/// `reset: true` returns the counts, then zeroes them. Python `_usage`.
+/// The agent's counts since it was created: the sidecar's base plus this process's.
+fn total_counts(agent_id: &AgentId, kernel: &Kernel) -> Usage {
+    let base_arc = base_of(agent_id, kernel);
+    let base = base_arc.lock().expect("usage base poisoned");
+    let boot_arc = usage_of(agent_id);
+    let boot = boot_arc.lock().expect("usage poisoned");
+    base.plus(&boot)
+}
+
+/// The agent's counts since it was created, with the record's prices applied.
+fn usage_now(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let meta = helpers::agent_meta(agent_id, kernel);
+    priced(&total_counts(agent_id, kernel), &meta)
+}
+
+/// The counts this kernel process has seen since it booted (`usage_since_boot`).
+fn usage_since_boot_now(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let meta = helpers::agent_meta(agent_id, kernel);
+    let boot_arc = usage_of(agent_id);
+    let boot = boot_arc.lock().expect("usage poisoned");
+    priced(&boot, &meta)
+}
+
+/// `usage` — args: reset? (bool). The agent's token usage since it was created, and
+/// `usage_since_boot` over this process. `reset: true` returns the counts, then
+/// zeroes the since-boot counts (the total is kept: see `usage_reset`). Python
+/// `_usage`.
 fn usage_reply(agent_id: &AgentId, payload: &Value, kernel: &Kernel) -> Value {
     let reset = payload.get("reset").cloned().unwrap_or(json!(false));
     let Some(reset) = reset.as_bool() else {
@@ -861,9 +1169,33 @@ fn usage_reply(agent_id: &AgentId, payload: &Value, kernel: &Kernel) -> Value {
         fantastic_kernel::refusal::with(&mut r, "arg", json!("reset"));
         return r;
     };
-    let out = usage_now(agent_id, kernel);
+    let mut out = usage_now(agent_id, kernel);
+    if let Some(m) = out.as_object_mut() {
+        m.insert(
+            "usage_since_boot".into(),
+            usage_since_boot_now(agent_id, kernel),
+        );
+    }
     if reset {
         *usage_of(agent_id).lock().expect("usage poisoned") = Usage::default();
+    }
+    out
+}
+
+/// `usage_reset` — returns the total counts as they stood, then zeroes them for
+/// good: this process's counts, the base, and the sidecar (rewritten as zeros).
+fn usage_reset_reply(agent_id: &AgentId, kernel: &Kernel) -> Value {
+    let out = usage_now(agent_id, kernel);
+    let base_arc = base_of(agent_id, kernel);
+    let boot_arc = usage_of(agent_id);
+    let mut base = base_arc.lock().expect("usage base poisoned");
+    let mut boot = boot_arc.lock().expect("usage poisoned");
+    *base = Usage::default();
+    *boot = Usage::default();
+    if let Some(path) = usage_file_of(agent_id, kernel) {
+        if let Err(e) = write_usage_file(&path, &Usage::default()) {
+            boot.log_error = Some(e);
+        }
     }
     out
 }
@@ -892,6 +1224,10 @@ fn reflect_reply(agent_id: &AgentId, kernel: &Kernel) -> Result<Value, BundleErr
         out.insert("cache_primer_until".into(), row.clone());
     }
     out.insert("usage".into(), usage_now(agent_id, kernel));
+    out.insert(
+        "usage_since_boot".into(),
+        usage_since_boot_now(agent_id, kernel),
+    );
     Ok(Value::Object(out))
 }
 
@@ -941,6 +1277,9 @@ pub fn validate(meta: &Map<String, Value>, record: &Map<String, Value>) -> Optio
         "price_output_per_mtok",
         "price_input_long_per_mtok",
         "price_output_long_per_mtok",
+        "price_cache_read_per_mtok",
+        "price_cache_write_5m_per_mtok",
+        "price_cache_write_1h_per_mtok",
     ] {
         if let Some(p) = meta.get(key).filter(|v| !v.is_null()) {
             if !p.is_number() || p.as_f64().unwrap_or(0.0) < 0.0 {
@@ -1101,6 +1440,22 @@ pub fn record_schema() -> &'static Value {
                 "USD per million output tokens for a long-context request; unset = the base price",
             ),
             Field::new(
+                "price_cache_read_per_mtok",
+                "float",
+                "USD per million cache-read input tokens; unset = the model default (0.05x input for \
+                 claude-sonnet-5-5 and claude-opus-5-5, else 0.1x)",
+            ),
+            Field::new(
+                "price_cache_write_5m_per_mtok",
+                "float",
+                "USD per million 5-minute cache-write input tokens; unset = 1.25x input",
+            ),
+            Field::new(
+                "price_cache_write_1h_per_mtok",
+                "float",
+                "USD per million 1-hour cache-write input tokens; unset = 2x input",
+            ),
+            Field::new(
                 "long_context_tokens",
                 "int",
                 "prompt tokens above which a request is billed at the long-context prices",
@@ -1144,6 +1499,7 @@ impl Bundle for AnthropicBundle {
             out.insert(k, v);
             if after {
                 out.insert("usage".into(), json!(USAGE_DOC));
+                out.insert("usage_reset".into(), json!(USAGE_RESET_DOC));
                 out.insert("models".into(), json!(MODELS_DOC));
             }
         }
@@ -1193,6 +1549,9 @@ impl Bundle for AnthropicBundle {
         if verb == "usage" {
             return Ok(Some(usage_reply(agent_id, payload, kernel)));
         }
+        if verb == "usage_reset" {
+            return Ok(Some(usage_reset_reply(agent_id, kernel)));
+        }
         if verb == "models" {
             let meta = helpers::agent_meta(agent_id, kernel);
             let endpoint = meta.get("endpoint").and_then(Value::as_str).unwrap_or("");
@@ -1230,10 +1589,11 @@ impl Bundle for AnthropicBundle {
 
     async fn on_delete(&self, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Result<(), BundleError> {
         // this agent's counts go with it: an id re-created later starts clean
-        usage_table()
-            .lock()
-            .expect("usage table poisoned")
-            .remove(agent_id.as_str());
+        let file = usage_file_of(agent_id, kernel);
+        forget_counts(agent_id.as_str());
+        if let Some(file) = file {
+            let _ = std::fs::remove_file(file);
+        }
         verbs::on_delete(agent_id, kernel).await;
         Ok(())
     }

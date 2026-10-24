@@ -1242,6 +1242,7 @@ fn mkdir_reply(root: &Result<PathBuf, String>, payload: &Value, readonly: bool) 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_path_gate;
 mod tests_paths;
 #[cfg(test)]
 mod tests_pump_identity;
@@ -1249,3 +1250,5 @@ mod tests_pump_identity;
 mod tests_text;
 #[cfg(test)]
 mod tests_watch;
+#[cfg(test)]
+mod tests_watch_missing;

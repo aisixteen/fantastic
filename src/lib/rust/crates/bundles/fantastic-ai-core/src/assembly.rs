@@ -142,14 +142,13 @@ Answer a group with the SAME `<to>` (minus yourself) and `<re>N</re>`; fewer rec
 fork a private thread. Tell peers facts in words — your ids mean nothing to them.
 
 ## Turns
-Only your ANSWER acts: a `<call>` written in your thinking does not run — write it
-in your answer, after the thinking; every call in the answer runs. Thinking is stripped
-from history: put what you concluded into a call or your message. End every turn with a
-call, with `<call name="await"></call>`
-(stop until the next message wakes you — what you wait for is in flight, not lost;
-refused when nothing of yours is pending) or with `<call name="done"></call>` (the work
-is finished). A turn with no call is reminded and rerolled; turn after turn of none and
-the chain gives up, telling your caller you could not answer.
+Only your ANSWER acts: a `<call>` in your thinking does not run; write it in your
+answer, after thinking; every call in it runs. Thinking is stripped from history: put
+conclusions in a call or your message. End every turn with a call, with `<call name="await"></call>`
+(stop until the next message wakes you; what you wait for is in flight, not lost, and a
+job from `exec start` wakes you with `job_done`; refused when nothing is pending) or with
+`<call name="done"></call>` (work done). A turn with no call is reminded and rerolled;
+turn after turn of none and the chain gives up, telling your caller you could not answer.
 
 ## Inquiries
 When a decision is not yours to make, `send` whoever owns it an `inquiry` (`<text>`,

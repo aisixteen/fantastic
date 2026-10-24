@@ -51,6 +51,8 @@ import secrets
 
 from kernel.modes.parse import coerce_scalar
 
+from ai_core.grammar import envelopes_in
+
 OPEN = "<call"
 CLOSE = "</call>"
 BYTES_OPEN = "<bytes>"
@@ -373,7 +375,13 @@ def _scan(text: str) -> list[tuple[str, dict | None, str | None, bool]]:
     is the model MENTIONING `<call` in prose (not call-shaped): stepped over, so a
     stray mention never swallows the real call after it."""
     out: list[tuple[str, dict | None, str | None, bool]] = []
-    for _pos, after, end in _envelopes(text):
+    for env in envelopes_in(text):
+        if env.wrapper is not None:
+            # A call written inside a wrapper tag is refused, not dispatched; the
+            # call checker reports it with the bare form to write.
+            continue
+        after = env.body
+        end = -1 if env.end is None else env.end
         # UNTERMINATED (`end == -1`) is not a truncation guess: the envelope is the
         # LAST thing in the completion, so there is nothing after it to misread.
         block = text[after : end if end != -1 else len(text)]
