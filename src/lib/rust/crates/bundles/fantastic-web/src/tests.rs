@@ -3207,6 +3207,11 @@ mod ws_message_cap;
 #[path = "tests_binary_steps.rs"]
 mod binary_steps;
 
+/// A credential store on a connected kernel is recorded as `[secret]` by the
+/// caller (issue #285), and the reply frame carries the marks.
+#[path = "tests_credential_forward.rs"]
+mod credential_forward;
+
 /// ANY verb whose reply carries raw bytes answers binary on every leg — no verb
 /// list (python `io_bridge/tests/test_any_verb_bytes_reply.py`).
 #[path = "tests_any_verb_bytes.rs"]

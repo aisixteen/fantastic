@@ -11,7 +11,7 @@
 //! to the item's marks) and of its reply (`Bundle::reply_secret`, carried as
 //! `Outcome::secret`, shown by `crate::ledger::stored_outcome`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
@@ -21,6 +21,37 @@ pub const SHOWN: &str = "[secret]";
 tokio::task_local! {
     /// The marks of the item the running dispatch serves.
     pub(crate) static CURRENT_SECRET: Arc<Vec<String>>;
+}
+
+/// Where a running dispatch collects the reply marks a handler notes.
+pub(crate) type ReplySink = Arc<Mutex<Vec<String>>>;
+
+tokio::task_local! {
+    /// The reply marks the running dispatch's handler has noted so far.
+    pub(crate) static REPLY_SECRET: ReplySink;
+}
+
+/// Note reply marks — dotted paths into THIS dispatch's reply — for a reply the
+/// handler got from elsewhere (a connected kernel's store): the kernel records
+/// the reply as [`SHOWN`] at those paths exactly as for `Bundle::reply_secret`,
+/// while the caller still gets it whole. A no-op outside a dispatch.
+pub fn note_reply_secret(marks: impl IntoIterator<Item = String>) {
+    let _ = REPLY_SECRET.try_with(|sink| {
+        if let Ok(mut all) = sink.lock() {
+            all.extend(marks);
+        }
+    });
+}
+
+/// The well-formed marks among `noted` (non-empty steps, never `type`), each
+/// once, after `base`.
+pub(crate) fn well_formed(mut base: Vec<String>, noted: &[String]) -> Vec<String> {
+    for m in noted {
+        if m != "type" && !m.is_empty() && !m.split('.').any(str::is_empty) && !base.contains(m) {
+            base.push(m.clone());
+        }
+    }
+    base
 }
 
 /// The `secret` marks of the item this dispatch serves — dotted paths into its

@@ -12,11 +12,13 @@
 > resolver unit tests in `src/tests.rs`).
 
 WS-only, asymmetric. A bridge agent opens a WS to the remote's
-`web_ws` and ships raw `{type:"call", id, target, payload, caller, secret?}`
-frames (`secret` = the forward call's own marks re-rooted at the forwarded
-item: `payload.payload.<f>` → `payload.<f>`, `result[.<f>]` as is); the
-remote dispatches `kernel.send` like a browser frame — with those marks, so
-it records `<secret>` too — and replies over the same socket — no peer bridge. Streaming via `watch_remote`
+`web_ws` and ships raw `{type:"call", id, target, payload}`
+frames (no `secret` on the call: the bridge marks a forwarded `set`'s
+`payload.fields.<name>` in its own records, and the remote records its own
+marks). The remote dispatches `kernel.send` like a browser frame and replies
+over the same socket with `{type:"reply", id, data, secret?}` — `secret` names
+the reply's secret paths (a credential store's `get` fields), which the
+calling kernel records as `[secret]` — no peer bridge. Streaming via `watch_remote`
 (`{type:"watch", src}` out, `{type:"event"}` back, re-emitted on the
 bridge's own inbox). One-shot CLI: `fantastic <id> <verb> [k=v ...]`.
 

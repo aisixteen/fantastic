@@ -110,6 +110,10 @@ async fn inbound_call(
         onward = onward.with_binary(b.path, b.bytes);
     }
     let out = kernel.send(vec![onward]).await.remove(0);
+    // The onward reply's own secret paths (a credential store's `get` fields) are
+    // rooted at the reply, which IS this leg's reply: the leg's settle row hides
+    // them too, and the transport can tell the far side (`Outcome::secret`).
+    fantastic_kernel::note_reply_secret(out.secret.clone());
     (out.result, out.body)
 }
 

@@ -272,6 +272,11 @@ async fn ws_end(
     heads
 }
 
+/// [`ws_end`] for a caller that wants only the pipe.
+pub(super) async fn ws_end_for_tests(port: u16, web_id: &str, half: Arc<dyn BridgeTransport>) {
+    let _ = ws_end(port, web_id, half, None).await;
+}
+
 fn binary_paths(heads: &Arc<Mutex<Vec<Value>>>) -> Vec<Value> {
     heads
         .lock()

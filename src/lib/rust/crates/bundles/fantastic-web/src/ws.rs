@@ -12,7 +12,10 @@
 //! C→S {type:"state_subscribe"|"state_unsubscribe"}
 //! C→S {type:"hello", guid}                    → the page kernel becomes the
 //!                                               host's peer `<guid>|<agent>`
-//! S→C {type:"reply", id, data} | {type:"error", id, …}
+//! S→C {type:"reply", id, data, secret?} | {type:"error", id, …}
+//!                                             (`secret` = dotted paths into `data`
+//!                                               the reply's bundle marked — absent
+//!                                               when none)
 //! S→C {type:"event", src, payload}            → an event from a watched agent
 //!                                               (`src` = the name the client watched)
 //! S→C {type:"event", payload}                 → an event emitted to THIS connection
@@ -615,7 +618,13 @@ pub(crate) async fn ws_loop(
                     let siblings = mirror.siblings();
                     let mirrored = (!siblings.is_empty())
                         .then(|| (out_item.result.clone(), out_item.body.clone()));
-                    let f = json!({"type": "reply", "id": fid, "data": out_item.result});
+                    let mut f = json!({"type": "reply", "id": fid, "data": out_item.result});
+                    // the reply's own secret paths (a credential store's `get`
+                    // fields), so a calling kernel records them as shown; a plain
+                    // reply carries no such key
+                    if !out_item.secret.is_empty() {
+                        f["secret"] = json!(out_item.secret);
+                    }
                     send_envelope(&out, f, out_item.body, REPLY_KEY).await;
                     drop(held);
                     if let Some((data, body)) = mirrored {
