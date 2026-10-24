@@ -45,7 +45,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::Response;
-use fantastic_bundle::{py_int, py_repr_value, py_truthy};
+use fantastic_bundle::{py_int, py_repr_value, py_str, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{AgentId, Item, Kernel};
 use serde_json::{json, Map, Value};
@@ -63,6 +63,17 @@ use routes::RouteTable;
 pub const HANDLER_MODULE: &str = "web.tools";
 
 pub use origin::DEFAULT_HOST;
+
+/// The address the listener binds: the record's `bind` when it names one (the
+/// container's `0.0.0.0`), else its `host`, else loopback. The Host/Origin guard
+/// judges by `host` alone (`origin.rs`), so a wildcard `bind` leaves the guard's
+/// identity where it was. Python `tools.py` and Swift `webListenHost` agree.
+pub fn listen_host(rec: &Map<String, Value>) -> String {
+    match rec.get("bind") {
+        Some(v) if py_truthy(v) => py_str(v),
+        _ => origin::effective_host(rec),
+    }
+}
 
 /// readme.md auto-seeded into the agent's dir on creation. Python's file, byte
 /// for byte (`PB/web/host/src/web/readme.md`).
@@ -371,8 +382,8 @@ Set port on create_agent or via update_agent."
                 task: None,
                 table: Arc::new(AsyncRwLock::new(RouteTable::base())),
                 port,
-                // LOOPBACK unless the record names a host (`host: "0.0.0.0"` to publish).
-                host: origin::effective_host(&read_rec(agent_id, kernel)),
+                // LOOPBACK unless the record names a bind or a host (`bind: "0.0.0.0"` to publish).
+                host: listen_host(&read_rec(agent_id, kernel)),
             },
         );
     }

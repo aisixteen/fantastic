@@ -485,12 +485,16 @@ class Vm:
 _call_ids = itertools.count(1)
 
 
-def http_get(port: int, path: str) -> tuple[int, str]:
-    """GET through the forward, naming the guest's authority in `Host` (the host guard)."""
-    c = http.client.HTTPConnection("127.0.0.1", FORWARD_PORT, timeout=5)
+def http_get(port: int, path: str, *, connect: int = FORWARD_PORT, authority: str | None = None) -> tuple[int, str]:
+    """GET through the forward, naming the guest's authority in `Host` (the host guard).
+
+    `connect` is the TCP port dialled on loopback (the forward, or a container's port
+    map); `authority` is the `Host` value (default `127.0.0.1:<port>`, a loopback bind's
+    own authority)."""
+    c = http.client.HTTPConnection("127.0.0.1", connect, timeout=5)
     try:
         c.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
-        c.putheader("Host", f"127.0.0.1:{port}")
+        c.putheader("Host", authority or f"127.0.0.1:{port}")
         c.endheaders()
         r = c.getresponse()
         return r.status, r.read().decode("utf-8", "replace")
@@ -498,12 +502,17 @@ def http_get(port: int, path: str) -> tuple[int, str]:
         c.close()
 
 
-def ws_connect(port: int, path: str):
+def ws_connect(
+    port: int, path: str, *, connect: int = FORWARD_PORT, authority: str | None = None, origin: str | None = None
+):
     """A websocket to the guest's kernel: the TCP connection goes to the forward, the
-    URI (and so `Host`) names the guest's port, and no `Origin` is sent."""
-    from websockets.asyncio.client import connect
+    URI (and so `Host`) names the guest's port. No `Origin` is sent unless `origin` is
+    given: a browser page's websocket sends its own (the guard checks it)."""
+    from websockets.asyncio.client import connect as open_ws
 
-    return connect(f"ws://127.0.0.1:{port}{path}", host="127.0.0.1", port=FORWARD_PORT, open_timeout=10)
+    return open_ws(
+        f"ws://{authority or f'127.0.0.1:{port}'}{path}", host="127.0.0.1", port=connect, open_timeout=10, origin=origin
+    )
 
 
 def ws_errors() -> tuple[type[BaseException], ...]:
@@ -526,9 +535,23 @@ def retrying(what: str, e: BaseException) -> None:
 
 async def home_call(port: int, payload: dict, timeout: float = 10) -> object:
     """A call to `home` the way a page makes one: through `user`."""
+    return await forward_call(port, "home", payload, timeout)
+
+
+async def forward_call(
+    port: int,
+    target: str,
+    payload: dict,
+    timeout: float = 10,
+    *,
+    connect: int = FORWARD_PORT,
+    authority: str | None = None,
+    origin: str | None = None,
+) -> object:
+    """A call to agent `target` the way a page makes one: through `user`'s `forward`."""
     call_id = f"boot-check-{next(_call_ids)}"
-    frame = {"type": "call", "target": "user", "payload": {"type": "forward", "target": "home", "payload": payload}, "id": call_id}
-    async with ws_connect(port, "/user/ws") as ws:
+    frame = {"type": "call", "target": "user", "payload": {"type": "forward", "target": target, "payload": payload}, "id": call_id}
+    async with ws_connect(port, "/user/ws", connect=connect, authority=authority, origin=origin) as ws:
         await ws.send(json.dumps(frame))
         end = time.monotonic() + timeout
         while True:
@@ -556,11 +579,14 @@ async def key_reaches_home(vm: Vm, port: int, step: float) -> None:
                 raise Fail(f"Ctrl+0 never reached `home` as select {{id: null}} within {step:g} s")
 
 
-def until(vm: Vm, what: str, check, timeout: float, every: float = 1.0):
-    """`check()` until it is truthy (its value); fails naming `what` after `timeout`."""
+def until(vm: Vm | None, what: str, check, timeout: float, every: float = 1.0):
+    """`check()` until it is truthy (its value); fails naming `what` after `timeout`.
+
+    `vm` is the QEMU run to watch while waiting (a fail-fast on its exit), or None."""
     end = time.monotonic() + timeout
     while True:
-        vm.alive()
+        if vm is not None:
+            vm.alive()
         got = check()
         if got:
             return got
@@ -575,17 +601,25 @@ def read_run_file(vm: Vm) -> dict | None:
     return parse_run_file(out) if code == 0 else None
 
 
+def page_served(get, port: int, path: str, marker: str) -> bool:
+    """`get(port, path)` answers 200 with `marker` in the body. A refused or
+    half-closed connection is not yet served (the server is still coming up)."""
+    try:
+        status, body = get(port, path)
+    except (OSError, http.client.HTTPException):
+        return False
+    return status == 200 and marker in body
+
+
 def wait_page(vm: Vm, run: dict, step: float) -> None:
     """The run file's url, through the forward: 200 and the Home document."""
-
-    def served() -> bool:
-        try:
-            status, body = http_get(run["port"], urlsplit(run["url"]).path or "/")
-        except (OSError, http.client.HTTPException):
-            return False
-        return status == 200 and 'data-page="home"' in body
-
-    until(vm, f"GET {run['url']} through the forward (200, data-page=\"home\")", served, step)
+    path = urlsplit(run["url"]).path or "/"
+    until(
+        vm,
+        f"GET {run['url']} through the forward (200, data-page=\"home\")",
+        lambda: page_served(http_get, run["port"], path, 'data-page="home"'),
+        step,
+    )
 
 
 def check_kernel(vm: Vm, run: dict, step: float) -> dict:
