@@ -56,6 +56,7 @@ from ai_core.context import (
 )
 from ai_core import caching
 from ai_core import prompt_file
+from ai_core.provider import ProviderError
 from ai_core.folds import anchors_of, is_fold, member_anchor
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
@@ -95,6 +96,10 @@ from ai_core.constants import (  # noqa: F401 — re-exported seams
     SEND_TIMEOUT,
     TRIGGER,
 )
+
+# The first transport retry waits this many seconds, the next twice that: 2 s, 4 s, 8 s
+# (#198 part 2). Read live, so a test can shorten it.
+RETRY_BACKOFF_BASE = 2.0
 
 # ─── shared module-global state (keyed by agent id) ─────────────
 
@@ -1443,6 +1448,16 @@ def _misfire_limit(kernel, self_id: str) -> int:
     return MAX_SILENT_TURNS
 
 
+def _transport_retries(kernel, self_id: str) -> int:
+    """The record's `transport_retries` (#198 part 2): how many times a turn whose
+    link dropped is re-run, 0..5; unset, missing or invalid, 0 (off)."""
+    _get = getattr(kernel, "get", None)  # a bare test kernel has no record
+    v = ((_get(self_id) if _get else None) or {}).get("transport_retries")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return min(max(v, 0), 5)
+    return 0
+
+
 # Prefixed to the reminder when the turn it answers was DEAD (only thinking).
 _DEAD_TURN_LINE = (
     "[no answer] Your last turn produced only thinking and no answer — it was "
@@ -2584,7 +2599,7 @@ async def _emit_status(
 ) -> None:
     """Broadcast a structured `status` event AND update _current's phase
     so the on-demand `status` verb stays in sync. Phases:
-        queued, thinking, streaming, tool_calling, done.
+        queued, thinking, streaming, tool_calling, retrying, done.
     UI subscribes for live phase transitions (animate a pulse indicator
     while phase is thinking/tool_calling), and calls the `status` verb
     on page boot to rebuild lost state.
@@ -3424,15 +3439,59 @@ def _make_send(cfg: Backend):
                 # substrate resolves the blocked caller's `send` to
                 # `{"cancelled": True}`. Closing the turn out for the CLIENT is the
                 # one thing the abort cannot do — that is `on_cancel`'s job.
-                async with asyncio.timeout(SEND_TIMEOUT):
-                    reply = await _run(
-                        id,
-                        text,
-                        kernel,
-                        client_id,
-                        cfg,
-                        system_prompt,
-                    )
+                # TRANSPORT RETRIES (#198 part 2): a pass that failed on the LINK is
+                # re-run, visibly, up to the record's `transport_retries`; every other
+                # failure is raised to the handlers below untouched. The timeout is per
+                # pass, as in Rust.
+                retries = _transport_retries(kernel, id)
+                attempt = 0
+                while True:
+                    try:
+                        async with asyncio.timeout(SEND_TIMEOUT):
+                            reply = await _run(
+                                id,
+                                text,
+                                kernel,
+                                client_id,
+                                cfg,
+                                system_prompt,
+                            )
+                        break
+                    except ProviderError as e:
+                        if not (e.transport and attempt < retries):
+                            raise
+                        attempt += 1
+                        # The failed pass's partial stream is not the next pass's text.
+                        if id in _current:
+                            _current[id]["text_so_far"] = ""
+                        # A visible row: the model and the operator both read the retry.
+                        await _save_history(
+                            id,
+                            kernel,
+                            [
+                                {
+                                    "role": "user",
+                                    "kind": "notice",
+                                    "parent": None,
+                                    "content": (
+                                        f"[retry {attempt}/{retries}] the link dropped "
+                                        f"({e}) — retrying the turn"
+                                    ),
+                                }
+                            ],
+                        )
+                        await _emit_status(
+                            kernel,
+                            id,
+                            client_id,
+                            "retrying",
+                            attempt=attempt,
+                            of=retries,
+                            error=str(e),
+                        )
+                        # Backoff 2 s, 4 s, 8 s …; a cancel lands in this sleep and
+                        # unwinds through the handlers below.
+                        await asyncio.sleep(RETRY_BACKOFF_BASE * 2 ** (attempt - 1))
             except TimeoutError:
                 await _emit_status(kernel, id, client_id, "done", reason="timeout")
                 reply = {
@@ -3627,7 +3686,7 @@ CANCEL = (
 
 EMITS = {
     "token": "{type:'token', text:str, source, client_id} — streaming chunk, routed ONLY to the caller: cli (stdout) when client_id='cli', else this agent's own inbox (a browser filters by client_id).",
-    "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'done', detail:{send_id, started_at, queue_depth, ...}} — the one channel for phase transitions. On done, detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS call-less turns in a row; detail.error says so). On queued, detail.ahead.",
+    "status": "{type:'status', source, client_id, ts, phase:'queued'|'thinking'|'streaming'|'retrying'|'done', detail:{send_id, started_at, queue_depth, ...}} — the one channel for phase transitions. On done, detail.reason='ok'|'cancelled'|'timeout'|'error'|'awaiting'|'dead_turn' (only thinking — discarded, rerolled)|'gave_up' (MAX_SILENT_TURNS call-less turns in a row; detail.error says so). On queued, detail.ahead. On retrying, detail.attempt, detail.of and detail.error: a transport failure is re-run (transport_retries), each retry a visible row.",
     "context": "{type:'context', source, client_id, ts, phase:'compacted'|'too_small', detail} — compacted: {strategy, dropped_messages, kept_messages, summarized}, the view was cut to fit the window; too_small: {context_window, system_tokens, hint}, even the system block + one turn won't fit and the model is NOT called. Pull counterpart: `context_status`.",
 }
 

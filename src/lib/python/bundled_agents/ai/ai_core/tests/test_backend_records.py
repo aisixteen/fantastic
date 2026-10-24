@@ -44,6 +44,7 @@ _AI_TAIL = [
         ["none", "cleanup", "provider_cache"],
     ),
     ("cache_primer_until", "int", False, None, None),
+    ("transport_retries", "int", False, 0, None),
     ("misfire_limit", "int", False, 10, None),
     ("system_prompt", "str", False, None, None),
     ("file_bridge_id", "str", False, None, None),
