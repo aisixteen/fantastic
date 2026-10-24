@@ -46,6 +46,9 @@ def _which(binary: str) -> str | None:
 
 
 def main() -> int:
+    # a Windows console is cp1252, which has no box-drawing characters
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print("live-probe preflight — nothing is sent to a model\n")
     blockers: list[str] = []
     notes: list[str] = []
