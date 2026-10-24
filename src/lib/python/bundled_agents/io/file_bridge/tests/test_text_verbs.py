@@ -758,6 +758,76 @@ async def test_text_verbs_see_only_exposed_paths(seeded_kernel, tmp_path, monkey
     assert r["size"] == 2, r
 
 
+# ─── if_match that looks like a number still matches (#256, Rust #290) ─────
+
+
+async def test_an_all_digit_version_matches_as_a_number():
+    from file_bridge.tools import _same_version
+
+    assert _same_version(1234567890123456, "1234567890123456")
+    assert _same_version("1234567890123456", "1234567890123456")
+    assert not _same_version(1234567890123457, "1234567890123456")
+    assert not _same_version(True, "1")
+
+
+async def test_an_exponent_like_version_matches(monkeypatch):
+    import types
+
+    from file_bridge import tools
+    from file_bridge.tools import _same_version, _version
+
+    assert _same_version("12e45", "12e45")
+    assert _same_version(12e45, "12e45")
+    for i in range(5000):
+        v = _version(str(i).encode("utf-8"))
+        assert len(v) == 16
+        try:
+            float(v)
+        except ValueError:
+            continue
+        raise AssertionError(f"version {v!r} parses as a number")
+
+    # the deterministic cause: a digest whose first 16 hex digits are all digits
+    fake = types.SimpleNamespace(hexdigest=lambda: "1234567890123456" + "0" * 48)
+    monkeypatch.setattr(tools.hashlib, "sha256", lambda data: fake)
+    v = _version(b"anything")
+    assert v == "a234567890123456", v
+    assert len(v) == 16
+
+
+async def test_a_numeric_if_match_that_differs_is_refused(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "n.txt", "one\n")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "write",
+            "path": "n.txt",
+            "bytes": b"x",
+            "if_match": 1234567890123456,
+        },
+    )
+    assert r["reason"] == "version_mismatch", r
+    assert (tmp_path / "sd" / "n.txt").read_text(encoding="utf-8") == "one\n"
+
+
+async def test_a_numeric_if_match_equal_to_the_version_passes(monkeypatch):
+    from file_bridge import tools
+
+    # the document's version is all digits: a JSON-number if_match names it
+    monkeypatch.setattr(tools, "_version", lambda data: "1234567890123456")
+    assert tools._mismatch("n.txt", 1234567890123456, b"x") is None
+    assert tools._mismatch("n.txt", "1234567890123456", b"x") is None
+    refusal = tools._mismatch("n.txt", 1234567890123457, b"x")
+    assert refusal is not None and refusal["reason"] == "version_mismatch"
+    assert refusal["expected"] == 1234567890123457
+    assert refusal["actual"] == "1234567890123456"
+
+
 # ─── issue #277: the edit grammar works on text with conflict markers ───
 
 
