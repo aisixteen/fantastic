@@ -239,6 +239,31 @@ impl Runner {
                 }
             }
 
+            Cmd::OpenView {
+                bridge,
+                from,
+                kind,
+                path,
+            } => {
+                let payload = json!({"type":"open_view","kind":kind,"path":path});
+                match Host::read(self.host.act(bridge, payload).await) {
+                    Ok(reply) => {
+                        // a view made just now is in the tree only once it is read again
+                        if reply.get("error").is_none() {
+                            if let Some(t) = self.host.tree() {
+                                self.got(Got::Tree(t)).await;
+                            }
+                        }
+                        self.got(Got::Opened {
+                            from: from.clone(),
+                            reply,
+                        })
+                        .await;
+                    }
+                    Err(e) => self.refused(&cmd, e).await,
+                }
+            }
+
             Cmd::Send { target, payload } => {
                 let out = self.host.act(target, payload.clone()).await;
                 let failed = out.status != fantastic_kernel::Status::Completed;

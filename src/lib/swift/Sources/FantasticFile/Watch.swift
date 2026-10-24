@@ -101,10 +101,12 @@ final class Watches: @unchecked Sendable {
     /// old watcher is stopped first: its stream finishes and its task ends.
     private func rewatch(_ bridge: AgentId, root: String, base: String, kernel: Kernel) {
         let k = key(kernel, bridge)
-        let (old, paths) = lock.withLock { () -> (DiskWatcher?, [String]) in
+        // The holders as they stand now: every watch change re-arms this stream, so the
+        // snapshot is the holders of this watcher's life.
+        let (old, paths, holders) = lock.withLock { () -> (DiskWatcher?, [String], [String: Set<String>]) in
             let old = byBridge[k]?.watcher
             byBridge[k]?.watcher = nil
-            return (old, byBridge[k].map { Array($0.paths.keys) } ?? [])
+            return (old, byBridge[k].map { Array($0.paths.keys) } ?? [], byBridge[k]?.paths ?? [:])
         }
         old?.stop()
         if paths.isEmpty { return }
@@ -149,6 +151,8 @@ final class Watches: @unchecked Sendable {
                         .object([
                             "type": .string("changed"), "path": .string(rel), "kind": .string(kind),
                         ]))
+                    viewRelayToViews(
+                        kernel, bridge: bridge.value, holders: holders, rel: rel, kind: kind)
                 }
             }
         }
