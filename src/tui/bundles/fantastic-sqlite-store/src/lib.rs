@@ -938,13 +938,6 @@ impl SqliteStoreBundle {
                 }
             }
             let n = db.delete(&owner, &doomed).map_err(db_err)?;
-            if n > 0 {
-                // Merge the FTS5 segments, so the old text's pages are freed
-                // (and zeroed: secure_delete) instead of lingering in a segment.
-                db.0
-                    .execute("INSERT INTO text_idx (text_idx) VALUES ('optimize')", [])
-                    .map_err(db_err)?;
-            }
             Ok(json!({"pruned": n}))
         });
         // The WAL still holds the old frames: fold them into the file and
