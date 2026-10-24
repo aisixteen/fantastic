@@ -469,6 +469,45 @@ def test_a_mode_switch_keeps_the_rows_a_cleanup_left_out_of_the_view_array():
     assert sum(1 for _, c in hist if "new state" in c) == 1
 
 
-# Not ported (no `context_fold` verb in Python):
-#   context_fold_refuses_a_range_that_starts_at_or_before_the_primer
-#   context_fold_refuses_a_caching_value_it_cannot_read
+def test_context_fold_refuses_a_range_that_starts_at_or_before_the_primer():
+    """Port of tests_caching.rs: the primer pins its prefix; a fold may not start at or
+    before it, the default range included; the rows after it fold as before."""
+    import asyncio
+
+    k = _k()
+    u1 = _put(k, "user", "u1")
+    a1 = _put(k, "assistant", "a1")
+    u2 = _put(k, "user", "u2")
+    a2 = _put(k, "assistant", "a2")
+    k.record["cache_primer_until"] = a1
+    cfg = core.Backend(sentence="s", make_provider=lambda *a: None, name="mock_backend")
+    verb = core._make_context_fold(cfg)
+
+    async def run(payload):
+        return await verb("ai", payload, k)
+
+    for payload in (
+        {"from": a1, "to": u2, "summary": "s"},
+        {"from": u1, "to": u1, "summary": "s"},
+        {"summary": "s"},
+    ):
+        out = asyncio.run(run(payload))
+        assert out["reason"] == "bad_arg", f"{payload}: {out}"
+        assert out["arg"] == "from", f"{payload}: {out}"
+        assert "the primer is pinned" in out["error"], out
+    out = asyncio.run(run({"from": u2, "to": a2, "summary": "s"}))
+    assert out["rows"] == 2, out
+    assert "error" not in out, out
+
+
+def test_context_fold_refuses_a_caching_value_it_cannot_read():
+    """Port of tests_caching.rs: a caching value the record cannot read is a bad_arg
+    naming `caching`."""
+    import asyncio
+
+    k = _k(caching="always")
+    _put(k, "user", "u1")
+    cfg = core.Backend(sentence="s", make_provider=lambda *a: None, name="mock_backend")
+    out = asyncio.run(core._make_context_fold(cfg)("ai", {"summary": "s"}, k))
+    assert out["reason"] == "bad_arg", out
+    assert out["arg"] == "caching", out

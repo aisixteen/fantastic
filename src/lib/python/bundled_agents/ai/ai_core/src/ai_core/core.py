@@ -56,11 +56,16 @@ from ai_core.context import (
 )
 from ai_core import caching
 from ai_core import prompt_file
-from ai_core.folds import anchors_of
+from ai_core.folds import anchors_of, is_fold, member_anchor
 from ai_core.folds import expand_ids as expand_fold_ids
 from ai_core.strategies import DEFAULT_STRATEGY, get_strategy, strategy_names
 from ai_core.strategies.base import NOTICE_ENVELOPE_RESERVE
-from ai_core.strategies.fold import FoldSummaryError
+from ai_core.strategies.fold import (
+    FoldSummaryError,
+    append_fold,
+    summarize_span,
+    summary_title,
+)
 
 # TWO live consumers. The agentic LOOP is still emergent — the backend does ONE
 # provider pass per send and never iterates — but `_route_reply` DOES parse this
@@ -78,7 +83,7 @@ from ai_core.tool_parse import (
     render_reply,
 )
 from kernel import current_origin, current_task
-from kernel._refusal import UNHANDLED, refusal
+from kernel._refusal import BAD_ARG, LOCKED, UNHANDLED, refusal
 from kernel._refusal import bad as bad_arg
 from ai_core.constants import (  # noqa: F401 — re-exported seams
     DEFAULT_CLIENT_ID,
@@ -2355,6 +2360,49 @@ async def _inner_system_content(
     return await _default_system_content(self_id, kernel)
 
 
+def _listed(hist: list[dict], view: dict | None) -> list[dict] | None:
+    """The view array's entries when there is a usable one: non-empty, and every id it
+    names still a row of the store. Otherwise None (no array, or a stale one)."""
+    if not view or not view["ids"]:
+        return None
+    known = {r.get("id") for r in hist}
+    if all(e.get("id") in known for e in view["ids"]):
+        return view["ids"]
+    return None
+
+
+def _render_tail(
+    hist: list[dict], frm: int, clean: bool
+) -> list[tuple[int, str, dict]]:
+    """The rows of `hist` from `frm` on, each as (store index, res, message). Under
+    `clean` they run through the trimmers: a trimmed row keeps its id, a dropped one is
+    absent. Otherwise every row is kept as stored."""
+    if not clean:
+        return [(i, _res_of(hist[i]), hist[i]) for i in range(frm, len(hist))]
+    at = {r.get("id"): i for i, r in enumerate(hist) if i >= frm}
+    kept = drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(hist[frm:])))
+    return [(at[r.get("id")], _res_of(r), r) for r in kept]
+
+
+def _render_history(
+    hist: list[dict], view: dict | None, clean: bool
+) -> list[tuple[int, str, dict]]:
+    """The history part of the model view (no system block, no user turn), as
+    (store index, res, message): the view array's entries each at its recorded
+    resolution, then the rows after the newest of them (trimmed under `clean`); with no
+    usable array, the whole store, trimmed under `clean`."""
+    listed = _listed(hist, view)
+    if listed is None:
+        return _render_tail(hist, 0, clean)
+    pos = {r.get("id"): i for i, r in enumerate(hist)}
+    out = []
+    for e in listed:
+        i = pos[e["id"]]
+        res = e.get("res", "full")
+        out.append((i, res, _apply_res(hist[i], res)))
+    return out + _render_tail(hist, max(pos[e["id"]] for e in listed) + 1, clean)
+
+
 async def _assemble(
     self_id: str,
     user_text: str,
@@ -2391,34 +2439,19 @@ async def _assemble(
     # reflects reduced to a stub — the model's own distillation carries the facts.
     hist = await _load_history(self_id, kernel)
     store_len = len(hist)
-    clean = caching.cleans(mode)
-
-    def _trim(rows: list[dict]) -> list[dict]:
-        # caching=cleanup trims the tail; none and provider_cache keep it as stored.
-        if not clean:
-            return list(rows)
-        return drop_read_docs(dedupe_stale_reads(dedupe_repeat_bodies(rows)))
-
     # THE VIEW ARRAY IS THE STATE. When one exists and every id it names still
-    # resolves, the model sees exactly those rows at exactly those resolutions —
-    # the same bytes before and after a restart. Otherwise (no array yet, or an
-    # id that no longer resolves) the view is the trimmed store, as before.
+    # resolves, the model sees exactly those rows at exactly those resolutions — the
+    # same bytes before and after a restart. The rows after its newest entry ride
+    # behind it in full (trimmed under cleanup). Otherwise the view is the trimmed
+    # store, as before. `_render_history` is the one implementation, shared with
+    # `context_fold`, which persists exactly what this renders.
     view = await _load_view(self_id, kernel)
-    by_id = {r.get("id"): r for r in hist if r.get("id")}
-    if view and view["ids"] and all(e.get("id") in by_id for e in view["ids"]):
-        messages.extend(
-            _apply_res(by_id[e["id"]], e.get("res", "full")) for e in view["ids"]
-        )
-        # THE ARRAY IS THE HEAD AS OF ITS WRITE; THE LOG KEEPS GROWING. Every row
-        # appended since — the model's own turns, the replies that landed — rides
-        # behind it in full. Served the array alone, the model would never see the
-        # read it had just made and would restart its work in a circle.
-        idx = {r.get("id"): i for i, r in enumerate(hist) if r.get("id")}
-        newest = max(idx[e["id"]] for e in view["ids"])
-        messages.extend(_trim(hist[newest + 1 :]))
+    messages.extend(
+        msg for _, _, msg in _render_history(hist, view, caching.cleans(mode))
+    )
+    if _listed(hist, view) is not None:
         _view_source[self_id] = "array"
     else:
-        messages.extend(_trim(hist))
         _view_source[self_id] = (
             "store" if view is None or not view["ids"] else "store (stale array)"
         )
@@ -4291,6 +4324,164 @@ async def _context_clear(id, payload, kernel):
     return {"cleared": rid, "rows": len(members)}
 
 
+def _is_boundary(row: dict) -> bool:
+    """A fold or a clear: the rows a `context_fold` span may not cross."""
+    return is_fold(row) or row.get("kind") == "clear"
+
+
+async def _context_fold(id, payload, kernel, cfg: Backend):
+    """args: from:int?, to:int? (row ids, inclusive, consecutive in the view; default `from` = the first row after the last fold or clear in the view, default `to` = the last row), summary:str? (the fold's text, used verbatim; absent, the fold summarizer writes it). Operator only — fold a chosen stretch of this agent's VIEW into ONE fold row, the same kind and shape an automatic fold writes (members in `refs`, reachable by `history {fold}`, `recall`, `grep`). Nothing is deleted; the view becomes the rows before the range (unchanged), the fold, then the rows after. Returns {folded, rows, summarized}; `summarized` is false only when the summarizer gave nothing and the fold carries its titles. Refused, with the reason named: an empty range, an id not in the view, a range crossing a fold or clear row, a range that starts at or before the cache primer, a turn running for this agent."""
+    # A turn holds the per-agent lock for its whole run: the view must not move under it.
+    if _lock_for(id).locked():
+        return refusal(
+            LOCKED,
+            f"context_fold: a turn is running for {id}",
+            hint="fold once the running turn has answered",
+        )
+    async with _lock_for(id):
+        return await _fold_range(id, payload, kernel, cfg)
+
+
+async def _fold_range(id, payload, kernel, cfg: Backend):
+    """`context_fold`'s body, run under the agent's lock (see `_context_fold`)."""
+    verb = "context_fold"
+    rec = kernel.get(id) or {}
+    # The view is rendered as the record's caching mode renders it, so the fold
+    # persists exactly the view the next turn will send. A primer pins its prefix.
+    try:
+        mode, primer = caching.settings(rec)
+    except ValueError as why:
+        return refusal(
+            BAD_ARG,
+            f"{verb}: {why}",
+            hint="set caching to none, cleanup or provider_cache",
+            arg="caching",
+        )
+
+    # `from` / `to`: absent or null is the default; anything else must be an id.
+    def id_arg(key: str):
+        raw = payload.get(key)
+        if raw is None:
+            return None, None
+        v = _as_id(raw)
+        return (
+            (v, None) if v is not None else (None, bad_arg(verb, key, "a row id (int)"))
+        )
+
+    from_id, err = id_arg("from")
+    if err is not None:
+        return err
+    to_id, err = id_arg("to")
+    if err is not None:
+        return err
+    # `summary`: absent or null writes the summarizer's; a given one is the text.
+    raw_summary = payload.get("summary")
+    if raw_summary is None:
+        summary = None
+    elif isinstance(raw_summary, str) and raw_summary.strip():
+        summary = raw_summary
+    else:
+        return bad_arg(verb, "summary", "a non-empty string")
+
+    rows = await _load_history(id, kernel)
+    anchors = anchors_of(await _head(id, kernel))
+    view = _render_history(rows, await _load_view(id, kernel), caching.cleans(mode))
+    pos: dict = {}
+    for p, (idx, _, _) in enumerate(view):
+        pos.setdefault(rows[idx].get("id"), p)
+
+    def empty(arg: str, why: str) -> dict:
+        return refusal(
+            BAD_ARG,
+            f"{verb}: the range is empty — {why}",
+            hint="name a range of rows that are in the view, from first to last",
+            arg=arg,
+        )
+
+    if not view:
+        return empty("from", "the view holds no rows")
+    # The default `from` is the row after the last fold or clear in the view.
+    default_from = max(
+        (p + 1 for p, (idx, _, _) in enumerate(view) if _is_boundary(rows[idx])),
+        default=0,
+    )
+    if from_id is None:
+        from_p = default_from
+    elif from_id in pos:
+        from_p = pos[from_id]
+    else:
+        return bad_arg(verb, "from", "a row id in this agent's view")
+    if to_id is None:
+        to_p = len(view) - 1
+    elif to_id in pos:
+        to_p = pos[to_id]
+    else:
+        return bad_arg(verb, "to", "a row id in this agent's view")
+    if from_p > to_p:
+        return empty("to", "to comes before from")
+    # THE PRIMER IS PINNED: the cached prefix ends at its row, so a range that starts at
+    # or before that row would move bytes the provider has cached. A primer not in this
+    # view pins nothing.
+    if primer is not None and primer in pos and from_p <= pos[primer]:
+        return refusal(
+            BAD_ARG,
+            f"{verb}: the primer is pinned — row {primer} ends the cached prefix, so a "
+            "range may not start at or before it",
+            hint="fold rows after the primer; the primer and the rows before it stay as they are",
+            arg="from",
+        )
+    span = [idx for idx, _, _ in view[from_p : to_p + 1]]
+    if any(_is_boundary(rows[i]) for i in span):
+        return refusal(
+            BAD_ARG,
+            f"{verb}: the range crosses a fold or clear row",
+            hint="fold the rows on each side of it separately; a fold row is never folded again by a range",
+            arg="from",
+        )
+    anchor = member_anchor(rows, span, anchors)
+    if summary is not None:
+        # Verbatim: the body IS the given text, its first line the title. No provider.
+        title, body, degraded = summary_title(summary), summary, False
+    else:
+        try:
+            provider = await _build_provider(id, kernel, cfg)
+        except Exception:
+            provider = None
+        ctx = ProjectionCtx(
+            budget=budget(rec),
+            recent_n=_recent_n(rec),
+            summarize=_make_summarizer(provider) if provider is not None else None,
+            self_id=id,
+            kernel=kernel,
+            client_id=None,
+            anchors=anchors,
+        )
+        title, body, degraded = await summarize_span(ctx, rows, span)
+    summarized = not degraded
+    fold = await append_fold(id, kernel, rows, span, anchor, title, body, degraded)
+    fid = fold["id"]
+    # THE NEW VIEW: the rows before the range as they were rendered, the fold where the
+    # range began, then the rows after. The fold is the newest row, so the array carries
+    # every kept row.
+    ids: list[dict] = []
+    for p, (idx, res, _) in enumerate(view):
+        if p == from_p:
+            ids.append({"id": fid, "res": "fold"})
+        if from_p <= p <= to_p:
+            continue
+        ids.append({"id": rows[idx]["id"], "res": res})
+    await _save_view(id, kernel, ids, budget_=budget(rec), why="context_fold")
+    return {"folded": fid, "rows": len(span), "summarized": summarized}
+
+
+def _make_context_fold(cfg: Backend):
+    async def _verb(id, payload, kernel):
+        return await _context_fold(id, payload, kernel, cfg)
+
+    _verb.__doc__ = _context_fold.__doc__
+    return _verb
+
+
 async def _context_forget(id, payload, kernel):
     """args: include_cleared:bool? (default false). Compacts this agent's OWN store: drops the rows the model can no longer see and keeps every fold. In ONE `prune` it removes every non-fold row covered by a fold whose place is known, every `view` row but the newest one after the last clear, and with `include_cleared` every row before the last `clear` (the clear row stays). Kept: every fold at every level, every row of an open chain, every row no fold covers, the members of a fold whose place cannot be known, and the newest `anchors` row a kept fold needs — a fold written without an `anchor` has its place recorded first, in one appended `anchors` row. Waits for a running turn. The next prompt is the same before and after. Afterwards `recall`, `grep` and `history {fold}` do not find a pruned id; `history {fold}` still returns the fold's title and summary. Returns {pruned, kept_folds, unanchored}."""
     from ai_core.folds import chains, is_fold, is_open, recorded_anchors
@@ -4599,6 +4790,8 @@ def build(
         "context_recall": _make_context_recall(cfg),
         # A new thread on the same store: the view starts here, nothing is deleted.
         "context_clear": _context_clear,
+        # Operator only: fold a chosen stretch of the view into one fold row.
+        "context_fold": _make_context_fold(cfg),
         # Compact the store: drop the rows the folds already summarise.
         "context_forget": _context_forget,
         # THE ROW EVENT: this agent announces its own rows to its watchers.
