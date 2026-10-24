@@ -166,21 +166,23 @@ def main() -> bool:
                     open_ = Mock(model="mock-x").start()
                     mocks.extend([keyed, open_])
                     base_y = 100 + i * 40
+                    # the spots sit right of the tree sidebar's 300px column (#148, open beside the canvas
+                    # on a wide screen): 320, 820 and 1320, 500 apart, the last still on the 1800px page
                     # A. a pasted key
-                    at = await wizard(pg, 200, base_y)
+                    at = await wizard(pg, 320, base_y)
                     p["A_page2"] = await page2(pg, provider, keyed.url, "mock-x", "new")
                     a, p["A_say"] = await create(pg, at)
                     p["A_answers"] = bool(a) and await turn(pg, a, keyed, "hi", f"answer-A-{provider}")
                     lap(f"{provider}.A")
                     p["A_keys"] = sorted({k for k in keyed.keys() if k is not None} | ({None} if None in keyed.keys() else set()), key=str)
                     # B. the same host: the saved key
-                    at = await wizard(pg, 700, base_y)
+                    at = await wizard(pg, 820, base_y)
                     p["B_page2"] = await page2(pg, provider, keyed.url, "mock-x", "saved")
                     b, p["B_say"] = await create(pg, at)
                     p["B_answers"] = bool(b) and await turn(pg, b, keyed, "hi", f"answer-B-{provider}")
                     lap(f"{provider}.B")
                     # C. no key, on the open mock
-                    at = await wizard(pg, 1200, base_y)
+                    at = await wizard(pg, 1320, base_y)
                     p["C_page2"] = await page2(pg, provider, open_.url, "mock-x", "none")
                     c, p["C_say"] = await create(pg, at)
                     if c is None:
@@ -230,7 +232,7 @@ def main() -> bool:
                         p["E_evidence"] = settings_evidence(rig, ai, e_sent, e_seen, e_end)
                     lap(f"{provider}.DE")
                     # F. a saved provider from page 1: the SAME cell rebound at once
-                    f = await wizard(pg, 200, base_y + 600)
+                    f = await wizard(pg, 320, base_y + 600)
                     saved = await pg.js("[...document.querySelectorAll('.wiz .saved button .name')].map(n=>n.textContent)")
                     p["F_saved_list"] = saved
                     await pg.js(f"[...document.querySelectorAll('.wiz .saved button')].find(b=>b.querySelector('.name')?.textContent==={json.dumps(provider + '-1')})?.click()")

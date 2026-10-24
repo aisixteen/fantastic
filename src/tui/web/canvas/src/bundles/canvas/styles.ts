@@ -191,7 +191,7 @@ export const CANVAS_CSS = `
   /* VIEWING ONE AGENT FULL: no world transform, the frame fills the page */
   #canvas.full-view .canvas-world { transform: none !important; }
   #canvas.full-view .agent-frame.full { left: 12px !important; top: 44px !important;
-    width: calc(100vw - 24px) !important; height: calc(100vh - 56px) !important; }
+    width: calc(100% - 24px) !important; height: calc(100vh - 56px) !important; }
   #canvas.full-view .agent-frame.full .resize-handle { display: none; }
   /* an AI cell not set up yet (the wizard's skip) */
   .ai-not-set-up { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -210,6 +210,22 @@ export const CANVAS_CSS = `
     background: ${tok("color.surface.pill")}; box-shadow: ${tok("shadow.pill")};
     color: ${tint("color.text.cool", 72)}; font: 400 13px/1.2 ${tok("font.family.sans")}; letter-spacing: 0.2px; }
   .full-hint[hidden] { display: none; }
+  /* THE TREE SIDEBAR (#148): beside the zoomed world, fixed to the viewport's left edge — a zoom
+     or a pan never moves or scales it. Over the canvas on a narrow screen (an overlay there). */
+  .tree-sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 2; display: flex; box-sizing: border-box; width: 300px; max-width: 80vw;
+    background: ${tok("color.surface.panel")}; border-right: 1px solid ${tint("color.accent.base", 30)}; }
+  .tree-sidebar.collapsed { width: 22px; }
+  .tree-sidebar .ts-toggle { flex: none; width: 22px; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer;
+    color: ${tint("color.text.cool", 60)}; font: 14px ${tok("font.family.mono")}; }
+  .tree-sidebar .ts-toggle:hover { color: ${tok("color.text.bright")}; background: ${tint("color.accent.base", 14)}; }
+  .tree-sidebar .ts-body { flex: 1; min-width: 0; display: flex; }
+  .tree-sidebar.collapsed .ts-body { display: none; }
+  .tree-sidebar .ts-body > .files-view { flex: 1; min-width: 0; }
+  /* ON A WIDE SCREEN the canvas sits beside the sidebar: its margin is the sidebar's width (the
+     widths of \`.tree-sidebar\` above, 300px open and 22px collapsed); a narrow screen's is an overlay */
+  .tree-beside { --tree-w: 22px; }
+  .tree-beside.tree-open { --tree-w: 300px; }
+  .tree-beside #canvas { margin-left: var(--tree-w); width: calc(100% - var(--tree-w)); }
   .full-hint b { color: ${tok("color.text.bright")}; font-weight: 600; }
   .full-hint kbd { font: 600 11px ${tok("font.family.mono")}; color: ${tok("color.accent.text")};
     padding: 2px 6px; margin: 0 1px; border-radius: ${tok("radius.key")}; background: ${tint("color.accent.base", 16)}; box-shadow: inset 0 0 0 1px ${tint("color.accent.base", 40)}; }

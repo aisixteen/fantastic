@@ -53,9 +53,14 @@ def main() -> bool:
                 # the column fills the width edge to edge (mobile is flat, owner 2026-10-12) and its chrome shows without hover
                 info["a_screen_w"] = await pg.js("Math.round(document.querySelector('.agent-frame[data-id=a]').getBoundingClientRect().width)")
                 info["a_head_opacity"] = await pg.js("getComputedStyle(document.querySelector('.agent-frame[data-id=a] > .frame-head')).opacity")
-                # the wheel over A's head bar (no gutter now; an iframe takes its own wheel)
+                # the wheel over A's head bar (no gutter now; an iframe takes its own wheel). Past the
+                # file tree's sidebar: on a phone it is an overlay over the canvas (#148) and takes the
+                # wheel where it covers the bar, so the point is just right of its right edge
                 head = await pg.rect(".agent-frame[data-id=a] > .frame-head")
-                await pg.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=(head or {}).get("x", 0) + 12, y=(head or {}).get("y", 0) + 16, deltaX=0, deltaY=300)
+                side = await pg.rect(".tree-sidebar")
+                info["phone_side"] = side
+                wheel_x = max((head or {}).get("x", 0), (side or {}).get("x", 0) + (side or {}).get("w", 0)) + 12
+                await pg.cdp("Input.dispatchMouseEvent", type="mouseWheel", x=wheel_x, y=(head or {}).get("y", 0) + 16, deltaX=0, deltaY=300)
                 await asyncio.sleep(0.6)
                 info["pinned_after_scroll"] = await pg.js(bottom)
                 info["phone_a_after_scroll"] = await left_top(pg, "a")
