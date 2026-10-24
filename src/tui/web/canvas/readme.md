@@ -77,6 +77,19 @@ delete path (a locked cell or agent refuses). The hidden set is on the view
 (`hidden: [<cell id>…]`), so a reload keeps the cells hidden. Picking a hidden
 agent in the sidebar shows its cell where it was.
 
+**Chat cards (#339).** A chat cell (`ai_view.ts`) shows a host agent's panel INLINE, where the
+AI's `embed {id}` row sits in the conversation (`history` lists it as a row of kind `embed`;
+`unembed {id}` takes it out). The card (`ai_view/chat_card.ts`) is 100% of the chat column
+wide and as tall as its panel says, at most `CHAT_CARD_MAX_HEIGHT` = 1200 px (taller content
+scrolls inside; the twin of ai-core's constant). Its panel is the one `place {backend_id}` draws
+(`mountHostPanel`), its calls go out as the chat cell, granted from the record's `view.calls`.
+**✕ hides** the card (its hide is `embed:<chat cell>:<agent>` in the view's hidden set, so a
+reload keeps it), **Shift+✕** and the menu **delete the agent** (the delete lock refuses, said),
+the menu's *remove card* is `unembed`. The host's `removed` state frame turns a card "deleted";
+a redraw with the agent gone shows `[deleted from canvas]`, and pressing it checks again.
+The AI is told, by a short message through its `send`, when a fresh card overflows the column
+or the cap.
+
 The view↔backend pairing is **never hardcoded** — each view's reflect names the
 host capability + verb surface it fronts; an LLM weaves the binding from that plus
 the host's capability readme.

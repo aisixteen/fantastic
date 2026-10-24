@@ -5229,6 +5229,8 @@ fn verb_docs_match_python_docstrings() {
             "rows",
             "inquiry",
             "history",
+            "embed",
+            "unembed",
             "status",
             "context_status",
             "recall",
@@ -6977,6 +6979,9 @@ mod stream_parts;
 
 #[path = "tests_stall.rs"]
 mod stall;
+/// Inline agent views in a chat (#339).
+#[path = "tests_embed.rs"]
+mod tests_embed;
 #[path = "tests_retries.rs"]
 mod tests_retries;
 

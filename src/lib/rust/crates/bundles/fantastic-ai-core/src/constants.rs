@@ -174,3 +174,11 @@ pub const FOLD_RUN: usize = 3;
 /// on the first dead turn would end long chains early; an unbounded reminder loop
 /// would never end).
 pub const MAX_SILENT_TURNS: usize = 10;
+
+// ─── inline agent views (#339) ──────────────────────────────────────────────
+
+/// The tallest a chat card may be, in CSS px. A card fills the chat column's
+/// width and its panel defines its height; content taller than this scrolls
+/// inside the card. The canvas's TS twin (`chat_card.ts`) says the same 1200 —
+/// a test reads both.
+pub const CHAT_CARD_MAX_HEIGHT: i64 = 1200;

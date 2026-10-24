@@ -38,7 +38,16 @@ export function canvasUrl(pageHref: string, id: string): string {
  *  relayed AS the cell's own agent. Shared by `html_view` (page content) and
  *  `agent_view` (a host agent's own view, `agent_view.ts`). `body` is read at
  *  every render; `reload_html` on the cell's inbox renders again. */
-export function mountPanel(ctx: ViewContext, body: () => string | Promise<string>): ViewHandle {
+export interface PanelOptions {
+  /** the key the panel's size reports are filed under (`fit.ts`); the cell's id by default.
+   *  A chat holding several cards gives each its own. */
+  sizeKey?: string;
+  /** forward the cell's inbox to the panel and re-render on `reload_html` (a cell's own
+   *  panel does; a card inside a chat does not: that inbox is the chat's) */
+  cellInbox?: boolean;
+}
+
+export function mountPanel(ctx: ViewContext, body: () => string | Promise<string>, opts: PanelOptions = {}): ViewHandle & { reload(): void } {
   {
     const { kernel, mount, selfId } = ctx;
     const iframe = document.createElement("iframe");
@@ -74,10 +83,14 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
 
     // Messages the kernel delivers to THIS agent's inbox → forward to the iframe's
     // connector (`onMessage`). `reload_html` (from `set_html`) re-renders instead.
-    const offInbox = kernel.onInbox(selfId, (p) => {
-      if ((p as Payload)["type"] === "reload_html") render();
-      else toIframe({ op: "inbox", payload: p });
-    });
+    const sizeKey = opts.sizeKey ?? selfId;
+    const offInbox =
+      opts.cellInbox === false
+        ? (): void => {}
+        : kernel.onInbox(selfId, (p) => {
+            if ((p as Payload)["type"] === "reload_html") render();
+            else toIframe({ op: "inbox", payload: p });
+          });
 
     // The relay: connector(postMessage) → the REAL JS kernel. The kernel does the
     // local-vs-host routing — the iframe never knows or cares which.
@@ -158,7 +171,7 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
         case "size": {
           // the panel measured its content (`fit.ts`): what `fit` sizes the cell to
           const z = m as unknown as { mw?: unknown; h?: unknown; ox?: unknown };
-          if (typeof z.mw === "number" && typeof z.h === "number") reportSize(selfId, { mw: z.mw, h: z.h, ox: z.ox === true });
+          if (typeof z.mw === "number" && typeof z.h === "number") reportSize(sizeKey, { mw: z.mw, h: z.h, ox: z.ox === true });
           break;
         }
         case "unwatch": {
@@ -172,10 +185,11 @@ export function mountPanel(ctx: ViewContext, body: () => string | Promise<string
     window.addEventListener("message", onMsg);
 
     return {
+      reload: render,
       unmount(): void {
         window.removeEventListener("message", onMsg);
         offInbox();
-        forgetSize(selfId);
+        forgetSize(sizeKey);
         for (const off of watchOffs.values()) off();
         watchOffs.clear();
         iframe.remove();

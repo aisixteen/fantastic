@@ -1,0 +1,25 @@
+# INLINE AGENT VIEWS IN A CHAT (#339), on the canvas. No model: a scripted model
+# (`e2e/mocks/vllm.py`) answers the chat's AI, and a REAL headless Chrome drives the
+# canvas's chat cell over CDP. The scripted model creates a host agent with a `view`
+# record and embeds it by id; the card draws inside the chat cell at the column's
+# full width with a defined height of at most 1200 px (CHAT_CARD_MAX_HEIGHT).
+
+id: canvas_chat_cards
+title: a chat shows a host agent's panel as a card — created and embedded by the model, kept across a reload and a restart
+runtimes: [canvas_chat]
+costs: free
+
+port_base: 18850
+window: {width: 1280, height: 900}
+mode: scripted
+
+runs:
+  - embed            # the model creates a host agent with a view and embeds it: full column width, height <= 1200, the reply carries the box and the cap
+  - live-update      # the agent emits an update and the card redraws, no polling
+  - overflow-hint    # a panel taller than the cap: the card is capped at 1200 and the model is told to redo it
+  - reload           # a page reload brings the cards back, in the same places, live
+  - restart          # a kernel restart does the same
+  - delete-open      # delete the agent with the chat open: its card turns "deleted"
+  - delete-closed    # delete it with the chat closed: [deleted from canvas] after a reload; the press re-checks (back: re-attaches; gone: asks, then unembeds)
+  - unembed          # the card's menu removes it; it stays gone after a reload
+  - canvas-and-chat  # the same agent on the canvas and in the chat: hiding the canvas cell leaves the chat card
