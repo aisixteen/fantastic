@@ -22,7 +22,7 @@
 //! | `watch{src}` / `unwatch{src}` | `event{src,payload}` |
 //! | `onmessage` / `offmessage` | `inbox{payload}` |
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use fantastic_bundle::py_truthy;
@@ -52,6 +52,78 @@ static OWNER_INBOX: OnceLock<Mutex<HashMap<AgentId, OwnerInbox>>> = OnceLock::ne
 
 fn owner_inbox() -> &'static Mutex<HashMap<AgentId, OwnerInbox>> {
     OWNER_INBOX.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// How many refused payloads one owner's ledger keeps; the oldest is evicted past it.
+pub(crate) const REFUSED_CAP: usize = 256;
+
+/// The mail this leg's handler REFUSED, per owner, noted at SEND time. The fanout
+/// queues a copy of every payload before the handler runs, so the verdict on a piece
+/// of mail must be carried from the handler to the drain: a drain that re-reads the
+/// live record when it dequeues would deliver refused mail if the leg was reopened in
+/// between.
+static REFUSED: OnceLock<Mutex<HashMap<AgentId, VecDeque<Value>>>> = OnceLock::new();
+
+fn refused() -> &'static Mutex<HashMap<AgentId, VecDeque<Value>>> {
+    REFUSED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// True when a relay has registered an inbox drain for `owner`.
+pub(crate) fn has_owner_inbox(owner: &AgentId) -> bool {
+    owner_inbox()
+        .lock()
+        .expect("OWNER_INBOX")
+        .contains_key(owner)
+}
+
+/// Record that `payload`, sent to `owner`, was refused. Bounded by [`REFUSED_CAP`].
+pub(crate) fn note_refused(owner: &AgentId, payload: &Value) {
+    let mut g = refused().lock().expect("REFUSED");
+    let q = g.entry(owner.clone()).or_default();
+    if q.len() >= REFUSED_CAP {
+        q.pop_front();
+    }
+    q.push_back(payload.clone());
+}
+
+/// Remove ONE noted refusal equal to `payload`; true when there was one.
+pub(crate) fn take_refused(owner: &AgentId, payload: &Value) -> bool {
+    let mut g = refused().lock().expect("REFUSED");
+    let Some(q) = g.get_mut(owner) else {
+        return false;
+    };
+    let hit = q.iter().position(|v| v == payload).map(|i| q.remove(i));
+    if q.is_empty() {
+        g.remove(owner);
+    }
+    hit.is_some()
+}
+
+fn clear_refused(owner: &AgentId) {
+    refused().lock().expect("REFUSED").remove(owner);
+}
+
+#[cfg(test)]
+pub(crate) fn refused_len(owner: &AgentId) -> usize {
+    refused()
+        .lock()
+        .expect("REFUSED")
+        .get(owner)
+        .map_or(0, VecDeque::len)
+}
+
+/// Register an owner inbox row with no drain task, so a test can pull the queued
+/// items itself and run them through [`drain_verdict`].
+#[cfg(test)]
+pub(crate) fn register_owner_inbox_for_test(owner: &AgentId, job_id: TaskId, proxy: &AgentId) {
+    owner_inbox().lock().expect("OWNER_INBOX").insert(
+        owner.clone(),
+        OwnerInbox {
+            job_id,
+            proxy: proxy.clone(),
+            drain: TaskId(0),
+        },
+    );
 }
 
 /// A `watch` subscription held on the job's behalf.
@@ -199,6 +271,27 @@ fn inbox_framer(p: &Value, owner: &AgentId, job_id: TaskId, kernel: &Kernel) -> 
         return None;
     }
     Some(json!({"op": "inbox", "payload": p}))
+}
+
+/// The drain's verdict on ONE queued item: the frame to write, or `None` to drop it.
+/// Mail the handler refused at send time ([`note_refused`]) is dropped whatever the
+/// record says now; the live gate in [`inbox_framer`] still catches an item the
+/// drain dequeues before the handler has noted it.
+pub(crate) fn drain_verdict(
+    p: &Value,
+    owner: &AgentId,
+    job_id: TaskId,
+    kernel: &Kernel,
+) -> Option<Value> {
+    if take_refused(owner, p) {
+        return None;
+    }
+    let f = inbox_framer(p, owner, job_id, kernel);
+    if f.is_none() {
+        // dropped by its own gate: leave no entry behind for it
+        take_refused(owner, p);
+    }
+    f
 }
 
 /// Read one `[4-byte BE len | payload]` frame. `None` = the socket is finished:
@@ -374,6 +467,7 @@ pub async fn serve(
                 // makes the gap safe: it can receive no more mail in the interim.
                 let prev = owner_inbox().lock().expect("OWNER_INBOX").remove(&owner);
                 if let Some(prev) = prev {
+                    clear_refused(&owner);
                     kernel.unwatch(&owner, &prev.proxy).await;
                     kernel.remove_inbox(&prev.proxy);
                     kernel.cancel_task(&prev.drain).await;
@@ -401,7 +495,7 @@ pub async fn serve(
                 let drain = kernel.spawn_task(&owner, "inbox_drain", async move {
                     while let Some(p) = rx.recv().await {
                         let Some(k) = weak.upgrade() else { break };
-                        if let Some(f) = inbox_framer(&p.payload, &o, job_id, &k) {
+                        if let Some(f) = drain_verdict(&p.payload, &o, job_id, &k) {
                             push_item(&w, f, &p).await;
                         }
                     }
@@ -454,7 +548,7 @@ pub struct Extra {
 
 /// Give up the owner's inbox — but ONLY if it still names this job. A predecessor
 /// tearing down after being superseded must not unhook its replacement.
-async fn release_owner_inbox(kernel: &Arc<Kernel>, owner: &AgentId, job_id: TaskId) {
+pub(crate) async fn release_owner_inbox(kernel: &Arc<Kernel>, owner: &AgentId, job_id: TaskId) {
     let mine = {
         let mut g = owner_inbox().lock().expect("OWNER_INBOX");
         match g.get(owner) {
@@ -463,6 +557,7 @@ async fn release_owner_inbox(kernel: &Arc<Kernel>, owner: &AgentId, job_id: Task
         }
     };
     if let Some(c) = mine {
+        clear_refused(owner);
         kernel.unwatch(owner, &c.proxy).await;
         kernel.remove_inbox(&c.proxy);
         kernel.cancel_task(&c.drain).await;
