@@ -30,6 +30,7 @@ export type Pick =
   | { kind: "tips" }
   | { kind: "mcp" }
   | { kind: "user_store" }
+  | { kind: "system"; id: string }
   | { kind: "chat"; id: string; name: string }
   | { kind: "bundle"; starter: string }
   | { kind: "instance"; bundle: string }
@@ -46,6 +47,8 @@ export interface Presets {
   bundles?: Array<{ name: string; sentence: string }>;
   /** this canvas's PAGE bundles (`<web root>/bundles/`, e.g. on the html base) */
   pageBundles?: Array<{ name: string; sentence: string }>;
+  /** the machine's agents here (`system` recipe, `backend presets`), each placeable as a host cell */
+  system?: string[];
 }
 
 /** THE CODING AGENTS the menu knows (owner 2026-10-08): LAUNCHERS — a tile
@@ -128,6 +131,11 @@ export function tiles(typed: string, presets: Presets | null): Tile[] {
   out.push(aiTile(t));
   for (const [k, pick, icon, section] of KINDS) {
     if (!t || k.toLowerCase().startsWith(low)) out.push({ icon, label: k, hint: "", pick, section });
+  }
+  // the machine's agents (power, …): a host tile each, placed as the agent's own view
+  for (const id of presets?.system ?? []) {
+    if (t && !id.toLowerCase().startsWith(low)) continue;
+    out.push({ icon: "agent", label: id, hint: "", pick: { kind: "system", id }, section: "host" });
   }
   for (const c of presets?.coding ?? []) {
     if (t && !c.name.startsWith(low)) continue;

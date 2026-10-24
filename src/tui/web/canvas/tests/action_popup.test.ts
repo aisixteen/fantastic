@@ -110,3 +110,11 @@ test("ONE way to make an AI: the \"AI agent\" tile — typed exactly, that tile 
   assert.deepEqual(tiles("ai agent", { preferred: null, dialogs: [] }).map((x) => x.pick), [{ kind: "setup" }]);
   assert.equal(tiles("", P).filter((x) => x.label.toLowerCase().includes("ai agent")).length, 1);
 });
+
+test("the machine's agents: a host tile each, placed by id; none when the recipe was not named", () => {
+  assert.ok(!tiles("", P).some((x) => x.pick.kind === "system"), "no system tiles without the recipe");
+  const t = tiles("", { ...P, system: ["power"] }).filter((x) => x.pick.kind === "system");
+  assert.deepEqual(t.map((x) => [x.label, x.section, x.pick]), [["power", "host", { kind: "system", id: "power" }]]);
+  assert.deepEqual(tiles("po", { ...P, system: ["power"] }).filter((x) => x.pick.kind === "system").map((x) => x.label), ["power"]);
+  assert.deepEqual(tiles("zz", { ...P, system: ["power"] }).filter((x) => x.pick.kind === "system"), []);
+});

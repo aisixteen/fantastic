@@ -1,0 +1,16 @@
+// fantastic-session: the kiosk user runs its own machine, with no password
+// prompt, whatever the state of the kiosk session (a restart interrupts it).
+polkit.addRule(function (action, subject) {
+  if (subject.user !== "fantastic") return polkit.Result.NOT_HANDLED;
+  if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0) return polkit.Result.YES;
+  switch (action.id) {
+    case "org.freedesktop.login1.power-off":
+    case "org.freedesktop.login1.reboot":
+    case "org.freedesktop.login1.suspend":
+    case "org.freedesktop.login1.hibernate":
+    case "org.freedesktop.login1.power-off-multiple-sessions":
+    case "org.freedesktop.login1.reboot-multiple-sessions":
+      return polkit.Result.YES;
+  }
+  return polkit.Result.NOT_HANDLED;
+});

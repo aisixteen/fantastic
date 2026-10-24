@@ -88,6 +88,9 @@ fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegist
     // THE HUMAN, as an agent. This is the id the terminal acts as, so every act
     // carries a ledger row naming a person instead of an operator injection.
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
+    // THE MACHINE'S AGENTS (`system` recipe): Linux only, on the D-Bus services
+    #[cfg(target_os = "linux")]
+    fantastic_system_agents::register(&mut reg);
     // THE MCP LEG — a bundle from outside the kernel tree. Registered so a
     // persisted `mcp` record hydrates into a live agent on every run; the
     // record itself is only ever created by `fantastic mcp`, never by the
@@ -713,6 +716,8 @@ mod tests {
             "web_mcp.tools",
             "web_ws.tools",
         ];
+        #[cfg(target_os = "linux")]
+        want.extend(fantastic_system_agents::HANDLER_MODULES);
         #[cfg(feature = "foundation-models")]
         want.push(fantastic_foundation_models_backend::HANDLER_MODULE);
         #[cfg(feature = "vllm")]

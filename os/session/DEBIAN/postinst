@@ -19,4 +19,16 @@ if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigur
     echo "fantastic-session: the kiosk starts on the next boot (or: systemctl start fantastic-kiosk)"
   fi
 fi
+if [ "$1" = configure ] || [ "$1" = abort-upgrade ] || [ "$1" = abort-deconfigure ] || [ "$1" = abort-remove ]; then
+  # the system canvas's folder (tmpfiles.d), and its user unit, enabled for every
+  # user's manager (it runs in the kiosk user's only: ConditionUser=)
+  if [ -x "$(command -v systemd-tmpfiles)" ]; then
+    systemd-tmpfiles --create fantastic-session.conf || true
+  fi
+  if deb-systemd-helper --quiet --user was-enabled fantastic-system.service; then
+    deb-systemd-helper --user enable fantastic-system.service >/dev/null || true
+  else
+    deb-systemd-helper --user update-state fantastic-system.service >/dev/null || true
+  fi
+fi
 exit 0

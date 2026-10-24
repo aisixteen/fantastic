@@ -1,0 +1,61 @@
+//! THE OS TREE: the ports the driver runs the ViewModels against, and the one
+//! place each OS implements them. Linux has the real ones (`linux/`); every
+//! other OS gets [`other`], which refuses. Nothing outside this tree, and
+//! nothing outside `linux/` inside it, may name an OS crate or a process.
+
+use std::sync::Arc;
+
+use fantastic_system::power;
+
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(not(target_os = "linux"))]
+pub mod other;
+
+/// Why an OS call failed. The reply's `reason` is the lower-case name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OsError {
+    /// The service is not there.
+    Unavailable(String),
+    /// The OS said no (authentication, policy).
+    Denied(String),
+    /// Anything else.
+    Failed(String),
+}
+
+impl OsError {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            OsError::Unavailable(_) => "unavailable",
+            OsError::Denied(_) => "denied",
+            OsError::Failed(_) => "failed",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            OsError::Unavailable(m) | OsError::Denied(m) | OsError::Failed(m) => m,
+        }
+    }
+}
+
+/// The power agent's port: UPower and logind, flattened.
+#[async_trait::async_trait]
+pub trait PowerOs: Send + Sync {
+    async fn read(&self) -> Result<power::Read, OsError>;
+    async fn call(&self, c: power::Call) -> Result<(), OsError>;
+    /// OS-side changes, as VM events, until the port is dropped.
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<power::Event>;
+}
+
+/// The real power port of this OS.
+pub async fn power() -> Arc<dyn PowerOs> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::power().await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Arc::new(other::Unsupported)
+    }
+}

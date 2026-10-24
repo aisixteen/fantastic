@@ -1,0 +1,21 @@
+[Unit]
+Description=fantastic OS: the system canvas in /home/fantastic/system (network, audio, power, displays, notifications, lock)
+Documentation=https://github.com/aisixteen/fantastic/tree/main/os
+# enabled for every user's manager; it runs in the kiosk user's only
+ConditionUser=fantastic
+# the machine's agents come back however often they fall: no start rate limit
+StartLimitIntervalSec=0
+
+[Service]
+# READY=1 once the canvas serves and its MCP socket listens
+Type=notify
+WorkingDirectory=/home/fantastic/system
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus WAYLAND_DISPLAY=wayland-0
+ExecStart=/usr/bin/fantastic canvas system
+# list it in the Home: this canvas's own registry switch, on
+ExecStartPost=/usr/bin/fantastic send '{"target":"user","payload":{"type":"forward","target":"user_store","payload":{"type":"register_home_folder","value":true}}}'
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

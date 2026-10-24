@@ -954,6 +954,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       dialogs: ((d?.["dialogs"] as Presets["dialogs"] | undefined) ?? []).map((x) => ({ id: x.id, name: x.name })),
       coding: await codingAgents(),
       bundles: (r["bundles"] as Presets["bundles"]) ?? [],
+      system: (r["system"] as string[] | undefined) ?? [],
       // this canvas's page bundles: folder rows with a base, loaded (not refused)
       pageBundles: kernel
         .availableBundles()
@@ -1928,6 +1929,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         else if (p.kind === "backgrounds") spawnBackgroundsAt(w);
         // THE USER STORE: a view of the host's `user_store` agent (its own html view)
         else if (p.kind === "user_store") void kernel.send([{ target: containerNow(), payload: { type: "place", backend_id: "user_store", x: Math.round(w.x), y: Math.round(w.y), width: 440, height: 560 } as unknown as Payload }]).then((r) => {
+          const e = (r[0]?.result as Rec | null)?.["error"];
+          if (typeof e === "string") toast(`✕ ${e}`);
+        });
+        // THE MACHINE'S AGENTS (`system` recipe): the agent's own html view, 380x420
+        else if (p.kind === "system") void kernel.send([{ target: containerNow(), payload: { type: "place", backend_id: p.id, x: Math.round(w.x), y: Math.round(w.y), width: 380, height: 420 } as unknown as Payload }]).then((r) => {
           const e = (r[0]?.result as Rec | null)?.["error"];
           if (typeof e === "string") toast(`✕ ${e}`);
         });
