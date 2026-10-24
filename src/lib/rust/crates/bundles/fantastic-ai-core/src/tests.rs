@@ -5529,6 +5529,82 @@ fn owed_under(me: &str) -> Vec<String> {
     pids
 }
 
+/// A held send reads `alive` before it stores its row; the chain can end in that
+/// await. The late push must revive the chain and wake it, or no pass ever reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_held_on_a_chain_that_just_ended_wakes_it() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "held_dead").await;
+    let s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let state = crate::state::state_for(&backend);
+    state.chain.lock().unwrap().alive = true;
+    // The chain ends (nothing held yet) while the send is still storing its row.
+    crate::route::chain_ended(&kernel, &backend, None);
+    assert!(!state.chain.lock().unwrap().alive);
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    crate::verbs::push_held_or_wake(
+        &kernel,
+        &backend,
+        None,
+        crate::state::HeldMsg {
+            client_id: "h".to_string(),
+            send_id: "sid".to_string(),
+            reply: tx,
+        },
+    );
+    assert!(
+        until_passes(&s, 1).await,
+        "the late held message never woke the chain"
+    );
+}
+
+/// A held reply that settles an owed pid must be visible as held BEFORE the pid
+/// stops being owed: never an instant with nothing owed and nothing held, which is
+/// what makes an `await` read "nothing to wait for".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_inquiry_reply_keeps_the_pid_owed_until_it_is_held() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "held_owed").await;
+    let _s = script(
+        &backend,
+        vec![pass(r#"<call name="done"></call>"#)],
+        Duration::ZERO,
+    );
+    let me = backend.as_str().to_string();
+    crate::route::owe(&me, "7");
+    let state = crate::state::state_for(&backend);
+    {
+        let mut c = state.chain.lock().unwrap();
+        c.alive = true;
+        c.token = "tok".to_string();
+    }
+    let k = Arc::clone(&kernel);
+    let b = backend.clone();
+    let sender = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "[reply to 7 \u{b7} peer inquiry]", "client_id": "peer"}),
+        )])
+        .await
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let owed = owed_under(&me);
+        let held = state.chain.lock().unwrap().held.len();
+        if owed.is_empty() {
+            assert_eq!(held, 1, "nothing owed and nothing held at once");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the pid stayed owed");
+        tokio::task::yield_now().await;
+    }
+    sender.abort();
+}
+
 /// An answer that beats the owed registration is settled BEFORE `owe` runs; the
 /// pid must not be left owed afterwards (the stale count that made `await` lie).
 #[test]

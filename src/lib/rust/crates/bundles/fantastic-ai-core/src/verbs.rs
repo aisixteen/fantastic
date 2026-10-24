@@ -868,6 +868,72 @@ impl Drop for QueuedGuard {
     }
 }
 
+/// The owed pids a message settles, settled once: at the point the message is
+/// visible where an `await` can see it, or at the latest when `send` returns.
+struct OwedSettle {
+    agent: String,
+    text: Option<String>,
+}
+
+impl OwedSettle {
+    fn now(&mut self) {
+        if let Some(t) = self.text.take() {
+            crate::route::settle_owed(&self.agent, &t);
+        }
+    }
+}
+
+impl Drop for OwedSettle {
+    fn drop(&mut self) {
+        self.now();
+    }
+}
+
+/// Whether this send is one of the chain's own turns (never held).
+fn is_chain_turn(
+    state: &crate::state::BackendState,
+    agent_id: &AgentId,
+    chain_token: &str,
+) -> bool {
+    (!chain_token.is_empty() && state.chain.lock().expect("chain poisoned").token == chain_token)
+        || fantastic_kernel::current_origin().is_some_and(|o| o == *agent_id)
+}
+
+/// What `send` will decide about the hold, read early (the chain can still end
+/// before the real decision, which is why the settle also runs on every other path).
+fn would_hold(state: &crate::state::BackendState, agent_id: &AgentId, payload: &Value) -> bool {
+    let token = payload.get("chain").and_then(Value::as_str).unwrap_or("");
+    !is_chain_turn(state, agent_id, token) && state.chain.lock().expect("chain poisoned").alive
+}
+
+/// Hold a message on the agent's chain. The chain may have ended while the row was
+/// being stored (the caller read `alive` before that await): the push and the
+/// `alive` read are ONE critical section, and a message pushed onto a dead chain
+/// revives it and wakes it, or nothing would ever read the message.
+pub(crate) fn push_held_or_wake(
+    kernel: &Arc<Kernel>,
+    agent_id: &AgentId,
+    system_prompt: Option<&str>,
+    msg: crate::state::HeldMsg,
+) {
+    let state = state_for(agent_id);
+    let revived = {
+        let mut chain = state.chain.lock().expect("chain poisoned");
+        chain.held.push(msg);
+        let dead = !chain.alive;
+        if dead {
+            chain.alive = true;
+            if chain.token.is_empty() {
+                chain.token = mint_send_id();
+            }
+        }
+        dead
+    };
+    if revived {
+        crate::route::chain_ended(kernel, agent_id, system_prompt);
+    }
+}
+
 /// The shared `send` flow: guard the call chain → the memory store named (fail
 /// loud) → a `late` reply recorded, never a turn → enqueue → FIFO lock → run the
 /// generation under a timeout → clean up → ROUTE the pass's output. The backend
@@ -908,7 +974,18 @@ pub async fn send(
         _ => String::new(),
     };
     // AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
-    crate::route::settle_owed(agent_id.as_str(), &text);
+    //
+    // A message that will be HELD settles only once it is visible as held (see
+    // `push_held_or_wake`): settling first drops the pid from `awaiting()` while
+    // the message is in no queue, and a concurrent `await` then sees nothing to
+    // wait for. Every other path settles here, as before.
+    let mut owed = OwedSettle {
+        agent: agent_id.as_str().to_string(),
+        text: Some(text.clone()),
+    };
+    if !would_hold(&state_for(agent_id), agent_id, payload) {
+        owed.now();
+    }
     // A MESSAGE FROM ANOTHER AGENT OPENS WITH WHO SENT IT — python's
     // `[from <sender> · to a, b · msg N · re N]` line. Without it a peer's
     // inquiry arrives as bare prose and the receiver cannot tell it is being
@@ -1015,9 +1092,7 @@ pub async fn send(
         .unwrap_or("")
         .to_string();
     // A message the agent sends to ITSELF is its own chain and is never held.
-    let chain_turn = (!chain_token.is_empty()
-        && state.chain.lock().expect("chain poisoned").token == chain_token)
-        || fantastic_kernel::current_origin().is_some_and(|o| o == *agent_id);
+    let chain_turn = is_chain_turn(&state, agent_id, &chain_token);
     // An inquiry's answer obeys the hold like any other message: it is read by the
     // chain's next pass, never a second chain of its own.
     let chain_alive = state.chain.lock().expect("chain poisoned").alive;
@@ -1038,16 +1113,18 @@ pub async fn send(
         // A held send RETURNS THE ANSWER of the pass that reads it (#227): its
         // caller waits on the oneshot the answering pass sends into.
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        state
-            .chain
-            .lock()
-            .expect("chain poisoned")
-            .held
-            .push(crate::state::HeldMsg {
+        push_held_or_wake(
+            kernel,
+            agent_id,
+            system_prompt_for_route.as_deref(),
+            crate::state::HeldMsg {
                 client_id: client_id.clone(),
                 send_id: send_id.clone(),
                 reply: reply_tx,
-            });
+            },
+        );
+        // Only now is the message visible as held: settle what it answers.
+        owed.now();
         let mut detail = Map::new();
         detail.insert("send_id".to_string(), json!(send_id));
         detail.insert("ahead".to_string(), json!(0));
@@ -1067,6 +1144,7 @@ pub async fn send(
     }
 
     // Enqueue.
+    owed.now();
     let queued_at = now_secs();
     // A notice is this agent's own harness text: honoured only when the agent sent
     // it to itself (or the operator did), so no peer can hide a message from a
@@ -1133,8 +1211,8 @@ pub async fn send(
     // was decided under. If that chain has since ended (a stop, a reboot, a clear,
     // a lost wake) the token no longer matches: the reply is RECORDED, never a
     // turn, so it cannot resume or double the chain.
-    let stale = !chain_token.is_empty()
-        && state.chain.lock().expect("chain poisoned").token != chain_token;
+    let stale =
+        !chain_token.is_empty() && state.chain.lock().expect("chain poisoned").token != chain_token;
     if stale {
         save_late(agent_id, kernel, payload).await?;
         drop(_guard);
