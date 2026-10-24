@@ -1249,3 +1249,5 @@ mod tests_pump_identity;
 mod tests_text;
 #[cfg(test)]
 mod tests_watch;
+#[cfg(test)]
+mod tests_watch_missing;
