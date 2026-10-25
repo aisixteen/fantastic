@@ -5,7 +5,9 @@
 # cancels the older one. Two sizes:
 #
 #   units only (default)   a bug fix: every runtime's unit tests, debug, on
-#                          Linux, macOS and Windows
+#                          Linux, macOS and Windows (`-f units_os=linux`: on
+#                          Linux only, for a quick check; a full run always
+#                          covers all three)
 #   full (`-f e2e=true`)   a completed phase or a release: the units, plus
 #                          every release target's archive, the model-free
 #                          e2e on those binaries, and the fantastic OS image
@@ -14,6 +16,8 @@
 # The reusable BUILD (`build.yml`) is called up to four times:
 #
 #   units     debug    every runtime's unit tests on Linux, macOS and Windows
+#                      (`units_os`: Linux only when `units_os=linux`, unless
+#                      the run is full)
 #   binaries  release  every release target's archive (`release-<target>`),
 #                      per OS the binaries the e2e runs, and the desktop app
 #                      (`app-<triple>`) — side by side with units (full runs only)
@@ -47,6 +51,11 @@ on:
         description: "Full run — also build every release binary and run the e2e (a completed phase, a release). Off: the unit suites only (a bug fix)."
         type: boolean
         default: false
+      units_os:
+        description: "The units' OS set. all (default): Linux, macOS and Windows. linux: Linux only, for a quick check. A full run (e2e) always runs the units on all three."
+        type: choice
+        options: [all, linux]
+        default: all
 
 permissions:
   contents: read
@@ -61,6 +70,8 @@ jobs:
     with:
       profile: debug
       units: true
+      # a full run keeps every OS, whatever units_os says
+      units_os: ${{ inputs.e2e && 'all' || inputs.units_os }}
 
   binaries:
     if: inputs.e2e
