@@ -873,3 +873,188 @@ async def test_a_cancelled_fire_error_reads_none():
         fake.outcome = outcome
         (ev,) = await tools._fire_many("sch_cx", due, fake)
         assert (ev["result"], ev["error"]) == want, (outcome, ev)
+
+
+# ─── Rust-parity twins (#170): python is the spec, these pin it ──────────────
+
+
+async def test_readme_present_and_titled(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+    r = await _send(seeded_kernel, sid, {"type": "reflect", "readme": True})
+    assert isinstance(r.get("readme"), str) and r["readme"], r
+    assert "scheduler" in r["readme"]
+
+
+async def test_reflect_reports_state(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+    try:
+        r = await _send(seeded_kernel, sid, {"type": "reflect"})
+        assert r["id"] == sid
+        assert r["paused"] is False
+        assert isinstance(r["sentence"], str) and r["sentence"]
+        # create_agent auto-fires boot, so the tick loop runs by reflect time.
+        assert r["running"] is True
+    finally:
+        await _send(seeded_kernel, sid, {"type": "pause"})
+
+
+async def test_shutdown_is_an_unknown_type(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+    r = await _send(seeded_kernel, sid, {"type": "shutdown"})
+    assert r["error"] == "scheduler: unknown type 'shutdown'"
+    assert r["reason"] == "unhandled"
+
+
+async def test_boot_twice_replies_running_only(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+    for _ in range(2):
+        assert await _send(seeded_kernel, sid, {"type": "boot"}) == {"running": True}
+
+
+async def test_schedule_validation_order_is_pythons(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+
+    async def call(p):
+        return await _send(seeded_kernel, sid, {"type": "schedule", **p})
+
+    # No target AND a bad interval => the INTERVAL is named.
+    r = await call({"interval_seconds": "60", "payload": {"type": "ping"}})
+    assert r["arg"] == "interval_seconds", r
+    # A non-object payload beats the interval.
+    r = await call({"payload": [1], "interval_seconds": "60"})
+    assert r["arg"] == "payload", r
+    # No target AND no payload.type => the TARGET is named.
+    r = await call({"payload": {}})
+    assert r["error"] == "schedule: target required", r
+    # A truthy NON-STRING target is stored verbatim.
+    r = await call({"target": 7, "payload": {"type": "ping"}})
+    assert r["schedule"]["target"] == 7, r
+
+
+async def test_empty_schedule_id_is_absent_like_python(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+
+    async def call(p):
+        return await _send(seeded_kernel, sid, p)
+
+    for falsy in ("", None, 0):
+        r = await call({"type": "unschedule", "schedule_id": falsy})
+        assert r["error"] == "unschedule: schedule_id required", r
+        r = await call({"type": "tick_now", "schedule_id": falsy})
+        assert r["error"] == "tick_now: schedule_id required", r
+        # A falsy id on pause is the WHOLE-SCHEDULER form.
+        r = await call({"type": "pause", "schedule_id": falsy})
+        assert r["scheduler_id"] == sid, r
+    r = await call({"type": "unschedule", "schedule_id": 7})
+    assert r["removed"] is False and r["schedule_id"] == 7, r
+
+
+async def test_paused_meta_uses_python_truthiness(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+    await seeded_kernel.send(
+        [
+            {
+                "target": "kernel_state",
+                "payload": {"type": "update_agent", "id": sid, "paused": "no"},
+            }
+        ]
+    )
+    r = await _send(seeded_kernel, sid, {"type": "reflect"})
+    assert r["paused"] is True, r
+
+
+async def test_schedules_sidecar_uses_python_yaml_layout(
+    seeded_kernel, store_agent, tmp_path
+):
+    sid = await _make_scheduler(seeded_kernel)
+    r = await _send(
+        seeded_kernel,
+        sid,
+        {"type": "schedule", "target": "córe", "payload": {"type": "list_agents"}},
+    )
+    assert isinstance(r.get("schedule_id"), str), r
+    body = (tmp_path / ".fantastic" / "agents" / sid / "schedules.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert body.startswith("- id: "), body
+    assert "\n  target: córe\n" in body, body
+    assert "\n  payload:\n    type: list_agents\n" in body, body
+
+
+async def test_pause_reply_key_order_matches_python(seeded_kernel, store_agent):
+    sid = await _make_scheduler(seeded_kernel)
+    r = await _send(seeded_kernel, sid, {"type": "pause", "schedule_id": "nope"})
+    assert list(r) == ["paused", "schedule_id"]
+    r = await _send(seeded_kernel, sid, {"type": "resume", "schedule_id": "nope"})
+    assert list(r) == ["resumed", "schedule_id"]
+
+
+async def test_a_failed_persist_prints_python_line(seeded_kernel, caplog):
+    # No store_agent: every persist fails.
+    from scheduler import tools
+
+    sid = await _make_probed_scheduler(seeded_kernel, "sch_log_host", ["p_log"])
+    try:
+        _seed_schedule(
+            sid, "sch_log", "p_log", next_run=time.time() - 1, interval_seconds=60
+        )
+        with caplog.at_level("WARNING", logger="scheduler.tools"):
+            await _send(seeded_kernel, sid, {"type": "boot"})
+            assert await _wait_for(lambda: "p_log" in _probe.hits, 3.0), _probe.hits
+            msgs: list[str] = []
+            assert await _wait_for(
+                lambda: (
+                    msgs.__setitem__(slice(None), [r.getMessage() for r in caplog.records])
+                    or any("history persist failed" in m for m in msgs)
+                ),
+                3.0,
+            ), msgs
+        await _send(seeded_kernel, sid, {"type": "pause"})
+        persist = [m for m in msgs if m.startswith(f"scheduler {sid}: persist failed: ")]
+        assert persist and "no store" in persist[0], msgs
+        history = [
+            m for m in msgs if m.startswith(f"scheduler {sid}: history persist failed: ")
+        ]
+        assert history and "no store" in history[0], msgs
+    finally:
+        tools._cache.pop(sid, None)
+
+
+async def test_unknown_type_wire_shape_is_byte_exact(seeded_kernel, store_agent):
+    import json
+
+    from scheduler import tools
+
+    sid = await _make_scheduler(seeded_kernel)
+    r = await _send(seeded_kernel, sid, {"type": "frob"})
+    assert r == {
+        "error": "scheduler: unknown type 'frob'",
+        "reason": "unhandled",
+        "verb": "frob",
+    }
+    assert list(r) == ["error", "reason", "verb"]
+    r = await tools.handler(sid, {}, seeded_kernel)
+    assert json.dumps(r) == (
+        '{"error": "scheduler: unknown type None", "reason": "unhandled", "verb": null}'
+    )
+
+
+async def test_schedule_ids_are_sch_and_token_hex_3(seeded_kernel, store_agent):
+    import re
+
+    sid = await _make_scheduler(seeded_kernel)
+    seen = set()
+    for _ in range(8):
+        r = await _send(
+            seeded_kernel,
+            sid,
+            {
+                "type": "schedule",
+                "target": "cli",
+                "payload": {"type": "say", "text": "x"},
+                "interval_seconds": 3600,
+            },
+        )
+        assert re.fullmatch(r"sch_[0-9a-f]{6}", r["schedule_id"]), r
+        seen.add(r["schedule_id"])
+    assert len(seen) == 8, seen
