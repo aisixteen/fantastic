@@ -244,6 +244,22 @@ fn plan_refuses_bind_of_wrong_kind() {
 }
 
 #[test]
+fn plan_refuses_bind_of_missing_agent_naming_the_port() {
+    let e = run(
+        PORTED,
+        &[],
+        json!({"@memory": "nope", "@exec": "exec"}),
+        false,
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(e.reason, "bad_binding");
+    for want in ["@memory", "nope", "no agent"] {
+        assert!(e.message.contains(want), "{want}: {}", e.message);
+    }
+}
+
+#[test]
 fn plan_refuses_bind_key_that_is_not_a_port() {
     let e = run(
         PORTED,

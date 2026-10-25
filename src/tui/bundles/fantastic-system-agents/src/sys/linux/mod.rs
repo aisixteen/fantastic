@@ -7,16 +7,36 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
-use super::{AudioOs, OsError, PowerOs};
+use super::{AudioOs, DisplaysOs, LockOs, NetworkOs, NotificationsOs, OsError, PowerOs};
 
 pub mod audio;
+pub mod displays;
+pub mod lock;
+pub mod logind;
+pub mod network;
+pub mod notifications;
 pub mod power;
 
 pub use audio::LinuxAudio;
+pub use displays::LinuxDisplays;
+pub use lock::LinuxLock;
+pub use network::LinuxNetwork;
+pub use notifications::LinuxNotifications;
 pub use power::LinuxPower;
 
 /// The system bus, connected once per process.
 static SYSTEM: OnceCell<Result<zbus::Connection, String>> = OnceCell::const_new();
+
+/// The session bus, connected once per process.
+static SESSION: OnceCell<Result<zbus::Connection, String>> = OnceCell::const_new();
+
+async fn session() -> Result<zbus::Connection, OsError> {
+    SESSION
+        .get_or_init(|| async { zbus::Connection::session().await.map_err(|e| e.to_string()) })
+        .await
+        .clone()
+        .map_err(|e| OsError::Unavailable(format!("the session bus is not reachable: {e}")))
+}
 
 async fn system() -> Result<zbus::Connection, OsError> {
     SYSTEM
@@ -31,6 +51,38 @@ async fn system() -> Result<zbus::Connection, OsError> {
 pub async fn power() -> Arc<dyn PowerOs> {
     match system().await {
         Ok(c) => Arc::new(LinuxPower::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
+/// The network port on the system bus, like [`power`].
+pub async fn network() -> Arc<dyn NetworkOs> {
+    match system().await {
+        Ok(c) => Arc::new(LinuxNetwork::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
+/// The notifications port on the session bus, where this process is the server.
+pub async fn notifications() -> Arc<dyn NotificationsOs> {
+    match session().await {
+        Ok(c) => Arc::new(LinuxNotifications::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
+/// The displays port: `wlr-randr` in the compositor's environment, and logind on the system bus.
+pub async fn displays() -> Arc<dyn DisplaysOs> {
+    match system().await {
+        Ok(c) => Arc::new(LinuxDisplays::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
+/// The lock port: logind on the system bus, and `<home>/lock.yaml`.
+pub async fn lock() -> Arc<dyn LockOs> {
+    match system().await {
+        Ok(c) => Arc::new(LinuxLock::new(c)),
         Err(e) => Arc::new(Absent(e)),
     }
 }
@@ -53,6 +105,61 @@ impl PowerOs for Absent {
         Err(self.0.clone())
     }
     fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::power::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkOs for Absent {
+    async fn read(&self) -> Result<fantastic_system::network::Read, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::network::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::network::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationsOs for Absent {
+    async fn request(&self) -> Result<fantastic_system::notifications::Ownership, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::notifications::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::notifications::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl DisplaysOs for Absent {
+    async fn read(&self) -> Result<fantastic_system::displays::Read, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::displays::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::displays::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl LockOs for Absent {
+    async fn read(&self) -> Result<fantastic_system::lock::Read, OsError> {
+        Err(self.0.clone())
+    }
+    async fn check_pin(&self, _pin: fantastic_system::lock::Pin) -> Result<bool, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::lock::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::lock::Event> {
         tokio::sync::mpsc::channel(1).1
     }
 }

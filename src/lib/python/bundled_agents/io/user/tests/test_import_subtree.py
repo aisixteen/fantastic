@@ -408,3 +408,27 @@ async def test_import_subtree_args_and_docs(setup):
     assert r["reason"] == "not_found", r
     d = await op(k, "kernel", {"type": "docs", "of": "user"})
     assert "import_subtree" in d["verbs"], d
+
+
+async def test_import_refuses_bind_to_a_missing_agent_naming_the_port(setup, tmp_path):
+    k = setup
+    d = await exported(k, tmp_path, "ghost")
+    n = count(k)
+    for extra in (
+        {"approve": True, "bind": {"@memory": "ghost", "@exec": "exec"}},
+        {"bind": {"@memory": "ghost", "@exec": "exec"}},
+    ):
+        r = await import_(k, d, **extra)
+        assert r["reason"] == "bad_binding", r
+        msg = r["error"]
+        assert "@memory" in msg and "ghost" in msg and "no agent" in msg, msg
+        assert count(k) == n, "nothing created"
+    r = await import_(
+        k,
+        d,
+        approve=True,
+        bind={"@memory": "memory2", "@exec": "exec", "@nope": "exec"},
+    )
+    assert r["reason"] == "bad_binding", r
+    assert "@nope" in r["error"], r
+    assert count(k) == n, "nothing created"

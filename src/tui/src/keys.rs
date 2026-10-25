@@ -207,6 +207,11 @@ pub const TABLE: &[Binding] = &[
     },
     Binding {
         scope: "composer",
+        keys: "/export <path>",
+        does: "write the selected agent and everything under it as a blueprint folder",
+    },
+    Binding {
+        scope: "composer",
         keys: "↑ ↓",
         does: "history",
     },

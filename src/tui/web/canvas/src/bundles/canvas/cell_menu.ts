@@ -7,7 +7,7 @@ import { SELECTOR } from "./selector_agent.ts";
 // right-click menu DELETE. Pure: the page wires the intents to its own acts.
 
 /** What a close click or a menu pick does to the cell. */
-export type CellIntent = "hide" | "delete";
+export type CellIntent = "hide" | "delete" | "export";
 
 /** ✕ hides; Shift+✕ deletes. */
 export const closeIntent = (shiftKey: boolean): CellIntent => (shiftKey ? "delete" : "hide");
@@ -16,7 +16,23 @@ export const closeIntent = (shiftKey: boolean): CellIntent => (shiftKey ? "delet
 export const CELL_MENU: ReadonlyArray<{ intent: CellIntent; label: string; title: string }> = [
   { intent: "hide", label: "Hide", title: "hide the cell — its agent keeps running" },
   { intent: "delete", label: "Delete", title: "delete the agent (a locked one is refused)" },
+  { intent: "export", label: "Export…", title: "write this agent and everything under it as a blueprint folder" },
 ];
+
+/** The host agent an Export… on a cell exports: the cell's `backend_id`;
+ *  `undefined` for a page-only cell (nothing on the host to write). */
+export const exportTarget = (rec: Readonly<Record<string, unknown>>): string | undefined => {
+  const b = rec["backend_id"];
+  return typeof b === "string" && b !== "" ? b : undefined;
+};
+
+/** The call Export… sends to `user`: the agent and everything under it, as a
+ *  blueprint folder at `path` (relative to the running dir). */
+export const exportCall = (agentId: string, path: string): { type: "export_subtree"; agent_id: string; path: string } => ({
+  type: "export_subtree",
+  agent_id: agentId,
+  path,
+});
 
 /** The page's own agents, which are no cells of a view (a background, a popup,
  *  a layout): a verb never hides or shows them. */

@@ -14,6 +14,7 @@ fantastic-bundle = { path = "../../fantastic-bundle" }
 fantastic-file = { path = "../fantastic-file" }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

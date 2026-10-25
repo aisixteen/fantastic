@@ -51,6 +51,12 @@ export interface Presets {
   system?: string[];
 }
 
+/** The size a machine agent's cell opens at (`system` recipe): the network list is
+ *  wider and taller than the rest. */
+export function systemTileSize(id: string): { width: number; height: number } {
+  return id === "network" ? { width: 640, height: 480 } : { width: 380, height: 420 };
+}
+
 /** THE CODING AGENTS the menu knows (owner 2026-10-08): LAUNCHERS — a tile
  *  starts the human's own installed program, interactive, in a terminal cell;
  *  nothing is automated, no login is touched. Found by name on `user path`.

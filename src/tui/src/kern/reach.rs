@@ -159,7 +159,8 @@ fn union(had: Option<&Value>, add: &Value) -> Value {
 /// The agents whose `callable_by` their own code narrows to `user` (the user's
 /// home files): no other holder is granted them here — `user` keeps its own
 /// side (its `can_call`), the leg its own verbs.
-const NARROWED: [&str; 2] = [crate::kern::saved::HOME_ID, crate::kern::user_store::ID];
+/// `lock` is one of them: an AI must not unlock the screen or change the PIN.
+const NARROWED: [&str; 3] = [crate::kern::saved::HOME_ID, crate::kern::user_store::ID, fantastic_system_agents::lock::ID];
 
 /// Grant every holder every verb on `ids` — both edges, BY ID (no subtree
 /// keys): each target's `callable_by` names each holder, and each holder's
@@ -456,7 +457,7 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{announce, cabinet_owned, grant, leg_verbs, CANVAS_LEG};
+    use super::{announce, cabinet_owned, grant, leg_verbs, CANVAS_LEG, NARROWED};
     use crate::kern::host::Host;
     use fantastic_kernel::{Agent, AgentId, Kernel};
     use serde_json::{json, Map, Value};
@@ -543,6 +544,39 @@ mod tests {
             put(&h.kernel, id, Some(parent), json!({}));
         }
         h
+    }
+
+    #[tokio::test]
+    async fn system_agents_are_granted_to_user_but_lock_is_narrowed() {
+        let h = host_with_leg("system-narrowed").await;
+        let k = &h.kernel;
+        // what `kern/system` makes: each agent answers `user`; an AI holds the reach
+        for id in fantastic_system_agents::IDS {
+            put(k, id, Some(crate::env::HUMAN), json!({"callable_by": {crate::env::HUMAN: fantastic_system_agents::verbs(id)}}));
+        }
+        put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
+        put(k, "m", Some("kernel"), json!({}));
+        let ids: Vec<String> = fantastic_system_agents::IDS.iter().map(|s| s.to_string()).collect();
+        grant(&h, &ids).await.unwrap();
+        let field = |id: &str, f: &str| -> Value {
+            k.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get(f).cloned().unwrap_or(Value::Null)
+        };
+        for id in fantastic_system_agents::IDS {
+            // the human reaches every one of them
+            assert_eq!(field(crate::env::HUMAN, "can_call")[id], json!(["*"]), "{id}");
+            if id == fantastic_system_agents::lock::ID {
+                continue;
+            }
+            // the others are ordinary: an AI calls them like any other agent
+            assert_eq!(field(id, "callable_by")["master"], json!(["*"]), "{id}");
+            assert_eq!(field("master", "can_call")[id], json!(["*"]), "{id}");
+        }
+        // the lock is not: no AI may call it, and its record keeps `user` alone
+        assert!(field("master", "can_call").get("lock").is_none(), "{}", field("master", "can_call"));
+        let cb = field("lock", "callable_by");
+        assert!(cb.get("master").is_none(), "{cb}");
+        assert_eq!(cb[crate::env::HUMAN], json!(fantastic_system_agents::lock::VERBS));
+        assert!(NARROWED.contains(&"lock"));
     }
 
     #[tokio::test]

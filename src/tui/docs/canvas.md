@@ -266,7 +266,8 @@ A cell is a VIEW of a host agent: the agent's record says how it is drawn
 else its reflect card). `place {backend_id, x, y}` shows one. ✕ HIDES the cell
 (#133): it leaves the view, its agent keeps running, its rect is kept, and a
 reload keeps it hidden. Shift+✕ and the head's right-click → Delete DELETE the
-agent. Picking a hidden agent in the file tree, or `show {id, x?, y?}`, brings its
+agent. The head's right-click → Export… asks for a folder and writes the cell's
+agent and everything under it as a blueprint (`export_subtree`, see system.md). Picking a hidden agent in the file tree, or `show {id, x?, y?}`, brings its
 cell back where it was (or at `x`, `y`); the tree marks a hidden agent `hidden`,
 and ⌫ there deletes it. A cell whose agent is gone disappears.
 

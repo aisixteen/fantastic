@@ -160,6 +160,13 @@ def test_plan_refuses_bind_of_wrong_kind():
     assert e.reason == "bad_binding", e.message
 
 
+def test_plan_refuses_bind_of_missing_agent_naming_the_port():
+    e = refused(PORTED, bind={"@memory": "nope", "@exec": "exec"})
+    assert e.reason == "bad_binding"
+    for want in ["@memory", "nope", "no agent"]:
+        assert want in e.message, f"{want}: {e.message}"
+
+
 def test_plan_refuses_bind_key_that_is_not_a_port():
     e = refused(
         PORTED, bind={"@memory": "memory", "@exec": "exec", "@model": "memory"}

@@ -13,7 +13,7 @@
 //! | `canvas` | `web` (the HTTP host), the canvas (`canvas_page`, `canvas_ws` + its helpers) | `web`, and serves the canvas |
 //! | `ai` | with a BACKEND: the ROOT AI `ai` on it (`kern/root_ai`) — made, re-pointed, or remade on a new backend | the root AI, composer focused; with none, the set-up page |
 //! | `run COMMAND [ARGS…]` | a terminal running exactly that command, from `$PATH`, as is (`kern/terminal`) — the user's own program at their discretion | the terminal (with `canvas`: a terminal cell) |
-//! | `system` | the machine's agents under `user` (`kern/system`): `power` (Linux with D-Bus only; refused elsewhere) | nothing of its own — only when it is the sole recipe, the first system agent |
+//! | `system` | the machine's agents under `user` (`kern/system`): `power`, `network`, `audio`, `displays`, `notifications`, `lock` (Linux with D-Bus only; refused elsewhere) | nothing of its own — only when it is the sole recipe, the `network` agent |
 //!
 //! `ai` BACKENDS (the word names the server it talks to):
 //! - `vllm -p PORT [--host H] [--kv-overflow evict|reject]` — the rest is read from the server
@@ -74,7 +74,7 @@ impl Opts {
     }
 }
 
-const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …] [system]`, `fantastic mcp`, `fantastic send <item>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
+const USAGE: &str = "run `fantastic [canvas [--port N] | --headless] [ai [vllm|ollama|responses|anthropic …]] [run COMMAND …] [system]`, `fantastic mcp`, `fantastic send <item>`, `fantastic import <path> --parent <id>`, `fantastic migrate-home [--dry-run]` or `fantastic readme [key]`";
 
 fn port_of(v: &str, flag: &str) -> Result<u16, String> {
     v.parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| format!("{flag} must be 1..65535, got `{v}`"))

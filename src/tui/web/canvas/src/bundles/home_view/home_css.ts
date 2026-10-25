@@ -121,5 +121,15 @@ export const HOME_CSS = `
 #home dialog.log header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--home-line); }
 #home dialog.log pre { margin: 0; padding: 12px 14px; overflow: auto; max-height: calc(70vh - 60px); font: 12px/1.5 ${tok("font.family.mono")}; white-space: pre-wrap; }
 
+/* the lock screen: over everything, kept above the nav, the problem and the dialogs */
+#home .lock-overlay { position: absolute; inset: 0; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  background: var(--home-bg); color: var(--home-bright); }
+#home .lock-overlay h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.3px; }
+#home .lock-form { display: flex; gap: 8px; }
+#home .lock-form input { width: 12em; background: var(--home-field); border: 1px solid var(--home-line); border-radius: ${tok("radius.control")}; padding: 8px 12px; text-align: center; letter-spacing: .3em; }
+#home .lock-form input:focus { outline: 2px solid var(--home-accent-tint); outline-offset: -1px; }
+#home .lock-form input:disabled { opacity: .5; }
+#home .lock-note { margin: 0; min-height: 1.4em; color: var(--home-toast-text); }
+
 #home .home-error { position: absolute; inset: 0; display: grid; place-content: center; padding: 24px; text-align: center; color: var(--home-toast-text); }
 `;

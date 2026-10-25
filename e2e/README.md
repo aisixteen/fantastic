@@ -205,8 +205,17 @@ BACKEND=anthropic FANTASTIC_AI_MODEL=<haiku> \
   FANTASTIC_AI_MODEL_MASTER=<sonnet> FANTASTIC_AI_MODEL_WORKER=<haiku> ...
 ```
 
+`peer_review` (E48, roles `coder` and `reviewer`) and `self_managed_groups` (roles
+`master` and `worker`) name their roles:
+
+```sh
+# a Haiku coder and a Sonnet reviewer
+BACKEND=anthropic FANTASTIC_AI_MODEL=<haiku> FANTASTIC_AI_MODEL_REVIEWER=<sonnet> ...
+```
+
 The model names are the operator's to give; none is guessed. The rule is unit-tested
-without a model in `src/lib/python/tests/e2e_harness/test_model_roles.py`.
+without a model in `src/lib/python/tests/e2e_harness/test_model_roles.py`, and the
+coder+reviewer wiring in `test_review_lane_roles.py` next to it.
 
 ## Reading a result
 
