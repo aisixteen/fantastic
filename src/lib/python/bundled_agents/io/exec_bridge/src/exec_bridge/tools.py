@@ -99,6 +99,67 @@ DRIVE_VERBS = frozenset(
 # `send` in duplicate.
 _owner_inbox: dict[str, dict] = {}
 
+# The handler's SEND-TIME refusals, carried to the drain: the fanout copies every payload
+# into the owner's proxy inbox BEFORE the handler runs, so a leg refused at send time but
+# reopened before the drain dequeues would otherwise deliver the refused mail. owner_id ->
+# {"noted": refusals the drain must still drop, "early": drops the drain made before the
+# handler noted them (tombstones)}. Both bounded by REFUSED_CAP, oldest evicted.
+REFUSED_CAP = 256
+_refused: dict[str, dict] = {}
+
+
+def _push_capped(q, v):
+    if len(q) >= REFUSED_CAP:
+        q.popleft()
+    q.append(v)
+
+
+def _remove_eq(q, v) -> bool:
+    for i, x in enumerate(q):
+        if x == v:
+            del q[i]
+            return True
+    return False
+
+
+def _ledger(owner_id) -> dict:
+    return _refused.setdefault(
+        owner_id, {"noted": collections.deque(), "early": collections.deque()}
+    )
+
+
+def _note_refused(owner_id, payload):
+    ledger = _ledger(owner_id)
+    if not _remove_eq(ledger["early"], payload):
+        _push_capped(ledger["noted"], payload)
+
+
+def _take_refused(owner_id, payload) -> bool:
+    ledger = _refused.get(owner_id)
+    return ledger is not None and _remove_eq(ledger["noted"], payload)
+
+
+def _note_dropped_early(owner_id, payload):
+    _push_capped(_ledger(owner_id)["early"], payload)
+
+
+def _clear_refused(owner_id):
+    _refused.pop(owner_id, None)
+
+
+def _refused_len(owner_id) -> int:
+    ledger = _refused.get(owner_id)
+    return len(ledger["noted"]) if ledger else 0
+
+
+def _release_owner_row(owner_id, job_id):
+    """Remove the owner-inbox row, and its refusal ledger, only if it still names
+    `job_id` (a superseded predecessor must not evict its replacement)."""
+    cur = _owner_inbox.get(owner_id)
+    if cur and cur["job_id"] == job_id:
+        _owner_inbox.pop(owner_id, None)
+        _clear_refused(owner_id)
+
 
 def _alive(job: dict) -> bool:
     """THE definition of a live job: its OS process has not exited.
@@ -205,9 +266,13 @@ def _inbox_framer(owner_id, job_id, kernel):
     the owner), minus a drive verb addressed to ANOTHER job (`DRIVE_VERBS`) — and
     nothing the leg's gate refuses. The substrate's fanout mirrors every payload to
     the owner's watchers BEFORE any handler runs, so without that check a sealed leg
-    whose handler refused the call would still have it delivered here."""
+    whose handler refused the call would still have it delivered here. The handler's
+    send-time verdict reaches the drain through the refusal ledger, so a leg reopened
+    before the drain runs still drops what it refused."""
 
     def frame(payload):
+        if _take_refused(owner_id, payload):
+            return None
         if isinstance(payload, dict) and payload.get("type") in (
             "progress",
             "output",
@@ -223,6 +288,8 @@ def _inbox_framer(owner_id, job_id, kernel):
             if isinstance(jid, int) and not isinstance(jid, bool) and jid != job_id:
                 return None
         if _gate(owner_id, payload, kernel) is not None:
+            if _gate_refuses(owner_id, payload, kernel):
+                _note_dropped_early(owner_id, payload)
             return None
         return {"op": "inbox", "payload": payload}
 
@@ -402,6 +469,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
                     # every inbound `send` is delivered to both and doubled.
                     prev = _owner_inbox.pop(owner_id, None)
                     if prev is not None:
+                        _clear_refused(owner_id)
                         release(owner_id, prev["proxy"], prev["task"])
                     proxy = f"_xbself_{job_id}"
                     kernel.ctx.ensure_inbox(proxy)
@@ -429,9 +497,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
                 self_sub[0] = None
                 if ent:
                     release(owner_id, *ent)
-                    cur = _owner_inbox.get(owner_id)
-                    if cur and cur["job_id"] == job_id:
-                        _owner_inbox.pop(owner_id, None)
+                    _release_owner_row(owner_id, job_id)
     finally:
         for src, ent in subs.items():
             release(src, *ent)
@@ -439,9 +505,7 @@ async def _serve_ctrl(parent_sock, owner_id, job_id, kernel, *, ops=None, on_pus
             release(owner_id, *self_sub[0])
             # Only if it still names THIS job — a supersede must not evict its
             # replacement (the bug `c2a4297` fixed).
-            cur = _owner_inbox.get(owner_id)
-            if cur and cur["job_id"] == job_id:
-                _owner_inbox.pop(owner_id, None)
+            _release_owner_row(owner_id, job_id)
         try:
             writer.close()
         except OSError:
@@ -1700,12 +1764,22 @@ def _gate(id: str, payload, kernel) -> dict | None:
     return out
 
 
+def _gate_refuses(id, payload, kernel) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("type") not in UNGATED
+        and _gate(id, payload, kernel) is not None
+    )
+
+
 async def handler(id: str, payload: dict, kernel) -> dict | None:
     t = payload.get("type")
     # AUTH GATE — every verb but `reflect`/`connector`, MAIL INCLUDED: a sealed leg
     # delivers nothing to its program (the relay's framer refuses the same
     # payloads, since the fanout reaches it before this handler runs).
     if t not in UNGATED and (out := _gate(id, payload, kernel)):
+        if id in _owner_inbox:
+            _note_refused(id, payload)
         return out
     fn = VERBS.get(t)
     if fn is None:

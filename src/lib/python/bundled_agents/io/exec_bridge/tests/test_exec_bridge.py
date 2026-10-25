@@ -1263,6 +1263,142 @@ async def test_a_sealed_leg_refuses_mail_and_relays_nothing(seeded_kernel):
     await asyncio.wait_for(task, 5)
 
 
+import exec_bridge.tools as ebt  # noqa: E402
+
+
+async def _set_rule(k, rule):
+    up = await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "update_agent",
+                    "id": "runner",
+                    "ingress_rule": rule,
+                },
+            }
+        ]
+    )
+    assert up[0]["status"] == "completed", up
+
+
+async def _mail(k, payload):
+    return (await k.send([{"target": "runner", "payload": payload}]))[0]["result"]
+
+
+def _manual_owner_inbox(k, owner, job_id):
+    proxy = f"_xbself_{job_id}"
+    q = k.ctx.ensure_inbox(proxy)
+    assert k.watch(owner, proxy) is None
+    ebt._owner_inbox[owner] = {"job_id": job_id, "proxy": proxy, "task": None}
+    return q, ebt._inbox_framer(owner, job_id, k)
+
+
+async def test_a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    try:
+        q, framer = _manual_owner_inbox(k, "runner", "r1")
+        await _set_rule(k, "deny_ingress")
+        out = await _mail(k, {"type": "probe_mail"})
+        assert out["reason"] == "unauthorized", out
+        await _set_rule(k, "allow_all_ingress")
+        await _mail(k, {"type": "after"})
+        first, second = await q.get(), await q.get()
+        assert framer(first) is None
+        assert framer(second) == {"op": "inbox", "payload": {"type": "after"}}
+    finally:
+        ebt._owner_inbox.pop("runner", None)
+        ebt._clear_refused("runner")
+
+
+async def test_a_refused_mail_entry_is_consumed_once(seeded_kernel):
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    try:
+        q, framer = _manual_owner_inbox(k, "runner", "r2")
+        m = {"type": "probe_mail", "n": 1}
+        await _set_rule(k, "deny_ingress")
+        await _mail(k, m)
+        await _mail(k, m)
+        await _set_rule(k, "allow_all_ingress")
+        await _mail(k, m)
+        got = [framer(await q.get()) for _ in range(3)]
+        assert got == [None, None, {"op": "inbox", "payload": m}]
+    finally:
+        ebt._owner_inbox.pop("runner", None)
+        ebt._clear_refused("runner")
+
+
+async def test_the_refused_ledger_is_released_with_the_owner_inbox(seeded_kernel):
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    try:
+        _manual_owner_inbox(k, "runner", "r3")
+        await _set_rule(k, "deny_ingress")
+        await _mail(k, {"type": "probe_mail"})
+        assert ebt._refused_len("runner") == 1
+        ebt._release_owner_row("runner", "other")
+        assert "runner" in ebt._owner_inbox and ebt._refused_len("runner") == 1
+        ebt._release_owner_row("runner", "r3")
+        assert ebt._refused_len("runner") == 0 and "runner" not in ebt._owner_inbox
+        await _mail(k, {"type": "probe_mail"})
+        assert ebt._refused_len("runner") == 0
+    finally:
+        ebt._owner_inbox.pop("runner", None)
+        ebt._clear_refused("runner")
+
+
+async def test_a_refused_drive_verb_is_dropped_even_if_the_leg_reopens_before_the_drain_runs(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    try:
+        q, framer = _manual_owner_inbox(k, "runner", "r4")
+        await _set_rule(k, "deny_ingress")
+        out = await _mail(k, {"type": "write", "data": "rm -rf\n"})
+        assert out["reason"] == "unauthorized", out
+        await _set_rule(k, "allow_all_ingress")
+        assert framer(await q.get()) is None
+    finally:
+        ebt._owner_inbox.pop("runner", None)
+        ebt._clear_refused("runner")
+
+
+async def test_a_late_refusal_note_does_not_swallow_later_identical_mail(seeded_kernel):
+    k = seeded_kernel
+    await _mk(k, allowed=["x"])
+    try:
+        _, framer = _manual_owner_inbox(k, "runner", "r5")
+        mail = {"type": "probe_mail"}
+        await _set_rule(k, "deny_ingress")
+        assert framer(mail) is None
+        ebt._note_refused("runner", mail)
+        assert ebt._refused_len("runner") == 0
+        await _set_rule(k, "allow_all_ingress")
+        assert framer(mail) == {"op": "inbox", "payload": mail}
+    finally:
+        ebt._owner_inbox.pop("runner", None)
+        ebt._clear_refused("runner")
+
+
+def test_the_refused_ledger_is_bounded():
+    owner = "ledger_bound_owner"
+    try:
+        for i in range(ebt.REFUSED_CAP + 50):
+            ebt._note_refused(owner, {"type": "m", "i": i})
+        assert ebt._refused_len(owner) == ebt.REFUSED_CAP
+        assert ebt._take_refused(owner, {"type": "m", "i": 0}) is False
+        assert (
+            ebt._take_refused(owner, {"type": "m", "i": ebt.REFUSED_CAP + 49}) is True
+        )
+    finally:
+        ebt._clear_refused(owner)
+
+
 async def test_a_malformed_ctrl_frame_is_skipped_never_fatal(seeded_kernel):
     """JSON that is no envelope (`T[1]`), or a `src` that is no string, must not
     end the relay task (AttributeError / unhashable TypeError) and with it the
