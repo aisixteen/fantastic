@@ -511,3 +511,97 @@ async def test_open_view_leaves_a_stamped_entry_untouched(
     assert (await _open_with(k, fb, "file", "a.txt", dv))["created"] is False
     assert k.get(fb)["callable_by"][dv] == before
     assert calls == []
+
+
+async def _changed_for(q, secs: float = 2.0) -> list[tuple[str, str]]:
+    """Every `changed` that arrives within `secs`, as (path, kind), in arrival order."""
+    out: list[tuple[str, str]] = []
+    end = asyncio.get_event_loop().time() + secs
+    while (left := end - asyncio.get_event_loop().time()) > 0:
+        try:
+            ev = await asyncio.wait_for(q.get(), left)
+        except asyncio.TimeoutError:
+            break
+        if ev.get("type") == "changed":
+            out.append((ev["path"], ev["kind"]))
+    return out
+
+
+async def test_view_event_stamps_one_relayed_event_per_edit_with_kinds(
+    seeded_kernel, file_bridge
+):
+    """Rust tests_views.rs::a_view_gets_one_relayed_event_per_edit_with_stamp_kinds."""
+    k, fb = seeded_kernel, file_bridge
+    p = Path("live.txt")
+    p.write_text("one\n")
+    v = (await _open(k, fb, "file", "live.txt"))["id"]
+    q = _inbox(k, v)
+    await _call(k, v, {"type": "watch"})
+    await asyncio.sleep(0.5)
+    p.write_text("two two\n")
+    assert await _changed_for(q) == [("live.txt", "modified")]
+    p.write_text("three three three\n")
+    assert await _changed_for(q) == [("live.txt", "modified")]
+    p.unlink()
+    assert await _changed_for(q) == [("live.txt", "deleted")]
+    p.write_text("back\n")
+    assert await _changed_for(q) == [("live.txt", "added")]
+
+
+async def test_two_opens_of_one_file_share_one_relay(seeded_kernel, file_bridge):
+    """Rust tests_views.rs::two_opens_of_one_file_share_one_relay."""
+    from file_bridge import views
+
+    k, fb = seeded_kernel, file_bridge
+    Path("shared.txt").write_text("s\n")
+    first = await _open(k, fb, "file", "shared.txt")
+    v = first["id"]
+    assert first["created"] is True
+    q = _inbox(k, v)
+    assert (await _call(k, v, {"type": "watch"}))["relayed"] is False
+    second = await _open(k, fb, "file", "shared.txt")
+    assert second["id"] == v and second["created"] is False, second
+    assert (await _call(k, v, {"type": "watch"}))["relayed"] is True
+    held = [
+        vid
+        for vid, s in views.RELAYS.items()
+        if s["bridge"] == fb and s["path"] == "shared.txt"
+    ]
+    assert held == [v], held
+    await asyncio.sleep(0.5)
+    Path("shared.txt").write_text("changed longer\n")
+    ev = await _next(q, lambda e: e.get("type") == "changed")
+    assert ev["path"] == "shared.txt", ev
+
+
+async def test_open_view_restamp_keeps_keys_a_concurrent_edit_adds(
+    seeded_kernel, file_bridge
+):
+    """Rust tests_views.rs::open_view_restamp_keeps_keys_a_concurrent_edit_adds."""
+    k, fb = seeded_kernel, file_bridge
+    ids = []
+    for n in range(20):
+        Path(f"n{n}.md").write_text("x\n")
+        vid = (await _open(k, fb, "file", f"n{n}.md"))["id"]
+        _set_entry(k, fb, vid, list(_OLD_FILE_ENTRY))
+        ids.append(vid)
+
+    async def writer():
+        for n in range(50):
+            cb = dict(k.get(fb)["callable_by"])
+            cb[f"viewer{n}"] = ["*"]
+            k.ctx.agents[fb].update(fb, callable_by=cb)
+            await asyncio.sleep(0)
+
+    async def reopener():
+        for n in range(20):
+            r = await _open(k, fb, "file", f"n{n}.md")
+            assert r["created"] is False and r["id"] == ids[n], r
+            await asyncio.sleep(0)
+
+    await asyncio.gather(writer(), reopener())
+    cb = k.get(fb)["callable_by"]
+    for n, vid in enumerate(ids):
+        assert f"file:n{n}.md" in cb[vid], (vid, cb[vid])
+    for n in range(50):
+        assert cb[f"viewer{n}"] == ["*"], n
