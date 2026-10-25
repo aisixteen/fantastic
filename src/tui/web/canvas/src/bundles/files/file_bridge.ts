@@ -526,6 +526,11 @@ export async function awaitGrant(kernel: Kernel, view: string): Promise<Refusal 
   return r;
 }
 
+/** Whether the host still owes this view a word on its grant (a test seam; read-only). */
+export function grantOwed(kernel: Kernel, view: string): boolean {
+  return grantBoard(kernel).owed.has(view);
+}
+
 /** `open_view` on the bridge: the view agent of `path` — reused when one exists, made
  *  otherwise — served on this page. A refusal (the path is not exposed, say) is returned
  *  as it is. The page's grant on the view is awaited by the cell that reads it
@@ -542,7 +547,7 @@ export async function openViewAgent(
   if (isRefusal(r)) return r;
   const id = r["id"];
   if (typeof id !== "string") return { error: `open_view ${path}: the reply names no view`, reason: "bad_reply" };
-  if (r["created"] === true) board.owed.add(id);
+  if (r["created"] === true && !board.said.has(id)) board.owed.add(id);
   route(kernel, kind, path, id);
   return { view: id, created: r["created"] === true };
 }

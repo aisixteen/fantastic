@@ -427,3 +427,87 @@ async def _open_with(k, fb, kind, path, chosen):
     return await _call(
         k, fb, {"type": "open_view", "kind": kind, "path": path, "id": chosen}
     )
+
+
+_OLD_FILE_ENTRY = ["read", "write", "watch_path", "unwatch_path"]
+
+
+def _set_entry(k, fb, vid, entry):
+    cb = dict(k.get(fb)["callable_by"])
+    cb[vid] = entry
+    k.ctx.agents[fb].update(fb, callable_by=cb)
+
+
+async def _read_as(k, fb, vid, path):
+    token = _current_origin.set(vid)
+    try:
+        return await tools.handler(fb, {"type": "read", "path": path}, k)
+    finally:
+        _current_origin.reset(token)
+
+
+async def test_open_view_restamps_a_view_made_before_the_scope_token(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("x\n")
+    dv = (await _open(k, fb, "file", "a.txt"))["id"]
+    _set_entry(k, fb, dv, list(_OLD_FILE_ENTRY))  # the pre-token form
+    assert (await _read_as(k, fb, dv, "a.txt"))["reason"] == "unauthorized"
+    again = await _open(k, fb, "file", "a.txt")
+    assert again == {"id": dv, "kind": "file", "path": "a.txt", "created": False}
+    assert k.get(fb)["callable_by"][dv] == sorted(_OLD_FILE_ENTRY + ["file:a.txt"])
+    assert "lines" in await _read_as(k, fb, dv, "a.txt")
+
+
+async def test_open_view_restamp_covers_the_chosen_id_path(seeded_kernel, file_bridge):
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("x\n")
+    dv = (await _open(k, fb, "file", "a.txt"))["id"]
+    _set_entry(k, fb, dv, list(_OLD_FILE_ENTRY))
+    again = await _open_with(k, fb, "file", "a.txt", dv)
+    assert again == {"id": dv, "kind": "file", "path": "a.txt", "created": False}
+    assert k.get(fb)["callable_by"][dv] == sorted(_OLD_FILE_ENTRY + ["file:a.txt"])
+    assert "lines" in await _read_as(k, fb, dv, "a.txt")
+
+
+async def test_open_view_leaves_a_narrowed_entry_alone(seeded_kernel, file_bridge):
+    k, fb = seeded_kernel, file_bridge
+    Path("dir/sub").mkdir(parents=True)
+    dv = (await _open(k, fb, "folder", "dir"))["id"]
+    narrowed = ["folder:dir/sub", "list", "watch_path", "unwatch_path"]
+    _set_entry(k, fb, dv, list(narrowed))
+    assert (await _open(k, fb, "folder", "dir"))["created"] is False
+    assert k.get(fb)["callable_by"][dv] == narrowed
+    assert (await _open_with(k, fb, "folder", "dir", dv))["created"] is False
+    assert k.get(fb)["callable_by"][dv] == narrowed
+
+
+async def test_open_view_leaves_a_two_token_entry_alone(seeded_kernel, file_bridge):
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("x\n")
+    dv = (await _open(k, fb, "file", "a.txt"))["id"]
+    two = ["file:a.txt", "file:b.txt", *_OLD_FILE_ENTRY]
+    _set_entry(k, fb, dv, list(two))
+    assert (await _open(k, fb, "file", "a.txt"))["created"] is False
+    assert k.get(fb)["callable_by"][dv] == two
+    assert (await _read_as(k, fb, dv, "a.txt"))["reason"] == "unauthorized"
+
+
+async def test_open_view_leaves_a_stamped_entry_untouched(
+    seeded_kernel, file_bridge, monkeypatch
+):
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("x\n")
+    dv = (await _open(k, fb, "file", "a.txt"))["id"]
+    before = list(k.get(fb)["callable_by"][dv])
+    bridge = k.ctx.agents[fb]
+    calls = []
+    real = bridge.update
+    monkeypatch.setattr(
+        bridge, "update", lambda *a, **kw: calls.append(kw) or real(*a, **kw)
+    )
+    assert (await _open(k, fb, "file", "a.txt"))["created"] is False
+    assert (await _open_with(k, fb, "file", "a.txt", dv))["created"] is False
+    assert k.get(fb)["callable_by"][dv] == before
+    assert calls == []

@@ -142,6 +142,15 @@ def scope_token(kind: str, path: str) -> str:
     return f"{kind}:{path}"
 
 
+def _scope_tokens(grant) -> list[str]:
+    """The scope tokens (`file:<path>`, `folder:<prefix>`) in a `callable_by` entry."""
+    return [
+        v
+        for v in (grant if isinstance(grant, list) else [])
+        if isinstance(v, str) and ":" in v and v.partition(":")[0] in SCOPE_KINDS
+    ]
+
+
 def caller_scope(kernel, bridge: str, caller: str | None) -> tuple[str, str] | None:
     """The path a caller is scoped to on this bridge, read from the bridge's own
     `callable_by` entry for it: `(kind, path)` from its scope token. None when the caller
@@ -154,11 +163,7 @@ def caller_scope(kernel, bridge: str, caller: str | None) -> tuple[str, str] | N
         return None
     rec = kernel.get(caller) or {}
     grant = ((kernel.get(bridge) or {}).get("callable_by") or {}).get(caller)
-    tokens = [
-        v
-        for v in (grant if isinstance(grant, list) else [])
-        if isinstance(v, str) and ":" in v and v.partition(":")[0] in SCOPE_KINDS
-    ]
+    tokens = _scope_tokens(grant)
     if rec.get("view") in ANSWERS and (rec.get("bridge") != bridge or len(tokens) != 1):
         return rec["view"], ""
     if len(tokens) == 1:
@@ -203,7 +208,11 @@ def open_view(
     kernel, bridge_agent, kind: str, path: str, chosen: str | None = None
 ) -> dict:
     """Reuse the view of `path` on this bridge, or make it. The bridge grants the new
-    view exactly its GRANTS in its `callable_by`, with the view's scope token.
+    view exactly its GRANTS in its `callable_by`, with the view's scope token. A view
+    that already exists, made before the scope token, has an entry with none: opening it
+    again stamps the token (the entry becomes the union of what it held, the GRANTS and
+    the token). An entry that has any scope token is left as it is, so a deliberate
+    narrowing stands and a two-token entry stays refused.
 
     `chosen` is a caller-picked id for the new view (so a caller can declare it up
     front). It is taken only when it is free; a `chosen` that is already another agent,
@@ -219,6 +228,7 @@ def open_view(
                     f"open_view: {chosen!r} is already an agent, not a {kind} view of {path!r}",
                     id=chosen,
                 )
+            _restamp(bridge_agent, chosen, kind, path)
             return {"id": chosen, "kind": kind, "path": path, "created": False}
         if existing is not None:
             return refusal(
@@ -228,6 +238,7 @@ def open_view(
                 hint="open it by that id, or omit `id`",
             )
     if existing is not None:
+        _restamp(bridge_agent, existing, kind, path)
         return {"id": existing, "kind": kind, "path": path, "created": False}
     grants = list(GRANTS[kind])
     made = bridge_agent.create(
@@ -243,11 +254,24 @@ def open_view(
     if "error" in made:
         return made
     vid = made["id"]
-    cb = dict(bridge_agent._meta.get("callable_by") or {})
-    entry = grants + [scope_token(kind, path)]
-    cb[vid] = sorted(set(cb.get(vid, [])) | set(entry))
-    bridge_agent.update(bridge_agent.id, callable_by=cb)
+    _stamp(bridge_agent, vid, kind, path)
     return {"id": vid, "kind": kind, "path": path, "created": True}
+
+
+def _stamp(bridge_agent, vid: str, kind: str, path: str) -> None:
+    """Grant the view `vid` its GRANTS and its scope token in the bridge's `callable_by`."""
+    cb = dict(bridge_agent._meta.get("callable_by") or {})
+    entry = list(GRANTS[kind]) + [scope_token(kind, path)]
+    held = cb.get(vid)
+    cb[vid] = sorted(set(held if isinstance(held, list) else []) | set(entry))
+    bridge_agent.update(bridge_agent.id, callable_by=cb)
+
+
+def _restamp(bridge_agent, vid: str, kind: str, path: str) -> None:
+    """Stamp a reused view whose entry has no scope token (made before the token)."""
+    held = (bridge_agent._meta.get("callable_by") or {}).get(vid)
+    if not _scope_tokens(held):
+        _stamp(bridge_agent, vid, kind, path)
 
 
 def _is_view_of(rec: dict, bridge: str, kind: str, path: str) -> bool:
