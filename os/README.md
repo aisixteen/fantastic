@@ -158,7 +158,7 @@ belongs to the app.
 | the app | `/usr/bin/fantastic-app --kiosk` | the home kernel in-process, its web host on 127.0.0.1, the run file `~/.fantastic/app/home.yaml`, the Home page in one window |
 | the canvases | `/usr/bin/fantastic`, the app's sidecar | each opened folder's kernel and page, on 127.0.0.1; they outlive a restart of the kiosk (`KillUserProcesses=no`) |
 | no blanking | kernel default, `consoleblank=0`, logind `IdleAction=ignore` | the screen stays on |
-| the system canvas | `fantastic-system.service`, a user unit (`ConditionUser=fantastic`, `Type=notify`), `upower` | the machine's agents (`fantastic canvas system`), see below |
+| the system canvas | `fantastic-system.service`, a user unit (`ConditionUser=fantastic`, `Type=notify`), `upower` | the machine's agents (`fantastic canvas system`), see below; `audio` uses the image's PipeWire, WirePlumber (`wpctl`) and `pw-dump` |
 
 `Restart=always` brings the kiosk back 2 s after the app quits or crashes, with
 no start-rate limit. The unit sets `SHELL` through the user's passwd entry
@@ -167,9 +167,10 @@ prints, and fails without it.
 
 ### The system canvas
 
-The machine's basics as agents an AI calls like any other (`power` so far:
-battery and lid over UPower, power off / reboot / suspend / hibernate over
-logind; `fantastic readme system`) live in one ordinary fantastic folder,
+The machine's basics as agents an AI calls like any other (`power` and `audio`
+so far: battery and lid over UPower, power off / reboot / suspend / hibernate
+over logind; PipeWire's sinks and sources, volume, mute and default over
+`pw-dump` and `wpctl`; `fantastic readme system`) live in one ordinary fantastic folder,
 `/home/fantastic/system`, whose kernel runs `fantastic canvas system` as a
 systemd **user** unit, `fantastic-system.service`. The Home lists it as `system`;
 its page holds the cells, placed from the host tiles.

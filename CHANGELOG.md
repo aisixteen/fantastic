@@ -9,7 +9,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 - System agents (Linux, `fantastic [canvas] system`): the machine's basics as
   agents an AI calls like any other, each with its view as a canvas cell — first
-  `power` (battery over UPower; power off, reboot, suspend over logind). The model
+  `power` (battery over UPower; power off, reboot, suspend over logind), then
+  `audio` (PipeWire's sinks and sources: volume, mute and the default, read with
+  `pw-dump` and followed with `pw-dump --monitor`, set with `wpctl`). Still to come
+  (#55): network, notifications, displays and lock, and the QEMU harness that runs
+  the system canvas and audio in a fantastic OS guest. The model
   and ViewModel are pure (`fantastic-system`); every OS call is in the bundle's
   `sys/linux`. On fantastic OS they run in the system canvas `/home/fantastic/system`,
   the user service `fantastic-system`, which the Home lists.

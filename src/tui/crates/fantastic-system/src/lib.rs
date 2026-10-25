@@ -4,4 +4,5 @@
 //! as plain data, time as `now_ms`; the effects are plain data the bundle's
 //! driver runs through its port. Nothing here touches the OS.
 
+pub mod audio;
 pub mod power;

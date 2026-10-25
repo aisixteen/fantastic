@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use fantastic_system::power;
+use fantastic_system::{audio, power};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -53,6 +53,28 @@ pub async fn power() -> Arc<dyn PowerOs> {
     #[cfg(target_os = "linux")]
     {
         linux::power().await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Arc::new(other::Unsupported)
+    }
+}
+
+/// The audio agent's port: PipeWire through `pw-dump` and `wpctl`.
+#[async_trait::async_trait]
+pub trait AudioOs: Send + Sync {
+    /// The whole `pw-dump` array, parsed.
+    async fn read(&self) -> Result<serde_json::Value, OsError>;
+    async fn call(&self, c: audio::Call) -> Result<(), OsError>;
+    /// OS-side changes (`pw-dump --monitor`), as VM events, until the port is dropped.
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<audio::Event>;
+}
+
+/// The real audio port of this OS.
+pub async fn audio() -> Arc<dyn AudioOs> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::audio()
     }
     #[cfg(not(target_os = "linux"))]
     {

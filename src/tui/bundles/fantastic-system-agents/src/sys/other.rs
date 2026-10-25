@@ -1,10 +1,10 @@
 //! Every OS but Linux: the agents exist where a record names them, and say
 //! they are not available.
 
-use fantastic_system::power;
+use fantastic_system::{audio, power};
 use tokio::sync::mpsc;
 
-use super::{OsError, PowerOs};
+use super::{AudioOs, OsError, PowerOs};
 
 pub struct Unsupported;
 
@@ -19,6 +19,19 @@ impl PowerOs for Unsupported {
         Err(OsError::Unavailable(WHY.into()))
     }
     fn changes(&self) -> mpsc::Receiver<power::Event> {
+        mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl AudioOs for Unsupported {
+    async fn read(&self) -> Result<serde_json::Value, OsError> {
+        Err(OsError::Unavailable(WHY.into()))
+    }
+    async fn call(&self, _c: audio::Call) -> Result<(), OsError> {
+        Err(OsError::Unavailable(WHY.into()))
+    }
+    fn changes(&self) -> mpsc::Receiver<audio::Event> {
         mpsc::channel(1).1
     }
 }

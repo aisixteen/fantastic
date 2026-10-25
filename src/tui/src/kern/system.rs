@@ -1,5 +1,5 @@
 //! THE SYSTEM AGENTS (`fantastic [canvas] system`, Linux): the machine's basics
-//! as agents under `user` — `power` so far (`fantastic-system-agents`). Made
+//! as agents under `user` — `power` and `audio` so far (`fantastic-system-agents`). Made
 //! when the recipe is named, each with its own html view, re-set on every such
 //! boot so a new build's view replaces the old one. The OS connections are the
 //! bundle's: made once per process on first use (`sys/linux`), and an agent
@@ -41,8 +41,8 @@ mod tests {
     use super::*;
     use crate::env::ClientCfg;
     use fantastic_kernel::{Agent, AgentId, Kernel};
-    use fantastic_system::power;
-    use fantastic_system_agents::sys::{OsError, PowerOs};
+    use fantastic_system::{audio, power};
+    use fantastic_system_agents::sys::{AudioOs, OsError, PowerOs};
     use serde_json::Map;
     use std::sync::Arc;
 
@@ -62,6 +62,22 @@ mod tests {
         }
     }
 
+    /// An audio port with nothing behind it.
+    struct NothingAudio;
+
+    #[async_trait::async_trait]
+    impl AudioOs for NothingAudio {
+        async fn read(&self) -> Result<Value, OsError> {
+            Err(OsError::Unavailable("wpctl is not installed".into()))
+        }
+        async fn call(&self, _c: audio::Call) -> Result<(), OsError> {
+            Err(OsError::Unavailable("no".into()))
+        }
+        fn changes(&self) -> tokio::sync::mpsc::Receiver<audio::Event> {
+            tokio::sync::mpsc::channel(1).1
+        }
+    }
+
     async fn host(dir: &std::path::Path) -> Host {
         let mut kernel = Kernel::new();
         kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
@@ -69,6 +85,10 @@ mod tests {
         kernel.bundles.register(
             fantastic_system_agents::power::HANDLER_MODULE,
             fantastic_system_agents::power::PowerBundle::with_port(Arc::new(Nothing)),
+        );
+        kernel.bundles.register(
+            fantastic_system_agents::audio::HANDLER_MODULE,
+            fantastic_system_agents::audio::AudioBundle::with_port(Arc::new(NothingAudio)),
         );
         let kernel = Arc::new(kernel);
         let root = Agent::new(
@@ -129,6 +149,36 @@ mod tests {
             h.kernel.agents.iter().filter(|a| a.value().record().handler_module.as_deref() == Some("power.tools")).count(),
             1,
             "one power agent, not two"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_makes_audio_under_user_with_its_view_and_one_instance() {
+        assert_eq!(ids(), ["power", "audio"], "the tiles the presets list");
+        let dir = std::env::temp_dir().join(format!("fc-system-ensure-audio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = host(&dir).await;
+        ensure(&h).await.unwrap();
+        let audio = h.kernel.agents.get(&AgentId::from("audio")).expect("audio exists").value().record();
+        assert_eq!(audio.parent_id.as_deref(), Some(h.cfg.user.as_str()));
+        assert_eq!(audio.handler_module.as_deref(), Some("audio.tools"));
+        let view = meta(&h, "audio", "view").unwrap();
+        assert_eq!(view["kind"], "html");
+        assert!(view["bytes"].as_str().unwrap().contains("set_volume"), "the page's html");
+        assert!(view["calls"].as_array().unwrap().iter().any(|v| v == "set_volume"));
+        let r = h
+            .operator("kernel", json!({"type": "update_agent", "id": "audio", "view": {"kind": "html", "bytes": "old", "calls": []}}))
+            .await
+            .result;
+        assert!(r.get("error").is_none(), "{r}");
+        ensure(&h).await.unwrap();
+        assert_ne!(meta(&h, "audio", "view").unwrap()["bytes"], "old", "the view is reset");
+        assert_eq!(
+            h.kernel.agents.iter().filter(|a| a.value().record().handler_module.as_deref() == Some("audio.tools")).count(),
+            1,
+            "one audio agent, not two"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
