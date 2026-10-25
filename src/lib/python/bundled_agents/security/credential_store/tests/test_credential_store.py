@@ -667,6 +667,134 @@ async def test_a_stored_value_without_a_host_is_refused(
     assert KEY not in repr(out), out
 
 
+# ─── secrets never reach a row, event or store ──────────────────────────────
+
+
+def test_field_marks_name_each_field_or_the_whole_map():
+    """Twin of the Rust `field_marks_names_each_field_or_the_whole_map`."""
+    from credential_store.tools import _field_marks, payload_secret
+
+    assert _field_marks({"api_key": "x", "user": "y"}) == [
+        "fields.api_key",
+        "fields.user",
+    ]
+    assert _field_marks({"a.b": "x"}) == ["fields"]
+    assert _field_marks({"": "x"}) == ["fields"]
+    assert _field_marks("x") == ["fields"]
+    assert _field_marks(None) == []
+    assert payload_secret({"type": "set", "fields": {"api_key": "x"}}) == [
+        "fields.api_key"
+    ]
+    assert payload_secret({"type": "get", "fields": {"api_key": "x"}}) == []
+
+
+async def test_concurrent_sets_lose_no_ref(seeded_kernel, tmp_path):
+    """Twin of the Rust `concurrent_sets_lose_no_ref`: parallel sets on different
+    refs all land in the file."""
+    import asyncio
+
+    k = _mk(seeded_kernel, tmp_path)
+    refs = [f"r{i:02}" for i in range(16)]
+    await _declare(k, {r: {"host": "h.example"} for r in refs})
+    outs = await asyncio.gather(
+        *[
+            _call(k, {"type": "set", "ref": r, "fields": {"api_key": f"k{i}"}})
+            for i, r in enumerate(refs)
+        ]
+    )
+    for out in outs:
+        assert out["result"]["stored"] is True, out
+    assert len(k.ctx.agents["creds"].record["refs"]) == 16
+    text = (tmp_path / "creds.yaml").read_text()
+    for i, r in enumerate(refs):
+        assert f"{r}:" in text and f"k{i}" in text, (r, text)
+    for i, r in enumerate(refs):
+        got = await _call(k, {"type": "get", "ref": r}, as_="alice")
+        assert got["result"]["fields"] == {"api_key": f"k{i}"}, got
+
+
+async def test_a_set_and_a_get_leave_the_value_in_no_row_event_or_store(
+    seeded_kernel, tmp_path
+):
+    """Twin of the Rust `a_set_and_a_get_leave_the_value_in_no_row_event_or_store`."""
+    k = _mk(seeded_kernel, tmp_path)
+    await k.send(
+        [
+            {
+                "target": "kernel",
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": k.id,
+                    "handler_module": "ram_store.tools",
+                    "id": "memory",
+                },
+            }
+        ]
+    )
+    k.ctx.update(k.id, memory_store_id="memory")
+    out = await k.ctx.start(boot_all=False)
+    assert out.get("started"), out
+    events: list = []
+    off = k.add_state_subscriber(events.append)
+    try:
+        await _seed(k)
+        with as_agent(k, "alice"):
+            got = (
+                await k.send(
+                    [
+                        {
+                            "target": "creds",
+                            "payload": {"type": "get", "ref": "openai/main"},
+                            "id": "get-1",
+                        }
+                    ]
+                )
+            )[0]
+        assert got["result"]["fields"] == {"api_key": KEY}, got
+        await k.ctx.flush_executions()
+        dump = str(
+            (await k.send([{"target": "memory", "payload": {"type": "dump"}}]))[0][
+                "result"
+            ]
+        )
+        ledger = str(
+            (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0][
+                "result"
+            ]
+        )
+    finally:
+        if callable(off):
+            off()
+    for name, text in (("store dump", dump), ("ledger", ledger)):
+        assert "get-1" in text, name
+        assert KEY not in text, name
+        assert "[secret]" in text, name
+    assert KEY not in repr(events)
+    assert KEY not in repr(list(k.ctx.rows.values()))
+    assert KEY in (tmp_path / "creds.yaml").read_text()
+
+
+async def test_a_gate_refused_set_leaves_no_value_in_any_row(seeded_kernel, tmp_path):
+    """Twin of the Rust `a_gate_refused_set_leaves_no_value_in_any_row`."""
+    k = _mk(seeded_kernel, tmp_path)
+    await _seed(k)
+    k.create(None, id="stranger", can_call={"creds": "*"})
+    refused = await _call(
+        k,
+        {"type": "set", "ref": "openai/main", "fields": {"api_key": KEY2}},
+        as_="stranger",
+    )
+    assert refused["status"] != "completed", refused
+    assert refused["result"]["reason"] == "unauthorized", refused
+    assert KEY2 not in repr(refused)
+    assert KEY2 not in repr(list(k.ctx.rows.values()))
+    ledger = (await k.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
+    assert KEY2 not in repr(ledger)
+    assert KEY2 not in (tmp_path / "creds.yaml").read_text()
+    got = await _call(k, {"type": "get", "ref": "openai/main"}, as_="alice")
+    assert got["result"]["fields"] == {"api_key": KEY}, got
+
+
 def test_the_default_file_is_under_the_homes_user_credentials(monkeypatch, tmp_path):
     """No `file`: `<home>/user/credentials/<id>.yaml`, `<home>` being
     FANTASTIC_HOME (made absolute), else `~/.fantastic`."""

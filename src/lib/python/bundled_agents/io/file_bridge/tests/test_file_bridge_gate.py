@@ -253,3 +253,136 @@ async def test_a_legal_rule_still_creates(seeded_kernel):
         0
     ]["result"]
     assert r["ingress_rule"] == "allow_all_ingress" and r["sealed"] is False
+
+
+# ─── the path gate, every verb (Rust tests_path_gate.rs) ────────
+
+
+async def test_every_verb_refuses_a_path_outside_the_list_and_changes_nothing(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    from file_bridge import tools
+
+    monkeypatch.chdir(tmp_path)
+    served = Path("served")
+    (served / "sub").mkdir(parents=True)
+    (served / "priv").mkdir()
+    (served / "sub/in.txt").write_bytes(b"old\n")
+    (served / "other.txt").write_bytes(b"secret\n")
+    (served / "priv/p.txt").write_bytes(b"p\n")
+    k = seeded_kernel
+    fb = await _make(
+        k, root="served", ingress_rule="allow_all_ingress", **{"allow": ["sub"]}
+    )
+
+    async def send(payload):
+        return (await k.send([{"target": fb, "payload": payload}]))[0]["result"]
+
+    def refused(r, label):
+        assert "error" in r, f"{label}: {r!r}"
+        assert r["reason"] == "not_found", f"{label}: {r!r}"
+        assert "not exposed" in r["error"], f"{label}: {r!r}"
+
+    refused(await send({"type": "list", "path": "priv"}), "list")
+    refused(await send({"type": "read_stream", "path": "other.txt"}), "read_stream")
+    refused(await send({"type": "watch_path", "path": "other.txt"}), "watch_path")
+    assert fb not in tools._WATCH, "a refused watch_path armed something"
+
+    refused(await send({"type": "write", "path": "new.txt", "bytes": b"x"}), "write")
+    assert not (served / "new.txt").exists()
+
+    refused(
+        await send({"type": "append", "path": "other.txt", "bytes": b"x"}), "append"
+    )
+    assert (served / "other.txt").read_bytes() == b"secret\n"
+
+    refused(
+        await send(
+            {"type": "write_stream", "path": "new.bin", "bytes": b"x", "truncate": True}
+        ),
+        "write_stream",
+    )
+    assert not (served / "new.bin").exists()
+
+    refused(await send({"type": "delete", "path": "other.txt"}), "delete")
+    assert (served / "other.txt").exists()
+
+    refused(await send({"type": "mkdir", "path": "newdir"}), "mkdir")
+    assert not (served / "newdir").exists()
+
+    # undo: a real slot for other.txt, then the list narrows back
+    r = (
+        await k.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": fb,
+                        "allow": ["sub", "other.txt"],
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert "error" not in r, r
+    w = await send({"type": "write", "path": "other.txt", "bytes": b"changed\n"})
+    assert "error" not in w, w
+    r = (
+        await k.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "update_agent", "id": fb, "allow": ["sub"]},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert "error" not in r, r
+    refused(await send({"type": "undo", "path": "other.txt"}), "undo")
+    assert (served / "other.txt").read_bytes() == b"changed\n"
+    (served / "other.txt").write_bytes(b"secret\n")
+
+    patch = (
+        "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+        "<<<<<<< SEARCH\nsecret\n=======\nchanged\n>>>>>>> REPLACE\n"
+    )
+    refused(
+        await send(
+            {
+                "type": "edit",
+                "edits": [
+                    {"path": "sub/in.txt", "hunks": 1},
+                    {"path": "other.txt", "hunks": 1},
+                ],
+                "bytes": patch.encode(),
+            }
+        ),
+        "edit",
+    )
+    assert (served / "sub/in.txt").read_bytes() == b"old\n"
+    assert (served / "other.txt").read_bytes() == b"secret\n"
+
+    refused(
+        await send(
+            {"type": "rename", "old_path": "other.txt", "new_path": "sub/moved.txt"}
+        ),
+        "rename out",
+    )
+    assert (served / "other.txt").exists()
+    assert not (served / "sub/moved.txt").exists()
+
+    refused(
+        await send(
+            {
+                "type": "rename",
+                "old_path": "priv/p.txt",
+                "new_path": "sub/imported.txt",
+            }
+        ),
+        "rename in",
+    )
+    assert (served / "priv/p.txt").exists()
+    assert not (served / "sub/imported.txt").exists()

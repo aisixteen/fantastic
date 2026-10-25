@@ -1433,6 +1433,30 @@ async def test_a_silent_api_stream_is_stalled_not_hung():
     assert ENDPOINT in str(err) and "0.05s" in str(err)
 
 
+async def test_a_future_still_pending_when_the_window_passes_is_stalled():
+    from ai_core.provider import ProviderError
+
+    class _Pending(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            raise httpx.ReadTimeout("window passed")
+            yield b""
+
+    t = httpx.MockTransport(lambda req: httpx.Response(200, stream=_Pending()))
+    err = await _turn_error(_provider(t, stream_idle=5.0))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert str(err).startswith("anthropic_backend: stream_stalled")
+    assert ENDPOINT in str(err) and "5s" in str(err)
+
+
+async def test_a_future_that_answers_within_the_window_passes_its_output():
+    chunks = [_sse(START).encode(), _sse(_text("fine")).encode()]
+    chunks += [_sse(*_stop()).encode()]
+    t = httpx.MockTransport(
+        lambda req: httpx.Response(200, stream=_SlowStream(chunks, 0.01))
+    )
+    assert await _drain(_provider(t, stream_idle=0.5)) == "fine"
+
+
 async def test_the_stream_runs_on_the_read_clock():
     seen = {}
 
