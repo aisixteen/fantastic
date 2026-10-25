@@ -182,7 +182,7 @@ impl NotificationsOs for LinuxNotifications {
         let _ = self.conn.object_server().remove::<Server, _>(PATH).await;
         let dbus = zbus::fdo::DBusProxy::new(&self.conn)
             .await
-            .map_err(|e| failed(e.into()))?;
+            .map_err(failed)?;
         let name = zbus::names::BusName::try_from(NAME).map_err(|e| failed(e.into()))?;
         let by = dbus
             .get_name_owner(name)
