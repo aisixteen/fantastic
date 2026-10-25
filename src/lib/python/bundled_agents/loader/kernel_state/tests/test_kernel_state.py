@@ -396,3 +396,47 @@ async def test_read_bundles_refuses_what_is_no_folder(tmp_path, monkeypatch):
     for name, reason in (("nope", "not_found"), ("../x", "not_found"), ("", "bad_arg")):
         r = await _ask(root, root.id, {"type": "read_bundles", "name": name})
         assert r.get("reason") == reason, (name, r)
+
+
+async def test_save_is_pure_in_ram_no_state_json_on_disk(tmp_path, monkeypatch):
+    """`Kernel.save()` is a pure read of the live tree. No `state.json` is ever
+    created: the on-disk medium is the per-agent `agent.yaml` tree, written THROUGH
+    the provider."""
+    from kernel._state import CURRENT_VERSION
+
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    root.create(
+        "file_bridge.tools",
+        allow=["."],
+        id="store",
+        root=".fantastic",
+        ingress_rule="allow_all_ingress",
+    )
+    (await root.send([{"target": root.id, "payload": {"type": "boot"}}]))[0]
+    try:
+        await root.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": root.id,
+                        "handler_module": "file_bridge.tools",
+                        "allow": ["."],
+                        "id": "alpha",
+                    },
+                }
+            ]
+        )
+        await root._fs_flush_loop.aflush()
+
+        assert not (tmp_path / ".fantastic" / "state.json").exists()
+        assert (tmp_path / ".fantastic" / "agents" / "alpha" / "agent.yaml").exists()
+
+        snap = root.ctx.save()
+        assert snap["version"] == CURRENT_VERSION
+        ids = [r["id"] for r in snap["records"]]
+        assert "alpha" in ids and "kernel_state" in ids
+    finally:
+        await on_shutdown(root)
