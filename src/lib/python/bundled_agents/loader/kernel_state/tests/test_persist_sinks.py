@@ -367,3 +367,69 @@ async def test_blob_verbs_refuse_bad_arguments(tmp_path, monkeypatch):
     assert await _root_call(
         root, {"type": "load_blob", "agent_id": "kernel_state", "name": ""}
     ) == {"error": "load_blob: name (non-empty str) required"}
+
+
+# ─── the dirty set and the shape of the store traffic ────────────────────────
+
+
+async def test_records_created_before_the_store_persist_once_it_is_wired(
+    tmp_path, monkeypatch
+):
+    """The record writer's DIRTY SET SURVIVES a no-store flush: it returns BEFORE
+    clearing the queues when nothing is wired, so everything created before a store
+    exists lands the moment one does."""
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    (await root.send([{"target": root.id, "payload": {"type": "boot"}}]))[0]
+    try:
+        # NO store yet: the record is queued, not written, and NOT dropped.
+        root.create("file_bridge.tools", id="early", mode="mem")
+        await _flush(root)
+        assert not (tmp_path / ".fantastic/agents/early/agent.yaml").exists()
+
+        # Wire one: the queued record drains on the next flush.
+        root.create(
+            "file_bridge.tools",
+            allow=["."],
+            id="store",
+            root=".fantastic",
+            ingress_rule="allow_all_ingress",
+        )
+        await _flush(root)
+        assert (tmp_path / ".fantastic/agents/early/agent.yaml").exists(), (
+            "the dirty set must survive a no-store flush"
+        )
+    finally:
+        await on_shutdown(root)
+
+
+async def test_store_calls_have_python_shape(wired):
+    """The store calls are TEXT-channel dicts: a read is `{type: read_stream, path,
+    offset}` with no `bytes` key, a write `{type: write_stream, path, bytes,
+    truncate}` with the chunk at `bytes` in place."""
+    root = wired
+    seen: list[dict] = []
+    root.ctx.add_state_subscriber(
+        lambda e: (
+            seen.append(e["payload"])
+            if e.get("agent_id") == "store" and e.get("kind") == "send"
+            else None
+        )
+    )
+    root.create("file_bridge.tools", id="shaped", mode="mem")
+    await _flush(root)  # a barrier: every dirty write has landed
+
+    read = next(
+        p
+        for p in seen
+        if p.get("type") == "read_stream"
+        and p.get("path") == "agents/shaped/agent.yaml"
+    )
+    assert list(read) == ["type", "path", "offset"], read
+    write = next(
+        p
+        for p in seen
+        if p.get("type") == "write_stream"
+        and str(p.get("path")).startswith("agents/shaped/agent.yaml.tmp.")
+    )
+    assert list(write) == ["type", "path", "bytes", "truncate"], write

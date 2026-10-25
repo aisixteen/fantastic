@@ -110,3 +110,19 @@ async def test_create_agent_guards_the_id(seeded_kernel, aid, want):
         "reason": "bad_arg",
         "arg": "id",
     }, r
+
+
+async def test_the_id_index_is_bounded(seeded_kernel):
+    """The count is honest even though the list is clipped: one typo must not turn
+    into a context dump."""
+    from kernel import Kernel
+
+    assert Kernel.UNKNOWN_AGENT_IDS_MAX == 40
+    for i in range(200):
+        seeded_kernel.create("file_bridge.tools", id=f"agent_{i:03}", allow=["."])
+    r = (
+        await seeded_kernel.send([{"target": "nope", "payload": {"type": "reflect"}}])
+    )[0]["result"]
+    assert r["reason"] == "unknown_agent", r
+    assert len(r["agents"]) == Kernel.UNKNOWN_AGENT_IDS_MAX, r
+    assert r["agent_count"] == len(seeded_kernel.ctx.agents) > 200, r
