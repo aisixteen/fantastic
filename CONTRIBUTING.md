@@ -61,7 +61,8 @@ the full detail.
 Container changes: `sh container/build.sh` then `sh container/test/build_smoke.sh`.
 
 CI (`.github/workflows/ci.yml`) builds every runtime and runs its unit tests on
-Linux, macOS and Windows (swift: Linux and macOS). A full run adds every release
+Linux, macOS and Windows (swift: Linux and macOS). For a quick check, `-f units_os=linux`
+runs the units on Linux only; a full run always covers all three. A full run adds every release
 binary and the model-free e2e (`e2e/run.py --only-free`) on them. Every run is
 started by hand, never on a push or a PR; ready branches are batched into one
 temporary `ci/batch-<n>` branch and run once. A bug fix gets the units

@@ -1,7 +1,8 @@
 # THE BUILD — one reusable workflow, called with what to do:
 #
 #   profile    debug | release — what every job builds
-#   units      the unit tests of every runtime, per OS
+#   units      the unit tests of every runtime, per OS (`units_os`: all three
+#              OSes, or Linux only when `units_os` is `linux`)
 #   binaries   the shipping archive of every release target (`release-<target>`;
 #              `release.yml` publishes the ones a green run of `ci.yml` kept for
 #              the tagged commit), and per OS the kernels and rig the e2e runs
@@ -43,6 +44,10 @@ on:
       units:
         type: boolean
         default: false
+      units_os:
+        # the units' OS set: `all` (Linux, macOS, Windows) or `linux` (Linux only)
+        type: string
+        default: all
       binaries:
         type: boolean
         default: false
@@ -78,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, xcode-27, windows-latest]
+        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
@@ -107,7 +112,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, xcode-27, windows-latest]
+        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -144,7 +149,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, xcode-27, windows-latest]
+        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
@@ -197,7 +202,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, xcode-27, windows-latest]
+        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
