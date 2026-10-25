@@ -130,6 +130,11 @@ _current: dict[str, dict] = {}
 # the pass that reads the message.
 _chains: dict[str, dict] = {}
 
+# The task each in-flight generation runs in (`asyncio.current_task()`), per agent
+# id. Kept apart from `_current`, whose entry status snapshots serialise. `_stop`
+# aborts it when the kernel's cancel does not find the turn's task.
+_generations: dict[str, asyncio.Task] = {}
+
 # Last context-overflow projection per agent — the PUBLIC summary surfaced by the
 # `context_status` verb. {fired:bool, strategy?, kept_messages?, dropped_messages?, summarized?,
 # too_small?}. Kept free of internal bookkeeping (see `_compaction_mark`).
@@ -219,10 +224,14 @@ def _set_current(self_id: str, entry: dict) -> None:
         "text_so_far": "",
         "task_id": current_task(),
     }
+    task = asyncio.current_task()
+    if task is not None:
+        _generations[self_id] = task
 
 
 def _clear_current(self_id: str) -> None:
     _current.pop(self_id, None)
+    _generations.pop(self_id, None)
 
 
 def _chain_of(self_id: str) -> dict:
@@ -243,8 +252,21 @@ def _end_chain(self_id: str) -> None:
     cancelled shape."""
     chain = _chain_of(self_id)
     chain["alive"] = False
+    chain["token"] = ""
     held, chain["held"] = chain["held"], []
     _answer_held(held, {"held": True, "cancelled": True})
+
+
+def _reset_chain(self_id: str, why: str) -> None:
+    """The chain is over for a reason that is not a stop (delete, shutdown, boot,
+    context clear, a wake that could not run): every held sender is answered with
+    `why` instead of waiting out the send ceiling; the chain is dead and its token
+    is dropped. Rust: `ChainState::reset`."""
+    chain = _chain_of(self_id)
+    held, chain["held"] = chain["held"], []
+    chain["alive"] = False
+    chain["token"] = ""
+    _answer_held(held, {"error": why, "held": True})
 
 
 #: The wake turn a chain that ended with held messages gets (#227).
@@ -270,6 +292,30 @@ def _chain_ended(kernel, self_id: str, system_prompt: str | None) -> None:
         system_prompt,
         notice=True,
     )
+    # WAKE WATCHDOG: a wake that never gets the lock must not leave its senders
+    # waiting forever. After the send ceiling the senders this wake was for, if no
+    # pass has taken them, are answered with an error.
+    watched = list(chain["held"])
+
+    async def _watch() -> None:
+        await asyncio.sleep(SEND_TIMEOUT)
+        c = _chain_of(self_id)
+        expired = [h for h in c["held"] if any(h is w for w in watched)]
+        if not expired:
+            return
+        c["held"] = [h for h in c["held"] if not any(h is e for e in expired)]
+        _answer_held(
+            expired,
+            {
+                "error": "send: no turn read this message within the send ceiling",
+                "held": True,
+            },
+        )
+        if not c["held"]:
+            c["alive"] = False
+            c["token"] = ""
+
+    _ctx(kernel).spawn_task(self_id, "chain_wake_watch", _watch())
 
 
 def _push_held_or_wake(
@@ -1248,6 +1294,8 @@ async def _deliver(
             if isinstance(reply, dict) and reply.get("error")
             else out["status"]
         )
+        if notice:
+            _reset_chain(target, "send: the turn that was to read this message did not run")
         await _emit_status(kernel, target, client_id, "done", reason="error", error=err)
 
 
@@ -2602,7 +2650,12 @@ def _render_history(
     for e in listed:
         i = pos[e["id"]]
         res = e.get("res", "full")
-        out.append((i, res, _apply_res(hist[i], res)))
+        # A body a trimmer left on the entry (a `context_fold` keeps the rows before
+        # its range as the model saw them) renders as saved while cleanup is on.
+        if clean and isinstance(e.get("content"), str):
+            out.append((i, res, {**hist[i], "content": e["content"]}))
+        else:
+            out.append((i, res, _apply_res(hist[i], res)))
     return out + _render_tail(hist, max(pos[e["id"]] for e in listed) + 1, clean)
 
 
@@ -3609,6 +3662,27 @@ def _make_send(cfg: Backend):
             # the in-flight entry. _set_current establishes phase='thinking',
             # the started_at timestamp, and the kernel task id we run as.
             _dequeue_send(id, send_id)
+            # A REPLY IN FLIGHT ACROSS A STOP: it carries the token of a chain that
+            # has ended, so it is recorded as a late row and runs nothing.
+            if (
+                isinstance(token, str)
+                and token
+                and token != _chain_of(id)["token"]
+            ):
+                await _save_history(
+                    id,
+                    kernel,
+                    [
+                        {
+                            "role": "user",
+                            "parent": None,
+                            "kind": "late",
+                            "content": "[late reply — answered a call of a chain "
+                            "that has ended; recorded, not acted on]\n" + str(text),
+                        }
+                    ],
+                )
+                return {"late": True, "client_id": client_id}
             _set_current(id, entry)
             # ONE CHAIN PER AGENT (#227): this pass owns the chain. A new chain mints
             # its token; this pass TAKES the held messages (it reads their rows) and
@@ -3956,7 +4030,14 @@ async def _stop(id, payload, kernel):
     # ONE CHAIN PER AGENT (#227): stop means stop. The chain ends and the held
     # messages are dropped from the wake list (their rows stay stored); no wake.
     _end_chain(id)
-    await kernel.ctx.cancel_task(cur["task_id"])
+    res = await kernel.ctx.cancel_task(cur["task_id"])
+    if not (isinstance(res, dict) and res.get("cancelled")):
+        # The kernel did not find the turn's task: close the turn ourselves, then
+        # abort the generation that is still running.
+        gen = _generations.get(id)
+        await on_cancel(id, cur["task_id"], kernel)
+        if gen is not None and gen is not asyncio.current_task():
+            gen.cancel()
     return {"stopped": True}
 
 
@@ -4141,6 +4222,7 @@ async def on_delete(agent) -> None:
     from ai_core.strategies.strip import _stripped
 
     id = agent.id
+    _reset_chain(id, "send: the agent was deleted or shut down")
     await _purge(id, agent)
     for table in (
         _locks,
@@ -4155,6 +4237,7 @@ async def on_delete(agent) -> None:
         _inflight,
         _stripped,
         _chains,
+        _generations,
         _running_jobs,
     ):
         table.pop(id, None)
@@ -4746,6 +4829,7 @@ async def _context_clear(id, payload, kernel):
     _folds_since.pop(id, None)
     _recall_due.discard(id)
     _view_source.pop(id, None)
+    _reset_chain(id, "send: the context was cleared before a turn read this message")
     return {"cleared": rid, "rows": len(members)}
 
 
@@ -4889,12 +4973,17 @@ async def _fold_range(id, payload, kernel, cfg: Backend):
     # range began, then the rows after. The fold is the newest row, so the array carries
     # every kept row.
     ids: list[dict] = []
-    for p, (idx, res, _) in enumerate(view):
+    for p, (idx, res, msg) in enumerate(view):
         if p == from_p:
             ids.append({"id": fid, "res": "fold"})
         if from_p <= p <= to_p:
             continue
-        ids.append({"id": rows[idx]["id"], "res": res})
+        entry = {"id": rows[idx]["id"], "res": res}
+        # a body a trimmer changed is kept as trimmed, so the next turn renders the
+        # same message the model saw before the fold
+        if msg != _apply_res(rows[idx], res):
+            entry["content"] = msg["content"]
+        ids.append(entry)
     await _save_view(id, kernel, ids, budget_=budget(rec), why="context_fold")
     return {"folded": fid, "rows": len(span), "summarized": summarized}
 
@@ -5051,6 +5140,7 @@ def _make_boot(cfg: Backend):
     async def _boot(id, payload, kernel):
         """LAZY: never touches the memory store. Checks the record names one (fail loud otherwise), starts a new incarnation, and marks the view for rebuilding — the first turn reads the head from the store and runs `context_recall`."""
         _incarnation[id] = _incarnation.get(id, 0) + 1
+        _reset_chain(id, "send: the agent rebooted before a turn read this message")
         try:
             _store_of(id, kernel)
         except MemoryStoreError as e:
