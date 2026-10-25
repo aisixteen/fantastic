@@ -46,7 +46,7 @@ from file_bridge import fs
 
 import yaml
 
-from kernel_state import yaml_io
+from kernel_state import export, yaml_io
 
 from kernel import CURRENT_VERSION
 from kernel._bundles import (
@@ -1183,11 +1183,20 @@ async def _read_bundles(id, payload, agent):
     return {"bundles": out}
 
 
+async def _export_subtree(id, payload, agent):
+    """args: agent_id:str (req), path:str (req) — writes the agent and everything under it as a blueprint folder; outside references become ports; no keys, no absolute paths, no rows. path: a new or empty folder (relative to the running dir; no `..`). Reply {exported, path, ports, files}."""
+    who = "kernel_state.export_subtree"
+    if agent.parent is not None:
+        return refusal(BAD_ARG, f"{who}: the ROOT answers it")
+    return export.export_subtree(agent, payload, who)
+
+
 VERBS = {
     "reflect": _reflect,
     "boot": _boot,
     "reload_bundle": _reload_bundle,
     "read_bundles": _read_bundles,
+    "export_subtree": _export_subtree,
     "load_tree": _load_tree,
     "persist_record": _persist_record,
     "forget_record": _forget_record,

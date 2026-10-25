@@ -34,6 +34,7 @@ use fantastic_kernel::agent::Agent;
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::{persistence, AgentId, Kernel};
 
+pub mod export;
 pub mod folders;
 
 /// The `handler_module` this bundle answers to — python's package path.
@@ -616,6 +617,7 @@ impl Bundle for KernelStateBundle {
             "load_blob" => persistence::load_blob(kernel, &agent, payload).await?,
             "reload_bundle" => reload_bundle(&agent, payload, kernel).await?,
             "read_bundles" => read_bundles(&agent, payload, kernel)?,
+            "export_subtree" => export_subtree_root(&agent, payload, kernel).await,
             // CODED. A reason-less error on the ROOT — the most-addressed agent
             // in the kernel — is decorated by `apply_reflect_flags` into
             // something that reads like a healthy reflect (python).
@@ -850,6 +852,18 @@ fn read_bundles(
     Ok(json!({"bundles": out}))
 }
 
+/// `export_subtree {agent_id, path}` — the ROOT writes an agent and everything
+/// under it as a blueprint folder (`export.rs`; `user` answers the same verb).
+async fn export_subtree_root(agent: &Arc<Agent>, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    if agent.parent_id.is_some() {
+        return fantastic_kernel::refusal::refusal(
+            fantastic_kernel::refusal::BAD_ARG,
+            "kernel_state.export_subtree: the ROOT answers it",
+        );
+    }
+    export::export_subtree(kernel, payload, "kernel_state.export_subtree").await
+}
+
 fn verbs_view() -> Value {
     json!({
         "reflect": "Identity + the disk root it owns. No args.",
@@ -860,6 +874,7 @@ fn verbs_view() -> Value {
         "persist_blob": "args: agent_id:str (req), name:str (req), content:str (req). Persist an",
         "load_blob": "args: agent_id:str (req), name:str (req). Read an agent's sidecar THROUGH the",
         "reload_bundle": "args: name:str (req). Re-read `bundles/<name>/bundle.yaml` (a new folder loads) and restart every live instance of it, abruptly — an in-flight call is answered with an error naming the reload. Returns {reloaded, instances}. The root answers it.",
+        "export_subtree": "args: agent_id:str (req), path:str (req) — writes the agent and everything under it as a blueprint folder; outside references become ports; no keys, no absolute paths, no rows. path: a new or empty folder (relative to the running dir; no `..`). Reply {exported, path, ports, files}.",
         "read_bundles": "args: name:str?. The folder bundles under this loader's root AS TEXT — {bundles:[{name, folder, text?, error?}]}, each `bundles/<name>/bundle.yaml` raw (`error` when it has none); `name` reads one. For a kernel that loads its own folders through this loader (a page kernel's proxy_loader); this loader parses nothing.",
     })
 }

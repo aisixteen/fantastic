@@ -1016,6 +1016,15 @@ impl App {
             return;
         };
 
+        // `/export <path>`: the selected agent and everything under it, as a
+        // blueprint folder — the human's own act, so it goes through `user`
+        if line.split_whitespace().next() == Some("/export") {
+            match Composer::parse_export(&line, Some(target.as_str())) {
+                Ok(payload) => self.out.push(Cmd::Send { target: "user".into(), payload }),
+                Err(e) => self.note(format!("export: {e}")),
+            }
+            return;
+        }
         if verb_mode && !line.starts_with("/q ") {
             match Composer::parse_verb(&line) {
                 Ok(payload) => self.out.push(Cmd::Send { target, payload }),
@@ -1059,4 +1068,59 @@ fn ancestors(t: &TreeNode, id: &str) -> Vec<AgentId> {
 /// `_abort`).
 fn is_part(payload: &Value) -> bool {
     payload.get("type").and_then(Value::as_str).is_some_and(|t| t.starts_with("part_"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kern::model::TreeNode;
+
+    fn app_on(id: &str) -> App {
+        let leaf = |id: &str| TreeNode {
+            id: id.into(),
+            parent_id: None,
+            handler_module: Some("x.tools".into()),
+            display_name: None,
+            description: None,
+            children: vec![],
+        };
+        let mut app = App::new(crate::env::Paths::at(std::path::Path::new("/nonexistent")));
+        app.screen = ratatui::layout::Rect::new(0, 0, 120, 40);
+        app.tree = Some(TreeNode { children: vec![leaf(id)], ..leaf("root") });
+        app.reflow();
+        app.sel = app.trows.iter().position(|r| r.id.as_str() == id).expect("the row");
+        app
+    }
+
+    #[test]
+    fn submit_export_sends_user_export_subtree_for_the_selected_agent() {
+        let mut app = app_on("worker");
+        app.composer.insert_str("/export out/team");
+        app.submit();
+        assert_eq!(app.out.len(), 1, "{:?}", app.out.len());
+        match &app.out[0] {
+            Cmd::Send { target, payload } => {
+                assert_eq!(target, "user");
+                assert_eq!(
+                    *payload,
+                    serde_json::json!({"type": "export_subtree", "agent_id": "worker", "path": "out/team"})
+                );
+            }
+            _ => panic!("a Send"),
+        }
+    }
+
+    #[test]
+    fn submit_export_with_bad_path_notes_the_error_and_sends_nothing() {
+        for (line, want) in [
+            ("/export ../x", "export: path may not hold `..`"),
+            ("/export", "export: usage: /export <path>"),
+        ] {
+            let mut app = app_on("worker");
+            app.composer.insert_str(line);
+            app.submit();
+            assert!(app.out.is_empty(), "{line}: nothing is sent");
+            assert_eq!(app.notes.last().map(String::as_str), Some(want), "{line}");
+        }
+    }
 }

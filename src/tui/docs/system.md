@@ -306,16 +306,27 @@ The Home's actions on this row:
 
 ## Export a subtree
 
-`user`'s verb `export_subtree {agent_id, path}` writes an agent and every agent
+The verb `export_subtree {agent_id, path}` (on `user` and on the kernel's
+root, the same engine and the same reply) writes an agent and every agent
 under it as a blueprint folder at `path` (relative to the running dir; a new
-or empty folder; no `..`):
+or empty folder; no `..`). In the TUI, `/export <path>` exports the selected
+agent; on the canvas, a cell's right-click menu has "Export…":
 
 - `blueprint.yaml` in the shape of `src/tui/blueprint.yaml`: nesting under
   `agents:` is the parent (no `parent_id`), children in creation order, grants
   by id on both ends, `@root` for the root. Ids stay the readable names; the
   importer makes fresh ones.
 - the owned files beside it: an agent's `system_prompt_file` (relative and
-  readable) as `<agent id>/directive.md`, the record pointing there.
+  readable) as `<agent id>/directive.md`, the record pointing there; an html
+  view's body (`view.bytes`) as `<agent id>/view.html`, the record keeping
+  `view.bytes_file` in its place (`kind` and `calls` stay); and, for an agent
+  that runs on a FOLDER BUNDLE, the plain top-level files of
+  `.fantastic/bundles/<handler_module>/` (`bundle.yaml`, `agent.py`,
+  `panel.html`…) as `bundles/<handler_module>/<name>`, once per bundle.
+  `<agent id>/view.html` and `bundles/…` are CODE: the blueprint's header
+  lists each as `# code: <path>`, and the importer takes them only with
+  `allow_code`. A symlink, a hidden file, a file that is not UTF-8 text or is
+  over 1 MiB is left out and noted in the header.
 
 The reply is `{exported, path, ports, files}`. Files are written `0600`,
 folders `0700`, into a temp folder that is renamed into place.
@@ -347,9 +358,8 @@ subtree's folder when under it, else a port). Only records are read, never
 rows. A secrets scan runs over the written folder; a hit deletes it and the
 export is refused (`secret_found`).
 
-Not yet: the canvas cell menu "Export…", a TUI command, the verb on the
-kernel's root, and owned files beyond the directive (an html view's body, a
-starter's `bundle.yaml`, code and panels). The import is below.
+Not yet: a frontend agent's top-level `html` field stays inline in the
+blueprint. The import is below.
 
 ## Import a subtree
 
@@ -391,7 +401,17 @@ for a `callable_by`), so the copy reaches exactly what it was granted and what
 its ports were bound to. A failure deletes what was made (`failed`). The
 reply is `{imported, ids, parent_id, ports}`.
 
-Not yet: the canvas drop (a folder dragged onto a cell or the canvas), a TUI
-command, the verb on the kernel's root, `@path:*` ports, and owned files
+From a shell: `fantastic import <path> --parent <agent id> [--bind
+@port=agent id]… [--allow-code] [--approve]` calls the verb in the running
+kernel (attach-only, like `send`). It prints the preview (new ids, what each
+reaches, the ports, the code) and creates nothing; on a terminal it then asks
+`approve? [y/N]`, and `--approve` sends the approved call at once. Exit 0 for a
+preview or an import, 1 for a refusal (`refused (<reason>): <message>`), 2 for
+a bad command line. On the canvas, dropping a folder that holds
+`blueprint.yaml` onto a cell (the parent) or the canvas (the canvas's host
+node) shows the same preview with Approve/Cancel (code needs its own "allow
+code" tick) instead of opening the folder.
+
+Not yet: the verb on the kernel's root, `@path:*` ports, and owned files
 beyond the directive (a directive keeps its relative `system_prompt_file`; the
 file is not written into the new agent's folder).

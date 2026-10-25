@@ -49,7 +49,7 @@ from kernel._refusal import (
     refusal,
 )
 
-from user.export import (
+from kernel_state.export import (
     BLUEPRINT_FILE,
     GRANT_FIELDS,
     REF_FIELDS,

@@ -21,6 +21,7 @@ mod atomic;
 mod boot;
 mod env;
 mod ev;
+mod import;
 mod kern;
 mod keys;
 mod mcp;
@@ -97,6 +98,9 @@ pub fn main_with(args: Vec<String>, extras: &[Extra]) -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("send") {
         send::main(&args[1..])
+    }
+    if args.first().map(String::as_str) == Some("import") {
+        import::main(&args[1..])
     }
     if args.first().map(String::as_str) == Some("migrate-home") {
         migrate::main(&args[1..])
