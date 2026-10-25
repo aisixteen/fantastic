@@ -18,7 +18,10 @@ def test_a_call_inside_a_tool_call_wrapper_is_refused_with_the_bare_rewrite():
     assert len(reports) == 1
     assert "`<tool_call>`" in reports[0]
     assert "drop the wrapper" in reports[0]
-    assert '<call name="send"><target_id>files</target_id>' in reports[0]
+    assert (
+        'write it as:\n<call name="send">\n<target_id>files</target_id>\n'
+        "<type>reflect</type>\n</call>"
+    ) in reports[0]
 
 
 def test_a_call_inside_an_arbitrary_tag_is_refused():
@@ -78,7 +81,9 @@ def test_a_wrapped_call_is_not_dispatched_and_the_top_level_one_runs():
 
 
 def test_an_empty_wrapper_is_reported_by_name_not_only_reminded():
-    reports = check("<tool_call>\n<function_calls>\n<function_calls>\n</function_calls>", ran=0)
+    reports = check(
+        "<tool_call>\n<function_calls>\n<function_calls>\n</function_calls>", ran=0
+    )
     assert reports and "holds no call" in reports[0]
 
 
