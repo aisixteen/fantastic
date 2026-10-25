@@ -544,6 +544,22 @@ async def test_the_id_counter_reserves_blocks_in_the_root_record(tmp_path, monke
     assert root2.ctx.mint_id() >= bound, "a reboot resumes past the reserved block"
 
 
+# Rust twin: fantastic-kernel src/rows/tests.rs::restore_resumes_at_the_persisted_bound_and_never_lowers
+def test_the_id_counter_restore_never_lowers_the_bound():
+    from kernel._kernel import Kernel
+
+    root = {"id": "kernel_state", "handler_module": "kernel_state.tools"}
+    k = Kernel()
+    k.load([{**root, "next_id": 5000}])
+    assert k.next_id == 5000
+    assert k.id_reserved == 5000 + k.ID_BLOCK
+    k.load([{**root, "next_id": 10}])
+    assert k.next_id == 5000, "never lowered"
+    k2 = Kernel()
+    k2.load([dict(root)])
+    assert k2.id_reserved == 1 + k2.ID_BLOCK, "no bound: the first block in memory"
+
+
 async def test_kernel_stop_acks(seeded_kernel):
     out = (await _call(seeded_kernel, "kernel", {"type": "kernel_stop"}))["result"]
     assert out == {"type": "kernel_stop", "ok": True}
