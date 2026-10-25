@@ -17,6 +17,7 @@ This is `fantastic` without a terminal, so it only prints this readme: it starts
 \x20\x20fantastic --headless               no screen, no canvas: the kernel's message stream on stdout\n\
 \x20\x20fantastic mcp                      MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)\n\
 \x20\x20fantastic send '<item json>'       one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
+\x20\x20fantastic import PATH --parent ID  import a blueprint folder as agents under ID: prints the preview, then asks (`--bind @port=ID`, `--allow-code`, `--approve` skips the question)\n\
 \x20\x20fantastic migrate-home [--dry-run]  move the files of an older layout (~/.config/fantastic, ~/.fantastic/credentials) into ~/.fantastic; --dry-run only prints the moves\n\
 \x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, `system`, and the kernel's own)\n\
 \n";
