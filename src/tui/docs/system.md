@@ -75,3 +75,50 @@ The Home's actions on this row:
   `systemctl --user disable --now fantastic-system`, then `remove`.
 - `start` is not for it: in those 2 s it would make a second host in the
   kiosk's session, holding the folder while systemd retries.
+
+## Export a subtree
+
+`user`'s verb `export_subtree {agent_id, path}` writes an agent and every agent
+under it as a blueprint folder at `path` (relative to the running dir; a new
+or empty folder; no `..`):
+
+- `blueprint.yaml` in the shape of `src/tui/blueprint.yaml`: nesting under
+  `agents:` is the parent (no `parent_id`), children in creation order, grants
+  by id on both ends, `@root` for the root. Ids stay the readable names; the
+  importer makes fresh ones.
+- the owned files beside it: an agent's `system_prompt_file` (relative and
+  readable) as `<agent id>/directive.md`, the record pointing there.
+
+The reply is `{exported, path, ports, files}`. Files are written `0600`,
+folders `0700`, into a temp folder that is renamed into place.
+
+A reference that points OUTSIDE the subtree (a grant key in `can_call` /
+`callable_by`, `memory_store_id`, `file_bridge_id`, `backend_id`,
+`credentials.store`) becomes a PORT, listed under `ports:` with its `kind`,
+`why` and `used_by`:
+
+| port | kind | for |
+|---|---|---|
+| `@memory` | memory | a memory store (`memory_store_id`, a `*_store.tools`) |
+| `@credentials` | credentials | the key store (`credential_store.tools`) |
+| `@exec` | exec | an exec agent (`exec_bridge.tools`) |
+| `@files` | files | a file bridge (`file_bridge.tools`) |
+| `@model` | model | a chat model (`*_backend.tools`, `backend_id`) |
+| `@connector:<id>` | connector | anything else |
+| `@path:<field>` | path | an absolute path outside the subtree's folder |
+
+Two outside agents of one kind are `@memory`, `@memory_2`…, numbered by
+outside id. `$self`, `$parent`, `$subtree`, `*` and page grants
+(`<guid>|<id>`) are written as they are.
+
+Stripped: runtime state (`guid`, `pid`, `version`, `rows`, `history`, `cache`,
+`usage`, `ts`, `created_at`, `updated_at`, `error`, `last_error`, any `last_*`,
+`*_error`, `*_at`, `*_ts`), every `api_key`, `token`, `secret` and `password`
+(at any depth; `credentials.ref` stays), and absolute paths (relative to the
+subtree's folder when under it, else a port). Only records are read, never
+rows. A secrets scan runs over the written folder; a hit deletes it and the
+export is refused (`secret_found`).
+
+Not yet: the canvas cell menu "Export…", a TUI command, the verb on the
+kernel's root, the import (the next issue), and owned files beyond the
+directive (an html view's body, a starter's `bundle.yaml`, code and panels).
