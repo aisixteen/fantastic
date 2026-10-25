@@ -1117,7 +1117,9 @@ async def on_delete(agent) -> None:
 # own inbox as `{type: changed, path, kind}`. A caller receives them by WATCHING this
 # bridge. A file is watched through its parent directory, so an editor's atomic
 # save (write a temp file, rename it over) is seen. Each path is held per caller;
-# the disk watch stops when no caller holds any path. RAM only: a kernel restart
+# the disk watch stops when no caller holds any path. A path that does not exist yet
+# is held PENDING: its nearest existing folder is watched, the watch moves down as
+# folders appear, and `added` fires once when the path does. RAM only: a kernel restart
 # drops every watch (a caller re-arms on boot).
 
 #: A burst of disk events (an editor's save) inside this many ms is one `changed`.
@@ -1135,7 +1137,7 @@ def _caller() -> str:
 
 
 async def _watch_path(id, payload, kernel):
-    """args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths}; refused with transport_error when the disk watch cannot be armed.
+    """args: path:str (req — an exposed file or directory). Emit `{type: changed, path, kind}` on this bridge's inbox whenever it changes on disk, by any writer; WATCH this bridge to receive them. Returns {watching, paths, pending?}; `pending: true` when the path does not exist yet (it is held, and `changed` kind=added fires when it appears); refused with transport_error when the disk watch cannot be armed.
 
     `kind` is `added`, `modified` or `deleted`, judged from each path's stamp (inode, ctime, mtime, size) against its last stamp, not from the platform's event name — treat any `changed` as "read it again". A directory reports its entries (not recursive).
     Held per caller until `unwatch_path`; RAM only."""
@@ -1147,22 +1149,11 @@ async def _watch_path(id, payload, kernel):
     if err := _gate_path("watch_path", root, _allow(rec), path):
         return err
     norm = _norm(path) or "."
-    parent = posixpath.dirname(norm) or "."
-    try:
-        is_dir = fs.is_dir(root, norm)
-        if not (is_dir or fs.is_dir(root, parent)):
-            return refusal(
-                NOT_FOUND,
-                f"watch_path: no directory {parent!r} to watch {path!r} in",
-                path=path,
-            )
-    except (ValueError, OSError) as e:
-        return refusal(TRANSPORT_ERROR, str(e))
     st = _WATCH.setdefault(id, {"paths": {}, "task": None})
     me = _caller()
     was_holder = me in st["paths"].get(norm, set())
     st["paths"].setdefault(norm, set()).add(me)
-    armed_err = _rewatch(id, kernel, root)
+    armed_err, missing = _rewatch(id, kernel, root)
     if armed_err is not None:
         # a watch that did not arm is not a watch: roll this caller's new hold back,
         # and re-arm what the others still hold
@@ -1181,7 +1172,10 @@ async def _watch_path(id, payload, kernel):
             f"watch_path {norm!r}: the disk watch cannot be armed: {armed_err}",
             path=path,
         )
-    return {"watching": norm, "paths": sorted(st["paths"])}
+    out = {"watching": norm, "paths": sorted(st["paths"])}
+    if norm in missing:
+        out["pending"] = True
+    return out
 
 
 async def _unwatch_path(id, payload, kernel):
@@ -1203,36 +1197,67 @@ async def _unwatch_path(id, payload, kernel):
     return {"watching": False, "paths": sorted(st["paths"])}
 
 
-def _rewatch(id: str, kernel, root: fs.Root) -> str | None:
+def _nearest_existing(target: str) -> str:
+    """The deepest existing directory at or above `target`."""
+    p = target
+    while not os.path.isdir(p):
+        up = os.path.dirname(p)
+        if up == p:
+            break
+        p = up
+    return p
+
+
+def _layout(root: fs.Root, norms) -> tuple[dict, dict, set, list]:
+    """Where the disk watcher must look for these held paths now: (files, dirs, missing,
+    targets). `files` maps an absolute file path to its norm, `dirs` an absolute directory
+    to its norm; a path that does not exist yet is a file, placed under its nearest
+    existing ancestor (`missing` holds its norm). `targets` is the sorted list of existing
+    directories to watch: a held directory, a file's parent, or that ancestor."""
+    files: dict[str, str] = {}
+    dirs: dict[str, str] = {}
+    missing: set[str] = set()
+    targets: set[str] = set()
+    for norm in norms:
+        target = str(fs.resolve(root, "" if norm == "." else norm))
+        if os.path.isdir(target):
+            dirs[target] = norm
+            targets.add(target)
+            continue
+        if not os.path.lexists(target):
+            missing.add(norm)
+        near = _nearest_existing(os.path.dirname(target))
+        anc = os.path.realpath(near)
+        files[os.path.join(anc, os.path.relpath(target, near))] = norm
+        targets.add(anc)
+    return files, dirs, missing, sorted(targets)
+
+
+def _rewatch(id: str, kernel, root: fs.Root) -> tuple[str | None, set[str]]:
     """(Re)start the one disk watcher this bridge runs, over the paths held now. The old
-    task is cancelled first. Returns None when armed (or nothing is held), else why the
-    watch could not be armed."""
+    task is cancelled first. Returns (err, missing): err is None when armed (or nothing
+    is held), else why the watch could not be armed; missing is the held paths that do
+    not exist yet (pending)."""
     st = _WATCH.get(id)
     if st is None:
-        return None
+        return None, set()
     if st["task"] is not None:
         st["task"].cancel()
         st["task"] = None
     if not st["paths"]:
-        return None
-    files: dict[str, str] = {}  # absolute file → its path under the root
-    dirs: dict[str, str] = {}  # absolute dir → its path under the root
-    for norm in st["paths"]:
-        target = fs.resolve(root, "" if norm == "." else norm)
-        if fs.is_dir(root, norm):
-            dirs[str(target)] = norm
-        else:
-            files[str(target)] = norm
+        return None, set()
+    norms = list(st["paths"])
+    files, dirs, missing, _targets = _layout(root, norms)
     err = _arm_error(files, dirs)
     if err is not None:
-        return err
+        return err, missing
     # the stamps the judgement starts from: what the disk holds at the arm
     stamps = _seed(root, list(st["paths"]))
     tid = kernel.ctx.spawn_task(
-        id, "watch_path", _watch_loop(id, kernel, files, dirs, stamps)
+        id, "watch_path", _watch_loop(id, kernel, root, norms, stamps)
     )
     st["task"] = kernel.ctx.tasks[tid]["_task"]
-    return None
+    return None, missing
 
 
 def _arm_error(files: dict[str, str], dirs: dict[str, str]) -> str | None:
@@ -1301,58 +1326,91 @@ def _seed(root: fs.Root, norms: list[str]) -> dict[str, tuple]:
     return stamps
 
 
+#: While a held path has no stamp (pending), the watcher also wakes this often (ms) with an
+#: empty batch, so a path created before the watcher was live is still judged.
+PENDING_POLL_MS = 100
+
+
 async def _watch_loop(
     id: str,
     kernel,
-    files: dict[str, str],
-    dirs: dict[str, str],
+    root: fs.Root,
+    norms: list[str],
     stamps: dict[str, tuple],
 ):
-    """Watch the targets until cancelled. A batch of events only picks the paths to judge;
+    """Watch the held paths until cancelled. A batch of events only picks the paths to judge;
     each is judged against its own last stamp (`_judge`), so a replayed or no-op event is
-    not reported. A held path with no stamp yet (pending) is judged on every batch."""
+    not reported. A held path with no stamp yet (pending) is judged on every batch and on
+    every restart. The layout is recomputed on each batch: when a missing folder appears the
+    watch is re-armed one level down, and an empty batch (while something is pending)
+    reconciles a path created before the watcher was live."""
     import watchfiles
 
-    targets = sorted({os.path.dirname(f) for f in files} | set(dirs))
-    held_abs = {rel: path for path, rel in {**files, **dirs}.items()}
     try:
-        async for changes in watchfiles.awatch(
-            *targets,
-            recursive=False,
-            debounce=WATCH_DEBOUNCE_MS,
-            raise_interrupt=False,
-        ):
-            touched: dict[str, str] = {}  # rel path → absolute path to judge
-            for _change, raw in changes:
-                p = os.path.realpath(raw)
-                if p in files:
-                    touched[files[p]] = p
-                    continue
-                d = dirs.get(os.path.dirname(p))
-                if d is not None:
-                    name = os.path.basename(p)
-                    touched[name if d == "." else f"{d}/{name}"] = p
-            for rel, path in held_abs.items():
-                if rel not in stamps:
-                    touched.setdefault(rel, path)
-            # `allow` is read LIVE: a path the bridge stopped exposing after the watch
-            # was armed reports nothing more.
-            allow = _allow(kernel.get(id) or {})
-            for rel, path in touched.items():
-                now = _stamp(path)
-                kind = _judge(stamps.get(rel), now)
-                # the stamp is kept current even when the path is not exposed
-                if now is None:
-                    stamps.pop(rel, None)
-                else:
-                    stamps[rel] = now
-                if kind is not None and _exposed(allow, rel):
-                    await kernel.emit(
-                        id, {"type": "changed", "path": rel, "kind": kind}
-                    )
-                    _relay_to_views(id, kernel, rel, kind)
+        while True:
+            files, dirs, _missing, targets = _layout(root, norms)
+            if not targets:
+                await asyncio.sleep(PENDING_POLL_MS / 1000)
+                continue
+            pending = any(rel not in stamps for rel in {**files, **dirs}.values())
+            kw = (
+                {"rust_timeout": PENDING_POLL_MS, "yield_on_timeout": True}
+                if pending
+                else {}
+            )
+            # judge what is already there before waiting (a restart one level down)
+            await _judge_batch(id, kernel, files, dirs, stamps, [])
+            async for changes in watchfiles.awatch(
+                *targets,
+                recursive=False,
+                debounce=WATCH_DEBOUNCE_MS,
+                raise_interrupt=False,
+                **kw,
+            ):
+                files, dirs, _missing, now_targets = _layout(root, norms)
+                await _judge_batch(id, kernel, files, dirs, stamps, changes)
+                if now_targets != targets:
+                    break  # a missing folder appeared: re-arm on the new targets
+                pending_now = any(
+                    rel not in stamps for rel in {**files, **dirs}.values()
+                )
+                if pending_now != pending:
+                    break  # start or stop the bounded poll
+            else:
+                return
     except Exception:
         return  # the watch ends quietly; a re-arm starts a new one
+
+
+async def _judge_batch(id, kernel, files, dirs, stamps, changes) -> None:
+    """Judge the paths an event batch touched, plus every held path with no stamp."""
+    touched: dict[str, str] = {}  # rel path → absolute path to judge
+    for _change, raw in changes:
+        p = os.path.realpath(raw)
+        if p in files:
+            touched[files[p]] = p
+            continue
+        d = dirs.get(os.path.dirname(p))
+        if d is not None:
+            name = os.path.basename(p)
+            touched[name if d == "." else f"{d}/{name}"] = p
+    for path, rel in {**files, **dirs}.items():
+        if rel not in stamps:
+            touched.setdefault(rel, path)
+    # `allow` is read LIVE: a path the bridge stopped exposing after the watch
+    # was armed reports nothing more.
+    allow = _allow(kernel.get(id) or {})
+    for rel, path in touched.items():
+        now = _stamp(path)
+        kind = _judge(stamps.get(rel), now)
+        # the stamp is kept current even when the path is not exposed
+        if now is None:
+            stamps.pop(rel, None)
+        else:
+            stamps[rel] = now
+        if kind is not None and _exposed(allow, rel):
+            await kernel.emit(id, {"type": "changed", "path": rel, "kind": kind})
+            _relay_to_views(id, kernel, rel, kind)
 
 
 def _relay_to_views(id: str, kernel, rel: str, kind: str) -> None:

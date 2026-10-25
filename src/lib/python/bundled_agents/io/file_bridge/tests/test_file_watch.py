@@ -1,7 +1,9 @@
 """`watch_path`: a path under the disk watcher, any writer's change
 emitted on the bridge's own inbox as `{type: changed, path, kind}`. Against the real
 disk: a direct write (an editor), an atomic save (temp file renamed over), a write
-through the bridge, a directory's entries; refusals; `unwatch_path` ends it."""
+through the bridge, a directory's entries; refusals; `unwatch_path` ends it; a path that
+does not exist yet is accepted and held pending (`pending: true`), and `added` fires once
+when it appears."""
 
 from __future__ import annotations
 
@@ -142,7 +144,8 @@ async def test_what_is_not_exposed_or_not_there_is_refused(seeded_kernel):
     r = await _call(k, fb, {"type": "watch_path", "path": "secret.md"})
     assert r.get("reason") == "not_found", r  # not exposed reads as absent
     r = await _call(k, fb, {"type": "watch_path", "path": "docs/missing/deep.md"})
-    assert r.get("reason") == "not_found", r
+    assert r.get("watching") == "docs/missing/deep.md", r  # exposed: held pending
+    assert r.get("pending") is True and "reason" not in r, r
     r = await _call(k, fb, {"type": "watch_path"})  # no path = the root, as every verb
     assert r.get("reason") == "not_found", r
 
@@ -271,3 +274,139 @@ async def test_a_rearm_drops_the_old_stream(seeded_kernel, file_bridge):
     await asyncio.sleep(0.3)
     Path("a.md").write_text("a, written again")
     assert await _changes_for(q, "a.md") == ["modified"]
+
+
+async def test_watch_of_a_missing_file_is_accepted_pending(seeded_kernel, file_bridge):
+    k, fb = seeded_kernel, file_bridge
+    r = await _call(k, fb, {"type": "watch_path", "path": "a/b/c.txt"})
+    assert r.get("watching") == "a/b/c.txt", r
+    assert r.get("pending") is True, r
+    assert "reason" not in r, r
+
+
+async def test_a_file_created_later_in_a_missing_folder_fires_added(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "a/b/c.txt"})
+    await asyncio.sleep(0.3)
+    Path("a").mkdir()
+    Path("a/b").mkdir()
+    Path("a/b/c.txt").write_text("")
+    assert await _changes_for(q, "a/b/c.txt", 2.0) == ["added"]
+
+
+async def test_later_writes_fire_modified_after_the_path_appears(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "a/b/c.txt"})
+    await asyncio.sleep(0.3)
+    os.makedirs("a/b")
+    Path("a/b/c.txt").write_text("")
+    assert (await _next_changed(q, "a/b/c.txt"))["kind"] == "added"
+    await asyncio.sleep(0.3)
+    Path("a/b/c.txt").write_text("hello")
+    assert (await _next_changed(q, "a/b/c.txt"))["kind"] == "modified"
+
+
+async def test_unwatch_of_a_pending_path_stops_events(seeded_kernel, file_bridge):
+    k, fb = seeded_kernel, file_bridge
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "a/b/c.txt"})
+    r = await _call(k, fb, {"type": "unwatch_path", "path": "a/b/c.txt"})
+    assert r == {"watching": False, "paths": []}, r
+    await asyncio.sleep(0.3)
+    os.makedirs("a/b")
+    Path("a/b/c.txt").write_text("")
+    assert await _quiet(q, "a/b/c.txt", 1.0)
+
+
+async def test_a_missing_path_outside_the_root_is_still_refused(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    r = await _call(k, fb, {"type": "watch_path", "path": "../outside/x.txt"})
+    assert r.get("reason"), r
+    assert "watching" not in r and "pending" not in r, r
+    rec = (
+        await k.send(
+            [
+                {
+                    "target": k.id,
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": k.id,
+                        "handler_module": "file_bridge.tools",
+                        "allow": ["docs"],
+                        "ingress_rule": "allow_all_ingress",
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    r = await _call(k, rec["id"], {"type": "watch_path", "path": "secret/x.md"})
+    assert r.get("reason") == "not_found", r
+    assert "pending" not in r, r
+
+
+async def test_fifty_quick_nested_creates_each_fire_added(seeded_kernel, file_bridge):
+    k, fb = seeded_kernel, file_bridge
+    q = _inbox(k, fb)
+    for i in range(50):
+        rel = f"run{i}/a/b/c.txt"
+        r = await _call(k, fb, {"type": "watch_path", "path": rel})
+        assert r.get("pending") is True, r
+        Path(f"run{i}").mkdir()
+        Path(f"run{i}/a").mkdir()
+        Path(f"run{i}/a/b").mkdir()
+        Path(rel).write_text("")
+        ev = await _next_changed(q, rel, 10.0)
+        assert ev["kind"] == "added", (i, ev)
+
+
+async def test_a_file_in_a_deep_missing_folder_created_at_once_fires_added(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "a/b/c/d/e.txt"})
+    await asyncio.sleep(0.3)
+    os.makedirs("a/b/c/d")
+    Path("a/b/c/d/e.txt").write_text("")
+    assert (await _next_changed(q, "a/b/c/d/e.txt"))["kind"] == "added"
+    await asyncio.sleep(0.3)
+    Path("a/b/c/d/e.txt").write_text("hello")
+    assert (await _next_changed(q, "a/b/c/d/e.txt"))["kind"] == "modified"
+
+
+async def test_a_file_that_exists_when_watched_is_not_pending(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    os.makedirs("a")
+    Path("a/c.txt").write_text("")
+    q = _inbox(k, fb)
+    r = await _call(k, fb, {"type": "watch_path", "path": "a/c.txt"})
+    assert r.get("watching") == "a/c.txt" and "pending" not in r, r
+    await asyncio.sleep(0.3)
+    Path("a/c.txt").write_text("hello")
+    assert await _changes_for(q, "a/c.txt") == ["modified"]
+
+
+async def test_a_created_file_is_announced_added_once_then_modified(
+    seeded_kernel, file_bridge
+):
+    k, fb = seeded_kernel, file_bridge
+    q = _inbox(k, fb)
+    await _call(k, fb, {"type": "watch_path", "path": "a/b/c.txt"})
+    await asyncio.sleep(0.3)
+    os.makedirs("a/b")
+    Path("a/b/c.txt").write_text("")
+    assert (await _next_changed(q, "a/b/c.txt"))["kind"] == "added"
+    await asyncio.sleep(0.3)
+    Path("a/b/c.txt").write_text("hello")
+    kinds = await _changes_for(q, "a/b/c.txt", 1.5)
+    assert kinds and set(kinds) == {"modified"}, kinds
