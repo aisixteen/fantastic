@@ -22,6 +22,7 @@ from unittest import mock
 from pathlib import Path
 
 import boot_check as bc
+import qemu as qm
 
 
 def ppm(w: int, h: int, pixels: bytes, header: bytes = b"P6\n") -> bytes:
@@ -31,15 +32,15 @@ def ppm(w: int, h: int, pixels: bytes, header: bytes = b"P6\n") -> bytes:
 class Ppm(unittest.TestCase):
     def test_reads_header_and_pixels(self):
         px = bytes(range(12))
-        self.assertEqual(bc.parse_ppm(ppm(2, 2, px)), (2, 2, px))
+        self.assertEqual(qm.parse_ppm(ppm(2, 2, px)), (2, 2, px))
 
     def test_comment_in_header(self):
         px = b"\x01\x02\x03"
-        self.assertEqual(bc.parse_ppm(ppm(1, 1, px, b"P6\n# made by qemu\n")), (1, 1, px))
+        self.assertEqual(qm.parse_ppm(ppm(1, 1, px, b"P6\n# made by qemu\n")), (1, 1, px))
 
     def test_pixel_bytes_that_look_like_whitespace_are_pixels(self):
         px = b"\n\n\n \x00 "
-        self.assertEqual(bc.parse_ppm(ppm(2, 1, px)), (2, 1, px))
+        self.assertEqual(qm.parse_ppm(ppm(2, 1, px)), (2, 1, px))
 
     def test_refused(self):
         for bad, why in [
@@ -52,7 +53,7 @@ class Ppm(unittest.TestCase):
             (b"P6\nx 1\n255\n\x00\x00\x00", "not a number"),
         ]:
             with self.subTest(why), self.assertRaises(ValueError):
-                bc.parse_ppm(bad)
+                qm.parse_ppm(bad)
 
 
 class Screen(unittest.TestCase):
@@ -204,7 +205,7 @@ class Guest(unittest.TestCase):
 
 class Qemu(unittest.TestCase):
     def argv(self, arch):
-        return bc.qemu_argv(arch, Path("/img/fantastic-os.raw"), Path("/out"))
+        return qm.qemu_argv(arch, Path("/img/fantastic-os.raw"), Path("/out"))
 
     def test_x86(self):
         a = self.argv("x86-64")
@@ -228,7 +229,11 @@ class Qemu(unittest.TestCase):
         for arch in ("x86-64", "arm64"):
             a = self.argv(arch)
             with self.subTest(arch):
-                self.assertIn(f"user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:{bc.FORWARD_PORT}-:{bc.FORWARD_PORT}", a)
+                self.assertIn(
+                    f"user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:{qm.HOME_FORWARD}-:{qm.HOME_FORWARD},"
+                    f"hostfwd=tcp:127.0.0.1:{qm.SYSTEM_FORWARD}-:{qm.SYSTEM_FORWARD}",
+                    a,
+                )
                 self.assertIn("unix:/out/qmp.sock,server=on,wait=off", a)
                 self.assertIn("socket,id=qga0,path=/out/qga.sock,server=on,wait=off", a)
                 self.assertIn("file:/out/serial.log", a)
@@ -239,8 +244,8 @@ class Qemu(unittest.TestCase):
             self.argv("riscv")
 
     def test_vars_firmware(self):
-        self.assertEqual(bc.vars_firmware("x86-64").name, "OVMF_VARS_4M.fd")
-        self.assertEqual(bc.vars_firmware("arm64").name, "AAVMF_VARS.fd")
+        self.assertEqual(qm.vars_firmware("x86-64").name, "OVMF_VARS_4M.fd")
+        self.assertEqual(qm.vars_firmware("arm64").name, "AAVMF_VARS.fd")
 
 
 class FakeGuest:
@@ -331,7 +336,7 @@ class Channels(unittest.TestCase):
         self.addCleanup(lambda: [p.unlink() for p in self.dir.iterdir()] and self.dir.rmdir())
 
     def vm(self):
-        vm = bc.Vm(Path("/img"), "x86-64", self.dir)
+        vm = qm.Vm(Path("/img"), "x86-64", self.dir)
         return vm
 
     def test_guest_agent(self):
@@ -368,7 +373,7 @@ class Channels(unittest.TestCase):
         self.addCleanup(guest.close)
         vm = self.vm()
         threading.Timer(2.0, started.set).start()
-        with mock.patch.object(bc, "SYNC_EVERY", 0.005), mock.patch.object(bc.socket, "socket", small_socket):
+        with mock.patch.object(qm, "SYNC_EVERY", 0.005), mock.patch.object(qm.socket, "socket", small_socket):
             vm.wait_agent(10)
         self.assertTrue(started.is_set())
         self.assertEqual(vm.ga_run(["/bin/true"])[0], 3)
@@ -409,12 +414,12 @@ class Channels(unittest.TestCase):
 
     def test_ga_reply_that_never_comes_fails_in_30_s(self):
         vm = self.agent_vm(lambda m: None)
-        real_recv = bc.Chan.recv
+        real_recv = qm.Chan.recv
 
         def recv_at_most_0_2_s(self, timeout):
             return real_recv(self, min(timeout, 0.2))
 
-        with mock.patch.object(bc.Chan, "recv", recv_at_most_0_2_s):
+        with mock.patch.object(qm.Chan, "recv", recv_at_most_0_2_s):
             with self.assertRaisesRegex(bc.Fail, "guest agent guest-exec: no reply within 30 s"):
                 vm.ga_run(["/bin/true"])
 
@@ -457,7 +462,7 @@ class Channels(unittest.TestCase):
         vm = self.vm()
         vm.qmp("ok")  # the handshake, on the real clock
         ticks = itertools.count()  # each clock read is one second later
-        with mock.patch.object(bc.Chan, "recv", lambda self, timeout: None), mock.patch.object(
+        with mock.patch.object(qm.Chan, "recv", lambda self, timeout: None), mock.patch.object(
             bc.time, "monotonic", lambda: float(next(ticks))
         ):
             with self.assertRaisesRegex(bc.Fail, "qmp bad: no reply within 30 s"):
@@ -465,7 +470,7 @@ class Channels(unittest.TestCase):
 
     def test_chan_not_connectable(self):
         with self.assertRaisesRegex(bc.Fail, "missing.sock: not connectable within 0.3 s"):
-            bc.Chan(self.dir / "missing.sock", 0.3, lambda: None)
+            qm.Chan(self.dir / "missing.sock", 0.3, lambda: None)
 
 
 class Framing(unittest.TestCase):
@@ -475,7 +480,7 @@ class Framing(unittest.TestCase):
         a, b = socket.socketpair()
         self.addCleanup(a.close)
         self.addCleanup(b.close)
-        ch = bc.Chan.__new__(bc.Chan)  # no connect: the pair's end is the socket
+        ch = qm.Chan.__new__(qm.Chan)  # no connect: the pair's end is the socket
         ch.path, ch.alive, ch.buf, ch.sock = Path("qmp.sock"), alive, b"", a
         return ch, b
 
@@ -514,12 +519,12 @@ class Until(unittest.TestCase):
 
     def test_returns_the_value(self):
         calls = []
-        got = bc.until(self.Vm(), "x", lambda: calls.append(1) or (len(calls) > 2 and "v"), 5, every=0.01)
+        got = qm.until(self.Vm(), "x", lambda: calls.append(1) or (len(calls) > 2 and "v"), 5, every=0.01)
         self.assertEqual(got, "v")
 
     def test_fails_naming_the_wait(self):
         with self.assertRaisesRegex(bc.Fail, "never: not within"):
-            bc.until(self.Vm(), "never", lambda: None, 0.05, every=0.01)
+            qm.until(self.Vm(), "never", lambda: None, 0.05, every=0.01)
 
 
 class Shell(unittest.TestCase):
@@ -551,7 +556,8 @@ class StubVm:
     def ga_run(self, argv, timeout=60):
         return 0, "", ""
 
-    def forward(self, port):
+    def forward(self, port, via):
+        assert via == qm.HOME_FORWARD, "the boot check forwards the home"
         self.forwarded.append(port)
 
     def screendump(self, name):

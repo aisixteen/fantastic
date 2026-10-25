@@ -55,6 +55,12 @@ folder beside the target and renamed into place after the scan.
 - an agent's `system_prompt_file` (relative, readable) goes beside the blueprint
   as `<agent id>/directive.md`, and the record points there. One that cannot be
   read is kept as it is and noted in the blueprint's header.
+- an html view's body (`view.bytes`) goes beside it as `<agent id>/view.html`
+  (the record keeps `view.bytes_file`), and the plain top-level files of a folder
+  bundle an agent runs on go once per bundle to `bundles/<handler_module>/<name>`.
+  Both are CODE, listed in the header as `# code: <path>`; a symlink, a hidden
+  file, a non-UTF-8 file or one over 1 MiB is left out and noted.
+- the kernel root answers the same verb (`kernel_state.export_subtree`).
 
 ## Import
 

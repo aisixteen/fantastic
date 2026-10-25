@@ -17,6 +17,7 @@ This is `fantastic` without a terminal, so it only prints this readme: it starts
 \x20\x20fantastic --headless               no screen, no canvas: the kernel's message stream on stdout\n\
 \x20\x20fantastic mcp                      MCP over stdio for a coding CLI (attaches to a running kernel, or runs it)\n\
 \x20\x20fantastic send '<item json>'       one call into the running kernel, as the `mcp` leg; `$env:NAME` values come from this shell, marked secret\n\
+\x20\x20fantastic import PATH --parent ID  import a blueprint folder as agents under ID: prints the preview, then asks (`--bind @port=ID`, `--allow-code`, `--approve` skips the question)\n\
 \x20\x20fantastic migrate-home [--dry-run]  move the files of an older layout (~/.config/fantastic, ~/.fantastic/credentials) into ~/.fantastic; --dry-run only prints the moves\n\
 \x20\x20fantastic readme [key]              the docs: the index, or one doc (`canvas`, `mcp`, `setup`, `bundles`, `system`, and the kernel's own)\n\
 \n";
@@ -96,6 +97,40 @@ mod tests {
             assert!(keys.insert(k), "`{k}` twice");
         }
         assert!(keys.contains("canvas") && keys.contains("mcp") && keys.contains("setup") && keys.contains("agents"));
+    }
+
+    fn system_doc() -> &'static str {
+        docs().find(|(k, _)| *k == "system").expect("a `system` doc").1
+    }
+
+    #[test]
+    fn readme_system_names_every_agent_in_ids() {
+        let doc = system_doc();
+        assert_eq!(fantastic_system_agents::IDS.len(), 6);
+        for (id, module) in fantastic_system_agents::IDS.iter().zip(fantastic_system_agents::HANDLER_MODULES) {
+            assert!(doc.contains(&format!("## {id} (`{module}`, id `{id}`)")), "`readme system` has no section for `{id}` ({module})");
+        }
+        // and the sections come in the agents' order
+        let at: Vec<usize> = fantastic_system_agents::IDS.iter().map(|id| doc.find(&format!("## {id} (")).unwrap()).collect();
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "the sections are in the order of IDS: {at:?}");
+    }
+
+    #[test]
+    fn readme_system_documents_every_verb() {
+        let doc = system_doc();
+        for id in fantastic_system_agents::IDS {
+            // each agent's section, up to the next `## `
+            let start = doc.find(&format!("## {id} (")).unwrap();
+            let rest = &doc[start + 3..];
+            let section = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
+            for verb in fantastic_system_agents::verbs(id).iter().filter(|v| !["reflect", "state", "boot"].contains(v)) {
+                assert!(section.contains(&format!("`{verb}")), "`readme system` does not document `{id}`.`{verb}`");
+            }
+        }
+        // every OS need the agents name
+        for need in ["NetworkManager", "wlr-randr", "org.freedesktop.Notifications", "logind", "lock.yaml", "not a security boundary"] {
+            assert!(doc.contains(need), "`readme system` never says `{need}`");
+        }
     }
 
     #[test]

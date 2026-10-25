@@ -243,6 +243,11 @@ async fn run(
                                 if let Err(e) = crate::kern::reach::grant_all(&h).await {
                                     app.note(e);
                                 }
+                                // the lock screen's channel: the Home page dials this canvas
+                                // (`lock`), so its origin is let into the `web` record
+                                if boot.canvas {
+                                    crate::kern::home_origin::spawn(Arc::clone(&h));
+                                }
                             }
                             Err(e) => {
                                 boot.say(&format!("fantastic: {e}"));

@@ -1,0 +1,19 @@
+# CI only, never shipped: the Wi-Fi fixture of the system canvas's network e2e.
+# `mac80211_hwsim` makes two simulated radios (wlan0, wlan1); hostapd serves the
+# WPA2 network `fantastic-ci` on wlan1, which NetworkManager leaves alone
+# (90-ci-hwsim.conf) and wlan0 sees as an access point.
+# Debian's generic kernel builds the module; a kernel without it (the cloud one)
+# skips this unit, and the e2e says so.
+[Unit]
+Description=CI: simulated Wi-Fi radios and an access point (fantastic-ci)
+Before=NetworkManager.service
+
+[Service]
+# a non-zero exit of ExecCondition= skips the unit quietly: no module, no fixture
+ExecCondition=/sbin/modprobe mac80211_hwsim radios=2
+ExecStart=/usr/sbin/hostapd /etc/hostapd/fantastic-ci.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

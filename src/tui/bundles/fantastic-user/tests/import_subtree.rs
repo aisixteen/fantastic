@@ -470,3 +470,34 @@ async fn import_subtree_args_and_docs() {
     let d = op(&k, "kernel", json!({"type": "docs", "of": "user"})).await;
     assert!(d["verbs"].get("import_subtree").is_some(), "{d}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn import_refuses_bind_to_a_missing_agent_naming_the_port() {
+    let k = setup().await;
+    let d = exported(&k, "ghost").await;
+    let n = k.agents.len();
+    for extra in [
+        json!({"approve": true, "bind": {"@memory": "ghost", "@exec": "exec"}}),
+        json!({"bind": {"@memory": "ghost", "@exec": "exec"}}),
+    ] {
+        let r = import(&k, &d, extra).await;
+        assert_eq!(r["reason"], "bad_binding", "{r}");
+        let msg = r["error"].as_str().unwrap();
+        assert!(
+            msg.contains("@memory") && msg.contains("ghost") && msg.contains("no agent"),
+            "{msg}"
+        );
+        assert_eq!(k.agents.len(), n, "nothing created");
+    }
+    // a bind key that names no port is refused naming that key
+    let r = import(
+        &k,
+        &d,
+        json!({"approve": true, "bind": {"@memory": "memory2", "@exec": "exec", "@nope": "exec"}}),
+    )
+    .await;
+    assert_eq!(r["reason"], "bad_binding", "{r}");
+    assert!(r["error"].as_str().unwrap().contains("@nope"), "{r}");
+    assert_eq!(k.agents.len(), n, "nothing created");
+    let _ = std::fs::remove_dir_all(d);
+}

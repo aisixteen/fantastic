@@ -912,6 +912,7 @@ dependencies = [
  "fantastic-file",
  "fantastic-kernel",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -1024,6 +1025,7 @@ name = "fantastic-user"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "fantastic-core",
  "fantastic-kernel",
  "fantastic-scenario-probes",
  "serde_json",

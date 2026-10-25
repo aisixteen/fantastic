@@ -12,6 +12,7 @@ pub mod reach;
 pub mod root_ai;
 pub mod backend;
 pub mod bundle_watch;
+pub mod home_origin;
 pub mod host;
 pub mod keys;
 pub mod model;
