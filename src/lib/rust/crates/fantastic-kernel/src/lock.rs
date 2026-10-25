@@ -3,7 +3,7 @@
 //! The decision is an `flock(LOCK_EX)` on `lock.yaml`, held on an open
 //! descriptor for the life of the process: the OS grants it to exactly one
 //! opener and drops it the moment its holder exits — however it exits — so a
-//! dead holder's lock is simply taken over. Python, rust and swift take the
+//! dead holder's lock is simply taken over. Python and rust take the
 //! SAME flock on the SAME file, so kernels of different runtimes exclude each
 //! other too.
 //!

@@ -86,7 +86,7 @@ advertising a surface that does not exist. Anything not named must pass.
 
 ## The agentic corpus is HOST-RUNTIMES-ONLY
 
-Python, rust and swift run `agentic/`. The ts kernel does not, and that is a
+Python and rust run `agentic/`. The ts kernel does not, and that is a
 decision, not a gap.
 
 **No scenario applies to it.** Every config builds its roster from
@@ -112,6 +112,6 @@ outside tests.
 ## Root ids differ, deliberately
 
 `$root` in a conformance expectation means THAT RUNTIME'S root — python
-`kernel_state`, rust and swift `core`. Parity asserts the per-runtime value,
+`kernel_state`, rust `core`. Parity asserts the per-runtime value,
 never equality. The target `kernel` is the alias every runtime resolves to its
 own root.

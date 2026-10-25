@@ -3,7 +3,7 @@
 These are the items §9.1 marks `source` on BOTH rounds: nothing ever drove a
 `delete` of a populated directory, a `cols:70000`, a manifest that is a YAML
 scalar `no`, a `paste_image` with mime `''`. They were read out of python and
-written into rust and swift from the reading. Reading is not measuring, so they
+written into rust from the reading. Reading is not measuring, so they
 are driven here.
 
 One boot, no model stub, every case a `{target, payload}` over REST and its whole

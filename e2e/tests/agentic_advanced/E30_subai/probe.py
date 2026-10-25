@@ -173,7 +173,7 @@ EXEC_MODULE = "exec_bridge.tools"
 
 MINE = {
     # BOTH root ids: python's root IS the persistence loader (`kernel_state`),
-    # rust's and swift's is `core`. This set marks what the FIXTURE built, so
+    # rust's is `core`. This set marks what the FIXTURE built, so
     # naming an id the runtime does not use costs nothing — and missing the
     # live one would score the root as something the model authored.
     "kernel_state",
@@ -234,7 +234,7 @@ def _ai_meta(
             "$parent": "*",
             "$subtree": "*",
             # THE ROOT, by whatever id this runtime gives it (python:
-            # kernel_state, rust/swift: core).
+            # kernel_state, rust: core).
             root.id: ["*", "create_agent", "update_agent", "delete_agent"],
             "cli": "*",
             "readings": "*",

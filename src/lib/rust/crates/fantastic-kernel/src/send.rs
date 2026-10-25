@@ -165,7 +165,7 @@ impl Signal {
 }
 
 tokio::task_local! {
-    /// BATCH LAUNCHED (swift `KernelTaskLocals.onBatchLaunched`): set around a
+    /// BATCH LAUNCHED: set around a
     /// `send`, it is called once EVERY item of that batch has reached its target
     /// (fanned out on its inbox) — before any of them has settled. An AI's router
     /// uses it so the `send` that spawned the route returns only after the routed
@@ -1823,8 +1823,8 @@ impl Kernel {
         let summary = summarize_payload(&item.payload, item.body.as_ref());
         if let Some(tx) = self.inboxes.get(&target.id) {
             // Never blocks the emitter, and at the bound the OLDEST payload is
-            // evicted — python's `_put_drop_oldest` and swift's
-            // `.bufferingNewest` rule.
+            // evicted — python's `_put_drop_oldest`
+            // rule.
             tx.send(item.clone());
         }
         if publish {

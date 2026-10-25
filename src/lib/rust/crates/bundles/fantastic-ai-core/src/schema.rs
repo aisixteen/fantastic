@@ -142,7 +142,7 @@ pub fn ai_fields() -> Vec<Field> {
 
 /// [`ai_fields`] with `context_window` defaulting to `context_window` — the
 /// backend's own window ([`crate::agent_loop::BackendConfig::model_window`]),
-/// where it can read one. Swift `RecordSchema.aiFields(contextWindow:)`.
+/// where it can read one.
 #[must_use]
 pub fn ai_fields_with_window(context_window: i64) -> Vec<Field> {
     let (lo, hi) = RECENT_N_RANGE;
@@ -292,7 +292,7 @@ pub fn schema(backend_fields: Vec<Field>) -> Value {
 
 /// The same, for a backend whose model window is its own
 /// ([`crate::agent_loop::BackendConfig::model_window`]): `context_window`
-/// defaults to it. Swift `RecordSchema.schema(_:contextWindow:)`.
+/// defaults to it.
 ///
 /// # Panics
 /// On a duplicate field name, or a field [`Field::json`] refuses.

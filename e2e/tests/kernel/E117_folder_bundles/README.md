@@ -5,7 +5,7 @@ program using `fantastic_agent.py`) on the packaged host of `RUNTIME`, every cal
 over `web_rest`. It proves:
 
 - **cold load**: folders written before boot are read by the root loader (through
-  the fs clamp on rust/swift); a seeded instance record of one resolves and its
+  the fs clamp on rust); a seeded instance record of one resolves and its
   program answers right after boot;
 - **catalog**: `reflect bundles=all` lists the folder (`base`, `sentence`,
   `handler_module`, `folder`); `docs of=<bundle>` / `of=<instance>` read

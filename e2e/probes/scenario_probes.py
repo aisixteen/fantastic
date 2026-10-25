@@ -1,8 +1,7 @@
 """THE SCENARIO PROBES, registered — python's `--features scenario-probes`.
 
 The python kernel resolves a `handler_module` only from its bundle catalog plus
-`register_unlisted` (rust's `BundleRegistry::register_unlisted`, swift's
-`registerUnlisted`), so a probe on `sys.path` is not enough: it must be
+`register_unlisted` (rust's `BundleRegistry::register_unlisted`), so a probe on `sys.path` is not enough: it must be
 REGISTERED, unlisted, in the kernel's own process. The same six rust registers
 behind its feature, plus the `vault` of `docs_mechanics`.
 

@@ -253,7 +253,7 @@ function markFloats(this: object, key: string, value: unknown, context?: { sourc
 /** python `io_bridge._codec.loads`: JSON off the wire, STRICTLY. `NaN` /
  *  `Infinity` are not JSON (`JSON.parse` already refuses them); an integer
  *  outside int64, a number that overflows a double and a lone surrogate are
- *  refused too — rust and swift cannot hold them. Throws a `SyntaxError`. An
+ *  refused too — rust cannot hold them. Throws a `SyntaxError`. An
  *  integral number python reads as a float is recorded (`wireFloat`). */
 export function strictLoads(text: string): Json {
   const out = JSON.parse(text, markFloats) as Json; // not JSON at all: refused here

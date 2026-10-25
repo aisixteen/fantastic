@@ -46,7 +46,7 @@ export function isKernelVerb(verb: string): boolean {
 }
 
 /** What `docs of=kernel` serves — python `_SYSTEM_VERB_DOCS`, VERBATIM and in
- *  its order (rust and swift copy the same bytes), minus the tree CRUD this
+ *  its order (rust copies the same bytes), minus the tree CRUD this
  *  kernel does not answer (that lives on the HOST root, over the bridge). */
 export const KERNEL_VERB_DOCS: { [verb: string]: string } = {
   ps:

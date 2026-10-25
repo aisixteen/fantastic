@@ -394,13 +394,12 @@ def seed_bridge_ws(
     - `peer_port`  the peer kernel's web port (the bridge dials it)
 
     The bridge ships raw `{type:"call", target, payload}` frames; the
-    peer's `web_ws` (Python) or native WS server (Swift) dispatches
+    peer's `web_ws` dispatches
     `kernel.send(target, payload)` and replies over the same socket.
     No B-side bridge agent, no read_loop on the remote.
 
     The `handler_module` is resolved per the dialing runtime
-    (`_WS_BRIDGE_HANDLER_MODULE`): `ws_bridge.tools` on Python + Rust,
-    `kernel_bridge.tools` on Swift (its port is deferred).
+    (`_WS_BRIDGE_HANDLER_MODULE`): `ws_bridge.tools` on Python + Rust.
     """
     handler_module = _WS_BRIDGE_HANDLER_MODULE.get(
         runtime(binary, workdir) or "", "kernel_bridge.tools"

@@ -1559,7 +1559,7 @@ async fn route_reply_gated(
         // re-issuing the call, which only lengthens the queue that delays it.
         inflight_bump(self_id.as_str(), 1);
         // LAUNCHED = every routed call has reached its target; the `send` that
-        // spawned this route returns only then (swift `onBatchLaunched`).
+        // spawned this route returns only then.
         let out = match &launched {
             Some(sig) => {
                 let sig = Arc::clone(sig);

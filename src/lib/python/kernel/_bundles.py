@@ -40,7 +40,7 @@ def register_unlisted(handler_module: str, module: ModuleType) -> None:
     """Register a bundle that DISPATCHES but is not installable — a test or probe
     module with no `fantastic.bundles` entry point (the pytest fixtures, the e2e
     scenario probes). It never appears in the `bundles` catalog. Mirror of rust's
-    `BundleRegistry::register_unlisted` / swift's `registerUnlisted`: the same
+    `BundleRegistry::register_unlisted`: the same
     name, the same meaning, process-wide as python's catalog is."""
     _UNLISTED[handler_module] = module
 
@@ -91,8 +91,8 @@ def import_handler(handler_module: str) -> ModuleType:
     grant-less `create_agent`: an agent could name `unittest.__main__` and exit
     the process, or a module it had written itself.
     A name outside the catalog is, to this kernel, a module that does not exist:
-    `ModuleNotFoundError: No module named '<top-level package>'` — rust's and
-    swift's text for an unregistered name, so every runtime says one thing."""
+    `ModuleNotFoundError: No module named '<top-level package>'` — rust's
+    text for an unregistered name, so every runtime says one thing."""
     mod = _UNLISTED.get(handler_module) or _FOLDER.get(handler_module)
     if mod is not None:
         return mod

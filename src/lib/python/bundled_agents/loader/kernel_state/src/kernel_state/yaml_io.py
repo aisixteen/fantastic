@@ -3,7 +3,7 @@
 Everything written under `.fantastic` goes through `dump` here: the records
 (`agent.yaml`) and the per-agent sidecars (the scheduler's `schedules.yaml`, and
 its `schedule_events.yaml` — a YAML STREAM, one `---` document per event, via
-`row_to_doc`). The rust and swift ports reproduce the output BYTE FOR BYTE, so
+`row_to_doc`). The rust port reproduces the output BYTE FOR BYTE, so
 every choice below is a rule, pinned by the python-written fixture
 `tests/fixtures/agent.yaml`.
 
@@ -38,7 +38,7 @@ emitter, so the same requested styles give the same bytes):
         number is single-quoted too — `0o17` (1.2 octal) and a float with no dot
         or an unsigned exponent (`1e3`, `2E-4`, `5.`). The 1.1 resolver reads
         those as strings and would write them plain, but a 1.2 loader (the
-        rust/swift ports) would read a number — so they are quoted, and the file
+        rust port) would read a number — so they are quoted, and the file
         means the same thing to every runtime. Regex (fullmatch):
         `[-+]?0o[0-7]+|[-+]?(\\.[0-9]+|[0-9]+(\\.[0-9]*)?)([eE][-+]?[0-9]+)?`
         (a string the 1.1 resolver already quotes is quoted either way).

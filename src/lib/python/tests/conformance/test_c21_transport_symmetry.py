@@ -22,7 +22,7 @@ So the fixture grants every leg the same reach, both halves (the probe's and the
 root's `callable_by` name every leg), and cases avoid asserting on the gate
 itself (the authz suites' job). What must be identical is the REPLY.
 
-Rust and swift join by reading the same YAML once #29 lands there; this file is
+Rust joins by reading the same YAML once #29 lands there; this file is
 then the contract the ports are graded against.
 """
 
@@ -43,7 +43,7 @@ from io_bridge import _engine
 from web_rest.tools import _make_post_endpoint
 from kernel import register_unlisted
 
-# THE SHARED CORPUS, at the repo root — rust, swift and ts drivers read this
+# THE SHARED CORPUS, at the repo root — rust and ts drivers read this
 # same file. It is JSON so every runtime parses it with what it already has (the
 # ts kernel ships zero runtime deps); JSON is valid YAML, so nothing was lost in
 # the move from `c21_cases.yaml`.

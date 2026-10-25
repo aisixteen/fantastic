@@ -127,5 +127,5 @@ uv run pytest relay_e2e/ -v
   as in the table above. The test then `create_agent`s (`parent_id` = the root) a
   `relay_connector` leg on **both concurrently** (`asyncio.gather`), polls
   `reflect.connected`, and `forward`s a reflect through the relay.
-- The relay binary is parametrizable via the harness; the same suite runs the Swift
-  `relayd` locally and the `relay:latest` container under the two targets.
+- The relay binary is parametrizable via the harness; the same suite runs a local
+  `relayd` build and the `relay:latest` container under the two targets.

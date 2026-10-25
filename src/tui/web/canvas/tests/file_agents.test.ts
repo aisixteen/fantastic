@@ -5,7 +5,7 @@ import type { Payload } from "../src/lib.ts";
 import { grantViewLists, registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerLayout } from "../src/bundles/canvas/layout.ts";
 import { setCanvasNode } from "../src/bundles/canvas/host_views.ts";
-import { awaitGrant, bindCellToView, changeOf, isRefusal, onStateFrame, openViewAgent, release, routeOf, routedBridge, servedOf } from "../src/bundles/files/file_bridge.ts";
+import { awaitGrant, bindCellToView, grantOwed, changeOf, isRefusal, onStateFrame, openViewAgent, release, routeOf, routedBridge, servedOf } from "../src/bundles/files/file_bridge.ts";
 import type { Refusal, Served } from "../src/bundles/files/file_bridge.ts";
 import { filesView } from "../src/bundles/files/files_view.ts";
 import { setFilesDeps } from "../src/bundles/files/files_deps.ts";
@@ -345,6 +345,45 @@ test("a grant reported before the wait, yet the probe is still refused: the prob
   b.grantWord = "never";
   const bound = await bindCellToView(k, "file", "docs/a.md", first.view, () => {});
   assert.equal(bound.ok ? "" : (bound.refusal as Dict)["reason"], "unauthorized");
+});
+
+test("a grant word that beats the open_view reply leaves the view not owed", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  b.grantOnOpen = true;
+  b.grantWord = "before";
+  const r = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(r));
+  assert.equal(grantOwed(k, r.view), false);
+});
+
+test("a grant_refused word that beats the reply is kept and not owed", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  b.grantOnOpen = true;
+  b.grantWord = "before";
+  b.grantRefusal = "reach: refused";
+  const r = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(r));
+  assert.equal(grantOwed(k, r.view), false);
+  b.pendingGrants = 1;
+  const w = await awaitGrant(k, r.view);
+  assert.equal(w !== null && w.reason, "grant_refused");
+});
+
+test("a view whose word comes after the reply stays owed until it comes", async () => {
+  const b = new FakeBridge();
+  project(b);
+  const k = bridgeKernel(b);
+  b.grantOnOpen = true;
+  b.grantWord = "after";
+  const r = await openViewAgent(k, "file", "docs/a.md");
+  assert.ok(!isRefusal(r));
+  assert.equal(grantOwed(k, r.view), true);
+  await settle();
+  assert.equal(grantOwed(k, r.view), false);
 });
 
 test("a restored cell whose view is refused settles at once: no `added` will come for it", async () => {

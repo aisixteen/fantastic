@@ -579,8 +579,8 @@ class Norm:
             # recorded WHOLE as `ctx/stub/req_<n>.bin` and compared there, line
             # by line, after normalisation. What makes them incomparable AS
             # NUMBERS is two things the rules have already declared
-            # incomparable: the `runtime=` word (N2 — `runtime=python` is one
-            # byte longer than `runtime=swift`, two longer than `runtime=rust`),
+            # incomparable: the `runtime=` word (N2 — `runtime=python` is two
+            # bytes longer than `runtime=rust`),
             # and the id DIGIT WIDTH (N4 — runtimes that execute different
             # numbers of ledger writes reach different id widths, and a body
             # quoting those ids changes length with them).
@@ -1542,8 +1542,8 @@ def canon_self_reflect(events: list) -> list:
     with no `client_id`) and, a moment later, the reply its own earlier call was
     waiting for. The peer turn's self-`reflect` (the agent reflecting itself as
     its prompt is assembled) and the reply's DELIVERY race: python records the
-    reflect right after the peer `send`; swift records the reply's `send` and its
-    `queued` status first. That order is not a contract.
+    reflect right after the peer `send`; a port may record the reply's `send` and
+    its `queued` status first. That order is not a contract.
 
     Canonical form: the first `reflect` after a peer `send` is moved to right
     after it, but ONLY across `send` events and `queued` statuses. A `thinking`
@@ -1613,7 +1613,7 @@ def exclude_flush_rows(doc):
     return {**doc, "rows": f"<ROWS_EXCLUDING_FLUSH:{rows - flush.pop()}>"}, True
 
 
-#: N25 — python ships no `foundation_models_backend`; rust and swift do. Dropped from the PORT side of a catalog only.
+#: N25 — python ships no `foundation_models_backend`; rust does. Dropped from the PORT side of a catalog only.
 FM_BUNDLE = "foundation_models_backend"
 _FM_COMMA = re.compile(r"(?<![\w])bundles=([\w,]+)")
 #: A `"bundles": [...]` of NAMES inside text (a cli stdout, a REST body recorded
@@ -2638,7 +2638,7 @@ def cmd_rulecheck() -> int:
         ("N21 — the peer turn's self-reflect after the reply's delivery",
          lambda: cjr({"ai": canon_self_reflect([PEER, SELF, REPLY, QUEUED, THINK])},
                      {"ai": canon_self_reflect([PEER, REPLY, QUEUED, SELF, THINK])},
-                     "ai_paths/events.json", "swift"), False),
+                     "ai_paths/events.json"), False),
         ("N21 — the two TURNS in the other order is still a line",
          lambda: cjr({"ai": canon_self_reflect([PEER, SELF, REPLY, QUEUED, THINK])},
                      {"ai": canon_self_reflect([PEER, REPLY, THINK, SELF])},

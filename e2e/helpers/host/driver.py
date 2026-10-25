@@ -68,8 +68,8 @@ def _bytes_field(d: dict):
 #: The host runtimes this driver can spawn. Adding one is adding a ROW.
 #:
 #: `root_id` is the same on every runtime now: the root IS the persistence
-#: loader, `kernel_state`. Rust and swift called it `core` until the python
-#: parity port (`bootstrap.rs DEFAULT_ROOT_ID`, `Kernel.swift ROOT_ID`); the row
+#: loader, `kernel_state`. Rust called it `core` until the python parity
+#: port (`bootstrap.rs DEFAULT_ROOT_ID`); the row
 #: is what the driver seeds and grants against, so it must name what the binary
 #: actually writes into `.fantastic/agent.yaml` or every grant misses.
 RUNTIMES = {

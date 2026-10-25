@@ -1,7 +1,7 @@
 """kernel/file_clamp — file_bridge's clamp and allow list over REST. NO MODEL.
 
-The kernel's own `file_bridge` on the PACKAGED host of `RUNTIME` (python | rust |
-swift), every call through `web_rest`, its `changed` events over the `ws` face. The
+The kernel's own `file_bridge` on the PACKAGED host of `RUNTIME` (python |
+rust), every call through `web_rest`, its `changed` events over the `ws` face. The
 bridge serves `box/` (root) and exposes `pub` and `bin` (allow):
 
   1. escapes refused, nothing leaked: `..` out of the root, `..` to an unexposed
