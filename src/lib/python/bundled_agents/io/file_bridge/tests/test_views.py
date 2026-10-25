@@ -492,3 +492,22 @@ async def test_open_view_leaves_a_two_token_entry_alone(seeded_kernel, file_brid
     assert (await _open(k, fb, "file", "a.txt"))["created"] is False
     assert k.get(fb)["callable_by"][dv] == two
     assert (await _read_as(k, fb, dv, "a.txt"))["reason"] == "unauthorized"
+
+
+async def test_open_view_leaves_a_stamped_entry_untouched(
+    seeded_kernel, file_bridge, monkeypatch
+):
+    k, fb = seeded_kernel, file_bridge
+    Path("a.txt").write_text("x\n")
+    dv = (await _open(k, fb, "file", "a.txt"))["id"]
+    before = list(k.get(fb)["callable_by"][dv])
+    bridge = k.ctx.agents[fb]
+    calls = []
+    real = bridge.update
+    monkeypatch.setattr(
+        bridge, "update", lambda *a, **kw: calls.append(kw) or real(*a, **kw)
+    )
+    assert (await _open(k, fb, "file", "a.txt"))["created"] is False
+    assert (await _open_with(k, fb, "file", "a.txt", dv))["created"] is False
+    assert k.get(fb)["callable_by"][dv] == before
+    assert calls == []
