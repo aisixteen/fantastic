@@ -5,7 +5,7 @@ The home is `FANTASTIC_HOME`, else `~/.fantastic`. It holds what the user keeps
 across every fantastic (`user/`, `fantastics/`, `logs/`, the app's own `app/`),
 so a kernel booted in `~` — whose `.fantastic` IS the home — is refused. Paths
 are compared absolutized and folded (`.`/`..`), with no filesystem access, the
-same rule as rust's `refuse_home_as_state_dir` and swift's.
+same rule as rust's `refuse_home_as_state_dir`.
 """
 
 from __future__ import annotations

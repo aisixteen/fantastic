@@ -547,7 +547,7 @@ async def run(
         "$parent": "*",
         "$subtree": "*",
         # THE ROOT, by whatever id this runtime gives it — python's root IS the
-        # persistence loader (`kernel_state`), rust's and swift's is `core`.
+        # persistence loader (`kernel_state`), rust's is `core`.
         root.id: ["*", "create_agent", "update_agent", "delete_agent"],
         "cli": "*",
         "readings": "*",

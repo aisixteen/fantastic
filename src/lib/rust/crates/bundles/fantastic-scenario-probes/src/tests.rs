@@ -1,9 +1,6 @@
 //! Unit tests for the scenario fixtures. Every text pinned here is the python
 //! probe's (`e2e/probes/*/tools.py`) — a fixture that refuses differently from
 //! python makes a scenario measure the FIXTURE instead of the kernel.
-//!
-//! Each test has a camelCase swift twin with identical pins
-//! (`ST/FantasticBundlesTests/ScenarioProbesTests.swift`).
 
 use super::*;
 use fantastic_kernel::Agent;

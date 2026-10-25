@@ -136,8 +136,7 @@ class ws_session:
     async def send_call(self, verb: str, **args: Any) -> str:
         """Send a `call` frame to the session's target; return the
         correlation id for matching. The `target` is set explicitly —
-        Python's `_on_call` requires it (only Swift's server defaults
-        to the URL-path agent)."""
+        Python's `_on_call` requires it."""
         assert self._ws is not None
         corr_id = self._mint_corr()
         frame = {

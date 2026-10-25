@@ -1,8 +1,8 @@
 """backends/provider_mocks — the reusable provider mocks (`e2e/mocks`), proven
 against the kernel's own backends. NO MODEL.
 
-One mock per provider, and on the PACKAGED host of `RUNTIME` (python | rust |
-swift), every call through `web_rest`, one AI agent per provider whose record
+One mock per provider, and on the PACKAGED host of `RUNTIME` (python |
+rust), every call through `web_rest`, one AI agent per provider whose record
 names the mock's `url` and an env-backed credential ref pinned to its host. The
 record leaves to the server what the backend reads from it (vllm: model,
 max_tokens, context_window, kv_slots; ollama: model; anthropic: max_tokens,

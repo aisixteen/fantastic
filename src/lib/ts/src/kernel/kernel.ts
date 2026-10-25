@@ -724,7 +724,7 @@ export class Kernel {
    *  frontend's `resolve` maps `"kernel"` to the LOCAL root (the canvas), so a
    *  plain `send("kernel", …)` would dispatch locally; this forwards the
    *  LITERAL target so the HOST resolves `"kernel"` to ITS OWN root
-   *  (`kernel_state` on python, `core` on rust/swift). Used to create host peers +
+   *  (`kernel_state` on python, `core` on rust). Used to create host peers +
    *  read the host bundle catalog without the frontend naming a host id. */
   callHost(target: string, payload: Payload): Promise<Json> {
     if (this.bridge === null) {

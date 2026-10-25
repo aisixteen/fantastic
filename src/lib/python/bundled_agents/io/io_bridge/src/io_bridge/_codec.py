@@ -28,7 +28,7 @@ frame as `bytes`; `decode_frame` dispatches on that. The relay forwards the WS
 frame kind end-to-end, so a tunneled binary chunk stays a binary frame.
 
 ONE bytes value per frame (the stream protocol carries exactly one chunk per frame;
-rust and swift replies hold one body by type). An envelope holding MORE is refused
+rust replies hold one body by type). An envelope holding MORE is refused
 by `encode_frame` (`FrameError`, naming each path) — never written with the second
 value stringified (`json.dumps(default=str)` → `"b'…'"`), a corrupted value the
 receiver could not tell from data. A sender passes what it sends through
@@ -224,8 +224,8 @@ def _finite(digits: str) -> float:
 
 def _no_lone_surrogate(x) -> None:
     """A `\\ud800`–`\\udfff` escape with no partner decodes to a code point that is
-    not a Unicode scalar: python holds it, UTF-8 cannot write it, rust and swift
-    strings cannot hold it at all."""
+    not a Unicode scalar: python holds it, UTF-8 cannot write it, rust strings
+    cannot hold it at all."""
     if isinstance(x, str):
         if any(0xD800 <= ord(c) <= 0xDFFF for c in x):
             raise ValueError("a lone surrogate (\\ud800–\\udfff) is not text")
@@ -243,13 +243,13 @@ def loads(text: str | bytes):
     existing "not valid JSON" path answers it:
       * `NaN`, `Infinity`, `-Infinity` — not JSON at all (RFC 8259), yet python's
         `json.loads` alone accepts them;
-      * an integer outside int64, or a number that overflows a double — rust and
-        swift parse it into a different value;
+      * an integer outside int64, or a number that overflows a double — rust
+        parses it into a different value;
       * a lone surrogate in a string — not text; no runtime can write it as UTF-8;
       * a document nested deeper than the json scanner can enter — it charges
         every `[`/`{` against `sys.getrecursionlimit()` and raises
         `RecursionError`, which no "not valid JSON" path catches (web_rest
-        would answer a bare 500). Swift's scanner refuses at the same depth."""
+        would answer a bare 500)."""
     try:
         out = json.loads(
             text, parse_constant=_no_constant, parse_int=_int64, parse_float=_finite

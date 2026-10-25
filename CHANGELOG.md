@@ -238,6 +238,18 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   (`ci · units`); a newer push to the same branch cancels the older run. Every
   other run is still started by hand.
 
+### Removed
+
+- The Swift kernel runtime (`src/lib/swift`): its kernel, bundles, CLI and
+  unit suites, its e2e and contract runners, the CI `swift` job,
+  `scripts/build/swift.sh` and the container's swift runtime (#53). The host
+  runtimes are Python (the reference) and Rust, plus the TypeScript browser
+  kernel. Apple's on-device model stays: the Foundation Models bridge
+  (`FantasticFMCore` + `FantasticFMBridge`) is now a Swift package with no
+  dependencies inside the rust `fantastic-foundation-models-backend` crate,
+  built and linked on macOS by its `build.rs` — which no longer fetches 23
+  Swift packages to do it. v0.0.6 is the last release with the Swift kernel.
+
 ### Fixed
 
 - A file dropped on the canvas (#134) opens its preview where it was dropped: the

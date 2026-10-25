@@ -2,7 +2,7 @@
 //! `context_window` resolves to when the record names neither `context_window`
 //! nor `num_ctx`, and the schema's `context_window` default. A server backend
 //! passes `DEFAULT_CONTEXT_WINDOW`; a backend that can read its model's real
-//! window (foundation_models_backend) passes that. Swift `AIBackendConfig.modelWindow`.
+//! window (foundation_models_backend) passes that.
 
 use crate::constants::DEFAULT_CONTEXT_WINDOW;
 use crate::context::{budget, inline_cap, resolve_context_window};

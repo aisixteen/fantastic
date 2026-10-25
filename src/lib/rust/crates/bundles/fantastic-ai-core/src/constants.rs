@@ -53,7 +53,7 @@ pub const TRIGGER: f64 = 0.8;
 
 /// Default per-`send` ceiling, in seconds — overridable via the
 /// `FANTASTIC_AI_SEND_TIMEOUT` env (see [`send_timeout_secs`]). Mirrors the
-/// python/swift default; a slow LOCAL model can raise it via the env. Python
+/// python default; a slow LOCAL model can raise it via the env. Python
 /// `SEND_TIMEOUT` (the hard ceiling per generation; releases the lock).
 pub const SEND_TIMEOUT_SECS: f64 = 180.0;
 

@@ -547,7 +547,7 @@ async def test_the_file_is_the_kernel_emitters_bytes_sorted(seeded_kernel, tmp_p
     """ONE format across runtimes: `kernel_state/yaml_io.dump` with every map's keys
     sorted — each ref's entry is `{fields, host}` (the host stored WITH the
     value) — and a value a YAML 1.2 loader would read as a number quoted, so the
-    rust and swift ports read back the same string."""
+    rust port reads back the same string."""
     k = _mk(seeded_kernel, tmp_path)
     await _declare(k, {"zeta": {"host": "h.example"}, "alpha": {"host": "h.example"}})
     for ref, fields in (

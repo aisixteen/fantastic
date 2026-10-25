@@ -205,7 +205,7 @@ against its spec in `../specs/`.
 `lifecycle.yaml` names one non-shipped bundle, `lifecycle_probe.tools`, which
 lives at `tests/agentic/lifecycle_probe/` and is registered UNLISTED by the
 suite's conftest (python resolves a `handler_module` only from the bundle catalog
-plus `register_unlisted`, as rust and swift resolve only what they registered),
+plus `register_unlisted`, as rust resolves only what it registered),
 because the manifest's `handler_module` has to resolve inside `Kernel.load` at
 reboot as well as at dispatch.
 

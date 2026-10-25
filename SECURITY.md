@@ -21,7 +21,7 @@ disclosure with you.
 
 Helpful to include, where you can:
 
-- the affected **runtime(s)** — `python/`, `rust/`, `swift/`, or the `ts/`
+- the affected **runtime(s)** — `python/`, `rust/`, or the `ts/`
   frontend — and a version or commit SHA;
 - a description, impact, and a **minimal reproduction**;
 - whether it touches the **protocol surface** (the HTTP/WS/REST wire shapes,
@@ -82,7 +82,7 @@ sandbox escape from a view iframe, a crafted payload that crashes or hangs the
 kernel (DoS), secrets leaking into `reflect`/logs/`.fantastic/`, or a weak-load /
 deserialization flaw in the on-disk format.
 
-**In scope:** the kernels (`python/`, `rust/`, `swift/`), the browser frontend
+**In scope:** the kernels (`python/`, `rust/`), the browser frontend
 (`ts/`), the universal container image, and the `send`/`reflect` protocol +
 `.fantastic/` on-disk format.
 

@@ -290,7 +290,7 @@ async def _read_loop(id: str, kernel: Any) -> None:
                 st.pending_calls.add(t)
                 t.add_done_callback(st.pending_calls.discard)
             elif ftype in ("reply", "error"):
-                # Only a STRING id names one of our forwards (rust/swift skip the
+                # Only a STRING id names one of our forwards (rust skips the
                 # rest). A list id was hashed by `pending.pop` and its TypeError
                 # ended this loop while `reflect` still read `connected:true`.
                 fid = frame.get("id")

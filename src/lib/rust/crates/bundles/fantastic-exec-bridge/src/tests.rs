@@ -1219,8 +1219,7 @@ async fn a_stream_chunk_crosses_the_wire_raw() {
 
 /// A TEXT send (kind T, no bytes in the call) whose reply holds bytes comes back
 /// kind B: python's relay `encode_frame`s every reply dict, with no list of verbs,
-/// so the program needs no `bytes: b''` to get its chunk raw. Swift's
-/// `aTextSendsBytesReplyComesBackRaw` twin.
+/// so the program needs no `bytes: b''` to get its chunk raw.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_text_sends_bytes_reply_comes_back_raw() {
     let Some(py) = find_real_python() else {

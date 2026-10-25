@@ -299,7 +299,7 @@ def _anthropic() -> Backend:
 
 
 class _FoundationModels(Backend):
-    """Apple's on-device model (rust + swift only — python has no FM backend). Its
+    """Apple's on-device model (rust only — python has no FM backend). Its
     record names no model, endpoint or key: the backend refuses them."""
 
     def record(self, role: str | None = None, **overrides: Any) -> dict:

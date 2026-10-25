@@ -15,7 +15,7 @@ class Password(IngressRule):
     leg's group token, read from an env var (`env`, default
     `FANTASTIC_GROUP_TOKEN`) so the secret never touches the portable `.fantastic`
     workdir. Fail-closed: an unset/empty env var refuses every inbound `call`.
-    Constant-time compare over the UTF-8 BYTES of both sides (rust and swift compare
+    Constant-time compare over the UTF-8 BYTES of both sides (rust compares
     bytes): on `str`, `hmac.compare_digest` raises TypeError for any non-ASCII text,
     so a stray `é` from a tokenless client would be an unhandled error instead of
     a denial, and a non-ASCII group token would refuse its own holders. The egress

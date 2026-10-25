@@ -30,8 +30,8 @@
 //! query of any length gives the same answer and one of three chars or more is
 //! answered by the index.
 //!
-//! EVERY TABLE ACCESS GOES THROUGH ONE LOCK per store. The swift ram_store port
-//! raced its tables under concurrent agents + the flusher and crashed the kernel;
+//! EVERY TABLE ACCESS GOES THROUGH ONE LOCK per store. Tables raced under
+//! concurrent agents + the flusher crash the kernel;
 //! here a connection is never shared unlocked, and every verb is one transaction.
 //!
 //! The file: `path` on the record, REQUIRED (no default), relative to the directory

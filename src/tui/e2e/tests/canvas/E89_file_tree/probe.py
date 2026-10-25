@@ -18,7 +18,9 @@ h) the file changed on disk under unsaved edits: the conflict is shown, NOTHING 
 i) the filter narrows the loaded tree, and ↓ from it goes into the tree;
 j) collapsing `src` drops its watch from the bridge;
 k) once the cells close, the file bridge holds no watch of theirs, except a file or
-   folder view's own relay (the views outlive the cells, #150); no page error."""
+   folder view's own relay (the views outlive the cells, #150);
+l) deleting those exempted views releases their relays (#157): check 10 exempts
+   their paths, so this one proves the exemption is not a leak; no page error."""
 
 from __future__ import annotations
 
@@ -52,6 +54,19 @@ def view_paths(proj: Path) -> set:
             continue  # deleted between the listing and the read
         if rec.get("handler_module") == "file_bridge.tools" and rec.get("view") in ("file", "folder") and isinstance(rec.get("path"), str):
             out.add(rec["path"])
+    return out
+
+
+def view_ids(proj: Path) -> dict:
+    """The live file and folder views as {path: id} (`file_bridge_*`, #150)."""
+    out = {}
+    for f in (proj / ".fantastic").rglob("file_bridge_*/agent.yaml"):
+        try:
+            rec = yaml.safe_load(f.read_text()) or {}
+        except FileNotFoundError:
+            continue
+        if rec.get("handler_module") == "file_bridge.tools" and rec.get("view") in ("file", "folder") and isinstance(rec.get("path"), str):
+            out[rec["path"]] = rec.get("id") or f.parent.name
     return out
 
 
@@ -220,6 +235,21 @@ def main() -> bool:
             info["10_paths"] = held
             info["10_views"] = sorted(views)
             r["10 no watch of the cells' is left"] = not set(leaks) & set(held)
+            # 12 deleting the views the check above exempted releases their relays (#157)
+            ids = view_ids(rig.proj)
+            exempt = [p for p in LEAKS if p in ids]
+            info["12_exempt"] = exempt
+            for p in exempt:
+                await host_call(rig.port, "kernel", {"type": "delete_agent", "id": ids[p]})
+            held12: list = []
+            end = time.time() + 10
+            while time.time() < end:
+                held12 = await held_paths()
+                if not set(exempt) & set(held12):
+                    break
+                await asyncio.sleep(0.25)
+            info["12_held"] = held12
+            r["12 deleting the exempted views releases their relays"] = bool(exempt) and not set(exempt) & set(held12)
             info["page_errors"] = [x for x in pg.logs if "WebGL" not in x][:8]
             r["11 no page errors"] = not info["page_errors"]
 
