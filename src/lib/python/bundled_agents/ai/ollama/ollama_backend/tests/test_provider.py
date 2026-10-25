@@ -126,6 +126,87 @@ async def test_a_stream_that_ends_mid_thought_still_closes_the_wrapper():
     assert out == [THINK_OPEN, "hm", THINK_CLOSE]
 
 
+async def test_a_thinking_only_chunk_is_not_an_empty_completion():
+    from ai_core.core import THINK_CLOSE, THINK_OPEN
+
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    out, _ = await _run(p, [{"message": {"thinking": "all of it"}, "done": True}])
+    assert "".join(out) != ""
+    assert "".join(out) == f"{THINK_OPEN}all of it{THINK_CLOSE}"
+    assert out == [THINK_OPEN, "all of it", THINK_CLOSE]
+    # explicit nulls on both channels are shape, not content
+    out, _ = await _run(p, [{"message": {"thinking": None, "content": None}}])
+    assert out == []
+
+
+async def _serve_once(body: bytes):
+    """A real local server answering POST /api/chat with the exact ndjson body."""
+    import asyncio
+
+    async def handle(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            n = 0
+            for line in head.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    n = int(line.split(b":")[1])
+            if n:
+                await reader.readexactly(n)
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1]
+
+
+async def _chat_against(body: bytes):
+    server, port = await _serve_once(body)
+    try:
+        p = OllamaProvider(endpoint=f"http://127.0.0.1:{port}", model="m")
+        out = [x async for x in p.chat([{"role": "user", "content": "hi"}])]
+        return p, out
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_a_final_ndjson_line_without_a_newline_still_counts():
+    from ai_core.core import THINK_CLOSE, THINK_OPEN
+
+    body = (
+        b'{"message":{"role":"assistant","content":"Hello"}}\n'
+        b'{"message":{"role":"assistant","content":" world"},"done":true,"done_reason":"stop"}'
+    )
+    p, out = await _chat_against(body)
+    assert "".join(out) == "Hello world"
+    assert p.last_stop_reason == "stop"
+
+    _, out = await _chat_against(b'{"message":{"role":"assistant","thinking":"hm"}}')
+    assert out == [THINK_OPEN, "hm", THINK_CLOSE]
+
+
+def test_caching_none_and_cleanup_pass_and_provider_cache_is_refused_naming_ollama_backend():
+    import ollama_backend.tools as ot
+
+    rec = {"endpoint": "http://o.test", "memory_store_id": "memory"}
+    for mode in ("none", "cleanup"):
+        assert ot.validate_meta({"caching": mode}, rec) is None
+    assert ot.validate_meta({"caching": "provider_cache"}, rec) == (
+        "ollama_backend cannot do provider caching: caching=provider_cache "
+        "is refused \u2014 use none or cleanup"
+    )
+    assert ot.validate_meta({}, {**rec, "caching": "provider_cache"}) is not None
+    assert ot.validate_meta({"caching": "always"}, rec) == (
+        "caching='always' is not one of the legal values: none, cleanup, provider_cache"
+    )
+
+
 async def test_reported_usage_and_done_reason_land_on_the_provider():
     p = OllamaProvider(endpoint="http://ollama.test", model="m")
     await _run(
