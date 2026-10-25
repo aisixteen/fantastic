@@ -7,6 +7,7 @@ runs every test against both stores) and the shared memory-store cases
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import types
 from pathlib import Path
@@ -187,6 +188,8 @@ async def _probe(id, payload, kernel):
     if verb == "count":
         _counts[id] = _counts.get(id, 0) + 1
         return {"n": _counts[id]}
+    if verb == "work":
+        return {"ok": True}
     if verb == "fail":
         raise RuntimeError("probe failed on purpose")
     return {"error": f"unknown {verb!r}", "reason": "unhandled"}
@@ -194,7 +197,7 @@ async def _probe(id, payload, kernel):
 
 _mod = types.ModuleType("sqlite_probe.tools")
 _mod.handler = _probe
-_mod.VERBS = {"reflect": None, "count": None, "fail": None}
+_mod.VERBS = {"reflect": None, "count": None, "fail": None, "work": None}
 register_unlisted("sqlite_probe.tools", _mod)
 
 
@@ -302,3 +305,94 @@ async def test_prune_overwrites_bytes_and_truncates_wal(kernel, mem):
     assert not wal.exists() or token.encode() not in wal.read_bytes(), (
         "pruned text left in the WAL"
     )
+
+
+# ── the cascade, on disk ────────────────────────────────────────────────
+
+
+async def test_pruning_a_member_drops_its_fold_ref_in_the_file(kernel, mem):
+    rows = [
+        {"id": 1, "content": "x"},
+        {"id": 2, "content": "y"},
+        {"id": 3, "kind": "fold", "refs": [1, 2]},
+    ]
+    out = (await _call(kernel, "mem", {"type": "append", "rows": rows}, as_="alice"))[
+        "result"
+    ]
+    assert "reason" not in out and "error" not in out, out
+    con = sqlite3.connect(DB)
+    try:
+        n = con.execute("SELECT COUNT(*) FROM fold_refs").fetchone()[0]
+        assert n == 2, n
+        out = (
+            await _call(kernel, "mem", {"type": "prune", "ids": [1]}, as_="alice")
+        )["result"]
+        assert "reason" not in out and "error" not in out, out
+        n = con.execute("SELECT COUNT(*) FROM fold_refs").fetchone()[0]
+        assert n == 1, "the FK cascade took the member's ref"
+    finally:
+        con.close()
+
+
+# ── many writers and the flusher on one file ────────────────────────────
+
+
+async def test_many_agents_and_the_flusher_share_one_file(tmp_path, monkeypatch):
+    agents, nrows = 12, 40
+    names = [f"w{i}" for i in range(agents)]
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    await _call(root, root.id, {"type": "boot"})  # mints the guid
+    out = await _create(
+        root, id="memory", handler_module="sqlite_store.tools", path=DB
+    )
+    assert out.get("id") == "memory", out
+    for name in names:
+        out = await _create(root, id=name, handler_module="sqlite_probe.tools")
+        assert out.get("id") == name, out
+        wire(root, name, "memory")
+    root.ctx.update(root.id, memory_store_id="memory")
+    assert (await root.ctx.start(boot_all=False)).get("started")
+
+    async def writer(k, name):
+        for i in range(nrows):
+            row = {"id": k * 1000 + i + 1, "content": f"{name} row {i}"}
+            out = (
+                await _call(
+                    root, "memory", {"type": "append", "rows": [row]}, as_=name
+                )
+            )["result"]
+            assert "reason" not in out and "error" not in out, out
+            await _call(root, name, {"type": "work"})
+
+    await asyncio.gather(*(writer(k, n) for k, n in enumerate(names)))
+    await root.ctx.flush_executions()
+
+    for name in names:
+        got = (
+            await _call(
+                root, "memory", {"type": "read", "limit": 1000}, as_=name
+            )
+        )["result"]
+        assert len(got["rows"]) == nrows, f"{name} lost rows"
+        found = (
+            await _call(
+                root, "memory", {"type": "search", "query": f"{name} row 7"}, as_=name
+            )
+        )["result"]
+        assert found["matches"], f"{name}: FTS found nothing"
+
+    con = sqlite3.connect(DB)
+    try:
+        owner = f"{root.record['guid']}|kernel"
+        settled = con.execute(
+            "SELECT COUNT(*) FROM rows WHERE owner=? "
+            "AND json_extract(doc,'$.kind')='settle'",
+            (owner,),
+        ).fetchone()[0]
+        assert settled >= agents * nrows, f"every work call settled: {settled}"
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        con.close()
+    with shutdown_context():
+        await root.ctx.shutdown()
