@@ -605,3 +605,55 @@ async def test_open_view_restamp_keeps_keys_a_concurrent_edit_adds(
         assert f"file:n{n}.md" in cb[vid], (vid, cb[vid])
     for n in range(50):
         assert cb[f"viewer{n}"] == ["*"], n
+
+
+async def test_open_view_keeps_keys_a_concurrent_callable_by_edit_adds(
+    seeded_kernel, file_bridge
+):
+    """Rust tests_views.rs::open_view_keeps_keys_a_concurrent_callable_by_edit_adds:
+    opening NEW file views while another writer adds keys to the bridge's
+    `callable_by` loses neither the new views' entries nor the writer's keys."""
+    k, fb = seeded_kernel, file_bridge
+    for n in range(20):
+        Path(f"n{n}.md").write_text("x\n")
+
+    async def writer():
+        for n in range(50):
+            cb = dict(k.get(fb)["callable_by"])
+            cb[f"viewer{n}"] = ["*"]
+            k.ctx.agents[fb].update(fb, callable_by=cb)
+            await asyncio.sleep(0)
+
+    ids: list[str] = []
+
+    async def opener():
+        for n in range(20):
+            r = await _open(k, fb, "file", f"n{n}.md")
+            assert r["created"] is True, r
+            ids.append(r["id"])
+            await asyncio.sleep(0)
+
+    await asyncio.gather(writer(), opener())
+    cb = k.get(fb)["callable_by"]
+    assert len(ids) == 20
+    for vid in ids:
+        assert vid in cb, f"the view {vid} lost its entry: {cb}"
+    for n in range(50):
+        assert cb[f"viewer{n}"] == ["*"], (n, cb)
+
+
+async def test_open_view_publishes_an_updated_event_for_the_bridge_callable_by(
+    seeded_kernel, file_bridge
+):
+    """Rust tests_views.rs::open_view_publishes_an_updated_event_for_the_bridge_callable_by."""
+    k, fb = seeded_kernel, file_bridge
+    Path("a.md").write_text("x\n")
+    seen: list[dict] = []
+    k.ctx.add_state_subscriber(seen.append)
+    await _open(k, fb, "file", "a.md")
+    assert any(
+        ev.get("kind") == "updated"
+        and ev.get("agent_id") == fb
+        and ev.get("changed") == ["callable_by"]
+        for ev in seen
+    ), seen
