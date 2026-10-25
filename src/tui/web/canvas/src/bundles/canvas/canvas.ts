@@ -46,7 +46,7 @@ import { agentViewBundle } from "../agent_view/agent_view.ts";
 import { headTitle, hostRecordFresh, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
 import { COLUMN, LAYOUT, framesToRemove, hiddenCellFor, hiddenOf, layoutOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, themeOf, themesOf, writeRects } from "./layout.ts";
-import { CELL_MENU, closeIntent } from "./cell_menu.ts";
+import { CELL_MENU, closeIntent, exportCall, exportTarget } from "./cell_menu.ts";
 import type { Rect, Theme } from "./layout.ts";
 import type { GlHost, GlView } from "./gl_host.ts";
 
@@ -865,6 +865,23 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     renderSoon();
   };
 
+  // EXPORT a cell's agent and everything under it as a blueprint folder (#268):
+  // the head's menu asks for the folder, `user` writes it
+  const exportCell = async (cellId: string): Promise<void> => {
+    const a = kernel.get(cellId);
+    if (a === undefined) return;
+    const agent = exportTarget(a.record() as Rec);
+    if (agent === undefined) {
+      toast(`export: ${cellId} has no host agent`);
+      return;
+    }
+    const path = prompt("Export to folder", `export_${agent}`)?.trim();
+    if (path === undefined || path === "") return;
+    const r = (await host.callHost("user", exportCall(agent, path) as unknown as Payload)) as Rec | undefined;
+    if (typeof r?.["error"] === "string") toast(`✕ ${r["error"]}`);
+    else toast(`exported ${String(r?.["exported"] ?? 0)} agents to ${path}`);
+  };
+
   // A PICK of a hidden cell (the file tree's, #133) shows it where it was first, so
   // the pick views it live rather than bouncing back to its view
   const showPicked = (cellId: string): void => {
@@ -911,6 +928,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         e.stopPropagation();
         closeCellMenu();
         if (item.intent === "hide") hideCell(cellId);
+        else if (item.intent === "export") void exportCell(cellId);
         else deleteCell(cellId);
       });
       menu.appendChild(b);

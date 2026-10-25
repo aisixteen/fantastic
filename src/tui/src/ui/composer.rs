@@ -296,6 +296,25 @@ impl Composer {
         Ok(serde_json::Value::Object(m))
     }
 
+    /// `/export <path>` (or `/export path=<path>`) for the SELECTED agent, as the
+    /// `export_subtree` call that writes it and everything under it as a blueprint
+    /// folder at `path` (relative to the running dir; no `..`).
+    pub fn parse_export(line: &str, selected: Option<&str>) -> Result<serde_json::Value, String> {
+        let agent = selected
+            .filter(|a| !a.is_empty() && !a.starts_with('#'))
+            .ok_or_else(|| "select an agent first.".to_string())?;
+        let rest = line.trim().strip_prefix('/').unwrap_or(line.trim());
+        let rest = rest.strip_prefix("export").unwrap_or(rest).trim();
+        let path = rest.strip_prefix("path=").unwrap_or(rest).trim().trim_matches('"');
+        if path.is_empty() {
+            return Err("usage: /export <path>".into());
+        }
+        if std::path::Path::new(path).components().any(|c| c == std::path::Component::ParentDir) {
+            return Err("path may not hold `..`".into());
+        }
+        Ok(serde_json::json!({"type": "export_subtree", "agent_id": agent, "path": path}))
+    }
+
     /// One value, typed. Shared by the arg parser so a list's elements are read
     /// the same way a bare value is.
     fn one(v: &str) -> serde_json::Value {
@@ -479,5 +498,38 @@ mod tests {
         c.insert_str("héllo");
         c.end();
         assert_eq!(c.caret_col(), 5, "é is one cell but two bytes");
+    }
+
+    #[test]
+    fn parse_export_builds_export_subtree_payload_for_the_selected_agent() {
+        let p = Composer::parse_export("/export out/team", Some("a1")).unwrap();
+        assert_eq!(p, json!({"type": "export_subtree", "agent_id": "a1", "path": "out/team"}));
+    }
+
+    #[test]
+    fn parse_export_accepts_path_key_form() {
+        let p = Composer::parse_export("/export path=out/team", Some("a1")).unwrap();
+        assert_eq!(p["path"], "out/team");
+        assert_eq!(p["agent_id"], "a1");
+    }
+
+    #[test]
+    fn parse_export_without_path_shows_usage_error() {
+        for l in ["/export", "/export   ", "/export path="] {
+            assert_eq!(Composer::parse_export(l, Some("a1")).unwrap_err(), "usage: /export <path>", "{l:?}");
+        }
+    }
+
+    #[test]
+    fn parse_export_refuses_dotdot_path() {
+        for l in ["/export ../x", "/export a/../../x", "/export path=../x"] {
+            assert_eq!(Composer::parse_export(l, Some("a1")).unwrap_err(), "path may not hold `..`", "{l:?}");
+        }
+    }
+
+    #[test]
+    fn parse_export_without_selection_says_select_an_agent() {
+        assert_eq!(Composer::parse_export("/export out", None).unwrap_err(), "select an agent first.");
+        assert_eq!(Composer::parse_export("/export out", Some("#bundles")).unwrap_err(), "select an agent first.");
     }
 }

@@ -204,7 +204,7 @@ async def test_export_subtree_write_failure_is_failed(setup, tmp_path, monkeypat
     def boom(p, text):
         raise OSError("disk full")
 
-    monkeypatch.setattr(export, "write_file", boom)
+    monkeypatch.setattr("kernel_state.export.write_file", boom)
     d = out_dir(tmp_path, "fail")
     r = await op(
         setup, "user", {"type": "export_subtree", "agent_id": "a", "path": str(d)}
@@ -212,3 +212,80 @@ async def test_export_subtree_write_failure_is_failed(setup, tmp_path, monkeypat
     assert r["reason"] == "failed", r
     assert not d.exists()
     assert leftovers(d) == []
+
+
+# ---- OWNED FILES, and the same engine on the root (#268) ----
+
+
+@pytest.fixture
+async def disk_setup(kernel, monkeypatch, tmp_path):
+    """root - user - a (a folder-bundle agent with an html view) {b {c}}, and the
+    folder `.fantastic/bundles/py_ab12/` under the running dir."""
+    for name in ("py_ab12", "echo.tools"):
+        monkeypatch.setitem(_bundles._UNLISTED, name, _echo_module(name))
+    k = kernel
+    for id, parent, hm, extra in [
+        ("user", k.id, "user.tools", {}),
+        (
+            "a",
+            "user",
+            "py_ab12",
+            {"view": {"kind": "html", "bytes": "<p>hi</p>", "calls": ["a"]}},
+        ),
+        ("b", "a", "py_ab12", {}),
+        ("c", "b", "echo.tools", {}),
+    ]:
+        p = {"type": "create_agent", "parent_id": parent, "id": id, "handler_module": hm}
+        r = await op(k, k.id, {**p, **extra})
+        assert "error" not in r, f"{p}: {r}"
+    b = tmp_path / ".fantastic" / "bundles" / "py_ab12"
+    b.mkdir(parents=True)
+    (b / "bundle.yaml").write_text("base: py_agent\nsentence: x\n")
+    (b / "agent.py").write_text("print('hi')\n")
+    (b / "panel.html").write_text("<p>panel</p>")
+    return k
+
+
+async def test_export_subtree_writes_view_and_bundle_files_for_a_folder_bundle_agent(
+    disk_setup, tmp_path
+):
+    k = disk_setup
+    r = await op(
+        k, "user", {"type": "export_subtree", "agent_id": "a", "path": "out_owned"}
+    )
+    assert r["exported"] == 3, r
+    assert r["files"] == [
+        "blueprint.yaml",
+        "a/view.html",
+        "bundles/py_ab12/agent.py",
+        "bundles/py_ab12/bundle.yaml",
+        "bundles/py_ab12/panel.html",
+    ], r
+    d = tmp_path / "out_owned"
+    assert (d / "a/view.html").read_text() == "<p>hi</p>"
+    assert (d / "bundles/py_ab12/agent.py").read_text() == "print('hi')\n"
+    text = (d / "blueprint.yaml").read_text()
+    assert "# code: a/view.html\n" in text, text
+    assert "# code: bundles/py_ab12/panel.html\n" in text, text
+    v = yaml.safe_load(text)
+    assert v["agents"][0]["view"]["bytes_file"] == "a/view.html"
+    assert "bytes" not in v["agents"][0]["view"], text
+    if sys.platform != "win32":
+        for f in ["a/view.html", "bundles/py_ab12/agent.py", "bundles/py_ab12/panel.html"]:
+            assert ((d / f).stat().st_mode & 0o777) == 0o600, f
+        assert ((d / "bundles/py_ab12").stat().st_mode & 0o777) == 0o700
+
+
+async def test_export_subtree_refuses_with_secret_found_when_agent_py_holds_a_key(
+    disk_setup, tmp_path
+):
+    k = disk_setup
+    (tmp_path / ".fantastic/bundles/py_ab12/agent.py").write_text(
+        "KEY = 'sk-abcd1234efgh'\n"
+    )
+    r = await op(
+        k, "user", {"type": "export_subtree", "agent_id": "a", "path": "out_keyed"}
+    )
+    assert r["reason"] == "secret_found", r
+    assert "bundles/py_ab12/agent.py" in r["error"], r
+    assert not (tmp_path / "out_keyed").exists()
