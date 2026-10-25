@@ -565,3 +565,103 @@ def test_stream_idle_seconds_is_validated_at_the_write():
         )
     assert validate_meta({"stream_idle_seconds": 2.5}, rec) is None
     assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]
+
+
+# ── Rust twins (#170) ────────────────────────────────────────────────────────
+
+_REC = {
+    "endpoint": EP,
+    "model": "m",
+    "memory_store_id": "memory",
+    "credentials": {"store": "s", "ref": "r"},
+}
+
+
+async def test_a_503_is_a_transport_failure_and_a_401_is_not():
+    from ai_core.provider import ProviderError
+
+    with pytest.raises(ProviderError) as gw:
+        await _drain(_seq_provider([(503, "overloaded", "text/plain")], []))
+    assert gw.value.transport is True
+    assert str(gw.value).startswith("responses 503")
+    with pytest.raises(ProviderError) as deliberate:
+        await _drain(_seq_provider([(401, "no", "text/plain")], []))
+    assert deliberate.value.transport is False
+    assert str(deliberate.value) == "responses 401: no"
+
+
+async def test_a_rotated_key_rides_the_next_request_and_nothing_pools(monkeypatch):
+    made: list = []
+    real_init = httpx.AsyncClient.__init__
+
+    def counting(self, *a, **kw):
+        made.append(1)
+        real_init(self, *a, **kw)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", counting)
+    current = {"key": "sk-pad\tinner"}
+    asked: list = []
+
+    async def reader(endpoint: str) -> str:
+        asked.append(endpoint)
+        return current["key"]
+
+    sink: list = []
+    p = _provider(sink, _text("ok"), key=reader)
+    await _drain(p)
+    assert sink[0].headers["authorization"] == "Bearer sk-pad\tinner"
+    assert sink[0].headers["content-type"] == "application/json"
+    current["key"] = "sk-next"
+    await _drain(p)
+    assert sink[1].headers["authorization"] == "Bearer sk-next"
+    assert asked == [EP, EP]
+    assert len(made) == 2
+
+
+async def test_transport_retry_is_bounded_and_deliberate_answers_are_not_retried():
+    sink: list = []
+    p = _seq_provider(
+        [
+            (521, "<!DOCTYPE html>", "text/html"),
+            (200, _text("recovered"), "text/event-stream"),
+        ],
+        sink,
+    )
+    assert await _drain(p) == "recovered"
+    assert len(sink) == 2
+    sink = []
+    p = _seq_provider([(521, "<!DOCTYPE html>", "text/html")], sink)
+    with pytest.raises(RuntimeError, match="responses 521"):
+        await _drain(p)
+    assert len(sink) == RETRIES + 1
+    sink = []
+    p = _seq_provider([(404, '{"error": "not found"}', "application/json")], sink)
+    with pytest.raises(RuntimeError, match="responses 404"):
+        await _drain(p)
+    assert len(sink) == 1
+
+
+def test_a_record_without_an_endpoint_is_refused_at_the_write_naming_it():
+    from responses_backend.tools import validate_meta
+
+    assert validate_meta({}, _REC) is None
+    assert validate_meta({"endpoint": ""}, _REC) == (
+        "responses_backend: required on the record and missing: endpoint — "
+        "nothing is guessed. endpoint = the full Responses API URL (…/v1/responses)"
+    )
+
+
+def test_caching_none_and_cleanup_pass_and_provider_cache_is_refused_naming_responses_backend():
+    from responses_backend.tools import validate_meta
+
+    for mode in ("none", "cleanup"):
+        assert validate_meta({"caching": mode}, _REC) is None
+    assert validate_meta({"caching": "provider_cache"}, _REC) == (
+        "responses_backend cannot do provider caching: "
+        "caching=provider_cache is refused — use none or cleanup"
+    )
+    assert validate_meta({}, {**_REC, "caching": "provider_cache"}) is not None
+    assert validate_meta({"caching": "always"}, _REC) == (
+        "caching='always' is not one of the legal values: "
+        "none, cleanup, provider_cache"
+    )

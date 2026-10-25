@@ -251,3 +251,84 @@ async def test_an_empty_await_is_refused_and_ends_the_chain(
         assert core._AWAIT_REFUSED in str(fp.seen[1]), fp.seen
     finally:
         fake_providers.pop(aid, None)
+
+
+async def test_a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends(
+    seeded_kernel, fake_providers
+):
+    aid = "ft_queued"
+    endpoint = "https://api.example/v1/messages"
+
+    class _StallThenDone:
+        def __init__(self):
+            self.calls = 0
+            self.seen: list[list[dict]] = []
+
+        async def chat(self, messages, max_tokens=None):
+            self.calls += 1
+            self.seen.append(list(messages))
+            if self.calls == 1:
+                await asyncio.sleep(0.5)
+                raise ProviderError(
+                    f"x_backend: stream_stalled — {endpoint} sent no bytes for 0.5s; "
+                    "this turn is NOT complete",
+                    transport=True,
+                )
+            yield DONE
+
+    _agent(seeded_kernel, aid)
+    fp = fake_providers[aid] = _StallThenDone()
+    seeded_kernel.ctx.ensure_inbox("watch_q")
+    seeded_kernel.watch(aid, "watch_q")
+
+    def send(text, cid):
+        return asyncio.ensure_future(
+            seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {"type": "send", "text": text, "client_id": cid},
+                    }
+                ]
+            )
+        )
+
+    try:
+        first = send("one", "probe_a")
+        for _ in range(200):
+            if fp.calls:
+                break
+            await asyncio.sleep(0.02)
+        second = send("two", "probe_b")
+        await asyncio.sleep(0.2)
+        q = seeded_kernel.ctx.inboxes["watch_q"]
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        assert any(
+            e.get("type") == "status"
+            and e.get("phase") == "queued"
+            and e.get("client_id") == "probe_b"
+            for e in events
+        ), events
+        assert fp.calls == 1, "the second send ran while the first turn was open"
+        r1 = (await asyncio.wait_for(first, 10))[0]["result"]
+        r2 = (await asyncio.wait_for(second, 10))[0]["result"]
+        assert "stream_stalled" in r1["error"], r1
+        assert "error" not in r2 and "response" in r2, r2
+        assert fp.calls == 2
+        assert "[turn failed]" in str(fp.seen[1]), fp.seen[1]
+        while not q.empty():
+            events.append(q.get_nowait())
+        done = [
+            e
+            for e in events
+            if e.get("type") == "status"
+            and e.get("phase") == "done"
+            and e.get("client_id") == "probe_a"
+        ]
+        assert done and done[-1]["detail"]["reason"] == "error", done
+        assert endpoint in done[-1]["detail"]["error"], done
+        assert len(_errors(await _rows(seeded_kernel, aid))) == 1
+    finally:
+        fake_providers.pop(aid, None)

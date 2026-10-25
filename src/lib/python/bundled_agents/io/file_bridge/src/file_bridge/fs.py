@@ -348,7 +348,8 @@ def read_chunk(
     total = target.stat().st_size
     with target.open("rb") as f:
         f.seek(offset)
-        chunk = f.read(max(0, length))
+        # clamp to what exists: a huge `length` must not size an allocation
+        chunk = f.read(min(max(0, length), max(0, total - offset)))
     return chunk, total
 
 
