@@ -1027,6 +1027,7 @@ dependencies = [
  "fantastic-kernel",
  "fantastic-scenario-probes",
  "serde_json",
+ "serde_yaml",
  "tokio",
 ]
 
