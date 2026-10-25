@@ -410,3 +410,18 @@ async def test_a_created_file_is_announced_added_once_then_modified(
     Path("a/b/c.txt").write_text("hello")
     kinds = await _changes_for(q, "a/b/c.txt", 1.5)
     assert kinds and set(kinds) == {"modified"}, kinds
+
+
+def test_judge_reports_delete_then_restore_with_a_preserved_stamp():
+    """Rust watch.rs::judge_reports_delete_then_restore_with_a_preserved_stamp: the
+    comparison is against the LAST stamp (the watch batch's `stamps` dict): a delete
+    clears it, and the same stamp back is a new file at the path."""
+    from file_bridge.tools import _judge
+
+    s = (7, 100, 100, 3)
+    stamps: dict[str, tuple] = {"f": s}
+    assert _judge(stamps.get("f"), None) == "deleted"
+    stamps.pop("f")
+    assert _judge(stamps.get("f"), s) == "added"  # not None: a new file
+    stamps["f"] = s
+    assert _judge(stamps.get("f"), s) is None  # an unchanged repeat

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import errno
 import os
+from pathlib import Path
 
 import pytest
 from _testkit import posix_only
@@ -279,3 +280,34 @@ def test_transient_rename_error_reads_winerror_codes():
         assert fs._transient_rename_error(e) is want
     assert fs._transient_rename_error(PermissionError(13, "x"))
     assert not fs._transient_rename_error(OSError(errno.ENOENT, "x"))
+
+
+# ─── Rust twins (src/lib/rust/crates/bundles/fantastic-file/src/tests.rs) ─────
+
+
+def test_resolve_dot_dot_after_descent_is_ok(tmp_path):
+    """a/b/.. resolves to root/a — still inside."""
+    p = fs.resolve(fs.Root(tmp_path, "."), "a/b/../leaf.txt")
+    assert p.is_relative_to(tmp_path.resolve())
+    assert p == tmp_path.resolve() / "a" / "leaf.txt"
+
+
+@posix_only("a root symlink needs symlink privilege on Windows")
+def test_root_symlink_pointing_outside_the_running_dir_refuses(tmp_path):
+    """The clamp resolves symlinks on both sides: an outward symlinked root
+    escapes (a file symlink inside the root is another test)."""
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    os.symlink(outside, base / "out")
+    with pytest.raises(ValueError) as e:
+        fs.resolve_root(fs.Root(base, "out"))
+    assert str(e.value) == "fs: root 'out' escapes the running dir"
+
+
+def test_tilde_root_is_literal_not_home(tmp_path):
+    """`fs` never expands `~` for a clamped root: the name is a directory."""
+    resolved = fs.resolve_root(fs.Root(tmp_path, "~/projects"))
+    assert resolved == tmp_path.resolve() / "~" / "projects"
+    assert resolved != Path(os.path.expanduser("~")).resolve()

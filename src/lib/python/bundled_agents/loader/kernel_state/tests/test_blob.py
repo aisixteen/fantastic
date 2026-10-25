@@ -349,3 +349,80 @@ async def test_forget_record_refuses_a_siblings_namespace(seeded_kernel):
             )
         )[0]["result"]
     assert r.get("reason") == "unauthorized", r
+
+
+async def test_blob_verbs_pass_root_ingress(seeded_kernel):
+    """`persist_blob`/`load_blob` are not kernel verbs, so they do not bypass the
+    root's ingress. A grandchild granted exactly `kernel_state:[persist_blob]` is
+    refused by the ROOT's `callable_by` — side `ingress`."""
+    from _testkit import as_agent
+
+    # A direct child, then a grandchild under it: the root's `callable_by` names
+    # neither, so the only edge the grandchild could have is the explicit one.
+    for aid, parent in (("bi_mid", seeded_kernel.id), ("bi_leaf", "bi_mid")):
+        rec = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "create_agent",
+                            "parent_id": parent,
+                            "handler_module": "file_bridge.tools",
+                            "allow": ["."],
+                            "id": aid,
+                            "can_call": {"kernel_state": ["persist_blob"]},
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+        assert rec.get("id") == aid, rec
+    with as_agent(seeded_kernel, "bi_leaf"):
+        denial = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel",
+                        "payload": {
+                            "type": "persist_blob",
+                            "agent_id": "bi_leaf",
+                            "name": "s.yaml",
+                            "content": "x",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+    assert denial.get("reason") == "unauthorized", denial
+    assert denial.get("side") == "ingress", denial
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "persist_blob", "agent_id": "ghost", "name": "s.yaml", "content": "x"},
+        {"type": "load_blob", "agent_id": "ghost", "name": "s.yaml"},
+    ],
+)
+async def test_a_walk_that_escapes_the_root_raises_the_blob_verb(
+    seeded_kernel, store_agent, tmp_path, payload
+):
+    """A namespace that is not live is placed by walking the loader's persisted
+    tree; that walk has no `try`, so an entry linked outside the root RAISES and
+    the verb settles `failed` with the raised error, not a `completed` reply."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "agent.yaml").write_text("id: probe_out\n")
+    (tmp_path / ".fantastic" / "agents").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fantastic" / "agents" / "evil").symlink_to(outside)
+
+    out = (await seeded_kernel.send([{"target": "kernel", "payload": payload}]))[0]
+    assert out["status"] == "failed", out
+    # Python appends a "paths are relative to the root ..." hint to fs's refusal.
+    assert out["result"]["raised"] is True, out
+    assert out["result"]["error"].startswith(
+        "ValueError: fs: path 'agents/evil/agent.yaml' escapes root"
+    ), out
+    assert set(out["result"]) == {"error", "raised"}, out
+    assert not (outside / "s.yaml").exists()

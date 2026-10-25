@@ -638,3 +638,94 @@ async def test_context_forget_waits_for_a_running_turn(seeded_kernel, fake_provi
     await turn
     out = await asyncio.wait_for(forget, 5)
     assert out["pruned"] >= 0
+
+
+# ── the canvas AI cell's S8: folds at a small window, and every turn answers ──
+
+S8_SUMMARY = (
+    "Filler turns about lorem ipsum\n\nASKED: filler turns\nDONE: answered each\n"
+    "BINDING: none\nERRORS: none\nOPEN: none"
+)
+
+
+class _S8Model:
+    """Answers each turn from a queue; the model's two SIDE calls are answered in
+    their own shapes — the fold's summary, and the `context_recall` a fold batch
+    makes due — so neither takes a turn's queued answer."""
+
+    def __init__(self):
+        self.answers: list[str] = []
+        self.recalls = 0
+
+    async def chat(self, messages, max_tokens=None):
+        everything = json.dumps(messages, default=str)
+        last = str(messages[-1].get("content") or "").lstrip()
+        if "FOLD this finished piece of work" in everything:
+            yield S8_SUMMARY
+        elif last.startswith("You are rebuilding your own working context"):
+            self.recalls += 1
+            yield '{"expand": [], "why": "the filler is folded"}'
+        elif last.startswith("[no call was dispatched]") or last.startswith(
+            "[no answer]"
+        ):
+            yield DONE
+        else:
+            yield self.answers.pop(0)
+
+
+async def test_folds_at_a_small_window_and_every_turn_answers(
+    seeded_kernel, fake_providers
+):
+    """e2e `canvas.ai_cell` S8 as full turns: a 12000 window on the fold strategy
+    (async + titled), eight long answers, each followed by the runtime's no-call
+    reminder answered `done`. Every turn answers, the folds land, and the turn after
+    them answers too."""
+    k = seeded_kernel
+    _agent(k, "s8", window=12000)
+    k.ctx.update("s8", context_async=True, context_titles=True)
+    model = fake_providers["s8"] = _S8Model()
+    long = "lorem ipsum dolor sit amet, consectetur adipiscing elit. " * 120
+
+    async def turn(text: str, reply: str) -> None:
+        model.answers.append(reply)
+        out = await k.send(
+            [
+                {
+                    "target": "s8",
+                    "payload": {"type": "send", "text": text, "client_id": "cell"},
+                }
+            ]
+        )
+        assert out[0]["status"] == "completed", out
+
+    async def answered(prefix: str) -> bool:
+        for _ in range(100):
+            rows = await _store(k, "s8")
+            if any(
+                r.get("role") == "assistant"
+                and str(r.get("content") or "").startswith(prefix)
+                for r in rows
+            ):
+                return True
+            await asyncio.sleep(0.1)
+        return False
+
+    for i in range(8):
+        await turn(f"turn {i} {long[:300]}", f"S8-turn-{i} {long}")
+        assert await answered(f"S8-turn-{i}"), f"turn {i} was never answered"
+    rows = await _store(k, "s8")
+    assert any(r.get("kind") == "fold" for r in rows), (
+        "eight long turns at a 12000 window fold"
+    )
+    # Python debounces the recall to every RECALL_EVERY-th fold row: keep answering
+    # until the folds made one due, and it ran inside a turn.
+    extra = 0
+    while model.recalls < 1 and extra < 12:
+        await turn(f"more {extra}", f"S8-more-{extra} {long}")
+        assert await answered(f"S8-more-{extra}"), f"extra turn {extra} unanswered"
+        extra += 1
+    assert model.recalls >= 1, "the folds made a context_recall due, and it ran"
+    await turn("still there?", "S8-after-fold")
+    assert await answered("S8-after-fold"), (
+        "the turn after the folds was never answered"
+    )

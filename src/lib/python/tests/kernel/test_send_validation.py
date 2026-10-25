@@ -96,3 +96,22 @@ async def test_a_supplied_empty_id_on_create_is_refused_not_minted(seeded_kernel
         )
     )[0]["result"]
     assert r.get("reason") == "bad_arg" and r.get("arg") == "id", r
+
+
+async def test_draining_refuses_before_resolving_the_target(seeded_kernel):
+    """Draining is checked BEFORE the target is resolved, so a send to an id that
+    does not even exist answers `draining`, not `unknown_agent`, while the kernel
+    is stopping."""
+    k = seeded_kernel.ctx
+    await k.shutdown_agents()
+    try:
+        assert k.draining is True
+        out = (
+            await seeded_kernel.send(
+                [{"target": "no-such-agent", "payload": {"type": "poke"}}]
+            )
+        )[0]
+        assert out["result"]["reason"] == "draining", out
+        assert out["pid"] is None, "a refused root costs no id"
+    finally:
+        k.draining = False
