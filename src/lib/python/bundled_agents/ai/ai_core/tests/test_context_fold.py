@@ -4,6 +4,10 @@ the same range rules, the same refusals (each naming its arg), the same view aft
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from ai_core import core, folds
 from _fake import FakeCtx
 
@@ -279,3 +283,70 @@ async def test_history_fold_and_grep_reach_members(fake_providers):
     g = await core._grep("ai", {"query": "secret"}, k)
     assert g["total"] == 1, g
     assert g["matches"][0]["id"] == ids[3], g
+
+
+async def test_a_view_array_naming_a_missing_row_is_no_view(fake_providers):
+    # A stale array (a row the store no longer has) is not the view: the head is.
+    k = _k()
+    ids = _turns(k, ["one", "two", "three"])
+    await core._save_view(
+        "ai", k, [{"id": 999999, "res": "full"}], budget_=1000, why="test"
+    )
+
+    out = await _fold(k, {"summary": "all three"})
+    assert out["rows"] == len(ids), out
+    assert _fold_row(k, out["folded"])["refs"] == ids
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Python re-renders the prefix untrimmed after a fold; keeping the trimmed "
+    "bytes needs a view-entry field the issue does not name. Rust is the spec.",
+)
+async def test_the_prefix_keeps_the_trimmed_bytes_the_model_saw_before_the_fold(
+    fake_providers,
+):
+    # The model's view trims the store: a whole-state read a later one supersedes is
+    # dropped, and a body repeated from an earlier reply is stubbed. A fold must not
+    # bring either back: the messages before the range stay byte-identical.
+    k = _k()
+    long = "the same long reply body, repeated word for word. " * 10
+    old = "[reply to 1 · notes reflect]\nthe old state"
+    superseded = _put(k, "user", old)
+    _put(k, "assistant", "noted")
+    _put(k, "user", "[reply to 2 · notes reflect]\nthe new state")
+    _put(k, "assistant", "noted again")
+    _put(k, "user", f"[reply to 3 · notes read]\n{long}")
+    _put(k, "assistant", "read it")
+    _put(k, "user", f"[reply to 4 · notes read]\n{long}")
+    _put(k, "assistant", "and again")
+    ids = []
+    for t in (
+        "question about the range",
+        "answer about the range",
+        "question after the range",
+        "answer after the range",
+    ):
+        ids.append(_put(k, "user" if t.startswith("question") else "assistant", t))
+    before = await _messages(k)
+    # the trimmers did their work: the superseded read is gone, the repeat is a stub
+    assert not any(m["content"] == old for m in before)
+    assert any("[identical to the reply in row" in m["content"] for m in before)
+    kpos = next(
+        i for i, m in enumerate(before) if m["content"] == "question about the range"
+    )
+
+    out = await _fold(k, {"from": ids[0], "to": ids[1], "summary": "the range, folded"})
+    assert out["rows"] == 2, out
+    fid = out["folded"]
+
+    after = await _messages(k)
+    f = next(
+        i for i, m in enumerate(after) if m["content"].startswith(f"[fold {fid} ·")
+    )
+    assert f == kpos, "the fold sits where the range began"
+    assert json.dumps(after[:f]) == json.dumps(before[:kpos]), "prefix byte-identical"
+    assert json.dumps(after[f + 1 :]) == json.dumps(before[kpos + 2 :]), (
+        "the rows after the range are byte-identical"
+    )
+    assert superseded not in await _view_ids(k), "a dropped row stays out of the view"
