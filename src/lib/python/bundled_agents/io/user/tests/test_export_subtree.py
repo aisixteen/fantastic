@@ -188,7 +188,6 @@ async def test_export_subtree_requires_agent_id_and_path(setup):
 
 async def test_export_subtree_is_in_verbs_and_docs(setup):
     assert "export_subtree" in tools.VERBS
-    assert "import_subtree" not in tools.VERBS
     d = await op(setup, "kernel", {"type": "docs", "of": "user"})
     assert "export_subtree" in d["verbs"], d
 

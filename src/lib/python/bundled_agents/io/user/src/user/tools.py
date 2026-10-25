@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from kernel._refusal import UNHANDLED, refusal
 
-from user import export
+from user import export, import_
 
 NAME = "user"
 
@@ -25,9 +25,15 @@ async def _export_subtree(id, payload, agent):
     return export.export_subtree(agent, payload)
 
 
+async def _import_subtree(id, payload, agent):
+    """args: path:str (req — a blueprint folder, relative to the running dir; no `..`), parent_id:str (req), bind:dict? ({"@port": "<agent id>"} — every declared port, to an agent of its kind), allow_code:bool? (only true counts), approve:bool? (only true counts) — without approve: {approval_required, agents, new_ids, reaches, ports, code} and nothing is created; with it: the agents under parent_id with fresh ids (one `_<k>` suffix), bound agents granted back. Refused: unbound_ports, bad_binding, secret_found, code_not_allowed. Reply {imported, ids, parent_id, ports}."""
+    return await import_.import_subtree(agent, payload)
+
+
 VERBS = {
     "reflect": _reflect,
     "export_subtree": _export_subtree,
+    "import_subtree": _import_subtree,
 }
 
 

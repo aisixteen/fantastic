@@ -33,12 +33,26 @@ def test_the_closed_set():
         "timeout",
         "secret_found",
         "failed",
+        "unbound_ports",
+        "bad_binding",
+        "code_not_allowed",
     }
     with pytest.raises(ValueError) as e:
         refusal("memory_store", "x")
     assert (
         str(e.value) == f"unknown refusal code 'memory_store'; one of {sorted(CODES)}"
     )
+
+
+def test_the_import_codes_build_and_carry_their_reason():
+    for code in (
+        "secret_found",
+        "failed",
+        "unbound_ports",
+        "bad_binding",
+        "code_not_allowed",
+    ):
+        assert refusal(code, "e") == {"error": "e", "reason": code}
 
 
 def test_key_order_and_the_optional_fields():

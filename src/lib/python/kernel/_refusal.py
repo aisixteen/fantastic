@@ -50,6 +50,9 @@ DRAINING = "draining"  # the kernel is stopping; no new roots are accepted
 NO_CONSUMER = "no_consumer"  # watch: the watcher has no registered inbox
 SECRET_FOUND = "secret_found"  # a secret scan found a key, a row or a path in an output
 FAILED = "failed"  # the operation was valid but the system could not finish it (I/O)
+UNBOUND_PORTS = "unbound_ports"  # a blueprint port with nothing bound to it (or not bindable)
+BAD_BINDING = "bad_binding"  # a bind that names no port, no agent, or an agent of the wrong kind
+CODE_NOT_ALLOWED = "code_not_allowed"  # a blueprint carries code and `allow_code` was not true
 
 # Transport codes — a leg that could not carry the call at all. Owned by
 # `relay_connector` today; listed here because they share the field, and a caller
@@ -75,6 +78,9 @@ CODES = frozenset(
         NO_CONSUMER,
         SECRET_FOUND,
         FAILED,
+        UNBOUND_PORTS,
+        BAD_BINDING,
+        CODE_NOT_ALLOWED,
         NOT_CONNECTED,
         TRANSPORT_ERROR,
         TRANSPORT_CLOSED,
