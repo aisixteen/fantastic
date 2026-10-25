@@ -78,6 +78,29 @@ def saved_tokens(cache_read: int, cache_write: int) -> int:
 CHEAP_READ_MODELS = ("claude-sonnet-5-5", "claude-opus-5-5")
 
 
+def budget_thinking_refused(model: str) -> bool:
+    """True for a model that rejects `thinking: {type: enabled, budget_tokens}`:
+    claude-<family>-N with N >= 5, or 4.7 and later."""
+    parts = model.split("-")
+    if (
+        len(parts) < 3
+        or parts[0] != "claude"
+        or not (parts[1].isascii() and parts[1].isalpha())
+    ):
+        return False
+    try:
+        major = int(parts[2])
+    except ValueError:
+        return False
+    if major >= 5:
+        return True
+    try:
+        minor = int(parts[3]) if len(parts) > 3 else None
+    except ValueError:
+        minor = None
+    return major == 4 and minor is not None and minor >= 7
+
+
 class CacheRates:
     """The three cache rates of one price bucket, USD per million tokens."""
 
@@ -436,6 +459,8 @@ class AnthropicProvider:
         max_tokens: int,
         temperature: float | None = None,
         thinking_budget: int | None = None,
+        effort: str | None = None,
+        thinking_display: str | None = None,
         caching: str = ai_caching.DEFAULT_MODE,
         usage: Usage | None = None,
         base: Usage | None = None,
@@ -452,6 +477,8 @@ class AnthropicProvider:
         self._max_tokens = int(max_tokens)
         self._temperature = temperature
         self._thinking_budget = thinking_budget
+        self._effort = effort
+        self._thinking_display = thinking_display
         self._marks = ai_caching.marks(caching)
         # The agent's running counts; None = nothing is counted (a bare provider).
         self._usage = usage
@@ -521,9 +548,14 @@ class AnthropicProvider:
             body["cache_control"] = dict(CACHE_CONTROL)
         if self._temperature is not None:
             body["temperature"] = self._temperature
-        # Thinking only where the bound leaves room for it and an answer after it.
+        if self._effort is not None:
+            body["output_config"] = {"effort": self._effort}
         budget = self._thinking_budget
-        if budget and THINKING_FLOOR <= budget < call_max:
+        if self._thinking_display is not None:
+            # adaptive thinking: its display is the mode, so a budget adds nothing
+            body["thinking"] = {"type": "adaptive", "display": self._thinking_display}
+        # Budgeted thinking only where the bound leaves room for it and an answer.
+        elif budget and THINKING_FLOOR <= budget < call_max:
             body["thinking"] = {"type": "enabled", "budget_tokens": int(budget)}
         return body
 

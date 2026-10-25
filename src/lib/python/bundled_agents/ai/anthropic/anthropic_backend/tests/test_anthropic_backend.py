@@ -1343,3 +1343,57 @@ async def test_a_corrupt_usage_file_starts_clean(seeded_kernel, mock_http, _proc
     await _turn(k2, mock_http)
     saved = json.loads(_sidecar(k2).read_text())
     assert saved["requests"] == 1, saved
+
+
+def test_effort_and_thinking_display_shape_the_body():
+    msgs = [{"role": "user", "content": "hi"}]
+    b = _provider(None, effort="high").body(msgs, None)
+    assert b["output_config"] == {"effort": "high"} and "thinking" not in b
+    b = _provider(None, thinking_display="summarized", thinking_budget=2048).body(
+        msgs, None
+    )
+    assert b["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert "output_config" not in b
+    b = _provider(None).body(msgs, None)
+    assert "thinking" not in b and "output_config" not in b
+
+
+def test_a_bad_effort_or_display_or_both_modes_are_refused():
+    def check(meta):
+        return validate_meta(meta, _rec())
+
+    assert check({"effort": "ultra"}) == (
+        "effort must be one of low, medium, high, xhigh, max"
+    )
+    assert check({"thinking_display": "verbose"}) == (
+        "thinking_display must be summarized or omitted"
+    )
+    assert check({"thinking_display": "summarized", "thinking_budget": 2048}) == (
+        "thinking_display and thinking_budget are two thinking modes — set one"
+    )
+    assert check({"effort": "xhigh", "thinking_display": "omitted"}) is None
+
+
+def test_budget_thinking_refused_reads_the_model_family():
+    from anthropic_backend.provider import budget_thinking_refused
+
+    for m in (
+        "claude-sonnet-5-5",
+        "claude-opus-4-7",
+        "claude-fable-5-1",
+        "claude-haiku-5-5-20260101",
+    ):
+        assert budget_thinking_refused(m), m
+    for m in ("claude-opus-4-6", "claude-3-5-sonnet-20241022", "my-model"):
+        assert not budget_thinking_refused(m), m
+
+
+def test_thinking_budget_is_refused_for_a_5x_model():
+    msg = validate_meta({"model": "claude-sonnet-5-5", "thinking_budget": 2048}, _rec())
+    assert msg is not None
+    assert "thinking_budget is refused by claude-sonnet-5-5" in msg
+    assert "thinking_display (summarized|omitted) and effort instead" in msg
+    assert (
+        validate_meta({"model": "claude-opus-4-6", "thinking_budget": 2048}, _rec())
+        is None
+    )

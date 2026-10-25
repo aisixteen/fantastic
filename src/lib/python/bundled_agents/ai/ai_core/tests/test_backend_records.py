@@ -97,6 +97,8 @@ SCHEMAS = {
             ("context_window", "int", False, None, None),
             ("temperature", "float", False, None, None),
             ("thinking_budget", "int", False, None, None),
+            ("effort", "enum", False, None, ["low", "medium", "high", "xhigh", "max"]),
+            ("thinking_display", "enum", False, None, ["summarized", "omitted"]),
             ("price_input_per_mtok", "float", False, None, None),
             ("price_output_per_mtok", "float", False, None, None),
             ("price_input_long_per_mtok", "float", False, None, None),
