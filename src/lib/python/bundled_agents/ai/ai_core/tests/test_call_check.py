@@ -10,7 +10,7 @@ from _testkit import memory_meta
 import asyncio
 
 from ai_core import core
-from ai_core.call_check import MAX_REPORTS, check, repair
+from ai_core.call_check import MAX_REPORTS, _risky, check, repair
 
 E59 = """I'll look at the files agent.
 <tool_call>
@@ -386,3 +386,61 @@ async def test_a_call_that_lost_its_lt_runs_and_is_stored_whole(
         assert said[0].startswith('<call name="send">'), said
     finally:
         fake_providers.pop(aid, None)
+
+
+def test_risky_names_each_destructive_pattern():
+    """#255"""
+
+    def a(line):
+        return [("type", "start"), ("command", "sh"), ("args", ["-c", line])]
+
+    assert _risky(a("cd wt && git stash && cargo test && git stash pop")) == "git stash"
+    assert _risky(a("git -C /w/x stash")) == "git stash"
+    assert _risky(a("git reset --hard origin/main")) == "git reset --hard"
+    assert _risky(a("git reset --soft HEAD~1")) is None
+    assert _risky(a("git clean -fdx")) == "git clean -f"
+    assert _risky(a("git push --force origin b")) == "git push --force"
+    assert _risky(a("git push -u origin b")) is None
+    for rm in ("rm -rf target", "rm -fR target", "rm -r -f target"):
+        assert _risky(a(rm)) == "rm -rf"
+    assert _risky(a("rm -f x")) is None
+    assert _risky(a("cargo test -p fantastic-ai-core")) is None
+    assert _risky([("type", "write"), ("bytes", "git stash")]) is None
+    run = [("type", "run"), ("command", "sh"), ("args", ["-c", "git stash"])]
+    assert _risky(run) == "git stash"
+
+
+def _exec(line):
+    return (
+        '<tool_call><call name="send"><target_id>exec</target_id><type>start</type>'
+        f"<command>sh</command><args><item>-c</item><item>{line}</item></args>"
+        "</call></tool_call>"
+    )
+
+
+def test_a_wrapped_exec_call_that_stashes_is_not_rewritten_ready_to_run():
+    """#255"""
+    r = check(_exec("cd wt && git stash && cargo test && git stash pop"), ran=0)[0]
+    assert "careful: this command runs `git stash`" in r
+    form = r.split("write it as:\n", 1)[1]
+    assert "git stash" not in form
+    assert "<command>LEFT OUT — write the command yourself</command>" in form
+    assert "<target_id>exec</target_id>\n<type>start</type>" in form
+
+
+def test_a_bare_tag_exec_call_with_rm_rf_is_shown_without_its_command():
+    """#255"""
+    answer = (
+        "<send><target_id>exec</target_id><type>run</type><command>rm</command>"
+        "<args><item>-rf</item><item>/tmp/x</item></args></send>"
+    )
+    r = check(answer, ran=0)[0]
+    assert "careful: this command runs `rm -rf`," in r
+    assert "-rf" not in r.split("write it as:\n", 1)[1]
+
+
+def test_a_harmless_exec_call_is_still_rewritten_whole():
+    """#255"""
+    r = check(_exec("cargo test -p fantastic-ai-core"), ran=0)[0]
+    assert "careful:" not in r
+    assert "cargo test -p fantastic-ai-core" in r.split("write it as:\n", 1)[1]
