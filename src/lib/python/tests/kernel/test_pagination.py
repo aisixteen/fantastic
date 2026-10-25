@@ -186,3 +186,27 @@ async def test_reflect_pages_the_flat_id_index_but_never_the_nested_tree(kernel)
     )[0]["result"]
     assert isinstance(whole["tree"], dict), "the nested tree is not a list"
     assert "next" not in whole
+
+
+def test_an_empty_after_is_ignored():
+    """An empty-string cursor is no cursor: the whole list from the top."""
+    rows = _rows(2)
+    got, nxt = page(rows, {"after": ""}, **_BY_ID)
+    assert got == rows
+    assert nxt is None
+
+
+def test_int_ids_page_with_a_decimal_cursor():
+    """`ps`/`ledger` row identities are ints; a JSON-int `after` resumes past the
+    item whose identity stringifies to the same digits, and the cursor page() hands
+    back (a plain string) is interchangeable with the caller's int."""
+    items = [{"id": i} for i in (1, 2, 3, 4)]
+    got, nxt = page(items, {"after": 2}, **_BY_ID)
+    assert got == [{"id": 3}, {"id": 4}]
+    assert nxt is None
+
+    got, nxt = page(items, {"after": 2, "limit": 1}, **_BY_ID)
+    assert got == [{"id": 3}]
+    assert nxt == "3"
+    got, _ = page(items, {"after": nxt}, **_BY_ID)
+    assert got == [{"id": 4}]
