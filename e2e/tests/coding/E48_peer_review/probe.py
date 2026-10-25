@@ -14,6 +14,9 @@ got `unknown type 'inquiry'` — inquiry between agents had no shape at all.
 
 Scored on the verdict file, the reviewer's own tally of turns, and the ledger
 edge proving `ai -> ai_rev` actually happened.
+
+The coder and reviewer take FANTASTIC_AI_MODEL_CODER / FANTASTIC_AI_MODEL_REVIEWER,
+falling back to FANTASTIC_AI_MODEL.
 """
 
 from __future__ import annotations
@@ -36,9 +39,15 @@ from helpers.kernel import open_kernel, home
 BK = _resolve_backend()
 FB, RUNNER = "pr_fb", "pr_runner"
 INTERP = sys.executable
+CODER_ROLE, REVIEWER_ROLE = "coder", "reviewer"
 DONE = 'end your run by calling done — emit <call name="done"></call>'
 SPEC = "The service MUST use `timeout = 30`. Any other value is a defect.\n"
 CONFIG = "host = 127.0.0.1\ntimeout = 30\nworkers = 4\n"
+
+
+def lane_records(bk):
+    """The one place the lane asks for roles: coder first, then reviewer."""
+    return {"coder": bk.record(role=CODER_ROLE), "reviewer": bk.record(role=REVIEWER_ROLE)}
 
 
 async def _call(root, target, payload):
@@ -50,6 +59,9 @@ def _git(*args):
 
 
 async def main():
+    recs = lane_records(BK)
+    for role, model in BK.roles_used().items():
+        print(f"    role {role:<8} -> {model}")
     root, core, close = await open_kernel(
         prefix="coding_pr_", reach=[FB, RUNNER, "editor", "ai", "ai_rev", "cli", "user"]
     )
@@ -94,6 +106,7 @@ async def main():
         # these are siblings, so both halves are written here.
         # THE ANSWER IS THE REVIEWER'S OWN SEND (inquiries are fully async) — `ai_rev -> ai send`, both halves (the coder's below).
         rv = await connect(root, core, BK, agent_id="ai_rev",
+                           record=recs["reviewer"],
                            can_call={FB: "*", "editor": "*", RUNNER: "*", "cli": "*",
                                      "ai": ["send"]},
                            callable_by={"ai": "*"},
@@ -112,6 +125,7 @@ async def main():
             f"through the editor — do not judge it yourself. Then {DONE}."
         )
         c = await connect(root, core, BK, agent_id="ai",
+                          record=recs["coder"],
                           can_call={FB: "*", "editor": "*", "cli": "*", "ai_rev": "*"},
                           callable_by={"user": "*", "ai_rev": ["send"]},
                           limits=Limits.from_env(os.environ))
