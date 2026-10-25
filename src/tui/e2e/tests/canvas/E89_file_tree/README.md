@@ -35,4 +35,7 @@ conflict. Seeded: a `file tree` cell (`tree_e89`), a preview pinned to
     `.`, `src`, `docs`, `src/one.txt`, `docs/a.md` except the paths of the file
     and folder views still on the host (`file_bridge_*` records): a view keeps
     its own relay until it is deleted (#150), so its path is not a cell's leftover.
+12. each exempted file or folder view deleted (the host's `delete_agent`): the
+    bridge's holds name none of their paths within 10 s, so check 10's exemption
+    hides no leaked relay (the #157 test-design note, from #162).
 11. no page error is logged (WebGL noise aside).
