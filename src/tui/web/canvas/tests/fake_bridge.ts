@@ -34,6 +34,9 @@ export class FakeBridge implements FileBridge {
   grantWord: "after" | "before" | "never" = "after";
   /** when set, the host refuses the grant and announces that, rather than granting */
   grantRefusal: string | null = null;
+  /** when set, a new view's grant word is announced by `open_view` itself (per `grantWord`),
+   *  so it can beat the reply */
+  grantOnOpen = false;
   private stateListener: ((frame: Dict) => void) | null = null;
   /** what `open_view` refuses with, when set (a path the bridge does not expose, say) */
   openViewRefusal: Dict | null = null;
@@ -177,6 +180,11 @@ export class FakeBridge implements FileBridge {
         const id = `view:${kind}:${path}`;
         const created = !this.views.has(id);
         this.views.set(id, { kind, path });
+        if (created && this.grantOnOpen) {
+          const word = (): void => this.emitState(this.grantRefusal === null ? { kind: "granted", agent_id: id } : { kind: "grant_refused", agent_id: id, error: this.grantRefusal });
+          if (this.grantWord === "after") setTimeout(word, 0);
+          else if (this.grantWord === "before") word();
+        }
         return { id, kind, path, created };
       }
     }

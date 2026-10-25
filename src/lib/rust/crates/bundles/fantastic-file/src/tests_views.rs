@@ -814,6 +814,88 @@ async fn open_view_publishes_an_updated_event_for_the_bridge_callable_by() {
     );
 }
 
+#[tokio::test]
+async fn open_view_leaves_a_stamped_entry_untouched() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::write(served(&tmp).join("a.md"), "x").unwrap();
+    let dv = open(&k, "file", "a.md").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let before = entry_of(&k, &dv);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let sink = Arc::clone(&seen);
+    k.add_state_subscriber(Arc::new(
+        move |v: &Value, _b: Option<&fantastic_kernel::Blob>| {
+            sink.lock().unwrap().push(v.clone());
+        },
+    ));
+    assert_eq!(open(&k, "file", "a.md").await["created"], false);
+    assert_eq!(
+        open_with(&k, "file", "a.md", json!(dv)).await["created"],
+        false
+    );
+    assert_eq!(entry_of(&k, &dv), before);
+    let seen = seen.lock().unwrap();
+    assert!(
+        !seen
+            .iter()
+            .any(|v| v["kind"] == "updated" && v["agent_id"] == "fb"),
+        "a healthy view's reopen published an update: {seen:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn open_view_restamp_keeps_keys_a_concurrent_edit_adds() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    let mut ids = Vec::new();
+    for round in 0..20 {
+        std::fs::write(served(&tmp).join(format!("n{round}.md")), "x").unwrap();
+        let id = open(&k, "file", &format!("n{round}.md")).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        set_callable_by(&k, "fb", &id, json!(OLD_FILE_ENTRY));
+        ids.push(id);
+    }
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let (k2, b2) = (Arc::clone(&k), Arc::clone(&barrier));
+    let writer = std::thread::spawn(move || {
+        b2.wait();
+        for n in 0..50 {
+            k2.edit_callable_by(&AgentId::from("fb"), |cb| {
+                cb.insert(format!("viewer{n}"), json!(["*"]));
+                true
+            })
+            .unwrap();
+            std::thread::yield_now();
+        }
+    });
+    barrier.wait();
+    for round in 0..20 {
+        let r = open(&k, "file", &format!("n{round}.md")).await;
+        assert_eq!(r["created"], false, "{r}");
+    }
+    writer.join().unwrap();
+    let cb = k.agents.get(&AgentId::from("fb")).unwrap().record().meta["callable_by"].clone();
+    for (round, id) in ids.iter().enumerate() {
+        let token = format!("file:n{round}.md");
+        assert!(
+            cb[id].as_array().unwrap().contains(&json!(token)),
+            "the view {id} was not re-stamped: {cb}"
+        );
+    }
+    for n in 0..50 {
+        assert_eq!(
+            cb.get(format!("viewer{n}")),
+            Some(&json!(["*"])),
+            "viewer{n}: {cb}"
+        );
+    }
+}
+
 /// The events of `type: changed` a watcher's inbox holds within `secs`, as (path, kind).
 async fn changed_for(
     rx: &mut fantastic_kernel::inbox::InboxReceiver,
@@ -856,4 +938,101 @@ async fn a_view_gets_one_relayed_event_per_edit_with_stamp_kinds() {
     assert_eq!(changed_for(&mut rx, 2).await, live("deleted"));
     std::fs::write(&f, "back\n").unwrap();
     assert_eq!(changed_for(&mut rx, 2).await, live("added"));
+}
+
+const OLD_FILE_ENTRY: [&str; 4] = ["read", "write", "watch_path", "unwatch_path"];
+
+fn entry_of(k: &Arc<Kernel>, caller: &str) -> Value {
+    k.agents.get(&AgentId::from("fb")).unwrap().record().meta["callable_by"][caller].clone()
+}
+
+fn refused_read(k: &Arc<Kernel>, dv: &str, path: &str) -> bool {
+    view_scope(
+        k,
+        &AgentId::from("fb"),
+        Some(&AgentId::from(dv)),
+        "read",
+        &json!({"type": "read", "path": path}),
+    )
+    .is_some()
+}
+
+async fn file_view_made_before_the_token(tmp: &tempfile::TempDir) -> (Arc<Kernel>, String) {
+    let k = kernel(tmp).await;
+    std::fs::write(served(tmp).join("a.txt"), "x\n").unwrap();
+    let dv = open(&k, "file", "a.txt").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    set_callable_by(&k, "fb", &dv, json!(OLD_FILE_ENTRY));
+    (k, dv)
+}
+
+#[tokio::test]
+async fn open_view_restamps_a_view_made_before_the_scope_token() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (k, dv) = file_view_made_before_the_token(&tmp).await;
+    assert!(refused_read(&k, &dv, "a.txt"));
+    let again = open(&k, "file", "a.txt").await;
+    assert_eq!(
+        again,
+        json!({"id": dv, "kind": "file", "path": "a.txt", "created": false})
+    );
+    assert_eq!(
+        entry_of(&k, &dv),
+        json!(["file:a.txt", "read", "unwatch_path", "watch_path", "write"])
+    );
+    assert!(!refused_read(&k, &dv, "a.txt"));
+}
+
+#[tokio::test]
+async fn open_view_restamp_covers_the_chosen_id_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (k, dv) = file_view_made_before_the_token(&tmp).await;
+    let again = open_with(&k, "file", "a.txt", json!(dv)).await;
+    assert_eq!(again["created"], false, "{again}");
+    assert_eq!(again["id"], json!(dv));
+    assert_eq!(
+        entry_of(&k, &dv),
+        json!(["file:a.txt", "read", "unwatch_path", "watch_path", "write"])
+    );
+    assert!(!refused_read(&k, &dv, "a.txt"));
+}
+
+#[tokio::test]
+async fn open_view_leaves_a_narrowed_entry_alone() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(&tmp).await;
+    std::fs::create_dir_all(served(&tmp).join("dir/sub")).unwrap();
+    let dv = open(&k, "folder", "dir").await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let narrowed = json!(["folder:dir/sub", "list", "watch_path", "unwatch_path"]);
+    set_callable_by(&k, "fb", &dv, narrowed.clone());
+    assert_eq!(open(&k, "folder", "dir").await["created"], false);
+    assert_eq!(entry_of(&k, &dv), narrowed);
+    assert_eq!(
+        open_with(&k, "folder", "dir", json!(dv)).await["created"],
+        false
+    );
+    assert_eq!(entry_of(&k, &dv), narrowed);
+}
+
+#[tokio::test]
+async fn open_view_leaves_a_two_token_entry_alone() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (k, dv) = file_view_made_before_the_token(&tmp).await;
+    let two = json!([
+        "file:a.txt",
+        "file:b.txt",
+        "read",
+        "write",
+        "watch_path",
+        "unwatch_path"
+    ]);
+    set_callable_by(&k, "fb", &dv, two.clone());
+    assert_eq!(open(&k, "file", "a.txt").await["created"], false);
+    assert_eq!(entry_of(&k, &dv), two);
+    assert!(refused_read(&k, &dv, "a.txt"));
 }
