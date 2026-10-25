@@ -20,6 +20,17 @@ def test_create_assigns_id_with_bundle_prefix(kernel):
     assert rec["handler_module"] == "file_bridge.tools"
 
 
+def test_a_minted_agent_id_is_bundle_and_token_hex_3(kernel):
+    """`f"{bundle}_{secrets.token_hex(3)}"`: the bundle's name, `_`, then 6 lowercase
+    hex characters, random."""
+    import re
+
+    ids = [kernel.create("pkg.web.tools")["id"] for _ in range(256)]
+    for id in ids:
+        assert re.fullmatch(r"web_[0-9a-f]{6}", id), id
+    assert len(set(ids)) > 250, f"token_hex(3) repeats too often: {len(set(ids))}"
+
+
 def test_create_persists_to_disk(kernel, tmp_path):
     rec = kernel.create("file_bridge.tools", allow=["."], model="gemma4")
     # Agent itself never writes; the loader does. persist() is a
@@ -207,3 +218,30 @@ async def test_inbox_bounded_drops_oldest(kernel):
     while not q.empty():
         last = q.get_nowait()
     assert last["n"] == INBOX_BOUND + 49
+
+
+# ─── Rust twins (#170): each `test_<rust test name>` asserts what the Rust test does ─
+
+
+async def test_ensure_inbox_is_idempotent_and_shares_one_queue(kernel):
+    """A reader may call it defensively before every read; a second call hands back
+    the SAME queue, not a fresh one that silently swallows the first reader's mail."""
+    kernel.create("file_bridge.tools", id="twice", allow=["."])
+    ctx = kernel.ctx
+    before = len(ctx.inboxes)
+    first = ctx.ensure_inbox("twice")
+    second = ctx.ensure_inbox("twice")
+    assert first is second
+    assert len(ctx.inboxes) == before + 1, "a second call minted a second inbox"
+    ctx.inboxes["twice"].put_nowait({"type": "ping"})
+    assert second.get_nowait()["type"] == "ping"
+
+
+async def test_unregister_drops_both_indexes(kernel):
+    kernel.create("file_bridge.tools", id="zap", allow=["."])
+    ctx = kernel.ctx
+    ctx.ensure_inbox("zap")
+    assert "zap" in ctx.agents and "zap" in ctx.inboxes
+    ctx.unregister("zap")
+    assert "zap" not in ctx.agents
+    assert "zap" not in ctx.inboxes
