@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use fantastic_system::{audio, power};
+use fantastic_system::{audio, network, power};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -80,4 +80,33 @@ pub async fn audio() -> Arc<dyn AudioOs> {
     {
         Arc::new(other::Unsupported)
     }
+}
+
+/// The network agent's port: NetworkManager, flattened.
+#[async_trait::async_trait]
+pub trait NetworkOs: Send + Sync {
+    async fn read(&self) -> Result<network::Read, OsError>;
+    async fn call(&self, c: network::Call) -> Result<(), OsError>;
+    /// OS-side changes, as VM events, until the port is dropped.
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<network::Event>;
+}
+
+/// The real network port of this OS.
+pub async fn network() -> Arc<dyn NetworkOs> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::network().await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Arc::new(other::Unsupported)
+    }
+}
+
+/// The name of the user running this process: whom a new connection belongs to.
+pub fn user_name() -> String {
+    ["USER", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "fantastic".to_string())
 }

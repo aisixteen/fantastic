@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod driver;
+pub mod network;
 pub mod power;
 pub mod sys;
 

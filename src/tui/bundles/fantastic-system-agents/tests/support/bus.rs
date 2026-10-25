@@ -21,6 +21,7 @@ fn name_of(template: &str) -> &'static str {
     match template {
         "upower" => "org.freedesktop.UPower",
         "logind" => "org.freedesktop.login1",
+        "networkmanager" => "org.freedesktop.NetworkManager",
         other => panic!("support/bus.rs does not know the template `{other}`"),
     }
 }

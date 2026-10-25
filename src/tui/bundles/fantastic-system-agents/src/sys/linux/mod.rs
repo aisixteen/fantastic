@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
-use super::{AudioOs, OsError, PowerOs};
+use super::{AudioOs, NetworkOs, OsError, PowerOs};
 
 pub mod audio;
+pub mod network;
 pub mod power;
 
 pub use audio::LinuxAudio;
+pub use network::LinuxNetwork;
 pub use power::LinuxPower;
 
 /// The system bus, connected once per process.
@@ -35,6 +37,14 @@ pub async fn power() -> Arc<dyn PowerOs> {
     }
 }
 
+/// The network port on the system bus, like [`power`].
+pub async fn network() -> Arc<dyn NetworkOs> {
+    match system().await {
+        Ok(c) => Arc::new(LinuxNetwork::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
 /// The audio port: `pw-dump` and `wpctl` from `$PATH`. A missing tool is a port
 /// that says so on its first read.
 pub fn audio() -> Arc<dyn AudioOs> {
@@ -53,6 +63,19 @@ impl PowerOs for Absent {
         Err(self.0.clone())
     }
     fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::power::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkOs for Absent {
+    async fn read(&self) -> Result<fantastic_system::network::Read, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::network::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::network::Event> {
         tokio::sync::mpsc::channel(1).1
     }
 }

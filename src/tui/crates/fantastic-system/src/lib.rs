@@ -5,4 +5,5 @@
 //! driver runs through its port. Nothing here touches the OS.
 
 pub mod audio;
+pub mod network;
 pub mod power;
