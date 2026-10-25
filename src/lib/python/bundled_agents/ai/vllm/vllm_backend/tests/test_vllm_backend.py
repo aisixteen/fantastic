@@ -100,6 +100,114 @@ async def test_the_thought_channel_is_wrapped_once_not_dropped():
     assert (p.last_stop_reason, p.last_prompt_tokens) == ("stop", 42)
 
 
+class _Pieces(httpx.AsyncByteStream):
+    """A body delivered as the given separate writes, like uneven TCP segments."""
+
+    def __init__(self, pieces: list[bytes]):
+        self._pieces = pieces
+
+    async def __aiter__(self):
+        for piece in self._pieces:
+            yield piece
+
+
+def _chunked_transport(pieces: list[bytes]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_Pieces(pieces))
+
+    return httpx.MockTransport(handler)
+
+
+async def test_a_finish_chunk_with_timings_and_usage_ends_the_turn():
+    final = {
+        "choices": [{"delta": {}, "finish_reason": "stop"}],
+        "timings": {"predicted_n": 1},
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+    }
+    p = _provider(_transport(_sse(_delta(content="ok"), final)))
+    assert await _drain(p) == "ok"
+    assert p.last_stop_reason == "stop"
+    assert p.last_prompt_tokens == 5
+
+
+async def test_a_usage_chunk_with_empty_choices_after_finish_is_accepted():
+    usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}}
+    p = _provider(_transport(_sse(_delta(content="ok"), _delta(finish="stop"), usage)))
+    assert await _drain(p) == "ok"
+    assert p.last_stop_reason == "stop"
+
+
+async def test_a_12000_chunk_reasoning_run_is_one_wrapped_thought():
+    chunks = [_delta(reasoning_content="t")] * 12000
+    chunks += [_delta(content="done"), _delta(finish="stop")]
+    p = _provider(_transport(_sse(*chunks)))
+    assert await _drain(p) == f"{THINK_OPEN}{'t' * 12000}{THINK_CLOSE}done"
+    assert p.last_stop_reason == "stop"
+
+
+async def test_the_issue_208_stream_in_uneven_writes_ends_normally():
+    final = {
+        "choices": [{"delta": {}, "finish_reason": "stop"}],
+        "timings": {"predicted_n": 8893},
+        "usage": {"prompt_tokens": 120, "completion_tokens": 8893},
+    }
+    chunks = [_delta(reasoning_content="t")] * 8892 + [_delta(content="answer"), final]
+    data = _sse(*chunks).encode()
+    pieces, i, step = [], 0, 1
+    while i < len(data):
+        end = min(i + step, len(data))
+        pieces.append(data[i:end])
+        i = end
+        step = step * 7 % 997 + 1
+    p = _provider(_chunked_transport(pieces))
+    out = await _drain(p)
+    assert out.startswith(THINK_OPEN)
+    assert out.endswith("answer")
+    assert p.last_stop_reason == "stop"
+
+
+async def test_sse_events_split_across_writes_and_several_in_one_write_decode():
+    b = _sse(
+        _delta(content="ab"), _delta(content="cd"), _delta(finish="stop")
+    ).encode()
+    split = _provider(_chunked_transport([b[:15], b[15:]]))
+    assert await _drain(split) == "abcd"
+    whole = _provider(_chunked_transport([b]))
+    assert await _drain(whole) == "abcd"
+
+
+async def test_sse_comment_keepalive_lines_are_ignored():
+    chunks = (_delta(content="o"), _delta(content="k"), _delta(finish="stop"))
+    c = [json.dumps(x) for x in chunks]
+    body = (
+        f"data: {c[0]}\n\n: ping\n\ndata: {c[1]}\n\n: ping\n\n"
+        f"data: {c[2]}\n\ndata: [DONE]\n\n"
+    )
+    p = _provider(_transport(body))
+    assert await _drain(p) == "ok"
+
+
+async def test_a_clean_close_without_a_trailing_blank_line_is_decoded():
+    c1 = json.dumps(_delta(content="o"))
+    c2 = json.dumps(_delta(content="k", finish="stop"))
+    body = f"data: {c1}\n\ndata: {c2}\n\ndata: [DONE]"
+    p = _provider(_chunked_transport([body.encode()]))
+    assert await _drain(p) == "ok"
+    assert p.last_stop_reason == "stop"
+    # a last data line with no newline and no [DONE]
+    last = f"data: {json.dumps(_delta(finish='stop', content='answer'))}"
+    p = _provider(_chunked_transport([last.encode()]))
+    assert await _drain(p) == "answer"
+
+
+async def test_crlf_line_endings_decode_like_lf():
+    lf = _sse(_delta(content="ok"), _delta(finish="stop"))
+    out_lf = await _drain(_provider(_transport(lf)))
+    out_crlf = await _drain(_provider(_transport(lf.replace("\n", "\r\n"))))
+    assert out_crlf == "ok"
+    assert out_crlf == out_lf
+
+
 async def test_a_cut_main_turn_fails_naming_the_cut():
     # the record's bound hit on a MAIN turn: it did not finish — never an answer
     p = _provider(_transport(_sse(_delta(content="half"), _delta(finish="length"))))
@@ -575,6 +683,21 @@ def test_a_consistent_write_passes():
         "memory_store_id": "memory",
     }
     assert validate_meta(meta, {}) is None
+
+
+def test_caching_none_and_cleanup_pass_and_provider_cache_is_refused_naming_vllm_backend():
+    rec = {"endpoint": ENDPOINT, "kv_overflow": "evict", "memory_store_id": "memory"}
+    for mode in ("none", "cleanup"):
+        assert validate_meta({"caching": mode}, rec) is None
+    refusal = validate_meta({"caching": "provider_cache"}, rec)
+    assert refusal is not None
+    assert refusal == (
+        "vllm_backend cannot do provider caching: "
+        "caching=provider_cache is refused — use none or cleanup"
+    )
+    assert validate_meta({}, {**rec, "caching": "provider_cache"}) is not None
+    legal = validate_meta({"caching": "always"}, rec)
+    assert legal is not None and "not one of the legal values" in legal
 
 
 async def test_the_final_usage_chunk_adds_one_request_and_its_tokens():
