@@ -52,7 +52,7 @@ plug.
 | group | what lives there |
 |---|---|
 | `agentic/` | a model doing real work in the substrate — building a program, planning posture, learning a deep agent's verbs from `docs` |
-| `agentic_advanced/` | the hard end: structures that OUTLIVE the conversation — durable sub-agents, wired graphs, A/B on whether naming the graph changes its shape |
+| `agentic_advanced/` | the hard end: structures that OUTLIVE the conversation — durable sub-agents, wired graphs, A/B on whether naming the graph changes its shape, a master that runs its own worker groups within a bound (`self_managed_groups`, E124) |
 | `coding/` | the coder organs, model-driven — file edits, search, git, tests, cancel, job mail, peer review, gated writes — and the context protocol over long runs (folds, recall, restarts, `context_clear`), plus exec_bridge monitors |
 | `memory/` | what survives compaction and restarts in the memory store — plans and their reasons, rules, poisoned folds, repeat reads, the budget trigger; the free ones (graceful stop, clean start, rehydrate, growth) need no model |
 | `scenario/` | shared scenarios as DATA (`scenario.yaml`), one runner per runtime over `web_rest` — dialog, compose, and the kernel contracts measured *through* a model (ledger, dead letters, user actions); plus scripted runs of the CLI's MCP leg, shell, set-up and canvas |
@@ -178,6 +178,35 @@ E2E_ARTIFACTS=/tmp/e2e-art E2E_PROFILE=release uv run python ../../../e2e/run.py
 same rule the kernel holds itself to, for the same reason: a guessed default is
 how a run ends up measuring something other than what you meant, and here that
 mistake also costs real turns to discover.
+
+## A model per role
+
+`FANTASTIC_AI_MODEL` is the default model for every AI a probe creates. A probe that
+names its roles (`BK.record(role="master")`) lets one run give each role its own
+model: `FANTASTIC_AI_MODEL_<ROLE>` (the role upper-cased, any non-alphanumeric
+character becoming `_`, so `review-lane` reads `FANTASTIC_AI_MODEL_REVIEW_LANE`)
+overrides the default for that role only. Roles are plain strings and none is
+hard-coded; a role with no override, an empty override, or a role nobody has heard
+of gets the default, and an unset `FANTASTIC_AI_MODEL` is still refused. Every other
+record field (endpoint, key reference, caching, output cap) is the same for every
+role. A probe prints the resulting role -> model pairs in its log header
+(`BK.model_for(role)`, `BK.roles_used()`), so a result says which model played which
+part. For `self_managed_groups` (E124, roles `master` and `worker`):
+
+```sh
+# one model for every role
+BACKEND=anthropic FANTASTIC_AI_MODEL=<model> ...
+
+# one role overridden: the master on its own model, workers on the default
+BACKEND=anthropic FANTASTIC_AI_MODEL=<haiku> FANTASTIC_AI_MODEL_MASTER=<sonnet> ...
+
+# both named: a Sonnet master with Haiku workers
+BACKEND=anthropic FANTASTIC_AI_MODEL=<haiku> \
+  FANTASTIC_AI_MODEL_MASTER=<sonnet> FANTASTIC_AI_MODEL_WORKER=<haiku> ...
+```
+
+The model names are the operator's to give; none is guessed. The rule is unit-tested
+without a model in `src/lib/python/tests/e2e_harness/test_model_roles.py`.
 
 ## Reading a result
 
