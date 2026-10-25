@@ -70,7 +70,7 @@ def _to_responses(messages: list[dict]) -> tuple[str | None, list[dict]]:
         role = m.get("role")
         content = m.get("content", "") or ""
         if role == "system":
-            instructions = content
+            instructions = content or None
         elif role in ("user", "assistant"):
             part = "input_text" if role == "user" else "output_text"
             items.append(

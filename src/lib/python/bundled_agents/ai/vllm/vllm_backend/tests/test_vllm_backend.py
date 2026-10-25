@@ -1021,3 +1021,101 @@ def test_stream_idle_seconds_is_validated_at_the_write():
         msg = validate_meta({"stream_idle_seconds": bad}, {})
         assert msg == "stream_idle_seconds must be a positive number of seconds"
     assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]
+
+
+# ─── twins of the rust vllm_backend tests (#170) ────────────────────────────
+
+
+async def test_unknown_type_wire_shape_is_byte_exact(seeded_kernel):
+    k = seeded_kernel
+    r = await _create(
+        k,
+        id="v1",
+        endpoint=ENDPOINT,
+        model="m",
+        max_tokens=8000,
+        context_window=262144,
+        kv_slots=2,
+        kv_overflow="evict",
+        memory_store_id="memory",
+    )
+    assert r.get("id") == "v1", r
+    got = (await k.send([{"target": "v1", "payload": {"type": "frob"}}]))[0]["result"]
+    assert list(got) == ["error", "reason", "verb"]
+    assert json.dumps(got, separators=(",", ":")) == (
+        '{"error":"vllm_backend: unknown type \'frob\'","reason":"unhandled",'
+        '"verb":"frob"}'
+    )
+
+
+async def test_the_last_budget_is_per_agent_and_freed_on_delete(
+    seeded_kernel, store_agent, monkeypatch
+):
+    import asyncio
+
+    from _testkit import ensure_memory
+
+    k = seeded_kernel
+    store = ensure_memory(k)
+    transport = _transport(
+        _sse(_delta("stop", content="ok"))  # a call-less answer
+    )
+    real_init = VllmProvider.__init__
+
+    def init(self, *a, **kw):
+        kw.setdefault("transport", transport)
+        real_init(self, *a, **kw)
+
+    monkeypatch.setattr(VllmProvider, "__init__", init)
+    meta = dict(
+        endpoint=ENDPOINT,
+        model="m",
+        max_tokens=8000,
+        context_window=262144,
+        kv_slots=4,
+        kv_overflow="evict",
+        memory_store_id=store,
+        can_call={"cli": "*", store: "*"},
+    )
+
+    def call(who, payload):
+        return k.send([{"target": who, "payload": payload}])
+
+    async def last(who):
+        return (await call(who, {"type": "reflect"}))[0]["result"][
+            "last_thinking_budget"
+        ]
+
+    async def make(aid):
+        assert (await _create(k, id=aid, **meta)).get("id") == aid
+        # two-sided deny-all: open each callee's reciprocal `callable_by`
+        for target in meta["can_call"]:
+            cb = dict(k.ctx.agents[target]._meta.get("callable_by") or {})
+            cb[aid] = "*"
+            await call(
+                "kernel_state",
+                {"type": "update_agent", "id": target, "callable_by": cb},
+            )
+
+    await make("v1")
+    await make("v1_sib")
+    out = (await call("v1", {"type": "send", "text": "hi"}))[0]["result"]
+    assert out.get("final") == "ok", out
+    # the call-less answer is rerolled in the background; let it settle so a late
+    # reroll cannot record a budget for the re-created id
+    quiet = 0
+    for _ in range(500):
+        st = (await call("v1", {"type": "status"}))[0]["result"]
+        idle = st["generating"] is False and st["current"] is None
+        quiet = quiet + 1 if idle else 0
+        if quiet >= 5:
+            break
+        await asyncio.sleep(0.02)
+    assert quiet >= 5, "the chain never settled"
+    mine = await last("v1")
+    assert isinstance(mine, int) and not isinstance(mine, bool), mine
+    assert await last("v1_sib") is None  # a sibling shares nothing
+    gone = (await call(k.id, {"type": "delete_agent", "id": "v1"}))[0]["result"]
+    assert "error" not in gone, gone
+    await make("v1")
+    assert await last("v1") is None  # freed on delete
