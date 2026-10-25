@@ -238,3 +238,55 @@ async def test_a_name_match_reads_the_rows_carrying_it(kernel, store):
     assert await ids(match={"name": 7}) == [6]
     await _call(kernel, "mem", {"type": "prune", "before_id": 3}, as_="alice")
     assert await ids(match={"name": "job"}) == [4]
+
+
+async def test_two_stores_hold_separate_tables_and_delete_frees_one(
+    kernel, store, request
+):
+    """Per-agent state: a second store of the same kind starts empty, and its own
+    delete does not touch the first's rows."""
+    handler = request.node.callspec.params["store"]
+    kwargs = {"path": "stores/mem2.db"} if STORES[handler] else {}
+    rec = kernel.create(handler, id="mem2", callable_by={"alice": "*"}, **kwargs)
+    assert rec.get("id") == "mem2", rec
+    kernel.ctx.update("alice", can_call={"mem": "*", "mem2": "*"})
+    await _append(kernel, "alice", [{"id": 1, "content": "in mem"}])
+    out = await _call(kernel, "mem2", {"type": "read"}, as_="alice")
+    assert out["rows"] == [], f"mem2 shares nothing with mem: {out}"
+    gone = (
+        await kernel.send(
+            [
+                {
+                    "target": kernel.id,
+                    "payload": {"type": "delete_agent", "id": "mem2"},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert "error" not in gone, gone
+    out = await _call(kernel, "mem", {"type": "read"}, as_="alice")
+    assert [r["id"] for r in out["rows"]] == [1], out
+
+
+async def test_a_row_holding_a_non_json_number_reads_back_and_the_store_survives(
+    kernel, store, request
+):
+    """`3e500123` parses to a float that is no JSON number (`inf`): a row holding it
+    appends and reads back, and the store keeps answering every owner."""
+    from kernel.modes.parse import coerce_scalar
+
+    inf = coerce_scalar("3e500123")
+    assert inf == float("inf"), "the token under test"
+    out = await _append(kernel, "alice", [{"id": 7, "job_id": inf}])
+    read = await _call(kernel, "mem", {"type": "read"}, as_="alice")
+    if STORES[request.node.callspec.params["store"]]:
+        # the durable store holds JSON only (its readme): it refuses the row whole
+        # and stays up, rather than rewriting the number
+        assert out["reason"] == "bad_arg", out
+        assert read["rows"] == [], read
+    else:
+        assert out["appended"] == 1, out
+        assert read["rows"][0]["job_id"] == float("inf"), read
+    # the store is not broken: another owner's call still answers
+    other = await _append(kernel, "bob", [{"id": 1, "content": "after"}])
+    assert other["appended"] == 1, other
