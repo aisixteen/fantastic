@@ -155,10 +155,12 @@ async def test_a_first_turn_with_no_call_is_nudged_too(seeded_kernel, fake_provi
 # exactly like the other test-only fixtures.
 
 
-async def test_await_with_nothing_in_flight_is_refused_and_told_what_to_do(
+async def test_await_with_nothing_in_flight_ends_the_chain_with_a_visible_note(
     seeded_kernel,
     fake_providers,
 ):
+    """Twin of the Rust test of the same name (#177): no second pass runs, and the
+    stored `note` row says nothing was awaited."""
     fp = _Script(['waiting <call name="await"></call>', DONE])
     aid = "nd_aw"
     seeded_kernel.create(
@@ -173,9 +175,12 @@ async def test_await_with_nothing_in_flight_is_refused_and_told_what_to_do(
             [{"target": aid, "payload": {"type": "send", "text": "hi"}}]
         )
         await asyncio.sleep(0.6)
-        assert fp.calls == 2, fp.incoming
-        assert "[await refused]" in fp.incoming[-1]
-        assert "nothing of yours is in flight" in fp.incoming[-1]
+        assert fp.calls == 1, "the empty await ended the chain"
+        rows = await core._load_history(aid, seeded_kernel)
+        notes = [r for r in rows if r.get("kind") == "note"]
+        assert len(notes) == 1, rows
+        assert "[await: nothing to wait for]" in notes[0]["content"]
+        assert "nothing was awaited" in notes[0]["content"]
     finally:
         fake_providers.pop(aid, None)
 
@@ -210,7 +215,7 @@ async def test_await_with_a_message_queued_stops_quietly_and_the_queue_wakes_it(
         await asyncio.gather(first, second)
         await asyncio.sleep(0.4)
         assert fp.calls == 2, fp.incoming
-        assert not any("[await refused]" in m for m in fp.incoming)
+        assert not any("[await: nothing to wait for]" in m for m in fp.incoming)
         assert not any("[no call was dispatched]" in m for m in fp.incoming)
         # ONE CHAIN PER AGENT (#227): "two" landed mid-chain, so it was held; the
         # await ended the chain and its ONE wake turn read it.

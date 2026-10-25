@@ -42,6 +42,9 @@ async def _handler(id, payload, kernel):
         return {"finished": True}
     if verb == "work":
         return {"ok": True}
+    if verb == "hold":
+        await asyncio.sleep(payload.get("hold_ms", 0) / 1000)
+        return {"held": True}
     if verb == "count":
         _counts[id] = _counts.get(id, 0) + 1
         return {"n": _counts[id]}
@@ -174,6 +177,97 @@ async def test_shutdown_agents_tells_advertisers_waits_then_cancels_the_rest(
     assert r["result"]["reason"] == "draining"
     keep.cancel()
     k.draining = False
+
+
+async def test_the_shutdown_agents_verb_tells_a_grandchild(seeded_kernel):
+    """Telling is kernel bookkeeping (the handler run directly, ungated), so every
+    advertising agent is told at ANY depth. Through the kernel verb the dispatch
+    runs AS THE ROOT, whose grant reaches no one: gated, a grandchild would be
+    refused and never told."""
+    _shut_calls.clear()
+    p = await _mk(seeded_kernel, "sd_parent")
+    r = (
+        await _call(
+            seeded_kernel,
+            "kernel",
+            {
+                "type": "create_agent",
+                "parent_id": p,
+                "handler_module": "mem_probe.tools",
+                "id": "sd_grandchild",
+            },
+        )
+    )["result"]
+    assert r["id"] == "sd_grandchild", r
+    k = seeded_kernel.ctx
+    try:
+        out = (await _call(seeded_kernel, "kernel", {"type": "shutdown_agents"}))[
+            "result"
+        ]
+        assert "sd_grandchild" in out["shut"], f"the grandchild was not told: {out}"
+        assert "sd_grandchild" in _shut_calls
+    finally:
+        k.draining = False
+
+
+async def test_a_second_shutdown_agents_answers_the_same_and_shuts_nothing_new(
+    seeded_kernel,
+):
+    """IDEMPOTENT. An operator watching a stop will call it twice; the second call
+    must not be a second teardown."""
+    k = seeded_kernel.ctx
+    try:
+        first = await k.shutdown_agents()
+        second = await k.shutdown_agents()
+        assert first["drained"] == second["drained"] is True
+        assert second["cancelled"] == [], (
+            f"nothing new to cancel the second time: {second}"
+        )
+    finally:
+        k.draining = False
+
+
+async def test_shutdown_agents_is_the_roots_control_surface_only(seeded_kernel):
+    """A CHILD MAY NOT STOP THE TREE. The verb is addressed to the kernel root;
+    anything else answers a coded `not_here` rather than quietly draining the whole
+    process on one agent's say-so."""
+    child = await _mk(seeded_kernel, "sd_child")
+    k = seeded_kernel.ctx
+    try:
+        out = (await _call(seeded_kernel, child, {"type": "shutdown_agents"}))["result"]
+        assert out.get("reason") == "not_here", f"a child must be refused: {out}"
+        assert k.draining is False, "a refused call drains nothing"
+    finally:
+        k.draining = False
+
+
+async def test_the_quiet_phase_still_waits_for_a_real_in_flight_dispatch(
+    seeded_kernel,
+):
+    """Ignoring forks must not turn the graceful stop into a kill: a dispatch
+    actually running is waited for (default `QUIET_TIMEOUT`), and settles rather
+    than appearing in `cancelled`."""
+    import time
+
+    a = await _mk(seeded_kernel, "sd_hold")
+    k = seeded_kernel.ctx
+    assert k.QUIET_TIMEOUT == 10.0
+    running = asyncio.create_task(
+        seeded_kernel.send([{"target": a, "payload": {"type": "hold", "hold_ms": 400}}])
+    )
+    try:
+        while not any(e["verb"] == "hold" for e in k.tasks.values()):
+            await asyncio.sleep(0.005)
+        t0 = time.monotonic()
+        out = await k.shutdown_agents()
+        took = time.monotonic() - t0
+        assert took >= 0.3, f"the quiet phase waits for in-flight work, took {took}"
+        assert took < 9, f"and stops waiting once the work settles: {took}"
+        assert out["cancelled"] == [], f"a settled dispatch is not cancelled: {out}"
+        done = (await asyncio.wait_for(running, 2))[0]
+        assert done["status"] == "completed", done
+    finally:
+        k.draining = False
 
 
 # ── kernel_start: no store, no start ───────────────────────────────────

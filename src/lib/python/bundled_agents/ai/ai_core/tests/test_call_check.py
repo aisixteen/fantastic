@@ -444,3 +444,33 @@ def test_a_harmless_exec_call_is_still_rewritten_whole():
     r = check(_exec("cargo test -p fantastic-ai-core"), ran=0)[0]
     assert "careful:" not in r
     assert "cargo test -p fantastic-ai-core" in r.split("write it as:\n", 1)[1]
+
+
+def test_a_malformed_call_inside_a_wrapper_names_its_fault():
+    answer = '<tool_call><call name="send"><type>reflect</type></call></tool_call>'
+    (r,) = check(answer, ran=0)
+    assert "also: the call inside does not parse — a send names its target" in r, r
+    assert "write it as:" not in r, r
+
+
+def test_a_backtick_inside_a_call_argument_does_not_hide_a_wrapper_after_it():
+    """#188 review: a backtick in a call's argument must not open a code span that
+    runs past the call and hides the wrapper after it."""
+    from ai_core.tool_parse import extract_tool_calls
+
+    send = '<call name="send"><target_id>files</target_id><type>reflect</type></call>'
+    answer = (
+        '<call name="send"><target_id>a</target_id><type>run</type>'
+        "<cmd>echo `x</cmd></call>\n"
+        f"<tool_call>`y` {send}</tool_call>"
+    )
+    assert len(extract_tool_calls(answer)) == 1
+    r = check(answer, ran=1)
+    assert len(r) == 1, r
+    assert r[0].startswith(
+        "[malformed call — nothing ran] line 2, col 1:\n  <tool_call>"
+    ), r[0]
+    assert r[0].endswith(
+        "The other call of this answer ran — its reply is in this batch; do not "
+        "write it again."
+    ), r[0]

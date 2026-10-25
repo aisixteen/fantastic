@@ -903,3 +903,60 @@ async def test_mixed_fence_lengths_in_one_edit(seeded_kernel, tmp_path, monkeypa
     assert (tmp_path / "sd" / "m.py").read_text(encoding="utf-8") == "A = 1\nB = 2\n"
     grammar = (await _call(seeded_kernel, ed, {"type": "reflect"}))["edit_grammar"]
     assert "8-character fence" in grammar
+
+
+# ─── Rust twins (src/lib/rust/crates/bundles/fantastic-file/src/tests_text.rs) ─
+
+
+async def test_version_mismatch_key_order_is_pythons(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "v.txt", "one\n")
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {"type": "write", "path": "v.txt", "bytes": b"x", "if_match": 12345},
+    )
+    assert list(r) == ["error", "reason", "path", "expected", "actual"], list(r)
+    assert r["reason"] == "version_mismatch"
+    assert r["expected"] == 12345 and isinstance(r["expected"], int), r
+
+
+async def test_deleting_the_bridge_drops_its_slots(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    """A deleted bridge takes its undo slots with it: a bridge recreated under
+    the same id has nothing to undo."""
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel, fb_meta={"id": "fb_slots"})
+    assert fb == "fb_slots", fb
+    await _seed(seeded_kernel, ed, "s.txt", "x\n")
+    await _seed(seeded_kernel, ed, "s.txt", "y\n")  # a slot now holds "x\n"
+    from file_bridge import tools
+
+    assert ("fb_slots", "s.txt") in tools._UNDO
+    del_ = await _call(
+        seeded_kernel, "kernel_state", {"type": "delete_agent", "id": fb}
+    )
+    assert del_.get("deleted") is True, del_
+    fb2, ed2 = await _mk(seeded_kernel, fb_meta={"id": "fb_slots"})
+    assert fb2 == "fb_slots", fb2
+    r = await _call(seeded_kernel, ed2, {"type": "undo", "path": "s.txt"})
+    assert r["reason"] == "not_found", r
+    assert (tmp_path / "sd" / "s.txt").read_text(encoding="utf-8") == "y\n"
+
+
+async def test_reflect_carries_edit_grammar_and_compose(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    r = await _call(seeded_kernel, ed, {"type": "reflect"})
+    keys = list(r)
+    assert keys.index("allow_count") < keys.index("edit_grammar") < keys.index("compose")
+    assert "verbs" not in r and "hidden_count" not in r, r
+    docs = await _call(seeded_kernel, "kernel_state", {"type": "docs", "of": fb})
+    for v in ("read", "write", "edit", "append", "undo"):
+        assert v in docs["verbs"], (v, sorted(docs["verbs"]))

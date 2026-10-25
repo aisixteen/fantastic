@@ -557,3 +557,124 @@ async def test_a_fold_starts_at_fold_at_and_lands_at_low_by_tokens():
     _, view, folded, _ = await fold_down(body, _ctx(bud, k, anchors={}), bud)
     assert folded == 1, f"one fold per overflow, got {folded}"
     assert estimate_tokens(view) <= int(bud * LOW), (estimate_tokens(view), bud)
+
+
+def test_folds_at_the_head_are_skipped_until_there_are_fold_run_of_them():
+    """THE ANTI-LINKED-LIST RULE, the CEILING half: FOLD_RUN-1 folds at the head are
+    skipped (ordinary rows taken); at FOLD_RUN they become the span."""
+    from ai_core.constants import FOLD_RUN
+    from ai_core.strategies.fold import next_span
+
+    def head(n_folds):
+        goal = _row("user", "GOAL", "user:goal")
+        members = [
+            _row("user", "folded away", f"user:m{n_folds}{k}") for k in range(n_folds)
+        ]
+        fs = [
+            _fold("ai", [m["id"]], "old", "body", False, id=100 + k + 10 * n_folds)
+            for k, m in enumerate(members)
+        ]
+        tail = [_row("user", f"row {i}", f"user:r{n_folds}{i}") for i in range(14)]
+        rows = [goal] + members + fs + tail
+        return rows, _render(rows)
+
+    rows, view = head(FOLD_RUN - 1)
+    span = next_span(rows, view, need=10**9)
+    assert span, "ordinary rows are taken below the threshold"
+    assert not any(folds.is_fold(rows[i]) for i in span), span
+
+    rows, view = head(FOLD_RUN)
+    span = next_span(rows, view, need=10**9)
+    assert len(span) == FOLD_RUN and all(folds.is_fold(rows[i]) for i in span), span
+
+
+def test_a_view_with_nothing_foldable_yields_no_span():
+    """TERMINATION: the fold loop runs while over budget; an empty span stops it."""
+    from ai_core.strategies.fold import next_span
+
+    rows = [_row("user", "goal", "user:goal"), _row("user", "one", "user:one")]
+    assert next_span(rows, _render(rows), need=10**9) == []
+
+
+async def test_successive_fold_projections_do_not_nest_into_a_chain():
+    """The strategy folds the VIEW ARRAY, never the whole store: on the view an old
+    fold's members are absent and `render` does not re-place it at the head. Fed the
+    whole store, adjacent folds wrap into a deeper one every other turn and the depth
+    runs away. Twin of the Rust test of the same name: the shape of the view stays
+    flat (a fold or two at the head, then the live rows) while the store's fold count
+    and depth grow at the measured rate, one level per two steps."""
+    from ai_core import core
+
+    class _Titler:
+        async def chat(self, messages, max_tokens=None):
+            yield "A title\n\nSummary."
+
+    cfg = core.Backend(sentence="s", make_provider=lambda *a: None, name="fake")
+    k = _K(
+        {
+            "context_strategy": "fold",
+            "context_window": 2600,
+            "output_reserve": 200,
+            "context_titles": True,
+            "context_async": True,
+        }
+    )
+    prev = k.rows_put("ai", {"role": "user", "content": "THE GOAL"})
+    folded, deepest, head = [], [], []
+    for step in range(14):
+        for i in range(4):
+            call = k.rows_put(
+                "ai",
+                {
+                    "role": "assistant",
+                    "parent": prev,
+                    "content": f'Reading f{step}_{i}. <call name="send"><target_id>'
+                    f"notes</target_id><title>survey f{step}_{i}</title><type>read"
+                    "</type><path>f.txt</path></call>",
+                },
+            )
+            pid = k.mint_id()
+            prev = k.rows_put(
+                "ai",
+                {
+                    "role": "user",
+                    "parent": call,
+                    "content": f'[reply to {pid} · notes read · "survey f{step}_{i}"]\n'
+                    + f"filler {step}.{i} text " * 60,
+                },
+            )
+        msgs, store_len = await core._assemble(
+            "ai", "next", k, "cli", system_prompt="sys"
+        )
+        out = await core._project_context(
+            k.record, cfg, _Titler(), "ai", k, "cli", msgs, store_len
+        )
+        assert isinstance(out, list), out
+        rows = k.rows_of()
+        stored = [r for r in rows if folds.is_fold(r)]
+        folded.append(len(stored))
+        deepest.append(max((folds.level(rows, f) for f in stored), default=0))
+        view = folds.render(rows, folds.anchors_of(rows))
+        head.append(
+            "".join(f"F{folds.level(rows, r)}" for r in view if folds.is_fold(r))
+        )
+    # measured on the Rust twin (same fixture): the view never holds a chain of folds,
+    # only the newest big fold and at most one fresh one beside it
+    assert head == [
+        "",
+        "F1",
+        "F1F1",
+        "F2",
+        "F2F1",
+        "F3",
+        "F3F1",
+        "F4",
+        "F4F1",
+        "F5",
+        "F5F1",
+        "F6",
+        "F6F1",
+        "F7",
+    ], head
+    assert folded == [0, 1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 19], folded
+    assert deepest == [0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7], deepest

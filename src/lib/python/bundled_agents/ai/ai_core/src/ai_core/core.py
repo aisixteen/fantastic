@@ -1147,8 +1147,21 @@ def _deliver_soon(
     # ONE PATH: no `create_task` fallback — it would turn a REAL spawn failure into
     # an unregistered orphan. A test fake that delivers answers `spawn_task` like
     # the kernel does.
+    # THE TOKEN IS READ NOW, when the delivery is DECIDED, not when the spawned task
+    # finally runs: a newer chain that began in between must not adopt a reply the
+    # old chain decided (Rust #227 bug 4).
+    token = (
+        _chain_of(target)["token"] if (notice or current_origin() == target) else None
+    )
     coro = _deliver(
-        kernel, target, text, client_id, system_prompt, born=born, notice=notice
+        kernel,
+        target,
+        text,
+        client_id,
+        system_prompt,
+        born=born,
+        notice=notice,
+        chain_token=token,
     )
     _ctx(kernel).spawn_task(target, "deliver_reply", coro)
 
@@ -1246,6 +1259,7 @@ async def _deliver(
     *,
     born: int | None = None,
     notice: bool = False,
+    chain_token: str | None = None,
 ) -> None:
     """Hand `text` to `target` as a fresh turn. AWAITS the whole turn — call
     `_deliver_soon` unless you specifically need to block on it.
@@ -1274,7 +1288,9 @@ async def _deliver(
     # running is that chain's own turn — it carries the chain token, so it is never
     # held. Harness self-turns (nudges, the held-message wake) are chain turns too.
     if notice or current_origin() == target:
-        payload["chain"] = _chain_of(target)["token"]
+        payload["chain"] = (
+            chain_token if chain_token is not None else _chain_of(target)["token"]
+        )
     if born is not None and _incarnation.get(target, 0) != born:
         # A LATE REPLY TO A PREVIOUS INCARNATION. Kept as a ROW — it is real data —
         # but it does not wake a turn: the agent that made the call is gone, and the
@@ -1618,9 +1634,10 @@ def thinking_fields(text: str) -> dict:
 # `await` — the one control call that asks "is anything of mine still coming?".
 _inflight: dict[str, int] = {}
 
-_AWAIT_REFUSED = (
-    "[await refused] nothing of yours is in flight and nothing is queued for you, "
-    "so there is nothing to wait for. Act — make the call — or end the chain with "
+_EMPTY_AWAIT_NOTE = (
+    "[await: nothing to wait for] Nothing of yours is in flight and nothing is "
+    "queued for you, so this chain ends here and nothing was awaited. Make the "
+    "call you were waiting on, or end the chain with "
     '<call name="done"></call>.'
 )
 
@@ -1886,6 +1903,39 @@ def _routing_clash(
             sig = str(res["verbs"].get(verb) or "")
         cache[key] = set(_DOC_ARG.findall(sig))
     return [k for k in used if k in cache[key]]
+
+
+async def _note_empty_await(kernel, self_id: str, client_id: str, parent) -> None:
+    """An `await` with nothing in flight ends the chain VISIBLY (#177): the note is a
+    stored row the model reads on its next turn, and `status` goes to `done` with
+    reason `nothing_to_await`. A store that refuses the note is reported on
+    `status(done, reason=error)` instead — the end is never silent. Rust:
+    `note_empty_await`."""
+    try:
+        await _save_history(
+            self_id,
+            kernel,
+            [
+                {
+                    "role": "user",
+                    "kind": "note",
+                    "content": _EMPTY_AWAIT_NOTE,
+                    "id": _mint_row_id(self_id, kernel),
+                    "parent": parent,
+                }
+            ],
+        )
+    except Exception as e:
+        await _emit_status(
+            kernel,
+            self_id,
+            client_id,
+            "done",
+            reason="error",
+            error=f"the await's note could not be stored: {e}",
+        )
+        return
+    await _emit_status(kernel, self_id, client_id, "done", reason="nothing_to_await")
 
 
 async def _route_then_settle(kernel, self_id: str, system_prompt, route) -> None:
@@ -2433,11 +2483,10 @@ async def _route_reply(
             # ONE CHAIN PER AGENT (#227): an await is not a running chain. Messages
             # that land while it waits wake it as any message does.
             return False
-        _deliver_soon(
-            kernel, self_id, _AWAIT_REFUSED, client_id, system_prompt, notice=True
-        )
-        # That refusal is a turn delivered to the agent itself: the chain goes on.
-        return True
+        # Nothing to wait for: the chain ENDS, with a stored note the model and the
+        # operator both read — never a silent end, never a turn nobody asked for (#177).
+        await _note_empty_await(kernel, self_id, client_id, message_id)
+        return False
     if done_called:
         # AN INQUIRY THIS CHAIN NEVER ANSWERED is closed for its asker, saying so —
         # the asker must not wait on an answer that will not come.
@@ -3552,14 +3601,18 @@ def _make_send(cfg: Backend):
             send_to = None
         text = payload.get("text", "")
         # AN ANSWER UNDER AN INQUIRY'S PID settles what this agent was owed.
-        # ONE CHAIN PER AGENT (#227): such an answer is a turn of the chain.
-        # The settle happens before the row save and is safe in Python: an owed
-        # answer is a chain_turn, never held, so no held message carries it.
-        answered_owed = False
-        if isinstance(text, str) and _awaiting.get(id):
-            for owed in _ANSWER_TAG.findall(text):
-                _awaiting[id].discard(owed)
-                answered_owed = True
+        # ONE CHAIN PER AGENT (#227): such an answer obeys the hold like any other
+        # message — read by the live chain's next pass, never a chain of its own.
+        answers = (
+            _ANSWER_TAG.findall(text)
+            if isinstance(text, str) and _awaiting.get(id)
+            else []
+        )
+
+        def settle_owed() -> None:
+            for owed in answers:
+                _awaiting.get(id, set()).discard(owed)
+
         # A message is TEXT whatever the caller typed: the tag grammar types a bare
         # number (`<text>586</text>` → 586), and "586" is a perfectly good message.
         if isinstance(text, (int, float)) and not isinstance(text, bool):
@@ -3589,14 +3642,12 @@ def _make_send(cfg: Backend):
         # ONE CHAIN PER AGENT (#227): a message that lands while this agent's chain
         # is alive is HELD — stored as a row, read by the chain's next pass — unless
         # it is one of the chain's own turns (it carries the chain token, the agent
-        # sent it to itself, or it answers an inquiry the agent is owed).
+        # sent it to itself). An inquiry's ANSWER obeys the hold like any message.
         chain = _chain_of(id)
         token = payload.get("chain")
         chain_turn = (
-            (isinstance(token, str) and bool(token) and token == chain["token"])
-            or sender == id
-            or answered_owed
-        )
+            isinstance(token, str) and bool(token) and token == chain["token"]
+        ) or sender == id
         if chain["alive"] and not chain_turn:
             # The SAME row the normal incoming path stores, so a held message folds
             # and recalls exactly like any other turn.
@@ -3609,6 +3660,10 @@ def _make_send(cfg: Backend):
             # A held send RETURNS THE ANSWER of the pass that reads it.
             fut = asyncio.get_running_loop().create_future()
             _push_held_or_wake(kernel, id, client_id, fut, system_prompt)
+            # HELD BEFORE SETTLED: the pid stops being owed in the same step the
+            # answer becomes visible as held, never an instant with neither (an
+            # `await` would read "nothing to wait for").
+            settle_owed()
             await _emit_status(
                 kernel, id, client_id, "queued", send_id=send_id, ahead=0, held=True
             )
@@ -3620,6 +3675,7 @@ def _make_send(cfg: Backend):
                     "error": f"send: timeout after {SEND_TIMEOUT}s",
                     "client_id": client_id,
                 }
+        settle_owed()
         entry = {
             "client_id": client_id,
             "text": text,

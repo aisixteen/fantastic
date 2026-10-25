@@ -345,21 +345,25 @@ _FLOOD = (
 )
 
 
-async def test_a_replay_clears_the_backlog_a_gone_viewer_left(term):
-    """A viewer that streamed but never acked (a reloaded page) leaves `unacked`
-    past HIGH and the reader paused. The new viewer's `output` replay hands it
-    everything so far, so it zeroes the count and resumes the reader."""
+# The same flood after the child stays silent for 8 s: ConPTY's slow start (#93),
+# where a started child can print nothing for several seconds first.
+_SLOW_FLOOD = "import time\ntime.sleep(8)\n" + _FLOOD
+
+
+async def _replay_clears_the_backlog(term, program):
     r = await _call(
         term,
         {
             "type": "start",
             "command": PY,
-            "args": ["-c", _FLOOD],
+            "args": ["-c", program],
             "pty": {"cols": 80, "rows": 24},
         },
     )
     jid = r["job_id"]
-    for _ in range(250):
+    # wait on the observable state, not a fixed window: a slow start may print
+    # nothing for a long while before its flood lands
+    for _ in range(750):
         st = await _call(term, {"type": "ack", "job_id": jid, "chars": 0})
         if st["paused"]:
             break
@@ -372,6 +376,19 @@ async def test_a_replay_clears_the_backlog_a_gone_viewer_left(term):
     # the rest of the flood (under HIGH) arrives with no further ack
     await _until(term, lambda t: "DONE" in t)
     await _call(term, {"type": "write", "job_id": jid, "data": ENTER})
+
+
+async def test_a_replay_clears_the_backlog_a_gone_viewer_left(term):
+    """A viewer that streamed but never acked (a reloaded page) leaves `unacked`
+    past HIGH and the reader paused. The new viewer's `output` replay hands it
+    everything so far, so it zeroes the count and resumes the reader."""
+    await _replay_clears_the_backlog(term, _FLOOD)
+
+
+async def test_a_replay_clears_the_backlog_after_a_slow_start(term):
+    """The same replay when the child stays silent for a while before its flood:
+    the backlog must still pause the reader and the replay must still clear it."""
+    await _replay_clears_the_backlog(term, _SLOW_FLOOD)
 
 
 # Waits for a typed line, floods past HIGH, waits for a line, floods again, then
