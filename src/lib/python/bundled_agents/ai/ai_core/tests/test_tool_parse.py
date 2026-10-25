@@ -4,10 +4,13 @@ verbatim, no JSON anywhere. Parse or refuse with the fault named — never repai
 from __future__ import annotations
 
 from ai_core.tool_parse import (
+    OPEN,
+    _HINT,
     _defang,
     extract_tool_calls,
     malformed_calls,
     render_call,
+    render_reply,
 )
 
 WRITE = """<call name="send">
@@ -363,3 +366,142 @@ def test_a_reply_body_reads_as_utf8_text_at_its_slot():
     )
     # a body-less reply is unchanged
     assert render_reply({"seq": 3}) == "<seq>3</seq>"
+
+
+# ── twins of the Rust tool_parse tests (#170) ────────────────────────────────
+
+
+def test_a_dict_is_one_line_per_field():
+    assert (
+        render_reply({"path": "a.md", "size": 12, "ok": True})
+        == "<path>a.md</path>\n<size>12</size>\n<ok>true</ok>"
+    )
+
+
+def test_a_nested_dict_opens_on_its_own_line():
+    assert (
+        render_reply({"agent": {"id": "notes", "verbs": "read"}})
+        == "<agent>\n<id>notes</id>\n<verbs>read</verbs>\n</agent>"
+    )
+
+
+def test_a_top_level_list_is_items():
+    assert render_reply(["a", "b"]) == "<items>\n<item>a</item>\n<item>b</item>\n</items>"
+
+
+def test_a_list_of_structures_nests_and_an_empty_list_takes_that_branch():
+    assert (
+        render_reply({"lines": [{"n": 1}, {"n": 2}]})
+        == "<lines>\n<item>\n<n>1</n>\n</item>\n<item>\n<n>2</n>\n</item>\n</lines>"
+    )
+    assert render_reply({"lines": []}) == "<lines>\n</lines>"
+
+
+def test_a_multiline_scalar_spans_lines_verbatim():
+    assert render_reply({"text": "one\ntwo"}) == "<text>\none\ntwo\n</text>"
+
+
+def test_null_is_an_empty_tag_and_a_bare_scalar_is_its_text():
+    assert render_reply({"next": None}) == "<next></next>"
+    assert render_reply("just text") == "just text"
+    assert render_reply(False) == "false"
+
+
+def test_nothing_is_escaped():
+    assert (
+        render_reply({"content": 'say "hi"\nand \\ that'})
+        == '<content>\nsay "hi"\nand \\ that\n</content>'
+    )
+
+
+def test_render_call_nests_tighter_than_render_reply():
+    args = {"target_id": "notes", "payload": {"type": "read", "path": "a.md"}}
+    assert render_call("send", args) == (
+        '<call name="send">\n<target_id>notes</target_id>\n<type>read</type>\n'
+        "<path>a.md</path>\n</call>"
+    )
+
+
+def test_reply_scalars_are_python_str():
+    assert render_reply(1e-5) == "1e-05"
+    assert render_reply(1e16) == "1e+16"
+    assert render_reply(0.5) == "0.5"
+    assert render_reply(3.0) == "3.0"
+    assert render_reply(None) == ""
+    assert render_reply(True) == "true"
+    assert (
+        render_reply(["a", {"a": 1}])
+        == "<items>\n<item>a</item>\n<item>\n<a>1</a>\n</item>\n</items>"
+    )
+    assert (
+        render_reply({"v": {"a": 1, "b": [True, None]}})
+        == "<v>\n<a>1</a>\n<b>\n<item>true</item>\n<item></item>\n</b>\n</v>"
+    )
+
+
+def test_the_hint_is_verbatim():
+    assert _HINT == (
+        'The shape: <call name="send">\n'
+        "<target_id>agent id</target_id>\n"
+        "<type>verb</type>\n"
+        "<path>a.md</path>\n"
+        "<bytes>document, verbatim, to the first </bytes>\n"
+        "</bytes>\n"
+        "</call> — one child tag per argument, a list is one tag whose children "
+        "are all <item>, nothing is escaped."
+    )
+
+
+def test_the_report_is_three_fields_and_one_composed_sentence():
+    text = '<call name="send"><target_id>n</target_id><path>a</path><path>b</path></call>'
+    bad = malformed_calls(text)
+    assert len(bad) == 1
+    assert set(bad[0]) == {"error", "envelope", "your_block"}
+    assert bad[0]["envelope"] == OPEN
+    assert bad[0]["error"] == (
+        "call NOT dispatched: duplicate `<path>` — a list is one tag whose "
+        "children are all `<item>`: `<path><item>…</item><item>…</item></path>`. "
+        "Nothing ran. " + _HINT
+    )
+    assert (
+        bad[0]["your_block"]
+        == 'name="send"><target_id>n</target_id><path>a</path><path>b</path>'
+    )
+
+
+def test_the_body_delivered_to_the_model_is_plain_text():
+    bad = malformed_calls('<call name="send"><type>reflect</type></call>')[0]
+    # the body core builds for the model (core.py: error + your block)
+    body = f"{bad['error']}\n\nyour block:\n{bad['your_block']}"
+    assert body.startswith("call NOT dispatched: a send names its target")
+    assert "\n\nyour block:\n" in body
+    assert not body.startswith("{")
+
+
+def test_every_broken_envelope_gets_its_own_report():
+    text = (
+        '<call name="send"><type>reflect</type></call>\n'
+        '<call name="nope"><target_id>n</target_id></call>'
+    )
+    bad = malformed_calls(text)
+    assert len(bad) == 2
+    assert "a send names its target" in bad[0]["error"]
+    assert "`nope` is not a tool" in bad[1]["error"]
+
+
+def test_a_huge_numeric_target_is_refused():
+    for tid in ("123456789012345678901234567890", "42"):
+        _refused(
+            f'<call name="send"><target_id>{tid}</target_id><type>reflect</type></call>',
+            "a send names its target",
+        )
+
+
+def test_a_truthy_non_list_to_is_kept_raw():
+    calls = extract_tool_calls('<call name="send"><to>42</to><type>reflect</type></call>')
+    assert len(calls) == 1, calls
+    assert calls[0]["arguments"]["to"] == 42
+    assert "target_id" not in calls[0]["arguments"]
+    bad = malformed_calls('<call name="send"><to>0</to><type>reflect</type></call>')
+    assert len(bad) == 1, bad
+    assert "a send names its target" in bad[0]["error"]

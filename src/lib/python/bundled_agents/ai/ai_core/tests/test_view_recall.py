@@ -225,6 +225,99 @@ async def test_recall_asks_the_model_and_expands_only_what_fits(
     )
 
 
+async def _recall_answering(monkeypatch, fake_providers, answer: str):
+    k = _K()
+    await _seed(k, [_row("user", "THE GOAL", "user:goal")] + _chain("a", 4))
+
+    async def fake_sys(self_id, kernel):
+        return "s"
+
+    monkeypatch.setattr(core, "_default_system_content", fake_sys)
+
+    class _P:
+        async def chat(self, messages, max_tokens=None):
+            yield answer
+
+    fake_providers["ai"] = _P()
+    before = len(await core._load_history("ai", k))
+    r = await _context_recall("ai", {}, k, _cfg())
+    return k, r, before
+
+
+async def test_an_empty_json_recall_answer_stays_degraded(monkeypatch, fake_providers):
+    # python `if ans:` - an empty `{}` is NO answer
+    _, r, _ = await _recall_answering(monkeypatch, fake_providers, "{}")
+    assert r["degraded"] is True, r
+    assert r["why"] == "mechanical fit"
+
+
+async def test_a_numeric_why_is_its_python_str(monkeypatch, fake_providers):
+    for answer, want in [
+        ('{"why": 42}', "42"),
+        ('{"why": ["a"]}', "['a']"),
+        ('{"why": 0}', "chosen"),
+        ('{"why": ""}', "chosen"),
+    ]:
+        _, r, _ = await _recall_answering(monkeypatch, fake_providers, answer)
+        assert r["why"] == want, (answer, r)
+        assert r["degraded"] is False
+
+
+async def test_a_scalar_expand_is_wrapped_like_python(monkeypatch, fake_providers):
+    for answer in ('{"expand": 5, "why": "w"}', '{"expand": "7", "why": "w"}'):
+        k, r, before = await _recall_answering(monkeypatch, fake_providers, answer)
+        assert "error" not in r, r
+        assert r["degraded"] is False, r
+        assert len(await core._load_history("ai", k)) == before + 1, (
+            "the recall row is written"
+        )
+
+
+async def test_history_by_fold_parses_the_id_and_refuses_in_pythons_words():
+    from ai_core import core
+
+    k = _K()
+    rows = _chain("a", 1, big=False)[:2]
+    f = _fold("ai", [r["id"] for r in rows], "T", "S", False)
+    for r in rows + [f]:
+        k.rows_put("ai", r)
+    hist = core._make_history(None)
+    for fold in (f["id"], f" {f['id']} ", str(f["id"])):
+        h = await hist("ai", {"fold": fold}, k)
+        assert list(h["fold"].items()) == [
+            ("id", f["id"]),
+            ("kind", "fold"),
+            ("title", "T"),
+            ("summary", "S"),
+            ("members", 2),
+        ], (fold, h)
+        assert [d["id"] for d in h["rows"]] == [r["id"] for r in rows], fold
+    for fold in ("abc", float(f["id"]), True, "+1", -1):
+        assert await hist("ai", {"fold": fold}, k) == {
+            "error": "history: `fold` must be a fold id (int)",
+            "reason": "bad_arg",
+            "arg": "fold",
+        }, fold
+    r1 = rows[0]["id"]
+    got = await hist("ai", {"fold": r1}, k)
+    assert list(got.items()) == [
+        ("error", f"history: {r1} is not a fold in your conversation"),
+        ("reason", "not_found"),
+        ("arg", "fold"),
+    ]
+
+
+async def test_grep_scope_scans_bodies_in_arrival_order():
+    k = _K()
+    line = "the audit marker"
+    a, b = 11, 12
+    await _store_reply("ai", k, b, line)
+    await _store_reply("ai", k, a, line)
+    r = await _grep("ai", {"query": "audit marker", "ids": [a, b]}, k)
+    assert len(r["matches"]) == 1, r
+    assert r["matches"][0]["id"] == b, "the body that ARRIVED first owns the line"
+
+
 async def test_recall_clears_ram_scratch_but_never_the_store(monkeypatch):
     k = _K()
     await _seed(k, [_row("user", "GOAL", "user:goal")] + _chain("a", 8))
