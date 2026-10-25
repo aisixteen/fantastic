@@ -1491,3 +1491,35 @@ def test_stream_idle_seconds_is_validated_at_the_write():
         )
     assert check({"stream_idle_seconds": 2.5}) is None
     assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]
+
+
+# ── twins of the rust anthropic_backend tests (#170) ─────────────────────────
+
+
+async def test_an_endpoint_that_never_answers_fails_after_the_idle_window():
+    """No response headers ever arrive: the handler raises ReadTimeout before any
+    response, and the turn fails naming the stall, not a connect error (#177)."""
+    from ai_core.provider import ProviderError
+
+    def never(req: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no headers", request=req)
+
+    err = await _turn_error(_provider(httpx.MockTransport(never), stream_idle=0.2))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert "stream_stalled" in str(err)
+    assert "sent no bytes for 0.2s" in str(err)
+    assert ENDPOINT in str(err)
+
+
+def test_the_sidecar_keeps_the_one_hour_write_count():
+    from anthropic_backend.provider import Usage
+
+    u = Usage()
+    u.cache_write_1h_tokens = 40
+    u.long_cache_write_1h_tokens = 7
+    back = Usage.from_json(u.to_json())
+    assert (back.cache_write_1h_tokens, back.long_cache_write_1h_tokens) == (40, 7)
+    # a sidecar written before the field existed loads with 0
+    old = Usage.from_json({"requests": 3, "cache_write": 5})
+    assert (old.requests, old.cache_write_tokens) == (3, 5)
+    assert (old.cache_write_1h_tokens, old.long_cache_write_1h_tokens) == (0, 0)
