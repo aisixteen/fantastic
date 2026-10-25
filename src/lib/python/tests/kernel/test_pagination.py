@@ -210,3 +210,24 @@ def test_int_ids_page_with_a_decimal_cursor():
     assert nxt == "3"
     got, _ = page(items, {"after": nxt}, **_BY_ID)
     assert got == [{"id": 4}]
+
+
+def test_a_non_string_cursor_compares_as_python_str():
+    """Twin of the Rust test of the same name: `after=True` is IGNORED (a bool is
+    never a cursor); `after=1.5` / `after=["c1"]` compare as `str(...)` and, naming
+    no item, page EMPTY rather than the whole list; `after=2.0` renders `"2.0"` --
+    not the same string as an item literally named `"2"`."""
+    items = [{"id": "1"}, {"id": "2"}, {"id": "3"}]
+
+    got, _ = page(items, {"after": True}, **_BY_ID)
+    assert got == items, "a bool cursor is never a cursor at all"
+
+    got, nxt = page(items, {"after": 1.5}, **_BY_ID)
+    assert got == []
+    assert nxt is None
+
+    got, _ = page(items, {"after": ["c1"]}, **_BY_ID)
+    assert got == []
+
+    got, _ = page(items, {"after": 2.0}, **_BY_ID)
+    assert got == [], "'2.0' must not match the item '2'"

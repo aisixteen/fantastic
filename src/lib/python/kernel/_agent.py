@@ -1368,6 +1368,10 @@ class Agent:
         row = self.ctx.rows.get(pid)
         exe = self.ctx.executions.get(pid)
         res = out.get("result")
+        if isinstance(res, dict):
+            # The error text is read from the SHOWN result: a value the bundle
+            # marked secret (an `error` path that echoes it) never reaches the row.
+            res = _secret.shown(res, out.get("secret") or ())
         stamp = {"status": out.get("status")}
         if isinstance(res, dict) and res.get("error"):
             stamp["error"] = str(res.get("error"))[:200]

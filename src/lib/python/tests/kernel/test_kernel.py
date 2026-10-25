@@ -218,3 +218,30 @@ async def test_inbox_bounded_drops_oldest(kernel):
     while not q.empty():
         last = q.get_nowait()
     assert last["n"] == INBOX_BOUND + 49
+
+
+# ─── Rust twins (#170): each `test_<rust test name>` asserts what the Rust test does ─
+
+
+async def test_ensure_inbox_is_idempotent_and_shares_one_queue(kernel):
+    """A reader may call it defensively before every read; a second call hands back
+    the SAME queue, not a fresh one that silently swallows the first reader's mail."""
+    kernel.create("file_bridge.tools", id="twice", allow=["."])
+    ctx = kernel.ctx
+    before = len(ctx.inboxes)
+    first = ctx.ensure_inbox("twice")
+    second = ctx.ensure_inbox("twice")
+    assert first is second
+    assert len(ctx.inboxes) == before + 1, "a second call minted a second inbox"
+    ctx.inboxes["twice"].put_nowait({"type": "ping"})
+    assert second.get_nowait()["type"] == "ping"
+
+
+async def test_unregister_drops_both_indexes(kernel):
+    kernel.create("file_bridge.tools", id="zap", allow=["."])
+    ctx = kernel.ctx
+    ctx.ensure_inbox("zap")
+    assert "zap" in ctx.agents and "zap" in ctx.inboxes
+    ctx.unregister("zap")
+    assert "zap" not in ctx.agents
+    assert "zap" not in ctx.inboxes

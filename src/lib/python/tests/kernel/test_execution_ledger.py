@@ -7,9 +7,9 @@ the semantics a supplied `create_agent` id already has, applied to dispatch:
     in flight    ⇒ JOIN — no second run         (C10: once-only under concurrency)
     settled      ⇒ the recorded outcome returns (C11: idempotency; C9 in-process)
 
-ONE id space: the caller id IS the pid `ps`/`cancel`/reply tags carry. Minted
-pids are `<agent>:<hex>`, so caller ids may not contain ":" and can never
-collide. An id is BOUND to its first execution's target — the same id aimed
+ONE id space: a caller supplies only NAMES, and the kernel mints the numeric pids
+`ps`/`cancel`/reply tags carry, so a name (any shape, a ":" included) can never
+collide with a pid. An id is BOUND to its first execution's target — the same id aimed
 elsewhere refuses instead of returning an unrelated outcome.
 
 Exemplars this transfers from: `dbos/tests/test_singleexec.py` (best in corpus),
@@ -1143,3 +1143,232 @@ async def test_forget_drops_the_entry_and_its_name(seeded_kernel):
     assert eid not in k.executions
     assert "gone-1" not in k.names
     assert k.resolve_name("gone-1") is None, "the name left with it"
+
+
+# ─── Rust twins (#170): each `test_<rust test name>` asserts what the Rust test does ─
+
+_twin_calls: list[str] = []
+
+
+async def _twin_handler(id, payload, kernel):
+    verb = payload.get("type")
+    if verb in ("boot", "shutdown"):
+        return None
+    if verb == "reflect":
+        return {"id": id, "sentence": "ledger twin probe", "verbs": {}}
+    if verb == "work":
+        _twin_calls.append(id)
+        return {"done": "ok"}
+    if verb == "echo_error":
+        return {"error": payload.get("error")}
+    if verb == "fork":
+
+        async def body():
+            kernel.ctx.rows_put(id, {"kind": "note"})
+            _twin_calls.append("body")
+
+        return {"task": kernel.ctx.spawn_task(id, "body", body())}
+    if verb == "nope":
+        return {"error": "н" * 300, "reason": "not_found"}
+    return {"error": f"unknown verb {verb!r}"}
+
+
+_twin_mod = types.ModuleType("ledger_twin_probe.tools")
+_twin_mod.handler = _twin_handler
+_twin_mod.VERBS = {}
+register_unlisted("ledger_twin_probe.tools", _twin_mod)
+
+
+async def _twin_agent(kernel, agent_id: str) -> str:
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": kernel.id,
+                        "handler_module": "ledger_twin_probe.tools",
+                        "id": agent_id,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert rec.get("id") == agent_id, rec
+    return agent_id
+
+
+async def _ledger(kernel) -> list[dict]:
+    r = (await kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}]))[0]
+    return r["result"]["executions"]
+
+
+def _rows_about(kernel, agent_id: str) -> list[dict]:
+    return [r for r in kernel.ctx.rows.values() if r.get("agent") == agent_id]
+
+
+async def test_ledger_row_key_order_matches_python(seeded_kernel):
+    """A ledger row is exactly `[id, target, attempts, retries, named, name?, status,
+    outcome]` -- `name` OMITTED (not null) when the execution is unnamed."""
+    a = await _twin_agent(seeded_kernel, "l_key_order")
+    await seeded_kernel.send([{"target": a, "payload": {"type": "work"}}])
+    unnamed = next(
+        r
+        for r in await _ledger(seeded_kernel)
+        if r["target"] == "l_key_order" and r["status"] == "completed"
+    )
+    assert list(unnamed) == [
+        "id",
+        "target",
+        "attempts",
+        "retries",
+        "named",
+        "status",
+        "outcome",
+    ], unnamed
+    assert "name" not in unnamed
+
+    await seeded_kernel.send(
+        [{"target": a, "payload": {"type": "work"}, "id": "named-1"}]
+    )
+    named = next(r for r in await _ledger(seeded_kernel) if r.get("name") == "named-1")
+    assert list(named) == [
+        "id",
+        "target",
+        "attempts",
+        "retries",
+        "named",
+        "name",
+        "status",
+        "outcome",
+    ], named
+
+
+async def test_an_errored_execution_is_visible_in_the_ledger(seeded_kernel):
+    """A handler that RAN and said no is a ledger row like any other: the `ledger`
+    verb lists that pid with its target and status `errored`."""
+    a = await _twin_agent(seeded_kernel, "l_err")
+    out = (
+        await seeded_kernel.send([{"target": a, "payload": {"type": "nope_unknown"}}])
+    )[0]
+    assert out["status"] == "errored", out
+    pid = out["pid"]
+    hit = next((r for r in await _ledger(seeded_kernel) if r["id"] == pid), None)
+    assert hit is not None, "the errored execution vanished from the ledger"
+    assert hit["target"] == a
+    assert hit["status"] == "errored"
+
+
+async def test_a_dispatch_writes_a_call_row_with_outcome(seeded_kernel):
+    a = await _twin_agent(seeded_kernel, "w")
+    out = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "work"}, "id": "named-one"}]
+        )
+    )[0]
+    rows = _rows_about(seeded_kernel, a)
+    calls = [r for r in rows if r.get("kind") == "call" and r.get("verb") == "work"]
+    assert len(calls) == 1, f"one call row on the TARGET: {rows}"
+    call = calls[0]
+    # PYTHON'S KEY ORDER: the row as written, `agent` + `ts` added by the store,
+    # `outcome` stamped onto the end at settle.
+    assert list(call) == [
+        "id",
+        "kind",
+        "verb",
+        "parent",
+        "caller",
+        "payload",
+        "named",
+        "retries",
+        "attempts",
+        "timeout",
+        "name",
+        "agent",
+        "ts",
+        "outcome",
+    ], list(call)
+    assert call["payload"] == {"type": "work"}
+    assert call["named"] is True
+    assert call["retries"] == 0
+    assert call["attempts"] == 1
+    assert call["timeout"] is None
+    assert call["kind"] == "call"
+    assert call["verb"] == "work"
+    assert call["parent"] is None, "no dispatch was nested around it"
+    assert call["caller"] is None, "an operator send has no origin"
+    assert call["name"] == "named-one"
+    assert call["id"] == out["pid"]
+    assert call["outcome"] == {"status": "completed"}
+
+
+async def test_an_errored_call_row_stamps_the_python_error_and_reason(seeded_kernel):
+    a = await _twin_agent(seeded_kernel, "w_err")
+    await seeded_kernel.send([{"target": a, "payload": {"type": "nope"}}])
+    call = next(
+        r
+        for r in _rows_about(seeded_kernel, a)
+        if r.get("kind") == "call" and r.get("verb") == "nope"
+    )
+    assert call["outcome"] == {
+        "status": "errored",
+        "reason": "not_found",
+        "error": "н" * 200,
+    }
+    assert len(call["outcome"]) == 3, "nothing else is copied"
+
+
+async def test_a_falsy_non_string_error_settles_completed(seeded_kernel):
+    """FULL truthiness, not "the key is present": a falsy `error` settles completed,
+    a truthy non-string one errored."""
+    a = await _twin_agent(seeded_kernel, "w_falsy")
+    for falsy in (0, 0.0, [], {}, "", False, None):
+        out = (
+            await seeded_kernel.send(
+                [{"target": a, "payload": {"type": "echo_error", "error": falsy}}]
+            )
+        )[0]
+        assert out["status"] == "completed", f"falsy error {falsy!r}: {out}"
+    for truthy in (1, -1, [1], {"k": 1}):
+        out = (
+            await seeded_kernel.send(
+                [{"target": a, "payload": {"type": "echo_error", "error": truthy}}]
+            )
+        )[0]
+        assert out["status"] == "errored", f"truthy error {truthy!r}: {out}"
+
+
+async def test_a_refusal_that_opened_no_call_row_appends_no_settle(seeded_kernel):
+    """`pid is None` <=> nothing reached the task table: no ending is written for a
+    beginning that was never written down."""
+    await _twin_agent(seeded_kernel, "w_ghost")
+    before = {i for i, r in seeded_kernel.ctx.rows.items() if r.get("kind") == "settle"}
+    out = (await seeded_kernel.send([{"target": "ghost", "payload": {"type": "work"}}]))[0]
+    assert out["pid"] is None, out
+    after = {i for i, r in seeded_kernel.ctx.rows.items() if r.get("kind") == "settle"}
+    assert after == before, "a refused send appended a settle row"
+
+
+async def test_a_fork_is_rowed_before_the_dispatch_settles_and_its_body_runs_under_it(
+    seeded_kernel,
+):
+    """`spawn_task` mints the fork's `task` row synchronously inside the handler, so
+    it precedes the dispatch's `settle` row; the forked body's rows follow the task
+    row that names it."""
+    _twin_calls.clear()
+    a = await _twin_agent(seeded_kernel, "f")
+    out = (await seeded_kernel.send([{"target": a, "payload": {"type": "fork"}}]))[0]
+    for _ in range(200):
+        if "body" in _twin_calls:
+            break
+        await asyncio.sleep(0.01)
+    assert "body" in _twin_calls, "the forked body never ran"
+    rows = seeded_kernel.ctx.rows
+    task = next(i for i, r in rows.items() if r.get("kind") == "task" and r["agent"] == a)
+    settle = next(
+        i for i, r in rows.items() if r.get("kind") == "settle" and r["parent"] == out["pid"]
+    )
+    note = next(i for i, r in rows.items() if r.get("kind") == "note" and r["agent"] == a)
+    assert task < settle, "the fork's task row precedes the dispatch's settle row"
+    assert task < note, "the body's rows follow the task row that names it"
