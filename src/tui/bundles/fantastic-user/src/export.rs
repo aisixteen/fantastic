@@ -597,7 +597,8 @@ pub fn scan_secrets(dir: &Path) -> Vec<String> {
     hits
 }
 
-fn has_key_token(text: &str) -> bool {
+/// Whether `text` holds an `sk-…` key token (4+ key characters after it).
+pub(crate) fn has_key_token(text: &str) -> bool {
     let b = text.as_bytes();
     text.match_indices("sk-").any(|(i, _)| {
         let before = i == 0 || !b[i - 1].is_ascii_alphanumeric();

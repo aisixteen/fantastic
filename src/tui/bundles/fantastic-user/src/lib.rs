@@ -29,6 +29,13 @@
 //!   under it as a blueprint folder (`blueprint.yaml` + owned files) at
 //!   `path`, new or empty: nesting is the parent, outside references become
 //!   PORTS (`ports:`), no key values, absolute paths or rows (`export.rs`).
+//! - `import_subtree {path, parent_id, bind?, allow_code?, approve?}` — the
+//!   other half: the blueprint folder at `path` becomes agents under
+//!   `parent_id`, every id fresh (one `_<k>` suffix), every port bound
+//!   (`bind: {port: agent id}`, of the port's kind) on both ends. Without
+//!   `approve: true` it only shows what the team will reach and the code it
+//!   carries; key values are refused, code unless `allow_code: true`
+//!   (`import.rs`).
 //! - `reflect` — this agent, its verbs, and (when it can) its `can_call`.
 //! - every other verb is the lib's `user_probe` (the human as a test fixture:
 //!   `inquiry`, `inquiries`), unchanged — but its `send` (any payload to any
@@ -36,6 +43,7 @@
 
 pub mod export;
 pub mod grants;
+pub mod import;
 pub mod inquiries;
 pub mod path;
 mod sys;
@@ -52,7 +60,7 @@ use serde_json::{json, Map, Value};
 pub const HANDLER_MODULE: &str = "user.tools";
 
 /// The verbs this bundle answers itself (the rest are the probe's).
-pub const VERBS: [&str; 8] = [
+pub const VERBS: [&str; 9] = [
     "forward",
     "around",
     "path",
@@ -61,6 +69,7 @@ pub const VERBS: [&str; 8] = [
     "inquiries",
     "answer_inquiry",
     "export_subtree",
+    "import_subtree",
 ];
 
 /// A view's children that are not cells: its background (drawn behind them),
@@ -394,6 +403,8 @@ impl UserBundle {
             "around" => Self::around(me, p, kernel).await,
             // A SUBTREE AS A BLUEPRINT, outside references as ports (`export.rs`)
             "export_subtree" => export::export_subtree(kernel, p).await,
+            // A BLUEPRINT AS A LIVE SUBTREE: fresh ids, ports bound, approved (`import.rs`)
+            "import_subtree" => import::import_subtree(kernel, p).await,
             // THE PERSON'S INQUIRIES: held, listed, answered (`inquiries.rs`)
             "inquiry" => self.inquiries.ask(p),
             "inquiries" => self.inquiries.list(p),
@@ -423,6 +434,7 @@ impl Bundle for UserBundle {
         v.insert("inquiries".into(), json!("args: asker:str? — {inquiries: [{re, asker, text, kind, options, request_id, ts}]}: the open questions (one asker's, when named)."));
         v.insert("answer_inquiry".into(), json!("args: re:int (req — the inquiry's pid), answer: str | list | bool (req) — the person's answer, sent to the asker under the inquiry's pid; then closed."));
         v.insert("export_subtree".into(), json!("args: agent_id:str (req), path:str (req) — writes the agent and everything under it as a blueprint folder; outside references become ports; no keys, no absolute paths, no rows. path: a new or empty folder (relative to the running dir; no `..`). Reply {exported, path, ports, files}."));
+        v.insert("import_subtree".into(), json!("args: path:str (req — a blueprint folder, relative to the running dir; no `..`), parent_id:str (req), bind:dict? ({\"@port\": \"<agent id>\"} — every declared port, to an agent of its kind), allow_code:bool? (only true counts), approve:bool? (only true counts) — without approve: {approval_required, agents, new_ids, reaches, ports, code} and nothing is created; with it: the agents under parent_id with fresh ids (one `_<k>` suffix), bound agents granted back. Refused: unbound_ports, bad_binding, secret_found, code_not_allowed. Reply {imported, ids, parent_id, ports}."));
         v.insert("path".into(), json!("args: rescan:bool? — {dirs: [PATH dirs], executables: {name: full path}, self: the running fantastic's own executable}: every program on the human's PATH (this process's merged with the login shell's), the first on PATH winning; `executables.fantastic` is always `self` (#216); scanned at boot, `rescan: true` scans again. The caller decides what a name means."));
         v.insert("around".into(), json!("args: canvas:str? (a canvas node id — default the main canvas), view:str? (default view_root), theme:str? (whose layout's rects — default canvas), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
         Value::Object(v)
