@@ -116,15 +116,21 @@ async fn logind(conn: &zbus::Connection, brightness_file: &Path) {
         .add_field(ObjectPath::try_from(SESSION).unwrap())
         .build()
         .unwrap();
-    let mut props: HashMap<&str, V<'_>> = HashMap::new();
-    props.insert("Display", V::Structure(display));
-    mock(
-        conn,
+    // `Set`, not the mock's `UpdateProperties`: that one cannot wrap a struct
+    // value (dbusmock fails on `Display`)
+    conn.call_method(
+        Some(LOGIND),
         USER,
-        "UpdateProperties",
-        &("org.freedesktop.login1.User", props),
+        Some("org.freedesktop.DBus.Properties"),
+        "Set",
+        &(
+            "org.freedesktop.login1.User",
+            "Display",
+            V::Structure(display),
+        ),
     )
-    .await;
+    .await
+    .unwrap_or_else(|e| panic!("Set Display: {e}"));
     mock(
         conn,
         SESSION,

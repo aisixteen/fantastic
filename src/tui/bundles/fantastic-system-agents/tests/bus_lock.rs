@@ -7,7 +7,6 @@
 #[path = "support/bus.rs"]
 mod bus;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,15 +89,17 @@ async fn display(conn: &zbus::Connection, id: &str) {
         .add_field(ObjectPath::try_from(session(id)).unwrap())
         .build()
         .unwrap();
-    let mut props: HashMap<&str, V<'_>> = HashMap::new();
-    props.insert("Display", V::Structure(d));
-    mock(
-        conn,
+    // `Set`, not the mock's `UpdateProperties`: that one cannot wrap a struct
+    // value (dbusmock fails on `Display`); `Set` stores it and emits PropertiesChanged
+    conn.call_method(
+        Some(LOGIND),
         USER,
-        "UpdateProperties",
-        &("org.freedesktop.login1.User", props),
+        Some("org.freedesktop.DBus.Properties"),
+        "Set",
+        &("org.freedesktop.login1.User", "Display", V::Structure(d)),
     )
-    .await;
+    .await
+    .unwrap_or_else(|e| panic!("Set Display: {e}"));
 }
 
 /// The logind calls on a session object's mock method `name`: each call's arguments.
