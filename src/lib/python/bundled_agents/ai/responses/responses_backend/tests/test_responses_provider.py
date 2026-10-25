@@ -505,3 +505,63 @@ async def test_a_status_the_endpoint_meant_is_not_transport(code):
         await _drain(p)
     assert e.value.transport is False
     assert str(e.value) == f"responses {code}: no"
+
+
+# ── the read clock (#177) ───────────────────────────────────────────────────
+
+
+async def test_a_stalled_responses_stream_is_stream_stalled():
+    from ai_core.provider import ProviderError
+
+    class _Silent(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"type": "response.output_text.delta", "delta": "par"}\n\n'
+            raise httpx.ReadTimeout("no byte")
+
+    t = httpx.MockTransport(lambda r: httpx.Response(200, stream=_Silent()))
+    p = ResponsesProvider(
+        endpoint=EP, model="m", key=_key, transport=t, stream_idle=0.2
+    )
+    with pytest.raises(ProviderError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+    assert str(e.value) == (
+        f"responses_backend: stream_stalled — {EP} sent no bytes for 0.2s; "
+        "this turn is NOT complete"
+    )
+
+
+async def test_the_stream_runs_on_the_read_clock():
+    seen: list = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.extensions["timeout"])
+        return httpx.Response(200, text=_text("ok"))
+
+    t = httpx.MockTransport(handler)
+    await _drain(ResponsesProvider(endpoint=EP, model="m", key=_key, transport=t))
+    await _drain(
+        ResponsesProvider(
+            endpoint=EP, model="m", key=_key, transport=t, stream_idle=4.5
+        )
+    )
+    assert seen[0]["read"] == 60.0 and seen[1]["read"] == 4.5
+    assert seen[1]["connect"] == 15.0
+
+
+def test_stream_idle_seconds_is_validated_at_the_write():
+    from responses_backend.tools import RECORD_SCHEMA, validate_meta
+
+    rec = {
+        "endpoint": EP,
+        "model": "m",
+        "memory_store_id": "memory",
+        "credentials": {"store": "s", "ref": "r"},
+    }
+    for bad in (0, -1, "x"):
+        msg = validate_meta({"stream_idle_seconds": bad}, rec)
+        assert msg and msg.startswith(
+            "stream_idle_seconds must be a positive number of seconds"
+        )
+    assert validate_meta({"stream_idle_seconds": 2.5}, rec) is None
+    assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]

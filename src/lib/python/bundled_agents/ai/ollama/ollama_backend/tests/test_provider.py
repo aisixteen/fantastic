@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 
@@ -85,7 +86,9 @@ async def test_the_client_is_opened_and_closed_per_call():
     client = _patched_client([_mk_chunk(content="ok")])
     with patch("ollama.AsyncClient", return_value=client) as made:
         assert [x async for x in p.chat([{"role": "user", "content": "hi"}])] == ["ok"]
-    made.assert_called_once_with(host="http://ollama.test")
+    made.assert_called_once_with(
+        host="http://ollama.test", timeout=httpx.Timeout(60.0, connect=15.0)
+    )
     client.__aenter__.assert_awaited_once()
     client.__aexit__.assert_awaited_once()
 
@@ -233,3 +236,56 @@ async def test_a_status_the_server_answered_is_raised_as_it_was():
             async for _ in p.chat([{"role": "user", "content": "hi"}]):
                 pass
     assert getattr(e.value, "transport", False) is False
+
+
+# ─── the read clock (#177) ──────────────────────────────────────────────────
+
+
+async def test_a_stalled_ollama_stream_is_stream_stalled():
+    import httpx
+    from ai_core.provider import ProviderError
+
+    p = OllamaProvider(endpoint="http://ollama.test", model="m", stream_idle=0.2)
+    client = _patched_client([])
+    client.chat = AsyncMock(
+        return_value=_raising_stream(_mk_chunk("par"), httpx.ReadTimeout("no byte"))
+    )
+    with patch("ollama.AsyncClient", return_value=client):
+        with pytest.raises(ProviderError) as e:
+            async for _ in p.chat([{"role": "user", "content": "hi"}]):
+                pass
+    assert e.value.transport is True
+    assert str(e.value) == (
+        "ollama_backend: stream_stalled — http://ollama.test sent no bytes for 0.2s; "
+        "this turn is NOT complete"
+    )
+
+
+async def test_the_client_runs_on_the_read_clock():
+    p = OllamaProvider(endpoint="http://ollama.test", model="m", stream_idle=4.5)
+    client = _patched_client([_mk_chunk(content="ok")])
+    with patch("ollama.AsyncClient", return_value=client) as ctor:
+        async for _ in p.chat([{"role": "user", "content": "hi"}]):
+            pass
+    t = ctor.call_args.kwargs["timeout"]
+    assert (t.read, t.connect) == (4.5, 15.0)
+    p = OllamaProvider(endpoint="http://ollama.test", model="m")
+    with patch(
+        "ollama.AsyncClient", return_value=_patched_client([_mk_chunk(content="ok")])
+    ) as ctor:
+        async for _ in p.chat([{"role": "user", "content": "hi"}]):
+            pass
+    assert ctor.call_args.kwargs["timeout"].read == 60.0
+
+
+def test_stream_idle_seconds_is_validated_at_the_write():
+    from ollama_backend.tools import RECORD_SCHEMA, validate_meta
+
+    rec = {"endpoint": "http://ollama.test", "memory_store_id": "memory"}
+    for bad in (0, -1, "x"):
+        msg = validate_meta({"stream_idle_seconds": bad}, rec)
+        assert msg and msg.startswith(
+            "stream_idle_seconds must be a positive number of seconds"
+        )
+    assert validate_meta({"stream_idle_seconds": 2.5}, rec) is None
+    assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]

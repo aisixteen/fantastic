@@ -17,7 +17,7 @@ request shape and a different event stream.
 from __future__ import annotations
 
 from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
-from ai_core import caching
+from ai_core import ProviderError, caching, stream_idle_of
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 
@@ -39,6 +39,13 @@ RECORD_SCHEMA = schema(
         ),
         field("model", "str", "the model name", required=True),
         field(
+            "stream_idle_seconds",
+            "float",
+            "the read clock on the answer stream: seconds with no byte from the "
+            "endpoint (headers included) before the turn is judged stalled and ends "
+            "with an error row; default 60",
+        ),
+        field(
             "max_tokens", "int", "a turn's output budget (tokens)", default=MAX_TOKENS
         ),
         field("sampling", "map", "runner params merged verbatim into the request body"),
@@ -51,6 +58,10 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     """Refuse, AT THE WRITE, a record missing a required field or naming an enum
     value outside its set — every missing field named at once, from the schema.
     Then ai_core's caching refusal: this backend cannot do provider caching."""
+    try:
+        stream_idle_of(meta)
+    except ProviderError as err:
+        return str(err)
     return validate(RECORD_SCHEMA, NAME, meta, record) or caching.refusal(
         meta, record, NAME, False
     )
@@ -69,6 +80,7 @@ def make_provider(id, kernel):
         # RUNNER (meta) params — sampling knobs saved on the record, distinct from
         # connection (endpoint/key/model). Merged verbatim into the request body.
         sampling=rec.get("sampling"),
+        stream_idle=stream_idle_of(rec),
     )
 
 

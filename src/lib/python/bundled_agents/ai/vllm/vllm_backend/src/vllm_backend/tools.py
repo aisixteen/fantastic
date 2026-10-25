@@ -21,7 +21,7 @@ bundle's cancel hook; `on_delete` is ai_core's, plus this backend's own table.
 from __future__ import annotations
 
 from ai_core import build, on_cancel, required_meta  # noqa: F401 — the cancel hook
-from ai_core import caching
+from ai_core import caching, stream_idle_of
 from ai_core import on_delete as _core_on_delete
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
@@ -101,6 +101,7 @@ def make_provider(id, kernel):
         explicit_budget=explicit,
         connect_timeout=float(rec.get("connect_timeout") or CONNECT_TIMEOUT),
         read_timeout=float(rec.get("read_timeout") or READ_TIMEOUT),
+        stream_idle=stream_idle_of(rec, float(rec.get("read_timeout") or READ_TIMEOUT)),
     )
 
 
@@ -234,6 +235,13 @@ RECORD_SCHEMA = schema(
             "seconds to wait on a generation",
             default=READ_TIMEOUT,
         ),
+        field(
+            "stream_idle_seconds",
+            "float",
+            "the read clock on the answer stream: seconds with no byte from the "
+            "server (headers included) before the turn is judged stalled and ends "
+            "with an error row; default read_timeout",
+        ),
         # the door's key, when it wants one — absent = no Authorization header
         credentials_field(required=False),
     ],
@@ -265,7 +273,7 @@ def validate_meta(meta: dict, record: dict) -> str | None:
             and not _positive(meta[key], integer=True)
         ):
             return f"{key} must be a positive int"
-    for key in ("kv_ttl", "connect_timeout", "read_timeout"):
+    for key in ("kv_ttl", "connect_timeout", "read_timeout", "stream_idle_seconds"):
         if (
             key in meta
             and meta[key] is not None

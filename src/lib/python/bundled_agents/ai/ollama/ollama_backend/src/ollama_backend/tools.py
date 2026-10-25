@@ -18,7 +18,7 @@ system verbs.
 from __future__ import annotations
 
 from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
-from ai_core import caching
+from ai_core import ProviderError, caching, stream_idle_of
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 
@@ -46,6 +46,13 @@ RECORD_SCHEMA = schema(
         ),
         field("num_predict", "int", "a turn's output budget (tokens)"),
         field("think", "bool", "turn the model's thinking channel on or off"),
+        field(
+            "stream_idle_seconds",
+            "float",
+            "the read clock on the answer stream: seconds with no byte from the "
+            "server (headers included) before the turn is judged stalled and ends "
+            "with an error row; default 60",
+        ),
         # a door's key, when the server sits behind one — absent = no header
         credentials_field(required=False),
     ],
@@ -56,6 +63,10 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     """Refuse, AT THE WRITE, a record missing a required field or naming an enum
     value outside its set — every missing field named at once, from the schema.
     Then ai_core's caching refusal: this backend cannot do provider caching."""
+    try:
+        stream_idle_of(meta)
+    except ProviderError as err:
+        return str(err)
     return validate(RECORD_SCHEMA, NAME, meta, record) or caching.refusal(
         meta, record, NAME, False
     )
@@ -81,6 +92,7 @@ def make_provider(id, kernel):
         num_predict=int(num_predict) if num_predict else None,
         think=bool(think) if think is not None else None,
         key=key_reader(id, kernel, NAME, required=False),
+        stream_idle=stream_idle_of(rec),
     )
 
 

@@ -39,14 +39,16 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
-from ai_core.provider import ProviderError
+from ai_core.constants import STREAM_IDLE_SECONDS
+from ai_core.provider import ProviderError, stalled_error
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 from ai_core import caching as ai_caching
 
 #: The API version every request names.
 ANTHROPIC_VERSION = "2023-06-01"
-#: Seconds to reach the API. The stream itself has no read clock: the turn's one
-#: bound is ai_core's send timeout.
+#: Seconds to reach the API. The stream's read clock is the record's
+#: `stream_idle_seconds` (httpx's per-read timeout, headers included; the API's pings
+#: keep it alive through a silent thought).
 CONNECT_TIMEOUT = 15.0
 #: Below this a side call gets no thinking: the API needs budget_tokens >= 1024 and
 #: below max_tokens.
@@ -76,6 +78,29 @@ def saved_tokens(cache_read: int, cache_write: int) -> int:
 #: Models whose cache reads bill at 0.05x the input price; every other model reads at
 #: 0.1x. A dated id of one of these (`claude-sonnet-5-5-<date>`) matches too.
 CHEAP_READ_MODELS = ("claude-sonnet-5-5", "claude-opus-5-5")
+
+
+def budget_thinking_refused(model: str) -> bool:
+    """True for a model that rejects `thinking: {type: enabled, budget_tokens}`:
+    claude-<family>-N with N >= 5, or 4.7 and later."""
+    parts = model.split("-")
+    if (
+        len(parts) < 3
+        or parts[0] != "claude"
+        or not (parts[1].isascii() and parts[1].isalpha())
+    ):
+        return False
+    try:
+        major = int(parts[2])
+    except ValueError:
+        return False
+    if major >= 5:
+        return True
+    try:
+        minor = int(parts[3]) if len(parts) > 3 else None
+    except ValueError:
+        minor = None
+    return major == 4 and minor is not None and minor >= 7
 
 
 class CacheRates:
@@ -436,6 +461,8 @@ class AnthropicProvider:
         max_tokens: int,
         temperature: float | None = None,
         thinking_budget: int | None = None,
+        effort: str | None = None,
+        thinking_display: str | None = None,
         caching: str = ai_caching.DEFAULT_MODE,
         usage: Usage | None = None,
         base: Usage | None = None,
@@ -444,6 +471,7 @@ class AnthropicProvider:
         long_context_tokens: int | None = None,
         usage_log: str | None = None,
         agent_id: str = "",
+        stream_idle: float = STREAM_IDLE_SECONDS,
     ):
         self._endpoint = endpoint.rstrip("/")
         self._model = model
@@ -452,6 +480,8 @@ class AnthropicProvider:
         self._max_tokens = int(max_tokens)
         self._temperature = temperature
         self._thinking_budget = thinking_budget
+        self._effort = effort
+        self._thinking_display = thinking_display
         self._marks = ai_caching.marks(caching)
         # The agent's running counts; None = nothing is counted (a bare provider).
         self._usage = usage
@@ -466,6 +496,7 @@ class AnthropicProvider:
         # id written into each line.
         self._usage_log = usage_log
         self._agent_id = agent_id
+        self._stream_idle = stream_idle
 
     def _persist(self) -> None:
         """Rewrite the agent's usage.json with the running total: the base plus this
@@ -521,9 +552,14 @@ class AnthropicProvider:
             body["cache_control"] = dict(CACHE_CONTROL)
         if self._temperature is not None:
             body["temperature"] = self._temperature
-        # Thinking only where the bound leaves room for it and an answer after it.
+        if self._effort is not None:
+            body["output_config"] = {"effort": self._effort}
         budget = self._thinking_budget
-        if budget and THINKING_FLOOR <= budget < call_max:
+        if self._thinking_display is not None:
+            # adaptive thinking: its display is the mode, so a budget adds nothing
+            body["thinking"] = {"type": "adaptive", "display": self._thinking_display}
+        # Budgeted thinking only where the bound leaves room for it and an answer.
+        elif budget and THINKING_FLOOR <= budget < call_max:
             body["thinking"] = {"type": "enabled", "budget_tokens": int(budget)}
         return body
 
@@ -547,7 +583,7 @@ class AnthropicProvider:
         try:
             async with (
                 httpx.AsyncClient(
-                    timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT),
+                    timeout=httpx.Timeout(self._stream_idle, connect=CONNECT_TIMEOUT),
                     transport=self._transport,
                 ) as client,
                 client.stream(
@@ -657,6 +693,10 @@ class AnthropicProvider:
             raise ProviderError(
                 f"anthropic_backend: could not connect to {self._endpoint}",
                 transport=True,
+            ) from e
+        except httpx.ReadTimeout as e:
+            raise stalled_error(
+                "anthropic_backend", self._endpoint, self._stream_idle
             ) from e
         except (httpx.ReadError, httpx.RemoteProtocolError) as e:
             raise ProviderError(

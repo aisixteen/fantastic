@@ -678,6 +678,48 @@ async def _save_history(self_id: str, kernel, new_turns: list[dict]) -> None:
             _announce_row(self_id, kernel, stored)
 
 
+async def _store_failed_turn(
+    self_id: str, kernel, text: str, notice: bool, reason: str
+) -> str | None:
+    """A turn whose pass FAILED stores its own rows (#177): the incoming message and
+    an error row naming why, so the model reads the failure on its next turn and the
+    operator sees it in the history. Nothing the turn meant to send was dispatched.
+    Returns None when stored, else why the store refused; never raises."""
+    try:
+        in_id, in_parent = _row_ids_for_incoming(self_id, text, kernel)
+        await _save_history(
+            self_id,
+            kernel,
+            [
+                {
+                    "role": "user",
+                    "content": text,
+                    "id": in_id,
+                    "parent": in_parent,
+                    **({"kind": "notice"} if notice else {}),
+                },
+                {
+                    "role": "user",
+                    "kind": "error",
+                    "content": f"[turn failed] {reason}. No answer was stored, and "
+                    "nothing this turn meant to send was dispatched.",
+                    "id": _mint_row_id(self_id, kernel),
+                    "parent": in_id,
+                },
+            ],
+        )
+    except Exception as e:
+        return str(e)
+    return None
+
+
+def _with_store_outcome(message: str, stored_error: str | None) -> str:
+    """The failure a turn reports; when its error row could not be stored, it says so."""
+    if stored_error is None:
+        return message
+    return f"{message}; the turn's error row could not be stored: {stored_error}"
+
+
 async def _store_reply(self_id: str, kernel, pid, body: str) -> bool:
     """A reply too big to hand the model as a turn: kept IN RAM under its pid (never
     persisted); the model is handed its digest + `origin` line."""
@@ -3642,8 +3684,13 @@ def _make_send(cfg: Backend):
                         await asyncio.sleep(RETRY_BACKOFF_BASE * 2 ** (attempt - 1))
             except TimeoutError:
                 await _emit_status(kernel, id, client_id, "done", reason="timeout")
+                # The send ceiling ends the turn with an error row too (#177).
+                message = f"send: timeout after {SEND_TIMEOUT}s"
+                stored = await _store_failed_turn(
+                    id, kernel, text, bool(entry.get("notice")), message
+                )
                 reply = {
-                    "error": f"send: timeout after {SEND_TIMEOUT}s",
+                    "error": _with_store_outcome(message, stored),
                     "client_id": client_id,
                 }
             except MemoryStoreError as e:
@@ -3689,12 +3736,21 @@ def _make_send(cfg: Backend):
                 # `reason='error'` with only `str(e)` is undiagnosable from a
                 # transcript with no frame to name where.
                 traceback.print_exc()
+                # A FAILED PASS stores its own error row (#177): nothing ends
+                # silently. A refused record (the branches above) opened no pass.
+                message = str(e)
+                stored = await _store_failed_turn(
+                    id, kernel, text, bool(entry.get("notice")), message
+                )
+                if stored is not None:
+                    message = _with_store_outcome(message, stored)
+                    e.args = (message,)
                 await _emit_status(
-                    kernel, id, client_id, "done", reason="error", error=str(e)
+                    kernel, id, client_id, "done", reason="error", error=message
                 )
                 # ONE CHAIN PER AGENT (#227): a pass that raised is not routed — its
                 # chain ends here, and the held sends it took get its error.
-                _answer_held(answering, {"error": str(e)})
+                _answer_held(answering, {"error": message})
                 _chain_ended(kernel, id, system_prompt)
                 raise
             finally:

@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ai_core import build, on_cancel, required_meta  # noqa: F401 — the hooks
 from ai_core import on_delete as _core_on_delete
-from ai_core import caching
+from ai_core import ProviderError, caching, stream_idle_of
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 from kernel._refusal import BAD_ARG, refusal
@@ -35,6 +35,7 @@ from anthropic_backend import server
 from anthropic_backend.provider import (
     THINKING_FLOOR,
     USAGE_FILE,
+    budget_thinking_refused,
     Usage,
     write_usage_file,
 )
@@ -120,7 +121,22 @@ RECORD_SCHEMA = schema(
             "thinking_budget",
             "int",
             f"extended thinking per turn (tokens, at least {THINKING_FLOOR}, below "
-            "max_tokens); unset, no thinking is asked for",
+            "max_tokens); unset, no thinking is asked for — not for 4.7+ or 5.x "
+            "models: use thinking_display and effort",
+        ),
+        field(
+            "effort",
+            "enum",
+            "the model's effort per turn, sent as output_config.effort; unset, the "
+            "model's default",
+            enum=["low", "medium", "high", "xhigh", "max"],
+        ),
+        field(
+            "thinking_display",
+            "enum",
+            "adaptive thinking with its text shown (summarized) or hidden (omitted); "
+            "unset, the API default — set summarized so long thinking streams",
+            enum=["summarized", "omitted"],
         ),
         field(
             "price_input_per_mtok",
@@ -172,6 +188,13 @@ RECORD_SCHEMA = schema(
             "str",
             "a file every request appends one JSON usage line to",
         ),
+        field(
+            "stream_idle_seconds",
+            "float",
+            "the read clock on the answer stream: seconds with no byte from the API "
+            "(headers included) before the turn is judged stalled and ends with an "
+            "error row; default 60",
+        ),
         # the API key — optional on the record: absent, no key header goes out
         credentials_field(required=False),
     ],
@@ -215,6 +238,19 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     u = meta.get("usage_log")
     if u is not None and not (isinstance(u, str) and u):
         return "usage_log must be a non-empty string"
+    try:
+        stream_idle_of(meta)
+    except ProviderError as err:
+        return str(err)
+    e = meta.get("effort")
+    if e is not None and e not in ("low", "medium", "high", "xhigh", "max"):
+        return "effort must be one of low, medium, high, xhigh, max"
+    d = meta.get("thinking_display")
+    if d is not None and d not in ("summarized", "omitted"):
+        return "thinking_display must be summarized or omitted"
+    has_budget = merged.get("thinking_budget") is not None
+    if merged.get("thinking_display") is not None and has_budget:
+        return "thinking_display and thinking_budget are two thinking modes — set one"
     budget, mx = merged.get("thinking_budget"), merged.get("max_tokens")
     if _positive_int(budget):
         if budget < THINKING_FLOOR:
@@ -224,6 +260,13 @@ def validate_meta(meta: dict, record: dict) -> str | None:
                 f"thinking_budget={budget} is not below max_tokens={mx} — the API "
                 "refuses it; keep it below max_tokens"
             )
+    model = str(merged.get("model") or "")
+    if has_budget and budget_thinking_refused(model):
+        return (
+            f"thinking_budget is refused by {model} (4.7+ and 5.x models use "
+            "adaptive thinking) — set thinking_display (summarized|omitted) and "
+            "effort instead"
+        )
     endpoint = str(merged.get("endpoint") or "").strip()
     left = server.missing(merged)
     if endpoint and left and server.models_url(endpoint) is None:
@@ -259,6 +302,8 @@ def make_provider(id, kernel):
         max_tokens=_required_int(rec, "max_tokens"),
         temperature=float(t) if t is not None else None,
         thinking_budget=rec.get("thinking_budget") or None,
+        effort=rec.get("effort"),
+        thinking_display=rec.get("thinking_display"),
         caching=caching.mode_of(rec),
         usage=usage_of(id),
         base=base_of(id, kernel),
@@ -268,6 +313,7 @@ def make_provider(id, kernel):
         else None,
         usage_log=rec.get("usage_log") or None,
         agent_id=id,
+        stream_idle=stream_idle_of(rec),
     )
 
 

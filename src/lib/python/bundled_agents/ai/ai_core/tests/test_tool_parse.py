@@ -321,3 +321,24 @@ def test_item_beside_other_tags_is_a_field():
         "type": "buy",
         "item": "rocket",
     }
+
+
+_SEND_AND_AWAIT = (
+    '<call name="send"><target_id>exec</target_id><type>tail</type>'
+    "<text>go</text></call>\n"
+    '<call name="await"></call>\n'
+)
+
+
+def test_a_trailing_fence_and_a_leading_invoke_fragment_leave_calls_dispatchable():
+    from ai_core import call_check
+
+    for text in (
+        _SEND_AND_AWAIT + "```\n",
+        '<invoke name="x"></invoke>\n' + _SEND_AND_AWAIT.rstrip("\n"),
+        '<invoke name="x"></invoke>\n' + _SEND_AND_AWAIT + "```\n",
+    ):
+        calls = extract_tool_calls(text)
+        assert [c["name"] for c in calls] == ["send", "await"], calls
+        assert malformed_calls(text) == []
+        assert call_check.check(text, ran=2) == []
