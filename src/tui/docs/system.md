@@ -1,4 +1,4 @@
-> The machine's basics as agents (Linux, `fantastic [canvas] system`): `power` so far — battery and lid over UPower, power off / reboot / suspend / hibernate over logind — and the system canvas fantastic OS runs them in.
+> The machine's basics as agents (Linux, `fantastic [canvas] system`): `power` and `audio` so far — battery and lid over UPower, power off / reboot / suspend / hibernate over logind; PipeWire's sinks and sources, their volume, mute and default, over `pw-dump` and `wpctl` — and the system canvas fantastic OS runs them in.
 
 # The system agents
 
@@ -6,7 +6,7 @@
 missing (and resets their views on every start that names it). An AI calls them
 like any other agent: `reflect`, `state`, then their verbs. Each has an html
 view, a canvas cell: add one from the canvas's action popup, a tile per agent
-(`power`).
+(`power`, `audio`).
 
 The word is refused off Linux: "`system` needs Linux with D-Bus: the system
 agents are fantastic OS's". Alone (`fantastic system`) the terminal UI opens on
@@ -18,7 +18,7 @@ missing the agent still exists: `reflect` and `state` say `available: false`
 with a `why`, and its other verbs are refused with the reason `unavailable`.
 A refusal is `{error, reason}`; the reasons here are `denied` (the OS asked for
 authentication), `unsupported` (the machine cannot), `unavailable` (no
-service), `failed`.
+service), `failed`, and for a verb's arguments `bad_arg` and `not_found`.
 
 Every agent emits `{type: "state", state}` to its watchers after each change of
 its state: at most one per 100 ms, the latest.
@@ -46,6 +46,52 @@ verb is refused unless its `can` is `yes`: `challenge` is `denied` ("needs
 authentication — is the polkit rule installed?"), `no` and `na` are
 `unsupported`. The reply of a verb is the state. Calls are never interactive:
 there is no polkit agent, so on fantastic OS a rule grants them (below).
+
+## audio (`audio.tools`, id `audio`)
+
+OS needs: PipeWire with WirePlumber in the user's session, its socket at
+`$XDG_RUNTIME_DIR/pipewire-0`, and its tools on `$PATH`: `pw-dump` (reads every
+object as JSON; `pw-dump --monitor` follows the changes) and `wpctl` (acts).
+Without `wpctl`, `why` is "wpctl is not installed"; without `pw-dump`, "pw-dump
+is not installed"; a PipeWire that does not answer is `why` with `pw-dump`'s
+error.
+
+```json
+{"available": true,
+ "sinks": [{"id": 52, "name": "alsa_output.pci-0000_00_1b.0.analog-stereo",
+            "description": "Built-in Audio Analog Stereo", "volume": 0.4, "muted": false, "default": true}],
+ "sources": [{"id": 54, "name": "alsa_input.pci-0000_00_1b.0.analog-stereo",
+              "description": "alsa_input.pci-0000_00_1b.0.analog-stereo", "volume": 0.5, "muted": false, "default": true}]}
+```
+
+- `sinks` are the `Audio/Sink` nodes, `sources` the `Audio/Source` ones, each by
+  `id` (PipeWire's object id, what `wpctl` takes). Other nodes are not listed.
+- `description` is `node.description`, else `node.nick`, else `name`
+  (`node.name`).
+- `volume` is what `wpctl get-volume` shows: the cube root of the mean of the
+  node's channel volumes, two places; 1.0 is 100 %.
+- `default` is the node the `default` metadata names (`default.audio.sink`,
+  `default.audio.source`).
+- The state follows `pw-dump --monitor`: a change made elsewhere (another app,
+  `wpctl` in a terminal) reaches the watchers too.
+
+Verbs: `reflect`, `state`, then
+
+- `set_volume {volume, id?}`: `wpctl set-volume <id> <volume> -l 1.5`. The
+  volume is clamped to 0.0..1.5. Without `id`, the default sink. Refused:
+  `bad_arg` (no number), `not_found` (no such sink or source, or no default
+  sink).
+- `set_mute {muted, id?}`: `wpctl set-mute <id> 1|0`. Without `id`, the default
+  sink. Refused: `bad_arg` (no `muted`), `not_found`.
+- `set_default {id}`: `wpctl set-default <id>`. Refused: `bad_arg` (no `id`),
+  `not_found`.
+
+Any of them is `unavailable` while the state is (`<verb>: <why>`), and `failed`
+with `wpctl`'s error when it exits non-zero. The reply of a verb is the state.
+
+The parser's tests read a hand-written `pw-dump` fixture
+(`crates/fantastic-system/tests/fixtures/pw_dump.json`) in pw-dump's shape,
+until one recorded in the fantastic OS guest replaces it.
 
 ## The system canvas on fantastic OS
 
