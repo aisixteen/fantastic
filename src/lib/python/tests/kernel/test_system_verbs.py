@@ -10,7 +10,7 @@ these stay in-memory and assert the live-tree + event behavior.
 from __future__ import annotations
 
 
-async def test_reflect_returns_uniform_identity(seeded_kernel):
+async def test_root_with_handler_reflects_identity(seeded_kernel):
     """Root reflect returns the uniform substrate identity + tree (default
     all), even though the root now carries the `kernel_state` handler_module.
     Transports/wire docs moved to the root readme; the bundle catalog is
@@ -37,7 +37,7 @@ async def test_reflect_returns_uniform_identity(seeded_kernel):
     assert any(b["name"] == "file_bridge" for b in catalog["bundles"])
 
 
-async def test_list_agents(seeded_kernel):
+async def test_list_agents_returns_records_for_every_registered(seeded_kernel):
     r = (
         await seeded_kernel.send(
             [{"target": "kernel_state", "payload": {"type": "list_agents"}}]
@@ -204,7 +204,7 @@ async def test_delete_agent_emits_event(seeded_kernel):
     assert any(e["type"] == "agent_deleted" for e in events)
 
 
-async def test_delete_agent_runs_on_delete_hook(seeded_kernel):
+async def test_create_then_delete_unregisters_and_calls_hook(seeded_kernel):
     """delete_agent runs each agent's `on_delete` hook depth-first BEFORE
     detaching the record from `ctx.agents` + the parent's `_children`.
     The hook tears down bundle process-memory state; disk cleanup is the

@@ -164,7 +164,7 @@ def _expected_field(name, type_, required, default, enum) -> list:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_each_backend_schema_is_exact(backend):
+def test_a_schema_is_the_backend_fields_then_the_ai_fields(backend):
     own = SCHEMAS[backend]
     sch = _tools(backend).RECORD_SCHEMA
     # no `key_var`: a key is never read from the environment — a backend that
@@ -192,6 +192,10 @@ async def test_the_catalog_serves_each_backend_schema_verbatim(seeded_kernel):
     for backend in BACKENDS:
         assert by[backend]["schema"] == _tools(backend).RECORD_SCHEMA, backend
         assert by[backend]["handler_module"] == f"{backend}.tools"
+# twin: a_required_field_with_a_default_cannot_ship
+# twin: enum_values_need_the_enum_type
+# twin: a_backend_field_replaces_the_shared_one_of_its_name
+# twin: a_backend_field_named_twice_is_refused
 
 
 def test_the_schema_builders_refuse_malformed_fields():
@@ -229,7 +233,7 @@ def test_the_schema_builders_refuse_malformed_fields():
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_validate_meta_names_every_missing_required_field(backend):
+def test_every_missing_field_is_named_with_its_hint(backend):
     own = SCHEMAS[backend]
     required = [n for (n, _t, req, _d, _e) in own + _tail(backend) if req]
     err = _tools(backend).validate_meta({}, {})
@@ -269,7 +273,7 @@ def test_validate_meta_judges_the_merged_record(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_an_enum_outside_its_set_is_refused_with_the_generic_text(backend):
+def test_an_enum_value_outside_its_set_is_refused_in_pythons_words(backend):
     err = _tools(backend).validate_meta({"context_strategy": "zip"}, {})
     assert err == (
         "context_strategy='zip' is not one of the legal values: "

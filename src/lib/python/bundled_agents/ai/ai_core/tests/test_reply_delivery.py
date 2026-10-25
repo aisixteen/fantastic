@@ -83,7 +83,7 @@ async def _settle(k: _Kernel, want: int, timeout: float = 2.0) -> None:
         await asyncio.sleep(0.005)
 
 
-async def test_a_turn_of_four_calls_is_answered_in_one_message():
+async def test_a_batch_of_calls_without_reply_to_all_come_back():
     """Four calls out → ONE delivered message holding four tagged blocks, in
     the model's own emission order."""
     k = _Kernel()
@@ -137,7 +137,7 @@ async def test_fire_and_forget_still_dispatches_but_is_not_counted():
     assert "in batch" not in body, "one awaited call -> no batch suffix"
 
 
-async def test_the_layer_default_timeout_rides_every_item():
+async def test_every_model_call_carries_the_layer_default_timeout():
     """The AI layer ALWAYS supplies a per-call deadline (the kernel defaults
     nothing), and the model's own `timeout` arg overrides it for that call."""
     seen: list[tuple[str, object]] = []
@@ -238,7 +238,7 @@ async def test_the_models_exec_id_rides_the_item_as_its_id():
     assert k.items[0]["payload"] == {"type": "withdraw"}
 
 
-async def test_to_fans_out_one_copy_per_recipient_carrying_the_list_and_msg():
+async def test_a_to_list_fans_out_one_copy_per_recipient_carrying_the_list():
     """`<to>` becomes N kernel items; every copy carries the whole list, the sending
     turn's id (`msg`) and the answered message (`re`)."""
 

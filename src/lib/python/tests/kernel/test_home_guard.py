@@ -15,7 +15,7 @@ from kernel._home import refuse_home_as_state_dir
 PY = Path(__file__).resolve().parents[2]
 
 
-def test_the_rule_refuses_the_home_and_nothing_else(monkeypatch, tmp_path):
+def test_the_guard_refuses_a_state_dir_that_is_the_home(monkeypatch, tmp_path):
     home = tmp_path / ".fantastic"
     monkeypatch.setenv("FANTASTIC_HOME", str(home))
     with pytest.raises(SystemExit) as e:
@@ -40,7 +40,7 @@ def test_the_default_home_is_dot_fantastic_in_the_users_home(monkeypatch, tmp_pa
         refuse_home_as_state_dir(tmp_path, tmp_path / ".fantastic")
 
 
-def test_a_cli_run_in_the_homes_parent_is_refused_and_writes_nothing(tmp_path):
+def test_a_kernel_booted_in_the_homes_parent_is_refused(tmp_path):
     home = tmp_path / ".fantastic"
     env = {**os.environ, "FANTASTIC_HOME": str(home)}
     p = subprocess.run(

@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from ai_core import core, folds
 from _fake import FakeCtx
 
@@ -71,7 +69,7 @@ async def _fold(k, payload, cfg=None):
 # ── the default range and the verb's shape ──────────────────────────
 
 
-async def test_default_range_is_the_rows_after_the_last_clear(fake_providers):
+async def test_the_default_range_is_the_rows_after_the_last_clear(fake_providers):
     k = _k()
     _turns(k, ["old one", "old two"])
     clear = await core._context_clear("ai", {"why": "next task"}, k)
@@ -95,7 +93,7 @@ async def test_default_range_is_the_rows_after_the_last_clear(fake_providers):
     assert len(msgs) == 4, f"system, clear, fold, the next turn: {msgs}"
 
 
-async def test_explicit_middle_range_leaves_the_rows_around_it_in_place(fake_providers):
+async def test_an_explicit_middle_range_leaves_the_rows_around_it_in_place(fake_providers):
     k = _k()
     ids = _turns(k, ["a", "b", "c"])
     before = await _messages(k)
@@ -126,7 +124,7 @@ async def test_explicit_middle_range_leaves_the_rows_around_it_in_place(fake_pro
 # ── summaries ───────────────────────────────────────────────────────
 
 
-async def test_given_summary_is_verbatim_with_no_provider_call(fake_providers):
+async def test_a_given_summary_is_used_verbatim_with_no_provider_call(fake_providers):
     k = _k()
     ids = _turns(k, ["x", "y"])
     prov = fake_providers["ai"] = _Summ()
@@ -143,6 +141,9 @@ async def test_given_summary_is_verbatim_with_no_provider_call(fake_providers):
     assert fold["content"] == (
         f'[fold {fid} · 4 refs · L1] "Verbatim title"\n{summary}'
     )
+# twin: an_absent_summary_calls_the_summarizer_once
+# twin: a_summarizer_that_gives_nothing_folds_the_titles_and_says_so
+# twin: an_empty_summary_degrades_to_titles
 
 
 async def test_absent_summary_calls_summarizer_once_and_empty_summary_degrades(
@@ -177,6 +178,10 @@ async def test_absent_summary_calls_summarizer_once_and_empty_summary_degrades(
 
 
 # ── refusals: each names the arg ────────────────────────────────────
+# twin: a_range_refuses_an_empty_range_and_an_id_outside_the_view
+# twin: a_range_refuses_to_cross_a_fold_or_a_clear
+# twin: a_default_range_after_a_fold_that_ends_the_view_is_empty
+# twin: a_bad_argument_is_refused_by_name
 
 
 async def test_range_refusals_name_the_arg(fake_providers):
@@ -247,7 +252,7 @@ async def test_range_refusals_name_the_arg(fake_providers):
 # ── a turn running for the agent ────────────────────────────────────
 
 
-async def test_running_turn_refuses_with_locked(fake_providers):
+async def test_a_turn_running_for_the_agent_refuses_the_fold(fake_providers):
     k = _k()
     _turns(k, ["x"])
     lock = core._lock_for("ai")
@@ -261,6 +266,8 @@ async def test_running_turn_refuses_with_locked(fake_providers):
 
 
 # ── history and grep reach the members ──────────────────────────────
+# twin: history_fold_returns_the_members_of_an_operator_fold
+# twin: grep_reaches_the_rows_an_operator_fold_hides
 
 
 async def test_history_fold_and_grep_reach_members(fake_providers):
@@ -298,11 +305,6 @@ async def test_a_view_array_naming_a_missing_row_is_no_view(fake_providers):
     assert _fold_row(k, out["folded"])["refs"] == ids
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Python re-renders the prefix untrimmed after a fold; keeping the trimmed "
-    "bytes needs a view-entry field the issue does not name. Rust is the spec.",
-)
 async def test_the_prefix_keeps_the_trimmed_bytes_the_model_saw_before_the_fold(
     fake_providers,
 ):
@@ -350,3 +352,40 @@ async def test_the_prefix_keeps_the_trimmed_bytes_the_model_saw_before_the_fold(
         "the rows after the range are byte-identical"
     )
     assert superseded not in await _view_ids(k), "a dropped row stays out of the view"
+
+
+async def test_a_kept_view_entry_carries_the_trimmed_body_only_when_a_trimmer_changed_it(
+    fake_providers,
+):
+    k = _k()
+    long = "the same long reply body, repeated word for word. " * 10
+    _put(k, "user", f"[reply to 3 · notes read]\n{long}")
+    _put(k, "assistant", "read it")
+    repeat = _put(k, "user", f"[reply to 4 · notes read]\n{long}")
+    _put(k, "assistant", "and again")
+    ids = [_put(k, "user", "question"), _put(k, "assistant", "answer")]
+    plain = _put(k, "user", "after")
+
+    out = await _fold(k, {"from": ids[0], "to": ids[1], "summary": "folded"})
+
+    entries = {e["id"]: e for e in (await core._load_view("ai", k))["ids"]}
+    assert "[identical to the reply in row" in entries[repeat]["content"], entries
+    assert "content" not in entries[plain], entries
+    assert entries[out["folded"]] == {"id": out["folded"], "res": "fold"}, entries
+
+
+async def test_a_trimmed_body_on_a_view_entry_is_ignored_when_caching_is_not_cleanup(
+    fake_providers,
+):
+    k = _k()
+    a = _put(k, "user", "original body")
+    await core._save_view(
+        "ai", k, [{"id": a, "res": "full", "content": "X"}], budget_=1000, why="test"
+    )
+    hist = await core._load_history("ai", k)
+    view = await core._load_view("ai", k)
+
+    off = core._render_history(hist, view, False)
+    assert off[0][2] == hist[0], off
+    on = core._render_history(hist, view, True)
+    assert on[0][2]["content"] == "X", on

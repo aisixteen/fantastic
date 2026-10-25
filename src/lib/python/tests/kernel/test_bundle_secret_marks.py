@@ -58,7 +58,7 @@ async def _mk(kernel) -> str:
     return out[0]["result"]["id"]
 
 
-async def test_set_value_is_secret_in_the_call_row_and_ledger(seeded_kernel):
+async def test_a_bundle_names_its_own_secret_paths(seeded_kernel):
     aid = await _mk(seeded_kernel)
     out = (
         await seeded_kernel.send(

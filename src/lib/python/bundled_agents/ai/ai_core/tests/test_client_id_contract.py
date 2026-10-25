@@ -53,7 +53,7 @@ def test_everything_else_becomes_underscore_silently():
         assert _safe_client(raw) == want, raw
 
 
-def test_unicode_alphanumerics_survive_isalnum_is_unicode_aware():
+def test_safe_client_strips_python_whitespace():
     """The alphabet is UNICODE alnum, not ASCII — `тест` and `日本語` pass
     through verbatim. A consumer wanting ASCII-only must enforce it itself."""
     assert _safe_client("тест") == "тест"

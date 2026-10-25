@@ -23,7 +23,7 @@ def _dead_port() -> int:
     return port
 
 
-async def test_ws_boot_fails_cleanly_on_an_unreachable_host(seeded_kernel):
+async def test_ws_boot_fails_cleanly_on_unreachable_host(seeded_kernel):
     k = seeded_kernel
     # Rust dials TEST-NET-1 192.0.2.1:9; a refused loopback port is the
     # deterministic equivalent here.
@@ -65,7 +65,7 @@ async def test_ws_boot_fails_cleanly_on_an_unreachable_host(seeded_kernel):
         _engine._bridges.pop(leg, None)
 
 
-async def test_reconnect_emits_bridge_down_then_bridge_up(seeded_kernel):
+async def test_reconnect_calls_shutdown_then_boot(seeded_kernel):
     k = seeded_kernel
     bid = (
         await k.send(

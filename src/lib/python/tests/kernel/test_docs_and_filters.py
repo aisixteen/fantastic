@@ -23,7 +23,7 @@ async def _docs(k, **args) -> dict:
 # ─── the oneliner rule ─────────────────────────────────────────
 
 
-def test_signature_cuts_at_the_first_top_level_period_or_dash():
+def test_docs_signatures_are_pythons():
     assert signature("args: a:int. Does a thing.") == "args: a:int"
     assert signature("args: a:int — does a thing") == "args: a:int"
     # never inside brackets: an arg note keeps its own dash and period

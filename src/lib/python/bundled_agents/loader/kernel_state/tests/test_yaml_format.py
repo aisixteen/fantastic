@@ -66,16 +66,16 @@ def _check(name: str, got: str) -> None:
     assert got == path.read_text(encoding="utf-8"), f"{name} drifted"
 
 
-def test_record_matches_the_fixture_bytes():
+def test_persisted_record_bytes_are_python_yaml_dump():
     _check("agent.yaml", yaml_io.dump(RECORD))
 
 
-def test_load_then_dump_is_the_identity_on_the_fixture():
+def test_load_then_dump_is_the_identity_on_the_record_fixture():
     text = (FIX / "agent.yaml").read_text(encoding="utf-8")
     assert yaml_io.dump(yaml_io.load(text)) == text
 
 
-def test_record_round_trips_type_stable_and_byte_stable(tmp_path, monkeypatch):
+def test_a_record_round_trips_type_stable_key_ordered_and_byte_stable(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     d = Path(".fantastic")
     d.mkdir()

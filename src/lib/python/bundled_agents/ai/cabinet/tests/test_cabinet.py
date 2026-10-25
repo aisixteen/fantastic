@@ -230,7 +230,7 @@ def worker_of(k, cab: str) -> str:
 # ─── wiring ──────────────────────────────────────────────────────
 
 
-async def test_open_wires_every_worker_to_every_peer_and_the_master(world):
+async def test_each_cabinets_canvas_is_a_child_of_the_canvas_that_spawns_it(world):
     k = world
     names = ["alpha", "beta", "gamma"]
     cabs = []
@@ -367,7 +367,7 @@ async def test_the_ceiling_refuses_loudly_and_makes_nothing(world):
 # ─── peer messages and equipment ─────────────────────────────────
 
 
-async def test_a_worker_messages_a_peer_and_the_peer_model_receives_it(
+async def test_a_worker_messages_a_peer_and_the_peer_receives_it(
     world, fake_providers
 ):
     k = world
@@ -604,7 +604,7 @@ async def test_a_worker_with_a_credential_store_is_wired_to_read_it(world):
     assert k.get(w)["credentials"] == {"store": "keys", "ref": "api"}
 
 
-async def test_a_wiring_failure_removes_the_half_made_cabinet(world):
+async def test_a_wiring_failure_removes_the_half_made_cabinet_and_its_canvas(world):
     k = world
     # a cabinet whose worker does not exist: wiring the new worker to it must fail
     await k.send(
@@ -631,7 +631,7 @@ async def test_a_wiring_failure_removes_the_half_made_cabinet(world):
     assert set(k.ctx.agents) == before
 
 
-async def test_a_worker_that_cannot_be_created_removes_its_cabinet(world):
+async def test_a_worker_that_cannot_be_created_removes_its_cabinet_and_its_canvas(world):
     k = world
     # a squatter already holds the id the new worker needs
     await k.send(
@@ -714,7 +714,7 @@ async def test_each_cabinet_is_a_live_html_panel_of_its_own_id(world):
     assert set(view["calls"]) == {"view", "watch"}
 
 
-async def test_the_status_cell_opens_its_own_canvas(world):
+async def test_the_status_cell_names_its_canvas_and_opens_it(world):
     """The cell's button opens the cabinet's canvas: the view names it, and the cell's
     script hands that id to the page (`fantastic.openCanvas`), never a guessed URL."""
     k = world
@@ -808,7 +808,7 @@ async def test_three_opens_in_one_batch_keep_every_grant(world):
 # ─── equipment: placed on the cabinet's canvas, granted inside it ───
 
 
-async def test_a_worker_places_equipment_on_its_own_canvas_only(world):
+async def test_a_worker_creates_equipment_on_its_own_canvas_only(world):
     k = world
     cab_a = (await open_cabinet(k, "a", name="a"))["id"]
     cab_b = (await open_cabinet(k, "b", name="b"))["id"]

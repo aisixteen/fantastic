@@ -172,6 +172,8 @@ def test_a_web_ws_custom_verb_text_call_gets_a_binary_reply_frame(one):
         ),
     ],
 )
+# twin: e_web_ws_carries_bytes_at_a_nested_key
+# twin: e_web_ws_carries_bytes_inside_a_list
 def test_e_web_ws_carries_bytes_at_any_depth(one, verb, data, path):
     with one.websocket_connect("/kernel_state/ws") as ws:
         msg = _ws_call(ws, "n1", {"type": verb})
@@ -211,6 +213,8 @@ def test_b_web_rest_custom_verb_json_call_gets_an_octet_reply(one):
     assert r.json() == {"seq": 3}
 
 
+# twin: e_web_rest_bytes_at_a_nested_key_have_no_rest_form
+# twin: e_web_rest_bytes_inside_a_list_have_no_rest_form
 @pytest.mark.parametrize("verb", ["nested", "listed"])
 def test_e_web_rest_bytes_below_the_top_level_have_no_rest_form(one, verb):
     """The octet reply names ONE top-level field (`X-Fantastic-Bytes-Field` is a

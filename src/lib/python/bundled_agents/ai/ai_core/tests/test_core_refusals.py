@@ -76,7 +76,7 @@ async def _call(k, target, payload, as_=None) -> dict:
 # ─── send ────────────────────────────────────────────────────────────────────
 
 
-async def test_send_refuses_a_cycle_and_an_over_deep_chain(seeded_kernel):
+async def test_check_reports_the_chain_and_never_mutates(seeded_kernel):
     k = seeded_kernel
     _ai(k, "kp_s", _Script())
     r = await _call(
@@ -143,6 +143,9 @@ async def test_a_turn_over_the_send_timeout(seeded_kernel, monkeypatch):
     _ai(k, "kp_to", _Script(["late"], hold=5))
     r = await _call(k, "kp_to", {"type": "send", "text": "x"})
     assert r == {"error": "send: timeout after 0.05s", "client_id": "cli"}
+# twin: unknown_type_is_pythons_repr_and_shutdown_is_unknown
+# twin: unknown_type_wire_shape_is_byte_exact
+# twin: unknown_type_wire_shape_is_byte_exact
 
 
 async def test_an_unknown_verb_names_the_backend(seeded_kernel):
@@ -158,7 +161,7 @@ async def test_an_unknown_verb_names_the_backend(seeded_kernel):
 # ─── inquiry ─────────────────────────────────────────────────────────────────
 
 
-async def test_inquiry_texts(seeded_kernel, fake_providers):
+async def test_inquiry_turn_text_uses_python_str_and_json_dumps(seeded_kernel, fake_providers):
     """`inquiry` on an AI is ACCEPTED at once (fully async) and
     runs as its own turn, the question under a head naming who asked and the pid;
     the answer — given in any later turn — is covered in `test_inquiry_async.py`.

@@ -17,7 +17,7 @@ from file_bridge import _sys, fs
 # ─── clamped surface (the running-dir law) ──────────────────────
 
 
-def test_clamped_round_trip(tmp_path):
+def test_resolve_keeps_subpath(tmp_path):
     R = fs.Root(tmp_path, ".fantastic")
     fs.write_text(R, "a/b.txt", "hi")
     assert fs.read_text(R, "a/b.txt") == "hi"
@@ -48,7 +48,7 @@ def test_clamped_root_escape_refuses(tmp_path):
         fs.read_text(fs.Root(tmp_path, str(tmp_path.parent)), "anything.txt")
 
 
-def test_clamped_path_escape_refuses(tmp_path):
+def test_resolve_refuses_escape(tmp_path):
     with pytest.raises(ValueError):
         fs.resolve(fs.Root(tmp_path, ".fantastic"), "../../etc/passwd")
 
@@ -62,7 +62,7 @@ def test_atomic_write_is_default(tmp_path):
 
 
 @pytest.mark.parametrize("mode", [None, 0o600])
-def test_atomic_write_never_follows_a_planted_tmp_link(tmp_path, mode):
+def test_an_atomic_write_never_follows_a_planted_tmp_link(tmp_path, mode):
     """A symlink at `<name>.tmp` pointing outside the root is never written
     through: each write stages in a fresh, exclusively created tmp."""
     outside = tmp_path / "outside.txt"
@@ -116,7 +116,7 @@ def test_external_remove_recursive(tmp_path):
 # ─── symlinks are names, not their targets ──────────────────────
 
 
-def test_remove_unlinks_a_symlink_not_its_target(tmp_path, monkeypatch):
+def test_delete_on_symlink_removes_the_link_only(tmp_path, monkeypatch):
     """`remove` never `resolve()`s first — which FOLLOWS the link — so
     `delete link` (link -> data/) never rmtree's the real `data/` and leaves the link."""
     import os
@@ -146,7 +146,7 @@ def test_dangling_symlink_is_deletable(tmp_path, monkeypatch):
     assert not (tmp_path / "root" / "dangling").is_symlink()
 
 
-def test_absolute_path_refuses_not_re_roots(tmp_path, monkeypatch):
+def test_resolve_refuses_absolute_path(tmp_path, monkeypatch):
     R = fs.Root(tmp_path, "root")
     fs.write_text(R, "x.txt", "x")
     with pytest.raises(ValueError):
@@ -178,7 +178,7 @@ def test_read_private_judges_the_open_descriptor_it_reads(tmp_path):
 
 
 @posix_only("a FIFO does not exist on Windows")
-def test_read_private_refuses_a_fifo_without_hanging(tmp_path):
+def test_read_private_refuses_a_fifo(tmp_path):
     import os
 
     os.mkfifo(tmp_path / "pipe")
@@ -186,7 +186,7 @@ def test_read_private_refuses_a_fifo_without_hanging(tmp_path):
         fs.read_private(tmp_path, "pipe", external=True)
 
 
-def test_a_private_write_is_private_from_its_create(tmp_path):
+def test_an_atomic_write_with_a_mode_creates_exactly_those_bits(tmp_path):
     """`mode=0o600` makes the file private on the create itself — `read_private`
     takes it as written."""
     fs.write_bytes(str(tmp_path), "w.yaml", b"x: 1\n", external=True, mode=0o600)
@@ -209,7 +209,7 @@ def _tmps(d):
     return [p.name for p in d.iterdir() if ".tmp." in p.name]
 
 
-def test_replace_retries_transient_denial_then_succeeds(tmp_path, monkeypatch):
+def test_rename_retries_transient_denial_then_succeeds(tmp_path, monkeypatch):
     R = fs.Root(tmp_path, "root")
     monkeypatch.setattr(fs.time, "sleep", lambda s: None)
     real = os.replace
@@ -228,7 +228,7 @@ def test_replace_retries_transient_denial_then_succeeds(tmp_path, monkeypatch):
     assert _tmps(tmp_path / "root") == []
 
 
-def test_replace_gives_up_after_bounded_tries(tmp_path, monkeypatch):
+def test_rename_gives_up_after_bounded_tries(tmp_path, monkeypatch):
     R = fs.Root(tmp_path, "root")
     monkeypatch.setattr(fs.time, "sleep", lambda s: None)
     calls = []
@@ -245,7 +245,7 @@ def test_replace_gives_up_after_bounded_tries(tmp_path, monkeypatch):
     assert not (tmp_path / "root" / "f.txt").exists()
 
 
-def test_replace_does_not_retry_other_errors(tmp_path, monkeypatch):
+def test_rename_does_not_retry_other_errors(tmp_path, monkeypatch):
     R = fs.Root(tmp_path, "root")
     monkeypatch.setattr(fs.time, "sleep", lambda s: None)
     calls = []
@@ -262,7 +262,7 @@ def test_replace_does_not_retry_other_errors(tmp_path, monkeypatch):
     assert _tmps(tmp_path / "root") == []
 
 
-def test_write_bytes_atomic_leaves_no_tmp_on_replace_failure(tmp_path, monkeypatch):
+def test_write_bytes_atomic_leaves_no_tmp_on_rename_failure(tmp_path, monkeypatch):
     R = fs.Root(tmp_path, "root")
     monkeypatch.setattr(fs.time, "sleep", lambda s: None)
     d = tmp_path / "root" / "f.txt"

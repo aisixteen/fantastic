@@ -71,7 +71,7 @@ async def test_an_item_that_is_not_a_dict(seeded_kernel):
     }
 
 
-async def test_a_missing_or_empty_target(seeded_kernel):
+async def test_empty_target_is_missing_arg(seeded_kernel):
     for target in (None, "", 7):
         r = _refused(
             await _one(seeded_kernel, {"target": target, "payload": {"type": "ps"}})
@@ -108,6 +108,8 @@ async def test_a_bad_timeout(seeded_kernel):
             "reason": "bad_arg",
             "arg": "timeout",
         }, t
+# twin: non_string_type_is_bad_arg
+# twin: a_body_sent_as_type_is_refused_by_its_type
 
 
 async def test_a_missing_and_a_bad_verb(seeded_kernel):
@@ -136,7 +138,7 @@ async def test_a_missing_and_a_bad_verb(seeded_kernel):
         }, verb
 
 
-async def test_bad_ids(seeded_kernel):
+async def test_empty_id_is_refused_bad_arg(seeded_kernel):
     item = {"target": "kernel", "payload": {"type": "ps"}}
     for bad in (True, 1.5, [1], {"a": 1}):
         r = _refused(await _one(seeded_kernel, {**item, "id": bad}))
@@ -178,7 +180,7 @@ async def test_bad_retries(seeded_kernel):
             }, (bad, named)
 
 
-async def test_an_id_bound_to_another_target_text(seeded_kernel):
+async def test_an_int_id_rebind_renders_bare_digits(seeded_kernel):
     k = seeded_kernel
     _mk(k, "first")
     _mk(k, "second")
@@ -318,7 +320,7 @@ async def test_a_named_join_is_gated_on_the_original_verb(seeded_kernel):
 # ─── the draining kernel ─────────────────────────────────────────────────────
 
 
-async def test_draining_refuses_new_roots_with_this_text(seeded_kernel):
+async def test_while_draining_shutdown_traffic_and_live_work_pass_and_new_roots_do_not(seeded_kernel):
     k = seeded_kernel
     _mk(k, "d1")
     k.ctx.draining = True
@@ -369,7 +371,7 @@ async def test_draining_lets_a_live_dispatch_send(seeded_kernel):
     assert isinstance(inner["pid"], int)
 
 
-async def test_draining_refuses_a_fork_but_admits_a_keepalive_one(seeded_kernel):
+async def test_while_draining_a_fork_is_refused_and_a_keepalive_fork_is_not(seeded_kernel):
     """A FORK (a ws call, a scheduler tick, a bridge read loop) starting a send
     while draining is new work: refused. A keepalive fork — a persister that must
     outlive the quiet phase — still sends."""

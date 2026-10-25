@@ -23,7 +23,7 @@ def test_default_children_dir_is_agents(kernel):
     assert p.name == "x" and p.parent.name == "agents"
 
 
-def test_custom_children_dir_round_trips(tmp_path, monkeypatch):
+def test_the_root_records_children_dir_places_the_whole_tree(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root_dir = tmp_path / ".fantastic"
     # seed a root that DECLARES children_dir = host_agents

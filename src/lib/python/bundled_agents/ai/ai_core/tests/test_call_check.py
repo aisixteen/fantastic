@@ -283,7 +283,7 @@ async def test_a_call_that_runs_resets_the_escalation(seeded_kernel, fake_provid
         fake_providers.pop(aid, None)
 
 
-async def test_the_good_calls_run_and_the_broken_one_comes_back_beside_them(
+async def test_a_broken_call_beside_a_good_one_is_still_reported(
     seeded_kernel, fake_providers
 ):
     good = '<call name="send"><target_id>kernel</target_id><type>reflect</type></call>'

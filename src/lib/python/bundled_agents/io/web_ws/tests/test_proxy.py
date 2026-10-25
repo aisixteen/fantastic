@@ -143,7 +143,7 @@ def _recv_until_reply(ws, call_id, max_frames=12):
     raise AssertionError(f"no reply for id={call_id} within {max_frames} frames")
 
 
-def test_ws_read_stream_cursor_round_trips(
+def test_binary_ws_frame_routes_like_a_text_call(
     client, seeded_kernel, tmp_path, monkeypatch
 ):
     """The stream CURSOR + RAW BYTES survive a REAL WS round-trip. The pointer is a
@@ -293,7 +293,7 @@ def _read_until_type(ws, ftype, max_frames=10):
         "bytes-too-deep",
     ],
 )
-def test_malformed_frame_answers_an_error_and_the_socket_survives(client, send, raw):
+def test_malformed_frames_answer_the_frame_error_and_keep_the_socket(client, send, raw):
     """Before this, `decode_frame`/`.get` raised out of the receive loop and the
     `finally` tore the whole connection down — cancelling every in-flight call on
     it (an LLM generation with them). Now the bad frame is answered and the next

@@ -1,6 +1,6 @@
 """Harness for the relay_connector e2e (`integration_tests/relay_e2e/`).
 
-Boots the relay-KERNEL (`relayd`, sibling repo `../fantastic_relay/relaykernel`)
+Boots the relay-KERNEL (our relay, `relayd`, found through the `RELAYD` env var)
 and skips cleanly (pytest.skip) when it isn't available — matching the
 integration-test convention. Two targets, like the rest of the suite:
 
@@ -37,10 +37,6 @@ from helpers.kernel_proc import KernelProc
 from helpers.launcher import CONTAINER_PEER_HOST, Launcher, as_launcher, resolve_engine
 from helpers.seeding import BASE, DRIVER, root_id, seed_create, seed_grant
 
-# integration_tests/relay_e2e/ → canvas repo root is two up; the relay is a sibling.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_RELAY_ROOT = _REPO_ROOT.parent / "fantastic_relay" / "relaykernel"
-
 _TARGET = os.environ.get("FANTASTIC_TARGET", "local").strip().lower()
 _RELAY_IMAGE = os.environ.get("RELAY_IMAGE", "relay:latest")
 _RELAY_CONTAINER_PORT = 9443  # the relay's in-image listen port (entrypoint default).
@@ -52,13 +48,11 @@ RELAY_PASSWORD = "hunter2"
 
 
 def _relayd() -> Path | None:
-    """Newest built `relayd` (release preferred by mtime), or None."""
-    candidates = [
-        _RELAY_ROOT / ".build" / "release" / "relayd",
-        _RELAY_ROOT / ".build" / "debug" / "relayd",
-    ]
-    existing = [c for c in candidates if c.exists()]
-    return max(existing, key=lambda p: p.stat().st_mtime) if existing else None
+    """The `relayd` binary named by the `RELAYD` env var, or None."""
+    path = os.environ.get("RELAYD", "").strip()
+    if path and Path(path).is_file():
+        return Path(path)
+    return None
 
 
 def require_relay() -> Path | None:
@@ -75,13 +69,15 @@ def require_relay() -> Path | None:
             != 0
         ):
             pytest.skip(
-                f"relay image {_RELAY_IMAGE!r} not built — run:\n"
-                "  sh ../fantastic_relay/relaykernel/container/build.sh"
+                f"relay image {_RELAY_IMAGE!r} not built — build our relay image "
+                "(relay:latest)"
             )
         return None
     binary = _relayd()
     if binary is None:
-        pytest.skip("relayd not built — run:\n  cd ../fantastic_relay/relaykernel && swift build")
+        pytest.skip(
+            "relayd not found — set RELAYD to the path of our relay (relayd) binary"
+        )
     return binary
 
 

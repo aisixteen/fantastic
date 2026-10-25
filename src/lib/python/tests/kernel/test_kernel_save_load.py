@@ -29,6 +29,8 @@ def test_load_builds_tree_in_memory():
     assert k.root is not None and k.root.id == "kernel_state"
     assert k.get("web")["port"] == 8888
     assert k.get("web")["parent_id"] == "kernel_state"
+# twin: in_memory_save_load_roundtrips
+# twin: save_json_is_byte_deterministic
 
 
 def test_save_load_roundtrip():
@@ -62,7 +64,7 @@ def test_save_load_roundtrip():
     assert k2.get("f")["parent_id"] == "web"
 
 
-def test_weak_load_skips_unknown_bundle_and_subtree():
+def test_load_weak_loads_unknown_handler_modules():
     k = Kernel()
     k.load(
         [
@@ -101,6 +103,9 @@ def test_save_skips_ephemeral():
     assert "eph1" in k.agents
     ids = {r["id"] for r in k.save()["records"]}
     assert ids == {"kernel_state"}  # the ephemeral child is excluded
+# twin: load_rejects_missing_root
+# twin: load_rejects_duplicate_ids
+# twin: load_rejects_future_version
 
 
 def test_validate_rejects_bad_snapshots():

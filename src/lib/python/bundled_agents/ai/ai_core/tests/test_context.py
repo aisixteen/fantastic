@@ -80,7 +80,7 @@ def test_estimate_scale_and_monotonic():
     assert estimate_tokens(_body(4)) > estimate_tokens(_body(2))
 
 
-def test_window_precedence():
+def test_context_estimate_and_budget():
     assert resolve_context_window({"context_window": 8000, "num_ctx": 2000}) == 8000
     assert resolve_context_window({"num_ctx": 2000}) == 2000
     assert resolve_context_window({}) == DEFAULT_CONTEXT_WINDOW
@@ -108,7 +108,7 @@ def test_budget_floor():
         (2.0, None),
     ],
 )
-def test_id_digit_strings_are_ascii_only(v, want):
+def test_id_and_window_digit_strings_are_ascii_only(v, want):
     # rust tests.rs `id_and_window_digit_strings_are_ascii_only`, same vectors.
     assert core._as_id(v) == want
 
@@ -161,7 +161,7 @@ async def test_compact_returns_projection_with_summary():
     assert not any("[Earlier conversation summary]" in m["content"] for m in proj.body)
 
 
-async def test_truncate_returns_projection_no_summarizer():
+async def test_truncate_returns_projection_no_summary():
     called = []
 
     async def spy(_msgs, max_tokens=None):
@@ -335,7 +335,7 @@ def _send_turn(target, payload):
     }
 
 
-async def test_recall_filters_paginates_and_caps(monkeypatch):
+async def test_recall_returns_the_turn_whole(monkeypatch):
     store = [
         _turn("user", "the project codename is HALCYON"),
         _turn("assistant", "noted"),
@@ -449,7 +449,7 @@ async def test_reaction_counts_the_file_bridge_text_verbs(monkeypatch):
         _compaction_mark.pop("ai", None)
 
 
-async def test_the_reaction_cursor_is_the_store_index_not_the_deduped_view(monkeypatch):
+async def test_the_compaction_cursor_is_the_store_length_not_the_view(monkeypatch):
     """The mark is an index into the DURABLE STORE, never into the model view.
 
     `_derive_reaction` slices the full store by `fired_at_index`, but the index used
@@ -566,7 +566,7 @@ async def test_every_strategy_keeps_the_goal_when_the_body_overflows():
 # Reflect replies can be a large share of the whole conversation. The body is kept for
 # exactly one turn — the turn the model reads it — and once the model has answered, it
 # is cut to a stub that KEEPS THE IDS it named.
-def test_a_reflect_reply_is_never_cut_from_the_view():
+def test_reflect_replies_carry_no_cut_notice():
     """A reflect is MUTABLE state: its body stays whole after
     the model answers it; only a newer reflect of the same agent supersedes it
     (`dedupe_stale_reads`). Only `docs` replies are cut."""
@@ -689,7 +689,7 @@ async def test_the_seam_keeps_the_goal_the_strategies_pinned(strategy, window):
 # `json.dumps`, so a list-valued field puts a bracket in nearly every one of them.
 #
 # Fixtures must use a body WITH a bracket; a bracket-free body ("\nbody") hides it.
-def test_the_verb_group_stops_at_the_tags_own_bracket():
+def test_the_verb_stops_at_the_tags_own_bracket_not_the_bodys():
     from ai_core.core import _REPLY_TAG
 
     real = '[reply to notes:aa · notes reflect]\nverbs=["read", "write"]  root=.'

@@ -109,7 +109,7 @@ async def test_nothing_outside_the_root_can_be_read(kernel):
     assert "escape" in r["error"], r  # the clamp answers first
 
 
-async def test_the_list_is_validated_at_create(kernel):
+async def test_the_list_is_validated_at_write(kernel):
     for bad in ("docs", ["../up"], [""]):
         r = await _call(
             kernel,

@@ -361,7 +361,7 @@ def test_no_primer_field_flags_no_primer_and_no_fold_flags_no_fold():
     assert not any(m.get("cache_primer") or m.get("cache_fold") for m in msgs)
 
 
-def test_a_primer_outside_the_view_flags_nothing():
+def test_a_primer_outside_the_view_flags_nothing_and_pins_nothing():
     import asyncio
 
     k = _k()

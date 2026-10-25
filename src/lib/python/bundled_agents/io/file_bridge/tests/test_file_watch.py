@@ -107,7 +107,7 @@ async def test_only_the_watched_path_is_reported(seeded_kernel, file_bridge):
     assert await _quiet(q, "other.md")
 
 
-async def test_unwatch_ends_it_and_a_path_is_held_per_caller(
+async def test_only_the_watched_path_is_reported_and_unwatch_ends_it(
     seeded_kernel, file_bridge
 ):
     k, fb = seeded_kernel, file_bridge
@@ -228,6 +228,8 @@ async def test_a_watch_that_cannot_arm_is_refused(seeded_kernel, file_bridge):
         assert u == {"watching": False, "paths": []}, u
     finally:
         locked.chmod(0o755)
+# twin: judge_covers_every_row_of_the_table
+# twin: judge_chmod_only_is_modified_and_a_replay_is_dropped
 
 
 def test_judge_covers_every_row():
@@ -244,7 +246,7 @@ def test_judge_covers_every_row():
     assert _judge(None, None) is None
 
 
-def test_stamp_reads_a_file_and_nothing_at_a_missing_path(tmp_path):
+def test_stamp_of_reads_a_file_and_nothing_at_a_missing_path(tmp_path):
     from file_bridge.tools import _stamp
 
     f = tmp_path / "abc.txt"

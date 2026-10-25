@@ -51,7 +51,7 @@ DONE = '<call name="done"></call>'
 E59 = '<tool_call>\n<function=call name="send">\n<target_id>files</target_id>\n</call>'
 
 
-async def test_the_no_call_reminder_is_a_notice_and_the_task_is_not(
+async def test_the_incoming_row_carries_notice_only_when_asked(
     seeded_kernel, fake_providers
 ):
     fp = _Script(["just prose", DONE])

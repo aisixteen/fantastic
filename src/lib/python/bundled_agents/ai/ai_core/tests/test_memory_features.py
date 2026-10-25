@@ -206,7 +206,7 @@ async def test_a_row_another_writer_appends_reaches_the_next_head_read(seeded_ke
         assert len(await core._load_history("alice", seeded_kernel)) == 2
 
 
-async def test_a_note_the_agent_appends_itself_is_memory_not_a_turn(seeded_kernel):
+async def test_kernel_rows_and_role_less_notes_never_become_turns(seeded_kernel):
     """A row without a chat `role` (the agent's own note, appended straight to its
     store) stays in the store — never rendered as a message."""
     await _pair(seeded_kernel)
@@ -233,7 +233,7 @@ async def test_a_note_the_agent_appends_itself_is_memory_not_a_turn(seeded_kerne
     assert all(r.get("role") for r in behind)
 
 
-async def test_a_turns_rows_are_minted_when_appended_so_id_order_is_append_order(
+async def test_the_turns_row_ids_are_minted_after_the_assembly_reflects(
     fake_providers,
 ):
     """A row saved MID-TURN (the projection's fold or view) must not end up behind the

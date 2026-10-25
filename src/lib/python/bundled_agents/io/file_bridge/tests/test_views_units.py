@@ -32,6 +32,8 @@ def test_scope_refuses_a_non_string_path_and_names_the_view_path():
     target, err = views.scope("read", "file", "a.md", "b.md")
     assert target is None and err["reason"] == "unauthorized"
     assert "outside this agent's path 'a.md'" in err["error"]
+# twin: a_folder_view_relays_only_its_entries
+# twin: a_file_view_relays_only_its_own_path
 
 
 def test_relay_rule_maps_a_file_and_a_folder():
@@ -91,7 +93,7 @@ def test_a_view_admits_whoever_reaches_its_bridge_for_the_verbs_it_answers():
     assert folder == {"rest": ["list", "reflect", "reveal", "watch"], "user": ["list"]}
 
 
-def test_the_bridges_own_self_is_no_caller_and_a_parent_is_named_literally():
+def test_the_bridges_self_is_no_caller_and_its_parent_is_named_literally():
     b = _Bridge({"$self": "*", "$parent": ["read"]}, parent=_Parent())
     assert views.view_callers(b, views.FILE) == {"rest": ["read"]}
     orphan = _Bridge({"$parent": "*"}, parent=None)
@@ -103,7 +105,7 @@ def test_a_caller_with_no_verb_the_view_answers_is_not_admitted():
     assert views.view_callers(b, views.FILE) == {}
 
 
-def test_a_relay_event_without_a_known_kind_is_dropped_and_logged(caplog):
+def test_a_relay_event_without_a_known_kind_is_dropped(caplog):
     # the bridge reports added / modified / deleted; anything else is dropped, never
     # relabelled as a change
     file_rule = views._relay_rule(views.FILE, "a.md")

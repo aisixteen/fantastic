@@ -178,7 +178,7 @@ async def test_a_disconnected_tab_leaves_the_identity_routable(seeded_kernel):
     assert [c[0] for c in calls] == ["b"], calls
 
 
-async def test_a_call_to_a_peer_needs_no_guid_of_this_kernel(seeded_kernel):
+async def test_a_peer_call_names_no_caller(seeded_kernel):
     """The frame names no caller: the peer judges the call as the leg that serves
     it there, so this kernel's own guid is not part of the call."""
     k = seeded_kernel
@@ -190,7 +190,7 @@ async def test_a_call_to_a_peer_needs_no_guid_of_this_kernel(seeded_kernel):
     assert calls == [("canvas", {"type": "around"})]
 
 
-async def test_a_reflect_of_a_peer_returns_that_kernels_own_answer(seeded_kernel):
+async def test_a_peer_reflect_is_its_own_answer(seeded_kernel):
     """Discovery by reflect: the peer's reply comes back as it answered it — it is
     NOT re-rendered here (there is no local agent to render it from)."""
     k = seeded_kernel

@@ -31,7 +31,7 @@ async def _mk_target(kernel, mode="mem"):
     return rec["id"]
 
 
-async def test_persist_then_load_round_trips(seeded_kernel, store_agent):
+async def test_a_sidecar_round_trips_and_lands_beside_the_record(seeded_kernel, store_agent):
     aid = await _mk_target(seeded_kernel)
     w = (
         await seeded_kernel.send(
@@ -70,7 +70,7 @@ async def test_persist_then_load_round_trips(seeded_kernel, store_agent):
     assert r.get("content") == "user.name: Ada\n"
 
 
-async def test_load_absent_is_null_not_error(seeded_kernel, store_agent):
+async def test_a_never_written_sidecar_reads_empty_not_error(seeded_kernel, store_agent):
     aid = await _mk_target(seeded_kernel)
     r = (
         await seeded_kernel.send(
@@ -90,6 +90,8 @@ async def test_load_absent_is_null_not_error(seeded_kernel, store_agent):
     assert "error" not in r
 
 
+# twin: a_blob_name_must_be_one_plain_filename
+# twin: kernel_managed_files_are_reserved
 @pytest.mark.parametrize("bad", ["agent.yaml", "../escape", "sub/dir.yaml", ".hidden"])
 async def test_guard_rejects_dangerous_names(seeded_kernel, store_agent, bad):
     aid = await _mk_target(seeded_kernel)
@@ -113,7 +115,7 @@ async def test_guard_rejects_dangerous_names(seeded_kernel, store_agent, bad):
 
 @pytest.mark.parametrize("verb", ["persist_blob", "load_blob"])
 @pytest.mark.parametrize("bad", ["../bundles/x", "a/b", "..", ".hidden"])
-async def test_guard_rejects_dangerous_agent_ids(seeded_kernel, store_agent, verb, bad):
+async def test_an_agent_id_that_walks_out_is_refused(seeded_kernel, store_agent, verb, bad):
     """`agent_id` becomes a directory (`agents/<agent_id>/`): `../bundles/x` would
     reach a folder bundle's `bundle.yaml` — refused before any store is asked."""
     payload = {"type": verb, "agent_id": bad, "name": "bundle.yaml", "content": "x"}
@@ -243,7 +245,7 @@ async def test_a_non_utf8_sidecar_is_refused_not_mangled(seeded_kernel, store_ag
     assert "�" not in str(r.get("error", "")), "the refusal must not carry mojibake"
 
 
-async def test_persist_record_refuses_a_siblings_namespace(seeded_kernel):
+async def test_the_root_loader_refuses_record_verbs_from_an_agent(seeded_kernel):
     """The ROOT loader's tree is hydrated at boot, so no agent writes it — not a
     sibling's record and not its OWN (a record an agent persisted there would come
     back at the next boot with whatever grants it named).

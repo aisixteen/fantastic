@@ -75,7 +75,7 @@ async def test_boot_succeeds_without_store(seeded_kernel):
     assert r.get("running") is True
 
 
-async def test_schedule_failfasts_without_store(seeded_kernel):
+async def test_boot_succeeds_without_store_schedule_failfasts(seeded_kernel):
     # No store wired at the loader ⇒ the write (a schedule) failfasts, no phantom.
     sid = await _make_scheduler(seeded_kernel)
     r = (
@@ -105,7 +105,7 @@ async def test_schedule_failfasts_without_store(seeded_kernel):
     )
 
 
-async def test_schedule_persists_through_loader(seeded_kernel, store_agent, tmp_path):
+async def test_schedule_persists_and_lists(seeded_kernel, store_agent, tmp_path):
     sid = await _make_scheduler(seeded_kernel)
     r = (
         await seeded_kernel.send(
@@ -129,7 +129,7 @@ async def test_schedule_persists_through_loader(seeded_kernel, store_agent, tmp_
     assert r["schedule_id"] in persisted
 
 
-async def test_schedule_validation(seeded_kernel, store_agent):
+async def test_schedule_requires_target_and_payload_type(seeded_kernel, store_agent):
     sid = await _make_scheduler(seeded_kernel)
     no_target = (
         await seeded_kernel.send(
@@ -164,7 +164,7 @@ async def test_schedule_validation(seeded_kernel, store_agent):
     assert "error" in no_payload_type
 
 
-async def test_unschedule(seeded_kernel, store_agent):
+async def test_unschedule_removes(seeded_kernel, store_agent):
     sid = await _make_scheduler(seeded_kernel)
     r = (
         await seeded_kernel.send(
@@ -245,7 +245,7 @@ async def test_pause_resume_one(seeded_kernel, store_agent):
     assert r["resumed"] is True
 
 
-async def test_tick_now_fires(seeded_kernel, store_agent, tmp_path):
+async def test_tick_now_fires_immediately_and_appends_history(seeded_kernel, store_agent, tmp_path):
     sid = await _make_scheduler(seeded_kernel)
     r = (
         await seeded_kernel.send(
@@ -508,7 +508,7 @@ async def _wait_for(pred, seconds: float):
     return pred()
 
 
-async def test_due_schedules_fire_as_one_concurrent_batch(seeded_kernel, store_agent):
+async def test_tick_loop_fires_due_schedule(seeded_kernel, store_agent):
     # Two due schedules; the FIRST one holds until the second has STARTED.
     # Sequential firing cannot get there (the second starts only after the
     # first returns); one batch starts both together. Observed, not timed — a
@@ -704,7 +704,7 @@ async def test_an_idle_scheduler_never_wakes_and_a_change_wakes_it(
     assert await _wait_for(lambda: "p_idle" in _probe.hits, 3.0), _probe.hits
 
 
-async def test_missing_and_unknown_schedule_ids(seeded_kernel, store_agent):
+async def test_refusal_text_uses_python_repr(seeded_kernel, store_agent):
     sid = await _make_scheduler(seeded_kernel)
 
     async def call(payload):
@@ -735,7 +735,7 @@ async def test_missing_and_unknown_schedule_ids(seeded_kernel, store_agent):
     }
 
 
-async def test_pause_and_resume_the_whole_scheduler(seeded_kernel, store_agent):
+async def test_pause_resume_flips_meta(seeded_kernel, store_agent):
     sid = await _make_scheduler(seeded_kernel)
 
     async def call(payload):
@@ -772,7 +772,7 @@ def _seed_schedule(sid, sch_id, target, **over):
     return sch
 
 
-async def test_a_failed_tick_persist_does_not_refire_next_tick(seeded_kernel):
+async def test_failed_tick_persist_does_not_refire_next_tick(seeded_kernel):
     # No store_agent: every persist fails. The bump must stay in the cache, or the
     # still-due schedule would fire again in a hot loop.
     from scheduler import tools
@@ -807,7 +807,7 @@ async def test_a_failed_persist_rolls_back_tick_now_but_not_pause(seeded_kernel)
         tools._cache.pop(sid, None)
 
 
-async def test_two_schedulers_share_nothing_and_delete_frees_only_its_own(
+async def test_recreated_scheduler_drops_the_process_cache(
     seeded_kernel, store_agent
 ):
     from scheduler import tools
@@ -840,7 +840,7 @@ async def test_two_schedulers_share_nothing_and_delete_frees_only_its_own(
             tools._cache.pop(s, None)
 
 
-async def test_a_cancelled_fire_error_reads_none():
+async def test_cancelled_fire_error_reads_none():
     from scheduler import tools
 
     class FakeKernel:

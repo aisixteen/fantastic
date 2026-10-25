@@ -25,7 +25,7 @@ from kernel._agent import Agent
 # ─── token method (must match ai_core) ─────────────────────────
 
 
-def test_est_tokens_is_ai_core_ceil_div():
+def test_est_tokens_matches_ceil_div_and_desc_prefers_quote():
     """Advertised cost == the estimate the model actually pays: ceil(chars/4),
     the same constant ai_core.context uses."""
     assert Agent._CHARS_PER_TOKEN == CHARS_PER_TOKEN
@@ -93,6 +93,9 @@ async def test_readme_true_is_short_orientation(kernel):
 
 
 # ─── readme=index → token-annotated tree ───────────────────────
+# twin: readme_doctree_frame_index_view_and_errors
+# twin: docs_tree_present_keyed_and_descriptored
+# twin: nested_tiers_index_from_the_table
 
 
 async def test_readme_index_shape_and_nesting(kernel):
@@ -229,7 +232,7 @@ async def test_readme_nested_key_reachable(kernel):
     assert "html agent" in r["readme"]["body"].lower()
 
 
-async def test_readme_unknown_key_is_wellformed_error(kernel):
+async def test_readme_minds_is_no_doc(kernel):
     """Unknown key → `{error, keys}` (never a crash / null); keys lists what IS
     available so the caller can recover."""
     r = (
@@ -302,7 +305,7 @@ async def test_full_root_frame_key_order_is_pythons(kernel):
     assert [k for k in r if k in frame] == list(frame), list(r)
 
 
-async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
+async def test_distilled_self_extension_states_the_file_and_command_model(kernel):
     """THE SAFETY PROPERTY OF THE DIET.
 
     The distilled default omits the inlined doc frame (`readmes` + `docs` + the long
@@ -333,7 +336,7 @@ async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
     assert "write_stream" in se, "pointer must name the stream write path"
 
 
-async def test_non_root_bundle_no_frame_but_keyed(seeded_kernel):
+async def test_non_root_has_no_readmes_frame(seeded_kernel):
     """A non-root bundle carries neither `readmes` nor `docs` (root-only), but IS
     keyed-fetchable: `readme=true` → its single readme; a keyless bundle's
     `readme=index` → empty; an unknown key → `{error, keys:[]}`."""

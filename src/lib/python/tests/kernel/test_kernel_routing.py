@@ -6,6 +6,9 @@ is flat-global — `send(any_id, ...)` resolves through `ctx.agents`.
 """
 
 from __future__ import annotations
+# twin: unknown_agent_carries_the_live_index
+# twin: unknown_agent_error_is_python_repr
+# twin: send_to_missing_target_returns_error
 
 
 async def test_send_to_missing_agent_returns_error(kernel):
@@ -21,7 +24,7 @@ async def test_send_to_missing_agent_returns_error(kernel):
     assert "hint" not in r  # a plain unknown id is not a placeholder
 
 
-async def test_placeholder_id_is_called_out_as_a_placeholder(kernel):
+async def test_a_placeholder_id_is_named_as_one(kernel):
     """A model that copies `<id>` out of the prompt's own example must be told it is a
     placeholder, not just `no agent '<id>'`. Angle brackets
     are structurally a SLOT — no id this kernel mints can contain them."""
@@ -64,7 +67,7 @@ async def test_emit_puts_on_inbox(kernel):
     assert msg["n"] == 1
 
 
-async def test_emit_fans_out_to_watchers(kernel):
+async def test_watch_then_emit_fans_payload_to_watcher(kernel):
     kernel.create("file_bridge.tools", allow=["."], id="src")
     kernel.create("file_bridge.tools", allow=["."], id="watcher")
     kernel.ctx.ensure_inbox("watcher")
@@ -74,7 +77,7 @@ async def test_emit_fans_out_to_watchers(kernel):
     assert kernel.ctx.inboxes["watcher"].get_nowait()["n"] == 42
 
 
-async def test_unwatch_stops_routing(kernel):
+async def test_unwatch_stops_fanout(kernel):
     kernel.create("file_bridge.tools", allow=["."], id="src")
     kernel.create("file_bridge.tools", allow=["."], id="w")
     kernel.ctx.ensure_inbox("w")
@@ -84,7 +87,7 @@ async def test_unwatch_stops_routing(kernel):
     assert kernel.ctx.ensure_inbox("w").empty()
 
 
-async def test_send_also_fanouts_to_inbox(seeded_kernel):
+async def test_send_payload_reaches_the_targets_own_registered_inbox(seeded_kernel):
     """`send` fans the payload out (drops on inbox) before invoking
     the handler — so watchers / state subscribers see traffic events."""
     q = seeded_kernel.ctx.ensure_inbox("kernel_state")  # the test is the reader

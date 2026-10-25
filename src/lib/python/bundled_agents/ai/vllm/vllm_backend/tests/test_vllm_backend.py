@@ -87,7 +87,7 @@ def _fresh_tables():
 # ─── the stream ──────────────────────────────────────────────────────────────
 
 
-async def test_the_thought_channel_is_wrapped_once_not_dropped():
+async def test_wrap_opens_and_closes_once_per_turn():
     sse = _sse(
         _delta(reasoning_content="let me "),
         _delta(reasoning="think"),  # the other spelling a version may use
@@ -118,7 +118,7 @@ def _chunked_transport(pieces: list[bytes]):
     return httpx.MockTransport(handler)
 
 
-async def test_a_finish_chunk_with_timings_and_usage_ends_the_turn():
+async def test_llama_final_chunk_with_timings():
     final = {
         "choices": [{"delta": {}, "finish_reason": "stop"}],
         "timings": {"predicted_n": 1},
@@ -130,14 +130,14 @@ async def test_a_finish_chunk_with_timings_and_usage_ends_the_turn():
     assert p.last_prompt_tokens == 5
 
 
-async def test_a_usage_chunk_with_empty_choices_after_finish_is_accepted():
+async def test_llama_usage_chunk_with_empty_choices_after_finish():
     usage = {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}}
     p = _provider(_transport(_sse(_delta(content="ok"), _delta(finish="stop"), usage)))
     assert await _drain(p) == "ok"
     assert p.last_stop_reason == "stop"
 
 
-async def test_a_12000_chunk_reasoning_run_is_one_wrapped_thought():
+async def test_llama_long_reasoning_run():
     chunks = [_delta(reasoning_content="t")] * 12000
     chunks += [_delta(content="done"), _delta(finish="stop")]
     p = _provider(_transport(_sse(*chunks)))
@@ -145,7 +145,7 @@ async def test_a_12000_chunk_reasoning_run_is_one_wrapped_thought():
     assert p.last_stop_reason == "stop"
 
 
-async def test_the_issue_208_stream_in_uneven_writes_ends_normally():
+async def test_llama_issue_208_synthetic_stream():
     final = {
         "choices": [{"delta": {}, "finish_reason": "stop"}],
         "timings": {"predicted_n": 8893},
@@ -166,7 +166,7 @@ async def test_the_issue_208_stream_in_uneven_writes_ends_normally():
     assert p.last_stop_reason == "stop"
 
 
-async def test_sse_events_split_across_writes_and_several_in_one_write_decode():
+async def test_llama_large_and_split_chunks():
     b = _sse(
         _delta(content="ab"), _delta(content="cd"), _delta(finish="stop")
     ).encode()
@@ -176,7 +176,7 @@ async def test_sse_events_split_across_writes_and_several_in_one_write_decode():
     assert await _drain(whole) == "abcd"
 
 
-async def test_sse_comment_keepalive_lines_are_ignored():
+async def test_llama_keepalive_comments():
     chunks = (_delta(content="o"), _delta(content="k"), _delta(finish="stop"))
     c = [json.dumps(x) for x in chunks]
     body = (
@@ -185,6 +185,8 @@ async def test_sse_comment_keepalive_lines_are_ignored():
     )
     p = _provider(_transport(body))
     assert await _drain(p) == "ok"
+# twin: llama_clean_close_without_trailing_blank_line
+# twin: a_last_data_line_without_newline_is_decoded
 
 
 async def test_a_clean_close_without_a_trailing_blank_line_is_decoded():
@@ -200,7 +202,7 @@ async def test_a_clean_close_without_a_trailing_blank_line_is_decoded():
     assert await _drain(p) == "answer"
 
 
-async def test_crlf_line_endings_decode_like_lf():
+async def test_llama_crlf_line_endings():
     lf = _sse(_delta(content="ok"), _delta(finish="stop"))
     out_lf = await _drain(_provider(_transport(lf)))
     out_crlf = await _drain(_provider(_transport(lf.replace("\n", "\r\n"))))
@@ -223,14 +225,14 @@ async def test_a_cut_bounded_side_call_is_its_answer():
     assert p.last_stop_reason == "max_tokens"
 
 
-async def test_a_stream_that_ends_without_finish_reason_is_an_error():
+async def test_a_stream_cut_before_finish_is_still_dropped():
     # vLLM died mid-answer: the text so far must never read as a completion
     p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
     with pytest.raises(RuntimeError, match="without a finish_reason"):
         await _drain(p)
 
 
-async def test_a_transport_failure_is_marked_transport():
+async def test_a_refused_connection_is_a_transport_error():
     def handler(request):
         raise httpx.ConnectError("refused")
 
@@ -240,7 +242,7 @@ async def test_a_transport_failure_is_marked_transport():
     assert e.value.transport is True
 
 
-async def test_a_stream_without_finish_reason_is_transport():
+async def test_a_stream_without_a_finish_is_a_transport_error():
     p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
     with pytest.raises(RuntimeError) as e:
         await _drain(p)
@@ -306,7 +308,7 @@ async def test_a_body_error_before_finish_reason_still_drops():
     assert e.value.transport is True
 
 
-async def test_a_dropped_stream_names_its_cause():
+async def test_a_stream_dropped_mid_answer_says_vllm_died():
     sse = _sse(_delta(content="partial"), done=False)
     err = httpx.ReadError("connection reset by peer")
     p = _provider(_breaking_transport(sse, err))
@@ -316,7 +318,7 @@ async def test_a_dropped_stream_names_its_cause():
     assert "; this turn is NOT complete" in str(e.value)
 
 
-async def test_a_timeout_after_finish_reason_is_still_a_stall():
+async def test_a_timeout_after_finish_is_still_a_stall():
     sse = _sse(_delta(content="answer"), _delta(finish="stop"), done=False)
     p = _provider(_breaking_transport(sse, httpx.ReadTimeout("slow")))
     with pytest.raises(RuntimeError) as e:
@@ -327,6 +329,7 @@ async def test_a_timeout_after_finish_reason_is_still_a_stall():
     )
 
 
+# twin: a_503_is_a_transport_error
 @pytest.mark.parametrize("code", [502, 503, 504])
 async def test_a_gateway_status_is_transport(code):
     p = _provider(_transport('{"error":"down"}', status=code))
@@ -336,7 +339,7 @@ async def test_a_gateway_status_is_transport(code):
 
 
 @pytest.mark.parametrize("code", [400, 500])
-async def test_a_plain_http_status_is_not_transport(code):
+async def test_an_api_400_is_not_a_transport_error(code):
     p = _provider(_transport('{"error":"bad"}', status=code))
     with pytest.raises(RuntimeError) as e:
         await _drain(p)
@@ -357,7 +360,7 @@ async def test_an_http_error_names_the_endpoint_and_the_body():
         (httpx.RemoteProtocolError("reset"), "died or restarted"),
     ],
 )
-async def test_each_connection_failure_says_what_it_means(exc, words):
+async def test_a_refused_connection_says_vllm_is_not_listening_yet(exc, words):
     def handler(request):
         raise exc
 
@@ -366,7 +369,7 @@ async def test_each_connection_failure_says_what_it_means(exc, words):
         await _drain(p)
 
 
-async def test_a_native_tool_call_becomes_call_text():
+async def test_native_tool_calls_become_call_text():
     sse = _sse(
         _delta(
             tool_calls=[
@@ -388,7 +391,7 @@ async def test_a_native_tool_call_becomes_call_text():
     )
 
 
-async def test_a_native_tool_call_with_bad_arguments_fails_loud():
+async def test_a_native_tool_call_with_bad_arguments_is_an_error():
     sse = _sse(
         _delta(
             tool_calls=[
@@ -676,6 +679,7 @@ def test_a_conversation_is_its_prefix():
         ),
     ],
 )
+# twin: validate_refuses_a_bad_dialect_and_a_llamacpp_budget
 def test_a_write_the_backend_cannot_honour_is_refused(meta, record, fragment):
     assert fragment in (validate_meta(meta, record) or "")
 
@@ -949,7 +953,7 @@ async def test_a_turn_that_finishes_inside_the_thought_closes_the_wrapper():
         ),
     ],
 )
-async def test_each_transport_failure_text_is_exact(exc, text):
+async def test_a_server_that_never_answers_stalls_on_the_read_clock(exc, text):
     def handler(request):
         raise exc
 
@@ -1024,7 +1028,7 @@ async def test_stream_idle_seconds_defaults_to_read_timeout():
     assert seen[1]["read"] == 900.0
 
 
-async def test_stream_idle_seconds_overrides_read_timeout():
+async def test_a_stream_that_goes_quiet_stalls_on_the_read_clock():
     seen: list = []
     p = _provider(_timeout_probe(seen), read_timeout=30, stream_idle=0.2)
     await _drain(p)
@@ -1038,6 +1042,7 @@ async def test_stream_idle_seconds_overrides_read_timeout():
     with pytest.raises(RuntimeError) as e:
         await _drain(p)
     assert "sent no bytes for 0.2s" in str(e.value) and e.value.transport is True
+# twin: stream_idle_seconds_is_validated_and_read_clock_defaults_to_read_timeout
 
 
 def test_stream_idle_seconds_is_validated_at_the_write():

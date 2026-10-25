@@ -71,7 +71,7 @@ async def test_a_call_in_thinking_and_answer_dispatches_once(
     assert got[1].count("[reply to ") == 1, got[1]
 
 
-async def test_a_draft_only_in_thinking_does_not_run(seeded_kernel, fake_providers):
+async def test_thinking_is_streamed_raw_but_neither_dispatched_nor_persisted(seeded_kernel, fake_providers):
     got = await _drive(
         seeded_kernel,
         fake_providers,

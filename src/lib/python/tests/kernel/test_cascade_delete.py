@@ -16,7 +16,7 @@ import asyncio
 from _testkit import command_rx
 
 
-async def test_cascade_walks_deepest_first(seeded_kernel):
+async def test_cascade_delete_fires_hooks_depth_first(seeded_kernel):
     """Three-level pyramid: delete root of subtree → all descendants
     removed; ctx.agents and disk both reflect the cascade."""
     seeded_kernel.create("file_bridge.tools", allow=["."], id="P")
@@ -36,7 +36,7 @@ async def test_cascade_walks_deepest_first(seeded_kernel):
     assert "P" not in seeded_kernel._children
 
 
-async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
+async def test_delete_lock_refusal_is_python_text_and_key_order(seeded_kernel):
     """delete_lock on a deep descendant blocks the cascade. Response
     carries `locked:true, blocked_by:<id>, error:...`. NO mutations
     happen — the entire subtree is intact."""
@@ -53,7 +53,7 @@ async def test_cascade_lock_blocks_with_blocked_by(seeded_kernel):
     assert "OK" in seeded_kernel.ctx.agents
 
 
-async def test_cascade_lock_unblocks_after_clear(seeded_kernel):
+async def test_delete_lock_flag(seeded_kernel):
     """Clear the lock via update_agent; cascade proceeds."""
     seeded_kernel.create("file_bridge.tools", allow=["."], id="P")
     p_agent = seeded_kernel.ctx.agents["P"]

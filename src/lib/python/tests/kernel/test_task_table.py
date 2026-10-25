@@ -151,7 +151,7 @@ async def _row_for(kernel, agent: str, verb: str) -> dict | None:
 # ─── ps: the live table + the send TREE ────────────────────────
 
 
-async def test_ps_shows_the_tree_of_a_nested_send(seeded_kernel):
+async def test_a_nested_send_names_its_caller_as_parent(seeded_kernel):
     """A `send` issued INSIDE a handler is a CHILD of that handler's task. `ps`
     shows both rows with the parent link, so a caller sees who spawned what."""
     _hook_calls.clear()

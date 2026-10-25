@@ -18,7 +18,7 @@ import pytest
 from io_bridge import decode_frame, encode_frame
 
 
-def test_round_trip_text_and_binary():
+def test_binary_frame_round_trips_raw_bytes():
     wire, is_bin = encode_frame({"type": "call", "id": "1", "payload": {"x": 1}})
     assert is_bin is False
     assert decode_frame(wire.decode("utf-8")) == {
@@ -31,7 +31,7 @@ def test_round_trip_text_and_binary():
     assert decode_frame(wire)["data"]["bytes"] == b"\x00\xffhi"
 
 
-def test_short_binary_frame_raises_value_error():
+def test_decode_rejects_short_frame():
     # The exact frame from the sweep: 3 bytes, shorter than the length prefix.
     with pytest.raises(ValueError):
         decode_frame(b"\x00\x00\x00")
@@ -86,7 +86,7 @@ def test_non_finite_numbers_are_not_json():
     }
 
 
-def test_only_values_every_runtime_can_hold():
+def test_loads_refuses_what_python_refuses():
     """An integer outside int64, a number that overflows a
     double and a lone surrogate are refused at the wire — rust would
     hold a different value, or none."""

@@ -54,7 +54,7 @@ async def _resolve(k, transport, key=_nokey):
     return await server.resolve("o1", k, key=key, transport=transport)
 
 
-async def test_a_left_out_model_is_the_one_the_server_lists_and_is_written_back():
+async def test_the_one_served_model_is_read():
     seen: list = []
     k = _Kernel({})
     assert await _resolve(k, _server(seen)) is None

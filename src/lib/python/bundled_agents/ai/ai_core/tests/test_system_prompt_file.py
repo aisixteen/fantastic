@@ -140,7 +140,7 @@ async def test_the_default_layout_in_placeholders_is_the_default_block(
     assert await _turn(k, "ph_ai", fp) == default
 
 
-async def test_placeholders_fill_per_turn_and_unknown_ones_stay(
+async def test_placeholders_fill_and_unknown_ones_stay(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel
@@ -203,7 +203,7 @@ async def test_a_record_prompt_beats_the_file_and_clearing_the_field_drops_it(
     assert _WATCH["prompts"]["paths"] == {}, "the agent's hold is released"
 
 
-async def test_a_path_without_file_bridge_id_fails_loud(seeded_kernel, fake_providers):
+async def test_a_path_without_file_bridge_id_fails_and_a_bridge_alone_is_the_default(seeded_kernel, fake_providers):
     k = seeded_kernel
     fp = _ai(k, "pf6", fake_providers, system_prompt_file="prompt.md")
     res = await _failed_turn(k, "pf6", fp)
@@ -214,7 +214,7 @@ async def test_a_path_without_file_bridge_id_fails_loud(seeded_kernel, fake_prov
     assert "You are `pf6`." in await _turn(k, "pf6", fp)
 
 
-async def test_a_missing_file_fails_the_turn_and_reflect_says_why(
+async def test_a_missing_file_fails_the_turn_until_it_appears(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel

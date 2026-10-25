@@ -245,7 +245,7 @@ def test_c3_reject_the_wall_refusal_is_model_visible(wired, fake_providers):
         fake_providers.pop("ua_ai", None)
 
 
-def test_toctou_double_click_buys_exactly_once(wired):
+def test_a_frame_id_becomes_the_execution_id(wired):
     """The single-use capability IS the ledger row: the proposal's execution id
     rides every click, so double-clicks and racing tabs collapse to one buy —
     check-and-consume is atomic because consuming is a named execution."""

@@ -27,7 +27,7 @@ def test_json_safe_shrinks_bytes_like_telemetry():
     }
 
 
-async def test_kernel_ledger_is_json_after_a_binary_outcome(seeded_kernel, file_bridge):
+async def test_a_reply_with_a_binary_body_stays_whole_in_the_ledger(seeded_kernel, file_bridge):
     k = seeded_kernel
     fb = file_bridge if isinstance(file_bridge, str) else file_bridge.id
     await k.send(
@@ -91,7 +91,7 @@ async def test_readme_key_is_lexical_and_exact(seeded_kernel):
         assert str(r.get("readme", r).get("error", "")).startswith("no doc")
 
 
-def test_corrupt_root_record_keeps_the_children(tmp_path, monkeypatch):
+def test_a_missing_root_record_reseeds_and_keeps_children(tmp_path, monkeypatch):
     from file_bridge import fs
     from kernel_state.tools import read_tree
 
@@ -110,6 +110,8 @@ def test_corrupt_root_record_keeps_the_children(tmp_path, monkeypatch):
     ] == "kernel_state"
     root = boot_root()
     assert "memo" in root.ctx.agents and root.id == "kernel_state"
+# twin: reflect_posture_scopes_an_auth_stem_like_the_gate
+# twin: reflect_reports_egress_posture
 
 
 def test_describe_scopes_like_the_gate():

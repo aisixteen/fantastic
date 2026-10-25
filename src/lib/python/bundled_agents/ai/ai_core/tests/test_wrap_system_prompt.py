@@ -31,7 +31,7 @@ async def test_pre_and_post_wrap_the_default_block(seeded_kernel, fake_providers
         assert body.replace("wr_def", "wr_plain") == default
 
 
-async def test_they_wrap_a_record_and_a_per_call_prompt(seeded_kernel, fake_providers):
+async def test_pre_and_post_wrap_whichever_block_is_in_force(seeded_kernel, fake_providers):
     k = seeded_kernel
     _ai(
         k, "wr_rec", system_prompt="ROLE", pre_system_prompt="A", post_system_prompt="Z"
@@ -71,7 +71,7 @@ async def test_one_side_alone_and_update_live(seeded_kernel, fake_providers):
 
 @pytest.mark.parametrize("name", ["pre_system_prompt", "post_system_prompt"])
 @pytest.mark.parametrize("bad", ["", "   ", 42, ["x"]])
-async def test_an_unusable_value_is_refused_at_the_write(seeded_kernel, name, bad):
+async def test_an_unusable_wrap_value_is_refused_at_the_write(seeded_kernel, name, bad):
     k = seeded_kernel
     _ai(k, "wr_ok", **{name: "FINE"})
     out = await _op(k, {"type": "update_agent", "id": "wr_ok", name: bad})

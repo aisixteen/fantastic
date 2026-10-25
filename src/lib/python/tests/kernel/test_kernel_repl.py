@@ -11,7 +11,7 @@ from kernel.modes.parse import _coerce, _parse_at
 from kernel import _find_bundle_module
 
 
-def test_coerce_bool():
+def test_the_four_cases():
     assert _coerce("true") is True
     assert _coerce("false") is False
 

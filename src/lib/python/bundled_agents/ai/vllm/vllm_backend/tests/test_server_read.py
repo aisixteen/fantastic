@@ -107,7 +107,7 @@ async def _resolve(k: _Kernel, transport, key=_nokey):
 # ─── the read ────────────────────────────────────────────────────────────────
 
 
-async def test_what_the_record_leaves_out_is_read_and_written_back():
+async def test_what_the_record_leaves_out_is_read():
     seen: list = []
     k = _Kernel(_rec())
     assert await _resolve(k, _server(seen)) is None
@@ -144,7 +144,7 @@ async def test_the_record_s_model_picks_its_entry_among_several():
     assert k.updates == [{"max_tokens": 262144, "context_window": 262144}]
 
 
-async def test_several_served_models_and_no_model_on_the_record_refuse_naming_them():
+async def test_several_served_models_and_no_model_refuse_naming_them():
     body = _models(("a", 4096), ("b", 8192))
     k = _Kernel(_rec(kv_slots=6))
     r = await _resolve(k, _server([], models=body))
@@ -401,7 +401,7 @@ async def test_a_verb_that_runs_no_turn_reads_nothing(seeded_kernel, mock_http):
     assert seen == [] and k.get("v1").get("kv_slots") is None
 
 
-async def test_a_key_the_store_refuses_refuses_the_verb_naming_the_first_field():
+async def test_a_key_the_store_refuses_refuses_naming_the_first_field():
     from ai_core.credentials import CredentialError
 
     async def refused(endpoint):

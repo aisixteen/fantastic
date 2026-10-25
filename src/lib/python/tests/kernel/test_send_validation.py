@@ -40,7 +40,7 @@ async def test_bad_retries_on_unnamed_item_runs_nothing(seeded_kernel):
     assert not [r for r in rows if r.get("agent") == a], rows
 
 
-async def test_missing_type_is_missing_arg_before_the_gate(seeded_kernel):
+async def test_missing_type_is_missing_arg_before_gate(seeded_kernel):
     a = await _mk(seeded_kernel, "sv_a")
     b = await _mk(seeded_kernel, "sv_b")  # no edge a→b: the gate WOULD refuse
     with as_agent(seeded_kernel, a):
@@ -78,7 +78,7 @@ async def test_non_string_ids_on_system_verbs_are_missing_arg(seeded_kernel):
         assert "raised" not in r, (payload, r)
 
 
-async def test_a_supplied_empty_id_on_create_is_refused_not_minted(seeded_kernel):
+async def test_create_agent_with_empty_id_is_refused(seeded_kernel):
     r = (
         await seeded_kernel.send(
             [

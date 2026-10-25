@@ -45,6 +45,8 @@ async def test_top_level_agent_rehydrates(tmp_path, monkeypatch):
     k2 = boot_root()
     assert aid in k2.ctx.agents
     assert k2.get(aid)["x"] == 7
+# twin: boot_hydrates_registered_agents
+# twin: bootstrap_hydrates_persisted_children
 
 
 async def test_nested_pair_rehydrates(tmp_path, monkeypatch):
@@ -94,7 +96,7 @@ async def test_nested_pair_rehydrates(tmp_path, monkeypatch):
     assert child_id in k2.ctx.agents[parent_id]._children
 
 
-async def test_persistence_survives_corrupted_sibling(tmp_path, monkeypatch):
+async def test_boot_tolerates_a_corrupt_child_record(tmp_path, monkeypatch):
     """A corrupted agent.yaml under `agents/X/` is silently skipped;
     other agents in the same dir hydrate fine."""
     monkeypatch.chdir(tmp_path)
@@ -153,6 +155,8 @@ async def test_reboot_resets_in_flight_counters(tmp_path, monkeypatch):
     del k1
     k2 = boot_root()
     assert k2.ctx.agents[aid]._in_flight == 0
+# twin: record_includes_meta_and_omits_none
+# twin: display_name_reads_from_meta
 
 
 def test_agent_record_roundtrip_on_disk(tmp_path, monkeypatch):

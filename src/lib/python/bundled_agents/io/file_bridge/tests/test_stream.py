@@ -22,6 +22,9 @@ async def _open(kernel, **meta):
         )
     )[0]["result"]
     return r["id"]
+# twin: write_stream_then_read_stream_round_trips_raw_bytes
+# twin: read_stream_chunks_with_offset_and_eof
+# twin: write_stream_appends_when_offset_omitted
 
 
 async def test_write_stream_then_read_stream_round_trips(
@@ -365,7 +368,7 @@ async def test_pump_takes_source_path_only(seeded_kernel, file_bridge, tmp_path)
     assert not (tmp_path / "b.txt").exists()
 
 
-async def test_a_huge_read_length_reads_only_what_exists(
+async def test_huge_length_reads_only_what_exists(
     seeded_kernel, tmp_path, monkeypatch
 ):
     """Rust tests.rs::huge_length_reads_only_what_exists: a length past EOF is clamped

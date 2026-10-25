@@ -167,7 +167,7 @@ async def test_boot_is_idempotent_by_id(seeded_kernel):
     assert set(seeded_kernel.ctx.agents) == before
 
 
-async def test_missing_manifest_reports_not_crashes(seeded_kernel):
+async def test_an_unreadable_manifest_is_reported_at_boot(seeded_kernel):
     rec = (
         await seeded_kernel.send(
             [
@@ -194,7 +194,7 @@ async def test_missing_manifest_reports_not_crashes(seeded_kernel):
     assert r["error"].startswith("static_loader: cannot read manifest 'nope.yaml': "), r
 
 
-async def test_a_malformed_manifest_field_is_refused_at_write_time(seeded_kernel):
+async def test_the_manifest_shape_is_judged_at_write_time(seeded_kernel):
     for bad in ("", 5):
         rec = (
             await seeded_kernel.send(
@@ -268,7 +268,7 @@ async def _boot_with(kernel, aid: str, manifest_text: str | None, **meta) -> dic
     ]
 
 
-async def test_each_manifest_fault_has_its_own_text(seeded_kernel):
+async def test_a_record_without_a_manifest_boots_with_pythons_text(seeded_kernel):
     k = seeded_kernel
     assert await _boot_with(k, "sl_none", None) == {
         "error": "static_loader: no 'manifest' path on the record",
@@ -298,7 +298,7 @@ async def test_each_manifest_fault_has_its_own_text(seeded_kernel):
     }
 
 
-async def test_a_refused_create_and_a_refused_reapply_are_named(seeded_kernel):
+async def test_a_refused_re_apply_names_the_agent_and_forwards_the_error(seeded_kernel):
     k = seeded_kernel
     bad = "agents:\n  - id: 'a/b'\n    handler_module: file_bridge.tools\n"
     r = await _boot_with(k, "sl_bad", bad)

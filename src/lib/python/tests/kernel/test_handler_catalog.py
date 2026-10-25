@@ -109,7 +109,7 @@ def test_load_skips_a_record_outside_the_catalog_without_importing_it(
     assert not marker.exists()
 
 
-async def test_an_unlisted_module_dispatches_reloads_and_stays_out_of_the_catalog(
+async def test_a_probe_registered_bundle_is_absent_from_the_catalog(
     seeded_kernel,
 ):
     """`register_unlisted` — rust's `BundleRegistry::register_unlisted`: the module

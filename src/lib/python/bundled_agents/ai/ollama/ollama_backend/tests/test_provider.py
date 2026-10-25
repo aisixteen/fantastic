@@ -79,7 +79,7 @@ def test_endpoint_and_model_are_required():
         OllamaProvider()
 
 
-async def test_the_client_is_opened_and_closed_per_call():
+async def test_every_pass_opens_its_own_connection():
     """The provider is built per turn: each call opens its own client and closes
     it, so nothing holds a connection past the turn."""
     p = OllamaProvider(endpoint="http://ollama.test", model="ollama-test")
@@ -103,7 +103,7 @@ async def _run(p: OllamaProvider, chunks: list, **kw):
     return out, client.chat.call_args.kwargs
 
 
-async def test_thinking_is_wrapped_once_and_closed_by_content():
+async def test_reasoning_channel_is_wrapped_once_per_turn():
     from ai_core.core import THINK_CLOSE, THINK_OPEN
 
     p = OllamaProvider(endpoint="http://ollama.test", model="m")
@@ -207,7 +207,7 @@ def test_caching_none_and_cleanup_pass_and_provider_cache_is_refused_naming_olla
     )
 
 
-async def test_reported_usage_and_done_reason_land_on_the_provider():
+async def test_ndjson_usage_reports_prompt_tokens_and_a_cut_as_max_tokens():
     p = OllamaProvider(endpoint="http://ollama.test", model="m")
     await _run(
         p,
@@ -254,7 +254,7 @@ async def test_the_defaults_send_only_the_low_temperature():
     assert "think" not in kw
 
 
-async def test_no_model_fails_loud_before_any_request():
+async def test_an_empty_model_fails_loud_in_chat():
     p = OllamaProvider(endpoint="http://ollama.test", model="")
     client = _patched_client([])
     with patch("ollama.AsyncClient", return_value=client):
@@ -287,7 +287,7 @@ async def test_an_unreachable_endpoint_is_a_transport_failure():
     assert str(e.value).startswith("ollama: request failed: ")
 
 
-async def test_a_stream_that_breaks_mid_answer_is_a_transport_failure():
+async def test_a_body_cut_mid_stream_raises_in_ollamas_words():
     import httpx
     from ai_core.provider import ProviderError
 
@@ -322,7 +322,7 @@ async def test_a_status_the_server_answered_is_raised_as_it_was():
 # ─── the read clock (#177) ──────────────────────────────────────────────────
 
 
-async def test_a_stalled_ollama_stream_is_stream_stalled():
+async def test_a_stream_that_goes_quiet_fails_after_the_idle_window():
     import httpx
     from ai_core.provider import ProviderError
 

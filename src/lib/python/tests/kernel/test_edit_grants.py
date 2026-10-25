@@ -54,6 +54,10 @@ def test_edit_grants_merges_both_maps_in_one_step(seeded_kernel):
     updated = _updated_events(events)
     assert len(updated) == 1, updated
     assert updated[0]["changed"] == ["can_call", "callable_by"]
+# twin: a_peer_address_in_callable_by_is_refused_at_the_write
+# twin: an_edit_the_write_time_checks_refuse_writes_nothing
+# twin: a_refused_can_call_shape_writes_nothing
+# twin: edit_grants_refused_in_one_map_writes_neither
 
 
 def test_edit_grants_refusal_writes_neither(seeded_kernel):
@@ -83,7 +87,7 @@ def test_edit_grants_refusal_writes_neither(seeded_kernel):
     assert _updated_events(events) == []
 
 
-def test_edit_grants_no_change_publishes_nothing(seeded_kernel):
+def test_edit_grants_publishes_one_updated_event_only_when_something_changed(seeded_kernel):
     seeded_kernel.create(MOD, id=AID)
     k = seeded_kernel.ctx
     events: list[dict] = []

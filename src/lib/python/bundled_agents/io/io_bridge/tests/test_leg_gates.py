@@ -56,7 +56,7 @@ async def _create(k, **meta) -> dict:
 # ─── the sealed-by-default refusal, per leg ──────────────────────────────────
 
 
-async def test_file_bridge_sealed_refusal_is_exact(seeded_kernel):
+async def test_sealed_leg_teaches_python_s_repair(seeded_kernel):
     k = seeded_kernel
     k.create("file_bridge.tools", id="fb", allow=["."])
     r = await _call(k, "fb", {"type": "list", "path": ""})
@@ -219,6 +219,9 @@ _WIRE = "allow_all_ingress, deny_ingress, password_ingress"
         {"type": "password_ingress", "env": 7},
     ],
 )
+# twin: validate_meta_refuses_an_unknown_or_malformed_ingress_rule
+# twin: validate_meta_refuses_an_unknown_or_malformed_ingress_rule
+# twin: validate_meta_refuses_an_unknown_or_malformed_ingress_rule
 async def test_every_leg_refuses_an_unknown_or_malformed_rule_at_the_write(
     seeded_kernel, module, extra, legal, spec
 ):
@@ -255,7 +258,7 @@ async def test_a_wire_leg_takes_every_rule_it_implements(seeded_kernel, module, 
         assert "error" not in r, (spec, r)
 
 
-async def test_a_malformed_rule_on_a_bridge_record_denies_the_call(seeded_kernel):
+async def test_a_malformed_rule_on_the_record_denies_in_python_s_words(seeded_kernel):
     """A record can still carry one (written below the verbs, or by hand on
     disk): the inbound call is ANSWERED with the seal's denial — never a raise in
     the call task that leaves the peer waiting out its timeout."""
@@ -316,7 +319,7 @@ async def test_a_malformed_rule_on_a_bridge_record_denies_the_call(seeded_kernel
         ),
     ],
 )
-def test_describe_reports_what_the_gate_resolves(record, ingress, egress, sealed):
+def test_describe_scopes_an_auth_stem_like_the_gate(record, ingress, egress, sealed):
     assert describe(record) == {
         "ingress_rule": ingress,
         "egress_rule": egress,
@@ -433,7 +436,7 @@ def test_web_rest_reflect_gets_are_gated_too(seeded_kernel):
             assert r.status_code == 403 and r.json() == SEALED, path
 
 
-def test_web_rest_execution_id_header_names_one_execution(seeded_kernel):
+def test_octet_leg_names_executions_and_validates_type(seeded_kernel):
     _count_mod()
     _COUNT.clear()
     k = seeded_kernel

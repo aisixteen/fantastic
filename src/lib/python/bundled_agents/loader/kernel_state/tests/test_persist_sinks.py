@@ -90,7 +90,7 @@ async def test_store_sink_writes_records_only(wired, tmp_path):
     assert not (tmp_path / "sess" / "agent.yaml").exists()
 
 
-async def test_store_sink_merge_keeps_unknown_keys_past_one_chunk(wired, tmp_path):
+async def test_persist_merge_preserves_extra_fields_on_disk(wired, tmp_path):
     root = wired
     root.create("file_bridge.tools", id="big", allow=["."])
     await _flush(root)
@@ -171,7 +171,7 @@ async def test_store_sink_a_failed_rename_leaves_the_old_record_and_the_tmp(
     ) in capsys.readouterr().err
 
 
-async def test_store_sink_forget_removes_the_whole_subtree(wired, tmp_path):
+async def test_delete_removes_record_through_provider(wired, tmp_path):
     root = wired
     root.create("file_bridge.tools", id="parent", allow=["."])
     root.ctx.agents["parent"].create("file_bridge.tools", id="child", allow=["."])
@@ -189,7 +189,7 @@ async def test_store_sink_forget_removes_the_whole_subtree(wired, tmp_path):
     assert (tmp_path / ".fantastic" / "agent.yaml").exists()  # the root stays
 
 
-async def test_store_sink_an_agent_added_and_removed_between_drains_forgets_nothing(
+async def test_an_agent_added_and_removed_between_drains_forgets_nothing(
     wired, tmp_path, capsys
 ):
     """An agent created and deleted before any drain took its write has no dir on
@@ -241,7 +241,7 @@ async def test_store_sink_a_removed_racing_its_first_write_still_forgets(
     assert not (tmp_path / ".fantastic" / "agents" / "racer").exists()
 
 
-async def test_a_flush_waits_for_the_drain_the_loop_already_took(
+async def test_a_flush_waits_for_the_drain_the_writer_already_took(
     wired, tmp_path, monkeypatch
 ):
     """`aflush` returns once everything dirty has LANDED — also what the debounced
@@ -348,7 +348,7 @@ async def test_persist_record_merges_onto_the_live_agents_dir(tmp_path, monkeypa
     assert (f.parent / "readme.md").exists() is False  # no handler_module named
 
 
-async def test_blob_verbs_refuse_bad_arguments(tmp_path, monkeypatch):
+async def test_blob_verbs_are_the_loaders_and_refuse_like_python(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = boot_root()
     base = {"agent_id": "kernel_state", "name": "s.yaml"}

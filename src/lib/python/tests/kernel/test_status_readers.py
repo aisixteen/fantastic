@@ -50,7 +50,7 @@ def _with_store(k, sid: str = "memory") -> None:
 # ─── create_agent's child boot ───────────────────────────────────────────────
 
 
-async def test_a_failed_child_boot_is_printed_and_the_agent_kept(seeded_kernel, capsys):
+async def test_a_raised_child_boot_prints_python_line_and_an_errored_one_is_silent(seeded_kernel, capsys):
     k = seeded_kernel
     out = await _call(
         k,

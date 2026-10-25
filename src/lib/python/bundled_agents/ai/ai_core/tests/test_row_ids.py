@@ -34,7 +34,7 @@ def test_a_tag_that_ends_on_its_parent_segment_still_names_the_parent():
         assert _row_ids_for_incoming("ai", text, FakeCtx())[1] == want, text
 
 
-def test_the_reply_tag_carries_every_segment_in_order_and_still_parses():
+def test_the_batch_stamp_lives_inside_the_reply_tag():
     tag = _reply_tag(40, "notes", "read", "read the spec", 17, 2, 3, 17)
     assert tag == (
         '[reply to 40 · notes read · "read the spec" · ↑17 · 2 of 3 in batch 17]'

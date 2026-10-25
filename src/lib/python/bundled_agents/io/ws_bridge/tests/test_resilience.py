@@ -132,7 +132,7 @@ async def _wire_pair(ka, kbk) -> tuple[str, str]:
 # ─── 1. the re-entrant round trip ────────────────────────────────────
 
 
-async def test_reentrant_forward_completes_instead_of_deadlocking(two_kernels):
+async def test_a_reentrant_forward_completes_instead_of_deadlocking(two_kernels):
     """A forwards to B; B's handler forwards straight back to A over the SAME
     bridge. Served inline this cannot resolve — B's read loop is inside
     `kernel.send` and never reads A's reply. Served as a task it just works."""
@@ -208,7 +208,7 @@ class _FakeWS:
         return self._frames.pop(0)
 
 
-async def test_ws_transport_skips_malformed_frames_and_keeps_reading():
+async def test_a_malformed_frame_is_skipped_and_the_reader_survives():
     good = json.dumps({"type": "reply", "id": "1", "data": {"ok": True}})
     frames = [
         b"\x00\x00\x00",  # shorter than the length prefix

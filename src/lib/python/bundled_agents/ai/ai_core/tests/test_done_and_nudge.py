@@ -95,7 +95,7 @@ async def test_silent_chain_turns_are_nudged_until_a_call_or_done(
         fake_providers.pop(aid, None)
 
 
-async def test_done_call_ends_the_chain_without_a_nudge(seeded_kernel, fake_providers):
+async def test_a_done_call_ends_the_chain_without_a_nudge(seeded_kernel, fake_providers):
     fp = _Script(
         [
             _call({"type": "reflect"}).replace('"echo"', '"kernel"'),
@@ -254,7 +254,7 @@ async def test_two_thinking_only_turns_escalate_the_nudge(
         fake_providers.pop(aid, None)
 
 
-async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel, fake_providers):
+async def test_a_thinking_only_turn_is_discarded_and_rerolled(seeded_kernel, fake_providers):
     """A turn that is ONLY thinking did not answer: it is never stored and never
     counts as completed — it is rerolled by the no-call reminder, told why
     (a tiny thinking budget, then a clean `stop` with no answer; failing it
@@ -400,7 +400,7 @@ def _done_details(kernel, inbox: str) -> list[dict]:
     return out
 
 
-async def test_the_done_status_carries_the_token_usage(seeded_kernel, fake_providers):
+async def test_the_done_detail_carries_the_token_usage(seeded_kernel, fake_providers):
     """A finished generation's `status` `done` carries what a chat needs for
     `tok/s · ctx`: the provider's reported `prompt_tokens` / `completion_tokens`
     (estimated and marked so when it reports none), `gen_seconds`, and the

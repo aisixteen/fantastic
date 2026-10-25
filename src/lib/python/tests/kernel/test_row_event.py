@@ -60,7 +60,7 @@ async def test_a_call_announces_its_call_row_and_its_settle(seeded_kernel):
         assert "ts" in e
 
 
-async def test_a_forked_task_announces_its_task_row(seeded_kernel):
+async def test_spawn_task_writes_a_task_row(seeded_kernel):
     root = seeded_kernel
     events: list[dict] = []
     unsub = root.add_state_subscriber(events.append)

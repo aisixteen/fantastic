@@ -42,7 +42,7 @@ async def test_a_body_is_held_in_ram_for_this_run_only():
 # ── grep: find the line, don't page for it ───────────────────────────
 
 
-async def test_grep_finds_a_line_inside_a_stored_body_without_pulling_it(monkeypatch):
+async def test_grep_finds_the_line_inside_a_body_that_was_never_pulled(monkeypatch):
     from ai_core import core
 
     k = _Leg()
@@ -129,7 +129,7 @@ async def test_grep_puts_the_stored_body_hit_first_and_collapses_repeated_lines(
     assert r["total"] == 2, r
 
 
-async def test_grep_scoped_to_a_fold_searches_its_members_bodies():
+async def test_a_fold_id_in_grep_scope_descends_to_its_members():
     """A descent: `ids:[fold]` must reach the bodies behind the member replies."""
     from ai_core.core import _grep, _store_reply
     from ai_core.folds import make_fold

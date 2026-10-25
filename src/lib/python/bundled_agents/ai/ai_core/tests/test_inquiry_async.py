@@ -85,7 +85,7 @@ async def _go(k):
     )
 
 
-async def test_the_answer_arrives_later_under_the_inquiry_pid(
+async def test_an_inquiry_is_accepted_and_answered_later_under_its_pid(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel
@@ -112,7 +112,7 @@ async def test_the_answer_arrives_later_under_the_inquiry_pid(
         fake_providers.pop("ia_rcv", None)
 
 
-async def test_the_receiver_may_work_for_several_turns_first(
+async def test_the_receiver_may_work_for_several_turns_before_answering(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel
@@ -142,7 +142,7 @@ async def test_ending_without_an_answer_tells_the_asker(seeded_kernel, fake_prov
         fake_providers.pop("ia_rcv", None)
 
 
-async def test_a_placeholder_is_refused_and_the_inquiry_stays_open(
+async def test_a_placeholder_answer_is_refused_and_the_inquiry_stays_open(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel

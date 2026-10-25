@@ -32,7 +32,7 @@ async def _kernel_call(kernel, **payload):
     return (await kernel.send([{"target": "kernel", "payload": payload}]))[0]["result"]
 
 
-async def test_delete_agent_refuses_the_root(seeded_kernel):
+async def test_delete_agent_refuses_the_root_with_python_text(seeded_kernel):
     child = await _mk(seeded_kernel, "rg_child")
     r = await _kernel_call(seeded_kernel, type="delete_agent", id=seeded_kernel.id)
     assert r.get("reason") == "bad_arg" and r.get("arg") == "id", r
@@ -72,7 +72,7 @@ async def test_create_agent_refuses_reserved_keys(seeded_kernel):
     assert seeded_kernel.ctx.agents.get("rg_reserved") is None
 
 
-async def test_a_verb_a_bare_agent_cannot_answer_is_coded(seeded_kernel):
+async def test_an_unanswerable_verb_at_the_root_carries_reason_and_verb(seeded_kernel):
     """The ROOT is a bare agent for anything outside its own verb set."""
     r = await _kernel_call(seeded_kernel, type="no_such_verb_at_all")
     assert r.get("reason") == "unhandled", r
@@ -110,7 +110,7 @@ async def test_a_refusal_is_not_decorated_into_a_reflect(seeded_kernel):
         assert decoration not in r, (decoration, r)
 
 
-async def test_get_is_not_a_kernel_verb(seeded_kernel):
+async def test_get_is_unhandled_not_a_kernel_verb(seeded_kernel):
     """`get` is NOT one of the kernel verbs — in any runtime, so a model never
     learns from one runtime's reflect a verb another does not have. A record is
     read with `list_agents` or a `reflect`.

@@ -87,6 +87,9 @@ async def _rows(kernel) -> list[dict]:
 
 
 # ─── shape and order ────────────────────────────────────────────
+# twin: the_status_spellings_are_the_wire_contract
+# twin: the_wire_shape_is_pid_status_result_attempts
+# twin: a_mixed_batch_answers_every_item_in_input_order
 
 
 async def test_mixed_batch_settles_in_input_order(seeded_kernel):
@@ -108,7 +111,7 @@ async def test_mixed_batch_settles_in_input_order(seeded_kernel):
     assert "agents" in outs[3]["result"]
 
 
-async def test_gate_denial_is_a_failed_outcome_with_no_pid(seeded_kernel):
+async def test_a_refusal_has_no_pid_and_carries_the_refusal_verbatim(seeded_kernel):
     """A two-sided-gate denial never reaches the task table; the refusal dict
     rides in `result` unchanged (same shape callers always branched on)."""
     from _testkit import as_agent
@@ -145,7 +148,7 @@ async def test_non_list_argument_is_a_loud_typeerror(seeded_kernel):
 # ─── concurrency ────────────────────────────────────────────────
 
 
-async def test_batch_dispatch_is_concurrent_not_serial(seeded_kernel):
+async def test_a_batch_runs_concurrently_not_one_after_another(seeded_kernel):
     """Two slow items: both rows in `ps` mid-flight, wall ≈ max, not sum."""
     a = await _mk(seeded_kernel, "conc_a")
     b = await _mk(seeded_kernel, "conc_b")
@@ -167,7 +170,7 @@ async def test_batch_dispatch_is_concurrent_not_serial(seeded_kernel):
     assert [o["status"] for o in outs] == ["timed_out", "timed_out"]
 
 
-async def test_two_items_to_one_agent_get_two_pids(seeded_kernel):
+async def test_two_items_to_one_agent_both_run(seeded_kernel):
     """The substrate does not serialize per agent — any FIFO is a bundle's own
     lock. Two dispatches, two distinct pids, both complete."""
     a = await _mk(seeded_kernel, "twin_a")
@@ -184,7 +187,7 @@ async def test_two_items_to_one_agent_get_two_pids(seeded_kernel):
 # ─── timeout: the front door ────────────────────────────────────
 
 
-async def test_timeout_kills_through_the_front_door(seeded_kernel):
+async def test_a_timeout_kills_through_the_front_door(seeded_kernel):
     """Expiry runs the bundle's `on_cancel` BEFORE the abort (the spy sees its
     task still alive), the row leaves the table, and the outcome names the
     deadline it enforced."""
@@ -218,6 +221,8 @@ async def test_timeout_kills_the_subtree_too(seeded_kernel):
     hooked = {aid for aid, _tid, _alive in _hook_calls}
     assert hooked == {a, b}, f"subtree hooks: {hooked}"
     assert all(t["agent"] not in (a, b) for t in await _rows(seeded_kernel))
+# twin: an_item_defaults_nothing
+# twin: no_timeout_means_the_kernel_never_invents_one
 
 
 async def test_no_timeout_waits_out_a_slow_handler(seeded_kernel):
@@ -255,7 +260,7 @@ async def test_no_timeout_waits_out_a_slow_handler(seeded_kernel):
     assert out["status"] == "completed" and out["result"] == {"took": "its time"}
 
 
-async def test_bad_timeout_is_refused_before_dispatch(seeded_kernel):
+async def test_a_bad_timeout_is_refused_not_guessed(seeded_kernel):
     a = await _mk(seeded_kernel, "t_bad")
     for bad in (0, -1, "5", True):
         out = (
@@ -270,7 +275,7 @@ async def test_bad_timeout_is_refused_before_dispatch(seeded_kernel):
 # ─── cancellation ───────────────────────────────────────────────
 
 
-async def test_third_party_cancel_settles_one_item_only(seeded_kernel):
+async def test_cancelling_one_item_leaves_its_siblings_alone(seeded_kernel):
     """`cancel` of one item's pid → that slot is `cancelled` with the exact
     blocked-caller shape; the sibling completes untouched."""
     a = await _mk(seeded_kernel, "cx_a")
@@ -445,7 +450,7 @@ async def test_a_module_whose_top_level_exits_is_never_imported(
 # ─── the fast path and the Kernel facade ───────────────────────
 
 
-async def test_kernel_reflect_fast_path_mints_no_row(seeded_kernel):
+async def test_an_unnamed_kernel_reflect_writes_no_row(seeded_kernel):
     """`kernel`+`reflect` is a pure identity read: completed, `pid is None`,
     and it never appears in the table (assert from INSIDE the batch, next to a
     live row that proves ps ran mid-flight)."""
@@ -505,6 +510,8 @@ _ov = types.ModuleType("overlap_agent.tools")
 _ov.handler = _overlap_handler
 _ov.VERBS = {}
 register_unlisted("overlap_agent.tools", _ov)
+# twin: two_items_to_one_agent_execute_at_the_same_time
+# twin: two_items_to_two_agents_execute_at_the_same_time
 
 
 async def test_a_batch_executes_its_items_in_parallel_and_delivers_them_in_order(

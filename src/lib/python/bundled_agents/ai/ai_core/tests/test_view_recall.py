@@ -62,7 +62,7 @@ def test_fit_reply_never_exceeds_the_cap_and_says_so():
     assert kept2 == items[:2] and not cut2
 
 
-async def test_grep_answers_under_the_inline_cap_for_a_broad_query():
+async def test_grep_answers_under_the_inline_cap_even_when_everything_matches():
     k = _K()
     rows = [
         _row("user", "\n".join(f"marker {i}.{j}" for j in range(80)), f"u:{i}")
@@ -87,7 +87,7 @@ async def test_grep_answers_under_the_inline_cap_for_a_broad_query():
     assert r["truncated"] and r["next"]["id"]
 
 
-async def test_history_is_digest_resolution_and_paged():
+async def test_history_answers_the_digest_and_the_full_turns():
     k = _K()
     await _seed(k, [_row("user", BIG, f"u:{i}") for i in range(30)])
     from ai_core.core import _make_history
@@ -166,7 +166,7 @@ def test_res_of_classifies_rows():
 # ── context_recall ───────────────────────────────────────────────────
 
 
-async def test_recall_mechanical_fit_is_under_budget_and_persists_a_view_and_a_row(
+async def test_context_recall_fits_the_head_and_writes_the_view_it_chose(
     monkeypatch,
 ):
     k = _K()
@@ -341,7 +341,7 @@ async def test_recall_clears_ram_scratch_but_never_the_store(monkeypatch):
     )
 
 
-async def test_boot_is_lazy_and_marks_the_view_for_rebuilding():
+async def test_boot_is_noop():
     """Boot never touches the memory store; it marks the first turn to read the head
     and run `context_recall`."""
     k = _K()
@@ -354,7 +354,7 @@ async def test_boot_is_lazy_and_marks_the_view_for_rebuilding():
     core._recall_due.discard("ai")
 
 
-async def test_boot_without_a_memory_store_fails_loud():
+async def test_an_agent_without_a_memory_store_fails_loud():
     k = _K({"context_window": 12000, "output_reserve": 0, "memory_store_id": None})
     k.record.pop("memory_store_id")
     out = await _make_boot(_cfg())("ai", {}, k)
@@ -546,7 +546,7 @@ async def _long_head(k, strategy="fold"):
     await _seed(k, [_row("user", "GOAL", "user:goal")] + _chain("a", 20))
 
 
-async def test_recall_folds_a_head_longer_than_the_budget(monkeypatch, fake_providers):
+async def test_context_recall_folds_a_head_longer_than_the_budget(monkeypatch, fake_providers):
     k = _K()
     await _long_head(k)
 

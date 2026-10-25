@@ -5,7 +5,7 @@ readme) and the `description` field.
 from __future__ import annotations
 
 
-async def test_reflect_root_uniform(seeded_kernel):
+async def test_root_with_handler_reflects_identity(seeded_kernel):
     """Root reflect is the uniform identity."""
     r = (
         await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
@@ -13,6 +13,8 @@ async def test_reflect_root_uniform(seeded_kernel):
     assert r["id"] == "kernel_state"
     assert r["sentence"].startswith("Fantastic kernel")
     assert r["parent_id"] is None
+# twin: root_reflect_is_uniform
+# twin: child_reflect_is_uniform
 
 
 async def test_reflect_root_has_runtime(seeded_kernel):
@@ -46,7 +48,7 @@ async def test_reflect_root_env_version_from_environ(seeded_kernel, monkeypatch)
     assert r["version"] == "v9.9.9"
 
 
-async def test_kernel_address_equals_the_root(seeded_kernel):
+async def test_send_kernel_alias_routes_to_root(seeded_kernel):
     """`kernel` is the reserved address of the root; reflecting it == reflecting kernel_state."""
     via_address = (
         await seeded_kernel.send([{"target": "kernel", "payload": {"type": "reflect"}}])
@@ -86,7 +88,7 @@ async def test_reflect_tree_node_carries_a_bridges_allow(seeded_kernel):
     assert node.get("allow") == ["src", "README.md"], node
 
 
-async def test_reflect_tree_ids(seeded_kernel):
+async def test_tree_tiers(seeded_kernel):
     """tree=ids: a flat descendant-id list (self first)."""
     r = (
         await seeded_kernel.send(
@@ -118,7 +120,7 @@ async def test_reflect_bundles_default_omitted(seeded_kernel):
     assert "bundles" not in r
 
 
-async def test_reflect_bundles_all(seeded_kernel):
+async def test_bundles_tiers(seeded_kernel):
     r = (
         await seeded_kernel.send(
             [{"target": "kernel", "payload": {"type": "reflect", "bundles": "all"}}]
@@ -135,7 +137,7 @@ async def test_reflect_bundles_all(seeded_kernel):
         assert b["handler_module"].endswith(".tools")
 
 
-async def test_the_catalog_carries_each_backend_kinds_record_schema(seeded_kernel):
+async def test_bundles_all_carries_a_published_record_schema(seeded_kernel):
     """A set-up page reads what a KIND's record takes before any agent of it
     exists: every field with required/type/enum/default/hint — a key included,
     as a `credentials` field (a store ref), never an environment variable."""
@@ -261,7 +263,7 @@ async def test_reflect_readme_flag(seeded_kernel):
 # ─── description field ─────────────────────────────────────────
 
 
-async def test_reflect_description_surfaces_top_and_tree(seeded_kernel):
+async def test_description_surfaces_top_and_tree(seeded_kernel):
     """description set at create surfaces both at top-level reflect of the
     agent AND in its node inside a tree=all walk of the parent."""
     rec = (

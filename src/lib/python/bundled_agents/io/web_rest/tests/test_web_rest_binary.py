@@ -30,7 +30,7 @@ def _mount(kernel):
     return app
 
 
-def test_binary_leg_request_and_reply_round_trip(seeded_kernel, tmp_path, monkeypatch):
+def test_web_rest_octet_leg_edit_and_read_stream(seeded_kernel, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # Grant the surface reach to the bridge on BOTH ends (egress + ingress) —
     # authority is deny-all by default.

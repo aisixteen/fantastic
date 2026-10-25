@@ -139,7 +139,7 @@ def test_a_lockless_invocation_writes_no_root_record(tmp_path):
     assert (tmp_path / ".fantastic" / "agent.yaml").exists()
 
 
-def test_an_unreadable_root_record_is_never_written_over(tmp_path):
+def test_an_unreadable_root_record_refuses_the_boot_and_is_left_alone(tmp_path):
     d = tmp_path / ".fantastic"
     d.mkdir()
     (d / "agent.yaml").write_text("id: [unclosed\n")
@@ -148,7 +148,7 @@ def test_an_unreadable_root_record_is_never_written_over(tmp_path):
     assert (d / "agent.yaml").read_text(encoding="utf-8") == "id: [unclosed\n"
 
 
-async def test_a_service_loop_does_not_hold_the_quiet_phase(seeded_kernel):
+async def test_a_forked_service_loop_is_not_waited_for_but_is_cancelled(seeded_kernel):
     """A `spawn_task` fork is cancelled by the stop, never waited for."""
     k = seeded_kernel
     ctx = k.ctx

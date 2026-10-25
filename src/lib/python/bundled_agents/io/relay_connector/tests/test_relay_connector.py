@@ -46,7 +46,7 @@ async def test_transport_wraps_in_relay_send_and_unwraps_event():
     }
 
 
-async def test_transport_carries_raw_bytes_over_json_relay():
+async def test_binary_round_trips_raw_body_through_relay_envelope():
     """A bridge frame with raw `bytes` (a read_stream chunk) rides the relay as a
     native BINARY WS frame `[len|header|body]` — bytes stay RAW, round-trip
     intact, no base64."""
@@ -58,7 +58,7 @@ async def test_transport_carries_raw_bytes_over_json_relay():
     assert frame["data"] == {"eof": False}
 
 
-async def test_transport_skips_foreign_peer_events():
+async def test_classify_text_routes_partner_directory_and_replies():
     """recv() unwraps deliveries FROM the partner (and surfaces directory events
     separately); a FOREIGN peer's event is skipped, not mis-routed as the partner's."""
     hub = FakeRelayHub()

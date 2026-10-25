@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from web_ws.tools import _get_routes, _make_endpoint, _reflect, route_endpoints
 
 from _testkit import wire
+# twin: reflect_keys_match_python
 
 
 async def test_reflect_describes_surface(seeded_kernel):
@@ -20,7 +21,7 @@ async def test_reflect_describes_surface(seeded_kernel):
     assert "verbs" not in r
 
 
-async def test_get_routes_returns_one_websocket(seeded_kernel):
+async def test_get_routes_match_python(seeded_kernel):
     """DECLARATIVE — pure JSON data, byte-shaped like rust. No callable
     rides the reply, so it renders over REST and persists into the ledger."""
     r = await _get_routes("ws_xyz", {}, seeded_kernel)

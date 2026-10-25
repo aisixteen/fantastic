@@ -44,7 +44,7 @@ def _stub_bundle(
     return mod
 
 
-async def test_shutdown_walks_depth_first(seeded_kernel):
+async def test_shutdown_walks_depth_first_after_the_flush_hook(seeded_kernel):
     """Parent's hook fires AFTER all descendants' hooks — same order
     contract as `_cascade_delete`. Lets a PTY job die before the member that
     owns it (an exec_bridge) drops, serve-web before vscode_fantastic, etc."""
@@ -130,7 +130,7 @@ async def test_shutdown_never_falls_back_to_on_delete(seeded_kernel):
     assert fired == []
 
 
-async def test_shutdown_prefers_on_shutdown_over_on_delete(seeded_kernel):
+async def test_shutdown_prefers_on_shutdown_over_on_delete_and_is_idempotent(seeded_kernel):
     """If a bundle defines BOTH hooks, shutdown calls on_shutdown.
     on_delete stays reserved for cascade-delete (where the disk
     artifact will be wiped too)."""
@@ -174,7 +174,7 @@ async def test_shutdown_is_idempotent(seeded_kernel):
     assert seeded_kernel.ctx._shutdown_complete is True
 
 
-async def test_shutdown_continues_on_hook_exception(seeded_kernel):
+async def test_shutdown_continues_on_a_raising_hook(seeded_kernel):
     """One bundle's teardown can't take down the whole shutdown —
     sibling agents and ancestors must still get their hooks called.
     Mirrors `_cascade_delete`'s exception-swallowing behaviour."""

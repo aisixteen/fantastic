@@ -68,7 +68,7 @@ async def _slow_pid(k, aid: str):
 # ─── the kernel's `_as_id`: cancel task_id ───────────────────────────────────
 
 
-async def test_cancel_task_id_forms(seeded_kernel):
+async def test_cancel_without_a_task_id_is_missing_arg(seeded_kernel):
     k = seeded_kernel
     k.create("id_probe.tools", id="sl")
     nothing = {"cancelled": False, "killed": []}
@@ -108,7 +108,7 @@ async def test_cancel_accepts_a_leading_zero_and_a_plain_string(seeded_kernel):
 # ─── the kernel's `_as_id`: ack_deadletter id ────────────────────────────────
 
 
-async def test_ack_deadletter_id_forms_and_texts(seeded_kernel):
+async def test_ack_deadletter_refusals_and_acks_are_byte_exact(seeded_kernel):
     k = seeded_kernel
     k.create("id_probe.tools", id="dl")
     dead = await _call(k, "dl", {"type": "fail"})
@@ -343,7 +343,7 @@ async def test_init_refuses_while_another_fantastic_owns_the_dir(
     assert "static_loader" not in kernel.ctx.agents
 
 
-async def test_one_shots_probe_the_flock_not_the_pid(kernel, tmp_path, capsys):
+async def test_held_is_none_for_a_live_pid_without_the_flock(kernel, tmp_path, capsys):
     """A one-shot takes the daemon's own flock. A lock file
     naming a live pid that holds no flock is stale — taken over, not refused."""
     path = _manifest(tmp_path)
@@ -367,7 +367,7 @@ async def test_init_usage(kernel, capsys):
     )
 
 
-async def test_call_refuses_while_another_fantastic_owns_the_dir(
+async def test_held_names_the_holder_while_the_flock_is_held(
     kernel, tmp_path, capsys
 ):
     fd = _held_lock(tmp_path, os.getppid())

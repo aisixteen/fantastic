@@ -114,7 +114,7 @@ def test_no_generated_docs_routes(client):
         assert c.get(path).status_code == 404, path
 
 
-def test_root_is_not_a_page(client):
+def test_render_route_is_absent(client):
     """The host renders nothing of its own: `/` is undeclared, so it is a 404 —
     no tree index, nothing about the kernel leaks to an anonymous client."""
     c, _ = client

@@ -172,7 +172,7 @@ async def test_ephemeral_agents_are_never_in_the_document(kernel):
 # ─── C2 — resume in a DIFFERENT kernel ──────────────────────────
 
 
-async def test_a_checkpoint_loads_into_a_fresh_kernel_and_the_tree_behaves(kernel):
+async def test_save_and_load_round_trips_disk_to_memory(kernel):
     """The cross-process case, minus the process: a document written by one
     kernel, loaded by another that shares nothing with it. Asserted by
     REACHABILITY — attempt the call, do not read a field."""
@@ -269,7 +269,7 @@ async def test_a_bare_record_list_still_loads(kernel):
 # ─── the document is HAND-AUTHORED, so it can be wrong ──────────
 
 
-async def test_a_reserved_key_is_refused_before_the_tree_is_touched(kernel):
+async def test_a_reserved_key_is_refused_before_anything_is_torn_down(kernel):
     """`root_path` / `ctx` / `parent` are `Agent.__init__` parameters, and every
     non-structural record key becomes `**meta`. Before this was validated,
     `load` CLEARED THE TREE and then raised `TypeError: got multiple values for

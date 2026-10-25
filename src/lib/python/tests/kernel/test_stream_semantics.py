@@ -231,7 +231,7 @@ async def test_emit_never_invokes_a_handler(kernel, verb):
 # ─── a queue exists iff a reader registered it ──────────────────
 
 
-async def test_an_agent_has_no_inbox_until_a_reader_registers_one(kernel):
+async def test_register_mints_no_inbox(kernel):
     """A QUEUE EXISTS IFF A READER REGISTERED IT. One per agent at construction
     with NOTHING reading it would be a ring that fills once and then evicts one
     payload per message, for the life of the process. `ensure_inbox` IS the registration; an agent does not get a
@@ -249,7 +249,7 @@ async def test_an_agent_has_no_inbox_until_a_reader_registers_one(kernel):
     assert q.get_nowait()["text"] == "y"
 
 
-async def test_watch_without_a_registered_inbox_is_refused(kernel):
+async def test_a_registered_agent_without_a_reader_cannot_be_a_watcher(kernel):
     """A `watch` that lazy-created the watcher's queue would let a caller watch
     and never drain: payloads would pile to INBOX_BOUND and then be evicted one
     per message, with nothing to say so. Inventing a consumer on

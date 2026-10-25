@@ -14,7 +14,7 @@ from _testkit import boot_root, persist
 from kernel import INBOX_BOUND
 
 
-def test_create_assigns_id_with_bundle_prefix(kernel):
+def test_mint_id_format_is_bundle_underscore_hex6(kernel):
     rec = kernel.create("file_bridge.tools", allow=["."])
     assert rec["id"].startswith("file_")
     assert rec["handler_module"] == "file_bridge.tools"
@@ -63,7 +63,7 @@ def test_get_returns_record_or_none(kernel):
     assert kernel.get("missing") is None
 
 
-def test_update_merges_meta(kernel):
+def test_update_meta_merges_and_persists(kernel):
     kernel.create("file_bridge.tools", allow=["."], id="a")
     rec = kernel.update("a", model="x", endpoint="http://localhost")
     assert rec["model"] == "x"
@@ -135,6 +135,8 @@ def test_load_all_skips_corrupted_agent_json(tmp_path, monkeypatch):
     k = boot_root()
     assert k.get("broken") is None
     assert k.get("good") is not None
+# twin: boot_weak_load_skips_unknown_handler_module_and_subtree
+# twin: bootstrap_weak_loads_unknown_handler_modules
 
 
 def test_load_all_weak_loads_unknown_handler_module(tmp_path, monkeypatch, capsys):
@@ -203,6 +205,8 @@ async def test_reflect_kernel_returns_uniform_identity(seeded_kernel):
             )
         )[0]["result"]
     )
+# twin: the_oldest_is_evicted_so_the_newest_always_lands
+# twin: an_inbox_at_its_bound_drops_the_oldest
 
 
 async def test_inbox_bounded_drops_oldest(kernel):

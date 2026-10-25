@@ -209,6 +209,7 @@ async def _turn_error(p) -> Exception:
     with pytest.raises(RuntimeError) as e:
         await _drain(p)
     return e.value
+# twin: connect_failure_is_transport
 
 
 async def test_a_connect_failure_is_transport():
@@ -235,7 +236,7 @@ async def test_a_stream_dropped_mid_answer_is_transport():
 
 
 @pytest.mark.parametrize("code", [502, 503, 504, 529])
-async def test_a_gateway_or_overloaded_status_is_transport(code):
+async def test_http_529_is_transport(code):
     from ai_core.provider import ProviderError
 
     err = await _turn_error(_provider(_transport("busy", status=code)))
@@ -244,7 +245,7 @@ async def test_a_gateway_or_overloaded_status_is_transport(code):
 
 
 @pytest.mark.parametrize("code", [400, 401, 500])
-async def test_a_status_the_api_meant_is_not_transport(code):
+async def test_http_400_is_not_transport(code):
     from ai_core.provider import ProviderError
 
     err = await _turn_error(_provider(_transport("bad request", status=code)))
@@ -396,7 +397,7 @@ async def _create(kernel, **meta):
     )
 
 
-async def test_a_send_reads_the_api_first(seeded_kernel, mock_http, fake_providers):
+async def test_a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing(seeded_kernel, mock_http, fake_providers):
     seen: list = []
     mock_http(_api(seen))
     r = await _create(seeded_kernel)
@@ -783,7 +784,7 @@ def _models_api(status: int, body: str, seen: list | None = None):
     return httpx.MockTransport(handler)
 
 
-async def test_models_lists_the_keys_models(
+async def test_the_models_verb_lists_the_keys_models(
     seeded_kernel, mock_http, fake_providers, _fresh_usage
 ):
     seen: list = []
@@ -808,7 +809,7 @@ async def test_models_lists_the_keys_models(
     assert "limit=1000" in seen[0]
 
 
-async def test_models_names_a_missing_key_on_401(
+async def test_the_models_verb_names_a_refusing_api(
     seeded_kernel, mock_http, fake_providers, _fresh_usage
 ):
     mock_http(_models_api(401, "{}"))
@@ -817,7 +818,7 @@ async def test_models_names_a_missing_key_on_401(
     assert "401" in got["error"] and "credentials" in got["error"]
 
 
-async def test_models_refuses_a_body_that_is_not_a_model_list(
+async def test_the_models_verb_refuses_a_body_that_is_not_a_model_list(
     seeded_kernel, mock_http, fake_providers, _fresh_usage
 ):
     mock_http(_models_api(200, "<html>"))
@@ -1064,7 +1065,7 @@ def test_sonnet_cache_reads_bill_at_a_twentieth_of_input():
     assert s["saved_usd"] == pytest.approx(1_000_000 * (3.0 - 0.15) / 1e6, abs=1e-12)
 
 
-def test_haiku_cache_reads_bill_at_a_tenth_and_only_dated_ids_match_sonnet():
+def test_haiku_cache_reads_bill_at_a_tenth():
     from anthropic_backend.provider import Usage
 
     def read_cost(model: str) -> float:
@@ -1416,7 +1417,7 @@ class _SlowStream(httpx.AsyncByteStream):
             yield c
 
 
-async def test_a_silent_api_stream_is_stalled_not_hung():
+async def test_a_stream_that_goes_quiet_fails_after_the_idle_window():
     from ai_core.provider import ProviderError
 
     first = _sse(START, _text("par")).encode()
@@ -1478,6 +1479,7 @@ async def test_pings_keep_the_clock_alive():
         lambda req: httpx.Response(200, stream=_SlowStream(chunks, 0.01))
     )
     assert await _drain(_provider(t, stream_idle=0.5)) == "done"
+# twin: stream_idle_seconds_defaults_and_is_validated
 
 
 def test_stream_idle_seconds_is_validated_at_the_write():

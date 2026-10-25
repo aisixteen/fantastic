@@ -101,6 +101,8 @@ async def test_a_gated_out_agent_cannot_invoke_by_emitting(kernel):
 
 
 # ─── 2. provenance laundering ────────────────────────────────────
+# twin: a_handler_reads_its_caller_not_itself
+# twin: sender_is_the_callee_and_origin_the_caller_at_every_hop
 
 
 async def test_no_agent_initiated_path_arrives_as_operator(kernel):
