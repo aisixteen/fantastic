@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ai_core import build, on_cancel, required_meta  # noqa: F401 — the hooks
 from ai_core import on_delete as _core_on_delete
-from ai_core import caching
+from ai_core import ProviderError, caching, stream_idle_of
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 from kernel._refusal import BAD_ARG, refusal
@@ -188,6 +188,13 @@ RECORD_SCHEMA = schema(
             "str",
             "a file every request appends one JSON usage line to",
         ),
+        field(
+            "stream_idle_seconds",
+            "float",
+            "the read clock on the answer stream: seconds with no byte from the API "
+            "(headers included) before the turn is judged stalled and ends with an "
+            "error row; default 60",
+        ),
         # the API key — optional on the record: absent, no key header goes out
         credentials_field(required=False),
     ],
@@ -231,6 +238,10 @@ def validate_meta(meta: dict, record: dict) -> str | None:
     u = meta.get("usage_log")
     if u is not None and not (isinstance(u, str) and u):
         return "usage_log must be a non-empty string"
+    try:
+        stream_idle_of(meta)
+    except ProviderError as err:
+        return str(err)
     e = meta.get("effort")
     if e is not None and e not in ("low", "medium", "high", "xhigh", "max"):
         return "effort must be one of low, medium, high, xhigh, max"
@@ -302,6 +313,7 @@ def make_provider(id, kernel):
         else None,
         usage_log=rec.get("usage_log") or None,
         agent_id=id,
+        stream_idle=stream_idle_of(rec),
     )
 
 

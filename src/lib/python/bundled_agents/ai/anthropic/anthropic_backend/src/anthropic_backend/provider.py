@@ -39,14 +39,16 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
-from ai_core.provider import ProviderError
+from ai_core.constants import STREAM_IDLE_SECONDS
+from ai_core.provider import ProviderError, stalled_error
 from ai_core.core import THINK_CLOSE, THINK_OPEN
 from ai_core import caching as ai_caching
 
 #: The API version every request names.
 ANTHROPIC_VERSION = "2023-06-01"
-#: Seconds to reach the API. The stream itself has no read clock: the turn's one
-#: bound is ai_core's send timeout.
+#: Seconds to reach the API. The stream's read clock is the record's
+#: `stream_idle_seconds` (httpx's per-read timeout, headers included; the API's pings
+#: keep it alive through a silent thought).
 CONNECT_TIMEOUT = 15.0
 #: Below this a side call gets no thinking: the API needs budget_tokens >= 1024 and
 #: below max_tokens.
@@ -469,6 +471,7 @@ class AnthropicProvider:
         long_context_tokens: int | None = None,
         usage_log: str | None = None,
         agent_id: str = "",
+        stream_idle: float = STREAM_IDLE_SECONDS,
     ):
         self._endpoint = endpoint.rstrip("/")
         self._model = model
@@ -493,6 +496,7 @@ class AnthropicProvider:
         # id written into each line.
         self._usage_log = usage_log
         self._agent_id = agent_id
+        self._stream_idle = stream_idle
 
     def _persist(self) -> None:
         """Rewrite the agent's usage.json with the running total: the base plus this
@@ -579,7 +583,7 @@ class AnthropicProvider:
         try:
             async with (
                 httpx.AsyncClient(
-                    timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT),
+                    timeout=httpx.Timeout(self._stream_idle, connect=CONNECT_TIMEOUT),
                     transport=self._transport,
                 ) as client,
                 client.stream(
@@ -689,6 +693,10 @@ class AnthropicProvider:
             raise ProviderError(
                 f"anthropic_backend: could not connect to {self._endpoint}",
                 transport=True,
+            ) from e
+        except httpx.ReadTimeout as e:
+            raise stalled_error(
+                "anthropic_backend", self._endpoint, self._stream_idle
             ) from e
         except (httpx.ReadError, httpx.RemoteProtocolError) as e:
             raise ProviderError(

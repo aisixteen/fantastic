@@ -43,7 +43,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
-from ai_core.provider import ProviderError
+from ai_core.provider import ProviderError, stalled_error
 
 log = logging.getLogger(__name__)
 
@@ -282,6 +282,7 @@ class VllmProvider:
         explicit_budget: bool = False,
         connect_timeout: float = CONNECT_TIMEOUT,
         read_timeout: float = READ_TIMEOUT,
+        stream_idle: float | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         clock=time.monotonic,
     ):
@@ -310,6 +311,9 @@ class VllmProvider:
         # statement — never touched) or from the default (ours to fit per call).
         self._explicit_budget = explicit_budget
         self._timeouts = (float(connect_timeout), float(read_timeout))
+        # The read clock (#177): the record's `stream_idle_seconds`, else the
+        # `read_timeout` (a vLLM server may prefill a long while before a byte).
+        self._stream_idle = float(read_timeout if stream_idle is None else stream_idle)
         self._transport = transport
         self._clock = clock
 
@@ -404,7 +408,7 @@ class VllmProvider:
         tool_calls: list[list[str]] = []
         key = await self._key(self._endpoint)
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        connect, read = self._timeouts
+        connect, read = self._timeouts[0], self._stream_idle
         try:
             # ONE client per call: the provider is built per turn, and a client
             # kept on it would hold its sockets past the turn. After connect, one
@@ -501,10 +505,8 @@ class VllmProvider:
                 transport=True,
             ) from e
         except httpx.ReadTimeout as e:
-            raise ProviderError(
-                f"vllm_backend: {self._endpoint} sent nothing for "
-                f"read_timeout={self._timeouts[1]:g}s",
-                transport=True,
+            raise stalled_error(
+                "vllm_backend", self._endpoint, self._stream_idle
             ) from e
         except (httpx.ReadError, httpx.RemoteProtocolError) as e:
             if not saw_finish:

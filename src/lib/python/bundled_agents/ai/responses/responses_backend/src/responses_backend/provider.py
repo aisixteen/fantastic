@@ -24,7 +24,8 @@ from typing import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
-from ai_core.provider import ProviderError
+from ai_core.constants import STREAM_IDLE_SECONDS
+from ai_core.provider import ProviderError, stalled_error
 
 # EDGE TRANSPORT FAILURES — not answers, and not statements about the request.
 # A 4xx, or any 5xx carrying a JSON body, is the endpoint DELIBERATELY answering:
@@ -108,6 +109,7 @@ class ResponsesProvider:
         max_tokens: int = MAX_TOKENS,
         sampling: dict | None = None,
         transport=None,
+        stream_idle: float = STREAM_IDLE_SECONDS,
     ):
         # `async key(endpoint) -> str`, awaited before EACH request.
         self._key = key
@@ -126,6 +128,8 @@ class ResponsesProvider:
         self._sampling = {k: v for k, v in (sampling or {}).items() if v is not None}
         # Test seam: an httpx transport to hand the client. None = the real network.
         self._transport = transport
+        # The read clock: seconds the endpoint may send nothing (headers included).
+        self._stream_idle = stream_idle
 
     async def chat(
         self, messages: list[dict], max_tokens: int | None = None
@@ -137,6 +141,10 @@ class ResponsesProvider:
             async with aclosing(self._chat(messages, max_tokens)) as stream:
                 async for token in stream:
                     yield token
+        except httpx.ReadTimeout as e:
+            raise stalled_error(
+                "responses_backend", self._endpoint, self._stream_idle
+            ) from e
         except (
             httpx.TimeoutException,
             httpx.NetworkError,
@@ -200,9 +208,10 @@ class ResponsesProvider:
                 f"items={len(items)}",
                 flush=True,
             )
-        # NO READ CLOCK ON THE STREAM — the turn's one bound is ai_core's send
-        # timeout; a queued turn is not a dead one. Connect stays finite.
-        timeout = httpx.Timeout(None, connect=15.0)
+        # THE READ CLOCK (#177): httpx's per-read timeout covers the response headers
+        # and every body read; a silent endpoint ends the turn instead of holding the
+        # lock to ai_core's send ceiling. Connect stays finite.
+        timeout = httpx.Timeout(self._stream_idle, connect=15.0)
         async with httpx.AsyncClient(
             timeout=timeout, transport=self._transport
         ) as client:

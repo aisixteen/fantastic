@@ -42,6 +42,11 @@ TRIGGER = 0.8
 SEND_TIMEOUT = float(
     os.environ.get("FANTASTIC_AI_SEND_TIMEOUT", "180")
 )  # hard ceiling per-generation; releases the lock (env-overridable — slow local models need more)
+# The READ CLOCK on a provider stream, in seconds: the longest the endpoint may go
+# without sending a byte (headers included) before the stream is judged stalled and
+# the turn ends with an error row (#177). A record's `stream_idle_seconds` replaces
+# it; it bounds the gap BETWEEN bytes, it never widens SEND_TIMEOUT.
+STREAM_IDLE_SECONDS = 60.0
 DEFAULT_CLIENT_ID = "cli"  # headless / REPL caller defaults here
 MAX_CALL_DEPTH = 8  # recursion guard: AI→AI→… chains refuse past this depth
 

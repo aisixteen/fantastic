@@ -214,7 +214,8 @@ async def test_a_timeout_after_finish_reason_is_still_a_stall():
     with pytest.raises(RuntimeError) as e:
         await _drain(p)
     assert str(e.value) == (
-        "vllm_backend: http://vllm.test/v1 sent nothing for read_timeout=900s"
+        "vllm_backend: stream_stalled — http://vllm.test/v1 sent no bytes for 900s; "
+        "this turn is NOT complete"
     )
 
 
@@ -783,7 +784,8 @@ async def test_a_turn_that_finishes_inside_the_thought_closes_the_wrapper():
     [
         (
             httpx.ReadTimeout("slow"),
-            "vllm_backend: http://vllm.test/v1 sent nothing for read_timeout=900s",
+            "vllm_backend: stream_stalled — http://vllm.test/v1 sent no bytes for "
+            "900s; this turn is NOT complete",
         ),
         (
             httpx.ReadError("gone"),
@@ -850,3 +852,49 @@ async def test_an_evicted_conversation_is_logged_by_its_key(caplog):
 
 
 # ── the key never leaves in an error text ────────────────────────────────────
+
+
+# ─── the read clock (#177) ───────────────────────────────────────────────────
+
+
+def _timeout_probe(sink: list):
+    def handler(request: httpx.Request) -> httpx.Response:
+        sink.append(request.extensions["timeout"])
+        return httpx.Response(
+            200, text=_sse(_delta(content="ok"), _delta(finish="stop"))
+        )
+
+    return httpx.MockTransport(handler)
+
+
+async def test_stream_idle_seconds_defaults_to_read_timeout():
+    seen: list = []
+    await _drain(_provider(_timeout_probe(seen), read_timeout=30))
+    assert seen[0]["read"] == 30.0
+    await _drain(_provider(_timeout_probe(seen)))
+    assert seen[1]["read"] == 900.0
+
+
+async def test_stream_idle_seconds_overrides_read_timeout():
+    seen: list = []
+    p = _provider(_timeout_probe(seen), read_timeout=30, stream_idle=0.2)
+    await _drain(p)
+    assert seen[0]["read"] == 0.2
+    sse = _sse(_delta(content="part"), done=False)
+    p = _provider(
+        _breaking_transport(sse, httpx.ReadTimeout("slow")),
+        read_timeout=30,
+        stream_idle=0.2,
+    )
+    with pytest.raises(RuntimeError) as e:
+        await _drain(p)
+    assert "sent no bytes for 0.2s" in str(e.value) and e.value.transport is True
+
+
+def test_stream_idle_seconds_is_validated_at_the_write():
+    from vllm_backend.tools import RECORD_SCHEMA, validate_meta
+
+    for bad in (0, -1, "x"):
+        msg = validate_meta({"stream_idle_seconds": bad}, {})
+        assert msg == "stream_idle_seconds must be a positive number of seconds"
+    assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]

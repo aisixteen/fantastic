@@ -133,12 +133,16 @@ async def test_the_key_rides_the_chat_only_when_set():
         p = OllamaProvider(endpoint=ENDPOINT, model="m", key=_key)
         assert [x async for x in p.chat([{"role": "user", "content": "hi"}])] == ["ok"]
     made.assert_called_once_with(
-        host=ENDPOINT, headers={"Authorization": "Bearer sekret"}
+        host=ENDPOINT,
+        timeout=httpx.Timeout(60.0, connect=15.0),
+        headers={"Authorization": "Bearer sekret"},
     )
     with patch("ollama.AsyncClient", return_value=client()) as made:
         p = OllamaProvider(endpoint=ENDPOINT, model="m", key=_nokey)
         assert [x async for x in p.chat([{"role": "user", "content": "hi"}])] == ["ok"]
-    made.assert_called_once_with(host=ENDPOINT)
+    made.assert_called_once_with(
+        host=ENDPOINT, timeout=httpx.Timeout(60.0, connect=15.0)
+    )
 
 
 def test_a_record_with_only_endpoint_and_a_store_is_accepted():

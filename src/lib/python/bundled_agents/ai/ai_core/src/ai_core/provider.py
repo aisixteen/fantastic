@@ -12,8 +12,11 @@ provider holds no agent state — queue / lock / history live in `ai_core.core`.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+
+from ai_core.constants import STREAM_IDLE_SECONDS
 
 
 class ProviderError(RuntimeError):
@@ -24,6 +27,35 @@ class ProviderError(RuntimeError):
     def __init__(self, message: str, *, transport: bool = False):
         super().__init__(message)
         self.transport = transport
+
+
+def stream_idle_of(meta: dict, default: float = STREAM_IDLE_SECONDS) -> float:
+    """The read clock a provider's stream runs on: the record's `stream_idle_seconds`
+    (a positive number of seconds), else `default`. Anything else is refused by name
+    — a window the backend cannot run on is never guessed at."""
+    v = meta.get("stream_idle_seconds")
+    if v is None:
+        return default
+    if (
+        isinstance(v, bool)
+        or not isinstance(v, (int, float))
+        or not math.isfinite(v)
+        or v <= 0
+    ):
+        raise ProviderError(
+            f"stream_idle_seconds must be a positive number of seconds, not {v!r}"
+        )
+    return float(v)
+
+
+def stalled_error(name: str, endpoint: str, secs: float) -> ProviderError:
+    """The turn's failure for a stalled stream: `stream_stalled`, the seconds and the
+    endpoint. A raise, so the turn ends with an error row."""
+    return ProviderError(
+        f"{name}: stream_stalled — {endpoint} sent no bytes for {secs:g}s; "
+        "this turn is NOT complete",
+        transport=True,
+    )
 
 
 class Provider(ABC):

@@ -1397,3 +1397,73 @@ def test_thinking_budget_is_refused_for_a_5x_model():
         validate_meta({"model": "claude-opus-4-6", "thinking_budget": 2048}, _rec())
         is None
     )
+
+
+# ─── the read clock (#177) ───────────────────────────────────────────────────
+
+
+class _SlowStream(httpx.AsyncByteStream):
+    """A body of chunks, a pause before each."""
+
+    def __init__(self, chunks: list[bytes], pause: float):
+        self._chunks, self._pause = chunks, pause
+
+    async def __aiter__(self):
+        import asyncio
+
+        for c in self._chunks:
+            await asyncio.sleep(self._pause)
+            yield c
+
+
+async def test_a_silent_api_stream_is_stalled_not_hung():
+    from ai_core.provider import ProviderError
+
+    first = _sse(START, _text("par")).encode()
+
+    class _Silent(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield first
+            raise httpx.ReadTimeout("no byte")
+
+    t = httpx.MockTransport(lambda req: httpx.Response(200, stream=_Silent()))
+    err = await _turn_error(_provider(t, stream_idle=0.05))
+    assert isinstance(err, ProviderError) and err.transport is True
+    assert str(err).startswith("anthropic_backend: stream_stalled")
+    assert ENDPOINT in str(err) and "0.05s" in str(err)
+
+
+async def test_the_stream_runs_on_the_read_clock():
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["timeout"] = req.extensions["timeout"]
+        return httpx.Response(200, text=_sse(START, _text("ok"), *_stop()))
+
+    await _drain(_provider(httpx.MockTransport(handler), stream_idle=7.5))
+    assert seen["timeout"]["read"] == 7.5 and seen["timeout"]["connect"] == 15.0
+    await _drain(_provider(httpx.MockTransport(handler)))
+    assert seen["timeout"]["read"] == 60.0
+
+
+async def test_pings_keep_the_clock_alive():
+    ping = _sse({"type": "ping"}).encode()
+    chunks = [_sse(START).encode(), ping, ping, ping]
+    chunks += [_sse(_text("done"), *_stop()).encode()]
+    t = httpx.MockTransport(
+        lambda req: httpx.Response(200, stream=_SlowStream(chunks, 0.01))
+    )
+    assert await _drain(_provider(t, stream_idle=0.5)) == "done"
+
+
+def test_stream_idle_seconds_is_validated_at_the_write():
+    def check(meta):
+        return validate_meta(meta, _rec())
+
+    for bad in (0, -1, "x"):
+        msg = check({"stream_idle_seconds": bad})
+        assert msg and msg.startswith(
+            "stream_idle_seconds must be a positive number of seconds"
+        )
+    assert check({"stream_idle_seconds": 2.5}) is None
+    assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]

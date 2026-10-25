@@ -11,8 +11,13 @@ from typing import AsyncIterator
 
 import httpx
 from ai_core.core import THINK_CLOSE, THINK_OPEN
-from ai_core.provider import ProviderError
+from ai_core.constants import STREAM_IDLE_SECONDS
+from ai_core.provider import ProviderError, stalled_error
 
+
+#: Seconds to reach the server; the stream's own read clock is the record's
+#: `stream_idle_seconds`.
+CONNECT_TIMEOUT = 15.0
 
 #: Sampling temperature when the record names none — LOW, because an agentic
 #: backend must emit exact calls, not improvise.
@@ -36,6 +41,7 @@ class OllamaProvider:
         num_predict: int | None = None,
         think: bool | None = None,
         key=None,
+        stream_idle: float = STREAM_IDLE_SECONDS,
     ):
         self._endpoint = endpoint
         self._model = model
@@ -65,6 +71,8 @@ class OllamaProvider:
         # An agentic backend wants the ACTION, not the rumination: set `think=False`.
         # None = don't send it (non-thinking models reject the field).
         self._think = think
+        # The read clock: seconds the server may send nothing (headers included).
+        self._stream_idle = stream_idle
 
     async def chat(
         self, messages: list[dict], max_tokens: int | None = None
@@ -82,7 +90,11 @@ class OllamaProvider:
                     yield token
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             raise ProviderError(f"ollama: request failed: {e}", transport=True) from e
-        except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+        except httpx.ReadTimeout as e:
+            raise stalled_error(
+                "ollama_backend", self._endpoint, self._stream_idle
+            ) from e
+        except (httpx.ReadError, httpx.RemoteProtocolError) as e:
             raise ProviderError(f"ollama: stream error: {e}", transport=True) from e
 
     async def _chat(
@@ -125,7 +137,11 @@ class OllamaProvider:
         # on it would hold its connection past the turn.
         secret = await self._key(self._endpoint) if self._key else None
         auth = {"headers": {"Authorization": f"Bearer {secret}"}} if secret else {}
-        async with ollama.AsyncClient(host=self._endpoint, **auth) as client:
+        # httpx's per-read timeout: headers and every chunk (#177).
+        timeout = httpx.Timeout(self._stream_idle, connect=CONNECT_TIMEOUT)
+        async with ollama.AsyncClient(
+            host=self._endpoint, timeout=timeout, **auth
+        ) as client:
             stream = await client.chat(
                 model=self._model,
                 messages=messages,

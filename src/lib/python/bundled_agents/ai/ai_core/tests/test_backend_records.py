@@ -77,6 +77,7 @@ SCHEMAS = {
             ("temperature", "float", False, 0.3, None),
             ("num_predict", "int", False, None, None),
             ("think", "bool", False, None, None),
+            ("stream_idle_seconds", "float", False, None, None),
             ("credentials", "credentials", False, None, None),
         ]
     ),
@@ -84,6 +85,7 @@ SCHEMAS = {
         [
             ("endpoint", "str", True, None, None),
             ("model", "str", True, None, None),
+            ("stream_idle_seconds", "float", False, None, None),
             ("max_tokens", "int", False, 8192, None),
             ("sampling", "map", False, None, None),
             ("credentials", "credentials", True, None, None),
@@ -108,6 +110,7 @@ SCHEMAS = {
             ("price_cache_write_1h_per_mtok", "float", False, None, None),
             ("long_context_tokens", "int", False, None, None),
             ("usage_log", "str", False, None, None),
+            ("stream_idle_seconds", "float", False, None, None),
             ("credentials", "credentials", False, None, None),
         ]
     ),
@@ -136,6 +139,7 @@ SCHEMAS = {
             ("kv_ttl", "float", False, 1800.0, None),
             ("connect_timeout", "float", False, 5.0, None),
             ("read_timeout", "float", False, 900.0, None),
+            ("stream_idle_seconds", "float", False, None, None),
             ("credentials", "credentials", False, None, None),
         ]
     ),
@@ -470,6 +474,7 @@ def test_ollama_make_provider_coerces_each_knob(monkeypatch):
                 "temperature": None,
                 "num_predict": None,
                 "think": None,
+                "stream_idle": 60.0,
             },
         ),
         (
@@ -481,6 +486,7 @@ def test_ollama_make_provider_coerces_each_knob(monkeypatch):
                 "temperature": 0.5,
                 "num_predict": None,  # 0 is "unset" for a budget
                 "think": False,  # a set falsy think is still sent
+                "stream_idle": 60.0,
             },
         ),
     ]
@@ -511,6 +517,7 @@ def test_responses_make_provider_from_the_record(monkeypatch):
                 "model": "m",
                 "max_tokens": 8192,
                 "sampling": None,
+                "stream_idle": 60.0,
             },
         ),
         (
@@ -520,6 +527,7 @@ def test_responses_make_provider_from_the_record(monkeypatch):
                 "model": "m",
                 "max_tokens": 100,
                 "sampling": {"top_k": 3},
+                "stream_idle": 60.0,
             },
         ),
     ]
@@ -577,7 +585,10 @@ def test_vllm_make_provider_builds_the_effective_posture(monkeypatch):
         "explicit_budget": False,
         "connect_timeout": 5.0,
         "read_timeout": 900.0,
+        # no stream_idle_seconds on the record: the read clock is read_timeout
+        "stream_idle": 900.0,
     }
+    assert b["stream_idle"] == 30.0
     assert b["sampling"] == {
         "temperature": 0.9,
         "top_p": 0.8,

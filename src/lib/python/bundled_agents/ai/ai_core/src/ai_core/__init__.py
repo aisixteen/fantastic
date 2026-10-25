@@ -26,7 +26,7 @@ ollama / responses / vllm backends. Holds:
 from __future__ import annotations
 
 from .core import CANCEL, EMITS, NOTES, build, on_cancel, on_delete, required_meta
-from .provider import Provider, ProviderError
+from .provider import Provider, ProviderError, stalled_error, stream_idle_of
 
 __all__ = [
     "CANCEL",
@@ -38,4 +38,6 @@ __all__ = [
     "on_cancel",
     "on_delete",
     "required_meta",
+    "stalled_error",
+    "stream_idle_of",
 ]
