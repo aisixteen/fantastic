@@ -600,6 +600,32 @@ async def test_side_calls_take_no_kv_slot():
     ]
 
 
+async def test_a_side_call_leaves_the_slot_table_unchanged():
+    # two live conversations fill the 2-slot table; a fold summary and a repeat
+    # of a live conversation's text, both bounded, move no stamp and add no key
+    p = _provider(
+        _transport(_sse(_delta(finish="stop"))),
+        kv_slots=2,
+        kv_overflow="evict",
+    )
+    for text in ("first", "second"):
+        await _drain(p, messages=[{"role": "user", "content": text}])
+    table = vp.table_for(ENDPOINT)
+    view_before = table.view()
+    live_before = list(table.live.items())
+    assert view_before["evicted"] == 0 and len(live_before) == 2
+
+    fold = [{"role": "user", "content": "summarize part 3"}]
+    await _drain(p, messages=fold, max_tokens=64)
+    await _drain(
+        p, messages=[{"role": "user", "content": "first"}], max_tokens=64
+    )
+
+    assert table.view() == view_before
+    assert list(table.live.items()) == live_before
+    assert conversation_key(fold) not in table.live
+
+
 def test_a_conversation_is_its_prefix():
     base = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
     grown = [
