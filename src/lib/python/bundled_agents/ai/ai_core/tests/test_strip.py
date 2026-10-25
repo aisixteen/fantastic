@@ -188,3 +188,44 @@ async def test_a_recall_page_is_trimmed_to_half_the_window_and_says_so(monkeypat
     assert "before=" in r["note"] and str(msgs[0]["index"]) in r["note"]
     # the NEWEST of what was asked for is what survives
     assert msgs[-1]["index"] == 19
+
+
+def test_a_tag_that_is_not_a_reply_block_yields_no_pid():
+    from ai_core.strategies.strip import _PID, _render
+
+    assert _PID.match("just some prose") is None
+    # the ` · ` separator is required
+    assert _PID.match("[reply to 9]") is None
+    assert _PID.match("[reply to 9 · notes read]") is not None
+    # and such a block is never stripped, whatever the stripped set holds
+    for text in ("just some prose", "[reply to 9]\nbody"):
+        body = [_turn("user", text)]
+        out, n, saved = _render(body, {9, "just"})
+        assert out == body and (n, saved) == (0, 0), (text, out)
+
+
+def test_context_notice_shapes():
+    from ai_core.core import _context_notice
+
+    n = _context_notice("compact", "MY SUMMARY", False, 7)
+    assert n["role"] == "user" and "tool_calls" not in n
+    c = n["content"]
+    assert "[context-notice]" in c and "MY SUMMARY" in c
+    assert "memory agent" in c
+    # THE RECALL AFFORDANCE IN THE ONE GRAMMAR, never a JSON shape
+    assert "send your OWN id `<type>recall</type>` (optional `<query>`, `<limit>`)" in c
+    assert "{type:'recall'" not in c
+    assert "7 earlier turn" in c
+    assert "STRIPPED" not in c, "no stripped line when nothing was stripped"
+    t = _context_notice("truncate", None, True, 3)["content"]
+    assert "omitted in place" in t and "Summary of the dropped span" not in t
+    # a strip reports what left the view, and how to get it back
+    s = _context_notice("strip", None, False, 0, None, 4, 27_000)["content"]
+    assert (
+        "4 reply bod(ies) were STRIPPED to their tag+title line (27000 bytes left "
+        "your view)"
+    ) in s, s
+    assert (
+        "grep finds a line in a body held this run — after a restart, re-read it "
+        "from its origin."
+    ) in s, s

@@ -442,3 +442,89 @@ async def test_no_recursion_when_callback_creates_agent(seeded_kernel):
     seeded_kernel.create("file_bridge.tools", allow=["."], id="file_seed")
     # Bounded chain (we cap at 3) — not an unbounded loop.
     assert counter["creates"] == 3
+
+
+# ─── Rust twins (#170): each `test_<rust test name>` asserts what the Rust test does ─
+
+import types  # noqa: E402
+
+from kernel import register_unlisted  # noqa: E402
+from kernel._kernel import _summarize_payload  # noqa: E402
+
+_peek_mod = types.ModuleType("stream_twin_probe.tools")
+
+
+async def _peek_handler(id, payload, kernel):
+    verb = payload.get("type")
+    if verb in ("boot", "shutdown"):
+        return None
+    q = kernel.ctx.inboxes.get(id)
+    return {"inbox_at_entry": list(q._queue) if q is not None else None}
+
+
+_peek_mod.handler = _peek_handler
+_peek_mod.VERBS = {}
+register_unlisted("stream_twin_probe.tools", _peek_mod)
+
+
+def test_summarize_short_payload_unchanged():
+    # `json.dumps` separators: `, ` and `: `, exactly.
+    assert _summarize_payload({"type": "ping"}) == '{"type": "ping"}'
+
+
+async def test_state_summary_is_python_json_dumps(seeded_kernel):
+    """The emit event's summary is `json.dumps(shrunk, ensure_ascii=False)`: `, ` /
+    `: ` separators and raw non-ASCII."""
+    events: list[dict] = []
+    seeded_kernel.add_state_subscriber(events.append)
+    seeded_kernel.create("stream_twin_probe.tools", id="tgt")
+    await seeded_kernel.emit("tgt", {"type": "say", "text": "héllo"})
+    emit = next(e for e in events if e["kind"] == "emit")
+    assert emit["summary"] == '{"type": "say", "text": "héllo"}'
+
+
+async def test_send_fans_out_before_the_handler_runs(seeded_kernel):
+    """The mirror happens at DISPATCH START, not after the reply: the payload is
+    already in the target's own inbox when its handler first runs."""
+    k = seeded_kernel
+    k.create("stream_twin_probe.tools", id="peeker")
+    k.ctx.ensure_inbox("peeker")
+    out = (
+        await k.send([{"target": "peeker", "payload": {"type": "work", "n": 7}}])
+    )[0]
+    assert out["result"]["inbox_at_entry"] == [{"type": "work", "n": 7}], (
+        "the payload had not reached the inbox by the time the handler ran"
+    )
+
+
+async def test_emit_to_a_non_agent_id_is_a_noop(seeded_kernel):
+    """A synthetic id (a browser client `_ws_<hex>`) is not an agent: no inbox put,
+    no state event."""
+    k = seeded_kernel
+    events: list[dict] = []
+    k.add_state_subscriber(events.append)
+    rx = k.ctx.ensure_inbox("_ws_deadbeef")
+    await k.emit("_ws_deadbeef", {"type": "hi"})
+    assert rx.empty(), "an emit to a non-agent id landed"
+    assert events == [], "an emit to a non-agent id published a state event"
+
+
+def test_state_snapshot_is_registration_order_with_in_flight(seeded_kernel):
+    """The snapshot walks the registry in registration order and reports
+    `{agent_id, name, backlog}`: name from `display_name`, backlog the in-flight
+    handler count (2 after two enters)."""
+    k = seeded_kernel
+    for aid in ("zeta", "alpha", "middle"):
+        k.create("stream_twin_probe.tools", id=aid)
+    k.create("stream_twin_probe.tools", id="named", display_name="Zed")
+    named = k.ctx.agents["named"]
+    named._in_flight += 1
+    named._in_flight += 1
+
+    snap = k.ctx.state_snapshot()
+    ids = [e["agent_id"] for e in snap]
+    assert ids == list(k.ctx.agents), "registration order, not sorted"
+    assert ids[-4:] == ["zeta", "alpha", "middle", "named"]
+    assert snap[-4] == {"agent_id": "zeta", "name": "zeta", "backlog": 0}
+    assert snap[-1] == {"agent_id": "named", "name": "Zed", "backlog": 2}
+    assert list(snap[-1]) == ["agent_id", "name", "backlog"]

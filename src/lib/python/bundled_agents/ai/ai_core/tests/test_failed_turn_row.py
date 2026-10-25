@@ -235,7 +235,7 @@ async def test_stop_during_a_stalled_stream_ends_the_turn(
         fake_providers.pop(aid, None)
 
 
-async def test_an_empty_await_is_refused_and_ends_the_chain(
+async def test_an_empty_await_ends_the_chain_with_a_stored_note(
     seeded_kernel, fake_providers
 ):
     aid = "ft_await"
@@ -244,11 +244,10 @@ async def test_an_empty_await_is_refused_and_ends_the_chain(
     fake_providers[aid] = fp
     try:
         await _say(seeded_kernel, aid, "one")
-        for _ in range(200):
-            if len(fp.seen) >= 2:
-                break
-            await asyncio.sleep(0.02)
-        assert core._AWAIT_REFUSED in str(fp.seen[1]), fp.seen
+        await asyncio.sleep(0.4)
+        assert len(fp.seen) == 1, "the empty await ended the chain: no second pass"
+        notes = [r for r in await _rows(seeded_kernel, aid) if r.get("kind") == "note"]
+        assert [n["content"] for n in notes] == [core._EMPTY_AWAIT_NOTE]
     finally:
         fake_providers.pop(aid, None)
 

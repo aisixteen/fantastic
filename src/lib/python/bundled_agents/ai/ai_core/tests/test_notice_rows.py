@@ -1,6 +1,6 @@
 """Harness text is a NOTICE, not a message. A turn this layer
-writes to its own agent — the no-call reminder, a malformed-call report, an await
-refusal — is stored as `kind: "notice"`, so a view can hide it; the model still
+writes to its own agent — the no-call reminder, a malformed-call report, a held-message
+wake — is stored as `kind: "notice"`, so a view can hide it; the model still
 reads it as a user turn (Qwen's template takes no system message past the first).
 Only the agent itself can mark one: a peer's `notice` is ignored."""
 
@@ -89,15 +89,18 @@ async def test_a_report_batch_is_a_notice_and_a_batch_with_a_reply_is_not(
         fake_providers.pop("nt_b", None)
 
 
-async def test_a_refused_await_is_a_notice(seeded_kernel, fake_providers):
+async def test_an_empty_await_leaves_a_note_row_not_a_notice_turn(
+    seeded_kernel, fake_providers
+):
     fp = _Script(['<call name="await"></call>', DONE])
     _agent(seeded_kernel, "nt_c")
     fake_providers["nt_c"] = fp
     try:
         await _go(seeded_kernel, "nt_c")
-        await _settle(fp, 2)
+        await _settle(fp, 1)
         users = [r for r in await _rows(seeded_kernel, "nt_c") if r["role"] == "user"]
-        assert users[1]["kind"] == "notice", users[1]
+        assert [u.get("kind") for u in users] == [None, "note"], users
+        assert fp.calls == 1, "no refusal turn was delivered"
     finally:
         fake_providers.pop("nt_c", None)
 

@@ -383,3 +383,138 @@ async def test_a_deleted_id_leaves_every_grant(kernel):
     _mk(kernel, "reader", can_call={"$self": "*", "vault": ["get"]})
     denied = await _as(kernel, "reader", "vault", {"type": "get"})
     assert denied["status"] == "failed" and denied["result"]["side"] == "ingress"
+
+
+def test_empty_grant_denies():
+    """Twin of the Rust test of the same name: an EXPLICIT empty grant `{}` denies,
+    not only the default `{"$self": "*"}` (which reaches no peer either)."""
+    assert not authorize_call({}, "send", "peer", holder_id="worker").allowed
+    assert not authorize_call(
+        {}, "send", "peer", holder_id="worker", holder_parent="boss"
+    ).allowed
+    # and the default grant still reaches nothing but the holder itself
+    assert not authorize_call(
+        {"$self": "*"}, "send", "peer", holder_id="worker"
+    ).allowed
+
+
+# ─── Rust twins (#170): each `test_<rust test name>` asserts what the Rust test does ─
+
+_hop_log: list[str] = []
+
+
+async def _hop_handler(id, payload, kernel):
+    verb = payload.get("type")
+    if verb in ("boot", "shutdown"):
+        return None
+    if verb != "hop":
+        return {"ok": id}
+    _hop_log.append(id)
+    rest = list(payload.get("next") or [])
+    if not rest:
+        return {"at": id}
+    nxt = rest.pop(0)
+    o = (
+        await kernel.send([{"target": nxt, "payload": {"type": "hop", "next": rest}}])
+    )[0]
+    return {"via": id, "status": o["status"], "got": o["result"]}
+
+
+_hop_mod = types.ModuleType("hop_twin_probe.tools")
+_hop_mod.handler = _hop_handler
+_hop_mod.VERBS = {}
+register_unlisted("hop_twin_probe.tools", _hop_mod)
+
+
+def _hop_chain(k) -> None:
+    _hop_log.clear()
+    for aid, can_call, callable_by in (
+        ("h_a", {"h_b": "*"}, {}),
+        ("h_b", {"h_c": "*"}, {"h_a": "*"}),
+        ("h_c", {}, {"h_b": "*"}),
+        ("h_d", {}, {}),
+    ):
+        rec = k.create(
+            "hop_twin_probe.tools", id=aid, can_call=can_call, callable_by=callable_by
+        )
+        assert rec.get("id") == aid, rec
+
+
+async def test_emit_on_another_agent_needs_both_halves(seeded_kernel):
+    """An emit onto ANOTHER agent's inbox passes the two-sided gate under verb
+    `emit`: no egress grant -> dropped, both halves granted -> delivered. Emitting on
+    your own inbox is how every bundle publishes, so it stays ungated."""
+    k = seeded_kernel
+    _mk(k, "em_open", can_call={"em_target": ["emit"]})
+    _mk(k, "em_closed", can_call={})
+    _mk(k, "em_target", callable_by={"em_open": ["emit"], "em_closed": ["emit"]})
+    rx = k.ctx.ensure_inbox("em_target")
+
+    with as_agent(k, "em_closed"):
+        await k.emit("em_target", {"type": "poke", "n": 1})
+    assert rx.empty(), "an emit with no egress grant must be dropped"
+
+    with as_agent(k, "em_open"):
+        await k.emit("em_target", {"type": "poke", "n": 2})
+    assert rx.get_nowait() == {"type": "poke", "n": 2}, "the granted emit landed"
+
+    # emitting on your OWN inbox -- ungated
+    with as_agent(k, "em_target"):
+        await k.emit("em_target", {"type": "self", "n": 3})
+    assert rx.get_nowait()["n"] == 3
+
+
+async def test_a_handler_cannot_send_as_anyone_but_itself(seeded_kernel):
+    """IDENTITY COMES FROM DISPATCH: h_a holds NO grant to h_d and h_d accepts nobody
+    -- a nested send from h_a's handler is h_a's, and refused. There is no switch to
+    make it anyone else's."""
+    k = seeded_kernel
+    _hop_chain(k)
+    out = (
+        await k.send([{"target": "h_a", "payload": {"type": "hop", "next": ["h_d"]}}])
+    )[0]
+    assert out["result"]["status"] == "failed", out
+    assert out["result"]["got"]["reason"] == "unauthorized", out
+    assert _hop_log == ["h_a"], "h_d's handler never ran"
+
+
+async def test_a_peer_address_is_an_outbound_key_only(seeded_kernel):
+    """A caller is always local, so a `<guid>|<agent>` key in `callable_by` could
+    never match: refused at the write. In `can_call` it is an outbound peer address,
+    accepted."""
+    k = seeded_kernel
+    _hop_chain(k)
+    refused = (
+        await k.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": "h_d",
+                        "callable_by": {"g2|scout": "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert refused["reason"] == "invalid_meta", refused
+    assert refused["error"] == (
+        "callable_by['g2|scout'] is not a grant key — legal keys: an agent id, "
+        "$self, $parent, $subtree"
+    )
+    ok = (
+        await k.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "update_agent",
+                        "id": "h_d",
+                        "can_call": {"g2|scout": "*", "g3|*": "*"},
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert ok["updated"] is True, ok
