@@ -371,28 +371,35 @@ def repair(answer: str) -> str:
 
 def _wrapped_reports(answer: str) -> list[str]:
     """One report per call written INSIDE a wrapper tag: refused, not dispatched.
-    The report names the wrapper and gives the bare call to write."""
+    The caret sits under the wrapper and the call is shown bare — the form to write;
+    a call that does not parse has its fault named instead."""
     out: list[str] = []
     for env in envelopes_in(answer):
         if env.wrapper is None or env.end is None:
             continue
-        line = answer.count("\n", 0, env.wrapper.start) + 1
+        w = env.wrapper
         block = answer[env.body : env.end]
         body = block[block.find(">") + 1 :]
-        head = (
-            f"[malformed call — nothing ran] line {line}: a call inside "
-            f"`<{env.wrapper.name}>` is refused — drop the wrapper; write it at the top level"
-        )
+        tok = _Tok("other", answer[w.start : w.end], w.start, w.end)
+        line, col, quoted, caret = _where(answer, tok)
+        lines = [
+            f"[malformed call — nothing ran] line {line}, col {col}:",
+            f"  {quoted}",
+            f'  {caret} drop the wrapper: write the call at the top level, as <call name="…">…</call>',
+        ]
         try:
             call = parse_call(block)
             if call is None:
                 continue
             args = [(k, raw.strip()) for k, raw in _elements(body)]
-        except _Malformed:
-            bare = "<" + "call" + block + CLOSE
-            out.append(head + f":\n{bare}")
-            continue
-        out.append("\n".join([head + ".", *_rewrite(call["name"], args)]))
+        except _Malformed as e:
+            lines.append(f"also: the call inside does not parse — {e}.")
+        else:
+            lines += _rewrite(call["name"], args)
+        lines.append(
+            'A call is <call name="…">, one child tag per argument, closed by </call>.'
+        )
+        out.append("\n".join(lines))
     return out
 
 

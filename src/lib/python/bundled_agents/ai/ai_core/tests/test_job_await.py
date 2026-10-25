@@ -93,6 +93,11 @@ async def _say(kernel, aid, text="go"):
     )[0]
 
 
+async def _note_rows(kernel, aid) -> list[dict]:
+    """The `kind: note` rows an empty `await` left in the agent's store."""
+    return [r for r in await core._load_history(aid, kernel) if r.get("kind") == "note"]
+
+
 async def _setup(kernel, fake_providers, owner_turns):
     """The exec agent, and an owner AI that may start jobs on it."""
     _state["released"] = False
@@ -149,7 +154,7 @@ async def test_await_with_a_running_job_waits_for_it(
         assert awaiting and awaiting[-1].get("pending", 0) >= 1, statuses
         # no refusal, and no job_done wake while the job still runs (the start's own
         # reply may arrive as a turn; that is not a wake)
-        assert _requests_with(owner, core._AWAIT_REFUSED) == 0, owner.seen
+        assert _requests_with(owner, core._EMPTY_AWAIT_NOTE) == 0, owner.seen
         assert _requests_with(owner, JOB_DONE) == 0
         assert core._running_jobs.get("jw_owner"), core._running_jobs
     finally:
@@ -187,7 +192,10 @@ async def test_await_with_no_job_and_nothing_pending_still_ends_visibly(
     _ai(k, "jw_idle", idle, fake_providers)
     try:
         await _say(k, "jw_idle")
-        await _until(lambda: _requests_with(idle, core._AWAIT_REFUSED) >= 1)
+        await asyncio.sleep(0.3)
+        # the chain ENDED with a stored note: no second pass ran
+        assert len(idle.seen) == 1, idle.seen
+        assert await _note_rows(k, "jw_idle")
         assert "jw_idle" not in core._running_jobs, core._running_jobs
     finally:
         await _cleanup(k, fake_providers)
@@ -204,7 +212,8 @@ async def test_a_job_started_by_another_agent_does_not_wake_this_one(
         await _say(k, "jw_owner")
         await _until(lambda: bool(core._running_jobs.get("jw_owner")))
         await _say(k, "jw_bystander")
-        await _until(lambda: _requests_with(bystander, core._AWAIT_REFUSED) >= 1)
+        await asyncio.sleep(0.3)
+        assert await _note_rows(k, "jw_bystander")
         assert _requests_with(bystander, JOB_DONE) == 0, bystander.seen
         assert "jw_bystander" not in core._running_jobs, core._running_jobs
         assert core._running_jobs.get("jw_owner"), core._running_jobs
