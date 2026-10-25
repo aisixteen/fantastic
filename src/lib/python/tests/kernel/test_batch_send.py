@@ -539,3 +539,30 @@ async def test_a_batch_executes_its_items_in_parallel_and_delivers_them_in_order
         assert [o["status"] for o in outs] == ["completed", "completed"], outs
         assert outs[0]["result"] == {"overlapped": True}, (ta, tb, outs)
         assert _ov_arrivals == ["A", "B"], (ta, tb, _ov_arrivals)
+
+
+# Rust twin: fantastic-kernel src/send/batch_tests.rs::the_whole_batch_is_visible_in_ps_before_the_first_await
+async def test_the_whole_batch_is_visible_in_ps_before_the_first_await(seeded_kernel):
+    # Pids are minted in a SYNCHRONOUS launch phase: were they minted as each
+    # item awaited, `ps` would show the batch appearing one row at a time.
+    a = await _mk(seeded_kernel, "b_ps")
+    batch = asyncio.create_task(
+        seeded_kernel.send(
+            [
+                {"target": a, "payload": {"type": "slow"}, "timeout": 1.0},
+                {"target": a, "payload": {"type": "slow"}, "timeout": 1.0},
+            ]
+        )
+    )
+    # ONE yield: the batch task runs its synchronous launch phase and parks on
+    # the gather; no timer elapses, so nothing can have been minted "later".
+    await asyncio.sleep(0)
+    rows = len(
+        [
+            r
+            for r in await _rows(seeded_kernel)
+            if r.get("agent") == a and r.get("verb") == "slow"
+        ]
+    )
+    assert rows == 2, "the batch did not appear whole in ps"
+    await batch

@@ -479,6 +479,40 @@ async def test_ledger_shows_in_flight_and_pages(seeded_kernel):
     await asyncio.wait_for(batch, timeout=2)
 
 
+# Rust twin: fantastic-kernel src/send/ledger_tests.rs::a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger
+async def test_a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger(
+    seeded_kernel,
+):
+    from _testkit import as_agent, wire
+
+    b = await _mk(seeded_kernel, "l_peer")
+    a = await _mk(seeded_kernel, "l_forker")
+    wire(seeded_kernel, a, b)  # a refused send never reaches the ledger at all
+
+    async def fork():
+        await seeded_kernel.send(
+            [{"target": b, "payload": {"type": "work", "secs": 0.0}}]
+        )
+
+    with as_agent(seeded_kernel, a):
+        tid = seeded_kernel.ctx.spawn_task(a, "route_reply", fork())
+    for _ in range(100):
+        if tid not in seeded_kernel.ctx.tasks:
+            break
+        await asyncio.sleep(0.01)
+
+    led = (
+        await seeded_kernel.send([{"target": "kernel", "payload": {"type": "ledger"}}])
+    )[0]["result"]
+    rows = led["executions"]
+    assert any(
+        r["target"] == b
+        and r["status"] == "completed"
+        and isinstance((r.get("outcome") or {}).get("bytes"), (int, float))
+        for r in rows
+    ), f"a forked agent's send left no ledger row: {rows!r}"
+
+
 # ─── ledger-ALL: one id space, one engine ────────────────────────
 
 
