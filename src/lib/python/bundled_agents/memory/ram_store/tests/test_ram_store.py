@@ -290,3 +290,183 @@ async def test_a_row_holding_a_non_json_number_reads_back_and_the_store_survives
     # the store is not broken: another owner's call still answers
     other = await _append(kernel, "bob", [{"id": 1, "content": "after"}])
     assert other["appended"] == 1, other
+
+
+# ─── Rust twins (#170): ram_store's Python-exact edges ───────────────────────
+#
+# These pin ram_store's own behaviour (the Rust port copies it), so they run
+# against the RAM store only — sqlite_store has its own twins.
+
+
+@pytest.fixture
+async def ram(kernel):
+    kernel.ctx.update(kernel.id, guid="g1")
+    kernel.create(None, id="alice", can_call={"mem": "*"})
+    rec = kernel.create("ram_store.tools", id="mem", callable_by={"alice": "*"})
+    assert rec.get("id") == "mem", rec
+    return kernel
+
+
+async def _send_as(kernel, payload):
+    with as_agent(kernel, "alice"):
+        return (await kernel.send([{"target": "mem", "payload": payload}]))[0]
+
+
+async def test_reflect_names_the_posture_and_the_verbs(ram):
+    await _append(ram, "alice", [{"id": 1}])
+    r = await _call(ram, "mem", {"type": "reflect"})
+    assert r["durable"] is False
+    assert r["owners"] == 1
+    assert r["rows"] == 1
+    assert r["optional_verbs"] == ["search"]
+    from ram_store.tools import VERBS
+
+    assert list(VERBS) == [
+        "reflect",
+        "boot",
+        "append",
+        "read",
+        "search",
+        "prune",
+        "inject",
+        "dump",
+    ]
+
+
+async def test_digit_string_refs_are_not_found_like_python(ram):
+    # `_as_id('3')` passes the type check, but `t.has(owner, '3')` asks a str of
+    # int-keyed tables: never found — NOT_FOUND naming the raw ref.
+    first = await _append(ram, "alice", [{"kind": "msg", "content": "a"}])
+    rid = first["ids"][0]
+    r = await _append(
+        ram, "alice", [{"kind": "fold", "content": "f", "refs": [str(rid)]}]
+    )
+    assert r["reason"] == "not_found", r
+    assert r["error"].endswith(f"this owner: ['{rid}']"), r
+    r = await _append(ram, "alice", [{"kind": "fold", "content": "f", "refs": [rid]}])
+    assert r["appended"] == 1, r
+
+
+async def test_prune_keep_is_python_in(ram):
+    # `row.get("kind") in keep`: a STRING keep is a substring test; a kindless
+    # row makes that `in` raise TypeError; an int keep is not iterable.
+    await _append(
+        ram,
+        "alice",
+        [
+            {"kind": "fold", "content": "a"},
+            {"kind": "old", "content": "b"},
+            {"kind": "msg", "content": "c"},
+        ],
+    )
+    out = await _call(
+        ram,
+        "mem",
+        {"type": "prune", "before_id": 1_000_000, "keep": "folder"},
+        as_="alice",
+    )
+    assert out["pruned"] == 1, f"'fold' and 'old' are substrings of 'folder': {out}"
+    await _append(ram, "alice", [{"content": "kindless"}])
+    out = await _send_as(
+        ram, {"type": "prune", "before_id": 1_000_000, "keep": "fold"}
+    )
+    assert out["status"] == "failed", out
+    assert out["result"]["error"] == (
+        "TypeError: 'in <string>' requires string as left operand, not NoneType"
+    )
+    out = await _send_as(ram, {"type": "prune", "before_id": 1_000_000, "keep": 5})
+    assert out["result"]["error"] == "TypeError: argument of type 'int' is not iterable"
+
+
+async def test_a_zero_limit_is_no_limit_like_python(ram):
+    await _append(
+        ram,
+        "alice",
+        [{"kind": "msg", "content": "x one"}, {"kind": "msg", "content": "x two"}],
+    )
+    r = await _call(ram, "mem", {"type": "read", "limit": "0"}, as_="alice")
+    assert len(r["rows"]) == 2, r
+    assert r["next"] is None
+    r = await _call(
+        ram,
+        "mem",
+        {"type": "search", "query": "x", "limit": "0", "width": "0"},
+        as_="alice",
+    )
+    assert len(r["matches"]) == 2, r
+    assert r["matches"][0]["text"] == "x one", "width 0 falls back to 200"
+
+
+async def test_unknown_type_is_coded_unhandled_with_the_raw_verb_in_order(ram):
+    import json
+
+    from ram_store.tools import handler
+
+    for verb in ("frob", "it's", "shutdown"):
+        r = await _call(ram, "mem", {"type": verb}, as_="alice")
+        assert list(r) == ["error", "reason", "verb"], r
+        assert r == {
+            "error": f"ram_store: unknown type {verb!r}",
+            "reason": "unhandled",
+            "verb": verb,
+        }
+    r = await _call(ram, "mem", {"type": "it's"}, as_="alice")
+    assert json.dumps(r) == (
+        '{"error": "ram_store: unknown type \\"it\'s\\"", "reason": "unhandled", '
+        '"verb": "it\'s"}'
+    )
+    r = await handler("mem", {}, None)
+    assert list(r) == ["error", "reason", "verb"], r
+    assert r["error"] == "ram_store: unknown type None" and r["verb"] is None
+
+
+async def test_arg_refusals_carry_error_reason_arg_in_that_order(ram):
+    await _append(ram, "alice", [{"id": 1, "content": "a"}])
+    for payload, error in (
+        ({"type": "append", "rows": []}, "append: `rows` must be a non-empty list of rows"),
+        (
+            {"type": "append", "rows": [{"id": "5"}]},
+            "append: a row id is a kernel int, got '5'",
+        ),
+        (
+            {"type": "append", "rows": [{"id": 7, "refs": ["x"]}]},
+            "append: row 7 refs must be row ids",
+        ),
+    ):
+        got = await _call(ram, "mem", payload, as_="alice")
+        assert list(got) == ["error", "reason", "arg"], got
+        assert got == {"error": error, "reason": "bad_arg", "arg": "rows"}, payload
+
+
+async def test_row_ids_and_limits_parse_as_python_ascii_digit_ids(ram):
+    await _append(
+        ram, "alice", [{"id": i, "content": f"needle {i}"} for i in range(1, 6)]
+    )
+    for limit, want in (
+        (2, 2),
+        (" 2 ", 2),
+        ("3", 3),
+        ("٢", 5),  # a Unicode digit is not an id → the default 100
+        ("+2", 5),  # a sign is not a digit
+        (0, 5),
+        ("0", 5),
+        (-1, 5),
+        (2.0, 5),  # a float is not an int
+        (True, 5),  # a bool is not an id
+    ):
+        r = await _call(
+            ram,
+            "mem",
+            {"type": "search", "query": "needle", "limit": limit},
+            as_="alice",
+        )
+        assert len(r["matches"]) == want, (limit, r)
+        assert r["total"] == 5, limit
+        assert r["truncated"] is (want < 5), limit
+    r = await _call(
+        ram,
+        "mem",
+        {"type": "search", "query": "needle", "width": " 3 "},
+        as_="alice",
+    )
+    assert r["matches"][0]["text"] == "nee"

@@ -807,3 +807,138 @@ def test_the_default_file_is_under_the_homes_user_credentials(monkeypatch, tmp_p
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("FANTASTIC_HOME", "rel")
     assert default_file("c2") == f"{tmp_path / 'rel'}/user/credentials/c2.yaml"
+
+
+# ─── Rust twins (#170) ───────────────────────────────────────────────────────
+
+
+async def test_a_read_pinned_to_another_host_is_refused(seeded_kernel, tmp_path):
+    k = _mk(seeded_kernel, tmp_path)
+    await _seed(k)
+    bad = (
+        await _call(
+            k,
+            {"type": "get", "ref": "openai/main", "host": "https://evil.example.net/v1"},
+        )
+    )["result"]
+    assert bad == {
+        "error": "credential_store: ref 'openai/main' is bound to host "
+        "'api.openai.com', not 'evil.example.net' — refused, nothing read",
+        "reason": "bad_arg",
+        "arg": "host",
+    }
+    assert list(bad) == ["error", "reason", "arg"]
+    good = (
+        await _call(
+            k,
+            {
+                "type": "get",
+                "ref": "openai/main",
+                "host": "HTTPS://API.OpenAI.com/v1/responses",
+            },
+        )
+    )["result"]
+    assert good["fields"] == {"api_key": KEY}, good
+    # a host that names nothing is no host
+    blank = (
+        await _call(k, {"type": "get", "ref": "openai/main", "host": "  "})
+    )["result"]
+    assert blank["error"].endswith("not None — refused, nothing read"), blank
+
+
+def test_host_is_pythons_urlsplit_netloc_lowercased():
+    from credential_store.tools import _host
+
+    assert _host("https://api.openai.com/v1") == "api.openai.com"
+    assert _host("http://127.0.0.1:8080/x?y") == "127.0.0.1:8080"
+    assert _host("  API.Example.COM  ") == "api.example.com"
+    assert _host("://nohost") is None
+    assert _host("1http://x/y") is None
+    assert _host("") is None
+    assert _host(5) is None
+    assert _host(None) is None
+
+
+def test_validate_meta_texts_are_pythons():
+    from credential_store.tools import validate_meta
+
+    def v(m):
+        return validate_meta(m, {})
+
+    assert v({"backend": None}) is None
+    assert v({"file": " "}) == "file must be a non-empty string"
+    assert (
+        v({"keychain_namespace": 3}) == "keychain_namespace must be a non-empty string"
+    )
+    assert v({"file": " creds.yaml"}) == (
+        "file=' creds.yaml' must be an absolute path (starting with / or ~) — a "
+        "relative path is refused"
+    )
+    assert v({"file": "/abs/creds.yaml"}) is None
+    assert v({"refs": []}) == "refs must be a map of ref to {host, fields, env}"
+    assert v({"refs": {" ": {}}}) == "a ref must be a non-empty string"
+    assert v({"refs": {"r": 1}}) == "refs['r'] must be a map"
+    assert (
+        v({"refs": {"r": {"host": "://"}}}) == "refs['r'].host must be a non-empty host"
+    )
+    for nohost in ({}, {"host": None}):
+        assert v({"refs": {"r": nohost}}) == (
+            "refs['r'].host is required — the one host this ref's value may be "
+            "sent to"
+        )
+    assert (
+        v({"refs": {"r": {"host": "h", "env": {"api_key": ""}}}})
+        == "refs['r'].env must map field names to variable names"
+    )
+    assert (
+        v({"refs": {"r": {"host": "h", "fields": ["k"], "env": {"k": "V"}}}}) is None
+    )
+
+
+async def test_reflect_is_posture_never_a_value_or_a_ref_name(seeded_kernel, tmp_path):
+    from credential_store.tools import VERBS, default_file
+
+    k = _mk(seeded_kernel, tmp_path)
+    await _seed(k)
+    r = (await _call(k, {"type": "reflect"}))["result"]
+    assert list(r)[:5] == ["id", "sentence", "backend", "refs", "file"], r
+    assert r["backend"] == "file"
+    assert r["refs"] == 1
+    assert r["file"] == str(tmp_path / "creds.yaml")
+    assert list(VERBS) == ["reflect", "boot", "set", "get", "list", "forget"]
+    text = json.dumps(r)
+    assert KEY not in text and "openai/main" not in text
+    # with no `file`, the default under the user's home is NAMED, never touched
+    k.create("credential_store.tools", id="c2")
+    r2 = (await _call(k, {"type": "reflect"}, target="c2"))["result"]
+    assert r2["file"] == default_file("c2")
+
+
+async def test_missing_args_and_unknown_verbs_are_refused_in_pythons_words(
+    seeded_kernel, tmp_path
+):
+    k = _mk(seeded_kernel, tmp_path)
+    for payload, err in (
+        (
+            {"type": "set", "host": "h", "fields": {"k": "v"}},
+            "credential_store set: ref required",
+        ),
+        ({"type": "get", "ref": " "}, "credential_store get: ref required"),
+        ({"type": "forget"}, "credential_store forget: ref required"),
+    ):
+        out = (await _call(k, payload))["result"]
+        assert out == {"error": err, "reason": "missing_arg", "arg": "ref"}, out
+        assert list(out) == ["error", "reason", "arg"]
+    bad = (await _call(k, {"type": "set", "ref": "r", "fields": {"k": 1}}))["result"]
+    assert bad == {
+        "error": "credential_store set: fields must be a non-empty map of field name "
+        "to string value",
+        "reason": "bad_arg",
+        "arg": "fields",
+    }
+    unk = (await _call(k, {"type": "shutdown"}))["result"]
+    assert unk == {
+        "error": "credential_store: unknown type 'shutdown'",
+        "reason": "unhandled",
+        "verb": "shutdown",
+    }

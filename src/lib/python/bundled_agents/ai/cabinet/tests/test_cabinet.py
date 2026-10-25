@@ -1104,3 +1104,73 @@ async def test_wire_grants_then_fields(world):
         res = await _wire(mgr, MASTER, can_call={"peer_x": "ping"}, description="nope")
     assert res, res
     assert k.get(MASTER)["description"] == "hello"
+
+
+# ─── Rust twins (#170) ───────────────────────────────────────────────────────
+
+
+async def test_a_canvas_name_clash_is_refused_and_the_first_canvas_stays(world):
+    k = world
+    # a canvas already holds the node a cabinet named `clash` would take
+    (made,) = await k.send(
+        [
+            {
+                "target": k.id,
+                "payload": {
+                    "type": "create_agent",
+                    "parent_id": CANVAS,
+                    "id": "canvas_cabinet_clash",
+                    "handler_module": "canvas_stub.tools",
+                },
+            }
+        ]
+    )
+    assert not made["result"].get("error"), made
+    before = set(k.ctx.agents)
+    res = await open_cabinet(k, "x", name="clash")
+    assert "canvas_cabinet_clash" in (res.get("error") or ""), res
+    assert k.get("cabinet_clash") is None
+    assert set(k.ctx.agents) == before
+
+
+async def test_the_equip_verb_is_gone_and_no_longer_documented(world):
+    from cabinet.tools import VERBS
+
+    k = world
+    cab = (await open_cabinet(k, "old", name="old"))["id"]
+    # the operator's own send reaches the cabinet's handler: no `equip` there
+    (out,) = await k.send(
+        [
+            {
+                "target": cab,
+                "payload": {"type": "equip", "handler_module": "file_bridge.tools"},
+            }
+        ]
+    )
+    assert out["result"].get("reason") == "unhandled", out
+    assert f"{worker_of(k, cab)}_eq" not in k.ctx.agents
+    assert "equip" not in VERBS
+    view_html = k.get(cab)["view"]["bytes"]
+    assert '"equip"' not in view_html and "`equip`" not in view_html
+    from importlib import resources
+
+    readme = resources.files("cabinet").joinpath("readme.md").read_text("utf-8")
+    assert "`equip`" not in readme
+
+
+async def test_cabinets_lists_each_canvas_and_its_equipment(world):
+    k = world
+    cab = (await open_cabinet(k, "list", name="list"))["id"]
+    canvas = k.get(cab)["canvas"]
+    made = await create_on(
+        k,
+        canvas,
+        worker_of(k, cab),
+        handler_module="file_bridge.tools",
+        id="list_exec",
+    )
+    assert not made.get("error"), made
+    res = await as_(k, MASTER, MANAGER, {"type": "cabinets"})
+    row = res["cabinets"][0]
+    assert row["canvas"] == canvas
+    assert row["equipment"] == ["list_exec"]
