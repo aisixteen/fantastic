@@ -294,3 +294,119 @@ def test_the_scan_finds_keys_rows_and_absolute_paths(tmp_path):
     (d / "a/directive.md").write_text("ask-me about task-lists")
     assert scan_secrets(d) == []
     shutil.rmtree(d)
+
+
+# ---- OWNED FILES BEYOND THE DIRECTIVE (#268) ----
+
+MAX_FILE = 1 << 20
+
+
+def folder_tree(view):
+    recs = tree()
+    for r in recs:
+        if r["id"] in ("a", "b"):
+            r["handler_module"] = "py_ab12"
+        if r["id"] == "a":
+            r["meta"]["view"] = view
+    return recs
+
+
+def py_files(hm):
+    if hm != "py_ab12":
+        return []
+    return [
+        ("agent.py", "print('hi')\n", None),
+        ("bundle.yaml", "base: py_agent\nsentence: x\n", None),
+        ("panel.html", "<p>panel</p>", None),
+    ]
+
+
+def export_with(recs, rb):
+    return build(recs, "a", ROOT, None, none, rb)
+
+
+def test_view_bytes_body_is_exported_beside_the_blueprint():
+    recs = folder_tree({"kind": "html", "bytes": "<p>hi</p>", "calls": ["a"]})
+    ex = export_with(recs, lambda hm: [])
+    assert ("a/view.html", "<p>hi</p>") in ex.files, ex.files
+    v = find(doc(ex), "a")["view"]
+    assert v["bytes_file"] == "a/view.html"
+    assert "bytes" not in v, ex.yaml
+    assert v["calls"] == ["a"]
+    assert v["kind"] == "html"
+
+
+def test_folder_bundle_files_are_exported_once_per_bundle_and_marked_as_code():
+    ex = export_with(folder_tree({}), py_files)
+    paths = [p for p, _ in ex.files]
+    for f in ["agent.py", "bundle.yaml", "panel.html"]:
+        want = f"bundles/py_ab12/{f}"
+        assert paths.count(want) == 1, paths
+        assert want in ex.code, ex.code
+        assert f"# code: {want}\n" in ex.yaml, ex.yaml
+    assert len(ex.code) == 3, ex.code
+    assert paths.index("bundles/py_ab12/agent.py") < paths.index(
+        "bundles/py_ab12/bundle.yaml"
+    )
+
+
+def test_view_file_is_code_and_listed_in_code():
+    ex = export_with(folder_tree({"kind": "html", "bytes": "<b>x</b>"}), lambda hm: [])
+    assert ex.code == ["a/view.html"]
+    assert "# code: a/view.html\n" in ex.yaml, ex.yaml
+
+
+def test_unreadable_or_oversized_bundle_files_are_noted_not_written():
+    big = "x" * (MAX_FILE + 1)
+
+    def rb(hm):
+        if hm != "py_ab12":
+            return []
+        return [
+            ("agent.py", "ok", None),
+            ("link.py", None, "a symlink"),
+            ("blob.bin", None, "not UTF-8 text"),
+            ("big.txt", big, None),
+            (".env", "K=1", None),
+        ]
+
+    ex = export_with(folder_tree({}), rb)
+    paths = [p for p, _ in ex.files]
+    assert "bundles/py_ab12/agent.py" in paths, paths
+    for bad in ["link.py", "blob.bin", "big.txt", ".env"]:
+        assert not any(p.endswith(bad) for p in paths), (bad, paths)
+        assert any(bad in n for n in ex.notes), (bad, ex.notes)
+        assert f"# NOTE: bundle py_ab12: file {bad}" in ex.yaml, ex.yaml
+
+
+def _write(d, ex):
+    d.mkdir()
+    (d / BLUEPRINT_FILE).write_text(ex.yaml)
+    for rel, text in ex.files:
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+
+def test_owned_files_leave_the_blueprint_free_of_secrets_and_absolute_paths(tmp_path):
+    ex = export_with(folder_tree({"kind": "html", "bytes": "<p>hi</p>"}), py_files)
+    _write(tmp_path / "owned", ex)
+    assert scan_secrets(tmp_path / "owned") == []
+    assert "<p>hi</p>" not in ex.yaml, ex.yaml
+
+
+def test_an_sk_token_inside_an_exported_code_file_is_found_by_the_scan(tmp_path):
+    def rb(hm):
+        return [("agent.py", "KEY = 'sk-abcd1234efgh'\n", None)] if hm == "py_ab12" else []
+
+    ex = export_with(folder_tree({}), rb)
+    _write(tmp_path / "sk", ex)
+    hits = scan_secrets(tmp_path / "sk")
+    assert len(hits) == 1, hits
+    assert "bundles/py_ab12/agent.py" in hits[0], hits
+
+
+def test_no_owned_files_when_the_record_has_none():
+    ex = export(tree())
+    assert ex.files == [] and ex.code == [], ex.files
+    assert "# code:" not in ex.yaml

@@ -7,6 +7,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- Export a subtree, completed (#268): the kernel root answers `export_subtree` like
+  `user` (one engine, `fantastic-core` / `kernel_state`), the export now writes an
+  html view's body as `<id>/view.html` and a folder bundle's files as
+  `bundles/<name>/…` (marked `# code:` in the blueprint), the TUI has
+  `/export <path>`, and a canvas cell's right-click menu has "Export…".
 - System agents (Linux, `fantastic [canvas] system`): the machine's basics as
   agents an AI calls like any other, each with its view as a canvas cell — first
   `power` (battery over UPower; power off, reboot, suspend over logind), then
