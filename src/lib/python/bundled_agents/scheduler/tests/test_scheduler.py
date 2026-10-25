@@ -747,3 +747,129 @@ async def test_pause_and_resume_the_whole_scheduler(seeded_kernel, store_agent):
     assert seeded_kernel.ctx.get(sid)["paused"] is True
     assert await call({"type": "resume"}) == {"resumed": True, "scheduler_id": sid}
     assert seeded_kernel.ctx.get(sid)["paused"] is False
+
+
+async def _send(kernel, target, payload):
+    return (await kernel.send([{"target": target, "payload": payload}]))[0]["result"]
+
+
+def _seed_schedule(sid, sch_id, target, **over):
+    from scheduler import tools
+
+    now = time.time()
+    sch = {
+        "id": sch_id,
+        "target": target,
+        "payload": {"type": "hit"},
+        "interval_seconds": 60,
+        "created_at": now - 120,
+        "next_run": now + 60,
+        "run_count": 0,
+        "paused": False,
+        **over,
+    }
+    tools._cache[sid] = [sch]
+    return sch
+
+
+async def test_a_failed_tick_persist_does_not_refire_next_tick(seeded_kernel):
+    # No store_agent: every persist fails. The bump must stay in the cache, or the
+    # still-due schedule would fire again in a hot loop.
+    from scheduler import tools
+
+    sid = await _make_probed_scheduler(seeded_kernel, "sch_nopersist", ["p_np"])
+    try:
+        _seed_schedule(sid, "sch_fixed", "p_np", next_run=time.time() - 1)
+        await _send(seeded_kernel, sid, {"type": "boot"})
+        assert await _wait_for(lambda: "p_np" in _probe.hits, 3.0), _probe.hits
+        await asyncio.sleep(0.6)
+        await _send(seeded_kernel, sid, {"type": "pause"})
+        schedules = (await _send(seeded_kernel, sid, {"type": "list"}))["schedules"]
+        assert schedules[0]["run_count"] == 1, "the failed persist re-fired the tick"
+        assert schedules[0]["next_run"] > time.time()
+    finally:
+        tools._cache.pop(sid, None)
+
+
+async def test_a_failed_persist_rolls_back_tick_now_but_not_pause(seeded_kernel):
+    from scheduler import tools
+
+    sid = await _make_probed_scheduler(seeded_kernel, "sch_rb", ["p_rb"])
+    try:
+        _seed_schedule(sid, "sch_rb", "p_rb")
+        r = await _send(seeded_kernel, sid, {"type": "tick_now", "schedule_id": "sch_rb"})
+        assert isinstance(r.get("error"), str), r
+        assert tools._cache[sid][0]["run_count"] == 0, "the tick_now bump was kept"
+        r = await _send(seeded_kernel, sid, {"type": "pause", "schedule_id": "sch_rb"})
+        assert isinstance(r.get("error"), str), r
+        assert tools._cache[sid][0]["paused"] is True, "the pause was rolled back"
+    finally:
+        tools._cache.pop(sid, None)
+
+
+async def test_two_schedulers_share_nothing_and_delete_frees_only_its_own(
+    seeded_kernel, store_agent
+):
+    from scheduler import tools
+
+    a = await _make_probed_scheduler(seeded_kernel, "sch_two_a", ["p_two_a"])
+    b = await _make_probed_scheduler(seeded_kernel, "sch_two_b", ["p_two_b"])
+    try:
+        for s in (a, b):
+            assert (await _send(seeded_kernel, s, {"type": "boot"}))["running"] is True
+        r = await _schedule(seeded_kernel, a, "p_two_a", interval=3600)
+        assert "schedule_id" in r, r
+        assert len((await _send(seeded_kernel, a, {"type": "list"}))["schedules"]) == 1
+        assert (await _send(seeded_kernel, b, {"type": "list"}))["schedules"] == []
+        for s in (a, b):
+            assert (await _send(seeded_kernel, s, {"type": "reflect"}))["running"]
+            assert s in tools._tick_tasks and not tools._tick_tasks[s].done()
+        d = await _send(seeded_kernel, "kernel_state", {"type": "delete_agent", "id": a})
+        assert "error" not in d, d
+        await asyncio.sleep(0.1)
+        assert a not in tools._tick_tasks
+        assert a not in tools._cache
+        assert a not in tools._wake
+        assert a not in tools._unsub
+        assert b in tools._tick_tasks and not tools._tick_tasks[b].done()
+        assert b in tools._wake and b in tools._unsub
+        assert (await _send(seeded_kernel, b, {"type": "reflect"}))["running"] is True
+        assert (await _send(seeded_kernel, b, {"type": "list"}))["schedules"] == []
+    finally:
+        for s in (a, b):
+            tools._cache.pop(s, None)
+
+
+async def test_a_cancelled_fire_error_reads_none():
+    from scheduler import tools
+
+    class FakeKernel:
+        def __init__(self):
+            self.outcome = None
+            self.ctx = types.SimpleNamespace(root=None)
+
+        async def send(self, items):
+            return [self.outcome for _ in items]
+
+        async def emit(self, sid, event):
+            return None
+
+    fake = FakeKernel()
+    due = [{"id": "sch_x", "target": "t", "payload": {"type": "hit"}}]
+    cases = [
+        ({"status": "cancelled", "result": None}, (None, "cancelled: None")),
+        ({"status": "cancelled", "result": {}}, (None, "cancelled: None")),
+        (
+            {"status": "timed_out", "result": {"error": "gone"}},
+            (None, "timed_out: gone"),
+        ),
+        ({"status": "failed", "result": [1, "x"]}, (None, "failed: [1, 'x']")),
+        (
+            {"status": "completed", "result": {"error": "domain said no"}},
+            ({"error": "domain said no"}, None),
+        ),
+    ]
+    for outcome, want in cases:
+        fake.outcome = outcome
+        (ev,) = await tools._fire_many("sch_cx", due, fake)
+        assert (ev["result"], ev["error"]) == want, (outcome, ev)
