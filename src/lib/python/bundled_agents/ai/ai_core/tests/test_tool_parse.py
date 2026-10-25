@@ -342,3 +342,24 @@ def test_a_trailing_fence_and_a_leading_invoke_fragment_leave_calls_dispatchable
         assert [c["name"] for c in calls] == ["send", "await"], calls
         assert malformed_calls(text) == []
         assert call_check.check(text, ran=2) == []
+
+
+def test_a_reply_body_reads_as_utf8_text_at_its_slot():
+    from ai_core.tool_parse import render_reply
+
+    read = {
+        "path": "a.txt",
+        "offset": 0,
+        "bytes": b"line one\nline \xff two",
+        "eof": True,
+    }
+    assert render_reply(read) == (
+        "<path>a.txt</path>\n<offset>0</offset>\n<bytes>\nline one\nline \ufffd two\n"
+        "</bytes>\n<eof>true</eof>"
+    )
+    nested = {"seq": 3, "out": {"chunk": b"red \xff"}}
+    assert (
+        render_reply(nested) == "<seq>3</seq>\n<out>\n<chunk>red \ufffd</chunk>\n</out>"
+    )
+    # a body-less reply is unchanged
+    assert render_reply({"seq": 3}) == "<seq>3</seq>"

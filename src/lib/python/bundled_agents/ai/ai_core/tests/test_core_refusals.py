@@ -347,3 +347,102 @@ async def test_a_send_with_no_payload_names_the_target(seeded_kernel):
         }
     )
     assert want in text, text
+
+
+async def test_the_model_facing_error_strings_are_verbatim(seeded_kernel, monkeypatch):
+    """The model-facing strings are prompts: pinned as literal text so tidying one
+    shows up as a failing test."""
+    from ai_core.tool_parse import _HINT, malformed_calls
+
+    k = seeded_kernel
+    _ai(k, "kp_vb")
+    # no target
+    call = {"id": 1, "name": "send", "arguments": {"payload": {"type": "reflect"}}}
+    with monkeypatch.context() as m:
+        m.setattr(core, "terminated_calls", lambda a: [(call, "")])
+        text = await _turn_text(k, "kp_vb", "go")
+    assert (
+        "no target_id, so nothing was dispatched — a send must name the AGENT it "
+        'goes to. Shape: <call name="send"><target_id>agent</target_id>'
+        "<type>verb</type></call>. Send `kernel` <type>reflect</type> for the "
+        "list of agent ids."
+    ) in text, text
+    # no payload
+    text = await _turn_text(
+        k, "kp_vb", '<call name="send"><target_id>totals</target_id></call>'
+    )
+    assert (
+        "send to 'totals' carried no payload, so nothing was dispatched. A call "
+        "names its verb in `<type>`, e.g. <type>reflect</type>."
+    ) in text, text
+    # the no-call reminder
+    assert core._NO_CALL_NUDGE == (
+        "[no call was dispatched] Your answer emitted no <call> element, so "
+        "NOTHING ran — a call written in your thinking does not run: write it in "
+        "your answer, after the thinking. If the task is unfinished, emit that call "
+        "now. If it is finished, end the chain explicitly: "
+        '<call name="done"></call>'
+    )
+    # the parser's malformed-call sentence reaches the model verbatim as the body
+    bad_text = '<call name="send"><type>reflect</type></call>'
+    bad = malformed_calls(bad_text)
+    assert len(bad) == 1, bad
+    assert bad[0]["error"].startswith("call NOT dispatched: a send names its target")
+    assert bad[0]["error"].endswith(f". Nothing ran. {_HINT}")
+    text = await _turn_text(k, "kp_vb", bad_text)
+    assert bad[0]["error"] in text, text
+
+
+async def test_target_fallthrough_matches_python_truthiness(seeded_kernel, monkeypatch):
+    """`target` is accepted beside `target_id`; a falsy `target_id` yields to it, a
+    truthy non-string one does not (it earns the shape error)."""
+    k = seeded_kernel
+    _ai(k, "kp_tf")
+    no_target = "no target_id, so nothing was dispatched"
+
+    async def go(**args) -> str:
+        call = {
+            "id": 1,
+            "name": "send",
+            "arguments": {**args, "payload": {"type": "reflect"}},
+        }
+        monkeypatch.setattr(core, "terminated_calls", lambda a: [(call, "")])
+        return await _turn_text(k, "kp_tf", "go")
+
+    ok = await go(target_id="kernel")
+    assert no_target not in ok and "[reply to " in ok, ok
+    for args in (
+        {"target": " kernel "},
+        {"target_id": "", "target": "kernel"},
+        {"target_id": None, "target": "kernel"},
+    ):
+        text = await go(**args)
+        assert no_target not in text and "[reply to " in text, (args, text)
+    assert no_target in await go(target_id=7, target="kernel")
+    assert no_target in await go(reply_to="self")
+
+
+async def test_watch_announces_each_appended_row_until_unwatch(seeded_kernel):
+    """`watch` announces every row the agent appends to the watcher's inbox,
+    content-free without `body`; `unwatch` stops it."""
+    k = seeded_kernel
+    _ai(k, "kp_wa", callable_by={"viewer": ["watch", "unwatch"]})
+    k.create(None, id="viewer", can_call={"kp_wa": ["watch", "unwatch"]})
+    q = k.ctx.ensure_inbox("viewer")
+    assert await _call(k, "kp_wa", {"type": "watch"}, as_="viewer") == {
+        "watching": True,
+        "watcher": "viewer",
+        "body": False,
+    }
+    await core._save_history("kp_wa", k, [{"role": "user", "content": "hello"}])
+    stored = await core._load_history("kp_wa", k)
+    assert q.qsize() == 1, "one row event"
+    assert q.get_nowait() == {
+        "type": "row",
+        "source": "kp_wa",
+        "row": {"id": stored[-1]["id"], "kind": "user", "role": "user", "bytes": 5},
+    }, "a content-free digest"
+    r = await _call(k, "kp_wa", {"type": "unwatch"}, as_="viewer")
+    assert r["watching"] is False, r
+    await core._save_history("kp_wa", k, [{"role": "user", "content": "again"}])
+    assert q.empty(), "no event after unwatch"

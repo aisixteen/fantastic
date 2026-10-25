@@ -557,3 +557,40 @@ async def test_a_fold_starts_at_fold_at_and_lands_at_low_by_tokens():
     _, view, folded, _ = await fold_down(body, _ctx(bud, k, anchors={}), bud)
     assert folded == 1, f"one fold per overflow, got {folded}"
     assert estimate_tokens(view) <= int(bud * LOW), (estimate_tokens(view), bud)
+
+
+def test_folds_at_the_head_are_skipped_until_there_are_fold_run_of_them():
+    """THE ANTI-LINKED-LIST RULE, the CEILING half: FOLD_RUN-1 folds at the head are
+    skipped (ordinary rows taken); at FOLD_RUN they become the span."""
+    from ai_core.constants import FOLD_RUN
+    from ai_core.strategies.fold import next_span
+
+    def head(n_folds):
+        goal = _row("user", "GOAL", "user:goal")
+        members = [
+            _row("user", "folded away", f"user:m{n_folds}{k}") for k in range(n_folds)
+        ]
+        fs = [
+            _fold("ai", [m["id"]], "old", "body", False, id=100 + k + 10 * n_folds)
+            for k, m in enumerate(members)
+        ]
+        tail = [_row("user", f"row {i}", f"user:r{n_folds}{i}") for i in range(14)]
+        rows = [goal] + members + fs + tail
+        return rows, _render(rows)
+
+    rows, view = head(FOLD_RUN - 1)
+    span = next_span(rows, view, need=10**9)
+    assert span, "ordinary rows are taken below the threshold"
+    assert not any(folds.is_fold(rows[i]) for i in span), span
+
+    rows, view = head(FOLD_RUN)
+    span = next_span(rows, view, need=10**9)
+    assert len(span) == FOLD_RUN and all(folds.is_fold(rows[i]) for i in span), span
+
+
+def test_a_view_with_nothing_foldable_yields_no_span():
+    """TERMINATION: the fold loop runs while over budget; an empty span stops it."""
+    from ai_core.strategies.fold import next_span
+
+    rows = [_row("user", "goal", "user:goal"), _row("user", "one", "user:one")]
+    assert next_span(rows, _render(rows), need=10**9) == []

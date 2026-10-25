@@ -554,3 +554,28 @@ async def test_stop_reaches_a_reply_woken_turn(seeded_kernel, fake_providers):
     nxt = (await asyncio.wait_for(_start_send(k, aid, "after"), 5))[0]["result"]
     assert "error" not in nxt, nxt
     assert len(fp.requests) == 2
+
+
+def _call_oks(ev: list) -> list:
+    return [e[2]["ok"] for e in ev if e[0] == "end" and e[1]["kind"] == "call"]
+
+
+def test_a_call_after_a_closed_tag_or_after_think_is_not_wrapped():
+    """#188: a call after a closed tag, or after thinking, is not wrapped: it
+    streams ok and is matched to its stream."""
+    ev, sp = _run(f"<b>x</b> {DONE}<think>t</think>{DONE}", 5)
+    assert _call_oks(ev) == [True, True], ev
+    assert len(sp.closed_calls) == 2, sp.closed_calls
+
+
+def test_a_backtick_in_a_call_argument_does_not_hide_a_wrapper_after_it():
+    """#188 review: a backtick inside a call's argument must not open a code span
+    that hides the wrapper after it; the wrapped call ends not ok, unmatched."""
+    text = (
+        '<call name="send"><target_id>a</target_id><type>run</type>'
+        "<cmd>echo `x</cmd></call>\n"
+        f"<tool_call>`y` {DONE}</tool_call>"
+    )
+    ev, sp = _run(text, 4)
+    assert _call_oks(ev) == [True, False], ev
+    assert len(sp.closed_calls) == 1, sp.closed_calls
