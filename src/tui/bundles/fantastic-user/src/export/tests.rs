@@ -47,8 +47,12 @@ fn none(_: &str, _: &str) -> Option<String> {
     None
 }
 
+fn no_bundle(_: &str) -> Vec<BundleFile> {
+    Vec::new()
+}
+
 fn export(recs: &[AgentRecord]) -> Exported {
-    build(recs, "a", ROOT, None, &none).expect("exports")
+    build(recs, "a", ROOT, None, &none, &no_bundle).expect("exports")
 }
 
 fn doc(ex: &Exported) -> Value {
@@ -295,6 +299,7 @@ fn absolute_paths_become_relative_or_port() {
         ROOT,
         Some("/home/u/proj/.fantastic/agents/user/agents/a"),
         &none,
+        &no_bundle,
     )
     .unwrap();
     let d = doc(&ex);
@@ -318,7 +323,7 @@ fn directive_file_is_exported_beside_the_blueprint() {
     );
     let read =
         |id: &str, f: &str| (id == "a" && f == "prompt.md").then(|| "You are A.".to_string());
-    let ex = build(&recs, "a", ROOT, None, &read).unwrap();
+    let ex = build(&recs, "a", ROOT, None, &read, &no_bundle).unwrap();
     assert_eq!(
         ex.files,
         vec![("a/directive.md".to_string(), "You are A.".to_string())]
@@ -336,8 +341,8 @@ fn directive_file_is_exported_beside_the_blueprint() {
 #[test]
 fn exporting_the_root_or_unknown_id_is_refused() {
     let recs = tree(json!({}), json!({}), json!({}));
-    assert!(build(&recs, ROOT, ROOT, None, &none).is_err());
-    assert!(build(&recs, "nope", ROOT, None, &none).is_err());
+    assert!(build(&recs, ROOT, ROOT, None, &none, &no_bundle).is_err());
+    assert!(build(&recs, "nope", ROOT, None, &none, &no_bundle).is_err());
     let mut loose = recs.clone();
     loose.push(AgentRecord {
         id: "loose".into(),
@@ -346,7 +351,7 @@ fn exporting_the_root_or_unknown_id_is_refused() {
         parent_id: None,
     });
     assert!(
-        build(&loose, "loose", ROOT, None, &none).is_err(),
+        build(&loose, "loose", ROOT, None, &none, &no_bundle).is_err(),
         "a record in no tree"
     );
 }
@@ -368,4 +373,170 @@ fn the_scan_finds_keys_rows_and_absolute_paths() {
     std::fs::write(d.join("a/directive.md"), "ask-me about task-lists").unwrap();
     assert!(scan_secrets(&d).is_empty());
     let _ = std::fs::remove_dir_all(&d);
+}
+
+// ---- OWNED FILES BEYOND THE DIRECTIVE (#268) ----
+
+fn folder_tree(view: Value) -> Vec<AgentRecord> {
+    let mut recs = tree(json!({}), json!({}), json!({}));
+    for r in &mut recs {
+        if r.id == "a" || r.id == "b" {
+            r.handler_module = Some("py_ab12".into());
+        }
+        if r.id == "a" {
+            r.meta.insert("view".into(), view.clone());
+        }
+    }
+    recs
+}
+
+fn py_files(hm: &str) -> Vec<BundleFile> {
+    if hm != "py_ab12" {
+        return Vec::new();
+    }
+    vec![
+        ("agent.py".into(), Ok("print('hi')\n".into())),
+        (
+            "bundle.yaml".into(),
+            Ok("base: py_agent\nsentence: x\n".into()),
+        ),
+        ("panel.html".into(), Ok("<p>panel</p>".into())),
+    ]
+}
+
+fn export_with(recs: &[AgentRecord], rb: &dyn Fn(&str) -> Vec<BundleFile>) -> Exported {
+    build(recs, "a", ROOT, None, &none, rb).expect("exports")
+}
+
+#[test]
+fn view_bytes_body_is_exported_beside_the_blueprint() {
+    let recs = folder_tree(json!({"kind": "html", "bytes": "<p>hi</p>", "calls": ["a"]}));
+    let ex = export_with(&recs, &no_bundle);
+    assert!(
+        ex.files
+            .contains(&("a/view.html".to_string(), "<p>hi</p>".to_string())),
+        "{:?}",
+        ex.files
+    );
+    let d = doc(&ex);
+    let v = &find(&d, "a").unwrap()["view"];
+    assert_eq!(v["bytes_file"], "a/view.html");
+    assert!(v.get("bytes").is_none(), "no inline body: {}", ex.yaml);
+    assert_eq!(v["calls"], json!(["a"]));
+    assert_eq!(v["kind"], "html");
+}
+
+#[test]
+fn folder_bundle_files_are_exported_once_per_bundle_and_marked_as_code() {
+    let recs = folder_tree(json!({}));
+    let ex = export_with(&recs, &py_files);
+    let paths: Vec<&str> = ex.files.iter().map(|(p, _)| p.as_str()).collect();
+    for f in ["agent.py", "bundle.yaml", "panel.html"] {
+        let want = format!("bundles/py_ab12/{f}");
+        assert_eq!(paths.iter().filter(|p| **p == want).count(), 1, "{paths:?}");
+        assert!(ex.code.contains(&want), "{:?}", ex.code);
+        assert!(
+            ex.yaml.contains(&format!("# code: {want}\n")),
+            "{}",
+            ex.yaml
+        );
+    }
+    assert_eq!(ex.code.len(), 3, "{:?}", ex.code);
+    let at = |p: &str| paths.iter().position(|x| *x == p).unwrap();
+    assert!(at("bundles/py_ab12/agent.py") < at("bundles/py_ab12/bundle.yaml"));
+}
+
+#[test]
+fn view_file_is_code_and_listed_in_code() {
+    let recs = folder_tree(json!({"kind": "html", "bytes": "<b>x</b>"}));
+    let ex = export_with(&recs, &no_bundle);
+    assert_eq!(ex.code, vec!["a/view.html".to_string()]);
+    assert!(ex.yaml.contains("# code: a/view.html\n"), "{}", ex.yaml);
+}
+
+#[test]
+fn unreadable_or_oversized_bundle_files_are_noted_not_written() {
+    let recs = folder_tree(json!({}));
+    let big = "x".repeat(MAX_FILE + 1);
+    let rb = move |hm: &str| -> Vec<BundleFile> {
+        if hm != "py_ab12" {
+            return Vec::new();
+        }
+        vec![
+            ("agent.py".into(), Ok("ok".into())),
+            ("link.py".into(), Err("a symlink".into())),
+            ("blob.bin".into(), Err("not UTF-8 text".into())),
+            ("big.txt".into(), Ok(big.clone())),
+            (".env".into(), Ok("K=1".into())),
+        ]
+    };
+    let ex = export_with(&recs, &rb);
+    let paths: Vec<&str> = ex.files.iter().map(|(p, _)| p.as_str()).collect();
+    assert!(paths.contains(&"bundles/py_ab12/agent.py"), "{paths:?}");
+    for bad in ["link.py", "blob.bin", "big.txt", ".env"] {
+        assert!(!paths.iter().any(|p| p.ends_with(bad)), "{bad}: {paths:?}");
+        assert!(
+            ex.notes.iter().any(|n| n.contains(bad)),
+            "{bad}: {:?}",
+            ex.notes
+        );
+        assert!(
+            ex.yaml
+                .contains(&format!("# NOTE: bundle py_ab12: file {bad}")),
+            "{}",
+            ex.yaml
+        );
+    }
+}
+
+#[test]
+fn owned_files_leave_the_blueprint_free_of_secrets_and_absolute_paths() {
+    let recs = folder_tree(json!({"kind": "html", "bytes": "<p>hi</p>"}));
+    let ex = export_with(&recs, &py_files);
+    let d = std::env::temp_dir().join(format!("fu-owned-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join(BLUEPRINT_FILE), &ex.yaml).unwrap();
+    for (rel, text) in &ex.files {
+        let p = d.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    assert!(scan_secrets(&d).is_empty(), "{:?}", scan_secrets(&d));
+    assert!(
+        !ex.yaml.contains("<p>hi</p>"),
+        "no inline body: {}",
+        ex.yaml
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn an_sk_token_inside_an_exported_code_file_is_found_by_the_scan() {
+    let recs = folder_tree(json!({}));
+    let rb = |hm: &str| -> Vec<BundleFile> {
+        if hm != "py_ab12" {
+            return Vec::new();
+        }
+        vec![("agent.py".into(), Ok("KEY = 'sk-abcd1234efgh'\n".into()))]
+    };
+    let ex = export_with(&recs, &rb);
+    let d = std::env::temp_dir().join(format!("fu-sk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("bundles/py_ab12")).unwrap();
+    std::fs::write(d.join(BLUEPRINT_FILE), &ex.yaml).unwrap();
+    for (rel, text) in &ex.files {
+        std::fs::write(d.join(rel), text).unwrap();
+    }
+    let hits = scan_secrets(&d);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0].contains("bundles/py_ab12/agent.py"), "{hits:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn no_owned_files_when_the_record_has_none() {
+    let ex = export(&tree(json!({}), json!({}), json!({})));
+    assert!(ex.files.is_empty() && ex.code.is_empty(), "{:?}", ex.files);
+    assert!(!ex.yaml.contains("# code:"), "{}", ex.yaml);
 }

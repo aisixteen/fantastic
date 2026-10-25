@@ -1115,3 +1115,124 @@ async fn read_bundles_refuses_what_is_no_folder() {
         assert_eq!(r["reason"], reason, "{name}: {r}");
     }
 }
+
+// ─── export_subtree on the ROOT (#268) ───────────────────────────────
+
+async fn mk(kernel: &Arc<Kernel>, id: &str, parent: &str) {
+    let root = kernel.root().expect("root").id.clone();
+    let made = kernel
+        .send(vec![Item::new(
+            root.clone(),
+            json!({"type": "create_agent", "parent_id": parent, "id": id,
+                   "handler_module": "noop.tools", "note": id}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!(id), "{made}");
+}
+
+#[test]
+fn root_export_subtree_is_in_the_roots_verbs_and_docs() {
+    let v = KernelStateBundle::default().verb_docs();
+    let doc = v["export_subtree"]
+        .as_str()
+        .expect("export_subtree is a verb");
+    assert!(doc.contains("agent_id:str (req), path:str (req)"), "{doc}");
+    assert!(doc.contains("{exported, path, ports, files}"), "{doc}");
+}
+
+#[tokio::test]
+async fn root_export_subtree_exports_a_three_level_subtree() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().unwrap().id.0.clone();
+    mk(&kernel, "a", &root).await;
+    mk(&kernel, "b", "a").await;
+    mk(&kernel, "c", "b").await;
+    let r = root_reflect(
+        &kernel,
+        json!({"type": "export_subtree", "agent_id": "a", "path": "out_a"}),
+    )
+    .await;
+    assert_eq!(r["exported"], json!(3), "{r}");
+    assert_eq!(r["path"], json!("out_a"), "{r}");
+    assert_eq!(r["files"], json!(["blueprint.yaml"]), "{r}");
+    let text = std::fs::read_to_string(tmp.path().join("out_a/blueprint.yaml")).unwrap();
+    let d: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(d["agents"][0]["id"], "a");
+    assert_eq!(d["agents"][0]["agents"][0]["id"], "b");
+    assert_eq!(d["agents"][0]["agents"][0]["agents"][0]["id"], "c");
+    assert!(!text.contains("parent_id"), "{text}");
+}
+
+#[tokio::test]
+async fn root_export_subtree_refuses_the_root_id_and_unknown_id_and_bad_args() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().unwrap().id.0.clone();
+    mk(&kernel, "a", &root).await;
+    for (p, reason) in [
+        (
+            json!({"type": "export_subtree", "agent_id": root, "path": "o1"}),
+            "bad_arg",
+        ),
+        (
+            json!({"type": "export_subtree", "agent_id": "nope", "path": "o2"}),
+            "bad_arg",
+        ),
+        (
+            json!({"type": "export_subtree", "agent_id": "a"}),
+            "bad_arg",
+        ),
+        (json!({"type": "export_subtree", "path": "o3"}), "bad_arg"),
+        (
+            json!({"type": "export_subtree", "agent_id": "a", "path": "../o4"}),
+            "bad_arg",
+        ),
+    ] {
+        let r = root_reflect(&kernel, p.clone()).await;
+        assert_eq!(r["reason"], json!(reason), "{p}: {r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("kernel_state.export_subtree:"),
+            "{p}: {r}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_root_loader_refuses_export_subtree() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = booted(&tmp);
+    let root = kernel.root().unwrap().id.0.clone();
+    let made = kernel
+        .send(vec![Item::new(
+            kernel.root().unwrap().id.clone(),
+            json!({"type": "create_agent", "parent_id": root, "id": "inner",
+                   "handler_module": HANDLER_MODULE}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(made["id"], json!("inner"), "{made}");
+    let r = kernel
+        .send(vec![Item::new(
+            AgentId::from("inner"),
+            json!({"type": "export_subtree", "agent_id": "inner", "path": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(r["reason"], json!("bad_arg"), "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("kernel_state.export_subtree: the ROOT answers it"),
+        "{r}"
+    );
+    assert!(!tmp.path().join("o").exists());
+}
