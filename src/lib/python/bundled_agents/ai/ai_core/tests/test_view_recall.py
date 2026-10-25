@@ -635,7 +635,7 @@ async def _restarted_turn_sees(monkeypatch, fake_providers, clear_first, task_te
     await _make_boot(_cfg())("ai", {}, k)  # the restart: recall due, head cache gone
     fake_providers["ai"] = rec = _Recorder()
     await core._run("ai", "start ais", k, "c218", _cfg())
-    turn = [q for q in rec.requests if "Choose which rows you want" not in q]
+    turn = [q for q in rec.requests if core._RECALL_PROMPT[:40] not in q]
     assert turn, rec.requests
     return k, turn[0]
 
@@ -643,7 +643,9 @@ async def _restarted_turn_sees(monkeypatch, fake_providers, clear_first, task_te
 async def test_a_restarted_agent_still_sees_the_turn_that_set_its_task(
     monkeypatch, fake_providers
 ):
-    _, text = await _restarted_turn_sees(monkeypatch, fake_providers, False, DRIVER_TASK)
+    _, text = await _restarted_turn_sees(
+        monkeypatch, fake_providers, False, DRIVER_TASK
+    )
     assert "ROLE-MARKER-218" in text
 
 
@@ -664,26 +666,40 @@ async def test_pinning_stays_within_half_the_target_and_newest_rows_still_fill(
     assert "GIANT-218" not in text, "an oversized pin is skipped"
     assert "Polling job 59" in text, "the newest rows still fill"
 
-    # direct: a mid-sized pin is taken, and the pins stay within PIN_SHARE of target
-    k = _K()
-    await _driver_store(k, False, "MID-218 " + "z" * 3000)
-    await _context_recall("ai", {"dry": True}, k)
-    v = await _load_view("ai", k)
-    rows = {r["id"]: r for r in await core._load_history("ai", k)}
-    ids = [e["id"] for e in v["ids"]]
-    sys_tokens = estimate_one(
-        {"role": "system", "content": await core._system_content("ai", k, None)}
-    )
-    body = max(
-        core.BUDGET_FLOOR,
-        core.budget(k.record) - sys_tokens - core.NOTICE_ENVELOPE_RESERVE,
-    )
+    # direct: the pins stay within PIN_SHARE of target
     from ai_core.strategies.strip import LOW
 
-    target = int(body * LOW)
-    mid = [i for i in ids if "MID-218" in str(rows[i].get("content", ""))]
-    assert mid, "the mid-sized task is pinned"
-    cost = sum(
-        estimate_one({"role": "user", "content": rows[i]["content"]}) for i in mid
-    )
+    async def target_of(k):
+        sys_tokens = estimate_one(
+            {"role": "system", "content": await core._system_content("ai", k, None)}
+        )
+        body = max(
+            core.BUDGET_FLOOR,
+            core.budget(k.record) - sys_tokens - core.NOTICE_ENVELOPE_RESERVE,
+        )
+        return int(body * LOW)
+
+    async def pinned(marker, share):
+        k = _K()
+        target = await target_of(k)
+        n = 1000
+        while estimate_one({"role": "user", "content": "z" * n}) < target * share:
+            n += 500
+        await _driver_store(k, False, marker + " " + "z" * n)
+        await _context_recall("ai", {"dry": True}, k)
+        v = await _load_view("ai", k)
+        rows = {r["id"]: r for r in await core._load_history("ai", k)}
+        mid = [
+            e["id"] for e in v["ids"] if marker in str(rows[e["id"]].get("content", ""))
+        ]
+        cost = sum(
+            estimate_one({"role": "user", "content": rows[i]["content"]}) for i in mid
+        )
+        return mid, cost, target
+
+    mid, cost, target = await pinned("MID-218", 0.3)
+    assert mid, "a pin under the cap is taken"
     assert cost <= int(target * core.PIN_SHARE)
+    # a pin between half and the whole target is over the cap and is skipped
+    big, _, _ = await pinned("BIG-218", 0.7)
+    assert not big, "a pin over PIN_SHARE of the target is skipped"

@@ -4651,9 +4651,7 @@ async def _context_recall(
     # done. The newest root is what is live; say so.
     # Over the STORE, not the folded render: a root that a fold collapsed is still the
     # live one if nothing newer came.
-    live = next(
-(r for r in reversed(rows) if _is_task_root(r)), None
-    )
+    live = next((r for r in reversed(rows) if _is_task_root(r)), None)
     live_txt = (
         f' · live task: {live["id"]} "'
         + " ".join(str(live.get("content", "")).split())[:100]
