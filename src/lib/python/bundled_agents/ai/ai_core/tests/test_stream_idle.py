@@ -31,3 +31,10 @@ def test_stalled_error_names_seconds_and_endpoint_and_is_transport():
     assert "0.2s" in msg and "this turn is NOT complete" in msg
     assert msg.startswith("x_backend: stream_stalled")
     assert err.transport is True
+
+
+def test_a_stalled_read_is_a_transport_failure():
+    err = stalled_error("x", "http://e", 5.0)
+    assert isinstance(err, ProviderError)
+    assert err.transport is True
+    assert "stream_stalled" in str(err)
