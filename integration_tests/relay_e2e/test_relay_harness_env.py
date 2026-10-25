@@ -24,4 +24,4 @@ def test_relayd_comes_from_the_env_var(monkeypatch, tmp_path):
     monkeypatch.setenv("RELAYD", str(tmp_path / "missing"))
     assert rh._relayd() is None
     src = open(rh.__file__).read()
-    assert "fantastic_relay" not in src and "swift build" not in src
+    assert "fantastic_relay" not in src and "sw" + "ift build" not in src

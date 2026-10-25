@@ -76,7 +76,7 @@ def test_open_leg_dispatches(seeded_kernel):
 
 def test_absent_rule_is_sealed(seeded_kernel):
     # No ingress_rule on the leg ⇒ DenyInbound ⇒ sealed by default: the bare leg
-    # refuses AND teaches how to open it (mirrors test_sealed_leg_denies_and_teaches).
+    # refuses AND teaches how to open it (mirrors test_sealed_leg_denies_the_call_and_leaks_no_telemetry).
     seeded_kernel.create("web_ws.tools", id="bare_ws")
     with _client(seeded_kernel, "bare_ws") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
