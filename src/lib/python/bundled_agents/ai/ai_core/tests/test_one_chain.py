@@ -8,9 +8,12 @@ from __future__ import annotations
 import asyncio
 import time
 
-from _testkit import memory_meta
+from _testkit import as_agent, memory_meta
+
+from kernel._kernel import _current_origin
 
 from ai_core import core
+from ai_core.tool_parse import render_call
 
 DONE = '<call name="done"></call>'
 REFLECT = '<call name="send"><target_id>kernel</target_id><type>reflect</type></call>'
@@ -254,3 +257,190 @@ async def test_a_push_onto_a_live_chain_does_not_wake(seeded_kernel, monkeypatch
     assert len(chain["held"]) == 1
     assert woken == [], "a push onto a live chain woke it twice"
     core._chains.pop(aid, None)
+
+
+# ─── a chain that ends without a pass to read its held messages ──────────────
+# Twins of the Rust tests in fantastic-ai-core/src/tests.rs.
+
+
+def _is_held_error(out) -> bool:
+    return (
+        isinstance(out.get("error"), str)
+        and out.get("held") is True
+        and "response" not in out
+    )
+
+
+async def _held_behind_a_slow_pass(kernel, fake_providers, aid):
+    """Pass 1 is slow; a second send lands while it runs and is held. Returns
+    (provider, first send, held send)."""
+    fp = _Script([DONE, DONE], delay=1.5)
+    _agent(kernel, aid)
+    fake_providers[aid] = fp
+    first = _send(kernel, aid, "one", "o")
+    await _settle(fp, 1)
+    second = _send(kernel, aid, "two", "t")
+    end = asyncio.get_event_loop().time() + 5
+    while len(core._chain_of(aid)["held"]) != 1:
+        assert asyncio.get_event_loop().time() < end, "the second send was not held"
+        await asyncio.sleep(0.02)
+    return fp, first, second
+
+
+async def test_a_wake_that_cannot_be_delivered_releases_the_held_senders(
+    seeded_kernel,
+):
+    ghost = "no_such_agent_for_the_wake"
+    fut = asyncio.get_running_loop().create_future()
+    chain = core._chain_of(ghost)
+    chain["alive"] = True
+    chain["token"] = "tok"
+    chain["held"] = [("h", fut)]
+    try:
+        await core._deliver(
+            seeded_kernel,
+            ghost,
+            "wake",
+            "h",
+            None,
+            born=core._incarnation.get(ghost, 0),
+            notice=True,
+        )
+        out = await asyncio.wait_for(fut, 5)
+        assert isinstance(out["error"], str) and out["held"] is True, out
+        assert out["client_id"] == "h"
+        assert chain["alive"] is False
+    finally:
+        core._chains.pop(ghost, None)
+
+
+async def test_a_wake_that_never_runs_releases_the_held_senders_at_the_ceiling(
+    seeded_kernel, fake_providers, monkeypatch
+):
+    aid = "oc_ceiling"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = _Script([])
+    monkeypatch.setattr(core, "SEND_TIMEOUT", 0.2)
+    fut = asyncio.get_running_loop().create_future()
+    chain = core._chain_of(aid)
+    chain["alive"] = True
+    chain["token"] = "tok"
+    chain["held"] = [("h", fut)]
+    lock = core._lock_for(aid)
+    await lock.acquire()  # the wake cannot take the lock, so it never runs
+    try:
+        core._chain_ended(seeded_kernel, aid, None)
+        out = await asyncio.wait_for(fut, 5)
+        assert isinstance(out["error"], str) and out["held"] is True, out
+        assert chain["alive"] is False
+        assert chain["held"] == []
+    finally:
+        lock.release()
+        await asyncio.sleep(0.1)
+        fake_providers.pop(aid, None)
+
+
+async def test_a_shutdown_releases_the_held_senders(seeded_kernel, fake_providers):
+    aid = "oc_shutdown"
+    fp, first, second = await _held_behind_a_slow_pass(
+        seeded_kernel, fake_providers, aid
+    )
+    try:
+        await core.on_delete(seeded_kernel.ctx.agents[aid])
+        out = (await asyncio.wait_for(second, 5))[0]["result"]
+        assert _is_held_error(out), out
+        assert out["client_id"] == "t"
+        assert not core._chains.get(aid, {}).get("alive")
+    finally:
+        first.cancel()
+        fake_providers.pop(aid, None)
+
+
+async def test_a_context_clear_ends_the_chain_and_releases_the_held(
+    seeded_kernel, fake_providers
+):
+    aid = "oc_clear"
+    fp, first, second = await _held_behind_a_slow_pass(
+        seeded_kernel, fake_providers, aid
+    )
+    try:
+        await seeded_kernel.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "context_clear", "why": "fresh start"},
+                }
+            ]
+        )
+        out = (await asyncio.wait_for(second, 5))[0]["result"]
+        assert _is_held_error(out), out
+        assert core._chain_of(aid)["alive"] is False
+    finally:
+        first.cancel()
+        fake_providers.pop(aid, None)
+
+
+async def test_a_reply_in_flight_across_a_stop_runs_nothing(
+    seeded_kernel, fake_providers
+):
+    aid = "oc_inflight"
+    fp = _Script([DONE, DONE], delay=1.5)
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        first = _send(seeded_kernel, aid, "one", "o")
+        await _settle(fp, 1)
+
+        # a reply routed back to the agent carries the running chain's token
+        async def reply():
+            # the reply is routed by the agent's own dispatch: origin is the agent
+            _current_origin.set(aid)
+            with as_agent(seeded_kernel, aid):
+                await core._deliver(
+                    seeded_kernel, aid, "[reply to 1 · peer]\nanswered", "cli", None
+                )
+
+        late = asyncio.ensure_future(reply())
+        await asyncio.sleep(0.1)
+        await seeded_kernel.send([{"target": aid, "payload": {"type": "stop"}}])
+        await first
+        await asyncio.wait_for(late, 5)
+        end = asyncio.get_event_loop().time() + 5
+        while not [
+            r
+            for r in await core._load_history(aid, seeded_kernel)
+            if r.get("kind") == "late"
+        ]:
+            assert asyncio.get_event_loop().time() < end, "no late row"
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.3)
+        assert fp.calls == 1, "the stale reply ran a turn"
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_self_chain_does_not_deadlock(seeded_kernel, fake_providers):
+    aid = "oc_self"
+    call = render_call(
+        "send",
+        {
+            "target_id": "kernel_state",
+            "payload": {"type": "list_agents"},
+            "reply_to": aid,
+        },
+    )
+    fp = _Script([call, call, 'enough <call name="done"></call>'])
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        await asyncio.wait_for(
+            seeded_kernel.send(
+                [{"target": aid, "payload": {"type": "send", "text": "go"}}]
+            ),
+            5,
+        )
+        await _settle(fp, 3)
+        await asyncio.sleep(0.3)
+        assert fp.calls == 3, f"expected 3 passes, got {fp.calls}"
+    finally:
+        fake_providers.pop(aid, None)
