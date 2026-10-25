@@ -177,7 +177,8 @@ async def test_sse_events_split_across_writes_and_several_in_one_write_decode():
 
 
 async def test_sse_comment_keepalive_lines_are_ignored():
-    c = [json.dumps(x) for x in (_delta(content="o"), _delta(content="k"), _delta(finish="stop"))]
+    chunks = (_delta(content="o"), _delta(content="k"), _delta(finish="stop"))
+    c = [json.dumps(x) for x in chunks]
     body = (
         f"data: {c[0]}\n\n: ping\n\ndata: {c[1]}\n\n: ping\n\n"
         f"data: {c[2]}\n\ndata: [DONE]\n\n"
@@ -690,8 +691,13 @@ def test_caching_none_and_cleanup_pass_and_provider_cache_is_refused_naming_vllm
         assert validate_meta({"caching": mode}, rec) is None
     refusal = validate_meta({"caching": "provider_cache"}, rec)
     assert refusal is not None
-    assert "vllm_backend cannot do provider caching" in refusal
+    assert refusal == (
+        "vllm_backend cannot do provider caching: "
+        "caching=provider_cache is refused — use none or cleanup"
+    )
     assert validate_meta({}, {**rec, "caching": "provider_cache"}) is not None
+    legal = validate_meta({"caching": "always"}, rec)
+    assert legal is not None and "not one of the legal values" in legal
 
 
 async def test_the_final_usage_chunk_adds_one_request_and_its_tokens():
