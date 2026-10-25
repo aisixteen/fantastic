@@ -4,6 +4,9 @@ that may live anywhere, path still clamped within it). Never tried in sequence."
 
 from __future__ import annotations
 
+import errno
+import os
+
 import pytest
 from _testkit import posix_only
 
@@ -196,3 +199,83 @@ def test_an_absolute_path_is_refused_on_every_os(tmp_path):
     assert fs.is_absolute("/x") and not fs.is_absolute("a/b")
     with pytest.raises(ValueError):
         fs.resolve(fs.Root(tmp_path, "root"), "/x")
+
+
+# ─── atomic-write rename retries a transient refusal ────────────
+
+
+def _tmps(d):
+    return [p.name for p in d.iterdir() if ".tmp." in p.name]
+
+
+def test_replace_retries_transient_denial_then_succeeds(tmp_path, monkeypatch):
+    R = fs.Root(tmp_path, "root")
+    monkeypatch.setattr(fs.time, "sleep", lambda s: None)
+    real = os.replace
+    calls = []
+
+    def flaky(a, b):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise PermissionError(13, "denied")
+        return real(a, b)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    fs.write_bytes(R, "f.txt", b"new")
+    assert fs.read_bytes(R, "f.txt") == b"new"
+    assert len(calls) == 3
+    assert _tmps(tmp_path / "root") == []
+
+
+def test_replace_gives_up_after_bounded_tries(tmp_path, monkeypatch):
+    R = fs.Root(tmp_path, "root")
+    monkeypatch.setattr(fs.time, "sleep", lambda s: None)
+    calls = []
+
+    def deny(a, b):
+        calls.append(1)
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(os, "replace", deny)
+    with pytest.raises(PermissionError):
+        fs.write_bytes(R, "f.txt", b"new")
+    assert len(calls) == fs._RENAME_TRIES == 8
+    assert _tmps(tmp_path / "root") == []
+    assert not (tmp_path / "root" / "f.txt").exists()
+
+
+def test_replace_does_not_retry_other_errors(tmp_path, monkeypatch):
+    R = fs.Root(tmp_path, "root")
+    monkeypatch.setattr(fs.time, "sleep", lambda s: None)
+    calls = []
+
+    def gone(a, b):
+        calls.append(1)
+        raise OSError(errno.ENOENT, "gone")
+
+    monkeypatch.setattr(os, "replace", gone)
+    with pytest.raises(OSError) as ei:
+        fs.write_bytes(R, "f.txt", b"new")
+    assert not isinstance(ei.value, PermissionError)
+    assert len(calls) == 1
+    assert _tmps(tmp_path / "root") == []
+
+
+def test_write_bytes_atomic_leaves_no_tmp_on_replace_failure(tmp_path, monkeypatch):
+    R = fs.Root(tmp_path, "root")
+    monkeypatch.setattr(fs.time, "sleep", lambda s: None)
+    d = tmp_path / "root" / "f.txt"
+    d.mkdir(parents=True)
+    (d / "child").write_text("x")
+    with pytest.raises(OSError):
+        fs.write_bytes(R, "f.txt", b"new")
+    assert _tmps(tmp_path / "root") == []
+
+
+def test_transient_rename_error_reads_winerror_codes():
+    for code, want in ((5, True), (32, True), (33, True), (2, False)):
+        e = OSError(errno.EIO, "x")
+        e.winerror = code
+        assert fs._transient_rename_error(e) is want
+    assert fs._transient_rename_error(PermissionError(13, "x"))
+    assert not fs._transient_rename_error(OSError(errno.ENOENT, "x"))

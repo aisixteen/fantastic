@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import NamedTuple
 
@@ -211,6 +212,34 @@ def read_text(root, path, *, external: bool = False) -> str:
     return resolve(root, path, external=external).read_text(encoding="utf-8")
 
 
+# A watcher or reader holding the target can make the rename refuse for a moment:
+# retry a bounded number of times, pausing between tries (mirrors Rust #352).
+_RENAME_TRIES = 8
+_RENAME_PAUSE = 0.05  # seconds
+
+
+def _transient_rename_error(e: OSError) -> bool:
+    """A refusal worth retrying: any PermissionError, or the Windows sharing/access
+    codes 5/32/33 (`winerror` exists only on Windows). Anything else is final."""
+    return isinstance(e, PermissionError) or getattr(e, "winerror", None) in (5, 32, 33)
+
+
+def _rename_replace_with(op, tries: int, pause: float) -> None:
+    attempts = max(tries, 1)
+    for n in range(1, attempts + 1):
+        try:
+            op()
+            return
+        except OSError as e:
+            if n >= attempts or not _transient_rename_error(e):
+                raise
+            time.sleep(pause)
+
+
+def _rename_replace(tmp, target) -> None:
+    _rename_replace_with(lambda: os.replace(tmp, target), _RENAME_TRIES, _RENAME_PAUSE)
+
+
 @posix_errors
 def write_bytes(
     root,
@@ -242,7 +271,11 @@ def write_bytes(
             tmp.unlink(missing_ok=True)
             raise
         os.close(fd)
-        os.replace(tmp, target)
+        try:
+            _rename_replace(tmp, target)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
     else:
         if mode is not None:
             raise ValueError("fs: `mode` needs an atomic write")
