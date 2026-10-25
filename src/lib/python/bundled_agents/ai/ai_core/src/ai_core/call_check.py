@@ -27,7 +27,16 @@ import re
 from dataclasses import dataclass, field
 
 from ai_core.grammar import envelopes_in, open_tags
-from ai_core.tool_parse import CLOSE, TOOLS, _ROUTING, _defang, _envelopes
+from ai_core.tool_parse import (
+    CLOSE,
+    TOOLS,
+    _ROUTING,
+    _Malformed,
+    _defang,
+    _elements,
+    _envelopes,
+    parse_call,
+)
 
 #: The argument tags a call carries that are ours by name: the routing fields and
 #: the two every payload has.
@@ -173,6 +182,76 @@ def _json_args(masked: str, tok: _Tok) -> dict:
     return args
 
 
+LEFT_OUT = "LEFT OUT — write the command yourself"
+_STRIP_TAGS = re.compile(r"<[^<>]*>")
+_GIT_RISKY = [
+    ("git stash", re.compile(r"\bgit\b[^;&|\n]*?\sstash\b")),
+    (
+        "git reset --hard",
+        re.compile(r"\bgit\b[^;&|\n]*?\sreset\b[^;&|\n]*\s--hard\b"),
+    ),
+    (
+        "git clean -f",
+        re.compile(
+            r"\bgit\b[^;&|\n]*?\sclean\b[^;&|\n]*\s(?:-[A-Za-z]*f[A-Za-z]*|--force)\b"
+        ),
+    ),
+    (
+        "git push --force",
+        re.compile(
+            r"\bgit\b[^;&|\n]*?\spush\b[^;&|\n]*\s"
+            r"(?:--force(?:-with-lease)?|-[A-Za-z]*f[A-Za-z]*)\b"
+        ),
+    ),
+]
+_RM = re.compile(r"\brm((?:\s+-[A-Za-z-]+)+)")
+
+
+def _rm_rf(line: str) -> bool:
+    for m in _RM.finditer(line):
+        flags = m.group(1).split()
+        short = [f for f in flags if f.startswith("-") and not f.startswith("--")]
+        rec = "--recursive" in flags or any(("r" in f or "R" in f) for f in short)
+        frc = "--force" in flags or any("f" in f for f in short)
+        if rec and frc:
+            return True
+    return False
+
+
+def _flat(v: object) -> str:
+    if isinstance(v, (list, tuple)):
+        return " ".join(str(x) for x in v)
+    return str(v)
+
+
+def _risky(args: list[tuple[str, object]]) -> str | None:
+    """The label of a destructive command a start/run call would execute (#261)."""
+    if not any(k == "type" and _flat(v).strip() in ("start", "run") for k, v in args):
+        return None
+    line = " ".join(_flat(v) for k, v in args if k in ("command", "args"))
+    line = _STRIP_TAGS.sub(" ", line)
+    for label, rx in _GIT_RISKY:
+        if rx.search(line):
+            return label
+    return "rm -rf" if _rm_rf(line) else None
+
+
+def _rewrite(name: str, args: list[tuple[str, object]]) -> list[str]:
+    label = _risky(args)
+    if label is None:
+        return ["write it as:", _expected(name, args)]
+    shown = [(k, LEFT_OUT if k in ("command", "args") else v) for k, v in args]
+    return [
+        f"careful: this command runs `{label}`, which changes state outside this task "
+        "(a stash, reset, clean or force-push acts on the whole repository, and every "
+        "worktree shares it; rm -rf deletes for good). It is left out of the form "
+        "below: if you still mean it, write the command yourself, and prefer one that "
+        "touches only your own files.",
+        "write it as:",
+        _expected(name, shown),
+    ]
+
+
 def _expected(name: str, args: list[tuple[str, str]]) -> str:
     if not args:
         return f'<call name="{name}"></call>'
@@ -265,7 +344,7 @@ def _report(text: str, masked: str, call: _Call) -> str:
     if first.kind == "close" and len([t for t in call.toks if t.kind != "other"]) == 1:
         out[-1] += " — delete it"
     else:
-        out += ["write it as:", _expected(name, args)]
+        out += _rewrite(name, args)
     if notes:
         out.append("also: " + "; ".join(notes) + ".")
     out.append(
@@ -298,12 +377,22 @@ def _wrapped_reports(answer: str) -> list[str]:
         if env.wrapper is None or env.end is None:
             continue
         line = answer.count("\n", 0, env.wrapper.start) + 1
-        bare = "<" + "call" + answer[env.body : env.end] + CLOSE
-        out.append(
+        block = answer[env.body : env.end]
+        body = block[block.find(">") + 1 :]
+        head = (
             f"[malformed call — nothing ran] line {line}: a call inside "
-            f"`<{env.wrapper.name}>` is refused — drop the wrapper; write it at the top level:\n"
-            f"{bare}"
+            f"`<{env.wrapper.name}>` is refused — drop the wrapper; write it at the top level"
         )
+        try:
+            call = parse_call(block)
+            if call is None:
+                continue
+            args = [(k, raw.strip()) for k, raw in _elements(body)]
+        except _Malformed:
+            bare = "<" + "call" + block + CLOSE
+            out.append(head + f":\n{bare}")
+            continue
+        out.append("\n".join([head + ".", *_rewrite(call["name"], args)]))
     return out
 
 
@@ -319,9 +408,9 @@ def _wrapper_only(answer: str) -> list[str]:
     example = _expected("send", [("target_id", "agent id"), ("type", "verb")])
     return [
         f"[malformed call — nothing ran] line {line}: `<{w.name}>` holds no call — "
-        "write one at the top level, as <call name=\"…\">…</call>.\n"
+        'write one at the top level, as <call name="…">…</call>.\n'
         "write it as:\n" + example + "\n"
-        "If it is finished, end the chain explicitly: <call name=\"done\"></call>"
+        'If it is finished, end the chain explicitly: <call name="done"></call>'
     ]
 
 

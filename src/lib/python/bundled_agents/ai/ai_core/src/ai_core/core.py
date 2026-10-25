@@ -4430,6 +4430,46 @@ sentence why. Reply JSON only:
 {lines}"""
 
 
+# The share of the recall target the standing rows may take before the newest-first
+# fill (#218): the pins can never starve the fill.
+PIN_SHARE = 0.5
+
+
+def _is_task_root(r: dict) -> bool:
+    """A row that SET a task: a user turn with no parent, not a reply, not a system kind."""
+    return (
+        r.get("role") == "user"
+        and not r.get("parent")
+        and r.get("kind") in (None, "", "user")
+        and not _REPLY_TAG.match(str(r.get("content", "")))
+    )
+
+
+def _standing(view: list[dict]) -> list[int]:
+    """Indexes into the rebuilt view that recall pins past the goal (index 0), in
+    priority order, unique: the first root, the last root, the newest fold, then the
+    other roots newest first."""
+    from ai_core.folds import is_fold
+
+    roots = [i for i in range(1, len(view)) if _is_task_root(view[i])]
+    out: list[int] = []
+
+    def push(i: int) -> None:
+        if i != 0 and i not in out:
+            out.append(i)
+
+    if roots:
+        push(roots[0])
+        push(roots[-1])
+    for i in range(len(view) - 1, 0, -1):
+        if is_fold(view[i]):
+            push(i)
+            break
+    for i in reversed(roots):
+        push(i)
+    return out
+
+
 async def _context_recall(
     id,
     payload,
@@ -4511,10 +4551,19 @@ async def _context_recall(
             {"role": r.get("role", "user"), "content": r.get("content", "")}
         )
 
-    # 1. MECHANICAL FIT — never fails. The goal turn always in; then newest first.
+    # 1. MECHANICAL FIT — never fails. The goal turn always in; then the standing rows
+    # (task roots, newest fold) within PIN_SHARE of the target; then newest first.
     picked = {0}
     used = cost(digest(view[0]))
+    pin_cap = int(target * PIN_SHARE)
+    for i in _standing(view):
+        c = cost(digest(view[i]))
+        if used + c <= pin_cap:  # an oversized pin is skipped, never a stop
+            picked.add(i)
+            used += c
     for i in range(len(view) - 1, 0, -1):
+        if i in picked:
+            continue
         c = cost(digest(view[i]))
         if used + c > target:
             break
@@ -4602,17 +4651,7 @@ async def _context_recall(
     # done. The newest root is what is live; say so.
     # Over the STORE, not the folded render: a root that a fold collapsed is still the
     # live one if nothing newer came.
-    live = next(
-        (
-            r
-            for r in reversed(rows)
-            if r.get("role") == "user"
-            and not r.get("parent")
-            and r.get("kind") in (None, "", "user")
-            and not _REPLY_TAG.match(str(r.get("content", "")))
-        ),
-        None,
-    )
+    live = next((r for r in reversed(rows) if _is_task_root(r)), None)
     live_txt = (
         f' · live task: {live["id"]} "'
         + " ".join(str(live.get("content", "")).split())[:100]
