@@ -363,3 +363,42 @@ async def test_pump_takes_source_path_only(seeded_kernel, file_bridge, tmp_path)
     assert out["reason"] == "transport_error", out
     assert out["error"].startswith(f"pump: read from {fb!r} failed: {{"), out
     assert not (tmp_path / "b.txt").exists()
+
+
+async def test_a_huge_read_length_reads_only_what_exists(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    """Rust tests.rs::huge_length_reads_only_what_exists: a length past EOF is clamped
+    to what exists, never allocated."""
+    from file_bridge import fs
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_bytes(b"abc")
+    fid = await _open(seeded_kernel)
+
+    async def read(offset, length):
+        return (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": fid,
+                        "payload": {
+                            "type": "read_stream",
+                            "path": "a.txt",
+                            "offset": offset,
+                            "length": length,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+
+    for length in (10**15, 2**63 - 1):
+        r = await read(0, length)
+        assert "error" not in r, r
+        assert r["bytes"] == b"abc" and r["eof"] is True, r
+        assert r["size"] == 3 and r["next_offset"] == 3, r
+    r = await read(1, 10**15)
+    assert r["bytes"] == b"bc" and r["next_offset"] == 3 and r["eof"] is True, r
+    root = fs.Root(seeded_kernel.ctx.workdir, "")
+    assert fs.read_chunk(root, "a.txt", 0, 10**15) == (b"abc", 3)

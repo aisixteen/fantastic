@@ -1118,3 +1118,30 @@ async def test_status_event_includes_send_id(
             assert "send_id" in s["detail"], s
     finally:
         fake_providers.pop(oid, None)
+
+
+async def test_a_bad_system_prompt_is_refused_at_the_write(seeded_kernel, store_agent):
+    from ai_core.schema import SYSTEM_PROMPT_REFUSAL
+
+    aid = await _make_ollama(seeded_kernel)
+
+    async def upd(v):
+        return (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": "kernel_state",
+                        "payload": {
+                            "type": "update_agent",
+                            "id": aid,
+                            "system_prompt": v,
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+
+    for bad in ["", "   ", 7, ["x"]]:
+        assert (await upd(bad))["error"] == SYSTEM_PROMPT_REFUSAL
+    assert "error" not in await upd("be terse")
+    assert "error" not in await upd(None)
