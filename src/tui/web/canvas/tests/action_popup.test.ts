@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COLS, exactLine, layout, move, tiles } from "../src/bundles/canvas/action_popup.ts";
+import { COLS, exactLine, layout, move, systemTileSize, tiles } from "../src/bundles/canvas/action_popup.ts";
 import type { Presets } from "../src/bundles/canvas/action_popup.ts";
 
 const P: Presets = {
@@ -117,4 +117,23 @@ test("the machine's agents: a host tile each, placed by id; none when the recipe
   assert.deepEqual(t.map((x) => [x.label, x.section, x.pick]), [["power", "host", { kind: "system", id: "power" }]]);
   assert.deepEqual(tiles("po", { ...P, system: ["power"] }).filter((x) => x.pick.kind === "system").map((x) => x.label), ["power"]);
   assert.deepEqual(tiles("zz", { ...P, system: ["power"] }).filter((x) => x.pick.kind === "system"), []);
+});
+
+test("all six machine agents: one host tile each, in the order the presets list them", () => {
+  const ids = ["power", "network", "audio", "displays", "notifications", "lock"];
+  const t = tiles("", { ...P, system: ids }).filter((x) => x.pick.kind === "system");
+  assert.deepEqual(t.map((x) => x.label), ids);
+  assert.deepEqual(t.map((x) => x.pick), ids.map((id) => ({ kind: "system", id })));
+  assert.ok(t.every((x) => x.section === "host"), "all in the host group");
+  // typing narrows to the agent
+  for (const id of ids) {
+    assert.deepEqual(tiles(id.slice(0, 3), { ...P, system: ids }).filter((x) => x.pick.kind === "system").map((x) => x.label), [id]);
+  }
+});
+
+test("system_tile_size_is_640x480_for_network_and_380x420_otherwise", () => {
+  assert.deepEqual(systemTileSize("network"), { width: 640, height: 480 });
+  for (const id of ["power", "audio", "displays", "notifications", "lock", "anything"]) {
+    assert.deepEqual(systemTileSize(id), { width: 380, height: 420 }, id);
+  }
 });
