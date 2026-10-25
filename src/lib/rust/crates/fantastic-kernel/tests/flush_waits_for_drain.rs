@@ -1,4 +1,4 @@
-//! ONE RECORD DRAIN AT A TIME (mirrored from swift's `RecordWriter`).
+//! ONE RECORD DRAIN AT A TIME.
 //!
 //! `flush_records` must not just take the dirty queues and return: when the
 //! debounced writer's own drain had already taken them, the flush would find

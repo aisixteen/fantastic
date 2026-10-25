@@ -11,8 +11,7 @@ on `sys.path` is never enough: `scenario_probes.py` REGISTERS them, unlisted —
 `register()` in process (`helpers/kernel.py`), or run as the spawned kernel's
 entry in place of `main.py` (`helpers/host/driver.py`, `parity/spec.py`). A
 production kernel never runs it, so the role simply cannot be played — the same
-gate rust gets from `--features scenario-probes` and swift from
-`-DSCENARIO_PROBES`.
+gate rust gets from `--features scenario-probes`.
 
 Module names are shared with the compiled runtimes on purpose: one
 `ROLE_BUNDLE` map in `runners/host.py` serves every runtime.

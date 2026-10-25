@@ -180,7 +180,7 @@ tests only. The PID lock stays per-process.
 ## 3. WHAT STAYED INVARIANT (wire contracts)
 
 The collapse kept the cross-runtime wire byte-stable (gated by `relay_e2e`, the
-two-tree federation, the plain WS bridge matrix, and the Swift `ParityHarness`):
+two-tree federation, and the plain WS bridge matrix):
 
 - **Bridge frame envelope** (transport-agnostic): `call`/`reply`/`error`/`event`/
   `watch`/`unwatch` shapes; `corr_id = f'{bridge_id}:{counter}'`; `auth_token` is an
@@ -201,10 +201,10 @@ two-tree federation, the plain WS bridge matrix, and the Swift `ParityHarness`):
   `watch_remote`, `unwatch_remote` — same signatures across all runtimes.
 - **Auth-denial wire shape**: `{error, reason:"unauthorized"}` (+ optional
   `hint`/`see`). The only intra-Python change is the `see` value `io_core` →
-  `io_bridge` (rust/swift mirror on port; the cross-runtime matrix asserts only
+  `io_bridge` (rust mirrors on port; the cross-runtime matrix asserts only
   `reason:"unauthorized"`).
 - **Record field rename — `file_agent_id` → `file_bridge_id`** (python + ts done
-  2026-06-11; **rust/swift ports must mirror**, #524/#525). The meta field a bundle
+  2026-06-11; **the rust port must mirror**, #524/#525). The meta field a bundle
   (yaml_state / scheduler / ai backends) persists THROUGH — renamed after the
   `file` → `file_bridge` bundle rename. Same with the persistence-sidecar PATHS: now
   **store-relative** (`agents/<id>/…`, not `.fantastic/agents/<id>/…`), so wired to the

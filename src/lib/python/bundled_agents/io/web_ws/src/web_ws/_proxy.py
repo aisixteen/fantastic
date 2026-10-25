@@ -77,7 +77,7 @@ def _make_client_id() -> str:
 
 def _name(frame: dict, key: str) -> str:
     """A frame field the proxy USES as a name (`type`, `target`, `src`, an answer's
-    `id`): the field when it is a string, else `""` — as rust and swift read it. A
+    `id`): the field when it is a string, else `""` — as rust reads it. A
     list or object here would be hashed (`src in watching`, `out_calls.get(id)`, the
     handler table, the kernel's agent table) and its TypeError would end the socket,
     every in-flight call on it included."""

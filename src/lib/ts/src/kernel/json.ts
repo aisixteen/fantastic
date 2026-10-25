@@ -1,5 +1,5 @@
 // The JSON value lattice — the only thing that crosses the wire or an
-// agent boundary. Mirrors what the python/rust/swift kernels marshal.
+// agent boundary. Mirrors what the python/rust kernels marshal.
 
 export type Json =
   | null

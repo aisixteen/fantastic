@@ -49,7 +49,8 @@ model to take it from there with `create_agent`, `send` and `docs`.
 ## What's in the box
 
 - **AI agents** over vLLM, Ollama, the OpenAI Responses API and Anthropic's
-  Messages API (plus Apple's on-device model in Swift). Tool calling is the
+  Messages API (plus Apple's on-device model on macOS, through a small
+  Swift Foundation Models bridge the Rust kernel links). Tool calling is the
   kernel's own prompt-taught `<call>` grammar — no provider tool API — so any
   capable model drives the same verbs.
 - **IO legs**: `file_bridge` (files, edits, streams, watches; clamped to the
@@ -89,7 +90,7 @@ others), and what Fantastic does instead. "Not built" means exactly that.
 | **Protocols**: MCP client (universal), MCP server, A2A, AG-UI, ACP | MCP client (2026-07-28; each remote tool becomes a verb), an MCP server face for coding CLIs (`fantastic mcp`, stdio), its own WebSocket and REST wire, and kernel-to-kernel bridges, direct or through a relay. No A2A, AG-UI or ACP |
 | **Observability**: OpenTelemetry traces, hosted tracing, eval suites, visual debuggers | A live state stream of who sent what to whom, the ledger, the task table, and the canvas views over them. No OpenTelemetry export; evaluation is the e2e suites and an Exercism benchmark |
 | **Background work**: hosted agent runtimes, cron triggers, cloud background agents | A scheduler (interval-based, persisted, fires under its own grants), command and terminal jobs as kernel tasks, folder-bundle programs as agents. No cron expressions, no hosted platform |
-| **Runtimes**: mostly Python and TypeScript; some .NET, Go, Java | One protocol in Python, Rust and Swift (in-process on Apple platforms) plus a browser kernel in TypeScript; a single static binary; a contract corpus pins identical behaviour across them |
+| **Runtimes**: mostly Python and TypeScript; some .NET, Go, Java | One protocol in Python and Rust plus a browser kernel in TypeScript; a single static binary; a contract corpus pins identical behaviour across them |
 | **Models**: provider SDKs; other providers through adapters | vLLM, Ollama, the OpenAI Responses API, Anthropic, and Apple's on-device model — the same call grammar on all; a KV-cache slot table for shared vLLM servers |
 | **UI**: chat UI kits, generative UI, IDE extensions, studios | A terminal UI and a browser canvas where a model builds live panels, terminals and services and wires them by grants |
 | **Extensibility**: plugins, skill files, tools written in code | Folder bundles — a `bundle.yaml` plus a program becomes a new kind of agent, hot-reloaded, self-describing like every other |

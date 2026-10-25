@@ -3,8 +3,8 @@ boot.
 
 STORELESS ON PURPOSE. Nothing wires a persistence provider here, so an agent's
 `readme` comes from wherever the runtime keeps it with no disk behind it —
-python answers a null non-root `readme=true` while swift seeds straight to disk,
-and that difference only exists when there is no store to hide it. `store`
+python answers a null non-root `readme=true` while a port may seed straight to
+disk, and that difference only exists when there is no store to hide it. `store`
 covers the wired case.
 
 Three choices, each for a reason:

@@ -37,7 +37,7 @@ pub struct BackendConfig {
     /// (the record's `context_window` is the lever); a backend that can READ the
     /// real one says so here (foundation_models_backend: the SDK's
     /// `contextSize`). Its schema's `context_window` default is the same number
-    /// ([`crate::schema::schema_with_window`]). Swift `AIBackendConfig.modelWindow`.
+    /// ([`crate::schema::schema_with_window`]).
     pub model_window: i64,
     /// THE CAPABILITY: this backend can run the provider's own cache markers
     /// (`caching=provider_cache`). A backend that cannot refuses that mode at the
@@ -184,7 +184,7 @@ pub async fn run_generation(
     // recall, the assembly and the projection, so the caller reads why it
     // cannot answer rather than a window failure on a model that could never
     // have answered. Python `_run` builds its provider (`_get_provider`, which
-    // may raise) before anything else; swift's `providerInTurn` likewise.
+    // may raise) before anything else.
     provider.ready().map_err(GenFailure::Provider)?;
     // THE CACHING MODE IS CHECKED FIRST TOO: a record that asks for provider caching
     // on a backend that cannot cache is refused before any row is written, and so

@@ -13,8 +13,8 @@ check on the test files. Zero kernel code; reuses the e2e helpers verbatim.
     python tests/coding_exercism/gym.py --lang all --runtime rust
     python tests/coding_exercism/gym.py --langs python,go,rust     # a subset
 
-Self-bootstraps under the kernel's uv venv for --runtime python. rust/swift
-spawn their own compiled kernel over REST (bare python is fine). Toolchains
+Self-bootstraps under the kernel's uv venv for --runtime python. rust
+spawns its own compiled kernel over REST (bare python is fine). Toolchains
 (pytest/go/cargo/npm/cmake/gradlew) are toolchain-prechecked per language and a
 missing one SKIPS that language with a reason — never a crash. The clone at
 tmp/repos/polyglot-benchmark stays pristine (per-exercise workdir, cleaned).
@@ -58,8 +58,8 @@ EXCLUDE = {".meta", ".docs", ".approaches", ".git", "node_modules", "build", "ta
 def _ensure_kernel_env(runtime: str) -> None:
     """The IN-PROCESS python kernel needs its uv workspace venv (the agent
     bundles live there). If not importable, RE-EXEC self once under that
-    project — idempotent, and nothing but this launch is touched. rust/swift
-    spawn their own compiled kernel over REST, so bare python is fine there."""
+    project — idempotent, and nothing but this launch is touched. rust
+    spawns its own compiled kernel over REST, so bare python is fine there."""
     if runtime != "python":
         return
     try:

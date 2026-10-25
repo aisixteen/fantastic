@@ -68,8 +68,8 @@ def hydrate_scenario(agentic_cwd):
 def pytest_terminal_summary(terminalreporter) -> None:
     """The coverage matrix: which requirement ids this run actually pinned. A
     registered id with 0 checks is a hole, not a pass — and these counts are the
-    PARITY PROOF, since rust and swift pin the identical set from their own
-    runners over the same corpus."""
+    PARITY PROOF, since rust pins the identical set from its own
+    runner over the same corpus."""
     if not EXERCISED:
         return
     lines = ", ".join(f"{rid}×{n}" for rid, n in sorted(EXERCISED.items()))

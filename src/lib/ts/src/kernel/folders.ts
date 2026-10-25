@@ -7,7 +7,7 @@
 // builder (`registerBundle(…, {folderBundle})`, e.g. the canvas's html agent);
 // it builds the folder's handler and verb docs.
 //
-// Python `kernel_state.load_bundle`; rust `folders.rs`; swift `Folders.swift`.
+// Python `kernel_state.load_bundle`; rust `folders.rs`.
 
 import type { Handler, VerbDocs } from "./agent.ts";
 import type { Json, Payload } from "./json.ts";

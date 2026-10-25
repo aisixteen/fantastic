@@ -4,8 +4,8 @@ plus `register_unlisted` — never from all of `sys.path`.
 Importing any name on `sys.path` would run that module's top-level code on a
 grant-less `create_agent` under the sender itself. A name outside the catalog is, to
 this
-kernel, a module that does not exist — rust's and swift's answer for an
-unregistered name, in their text.
+kernel, a module that does not exist — rust's answer for an
+unregistered name, in its text.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ async def test_a_module_on_sys_path_outside_the_catalog_never_runs(
                 "id": "arch21_rec",
             },
         )
-    # kept as a record this runtime cannot answer — as rust and swift keep it
+    # kept as a record this runtime cannot answer — as rust keeps it
     assert made["status"] == "completed", made
     called = await _one(seeded_kernel, "arch21_rec", {"type": "ping"})
     assert called["result"] == {

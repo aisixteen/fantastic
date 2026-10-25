@@ -2,9 +2,8 @@
 //!
 //! WHY NOT `tokio::mpsc`. A channel can only refuse from the sender side: when
 //! it is full `try_send` fails and the payload being sent is lost. That is the
-//! opposite of what python and swift do — python's `_put_drop_oldest` evicts the
-//! head, swift's `AsyncStream` uses `.bufferingNewest` — and the rule they share
-//! is the one a stream consumer needs: under backpressure the FRESHEST events
+//! opposite of what python does — its `_put_drop_oldest` evicts the head — and
+//! that rule is the one a stream consumer needs: under backpressure the FRESHEST events
 //! survive, because a token stream or a PTY redraw is only useful at the tip.
 //!
 //! Rust drifted for years with a comment claiming the behaviours matched. They

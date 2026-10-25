@@ -1,7 +1,7 @@
 # `connectors/` — an outside service as an agent, measured at its wire
 
 No model. Each test runs a scripted fake of the outside service and drives the
-kernel's own connector agent on every host runtime (python · rust · swift — the
+kernel's own connector agent on every host runtime (python · rust — the
 PACKAGED host, every call through `web_rest`), checking what crosses the wire.
 
 | test | what it measures |

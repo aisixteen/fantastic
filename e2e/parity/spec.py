@@ -86,7 +86,7 @@ def kernel_cmd(rt: str) -> list[str]:
 
     python from the SOURCE tree (its venv holds the bundle entry points the
     capture reflects over), through the probe launcher — the probes registered,
-    then `main.py`'s own entry; rust and swift from the staged release-shaped
+    then `main.py`'s own entry; rust from the staged release-shaped
     artifact, never from a build tree.
     """
     if rt == "python":
@@ -115,8 +115,8 @@ CTX_WINDOW_TINY = 2048
 #:
 #: `ai_paths` runs many scripted cases through ONE ai agent, so its history
 #: grows over many model turns. A budget the history crosses BY ACCIDENT can be
-#: crossed one character apart on two runtimes (`runtime=python` is one byte
-#: longer than `runtime=swift`), and because the recorded event stream is
+#: crossed one character apart on two runtimes (`runtime=python` is two bytes
+#: longer than `runtime=rust`), and because the recorded event stream is
 #: compared positionally, one turn of skew cascades into every later line.
 #:
 #: Compaction is NOT this family's subject: `ctx` drives all four strategies

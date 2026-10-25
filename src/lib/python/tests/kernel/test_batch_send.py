@@ -398,7 +398,7 @@ async def test_a_module_whose_top_level_exits_is_never_imported(
     one call naming a module whose top level exits (stdlib `unittest.__main__` is
     one) take the kernel down — any agent may create under ITSELF on its baseline.
     A name outside the bundle catalog is never imported: the create keeps the record as one this
-    runtime cannot answer (as rust and swift do), the call to it is refused, and
+    runtime cannot answer (as rust does), the call to it is refused, and
     the kernel answers the next call."""
     from _testkit import as_agent
 

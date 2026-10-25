@@ -29,7 +29,7 @@ async def test_reflect_describes_surface(seeded_kernel):
 
 
 async def test_get_routes_returns_post_plus_two_reflect_gets(seeded_kernel):
-    """DECLARATIVE — pure JSON data, byte-shaped like rust/swift (kind, method,
+    """DECLARATIVE — pure JSON data, byte-shaped like rust (kind, method,
     path, in that order). No callable rides the reply."""
     r = await _get_routes("rest_xyz", {}, seeded_kernel)
     assert r == {
@@ -274,7 +274,7 @@ async def test_reflect_surfaces_rest_leg_posture(seeded_kernel):
 
 
 def test_post_endpoint_rejects_a_non_finite_number(seeded_kernel):
-    """A `NaN` body is not JSON — 400, as rust and swift answer it."""
+    """A `NaN` body is not JSON — 400, as rust answers it."""
     seeded_kernel.create(
         "web_rest.tools", id="rest_nan", ingress_rule="allow_all_ingress"
     )

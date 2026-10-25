@@ -1,7 +1,7 @@
 """The on-disk YAML format — pinned byte-for-byte by a python-written fixture.
 
 `fixtures/agent.yaml` (a record) is what THIS module writes for the input below. The
-rust and swift ports' twins load the same file and must write it back byte-identical
+rust port's twin loads the same file and must write it back byte-identical
 (load → dump is the identity on a python-written file), and build the same input in
 code and match the bytes. There is no message tape any more: the kernel keeps no
 conversation, and its execution rows live in its memory store.

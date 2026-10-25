@@ -62,9 +62,9 @@ from kernel_state.tools import read_tree
 from _testkit import boot_root, persist
 from _testkit import as_agent
 
-# THE SHARED CORPUS, at the repo root. The rust and swift runners read these
+# THE SHARED CORPUS, at the repo root. The rust runner reads these
 # same files: a scenario is DATA, and the runner is the only per-runtime part.
-# The corpus lives at the REPO ROOT, shared with the rust and swift runners —
+# The corpus lives at the REPO ROOT, shared with the rust runner —
 # it is not this runner's private data.
 CONTRACT_DIR = Path(__file__).resolve().parents[5] / "contract"
 
@@ -89,7 +89,7 @@ class Requirement:
 
 
 # The registry is DATA: `contract/requirements.yaml`, read by every runtime's
-# runner — never a python tuple in this file, which the rust and swift runners that
+# runner — never a python tuple in this file, which the rust runner that
 # must pin the SAME ids could not read.
 REQUIREMENTS_FILE = CONTRACT_DIR / "requirements.yaml"
 
