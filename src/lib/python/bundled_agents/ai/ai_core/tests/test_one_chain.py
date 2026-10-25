@@ -444,3 +444,185 @@ async def test_a_self_chain_does_not_deadlock(seeded_kernel, fake_providers):
         assert fp.calls == 3, f"expected 3 passes, got {fp.calls}"
     finally:
         fake_providers.pop(aid, None)
+
+
+# ─── twins of the Rust chain tests (fantastic-ai-core/src/tests.rs) ──────────
+
+
+async def test_the_self_chain_carries_no_call_stack(seeded_kernel, fake_providers):
+    """An inbound `_call_stack` must not ride the agent's own follow-up pass: a
+    propagated stack would refuse the second pass as a cycle."""
+    aid = "oc_stack"
+    call = render_call(
+        "send",
+        {
+            "target_id": "kernel_state",
+            "payload": {"type": "list_agents"},
+            "reply_to": "self",
+        },
+    )
+    fp = _Script([call, DONE])
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        out = (
+            await asyncio.wait_for(
+                seeded_kernel.send(
+                    [
+                        {
+                            "target": aid,
+                            "payload": {
+                                "type": "send",
+                                "text": "go",
+                                "_call_stack": ["upstream"],
+                            },
+                        }
+                    ]
+                ),
+                5,
+            )
+        )[0]["result"]
+        assert "cycle" not in out, out
+        await _settle(fp, 2)
+        await asyncio.sleep(0.3)
+        assert fp.calls == 2, "the follow-up never ran as its own pass"
+        assert not any("cycle detected" in str(m) for m in fp.seen[1]), fp.seen[1]
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_reboot_ends_the_chain_and_releases_the_held(
+    seeded_kernel, fake_providers
+):
+    aid = "oc_reboot"
+    fp, first, second = await _held_behind_a_slow_pass(
+        seeded_kernel, fake_providers, aid
+    )
+    try:
+        await seeded_kernel.send([{"target": aid, "payload": {"type": "boot"}}])
+        out = (await asyncio.wait_for(second, 5))[0]["result"]
+        assert _is_held_error(out), out
+        assert out["client_id"] == "t"
+        assert core._chain_of(aid)["alive"] is False
+        await first
+        await asyncio.sleep(0.4)
+        assert fp.calls == 1, "a reboot woke the held message"
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def _late_rows(kernel, aid) -> list[dict]:
+    return [r for r in await core._load_history(aid, kernel) if r.get("kind") == "late"]
+
+
+async def test_a_routed_reply_carries_the_token_read_when_it_was_decided(
+    seeded_kernel, fake_providers
+):
+    """The chain token is read when the delivery is DECIDED: a newer chain that
+    begins before the spawned delivery runs must not adopt the old chain's reply."""
+    aid = "oc_tokwhen"
+    fp = _Script([DONE])
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    chain = core._chain_of(aid)
+    chain["alive"] = True
+    chain["token"] = "old"
+    chain["held"] = []
+    try:
+        core._deliver_soon(seeded_kernel, aid, "an old reply", "cli", None, notice=True)
+        # A NEW chain began before the delivery ran (nothing awaited in between).
+        chain["token"] = "new"
+        end = asyncio.get_event_loop().time() + 10
+        while not (chain["held"] or await _late_rows(seeded_kernel, aid) or fp.calls):
+            assert asyncio.get_event_loop().time() < end, "the old reply went nowhere"
+            await asyncio.sleep(0.02)
+        assert fp.calls == 0, "the old reply ran as a turn of the new chain"
+    finally:
+        core._end_chain(aid)
+        await asyncio.sleep(0.1)
+        core._chains.pop(aid, None)
+        fake_providers.pop(aid, None)
+
+
+async def test_an_await_reply_after_a_new_chain_began_is_held_not_dropped(
+    seeded_kernel, fake_providers
+):
+    """A reply to an `await`ed call is routed UNTOKENED (the replier is the origin),
+    so a new chain does not turn it into a `late` row: it is held for that chain's
+    next pass."""
+    aid = "oc_awaitnew"
+    fp = _Script([DONE])
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        callable_by={"oc_replier": "*"},
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    seeded_kernel.create("", id="oc_replier", can_call={aid: "*"})
+    fake_providers[aid] = fp
+    chain = core._chain_of(aid)
+    chain["alive"] = True
+    chain["token"] = "new"
+    chain["held"] = []
+
+    async def reply():
+        with as_agent(seeded_kernel, "oc_replier"):
+            return await seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {
+                            "type": "send",
+                            "text": "[reply to 1 · peer]\nanswered",
+                            "client_id": "cli",
+                        },
+                    }
+                ]
+            )
+
+    late = asyncio.ensure_future(reply())
+    try:
+        end = asyncio.get_event_loop().time() + 5
+        while not (chain["held"] or fp.calls):
+            assert asyncio.get_event_loop().time() < end, "the reply went nowhere"
+            await asyncio.sleep(0.02)
+        assert len(chain["held"]) == 1, "held for the live chain's next pass"
+        assert not await _late_rows(seeded_kernel, aid), (
+            "recorded as late, not acted on"
+        )
+        assert fp.calls == 0
+    finally:
+        core._end_chain(aid)
+        await asyncio.wait_for(late, 5)
+        core._chains.pop(aid, None)
+        fake_providers.pop(aid, None)
+
+
+async def test_an_inquiry_answer_obeys_the_hold(seeded_kernel, fake_providers):
+    """An answer under an owed inquiry pid that lands mid-chain is HELD like any
+    message and read by the chain's next pass — never a chain of its own."""
+    aid = "oc_inqhold"
+    fp = _Script([DONE, DONE], delay=0.8)
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = fp
+    try:
+        first = _send(seeded_kernel, aid, "one", "o")
+        await _settle(fp, 1)
+        core._awaiting.setdefault(aid, set()).add("p9")
+        second = _send(seeded_kernel, aid, "[reply to p9 · peer inquiry]\nyes", "t")
+        end = asyncio.get_event_loop().time() + 5
+        while len(core._chain_of(aid)["held"]) != 1:
+            assert asyncio.get_event_loop().time() < end, "the answer was not held"
+            await asyncio.sleep(0.02)
+        assert not second.done(), "the answer ran a chain of its own"
+        assert "p9" not in core._awaiting.get(aid, set()), "the pid is still owed"
+        await first
+        out = (await asyncio.wait_for(second, 5))[0]["result"]
+        assert "response" in out, out
+        await asyncio.sleep(0.4)
+        assert fp.calls == 2, "the held answer is read by exactly one wake pass"
+        assert _read(fp, 1, "yes")
+    finally:
+        core._awaiting.pop(aid, None)
+        fake_providers.pop(aid, None)

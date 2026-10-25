@@ -102,7 +102,9 @@ async def test_the_answer_arrives_later_under_the_inquiry_pid(
         assert answer.startswith("[from ia_rcv]") and "[reply to " in answer, answer
         assert " ia_rcv inquiry]" in answer, answer
         assert "<answer>ship it</answer>" in answer, answer
-        assert not any("[await refused]" in m for m in a.incoming), a.incoming
+        assert not any("[await: nothing to wait for]" in m for m in a.incoming), (
+            a.incoming
+        )
         # the receiver saw the question with its head: who asked, under which pid
         assert r.incoming[0].startswith("[inquiry from ia_asker · re "), r.incoming[0]
     finally:
@@ -201,3 +203,64 @@ async def test_an_answer_with_nothing_open_is_told_so(seeded_kernel, fake_provid
         )
     finally:
         fake_providers.pop("ia_lone", None)
+
+
+# ─── twins of the Rust owed-pid tests (fantastic-ai-core/src/tests.rs) ───────
+
+
+async def test_an_answer_after_registration_still_clears_the_owed_pid(
+    seeded_kernel, fake_providers
+):
+    """The normal order: the pid is owed first, then the answer under it clears it."""
+    from ai_core import core
+
+    aid = "ia_owed"
+    seeded_kernel.create(
+        "ollama_backend.tools",
+        id=aid,
+        context_window=32768,
+        **memory_meta(seeded_kernel, aid, {"cli": "*"}),
+    )
+    fake_providers[aid] = _Script([DONE])
+    try:
+        core._awaiting.setdefault(aid, set()).add("7")
+        await seeded_kernel.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {
+                        "type": "send",
+                        "text": "[reply to 7 · peer inquiry]\nyes",
+                    },
+                }
+            ]
+        )
+        assert "7" not in core._awaiting.get(aid, set()), core._awaiting.get(aid)
+    finally:
+        core._awaiting.pop(aid, None)
+        fake_providers.pop(aid, None)
+
+
+async def test_an_instant_answer_wakes_the_asker_once_and_leaves_nothing_owed(
+    seeded_kernel, fake_providers
+):
+    """A receiver that answers with ZERO hold (the other tests hold 0.2s): the asker
+    wakes once with the answer, is told nothing "to wait for", and owes nothing."""
+    from ai_core import core
+
+    k = seeded_kernel
+    a, r = _pair(
+        k, fake_providers, [_ask("ia_rcv"), AWAIT, DONE], [_answer("ship it")], hold=0.0
+    )
+    try:
+        await _go(k)
+        await _until(lambda: len(a.incoming) >= 3)
+        await asyncio.sleep(0.4)
+        third = a.incoming[2]
+        assert third.count("<answer>ship it</answer>") == 1, third
+        assert "nothing to wait for" not in third, third
+        assert not core._awaiting.get("ia_asker"), core._awaiting.get("ia_asker")
+        assert len(a.incoming) == 3, a.incoming
+    finally:
+        fake_providers.pop("ia_asker", None)
+        fake_providers.pop("ia_rcv", None)

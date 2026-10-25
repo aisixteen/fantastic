@@ -17,7 +17,7 @@ import pytest
 from _testkit import memory_meta
 
 from ai_core import core
-from ai_core.tool_parse import render_call
+from ai_core.tool_parse import render_call, render_reply
 from kernel import register_unlisted
 from _testkit import as_agent
 
@@ -446,3 +446,343 @@ async def test_watch_announces_each_appended_row_until_unwatch(seeded_kernel):
     assert r["watching"] is False, r
     await core._save_history("kp_wa", k, [{"role": "user", "content": "again"}])
     assert q.empty(), "no event after unwatch"
+
+
+# ─── twins of the Rust send / routing tests (fantastic-ai-core/src/tests.rs) ──
+
+
+class _Boom:
+    """A provider whose stream dies with an error no layer maps."""
+
+    async def chat(self, messages, max_tokens=None):
+        raise RuntimeError("provider exploded")
+        yield  # pragma: no cover — makes this an async generator
+
+
+def _watch(k, aid: str) -> asyncio.Queue:
+    """The agent's events, as a watcher's inbox sees them."""
+    box = f"watch_{aid}"
+    q = k.ctx.ensure_inbox(box)
+    k.watch(aid, box)
+    return q
+
+
+def _drain(q) -> list[dict]:
+    out = []
+    while not q.empty():
+        out.append(q.get_nowait())
+    return out
+
+
+def _done_statuses(events) -> list[dict]:
+    return [e for e in events if e.get("type") == "status" and e.get("phase") == "done"]
+
+
+async def test_unmapped_provider_error_settles_raised(seeded_kernel):
+    """A provider failure no layer maps SETTLES `{error: 'RuntimeError: …', raised}`
+    (the raise carries the type) with no client_id; the one `status(done)` event
+    carries `str(e)` alone."""
+    k = seeded_kernel
+    _ai(k, "kp_raise", _Boom())
+    q = _watch(k, "kp_raise")
+    r = await _call(k, "kp_raise", {"type": "send", "text": "go", "client_id": "probe"})
+    assert r["error"] == "RuntimeError: provider exploded", r
+    assert r["raised"] is True, r
+    assert "client_id" not in r, r
+    done = _done_statuses(_drain(q))
+    assert len(done) == 1, done
+    assert done[0]["detail"]["reason"] == "error", done
+    assert done[0]["detail"]["error"] == "provider exploded", done
+
+
+async def test_a_projection_refusal_is_returned_verbatim_and_does_not_raise(
+    seeded_kernel,
+):
+    """A context-projection refusal is not a provider failure: the seam's dict comes
+    out of the send VERBATIM — no `status(done)` closes a turn that never opened a
+    provider pass, no `client_id` is stapled on, nothing raised."""
+    k = seeded_kernel
+    # a window the system block cannot fit: the `too_small` failsafe, before the model
+    _ai(k, "kp_toosmall", _Script(["never reached"]))
+    k.ctx.update("kp_toosmall", context_window=300)
+    q = _watch(k, "kp_toosmall")
+    r = await _call(
+        k, "kp_toosmall", {"type": "send", "text": "go", "client_id": "probe"}
+    )
+    assert "context_insufficient" in r["error"], r
+    assert "raised" not in r, f"a refusal is not a raise: {r}"
+    assert "client_id" not in r, f"the seam dict comes back bare: {r}"
+    events = _drain(q)
+    assert _done_statuses(events) == [], "no turn opened, so nothing closes one"
+    assert any(
+        e.get("type") == "context" and e.get("phase") == "too_small" for e in events
+    ), events
+    assert _fakes["kp_toosmall"].seen == [], "the model was never called"
+
+
+async def _ps(k) -> list[dict]:
+    return (await k.send([{"target": "kernel", "payload": {"type": "ps"}}]))[0][
+        "result"
+    ]["tasks"]
+
+
+async def _until(cond, what: str, timeout: float = 5.0) -> None:
+    end = asyncio.get_event_loop().time() + timeout
+    while not cond():
+        assert asyncio.get_event_loop().time() < end, what
+        await asyncio.sleep(0.01)
+
+
+async def test_routing_is_its_own_ps_row(seeded_kernel):
+    """Routing is a `route_reply` task of its own: while the slow peer works, `ps`
+    names it, and no row for the finished generation is still labelled `send`."""
+    k = seeded_kernel
+    peer = _Script(['slow peer <call name="done"></call>'], hold=0.8)
+    _ai(k, "kp_rt_peer", peer, callable_by={"kp_rt": "*"})
+    ping = render_call(
+        "send",
+        {
+            "target_id": "kp_rt_peer",
+            "payload": {"type": "send", "text": "ping"},
+            "reply_to": "null",
+        },
+    )
+    _ai(k, "kp_rt", _Script([ping]), can_call={"kp_rt_peer": "*"})
+    await _call(k, "kp_rt", {"type": "send", "text": "go"})
+    await _until(lambda: peer.seen, "the peer was never reached")
+    tasks = await _ps(k)
+    assert any(t["agent"] == "kp_rt" and t["verb"] == "route_reply" for t in tasks), (
+        f"routing must be its own `route_reply` row: {tasks}"
+    )
+    assert not any(t["agent"] == "kp_rt" and t["verb"] == "send" for t in tasks), (
+        f"the generation is finished — nothing may still be labelled `send`: {tasks}"
+    )
+
+
+async def test_delivery_is_a_deliver_reply_task_not_awaited(seeded_kernel):
+    """Each delivery is its own `deliver_reply` kernel task, on the TARGET, and the
+    router does not wait for the target's (slow) turn."""
+    k = seeded_kernel
+    peer = _Script(['peer ack <call name="done"></call>'], hold=0.8)
+    _ai(k, "kp_dl_peer", peer, callable_by={"kp_dl": "*"})
+    call = render_call(
+        "send",
+        {
+            "target_id": "kernel_state",
+            "payload": {"type": "list_agents"},
+            "reply_to": "kp_dl_peer",
+        },
+    )
+    _ai(
+        k,
+        "kp_dl",
+        _Script([call]),
+        can_call={"kernel_state": "*", "kp_dl_peer": "*"},
+    )
+    started = asyncio.get_event_loop().time()
+    await _call(k, "kp_dl", {"type": "send", "text": "go", "client_id": "probe"})
+    # the routing pass itself is detached, so give it a moment to spawn
+    await asyncio.sleep(0.15)
+    assert asyncio.get_event_loop().time() - started < 0.7, "the router awaited it"
+    tasks = await _ps(k)
+    rows = [t for t in tasks if t["verb"] == "deliver_reply"]
+    assert rows, f"no deliver_reply task row: {tasks}"
+    assert rows[0]["agent"] == "kp_dl_peer", f"the task belongs to the TARGET: {rows}"
+
+
+async def test_a_batch_that_includes_a_peer_ai_still_delivers(seeded_kernel):
+    """Seven calls in one turn, one of them another AI (its dispatch starts a
+    generation of its own): the whole batch still settles and the follow-up turn
+    runs."""
+    k = seeded_kernel
+    brain = _Script(['brain says hi <call name="done"></call>'])
+    _ai(k, "kp_pa_brain", brain, callable_by={"kp_pa": "*"})
+    reads = [
+        render_call(
+            "send", {"target_id": "kernel_state", "payload": {"type": "reflect"}}
+        )
+        for _ in range(6)
+    ]
+    ask = render_call(
+        "send",
+        {
+            "target_id": "kp_pa_brain",
+            "payload": {"type": "send", "text": "what shape?", "client_id": "probe"},
+        },
+    )
+    sa = _Script(["\n".join(reads + [ask])], ['seen <call name="done"></call>'])
+    _ai(k, "kp_pa", sa, can_call={"kernel_state": "*", "kp_pa_brain": "*"})
+    await _call(k, "kp_pa", {"type": "send", "text": "explore", "client_id": "probe"})
+    await _until(
+        lambda: len(sa.seen) >= 2,
+        "turn 2 never ran — a batch containing a peer AI delivered nothing",
+    )
+    assert brain.seen, "the peer AI was dispatched"
+
+
+async def test_a_malformed_timeout_arg_settles_the_kernels_refusal(seeded_kernel):
+    """Routing forwards `timeout` RAW: a non-numeric value reaches the kernel's own
+    refusal instead of being dropped and defaulting the call as if never written."""
+    k = seeded_kernel
+    _ai(k, "kp_bt", can_call={"kernel_state": "*"})
+    call = render_call(
+        "send",
+        {
+            "target_id": "kernel_state",
+            "payload": {"type": "list_agents"},
+            "reply_to": "self",
+            "timeout": "soon",
+        },
+    )
+    turn = await _turn_text(k, "kp_bt", call)
+    assert "timeout must be a positive number of seconds" in turn, turn
+    assert "'soon'" in turn, f"must echo the raw value: {turn}"
+
+
+async def test_two_identical_turns_get_different_batch_tokens(seeded_kernel):
+    """A FRESH token per turn: two turns that made the SAME calls must be
+    distinguishable at a glance."""
+    k = seeded_kernel
+    one = render_call(
+        "send",
+        {
+            "target_id": "kernel_state",
+            "payload": {"type": "list_agents"},
+            "reply_to": "self",
+        },
+    )
+    twice = one + "\n" + one
+    prov = _Script([twice], [twice], ['enough <call name="done"></call>'])
+    _ai(k, "kp_tok", prov, can_call={"kernel_state": "*"})
+    await _call(k, "kp_tok", {"type": "send", "text": "go", "client_id": "probe"})
+    await _until(lambda: len(prov.seen) >= 3, "the second batch never landed")
+
+    def token(turn_index: int) -> str:
+        last = [m for m in prov.seen[turn_index] if m["role"] == "user"][-1]["content"]
+        mark = "1 of 2 in batch "
+        assert mark in last, f"no batch stamp in: {last}"
+        return last.split(mark)[1].split("]")[0]
+
+    first, second = token(1), token(2)
+    assert first != second, "two identical turns must be distinguishable"
+
+
+async def _store_row(k, aid: str, row: dict) -> None:
+    """A row in the agent's own store, written as the agent."""
+    with as_agent(k, aid):
+        await core._save_history(aid, k, [row])
+
+
+async def test_grep_numeric_query_and_empty_ids_follow_python(seeded_kernel):
+    """`str(query or "")`: a NUMERIC query is its digits; an EMPTY `ids` list is
+    falsy, so it means NO SCOPE."""
+    k = seeded_kernel
+    _ai(k, "kp_gnum")
+    await _store_row(k, "kp_gnum", {"role": "user", "content": "order 586 shipped"})
+    r = await _call(k, "kp_gnum", {"type": "grep", "query": 586, "ids": []})
+    assert r["total"] == 1, r
+    assert list(r)[:3] == ["matches", "total", "truncated"], r
+    assert render_reply(r).startswith("<matches>"), render_reply(r)
+
+
+async def test_history_negative_limit_is_an_empty_page(seeded_kernel):
+    """A NEGATIVE `limit` is already satisfied by the empty page."""
+    k = seeded_kernel
+    _ai(k, "kp_hneg", _Script())
+    await _call(k, "kp_hneg", {"type": "send", "text": "ping"})
+    r = await _call(k, "kp_hneg", {"type": "history", "limit": -1})
+    assert r["rows"] == [], r
+    assert r["next"] is None, r
+    assert r["total"] >= 2, r
+
+
+async def test_the_history_digest_pages_forward(seeded_kernel):
+    """`limit` cuts the page, `next` names where to resume, and an `after` the store
+    does not know pages NOTHING rather than starting over."""
+    k = seeded_kernel
+    _ai(k, "kp_hpage", _Script())
+    await _call(k, "kp_hpage", {"type": "send", "text": "ping"})
+    first = await _call(k, "kp_hpage", {"type": "history", "limit": 1})
+    assert len(first["rows"]) == 1, first
+    nxt = first["next"]
+    assert isinstance(nxt, int), f"a cursor: {first}"
+    second = await _call(k, "kp_hpage", {"type": "history", "after": nxt})
+    assert second["rows"][0]["id"] > nxt, "the second page resumes past the cursor"
+    nowhere = await _call(k, "kp_hpage", {"type": "history", "after": 999_999})
+    assert nowhere["rows"] == [], "an unknown cursor pages nothing, never the head"
+
+
+async def test_a_null_context_strategy_is_reported_raw_and_refused(seeded_kernel):
+    """Only an ABSENT key means `compact`: `context_status` echoes the raw null and the
+    projection refuses it with the unknown-strategy text."""
+    k = seeded_kernel
+    _ai(k, "kp_nullstrat", _Script())
+    await k.send(
+        [
+            {
+                "target": "kernel_state",
+                "payload": {
+                    "type": "update_agent",
+                    "id": "kp_nullstrat",
+                    "context_strategy": None,
+                },
+            }
+        ]
+    )
+    st = await _call(k, "kp_nullstrat", {"type": "context_status"})
+    assert st["strategy"] is None, st
+    rec = k.ctx.get("kp_nullstrat")
+    assert "context_strategy" in rec and rec["context_strategy"] is None, rec
+    msgs = [{"role": "system", "content": "s"}] + [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 200}
+        for i in range(20)
+    ]
+    cfg = core.Backend(sentence="s", make_provider=lambda *a: None, name=NAME)
+    out = await core._project_context(
+        {**rec, "context_window": 500, "output_reserve": 0},
+        cfg,
+        None,
+        "kp_nullstrat",
+        k,
+        "cli",
+        msgs,
+        len(msgs) - 1,
+    )
+    assert isinstance(out, dict), out
+    assert out["error"].startswith(f"{NAME}: unknown context_strategy None (valid: "), (
+        out
+    )
+
+
+async def test_send_to_is_kept_raw_and_dropped_only_when_blank(seeded_kernel):
+    """`send_to` is kept VERBATIM and dropped only when it is not a string or is blank
+    after a strip: `' peer '` is NOT the agent `peer` — nothing is handed to it."""
+    k = seeded_kernel
+    handed: list[tuple[str, str]] = []
+
+    async def spy(id, payload, kernel):
+        if payload.get("type") == "send":
+            handed.append((id, payload.get("text", "")))
+        return None
+
+    mod = types.ModuleType("kp_sendto_spy.tools")
+    mod.handler = spy
+    mod.VERBS = {}
+    register_unlisted("kp_sendto_spy.tools", mod)
+    k.create("kp_sendto_spy.tools", id="peer", callable_by={"kp_st": "*"})
+    _ai(k, "kp_st", can_call={"peer": "*"})
+    done = 'the answer <call name="done"></call>'
+
+    async def run(send_to) -> list:
+        handed.clear()
+        _fakes["kp_st"] = _Script([done])
+        await _call(k, "kp_st", {"type": "send", "text": "hi", "send_to": send_to})
+        await asyncio.sleep(0.3)
+        return list(handed)
+
+    assert await run(" peer ") == [], "the raw ` peer ` is not the agent `peer`"
+    assert await run("\n\t") == []
+    assert await run(7) == []
+    got = await run("peer")
+    assert [h[0] for h in got] == ["peer"], got
+    assert "the answer" in got[0][1], got
