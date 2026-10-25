@@ -1023,6 +1023,24 @@ def test_stream_idle_seconds_is_validated_at_the_write():
     assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]
 
 
+async def test_openai_usage_reports_prompt_tokens_and_a_cut_as_max_tokens():
+    # a chunk with no finish and no usage leaves the report empty
+    p = _provider(_transport(_sse(_delta(content="x"), done=False)))
+    with pytest.raises(Exception, match="without a finish_reason"):
+        await _drain(p, max_tokens=50)
+    assert (p.last_stop_reason, p.last_prompt_tokens) == (None, None)
+    # a `length` finish plus usage: the prompt size and a cut as max_tokens
+    cut = {"choices": [{"finish_reason": "length"}], "usage": {"prompt_tokens": 1234}}
+    p = _provider(_transport(_sse(_delta(content="x"), cut)))
+    await _drain(p, max_tokens=50)
+    assert p.last_prompt_tokens == 1234
+    assert p.last_stop_reason == "max_tokens"
+    # any other finish is reported as it came
+    p = _provider(_transport(_sse(_delta(content="x"), _delta(finish="stop"))))
+    await _drain(p, max_tokens=50)
+    assert p.last_stop_reason == "stop"
+
+
 # ─── twins of the rust vllm_backend tests (#170) ────────────────────────────
 
 

@@ -202,3 +202,21 @@ def test_two_racing_acquisitions_exactly_one_wins(tmp_path, planted):
         ]
         outs = sorted(p.communicate(timeout=30)[0].strip() for p in procs)
         assert outs == ["0", "1"], f"round {round_}: {outs}"
+
+
+def test_release_keeps_a_malformed_lock():
+    """`release_lock` reads the file back; a lock it cannot parse is one it cannot
+    verify it owns, so the file is left ALONE (never blindly removed)."""
+    acquire_lock()
+    LOCK_FILE.write_text("{NOT_JSON", encoding="utf-8")
+    assert _read_lock() is None
+    release_lock()
+    assert LOCK_FILE.exists(), "a malformed lock survives release_lock()"
+    assert LOCK_FILE.read_text(encoding="utf-8") == "{NOT_JSON"
+
+
+def test_current_holder_returns_pid():
+    """`_read_lock()` is the holder: None before any acquire, `{pid}` after."""
+    assert _read_lock() is None
+    acquire_lock()
+    assert _read_lock() == {"pid": os.getpid()}

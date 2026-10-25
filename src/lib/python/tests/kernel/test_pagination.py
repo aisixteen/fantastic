@@ -186,3 +186,48 @@ async def test_reflect_pages_the_flat_id_index_but_never_the_nested_tree(kernel)
     )[0]["result"]
     assert isinstance(whole["tree"], dict), "the nested tree is not a list"
     assert "next" not in whole
+
+
+def test_an_empty_after_is_ignored():
+    """An empty-string cursor is no cursor: the whole list from the top."""
+    rows = _rows(2)
+    got, nxt = page(rows, {"after": ""}, **_BY_ID)
+    assert got == rows
+    assert nxt is None
+
+
+def test_int_ids_page_with_a_decimal_cursor():
+    """`ps`/`ledger` row identities are ints; a JSON-int `after` resumes past the
+    item whose identity stringifies to the same digits, and the cursor page() hands
+    back (a plain string) is interchangeable with the caller's int."""
+    items = [{"id": i} for i in (1, 2, 3, 4)]
+    got, nxt = page(items, {"after": 2}, **_BY_ID)
+    assert got == [{"id": 3}, {"id": 4}]
+    assert nxt is None
+
+    got, nxt = page(items, {"after": 2, "limit": 1}, **_BY_ID)
+    assert got == [{"id": 3}]
+    assert nxt == "3"
+    got, _ = page(items, {"after": nxt}, **_BY_ID)
+    assert got == [{"id": 4}]
+
+
+def test_a_non_string_cursor_compares_as_python_str():
+    """Twin of the Rust test of the same name: `after=True` is IGNORED (a bool is
+    never a cursor); `after=1.5` / `after=["c1"]` compare as `str(...)` and, naming
+    no item, page EMPTY rather than the whole list; `after=2.0` renders `"2.0"` --
+    not the same string as an item literally named `"2"`."""
+    items = [{"id": "1"}, {"id": "2"}, {"id": "3"}]
+
+    got, _ = page(items, {"after": True}, **_BY_ID)
+    assert got == items, "a bool cursor is never a cursor at all"
+
+    got, nxt = page(items, {"after": 1.5}, **_BY_ID)
+    assert got == []
+    assert nxt is None
+
+    got, _ = page(items, {"after": ["c1"]}, **_BY_ID)
+    assert got == []
+
+    got, _ = page(items, {"after": 2.0}, **_BY_ID)
+    assert got == [], "'2.0' must not match the item '2'"

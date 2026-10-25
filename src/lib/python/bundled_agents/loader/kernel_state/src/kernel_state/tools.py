@@ -163,7 +163,11 @@ def load_bundle(root_dir: fs.Root, name: str) -> str | None:
         )
     if clashes(name):
         return refuse(f"{name!r} is a built-in bundle — a folder may not shadow it")
-    if not fs.exists(root_dir, f"{rel}/{_BUNDLE_FILE}"):
+    try:
+        has_spec = fs.exists(root_dir, f"{rel}/{_BUNDLE_FILE}")
+    except ValueError as e:  # a folder linking outside the running dir (`fs` clamp)
+        return refuse(str(e))
+    if not has_spec:
         return refuse("no bundle.yaml")
     try:
         spec = yaml_io.load(fs.read_text(root_dir, f"{rel}/{_BUNDLE_FILE}"))

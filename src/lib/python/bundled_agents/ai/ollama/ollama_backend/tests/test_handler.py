@@ -1147,6 +1147,167 @@ async def test_a_bad_system_prompt_is_refused_at_the_write(seeded_kernel, store_
     assert "error" not in await upd(None)
 
 
+async def test_reflect_reports_state_shape(seeded_kernel, store_agent):
+    oid = await _make_ollama(seeded_kernel)
+    r = (await seeded_kernel.send([{"target": oid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
+    for key in ("id", "sentence", "model", "generating"):
+        assert key in r, f"reflect missing key {key!r}: {r}"
+    assert r["id"] == oid
+    assert r["generating"] is False
+    # python's reflect does not inline the verb table; `docs` serves it
+    docs = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "docs", "of": oid}}]
+        )
+    )[0]["result"]
+    assert "send" in docs["verbs"] and "reflect" in docs["verbs"], docs
+
+
+async def test_status_current_shape_matches_python(
+    seeded_kernel, store_agent, fake_providers
+):
+    """`status.current` has TWO shapes: with a client, `{phase, send_id, started_at,
+    elapsed, is_mine}` (+ the caller's own text); without, the in-flight ENTRY minus
+    its text-bearing keys. An EMPTY `client_id` is falsy and is echoed back as `''`."""
+    oid = await _make_ollama(seeded_kernel)
+    seen: dict[str, dict] = {}
+
+    async def status(**kw):
+        return (
+            await seeded_kernel.send(
+                [{"target": oid, "payload": {"type": "status", **kw}}]
+            )
+        )[0]["result"]
+
+    class _Probe:
+        async def chat(self, messages, max_tokens=None):
+            seen["mine"] = await status(client_id="probe")
+            seen["other"] = await status(client_id="someone_else")
+            seen["none"] = await status()
+            seen["empty"] = await status(client_id="")
+            yield 'ok <call name="done"></call>'
+
+    fake_providers[oid] = _Probe()
+    try:
+        await seeded_kernel.send(
+            [
+                {
+                    "target": oid,
+                    "payload": {"type": "send", "text": "go", "client_id": "probe"},
+                }
+            ]
+        )
+    finally:
+        fake_providers.pop(oid, None)
+
+    assert list(seen["mine"]["current"]) == [
+        "phase",
+        "send_id",
+        "started_at",
+        "elapsed",
+        "is_mine",
+        "text",
+        "text_so_far",
+    ], seen["mine"]
+    assert seen["mine"]["current"]["is_mine"] is True
+    assert list(seen["other"]["current"]) == [
+        "phase",
+        "send_id",
+        "started_at",
+        "elapsed",
+        "is_mine",
+    ], "no client_id leaks into a per-caller block"
+    assert seen["other"]["current"]["is_mine"] is False
+    for key, echo in (("none", None), ("empty", "")):
+        bare = seen[key]
+        assert bare["client_id"] == echo, bare
+        assert list(bare["current"]) == [
+            "client_id",
+            "send_id",
+            "queued_at",
+            "started_at",
+            "phase",
+            "elapsed",
+            "is_mine",
+        ], bare
+        assert bare["current"]["is_mine"] is False
+        assert bare["current"]["queued_at"] > 0
+        assert bare["mine_pending"] == []
+
+
+async def test_send_reply_carries_message_id(
+    seeded_kernel, store_agent, fake_providers
+):
+    """The `send` reply is `{response, final, client_id, message_id}` and
+    `message_id` names the assistant row this turn appended."""
+    oid = await _make_ollama(seeded_kernel)
+    fake_providers[oid] = _FakeProvider([["ack"], ['<call name="done"></call>']])
+    try:
+        r = (
+            await seeded_kernel.send(
+                [
+                    {
+                        "target": oid,
+                        "payload": {
+                            "type": "send",
+                            "text": "ping",
+                            "client_id": "probe",
+                        },
+                    }
+                ]
+            )
+        )[0]["result"]
+    finally:
+        fake_providers.pop(oid, None)
+    assert list(r) == ["response", "final", "client_id", "message_id"], r
+    mid = r["message_id"]
+    assert isinstance(mid, int)
+    rows = await core._load_history(oid, seeded_kernel)
+    row = next(m for m in rows if m.get("id") == mid)
+    assert row["role"] == "assistant" and row["content"] == "ack", row
+
+
+async def test_recall_pages_durable_store_and_context_status_shape(
+    seeded_kernel, store_agent, fake_providers
+):
+    oid = await _make_ollama(seeded_kernel)
+    fake_providers[oid] = _FakeProvider([["noted"], ['<call name="done"></call>']])
+    try:
+        await seeded_kernel.send(
+            [
+                {
+                    "target": oid,
+                    "payload": {
+                        "type": "send",
+                        "text": "my project codename is HALCYON",
+                        "client_id": "chat",
+                    },
+                }
+            ]
+        )
+    finally:
+        fake_providers.pop(oid, None)
+    st = (
+        await seeded_kernel.send(
+            [{"target": oid, "payload": {"type": "context_status"}}]
+        )
+    )[0]["result"]
+    for key in (
+        "context_window",
+        "output_reserve",
+        "budget",
+        "strategy",
+        "last_projection",
+        "last_reaction",
+    ):
+        assert key in st, f"context_status missing {key!r}: {st}"
+    assert st["strategy"] == "compact"
+    # a normal (under-budget) send does not fire compaction
+    assert st["last_projection"]["fired"] is False
+
+
 # ─── twins of the rust ollama_backend tests (#170) ──────────────────────────
 
 
