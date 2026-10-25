@@ -317,6 +317,32 @@ async def test_a_folder_that_cannot_load_is_listed_with_its_error(
     assert r.get("reason") == "unhandled", r
 
 
+async def test_a_bundle_folder_linking_outside_is_refused(kernel, workdir, tmp_path):
+    """A `bundles/<name>` that links OUTSIDE the running dir is refused by the `fs`
+    clamp, never loaded (twin of the Rust test of the same name)."""
+    outside = tmp_path / "outside_root"
+    outside.mkdir()
+    real = _bundle(workdir, "escape_src")
+    away = outside / "escape"
+    real.rename(away)
+    link = workdir / ".fantastic" / "bundles" / "escape"
+    link.symlink_to(away, target_is_directory=True)
+    _load(kernel)
+    cat = (
+        await _call(
+            kernel, "kernel", {"type": "reflect", "tree": "none", "bundles": "all"}
+        )
+    )["bundles"]
+    row = next(b for b in cat if b["name"] == "escape" and "folder" in b)
+    assert "escapes root" in row.get("error", ""), row
+    from kernel import _bundles
+
+    assert "escape" not in _bundles._FOLDER
+    await _create(kernel, "escape", "x_escape")
+    r = await _call(kernel, "x_escape", {"type": "echo", "text": "hi"})
+    assert r.get("reason") == "unhandled", r
+
+
 async def test_py_agent_itself_is_a_base_not_an_agent(kernel):
     r = await _create(kernel, "py_agent.tools", "p0")
     assert r.get("reason") == "invalid_meta" and "is a base" in r["error"], r
