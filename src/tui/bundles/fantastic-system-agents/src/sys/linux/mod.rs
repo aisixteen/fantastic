@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
-use super::{AudioOs, DisplaysOs, NetworkOs, NotificationsOs, OsError, PowerOs};
+use super::{AudioOs, DisplaysOs, LockOs, NetworkOs, NotificationsOs, OsError, PowerOs};
 
 pub mod audio;
 pub mod displays;
+pub mod lock;
 pub mod logind;
 pub mod network;
 pub mod notifications;
@@ -18,6 +19,7 @@ pub mod power;
 
 pub use audio::LinuxAudio;
 pub use displays::LinuxDisplays;
+pub use lock::LinuxLock;
 pub use network::LinuxNetwork;
 pub use notifications::LinuxNotifications;
 pub use power::LinuxPower;
@@ -73,6 +75,14 @@ pub async fn notifications() -> Arc<dyn NotificationsOs> {
 pub async fn displays() -> Arc<dyn DisplaysOs> {
     match system().await {
         Ok(c) => Arc::new(LinuxDisplays::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
+/// The lock port: logind on the system bus, and `<home>/lock.yaml`.
+pub async fn lock() -> Arc<dyn LockOs> {
+    match system().await {
+        Ok(c) => Arc::new(LinuxLock::new(c)),
         Err(e) => Arc::new(Absent(e)),
     }
 }
@@ -134,6 +144,22 @@ impl DisplaysOs for Absent {
         Err(self.0.clone())
     }
     fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::displays::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl LockOs for Absent {
+    async fn read(&self) -> Result<fantastic_system::lock::Read, OsError> {
+        Err(self.0.clone())
+    }
+    async fn check_pin(&self, _pin: fantastic_system::lock::Pin) -> Result<bool, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::lock::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::lock::Event> {
         tokio::sync::mpsc::channel(1).1
     }
 }

@@ -17,16 +17,26 @@ pub(crate) const LOGIND: &str = "org.freedesktop.login1";
     default_service = "org.freedesktop.login1",
     default_path = "/org/freedesktop/login1"
 )]
-trait LoginManager {
+pub(crate) trait LoginManager {
     #[zbus(name = "GetUserByPID")]
     fn get_user_by_pid(&self, pid: u32) -> zbus::Result<OwnedObjectPath>;
+    /// A sleep inhibitor: the lock's fd is closed to let sleep proceed.
+    fn inhibit(
+        &self,
+        what: &str,
+        who: &str,
+        why: &str,
+        mode: &str,
+    ) -> zbus::Result<zbus::zvariant::OwnedFd>;
+    #[zbus(signal)]
+    fn prepare_for_sleep(&self, start: bool) -> zbus::Result<()>;
 }
 
 #[zbus::proxy(
     interface = "org.freedesktop.login1.User",
     default_service = "org.freedesktop.login1"
 )]
-trait LoginUser {
+pub(crate) trait LoginUser {
     /// The id and the object path of the user's display session.
     #[zbus(property)]
     fn display(&self) -> zbus::Result<(String, OwnedObjectPath)>;
@@ -38,6 +48,11 @@ trait LoginUser {
 )]
 pub(crate) trait LoginSession {
     fn set_brightness(&self, subsystem: &str, name: &str, brightness: u32) -> zbus::Result<()>;
+    fn set_locked_hint(&self, locked: bool) -> zbus::Result<()>;
+    #[zbus(signal)]
+    fn lock(&self) -> zbus::Result<()>;
+    #[zbus(signal)]
+    fn unlock(&self) -> zbus::Result<()>;
 }
 
 /// The object path of the caller's user (`GetUserByPID(0)`: the caller's own).

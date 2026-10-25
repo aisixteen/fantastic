@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use fantastic_system::{audio, displays, network, notifications, power};
+use fantastic_system::{audio, displays, lock, network, notifications, power};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -150,6 +150,31 @@ pub async fn displays() -> Arc<dyn DisplaysOs> {
     #[cfg(target_os = "linux")]
     {
         linux::displays().await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Arc::new(other::Unsupported)
+    }
+}
+
+/// The lock agent's port: logind's display session and `<home>/lock.yaml`.
+#[async_trait::async_trait]
+pub trait LockOs: Send + Sync {
+    /// The stored settings; an error when logind or the display session is not there.
+    async fn read(&self) -> Result<lock::Read, OsError>;
+    /// Is `pin` the stored PIN? (Argon2id; the PIN is never kept.)
+    async fn check_pin(&self, pin: lock::Pin) -> Result<bool, OsError>;
+    async fn call(&self, c: lock::Call) -> Result<(), OsError>;
+    /// What logind says (`Lock`, `Unlock` on the display session, which is
+    /// followed, and `PrepareForSleep`), as VM events, until the port is dropped.
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<lock::Event>;
+}
+
+/// The real lock port of this OS.
+pub async fn lock() -> Arc<dyn LockOs> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::lock().await
     }
     #[cfg(not(target_os = "linux"))]
     {

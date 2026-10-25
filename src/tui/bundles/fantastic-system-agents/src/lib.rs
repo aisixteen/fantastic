@@ -6,6 +6,7 @@
 pub mod audio;
 pub mod displays;
 pub mod driver;
+pub mod lock;
 pub mod network;
 pub mod notifications;
 pub mod power;

@@ -19,6 +19,11 @@ tokio = { version = "1.40", features = ["sync", "time", "rt", "process", "io-uti
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 futures-util = "0.3"
+# the lock's PIN: Argon2id (pure Rust) in `<home>/lock.yaml`, `<home>` resolved as the user store does
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_yaml = "0.9"
+fantastic-user-home-store = { path = "../fantastic-user-home-store" }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
