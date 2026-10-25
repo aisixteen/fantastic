@@ -99,3 +99,50 @@ def test_edit_grants_no_change_publishes_nothing(seeded_kernel):
 
     changed, error = k.edit_grants("no_such_agent", lambda cc, cb: (True, True))
     assert (changed, error) == (False, "no such agent")
+
+
+async def test_edit_grants_persists_both_keys_across_a_restart(tmp_path, monkeypatch):
+    """Two grant edits on a persisted agent reach `agent.yaml` through the record
+    writer on their own (before any shutdown flush could write them regardless),
+    and a rebooted kernel still has both grants."""
+    import yaml
+
+    from _testkit import boot_root
+    from kernel_state.tools import on_shutdown
+
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    root.create(
+        "file_bridge.tools",
+        allow=["."],
+        id="store",
+        root=".fantastic",
+        ingress_rule="allow_all_ingress",
+    )
+    (await root.send([{"target": root.id, "payload": {"type": "boot"}}]))[0]
+    try:
+        root.create(MOD, id="child_m")
+        # settle the create's own write, so only the edits can make it dirty again
+        await root._fs_flush_loop.aflush()
+        k = root.ctx
+        edited = k.edit_callable_by(
+            "child_m", lambda cb: cb.update(view_a=["*"]) or True
+        )
+        assert edited == (True, None), edited
+        edited = k.edit_callable_by(
+            "child_m", lambda cb: cb.update(view_b=["*"]) or True
+        )
+        assert edited == (True, None), edited
+        await root._fs_flush_loop.aflush()
+        # on disk NOW, before any shutdown flush could persist it regardless
+        path = tmp_path / ".fantastic" / "agents" / "child_m" / "agent.yaml"
+        on_disk = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert on_disk["callable_by"]["view_a"] == ["*"], on_disk
+        assert on_disk["callable_by"]["view_b"] == ["*"], on_disk
+    finally:
+        await on_shutdown(root)
+
+    del root
+    rebooted = boot_root()
+    cb = rebooted.ctx.get("child_m")["callable_by"]
+    assert cb["view_a"] == ["*"] and cb["view_b"] == ["*"], cb

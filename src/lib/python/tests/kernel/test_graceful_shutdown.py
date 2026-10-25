@@ -199,3 +199,46 @@ async def test_shutdown_continues_on_hook_exception(seeded_kernel):
     assert "A" in fired
     assert "raised:B" in fired
     assert "C" in fired
+
+
+# ─── Rust twin (#170) ───────────────────────────────────────────────────────
+
+_declares_calls: list[str] = []
+
+
+async def test_the_shutdown_sweep_mints_no_id_and_writes_no_row(seeded_kernel):
+    """`shutdown_agents` discovers advertisers by reading the bundle's VERBS table: it
+    mints no message id, writes no call/internal row about the agent and never asks
+    the bundle a verb; with no bundle declaring `shutdown` the reply's `shut` is []."""
+    from kernel import register_unlisted
+
+    mod = types.ModuleType("declares_twin_probe.tools")
+    mod.VERBS = {"reflect": "Identity."}  # type: ignore[attr-defined]
+
+    async def handler(id, payload, kernel):
+        _declares_calls.append(payload.get("type"))
+        if payload.get("type") == "reflect":
+            return {"sentence": "declares"}
+        return None
+
+    mod.handler = handler  # type: ignore[attr-defined]
+    register_unlisted("declares_twin_probe.tools", mod)
+    seeded_kernel.create("declares_twin_probe.tools", id="node")
+
+    ctx = seeded_kernel.ctx
+
+    def about_node() -> list:
+        return [r for r in ctx.rows.values() if r.get("agent") == "node"]
+
+    before_id = ctx.next_id
+    before_rows = len(about_node())
+    seen = len(_declares_calls)
+
+    reply = await ctx.shutdown_agents()
+
+    assert ctx.next_id == before_id, "the advertises read mints no message id"
+    assert len(about_node()) == before_rows, (
+        "a VERBS lookup leaves no call row and no internal roster row"
+    )
+    assert len(_declares_calls) == seen, "the bundle is NOT asked"
+    assert reply["shut"] == [], "nothing declares `shutdown`"

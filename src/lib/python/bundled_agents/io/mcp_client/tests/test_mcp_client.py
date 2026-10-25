@@ -720,6 +720,23 @@ async def test_cancelling_a_call_closes_its_stream(
     assert started.is_set()
 
 
+async def test_a_call_past_its_timeout_settles_timed_out(
+    seeded_kernel, tmp_path, fake, monkeypatch
+):
+    """A `get_weather` call to a server that stalls, with a 0.5 s timeout, settles
+    `timed_out` (twin of the Rust test of the same name)."""
+    k = seeded_kernel
+    await _booted(k, tmp_path)
+
+    async def stall(request):
+        await asyncio.sleep(30)
+        return httpx.Response(200)
+
+    monkeypatch.setattr(wire, "TRANSPORT", httpx.MockTransport(stall))
+    out = await _call(k, "mcp", {"type": "get_weather", "city": "x"}, timeout=0.5)
+    assert out["status"] == "timed_out", out
+
+
 # ─── legacy servers: the initialize era (2025-11-25 … 2024-11-05) ────
 
 

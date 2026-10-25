@@ -513,10 +513,12 @@ it did not register.
   wrote (`ai_core/call_check.py`); the answer's good calls still run, and the report
   says so. A turn whose only output is broken calls ran nothing and counts as silent. Text
   this layer writes to its OWN agent — the no-call reminder, a malformed-call report batch
-  (no call outcome in it), an await refusal, an undelivered inquiry answer — is stored as
+  (no call outcome in it), an undelivered inquiry answer — is stored as
   `kind: "notice"` (rows, row events), so a view can hide it; the model still reads it as a
   user turn (Qwen's template takes no system message past the first). Only a send to self
-  can mark it — a peer's `notice` is ignored. One bound:
+  can mark it — a peer's `notice` is ignored. An `await` with nothing in flight is no
+  turn: the chain ENDS with a stored `kind: "note"` row (`[await: nothing to wait for]`).
+  One bound:
   `MAX_SILENT_TURNS` (10) silent turns in a row and the chain GIVES UP loudly
   (`status done reason=gave_up`, `detail.error` = "The LLM was not able to answer …
   Reiterate the inquiry.", also delivered to a `send_to`). Every ai_core tunable

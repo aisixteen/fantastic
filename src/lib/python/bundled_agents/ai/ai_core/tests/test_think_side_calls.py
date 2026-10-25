@@ -70,3 +70,16 @@ async def test_a_summary_that_still_opens_a_think_block_degrades_to_titles():
     ]
     title, body, degraded = await _summarize(_ctx(summ), rows, [0])
     assert degraded is True and "<think" not in title
+
+
+def test_thinking_is_every_span_joined():
+    from ai_core import core
+
+    assert core.thinking_fields("<think>a\nb</think>answer") == {"thinking": "a\nb"}
+    # every span joined by a blank line, an unclosed last span included
+    assert core.thinking_fields("<think>x</think>mid<think>y") == {"thinking": "x\n\ny"}
+    assert core.thinking_fields("plain") == {}
+    long = "<think>" + "z" * (core.THINKING_CAP + 5) + "</think>"
+    out = core.thinking_fields(long)
+    assert out["thinking_cut"] == 5
+    assert len(out["thinking"]) == core.THINKING_CAP

@@ -380,3 +380,21 @@ async def test_a_numeric_reply_to_is_an_id_not_a_discard():
 
     assert k.batches == [["chat"]]
     assert k.sent[0][0] == "1001"
+
+
+async def test_two_batch_tokens_differ_and_are_four_hex():
+    """No `message_id`: the batch token falls back to `secrets.token_hex(2)` -
+    4 lowercase hex characters, drawn fresh per turn."""
+    import re
+
+    text = _call("kernel") + _call("readings")
+    tokens = []
+    for _ in range(40):
+        k = _Kernel()
+        await _route_reply("ai", k, text, "cli", None, None, 180.0, "")
+        await _settle(k, 1)
+        body = k.sent[0][1]["text"]
+        tokens.append(body.split(" in batch ")[1][:5])
+    for t in tokens:
+        assert re.fullmatch(r"[0-9a-f]{4}[\]\s]", t), t
+    assert len({t[:4] for t in tokens}) > 1, tokens

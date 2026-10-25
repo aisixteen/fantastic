@@ -133,3 +133,38 @@ async def test_a_missing_secret_path_is_ignored(seeded_kernel):
     )[0]
     assert out["status"] == "completed"
     assert seeded_kernel.ctx.rows[out["pid"]]["payload"] == {"type": "set", "other": 1}
+
+
+# ─── Rust twin (#170) ───────────────────────────────────────────────────────
+
+_err_mod = types.ModuleType("secret_error_probe.tools")
+
+
+async def _err_handler(id, payload, kernel):
+    if payload.get("type") in ("boot", "shutdown"):
+        return None
+    return {"error": "bad key sk-ERR-REAL"}
+
+
+_err_mod.handler = _err_handler
+_err_mod.reply_secret = lambda payload, reply: (
+    ["error"] if payload.get("type") == "fail" else []
+)
+_err_mod.VERBS = {}
+register_unlisted("secret_error_probe.tools", _err_mod)
+
+
+async def test_a_call_error_echoing_a_secret_is_shown_in_the_row(seeded_kernel):
+    """A bundle's reply names its `error` as a secret path because the error echoes
+    the value: every row shows `[secret]`, never the value; the caller still gets the
+    error whole."""
+    seeded_kernel.create("secret_error_probe.tools", id="ep")
+    out = (
+        await seeded_kernel.send(
+            [{"target": "ep", "payload": {"type": "fail"}, "id": "f1"}]
+        )
+    )[0]
+    assert "sk-ERR-REAL" in out["result"]["error"], "the caller gets the error whole"
+    rows = repr(list(seeded_kernel.ctx.rows.values()))
+    assert "sk-ERR-REAL" not in rows, f"a row kept the error text: {rows}"
+    assert "[secret]" in rows

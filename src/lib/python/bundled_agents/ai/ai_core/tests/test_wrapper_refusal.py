@@ -16,8 +16,10 @@ def test_a_call_inside_a_tool_call_wrapper_is_refused_with_the_bare_rewrite():
     answer = f"I'll look at the files agent.\n<tool_call>{SEND}</tool_call>"
     reports = check(answer, ran=0)
     assert len(reports) == 1
-    assert "`<tool_call>`" in reports[0]
-    assert "drop the wrapper" in reports[0]
+    assert reports[0].startswith(
+        "[malformed call — nothing ran] line 2, col 1:\n  <tool_call>"
+    )
+    assert "  ^~~~~~~~~~~ drop the wrapper" in reports[0]
     assert (
         'write it as:\n<call name="send">\n<target_id>files</target_id>\n'
         "<type>reflect</type>\n</call>"
@@ -26,7 +28,10 @@ def test_a_call_inside_a_tool_call_wrapper_is_refused_with_the_bare_rewrite():
 
 def test_a_call_inside_an_arbitrary_tag_is_refused():
     reports = check(f"<foo>\n{SEND}\n</foo>", ran=0)
-    assert len(reports) == 1 and "`<foo>`" in reports[0]
+    assert len(reports) == 1
+    assert reports[0].startswith(
+        "[malformed call — nothing ran] line 1, col 1:\n  <foo>\n  ^~~~~ drop the wrapper"
+    )
 
 
 def test_a_top_level_call_beside_a_wrapped_one_runs_and_the_report_says_so():
@@ -49,7 +54,7 @@ def test_a_call_after_think_runs_and_one_inside_think_does_not():
     assert [c["name"] for c in calls] == ["done"]
     reports = check(answer, ran=1)
     assert len(reports) == 1
-    assert "inside" in reports[0] and "think" in reports[0]
+    assert "<think>" in reports[0] and "drop the wrapper" in reports[0]
     assert "The other call of this answer ran" in reports[0]
 
 
