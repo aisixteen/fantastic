@@ -396,3 +396,148 @@ async def test_an_agent_sent_boot_is_refused_and_re_runs_nothing(seeded_kernel):
         "result"
     ]
     assert r == {"booted": True, "created": ["memory"], "reapplied": ["worker"]}, r
+
+
+# ─── Rust twins (#170): the cold read's clamp, falsy documents, wire shape ───
+
+
+async def test_an_unknown_verb_is_a_coded_refusal(seeded_kernel):
+    await _init_loader(seeded_kernel)
+    for verb in ("frobnicate", "shutdown"):
+        r = (
+            await seeded_kernel.send(
+                [{"target": "static_loader", "payload": {"type": verb}}]
+            )
+        )[0]["result"]
+        assert r == {
+            "error": f"static_loader: unknown type '{verb}'",
+            "reason": "unhandled",
+            "verb": verb,
+        }, r
+
+
+async def test_a_manifest_outside_the_running_dir_is_refused_at_boot(seeded_kernel):
+    r = await _boot_with(seeded_kernel, "sl_etc", None, manifest="/etc/hosts")
+    assert r["booted"] is False, r
+    assert r["error"].startswith(
+        "static_loader: cannot read manifest '/etc/hosts': fs: path '/etc/hosts' escapes root"
+    ), r
+
+
+async def test_an_absolute_manifest_inside_cwd_is_refused(seeded_kernel):
+    Path("abs.yaml").write_text(MANIFEST)
+    abs_path = str(Path("abs.yaml").resolve())
+    r = await _boot_with(seeded_kernel, "sl_abs", None, manifest=abs_path)
+    assert r["booted"] is False, r
+    assert r["error"].startswith(
+        f"static_loader: cannot read manifest {abs_path!r}: fs: path {abs_path!r} escapes root"
+    ), r
+
+
+async def test_a_symlinked_manifest_escaping_cwd_is_refused(seeded_kernel):
+    Path("link.yaml").symlink_to("/etc/hosts")
+    r = await _boot_with(seeded_kernel, "sl_link", None, manifest="link.yaml")
+    assert r["booted"] is False, r
+    assert r["error"].startswith(
+        "static_loader: cannot read manifest 'link.yaml': fs: path 'link.yaml' escapes root"
+    ), r
+
+
+async def test_a_falsy_yaml_document_boots_empty(seeded_kernel):
+    for n, doc in enumerate(("", "~", "0", "false", "[]", "{}")):
+        r = await _boot_with(seeded_kernel, f"sl_f{n}", doc)
+        assert r == {"booted": True, "created": [], "reapplied": []}, (doc, r)
+    r = await _boot_with(seeded_kernel, "sl_one", "[1]")
+    assert r == {
+        "error": "static_loader: manifest 'sl_one.yaml' must be a mapping with `agents:`",
+        "booted": False,
+    }, r
+
+
+async def test_handler_module_absent_or_falsy_is_refused_truthy_passes(
+    seeded_kernel,
+):
+    cases = (
+        ("  - id: a\n", "{'id': 'a'}"),
+        ("  - id: a\n    handler_module: ''\n", "{'id': 'a', 'handler_module': ''}"),
+        ("  - id: a\n    handler_module: 0\n", "{'id': 'a', 'handler_module': 0}"),
+    )
+    for n, (entry, spec) in enumerate(cases):
+        r = await _boot_with(seeded_kernel, f"sl_h{n}", f"agents:\n{entry}")
+        assert r == {
+            "error": f"static_loader: each roster entry needs a handler_module: {spec}",
+            "booted": False,
+        }, r
+    r = await _boot_with(
+        seeded_kernel, "sl_h5", "agents:\n  - id: a\n    handler_module: 5\n"
+    )
+    assert r["booted"] is False, r
+    assert r["error"].startswith(
+        "static_loader: create failed for {'id': 'a', 'handler_module': 5}: "
+    ), r
+
+
+async def test_a_spec_type_key_overrides_the_create_verb(seeded_kernel):
+    r = await _boot_with(
+        seeded_kernel,
+        "sl_type",
+        "agents:\n  - id: a\n    handler_module: file_bridge.tools\n    type: reflect\n",
+    )
+    assert r["booted"] is True, r
+    assert r["created"] == ["kernel_state"], r
+    assert "a" not in seeded_kernel.ctx.agents
+
+
+async def test_reflect_display_name_empty_falls_back_to_id(seeded_kernel):
+    async def reflect(aid, **meta):
+        seeded_kernel.create("static_loader.tools", id=aid, **meta)
+        return (
+            await seeded_kernel.send([{"target": aid, "payload": {"type": "reflect"}}])
+        )[0]["result"]
+
+    assert (await reflect("sl_dn1", display_name=""))["display_name"] == "sl_dn1"
+    assert (await reflect("sl_dn2", display_name="Roster"))["display_name"] == "Roster"
+
+
+async def test_reflect_manifest_is_the_raw_meta_value(seeded_kernel):
+    seeded_kernel.create("static_loader.tools", id="sl_m1", manifest=7)
+    seeded_kernel.create("static_loader.tools", id="sl_m2")
+    r1 = (await seeded_kernel.send([{"target": "sl_m1", "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
+    r2 = (await seeded_kernel.send([{"target": "sl_m2", "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
+    assert r1["manifest"] == 7
+    assert r2["manifest"] is None
+
+
+async def test_an_unhashable_mapping_key_is_invalid_yaml(seeded_kernel):
+    for n, doc in enumerate(("? [a]\n: 1", "? {a: 1}\n: 1\n", "[a]: 1\n")):
+        r = await _boot_with(seeded_kernel, f"sl_u{n}", doc)
+        assert r["booted"] is False, r
+        assert r["error"].startswith(
+            f"static_loader: manifest 'sl_u{n}.yaml' is not valid YAML: "
+        ) and "found unhashable key" in r["error"], (doc, r)
+
+
+async def test_unknown_type_wire_shape_is_byte_exact(seeded_kernel):
+    import json
+
+    from static_loader.tools import handler
+
+    await _init_loader(seeded_kernel)
+    r = (
+        await seeded_kernel.send(
+            [{"target": "static_loader", "payload": {"type": "frob"}}]
+        )
+    )[0]["result"]
+    assert list(r) == ["error", "reason", "verb"], r
+    assert json.dumps(r) == (
+        '{"error": "static_loader: unknown type \'frob\'", "reason": "unhandled", '
+        '"verb": "frob"}'
+    )
+    r = await handler("static_loader", {}, None)
+    assert list(r) == ["error", "reason", "verb"], r
+    assert r["error"] == "static_loader: unknown type None"
+    assert r["reason"] == "unhandled" and r["verb"] is None

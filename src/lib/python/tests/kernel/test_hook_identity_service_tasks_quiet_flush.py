@@ -15,8 +15,6 @@ from __future__ import annotations
 import asyncio
 import types
 
-import pytest
-
 from kernel import register_unlisted
 from kernel._kernel import _current_sender
 
@@ -164,7 +162,7 @@ async def _started_kernel(root) -> None:
     assert out.get("started"), out
 
 
-async def test_cancel_refuses_the_flusher_and_it_stays_in_ps(seeded_kernel):
+async def test_cancel_refuses_the_flusher_and_it_keeps_flushing(seeded_kernel):
     root = seeded_kernel
     await _started_kernel(root)
     k = root.ctx
@@ -258,24 +256,32 @@ async def test_the_ledger_flush_publishes_nothing_on_the_state_stream(seeded_ker
         unsub()
 
 
-@pytest.mark.parametrize("headroom", [0])  # the flush row's id — its one mint
-async def test_an_id_block_reserved_inside_the_flush_publishes_nothing(
-    seeded_kernel, headroom
-):
+async def test_an_id_block_reserved_inside_the_flush_is_quiet(seeded_kernel):
     root = seeded_kernel
     await _started_kernel(root)
     k = root.ctx
     await k.flush_executions()
     seen: list[dict] = []
-    unsub = k.add_state_subscriber(seen.append)
+    woken = asyncio.Event()  # a long-poll `events` waiter
+
+    def tap(evt: dict) -> None:
+        seen.append(evt)
+        woken.set()
+
+    unsub = k.add_state_subscriber(tap)
     try:
-        k.rows_put("probe", {"kind": "call", "verb": "one"})
+        await _call(root, "kernel", {"type": "list_agents"})  # rows to flush
+        # the block is spent: the flush row's id — the flush's one mint — crosses
+        # the bound inside the silent flush
+        while k.next_id < k.id_reserved:
+            k.mint_id()
         seen.clear()
-        k.id_reserved = k.next_id + headroom  # the flush's own mints cross the bound
+        woken.clear()
         before = k.id_reserved
         await k.flush_executions()
         assert k.id_reserved > before
-        assert seen == [], seen  # CLI-B: the reservation inside the flush is quiet
+        assert seen == [], seen  # the reservation inside the flush is quiet
+        assert not woken.is_set(), "a reservation wakes no waiter"
         assert root.record["next_id"] == k.id_reserved
     finally:
         unsub()
