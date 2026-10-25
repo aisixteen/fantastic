@@ -1,7 +1,7 @@
 # Contributing to Aisixteen Fantastic (`fantastic-canvas`)
 
 This repo is the **open core** of Aisixteen Fantastic — the host kernels
-(`python/`, `swift/`, `rust/`) plus the browser frontend (`ts/`). It is
+(`python/`, `rust/`) plus the browser frontend (`ts/`). It is
 **AGPL-3.0-or-later** and part of one product family with the Apple client (in
 development), same author.
 
@@ -31,7 +31,7 @@ the code only, so a **fork must rename**.
 
 ## The one rule that matters: cross-runtime parity
 
-There are **three host runtimes** (python, swift, rust) plus the **ts** frontend,
+There are **two host runtimes** (python, rust) plus the **ts** frontend,
 and they share one wire contract. **Python is the canonical reference** — when
 implementations disagree, Python is right.
 
@@ -42,8 +42,9 @@ implementations disagree, Python is right.
 - the on-disk `.fantastic/` format.
 
 A protocol change to only one runtime is a bug. The parity is checked
-mechanically by `swift/Tests/FantasticParityTests` (spawns the Python kernel and
-diffs replies) and the `integration_tests/` bridge matrix. Bundle-local changes
+mechanically by the shared `contract/` corpus (python and rust run `agentic/`;
+python, rust and ts replay `conformance/cases.json`), by `e2e/parity` and by the
+`integration_tests/` bridge matrix. Bundle-local changes
 (one bundle's internals, no wire impact) don't need this.
 
 ## Build, test, lint — per runtime
@@ -54,14 +55,13 @@ the full detail.
 | runtime | build / run | test | lint / format |
 |---|---|---|---|
 | **python** (`python/`) | `uv sync` · `uv run fantastic` | `uv run pytest -n auto` | `uvx ruff check .` · `uvx ruff format --check .` |
-| **rust** (`rust/`) | `cargo build` · `cargo run` | `cargo test` | `cargo fmt --check` · `cargo clippy` · `cargo deny check` |
-| **swift** (`swift/`) | `swift build` · `swift run fantastic` | `swift test` | `swift-format` (see `swift/README.md`) |
+| **rust** (`rust/`) | `cargo build` · `cargo run` (on macOS the build also runs `swift build` for the Foundation Models bridge: Xcode with a macOS 26+ SDK) | `cargo test` | `cargo fmt --check` · `cargo clippy` · `cargo deny check` |
 | **ts** (`ts/`) | `npm run build` · pack: `sh scripts/pack.sh` | `node --test "tests/**/*.test.ts"` | `tsc` (typecheck via `npm run build`) |
 
 Container changes: `sh container/build.sh` then `sh container/test/build_smoke.sh`.
 
 CI (`.github/workflows/ci.yml`) builds every runtime and runs its unit tests on
-Linux, macOS and Windows (swift: Linux and macOS). For a quick check, `-f units_os=linux`
+Linux, macOS and Windows. For a quick check, `-f units_os=linux`
 runs the units on Linux only; a full run always covers all three. A full run adds every release
 binary and the model-free e2e (`e2e/run.py --only-free`) on them. Every run is
 started by hand, never on a push or a PR; ready branches are batched into one

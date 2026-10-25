@@ -11,7 +11,6 @@ maintainer's consent (project convention) — open from a branch/fork for review
 
 - [ ] python
 - [ ] rust
-- [ ] swift
 - [ ] ts (frontend)
 - [ ] container
 - [ ] docs only
@@ -26,8 +25,8 @@ maintainer's consent (project convention) — open from a branch/fork for review
 ## Checks (for each runtime you touched)
 
 - [ ] builds
-- [ ] tests pass (`pytest` / `cargo test` / `swift test` / `node --test`)
-- [ ] lint + format clean (`ruff` / `cargo fmt` + `clippy` + `deny` / `swift-format` / `tsc`)
+- [ ] tests pass (`pytest` / `cargo test` / `node --test`)
+- [ ] lint + format clean (`ruff` / `cargo fmt` + `clippy` + `deny` / `tsc`)
 
 ## Legal
 

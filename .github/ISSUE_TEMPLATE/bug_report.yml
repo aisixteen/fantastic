@@ -16,7 +16,6 @@ body:
       options:
         - python
         - rust
-        - swift
         - ts (browser frontend)
         - container image
         - protocol / cross-runtime

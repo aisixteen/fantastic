@@ -692,8 +692,8 @@ pub(crate) fn path_arg<'a>(verb: &str, payload: &'a Value, name: &str) -> Result
 
 /// An integer argument with a floor: absent/null ⇒ `default`; anything that is
 /// not a JSON integer (a bool, a float, a string) or is below `minimum` is
-/// `bad_arg` naming the arg. Mirrors py `_int_arg` — a negative `offset` used
-/// to trap swift and a huge `length` abort rust; now every runtime refuses.
+/// `bad_arg` naming the arg. Mirrors py `_int_arg` — a huge `length` used to
+/// abort rust; now every runtime refuses.
 pub(crate) fn int_arg(
     verb: &str,
     payload: &Value,

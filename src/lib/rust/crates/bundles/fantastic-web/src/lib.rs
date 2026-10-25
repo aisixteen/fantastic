@@ -67,7 +67,7 @@ pub use origin::DEFAULT_HOST;
 /// The address the listener binds: the record's `bind` when it names one (the
 /// container's `0.0.0.0`), else its `host`, else loopback. The Host/Origin guard
 /// judges by `host` alone (`origin.rs`), so a wildcard `bind` leaves the guard's
-/// identity where it was. Python `tools.py` and Swift `webListenHost` agree.
+/// identity where it was. Python `tools.py` agrees.
 pub fn listen_host(rec: &Map<String, Value>) -> String {
     match rec.get("bind") {
         Some(v) if py_truthy(v) => py_str(v),

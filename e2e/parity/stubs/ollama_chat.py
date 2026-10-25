@@ -1,7 +1,7 @@
 """The ollama surface — `POST <endpoint>/api/chat`, newline-delimited JSON.
 
 Its whole job in §5.4 is to record WHICH PATH the runtime chose (B4.6): python
-goes through the `ollama` client library, rust and swift hand-roll the HTTP, and
+goes through the `ollama` client library, rust hand-rolls the HTTP, and
 a backend that quietly posts to `/v1/chat/completions` instead would still look
 like it worked against a permissive server. It cannot look like it worked here —
 an unexpected path is recorded and answered 404.

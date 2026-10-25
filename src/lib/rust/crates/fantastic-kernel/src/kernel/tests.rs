@@ -77,7 +77,7 @@ fn unregister_drops_both_indexes() {
 
 #[test]
 fn remove_inbox_drops_the_reader_only() {
-    // The twin of swift `Kernel.removeInbox`: a browser disconnects, its
+    // A browser disconnects, its
     // synthetic queue goes, and the agent it was watching is untouched.
     let k = Kernel::new();
     let a = make_agent("keeper");
@@ -180,7 +180,7 @@ async fn an_inbox_at_its_bound_drops_the_oldest() {
     // THE BOUND IS WIRED, AND THE TIP SURVIVES. An emitter never blocks and
     // never fails; at the bound the OLDEST payload is evicted, so a consumer
     // that fell behind catches up on the freshest events rather than freezing on
-    // stale ones. Python's `_put_drop_oldest` and swift's `.bufferingNewest`
+    // stale ones. Python's `_put_drop_oldest`
     // rule — never `try_send`, which discards what is being sent.
     let k = Kernel::new_with_inbox_bound(2);
     let a = make_agent("bp");

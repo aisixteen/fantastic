@@ -47,7 +47,7 @@ def listen_host(rec: dict) -> str:
     """The address the listener binds: the record's `bind` when it names one (the
     container's `0.0.0.0`), else its `host`, else loopback. The Host/Origin guard
     judges by `host` alone (`app.own_origins`), so a wildcard `bind` leaves the
-    guard's identity where it was. Rust `listen_host` and Swift `webListenHost` agree."""
+    guard's identity where it was. Rust `listen_host` agrees."""
     return rec.get("bind") or rec.get("host") or DEFAULT_HOST
 
 _servers: dict[str, "_ServerHandle"] = {}

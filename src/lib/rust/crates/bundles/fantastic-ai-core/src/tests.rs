@@ -3284,7 +3284,7 @@ async fn contended_sends_emit_one_queued_status_and_no_bare_queued_event() {
     assert!(queued[0]["detail"]["ahead"].is_number(), "{:#?}", queued[0]);
 }
 
-/// `recall` answers the turn WHOLE. Rust/swift capped each recalled turn at 2000
+/// `recall` answers the turn WHOLE. Rust capped each recalled turn at 2000
 /// chars while python returned it verbatim — same verb, same store, two different
 /// replies, and the cut half is exactly what a model pages back FOR.
 #[tokio::test]

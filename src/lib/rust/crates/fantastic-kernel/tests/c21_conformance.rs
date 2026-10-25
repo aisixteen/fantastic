@@ -1,7 +1,7 @@
 //! One semantics, many transports, MANY RUNTIMES.
 //!
 //! This driver replays the SHARED corpus (`contract/conformance/cases.json` at the repo
-//! root) against the rust kernel. The python, swift and ts drivers replay the
+//! root) against the rust kernel. The python and ts drivers replay the
 //! SAME file. Add a case there and every runtime is on the hook for it — a
 //! wire-visible contract is decidable from outside, so asserting it once as
 //! DATA beats asserting it four times in four languages.

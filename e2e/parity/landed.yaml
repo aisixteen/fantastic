@@ -20,9 +20,6 @@
 #   rust A14.14  the tty REPL. Declined as under-specified; no rust code path.
 #   rust C55     the missing-`agent` KeyError text (`KeyError: 'agent'`), which
 #                is python's exception class and is carried as residual R-D3-5.
-#   swift C75    JSON object keys by scalar sequence (swift's String compares by
-#                canonical equivalence: U+212B == U+00C5). Residual R-D14-1.
-#   swift C87    the two shutdown lines. No swift code path can produce them.
 #
 # EVIDENCE CLASS. All but the items below are claimed against a capture selector in
 # `proofs.yaml`. The rest are claimed against something the capture cannot
@@ -31,7 +28,6 @@
 #   unit twins only (proofs.yaml `unit`): A0.1-A0.6, A5.9, A5.12,
 #     A7.10, A7.24, A11.30, B2.10, B2.19, C44, C49, C51, C82
 #   no proof at all (proofs.yaml `no_proof`): A15.1, A15.2, A15.3
-#     (C87 is in that set too, and is NOT claimed for swift)
 #
 # `run.py capture` reads the root id off `.fantastic/agent.yaml` after seeding
 # and records it in each family's `meta.json`. Every runtime answers

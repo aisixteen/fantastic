@@ -1,7 +1,7 @@
 # `e2e/parity` — the python-parity acceptance harness
 
-Python is the oracle. This harness runs the SAME inputs against python, rust and
-swift, records what each answered, and diffs the ports against python byte for
+Python is the oracle. This harness runs the SAME inputs against python and rust,
+records what each answered, and diffs the ports against python byte for
 byte under a named, reviewable set of normalisation rules.
 
 It replaces the five scratchpad capture scripts and their dozen ad-hoc probes.
@@ -41,20 +41,19 @@ PY=$R/src/lib/python/.venv/bin/python
 $PY $R/e2e/parity/run.py preflight --runtimes python,rust
 
 # 2. only after a fix lands (this is the ONLY thing that builds)
-$PY $R/e2e/parity/run.py stage --runtime rust      # or swift
+$PY $R/e2e/parity/run.py stage --runtime rust
 
 # 3. the captures. `--slot` (exactly two alphanumerics) names each capture's own
 #    work root, `runs/parity/w/<slot>/` — captures with different slots run SIDE BY
 #    SIDE, each with its own log. The slot is always two characters, so every path
 #    an answer embeds has the same length on every runtime.
 #    ONE run directory holds every capture of one acceptance run:
-#    <stamp>/{python,python_b,rust,swift}, and the diffs land in <stamp>/diff.
+#    <stamp>/{python,python_b,rust}, and the diffs land in <stamp>/diff.
 #    The python baseline runs twice — only when e2e/parity/** or src/lib/python changed.
 S=$R/e2e/runs/parity/<stamp>
 $PY $R/e2e/parity/run.py capture --runtime python --families all --slot p1 --out $S/python   > $S/python.log 2>&1 &
 $PY $R/e2e/parity/run.py capture --runtime python --families all --slot p2 --out $S/python_b > $S/python_b.log 2>&1 &
 $PY $R/e2e/parity/run.py capture --runtime rust   --families all --slot r1 --out $S/rust     > $S/rust.log 2>&1 &
-$PY $R/e2e/parity/run.py capture --runtime swift  --families all --slot s1 --out $S/swift    > $S/swift.log 2>&1 &
 wait
 
 # 4. the harness's own test: two python runs must agree exactly
@@ -62,7 +61,6 @@ $PY $R/e2e/parity/diff.py self --a <stamp>/python --b <stamp>/python_b
 
 # 5. the ports against python
 $PY $R/e2e/parity/diff.py port --base <stamp>/python --other <stamp>/rust
-$PY $R/e2e/parity/diff.py port --base <stamp>/python --other <stamp>/swift
 
 # 6. the status line
 $PY $R/e2e/parity/diff.py status --diff <stamp>/diff   # diff.py writes there itself
@@ -91,9 +89,9 @@ a subset FOR ITERATION ONLY — an acceptance run is always `all`.
 8. Zero stale residuals and zero stale selectors.
 9. `--check-proofs` passes.
 
-The status line is `rust pass/total · swift pass/total`, where an item passes when
+The status line is `rust pass/total`, where an item passes when
 it is in `landed.yaml`, its selectors produce no lines, and its unit twins exist
-with the §5.9 suites green. "Verified" only at `pass == total` on both.
+with the §5.9 suites green. "Verified" only at `pass == total`.
 
 ## The three rules a new family must not break
 

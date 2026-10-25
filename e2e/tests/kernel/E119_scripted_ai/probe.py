@@ -2,8 +2,8 @@
 
 A local OpenAI-compatible server (`e2e/mocks/vllm.py`, extended here with vLLM's
 thought channel `reasoning_content`) plays the model; the kernel's own
-`vllm_backend` agent (ai_core) on the PACKAGED host of `RUNTIME` (python | rust |
-swift) runs the chain, every call from the test through `web_rest`. Tool calling
+`vllm_backend` agent (ai_core) on the PACKAGED host of `RUNTIME` (python |
+rust) runs the chain, every call from the test through `web_rest`. Tool calling
 is the prompt-taught `<call name>` tag grammar — the request carries no `tools`.
 Every field the backend needs is SET on the record (endpoint, model, max_tokens,
 context_window, kv_slots, kv_overflow), so nothing is read from the server.

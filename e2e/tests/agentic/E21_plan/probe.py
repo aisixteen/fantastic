@@ -352,7 +352,7 @@ async def main():
         "$parent": "*",
         "$subtree": "*",
         # THE ROOT, by whatever id this runtime gives it (python: kernel_state,
-        # rust/swift: core).
+        # rust: core).
         root.id: ["*", "create_agent", "update_agent", "delete_agent"],
         "cli": "*",
         # THE HUMAN. The egress must exist or "consult me" is a sentence the

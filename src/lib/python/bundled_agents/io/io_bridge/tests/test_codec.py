@@ -88,7 +88,7 @@ def test_non_finite_numbers_are_not_json():
 
 def test_only_values_every_runtime_can_hold():
     """An integer outside int64, a number that overflows a
-    double and a lone surrogate are refused at the wire — rust and swift would
+    double and a lone surrogate are refused at the wire — rust would
     hold a different value, or none."""
     from io_bridge import loads
 

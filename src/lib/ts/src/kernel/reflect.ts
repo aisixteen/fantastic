@@ -5,7 +5,7 @@ import type { Kernel } from "./kernel.ts";
 import { page } from "./paging.ts";
 
 // Uniform `reflect`, a port of python's `_reflect_identity` + `_roster` +
-// `_apply_reflect_flags` (kernel/_agent.py; rust `reflect.rs` and swift match it).
+// `_apply_reflect_flags` (kernel/_agent.py; rust `reflect.rs` matches it).
 // This is a CROSS-LANGUAGE CONTRACT: tests/reflect.test.ts pins it against a
 // fixture captured from the python kernel's own replies.
 //

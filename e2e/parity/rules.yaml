@@ -1,6 +1,6 @@
 # Normalisation rules. `diff.py` implements them; this file is the CONTRACT.
 #
-# Every rule runs identically on python, rust and swift — a rule that fires on
+# Every rule runs identically on python and rust — a rule that fires on
 # one runtime and not another is a rule that manufactures agreement. Every
 # placeholder keeps SHAPE and TYPE (`<ID#3:int>` is not `<ID#3:str>`), so a
 # format item stays diffable after the value is gone.
@@ -24,7 +24,7 @@ rules:
   - id: N1
     name: root_alias
     why: >
-      Rust and swift called the root `core` before the port; python calls it
+      Rust called the root `core` before the port; python calls it
       `kernel_state`. Until C12 lands in a runtime, every reply that names the
       root differs for that one reason and buries everything else in the file.
       Whole-token only — `core` inside `fantastic-core`, `core.py` or a sentence
@@ -666,7 +666,7 @@ rules:
       An agent busy with one turn is sent a PEER message and, a moment later, the
       reply its own earlier call was waiting for. The peer turn's self-`reflect`
       and the reply's DELIVERY race: python records the reflect right after the
-      peer `send`; swift records the reply's `send` and its `queued` status first.
+      peer `send`; a port may record the reply's `send` and its `queued` status first.
       The first `reflect`
       after a peer `send` (a `send` event with no `client_id`) is moved to right
       after it — across `send` events and `queued` statuses ONLY.
@@ -764,9 +764,9 @@ rules:
   - id: N25
     name: port_catalog_without_foundation_models
     why: >
-      Python ships no `foundation_models_backend`; rust and swift do. Every comparison of a WHOLE bundle catalog (C10 —
+      Python ships no `foundation_models_backend`; rust does. Every comparison of a WHOLE bundle catalog (C10 —
       `bundles=ids|all`, and C8's paging over it) therefore differs by that one
-      name. The name is dropped from the RUST/SWIFT side only. This is
+      name. The name is dropped from the RUST side only. This is
       deliberately one-sided: on the python side the rule would
       fire on nothing, and if python ever carried the bundle again it must stay
       visible.
@@ -808,7 +808,7 @@ rules:
   - id: N26
     name: apple_fm_catalog_entry
     why: >
-      Rust and swift ship `foundation_models_backend` (Apple's on-device model);
+      Rust ships `foundation_models_backend` (Apple's on-device model);
       python has no such bundle. Every system prompt renders the bundle catalog as
       `bundles=a,b,…`, so the ports' prompt carries one more name — a by-design
       catalog difference. Only that entry of a

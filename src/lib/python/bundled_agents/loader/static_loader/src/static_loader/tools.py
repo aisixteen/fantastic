@@ -50,7 +50,7 @@ from kernel._refusal import UNAUTHORIZED, UNHANDLED, refusal
 
 MANIFEST_FIELD = "manifest"
 
-# The one text an agent-sent `boot` is refused with — rust/swift byte for byte.
+# The one text an agent-sent `boot` is refused with — rust byte for byte.
 BOOT_REFUSED = (
     "static_loader: an agent-sent boot is refused — hydrating the roster is the "
     "kernel's own bookkeeping, so only the kernel's own boot (cold boot, "

@@ -308,7 +308,7 @@ async def test_a_body_that_is_not_utf8_is_a_malformed_body_not_a_crash(kernel):
 async def test_get_routes_is_declarative_and_answers_200_over_rest(kernel):
     """`get_routes` is DATA now — the live endpoints reach `web` through the
     `route_endpoints(agent)` module hook, not through a reply. So the verb
-    renders over its own leg, 200, exactly as rust and swift answer it."""
+    renders over its own leg, 200, exactly as rust answers it."""
     async with await _rest_client(kernel) as c:
         r = await c.post("/pyfix_rest/pyfix_rest", json={"type": "get_routes"})
         ok = await c.post("/pyfix_rest/pyfix_rest", json={"type": "reflect"})
@@ -346,7 +346,7 @@ def test_a_reply_with_no_json_form_is_still_named_not_raised():
 async def test_a_settled_get_routes_is_a_storable_row(kernel):
     """A settle row carries the FULL result body, and the kernel's store has to be
     able to hold it. With the callables gone from `get_routes`, python records the
-    row rust and swift record."""
+    row rust records."""
     from kernel._kernel import _store_safe
 
     await kernel.send(

@@ -1,7 +1,7 @@
 """kernel/exec_jobs — exec_bridge jobs over REST, end to end. NO MODEL.
 
-The kernel's own `exec_bridge` on the PACKAGED host of `RUNTIME` (python | rust |
-swift), every call through `web_rest`, its events watched over the `ws` face:
+The kernel's own `exec_bridge` on the PACKAGED host of `RUNTIME` (python |
+rust), every call through `web_rest`, its events watched over the `ws` face:
 
   1. the allowlist: an allow-listed command runs as a job; a line that matches no
      pattern is refused `unauthorized` and starts nothing; a record whose only

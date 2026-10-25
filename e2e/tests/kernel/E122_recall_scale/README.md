@@ -20,7 +20,7 @@ number of `call` rows the store holds.
    time; median and p95 ms of each.
 
 Checks: the stored count reached every checkpoint (the default `ledger_cap`,
-1 000 000 on python, rust and swift, prunes nothing below it), and the BOUND
+1 000 000 on python and rust, prunes nothing below it), and the BOUND
 `fresh-name median at 100k ≤ 3 × unnamed median at 100k + 5 ms`. Every number is
 printed whether the bound holds or not.
 

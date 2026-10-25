@@ -467,9 +467,9 @@ async def _run_one(t: dict, bk, logdir: Path, sem: asyncio.Semaphore, results: d
             detail = ""
             if m := re.findall(r"^\s*(?:store\.read|.*side effects).*$", body, re.M):
                 detail = " · ".join(x.strip() for x in m[-2:])[:120]
-            # A ZERO-TEST RUN IS NOT A PASS. Both `cargo test` and `swift test`
-            # exit 0 when a filter matches nothing, which turned a mis-spelled
-            # selector into a green row. Require evidence that the scenario
+            # A ZERO-TEST RUN IS NOT A PASS. `cargo test` exits 0 when a
+            # filter matches nothing, which turned a mis-spelled selector into
+            # a green row. Require evidence that the scenario
             # actually ran.
             ran = re.search(r"Test run with (\d+) test", body)
             empty = (ran and ran.group(1) == "0") or "0 passed; 0 failed" in body
