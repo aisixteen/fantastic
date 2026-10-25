@@ -142,3 +142,45 @@ async def test_a_key_with_inner_spaces_is_a_legal_header_value(seeded_kernel, tm
     assert await key_reader("ai", k, "responses_backend", required=True)(EP) == (
         "sk a\tb"
     )
+
+
+async def test_a_malformed_record_or_a_missing_field_is_named(seeded_kernel, tmp_path):
+    k = await _mk(seeded_kernel, tmp_path)
+    read = key_reader("ai", k, "responses_backend", required=True)
+    # a record without `ref`
+    k.ctx.update("ai", credentials={"store": "creds"})
+    with pytest.raises(CredentialError) as e:
+        await read(EP)
+    assert str(e.value) == (
+        "responses_backend: credentials must be {store: <credential_store id>, ref: <ref>}"
+    )
+    # a ref with no `api_key` field: declared by the operator, then stored
+    k.ctx.update("ai", credentials={"store": "creds", "ref": "other"})
+    k.ctx.update(
+        "creds",
+        refs={
+            "main": {"host": "api.example.com"},
+            "other": {"host": "api.example.com"},
+        },
+    )
+    out = (
+        await k.send(
+            [
+                {
+                    "target": "creds",
+                    "payload": {
+                        "type": "set",
+                        "ref": "other",
+                        "fields": {"token": "t"},
+                    },
+                    "secret": ["payload.fields"],
+                }
+            ]
+        )
+    )[0]
+    assert out["result"].get("stored"), out
+    with pytest.raises(CredentialError) as e:
+        await read(EP)
+    assert str(e.value) == (
+        "responses_backend: credential 'other' in 'creds' has no 'api_key' field"
+    )

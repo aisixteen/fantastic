@@ -258,6 +258,8 @@ ERRORED = "errored"
 FAILED = "failed"
 CANCELLED = "cancelled"
 TIMED_OUT = "timed_out"
+# the endings a flushed `settle` row can record (anything else is not recalled)
+SETTLED_STATUSES = (COMPLETED, ERRORED, FAILED, CANCELLED, TIMED_OUT)
 # THE DEAD ENDINGS. An execution that settled one of these is a DEAD LETTER: it is
 # announced (`on_deadletter`), listed by `ledger`, never retried silently, and
 # retired by `ack_deadletter`.
@@ -1043,6 +1045,10 @@ class Kernel:
                 continue
             st = settles[-1]
             oc = st.get("outcome") or {}
+            # An unknown status is not guessed at, and a call row naming no target
+            # is no execution: neither comes back (re-sending runs it).
+            if oc.get("status") not in SETTLED_STATUSES or not call.get("agent"):
+                continue
             attempts = st.get("attempts") or call.get("attempts") or 1
             fut = loop.create_future()
             # A NAMED call's settle kept its result; an unnamed one (joined by its

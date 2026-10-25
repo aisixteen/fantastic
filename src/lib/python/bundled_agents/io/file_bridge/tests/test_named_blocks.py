@@ -128,3 +128,73 @@ def test_edit_grammar_text_matches_rust():
         "with several files, a block may name its file on its first line "
         "(`<<<<<<< SEARCH path`), and then no hunks are needed; any failure anywhere "
     ) in src
+
+
+# ─── Rust twins (src/lib/rust/crates/bundles/fantastic-file/src/tests_text.rs) ─
+
+
+async def test_named_blocks_may_come_in_any_order(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.txt", "x = 1\nw = 3\n")
+    await _seed(seeded_kernel, ed, "b.txt", "y = 1\n")
+    patch = (
+        _named("a.txt", "x = 1", "x = 2")
+        + "\n"
+        + _named("b.txt", "y = 1", "y = 2")
+        + "\n"
+        + _named("a.txt", "w = 3", "w = 4")
+    )
+    r = await _edit_files(seeded_kernel, ed, ["a.txt", "b.txt"], patch)
+    assert r["edited"] is True, r
+    root = pathlib.Path(tmp_path) / "sd"
+    assert (root / "a.txt").read_text(encoding="utf-8") == "x = 2\nw = 4\n"
+    assert (root / "b.txt").read_text(encoding="utf-8") == "y = 2\n"
+
+
+async def test_named_and_unnamed_blocks_do_not_mix(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.txt", "x = 1\n")
+    await _seed(seeded_kernel, ed, "b.txt", "y = 1\n")
+    patch = _named("a.txt", "x = 1", "x = 2") + "\n" + _block("y = 1", "y = 2")
+    r = await _edit_files(seeded_kernel, ed, ["a.txt", "b.txt"], patch)
+    assert r["reason"] == "bad_arg" and r["arg"] == "bytes", r
+    assert "every block or on none" in r["error"], r
+    root = pathlib.Path(tmp_path) / "sd"
+    assert (root / "a.txt").read_text(encoding="utf-8") == "x = 1\n"
+    assert (root / "b.txt").read_text(encoding="utf-8") == "y = 1\n"
+
+
+async def test_a_stated_hunks_must_match_the_named_blocks(
+    seeded_kernel, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    fb, ed = await _mk(seeded_kernel)
+    await _seed(seeded_kernel, ed, "a.txt", "x = 1\nw = 3\n")
+    await _seed(seeded_kernel, ed, "b.txt", "y = 1\n")
+    patch = (
+        _named("a.txt", "x = 1", "x = 2")
+        + "\n"
+        + _named("a.txt", "w = 3", "w = 4")
+        + "\n"
+        + _named("b.txt", "y = 1", "y = 2")
+    )
+    r = await _call(
+        seeded_kernel,
+        ed,
+        {
+            "type": "edit",
+            "edits": [{"path": "a.txt", "hunks": 1}, {"path": "b.txt"}],
+            "bytes": patch.encode("utf-8"),
+        },
+    )
+    assert r["reason"] == "bad_arg", r
+    assert "leave hunks out" in r["error"], r
+    root = pathlib.Path(tmp_path) / "sd"
+    assert (root / "a.txt").read_text(encoding="utf-8") == "x = 1\nw = 3\n"
+    assert (root / "b.txt").read_text(encoding="utf-8") == "y = 1\n"

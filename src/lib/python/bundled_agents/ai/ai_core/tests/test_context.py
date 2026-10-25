@@ -755,3 +755,114 @@ async def test_context_clear_starts_a_new_thread_without_deleting(seeded_kernel)
     # chatting on: the new thread grows after the mark
     await core._save_history(aid, k, [{"role": "user", "content": "hello again"}])
     assert [r["content"] for r in await core._load_history(aid, k)][-1] == "hello again"
+
+
+async def _reaction_over(monkeypatch, thread: list[dict]) -> dict:
+    async def fake_load(self_id, kernel, behind=False):
+        return thread
+
+    monkeypatch.setattr(core, "_load_history", fake_load)
+    _projection["me"] = {"fired": True}
+    _compaction_mark["me"] = {"fired_at_index": 0, "client_id": "cli"}
+    try:
+        return await core._derive_reaction("me", None)
+    finally:
+        _projection.pop("me", None)
+        _compaction_mark.pop("me", None)
+
+
+async def test_the_reaction_reader_sees_what_dispatch_saw(monkeypatch):
+    """AN UNTERMINATED ENVELOPE IS NOT A CALL: dispatch skips it, and the reaction
+    reader must see the same thing dispatch saw."""
+    thread = [
+        {
+            "role": "assistant",
+            "content": '<call name="send"><target_id>me</target_id><type>recall</type>',
+        },
+        {
+            "role": "assistant",
+            "content": '<call name="send"><target_id>notes</target_id><type>write</type>'
+            "<path>facts.md</path><bytes>x</bytes></call>",
+        },
+    ]
+    r = await _reaction_over(monkeypatch, thread)
+    assert r["recalled"] is False, f"an unterminated recall is no call: {r}"
+    assert r["recall_count"] == 0
+    assert r["persisted"] is True, f"the write must count: {r}"
+
+
+async def test_a_turn_with_no_call_is_no_reaction(monkeypatch):
+    thread = [
+        {"role": "assistant", "content": "I have finished."},
+        {"role": "user", "content": "go"},
+    ]
+    assert await _reaction_over(monkeypatch, thread) == {
+        "recalled": False,
+        "persisted": False,
+        "recall_count": 0,
+    }
+
+
+async def test_a_recall_addressed_elsewhere_is_not_this_agents_reaction(monkeypatch):
+    thread = [_send_turn("other", {"type": "recall"})]
+    r = await _reaction_over(monkeypatch, thread)
+    assert r["recalled"] is False, r
+
+
+# ── twins of the Rust ai-core tests (tests.rs) ───────────────────────
+
+
+def test_render_reflect_matches_python_one():
+    # A string as-is; a list of SCALARS comma-joined through `str()`; anything
+    # nested through `render_reply` with whitespace collapsed; `None` empty.
+    assert (
+        core._render_reflect(
+            {"sentence": "S", "a": None, "b": ["x", "y"], "c": {"$self": "*"}}
+        )
+        == "S  a=  b=x,y  c=<$self>*</$self>"
+    )
+    # the remaining keys keep their order
+    assert (
+        core._render_reflect({"sentence": "S", "one": 1, "two": 2, "three": 3})
+        == "S  one=1  two=2  three=3"
+    )
+    # a list of scalars uses `str()`, so a bool is `True`
+    assert core._render_reflect({"sentence": "", "t": [True, 2]}) == "t=True,2"
+
+
+def test_budget_meta_parses_like_python():
+    # `context_window` 0.5 is a POSITIVE float, so `_as_pos_int` truncates it to 0 and
+    # that 0 is the window; `output_reserve` "-5" is not a digit string, so 1024; the
+    # budget then floors at 256.
+    m = {"context_window": 0.5, "output_reserve": "-5", "recent_n": 1000.0}
+    assert resolve_context_window(m) == 0
+    assert output_reserve(m) == 1024
+    assert budget(m) == 256
+    assert core._recent_n(m) == 50
+    # `+12` is not `isdigit()`, `1000.0` is not an int, `True` is `int(True)` = 1
+    m = {"context_window": "+12", "output_reserve": 1000.0, "recent_n": True}
+    assert resolve_context_window(m) == DEFAULT_CONTEXT_WINDOW
+    assert output_reserve(m) == 1024
+    assert core._recent_n(m) == 1
+    # a positive float window truncates; the budget then floors
+    m = {"context_window": 12.9}
+    assert resolve_context_window(m) == 12
+    assert budget(m) == 256
+    # a bool is never a window; " 7 " is `int()`-able
+    m = {"context_window": True, "recent_n": " 7 "}
+    assert resolve_context_window(m) == DEFAULT_CONTEXT_WINDOW
+    assert core._recent_n(m) == 7
+
+
+def test_recent_n_bool_is_one():
+    assert core._recent_n({"recent_n": True}) == 1
+    assert core._recent_n({"recent_n": 7.9}) == 7
+    # `int()` raises on a non-numeric string -> the default 6
+    assert core._recent_n({"recent_n": "nope"}) == 6
+
+
+async def test_context_recall_on_an_empty_store_says_so_instead_of_failing():
+    k = FakeCtx({"context_window": 12000, "output_reserve": 0})
+    r = await core._context_recall("ai", {"dry": True}, k)
+    assert r.get("why") == "empty store", r
+    assert "error" not in r, r
