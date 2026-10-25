@@ -537,7 +537,9 @@ async def test_stop_reaches_a_reply_woken_turn(seeded_kernel, fake_providers):
     k.ctx.spawn_task(
         aid,
         "deliver_reply",
-        core._deliver(k, aid, "tool reply", "tab", None, born=core._incarnation.get(aid, 0)),
+        core._deliver(
+            k, aid, "tool reply", "tab", None, born=core._incarnation.get(aid, 0)
+        ),
     )
     await _until(lambda: len(fp.requests) >= 1)
     await asyncio.sleep(0.1)

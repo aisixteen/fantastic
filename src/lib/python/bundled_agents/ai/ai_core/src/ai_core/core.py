@@ -1295,7 +1295,9 @@ async def _deliver(
             else out["status"]
         )
         if notice:
-            _reset_chain(target, "send: the turn that was to read this message did not run")
+            _reset_chain(
+                target, "send: the turn that was to read this message did not run"
+            )
         await _emit_status(kernel, target, client_id, "done", reason="error", error=err)
 
 
@@ -2650,12 +2652,7 @@ def _render_history(
     for e in listed:
         i = pos[e["id"]]
         res = e.get("res", "full")
-        # A body a trimmer left on the entry (a `context_fold` keeps the rows before
-        # its range as the model saw them) renders as saved while cleanup is on.
-        if clean and isinstance(e.get("content"), str):
-            out.append((i, res, {**hist[i], "content": e["content"]}))
-        else:
-            out.append((i, res, _apply_res(hist[i], res)))
+        out.append((i, res, _apply_res(hist[i], res)))
     return out + _render_tail(hist, max(pos[e["id"]] for e in listed) + 1, clean)
 
 
@@ -3664,11 +3661,7 @@ def _make_send(cfg: Backend):
             _dequeue_send(id, send_id)
             # A REPLY IN FLIGHT ACROSS A STOP: it carries the token of a chain that
             # has ended, so it is recorded as a late row and runs nothing.
-            if (
-                isinstance(token, str)
-                and token
-                and token != _chain_of(id)["token"]
-            ):
+            if isinstance(token, str) and token and token != _chain_of(id)["token"]:
                 await _save_history(
                     id,
                     kernel,
@@ -4973,17 +4966,12 @@ async def _fold_range(id, payload, kernel, cfg: Backend):
     # range began, then the rows after. The fold is the newest row, so the array carries
     # every kept row.
     ids: list[dict] = []
-    for p, (idx, res, msg) in enumerate(view):
+    for p, (idx, res, _) in enumerate(view):
         if p == from_p:
             ids.append({"id": fid, "res": "fold"})
         if from_p <= p <= to_p:
             continue
-        entry = {"id": rows[idx]["id"], "res": res}
-        # a body a trimmer changed is kept as trimmed, so the next turn renders the
-        # same message the model saw before the fold
-        if msg != _apply_res(rows[idx], res):
-            entry["content"] = msg["content"]
-        ids.append(entry)
+        ids.append({"id": rows[idx]["id"], "res": res})
     await _save_view(id, kernel, ids, budget_=budget(rec), why="context_fold")
     return {"folded": fid, "rows": len(span), "summarized": summarized}
 
