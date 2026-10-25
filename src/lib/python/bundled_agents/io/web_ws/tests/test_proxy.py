@@ -336,7 +336,7 @@ def test_a_mistyped_name_field_is_skipped_and_the_socket_survives(client, frame)
     """`type`/`target`/`src`/an answer's `id` are NAMES — a list or object there
     was hashed (the handler table, `src in watching`, `out_calls.get`, the
     kernel's agent table) and the TypeError ended the socket. Read as `""` (as
-    rust and swift do), the frame is dropped and the next call is served."""
+    rust does), the frame is dropped and the next call is served."""
     with client.websocket_connect("/kernel_state/ws") as ws:
         ws.send_text(json.dumps(frame))
         ws.send_text(

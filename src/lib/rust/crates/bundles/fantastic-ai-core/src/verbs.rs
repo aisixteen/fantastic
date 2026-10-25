@@ -1573,7 +1573,7 @@ pub async fn send(
         // (a delivered reply) and so whether a silent turn earns the nudge.
         let route_incoming = incoming_text.clone();
         // THE ROUTED CALLS REACH THEIR TARGETS BEFORE THIS REPLY GOES BACK
-        // (python's event loop order; swift `StartSignal`): released at launch,
+        // (python's event loop order): released at launch,
         // not at completion — a self-addressed call fans out before it needs the
         // lock, so this never waits on this agent.
         let launched = Arc::new(fantastic_kernel::Signal::default());

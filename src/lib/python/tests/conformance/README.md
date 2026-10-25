@@ -28,7 +28,7 @@ explicit design decision.**
 | C16–C18 error taxonomy / delete | a2a error range, checkpoint-conformance delete | `tests/kernel/`, `tests/agentic/` |
 | C19 paged listing, opaque cursor | checkpoint-conformance `test_list.py` | list_agents/ps paging tests |
 | C20 child state namespaced | LangGraph subgraph ns | `tests/agentic/test_namespacing.py` |
-| C21 one semantics × N modes | openai runtime-symmetry, a2a ALL_TRANSPORTS | `c21_cases.yaml` + `test_c21_transport_symmetry.py` — STRICTER than the exemplars: 10 data-driven cases byte-diffed across FIVE legs (in-proc / ws / rest / exec-guest / relay); the YAML is the grading contract for the rust/swift ports |
+| C21 one semantics × N modes | openai runtime-symmetry, a2a ALL_TRANSPORTS | `c21_cases.yaml` + `test_c21_transport_symmetry.py` — STRICTER than the exemplars: 10 data-driven cases byte-diffed across FIVE legs (in-proc / ws / rest / exec-guest / relay); the YAML is the grading contract for the rust port |
 | C22 persisted state survives upgrade | openai run_state corpus | loader version-stamp tests |
 | C23 undeclared capability MUST error | a2a `@must` | sealed-by-default suite (`tests/agentic/`) |
 | C24 stream order, terminal close, fan-out | a2a `test_multi_stream.py`, DBOS offsets | `test_c24_stream_transport.py` + `test_c24_token_stream.py` — in-proc + wire events + token stream |

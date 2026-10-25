@@ -9,7 +9,7 @@ lines up case for case.
 
 Nothing is key-sorted (that would lose every key-order item), and the
 signals and the 15-second grace are unchanged: python's PTY daemon survives its
-SIGTERM (A14.19) and swift needs the SIGKILL (C85), and both are measurements.
+SIGTERM (A14.19), and that is a measurement.
 """
 
 from __future__ import annotations

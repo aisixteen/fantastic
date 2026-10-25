@@ -1,15 +1,18 @@
-//! LINUX: the D-Bus side of the ports. The only place in the crate that names
-//! the bus crates. Each port is given its connection (`LinuxPower::new`); the
-//! CLI's own are made once, here, on first use.
+//! LINUX: the OS side of the ports. The only place in the crate that names
+//! the bus crates or runs a program. Each D-Bus port is given its connection
+//! (`LinuxPower::new`); the CLI's own are made once, here, on first use. Audio
+//! runs PipeWire's own tools (`LinuxAudio`).
 
 use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
-use super::{OsError, PowerOs};
+use super::{AudioOs, OsError, PowerOs};
 
+pub mod audio;
 pub mod power;
 
+pub use audio::LinuxAudio;
 pub use power::LinuxPower;
 
 /// The system bus, connected once per process.
@@ -30,6 +33,12 @@ pub async fn power() -> Arc<dyn PowerOs> {
         Ok(c) => Arc::new(LinuxPower::new(c)),
         Err(e) => Arc::new(Absent(e)),
     }
+}
+
+/// The audio port: `pw-dump` and `wpctl` from `$PATH`. A missing tool is a port
+/// that says so on its first read.
+pub fn audio() -> Arc<dyn AudioOs> {
+    Arc::new(LinuxAudio::new())
 }
 
 /// A port whose bus never connected.

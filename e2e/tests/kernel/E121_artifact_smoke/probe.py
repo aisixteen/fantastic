@@ -43,7 +43,7 @@ REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 
 #: Kinds DOCUMENTED as runtime-specific: kind → the runtimes that ship it.
-#: `foundation_models_backend` — Apple's on-device model, one swift implementation
+#: `foundation_models_backend` — Apple's on-device model, a Foundation Models bridge
 #: rust links through a C ABI (src/lib/rust/README.md).
 #: `sqlite_store` — the durable memory store ships in the python kernel
 #: (`bundled_agents/memory/sqlite_store`, #59); rust has it only in the `fantastic`

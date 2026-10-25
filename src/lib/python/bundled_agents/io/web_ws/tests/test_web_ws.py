@@ -21,7 +21,7 @@ async def test_reflect_describes_surface(seeded_kernel):
 
 
 async def test_get_routes_returns_one_websocket(seeded_kernel):
-    """DECLARATIVE — pure JSON data, byte-shaped like rust/swift. No callable
+    """DECLARATIVE — pure JSON data, byte-shaped like rust. No callable
     rides the reply, so it renders over REST and persists into the ledger."""
     r = await _get_routes("ws_xyz", {}, seeded_kernel)
     assert r == {"routes": [{"kind": "websocket", "path": "/{host_id}/ws"}]}

@@ -12,7 +12,7 @@ fantastic-kernel = { path = "../../../lib/rust/crates/fantastic-kernel" }
 fantastic-system = { path = "../../crates/fantastic-system" }
 async-trait = "0.1"
 serde_json = "1"
-tokio = { version = "1.40", features = ["sync", "time", "rt"] }
+tokio = { version = "1.40", features = ["sync", "time", "rt", "process", "io-util"] }
 
 # zbus is pure Rust (no libdbus): the binary stays static musl. Only Linux has a
 # real implementation; `tests/os_boundary.rs` keeps it inside `src/sys/linux`.

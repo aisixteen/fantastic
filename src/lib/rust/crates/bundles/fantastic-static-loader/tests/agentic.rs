@@ -1,8 +1,7 @@
 //! THE AGENTIC RUNNER — rust's implementation over the SHARED corpus.
 //!
 //! Reads `contract/agentic/{configs,specs}` at the repo root, the same files
-//! python's runner reads (`src/lib/python/tests/agentic/_engine.py`) and swift's
-//! will. A scenario is DATA; the runner is the only per-runtime part.
+//! python's runner reads (`src/lib/python/tests/agentic/_engine.py`). A scenario is DATA; the runner is the only per-runtime part.
 //!
 //! `$root` in a config or spec means THIS runtime's root — `kernel_state` here,
 //! `kernel_state` in python. Parity asserts the per-runtime value, never
@@ -891,7 +890,7 @@ async fn run_steps(h: &Hydration, sc: &Scenario, pinned: &mut BTreeMap<String, u
 
 // ─── PC-5 · the hydration verdict ───────────────────────────────
 
-/// One assertion tagged with the requirement it pins (swift `check`).
+/// One assertion tagged with the requirement it pins.
 fn check(pinned: &mut BTreeMap<String, usize>, rid: &str, cond: bool, detail: String) {
     *pinned.entry(rid.to_string()).or_insert(0) += 1;
     assert!(cond, "[{rid}] {detail}");

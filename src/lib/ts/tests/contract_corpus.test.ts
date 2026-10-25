@@ -2,7 +2,7 @@
 //
 // `contract/` states what this substrate claims as DATA — `requirements.yaml`
 // (the registry), `agentic/configs` (deployable kernel shapes) and
-// `agentic/specs` (ordered steps). Python, rust and swift each run it with their
+// `agentic/specs` (ordered steps). Python and rust each run it with their
 // own runner; this is the ts one, a port of python's reference
 // (`src/lib/python/tests/agentic/{_engine,_core}.py`). The files are READ at
 // test time and never edited here.

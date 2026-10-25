@@ -12,7 +12,7 @@ care whether the peer is a local container, a remote container, or a bare host).
 Runs ONLY under `FANTASTIC_TARGET=container` (skips otherwise — locally the
 `test_bridge_python_python_ws` forward path covers the same bridge surface).
 
-Parametrized over `python` only (the swift runtime, its other leg, is retired).
+Parametrized over `python` only.
 """
 
 from __future__ import annotations

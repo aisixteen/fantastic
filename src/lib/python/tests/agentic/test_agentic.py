@@ -1,13 +1,13 @@
 """THE AGENTIC SUITE — one runner over the shared corpus at `contract/agentic/`.
 
 Every scenario is DATA: a deployable kernel `config` and a `spec` that declares
-what that config must prove. This file is the python RUNNER; rust and swift ship
-their own, reading the same files. A wire-visible property is decidable from
+what that config must prove. This file is the python RUNNER; rust ships
+its own, reading the same files. A wire-visible property is decidable from
 outside, so asserting it once as data beats asserting it four times in four
 languages.
 
 A UNIT suite: free, no model, in process. It lives here rather than in `e2e/`
-because that is where the rust and swift copies live, and because it should run
+because that is where the rust copy lives, and because it should run
 on every commit rather than only when someone invokes the paid harness.
 
 Each scenario pays two phases:

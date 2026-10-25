@@ -9,7 +9,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 - System agents (Linux, `fantastic [canvas] system`): the machine's basics as
   agents an AI calls like any other, each with its view as a canvas cell — first
-  `power` (battery over UPower; power off, reboot, suspend over logind). The model
+  `power` (battery over UPower; power off, reboot, suspend over logind), then
+  `audio` (PipeWire's sinks and sources: volume, mute and the default, read with
+  `pw-dump` and followed with `pw-dump --monitor`, set with `wpctl`). Still to come
+  (#55): network, notifications, displays and lock, and the QEMU harness that runs
+  the system canvas and audio in a fantastic OS guest. The model
   and ViewModel are pure (`fantastic-system`); every OS call is in the bundle's
   `sys/linux`. On fantastic OS they run in the system canvas `/home/fantastic/system`,
   the user service `fantastic-system`, which the Home lists.
@@ -237,6 +241,18 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 - CI: a push to a `fix/**` or `feat/**` branch runs the unit suites by itself
   (`ci · units`); a newer push to the same branch cancels the older run. Every
   other run is still started by hand.
+
+### Removed
+
+- The Swift kernel runtime (`src/lib/swift`): its kernel, bundles, CLI and
+  unit suites, its e2e and contract runners, the CI `swift` job,
+  `scripts/build/swift.sh` and the container's swift runtime (#53). The host
+  runtimes are Python (the reference) and Rust, plus the TypeScript browser
+  kernel. Apple's on-device model stays: the Foundation Models bridge
+  (`FantasticFMCore` + `FantasticFMBridge`) is now a Swift package with no
+  dependencies inside the rust `fantastic-foundation-models-backend` crate,
+  built and linked on macOS by its `build.rs` — which no longer fetches 23
+  Swift packages to do it. v0.0.6 is the last release with the Swift kernel.
 
 ### Fixed
 

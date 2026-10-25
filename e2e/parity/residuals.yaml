@@ -39,8 +39,8 @@ residuals:
     note: >
       Python (uvicorn/websockets) answers the upgrade with
       6 headers in Title-Case (`Upgrade`, `Connection`, `Sec-WebSocket-Accept`,
-      `Sec-WebSocket-Extensions`, `date`, `server: uvicorn`); rust and swift
-      answer with 5, lowercase where their HTTP stack writes names verbatim, and
+      `Sec-WebSocket-Extensions`, `date`, `server: uvicorn`); rust
+      answers with 5, lowercase where its HTTP stack writes names verbatim, and
       no `server`. The accept KEY is compared (as
       `<WS_ACCEPT>`) in every handshake, and the status line is not a header.
       Blast radius: a handshake response header a port drops or adds hides here,
@@ -72,8 +72,8 @@ residuals:
       The model-endpoint REQUEST header block is the HTTP CLIENT's, not the
       kernel's. python's providers run on httpx, which sends its own default set
       (`Host`, `Accept`, `Accept-Encoding`, `Connection`, `User-Agent:
-      python-httpx/<ver>`) in its own order; rust runs on reqwest/hyper and swift
-      on its own client, both of which send a smaller set and, because
+      python-httpx/<ver>`) in its own order; rust runs on reqwest/hyper,
+      which sends a smaller set and, because
       `http::HeaderName` is lowercase and hyper's writer emits it verbatim,
       cannot write a capitalised name at all. Matching the set would mean
       claiming httpx's User-Agent and pinning its version — a library identity,
@@ -126,8 +126,7 @@ residuals:
       `Connection` vs `connection` on the HTTP census — one physical difference. Same client-library class as R-D4-9 and
       R-D16-2: `http::HeaderName` is lowercase by construction and hyper's
       writer emits it verbatim, so rust cannot write a capitalised request
-      header name at all, while python's client sends httpx's own casing; swift
-      lowercases for its own reasons. The SET, the ORDER and the VALUES are
+      header name at all, while python's client sends httpx's own casing. The SET, the ORDER and the VALUES are
       compared as before. Blast radius: a request header whose name the kernel
       itself chooses hides here.
 
@@ -164,7 +163,7 @@ residuals:
     items: [A15.1, A15.2, B2.1]
     note: >
       Python's `logger.exception` / `traceback.print_exc()` print the stack;
-      rust and swift print none. A port's OWN error line is an `other` line and
+      rust prints none. A port's OWN error line is an `other` line and
       never matches, so a port that stops logging a failure at all is still a
       line only if python's closing line differs — the traceback body itself is
       python's runtime, not ours.
@@ -180,8 +179,7 @@ residuals:
     items: [A15.1]
     note: >
       `Expecting property name enclosed in double quotes: line 1 column 2`
-      (python's json) vs `parseFailure("expected string key at …")` (swift) and
-      serde_json's text (rust). The kernel's prefix is compared by the anchor
+      (python's json) vs serde_json's text (rust). The kernel's prefix is compared by the anchor
       itself; only the parser's tail differs.
 
   - id: R-L1-5
@@ -195,7 +193,7 @@ residuals:
     note: >
       The regex engine's own complaint after the kernel's fixed refusal:
       python `missing ), unterminated subpattern at position 0`, rust's regex
-      crate, swift's `The value “(unclosed” is invalid.`
+      crate's.
 
   - id: R-L1-6
     decision: L1
@@ -208,8 +206,7 @@ residuals:
     note: >
       The OS/socket library's connect-refused text after the kernel's fixed
       `bridge: ws boot failed: ` prefix: python `[Errno 61] Connect call failed
-      ('127.0.0.1', 9)`, rust `… os error 61`, swift `Connection errors:
-      SingleConnectionFailure(…)`.
+      ('127.0.0.1', 9)`, rust `… os error 61`.
 
   - id: R-C1-1
     decision: C1
@@ -224,7 +221,7 @@ residuals:
     allowed_tail_regex: ".*"
     items: []
     note: >
-      A by-design difference: rust and swift ship `foundation_models_backend`
+      A by-design difference: rust ships `foundation_models_backend`
       (Apple's on-device model), python does not. A few more tokens on every
       system prompt, budgets lower by the same, +2 completed calls per agent the
       store family pages with `bundles` and `limit 2`.
@@ -240,8 +237,7 @@ residuals:
     items: []
     note: >
       The ws CLIENT's upgrade request headers are its library's
-      (python's websockets sends `user-agent` and offers permessage-deflate; swift
-      writes `connection: upgrade` lowercase). Pinned to the peer's `open` event.
+      (python's websockets sends `user-agent` and offers permessage-deflate). Pinned to the peer's `open` event.
 
 
   # ── D3: python names its exception classes; the ports have none ──

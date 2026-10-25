@@ -27,7 +27,7 @@ Topology:
 The bridge dials the `kernel` ALIAS path (`ws://B/kernel/ws`) — not a
 hardcoded `core` path. On both kernels `kernel` is a universal alias that
 resolves to the runtime's actual root: `kernel_state` on Python, `core` on
-Swift/Rust. Forwarded call frames also target `"kernel"`, which B resolves
+Rust before its parity port. Forwarded call frames also target `"kernel"`, which B resolves
 locally. This means the test is runtime-agnostic and never hard-codes a
 root id.
 

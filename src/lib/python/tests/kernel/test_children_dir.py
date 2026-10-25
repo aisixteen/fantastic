@@ -128,7 +128,7 @@ def _seed(path, text: str) -> None:
 def test_cold_walk_refuses_an_escaping_children_dir(tmp_path):
     """The clamped cold walk (`fs`) refuses a children_dir that resolves outside
     `.fantastic` — loud, the boot fails — instead of hydrating records from
-    another directory. Rust and swift refuse the same input with the same text."""
+    another directory. Rust refuses the same input with the same text."""
     work = tmp_path / "work"
     _seed(
         work / ".fantastic" / "agent.yaml",

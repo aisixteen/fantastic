@@ -141,7 +141,7 @@ class _File:
 
     def _save(self, refs: dict) -> None:
         # THE KERNEL'S ONE EMITTER (`kernel_state/yaml_io.py`) — the bytes the rust
-        # and swift ports reproduce — every map's keys in sorted order.
+        # port reproduces — every map's keys in sorted order.
         text = yaml_io.dump(_sorted({"refs": refs}))
         fs.write_text(self.base, self.name, text, external=True, mode=0o600)
 

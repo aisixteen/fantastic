@@ -301,7 +301,9 @@ fn find_view(kernel: &Arc<Kernel>, bridge: &str, kind: &str, path: &str) -> Opti
 }
 
 /// python `open_view`: reuse the view of `path` on this bridge, or make it. The
-/// bridge grants the new view exactly its grant in its `callable_by`.
+/// bridge grants the new view exactly its grant in its `callable_by`. A reused view
+/// whose entry holds no scope token (made before the token) is stamped with it; an entry
+/// with any scope token is left as it is.
 ///
 /// `chosen` is a caller-picked id for the new view. It is taken only when it is free: a
 /// `chosen` that is another agent, or a view of another path, is refused; so is a path
@@ -331,6 +333,9 @@ pub(crate) async fn open_view(
                 rf::with(&mut r, "id", json!(chosen));
                 return r;
             }
+            if let Err(r) = stamp(kernel, bridge, chosen, kind, path, true) {
+                return r;
+            }
             return json!({"id": chosen, "kind": kind, "path": path, "created": false});
         }
         if let Some(existing) = &existing {
@@ -344,6 +349,9 @@ pub(crate) async fn open_view(
         }
     }
     if let Some(existing) = existing {
+        if let Err(r) = stamp(kernel, bridge, &existing, kind, path, true) {
+            return r;
+        }
         return json!({"id": existing, "kind": kind, "path": path, "created": false});
     }
     let Some(root) = kernel.root() else {
@@ -351,7 +359,6 @@ pub(crate) async fn open_view(
     };
     let own_grants = grants(kind);
     let base = bridge_name(path);
-    let scope = scope_token(kind, path);
     let bridge_grants = bridge
         .record()
         .meta
@@ -382,34 +389,55 @@ pub(crate) async fn open_view(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    // one step under the record's lock: a key a concurrent grant adds is kept, and the
-    // change is announced on the state stream so the root loader persists it
+    if let Err(r) = stamp(kernel, bridge, &vid, kind, path, false) {
+        return r;
+    }
+    json!({"id": vid, "kind": kind, "path": path, "created": true})
+}
+
+/// Grant the view `vid` its grants and its scope token in the bridge's `callable_by`.
+/// With `only_unscoped`, an entry that already holds any scope token is left as it is (a
+/// view made before the token is repaired; a deliberate narrowing stands). One step under
+/// the record's lock: a key a concurrent grant adds is kept, and the change is announced
+/// on the state stream so the root loader persists it.
+fn stamp(
+    kernel: &Arc<Kernel>,
+    bridge: &Arc<Agent>,
+    vid: &str,
+    kind: &str,
+    path: &str,
+    only_unscoped: bool,
+) -> Result<(), Value> {
+    let scope = scope_token(kind, path);
     let edited = kernel.edit_callable_by(&bridge.id, |cb| {
-        let mut set: BTreeSet<String> = cb
-            .get(&vid)
+        let held: Vec<String> = cb
+            .get(vid)
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect();
-        set.extend(own_grants.iter().map(|s| s.to_string()));
-        set.insert(scope);
-        let next = json!(set.into_iter().collect::<Vec<_>>());
-        if cb.get(&vid) == Some(&next) {
+        if only_unscoped && held.iter().any(|v| scope_of_token(v).is_some()) {
             return false;
         }
-        cb.insert(vid.clone(), next);
+        let mut set: BTreeSet<String> = held.into_iter().collect();
+        set.extend(grants(kind).iter().map(|s| s.to_string()));
+        set.insert(scope);
+        let next = json!(set.into_iter().collect::<Vec<_>>());
+        if cb.get(vid) == Some(&next) {
+            return false;
+        }
+        cb.insert(vid.to_string(), next);
         true
     });
-    if let Err(e) = edited {
+    edited.map(|_| ()).map_err(|e| {
         let mut r = rf::refusal(
             rf::INVALID_META,
             format!("open_view: the bridge did not take the grant for {vid:?}: {e}"),
         );
         rf::with(&mut r, "id", json!(vid));
-        return r;
-    }
-    json!({"id": vid, "kind": kind, "path": path, "created": true})
+        r
+    })
 }
 
 /// Is this record the view of `path` of this kind on this bridge?

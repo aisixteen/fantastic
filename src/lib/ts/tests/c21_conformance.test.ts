@@ -1,7 +1,7 @@
 // C21 — one semantics, many transports, MANY RUNTIMES.
 //
 // This driver replays the SHARED corpus (`contract/conformance/cases.json` at the repo
-// root) against the ts kernel. Python, rust and swift drivers replay the same
+// root) against the ts kernel. Python and rust drivers replay the same
 // file. Add a case there and every runtime is on the hook for it — which is the
 // whole point: a wire-visible contract is decidable from outside, so asserting
 // it once as DATA beats asserting it four times in four languages.

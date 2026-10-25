@@ -8,7 +8,7 @@ Two layers:
      id, so three backends loaded into ONE kernel share these dicts SAFELY —
      an ollama agent's id never collides with a vllm agent's id. `on_delete`
      drops an agent's rows. The PROVIDER is not state: it is built per turn
-     from the live record (`_build_provider`), as rust and swift build it.
+     from the live record (`_build_provider`), as rust builds it.
 
      There is NO backend-private task table: a `send` IS a kernel task (one
      `ps` row, `"<agent>:<n>"`), the generation runs INLINE in that dispatch,
@@ -3598,7 +3598,7 @@ def _make_send(cfg: Backend):
         # straight out of `acquire()`, and `async with`'s only cleanup is releasing a
         # lock it never took — the queue row stayed forever, so `status` reported a
         # phantom `others_pending` and every later caller's `ahead` was off by one.
-        # The dequeue is the acquire's own failure path; swift already does this.
+        # The dequeue is the acquire's own failure path.
         try:
             await lock.acquire()
         except BaseException:

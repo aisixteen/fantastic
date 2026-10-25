@@ -1,0 +1,235 @@
+[
+  {
+    "id": 0,
+    "type": "PipeWire:Interface:Core",
+    "version": 4,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "cookie": 1234567,
+      "user-name": "fantastic",
+      "host-name": "fantastic",
+      "version": "1.4.2",
+      "name": "pipewire-0",
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "core.name": "pipewire-0",
+        "object.id": 0
+      }
+    }
+  },
+  {
+    "id": 30,
+    "type": "PipeWire:Interface:Metadata",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "props": {
+      "metadata.name": "default",
+      "object.serial": 30
+    },
+    "metadata": [
+      {
+        "subject": 0,
+        "key": "default.configured.audio.sink",
+        "type": "Spa:String:JSON",
+        "value": {
+          "name": "alsa_output.pci-0000_00_1b.0.analog-stereo"
+        }
+      },
+      {
+        "subject": 0,
+        "key": "default.audio.sink",
+        "type": "Spa:String:JSON",
+        "value": {
+          "name": "alsa_output.pci-0000_00_1b.0.analog-stereo"
+        }
+      },
+      {
+        "subject": 0,
+        "key": "default.audio.source",
+        "type": "Spa:String:JSON",
+        "value": {
+          "name": "alsa_input.pci-0000_00_1b.0.analog-stereo"
+        }
+      }
+    ]
+  },
+  {
+    "id": 40,
+    "type": "PipeWire:Interface:Client",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "change-mask": [
+        "props"
+      ],
+      "props": {
+        "application.name": "pw-dump",
+        "application.process.binary": "pw-dump",
+        "client.api": "",
+        "object.id": 40
+      }
+    }
+  },
+  {
+    "id": 52,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "max-input-ports": 65,
+      "max-output-ports": 0,
+      "change-mask": [
+        "input-ports",
+        "output-ports",
+        "state",
+        "props",
+        "params"
+      ],
+      "n-input-ports": 2,
+      "n-output-ports": 0,
+      "state": "suspended",
+      "error": null,
+      "props": {
+        "media.class": "Audio/Sink",
+        "node.name": "alsa_output.pci-0000_00_1b.0.analog-stereo",
+        "node.description": "Built-in Audio Analog Stereo",
+        "object.id": 52,
+        "object.serial": 52
+      },
+      "params": {
+        "Props": [
+          {
+            "volume": 1.0,
+            "mute": false,
+            "channelVolumes": [
+              0.064,
+              0.064
+            ],
+            "channelMap": [
+              "FL",
+              "FR"
+            ],
+            "softMute": false
+          },
+          {
+            "params": []
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 53,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "state": "suspended",
+      "props": {
+        "media.class": "Audio/Sink",
+        "node.name": "alsa_output.pci-0000_00_1b.0.hdmi-stereo",
+        "node.description": "Built-in Audio Digital Stereo (HDMI)",
+        "object.id": 53
+      },
+      "params": {
+        "Props": [
+          {
+            "volume": 1.0,
+            "mute": true,
+            "channelVolumes": [
+              1.0,
+              1.0
+            ],
+            "channelMap": [
+              "FL",
+              "FR"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 54,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "state": "suspended",
+      "props": {
+        "media.class": "Audio/Source",
+        "node.name": "alsa_input.pci-0000_00_1b.0.analog-stereo",
+        "object.id": 54
+      },
+      "params": {
+        "Props": [
+          {
+            "volume": 1.0,
+            "mute": false,
+            "channelVolumes": [
+              0.125,
+              0.125
+            ],
+            "channelMap": [
+              "FL",
+              "FR"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": 60,
+    "type": "PipeWire:Interface:Node",
+    "version": 3,
+    "permissions": [
+      "r",
+      "w",
+      "x",
+      "m"
+    ],
+    "info": {
+      "state": "suspended",
+      "props": {
+        "media.class": "Video/Sink",
+        "node.name": "v4l2_output.platform-vivid.0",
+        "node.description": "Virtual Video Output",
+        "object.id": 60
+      },
+      "params": {}
+    }
+  }
+]

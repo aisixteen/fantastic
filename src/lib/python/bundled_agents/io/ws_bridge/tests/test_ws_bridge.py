@@ -1,8 +1,8 @@
 """ws_bridge — verbs + memory-transport round-trip + streaming.
 
 Tests use MemoryTransport (no network, no SSH, no real WS). The
-WS path is covered by integration tests (real Python ↔ Python and
-Python ↔ Swift over real websockets) at the repo root in
+WS path is covered by integration tests (real Python ↔ Python over
+real websockets) at the repo root in
 `integration_tests/`. MemoryTransport coverage here proves the
 framing + correlation + lifecycle paths; WSTransport on top is just
 a transport swap.
@@ -522,7 +522,7 @@ async def test_inbound_error_frame_fails_forward_promptly(two_kernels):
     dispatch RAISES (vs a verb-level error dict, which rides back as a
     `reply`). The bridge's read loop must fail the pending forward
     PROMPTLY with that error — not let it hang to the timeout. Regression
-    for the cross-runtime error-frame gap (rust handled it; py/swift
+    for the cross-runtime error-frame gap (rust handled it; py
     didn't)."""
     ka, _ = two_kernels
     rec_a = (
