@@ -1227,7 +1227,7 @@ fn one_shot_json(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
     serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not json ({e}): {stdout}"))
 }
 
-/// Lib request #3 — python `test_the_catalog_carries_each_backend_kinds_record_schema`:
+/// Lib request #3 — python `test_bundles_all_carries_a_published_record_schema`:
 /// a set-up page reads what a KIND's record takes before any agent of it exists —
 /// every field with required/type/enum/default/hint — a key included, as a
 /// `credentials` field (a store ref), never an environment variable — from the

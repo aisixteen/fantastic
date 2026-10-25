@@ -284,7 +284,7 @@ mod tests {
         wire
     }
 
-    /// python `test_a_path_with_no_slot_or_no_path_places_nothing`.
+    /// python `test_a_frame_with_no_path_places_nothing`.
     #[test]
     fn a_frame_with_no_path_places_nothing() {
         for head in [
@@ -297,7 +297,7 @@ mod tests {
         }
     }
 
-    /// python `test_a_malformed_path_off_the_wire_is_one_value_error`: every bad
+    /// python `test_a_malformed_path_off_the_wire_is_one_error`: every bad
     /// path is ONE error, `bad _binary_path <repr>: <why>`.
     #[test]
     fn a_malformed_path_off_the_wire_is_one_error() {

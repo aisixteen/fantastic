@@ -98,7 +98,7 @@ mod tests {
     /// The compare is over UTF-8 BYTES — any presented
     /// token is a plain allow/deny, and a non-ASCII group token admits its own
     /// holders. The python twin is
-    /// `test_ingress_password_compares_utf8_bytes_so_any_token_is_a_plain_answer`.
+    /// `test_password_compares_utf8_bytes_so_any_token_is_a_plain_answer`.
     #[test]
     fn password_compares_utf8_bytes_so_any_token_is_a_plain_answer() {
         let env = "FANTASTIC_GROUP_TOKEN_PW_UNIT_UTF8";
