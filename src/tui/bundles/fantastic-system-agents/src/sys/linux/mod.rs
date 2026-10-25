@@ -7,14 +7,17 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
-use super::{AudioOs, NetworkOs, NotificationsOs, OsError, PowerOs};
+use super::{AudioOs, DisplaysOs, NetworkOs, NotificationsOs, OsError, PowerOs};
 
 pub mod audio;
+pub mod displays;
+pub mod logind;
 pub mod network;
 pub mod notifications;
 pub mod power;
 
 pub use audio::LinuxAudio;
+pub use displays::LinuxDisplays;
 pub use network::LinuxNetwork;
 pub use notifications::LinuxNotifications;
 pub use power::LinuxPower;
@@ -66,6 +69,14 @@ pub async fn notifications() -> Arc<dyn NotificationsOs> {
     }
 }
 
+/// The displays port: `wlr-randr` in the compositor's environment, and logind on the system bus.
+pub async fn displays() -> Arc<dyn DisplaysOs> {
+    match system().await {
+        Ok(c) => Arc::new(LinuxDisplays::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
 /// The audio port: `pw-dump` and `wpctl` from `$PATH`. A missing tool is a port
 /// that says so on its first read.
 pub fn audio() -> Arc<dyn AudioOs> {
@@ -110,6 +121,19 @@ impl NotificationsOs for Absent {
         Err(self.0.clone())
     }
     fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::notifications::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl DisplaysOs for Absent {
+    async fn read(&self) -> Result<fantastic_system::displays::Read, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::displays::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::displays::Event> {
         tokio::sync::mpsc::channel(1).1
     }
 }

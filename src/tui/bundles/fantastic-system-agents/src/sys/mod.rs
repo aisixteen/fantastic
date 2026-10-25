@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use fantastic_system::{audio, network, notifications, power};
+use fantastic_system::{audio, displays, network, notifications, power};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -128,6 +128,28 @@ pub async fn notifications() -> Arc<dyn NotificationsOs> {
     #[cfg(target_os = "linux")]
     {
         linux::notifications().await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Arc::new(other::Unsupported)
+    }
+}
+
+/// The displays agent's port: `wlr-randr`, logind's brightness and the backlight files.
+#[async_trait::async_trait]
+pub trait DisplaysOs: Send + Sync {
+    /// `wlr-randr --json`, parsed, and the backlight devices.
+    async fn read(&self) -> Result<displays::Read, OsError>;
+    async fn call(&self, c: displays::Call) -> Result<(), OsError>;
+    /// There is no change stream (`wlr-randr` has none): the agent reads on its clock.
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<displays::Event>;
+}
+
+/// The real displays port of this OS.
+pub async fn displays() -> Arc<dyn DisplaysOs> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::displays().await
     }
     #[cfg(not(target_os = "linux"))]
     {

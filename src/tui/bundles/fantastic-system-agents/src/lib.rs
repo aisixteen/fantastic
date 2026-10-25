@@ -4,6 +4,7 @@
 //! `audio`.
 
 pub mod audio;
+pub mod displays;
 pub mod driver;
 pub mod network;
 pub mod notifications;
