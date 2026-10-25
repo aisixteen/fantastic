@@ -165,9 +165,9 @@ subtree's folder when under it, else a port). Only records are read, never
 rows. A secrets scan runs over the written folder; a hit deletes it and the
 export is refused (`secret_found`).
 
-Not yet: the canvas cell menu "Export…", a TUI command, the verb on the
-kernel's root, and owned files beyond the directive (an html view's body, a
-starter's `bundle.yaml`, code and panels). The import is below.
+Not yet: the canvas cell menu "Export…", the verb on the kernel's root, and
+owned files beyond the directive (an html view's body, a starter's
+`bundle.yaml`, code and panels). The import is below.
 
 ## Import a subtree
 
@@ -209,7 +209,17 @@ for a `callable_by`), so the copy reaches exactly what it was granted and what
 its ports were bound to. A failure deletes what was made (`failed`). The
 reply is `{imported, ids, parent_id, ports}`.
 
-Not yet: the canvas drop (a folder dragged onto a cell or the canvas), a TUI
-command, the verb on the kernel's root, `@path:*` ports, and owned files
+From a shell: `fantastic import <path> --parent <agent id> [--bind
+@port=agent id]… [--allow-code] [--approve]` calls the verb in the running
+kernel (attach-only, like `send`). It prints the preview (new ids, what each
+reaches, the ports, the code) and creates nothing; on a terminal it then asks
+`approve? [y/N]`, and `--approve` sends the approved call at once. Exit 0 for a
+preview or an import, 1 for a refusal (`refused (<reason>): <message>`), 2 for
+a bad command line. On the canvas, dropping a folder that holds
+`blueprint.yaml` onto a cell (the parent) or the canvas (the canvas's host
+node) shows the same preview with Approve/Cancel (code needs its own "allow
+code" tick) instead of opening the folder.
+
+Not yet: the verb on the kernel's root, `@path:*` ports, and owned files
 beyond the directive (a directive keeps its relative `system_prompt_file`; the
 file is not written into the new agent's folder).
