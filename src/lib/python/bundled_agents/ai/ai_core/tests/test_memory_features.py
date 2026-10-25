@@ -292,3 +292,25 @@ async def test_a_summary_cut_past_every_retry_fails_loud():
     with pytest.raises(fold_mod.FoldSummaryError, match="after 3 re-summarises"):
         await fold_mod._summarize(_sctx(s), _rows(), list(range(1, 6)))
     assert len(s.asked) == 1 + fold_mod.SUMMARY_RETRIES
+
+
+async def test_summary_body_falls_back_to_the_uncut_title():
+    long = "t" * 200
+
+    async def summarizer(msgs, max_tokens=None):
+        return long
+
+    rows = [{"role": "user", "id": 1, "content": "x" * 20_000}]
+    title, body, degraded = await fold_mod._summarize(_sctx(summarizer), rows, [0])
+    assert not degraded
+    assert len(title) == fold_mod.MAX_TITLE, "the TITLE is cut"
+    assert body == long, "the BODY is the uncut line"
+
+
+def test_a_given_summarys_title_is_its_first_line():
+    st = fold_mod.summary_title
+    assert st("TITLE\n\nbody") == "TITLE"
+    assert st('\n  \n"Quoted"\nbody') == "Quoted"
+    assert st("**bold**") == "bold"
+    assert st("   \n\n") == "(untitled)"
+    assert len(st("t" * (fold_mod.MAX_TITLE + 10))) == fold_mod.MAX_TITLE

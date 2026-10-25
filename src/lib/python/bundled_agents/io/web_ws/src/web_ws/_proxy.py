@@ -221,7 +221,7 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         # names the execution (the ledger's dedup/join/retry key). Reusing an
         # id DECLARES "same intent" — the recorded outcome returns, nothing
         # re-fires (double-click, racing tabs, retries). Mint a fresh id per
-        # intent; ":" is refused (minted namespace).
+        # intent (a name is only ever a name: the kernel mints the numeric pids).
         item = {"target": target, "payload": payload}
         if isinstance(fid, str) and fid:
             item["id"] = fid

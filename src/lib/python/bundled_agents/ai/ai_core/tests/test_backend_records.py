@@ -812,3 +812,46 @@ async def test_vllm_reflect_extras_with_every_knob_set(seeded_kernel):
         "kv",
     )
     assert list(r)[: len(_SHARED) + len(extra)] == list(_SHARED) + list(extra)
+
+
+def test_the_credentials_field_is_pythons():
+    from ai_core.schema import credentials_field
+
+    assert credentials_field(required=True) == {
+        "name": "credentials",
+        "type": "credentials",
+        "required": True,
+        "hint": "{store, ref}: the credential store and ref holding `api_key` — "
+        "read at each request, sent only to the ref's host",
+    }
+    keyless = credentials_field(required=False)
+    assert keyless["hint"] == (
+        "{store, ref}: the credential store and ref holding `api_key` — read at "
+        "each request, sent only to the ref's host; absent = no key (a keyless "
+        "server)"
+    )
+    assert keyless["required"] is False
+
+
+def test_a_credentials_value_must_be_store_and_ref():
+    from ai_core.schema import credentials_field
+
+    sch = schema([credentials_field(required=True)])
+    rec = {"memory_store_id": "m"}
+    shape = "credentials must be {store: <credential_store id>, ref: <ref>}"
+
+    def v(c):
+        return validate(sch, "x", {"credentials": c}, rec)
+
+    assert v({"store": "creds"}) == shape
+    assert v({"store": "creds", "ref": "r", "x": 1}) == shape
+    assert v("creds/r") == shape
+    assert (
+        v({"store": " ", "ref": "r"}) == "credentials.store must be a non-empty string"
+    )
+    assert (
+        v({"store": "creds", "ref": 5}) == "credentials.ref must be a non-empty string"
+    )
+    assert v({"store": "creds", "ref": "r"}) is None
+    # required: its absence is named with its hint
+    assert "missing: credentials —" in validate(sch, "x", {}, rec)

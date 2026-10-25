@@ -52,6 +52,19 @@ async def _slow_handler(id, payload, kernel):
                 [{"target": payload["next"], "payload": {"type": "slow"}}]
             )
         )[0]["result"]
+    if verb == "fork":
+        # Fork a long-lived job out of this dispatch, then reply at once: the job
+        # outlives the dispatch that spawned it.
+        async def _job():
+            _run_flag(id + ":job").set()
+            await asyncio.sleep(30)
+
+        return {"task_id": kernel.ctx.spawn_task(id, "job", _job())}
+    if verb == "chain_fork":
+        # A nested send whose callee forks a job, then this dispatch stays in
+        # flight (so the job's grandparent is alive to adopt it).
+        await kernel.send([{"target": payload["next"], "payload": {"type": "fork"}}])
+        await asyncio.sleep(30)
     if verb == "kill":
         # An AGENT cancelling another agent's work: discover via `ps`, then
         # `cancel`. Plain verbs — no special surface, no bundle coupling.
@@ -420,3 +433,79 @@ async def test_system_verb_signatures_are_reachable_from_the_doc_tree(seeded_ker
     )[0]["result"]
     body = doc["readme"]["body"]
     assert "task_id" in body and "handler_module" in body
+
+
+# ─── long-lived work: init-adoption + reachable by cancel ──────
+
+
+async def test_forked_work_outlives_its_dispatch_and_is_adopted_by_its_grandparent(
+    seeded_kernel,
+):
+    """Work can OUTLIVE the dispatch that spawned it (a job, a pump). The bundle
+    registers it with `spawn_task`, so `ps` sees it; when the dispatch that forked
+    it dies, the job is RE-PARENTED to that dispatch's parent (init-adoption,
+    exactly like Linux), which is what makes "cancel the message" also kill the
+    jobs that message spawned."""
+    a = await _mk(seeded_kernel, "slow_a", can_call={"slow_b": ["fork"]})
+    b = await _mk(seeded_kernel, "slow_b", callable_by={"slow_a": ["fork"]})
+
+    caller = asyncio.create_task(
+        seeded_kernel.send(
+            [{"target": a, "payload": {"type": "chain_fork", "next": b}}]
+        )
+    )
+    await asyncio.wait_for(_run_flag(b + ":job").wait(), timeout=2)
+    a_task = (await _row_for(seeded_kernel, a, "chain_fork"))["id"]
+    job = (await _row_for(seeded_kernel, b, "job"))["id"]
+
+    # The `fork` dispatch that spawned the job is GONE (it replied at once), but
+    # the job lives on, re-parented to the task that forked it.
+    for _ in range(300):
+        if await _row_for(seeded_kernel, b, "fork") is None:
+            break
+        await asyncio.sleep(0.01)
+    assert await _row_for(seeded_kernel, b, "fork") is None, "fork retired"
+    job_row = await _row_for(seeded_kernel, b, "job")
+    assert job_row is not None and job_row["id"] == job
+    assert job_row["parent"] == a_task, "init-adoption"
+
+    # Killing the OUTER task reaches the forked job through the adopted link.
+    r = (
+        await seeded_kernel.send(
+            [{"target": "kernel", "payload": {"type": "cancel", "task_id": a_task}}]
+        )
+    )[0]["result"]
+    assert r["cancelled"] is True
+    assert r["killed"] == [job, a_task]
+    assert job not in seeded_kernel.ctx.tasks
+    out = (await asyncio.wait_for(caller, timeout=2))[0]
+    assert out["result"] == {"cancelled": True}
+
+
+async def test_a_task_keeps_a_parent_that_has_already_ended(seeded_kernel):
+    """A task whose parent has already ended keeps NAMING it, never dropped to
+    `None`: a task put outside every subtree cannot be reached by `cancel` on the
+    caller that forked it, and `ps` would answer `parent: null` where the parent
+    dispatch is the one that spawned it."""
+    k = seeded_kernel.ctx
+    # The forking dispatch ended before the work it forked registered itself: the
+    # parent id is real, the parent task is gone.
+    dead = k.mint_id()
+    assert dead not in k.tasks, "never registered"
+    forked = k.mint_id()
+    work = asyncio.create_task(asyncio.sleep(30))
+    try:
+        k.register_task(
+            forked, "kernel_state", "tick_loop", work, parent=dead, forked=True
+        )
+
+        row = next(r for r in (await _rows(seeded_kernel)) if r["id"] == forked)
+        assert row["parent"] == dead, "the id survives the parent: None is a root"
+        # And it is therefore NOT a root, so the shutdown sweep leaves it to the
+        # subtree it belongs to.
+        out = await k.shutdown_agents()
+        assert forked not in out["cancelled"], out
+        assert forked in k.tasks
+    finally:
+        k.draining = False
+        work.cancel()

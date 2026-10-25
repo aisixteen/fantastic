@@ -665,3 +665,168 @@ def test_caching_none_and_cleanup_pass_and_provider_cache_is_refused_naming_resp
         "caching='always' is not one of the legal values: "
         "none, cleanup, provider_cache"
     )
+
+
+# ── twins of the rust responses_backend tests (#170) ─────────────────────────
+
+
+def test_to_responses_matches_python():
+    from responses_backend.provider import _to_responses
+
+    ins, items = _to_responses(
+        [
+            {"role": "system", "content": "first"},
+            {"role": "system", "content": "last wins"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": ""},
+            {"role": "tool", "content": "dropped"},
+        ]
+    )
+    assert ins == "last wins"
+    assert items == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hi"}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "(no content)"}],
+        },
+    ]
+    ins, _ = _to_responses([{"role": "system", "content": ""}])
+    assert ins is None  # a falsy system block means no `instructions` key
+
+
+async def _make_responses(kernel, transport):
+    """A responses agent on the real provider, its transport and key stubbed."""
+    from _testkit import ensure_memory
+
+    store = ensure_memory(kernel)
+    can_call = {"cli": "*", store: "*"}
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": "kernel_state",
+                        "handler_module": "responses_backend.tools",
+                        "endpoint": EP,
+                        "model": "test-model",
+                        "can_call": can_call,
+                        "memory_store_id": store,
+                        "credentials": {"store": "s", "ref": "r"},
+                        "stream_idle_seconds": 0.2,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    aid = rec["id"]
+    for target in can_call:
+        tgt = kernel.ctx.agents.get(target)
+        cb = dict(tgt._meta.get("callable_by") or {}) if tgt is not None else {}
+        cb[aid] = "*"
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {"type": "update_agent", "id": target, "callable_by": cb},
+                }
+            ]
+        )
+    return aid
+
+
+@pytest.fixture
+def stubbed_provider(monkeypatch):
+    """Hand every kernel-built ResponsesProvider a transport and a key."""
+    from responses_backend import provider as rp
+    from responses_backend import tools as rt
+
+    box: dict = {}
+    real_init = rp.ResponsesProvider.__init__
+
+    def init(self, *a, **kw):
+        kw["transport"] = box["transport"]
+        real_init(self, *a, **kw)
+
+    monkeypatch.setattr(rp.ResponsesProvider, "__init__", init)
+    monkeypatch.setattr(rt, "key_reader", lambda *a, **kw: _key)
+    return box
+
+
+async def test_reflect_sentence_is_python_verbatim(
+    seeded_kernel, store_agent, stubbed_provider
+):
+    stubbed_provider["transport"] = None
+    aid = await _make_responses(seeded_kernel, None)
+    r = (await seeded_kernel.send([{"target": aid, "payload": {"type": "reflect"}}]))[
+        0
+    ]["result"]
+    assert r["sentence"] == (
+        "OpenAI Responses-API LLM agent (raw prompt-and-parse tool-calling)."
+    )
+    assert r["model"] == "test-model"
+    assert r["endpoint"] == EP
+
+
+async def test_send_streams_tokens_raw_on_both_channels(
+    seeded_kernel, store_agent, stubbed_provider
+):
+    sse = _sse(
+        {"type": "response.created", "response": {"status": "in_progress"}},
+        {"type": "response.reasoning_text.delta", "delta": "pondering"},
+        {"type": "response.output_text.delta", "delta": "hel"},
+        {"type": "response.output_text.delta", "delta": "lo"},
+        _done(),
+    )
+    stubbed_provider["transport"] = httpx.MockTransport(
+        lambda req: httpx.Response(200, text=sse)
+    )
+    aid = await _make_responses(seeded_kernel, None)
+    events: list[dict] = []
+    unsub = seeded_kernel.add_state_subscriber(events.append)
+    try:
+        r = (
+            await seeded_kernel.send(
+                [{"target": aid, "payload": {"type": "send", "text": "hi"}}]
+            )
+        )[0]["result"]
+    finally:
+        unsub()
+    tokens = "".join(
+        e["payload"]["text"]
+        for e in events
+        if e.get("kind") == "send"
+        and e["agent_id"] == "cli"
+        and e["payload"].get("type") == "token"
+    )
+    assert tokens == "<think>pondering</think>hello", "streamed raw, both channels"
+    # the reply is the RAW text; only the stored assistant row is stripped
+    assert r.get("final") == "<think>pondering</think>hello", r
+
+
+async def test_an_endpoint_that_never_answers_fails_after_the_idle_window():
+    """No response headers ever arrive: the handler raises ReadTimeout before any
+    response, and the turn fails naming the stall (#177)."""
+    from ai_core.provider import ProviderError
+
+    def never(req: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no headers", request=req)
+
+    p = ResponsesProvider(
+        endpoint=EP,
+        model="m",
+        key=_key,
+        transport=httpx.MockTransport(never),
+        stream_idle=0.2,
+    )
+    with pytest.raises(ProviderError) as e:
+        await _drain(p)
+    assert e.value.transport is True
+    assert "stream_stalled" in str(e.value)
+    assert "sent no bytes for 0.2s" in str(e.value)

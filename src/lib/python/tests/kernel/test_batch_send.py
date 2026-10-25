@@ -18,7 +18,7 @@ import types
 
 from kernel._kernel import Kernel
 from kernel import register_unlisted
-from _testkit import wire
+from _testkit import as_agent, wire
 
 # A SELF-OWNED slow bundle. Importing test_task_table's would share its module
 # state, and under xdist the import can be a SECOND instance of that module —
@@ -566,3 +566,165 @@ async def test_the_whole_batch_is_visible_in_ps_before_the_first_await(seeded_ke
     )
     assert rows == 2, "the batch did not appear whole in ps"
     await batch
+
+
+# ─── Rust twins (#170): each `test_<rust test name>` asserts what the Rust test does ─
+
+_twin_runs: list[str] = []
+
+
+async def _twin_handler(id, payload, kernel):
+    verb = payload.get("type")
+    if verb in ("boot", "shutdown"):
+        return None
+    if verb == "reflect":
+        if id in _slow_reflect:
+            await asyncio.sleep(_slow_reflect[id])
+        return {"id": id, "sentence": "batch twin probe", "verbs": {}}
+    if verb == "fast":
+        return {"ok": True}
+    if verb == "slow":
+        await asyncio.sleep(30)
+        return {"finished": True}
+    if verb == "raised_reply":
+        _twin_runs.append(id)
+        return {"error": "relayed peer failure", "raised": True}
+    return {"error": f"unknown verb {verb!r}"}
+
+
+_slow_reflect: dict[str, float] = {}
+_twin_mod = types.ModuleType("batch_twin_probe.tools")
+_twin_mod.handler = _twin_handler
+_twin_mod.VERBS = {}
+register_unlisted("batch_twin_probe.tools", _twin_mod)
+
+
+async def _twin_mk(kernel, agent_id: str, **meta) -> str:
+    rec = (
+        await kernel.send(
+            [
+                {
+                    "target": "kernel_state",
+                    "payload": {
+                        "type": "create_agent",
+                        "parent_id": kernel.id,
+                        "handler_module": "batch_twin_probe.tools",
+                        "id": agent_id,
+                        **meta,
+                    },
+                }
+            ]
+        )
+    )[0]["result"]
+    assert rec.get("id") == agent_id, rec
+    return agent_id
+
+
+async def test_a_name_that_looks_like_an_old_pid_is_just_a_name(seeded_kernel):
+    """THERE IS NO PID NAMESPACE: a caller supplies only NAMES, so an id shaped
+    `<agent>:<hex>` collides with nothing and is refused nothing -- an ordinary named
+    execution that completes with a minted pid."""
+    a = await _twin_mk(seeded_kernel, "b_ns")
+    out = await seeded_kernel.send(
+        [{"target": a, "payload": {"type": "fast"}, "id": "b_ns:deadbeef"}]
+    )
+    assert out[0]["status"] == "completed", out
+    assert out[0]["name"] == "b_ns:deadbeef"
+    assert isinstance(out[0]["pid"], int) and out[0]["pid"] > 0
+
+
+async def test_an_empty_batch_is_an_empty_answer(seeded_kernel):
+    assert await seeded_kernel.send([]) == []
+
+
+async def test_a_returned_raised_dict_settles_errored_not_failed(seeded_kernel):
+    """FAILED only when the handler RAISES; a returned dict -- even
+    `{error, raised: true}`, a relayed peer's answer -- settles ERRORED: not retried,
+    not a dead letter."""
+    _twin_runs.clear()
+    a = await _twin_mk(seeded_kernel, "b_raised")
+    out = (
+        await seeded_kernel.send(
+            [{"target": a, "payload": {"type": "raised_reply"}, "retries": 2}]
+        )
+    )[0]
+    assert out["status"] == "errored", out
+    assert out["result"]["raised"] is True
+    assert len(_twin_runs) == 1, "an errored reply is never retried"
+    assert seeded_kernel.ctx.executions[out["pid"]]["attempts"] == 1
+
+
+async def test_the_unnamed_kernel_reflect_honours_its_timeout(seeded_kernel):
+    """Even the pid-less identity read runs under the deadline: on expiry it is
+    cancelled and settles `timed_out` with `task_id: "-"`."""
+    await _twin_mk(seeded_kernel, "b_slow_reflect")
+    _slow_reflect["b_slow_reflect"] = 5
+    try:
+        t0 = time.monotonic()
+        out = (
+            await seeded_kernel.send(
+                [{"target": "kernel", "payload": {"type": "reflect"}, "timeout": 0.1}]
+            )
+        )[0]
+    finally:
+        _slow_reflect.pop("b_slow_reflect", None)
+    assert time.monotonic() - t0 < 3, "the deadline was ignored"
+    assert out["status"] == "timed_out", out
+    assert out["pid"] is None
+    assert out["result"]["reason"] == "timeout"
+    assert out["result"]["task_id"] == "-"
+    assert out["result"]["error"] == (
+        "send: kernel_state 'reflect' exceeded its 0.1s timeout; task cancelled"
+    )
+
+
+async def test_timeout_prose_and_row_keep_the_number_the_caller_gave(seeded_kernel):
+    """`f"{timeout}s"` keeps the caller's number: an int prints `1s`, a float `0.1s`
+    / `1e-07s`; the call row stores the value as given."""
+    a = await _twin_mk(seeded_kernel, "b_prose")
+    out = await seeded_kernel.send(
+        [
+            {"target": a, "payload": {"type": "slow"}, "timeout": 1},
+            {"target": a, "payload": {"type": "slow"}, "timeout": 1e-7},
+            {"target": a, "payload": {"type": "slow"}, "timeout": 0.1},
+        ]
+    )
+    text = [o["result"]["error"] for o in out]
+    assert text[0] == "send: b_prose 'slow' exceeded its 1s timeout; task cancelled"
+    assert text[1] == "send: b_prose 'slow' exceeded its 1e-07s timeout; task cancelled"
+    assert text[2] == "send: b_prose 'slow' exceeded its 0.1s timeout; task cancelled"
+    row = seeded_kernel.ctx.rows[out[0]["pid"]]
+    assert row["timeout"] == 1 and isinstance(row["timeout"], int), row
+    assert seeded_kernel.ctx.rows[out[1]["pid"]]["timeout"] == 1e-7
+
+
+async def test_a_dead_letter_of_a_departed_caller_is_announced_on_the_root(
+    seeded_kernel,
+):
+    """`announce_deadletter` fans out directly, never gated; when the caller has left
+    the tree the src falls back to the root, so a watcher of the root still hears it."""
+    k = seeded_kernel
+    caller = await _twin_mk(k, "dl_caller")
+    child = await _twin_mk(k, "dl_child")
+    wire(k, caller, child)
+    inbox = k.ctx.ensure_inbox("tap_deadletter")
+    assert k.watch(k.id, "tap_deadletter") is None
+    with as_agent(k, caller):
+        call = asyncio.create_task(
+            k.send(
+                [{"target": child, "payload": {"type": "slow"}, "timeout": 0.3}]
+            )
+        )
+        await asyncio.sleep(0.05)
+        # The caller leaves the index while its call is in flight.
+        k.ctx.agents.pop(caller)
+        out = (await call)[0]
+    assert out["status"] == "timed_out", out
+    announced = []
+    while not inbox.empty():
+        item = inbox.get_nowait()
+        if item.get("type") == "on_deadletter":
+            announced.append(item)
+    assert announced, "the dead letter was announced on the root"
+    assert announced[0]["caller"] == "dl_caller"
+    assert announced[0]["status"] == "timed_out"

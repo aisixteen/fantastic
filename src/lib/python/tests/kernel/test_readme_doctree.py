@@ -281,6 +281,27 @@ async def test_root_reflect_full_carries_readmes_and_docs(kernel):
     assert "keyed doc tree" in r["docs"] and "readme" in r["docs"]
 
 
+async def test_full_root_frame_key_order_is_pythons(kernel):
+    """The FULL frame's key order is part of the wire: runtime, env, version, then
+    persistence, guid, readmes, docs, self_extension."""
+    r = (
+        await kernel.send(
+            [{"target": "kernel", "payload": {"type": "reflect", "detail": "full"}}]
+        )
+    )[0]["result"]
+    frame = (
+        "runtime",
+        "env",
+        "version",
+        "persistence",
+        "guid",
+        "readmes",
+        "docs",
+        "self_extension",
+    )
+    assert [k for k in r if k in frame] == list(frame), list(r)
+
+
 async def test_distilled_default_keeps_self_extension_ACTIONABLE(kernel):
     """THE SAFETY PROPERTY OF THE DIET.
 
