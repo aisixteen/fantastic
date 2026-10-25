@@ -373,8 +373,49 @@ fn in_session(leader: u32) -> Vec<u32> {
     crate::sys::job_members(leader)
 }
 
+/// Is `pid` a process that can still run? A killed process nobody has reaped yet
+/// (a zombie: its parent is a dead shell and init has not collected it, or the
+/// pump has not yet awaited the leader) still answers `kill(pid, 0)`, but it is
+/// dead — so on Linux a zombie does not count.
 fn exists(pid: u32) -> bool {
-    fantastic_kernel::lock::pid_alive(pid)
+    fantastic_kernel::lock::pid_alive(pid) && !is_zombie(pid)
+}
+
+/// `/proc/<pid>/stat` state `Z`; the state follows the `)` closing the command name.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            s.rsplit_once(')')
+                .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_zombie(_pid: u32) -> bool {
+    false
+}
+
+/// A process that has exited but is not yet reaped is not `exists`.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unreaped_zombie_does_not_exist() {
+    let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+    let pid = child.id();
+    for _ in 0..100 {
+        if is_zombie(pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        fantastic_kernel::lock::pid_alive(pid),
+        "zombie still answers kill 0"
+    );
+    assert!(!exists(pid));
+    child.wait().unwrap();
 }
 
 /// A shell puts each job it starts in its OWN process group inside the PTY
