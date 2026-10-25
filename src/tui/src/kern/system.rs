@@ -1,5 +1,6 @@
 //! THE SYSTEM AGENTS (`fantastic [canvas] system`, Linux): the machine's basics
-//! as agents under `user` — `power` and `audio` so far (`fantastic-system-agents`). Made
+//! as agents under `user` — `power`, `network`, `audio`, `displays`, `notifications` and
+//! `lock` (`fantastic-system-agents`; `lock` is `user`'s alone, `kern/reach`). Made
 //! when the recipe is named, each with its own html view, re-set on every such
 //! boot so a new build's view replaces the old one. The OS connections are the
 //! bundle's: made once per process on first use (`sys/linux`), and an agent
@@ -41,8 +42,8 @@ mod tests {
     use super::*;
     use crate::env::ClientCfg;
     use fantastic_kernel::{Agent, AgentId, Kernel};
-    use fantastic_system::{audio, power};
-    use fantastic_system_agents::sys::{AudioOs, OsError, PowerOs};
+    use fantastic_system::{audio, displays, lock, network, notifications, power};
+    use fantastic_system_agents::sys::{AudioOs, DisplaysOs, LockOs, NetworkOs, NotificationsOs, OsError, PowerOs};
     use serde_json::Map;
     use std::sync::Arc;
 
@@ -78,6 +79,73 @@ mod tests {
         }
     }
 
+    /// A network port with nothing behind it.
+    struct NothingNetwork;
+
+    #[async_trait::async_trait]
+    impl NetworkOs for NothingNetwork {
+        async fn read(&self) -> Result<network::Read, OsError> {
+            Err(OsError::Unavailable("org.freedesktop.NetworkManager is not on the system bus".into()))
+        }
+        async fn call(&self, _c: network::Call) -> Result<(), OsError> {
+            Err(OsError::Unavailable("no".into()))
+        }
+        fn changes(&self) -> tokio::sync::mpsc::Receiver<network::Event> {
+            tokio::sync::mpsc::channel(1).1
+        }
+    }
+
+    /// A notifications port with nothing behind it.
+    struct NothingNotifications;
+
+    #[async_trait::async_trait]
+    impl NotificationsOs for NothingNotifications {
+        async fn request(&self) -> Result<notifications::Ownership, OsError> {
+            Err(OsError::Unavailable("the session bus is not reachable".into()))
+        }
+        async fn call(&self, _c: notifications::Call) -> Result<(), OsError> {
+            Err(OsError::Unavailable("no".into()))
+        }
+        fn changes(&self) -> tokio::sync::mpsc::Receiver<notifications::Event> {
+            tokio::sync::mpsc::channel(1).1
+        }
+    }
+
+    /// A displays port with nothing behind it.
+    struct NothingDisplays;
+
+    #[async_trait::async_trait]
+    impl DisplaysOs for NothingDisplays {
+        async fn read(&self) -> Result<displays::Read, OsError> {
+            Err(OsError::Unavailable("wlr-randr is not installed".into()))
+        }
+        async fn call(&self, _c: displays::Call) -> Result<(), OsError> {
+            Err(OsError::Unavailable("no".into()))
+        }
+        fn changes(&self) -> tokio::sync::mpsc::Receiver<displays::Event> {
+            tokio::sync::mpsc::channel(1).1
+        }
+    }
+
+    /// A lock port with nothing behind it.
+    struct NothingLock;
+
+    #[async_trait::async_trait]
+    impl LockOs for NothingLock {
+        async fn read(&self) -> Result<lock::Read, OsError> {
+            Err(OsError::Unavailable("org.freedesktop.login1 is not on the system bus".into()))
+        }
+        async fn check_pin(&self, _pin: lock::Pin) -> Result<bool, OsError> {
+            Err(OsError::Unavailable("no".into()))
+        }
+        async fn call(&self, _c: lock::Call) -> Result<(), OsError> {
+            Err(OsError::Unavailable("no".into()))
+        }
+        fn changes(&self) -> tokio::sync::mpsc::Receiver<lock::Event> {
+            tokio::sync::mpsc::channel(1).1
+        }
+    }
+
     async fn host(dir: &std::path::Path) -> Host {
         let mut kernel = Kernel::new();
         kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
@@ -89,6 +157,22 @@ mod tests {
         kernel.bundles.register(
             fantastic_system_agents::audio::HANDLER_MODULE,
             fantastic_system_agents::audio::AudioBundle::with_port(Arc::new(NothingAudio)),
+        );
+        kernel.bundles.register(
+            fantastic_system_agents::network::HANDLER_MODULE,
+            fantastic_system_agents::network::NetworkBundle::with_port(Arc::new(NothingNetwork)),
+        );
+        kernel.bundles.register(
+            fantastic_system_agents::notifications::HANDLER_MODULE,
+            fantastic_system_agents::notifications::NotificationsBundle::with_port(Arc::new(NothingNotifications)),
+        );
+        kernel.bundles.register(
+            fantastic_system_agents::displays::HANDLER_MODULE,
+            fantastic_system_agents::displays::DisplaysBundle::with_port(Arc::new(NothingDisplays)),
+        );
+        kernel.bundles.register(
+            fantastic_system_agents::lock::HANDLER_MODULE,
+            fantastic_system_agents::lock::LockBundle::with_port(Arc::new(NothingLock)),
         );
         let kernel = Arc::new(kernel);
         let root = Agent::new(
@@ -155,7 +239,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn ensure_makes_audio_under_user_with_its_view_and_one_instance() {
-        assert_eq!(ids(), ["power", "audio"], "the tiles the presets list");
+        assert_eq!(
+            ids(),
+            ["power", "network", "audio", "displays", "notifications", "lock"],
+            "the tiles the presets list"
+        );
         let dir = std::env::temp_dir().join(format!("fc-system-ensure-audio-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -180,6 +268,41 @@ mod tests {
             1,
             "one audio agent, not two"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ensure_makes_all_six_agents_each_with_its_view_and_one_instance() {
+        let dir = std::env::temp_dir().join(format!("fc-system-ensure-six-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = host(&dir).await;
+        ensure(&h).await.unwrap();
+        ensure(&h).await.unwrap();
+        assert_eq!(fantastic_system_agents::IDS.len(), 6);
+        for (id, module) in fantastic_system_agents::IDS.iter().zip(fantastic_system_agents::HANDLER_MODULES) {
+            let rec = h.kernel.agents.get(&AgentId::from(*id)).unwrap_or_else(|| panic!("{id} exists")).value().record();
+            assert_eq!(rec.parent_id.as_deref(), Some(h.cfg.user.as_str()), "{id} is under user");
+            assert_eq!(rec.handler_module.as_deref(), Some(module), "{id}");
+            let view = meta(&h, id, "view").unwrap_or_else(|| panic!("{id} has a view"));
+            assert_eq!(view["kind"], "html", "{id}");
+            assert!(view["bytes"].as_str().unwrap().contains("fantastic.watch"), "{id}: the page's html");
+            assert_eq!(view["calls"], json!(fantastic_system_agents::verbs(id)), "{id}: the view may call its verbs");
+            assert_eq!(meta(&h, id, "callable_by").unwrap()[h.cfg.user.as_str()], json!(fantastic_system_agents::verbs(id)), "{id}: the user's grant");
+            assert_eq!(meta(&h, id, "display_name"), Some(json!(id)));
+            assert_eq!(
+                h.kernel.agents.iter().filter(|a| a.value().record().handler_module.as_deref() == Some(module)).count(),
+                1,
+                "one {id}, not two"
+            );
+        }
+        // each view draws state and sends intents: it names no host call of its own
+        for id in fantastic_system_agents::IDS {
+            let html = fantastic_system_agents::view(id).unwrap();
+            assert!(html.contains("fantastic.watch(ID"), "{id} watches its state");
+            assert!(html.contains("fantastic.send(ID"), "{id} sends to itself only");
+            assert!(!html.contains("fantastic.send(\"") && !html.contains("fantastic.send('"), "{id} sends only to its own id");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

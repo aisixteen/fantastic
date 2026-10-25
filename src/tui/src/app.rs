@@ -298,9 +298,12 @@ impl App {
             },
             // the terminal `run` made (with the canvas the program is a cell there)
             Recipe::Run => (self.trows.iter().position(|t| t.id == TERM_ID), Focus::Term),
-            // the machine's agents: the first one present
+            // the machine's agents: `network`, else the first one present
             Recipe::System => (
-                self.trows.iter().position(|t| fantastic_system_agents::IDS.contains(&t.id.as_str())),
+                self.trows
+                    .iter()
+                    .position(|t| t.id == fantastic_system_agents::network::ID)
+                    .or_else(|| self.trows.iter().position(|t| fantastic_system_agents::IDS.contains(&t.id.as_str()))),
                 Focus::Panel,
             ),
         };

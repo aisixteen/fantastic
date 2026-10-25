@@ -21,7 +21,8 @@ os/
   session/          the fantastic-session package's tree (installed paths)
   mkosi/            the image: mkosi.conf, one kernel per architecture, the ci profile
   container/        the server image: Containerfile, fantastic-server (its entrypoint)
-  ci/               boot_check.py: boots the image in QEMU and checks the kiosk;
+  ci/               qemu.py: QEMU, the guest agent and the /user/ws client (shared);
+                    boot_check.py: boots the image in QEMU and checks the kiosk;
                     container_check.py: smoke-tests the server image under Docker and Podman
 scripts/build/deb.sh        the app's .deb and fantastic-session into dist/deb/
 scripts/build/os.sh         the image into dist/os/
@@ -73,9 +74,9 @@ sudo sh scripts/build/os.sh --arch x86-64 --profile ci   # + a serial console, s
 The image is a UEFI disk (systemd-boot), x86_64 first, then arm64 (UEFI arm64:
 QEMU `virt` and UEFI boards; Raspberry Pi firmware is not covered). It has no
 root password, no SSH and no `Autologin=`: mkosi's would log root in on the
-consoles and fight the kiosk for tty1. NetworkManager (wired DHCP) and PipeWire
-are in the image, for the system agents of a later phase; they are not Depends of
-`fantastic-session`, so a server install stays small.
+consoles and fight the kiosk for tty1. NetworkManager (wired DHCP), PipeWire,
+UPower and `wlr-randr` are in the image, for the system agents; they are not
+Depends of `fantastic-session`, so a server install stays small.
 
 mkosi installs no Recommends, so `fantastic-session` depends on what the kiosk
 needs: `cage`, `libgl1-mesa-dri` (WebKit's EGL) and `fonts-dejavu-core`.
@@ -158,7 +159,7 @@ belongs to the app.
 | the app | `/usr/bin/fantastic-app --kiosk` | the home kernel in-process, its web host on 127.0.0.1, the run file `~/.fantastic/app/home.yaml`, the Home page in one window |
 | the canvases | `/usr/bin/fantastic`, the app's sidecar | each opened folder's kernel and page, on 127.0.0.1; they outlive a restart of the kiosk (`KillUserProcesses=no`) |
 | no blanking | kernel default, `consoleblank=0`, logind `IdleAction=ignore` | the screen stays on |
-| the system canvas | `fantastic-system.service`, a user unit (`ConditionUser=fantastic`, `Type=notify`), `upower` | the machine's agents (`fantastic canvas system`), see below; `audio` uses the image's PipeWire, WirePlumber (`wpctl`) and `pw-dump` |
+| the system canvas | `fantastic-system.service`, a user unit (`ConditionUser=fantastic`, `Type=notify`), `upower`, `wlr-randr` | the machine's agents (`fantastic canvas system`), see below; `audio` uses the image's PipeWire, WirePlumber (`wpctl`) and `pw-dump`; `displays` needs `wlr-randr` (the system canvas sets `WAYLAND_DISPLAY`) |
 
 `Restart=always` brings the kiosk back 2 s after the app quits or crashes, with
 no start-rate limit. The unit sets `SHELL` through the user's passwd entry
@@ -167,10 +168,12 @@ prints, and fails without it.
 
 ### The system canvas
 
-The machine's basics as agents an AI calls like any other (`power` and `audio`
-so far: battery and lid over UPower, power off / reboot / suspend / hibernate
-over logind; PipeWire's sinks and sources, volume, mute and default over
-`pw-dump` and `wpctl`; `fantastic readme system`) live in one ordinary fantastic folder,
+The machine's basics as agents an AI calls like any other (`power`, `network`,
+`audio`, `displays`, `notifications` and `lock`: battery and power controls over
+UPower and logind; NetworkManager's devices and Wi-Fi; PipeWire's sinks and sources
+over `pw-dump` and `wpctl`; the compositor's outputs over `wlr-randr` and the
+backlight over logind; the session's notification server; the PIN lock screen;
+`fantastic readme system`) live in one ordinary fantastic folder,
 `/home/fantastic/system`, whose kernel runs `fantastic canvas system` as a
 systemd **user** unit, `fantastic-system.service`. The Home lists it as `system`;
 its page holds the cells, placed from the host tiles.
@@ -192,6 +195,9 @@ its page holds the cells, placed from the host tiles.
 - **Polkit.** There is no polkit agent, so every `auth_*` answer is a refusal. The
   rule grants the user `fantastic`, whatever the state of the kiosk session,
   NetworkManager's actions and logind's power off, reboot, suspend and hibernate.
+- **The lock.** The Home page covers itself while `lock` says locked; it dials this
+  canvas's socket, whose `web` record lets the Home's origin in (read from
+  `~/.fantastic/app/home.yaml`). A UI lock, not a security boundary.
 - **Purge** removes the unit's link and keeps `/home/fantastic/system`: it is the
   user's data, like the user.
 - **The Home's actions on this row.** `stop` is a restart (SIGTERM; systemd starts it
@@ -351,3 +357,10 @@ the screen is not blank and changes when a canvas page opens; a canvas started
 from the kiosk runs on the sidecar; and after SIGTERM to the app the kiosk comes
 back (`NRestarts` + 1, a new pid), the canvas keeps its pid and is adopted, and
 the page checks pass again.
+
+The Wi-Fi fixture of the system canvas's network checks is in the `ci` profile only:
+`fantastic-ci-hwsim.service` loads `mac80211_hwsim` with two radios and runs hostapd
+(`/etc/hostapd/fantastic-ci.conf`) on `wlan1`, the WPA2 network `fantastic-ci`
+(passphrase `fantastic-ci-psk`); NetworkManager leaves `wlan1` alone
+(`90-ci-hwsim.conf`) and `wlan0` sees the network. Debian's generic kernel builds the
+module; a kernel without it skips the unit.

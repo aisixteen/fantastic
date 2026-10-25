@@ -12,7 +12,7 @@ import { aiView } from "../ai_view/ai_view.ts";
 import { setupView } from "../setup_view/setup_view.ts";
 import { reflectView } from "../reflect_view/reflect_view.ts";
 import { streamView } from "../stream_view/stream_view.ts";
-import { CODING_AGENTS, exactLine, openActionPopup, tiles } from "./action_popup.ts";
+import { CODING_AGENTS, exactLine, openActionPopup, systemTileSize, tiles } from "./action_popup.ts";
 import { SELECTOR, SELECTOR_PREFIX, setSelectorHost } from "./selector_agent.ts";
 import { ROOT_VIEW, VIEW, VIEW_VERBS, grantViewLists, hostViewCell } from "./canvas_agent.ts";
 import { containerOf, hashFor, isContainer, onMac, pathTo, viewFromHash } from "./viewer.ts";
@@ -1953,8 +1953,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
           const e = (r[0]?.result as Rec | null)?.["error"];
           if (typeof e === "string") toast(`✕ ${e}`);
         });
-        // THE MACHINE'S AGENTS (`system` recipe): the agent's own html view, 380x420
-        else if (p.kind === "system") void kernel.send([{ target: containerNow(), payload: { type: "place", backend_id: p.id, x: Math.round(w.x), y: Math.round(w.y), width: 380, height: 420 } as unknown as Payload }]).then((r) => {
+        // THE MACHINE'S AGENTS (`system` recipe): the agent's own html view, 380x420 (`network`: 640x480)
+        else if (p.kind === "system") void kernel.send([{ target: containerNow(), payload: { type: "place", backend_id: p.id, x: Math.round(w.x), y: Math.round(w.y), ...systemTileSize(p.id) } as unknown as Payload }]).then((r) => {
           const e = (r[0]?.result as Rec | null)?.["error"];
           if (typeof e === "string") toast(`✕ ${e}`);
         });

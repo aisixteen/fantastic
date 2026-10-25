@@ -279,6 +279,15 @@ jobs:
       - name: the CLI
         if: matrix.e2e == ''
         run: sh scripts/build/cli.sh --profile ${{ inputs.profile }} --target ${{ matrix.target }}
+      # the binary is static musl (the OS image and the server image run it): zbus
+      # (the system agents' D-Bus client) and argon2 are pure Rust, no C library.
+      # `file` calls a static PIE (rustc's musl default) "static-pie linked".
+      - name: the binary is statically linked
+        if: contains(matrix.target, 'musl')
+        run: |
+          bin=src/target/${{ matrix.target }}/${{ inputs.profile }}/fantastic
+          file "$bin"
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
       - name: keep the shipping archive
         uses: actions/upload-artifact@v7
         with:
@@ -328,6 +337,15 @@ jobs:
           key: ${{ matrix.target }}-${{ inputs.profile }}
       - name: the CLI
         run: sh scripts/build/cli.sh --profile ${{ inputs.profile }} --target ${{ matrix.target }}
+      # the binary is static musl (the OS image and the server image run it): zbus
+      # (the system agents' D-Bus client) and argon2 are pure Rust, no C library.
+      # `file` calls a static PIE (rustc's musl default) "static-pie linked".
+      - name: the binary is statically linked
+        if: contains(matrix.target, 'musl')
+        run: |
+          bin=src/target/${{ matrix.target }}/${{ inputs.profile }}/fantastic
+          file "$bin"
+          file "$bin" | grep -Eq 'statically linked|static-pie linked'
       - name: keep the shipping archive
         uses: actions/upload-artifact@v7
         with:

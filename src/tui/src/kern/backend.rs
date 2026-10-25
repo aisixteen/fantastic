@@ -823,6 +823,27 @@ mod create_tests {
     }
 
     #[tokio::test]
+    async fn system_tiles_list_matches_ids() {
+        let (h, dir) = host("system-tiles", &[]).await;
+        // none made here: none offered
+        assert!(BackendBundle::system_agents(&h).is_empty());
+        // all made: the tiles are the agents' ids, in order
+        for id in crate::kern::system::ids() {
+            let out = h
+                .operator("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": id, "handler_module": fantastic_core::HANDLER_MODULE}))
+                .await;
+            assert!(out.result.get("error").is_none(), "{id}: {:?}", out.result);
+        }
+        assert_eq!(BackendBundle::system_agents(&h), crate::kern::system::ids());
+        assert_eq!(BackendBundle::system_agents(&h), ["power", "network", "audio", "displays", "notifications", "lock"]);
+        // one that is gone is not offered
+        let out = h.operator("kernel", json!({"type": "delete_agent", "id": "network"})).await;
+        assert!(out.result.get("error").is_none(), "{:?}", out.result);
+        assert_eq!(BackendBundle::system_agents(&h), ["power", "audio", "displays", "notifications", "lock"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn an_ai_naming_its_callers_own_store_is_not_admitted_by_the_host() {
         let (h, dir) = host("own", &["helper2"]).await;
         h.act("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": "own_store", "handler_module": fantastic_core::HANDLER_MODULE}))

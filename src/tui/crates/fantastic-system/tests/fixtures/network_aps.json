@@ -1,0 +1,163 @@
+[
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/1",
+  "ssid": [
+   102,
+   97,
+   110,
+   116,
+   97,
+   115,
+   116,
+   105,
+   99,
+   45,
+   99,
+   105
+  ],
+  "strength": 94,
+  "flags": 3,
+  "wpa_flags": 0,
+  "rsn_flags": 392,
+  "frequency": 2437,
+  "active": true
+ },
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/2",
+  "ssid": [
+   102,
+   97,
+   110,
+   116,
+   97,
+   115,
+   116,
+   105,
+   99,
+   45,
+   99,
+   105
+  ],
+  "strength": 61,
+  "flags": 3,
+  "wpa_flags": 0,
+  "rsn_flags": 392,
+  "frequency": 2462,
+  "active": false
+ },
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/3",
+  "ssid": [
+   102,
+   105,
+   120,
+   116,
+   117,
+   114,
+   101,
+   45,
+   115,
+   97,
+   101
+  ],
+  "strength": 81,
+  "flags": 3,
+  "wpa_flags": 0,
+  "rsn_flags": 1160,
+  "frequency": 2412,
+  "active": false
+ },
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/4",
+  "ssid": [
+   102,
+   105,
+   120,
+   116,
+   117,
+   114,
+   101,
+   45,
+   111,
+   112,
+   101,
+   110
+  ],
+  "strength": 70,
+  "flags": 0,
+  "wpa_flags": 0,
+  "rsn_flags": 0,
+  "frequency": 2417,
+  "active": false
+ },
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/5",
+  "ssid": [
+   102,
+   105,
+   120,
+   116,
+   117,
+   114,
+   101,
+   45,
+   99,
+   111,
+   114,
+   112
+  ],
+  "strength": 62,
+  "flags": 3,
+  "wpa_flags": 0,
+  "rsn_flags": 648,
+  "frequency": 5180,
+  "active": false
+ },
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/6",
+  "ssid": [
+   195,
+   254,
+   0,
+   255
+  ],
+  "strength": 48,
+  "flags": 3,
+  "wpa_flags": 392,
+  "rsn_flags": 0,
+  "frequency": 2447,
+  "active": false
+ },
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/7",
+  "ssid": [
+   102,
+   105,
+   120,
+   116,
+   117,
+   114,
+   101,
+   45,
+   119,
+   101,
+   112
+  ],
+  "strength": 33,
+  "flags": 1,
+  "wpa_flags": 0,
+  "rsn_flags": 0,
+  "frequency": 2452,
+  "active": false
+ },
+ {
+  "path": "/org/freedesktop/NetworkManager/AccessPoint/8",
+  "ssid": [],
+  "strength": 25,
+  "flags": 3,
+  "wpa_flags": 0,
+  "rsn_flags": 392,
+  "frequency": 2422,
+  "active": false
+ }
+]
