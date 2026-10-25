@@ -34,14 +34,15 @@ async fn op(k: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 }
 
 async fn state_where(k: &Arc<Kernel>, what: &str, ok: impl Fn(&Value) -> bool) -> Value {
+    let mut last = Value::Null;
     for _ in 0..200 {
-        let s = op(k, "network", json!({"type": "state"})).await;
-        if ok(&s) {
-            return s;
+        last = op(k, "network", json!({"type": "state"})).await;
+        if ok(&last) {
+            return last;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("never saw: {what}");
+    panic!("never saw: {what}; the last state: {last}");
 }
 
 /// A mock helper that returns an object path.
@@ -55,7 +56,13 @@ async fn path_of(
         .call_method(Some(NM), at, Some(MOCK), member, body)
         .await
         .unwrap_or_else(|e| panic!("{member}: {e}"));
-    r.body().deserialize().expect("an object path")
+    // the template answers an object path, or its text (`s`, in some versions)
+    let body = r.body();
+    match body.deserialize::<OwnedObjectPath>() {
+        Ok(p) => p,
+        Err(_) => OwnedObjectPath::try_from(body.deserialize::<String>().expect("a path").as_str())
+            .expect("an object path"),
+    }
 }
 
 /// The calls the mock logged for a method of an object: each call's arguments.
@@ -131,21 +138,21 @@ async fn network_reads_classifies_connects_and_forgets_on_a_fake_bus() {
         &conn,
         NM_PATH,
         "AddAccessPoint",
-        &add_ap("ap-open", "cafe", "00:11:22:33:44:01", 80),
+        &add_ap("ap_open", "cafe", "00:11:22:33:44:01", 80),
     )
     .await;
     let psk = path_of(
         &conn,
         NM_PATH,
         "AddAccessPoint",
-        &add_ap("ap-psk", "home", "00:11:22:33:44:02", 70),
+        &add_ap("ap_psk", "home", "00:11:22:33:44:02", 70),
     )
     .await;
     let sae = path_of(
         &conn,
         NM_PATH,
         "AddAccessPoint",
-        &add_ap("ap-sae", "safe", "00:11:22:33:44:03", 60),
+        &add_ap("ap_sae", "safe", "00:11:22:33:44:03", 60),
     )
     .await;
     flags(&conn, &open, 0, 0, 0).await;
@@ -155,7 +162,7 @@ async fn network_reads_classifies_connects_and_forgets_on_a_fake_bus() {
         &conn,
         NM_PATH,
         "AddWiFiConnection",
-        &(wifi.as_str(), "safe-conn", "safe", "wpa-psk"),
+        &(wifi.as_str(), "safe_conn", "safe", "wpa-psk"),
     )
     .await;
     // the saved connection's settings, exactly (what the template stores varies)
@@ -301,5 +308,20 @@ async fn network_reads_classifies_connects_and_forgets_on_a_fake_bus() {
     )
     .await;
     assert!(r.get("error").is_none(), "{r}");
-    assert_eq!(calls(&conn, known.as_str(), "Delete").await.len(), 1);
+    // the mock drops the object on Delete: the connection is gone from the list
+    // (the one `connect` made stays: the mock saves what it activates)
+    let s = state_where(&k, "the connection forgotten", |s| {
+        s["known"]
+            .as_array()
+            .is_some_and(|k| !k.iter().any(|c| c["uuid"] == "uuid-safe"))
+    })
+    .await;
+    assert!(
+        s["known"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "home"),
+        "{s}"
+    );
 }

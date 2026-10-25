@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use fantastic_system::{audio, network, power};
+use fantastic_system::{audio, network, notifications, power};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -109,4 +109,28 @@ pub fn user_name() -> String {
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
         .unwrap_or_else(|| "fantastic".to_string())
+}
+
+/// The notifications agent's port: the session bus, where it is the server.
+#[async_trait::async_trait]
+pub trait NotificationsOs: Send + Sync {
+    /// Own `org.freedesktop.Notifications` without queueing and without
+    /// replacing another daemon, and serve it.
+    async fn request(&self) -> Result<notifications::Ownership, OsError>;
+    /// A signal to the clients, or the answer to the `Notify` call that waits.
+    async fn call(&self, c: notifications::Call) -> Result<(), OsError>;
+    /// What clients send (`Notify`, `CloseNotification`), as VM events, until the port is dropped.
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<notifications::Event>;
+}
+
+/// The real notifications port of this OS.
+pub async fn notifications() -> Arc<dyn NotificationsOs> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::notifications().await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Arc::new(other::Unsupported)
+    }
 }

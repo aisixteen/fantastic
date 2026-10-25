@@ -7,18 +7,31 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
-use super::{AudioOs, NetworkOs, OsError, PowerOs};
+use super::{AudioOs, NetworkOs, NotificationsOs, OsError, PowerOs};
 
 pub mod audio;
 pub mod network;
+pub mod notifications;
 pub mod power;
 
 pub use audio::LinuxAudio;
 pub use network::LinuxNetwork;
+pub use notifications::LinuxNotifications;
 pub use power::LinuxPower;
 
 /// The system bus, connected once per process.
 static SYSTEM: OnceCell<Result<zbus::Connection, String>> = OnceCell::const_new();
+
+/// The session bus, connected once per process.
+static SESSION: OnceCell<Result<zbus::Connection, String>> = OnceCell::const_new();
+
+async fn session() -> Result<zbus::Connection, OsError> {
+    SESSION
+        .get_or_init(|| async { zbus::Connection::session().await.map_err(|e| e.to_string()) })
+        .await
+        .clone()
+        .map_err(|e| OsError::Unavailable(format!("the session bus is not reachable: {e}")))
+}
 
 async fn system() -> Result<zbus::Connection, OsError> {
     SYSTEM
@@ -41,6 +54,14 @@ pub async fn power() -> Arc<dyn PowerOs> {
 pub async fn network() -> Arc<dyn NetworkOs> {
     match system().await {
         Ok(c) => Arc::new(LinuxNetwork::new(c)),
+        Err(e) => Arc::new(Absent(e)),
+    }
+}
+
+/// The notifications port on the session bus, where this process is the server.
+pub async fn notifications() -> Arc<dyn NotificationsOs> {
+    match session().await {
+        Ok(c) => Arc::new(LinuxNotifications::new(c)),
         Err(e) => Arc::new(Absent(e)),
     }
 }
@@ -76,6 +97,19 @@ impl NetworkOs for Absent {
         Err(self.0.clone())
     }
     fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::network::Event> {
+        tokio::sync::mpsc::channel(1).1
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationsOs for Absent {
+    async fn request(&self) -> Result<fantastic_system::notifications::Ownership, OsError> {
+        Err(self.0.clone())
+    }
+    async fn call(&self, _c: fantastic_system::notifications::Call) -> Result<(), OsError> {
+        Err(self.0.clone())
+    }
+    fn changes(&self) -> tokio::sync::mpsc::Receiver<fantastic_system::notifications::Event> {
         tokio::sync::mpsc::channel(1).1
     }
 }

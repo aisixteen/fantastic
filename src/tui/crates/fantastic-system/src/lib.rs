@@ -6,4 +6,5 @@
 
 pub mod audio;
 pub mod network;
+pub mod notifications;
 pub mod power;

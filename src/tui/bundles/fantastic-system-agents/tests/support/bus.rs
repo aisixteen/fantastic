@@ -7,7 +7,11 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// Makes each bus of a test binary its own directory (tests run in parallel).
+static COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub struct Bus {
     daemon: Child,
@@ -32,7 +36,7 @@ impl Bus {
         let dir = std::env::temp_dir().join(format!(
             "fantastic_bus_{}_{}",
             std::process::id(),
-            templates.len()
+            COUNT.fetch_add(1, Ordering::SeqCst)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let config = dir.join("bus.conf");
