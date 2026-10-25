@@ -34,7 +34,10 @@ import { filesView } from "../files/files_view.ts";
 import { renderFileTrees, setFilesDeps } from "../files/files_deps.ts";
 import { DRAG_MIME, boxCentre, decodeDrag, dropPlan, worldAt, zoomAbout } from "../files/drag.ts";
 import { mountTreeSidebar } from "./tree_sidebar.ts";
-import { fileGrant, onStateFrame } from "../files/file_bridge.ts";
+import { fileGrant, kernelBridge, onStateFrame } from "../files/file_bridge.ts";
+import { dropParent, isBlueprintDir, runImportDrop } from "../files/import_drop.ts";
+import { norm, wire } from "../files/paths.ts";
+import type { ImportAnswer, ImportView } from "../files/import_drop.ts";
 import { PREVIEW_VERBS } from "../preview/preview_controller.ts";
 import { previewView } from "../preview/preview_view.ts";
 import type { Pick, Presets } from "./action_popup.ts";
@@ -1976,6 +1979,56 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   canvas.addEventListener("dragleave", (e) => {
     if (!canvas.contains(e.relatedTarget as Node | null)) canvas.classList.remove("drop-target");
   });
+  // THE IMPORT DIALOG (#269): the preview's lines with Approve/Cancel; the ports a blueprint
+  // needs get an input each, code its own "allow code" tick. A refusal is the toast.
+  const importDialog = (v: ImportView): Promise<ImportAnswer> => {
+    if (v.kind === "refused" || v.kind === "done") {
+      toast(v.lines.join(" "));
+      return Promise.resolve({ approve: false, bind: {}, allowCode: false });
+    }
+    return new Promise((resolve) => {
+      const el = document.createElement("div");
+      el.className = "action-popup";
+      el.style.cssText = "left:50%;top:14vh;transform:translateX(-50%);padding-bottom:10px";
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = v.kind === "bind" ? "import: bind ports" : "import blueprint";
+      const body = document.createElement("pre");
+      body.style.cssText = "margin:8px 16px;white-space:pre-wrap;font-size:12px;max-height:40vh;overflow:auto";
+      body.textContent = v.lines.join("\n");
+      el.append(title, body);
+      const inputs = v.ports.map((port) => {
+        const i = document.createElement("input");
+        i.placeholder = `${port} = agent id`;
+        i.style.cssText = "margin:2px 16px;width:calc(100% - 32px)";
+        el.append(i);
+        return [port, i] as const;
+      });
+      const tick = document.createElement("input");
+      tick.type = "checkbox";
+      if (v.code) {
+        const l = document.createElement("label");
+        l.style.cssText = "display:block;margin:6px 16px;font-size:12px";
+        tick.style.cssText = "width:auto;display:inline;margin-right:6px";
+        l.append(tick, "allow code (this blueprint carries code)");
+        el.append(l);
+      }
+      const done = (approve: boolean): void => {
+        el.remove();
+        resolve({ approve, bind: Object.fromEntries(inputs.map(([p, i]) => [p, i.value.trim()]).filter(([, id]) => id !== "")), allowCode: tick.checked });
+      };
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin:8px 16px 0";
+      for (const [label, ok] of [["Cancel", false], ["Approve", true]] as const) {
+        const b = document.createElement("button");
+        b.textContent = v.kind === "bind" && ok ? "Preview" : label;
+        b.addEventListener("click", () => done(ok));
+        row.append(b);
+      }
+      el.append(row);
+      document.body.append(el);
+    });
+  };
   canvas.addEventListener("drop", (e) => {
     canvas.classList.remove("drop-target");
     if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
@@ -1985,8 +2038,33 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     // several items sit around the drop point, one slot each (no two overlap): the same
     // plan for a drag from the tree cell and from the sidebar (#148)
     const plan = dropPlan(got.items, e.clientX, e.clientY, canvas.getBoundingClientRect(), view, DROP_SLOT);
+    const parentId = dropParent(e.target instanceof Element ? e.target : null, {
+      backendOf: (cell) => {
+        const r = kernel.get(cell)?.record() as Rec | undefined;
+        return r === undefined ? undefined : str(r, "backend_id");
+      },
+      canvasHost: BACKEND,
+    });
     void (async (): Promise<void> => {
       for (const { item: it, x, y } of plan) {
+        // A BLUEPRINT FOLDER (one holding blueprint.yaml) is IMPORTED under the cell it was
+        // dropped on, after a preview the human approves (#269), not opened as a file tree
+        if (it.kind === "dir") {
+          try {
+            const listing = await kernelBridge(kernel).call({ type: "list", path: wire(norm(it.path)) });
+            if (isBlueprintDir(it, listing)) {
+              await runImportDrop({
+                item: it,
+                parentId,
+                send: async (payload) => ((await host.callHost("user", payload as unknown as Payload)) as Rec | null) ?? {},
+                show: importDialog,
+              });
+              continue;
+            }
+          } catch {
+            // the listing failed: the view's `open` below says why
+          }
+        }
         const what = it.kind === "agent" ? { agent: it.id } : { path: it.path };
         try {
           const r = (await kernel.send([{ target: containerNow(), payload: { type: "open", ...what, x, y } as unknown as Payload }]))[0]?.result as Rec | null;
