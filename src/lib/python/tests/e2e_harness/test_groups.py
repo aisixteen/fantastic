@@ -7,14 +7,20 @@ a fake exercise tree under `tmp_path`.
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 E2E = next(p for p in Path(__file__).resolve().parents if (p / "e2e" / ".e2e-root").exists()) / "e2e"
 sys.path.insert(0, str(E2E))
 
+import pytest  # noqa: E402
 from helpers import groups  # noqa: E402
+
+PROBE = E2E / "tests" / "agentic_advanced" / "E124_self_managed_groups" / "probe.py"
 
 
 def test_master_prompt_states_max_groups_and_worker_model():
@@ -127,3 +133,141 @@ def test_make_queue_copies_exercises_without_leaking_solutions(tmp_path):
     assert t["tests"] == ["leap_test.py"]
     assert t["stubs"] == ["leap.py"]
     assert "leap year" in t["instructions"]
+
+
+# --- the probe's pure functions (#174): max_turn_input, run_suite, worker_record ---
+
+
+@pytest.fixture
+def probe_env(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENDPOINT", "FANTASTIC_AI_MODEL", "BACKEND"):
+        monkeypatch.delenv(var, raising=False)
+    for var in list(os.environ):
+        if var.startswith("FANTASTIC_AI_MODEL_"):
+            monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("BACKEND", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_ENDPOINT", "https://api.example.test/v1/messages")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-TEST-KEY-DO-NOT-LOG")
+    monkeypatch.setenv("FANTASTIC_AI_MODEL", "test-model-default")
+    monkeypatch.setenv("MAX_GROUPS", "2")
+    monkeypatch.setenv("EXERCISES", "alpha,beta")
+    monkeypatch.setenv("MASTER_INPUT_CHARS_MAX", "100000")
+    return monkeypatch
+
+
+def _probe():
+    spec = importlib.util.spec_from_file_location("e124_groups_probe", PROBE)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _row(role, n):
+    return {"role": role, "content": "x" * n}
+
+
+def test_max_turn_input_no_assistant_row_is_zero(probe_env):
+    p = _probe()
+    assert p.max_turn_input("abcd", []) == 0
+    assert p.max_turn_input("abcd", [_row("user", 5), _row("user", 9)]) == 0
+
+
+def test_max_turn_input_counts_prompt_plus_conversation_before_reply(probe_env):
+    p = _probe()
+    assert p.max_turn_input("p" * 10, [_row("user", 5), _row("assistant", 7)]) == 15
+
+
+def test_max_turn_input_picks_largest_turn(probe_env):
+    p = _probe()
+    conv = [_row("user", 5), _row("assistant", 3), _row("user", 20), _row("assistant", 1),
+            _row("user", 2), _row("assistant", 1)]
+    assert p.max_turn_input("p" * 10, conv) == 41
+
+
+def test_max_turn_input_counts_earlier_replies_in_later_turns(probe_env):
+    p = _probe()
+    conv = [_row("user", 1), _row("assistant", 100), _row("user", 1), _row("assistant", 1)]
+    assert p.max_turn_input("", conv) == 102
+
+
+def test_max_turn_input_counts_non_assistant_roles_and_missing_content(probe_env):
+    p = _probe()
+    conv = [_row("tool", 6), {"role": "user", "content": None}, {"role": "user"}, _row("assistant", 1)]
+    assert p.max_turn_input("p" * 4, conv) == 10
+
+
+def test_run_suite_true_on_passing_exercise(probe_env, tmp_path):
+    p = _probe()
+    (tmp_path / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    ok, line = p.run_suite(str(tmp_path))
+    assert ok is True
+    assert "passed" in line
+
+
+def test_run_suite_false_on_failing_exercise(probe_env, tmp_path):
+    p = _probe()
+    (tmp_path / "test_bad.py").write_text("def test_bad():\n    assert False\n")
+    ok, line = p.run_suite(str(tmp_path))
+    assert ok is False
+    assert "failed" in line
+
+
+def test_run_suite_false_on_no_tests_collected(probe_env, tmp_path):
+    p = _probe()
+    ok, _ = p.run_suite(str(tmp_path))
+    assert ok is False
+
+
+def test_run_suite_timeout_scores_red(probe_env, tmp_path, monkeypatch):
+    p = _probe()
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=300)
+
+    monkeypatch.setattr(p.subprocess, "run", boom)
+    assert p.run_suite(str(tmp_path)) == (False, "suite timed out (300s)")
+
+
+def test_run_suite_summary_line_is_last_nonblank_and_capped_at_80(probe_env, tmp_path, monkeypatch):
+    p = _probe()
+    done = subprocess.CompletedProcess(args=[], returncode=0, stdout="a\nb\n\n" + "z" * 200 + "\n\n", stderr="")
+    monkeypatch.setattr(p.subprocess, "run", lambda *a, **k: done)
+    assert p.run_suite(str(tmp_path)) == (True, "z" * 80)
+
+
+def _worker_prompt(p):
+    return groups.master_prompt(2, p.BK.model_for("worker"), "/q", worker_record=p.worker_record())
+
+
+def test_worker_record_omits_model_the_master_sets_it(probe_env):
+    probe_env.setenv("FANTASTIC_AI_MODEL_WORKER", "worker-x")
+    p = _probe()
+    rec = p.worker_record()
+    assert "model" not in rec
+    assert rec["context_window"] == p.CTX == 65536
+    assert rec["handler_module"]
+    assert rec["can_call"]["$parent"] == "*"
+    assert p.creds.CREDS in rec["can_call"]
+
+
+def test_worker_model_comes_from_worker_override(probe_env):
+    probe_env.setenv("FANTASTIC_AI_MODEL_WORKER", "worker-x")
+    probe_env.setenv("FANTASTIC_AI_MODEL_MASTER", "master-y")
+    p = _probe()
+    assert p.BK.model_for("worker") == "worker-x"
+    text = _worker_prompt(p)
+    assert "`model` = `worker-x`" in text
+    assert "master-y" not in text
+
+
+def test_worker_model_falls_back_to_default_model(probe_env):
+    p = _probe()
+    assert p.BK.model_for("worker") == "test-model-default"
+    assert "`model` = `test-model-default`" in _worker_prompt(p)
+
+
+def test_worker_override_for_another_role_does_not_leak(probe_env):
+    probe_env.setenv("FANTASTIC_AI_MODEL_REVIEWER", "sonnet-y")
+    p = _probe()
+    assert p.BK.model_for("worker") == "test-model-default"
+    assert "sonnet-y" not in _worker_prompt(p)
