@@ -1,0 +1,29 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/.
+#
+# REQUIRED FROM THE OPERATOR, never set here (an `env:` value below would win over
+# the operator's): MAX_GROUPS (how many groups the master may run at once — run it
+# twice, 1 and 3), and FANTASTIC_AI_MODEL with FANTASTIC_AI_MODEL_MASTER /
+# FANTASTIC_AI_MODEL_WORKER for a model per role (unset role variables fall back to
+# FANTASTIC_AI_MODEL). The exercises come from the gym's polyglot-benchmark clone.
+id: self_managed_groups
+group: agentic_advanced
+title: a master AI runs up to MAX_GROUPS worker groups from its prompt alone — no group code, no harness-built group — within the bound, no orphans, every suite green, its prompt bounded
+runner: probe.py
+runtimes: [python, rust]
+costs: turns
+# A MASTER plus up to MAX_GROUPS workers at once, each its own lane. Run alone.
+long: true
+limits:
+  idle_seconds: 60
+  max_turns: 50
+  no_progress_turns: 0
+  turn_chars: 120000
+  turn_seconds: 600
+env:
+  FANTASTIC_AI_SEND_TIMEOUT: "420"
+  UNATTENDED: "3600"
+  # the same queue for every run, so MAX_GROUPS=1 and MAX_GROUPS=3 compare
+  EXERCISES: "phone-number,pig-latin,proverb,grade-school,transpose,wordy"
+  # the master's largest turn input, in characters (system prompt + conversation)
+  MASTER_INPUT_CHARS_MAX: "60000"
