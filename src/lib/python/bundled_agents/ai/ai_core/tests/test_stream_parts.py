@@ -8,6 +8,7 @@ import asyncio
 
 from _testkit import as_agent, memory_meta, wire
 
+from ai_core import core
 from ai_core.stream_parts import PartSplitter, cut_marker, stop_rows
 
 CALL = (
@@ -436,3 +437,120 @@ async def test_deltas_never_reach_the_state_stream(seeded_kernel, fake_providers
         if str((e.get("payload") or {}).get("type", "")).startswith("part_")
     }
     assert on_stream == {"part_start", "part_end"}, on_stream
+
+
+# ─── stop reaches the turn however it started (#177 / #232) ─────────────────
+
+
+def _start_send(k, aid, text="go"):
+    return asyncio.ensure_future(
+        k.send(
+            [
+                {
+                    "target": aid,
+                    "payload": {"type": "send", "text": text, "client_id": "tab"},
+                }
+            ]
+        )
+    )
+
+
+async def _stop_as_rx(k, aid) -> dict:
+    with as_agent(k, "rx"):
+        return (await k.send([{"target": aid, "payload": {"type": "stop"}}]))[0][
+            "result"
+        ]
+
+
+async def _generating(k, aid) -> bool:
+    out = (await k.send([{"target": aid, "payload": {"type": "status"}}]))[0]
+    return out["result"]["generating"]
+
+
+async def _rows_of(k, aid) -> list[dict]:
+    return await core._load_history(aid, k)
+
+
+async def test_stop_closes_a_stalled_turn_the_kernel_cancel_did_not_reach(
+    seeded_kernel, fake_providers, monkeypatch
+):
+    k = seeded_kernel
+    aid = "sp_nofind"
+    _ai(k, aid)
+    k.create("ram_store.tools", id="rx")
+    wire(k, "rx", aid)
+
+    async def _not_found(task_id):
+        return {"cancelled": False, "killed": []}
+
+    monkeypatch.setattr(k.ctx, "cancel_task", _not_found)
+    fp = fake_providers[aid] = _Slow(["never"], step=600)
+    turn = _start_send(k, aid)
+    try:
+        await _until(lambda: len(fp.requests) >= 1)
+        await asyncio.sleep(0.1)
+        assert await _stop_as_rx(k, aid) == {"stopped": True}
+        assert await _generating(k, aid) is False
+        stopped = [r for r in await _rows_of(k, aid) if r.get("kind") == "stopped"]
+        assert stopped and stopped[-1]["content"].startswith(
+            "[your turn was stopped by rx"
+        ), stopped
+        fp.step = 0
+        out = (await asyncio.wait_for(_start_send(k, aid, "after"), 5))[0]["result"]
+        assert "error" not in out and "raised" not in str(out), out
+        assert len(fp.requests) == 2
+    finally:
+        turn.cancel()
+
+
+async def test_stop_aborts_a_send_the_kernel_cancel_does_not_find(
+    seeded_kernel, fake_providers
+):
+    k = seeded_kernel
+    aid = "sp_abort"
+    _ai(k, aid)
+    k.create("ram_store.tools", id="rx")
+    wire(k, "rx", aid)
+    fp = fake_providers[aid] = _Slow(["never"], step=600)
+    turn = _start_send(k, aid)
+    await _until(lambda: len(fp.requests) >= 1)
+    await asyncio.sleep(0.1)
+    # a task id the kernel's table does not hold
+    core._current[aid]["task_id"] = "9000000001"
+    assert await _stop_as_rx(k, aid) == {"stopped": True}
+    out = (await asyncio.wait_for(turn, 5))[0]
+    assert out["status"] == "cancelled", out
+    assert await _generating(k, aid) is False
+    fp.step = 0
+    nxt = (await asyncio.wait_for(_start_send(k, aid, "after"), 5))[0]["result"]
+    assert "error" not in nxt, nxt
+    assert len(fp.requests) == 2
+
+
+async def test_stop_reaches_a_reply_woken_turn(seeded_kernel, fake_providers):
+    k = seeded_kernel
+    aid = "sp_woken"
+    _ai(k, aid)
+    k.create("ram_store.tools", id="rx")
+    wire(k, "rx", aid)
+    fp = fake_providers[aid] = _Slow(["never"], step=600)
+    k.ctx.spawn_task(
+        aid,
+        "deliver_reply",
+        core._deliver(
+            k, aid, "tool reply", "tab", None, born=core._incarnation.get(aid, 0)
+        ),
+    )
+    await _until(lambda: len(fp.requests) >= 1)
+    await asyncio.sleep(0.1)
+    assert await _stop_as_rx(k, aid) == {"stopped": True}
+    await _until(lambda: not core._current.get(aid))
+    assert await _generating(k, aid) is False
+    stopped = [r for r in await _rows_of(k, aid) if r.get("kind") == "stopped"]
+    assert stopped and stopped[-1]["content"].startswith(
+        "[your turn was stopped by rx"
+    ), stopped
+    fp.step = 0
+    nxt = (await asyncio.wait_for(_start_send(k, aid, "after"), 5))[0]["result"]
+    assert "error" not in nxt, nxt
+    assert len(fp.requests) == 2
