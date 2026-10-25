@@ -23,6 +23,7 @@ members = [
     "fantastic-scheduler",
     "fantastic-sqlite-store",
     "fantastic-static-loader",
+    "fantastic-user",
     "fantastic-vllm-backend",
     "fantastic-web",
     "fantastic-web-rest",
@@ -440,6 +441,7 @@ dependencies = [
     { name = "fantastic-scheduler" },
     { name = "fantastic-sqlite-store" },
     { name = "fantastic-static-loader" },
+    { name = "fantastic-user" },
     { name = "fantastic-vllm-backend" },
     { name = "fantastic-web" },
     { name = "fantastic-web-rest" },
@@ -477,6 +479,7 @@ requires-dist = [
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-sqlite-store", editable = "bundled_agents/memory/sqlite_store" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
+    { name = "fantastic-user", editable = "bundled_agents/io/user" },
     { name = "fantastic-vllm-backend", editable = "bundled_agents/ai/vllm/vllm_backend" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
     { name = "fantastic-web-rest", editable = "bundled_agents/io/web_rest" },
@@ -628,6 +631,21 @@ dependencies = [
 requires-dist = [
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "pyyaml", specifier = ">=6" },
+]
+
+[[package]]
+name = "fantastic-user"
+version = "0.1.0"
+source = { editable = "bundled_agents/io/user" }
+dependencies = [
+    { name = "fantastic-kernel-state" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
+    { name = "pyyaml" },
 ]
 
 [[package]]

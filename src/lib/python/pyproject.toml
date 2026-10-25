@@ -32,6 +32,7 @@ dependencies = [
   "fantastic-ram-store",
   "fantastic-sqlite-store",
   "fantastic-credential-store",
+  "fantastic-user",
   "pyyaml>=6",
 ]
 
@@ -85,6 +86,7 @@ testpaths = [
   "bundled_agents/memory/ram_store/tests",
   "bundled_agents/memory/sqlite_store/tests",
   "bundled_agents/security/credential_store/tests",
+  "bundled_agents/io/user/tests",
 ]
 # `-n auto` — xdist across every core BY DEFAULT, so a bare `pytest` never runs the
 # whole suite on one core. Parallelism is a property of the suite, not of the one
@@ -116,6 +118,7 @@ members = [
   "bundled_agents/memory/ram_store",
   "bundled_agents/memory/sqlite_store",
   "bundled_agents/security/credential_store",
+  "bundled_agents/io/user",
   "installed_agents/*",
 ]
 
@@ -143,3 +146,4 @@ fantastic-static-loader = { workspace = true }
 fantastic-ram-store = { workspace = true }
 fantastic-sqlite-store = { workspace = true }
 fantastic-credential-store = { workspace = true }
+fantastic-user = { workspace = true }

@@ -31,6 +31,8 @@ def test_the_closed_set():
         "transport_error",
         "transport_closed",
         "timeout",
+        "secret_found",
+        "failed",
     }
     with pytest.raises(ValueError) as e:
         refusal("memory_store", "x")
