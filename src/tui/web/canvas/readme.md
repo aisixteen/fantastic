@@ -73,7 +73,8 @@ A cell's head: **✕ hides** it — the view lets go of the cell, its agent keep
 running and its stream is torn down until it is shown again (the view's `show`
 puts it back where it was, or at `x`, `y`). **Shift+✕** and the head's
 right-click menu (`cell_menu.ts`) **delete** the agent, through the sidebar's
-delete path (a locked cell or agent refuses). The hidden set is on the view
+delete path (a locked cell or agent refuses); its **Export…** entry asks for a
+folder and sends `export_subtree` for the cell's host agent to `user` (#268). The hidden set is on the view
 (`hidden: [<cell id>…]`), so a reload keeps the cells hidden. Picking a hidden
 agent in the sidebar shows its cell where it was.
 
