@@ -1425,3 +1425,85 @@ async def test_a_malformed_ctrl_frame_is_skipped_never_fatal(seeded_kernel):
     assert not task.done()
     child.close()
     await asyncio.wait_for(task, 5)
+
+
+# ─── python twins of fantastic-exec-bridge tests.rs (#170) ──────
+
+
+async def test_an_overlong_output_line_is_read_whole(seeded_kernel):
+    """Python twin of tests.rs::an_overlong_line_is_read_whole. asyncio's 64 KiB
+    default line limit would end the pipe with a `[pump error]`; the 16 MiB limit
+    on the subprocess prevents that."""
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(seeded_kernel, "runner", PY, ["-c", "print('x' * 200000)"])
+    jid = r["job_id"]
+    row = await _wait_done(seeded_kernel, "runner", jid, secs=20)
+    assert row["exit_code"] == 0, row
+    assert row["lines"] == 1, row
+    assert row["last_line"] == "x" * 200000
+    err = (
+        await seeded_kernel.send(
+            [
+                {
+                    "target": "runner",
+                    "payload": {"type": "tail", "job_id": jid, "stream": "stderr"},
+                }
+            ]
+        )
+    )[0]["result"]
+    assert not err.get("lines"), err
+    assert "[pump error]" not in json.dumps(err)
+
+
+async def test_liveness_is_process_exit_not_pipe_eof(seeded_kernel):
+    """Python twin of tests.rs::liveness_is_process_exit_not_pipe_eof. A program
+    that closes stdout/stderr and keeps running is LIVE."""
+    await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
+    r = await _start(
+        seeded_kernel,
+        "runner",
+        PY,
+        ["-c", "import os, time\nos.close(1)\nos.close(2)\ntime.sleep(30)\n"],
+    )
+    jid = r["job_id"]
+    await asyncio.sleep(0.8)  # the pipes are at EOF by now; the process is not gone
+
+    async def send(payload):
+        return (await seeded_kernel.send([{"target": "runner", "payload": payload}]))[
+            0
+        ]["result"]
+
+    try:
+        assert (await send({"type": "reflect"}))["running"] == 1
+        assert (await send({"type": "ping"}))["queued"] is True
+        job = (await send({"type": "status", "job_id": jid}))["jobs"][0]
+        assert job["exit_code"] is None, job
+        assert job["status"] == "running", job
+    finally:
+        await send({"type": "stop", "job_id": jid})
+        await _wait_done(seeded_kernel, "runner", jid, secs=10)
+
+
+def test_the_record_auth_token_is_never_a_credential(monkeypatch):
+    """Python twin of tests.rs::the_record_auth_token_is_never_a_credential. The
+    process edge has no envelope, so a token stored on the record cannot satisfy
+    the leg's own password rule."""
+    env = "FANTASTIC_GROUP_TOKEN_EXEC_A4_16"
+    monkeypatch.setenv(env, "s3cret")
+
+    class Stub:
+        def __init__(self, rec):
+            self.rec = rec
+
+        def get(self, id):
+            return self.rec if id == "px" else None
+
+    rule = {"type": "password_ingress", "env": env}
+    for rec in (
+        {"ingress_rule": rule, "auth_token": "s3cret"},
+        {"ingress_rule": rule},
+    ):
+        denied = ebt._gate("px", {"type": "start"}, Stub(rec))
+        assert denied is not None
+        assert denied["reason"] == "unauthorized"
+        assert denied["error"] == "invalid or missing group token"
