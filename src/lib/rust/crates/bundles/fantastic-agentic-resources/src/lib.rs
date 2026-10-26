@@ -19,6 +19,9 @@
 //! NO CLEANUP: `report done` only sets a state. Nothing is retired or deleted;
 //! `delete_agent` is the only way out.
 //!
+//! `spawn` may branch `from` a fork point of an existing agent (`from:{agent, at}`):
+//! the registry forks it (ai_core `fork {at}`) and applies the role over the copy.
+//!
 //! Verbs (mirror Python verb-for-verb): `reflect`, `roles`, `role`, `spawn`,
 //! `report`, `fleet`, `set_limit`, `get_count`.
 
@@ -81,7 +84,7 @@ fn verb_docs_json() -> Value {
         "reflect": "Identity, whether the registry is enabled, and the role names. No args.",
         "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
         "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
-        "spawn": "args: role:str (req), task:str|{label, waits_on?}? (a string is sent to the child as its first message; an object is stored on its record as the task line {label, state, waits_on, result}), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}.",
+        "spawn": "args: role:str (req), task:str|{label, waits_on?}? (a string is sent to the child as its first message; an object is stored on its record as the task line {label, state, waits_on, result}), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card, task and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied.",
         "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent sets its OWN task line; its parent gets a message {type:'report', from, state, result}. Refused `not_spawned` for any other caller. Nothing is cleaned up on done. Returns {ok:true}.",
         "fleet": "No args. Returns {roles:{<role>:[{id, state}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
         "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
@@ -135,6 +138,14 @@ struct Spawned {
     id: AgentId,
     role: String,
     state: String,
+    /// The lead that spawned it `from` a fork point (it sits beside its source, so
+    /// the tree alone would not put it under that lead's quota).
+    lead: Option<String>,
+}
+
+/// Is `s` in `lead`'s subtree: below it in the tree, or spawned by it `from` a fork?
+fn below_lead(kernel: &Kernel, s: &Spawned, lead: &AgentId) -> bool {
+    s.lead.as_deref() == Some(lead.as_str()) || ancestors(kernel, &s.id).contains(lead)
 }
 
 fn spawned(kernel: &Kernel, reg: &AgentId) -> Vec<Spawned> {
@@ -151,6 +162,7 @@ fn spawned(kernel: &Kernel, reg: &AgentId) -> Vec<Spawned> {
                     .unwrap_or("")
                     .to_string(),
                 state: task_state(&m),
+                lead: m.get("lead").and_then(Value::as_str).map(str::to_string),
             })
         })
         .collect();
@@ -445,6 +457,19 @@ async fn spawn_reply(
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(_) => return bad("spawn", "name", "a non-empty string"),
     };
+    // `from`: branch the new agent off a fork point of an existing one
+    let from: Option<(String, i64)> = match payload.get("from") {
+        None | Some(Value::Null) => None,
+        Some(f) => match (
+            f.get("agent")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty()),
+            f.get("at").and_then(Value::as_i64),
+        ) {
+            (Some(a), Some(at)) => Some((a.to_string(), at)),
+            _ => return bad("spawn", "from", "{agent:str, at:int}"),
+        },
+    };
 
     let caller = current_origin();
     let parent = caller.clone().unwrap_or_else(|| reg.clone());
@@ -481,7 +506,7 @@ async fn spawn_reply(
         let Some(q) = lm.get("limits") else { continue };
         let below: Vec<&Spawned> = all
             .iter()
-            .filter(|s| active(&s.state) && ancestors(kernel, &s.id).contains(lead))
+            .filter(|s| active(&s.state) && below_lead(kernel, s, lead))
             .collect();
         if let Some(max) = cap(q, None) {
             if below.len() as u64 >= max {
@@ -504,7 +529,7 @@ async fn spawn_reply(
         {
             let used = all
                 .iter()
-                .filter(|s| active(&s.state) && ancestors(kernel, &s.id).contains(&parent))
+                .filter(|s| active(&s.state) && below_lead(kernel, s, &parent))
                 .count() as u64;
             if let (Some(want), Some(max)) = (
                 delegated.get("total").and_then(Value::as_u64),
@@ -538,17 +563,22 @@ async fn spawn_reply(
         }
     }
 
-    // the child's grants: the card's, with `$registry` made real, plus `report`
-    let mut can_call = Map::new();
-    for (k, v) in &card.grants {
-        let key = if k == REGISTRY_TOKEN {
-            reg.as_str()
-        } else {
-            k.as_str()
+    if let Some((src, at)) = from {
+        let ctx = SpawnFrom {
+            reg,
+            card,
+            tier_fields: &tier_fields,
+            caller: &caller,
+            line: &line,
+            delegated: &delegated,
+            name: &name,
+            first_message,
         };
-        grant_verbs(&mut can_call, key, v);
+        return spawn_from(kernel, &ctx, &src, at).await;
     }
-    grant_verbs(&mut can_call, reg.as_str(), &json!(["report"]));
+
+    // the child's grants: the card's, with `$registry` made real, plus `report`
+    let mut can_call = card_can_call(reg, card);
     // a tier that names the store the agent keeps its conversation in: the agent may
     // use it (the other end is opened below, before the first message)
     let store = tier_fields
@@ -559,10 +589,7 @@ async fn spawn_reply(
     if let Some(s) = &store {
         grant_verbs(&mut can_call, s, &json!("*"));
     }
-    let reg_verbs = can_call
-        .get(reg.as_str())
-        .cloned()
-        .unwrap_or(json!(["report"]));
+    let reg_verbs = reg_verbs_of(&can_call, reg);
     let mut callable_by = Map::new();
     if let Some(c) = &caller {
         callable_by.insert(c.as_str().to_string(), json!(PARENT_VERBS));
@@ -610,43 +637,300 @@ async fn spawn_reply(
             true
         });
     }
-    let reg_verbs2 = reg_verbs.clone();
-    let child_id = child.clone();
-    if let Err(e) = kernel.edit_callable_by(reg, move |m| {
-        grant_verbs(m, &child_id, &reg_verbs2);
-        true
-    }) {
-        return fail("grant_failed", format!("spawn: {e}"));
-    }
-    if let Some(c) = &caller {
-        let cid = child.clone();
-        if let Err(e) = kernel.edit_can_call(c, move |m| {
-            m.insert(cid, json!(PARENT_VERBS));
-            true
-        }) {
-            return fail("grant_failed", format!("spawn: {e}"));
-        }
+    if let Err(e) = open_edges(kernel, reg, caller.as_ref(), &child, &reg_verbs) {
+        return e;
     }
     if let Some(text) = first_message {
-        let cid = child.clone();
-        let _ = kernel.edit_can_call(reg, move |m| {
-            grant_verbs(m, &cid, &json!(["send"]));
-            true
-        });
-        // DETACHED, as the registry: a spawn answers at once, it never waits for the
-        // child's turn to end
-        let k = Arc::clone(kernel);
-        let target = AgentId::from(child.as_str());
-        fantastic_kernel::spawn_inherit(async move {
-            let _ = k
-                .send(vec![Item::new(
-                    target,
-                    json!({"type": "send", "text": text}),
-                )])
-                .await;
-        });
+        send_first(kernel, reg, &child, text);
     }
     json!({"id": child, "role": role, "tier": card.tier})
+}
+
+/// The child's grants from its card: `$registry` made real, plus `report`.
+fn card_can_call(reg: &AgentId, card: &Card) -> Map<String, Value> {
+    let mut can_call = Map::new();
+    for (k, v) in &card.grants {
+        let key = if k == REGISTRY_TOKEN {
+            reg.as_str()
+        } else {
+            k.as_str()
+        };
+        grant_verbs(&mut can_call, key, v);
+    }
+    grant_verbs(&mut can_call, reg.as_str(), &json!(["report"]));
+    can_call
+}
+
+/// What the registry lets the child call on it.
+fn reg_verbs_of(can_call: &Map<String, Value>, reg: &AgentId) -> Value {
+    can_call
+        .get(reg.as_str())
+        .cloned()
+        .unwrap_or(json!(["report"]))
+}
+
+/// The two edges every spawn opens: the registry accepts the child's calls, and the
+/// caller (when there is one) controls the child.
+fn open_edges(
+    kernel: &Kernel,
+    reg: &AgentId,
+    caller: Option<&AgentId>,
+    child: &str,
+    reg_verbs: &Value,
+) -> Result<(), Value> {
+    let (child_id, verbs) = (child.to_string(), reg_verbs.clone());
+    kernel
+        .edit_callable_by(reg, move |m| {
+            grant_verbs(m, &child_id, &verbs);
+            true
+        })
+        .map_err(|e| fail("grant_failed", format!("spawn: {e}")))?;
+    if let Some(c) = caller {
+        let cid = child.to_string();
+        kernel
+            .edit_can_call(c, move |m| {
+                m.insert(cid, json!(PARENT_VERBS));
+                true
+            })
+            .map_err(|e| fail("grant_failed", format!("spawn: {e}")))?;
+    }
+    Ok(())
+}
+
+/// A string task: let the registry `send` and send it, DETACHED, as the registry
+/// (a spawn answers at once, it never waits for the child's turn to end).
+fn send_first(kernel: &Arc<Kernel>, reg: &AgentId, child: &str, text: String) {
+    let cid = child.to_string();
+    let _ = kernel.edit_can_call(reg, move |m| {
+        grant_verbs(m, &cid, &json!(["send"]));
+        true
+    });
+    let k = Arc::clone(kernel);
+    let target = AgentId::from(child);
+    fantastic_kernel::spawn_inherit(async move {
+        let _ = k
+            .send(vec![Item::new(
+                target,
+                json!({"type": "send", "text": text}),
+            )])
+            .await;
+    });
+}
+
+/// Everything `spawn` has settled before it branches from a fork point.
+struct SpawnFrom<'a> {
+    reg: &'a AgentId,
+    card: &'a Card,
+    tier_fields: &'a Map<String, Value>,
+    caller: &'a Option<AgentId>,
+    line: &'a Option<Value>,
+    delegated: &'a Map<String, Value>,
+    name: &'a Option<String>,
+    first_message: Option<String>,
+}
+
+/// Does `who` hold `fork` on `source` in its own `can_call`?
+fn holds_fork(kernel: &Kernel, who: &AgentId, source: &Agent) -> bool {
+    let Some(w) = agent_of(kernel, who) else {
+        return false;
+    };
+    let grant = meta_of(&w).get("can_call").cloned().unwrap_or(Value::Null);
+    fantastic_kernel::authz::authorize_call(
+        &grant,
+        "fork",
+        source.id.as_str(),
+        who.as_str(),
+        w.parent_id.as_ref().map(AgentId::as_str),
+        &kernel.ancestor_ids(Some(source)),
+    )
+    .allowed
+}
+
+/// Let the registry `fork` the source: returns what to put back afterwards
+/// (the registry's `can_call` entry for the source, the source's `callable_by`
+/// entry for the registry; `None` inside = there was none).
+fn fork_grant(
+    kernel: &Kernel,
+    reg: &AgentId,
+    src: &AgentId,
+) -> Result<(Option<Value>, Option<Value>), String> {
+    let (mut before_cc, mut before_cb) = (None, None);
+    let s = src.as_str().to_string();
+    kernel.edit_can_call(reg, |m| {
+        before_cc = m.get(&s).cloned();
+        grant_verbs(m, &s, &json!(["fork"]));
+        true
+    })?;
+    let r = reg.as_str().to_string();
+    if let Err(e) = kernel.edit_callable_by(src, |m| {
+        before_cb = m.get(&r).cloned();
+        grant_verbs(m, &r, &json!(["fork"]));
+        true
+    }) {
+        fork_ungrant(kernel, reg, src, &(before_cc, None));
+        return Err(e);
+    }
+    Ok((before_cc, before_cb))
+}
+
+/// Take back what [`fork_grant`] added.
+fn fork_ungrant(
+    kernel: &Kernel,
+    reg: &AgentId,
+    src: &AgentId,
+    before: &(Option<Value>, Option<Value>),
+) {
+    let put = |m: &mut Map<String, Value>, key: &str, old: &Option<Value>| {
+        match old {
+            Some(v) => m.insert(key.to_string(), v.clone()),
+            None => m.remove(key),
+        };
+        true
+    };
+    let s = src.as_str().to_string();
+    let old = before.0.clone();
+    let _ = kernel.edit_can_call(reg, move |m| put(m, &s, &old));
+    let r = reg.as_str().to_string();
+    let old = before.1.clone();
+    let _ = kernel.edit_callable_by(src, move |m| put(m, &r, &old));
+}
+
+/// `spawn {role, from:{agent, at}}`: `fork {at}` of `src` makes the agent (it sits
+/// beside its source, in the source's store); the role card, the task line and the
+/// limits are then applied over the copy like any spawn.
+async fn spawn_from(kernel: &Arc<Kernel>, c: &SpawnFrom<'_>, src: &str, at: i64) -> Value {
+    let (reg, card) = (c.reg, c.card);
+    let src_id = AgentId::from(src);
+    let source = agent_of(kernel, &src_id);
+    // the caller (the operator when there is none) must itself hold `fork` on the source
+    if let (Some(who), Some(source)) = (c.caller.as_ref(), source.as_ref()) {
+        if !holds_fork(kernel, who, source) {
+            return fail(
+                "not_allowed",
+                format!("spawn: {who} may not fork {}", py_repr(src)),
+            );
+        }
+    }
+    let before = match fork_grant(kernel, reg, &src_id) {
+        Ok(b) => b,
+        Err(_) if source.is_none() => (None, None),
+        Err(e) => return fail("grant_failed", format!("spawn: {e}")),
+    };
+    // the registry forks AS ITSELF; whatever the fork refuses passes through unchanged
+    let out = kernel
+        .send(vec![Item::new(
+            src_id.clone(),
+            json!({"type": "fork", "at": at}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    fork_ungrant(kernel, reg, &src_id, &before);
+    let Some(child) = out.get("id").and_then(Value::as_str).map(str::to_string) else {
+        return out;
+    };
+    let copied = out.get("copied").cloned().unwrap_or(Value::Null);
+    let Some(fork) = agent_of(kernel, &AgentId::from(child.as_str())) else {
+        return out;
+    };
+
+    // the copy is the source's whole record: overwrite what the role decides, drop the rest
+    let fm = meta_of(&fork);
+    let store = fm
+        .get("memory_store_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let mut can_call = Map::new();
+    if let Some(s) = &store {
+        if let Some(v) = fm
+            .get("can_call")
+            .and_then(Value::as_object)
+            .and_then(|m| m.get(s))
+        {
+            can_call.insert(s.clone(), v.clone());
+        }
+    }
+    for (k, v) in card_can_call(reg, card) {
+        grant_verbs(&mut can_call, &k, &v);
+    }
+    let reg_verbs = reg_verbs_of(&can_call, reg);
+    let mut patch = Map::new();
+    for (k, v) in c.tier_fields {
+        // the fork stays in the source's store: its copied prefix must stay readable
+        if k != "memory_store_id" && k != "handler_module" {
+            patch.insert(k.clone(), v.clone());
+        }
+    }
+    patch.insert("system_prompt".to_string(), json!(card.directive));
+    patch.insert("spawned_by".to_string(), json!(reg.as_str()));
+    patch.insert("role".to_string(), json!(card.name));
+    patch.insert("tier".to_string(), json!(card.tier));
+    patch.insert("can_call".to_string(), Value::Object(can_call));
+    if let Some(n) = c.name {
+        patch.insert("name".to_string(), json!(n));
+        patch.insert("display_name".to_string(), json!(n));
+    }
+    let mut cleared: Vec<&str> = Vec::new();
+    match c.line {
+        Some(l) => {
+            patch.insert("task".to_string(), l.clone());
+        }
+        None => cleared.push("task"),
+    }
+    if c.delegated.is_empty() {
+        cleared.push("limits");
+    } else {
+        patch.insert("limits".to_string(), Value::Object(c.delegated.clone()));
+    }
+    match c.caller {
+        Some(who) => {
+            patch.insert("lead".to_string(), json!(who.as_str()));
+        }
+        None => cleared.push("lead"),
+    }
+    {
+        let mut m = fork.meta.write().expect("meta poisoned");
+        for k in &cleared {
+            m.remove(*k);
+        }
+    }
+    kernel.update(&fork.id, patch);
+
+    // the caller controls it; the registry hears its `report` and may `send` it
+    let (caller, first) = (c.caller.clone(), c.first_message.is_some());
+    let r = reg.as_str().to_string();
+    let opened = kernel
+        .edit_callable_by(&fork.id, move |m| {
+            if let Some(w) = &caller {
+                m.insert(w.as_str().to_string(), json!(PARENT_VERBS));
+            }
+            if first {
+                grant_verbs(m, &r, &json!(["send"]));
+            }
+            true
+        })
+        .map_err(|e| fail("grant_failed", format!("spawn: {e}")))
+        .and_then(|_| open_edges(kernel, reg, c.caller.as_ref(), &child, &reg_verbs));
+    if let Err(e) = opened {
+        // nothing of the registry is left behind
+        fantastic_kernel::lifecycle::cascade_delete(kernel, &fork).await;
+        if let Some(s) = &store {
+            let cid = child.clone();
+            let _ = kernel.edit_callable_by(&AgentId::from(s.as_str()), move |m| {
+                m.remove(&cid).is_some()
+            });
+        }
+        let _ = kernel.edit_callable_by(reg, |m| m.remove(&child).is_some());
+        return e;
+    }
+    if let Some(text) = c.first_message.clone() {
+        send_first(kernel, reg, &child, text);
+    }
+    json!({
+        "id": child, "role": card.name, "tier": card.tier,
+        "from": {"agent": src, "at": at}, "copied": copied,
+    })
 }
 
 async fn report_reply(reg: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
