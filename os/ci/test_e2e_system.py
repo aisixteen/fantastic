@@ -46,6 +46,14 @@ class Parsers(unittest.TestCase):
 
 
 class States(unittest.TestCase):
+    def test_audio_ready_needs_available_and_one_default_sink(self):
+        sink = {"default": True}
+        self.assertTrue(es.audio_ready({"available": True, "sinks": [sink]}))
+        self.assertTrue(es.audio_ready({"sinks": [sink]}))
+        self.assertFalse(es.audio_ready({"available": False, "why": "pw-dump took longer than 5 s", "sinks": [sink]}))
+        self.assertFalse(es.audio_ready({"available": True, "sinks": []}))
+        self.assertFalse(es.audio_ready(None))
+
     def test_one_default_sink_counts_exactly_one(self):
         sink = lambda d: {"id": 1, "default": d}  # noqa: E731
         self.assertFalse(es.one_default_sink({"sinks": []}))

@@ -126,6 +126,12 @@ def one_default_sink(state: object) -> bool:
     return sum(1 for s in sinks if isinstance(s, dict) and s.get("default")) == 1
 
 
+def audio_ready(state: object) -> bool:
+    """An audio state that is `available` with exactly one default sink: a pw-dump read that
+    timed out on a slow guest leaves the last sinks beside `available: false`, which is not yet."""
+    return isinstance(state, dict) and state.get("available", True) is not False and one_default_sink(state)
+
+
 def default_volume(state: object) -> float | None:
     """The default sink's volume in an audio state, or None."""
     for s in (state.get("sinks") or []) if isinstance(state, dict) else []:
@@ -318,9 +324,16 @@ def wpctl_volume(vm: Vm) -> tuple[float, bool]:
 
 
 def check_audio(vm: Vm, step: float) -> None:
-    st = until(vm, "audio.state has sinks", lambda: (s := state_of("audio")) and s.get("sinks") and s, step)
-    if not st.get("available", True) or not one_default_sink(st):
-        raise Fail(f"audio.state has no single default sink: {json.dumps(st)[:400]}")
+    last: list = []
+
+    def ready():
+        last[:] = [s := state_of("audio")]
+        return audio_ready(s) and s
+
+    try:
+        until(vm, "audio.state is available with one default sink", ready, step)
+    except Fail as e:
+        raise Fail(f"audio.state has no single default sink: {json.dumps(last[0] if last else None)[:400]} ({e})") from e
     for verb, args, want in (("set_volume", {"volume": 0.3}, (0.3, False)), ("set_mute", {"muted": True}, (0.3, True))):
         if (e := refused(sys_call("audio", {"type": verb, **args}))):
             raise Fail(f"audio {verb} refused: {e}")
@@ -334,6 +347,7 @@ def check_audio(vm: Vm, step: float) -> None:
         "audio",
         lambda: as_user(vm, "wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.5"),
         lambda p: p.get("type") == "state" and default_volume(p.get("state")) == 0.5,
+        timeout=15,
     )
     log(f"audio: a wpctl change arrived as a state event (volume {default_volume(ev['state'])})")
 

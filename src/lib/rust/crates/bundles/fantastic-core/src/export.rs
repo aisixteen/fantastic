@@ -675,7 +675,7 @@ pub fn scan_secrets(dir: &Path) -> Vec<String> {
                 stack.push(p);
                 continue;
             }
-            let name = p.strip_prefix(dir).unwrap_or(&p).display().to_string();
+            let name = rel_name(dir, &p);
             let Ok(text) = std::fs::read_to_string(&p) else {
                 continue;
             };
@@ -692,6 +692,16 @@ pub fn scan_secrets(dir: &Path) -> Vec<String> {
     }
     hits.sort();
     hits
+}
+
+/// `p` relative to `dir`, `/`-separated on every OS (the name a hit shows).
+pub(crate) fn rel_name(dir: &Path, p: &Path) -> String {
+    p.strip_prefix(dir)
+        .unwrap_or(p)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Whether `text` holds an `sk-…` key token (4+ key characters after it).
