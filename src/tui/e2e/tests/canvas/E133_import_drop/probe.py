@@ -1,4 +1,4 @@
-"""E128 import_drop — a blueprint folder dropped on the canvas (#269).
+"""E133 import_drop — a blueprint folder dropped on the canvas (#269).
 
 A file-tree cell, a host agent shown by a terminal cell, and project folders `bp` (3 agents),
 `bpport` (one port) and `bpcode` (a code file). Every drop is a DataTransfer dispatched on the

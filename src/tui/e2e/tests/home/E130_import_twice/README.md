@@ -1,4 +1,4 @@
-# E125 import_twice
+# E130 import_twice
 
 `user.import_subtree` (#269) against a running `fantastic canvas`, called the way
 `fantastic send` does. A hand-written blueprint (`squad` > `lead`, `scout`; `lead`

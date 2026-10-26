@@ -1,4 +1,4 @@
-# E126 import_refusals
+# E131 import_refusals
 
 `user.import_subtree` (#269) against a running `fantastic canvas`, on blueprint
 folders written by hand under the project:

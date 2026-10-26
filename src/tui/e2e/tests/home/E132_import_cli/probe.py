@@ -1,4 +1,4 @@
-"""E127 import_cli — `fantastic import` from a shell (#269).
+"""E132 import_cli — `fantastic import` from a shell (#269).
 
 The real binary, `cwd` the project of a running `fantastic canvas` (the command is attach-only):
 

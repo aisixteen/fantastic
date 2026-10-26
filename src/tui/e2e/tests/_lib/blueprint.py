@@ -1,4 +1,4 @@
-"""THE BLUEPRINT FIXTURE for the import tests (#269): E125, E126, E127 and E128 share it.
+"""THE BLUEPRINT FIXTURE for the import tests (#269): E130, E131, E132 and E133 share it.
 
 A running `fantastic canvas` in `rig.proj` is the kernel; a blueprint is a folder
 under `rig.proj` (the verb takes paths relative to the running dir, and refuses `..`).

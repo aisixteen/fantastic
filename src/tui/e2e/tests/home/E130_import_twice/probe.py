@@ -1,4 +1,4 @@
-"""E125 import_twice — a blueprint imported twice (#269).
+"""E130 import_twice — a blueprint imported twice (#269).
 
 a) a hand-written blueprint `bp/` (squad > lead, scout; `lead` reaches `@memory`) and a
    second store `memory2` to bind;

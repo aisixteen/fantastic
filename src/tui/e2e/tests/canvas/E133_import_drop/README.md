@@ -1,4 +1,4 @@
-# E128 import_drop
+# E133 import_drop
 
 The canvas's blueprint drop (#269). A folder holding `blueprint.yaml`, dragged from the
 file tree onto the canvas, is not opened as a tree: it is previewed, and imported only

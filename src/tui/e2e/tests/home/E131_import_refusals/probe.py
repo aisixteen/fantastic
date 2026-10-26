@@ -1,4 +1,4 @@
-"""E126 import_refusals — what `import_subtree` will not take (#269).
+"""E131 import_refusals — what `import_subtree` will not take (#269).
 
 Hand-written blueprint folders under the project, imported under `team_home`:
 
