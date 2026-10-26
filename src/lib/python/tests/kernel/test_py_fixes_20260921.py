@@ -139,7 +139,8 @@ def test_a_lockless_invocation_writes_no_root_record(tmp_path):
     assert (tmp_path / ".fantastic" / "agent.yaml").exists()
 
 
-def test_an_unreadable_root_record_refuses_the_boot_and_is_left_alone(tmp_path):
+# twin: an_unreadable_root_record_refuses_the_boot_and_is_left_alone
+def test_an_unreadable_root_record_is_never_written_over(tmp_path):
     d = tmp_path / ".fantastic"
     d.mkdir()
     (d / "agent.yaml").write_text("id: [unclosed\n")

@@ -128,7 +128,8 @@ def test_done_and_inquiry_answer():
 # ── verbatim mode ─────────────────────────────────────────────────────────────
 
 
-def test_a_call_written_inside_bytes_is_document_not_envelope():
+# twin: a_call_written_inside_bytes_is_document_not_envelope
+def test_a_closing_call_tag_inside_bytes_does_not_end_the_call():
     text = (
         '<call name="send"><target_id>notes</target_id><type>write</type>'
         "<path>a.md</path><bytes>the text says </call> and goes on\n</bytes>"
@@ -163,7 +164,8 @@ def test_several_calls_in_order_and_a_call_inside_think():
     assert [c["arguments"]["payload"]["type"] for c in calls] == ["patch"]
 
 
-def test_a_good_turn_reports_nothing():
+# twin: a_good_turn_reports_nothing
+def test_a_mention_in_prose_is_stepped_over_not_reported():
     text = f"I will emit a <call soon. {PATCH}"
     assert len(extract_tool_calls(text)) == 1 and malformed_calls(text) == []
     assert extract_tool_calls("a <caller> is not an envelope") == []

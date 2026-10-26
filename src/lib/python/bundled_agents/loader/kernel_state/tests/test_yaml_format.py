@@ -66,7 +66,8 @@ def _check(name: str, got: str) -> None:
     assert got == path.read_text(encoding="utf-8"), f"{name} drifted"
 
 
-def test_persisted_record_bytes_are_python_yaml_dump():
+# twin: persisted_record_bytes_are_python_yaml_dump
+def test_record_matches_the_fixture_bytes():
     _check("agent.yaml", yaml_io.dump(RECORD))
 
 

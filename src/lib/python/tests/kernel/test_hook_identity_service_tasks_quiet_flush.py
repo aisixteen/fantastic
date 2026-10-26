@@ -101,7 +101,8 @@ def _pid_of(root, aid: str, verb: str) -> int:
 # ── G-3: the hooks run as the agent itself ───────────────────────────────────
 
 
-async def test_on_cancel_hook_runs_and_releases_its_resource(seeded_kernel):
+# twin: on_cancel_hook_runs_and_releases_its_resource
+async def test_on_cancel_runs_as_the_agent_on_the_cancel_verb_path(seeded_kernel):
     root = seeded_kernel
     gc = await _grandchild(root)
     inbox = root.ctx.ensure_inbox(gc)
@@ -130,7 +131,8 @@ async def test_on_cancel_runs_as_the_agent_on_the_deadline_path(seeded_kernel):
     assert {"type": "status", "phase": "done", "reason": "cancelled"} in got, got
 
 
-async def test_kernel_bookkeeping_runs_the_handler_as_the_agent_with_no_origin(seeded_kernel):
+# twin: kernel_bookkeeping_runs_the_handler_as_the_agent_with_no_origin
+async def test_on_delete_runs_as_the_agent_itself(seeded_kernel):
     root = seeded_kernel
     await _grandchild(root)
     _hook_senders.clear()
@@ -162,6 +164,7 @@ async def _started_kernel(root) -> None:
     assert out.get("started"), out
 
 
+# twin: cancel_refuses_a_root_owned_keepalive_loop_and_ps_still_lists_it
 async def test_cancel_refuses_the_flusher_and_it_keeps_flushing(seeded_kernel):
     root = seeded_kernel
     await _started_kernel(root)
@@ -256,6 +259,7 @@ async def test_the_ledger_flush_publishes_nothing_on_the_state_stream(seeded_ker
         unsub()
 
 
+# twin: a_block_reserved_inside_the_flush_is_quiet_and_reaches_the_loader
 async def test_an_id_block_reserved_inside_the_flush_is_quiet(seeded_kernel):
     root = seeded_kernel
     await _started_kernel(root)

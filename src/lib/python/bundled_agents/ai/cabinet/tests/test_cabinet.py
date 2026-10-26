@@ -230,7 +230,8 @@ def worker_of(k, cab: str) -> str:
 # ─── wiring ──────────────────────────────────────────────────────
 
 
-async def test_each_cabinets_canvas_is_a_child_of_the_canvas_that_spawns_it(world):
+# twin: each_cabinets_canvas_is_a_child_of_the_canvas_that_spawns_it
+async def test_open_wires_every_worker_to_every_peer_and_the_master(world):
     k = world
     names = ["alpha", "beta", "gamma"]
     cabs = []

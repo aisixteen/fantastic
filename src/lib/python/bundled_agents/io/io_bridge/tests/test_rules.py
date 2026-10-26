@@ -155,7 +155,8 @@ def test_a_null_type_or_env_is_an_absent_one():
 # ─── password rule, both sides (kernel-group shared secret) ─────
 
 
-def test_password_rule_gates_every_kind(monkeypatch):
+# twin: password_rule_gates_every_kind
+def test_ingress_password_checks_envelope_token(monkeypatch):
     monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "s3cret")
     p = IngressPassword()
     assert p.authorize(_call("s3cret")).allowed

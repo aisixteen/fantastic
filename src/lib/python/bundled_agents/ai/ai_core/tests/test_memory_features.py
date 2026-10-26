@@ -233,7 +233,8 @@ async def test_kernel_rows_and_role_less_notes_never_become_turns(seeded_kernel)
     assert all(r.get("role") for r in behind)
 
 
-async def test_the_turns_row_ids_are_minted_after_the_assembly_reflects(
+# twin: the_turns_row_ids_are_minted_after_the_assembly_reflects
+async def test_a_turns_rows_are_minted_when_appended_so_id_order_is_append_order(
     fake_providers,
 ):
     """A row saved MID-TURN (the projection's fold or view) must not end up behind the

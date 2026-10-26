@@ -127,7 +127,8 @@ _note_mod.VERBS = {}
 register_unlisted("secret_note_agent.tools", _note_mod)
 
 
-async def test_stored_outcome_shows_reply_marks_as_secret(seeded_kernel):
+# twin: stored_outcome_shows_reply_marks_as_secret
+async def test_a_handler_noting_reply_secret_marks_its_settle_row(seeded_kernel):
     out_id = (
         await seeded_kernel.send(
             [

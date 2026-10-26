@@ -90,6 +90,7 @@ async def test_store_sink_writes_records_only(wired, tmp_path):
     assert not (tmp_path / "sess" / "agent.yaml").exists()
 
 
+# twin: store_sink_merge_keeps_unknown_keys_past_one_chunk
 async def test_persist_merge_preserves_extra_fields_on_disk(wired, tmp_path):
     root = wired
     root.create("file_bridge.tools", id="big", allow=["."])

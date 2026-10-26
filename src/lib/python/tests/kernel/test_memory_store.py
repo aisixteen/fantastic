@@ -299,7 +299,8 @@ async def test_kernel_start_boots_the_store_first_then_everyone(seeded_kernel):
 # ── the flusher ────────────────────────────────────────────────────────
 
 
-async def test_a_flushed_row_leaves_ram(seeded_kernel):
+# twin: a_flushed_row_leaves_ram
+async def test_execution_rows_flush_into_the_store_and_leave_ram(seeded_kernel):
     await _mk(seeded_kernel)
     await _with_store(seeded_kernel)
     out = await _call(seeded_kernel, "probe", {"type": "work"})
@@ -316,7 +317,8 @@ async def test_a_flushed_row_leaves_ram(seeded_kernel):
     assert pid not in seeded_kernel.ctx.executions, "a settled, flushed execution too"
 
 
-async def test_the_settle_row_keeps_what_stored_outcome_keeps(seeded_kernel):
+# twin: the_settle_row_keeps_what_stored_outcome_keeps
+async def test_stored_rows_keep_none_and_reduce_bytes_to_a_length(seeded_kernel):
     """C25 fidelity: a call's payload lands in the store verbatim — None stays None —
     except raw bytes, recorded as `{len: N}` (base64 is banned). And `dump` → `inject`
     round-trips the tables unchanged."""
@@ -339,7 +341,8 @@ async def test_the_settle_row_keeps_what_stored_outcome_keeps(seeded_kernel):
     assert after["fold_refs"] == before["fold_refs"]
 
 
-async def test_stored_outcome_keeps_a_named_result_a_dead_error_else_a_digest(
+# twin: stored_outcome_keeps_a_named_result_a_dead_error_else_a_digest
+async def test_a_settle_keeps_the_body_only_when_named_or_the_error_when_dead(
     seeded_kernel,
 ):
     """What a settle row keeps: a NAMED call's whole result (the dedup contract), a
@@ -403,7 +406,8 @@ async def test_the_flush_records_itself_and_never_loops(seeded_kernel):
     assert len(rows) >= n1
 
 
-async def test_an_unnamed_settle_comes_back_as_what_it_kept(
+# twin: an_unnamed_settle_comes_back_as_what_it_kept
+async def test_ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller(
     seeded_kernel,
 ):
     await _mk(seeded_kernel)

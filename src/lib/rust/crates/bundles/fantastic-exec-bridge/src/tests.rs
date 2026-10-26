@@ -335,7 +335,7 @@ async fn an_unknown_job_id_is_not_found_on_every_verb() {
 /// takes it. A string (even a stringified int) is a bad argument, never looked up:
 /// the old random 8-hex ids came back from a model as ints or infinite floats
 /// (`04203581`, `458e5912`) and 3.7% of jobs could not be addressed again
-/// (python `test_job_id_is_an_int_or_absent`).
+/// (python `test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_job_id_is_the_jobs_task_id_and_nothing_else_names_it() {
     let Some(py) = find_real_python() else {

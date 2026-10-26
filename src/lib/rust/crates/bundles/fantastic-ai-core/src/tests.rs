@@ -2382,7 +2382,7 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
 /// counts as completed — it is rerolled by the no-call reminder, told why
 /// (a tiny thinking budget, then a clean `stop` with no answer; failing it
 /// outright would end a long chain). python
-/// `test_a_thinking_only_turn_is_discarded_and_rerolled`.
+/// `test_a_dead_turn_is_discarded_and_rerolled`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_turn_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
@@ -6798,7 +6798,7 @@ fn backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation() {
     crate::state::drop_state(&b);
 }
 
-/// Delete-time teardown (python `test_backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation`):
+/// Delete-time teardown (python `test_delete_drops_every_row_but_the_incarnation`):
 /// `delete_agent` runs the backend's `on_delete`, which drops every per-id table,
 /// so the id re-created later starts clean; the incarnation stays monotonic, so a
 /// reply to a call the deleted agent made never becomes a live turn of the new one.

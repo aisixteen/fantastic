@@ -332,7 +332,8 @@ async def test_a_wait_on_a_running_job_still_waits_up_to_wait_s(seeded_kernel):
     await _wait_done(seeded_kernel, "runner", jid)
 
 
-async def test_job_id_is_an_int_or_absent(seeded_kernel):
+# twin: job_id_is_an_int_or_absent
+async def test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it(seeded_kernel):
     """One id space: the job's id IS its kernel task id — `ps` lists it, `cancel`
     takes it. A string (even a stringified int) is a bad argument, never looked up:
     the old random 8-hex ids came back from a model as ints or infinite floats
@@ -538,7 +539,8 @@ async def test_the_kernel_env_reaches_a_child_only_by_name(seeded_kernel, monkey
         assert row["last_line"] == want, (aid, row)
 
 
-async def test_spawn_failure_text_matches_python(seeded_kernel, tmp_path):
+# twin: spawn_failure_text_matches_python
+async def test_a_bare_command_is_found_on_the_childs_path_only(seeded_kernel, tmp_path):
     # a script found by name: `sh` on POSIX, a `.cmd` (a PATHEXT name) on Windows
     name, body = per_os(
         posix=("ft_only_here", "#!/bin/sh\necho found-by-child-path\n"),
@@ -715,7 +717,8 @@ _STREAM_CHILD = (
 )
 
 
-async def test_the_program_can_send_to_another_agent_and_read_the_reply(
+# twin: the_program_can_send_to_another_agent_and_read_the_reply
+async def test_a_stream_chunk_crosses_the_wire_raw(
     seeded_kernel, tmp_path, monkeypatch
 ):
     """`write_stream`/`read_stream` from a program: the bytes ride the fd as the
@@ -875,7 +878,8 @@ _WATCHER_CHILD = (
 )
 
 
-async def test_stop_releases_the_proxies_a_real_job_held(seeded_kernel):
+# twin: stop_releases_the_proxies_a_real_job_held
+async def test_stopping_a_watching_program_leaves_no_proxy_or_watcher(seeded_kernel):
     """Every proxy the relay held is given back on the way out — the watcher row,
     the INBOX row, and the drain task. A leaked inbox row makes `emit` auto-vivify
     into a Queue nobody drains, one per (job, watched src), forever."""
