@@ -68,6 +68,8 @@ on its `home.html`.
 | E130 `import_twice` | scripted: `import_subtree` on a hand-written blueprint — the preview names the ids, what each reaches and the ports and creates nothing; the approved call makes three agents (`*_1`) with parents right and grants re-wired (the bound store gains them); a second import is an independent copy (`*_2`); an unbound port is refused | #269: import a blueprint | scripted |
 | E131 `import_refusals` | scripted: a key in a blueprint is `secret_found` (never echoed), code is `code_not_allowed` until `allow_code: true` lets the same folder in, `"true"` as a string is not a yes, a missing `blueprint.yaml` is `not_found`; each leaves the home as it was | #269: import a blueprint | scripted |
 | E132 `import_cli` | scripted: `fantastic import` is attach-only (no kernel: exit 1, nothing started), a bad line exits 2 with the usage, off a terminal it previews and creates nothing, on a pty it asks `approve? [y/N]` (`n` nothing, `y` imports and names the ids; skipped on Windows), `--bind … --approve` imports, refusals print `refused (reason)` and exit 1 | #269: import a blueprint | scripted |
+| E134 `cabinets` | scripted: a master opens 3 cabinets in one turn, the workers build equipment on their own canvases and talk, their status shows live on the main canvas (no reload, no polling), the master re-tasks and stops one, `conclude` leaves nothing in the kernel or on disk | #136 (E2E for #132) | scripted |
+
 
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 

@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: the vLLM MOCK (e2e/mocks), no model.
+id: cabinets
+group: canvas
+title: "cabinets (#132) on the real host: a master opens 3 cabinets, the workers build equipment and talk, their status shows live on the main canvas, the master re-tasks and stops them and concludes: nothing of them is left"
+runner: probe.py
+costs: free
+limits:
+  seconds: 300
+env: {}

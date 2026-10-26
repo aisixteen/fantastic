@@ -67,7 +67,7 @@ impl Bundle for FakeAi {
 }
 
 /// The canvas that spawns cabinets, as a stub of the tui host's canvas node: `new_canvas`
-/// makes a CHILD canvas of itself (granted on the root, as the host grants it), `create`
+/// makes a CHILD canvas of itself (granted nothing: the cabinet wires it), `create`
 /// makes a child of itself (equipment, an AI admitted to the store it names), `place`
 /// acknowledges a view.
 #[derive(Default)]
@@ -112,6 +112,17 @@ fn stub_node(name: &str) -> String {
 async fn new_canvas(id: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     let node = stub_node(payload.get("name").and_then(Value::as_str).unwrap_or(""));
     let root = ROOT;
+    // the host's reach must know the canvas for a cabinet's the moment it exists: a
+    // cabinet record naming it is already there, or the canvas would be a holder with
+    // the reach of every AI
+    let named = kernel.agents.iter().any(|e| {
+        let r = e.value().record();
+        r.meta.get(ROLE).and_then(Value::as_str) == Some(CABINET)
+            && r.meta.get("canvas").and_then(Value::as_str) == Some(node.as_str())
+    });
+    if !named {
+        return json!({"error": format!("canvas stub: no cabinet names `{node}` yet")});
+    }
     let made = kernel
         .send(vec![Item::new(
             AgentId::from(root),
@@ -127,9 +138,6 @@ async fn new_canvas(id: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     if let Some(e) = made.get("error") {
         return json!({"error": e});
     }
-    // the root lets the new canvas make agents, and it may ask the root for them
-    grant(kernel, root, "callable_by", &node, json!(["create_agent"]));
-    grant(kernel, &node, "can_call", root, json!(["create_agent"]));
     json!({"id": node})
 }
 
@@ -435,6 +443,52 @@ async fn each_cabinets_canvas_is_a_child_of_the_canvas_that_spawns_it() {
         Some(MANAGER.to_string())
     );
     assert_eq!(meta(&k, &cab, "canvas"), json!(canvas));
+}
+
+#[tokio::test]
+async fn the_cabinet_record_names_its_canvas_before_the_canvas_exists() {
+    // the stub refuses a `new_canvas` no cabinet record names: opening works only in
+    // that order, and a refused canvas leaves no half-made cabinet behind
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let cab = open_ok(&k, "first").await;
+    assert_eq!(meta(&k, &cab, "canvas"), json!("canvas_cabinet_first"));
+    // a canvas of that name exists already: the host refuses, the record is removed again
+    let again = open(&k, "same name", json!({"name": "first"})).await;
+    assert!(again.get("error").is_some(), "{again}");
+    assert_eq!(
+        k.agents
+            .iter()
+            .filter(|e| e.value().record().meta.get(ROLE).and_then(Value::as_str) == Some(CABINET))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_cabinets_canvas_holds_create_agent_on_the_root_and_nothing_else() {
+    let tmp = TempDir::new().unwrap();
+    let (k, _) = world(&tmp).await;
+    let cab = open_ok(&k, "lean").await;
+    let canvas = canvas_of(&k, &cab);
+    let cc = meta(&k, &canvas, "can_call");
+    let keys: BTreeSet<&str> = cc.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, BTreeSet::from(["$self", ROOT]), "{cc}");
+    assert_eq!(cc[ROOT], json!(["create_agent"]));
+    assert_eq!(
+        meta(&k, ROOT, "callable_by")[canvas.as_str()],
+        json!(["create_agent"])
+    );
+    // closed: the root names it no more
+    let closed = as_(
+        &k,
+        MASTER,
+        MANAGER,
+        json!({"type": "close_cabinet", "id": cab}),
+    )
+    .await;
+    assert!(closed.get("error").is_none(), "{closed}");
+    assert!(meta(&k, ROOT, "callable_by").get(canvas.as_str()).is_none());
 }
 
 #[tokio::test]

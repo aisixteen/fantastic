@@ -71,11 +71,25 @@ fn meta(h: &Host, id: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// One key merged into `id`'s `can_call` or `callable_by`, as ONE step under the record's
+/// lock (`Kernel::edit_grants`): a key another writer puts there meanwhile (the reach's watch
+/// grants each new agent as it is made) stays. Read whole and written back by `update_agent`,
+/// a canvas made while an agent was being granted lost that grant.
 async fn merge_verbs(h: &Host, id: &str, field: &str, add: &str, verbs: Value) -> Result<(), String> {
-    let mut g = meta(h, id).get(field).and_then(Value::as_object).cloned().unwrap_or_default();
-    g.insert(add.into(), verbs);
-    let r = h.operator("kernel", json!({"type":"update_agent","id":id, field: g})).await;
-    err_of(&r).map_or(Ok(()), |e| Err(format!("could not grant {id}.{field} += {add}: {e}")))
+    let agent = fantastic_kernel::AgentId::from(id);
+    let edit = |g: &mut Map<String, Value>| {
+        if g.get(add) == Some(&verbs) {
+            return false;
+        }
+        g.insert(add.into(), verbs.clone());
+        true
+    };
+    let done = match field {
+        "can_call" => h.kernel.edit_can_call(&agent, edit),
+        "callable_by" => h.kernel.edit_callable_by(&agent, edit),
+        other => Err(format!("`{other}` is no grant map")),
+    };
+    done.map(|_| ()).map_err(|e| format!("could not grant {id}.{field} += {add}: {e}"))
 }
 
 async fn create(h: &Host, spec: Value) -> Result<(), String> {
@@ -512,6 +526,33 @@ pub(crate) mod canvas_tree_tests {
 
     fn records_root_of(h: &Host, loader: &str) -> String {
         meta(h, loader).get("root").and_then(Value::as_str).unwrap_or_default().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_canvas_made_while_an_agent_is_granted_keeps_that_grant() {
+        // `new_canvas` names the new loader in `user`'s `can_call`; a grant written to it at
+        // the same time (the reach's watch, for an agent made meanwhile) must survive
+        let dir = scratch("merge-race");
+        let h = Arc::new(canvas_world(&dir).await);
+        let writer = Arc::clone(&h);
+        let writing = std::thread::spawn(move || {
+            for i in 0..300 {
+                writer
+                    .kernel
+                    .edit_can_call(&KernelId::from(crate::env::HUMAN), |cc| {
+                        cc.insert(format!("late_{i}"), json!(["*"]));
+                        true
+                    })
+                    .unwrap();
+            }
+        });
+        for i in 0..6 {
+            new_canvas(&h, CANVAS_NODE_ID, &format!("race{i}")).await.unwrap();
+        }
+        writing.join().unwrap();
+        let cc = meta(&h, crate::env::HUMAN).get("can_call").and_then(Value::as_object).cloned().unwrap_or_default();
+        let lost: Vec<String> = (0..300).map(|i| format!("late_{i}")).filter(|k| !cc.contains_key(k)).collect();
+        assert!(lost.is_empty(), "grants lost to a canvas being made: {lost:?}");
     }
 
     #[tokio::test]

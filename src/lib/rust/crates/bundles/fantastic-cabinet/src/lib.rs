@@ -54,6 +54,10 @@ const STATUS_VERB: &str = "status";
 /// The canvas verb that makes a child canvas: the manager asks the spawning canvas for it.
 const NEW_CANVAS_VERB: &str = "new_canvas";
 
+/// The one verb a cabinet's canvas holds on the root: it makes the equipment its worker
+/// `create`s, as itself.
+const CREATE_VERB: &str = "create_agent";
+
 /// What a worker may do on its cabinet's canvas: place equipment (`create`) and place
 /// views (`place`). Nothing else on the canvas.
 const CANVAS_VERBS: [&str; 2] = ["create", "place"];
@@ -679,32 +683,8 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     if let Some(err) = grant_err {
         return json!({"error": format!("open_cabinet: could not grant the canvas: {err}")});
     }
-    // THE CABINET'S CANVAS: the spawning canvas makes it, a child of its own
-    let made_canvas = call(
-        kernel,
-        &canvas_id,
-        json!({"type": NEW_CANVAS_VERB, "name": cab_id}),
-    )
-    .await;
-    if let Some(err) = error_of(&made_canvas) {
-        let mut out = made_canvas.clone();
-        with(
-            &mut out,
-            "error",
-            json!(format!(
-                "open_cabinet: the canvas `{canvas_id}` did not make the cabinet's canvas: {err}"
-            )),
-        );
-        return out;
-    }
-    let cab_canvas = match made_canvas.get("id").and_then(Value::as_str) {
-        Some(c) if !c.is_empty() => c.to_string(),
-        _ => {
-            return json!({
-                "error": format!("open_cabinet: the canvas `{canvas_id}` answered no id for the cabinet's canvas")
-            })
-        }
-    };
+    // the canvas the host will make for `new_canvas {name: cab_id}`: `canvas_<name>`
+    let cab_canvas = format!("canvas_{cab_id}");
     let made = tree(
         kernel,
         json!({
@@ -739,8 +719,41 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
     )
     .await;
     if error_of(&made).is_some() {
-        unmake(kernel, "", &cab_canvas).await;
         return made;
+    }
+
+    // THE CABINET'S CANVAS: the spawning canvas makes it, a child of its own. The record
+    // above already names it, so the host's reach knows it for a cabinet's canvas the
+    // moment it exists (never a holder with the reach of every AI).
+    let made_canvas = call(
+        kernel,
+        &canvas_id,
+        json!({"type": NEW_CANVAS_VERB, "name": cab_id}),
+    )
+    .await;
+    if let Some(err) = error_of(&made_canvas) {
+        unmake(kernel, &cab_id, "").await;
+        let mut out = made_canvas.clone();
+        with(
+            &mut out,
+            "error",
+            json!(format!(
+                "open_cabinet: the canvas `{canvas_id}` did not make the cabinet's canvas: {err}"
+            )),
+        );
+        return out;
+    }
+    match made_canvas.get("id").and_then(Value::as_str) {
+        Some(c) if c == cab_canvas => {}
+        other => {
+            unmake(kernel, &cab_id, other.unwrap_or("")).await;
+            return json!({
+                "error": format!(
+                    "open_cabinet: the canvas `{canvas_id}` answered {} for the cabinet's canvas, not `{cab_canvas}`",
+                    other.map_or_else(|| "no id".to_string(), |c| format!("`{c}`"))
+                )
+            });
+        }
     }
 
     let handler = worker_rec.remove("handler_module").unwrap_or(Value::Null);
@@ -783,12 +796,25 @@ async fn open(manager: &str, payload: &Value, kernel: &Arc<Kernel>) -> Value {
             failure = err;
         }
     };
+    // the canvas makes the equipment its worker `create`s: it may ask the root for
+    // `create_agent`, and for nothing else (the root names it back)
+    let root = root_id(kernel);
     step(
         wire(
             kernel,
             &cab_canvas,
-            &[],
+            &grants(&[(root.as_str(), json!([CREATE_VERB]))]),
             &grants(&[(worker_id.as_str(), json!(CANVAS_VERBS))]),
+            &[],
+        )
+        .await,
+    );
+    step(
+        wire(
+            kernel,
+            &root,
+            &[],
+            &grants(&[(cab_canvas.as_str(), json!([CREATE_VERB]))]),
             &[],
         )
         .await,

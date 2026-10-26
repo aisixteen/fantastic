@@ -110,23 +110,27 @@ pub fn cabinet_owned(kernel: &fantastic_kernel::Kernel) -> std::collections::Has
 fn holders(h: &Host) -> Vec<String> {
     let root = h.kernel.root().map(|r| r.id.0.clone());
     let helper = [crate::kern::backend::HANDLER_MODULE, crate::kern::setup_agent::HANDLER_MODULE];
-    let owned = cabinet_owned(&h.kernel);
     let mut v: Vec<String> = HOLDING_LEGS.into_iter().filter(|l| exists(h, l)).map(String::from).collect();
     if exists(h, crate::env::HUMAN) {
         v.push(crate::env::HUMAN.to_string());
     }
-    v.extend(
-        h.kernel
-            .agents
-            .iter()
-            .filter(|e| Some(&e.key().0) != root.as_ref() && !owned.contains(&e.key().0))
-            .filter(|e| {
-                let r = e.value().record();
-                r.meta.get("memory_store_id").and_then(Value::as_str).is_some()
-                    || r.handler_module.as_deref().is_some_and(|m| helper.contains(&m))
-            })
-            .map(|e| e.key().0.clone()),
-    );
+    let candidates: Vec<String> = h
+        .kernel
+        .agents
+        .iter()
+        .filter(|e| Some(&e.key().0) != root.as_ref())
+        .filter(|e| {
+            let r = e.value().record();
+            r.meta.get("memory_store_id").and_then(Value::as_str).is_some()
+                || r.handler_module.as_deref().is_some_and(|m| helper.contains(&m))
+        })
+        .map(|e| e.key().0.clone())
+        .collect();
+    // The cabinets are read AFTER the candidates: an agent made while the candidates were
+    // listed has its cabinet made before it, so the later snapshot names it owned. Read
+    // first, it would be a holder for one grant (god mode for a worker).
+    let owned = cabinet_owned(&h.kernel);
+    v.extend(candidates.into_iter().filter(|id| !owned.contains(id)));
     v
 }
 
@@ -246,21 +250,23 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
     let send = json!(["send"]);
     let holders = holders(h);
     let root = h.kernel.root().map(|r| r.id.0.clone());
-    let owned = cabinet_owned(&h.kernel);
     // the agents that may START a call back: not a store (a store only answers),
     // not another holder (holders already reach each other with `*`), not a cabinet's
     let held: std::collections::HashSet<&str> = holders.iter().map(String::as_str).collect();
-    let everyone: Vec<String> = h
+    let listed: Vec<String> = h
         .kernel
         .agents
         .iter()
         .filter(|e| {
             let id = e.key().0.as_str();
-            Some(&e.key().0) != root.as_ref() && id != CANVAS_LEG && !held.contains(id) && !owned.contains(id)
+            Some(&e.key().0) != root.as_ref() && id != CANVAS_LEG && !held.contains(id)
                 && !e.value().record().handler_module.as_deref().is_some_and(|m| m.contains("store"))
         })
         .map(|e| e.key().0.clone())
         .collect();
+    // the cabinets are read AFTER the list (see `holders`)
+    let owned = cabinet_owned(&h.kernel);
+    let everyone: Vec<String> = listed.into_iter().filter(|id| !owned.contains(id)).collect();
     let touched: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
     let pairs = |holder: &str| -> Vec<String> {
         everyone
@@ -457,7 +463,7 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{announce, cabinet_owned, grant, leg_verbs, CANVAS_LEG, NARROWED};
+    use super::{announce, cabinet_owned, grant, holders, leg_verbs, CANVAS_LEG, NARROWED};
     use crate::kern::host::Host;
     use fantastic_kernel::{Agent, AgentId, Kernel};
     use serde_json::{json, Map, Value};
@@ -518,6 +524,31 @@ mod tests {
         for id in ["canvas_root", "canvas_root_helper", "m", "manager"] {
             assert!(!owned.contains(id), "{id} is not a cabinet's: {owned:?}");
         }
+    }
+
+    /// A worker made while the reach lists the holders is never one of them: its cabinet is
+    /// made before it, and the cabinets are read after the candidates are listed. (Read first,
+    /// a worker made between the two reads was a holder for one grant: `kernel` and every
+    /// agent in its `can_call`.)
+    #[tokio::test]
+    async fn a_worker_made_while_the_holders_are_listed_is_never_a_holder() {
+        let h = std::sync::Arc::new(host_with_leg("holders-race").await);
+        put(&h.kernel, "m", Some("kernel"), json!({}));
+        let maker = std::sync::Arc::clone(&h);
+        let making = std::thread::spawn(move || {
+            for i in 0..600 {
+                put(&maker.kernel, &format!("cabinet_{i}"), Some("kernel"), json!({"cabinet_role": "cabinet"}));
+                put(&maker.kernel, &format!("cabinet_{i}_worker"), Some(&format!("cabinet_{i}")), json!({"memory_store_id": "m"}));
+            }
+        });
+        let mut leaked = Vec::new();
+        while !making.is_finished() {
+            leaked.extend(holders(&h).into_iter().filter(|id| id.ends_with("_worker")));
+        }
+        making.join().unwrap();
+        assert!(leaked.is_empty(), "a cabinet's worker was a holder: {leaked:?}");
+        // and once made, none is one
+        assert!(holders(&h).iter().all(|id| !id.ends_with("_worker")));
     }
 
     /// A host on a kernel rooted at `kernel` (the root is the kernel-state handler, so the
