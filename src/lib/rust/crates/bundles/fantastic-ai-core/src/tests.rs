@@ -5089,6 +5089,99 @@ async fn a_fold_projection_over_budget_writes_folds() {
     );
 }
 
+/// Under `context_strategy: none` an over-budget turn is REFUSED — the reply
+/// names the prompt size and the budget, nothing reaches the model, nothing is
+/// written or dropped. python: `test_an_over_budget_turn_is_refused_under_none`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_budget_turn_is_refused_under_none() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "nonerefuse").await;
+    // budget = window - reserve = 4000 tokens.
+    let _ = kernel
+        .send(vec![Item::new(
+            AgentId::from("kernel_state"),
+            json!({"type": "update_agent", "id": backend.as_str(),
+                   "context_strategy": "none", "context_window": 4000,
+                   "output_reserve": 0}),
+        )])
+        .await;
+    for i in 0..20 {
+        let role = if i % 2 == 0 { "user" } else { "assistant" };
+        put_row(
+            &kernel,
+            &backend,
+            json!({"role": role, "content": (0..120).map(|j| format!("w{i}x{j} ")).collect::<String>()}),
+        )
+        .await;
+    }
+    let s = script(&backend, vec![pass("never reached")], Duration::ZERO);
+    // The boot-owed recall would write a recall row on the first turn; this test
+    // is about the seam alone, so settle it first.
+    *crate::state::state_for(&backend).recall_due.lock().unwrap() = false;
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let load = || async {
+        fantastic_kernel::test_support::as_agent(
+            backend.clone(),
+            crate::memory::load_history(&backend, &kernel, false),
+        )
+        .await
+        .expect("store read")
+    };
+    let before = load().await;
+    assert!(before.len() >= 20, "{}", before.len());
+    let r = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    let err = r["error"].as_str().unwrap_or_default().to_string();
+    let rest = err
+        .strip_prefix("mock_backend: context full: ")
+        .unwrap_or_else(|| panic!("{r:#?}"));
+    assert!(
+        rest.ends_with("clear, fold by hand, or raise context_window"),
+        "{err}"
+    );
+    let (prompt, tail) = rest.split_once("k of ").unwrap_or_else(|| panic!("{err}"));
+    let (budget, _) = tail
+        .split_once("k tokens")
+        .unwrap_or_else(|| panic!("{err}"));
+    let prompt: i64 = prompt.parse().expect("prompt size");
+    let budget: i64 = budget.parse().expect("budget");
+    assert_eq!(budget, 4, "{err}");
+    assert!(prompt >= 1 && prompt > budget, "{err}");
+    assert!(!err.contains("unknown context_strategy"), "{err}");
+    assert!(!err.contains("context_insufficient"), "{err}");
+    assert!(r.get("raised").is_none(), "{r:#?}");
+    assert!(r.get("client_id").is_none(), "{r:#?}");
+    assert_eq!(s.passes_served(), 0, "no request reached the backend");
+    let after = load().await;
+    assert_eq!(before, after, "nothing written, dropped or rewritten");
+    assert!(
+        !after
+            .iter()
+            .any(|x| x["kind"] == "fold" || x["kind"] == "recall"),
+        "{after:#?}"
+    );
+    assert!(
+        !after.iter().any(|x| x["content"].as_str() == Some("go")),
+        "the live turn was not stored"
+    );
+    let evs = drain(&mut rx).await;
+    let has = |ty: &str, phase: &str| {
+        evs.iter().any(|v| {
+            v.get("type").and_then(Value::as_str) == Some(ty)
+                && v.get("phase").and_then(Value::as_str) == Some(phase)
+        })
+    };
+    assert!(!has("status", "done"), "{evs:#?}");
+    assert!(!has("context", "compacted"), "{evs:#?}");
+    assert!(!has("context", "too_small"), "{evs:#?}");
+}
+
 #[tokio::test]
 async fn successive_fold_projections_do_not_nest_into_a_chain() {
     // The strategy folds the VIEW ARRAY, as python does, never the whole store:
