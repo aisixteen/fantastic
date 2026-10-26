@@ -13,10 +13,11 @@
 //!
 //! NOTHING is counted in memory. Every spawned agent carries `spawned_by` (this
 //! registry) and `role`, so `fleet` and `get_count` are read off the records: a
-//! delete lowers the count and a restart rebuilds it. `running` counts the agents
-//! whose task-line `state` is running or waiting (no task line = running).
+//! delete lowers the count and a restart rebuilds it. `running` counts
+//! EVERY spawned agent that still exists, so a slot frees only on
+//! `delete_agent`. The task tree is not kept here: that is `task_registry`.
 //!
-//! NO CLEANUP: `report done` only sets a state. Nothing is retired or deleted;
+//! NO CLEANUP: `report` only messages the parent. Nothing is retired or deleted;
 //! `delete_agent` is the only way out.
 //!
 //! `spawn` may branch `from` a fork point of an existing agent (`from:{agent, at}`):
@@ -48,7 +49,7 @@ pub const ENABLE_ENV: &str = "FANTASTIC_AGENTIC_RESOURCES";
 /// readme.md auto-seeded into the agent's dir on creation.
 pub const README: &str = include_str!("readme.md");
 
-/// The states a task line takes.
+/// The states a `report` may carry.
 pub const STATES: [&str; 6] = ["waiting", "running", "blocked", "done", "failed", "paused"];
 
 /// What a parent holds over every agent it spawns.
@@ -84,11 +85,11 @@ fn verb_docs_json() -> Value {
         "reflect": "Identity, whether the registry is enabled, and the role names. No args.",
         "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
         "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
-        "spawn": "args: role:str (req), task:str|{label, waits_on?}? (a string is sent to the child as its first message; an object is stored on its record as the task line {label, state, waits_on, result}), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card, task and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied.",
-        "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent sets its OWN task line; its parent gets a message {type:'report', from, state, result}. Refused `not_spawned` for any other caller. Nothing is cleaned up on done. Returns {ok:true}.",
-        "fleet": "No args. Returns {roles:{<role>:[{id, state}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
+        "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied.",
+        "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). Refused `not_spawned` for any other caller. Nothing is cleaned up on done. Returns {ok:true}.",
+        "fleet": "No args. Returns {roles:{<role>:[{id}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
         "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
-        "get_count": "args: role:str? (omitted = in total). Returns {running, max} — running counts ACTIVE agents only (running, waiting); max is null when uncapped.",
+        "get_count": "args: role:str? (omitted = in total). Returns {running, max} — running counts every agent this registry spawned that still exists (a slot frees on delete_agent); max is null when uncapped.",
     })
 }
 
@@ -121,23 +122,10 @@ fn fail(code: &str, reason: String) -> Value {
     json!({"error": code, "reason": reason})
 }
 
-fn task_state(meta: &Map<String, Value>) -> String {
-    meta.get("task")
-        .and_then(|t| t.get("state"))
-        .and_then(Value::as_str)
-        .unwrap_or("running")
-        .to_string()
-}
-
-fn active(state: &str) -> bool {
-    state == "running" || state == "waiting"
-}
-
 /// One agent this registry spawned.
 struct Spawned {
     id: AgentId,
     role: String,
-    state: String,
     /// The lead that spawned it `from` a fork point (it sits beside its source, so
     /// the tree alone would not put it under that lead's quota).
     lead: Option<String>,
@@ -161,7 +149,6 @@ fn spawned(kernel: &Kernel, reg: &AgentId) -> Vec<Spawned> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
-                state: task_state(&m),
                 lead: m.get("lead").and_then(Value::as_str).map(str::to_string),
             })
         })
@@ -408,34 +395,12 @@ async fn spawn_reply(
             format!("tier {} has no handler_module", py_repr(&card.tier)),
         );
     }
-    // the task: a string is the first message, an object is the task line
-    let mut first_message: Option<String> = None;
-    let mut line: Option<Value> = None;
-    match payload.get("task") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(s)) => first_message = Some(s.clone()),
-        Some(Value::Object(t)) => {
-            let Some(label) = t
-                .get("label")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            else {
-                return bad("spawn", "task.label", "a non-empty string");
-            };
-            let waits: Vec<Value> = match t.get("waits_on") {
-                None | Some(Value::Null) => Vec::new(),
-                Some(Value::Array(a)) if a.iter().all(Value::is_string) => a.clone(),
-                Some(_) => return bad("spawn", "task.waits_on", "a list of agent ids"),
-            };
-            let state = if waits.is_empty() {
-                "running"
-            } else {
-                "waiting"
-            };
-            line = Some(json!({"label": label, "state": state, "waits_on": waits, "result": null}));
-        }
-        Some(_) => return bad("spawn", "task", "a string or {label, waits_on?}"),
-    }
+    // the task: a string is the child's first message
+    let first_message: Option<String> = match payload.get("task") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return bad("spawn", "task", "a string"),
+    };
     let mut delegated = Map::new();
     if let Some(l) = payload.get("limits").filter(|l| !l.is_null()) {
         let Some(l) = l.as_object() else {
@@ -477,16 +442,13 @@ async fn spawn_reply(
     let limits = meta.get("limits").cloned().unwrap_or(Value::Null);
 
     // the registry's caps: per role, then in total
-    let in_role = all
-        .iter()
-        .filter(|s| s.role == role && active(&s.state))
-        .count();
+    let in_role = all.iter().filter(|s| s.role == role).count();
     if let Some(max) = cap(&limits, Some(role)) {
         if in_role as u64 >= max {
             return limit_refusal("role", role, in_role, max, None);
         }
     }
-    let total = all.iter().filter(|s| active(&s.state)).count();
+    let total = all.len();
     if let Some(max) = cap(&limits, None) {
         if total as u64 >= max {
             return limit_refusal("total", role, total, max, None);
@@ -504,10 +466,7 @@ async fn spawn_reply(
             continue;
         }
         let Some(q) = lm.get("limits") else { continue };
-        let below: Vec<&Spawned> = all
-            .iter()
-            .filter(|s| active(&s.state) && below_lead(kernel, s, lead))
-            .collect();
+        let below: Vec<&Spawned> = all.iter().filter(|s| below_lead(kernel, s, lead)).collect();
         if let Some(max) = cap(q, None) {
             if below.len() as u64 >= max {
                 return limit_refusal("subtree_total", role, below.len(), max, Some(lead.as_str()));
@@ -529,7 +488,7 @@ async fn spawn_reply(
         {
             let used = all
                 .iter()
-                .filter(|s| active(&s.state) && below_lead(kernel, s, &parent))
+                .filter(|s| below_lead(kernel, s, &parent))
                 .count() as u64;
             if let (Some(want), Some(max)) = (
                 delegated.get("total").and_then(Value::as_u64),
@@ -569,7 +528,6 @@ async fn spawn_reply(
             card,
             tier_fields: &tier_fields,
             caller: &caller,
-            line: &line,
             delegated: &delegated,
             name: &name,
             first_message,
@@ -612,9 +570,6 @@ async fn spawn_reply(
     create.insert("callable_by".to_string(), Value::Object(callable_by));
     if let Some(n) = &name {
         create.insert("name".to_string(), json!(n));
-    }
-    if let Some(l) = &line {
-        create.insert("task".to_string(), l.clone());
     }
     if !delegated.is_empty() {
         create.insert("limits".to_string(), Value::Object(delegated));
@@ -723,7 +678,6 @@ struct SpawnFrom<'a> {
     card: &'a Card,
     tier_fields: &'a Map<String, Value>,
     caller: &'a Option<AgentId>,
-    line: &'a Option<Value>,
     delegated: &'a Map<String, Value>,
     name: &'a Option<String>,
     first_message: Option<String>,
@@ -796,7 +750,7 @@ fn fork_ungrant(
 }
 
 /// `spawn {role, from:{agent, at}}`: `fork {at}` of `src` makes the agent (it sits
-/// beside its source, in the source's store); the role card, the task line and the
+/// beside its source, in the source's store); the role card and the
 /// limits are then applied over the copy like any spawn.
 async fn spawn_from(kernel: &Arc<Kernel>, c: &SpawnFrom<'_>, src: &str, at: i64) -> Value {
     let (reg, card) = (c.reg, c.card);
@@ -872,12 +826,8 @@ async fn spawn_from(kernel: &Arc<Kernel>, c: &SpawnFrom<'_>, src: &str, at: i64)
         patch.insert("display_name".to_string(), json!(n));
     }
     let mut cleared: Vec<&str> = Vec::new();
-    match c.line {
-        Some(l) => {
-            patch.insert("task".to_string(), l.clone());
-        }
-        None => cleared.push("task"),
-    }
+    // a task line copied from the source record is dropped
+    cleared.push("task");
     if c.delegated.is_empty() {
         cleared.push("limits");
     } else {
@@ -957,21 +907,6 @@ async fn report_reply(reg: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> V
             ),
         );
     }
-    let mut task = mm
-        .get("task")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_else(|| {
-            let mut t = Map::new();
-            t.insert("label".to_string(), Value::Null);
-            t.insert("waits_on".to_string(), json!([]));
-            t
-        });
-    task.insert("state".to_string(), json!(state));
-    task.insert("result".to_string(), result.clone());
-    let mut patch = Map::new();
-    patch.insert("task".to_string(), Value::Object(task));
-    kernel.update(&mine.id, patch);
     // the parent hears it; an emit is gated, so the registry is let in first
     if let Some(parent) = mine.parent_id.clone().filter(|p| p != reg) {
         let p = parent.as_str().to_string();
@@ -1000,7 +935,7 @@ fn fleet_reply(reg: &AgentId, kernel: &Kernel) -> Value {
         roles
             .entry(s.role)
             .or_default()
-            .push(json!({"id": s.id.as_str(), "state": s.state}));
+            .push(json!({"id": s.id.as_str()}));
     }
     json!({"roles": roles})
 }
@@ -1074,7 +1009,7 @@ fn get_count_reply(
     };
     let running = spawned(kernel, reg)
         .iter()
-        .filter(|s| active(&s.state) && role.is_none_or(|r| s.role == r))
+        .filter(|s| role.is_none_or(|r| s.role == r))
         .count();
     let max = meta.get("limits").and_then(|l| cap(l, role));
     json!({"running": running, "max": max})

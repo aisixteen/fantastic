@@ -13,8 +13,9 @@ third `spawn` is refused at the limit of 2 (`set_limit role=writer max=2`), and
 Script 2 (extended): a `project_lead` spawns two sub-leads with split limits
 (`limits:{total:1}` each); a sub-lead cannot spawn past its quota; the leaves
 `report done`; each sub-lead reports a condensed line and the top lead reports one
-line for the whole; the task tree (`reflect tree=all`) shows every task line and
-all agents are still there after completion (nothing is cleaned up).
+line for the whole. `report` only messages the parent and stores nothing on a record
+(the task tree is `task_registry`'s, E135); `get_count` counts every spawned agent that
+still exists, and all agents are still there after completion (nothing is cleaned up).
 
 Script 3 (from a fork point, #424; run by hand, not in CI): a source agent with two
 finished turns is `mark`ed; a lead `spawn`s a `worker` `from:{agent, at}` that mark. The

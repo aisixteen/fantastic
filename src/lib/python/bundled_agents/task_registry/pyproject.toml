@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastic-task-registry"
+version = "0.1.0"
+description = "Fantastic task_registry — which agent or subtree holds which task, and where each task comes from (off by default)."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.11"
+dependencies = ["fantastic-kernel-state"]
+
+[project.entry-points."fantastic.bundles"]
+task_registry = "task_registry.tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task_registry"]

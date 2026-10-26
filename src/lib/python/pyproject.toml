@@ -16,6 +16,7 @@ dependencies = [
   "fantastic-web-rest",
   "fantastic-scheduler",
   "fantastic-agentic-resources",
+  "fantastic-task-registry",
   "fantastic-file-bridge",
   "fantastic-kernel-state",
   "fantastic-ollama-backend",
@@ -70,6 +71,7 @@ testpaths = [
   "bundled_agents/io/web_rest/tests",
   "bundled_agents/scheduler/tests",
   "bundled_agents/agentic_resources/tests",
+  "bundled_agents/task_registry/tests",
   "bundled_agents/io/file_bridge/tests",
   "bundled_agents/loader/kernel_state/tests",
   "bundled_agents/loader/static_loader/tests",
@@ -103,6 +105,7 @@ members = [
   "bundled_agents/io/web_rest",
   "bundled_agents/scheduler",
   "bundled_agents/agentic_resources",
+  "bundled_agents/task_registry",
   "bundled_agents/io/file_bridge",
   "bundled_agents/ai/ai_core",
   "bundled_agents/ai/cabinet",
@@ -132,6 +135,7 @@ fantastic-web-ws = { workspace = true }
 fantastic-web-rest = { workspace = true }
 fantastic-scheduler = { workspace = true }
 fantastic-agentic-resources = { workspace = true }
+fantastic-task-registry = { workspace = true }
 fantastic-file-bridge = { workspace = true }
 fantastic-ollama-backend = { workspace = true }
 fantastic-responses-backend = { workspace = true }

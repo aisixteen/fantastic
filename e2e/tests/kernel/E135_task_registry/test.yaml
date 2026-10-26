@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a scripted OpenAI-compatible
+# server plays the model for the kernel's own vllm_backend agents, driven over web_rest.
+id: task_registry
+group: kernel
+title: "the task_registry (enabled by env) on a ram_store: a lead adds a task tree, spawns a sub-lead and a worker through agentic_resources, assigns a sub-task to the sub-lead and reassigns it to the sub-lead's subtree, and records the worker's report and status; list and get show the tree, the holder history and the last report, the store holds the rows under the registry's key, and the worker's own write to the registry is refused by the call gate"
+runner: probe.py
+runtimes: [python, rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

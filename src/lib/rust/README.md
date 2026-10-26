@@ -202,6 +202,7 @@ Bundles that compile under either tier:
 | `fantastic-web-rest`           | REST verb channel (mounted onto a parent web); sealed by default; the gate runs BEFORE the body is read, and a body past 16 MiB (io_bridge `MAX_FRAME`) is a 413; an admitted call is handed to the leg (`inbound_call`) and sent onward AS THE LEG |
 | `fantastic-scheduler`          | recurring tasks on a tokio tick; a schedule fires AS THE SCHEDULER (its `can_call` decides), and every caller the gate admits sees and drives every schedule |
 | `fantastic-agentic-resources`  | a generic roles registry (off by default, `FANTASTIC_AGENTIC_RESOURCES`): role cards, `spawn` as a child of the caller, `fleet`, per-role and total limits |
+| `fantastic-task-registry`      | a generic task registry (off by default, `FANTASTIC_TASK_REGISTRY`): which agent or subtree holds which task and where it came from, kept in a store agent |
 | `fantastic-bridge`             | cross-kernel bridge — two bundles, `ws_bridge.tools` and `relay_connector.tools` — WS-only, asymmetric (memory / WS); an inbound `call` frame is served AS THE LEG (its `can_call`, the target's `callable_by`); a leg's rules are read off its record per frame; frame ids are `<leg>-<boot nonce>-<n>`; a relay leg reads its password from a credential_store ref (`credentials: {store, ref}`) before every dial |
 | `fantastic-ollama-backend`     | local LLM via ollama |
 | `fantastic-responses-backend`  | the OpenAI Responses API |

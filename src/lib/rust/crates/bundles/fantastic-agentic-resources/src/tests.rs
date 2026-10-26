@@ -641,7 +641,10 @@ async fn fleet_groups_by_role_with_ids() {
     want.sort_by_key(ToString::to_string);
     assert_eq!(ids("writer"), want, "the stray agent is not listed: {f}");
     assert_eq!(ids("reviewer"), vec![v1]);
-    assert_eq!(f["roles"]["writer"][0]["state"], "running");
+    assert_eq!(
+        f["roles"]["writer"][0],
+        json!({"id": f["roles"]["writer"][0]["id"].clone()})
+    );
 }
 
 #[test]
@@ -739,36 +742,20 @@ async fn spawn_grants_parent_pause_resume_stop_both_ends() {
 }
 
 #[tokio::test]
-async fn spawn_task_line_stored() {
+async fn spawn_task_string_is_first_message_and_object_refused() {
     let tmp = TempDir::new().unwrap();
     let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
     let lead = &r.callers[0];
-    let a = r
+    // a task object (the old task line) is refused
+    let before = r.kernel.agents.len();
+    let bad = r
         .spawn_as(
             lead,
             json!({"role": "writer", "task": {"label": "draft intro"}}),
         )
         .await;
-    assert_eq!(
-        r.meta(a["id"].as_str().unwrap())["task"],
-        json!({"label": "draft intro", "state": "running", "waits_on": [], "result": null})
-    );
-    let b = r
-        .spawn_as(
-            lead,
-            json!({"role": "writer", "task": {"label": "polish", "waits_on": [a["id"]]}}),
-        )
-        .await;
-    let t = r.meta(b["id"].as_str().unwrap())["task"].clone();
-    assert_eq!(t["state"], "waiting");
-    assert_eq!(t["waits_on"], json!([a["id"]]));
-    assert_eq!(t["result"], Value::Null);
-    // a task with no label is refused; a string task is a first message, not a line
-    assert_eq!(
-        r.spawn_as(lead, json!({"role": "writer", "task": {}}))
-            .await["reason"],
-        "bad_arg"
-    );
+    assert_eq!(bad["reason"], "bad_arg", "{bad}");
+    assert_eq!(r.kernel.agents.len(), before, "nothing was created");
     let c = r
         .spawn_as(lead, json!({"role": "writer", "task": "do it"}))
         .await;
@@ -794,14 +781,12 @@ async fn spawn_task_line_stored() {
 }
 
 #[tokio::test]
-async fn report_sets_state_and_messages_parent() {
+async fn report_messages_parent_and_stores_nothing() {
     let tmp = TempDir::new().unwrap();
     let r = rig(&tmp, &["lead", "other"], &[("writer.md", WRITER)]).await;
     let (lead, other) = (&r.callers[0], &r.callers[1]);
     let mut inbox = r.kernel.ensure_inbox(&AgentId::from(lead.as_str()));
-    let id = r
-        .spawn_as(lead, json!({"role": "writer", "task": {"label": "x"}}))
-        .await["id"]
+    let id = r.spawn_as(lead, json!({"role": "writer"})).await["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -813,12 +798,7 @@ async fn report_sets_state_and_messages_parent() {
         )
         .await;
     assert_eq!(rep, json!({"ok": true}), "{rep}");
-    let t = r.meta(&id)["task"].clone();
-    assert_eq!(
-        (t["state"].clone(), t["result"].clone()),
-        (json!("done"), json!({"words": 120}))
-    );
-    assert_eq!(t["label"], "x");
+    assert!(r.meta(&id).get("task").is_none(), "nothing is stored");
     let mut got = None;
     while let Some(item) = inbox.try_recv() {
         if item.payload["type"] == "report" {
@@ -842,52 +822,7 @@ async fn report_sets_state_and_messages_parent() {
         .call(&id, &r.reg, json!({"type": "report", "state": "finished"}))
         .await;
     assert_eq!(bad["reason"], "bad_arg", "{bad}");
-    assert_eq!(r.meta(&id)["task"]["state"], "done");
-}
-
-fn find_node<'a>(v: &'a Value, id: &str) -> Option<&'a Value> {
-    if v.get("id").and_then(Value::as_str) == Some(id) {
-        return Some(v);
-    }
-    match v {
-        Value::Object(m) => m.values().find_map(|c| find_node(c, id)),
-        Value::Array(a) => a.iter().find_map(|c| find_node(c, id)),
-        _ => None,
-    }
-}
-
-#[tokio::test]
-async fn task_tree_visible_in_reflect_tree_all() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
-    let lead = &r.callers[0];
-    let a = r
-        .spawn_as(lead, json!({"role": "writer", "task": {"label": "intro"}}))
-        .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let b = r
-        .spawn_as(
-            lead,
-            json!({"role": "writer", "task": {"label": "body", "waits_on": [a.clone()]}}),
-        )
-        .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let tree = send(
-        &r.kernel,
-        "kernel_state",
-        json!({"type": "reflect", "tree": "all"}),
-    )
-    .await;
-    let lead_node = find_node(&tree, lead).expect("lead in the tree");
-    let na = find_node(lead_node, &a).expect("child a under the lead");
-    let nb = find_node(lead_node, &b).expect("child b under the lead");
-    let line = |n: &Value| n.get("task").cloned();
-    assert_eq!(line(na).unwrap()["label"], "intro", "{na}");
-    assert_eq!(line(nb).unwrap()["state"], "waiting");
+    assert!(r.meta(&id).get("task").is_none());
 }
 
 #[tokio::test]
@@ -946,55 +881,40 @@ async fn delegated_limits_bound_subtree() {
 }
 
 #[tokio::test]
-async fn get_count_counts_active_only() {
+async fn get_count_counts_every_spawned_agent() {
     let tmp = TempDir::new().unwrap();
     let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
     let lead = &r.callers[0];
     r.op(json!({"type": "set_limit", "max": 2})).await;
-    let a = r
-        .spawn_as(lead, json!({"role": "writer", "task": {"label": "a"}}))
-        .await["id"]
+    let a = r.spawn_as(lead, json!({"role": "writer"})).await["id"]
         .as_str()
         .unwrap()
         .to_string();
-    let b = r
-        .spawn_as(
-            lead,
-            json!({"role": "writer", "task": {"label": "b", "waits_on": [a.clone()]}}),
-        )
-        .await["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(
-        r.count(None).await["running"],
-        2,
-        "running and waiting both count"
-    );
+    r.spawn_as(lead, json!({"role": "writer"})).await;
+    assert_eq!(r.count(None).await, json!({"running": 2, "max": 2}));
+    let third = r.spawn_as(lead, json!({"role": "writer"})).await;
+    assert_eq!(third["error"], "limit", "{third}");
+    // a report frees nothing; only delete_agent does
+    r.call(&a, &r.reg, json!({"type": "report", "state": "done"}))
+        .await;
+    assert_eq!(r.count(None).await["running"], 2);
     assert_eq!(
         r.spawn_as(lead, json!({"role": "writer"})).await["error"],
         "limit"
     );
-    r.call(&a, &r.reg, json!({"type": "report", "state": "paused"}))
-        .await;
-    assert_eq!(r.count(None).await, json!({"running": 1, "max": 2}));
-    assert!(
-        r.spawn_as(lead, json!({"role": "writer"}))
-            .await
-            .get("id")
-            .is_some(),
-        "a freed slot"
-    );
-    r.call(&b, &r.reg, json!({"type": "report", "state": "done"}))
-        .await;
+    let gone = send(
+        &r.kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": a}),
+    )
+    .await;
+    assert_eq!(gone["deleted"], true);
     assert_eq!(r.count(None).await["running"], 1);
-    r.call(&a, &r.reg, json!({"type": "report", "state": "running"}))
-        .await;
-    assert_eq!(
-        r.count(None).await["running"],
-        2,
-        "resumed work uses a slot again"
-    );
+    assert!(r
+        .spawn_as(lead, json!({"role": "writer"}))
+        .await
+        .get("id")
+        .is_some());
 }
 
 #[tokio::test]
@@ -1002,9 +922,7 @@ async fn no_auto_cleanup_on_done() {
     let tmp = TempDir::new().unwrap();
     let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
     let lead = &r.callers[0];
-    let a = r
-        .spawn_as(lead, json!({"role": "writer", "task": {"label": "a"}}))
-        .await["id"]
+    let a = r.spawn_as(lead, json!({"role": "writer"})).await["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1031,11 +949,8 @@ async fn no_auto_cleanup_on_done() {
         (m["spawned_by"].clone(), m["role"].clone()),
         (json!(r.reg), json!("writer"))
     );
-    assert_eq!(
-        (m["task"]["label"].clone(), m["task"]["state"].clone()),
-        (json!("a"), json!("done"))
-    );
-    assert_eq!(r.count(None).await["running"], 0, "the count dropped");
+    assert!(m.get("task").is_none());
+    assert_eq!(r.count(None).await["running"], 2, "the count stays");
     let f = r.op(json!({"type": "fleet"})).await;
     assert_eq!(
         f["roles"]["writer"].as_array().unwrap().len(),
@@ -1238,7 +1153,7 @@ async fn spawn_from_keeps_the_source_store_and_drops_its_other_grants() {
 }
 
 #[tokio::test]
-async fn spawn_from_overwrites_the_copied_task_and_limits() {
+async fn spawn_from_drops_the_copied_task_and_overwrites_limits() {
     let tmp = TempDir::new().unwrap();
     let (r, src) = fork_rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
     let lead = &r.callers[0];
@@ -1249,21 +1164,23 @@ async fn spawn_from_overwrites_the_copied_task_and_limits() {
         .unwrap()
         .to_string();
     let m = r.meta(&bare);
-    assert!(m.get("task").is_none(), "no task: none carried over: {m:?}");
+    assert!(
+        m.get("task").is_none(),
+        "the source's task is dropped: {m:?}"
+    );
     assert!(m.get("limits").is_none(), "{m:?}");
     let given = r
         .spawn_as(
             lead,
             json!({"role": "writer", "from": from(&src, 5),
-                   "task": {"label": "draft"}, "limits": {"per_role": 1}}),
+                   "limits": {"per_role": 1}}),
         )
         .await["id"]
         .as_str()
         .unwrap()
         .to_string();
     let m = r.meta(&given);
-    assert_eq!(m["task"]["label"], "draft");
-    assert_eq!(m["task"]["state"], "running");
+    assert!(m.get("task").is_none(), "{m:?}");
     assert_eq!(m["limits"], json!({"per_role": 1}));
     assert_eq!(m["role"], "writer", "never the source's role");
     // the source itself is untouched
@@ -1396,10 +1313,7 @@ async fn spawn_from_counts_in_fleet_and_get_count_and_survives_restart() {
         .unwrap()
         .to_string();
     let f = r.op(json!({"type": "fleet"})).await;
-    assert_eq!(
-        f["roles"]["writer"],
-        json!([{"id": id, "state": "running"}])
-    );
+    assert_eq!(f["roles"]["writer"], json!([{"id": id}]));
     assert_eq!(r.count(Some("writer")).await["running"], 1);
     let state = r.kernel.save();
     let k2 = Arc::new(new_kernel());
