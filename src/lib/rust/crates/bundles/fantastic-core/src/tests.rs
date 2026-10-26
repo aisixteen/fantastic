@@ -1236,3 +1236,20 @@ async fn non_root_loader_refuses_export_subtree() {
     );
     assert!(!tmp.path().join("o").exists());
 }
+
+#[test]
+fn a_secret_hit_names_the_file_with_slashes_on_every_os() {
+    let d = TempDir::new().unwrap();
+    std::fs::create_dir_all(d.path().join("bundles").join("py_ab12")).unwrap();
+    std::fs::write(
+        d.path().join("bundles").join("py_ab12").join("agent.py"),
+        "KEY = 'sk-abcd1234efgh'\n",
+    )
+    .unwrap();
+    let p = d.path().join("bundles").join("py_ab12").join("agent.py");
+    assert_eq!(export::rel_name(d.path(), &p), "bundles/py_ab12/agent.py");
+    assert_eq!(
+        export::scan_secrets(d.path()),
+        vec!["bundles/py_ab12/agent.py: an sk- key token".to_string()]
+    );
+}

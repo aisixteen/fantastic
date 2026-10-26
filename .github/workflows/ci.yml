@@ -146,7 +146,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           podman info --format '{{.Host.Arch}} rootless={{.Host.Security.Rootless}}'
       - name: the image, built with Docker
-        # one build feeds both smoke tests: Docker's image is copied to Podman below
+        # one staged binary feeds both smoke tests: Podman builds its own image from it below
         run: ENGINE=docker sh scripts/build/container.sh --arch ${{ matrix.arch }} --tag fantastic-server:ci
       - name: the image's platform and labels
         run: |
@@ -163,7 +163,10 @@ jobs:
       - name: smoke test, Docker
         run: uv run --project src/lib/python python os/ci/container_check.py --engine docker --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/docker
       - name: the image into Podman
-        run: docker save fantastic-server:ci | podman load
+        # not `docker save | podman load`: Docker's containerd image store saves an OCI
+        # image, whose config Podman reads without the HEALTHCHECK ("no defined
+        # healthcheck"). Podman builds the same staged binary in docker's format.
+        run: ENGINE=podman sh scripts/build/container.sh --arch ${{ matrix.arch }} --tag fantastic-server:ci
       - name: smoke test, rootless Podman
         run: uv run --project src/lib/python python os/ci/container_check.py --engine podman --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/podman
       - name: keep the checks (logs)
