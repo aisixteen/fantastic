@@ -45,7 +45,27 @@ from helpers.ai import IDLE_END, QuietWatch  # noqa: E402
 from helpers.groups import PRACTICE, GroupLedger, group_of, make_queue, master_prompt, wall_seconds  # noqa: E402
 from helpers.kernel import home, open_kernel  # noqa: E402
 
-BK = _resolve_backend()
+
+
+def skip_reason():
+    """(backend, None) when the run can happen here, else (None, why): no model plug,
+    backend not ready, or no polyglot clone. A missing resource is a SKIP, never a FAIL."""
+    try:
+        bk = _resolve_backend()
+    except SystemExit as e:
+        return None, f"no model plug: {e}".splitlines()[0]
+    blockers = bk.blockers()
+    if blockers:
+        return None, f"{bk.name} is not ready: {blockers[0]}"
+    if not PRACTICE.is_dir():
+        return None, f"polyglot-benchmark clone missing at {PRACTICE} (see tests/coding_exercism/README.md)"
+    return bk, None
+
+
+BK, _SKIP = skip_reason()
+if _SKIP:
+    print(f"E2E-SKIP: {_SKIP}", flush=True)
+    raise SystemExit(0)
 W = 78
 MASTER = "ai"
 QUEUE = "queue"

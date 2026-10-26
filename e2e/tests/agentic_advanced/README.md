@@ -24,3 +24,8 @@ withholding grants the task required. `selftest.py` exists because of that.
 
 These are the most expensive tests in the suite: long idle windows, high turn
 caps, and several model-driven agents alive at once.
+
+E124 (self-managed groups) needs a model key and the polyglot clone. Without a
+ready backend or without the clone it prints `E2E-SKIP` and run.py reports SKIP.
+A real run needs `MAX_GROUPS=1` and then `MAX_GROUPS=3`, and an operator runs it,
+not CI.
