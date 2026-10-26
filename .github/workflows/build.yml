@@ -19,8 +19,9 @@
 #              `fantastic-session` from `scripts/build/deb.sh` on the Linux
 #              `app-*` and `release-*` artifacts of the same run (`debs`,
 #              installed on stock Debian 13 in a container), the mkosi image of
-#              them, and its boot in QEMU (`os/ci/boot_check.py`). Its own call,
-#              after the `binaries` call (`ci.yml`).
+#              them, and its boot in QEMU (`os/ci/boot_check.py`), then the
+#              system agents on the booted image (`os/ci/e2e_system.py`). Its
+#              own call, after the `binaries` call (`ci.yml`).
 #
 # Callers: `ci.yml` ({debug, units}, {release, binaries}, then {release, e2e}
 # and {release, os}).
@@ -826,6 +827,18 @@ jobs:
         with:
           name: os-check-${{ matrix.arch }}
           path: os-check/
+          retention-days: 14
+      - name: the system agents
+        run: |
+          raw=dist/os/fantastic-os_${FANTASTIC_VERSION}.raw
+          uv run --project src/lib/python python os/ci/e2e_system.py \
+            --image "$raw" --arch ${{ matrix.arch }} --out os-e2e-system ${{ matrix.boot }}
+      - name: keep the system agents' check (logs)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: os-e2e-system-${{ matrix.arch }}
+          path: os-e2e-system/
           retention-days: 14
       - name: compress the image
         if: success() && matrix.arch == 'x86-64'

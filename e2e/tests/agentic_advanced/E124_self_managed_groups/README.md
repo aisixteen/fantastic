@@ -43,3 +43,7 @@ MAX_GROUPS=3 uv run python ../../../e2e/run.py --id self_managed_groups
 The exercises come from the gym's clone at `tmp/repos/polyglot-benchmark` (see
 `tests/coding_exercism/README.md`); `EXERCISES` and `QUEUE_SIZE` pick the queue.
 `helpers/groups.py` `compare(wall_1, wall_3)` gives the speedup from the two walls.
+
+Without a key (or a ready backend) or without the polyglot clone, the probe prints
+`E2E-SKIP: <reason>` and exits 0, and run.py reports SKIP. An unset `MAX_GROUPS`
+with a ready backend still fails loud.

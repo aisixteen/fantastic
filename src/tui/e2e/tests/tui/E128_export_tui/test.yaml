@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: export_tui
+group: tui
+title: "the TUI command /export <path> writes the selected agent and everything under it as a blueprint folder; a path with .. is refused on screen"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

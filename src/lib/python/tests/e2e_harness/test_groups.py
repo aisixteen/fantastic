@@ -139,7 +139,8 @@ def test_make_queue_copies_exercises_without_leaking_solutions(tmp_path):
 
 
 @pytest.fixture
-def probe_env(monkeypatch):
+def probe_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(groups, "PRACTICE", tmp_path)
     for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_ENDPOINT", "FANTASTIC_AI_MODEL", "BACKEND"):
         monkeypatch.delenv(var, raising=False)
     for var in list(os.environ):
@@ -160,6 +161,63 @@ def _probe():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _skip_line(capsys):
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.startswith("E2E-SKIP:")]
+    return out, lines
+
+
+def test_skip_when_no_api_key(probe_env, capsys):
+    probe_env.delenv("ANTHROPIC_API_KEY")
+    with pytest.raises(SystemExit) as e:
+        _probe()
+    assert e.value.code == 0
+    out, lines = _skip_line(capsys)
+    assert len(lines) == 1 and "not ready" in lines[0]
+    assert "sk-ant" not in out
+
+
+def test_skip_when_no_model_plug(probe_env, capsys):
+    probe_env.delenv("BACKEND")
+    with pytest.raises(SystemExit) as e:
+        _probe()
+    assert e.value.code == 0
+    _, lines = _skip_line(capsys)
+    assert len(lines) == 1 and lines[0].startswith("E2E-SKIP: no model plug")
+
+
+def test_skip_when_polyglot_clone_missing(probe_env, tmp_path, capsys):
+    probe_env.setattr(groups, "PRACTICE", tmp_path / "absent")
+    with pytest.raises(SystemExit) as e:
+        _probe()
+    assert e.value.code == 0
+    _, lines = _skip_line(capsys)
+    assert len(lines) == 1 and "polyglot-benchmark" in lines[0]
+
+
+def test_skip_wins_over_unset_max_groups(probe_env, capsys):
+    probe_env.delenv("MAX_GROUPS")
+    probe_env.delenv("ANTHROPIC_API_KEY")
+    with pytest.raises(SystemExit) as e:
+        _probe()
+    assert e.value.code == 0
+    _, lines = _skip_line(capsys)
+    assert len(lines) == 1
+
+
+def test_unset_max_groups_still_fails_loud_when_ready(probe_env, capsys):
+    probe_env.delenv("MAX_GROUPS")
+    with pytest.raises(SystemExit) as e:
+        _probe()
+    assert "MAX_GROUPS is unset" in str(e.value)
+    assert not _skip_line(capsys)[1]
+
+
+def test_no_skip_when_ready(probe_env, capsys):
+    _probe()
+    assert not _skip_line(capsys)[1]
 
 
 def _row(role, n):
