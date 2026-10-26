@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: import_refusals
+group: home
+title: "import_subtree refuses a blueprint that carries a key (secret_found, the key never echoed), code without allow_code (code_not_allowed), a missing folder (not_found) and a string where a literal true is required; each leaves the home as it was, and allow_code lets the same folder in"
+runner: probe.py
+costs: free
+limits:
+  seconds: 180
+env: {}

@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: export_cell_menu
+group: canvas
+title: "right-click a cell head, pick Export…: a blueprint folder appears; a cell with no host agent says so and writes nothing"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

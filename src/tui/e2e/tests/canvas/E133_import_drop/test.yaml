@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: import_drop
+group: canvas
+title: "drop a blueprint folder from the file tree onto the canvas or a cell: a preview dialog first and nothing created, Cancel creates nothing, Approve imports under the canvas host (or the cell's backend) and says which ids, an unbound port asks for the agent, and a refusal is a toast"
+runner: probe.py
+costs: free
+limits:
+  seconds: 300
+env: {}

@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: import_cli
+group: home
+title: "fantastic import <folder> --parent <id>: attach-only (no kernel, no start), usage on a bad line, a preview off a terminal that creates nothing, a y/N question on a terminal, --approve with --bind that imports and names the new ids, and refusals that exit 1"
+runner: probe.py
+costs: free
+limits:
+  seconds: 240
+env: {}

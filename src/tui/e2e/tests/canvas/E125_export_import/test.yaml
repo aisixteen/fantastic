@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: export_import
+group: canvas
+title: "export a three-level subtree through a real kernel and import it back: a blueprint folder with ports, then fresh ids, bound ports and equal records"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

@@ -1,0 +1,11 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a scripted OpenAI-compatible server
+# answers HTTP 503, then the kernel's own vllm_backend agent retries it, over web_rest.
+id: transport_retries
+group: backends
+title: "transport_retries: a 503 turn is retried visibly (a notice row the model reads, a retrying status) and then succeeds; a 503 on every try fails loud after the budget; a 400 and retries off are not retried (Python runtime)"
+runner: probe.py
+runtimes: [python]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300
