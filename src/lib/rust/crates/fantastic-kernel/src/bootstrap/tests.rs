@@ -255,6 +255,76 @@ async fn concurrent_edit_grants_keep_every_key() {
 }
 
 #[test]
+fn concurrent_edit_grants_persist_every_key_across_a_restart() {
+    const ROUNDS: usize = 50;
+    let tmp = TempDir::new().unwrap();
+    let store_root = tmp.path().join(".fantastic");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+    {
+        let mut reg = with_loader(BundleRegistry::new());
+        reg.register("noop.tools", Noop);
+        crate::test_support::register_fake_store(&mut reg, &store_root);
+        let booted = bootstrap(reg, BootstrapOptions::daemon(tmp.path())).expect("boot");
+        let kernel = Arc::clone(&booted.kernel);
+        rt.block_on(async {
+            boot_root(&kernel).await;
+            crate::test_support::wire_fake_store(&kernel, &store_root).await;
+            for round in 0..ROUNDS {
+                let _ = kernel
+                    .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type":"create_agent","parent_id":"kernel","handler_module":"noop.tools","id":format!("child_{round}")}))])
+                    .await.remove(0).result;
+            }
+            // settle the creates' own writes, so only the edits can make the records dirty again
+            kernel.flush_records().await;
+            for round in 0..ROUNDS {
+                let barrier = Arc::new(std::sync::Barrier::new(2));
+                let mut handles = Vec::new();
+                for key in ["view_a", "view_b"] {
+                    let k = Arc::clone(&kernel);
+                    let b = Arc::clone(&barrier);
+                    let id = AgentId::from(format!("child_{round}").as_str());
+                    handles.push(tokio::spawn(async move {
+                        b.wait();
+                        k.edit_callable_by(&id, |cb| {
+                            cb.insert(key.to_string(), json!(["*"]));
+                            true
+                        })
+                    }));
+                }
+                for h in handles {
+                    assert!(h.await.unwrap().is_ok(), "round {round}");
+                }
+            }
+            kernel.flush_records().await;
+        });
+        shutdown(tmp.path()).unwrap();
+    }
+    let mut reg2 = with_loader(BundleRegistry::new());
+    reg2.register("noop.tools", Noop);
+    crate::test_support::register_fake_store(&mut reg2, &store_root);
+    let booted2 = bootstrap(reg2, BootstrapOptions::daemon(tmp.path())).expect("boot2");
+    for round in 0..ROUNDS {
+        let cb = booted2
+            .kernel
+            .agents
+            .get(&AgentId::from(format!("child_{round}").as_str()))
+            .expect("child rehydrated")
+            .record()
+            .meta
+            .get("callable_by")
+            .cloned()
+            .unwrap_or(Value::Null);
+        assert_eq!(cb.get("view_a"), Some(&json!(["*"])), "round {round}: {cb}");
+        assert_eq!(cb.get("view_b"), Some(&json!(["*"])), "round {round}: {cb}");
+    }
+    shutdown(tmp.path()).unwrap();
+}
+
+#[test]
 fn edit_callable_by_holds_the_record_lock_while_it_edits() {
     let kernel = Kernel::new();
     kernel.register(Agent::new(

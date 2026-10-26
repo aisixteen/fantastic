@@ -56,6 +56,10 @@ on:
         type: choice
         options: [all, linux]
         default: all
+      cleanup:
+        description: "Run the optional cleanup steps (rust-cache target clean and cache save, uv cache prune, image removal). Off: skipped, the runner is thrown away."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -68,6 +72,7 @@ jobs:
   units:
     uses: ./.github/workflows/build.yml
     with:
+      cleanup: ${{ inputs.cleanup }}
       profile: debug
       units: true
       # a full run keeps every OS, whatever units_os says
@@ -77,6 +82,7 @@ jobs:
     if: inputs.e2e
     uses: ./.github/workflows/build.yml
     with:
+      cleanup: ${{ inputs.cleanup }}
       profile: release
       binaries: true
 
@@ -85,6 +91,7 @@ jobs:
     needs: [units, binaries]
     uses: ./.github/workflows/build.yml
     with:
+      cleanup: ${{ inputs.cleanup }}
       profile: release
       e2e: true
 
@@ -93,6 +100,7 @@ jobs:
     needs: [binaries]
     uses: ./.github/workflows/build.yml
     with:
+      cleanup: ${{ inputs.cleanup }}
       profile: release
       os: true
 
@@ -122,6 +130,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
+          prune-cache: ${{ inputs.cleanup }}
           cache-dependency-glob: src/lib/python/uv.lock
       - name: the check's python (websockets)
         run: (cd src/lib/python && uv sync --locked)

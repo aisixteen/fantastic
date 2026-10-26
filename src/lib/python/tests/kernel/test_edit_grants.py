@@ -150,3 +150,56 @@ async def test_edit_grants_persists_both_keys_across_a_restart(tmp_path, monkeyp
     rebooted = boot_root()
     cb = rebooted.ctx.get("child_m")["callable_by"]
     assert cb["view_a"] == ["*"] and cb["view_b"] == ["*"], cb
+
+
+async def test_concurrent_edit_grants_persist_every_key_across_a_restart(
+    tmp_path, monkeypatch
+):
+    """Two grant edits running at once on one agent both reach `agent.yaml` and
+    survive a reboot (the lost-update race that only matters after reload)."""
+    import asyncio
+
+    import yaml
+
+    from _testkit import boot_root
+    from kernel_state.tools import on_shutdown
+
+    rounds = 50
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    root.create(
+        "file_bridge.tools",
+        allow=["."],
+        id="store",
+        root=".fantastic",
+        ingress_rule="allow_all_ingress",
+    )
+    (await root.send([{"target": root.id, "payload": {"type": "boot"}}]))[0]
+    try:
+        for n in range(rounds):
+            root.create(MOD, id=f"child_{n}")
+        await root._fs_flush_loop.aflush()
+        k = root.ctx
+
+        async def edit(aid, key):
+            await asyncio.sleep(0)
+            return k.edit_callable_by(aid, lambda cb: cb.update({key: ["*"]}) or True)
+
+        for n in range(rounds):
+            aid = f"child_{n}"
+            results = await asyncio.gather(edit(aid, "view_a"), edit(aid, "view_b"))
+            assert results == [(True, None), (True, None)], results
+        await root._fs_flush_loop.aflush()
+        for n in range(rounds):
+            path = tmp_path / ".fantastic" / "agents" / f"child_{n}" / "agent.yaml"
+            on_disk = yaml.safe_load(path.read_text(encoding="utf-8"))
+            assert on_disk["callable_by"]["view_a"] == ["*"], on_disk
+            assert on_disk["callable_by"]["view_b"] == ["*"], on_disk
+    finally:
+        await on_shutdown(root)
+
+    del root
+    rebooted = boot_root()
+    for n in range(rounds):
+        cb = rebooted.ctx.get(f"child_{n}")["callable_by"]
+        assert cb["view_a"] == ["*"] and cb["view_b"] == ["*"], (n, cb)

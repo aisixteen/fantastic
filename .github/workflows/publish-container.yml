@@ -37,6 +37,10 @@ on:
         description: "Also tag `latest` (the newest release only)."
         type: boolean
         default: false
+      cleanup:
+        description: "Run the optional cleanup steps (removal of the loaded image between arches). Off: skipped, the runner is thrown away."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -113,6 +117,8 @@ jobs:
           TOKEN: ${{ github.token }}
         run: printf '%s' "$TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: push each tested arch image, as loaded (no rebuild)
+        env:
+          CLEANUP: ${{ inputs.cleanup }}
         run: |
           for arch in amd64 arm64; do
             dir="images/container-image-$arch"
@@ -126,7 +132,7 @@ jobs:
             [ "$label" = "$VERSION" ] || { echo "::error::$arch: the image is version '$label', publish asked '$VERSION'"; exit 1; }
             docker tag fantastic-server:ci "$IMAGE:$SHA-$arch"
             docker push "$IMAGE:$SHA-$arch"
-            docker rmi fantastic-server:ci >/dev/null
+            [ "$CLEANUP" != true ] || docker rmi fantastic-server:ci >/dev/null
           done
       - name: the multi-arch manifest, from the two pushed images
         run: |
