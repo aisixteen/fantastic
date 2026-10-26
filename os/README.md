@@ -92,6 +92,10 @@ uv run --project src/lib/python python os/ci/boot_check.py \
   --image dist/os/fantastic-os_<version>.raw --arch x86-64 --out os-check
 ```
 
+The system canvas (power, network, audio, displays, notifications, lock) is checked
+on the same image by `os/ci/e2e_system.py` (same arguments, plus `--only` to pick
+steps); it prints `SKIP` and exits 0 when QEMU or the image is missing.
+
 It needs `qemu-system-x86` and `ovmf` (arm64: `qemu-system-arm`,
 `qemu-efi-aarch64`). `/dev/kvm` makes it fast; without it, QEMU falls back to TCG
 and the boot takes much longer (raise `--timeout` and `--step`).
