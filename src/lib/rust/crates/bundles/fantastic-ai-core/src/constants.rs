@@ -182,3 +182,12 @@ pub const MAX_SILENT_TURNS: usize = 10;
 /// inside the card. The canvas's TS twin (`chat_card.ts`) says the same 1200 —
 /// a test reads both.
 pub const CHAT_CARD_MAX_HEIGHT: i64 = 1200;
+
+// ─── fork points (#425) ─────────────────────────────────────────────────────
+
+/// How many `mark` rows an agent keeps: a new mark prunes the oldest beyond this.
+/// A constant, not a record field — the issue says "config" and names none.
+pub const MAX_MARKS: usize = 20;
+/// How long a provider keeps a prompt prefix warm after a send ended (seconds).
+/// `fork_points` reports an agent `warm` while its last send is younger than this.
+pub const CACHE_LIFETIME_SECS: f64 = 300.0;

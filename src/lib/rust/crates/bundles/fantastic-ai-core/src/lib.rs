@@ -68,6 +68,14 @@
 //!   `grants_missing`. `unembed` args `{id:str}` → `{unembedded:id}` takes the card
 //!   out (a tombstone row; the agent is never touched). The card is 100% of the
 //!   column wide and at most [`constants::CHAT_CARD_MAX_HEIGHT`] tall (see [`embed`]).
+//! - `fork` args `{at:int, name?, id?}` → `{id, copied, at}` — a NEW agent from this
+//!   one's first rows (its card and grants, the rows ≤ `at` copied under its own key
+//!   with their ids), refused as `no_such_row`, `cuts_turn`, `cuts_fold`,
+//!   `parent_mid_turn` or `store_refused` (see [`fork`]). `mark` args `{label, note?,
+//!   version?}` → `{marked, at, label}` — mark this agent's own history at a turn
+//!   boundary, the point a fork can start from. `fork_points` args `{filter?}` →
+//!   `{points}` — THIS agent's marks (`{agent, at, label, note, version, rows_after,
+//!   model, warm}`); the listing across agents is #424.
 //! - `reflect`, `boot`, `shutdown`, `status`.
 //!
 //! There is NO `interrupt` verb: a `send` IS a kernel task, so an in-flight
@@ -119,6 +127,7 @@ pub mod credentials;
 pub mod embed;
 pub mod events;
 pub mod folds;
+pub mod fork;
 pub mod helpers;
 pub mod history_view;
 pub mod memory;

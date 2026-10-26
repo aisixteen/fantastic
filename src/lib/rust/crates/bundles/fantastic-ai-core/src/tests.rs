@@ -5334,6 +5334,9 @@ fn verb_docs_match_python_docstrings() {
             "context_clear",
             "context_fold",
             "context_forget",
+            "fork",
+            "mark",
+            "fork_points",
             "watch",
             "unwatch",
             "boot",
@@ -7079,6 +7082,9 @@ mod stall;
 mod tests_embed;
 #[path = "tests_retries.rs"]
 mod tests_retries;
+/// fork, mark, fork_points (#425).
+#[path = "tests_fork.rs"]
+mod tests_fork;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
