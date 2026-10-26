@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a stub provider answers the live turns.
+id: fork_marks
+group: memory
+title: "mark and fork on a live agent (Python runtime): two forks of one mark both start from the parent's rows at the mark, ids and content alike"
+runner: probe.py
+runtimes: [python]
+costs: free
+limits:
+  idle_seconds: 60

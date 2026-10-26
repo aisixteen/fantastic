@@ -88,7 +88,9 @@ from kernel import current_origin, current_task
 from kernel._refusal import BAD_ARG, LOCKED, UNHANDLED, refusal
 from kernel._refusal import bad as bad_arg
 from ai_core.constants import (  # noqa: F401 — re-exported seams
+    CACHE_LIFETIME_SECS,
     DEFAULT_CLIENT_ID,
+    MAX_MARKS,
     MAX_CALL_DEPTH,
     MAX_SILENT_TURNS,
     RECALL_EVERY,
@@ -3346,6 +3348,8 @@ async def _run(
     cut_call = splitter.open_call
     await parts_out.push(splitter.finish(), final=True)
     last_text = "".join(content_parts)
+    # THE PASS ENDED: the provider's prompt cache is warm from here (`fork_points`).
+    _last_send[self_id] = time.time()
     reported = getattr(provider, "last_prompt_tokens", None)
     if isinstance(reported, int) and reported > 0:
         _calib[self_id] = reported / max(1, estimate_tokens(model_messages))
@@ -4297,6 +4301,7 @@ async def on_delete(agent) -> None:
         _folds_since,
         _calib,
         _reported,
+        _last_send,
         _inflight,
         _stripped,
         _chains,
@@ -5160,6 +5165,312 @@ async def _context_forget(id, payload, kernel):
         }
 
 
+# ─── fork, mark, fork_points (#425) ──────────────────────────────────
+#
+# THE PREFIX IS A COPY. Rows are never edited and the provider's prompt cache compares
+# bytes, not storage, so the fork re-appends the parent's rows under its OWN key with
+# their original ids and hits the parent's cache. A fork point is always a turn
+# boundary outside a fold: `fork` refuses any other `at`, and `mark` writes its row
+# only where `fork` would accept it. Rust twin: `fork.rs`.
+
+#: Rows that belong to the live state of ONE agent, never to a prefix a fork inherits:
+#: the pause state, the messages held for it, a late arrival and the marks.
+_NOT_COPIED = frozenset({"pause", "held", "late", "mark"})
+
+#: When each agent's last provider pass ended (unix seconds) — `fork_points`' `warm`.
+_last_send: dict[str, float] = {}
+
+
+def _refuse(verb: str, reason: str, why: str, hint: str, at: int | None = None) -> dict:
+    out = {"error": f"{verb}: {why}", "reason": reason, "hint": hint}
+    if at is not None:
+        out["at"] = at
+    return out
+
+
+def _mid_turn(self_id: str) -> bool:
+    """A turn is running for this agent, or its chain is alive: its rows are moving."""
+    return (
+        _lock_for(self_id).locked()
+        or _chain_of(self_id)["alive"]
+        or self_id in _current
+    )
+
+
+def _is_conversation(r: dict) -> bool:
+    """A chat turn (a fold included) — not bookkeeping, not a live-state row."""
+    return (
+        isinstance(r.get("id"), int)
+        and r.get("kind") not in _BOOKKEEPING
+        and r.get("kind") not in _NOT_COPIED
+        and r.get("role") in _TURN_ROLES
+    )
+
+
+def _leaves(fold: dict, folds: dict, seen: set) -> list:
+    """Every leaf (non-fold) id under a fold, through nested folds."""
+    out: list = []
+    for m in fold.get("refs") or ():
+        inner = folds.get(m)
+        if inner is None:
+            out.append(m)
+        elif m not in seen:
+            seen.add(m)
+            out.extend(_leaves(inner, folds, seen))
+    return out
+
+
+def _fork_plan(rows: list[dict], at: int) -> tuple[list[dict] | None, tuple | None]:
+    """`(the rows a fork at `at` carries over, in id order, None)` — or
+    `(None, (reason, why))` when `at` is no fork point. `rows` is the WHOLE store."""
+    from ai_core.folds import chains, is_open
+
+    conv = [r for r in rows if _is_conversation(r)]
+    if not any(r["id"] == at for r in conv):
+        return None, ("no_such_row", f"no row {at} in this conversation")
+    # Folds first: a fold whose members straddle `at` is cut, whatever else holds.
+    folds = {r["id"]: r for r in conv if is_fold(r)}
+    whole: set[int] = set()
+    for fid, f in folds.items():
+        ls = _leaves(f, folds, {fid})
+        below = any(m <= at for m in ls)
+        above = any(m > at for m in ls)
+        if above and (below or fid <= at):
+            return None, (
+                "cuts_fold",
+                f"row {at} cuts fold {fid}: some of its members are before it, "
+                "some after",
+            )
+        if fid > at and below:
+            whole.add(fid)
+    # A turn is a chain of rows linked by `parent`: `at` may not fall inside one, and
+    # an open chain (a reply still owed) is not yet a turn. A fold taken whole sits
+    # where its members sat, so it is not a row above `at`.
+    in_chain = [r for r in conv if r["id"] not in whole]
+    for chain in chains(in_chain):
+        ids = [in_chain[i]["id"] for i in chain]
+        below = any(i <= at for i in ids)
+        above = any(i > at for i in ids)
+        if below and (above or is_open(in_chain, chain)):
+            return None, (
+                "cuts_turn",
+                f"row {at} is inside a turn that is not finished",
+            )
+
+    # What the prompt is assembled from: the newest `view` and `anchors` row at or
+    # before `at`, so the fork's prompt is the parent's for the same prefix.
+    def newest(kind: str):
+        return max(
+            (r["id"] for r in rows if r.get("kind") == kind and r["id"] <= at),
+            default=None,
+        )
+
+    view, anchors = newest("view"), newest("anchors")
+    out = []
+    for r in rows:
+        rid, kind = r.get("id"), r.get("kind")
+        if not isinstance(rid, int):
+            continue
+        if rid in whole:
+            pass
+        elif kind == "view":
+            if rid != view:
+                continue
+        elif kind == "anchors":
+            if rid != anchors:
+                continue
+        elif rid > at or kind in _NOT_COPIED:
+            continue
+        out.append({k: v for k, v in r.items() if k != "agent"})
+    out.sort(key=lambda r: r["id"])
+    return out, None
+
+
+def _opt_str(payload: dict, key: str):
+    """`(value, ok)` for a string argument that may be absent or null."""
+    v = payload.get(key)
+    if v is None:
+        return None, True
+    return (v, True) if isinstance(v, str) else (None, False)
+
+
+async def _fork(id, payload, kernel):
+    """args: at:int (req — a row id), name:str?, id:str?, from:{agent:str, at:int}? (fork THAT agent instead: sent to it as a gated call). Starts a NEW agent from this one's first rows: the same card (handler, model, endpoint, system prompt, `memory_store_id`, context settings, `can_call`; the store's `callable_by` opens for it) and a COPY of every row with id ≤ `at` under its own key with the same ids, plus every fold whose members are all ≤ `at`, in ONE all-or-nothing append. The fork's next prompt is byte-identical to this agent's for the same prefix, so the provider's prompt cache hits. Later rows, folds and forgets on either side never reach the other. Refused, with `reason` and `at`: `no_such_row`, `cuts_turn` (`at` is inside a turn, or one still owed a reply), `cuts_fold` (some of a fold's members are ≤ `at`, some after), `parent_mid_turn` (a turn is running), `store_refused` (the store refused the copy: no agent is left behind). Returns {id, copied, at}."""
+    verb = "fork"
+    if payload.get("from") is not None:
+        return await _fork_from(payload, kernel)
+    at = _as_id(payload.get("at"))
+    if at is None:
+        return bad_arg(verb, "at", "a row id (int)")
+    name, ok_name = _opt_str(payload, "name")
+    want_id, ok_id = _opt_str(payload, "id")
+    if not (ok_name and ok_id):
+        return bad_arg(verb, "name/id", "a string")
+    # A turn holds the FIFO lock for its whole run: the rows must not move under the copy.
+    if _mid_turn(id):
+        return _parent_mid_turn(id, at)
+    async with _lock_for(id):
+        rows = (await _store_call(id, kernel, {"type": "read"})).get("rows") or []
+        copy, why = _fork_plan(rows, at)
+        if why is not None:
+            reason, text = why
+            hint = {
+                "no_such_row": "name a row of this conversation (see `history`)",
+                "cuts_fold": "fork at a row before the fold or after all of it",
+            }.get(reason, "fork at the end of a finished turn, or at a `mark`")
+            return _refuse(verb, reason, text, hint, at)
+        ctx = _ctx(kernel)
+        parent = ctx.agents[id]
+        store = _store_of(id, kernel)
+        # THE CARD: the parent's record, minus what is the parent's alone.
+        create = {
+            k: v
+            for k, v in (kernel.get(id) or {}).items()
+            if k not in ("id", "handler_module", "parent_id", "callable_by", "delete_lock")
+        }
+        create["display_name"] = name or f"{parent.display_name or id} fork"
+        create["type"] = "create_agent"
+        create["handler_module"] = parent.handler_module
+        create["parent_id"] = parent.parent.id if parent.parent is not None else "kernel"
+        if want_id is not None:
+            create["id"] = want_id
+        made = await kernel._root()._verb_create_agent(create)
+        if isinstance(made, dict) and made.get("error"):
+            return {**made, "at": at}
+        new_id = made["id"]
+
+        # THE GRANT: the store admits the fork the way it admits the parent.
+        def admit(cb: dict) -> bool:
+            cb[new_id] = cb.get(id, "*")
+            return True
+
+        ctx.edit_callable_by(store, admit)
+        # THE COPY: ONE `append`, as the fork (the store keys a row by its writer),
+        # ids kept, all or nothing.
+        try:
+            with ctx.agents[new_id]._as_self():
+                await _store_call(new_id, kernel, {"type": "append", "rows": copy})
+        except MemoryStoreError as e:
+            # The half-made agent is deleted, its grant taken back; the store keeps none of it.
+            await kernel._root().delete(new_id)
+            ctx.edit_callable_by(store, lambda cb: cb.pop(new_id, None) is not None)
+            return _refuse(
+                verb,
+                "store_refused",
+                f"the memory store refused the copy: {e}",
+                "the store must let the fork `append` and `read` as it lets this agent",
+                at,
+            )
+    return {"id": new_id, "copied": len(copy), "at": at}
+
+
+def _parent_mid_turn(id: str, at: int) -> dict:
+    return _refuse(
+        "fork",
+        "parent_mid_turn",
+        f"a turn is running for {id}",
+        "fork once the running turn has answered, or at a `mark`",
+        at,
+    )
+
+
+async def _fork_from(payload: dict, kernel) -> dict:
+    """`fork {from:{agent, at}}`: ask THAT agent to fork itself at `at`."""
+    src = payload.get("from")
+    agent = src.get("agent") if isinstance(src, dict) else None
+    at = _as_id(src.get("at")) if isinstance(src, dict) else None
+    if not isinstance(agent, str) or not agent or at is None:
+        return bad_arg("fork", "from", "{agent:str, at:int}")
+    ask = {"type": "fork", "at": at}
+    ask.update({k: payload[k] for k in ("name", "id") if k in payload})
+    out = (await kernel.send([{"target": agent, "payload": ask}]))[0]
+    return out.get("result")
+
+
+async def _mark(id, payload, kernel):
+    """args: label:str (req), note:str?, version:str? (a free-form tag, e.g. the repo commit). Marks THIS agent's history at its newest row, which is always a turn boundary outside any fold, so `fork {at}` there is always valid. One `mark` row (never in the prompt); the last 20 marks are kept, older ones are pruned in the same step. Refused, with `reason`: `mid_turn`, `open_chain`, `in_fold`, `no_rows`. Returns {marked, at, label}."""
+    verb = "mark"
+    label = payload.get("label")
+    if not isinstance(label, str) or not label.strip():
+        return bad_arg(verb, "label", "a non-empty string")
+    note, ok_note = _opt_str(payload, "note")
+    version, ok_version = _opt_str(payload, "version")
+    if not (ok_note and ok_version):
+        return bad_arg(verb, "note/version", "a string")
+    if _mid_turn(id):
+        return _refuse(
+            verb,
+            "mid_turn",
+            f"a turn is running for {id}",
+            "mark once the running turn has answered",
+        )
+    async with _lock_for(id):
+        rows = (await _store_call(id, kernel, {"type": "read"})).get("rows") or []
+        at = max((r["id"] for r in rows if _is_conversation(r)), default=None)
+        if at is None:
+            return _refuse(
+                verb,
+                "no_rows",
+                "there is nothing in the conversation to mark",
+                "mark after the first turn",
+            )
+        _, why = _fork_plan(rows, at)
+        if why is not None:
+            reason = "in_fold" if why[0] == "cuts_fold" else "open_chain"
+            return _refuse(verb, reason, why[1], "mark once the turn has ended", at)
+        row = {"kind": "mark", "label": label, "note": note, "version": version, "at": at}
+        marked = row["id"] = _mint_row_id(id, kernel)
+        await _save_history(id, kernel, [row])
+        # THE LAST N: older marks go in the same step.
+        marks = [r["id"] for r in rows if r.get("kind") == "mark"] + [marked]
+        if len(marks) > MAX_MARKS:
+            doomed = marks[: len(marks) - MAX_MARKS]
+            await _store_call(id, kernel, {"type": "prune", "ids": doomed})
+            # The head cache holds what the store just dropped: read it afresh.
+            _mem(kernel)["heads"].pop(id, None)
+    return {"marked": marked, "at": at, "label": label}
+
+
+async def _fork_points(id, payload, kernel):
+    """args: filter:{label?, version?}? (a substring of the label; the exact version). THIS agent's marks, oldest first (the listing across agents is #424). Returns {points:[{agent, at, label, note, version, rows_after, model, warm}]}: `rows_after` counts the conversation rows after `at`, `warm` is true while this agent's last send ended within the provider's cache lifetime (300 s)."""
+    verb = "fork_points"
+    flt = payload.get("filter")
+    if flt is None:
+        flt = {}
+    if not isinstance(flt, dict):
+        return bad_arg(verb, "filter", "an object {label?, version?}")
+    want_label, want_version = flt.get("label"), flt.get("version")
+    rows = (await _store_call(id, kernel, {"type": "read"})).get("rows") or []
+    model = (kernel.get(id) or {}).get("model")
+    sent = _last_send.get(id)
+    warm = sent is not None and time.time() - sent < CACHE_LIFETIME_SECS
+    points = []
+    for m in rows:
+        if m.get("kind") != "mark":
+            continue
+        label = m.get("label") or ""
+        if isinstance(want_label, str) and want_label not in label:
+            continue
+        if isinstance(want_version, str) and m.get("version") != want_version:
+            continue
+        at = m.get("at") or 0
+        points.append(
+            {
+                "agent": id,
+                "at": at,
+                "label": m.get("label"),
+                "note": m.get("note"),
+                "version": m.get("version"),
+                "rows_after": sum(
+                    1 for r in rows if _is_conversation(r) and r["id"] > at
+                ),
+                "model": model,
+                "warm": warm,
+            }
+        )
+    return {"points": points}
+
+
 def _strip_state_pop(id: str) -> None:
     from ai_core.strategies.strip import _stripped as _strip_state
 
@@ -5374,6 +5685,10 @@ def build(
         "context_fold": _make_context_fold(cfg),
         # Compact the store: drop the rows the folds already summarise.
         "context_forget": _context_forget,
+        # A NEW agent from this one's first rows; a mark to fork from; this agent's marks.
+        "fork": _fork,
+        "mark": _mark,
+        "fork_points": _fork_points,
         # THE ROW EVENT: this agent announces its own rows to its watchers.
         "watch": _watch,
         "unwatch": _unwatch,

@@ -1,0 +1,16 @@
+# WHAT to measure and HOW LONG to allow. Never a model, an endpoint, a key
+# or a backend name — those live in e2e/backends/. This one needs the Anthropic
+# plug (BACKEND=anthropic with its endpoint, model and key) and is skipped without it.
+id: fork_cache
+group: memory
+title: "a fork's first send reads the parent's prompt cache: the Anthropic reply's cache-read tokens are above zero"
+runner: probe.py
+runtimes: [python]
+costs: turns
+limits:
+  idle_seconds: 90
+  max_turns: 8
+  no_progress_turns: 8
+  turn_chars: 120000
+  turn_seconds: 300
+env: {}
