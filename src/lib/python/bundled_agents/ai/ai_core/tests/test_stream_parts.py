@@ -352,6 +352,27 @@ async def test_rows_is_a_view_of_what_the_agent_holds(seeded_kernel, fake_provid
     fp = fake_providers["sp_rows"] = _Slow(["hello there", DONE])
     await k.send([{"target": "sp_rows", "payload": {"type": "send", "text": "hi"}}])
     await _until(lambda: len(fp.requests) >= 2)
+    # `send` returns after pass 1; pass 2 (the nudge's answer) keeps appending rows
+    # in the background, and two `rows` calls are not one snapshot. Wait for the
+    # head to settle (hi, hello there, the nudge, done) before paging it.
+    settled: dict = {}
+
+    async def _settle() -> None:
+        for _ in range(250):
+            with as_agent(k, "viewer"):
+                settled.update(
+                    (
+                        await k.send(
+                            [{"target": "sp_rows", "payload": {"type": "rows"}}]
+                        )
+                    )[0]["result"]
+                )
+            if settled["total"] == 4:
+                return
+            await asyncio.sleep(0.02)
+
+    await _settle()
+    assert settled["total"] == 4, settled
     with as_agent(k, "viewer"):
         page = (
             await k.send(
