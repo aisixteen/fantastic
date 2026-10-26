@@ -339,7 +339,7 @@ async def test_fleet_groups_by_role_with_ids(kernel, tmp_path):
     f = await r.op({"type": "fleet"})
     assert sorted(x["id"] for x in f["roles"]["writer"]) == sorted([w1, w2]), f
     assert [x["id"] for x in f["roles"]["reviewer"]] == [v1]
-    assert f["roles"]["writer"][0]["state"] == "running"
+    assert set(f["roles"]["writer"][0]) == {"id"}
 
 
 def test_disabled_by_default(monkeypatch):
@@ -385,21 +385,12 @@ async def test_spawn_grants_parent_pause_resume_stop_both_ends(kernel, tmp_path)
     assert (await r.call("sib", cid, {"type": "pause"}))["reason"] == "unauthorized"
 
 
-async def test_spawn_task_line_stored(kernel, tmp_path):
+async def test_spawn_task_string_is_first_message_and_object_refused(kernel, tmp_path):
     r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    a = await r.spawn_as("lead", role="writer", task={"label": "draft intro"})
-    assert r.meta(a["id"])["task"] == {
-        "label": "draft intro",
-        "state": "running",
-        "waits_on": [],
-        "result": None,
-    }
-    b = await r.spawn_as(
-        "lead", role="writer", task={"label": "polish", "waits_on": [a["id"]]}
-    )
-    t = r.meta(b["id"])["task"]
-    assert t["state"] == "waiting" and t["waits_on"] == [a["id"]] and t["result"] is None
-    assert (await r.spawn_as("lead", role="writer", task={}))["reason"] == "bad_arg"
+    before = len(kernel.ctx.agents)
+    bad = await r.spawn_as("lead", role="writer", task={"label": "draft intro"})
+    assert bad["reason"] == "bad_arg", bad
+    assert len(kernel.ctx.agents) == before, "nothing was created"
     c = await r.spawn_as("lead", role="writer", task="do it")
     assert "task" not in r.meta(c["id"])
     # the string is the child's first message, delivered without holding the spawn
@@ -410,16 +401,15 @@ async def test_spawn_task_line_stored(kernel, tmp_path):
     assert (c["id"], "do it") in SENT
 
 
-async def test_report_sets_state_and_messages_parent(kernel, tmp_path):
+async def test_report_messages_parent_and_stores_nothing(kernel, tmp_path):
     r = await rig(kernel, tmp_path, ["lead", "other"], [("writer.md", WRITER)])
     inbox = kernel.ctx.ensure_inbox("lead")
-    cid = (await r.spawn_as("lead", role="writer", task={"label": "x"}))["id"]
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
     rep = await r.call(
         cid, r.reg, {"type": "report", "state": "done", "result": {"words": 120}}
     )
     assert rep == {"ok": True}, rep
-    t = r.meta(cid)["task"]
-    assert (t["state"], t["result"], t["label"]) == ("done", {"words": 120}, "x")
+    assert "task" not in r.meta(cid), "nothing is stored"
     got = None
     while not inbox.empty():
         item = inbox.get_nowait()
@@ -436,36 +426,7 @@ async def test_report_sets_state_and_messages_parent(kernel, tmp_path):
     assert (await r.op({"type": "report", "state": "done"}))["error"] == "not_spawned"
     bad = await r.call(cid, r.reg, {"type": "report", "state": "finished"})
     assert bad["reason"] == "bad_arg", bad
-    assert r.meta(cid)["task"]["state"] == "done"
-
-
-def _find(v, aid):
-    if isinstance(v, dict):
-        if v.get("id") == aid:
-            return v
-        for c in v.values():
-            f = _find(c, aid)
-            if f is not None:
-                return f
-    elif isinstance(v, list):
-        for c in v:
-            f = _find(c, aid)
-            if f is not None:
-                return f
-    return None
-
-
-async def test_task_tree_visible_in_reflect_tree_all(kernel, tmp_path):
-    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    a = (await r.spawn_as("lead", role="writer", task={"label": "intro"}))["id"]
-    b = (
-        await r.spawn_as("lead", role="writer", task={"label": "body", "waits_on": [a]})
-    )["id"]
-    tree = await send(kernel, "kernel_state", {"type": "reflect", "tree": "all"})
-    lead = _find(tree, "lead")
-    assert lead is not None
-    assert _find(lead, a)["task"]["label"] == "intro"
-    assert _find(lead, b)["task"]["state"] == "waiting"
+    assert "task" not in r.meta(cid)
 
 
 async def test_delegated_limits_bound_subtree(kernel, tmp_path):
@@ -487,27 +448,26 @@ async def test_delegated_limits_bound_subtree(kernel, tmp_path):
     assert "id" in await r.spawn_as("boss", role="writer")
 
 
-async def test_get_count_counts_active_only(kernel, tmp_path):
+async def test_get_count_counts_every_spawned_agent(kernel, tmp_path):
     r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
     await r.op({"type": "set_limit", "max": 2})
-    a = (await r.spawn_as("lead", role="writer", task={"label": "a"}))["id"]
-    b = (
-        await r.spawn_as("lead", role="writer", task={"label": "b", "waits_on": [a]})
-    )["id"]
-    assert (await r.count())["running"] == 2, "running and waiting both count"
+    a = (await r.spawn_as("lead", role="writer"))["id"]
+    await r.spawn_as("lead", role="writer")
+    assert await r.count() == {"running": 2, "max": 2}
+    third = await r.spawn_as("lead", role="writer")
+    assert third["error"] == "limit", third
+    await r.call(a, r.reg, {"type": "report", "state": "done"})
+    assert (await r.count())["running"] == 2, "a report frees nothing"
     assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
-    await r.call(a, r.reg, {"type": "report", "state": "paused"})
-    assert await r.count() == {"running": 1, "max": 2}
-    assert "id" in await r.spawn_as("lead", role="writer"), "a freed slot"
-    await r.call(b, r.reg, {"type": "report", "state": "done"})
+    gone = await send(kernel, "kernel_state", {"type": "delete_agent", "id": a})
+    assert gone["deleted"] is True
     assert (await r.count())["running"] == 1
-    await r.call(a, r.reg, {"type": "report", "state": "running"})
-    assert (await r.count())["running"] == 2, "resumed work uses a slot again"
+    assert "id" in await r.spawn_as("lead", role="writer")
 
 
 async def test_no_auto_cleanup_on_done(kernel, tmp_path):
     r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    a = (await r.spawn_as("lead", role="writer", task={"label": "a"}))["id"]
+    a = (await r.spawn_as("lead", role="writer"))["id"]
     b = (await r.spawn_as("lead", role="writer"))["id"]
     before = len(kernel.ctx.agents)
     await r.call(a, r.reg, {"type": "report", "state": "done", "result": "ok"})
@@ -515,8 +475,8 @@ async def test_no_auto_cleanup_on_done(kernel, tmp_path):
     assert len(kernel.ctx.agents) == before, "nothing was deleted"
     m = r.meta(a)
     assert (m["spawned_by"], m["role"]) == (r.reg, "writer")
-    assert (m["task"]["label"], m["task"]["state"]) == ("a", "done")
-    assert (await r.count())["running"] == 0, "the count dropped"
+    assert "task" not in m
+    assert (await r.count())["running"] == 2, "the count stays"
     f = await r.op({"type": "fleet"})
     assert len(f["roles"]["writer"]) == 2, f
     gone = await send(kernel, "kernel_state", {"type": "delete_agent", "id": a})
@@ -641,7 +601,7 @@ async def test_spawn_from_keeps_the_source_store_and_drops_its_other_grants(
     assert len(m["can_call"]) == 3, "store, notes, registry"
 
 
-async def test_spawn_from_overwrites_the_copied_task_and_limits(kernel, tmp_path):
+async def test_spawn_from_drops_the_copied_task_and_overwrites_limits(kernel, tmp_path):
     r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
     bare = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
     assert "task" not in r.meta(bare), "no task: none carried over"
@@ -650,14 +610,12 @@ async def test_spawn_from_overwrites_the_copied_task_and_limits(kernel, tmp_path
         await r.spawn_as(
             "lead",
             role="writer",
-            task={"label": "draft"},
             limits={"per_role": 1},
             **{"from": frm(src, 5)},
         )
     )["id"]
     m = r.meta(given)
-    assert m["task"]["label"] == "draft"
-    assert m["task"]["state"] == "running"
+    assert "task" not in m
     assert m["limits"] == {"per_role": 1}
     assert m["role"] == "writer", "never the source's role"
     assert r.meta(src)["task"]["label"] == "old task"
@@ -729,7 +687,7 @@ async def test_spawn_from_counts_in_fleet_and_get_count_and_survives_restart(
     r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
     cid = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
     f = await r.op({"type": "fleet"})
-    assert f["roles"]["writer"] == [{"id": cid, "state": "running"}]
+    assert f["roles"]["writer"] == [{"id": cid}]
     assert (await r.count("writer"))["running"] == 1
     persist(kernel)
     k2 = boot_root()

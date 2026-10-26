@@ -25,10 +25,13 @@ SCRIPT 2 (extended) — the top lead `L0`, a `project_lead`:
   4. each worker `report`s done with its result; `L0` waits for both sub-leads and
      reports ONE line condensing theirs.
   The waits are the scripted model's own (the responder blocks that turn until the
-  registry shows the child done) — what `await_set` (#426) will be for a real model.
-  Checks: every task line and result in the registry and in `reflect tree=all`, the
-  top result carries both parts, the counts drop as agents finish (finished ones free
-  their slot), and EVERY agent is still there at the end: nothing was cleaned up.
+  child's scripted `report` step has run) — what `await_set` (#426) will be for a real
+  model. `report` only messages the parent: nothing is stored on any record (the task
+  tree is `task_registry`'s, E135), so the probe keeps each scripted result itself.
+  Checks: every scripted agent reported done and the top result carries both parts,
+  the tree nests the agents under their callers (`reflect tree=all`), `get_count`
+  counts every spawned agent that still exists (a report frees no slot), and EVERY
+  agent is still there at the end: nothing was cleaned up.
 
 SCRIPT 3 (from a fork point, #424) — a source agent `SRC` (a `vllm_backend` agent with
 a memory store; the test gives it two finished turns, then `mark`s it) and a lead `L2`
@@ -128,9 +131,19 @@ def main() -> int:
         """The id of the spawned agent whose record `name` is `label`."""
         return next((i for i, r in records().items() if r.get("name") == label), None)
 
+    # what each scripted agent reported: `report` stores nothing on the record, so the
+    # probe notes it when the agent's script emits the report
+    reported: dict[str, str] = {}
+    finished: dict[str, threading.Event] = {}
+
     def result_of(label: str):
-        aid = named(label)
-        return ((records().get(aid) or {}).get("task") or {}).get("result") if aid else None
+        return reported.get(label)
+
+    def finish(label: str, result: str) -> str:
+        """The scripted `report done` of agent `label`, noted for the waiters."""
+        reported[label] = result
+        finished.setdefault(label, threading.Event()).set()
+        return call("report", state="done", result=result)
 
     def until(cond, bound: float = 90) -> bool:
         end = time.monotonic() + bound
@@ -141,8 +154,7 @@ def main() -> int:
         return False
 
     def done_of(label: str) -> bool:
-        aid = named(label)
-        return bool(aid) and ((records().get(aid) or {}).get("task") or {}).get("state") == "done"
+        return finished.setdefault(label, threading.Event()).is_set()
 
     # ── the scripts: one queue per agent key; an entry is a callable ─────────────
     seen: dict[str, list[str]] = {}          # key -> the last user turn of each request
@@ -155,20 +167,19 @@ def main() -> int:
     def sa_report() -> str:
         gate_sa.set()
         waits_for("WA")
-        return call("report", state="done", result=f"part A done: {result_of('WA')}")
+        return finish("SA", f"part A done: {result_of('WA')}")
 
     def wa_report() -> str:
         gate_sa.wait(60)
-        return call("report", state="done", result="leaf a ok")
+        return finish("WA", "leaf a ok")
 
     def sb_report() -> str:
         waits_for("WB")
-        return call("report", state="done", result=f"part B done: {result_of('WB')}")
+        return finish("SB", f"part B done: {result_of('WB')}")
 
     def l0_report() -> str:
         waits_for("SA", "SB")
-        return call("report", state="done",
-                    result=f"ship it: {result_of('SA')} / {result_of('SB')}")
+        return finish("L0", f"ship it: {result_of('SA')} / {result_of('SB')}")
 
     scripts: dict[str, list] = {
         "L1": [call("roles"),
@@ -187,7 +198,7 @@ def main() -> int:
         "SB": [call("spawn", role="worker", name="WB", task="WB: do leaf b"),
                sb_report, DONE],
         "WA": [wa_report, DONE],
-        "WB": [call("report", state="done", result="leaf b ok"), DONE],
+        "WB": [lambda: finish("WB", "leaf b ok"), DONE],
         "SRC": [],
         "L2": [lambda: call("spawn", role="worker", name="W2",
                             **{"from": {"agent": SRC, "at": mark_at["at"]}}),
@@ -265,8 +276,8 @@ def main() -> int:
         need(bool(out.get("id")), f"the test spawns the top lead L0: {str(out)[:200]}")
         need(until(lambda: spent("L0", "SA", "SB", "WA", "WB"), 120) and idle(),
              "every script runs to its end and settles")
-        need(done_of("L0") and done_of("SA") and done_of("SB") and done_of("WA")
-             and done_of("WB"), "every task line reads done")
+        need(all(done_of(n) for n in ("L0", "SA", "SB", "WA", "WB")),
+             "every scripted agent reported done")
         sa = (seen.get("SA") or []) + [""] * 4
         need("<error>limit</error>" in sa[2] and "subtree_total" in sa[2],
              f"SA cannot spawn past its quota of 1: {sa[2][:220]!r}")
@@ -283,7 +294,7 @@ def main() -> int:
         need(parents["SA"] == named("L0") and parents["WA"] == named("SA")
              and parents["WB"] == named("SB"), f"the tree follows the callers: {parents}")
 
-        # the task tree, from the root's reflect
+        # the agent tree, from the root's reflect: nested under the callers
         tree = hk.send(root, {"type": "reflect", "tree": "all"})
 
         def find(node, aid):
@@ -302,17 +313,17 @@ def main() -> int:
             return None
 
         l0 = find(tree, named("L0"))
-        wa = find(l0, named("WA")) if l0 else None
-        need(l0 is not None and (l0.get("task") or {}).get("result") == top
-             and wa is not None and (wa.get("task") or {}).get("state") == "done",
-             "reflect tree=all shows the nested task lines, results included")
+        need(l0 is not None and find(l0, named("WA")) is not None,
+             "reflect tree=all nests WA under L0")
+        need(all("task" not in (recs.get(named(n)) or {}) for n in ("L0", "SA", "WA")),
+             "no record carries a task line: report stores nothing")
 
-        # nothing is cleaned up; finished agents free their slots
+        # nothing is cleaned up; a report frees no slot
         every = set(fleet())
         need({named(n) for n in ("L0", "SA", "SB", "WA", "WB")} <= every and len(every) == 8,
              f"all eight spawned agents are still there: {len(every)}")
-        need(hk.send(AR, {"type": "get_count"}) == {"running": 2, "max": None},
-             "get_count counts the two running writers only (finished agents free slots)")
+        need(hk.send(AR, {"type": "get_count"}) == {"running": 8, "max": None},
+             "get_count counts every spawned agent that still exists (a report frees no slot)")
         need(all(a in records() for a in every), "no record was removed")
 
         # ── script 3: spawn from a fork point ────────────────────────────────

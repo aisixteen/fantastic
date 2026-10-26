@@ -104,6 +104,13 @@ fn register_default_bundles() -> BundleRegistry {
             .ok()
             .as_deref(),
     );
+    // OFF BY DEFAULT: the task registry loads only when the host turns it on.
+    fantastic_task_registry::register_if_enabled(
+        &mut reg,
+        std::env::var(fantastic_task_registry::ENABLE_ENV)
+            .ok()
+            .as_deref(),
+    );
     reg.register(
         fantastic_cabinet::HANDLER_MODULE,
         fantastic_cabinet::CabinetBundle,

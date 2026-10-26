@@ -40,7 +40,10 @@ _FOLDER_ROWS: dict[str, dict] = {}
 #: Bundles that load ONLY when the host turns them on: handler module -> the
 #: environment variable that does. Off, the module is not in the catalog (a create
 #: of it is an unknown handler, as on a rust host that did not register it).
-_GATED: dict[str, str] = {"agentic_resources.tools": "FANTASTIC_AGENTIC_RESOURCES"}
+_GATED: dict[str, str] = {
+    "agentic_resources.tools": "FANTASTIC_AGENTIC_RESOURCES",
+    "task_registry.tools": "FANTASTIC_TASK_REGISTRY",
+}
 
 
 def bundle_enabled(handler_module: str) -> bool:
