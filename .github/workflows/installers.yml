@@ -60,6 +60,10 @@ on:
         description: "vX.Y.Z: build nothing; verify that GitHub Release's signed installers (signatures, SHA256SUMS-app, install and launch). Empty: build."
         type: string
         default: ""
+      cleanup:
+        description: "Run the optional cleanup steps (rust-cache target clean and cache save, uv cache prune). Off: skipped, the runner is thrown away."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
