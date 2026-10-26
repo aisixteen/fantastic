@@ -262,6 +262,17 @@ fn roster(
                 node.insert(k.to_string(), v.clone());
             }
         }
+        // A TASK LINE is state the agent was given (`agentic_resources` `spawn` /
+        // `report`), not a purpose its bundle states: the tree reads it off the record,
+        // so a lead sees its subtree's plan and progress in one `reflect tree=all`.
+        if let Some(t) = a
+            .meta
+            .read()
+            .ok()
+            .and_then(|m| m.get("task").filter(|t| !t.is_null()).cloned())
+        {
+            node.insert("task".to_string(), t);
+        }
         let mut children = Vec::new();
         for c in a.children_snapshot() {
             if ignore.contains(&c.id.0) {

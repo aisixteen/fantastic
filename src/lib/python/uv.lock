@@ -4,6 +4,7 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
+    "fantastic-agentic-resources",
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
     "fantastic-cabinet",
@@ -337,6 +338,21 @@ wheels = [
 ]
 
 [[package]]
+name = "fantastic-agentic-resources"
+version = "0.1.0"
+source = { editable = "bundled_agents/agentic_resources" }
+dependencies = [
+    { name = "fantastic-kernel-state" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
+    { name = "pyyaml", specifier = ">=6" },
+]
+
+[[package]]
 name = "fantastic-ai-core"
 version = "0.1.0"
 source = { editable = "bundled_agents/ai/ai_core" }
@@ -423,6 +439,7 @@ name = "fantastic-kernel"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "fantastic-agentic-resources" },
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cabinet" },
@@ -461,6 +478,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fantastic-agentic-resources", editable = "bundled_agents/agentic_resources" },
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cabinet", editable = "bundled_agents/ai/cabinet" },

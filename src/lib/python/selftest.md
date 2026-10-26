@@ -133,6 +133,7 @@ agent answers them natively for its own children, so there's no
 | `bundled_agents/io/web_ws/selftest.md` | http, ws, web, web_ws | WS verb-invocation surface — mounts `/<host_id>/ws` on parent web |
 | `bundled_agents/io/web_rest/selftest.md` | http, web, web_rest | REST diagnostic surface — `POST /<rest_id>/<target_id>` body=payload |
 | `bundled_agents/scheduler/selftest.md` | kernel, persistence, time | schedule/tick/fire, schedule_events.yaml persisted through the loader (no store ⇒ fails loud) |
+| `bundled_agents/agentic_resources/selftest.md` | kernel, roles | role cards, spawn, per-role and total limits (off by default: `FANTASTIC_AGENTIC_RESOURCES=1`) |
 | `bundled_agents/io/file_bridge/selftest.md` | kernel, persistence | sealed-by-default fs edge — read/write/list/delete/rename/mkdir, running-dir clamp, path safety |
 | `bundled_agents/ai/ollama/ollama_backend/selftest.md` | kernel, ai, persistence | reflect-driven assembly, native tool-calls, multi-step loop |
 | `bundled_agents/io/ws_bridge/selftest.md` | kernel, ws | cross-kernel WS bridge — asymmetric raw call frames to remote `web_ws` (no peer bridge); memory + WS transports; streaming via `watch_remote` (subscribed `src` only) |
