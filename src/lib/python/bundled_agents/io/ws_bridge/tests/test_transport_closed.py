@@ -31,6 +31,8 @@ class _Remote:
 
     async def drop(self, n: int) -> None:
         await self.conns[n].close()
+# twin: closed_follows_the_peer_s_close
+# twin: closed_follows_an_abrupt_drop
 
 
 async def test_closed_follows_the_socket():
@@ -48,7 +50,7 @@ async def test_closed_follows_the_socket():
         assert t.closed is True
 
 
-async def test_a_dropped_leg_reflects_down_and_boot_dials_again(seeded_kernel):
+async def test_reflect_connected_false_after_peer_close_and_boot_rebuilds(seeded_kernel):
     k = seeded_kernel
     remote = _Remote()
     async with websockets.serve(remote.handler, "127.0.0.1", 0) as server:

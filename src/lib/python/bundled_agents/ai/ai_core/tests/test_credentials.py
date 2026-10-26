@@ -60,7 +60,7 @@ async def _mk(k, tmp_path, *, accept=("ai",), host="api.example.com"):
     return k
 
 
-async def test_the_provider_reads_the_key_per_request_and_records_none(
+async def test_the_reader_reads_the_key_per_request_and_records_none(
     seeded_kernel, tmp_path
 ):
     from responses_backend.tools import make_provider

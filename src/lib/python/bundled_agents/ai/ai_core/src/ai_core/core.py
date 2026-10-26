@@ -907,6 +907,15 @@ def _apply_res(row: dict, res: str) -> dict:
     return row
 
 
+def _kept_entry(row: dict, msg: dict, res: str) -> dict:
+    """The view entry for a row the view keeps: its id and resolution, and its body
+    when a trimmer changed it (the twin of Rust `kept_entry`)."""
+    e = {"id": row["id"], "res": res}
+    if msg != _apply_res(row, res):
+        e["content"] = msg["content"]
+    return e
+
+
 def required_meta(rec: dict, key: str, backend: str) -> str:
     """A connector field the record MUST name — an endpoint or a model is never
     guessed. Raises, naming the field, so the turn fails loud."""
@@ -2692,7 +2701,8 @@ def _render_history(
     """The history part of the model view (no system block, no user turn), as
     (store index, res, message): the view array's entries each at its recorded
     resolution, then the rows after the newest of them (trimmed under `clean`); with no
-    usable array, the whole store, trimmed under `clean`."""
+    usable array, the whole store, trimmed under `clean`. An entry may carry the
+    trimmed body the model saw; it is used only under `clean`."""
     listed = _listed(hist, view)
     if listed is None:
         return _render_tail(hist, 0, clean)
@@ -2701,7 +2711,11 @@ def _render_history(
     for e in listed:
         i = pos[e["id"]]
         res = e.get("res", "full")
-        out.append((i, res, _apply_res(hist[i], res)))
+        body = e.get("content")
+        if clean and isinstance(body, str):
+            out.append((i, res, {**hist[i], "content": body}))
+        else:
+            out.append((i, res, _apply_res(hist[i], res)))
     return out + _render_tail(hist, max(pos[e["id"]] for e in listed) + 1, clean)
 
 
@@ -5022,12 +5036,12 @@ async def _fold_range(id, payload, kernel, cfg: Backend):
     # range began, then the rows after. The fold is the newest row, so the array carries
     # every kept row.
     ids: list[dict] = []
-    for p, (idx, res, _) in enumerate(view):
+    for p, (idx, res, msg) in enumerate(view):
         if p == from_p:
             ids.append({"id": fid, "res": "fold"})
         if from_p <= p <= to_p:
             continue
-        ids.append({"id": rows[idx]["id"], "res": res})
+        ids.append(_kept_entry(rows[idx], msg, res))
     await _save_view(id, kernel, ids, budget_=budget(rec), why="context_fold")
     return {"folded": fid, "rows": len(span), "summarized": summarized}
 

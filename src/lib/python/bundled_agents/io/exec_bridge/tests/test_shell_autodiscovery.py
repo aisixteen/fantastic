@@ -244,7 +244,7 @@ async def test_reflect_advertises_the_shell_permission(k):
     assert (await _call(k, "login", {"type": "reflect"}))["shell"] == "login"
 
 
-async def test_write_bytes_is_verbatim_so_enter_reaches_the_shell(k, fake_shell):
+async def test_write_bytes_is_verbatim_so_enter_reaches_the_program(k, fake_shell):
     """A `<call>` strips a scalar like `data`, so a key ending in Enter rides
     `bytes`, written verbatim: the line runs. Exactly one of
     `data`/`bytes` is accepted."""

@@ -1,7 +1,7 @@
 # relay_e2e — kernels through the relay-kernel router (`relay_connector`)
 
 End-to-end proof that two host kernels reach each other through a **relay-KERNEL
-router** (`relayd`, sibling repo `../fantastic_relay/relaykernel`) via the
+router** (`relayd`, our relay) via the
 `relay_connector` transport. Each kernel runs a `relay_connector` agent that dials
 the relay at `ws://<host>/<guid>` (subprotocol `fantastic.relay.v1`, group password
 in the `X-Fantastic-Auth` header, checked once at the WS upgrade). The relay routes
@@ -107,9 +107,9 @@ Heavy + opt-in (kept out of the default `pytest` run); skips cleanly when `relay
 isn't built or the engine/image is absent.
 
 ```sh
-# 1. build the relay kernel — once
-cd ../fantastic_relay/relaykernel && swift build      # → .build/{debug,release}/relayd
-#    (or, for the container target: sh ../fantastic_relay/relaykernel/container/build.sh)
+# 1. build our relay (`relayd`) and point RELAYD at the binary — once
+export RELAYD=/path/to/relayd
+#    (for the container target: build our relay image, relay:latest)
 
 # 2. run (from integration_tests/)
 uv run pytest relay_e2e/ -v

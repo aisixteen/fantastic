@@ -141,6 +141,9 @@ async def test_done_means_one_pass(seeded_kernel, store_agent, fake_providers):
 
 
 # ─── the model acts, and sees the result ────────────────────────
+# twin: a_model_call_is_dispatched_and_the_result_returns
+# twin: routing_survives_the_dispatch_that_spawned_it
+# twin: an_envelope_dispatches_and_streams_verbatim
 
 
 async def test_model_call_is_dispatched_and_the_result_returns(
@@ -232,6 +235,8 @@ async def test_reply_to_omitted_defaults_to_self(
     finally:
         fake_providers.pop(oid, None)
         fake_providers.pop(other, None)
+# twin: all_fire_and_forget_calls_are_not_a_silent_turn
+# twin: a_turn_whose_calls_all_reply_elsewhere_ends_the_chain
 
 
 async def test_discarding_a_reply_must_be_said_explicitly(
@@ -262,7 +267,7 @@ async def test_discarding_a_reply_must_be_said_explicitly(
         fake_providers.pop(other, None)
 
 
-async def test_failed_call_comes_back_to_the_model(
+async def test_a_failed_call_comes_back_to_the_model(
     seeded_kernel, store_agent, fake_providers
 ):
     """A call that fails must be VISIBLE to the model — a silent failure is the one
@@ -284,7 +289,7 @@ async def test_failed_call_comes_back_to_the_model(
         fake_providers.pop(oid, None)
 
 
-async def test_malformed_call_is_reported_not_swallowed(
+async def test_a_call_with_no_target_is_reported_not_swallowed(
     seeded_kernel, store_agent, fake_providers
 ):
     """A `<call>` with no target tells the model so, instead of vanishing."""
@@ -353,6 +358,8 @@ async def test_an_unparseable_call_reaches_the_model_as_an_error(
         assert "NOT dispatched" in turn2, turn2[-400:]
     finally:
         fake_providers.pop(oid, None)
+# twin: a_verb_in_the_tool_slot_is_refused_by_name
+# twin: a_verb_in_the_tool_slot_is_refused_with_the_shape
 
 
 async def test_a_verb_named_tool_reaches_the_agent(
@@ -382,7 +389,7 @@ async def test_a_verb_named_tool_reaches_the_agent(
 # ─── the caller's one-shot handoff ──────────────────────────────
 
 
-async def test_caller_send_to_hands_off_once(
+async def test_a_caller_send_to_hands_off_once(
     seeded_kernel, store_agent, fake_providers
 ):
     """`send_to` delivers this pass's TEXT to a peer — once. It must NOT propagate:
@@ -422,7 +429,7 @@ async def test_caller_send_to_hands_off_once(
         fake_providers.pop(b, None)
 
 
-async def test_error_reply_does_not_route(seeded_kernel, store_agent, fake_providers):
+async def test_an_error_reply_does_not_route(seeded_kernel, store_agent, fake_providers):
     """A failed pass is terminal — a broken chain must not keep spending turns."""
     oid = await _make_ollama(seeded_kernel)
 
@@ -462,7 +469,7 @@ async def test_error_reply_does_not_route(seeded_kernel, store_agent, fake_provi
 # ─── the emergence discipline, guarded ──────────────────────────
 
 
-async def test_prompt_states_the_mechanism_not_a_strategy(seeded_kernel, store_agent):
+async def test_the_default_prompt_states_the_mechanism_not_a_strategy(seeded_kernel, store_agent):
     """The default system block may state FACTS — how to reach an agent, what reflect
     returns, where `reply_to` sends the answer. It must NOT name the STRATEGY.
 
@@ -501,7 +508,7 @@ async def test_prompt_states_the_mechanism_not_a_strategy(seeded_kernel, store_a
     assert not leaked, f"system prompt leaks strategy {leaked} — voids the test"
 
 
-async def test_a_raising_handler_comes_back_as_an_error_not_a_dead_chain(
+async def test_a_dying_handler_comes_back_as_an_error_not_a_dead_chain(
     seeded_kernel, store_agent, fake_providers
 ):
     """A handler that RAISES must reach the model as `{"error": ...}`.
@@ -556,6 +563,8 @@ async def test_a_raising_handler_comes_back_as_an_error_not_a_dead_chain(
         assert "password:whatever" in turn2, "and must carry what actually went wrong"
     finally:
         fake_providers.pop(oid, None)
+# twin: strips_a_span_and_keeps_the_surrounding_text
+# twin: thinking_streams_wrapped_and_persists_stripped
 
 
 async def test_thinking_is_parsed_but_not_persisted(

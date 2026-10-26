@@ -95,6 +95,8 @@ def test_rmtree_removes_dir(tmp_path, monkeypatch):
     (d / "agent.yaml").write_text("{}")
     rmtree(fs.Root(tmp_path, d))
     assert not d.exists()
+# twin: in_memory_boots_and_creates_agents_without_touching_disk
+# twin: persist_with_no_provider_is_ram_noop
 
 
 async def test_no_provider_state_stays_in_ram(tmp_path, monkeypatch):
@@ -130,7 +132,7 @@ async def test_no_provider_state_stays_in_ram(tmp_path, monkeypatch):
         await on_shutdown(root)
 
 
-async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypatch):
+async def test_persist_through_provider_writes_record(tmp_path, monkeypatch):
     """The stream-consumer path: an operator/LLM creates a PERSISTENT, gated
     file_bridge child rooted at `.fantastic`; the booted loader DISCOVERS it (by
     match, not a fixed id) and persists records THROUGH its `write_stream` — not
@@ -188,6 +190,9 @@ async def test_booted_loader_persists_via_discovered_provider(tmp_path, monkeypa
         assert not agent_dir.exists()
     finally:
         await on_shutdown(root)
+# twin: load_tree_persist_record_round_trip
+# twin: a_session_loader_persists_a_canvas_that_survives_a_restart
+# twin: load_tree_is_rooted_at_the_live_session_record
 
 
 async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
@@ -289,7 +294,7 @@ async def test_session_loader_serves_sub_namespace(tmp_path, monkeypatch):
     assert canvas_dir.exists()  # sibling untouched
 
 
-async def test_a_record_commits_atomically_and_leaves_no_debris(
+async def test_a_record_commits_via_tmp_and_rename(
     seeded_kernel, store_agent, tmp_path
 ):
     """A record is streamed to a tmp beside the target and RENAMED into place.

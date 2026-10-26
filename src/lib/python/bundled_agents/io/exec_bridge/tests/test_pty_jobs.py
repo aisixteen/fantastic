@@ -28,11 +28,14 @@ _CHILD = per_os(
         "def size():\n"
         "    r,c=struct.unpack('HHHH',fcntl.ioctl(0,termios.TIOCGWINSZ,b'\\0'*8))[:2]\n"
         "    return c,r\n"
-        "signal.signal(signal.SIGWINCH, lambda *a: print('WINCH %d %d' % size(), flush=True))\n"
-        "print('TTY', os.isatty(0), os.environ.get('TERM'), flush=True)\n"
-        "print('SIZE %d %d' % size(), flush=True)\n"
+        "def say(s):\n"
+        "    os.write(1, (s + '\\n').encode())\n"
+        "signal.signal(signal.SIGWINCH, lambda *a: say('WINCH %d %d' % size()))\n"
+        "say('TTY %s %s' % (os.isatty(0), os.environ.get('TERM')))\n"
+        "say('SIZE %d %d' % size())\n"
+        "say('READY')\n"
         "line = sys.stdin.readline()\n"
-        "print('GOT', line.strip(), flush=True)\n"
+        "say('GOT ' + line.strip())\n"
     ),
     nt=(
         "import os,sys,threading,time\n"
@@ -49,6 +52,7 @@ _CHILD = per_os(
         "threading.Thread(target=watch, args=(size(),), daemon=True).start()\n"
         "print('TTY', os.isatty(0), os.environ.get('TERM'), flush=True)\n"
         "print('SIZE %d %d' % size(), flush=True)\n"
+        "print('READY', flush=True)\n"
         "line = sys.stdin.readline()\n"
         "print('GOT', line.strip(), flush=True)\n"
     ),
@@ -140,15 +144,39 @@ async def test_a_pty_job_runs_on_a_terminal_and_takes_keystrokes(term):
     assert done == {"type": "job_done", "job_id": jid, "exit_code": 0, "ok": True}
 
 
-async def test_resize_reaches_the_program(term):
+async def test_resize_reaches_the_program_and_status_reports_it(term):
     jid = await _start(term)
-    await _until(term, lambda t: "SIZE" in t)
+    # wait until the program is up and waiting: a resize sent while it was still
+    # printing could be lost
+    text, _ = await _until(term, lambda t: "READY" in t)
+    assert "SIZE 91 37" in text, text
     r = await _call(term, {"type": "resize", "job_id": jid, "cols": 120, "rows": 40})
     assert r == {"resized": True, "cols": 120, "rows": 40}
     await _until(term, lambda t: "WINCH 120 40" in t)
     snap = (await _call(term, {"type": "status", "job_id": jid}))["jobs"][0]
     assert snap["pty"] is True and (snap["cols"], snap["rows"]) == (120, 40), snap
     await _call(term, {"type": "write", "job_id": jid, "data": "x" + ENTER})
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGWINCH is POSIX")
+async def test_the_child_survives_a_resize_that_lands_mid_print(term):
+    # the posix child never prints through a buffered writer a signal handler could
+    # re-enter
+    assert "print(" not in _CHILD
+    jid = await _start(term)
+    await _until(term, lambda t: "SIZE" in t)  # deliberately not READY: race the prints
+    for i in range(20):
+        await _call(
+            term, {"type": "resize", "job_id": jid, "cols": 100 + i, "rows": 30 + i}
+        )
+    await _until(term, lambda t: "WINCH 119 49" in t)
+    await _call(term, {"type": "write", "job_id": jid, "data": "x" + ENTER})
+    q = term.ctx.inboxes["viewer"]
+    while True:
+        ev = await asyncio.wait_for(q.get(), timeout=10)
+        if ev.get("type") == "job_done":
+            break
+    assert ev["exit_code"] == 0 and ev["ok"] is True, ev
 
 
 async def test_output_replays_the_ring_for_a_client_that_re_attaches(term):
@@ -223,7 +251,7 @@ async def test_paste_image_types_a_saved_path(term):
     assert r["path"] in text
 
 
-async def test_a_pty_job_is_gated_like_any_start(term):
+async def test_a_pty_job_is_gated_like_any_start_and_its_verbs_want_a_pty_job(term):
     r = await _call(
         term,
         {

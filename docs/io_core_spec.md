@@ -1,5 +1,7 @@
 # io_core — Sealed Edges & the Channel Model
 
+> Historical: the Swift kernel is retired; its parts below are kept for the record.
+
 **Spec / implementation plan for commit #4+ on branch `kernel_auth`.**
 Greenfield ("aloha software", no back-compat; the only user is the author). Three auth commits already shipped on `kernel_auth`: (1) the pluggable per-leg authorization seam + `deny_inbound`, (2) the password kernel-group policy, (3) symmetric `ingress_rule`/`egress_rule` + folder rule registries. This refactor is commit **#4 and onward**.
 
@@ -10,7 +12,7 @@ Greenfield ("aloha software", no back-compat; the only user is the author). Thre
 1. **What this is.** Lift the shipped `bridge_core` authorizer subtree into a standalone, entry-point-less **`io_core`** library (the CHANNEL model: `direction · modality · transport · rule · extractor`), collapse the IO zoo into thin transport bridges named by transport (`ws_bridge`, `http_bridge`, `cloud_bridge`), make `file` transport-blind, make `/file/` proxy-by-id, and **seal the IO edges deny-all** — discoverable by a readme-only LLM through denial.
 2. **What is genuinely solid** (verified against the live tree, keep as-is): the `{reason:"unauthorized"}` choke point, the message-frame `auth_token`-on-the-envelope plumbing, the `Action` already carries `verb`, the four ungated web faces make permissive-first/flip-last real *for them*, and `relay_e2e` is a real cross-runtime reference.
 3. **What the adversarial review BROKE and this spec now fixes in-line** (all load-bearing): (Q2) token authz is **verb-blind** — a group-token holder can spawn a `terminal_backend` PTY shell that inherits secrets in `os.environ`; (Q3) the seal is **call-only** — `state_subscribe`/`watch`/`emit` and the **WS upgrade itself** are silent open edges; (Q4) the proposed octet capability URL is a **plain replayable bearer** signed with the **reused group secret**; (Q1) a tty-less image with no baked rule **bricks closed**.
-4. **What the review corrected in the migration budget** (now folded in): `relay_e2e` is **NOT** "no change" (it breaks at the cloud carve and at the flip); `core.py` `resolve_ingress` is a **single shared engine call site** for `cloud_bridge` + ws-outbound — and **per author directive (§2.5) the engine default flips to deny-all there too**, so "every leg denies" is literally true and `relay_e2e` + the two `absent==AllowAll` unit tests re-baseline to declare openings; the `/file/` decouple is **net-new bytes-carrier work in rust+swift**, not deletion; reflect Tier-2 fields hit an **exact `deepEqual` conformance fixture** (largest parity blast radius, not smallest); the `__cloud-cert` CLI subcommand and the **rust/swift bundle-registration tables** must re-point at the carve/rename or the binaries fail to build. **Migration of existing projects is DEFERRED (§9.2) — not in this build.**
+4. **What the review corrected in the migration budget** (now folded in): `relay_e2e` is **NOT** "no change" (it breaks at the cloud carve and at the flip); `core.py` `resolve_ingress` is a **single shared engine call site** for `cloud_bridge` + ws-outbound — and **per author directive (§2.5) the engine default flips to deny-all there too**, so "every leg denies" is literally true and `relay_e2e` + the two `absent==AllowAll` unit tests re-baseline to declare openings; the `/file/` decouple is **net-new bytes-carrier work in rust**, not deletion; reflect Tier-2 fields hit an **exact `deepEqual` conformance fixture** (largest parity blast radius, not smallest); the `__cloud-cert` CLI subcommand and the **rust bundle-registration tables** must re-point at the carve/rename or the binaries fail to build. **Migration of existing projects is DEFERRED (§9.2) — not in this build.**
 5. **What the review corrected in the emergent-proof framing** (now honest): the denial→readme→open loop is **plausible but unproven** (Opus skipped `reflect readme=true` in the one existing run; `bridge_core` ships no readme yet); `denial_verify.ts` **cannot** mechanically prove "readme fetched between denial and open" without a net-new persisted audit log; it is the **north-star check, NOT** the end-to-end gate; the "counterfactual rig" does not exist (only a manual loop).
 6. **Net difficulty verdict below.**
 
@@ -18,7 +20,7 @@ Greenfield ("aloha software", no back-compat; the only user is the author). Thre
 
 **The refactor's STRUCTURE is sound and feasible across all 4 runtimes; the SECURITY MODEL as originally drafted ships a seal with named holes. This spec closes them.** Concretely:
 
-- **Rename/collapse: MEDIUM, mechanical, fully grounded.** Every hard structural claim (rust web_ws/web_rest are declaration-only shells; the frame loop lives in parent `fantastic-web`; `fantastic-web` depends on neither bridge nor authorizer today; swift FantasticWeb WS-inbound is a real ungated server; ts has zero runtime deps) is TRUE. The only traps are wiring tables the original plan omitted (now listed).
+- **Rename/collapse: MEDIUM, mechanical, fully grounded.** Every hard structural claim (rust web_ws/web_rest are declaration-only shells; the frame loop lives in parent `fantastic-web`; `fantastic-web` depends on neither bridge nor authorizer today; ts has zero runtime deps) is TRUE. The only traps are wiring tables the original plan omitted (now listed).
 - **Seal correctness: HARD, and the original draft was incomplete.** Verb-blind authz, the non-`call` frame classes, the ungated upgrade, and the octet bearer URL are four real breaks. They are all fixable without changing the structure, but they MUST land in the same commit that flips deny-all or the flip is cosmetic.
 - **Emergent proof: the MECHANISM is right, the ACCEPTANCE FRAMING was overstated.** Corrected here to an honest north-star check plus a real per-commit validation story.
 - **Smallest first slice (#4) is fully de-risked** (a pure lift + one unused dep + the readme), modulo a known `cargo-machete` soft warning.
@@ -123,7 +125,7 @@ Both land in the **same commit as the flip** (#9). Layer 1 is the policy; layer 
 - `Password`: on token match, ALLOWs `call` (subject to §2.3 verb policy), `watch`, and `state_subscribe` (a member wants telemetry); denies everything on token mismatch/absence. The telemetry channel is now a member-only stream, not an anonymous one.
 - `AllowAll`: unchanged (interior / explicitly-opened legs).
 
-This requires the web_ws proxy to route `watch` / `state_subscribe` / `emit` frames through `st.ingress.authorize(Action(kind=…))` **before** acting on them — today `_on_state_subscribe`/`_on_watch` act unconditionally. The same insertion mirrors in rust `ws_loop` and swift `handleCall`'s sibling handlers.
+This requires the web_ws proxy to route `watch` / `state_subscribe` / `emit` frames through `st.ingress.authorize(Action(kind=…))` **before** acting on them — today `_on_state_subscribe`/`_on_watch` act unconditionally. The same insertion mirrors in rust `ws_loop`.
 
 ### 2.5 — The engine default: deny-all EVERYWHERE (author directive — the fork is rejected)
 
@@ -158,7 +160,6 @@ Every handler_module string AND every code-side registration table must move in 
 
 - **python:** `bridge_core/_HANDLER_MODULE` maps, `helpers/seeding.py`, selftests, the `_HANDLER_MODULE` in `integration_tests/relay_e2e/test_relay_matrix.py:39-42` (see §5.4 — this is **not** "no change").
 - **rust (omitted in the original draft — load-bearing):** `register_default_bundles` in `crates/fantastic-cli/src/main.rs` (the `web_ws.tools` / `web_rest.tools` / `kernel_bridge.tools` → bundle-struct table), the workspace `Cargo.toml` members, and the struct/crate names. **If this table is not edited in lockstep with the handler_module flip, boot cannot resolve the renamed bundles.**
-- **swift (omitted in the original draft — load-bearing):** `defaultBundleRegistry` in `Sources/FantasticKernelStartup/Startup.swift`, plus `Package.swift` product/target lists, plus the bundle struct names.
 - **ts:** `_host.ts` seed strings.
 
 ### 3.2 Rust caveat (verified TRUE)
@@ -174,13 +175,8 @@ Every handler_module string AND every code-side registration table must move in 
 Carving cloud into `fantastic-cloud-bridge` / `FantasticCloudBridge` **moves the cert-minting symbols** out of the kernel-bridge crate/target:
 
 - rust `crates/fantastic-cli/src/main.rs` calls `fantastic_kernel_bridge::cloud_cert_pem_b64url` for the `__cloud-cert <id_key>` subcommand → must re-import from the new crate.
-- swift `Sources/Fantastic/FantasticCLI.swift` calls `CloudCert.selfSigned` → must re-import from the new target.
 
-`integration_tests/relay_e2e/relay_harness.py` **shells `__cloud-cert <id_key>` to mint rust/swift device certs.** If the CLI wiring is not re-pointed in the **same commit as the carve**, the rust/swift kernel binaries **fail to build** and `relay_e2e` cannot generate certs. The cloud-carve commit MUST include this re-point. (This is why §5.4 lists `relay_e2e` as a changed suite, not an untouched one.)
-
-### 3.5 swift caveat (verified — stronger than the original stated)
-
-`FantasticWeb/WebSocket.swift` is a **real inbound WS server** (`runWebSocketProxy`, `handleCall`, `kernel.send`) — **not** an asymmetric-client stub. It has **zero** authorize call anywhere in FantasticWeb (the only working ingress gate today is `CloudBridgeTransport.dispatch`, per `Authorizer.swift`'s own header). So the swift web gate is an **insertion into a live server path** (reply field is `data`), mirroring `CloudBridgeTransport.dispatch` — **not** a no-op shell like the rust/swift `web_ws` Bundle declarations. Implementers must not assume swift ws-inbound is a stub. The same `/file/` rewrite anchors apply (`HTTPServer.swift` file route, `image_base64` unwrap, `guessMime`) — pinned alongside the rust ones so the #7 rewrite is symmetric across all three host runtimes and the swift consumer-side test retarget is not forgotten.
+`integration_tests/relay_e2e/relay_harness.py` **shells `__cloud-cert <id_key>` to mint rust device certs.** If the CLI wiring is not re-pointed in the **same commit as the carve**, the rust kernel binaries **fail to build** and `relay_e2e` cannot generate certs. The cloud-carve commit MUST include this re-point. (This is why §5.4 lists `relay_e2e` as a changed suite, not an untouched one.)
 
 ---
 
@@ -191,15 +187,14 @@ Carving cloud into `fantastic-cloud-bridge` / `FantasticCloudBridge` **moves the
 - **`file` is an ALLOWANCE**: pure local bytes, with root + path-safety as a confinement sandbox so a capable wiring-LLM can hand a dumber agent a read capability that physically cannot reach the wrong files. `file` must be **transport-blind** — today it leaks (mime/base64/the `/file/`+WS comments).
 - **`bridge` is RESTREAM**: moves bytes across the boundary. Content is **proxied by ID** (`kernel.send` / `bridge.forward`), **never** resolved by a local path — because the file may live on ANOTHER machine. This is the root of the "file bug": `/file/` does a LOCAL read (verified: `web/host/src/web/app.py:97` `kernel.send(agent_id,{read,path})` runs in-process), silently working only when the file is local.
 
-### 4.2 Transport-blind `read` (corrected — NET-NEW in rust+swift, not deletion)
+### 4.2 Transport-blind `read` (corrected — NET-NEW in rust, not deletion)
 
 The target shape is one transport-blind `read` result: `{path, bytes, mime?}` — no `image_base64`, no transport comments.
 
 - **python only** already has the raw `{bytes}` + `_binary_path` path; there it is close to deletion of the base64 double-work.
 - **rust** `fantastic-file/src/lib.rs` returns `image_base64` for **all** binary (images AND pdf/video/fonts) and has **NO raw-bytes path**; `serve_file_proxy` reads only `image_base64` in-process. `serde_json` has no native bytes value.
-- **swift** `FileBundle.swift` likewise emits **only** `image_base64`.
 
-**So #7 is net-new in two of three host runtimes:** the rust and swift file bundles must **start producing a raw-bytes carrier** (a sidecar `_binary_path`/octet handle the local proxy reads, since JSON can't carry raw bytes), and their `/file/` proxies must read that new shape. The "pure double-work / just delete `read_binary`" framing is wrong for rust/swift; budget #7 accordingly.
+**So #7 is net-new in the rust host runtime:** the rust file bundle must **start producing a raw-bytes carrier** (a sidecar `_binary_path`/octet handle the local proxy reads, since JSON can't carry raw bytes), and their `/file/` proxies must read that new shape. The "pure double-work / just delete `read_binary`" framing is wrong for rust; budget #7 accordingly.
 
 ### 4.3 No HTML consumer breaks (verified TRUE)
 
@@ -226,9 +221,8 @@ All four call `kernel.send` with **zero** gate today, so inserting an `AllowAll`
 - python `web_ws/_proxy.py` `_on_call` (`:188`) → `kernel.send` no gate; **plus** `_on_watch` / `_on_state_subscribe` (`:203` / `:225`) which §2.4 now also gate.
 - python `web_rest` `_rest_call` → `kernel.send` no gate; GET `/_reflect` ungated.
 - rust `ws_loop` `call` arm → dispatch with no `auth_token` extraction (the WS wire has **no `auth_token` field today** — confirmed; the field is a real prerequisite the rename adds to the frame parse).
-- swift `handleCall` → `kernel.send` no gate (reply field `data`).
 
-The **upgrade gate** (§1.1 item 3) is a fifth insert point at `web_ws/tools.py` `accept()` and its rust/swift twins.
+The **upgrade gate** (§1.1 item 3) is a fifth insert point at `web_ws/tools.py` `accept()` and its rust twin.
 
 ### 5.2 The tty / `trusted_local` anchor (corrected — Q2: locality must be STRUCTURAL, not token)
 
@@ -251,8 +245,8 @@ Verified: the daemon boots web + binds uvicorn whenever a `web` agent is persist
 | `bridge_core/tests/test_bridge_core.py::test_resolve_ingress_absent_is_allow_all` | **RE-BASELINE → `absent == DenyInbound`** (§2.5 directive) | the engine default flips to deny-all everywhere |
 | `kernel_bridge` allow-all-default dispatch test | **RE-BASELINE** — assert the denial, or declare `ingress_rule=allow_all_ingress` on the leg | engine default is deny; an opened leg dispatches |
 | `helpers/seeding.py`, `helpers/ws.py`, `_host.ts` | add `ingress_rule=` openings | tests open legs explicitly so traffic flows post-flip (deny-all-as-documentation) |
-| web_ws / web_rest / rust-ws / swift-ws face tests | add an `auth_token` to frames + open the leg | the four net-new faces flip at #9 |
-| **`integration_tests/relay_e2e/test_relay_matrix.py`** | **CHANGES (two reasons now):** (a) at the **cloud carve**, `_HANDLER_MODULE` rust+swift `kernel_bridge.tools` → `cloud_bridge.tools`; (b) **the default round-trip legs declare an explicit opening** (`ingress_rule=allow_all_ingress`/`password`) because cloud now denies by default too (§2.5 directive) | the map hard-codes the old handler_module; and the engine flip seals cloud |
+| web_ws / web_rest / rust-ws face tests | add an `auth_token` to frames + open the leg | the four net-new faces flip at #9 |
+| **`integration_tests/relay_e2e/test_relay_matrix.py`** | **CHANGES (two reasons now):** (a) at the **cloud carve**, `_HANDLER_MODULE` rust `kernel_bridge.tools` → `cloud_bridge.tools`; (b) **the default round-trip legs declare an explicit opening** (`ingress_rule=allow_all_ingress`/`password`) because cloud now denies by default too (§2.5 directive) | the map hard-codes the old handler_module; and the engine flip seals cloud |
 | reflect conformance fixtures (`reflect_conformance.json` + 4 runtimes) | update in the reflect commit (#8) | exact `deepEqual` (§6.1) |
 
 **The one load-bearing ordering constraint:** the readmes + the reflect descriptor (#8) land **before** the flip (#9), or discovery-through-denial has no readme to discover.
@@ -299,9 +293,9 @@ Verified: the daemon boots web + binds uvicorn whenever a `web` agent is persist
 Each commit is shippable + green, with units/integration/e2e/readmes per the author's rhythm (quality sweep — strict clippy/fmt + strict YAML lint; no auto-commit; the author audits via their own commits and Claude returns a fix plan). **Defaults are a behavioral no-op until #9 flips the web faces.** The engine default never flips (§2.5).
 
 - **#4 — Pure lift `bridge_core → io_core` (smallest slice, fully de-risked).** Move the authorizer subtree in all four runtimes as a pure relocation; add the **unused-but-prerequisite** `fantastic-io-core` dep to `fantastic-web/Cargo.toml` (§3.3, accept the machete warning); add `io_core/readme.md` (G1+G2 + the discovery recipe). Every suite incl. `relay_e2e` stays green. Closes the biggest discovery gap early.
-- **#5 — Rename/collapse + cloud carve.** `kernel_bridge` dissolves → `ws_bridge` (two faces) / `http_bridge` / `cloud_bridge` (own crate/target). Edit **all** registration tables (§3.1): python `_HANDLER_MODULE`/seeding/selftests, rust `register_default_bundles` + workspace members, swift `defaultBundleRegistry` + `Package.swift` products. Re-point the **`__cloud-cert` CLI subcommand** (§3.4) in the same commit. Update `relay_e2e` `_HANDLER_MODULE` rust+swift → `cloud_bridge.tools` (§5.4). Green at the rename.
-- **#6 — Insert the gate at the 4 web faces + the upgrade gate, defaulted `AllowAll`.** Add `auth_token` to the rust WS wire; add the `CredentialExtractor` seam; wire the per-surface rule onto `AppState`/`RestOwner`/swift handler/python proxy. Behaviorally inert (AllowAll). Add the upgrade-gate insertion (§1.1 item 3), also inert under AllowAll.
-- **#7 — Transport-blind `file` + proxy-by-id.** Python: collapse to `{path,bytes,mime?}`. **Rust + swift: ADD the raw-bytes carrier** (`_binary_path`/octet handle) and teach the local `/file/` proxies the new shape (§4.2 — net-new, not deletion). Retarget the file selftests/`test_file.py` and swift consumer tests. `/file/` still local-read here (cap gate lands in #9).
+- **#5 — Rename/collapse + cloud carve.** `kernel_bridge` dissolves → `ws_bridge` (two faces) / `http_bridge` / `cloud_bridge` (own crate/target). Edit **all** registration tables (§3.1): python `_HANDLER_MODULE`/seeding/selftests, rust `register_default_bundles` + workspace members. Re-point the **`__cloud-cert` CLI subcommand** (§3.4) in the same commit. Update `relay_e2e` `_HANDLER_MODULE` rust → `cloud_bridge.tools` (§5.4). Green at the rename.
+- **#6 — Insert the gate at the 4 web faces + the upgrade gate, defaulted `AllowAll`.** Add `auth_token` to the rust WS wire; add the `CredentialExtractor` seam; wire the per-surface rule onto `AppState`/`RestOwner`/python proxy. Behaviorally inert (AllowAll). Add the upgrade-gate insertion (§1.1 item 3), also inert under AllowAll.
+- **#7 — Transport-blind `file` + proxy-by-id.** Python: collapse to `{path,bytes,mime?}`. **Rust: ADD the raw-bytes carrier** (`_binary_path`/octet handle) and teach the local `/file/` proxies the new shape (§4.2 — net-new, not deletion). Retarget the file selftests/`test_file.py`. `/file/` still local-read here (cap gate lands in #9).
 - **#8 — reflect leg descriptor + readme rewrites (LANDS BEFORE THE FLIP).** Add `direction`/`sealed`/`channels`/`io_core_readme` **to leg nodes only** (§6.1); update `reflect_conformance.json` + 4 runtimes in lockstep; rewrite bridge/file/web readmes with the channel vocabulary + two gotchas. Add the unauthenticated `/` **discovery preamble** (§1.2), replacing the full-tree dump.
 - **#9 — THE FLIP (the security-load-bearing commit).** Set `edge_default = deny` at the four web faces + the upgrade gate. In the **same** commit: upgrade `DenyInbound`/`Password` to gate **non-`call`** kinds (§2.4); add the **privileged-verb elevation policy** (§2.3 layer 1); **scrub secrets from the `terminal_backend` child env** (§2.3 layer 2); add the **octet capability** mint+verify with a **distinct non-exported `FANTASTIC_CAP_KEY`**, nonce, single-use, 30s ttl, no-referrer/no-store, blob path for JS fetches (§4.4). Add the **build-time brick check** (§5.3). Open the test legs (permissive-first migration completes here). **This is the one commit where "sealed" becomes true in the full sense of §1.1; nothing about the seal may be deferred past it.**
 - **#10 — 2026 browser PoP for the MESSAGE channel.** Non-extractable `CryptoKey` (extractable:false) in IndexedDB + proof-of-possession (sign a nonce) for message frames; optional `*.ts` login view shown only on `reason:"unauthorized"`. Forward-looking, isolated to ts; the octet channel keeps the hardened bearer (§4.4) since an `<img>` GET cannot carry PoP.
@@ -317,8 +311,8 @@ Each commit is shippable + green, with units/integration/e2e/readmes per the aut
 
 1. **#9 is the load-bearing commit and it carries five fixes the original draft missed** — verb-level elevation (Q2), non-`call` gating + upgrade gate (Q3), the hardened distinct-key octet cap (Q4), the env scrub, **and the teaching-denial frame (§9.3)**. None are structural, all are isolated, but **all must ship together** or the flip is cosmetic for the telemetry/octet/privilege surfaces. This is where review effort concentrates.
 2. **deny-all is the engine default EVERYWHERE, by author directive (§2.5).** `cloud_bridge` + ws-outbound seal too; the north-star "every leg denies" is now **literally true**. The cost is real test re-baseline: `relay_e2e` default legs + the two `absent==AllowAll` unit tests move from "NONE" to declaring openings. Accepted as the right churn (every test that wants traffic shows its opening). The builder LLM opens edges consciously; the operator keeps that capability in mind.
-3. **#7 is net-new bytes-carrier plumbing in rust+swift**, not deletion. Budget it as such.
-4. **#5 has two wiring sites the original omitted** (the `__cloud-cert` re-point and the rust/swift bundle-registration tables). Mechanical, but if missed the binaries fail to build and `relay_e2e` breaks.
+3. **#7 is net-new bytes-carrier plumbing in rust**, not deletion. Budget it as such.
+4. **#5 has two wiring sites the original omitted** (the `__cloud-cert` re-point and the rust bundle-registration tables). Mechanical, but if missed the binaries fail to build and `relay_e2e` breaks.
 5. **#8's reflect fields must be leg-scoped** (§6.1) or they detonate the exact-match conformance fixture across 4 runtimes.
 6. **Emergent sufficiency is unproven.** The discovery loop is plausible but the one existing data point cuts against it. The teaching-denial (§9.3) biases it toward success; #11 still treats the readme as a tested artifact and re-runs `llm_diag` against a sealed host for real evidence — it does not assume the hop.
 

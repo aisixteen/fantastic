@@ -101,7 +101,7 @@ def _pid_of(root, aid: str, verb: str) -> int:
 # ── G-3: the hooks run as the agent itself ───────────────────────────────────
 
 
-async def test_on_cancel_runs_as_the_agent_on_the_cancel_verb_path(seeded_kernel):
+async def test_on_cancel_hook_runs_and_releases_its_resource(seeded_kernel):
     root = seeded_kernel
     gc = await _grandchild(root)
     inbox = root.ctx.ensure_inbox(gc)
@@ -130,7 +130,7 @@ async def test_on_cancel_runs_as_the_agent_on_the_deadline_path(seeded_kernel):
     assert {"type": "status", "phase": "done", "reason": "cancelled"} in got, got
 
 
-async def test_on_delete_runs_as_the_agent_itself(seeded_kernel):
+async def test_kernel_bookkeeping_runs_the_handler_as_the_agent_with_no_origin(seeded_kernel):
     root = seeded_kernel
     await _grandchild(root)
     _hook_senders.clear()

@@ -111,6 +111,8 @@ async def _kernel_rows(root) -> list[dict]:
 
 
 # ── the tail ────────────────────────────────────────────────────────────
+# twin: the_tail_replays_above_the_cursor_then_follows_live
+# twin: a_dropped_tail_is_pruned
 
 
 async def test_rows_stream_replays_after_then_tails_without_duplicates(seeded_kernel):
@@ -150,6 +152,9 @@ async def test_draining_refuses_new_roots_but_not_shutdown_traffic(seeded_kernel
         assert out["status"] == "completed"
     finally:
         k.draining = False
+# twin: shutdown_agents_tells_every_agent_and_then_refuses_new_roots
+# twin: a_keepalive_loop_is_neither_waited_for_nor_cancelled
+# twin: a_bundle_that_declares_shutdown_is_still_the_one_told
 
 
 async def test_shutdown_agents_tells_advertisers_waits_then_cancels_the_rest(
@@ -294,7 +299,7 @@ async def test_kernel_start_boots_the_store_first_then_everyone(seeded_kernel):
 # ── the flusher ────────────────────────────────────────────────────────
 
 
-async def test_execution_rows_flush_into_the_store_and_leave_ram(seeded_kernel):
+async def test_a_flushed_row_leaves_ram(seeded_kernel):
     await _mk(seeded_kernel)
     await _with_store(seeded_kernel)
     out = await _call(seeded_kernel, "probe", {"type": "work"})
@@ -311,7 +316,7 @@ async def test_execution_rows_flush_into_the_store_and_leave_ram(seeded_kernel):
     assert pid not in seeded_kernel.ctx.executions, "a settled, flushed execution too"
 
 
-async def test_stored_rows_keep_none_and_reduce_bytes_to_a_length(seeded_kernel):
+async def test_the_settle_row_keeps_what_stored_outcome_keeps(seeded_kernel):
     """C25 fidelity: a call's payload lands in the store verbatim — None stays None —
     except raw bytes, recorded as `{len: N}` (base64 is banned). And `dump` → `inject`
     round-trips the tables unchanged."""
@@ -334,7 +339,7 @@ async def test_stored_rows_keep_none_and_reduce_bytes_to_a_length(seeded_kernel)
     assert after["fold_refs"] == before["fold_refs"]
 
 
-async def test_a_settle_keeps_the_body_only_when_named_or_the_error_when_dead(
+async def test_stored_outcome_keeps_a_named_result_a_dead_error_else_a_digest(
     seeded_kernel,
 ):
     """What a settle row keeps: a NAMED call's whole result (the dedup contract), a
@@ -398,7 +403,7 @@ async def test_the_flush_records_itself_and_never_loops(seeded_kernel):
     assert len(rows) >= n1
 
 
-async def test_ledger_is_a_projection_of_store_and_ram_scoped_to_the_caller(
+async def test_an_unnamed_settle_comes_back_as_what_it_kept(
     seeded_kernel,
 ):
     await _mk(seeded_kernel)
@@ -581,7 +586,7 @@ async def _until(cond, *, timeout=3.0):
     raise AssertionError("condition never held")
 
 
-async def test_a_failed_store_read_in_the_prune_is_loud_and_the_flusher_lives(
+async def test_a_failed_store_read_in_the_prune_prunes_nothing_and_the_flusher_lives(
     seeded_kernel, capsys, monkeypatch
 ):
     """A store READ that fails inside the window prune is said on stderr and prunes
@@ -614,6 +619,8 @@ async def test_a_failed_store_read_in_the_prune_is_loud_and_the_flusher_lives(
 
 
 # ── the id counter: block reservation in the root record ───────────────
+# twin: the_root_records_next_id_resumes_the_counter_and_the_load_writes_nothing
+# twin: the_first_mint_reserves_a_block_and_the_bound_is_reported
 
 
 async def test_the_id_counter_reserves_blocks_in_the_root_record(tmp_path, monkeypatch):
@@ -639,7 +646,7 @@ async def test_the_id_counter_reserves_blocks_in_the_root_record(tmp_path, monke
 
 
 # Rust twin: fantastic-kernel src/rows/tests.rs::restore_resumes_at_the_persisted_bound_and_never_lowers
-def test_the_id_counter_restore_never_lowers_the_bound():
+def test_restore_resumes_at_the_persisted_bound_and_never_lowers():
     from kernel._kernel import Kernel
 
     root = {"id": "kernel_state", "handler_module": "kernel_state.tools"}

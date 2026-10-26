@@ -151,7 +151,7 @@ async def test_held_messages_keep_their_order(seeded_kernel, fake_providers):
         fake_providers.pop(aid, None)
 
 
-async def test_pause_and_resume_twice_are_noops(seeded_kernel, fake_providers):
+async def test_pause_twice_and_resume_twice_are_noops(seeded_kernel, fake_providers):
     aid = "pause_twice"
     fp = _Recorder()
     _agent(seeded_kernel, aid)

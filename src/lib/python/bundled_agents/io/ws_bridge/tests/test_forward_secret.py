@@ -42,7 +42,7 @@ def test_bridge_payload_secret_marks_only_a_forwarded_set_fields():
         assert hook(_forward("c", {"type": "set", "ref": "r"})) == []
 
 
-async def test_forwarded_set_is_recorded_as_secret_in_the_callers_rows(
+async def test_forward_set_to_a_connected_credential_store_never_records_the_value_on_the_caller(
     request, tmp_path
 ):
     ka, kb = request.getfixturevalue("two_kernels")
@@ -111,7 +111,7 @@ async def test_forwarded_set_is_recorded_as_secret_in_the_callers_rows(
     )
 
 
-async def test_a_reply_frames_secret_marks_the_forward_reply_in_the_callers_records(
+async def test_forward_get_to_a_connected_credential_store_is_recorded_as_secret(
     request,
 ):
     ka, kb = request.getfixturevalue("two_kernels")

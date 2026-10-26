@@ -54,7 +54,7 @@ def _param(p):
 
 
 @pytest.mark.parametrize("spec_path", [_param(p) for p in _SPECS])
-async def test_scenario(spec_path, hydrate_scenario):
+async def test_the_shared_agentic_corpus_holds_on_this_runtime(spec_path, hydrate_scenario):
     if spec_path is None:
         pytest.skip("no scenarios in contract/agentic/specs")
     cfg = load_config(spec_path)

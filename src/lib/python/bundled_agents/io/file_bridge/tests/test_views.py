@@ -38,7 +38,7 @@ async def _next(q, pred, timeout: float = 5.0) -> dict:
             return ev
 
 
-async def test_open_view_makes_a_file_view_and_reuses_it(seeded_kernel, file_bridge):
+async def test_open_view_makes_one_view_per_path(seeded_kernel, file_bridge):
     k, fb = seeded_kernel, file_bridge
     Path("notes.md").write_text("hi\n")
     first = await _open(k, fb, "file", "notes.md")
@@ -69,6 +69,8 @@ async def test_a_folder_view_is_one_per_folder(seeded_kernel, file_bridge):
     assert a["kind"] == "folder" and a["created"] is True
     assert b["id"] == a["id"] and b["created"] is False
     assert k.get(a["id"])["view"] == "folder"
+# twin: open_view_refuses_bad_arguments_and_unexposed_paths
+# twin: open_view_refuses_a_path_the_bridge_does_not_expose
 
 
 async def test_open_view_refuses_what_the_bridge_does_not_expose(seeded_kernel):
@@ -111,7 +113,7 @@ async def test_a_file_view_reads_and_writes_its_own_path(seeded_kernel, file_bri
     assert stale["reason"] == "version_mismatch", stale
 
 
-async def test_a_file_view_refuses_another_path(seeded_kernel, file_bridge):
+async def test_a_file_view_reads_writes_and_refuses_another_path(seeded_kernel, file_bridge):
     k, fb = seeded_kernel, file_bridge
     Path("a.txt").write_text("one\n")
     Path("b.txt").write_text("two\n")
@@ -146,7 +148,7 @@ async def test_a_view_has_only_its_grant_on_the_bridge(seeded_kernel, file_bridg
     )
 
 
-async def test_a_folder_view_lists_inside_its_folder_only(seeded_kernel, file_bridge):
+async def test_a_folder_view_lists_inside_itself_and_reveals_the_way_down(seeded_kernel, file_bridge):
     k, fb = seeded_kernel, file_bridge
     Path("docs").mkdir()
     Path("docs/a.md").write_text("a")
@@ -172,7 +174,7 @@ async def test_reveal_shows_the_way_down(seeded_kernel, file_bridge):
     assert missing["reason"] == "not_found", missing
 
 
-async def test_a_file_view_relays_its_changes(seeded_kernel, file_bridge):
+async def test_a_file_view_relays_its_changes_to_its_watchers(seeded_kernel, file_bridge):
     k, fb = seeded_kernel, file_bridge
     Path("live.txt").write_text("one\n")
     Path("other.txt").write_text("x\n")
@@ -311,7 +313,7 @@ async def _docs(k, **args):
     return await _call(k, "kernel", {"type": "docs", **args})
 
 
-async def test_docs_of_a_view_lists_only_the_views_own_verbs(
+async def test_a_view_documents_only_its_own_verbs(
     seeded_kernel, file_bridge
 ):
     """A view answers its own table, so `docs of=<view>` (and `advertises`) name
@@ -527,7 +529,7 @@ async def _changed_for(q, secs: float = 2.0) -> list[tuple[str, str]]:
     return out
 
 
-async def test_view_event_stamps_one_relayed_event_per_edit_with_kinds(
+async def test_a_view_gets_one_relayed_event_per_edit_with_stamp_kinds(
     seeded_kernel, file_bridge
 ):
     """Rust tests_views.rs::a_view_gets_one_relayed_event_per_edit_with_stamp_kinds."""

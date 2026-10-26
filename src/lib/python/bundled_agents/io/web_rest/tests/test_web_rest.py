@@ -16,6 +16,7 @@ from web_rest.tools import (
     route_endpoints,
 )
 from _testkit import wire
+# twin: reflect_keys_match_python
 
 
 async def test_reflect_describes_surface(seeded_kernel):
@@ -28,7 +29,7 @@ async def test_reflect_describes_surface(seeded_kernel):
     assert "verbs" not in r
 
 
-async def test_get_routes_returns_post_plus_two_reflect_gets(seeded_kernel):
+async def test_get_routes_match_python(seeded_kernel):
     """DECLARATIVE — pure JSON data, byte-shaped like rust (kind, method,
     path, in that order). No callable rides the reply."""
     r = await _get_routes("rest_xyz", {}, seeded_kernel)
@@ -120,7 +121,7 @@ def test_post_endpoint_rejects_bad_json(seeded_kernel):
 # ─── GET _reflect shortcuts (browser-pastable) ──────────────────
 
 
-def test_get_reflect_root_returns_tree(seeded_kernel):
+def test_open_rest_leg_dispatches_including_the_reflect_routes(seeded_kernel):
     """GET /<rest_id>/_reflect (no target) defaults to the root → uniform
     reflect with the tree. `?bundles=all` adds the catalog."""
     seeded_kernel.create(
@@ -186,7 +187,7 @@ def test_get_reflect_target_returns_error_for_missing_agent(seeded_kernel):
         assert "error" in body
 
 
-def test_get_reflect_readme_query_flag(seeded_kernel):
+def test_get_reflect_query_flags_match_python(seeded_kernel):
     """`?readme=1` on the GET shortcut passes `readme:true` —
     the reply carries the agent's readme.md content."""
     seeded_kernel.create(
@@ -213,7 +214,7 @@ def test_get_reflect_readme_query_flag(seeded_kernel):
 # ─── auth gate (the io_bridge ingress rule on the leg) ──────────
 
 
-def test_sealed_rest_leg_denies_and_teaches(seeded_kernel):
+def test_sealed_rest_leg_answers_403_and_teaches_the_repair(seeded_kernel):
     seeded_kernel.create(
         "web_rest.tools", id="sealed_rest", ingress_rule="deny_ingress"
     )

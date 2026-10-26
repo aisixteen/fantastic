@@ -8,7 +8,7 @@
 The canvas is the **view layer** of Fantastic: a page that runs the ts kernel
 library (`src/lib/ts`) in the browser as a **peer** of the host — same
 `send`/`reflect`/`watch` protocol — and renders that kernel's own agent tree. The
-host (Python/Rust/Swift) knows nothing about it (weak binding). The library does
+host (Python/Rust) knows nothing about it (weak binding). The library does
 the kernel, the WS bridge and the persistence (`boot`); this app registers its
 bundles, seeds an empty tree with the canvas root, and mounts.
 

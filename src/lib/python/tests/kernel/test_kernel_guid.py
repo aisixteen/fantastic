@@ -23,6 +23,8 @@ _HEX = set("0123456789abcdef")
 
 def _is_guid(v) -> bool:
     return isinstance(v, str) and len(v) == 32 and all(c in _HEX for c in v)
+# twin: the_kernel_guid_is_a_uuid4_hex
+# twin: root_reflect_carries_a_32hex_guid
 
 
 async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
@@ -58,6 +60,7 @@ async def test_guid_auto_mints_once_and_persists(tmp_path, monkeypatch):
         (tmp_path / ".fantastic" / "agent.yaml").read_text(encoding="utf-8")
     )
     assert disk["guid"] == minted
+# twin: boot_mints_a_32hex_guid_and_persists_it_stably
 
 
 async def test_guid_persists_across_reboot(tmp_path, monkeypatch):
@@ -140,7 +143,7 @@ async def test_fresh_dir_mints_a_different_guid(tmp_path, monkeypatch):
     assert guid_a != guid_b
 
 
-async def test_in_memory_boot_mints_ephemeral_guid(tmp_path, monkeypatch):
+async def test_in_memory_boot_mints_an_ephemeral_guid(tmp_path, monkeypatch):
     """An in-memory boot with no store wired still mints a guid into the record
     (just not persisted), so root reflect ALWAYS carries one."""
     monkeypatch.chdir(tmp_path)

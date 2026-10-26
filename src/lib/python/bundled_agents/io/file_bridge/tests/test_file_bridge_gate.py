@@ -34,7 +34,7 @@ async def _make(kernel, **meta):
 # ─── (a) sealed by default ──────────────────────────────────────
 
 
-async def test_sealed_by_default_denies_verbs(seeded_kernel):
+async def test_gate_seals_by_default_and_opens_with_allow_all(seeded_kernel):
     fid = await _make(seeded_kernel)  # NO ingress_rule — the seal
     for payload in (
         {"type": "read_stream", "path": "x.txt"},
@@ -103,7 +103,7 @@ async def test_open_leg_reads_and_writes(seeded_kernel, tmp_path):
 # ─── (c) the running-dir law ────────────────────────────────────
 
 
-async def test_relative_root_escaping_cwd_refuses(seeded_kernel):
+async def test_root_escape_error_is_python_text(seeded_kernel):
     fid = await _make(seeded_kernel, ingress_rule="allow_all_ingress", root="../x")
     for payload in (
         {"type": "read_stream", "path": "a.txt"},
@@ -160,7 +160,7 @@ async def test_symlink_pointing_outside_cwd_refuses(seeded_kernel, tmp_path):
     assert "escape" in r.get("error", ""), f"symlink escape served: {r!r}"
 
 
-async def test_reflect_never_raises_on_invalid_root(seeded_kernel):
+async def test_reflect_root_is_resolved_absolute_path(seeded_kernel):
     fid = await _make(seeded_kernel, root="../nope")
     r = (await seeded_kernel.send([{"target": fid, "payload": {"type": "reflect"}}]))[
         0
@@ -256,6 +256,18 @@ async def test_a_legal_rule_still_creates(seeded_kernel):
 
 
 # ─── the path gate, every verb (Rust tests_path_gate.rs) ────────
+# twin: list_outside_is_refused
+# twin: read_stream_outside_is_refused
+# twin: watch_path_outside_is_refused
+# twin: write_outside_is_refused_and_creates_nothing
+# twin: append_outside_is_refused
+# twin: write_stream_outside_is_refused
+# twin: delete_outside_is_refused_and_the_file_stays
+# twin: mkdir_outside_is_refused
+# twin: undo_outside_is_refused
+# twin: edit_with_one_path_outside_writes_nothing
+# twin: rename_out_of_the_view_is_refused
+# twin: rename_into_the_view_from_outside_is_refused
 
 
 async def test_every_verb_refuses_a_path_outside_the_list_and_changes_nothing(

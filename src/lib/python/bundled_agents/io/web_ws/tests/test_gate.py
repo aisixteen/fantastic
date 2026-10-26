@@ -36,7 +36,7 @@ def _reply(ws, call_id, max_frames=10):
     raise AssertionError(f"no reply for id={call_id}")
 
 
-def test_sealed_leg_denies_and_teaches(seeded_kernel):
+def test_sealed_leg_denies_the_call_and_leaks_no_telemetry(seeded_kernel):
     seeded_kernel.create("web_ws.tools", id="sealed_ws", ingress_rule="deny_ingress")
     with _client(seeded_kernel, "sealed_ws") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
@@ -76,7 +76,7 @@ def test_open_leg_dispatches(seeded_kernel):
 
 def test_absent_rule_is_sealed(seeded_kernel):
     # No ingress_rule on the leg ⇒ DenyInbound ⇒ sealed by default: the bare leg
-    # refuses AND teaches how to open it (mirrors test_sealed_leg_denies_and_teaches).
+    # refuses AND teaches how to open it (mirrors test_sealed_leg_denies_the_call_and_leaks_no_telemetry).
     seeded_kernel.create("web_ws.tools", id="bare_ws")
     with _client(seeded_kernel, "bare_ws") as c:
         with c.websocket_connect("/kernel_state/ws") as ws:
@@ -183,7 +183,7 @@ def test_sealed_leg_skips_autowatch_no_telemetry_leak(seeded_kernel, monkeypatch
     assert "kernel_state" not in calls  # the sealed leg did NOT mirror the host inbox
 
 
-def test_open_leg_autowatches_host(seeded_kernel, monkeypatch):
+def test_open_leg_autowatches_and_calls_run_as_the_leg(seeded_kernel, monkeypatch):
     calls = _watch_spy(seeded_kernel, monkeypatch)
     seeded_kernel.create(
         "web_ws.tools", id="open_ws3", ingress_rule="allow_all_ingress"

@@ -371,7 +371,7 @@ LEGS = {
 }
 
 
-async def test_every_transport_gives_the_same_reply(wired):
+async def test_the_shared_c21_corpus_holds_on_this_runtime(wired):
     ka, kb, bridge_a, relay_a = wired
     replies = {name: await leg(ka, kb, bridge_a, relay_a) for name, leg in LEGS.items()}
 

@@ -40,7 +40,7 @@ async def _mk(kernel) -> str:
     return out[0]["result"]["id"]
 
 
-async def test_marked_value_is_shown_never_kept(seeded_kernel):
+async def test_a_marked_value_is_shown_never_kept(seeded_kernel):
     aid = await _mk(seeded_kernel)
     events: list[dict] = []
     off = seeded_kernel.ctx.add_state_subscriber(events.append)
@@ -127,7 +127,7 @@ _note_mod.VERBS = {}
 register_unlisted("secret_note_agent.tools", _note_mod)
 
 
-async def test_a_handler_noting_reply_secret_marks_its_settle_row(seeded_kernel):
+async def test_stored_outcome_shows_reply_marks_as_secret(seeded_kernel):
     out_id = (
         await seeded_kernel.send(
             [

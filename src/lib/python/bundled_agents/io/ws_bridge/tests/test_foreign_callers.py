@@ -79,7 +79,7 @@ def _accept(k, agent_id, key):
     k.update(agent_id, callable_by={**cb, key: "*"})
 
 
-async def test_an_inbound_call_is_gated_as_the_leg(leg):
+async def test_an_inbound_call_is_gated_as_the_leg_not_the_operator(leg):
     k, leg_id, target, mt_peer = leg
     out = await _call(mt_peer)
     assert out.get("reason") == "unauthorized" and out.get("side") == "ingress", out

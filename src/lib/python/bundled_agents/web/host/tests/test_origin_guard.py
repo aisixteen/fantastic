@@ -113,6 +113,8 @@ def test_own_authorities_are_the_bound_host_port_plus_loopback_spellings():
     assert own_authorities({"host": "::", "port": 8088}) == {"[::]:8088"}
     # no Host header at all is not an authority
     assert "" not in own_authorities({"port": 8088})
+# twin: a_rebound_host_cannot_read_the_file_proxy
+# twin: a_foreign_host_is_refused_on_every_method_with_no_origin
 
 
 def test_rebound_host_is_refused_on_every_method_with_no_origin(capsys):
@@ -158,7 +160,7 @@ def test_a_published_bind_admits_only_its_own_host_port():
         assert c.get("/x", headers={"Host": host}).status_code == 403, host
 
 
-def test_rebound_websocket_upgrade_is_refused():
+def test_a_rebound_websocket_upgrade_is_refused():
     """TestClient's websocket_connect always dials `ws://testserver`; the Host
     header is what the upgrade names."""
     c = TestClient(_app({"port": 8088}))

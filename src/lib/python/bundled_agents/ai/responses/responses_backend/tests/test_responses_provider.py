@@ -83,7 +83,7 @@ async def _drain(p: ResponsesProvider, **kw) -> str:
     return "".join([c async for c in p.chat(msgs, **kw)])
 
 
-async def test_request_is_stateless_typed_items_and_no_tools():
+async def test_request_is_stateless_typed_items_no_tools_in_pythons_key_order():
     """The system block rides as `instructions`, every other turn as a typed message
     item, the whole conversation each pass (`store:false`) — and no `tools` key: the
     call grammar is taught in the prompt."""
@@ -180,7 +180,7 @@ async def test_reported_usage_calibrates():
     assert p.last_stop_reason == "completed"
 
 
-async def test_a_cut_main_turn_raises_instead_of_faking_a_finish():
+async def test_a_cut_main_turn_is_an_error_and_a_bounded_cut_an_answer():
     """`max_output_tokens` mid-envelope returned as finished parses as garbage and
     the chain dies downstream with the cause hidden. A cut turn is an error."""
     p = _provider([], _text("half a ", status="incomplete", reason="max_output_tokens"))
@@ -197,7 +197,7 @@ async def test_a_bounded_side_call_cut_is_an_answer():
     assert p.last_stop_reason == "max_tokens"
 
 
-async def test_a_stream_with_no_terminal_event_is_a_cut_connection():
+async def test_no_terminal_event_is_a_cut_connection():
     sse = _sse({"type": "response.output_text.delta", "delta": "x"})
     with pytest.raises(RuntimeError, match="connection cut mid-stream"):
         await _drain(_provider([], sse))
@@ -215,7 +215,7 @@ async def test_response_failed_is_loud():
         await _drain(_provider([], sse))
 
 
-async def test_a_native_function_call_is_a_loud_error_not_a_silent_drop():
+async def test_response_failed_and_a_native_function_call_are_loud():
     """Its arguments are JSON this kernel does not read; dropping the item would end
     the turn looking finished with the call lost, so it raises, naming the grammar."""
     sse = _sse(
@@ -230,7 +230,7 @@ async def test_a_native_function_call_is_a_loud_error_not_a_silent_drop():
         await _drain(_provider([], sse))
 
 
-async def test_missing_endpoint_model_or_key_fail_loud_naming_it():
+async def test_missing_key_endpoint_or_model_fail_loud_naming_it():
     with pytest.raises(RuntimeError, match="endpoint"):
         await _drain(ResponsesProvider(endpoint="", model="m", key=_key))
     with pytest.raises(RuntimeError, match="model"):
@@ -470,6 +470,7 @@ async def test_a_connect_failure_is_transport(exc):
         await _drain(p)
     assert e.value.transport is True
     assert str(e.value) == f"http: {exc}"
+# twin: a_body_cut_mid_stream_raises_stream_and_the_cause_chain
 
 
 async def test_a_stream_dropped_mid_answer_is_transport():
@@ -510,7 +511,7 @@ async def test_a_status_the_endpoint_meant_is_not_transport(code):
 # ── the read clock (#177) ───────────────────────────────────────────────────
 
 
-async def test_a_stalled_responses_stream_is_stream_stalled():
+async def test_a_stream_that_goes_quiet_fails_after_the_idle_window():
     from ai_core.provider import ProviderError
 
     class _Silent(httpx.AsyncByteStream):
@@ -590,7 +591,7 @@ async def test_a_503_is_a_transport_failure_and_a_401_is_not():
     assert str(deliberate.value) == "responses 401: no"
 
 
-async def test_a_rotated_key_rides_the_next_request_and_nothing_pools(monkeypatch):
+async def test_the_key_rides_verbatim_a_rotated_key_rides_next_and_nothing_pools(monkeypatch):
     made: list = []
     real_init = httpx.AsyncClient.__init__
 

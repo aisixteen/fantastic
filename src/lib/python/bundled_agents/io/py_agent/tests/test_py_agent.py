@@ -202,7 +202,7 @@ async def test_an_exit_settles_the_call_and_nothing_respawns(kernel, workdir):
     await _call(kernel, kernel.id, {"type": "delete_agent", "id": "m1"})
 
 
-async def test_reload_restarts_live_instances_and_answers_the_inflight_call(
+async def test_reload_restarts_the_instance_and_answers_the_inflight_call(
     kernel, workdir
 ):
     folder = _bundle(workdir, "reloaded")

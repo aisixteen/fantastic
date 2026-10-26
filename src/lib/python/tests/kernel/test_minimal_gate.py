@@ -54,6 +54,8 @@ def _open_root(k, aid: str, verbs="*") -> None:
     """`aid` → the root on both ends."""
     k.ctx.update(aid, can_call={"$self": "*", "kernel_state": verbs})
     k.ctx.update("kernel_state", callable_by={"$self": "*", aid: verbs})
+# twin: the_baseline_is_self_only_on_both_fields
+# twin: baseline_is_self_only
 
 
 def test_the_baseline_is_self_only():
@@ -61,7 +63,7 @@ def test_the_baseline_is_self_only():
     assert DEFAULT_CALLABLE_BY == {"$self": "*"}
 
 
-async def test_no_structural_reach_without_a_grant(seeded_kernel):
+async def test_self_token_resolves_to_holder_id(seeded_kernel):
     k = seeded_kernel
     _mk(k, "boss")
     _mk(k, "kid", parent="boss")
@@ -72,6 +74,8 @@ async def test_no_structural_reach_without_a_grant(seeded_kernel):
     assert down["reason"] == "unauthorized" and down["side"] == "egress", down
     self_call = await _as(k, "kid", "kid", {"type": "ping"})
     assert self_call["status"] == "completed", self_call
+# twin: both_ends_must_grant_the_edge
+# twin: per_verb_list_grants_exactly_those
 
 
 async def test_two_sided_allow_and_deny(seeded_kernel):
@@ -87,7 +91,7 @@ async def test_two_sided_allow_and_deny(seeded_kernel):
     assert other["side"] == "egress", other
 
 
-async def test_subtree_reaches_every_depth(seeded_kernel):
+async def test_subtree_token_matches_every_depth_below(seeded_kernel):
     """`$subtree` matches every agent BELOW the holder — a grandchild included,
     on both sides of the gate; an agent outside the subtree stays refused."""
     k = seeded_kernel
@@ -101,7 +105,7 @@ async def test_subtree_reaches_every_depth(seeded_kernel):
     assert r["side"] == "ingress", r
 
 
-async def test_tokens_resolve_relative_to_the_holder(seeded_kernel):
+async def test_parent_token_resolves_to_parent_id(seeded_kernel):
     k = seeded_kernel
     _mk(k, "boss", can_call={"$subtree": "*"}, callable_by={"$subtree": ["up"]})
     _mk(
@@ -111,6 +115,8 @@ async def test_tokens_resolve_relative_to_the_holder(seeded_kernel):
     assert (await _as(k, "kid", "boss", {"type": "up"}))["status"] == "completed"
     r = (await _as(k, "kid", "boss", {"type": "sideways"}))["result"]
     assert r["side"] == "ingress", r
+# twin: star_covers_every_verb_including_the_mutators
+# twin: a_peer_target_matches_only_by_name
 
 
 def test_star_covers_every_verb_and_tokens_never_match_a_foreign_id():
@@ -159,7 +165,7 @@ async def test_star_covers_create_agent(seeded_kernel):
     assert k.ctx.agents["made"].parent.id == "maker"
 
 
-async def test_a_kernel_verb_takes_the_root_ingress_check(seeded_kernel):
+async def test_kernel_verbs_at_the_root_check_the_roots_callable_by(seeded_kernel):
     k = seeded_kernel
     _mk(k, "a", can_call={"kernel_state": ["ps"]})
     r = (await _as(k, "a", "kernel", {"type": "ps"}))["result"]
@@ -225,6 +231,8 @@ async def test_a_tree_verb_granted_on_the_root_acts_anywhere(seeded_kernel):
         ({"type": "delete_agent", "id": ""}, "id"),
     ],
 )
+# twin: delete_agent_without_an_id_is_missing_arg
+# twin: a_missing_operand_or_an_unknown_id_gets_the_verbs_own_refusal
 async def test_a_missing_operand_gets_the_verbs_own_refusal(
     seeded_kernel, payload, arg
 ):
@@ -297,6 +305,9 @@ async def test_a_mutator_is_gated_on_the_root_first(seeded_kernel):
     "key",
     ["$loader", "$subtree:a", "$root", "*", "", "|x", "g1|", "g1|a|b"],
 )
+# twin: unknown_grant_keys_and_bad_values_are_refused_at_write_time
+# twin: removed_tokens_match_nothing
+# twin: grant_keys_are_exactly_the_legal_set
 async def test_an_unknown_grant_key_is_refused_at_the_write(seeded_kernel, key):
     k = seeded_kernel
     for field in ("can_call", "callable_by"):

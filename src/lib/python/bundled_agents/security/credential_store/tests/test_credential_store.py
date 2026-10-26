@@ -543,7 +543,7 @@ async def test_the_file_is_an_absolute_path_a_relative_one_is_refused(
     assert not (k.ctx.workdir / "creds.yaml").exists()
 
 
-async def test_the_file_is_the_kernel_emitters_bytes_sorted(seeded_kernel, tmp_path):
+async def test_the_file_is_pythons_bytes(seeded_kernel, tmp_path):
     """ONE format across runtimes: `kernel_state/yaml_io.dump` with every map's keys
     sorted — each ref's entry is `{fields, host}` (the host stored WITH the
     value) — and a value a YAML 1.2 loader would read as a number quoted, so the
@@ -670,7 +670,7 @@ async def test_a_stored_value_without_a_host_is_refused(
 # ─── secrets never reach a row, event or store ──────────────────────────────
 
 
-def test_field_marks_name_each_field_or_the_whole_map():
+def test_field_marks_names_each_field_or_the_whole_map():
     """Twin of the Rust `field_marks_names_each_field_or_the_whole_map`."""
     from credential_store.tools import _field_marks, payload_secret
 

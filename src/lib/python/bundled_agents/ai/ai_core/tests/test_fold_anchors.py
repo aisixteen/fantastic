@@ -199,7 +199,7 @@ def test_a_new_folds_anchor_is_its_least_leaf():
     assert folds.member_anchor(rows, [0, 1, 2], anchors) == 1
 
 
-def test_a_fold_that_cannot_be_placed_is_an_error():
+def test_a_fold_that_cannot_be_placed_is_an_error_not_a_panic():
     rows = [
         {"role": "user", "id": 31, "kind": "fold", "refs": [1], "content": "legacy"},
         {"role": "user", "id": "x", "content": "a row with no int id"},

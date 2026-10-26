@@ -43,6 +43,8 @@ async def host(seeded_kernel):
     web_id = seeded_kernel.create("web.tools", id="mount_web", port=8999)["id"]
     yield web_id
     _servers.pop(web_id, None)
+# twin: web_with_ws_child_serves_ws
+# twin: web_with_rest_child_serves_rest
 
 
 async def test_web_mounts_the_ws_and_rest_legs(seeded_kernel, host):
@@ -150,7 +152,7 @@ async def test_a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all(
     assert left == [], left
 
 
-async def test_boot_announces_the_bound_host(seeded_kernel, monkeypatch):
+async def test_boot_announces_say_to_cli(seeded_kernel, monkeypatch):
     """ARCH2-10 — the boot announcement to `cli` names the host the server BINDS
     (`host` on the record), not a hardcoded `127.0.0.1`: a host bound elsewhere
     does not answer there. Nothing binds here — the serve loop is stubbed out, and

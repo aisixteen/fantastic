@@ -15,7 +15,7 @@ from _testkit import as_agent
 # ─── a1 — save() emitted a document its own load() refused ──────
 
 
-async def test_save_drops_the_ephemeral_SUBTREE_not_just_the_ephemeral_agent(kernel):
+async def test_save_drops_the_ephemeral_subtree_transitively(kernel):
     """`save()` filtered `type(a).ephemeral` per agent, so a CHILD of an
     ephemeral survived carrying `parent_id: cli` — an id no longer in the
     document. `Kernel.load` then refused its own output:

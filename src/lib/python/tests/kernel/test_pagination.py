@@ -27,7 +27,7 @@ _BY_ID = {"key": lambda r: r["id"]}
 # ─── the primitive ──────────────────────────────────────────────
 
 
-def test_absent_limit_returns_everything_so_paging_is_inert_until_asked_for():
+def test_no_limit_returns_everything_and_no_cursor():
     """The default MUST be unchanged. A caller that never learned about paging
     gets exactly what it always got — otherwise adding the field silently
     truncates every existing client."""
@@ -37,10 +37,13 @@ def test_absent_limit_returns_everything_so_paging_is_inert_until_asked_for():
     assert nxt is None
 
 
-def test_a_limit_is_never_exceeded():
+def test_a_limit_bounds_the_page_and_names_the_cursor():
     got, nxt = page(_rows(50), {"limit": 7}, **_BY_ID)
     assert len(got) == 7
     assert nxt is not None
+# twin: the_last_page_reports_no_cursor
+# twin: after_resumes_strictly_past_the_named_item
+# twin: walking_the_whole_list_by_cursor_visits_each_item_once
 
 
 def test_the_cursor_walks_the_whole_list_exactly_once_and_then_stops():
@@ -69,7 +72,7 @@ def test_the_cursor_is_opaque_and_not_an_offset():
         int(cursor)
 
 
-def test_a_cursor_naming_something_gone_yields_nothing_rather_than_restarting():
+def test_a_cursor_naming_something_gone_returns_empty_not_the_top():
     """The dangerous failure is not an error, it is a SILENT RESTART: a caller
     resuming with a stale cursor would re-walk the whole list from the top and
     read it as new work. Over a live tree a cursor may miss an item deleted
@@ -81,7 +84,7 @@ def test_a_cursor_naming_something_gone_yields_nothing_rather_than_restarting():
 
 
 @pytest.mark.parametrize("bad", [0, -1, "3", 2.5, True, None])
-def test_a_limit_that_is_not_a_positive_int_pages_nothing(bad):
+def test_a_nonsense_limit_means_everything(bad):
     """Including `True`, which `isinstance(x, int)` accepts and which would
     otherwise silently mean "one row"."""
     rows = _rows(10)
@@ -143,7 +146,7 @@ async def test_ps_pages_the_task_table(kernel):
     assert "next" in r
 
 
-async def test_reflect_pages_the_flat_id_index_but_never_the_nested_tree(kernel):
+async def test_tree_ids_is_paged_and_the_cursor_walks_the_whole_tree(kernel):
     """`tree:"ids"` is a list and pages. `tree:"all"` is a nested subtree whose
     VALUE is its structure — slicing it would hand back a forest with no root and
     call it a page, so it is left whole. Reflect must also stay useful in ONE

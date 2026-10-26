@@ -120,7 +120,7 @@ def test_nested_list_and_odd_key_paths_round_trip(env, path):
     assert decode_frame(wire) == env
 
 
-def test_a_path_with_no_slot_or_no_path_places_nothing():
+def test_a_frame_with_no_path_places_nothing():
     # absent or null ⇒ no body is placed, exactly as before
     assert decode_frame(_bin({"type": "x"})) == {"type": "x"}
     assert decode_frame(_bin({"type": "x", "_binary_path": None})) == {"type": "x"}
@@ -144,7 +144,7 @@ def test_a_path_with_no_slot_or_no_path_places_nothing():
         (["n", "x"], "step 'x' goes into a number, not a container"),
     ],
 )
-def test_a_malformed_path_off_the_wire_is_one_value_error(path, why):
+def test_a_malformed_path_off_the_wire_is_one_error(path, why):
     head = {"type": "reply", "items": [None, None], "n": 1, "_binary_path": path}
     with pytest.raises(ValueError) as e:
         decode_frame(_bin(head))
@@ -224,6 +224,8 @@ async def _until(pred, secs=3.0):
 
 
 # ─── (b) a ws_bridge forward through web_ws ──────────────────────────────────
+# twin: a_literal_key_crosses_a_ws_bridge_pair_both_ways
+# twin: a_binary_forward_ships_raw_bytes_and_returns_the_reply_body
 
 
 async def test_a_literal_key_crosses_a_ws_bridge_forward_both_ways(two):

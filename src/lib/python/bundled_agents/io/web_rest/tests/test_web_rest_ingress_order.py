@@ -136,7 +136,7 @@ async def test_a_declared_oversize_body_is_refused_unread(seeded_kernel, monkeyp
     assert read == 0
 
 
-async def test_an_undeclared_oversize_body_stops_at_the_bound(
+async def test_the_capped_read_stops_at_the_bound(
     seeded_kernel, monkeypatch
 ):
     """No Content-Length (a chunked body): read until the bound is crossed, then

@@ -7,7 +7,7 @@ from web.app import own_authorities, own_origins
 from web.tools import listen_host
 
 
-def test_the_listener_binds_the_bind_field_else_the_host_else_loopback():
+def test_the_listener_binds_the_bind_field_and_the_guard_keeps_the_host():
     assert listen_host({}) == "127.0.0.1"
     assert listen_host({"host": "192.168.1.5"}) == "192.168.1.5"
     assert listen_host({"bind": "0.0.0.0"}) == "0.0.0.0"
@@ -26,7 +26,7 @@ def test_a_wildcard_bind_keeps_the_loopback_identity_the_guard_admits():
     assert "http://localhost:8088" in own_origins(rec)
 
 
-def test_wildcard_bind_admits_loopback_names():
+def test_wildcard_bind_guard_admits_loopback_host():
     # the container's listener: bind 0.0.0.0, and a browser at localhost:<port>
     # (through a 127.0.0.1 port map or ssh -L) is admitted; a LAN name is not
     rec = {"bind": "0.0.0.0", "port": 8088}

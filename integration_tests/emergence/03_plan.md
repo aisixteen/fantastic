@@ -71,7 +71,7 @@ implements. Two defects followed:
    to that agent blew out of the handler as an unretrieved task exception, killed the
    caller's chain with no reply, and **the run looked finished**.
 
-Fixes that came out of it (py → rust → swift): unknown rule now seals with
+Fixes that came out of it (py → rust): unknown rule now seals with
 `DenyInbound(unknown=…)` naming the legal values; `validate_meta` refuses the write;
 `_route_reply` survives a raising handler. Under the current scorer this run is
 `transcripts got=BROKEN ✗`.

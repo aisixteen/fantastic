@@ -16,7 +16,7 @@ import pytest
 from kernel._state import SnapshotError, validate_records
 
 
-def test_a_parent_cycle_is_refused():
+def test_an_orphan_chain_is_refused():
     records = [
         {"id": "root", "parent_id": None},
         {"id": "a", "parent_id": "b"},
@@ -26,6 +26,8 @@ def test_a_parent_cycle_is_refused():
         validate_records(records)
     assert "unreachable" in str(e.value)
     assert "'a'" in str(e.value) and "'b'" in str(e.value)
+# twin: a_reachable_tree_loads
+# twin: root_finds_orphan_entry
 
 
 def test_a_reachable_tree_validates():
@@ -37,7 +39,7 @@ def test_a_reachable_tree_validates():
     assert validate_records(records) == "root"
 
 
-async def test_load_refuses_a_cycle_before_tearing_the_tree_down(seeded_kernel):
+async def test_a_parent_cycle_is_refused_and_nothing_is_torn_down(seeded_kernel):
     live = set(seeded_kernel.ctx.agents)
     assert live, "fixture must have a live tree"
     with pytest.raises(SnapshotError):

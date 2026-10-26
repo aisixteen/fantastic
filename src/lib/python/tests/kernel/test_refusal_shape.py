@@ -13,7 +13,7 @@ import pytest
 from kernel._refusal import CODES, bad, missing, refusal
 
 
-def test_the_closed_set():
+def test_an_unknown_code_is_a_programming_error():
     assert CODES == {
         "unauthorized",
         "unknown_agent",
@@ -53,6 +53,11 @@ def test_the_import_codes_build_and_carry_their_reason():
         "code_not_allowed",
     ):
         assert refusal(code, "e") == {"error": "e", "reason": code}
+# twin: every_refusal_carries_both_fields
+# twin: missing_and_bad_name_the_argument
+# twin: extra_facts_ride_at_the_top_level
+# twin: every_builder_serializes_in_pythons_key_order
+# twin: missing_hint_orders_hint_before_arg
 
 
 def test_key_order_and_the_optional_fields():
@@ -89,7 +94,7 @@ def test_key_order_and_the_optional_fields():
         ("kernel", "a name other than the reserved 'kernel'"),
     ],
 )
-async def test_create_agent_guards_the_id(seeded_kernel, aid, want):
+async def test_guard_refuses_all_digit_ids_and_accepts_colons(seeded_kernel, aid, want):
     r = (
         await seeded_kernel.send(
             [

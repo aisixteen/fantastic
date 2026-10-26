@@ -173,7 +173,7 @@ async def test_ambiguous_match_fails_and_writes_nothing(
     assert (tmp_path / "sd" / "m.py").read_text(encoding="utf-8") == "v = 1\nv = 1\n"
 
 
-async def test_second_hunk_failure_reverts_the_whole_patch(
+async def test_second_hunk_failure_reverts_the_whole_edit(
     seeded_kernel, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -221,7 +221,7 @@ async def test_file_not_found(seeded_kernel, tmp_path, monkeypatch):
     assert "edited" not in r and r["reason"] == "not_found"
 
 
-async def test_missing_path(seeded_kernel, tmp_path, monkeypatch):
+async def test_missing_edits(seeded_kernel, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     fb, ed = await _mk(seeded_kernel)
     r = await _call(
@@ -252,7 +252,7 @@ async def test_malformed_missing_divider(seeded_kernel, tmp_path, monkeypatch):
 # ─── the wired LEG refuses (was: readonly / sealed on the bridge) ────
 
 
-async def test_readonly_leg_refuses_the_write(seeded_kernel, tmp_path, monkeypatch):
+async def test_readonly_leg_refuses_the_edit(seeded_kernel, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     fb, ed = await _mk(seeded_kernel, fb_meta={"readonly": True})
     (tmp_path / "sd").mkdir(parents=True, exist_ok=True)
@@ -337,7 +337,7 @@ async def test_write_is_atomic_no_tmp_debris_on_success(
     assert names == ["a.txt"]  # the tmp sibling was renamed away
 
 
-async def test_if_match_guards_write_and_patch(seeded_kernel, tmp_path, monkeypatch):
+async def test_if_match_guards_write_and_edit(seeded_kernel, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     fb, ed = await _mk(seeded_kernel)
     w = await _seed(seeded_kernel, ed, "v.txt", "one\n")
@@ -368,7 +368,7 @@ async def test_if_match_guards_write_and_patch(seeded_kernel, tmp_path, monkeypa
     assert r["reason"] == "version_mismatch" and r["path"] == "v.txt"
 
 
-async def test_patch_dry_run_writes_nothing(seeded_kernel, tmp_path, monkeypatch):
+async def test_edit_dry_run_writes_nothing(seeded_kernel, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     fb, ed = await _mk(seeded_kernel)
     await _seed(seeded_kernel, ed, "d.txt", "a = 1\n")
@@ -389,7 +389,7 @@ async def test_patch_dry_run_writes_nothing(seeded_kernel, tmp_path, monkeypatch
 # ─── the TRANSACTION (multi-file edits in ONE patch) ────────────
 
 
-async def test_multifile_patch_applies_both_atomically(
+async def test_multifile_edit_applies_both_atomically(
     seeded_kernel, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -560,7 +560,7 @@ async def test_write_accepts_str_and_utf8_encodes(seeded_kernel, tmp_path, monke
 # ─── per-document serialization + payload hardening (sweep I-5) ──
 
 
-async def test_patch_refuses_the_same_path_twice(seeded_kernel, tmp_path, monkeypatch):
+async def test_edit_refuses_the_same_path_twice(seeded_kernel, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     fb, ed = await _mk(seeded_kernel)
     await _seed(seeded_kernel, ed, "a.md", "one\ntwo\n")
@@ -579,7 +579,7 @@ async def test_patch_refuses_the_same_path_twice(seeded_kernel, tmp_path, monkey
     assert (tmp_path / "sd" / "a.md").read_text(encoding="utf-8") == "one\ntwo\n"
 
 
-async def test_concurrent_patches_on_one_file_both_land(
+async def test_concurrent_edits_on_one_file_both_land(
     seeded_kernel, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -660,7 +660,7 @@ async def test_non_int_args_are_bad_arg_refusals(seeded_kernel, tmp_path, monkey
     assert r["lines"][0]["n"] == 1 and r["eof"] is True, r
 
 
-async def test_patch_hunk_count_must_be_an_int(seeded_kernel, tmp_path, monkeypatch):
+async def test_edit_hunk_count_must_be_an_int(seeded_kernel, tmp_path, monkeypatch):
     """#136 — the per-edit `hunks` count is typed too: a string count would slice
     the shared blob by nothing at all."""
     monkeypatch.chdir(tmp_path)
@@ -739,6 +739,8 @@ async def test_undo_is_refused_on_a_readonly_leg(seeded_kernel, tmp_path, monkey
     fb, ed = await _mk(seeded_kernel, fb_meta={"readonly": True})
     r = await _call(seeded_kernel, ed, {"type": "undo", "path": "z.txt"})
     assert r["reason"] == "unauthorized", r
+# twin: read_outside_is_refused
+# twin: inside_paths_work_for_every_verb
 
 
 async def test_text_verbs_see_only_exposed_paths(seeded_kernel, tmp_path, monkeypatch):

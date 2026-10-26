@@ -167,7 +167,7 @@ async def test_watching_the_root_takes_both_halves(wired):
     wired.unwatch(wired.id, "nosy")
 
 
-async def test_the_state_stream_needs_an_explicit_edge_on_the_root(wired):
+async def test_the_state_stream_needs_the_roots_own_grant_too(wired):
     # The broadest read the kernel offers: every send's sender, target, verb and
     # payload summary, for every agent. An open ingress rule says a client may
     # REACH the leg; it says nothing about what it may then READ.

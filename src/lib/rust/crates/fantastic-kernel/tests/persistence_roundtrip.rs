@@ -494,19 +494,18 @@ async fn a_record_commits_via_tmp_and_rename() {
     );
 }
 
-/// A provider whose `read_stream` always answers a FIXED-SIZE PREFIX of the
-/// file, regardless of the file's real size — a stand-in for a real
-/// provider's default chunk cap (`file_bridge`'s is 65536 bytes; this test
-/// uses a tiny one so the fixture stays small). Counts calls so the test can
-/// assert the merge issues exactly ONE.
-struct TruncatingStore {
+/// A provider whose `read_stream` pages like the real one: it answers at most
+/// `cap` bytes from the requested `offset`, with `eof` and `next_offset` in the
+/// reply (`file_bridge`'s cap is 65536 bytes; this test uses a tiny one so the
+/// fixture stays small). Records every read so a test can assert the merge paged.
+struct PagingStore {
     root: PathBuf,
     cap: usize,
     read_stream_paths: std::sync::Mutex<Vec<String>>,
 }
 
 #[async_trait]
-impl Bundle for TruncatingStore {
+impl Bundle for PagingStore {
     fn name(&self) -> &str {
         "file_bridge"
     }
@@ -535,7 +534,7 @@ impl Bundle for TruncatingStore {
             return Ok(Some(json!({"renamed": true})));
         }
         Ok(Some(
-            json!({"error": format!("TruncatingStore: text verb {verb:?}")}),
+            json!({"error": format!("PagingStore: text verb {verb:?}")}),
         ))
     }
     async fn handle_binary(
@@ -558,10 +557,20 @@ impl Bundle for TruncatingStore {
                     .push(path.to_string());
                 match std::fs::read(&target) {
                     Ok(bytes) => {
-                        let n = bytes.len().min(self.cap);
+                        let offset = (header.get("offset").and_then(Value::as_u64).unwrap_or(0)
+                            as usize)
+                            .min(bytes.len());
+                        let n = (bytes.len() - offset).min(self.cap);
                         Ok((
-                            Some(json!({"size": n})),
-                            Some(fantastic_kernel::Blob::key("bytes", bytes[..n].to_vec())),
+                            Some(json!({
+                                "size": n,
+                                "eof": offset + n >= bytes.len(),
+                                "next_offset": offset + n,
+                            })),
+                            Some(fantastic_kernel::Blob::key(
+                                "bytes",
+                                bytes[offset..offset + n].to_vec(),
+                            )),
                         ))
                     }
                     Err(_) => Ok((Some(json!({"error": "not found"})), None)),
@@ -581,17 +590,16 @@ impl Bundle for TruncatingStore {
     }
 }
 
-/// C44/D6: the merge read is ONE `read_stream` call, mirroring python's
-/// `_persist_via_store` exactly — a record bigger than the provider's chunk
-/// truncates (an accepted python quirk, not pumped to EOF).
+/// The merge read pages like python's: a record bigger than the provider's chunk
+/// is read to EOF, so a key past the first chunk survives the write.
 #[tokio::test]
-async fn record_merge_reads_one_chunk_like_python() {
+async fn store_sink_merge_keeps_unknown_keys_past_one_chunk() {
     let tmp = fresh_workdir();
     let store_root = tmp.path();
     let mut kernel = Kernel::with_storage(StorageMode::disk(store_root.to_path_buf()));
     let mut reg = BundleRegistry::new();
     reg.register("noop.tools", NoopBundle);
-    let store = Arc::new(TruncatingStore {
+    let store = Arc::new(PagingStore {
         root: store_root.to_path_buf(),
         cap: 40,
         read_stream_paths: std::sync::Mutex::new(Vec::new()),
@@ -616,8 +624,7 @@ async fn record_merge_reads_one_chunk_like_python() {
     wire_store(&kernel, store_root).await;
 
     // Existing on-disk record with a sidecar key that sits PAST the 40-byte
-    // cap once the id/handler_module head is written — the merge must not see
-    // it, exactly as python's one-chunk read would not.
+    // cap — the merge must page to it and keep it.
     let dir = store_root.join("agents/big");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -645,8 +652,12 @@ async fn record_merge_reads_one_chunk_like_python() {
 
     let text = std::fs::read_to_string(dir.join("agent.yaml")).expect("on disk");
     assert!(
-        !text.contains("sidecar_beyond_the_cap"),
-        "a key past the one-chunk read must not survive the merge: {text}"
+        text.contains("sidecar_beyond_the_cap") && text.contains(&"x".repeat(64)),
+        "a key past the first chunk must survive the merge: {text}"
+    );
+    assert!(
+        text.contains("Big"),
+        "the new display_name is written: {text}"
     );
     let reads_of_big = store
         .read_stream_paths
@@ -655,16 +666,16 @@ async fn record_merge_reads_one_chunk_like_python() {
         .iter()
         .filter(|p| p.as_str() == "agents/big/agent.yaml")
         .count();
-    assert_eq!(
-        reads_of_big, 1,
-        "the merge issues exactly one read_stream call for this record — no offset pump"
+    assert!(
+        reads_of_big > 1,
+        "the merge pages: more than one read_stream call for this record, got {reads_of_big}"
     );
 }
 
-/// Wraps an `Arc<TruncatingStore>` so the same instance can be registered
+/// Wraps an `Arc<PagingStore>` so the same instance can be registered
 /// (the registry needs an owned `Bundle`) while the test keeps its own `Arc`
 /// to read `read_stream_paths` back afterward.
-struct ArcBundle(Arc<TruncatingStore>);
+struct ArcBundle(Arc<PagingStore>);
 
 #[async_trait]
 impl Bundle for ArcBundle {

@@ -58,7 +58,7 @@ async def _call(k, target, payload) -> dict:
 # ─── a module that cannot answer ─────────────────────────────────────────────
 
 
-async def test_an_unimportable_handler_module_is_a_coded_refusal(seeded_kernel):
+async def test_handler_module_not_installed_is_the_python_unhandled_shape(seeded_kernel):
     k = seeded_kernel
     rec = k.create("no_such_bundle_pin.tools", id="ghost")
     assert rec.get("id") == "ghost", rec
@@ -106,6 +106,9 @@ async def test_a_bare_agent_answers_only_substrate_verbs(seeded_kernel):
         "reason": "unhandled",
         "verb": "ping",
     }
+# twin: a_kernel_verb_at_a_child_says_pythons_words_and_names_the_verb
+# twin: not_here_points_at_the_root
+# twin: a_kernel_verb_at_a_non_root_agent_says_where_to_send_it
 
 
 async def test_a_kernel_verb_sent_to_a_non_root_names_where_to_go(seeded_kernel):
@@ -150,7 +153,7 @@ async def test_an_unimportable_bundle_is_still_deleted(seeded_kernel, capsys):
     )
 
 
-async def test_a_raising_on_cancel_does_not_stop_the_cancel(seeded_kernel, capsys):
+async def test_on_cancel_failure_prints_python_line(seeded_kernel, capsys):
     _bundle("hook_pin_cancel.tools", on_cancel=_boom)
     k = seeded_kernel
     k.create("hook_pin_cancel.tools", id="cp")
@@ -244,7 +247,7 @@ async def test_a_raising_reflect_root_extra_fails_the_reflect(
         assert out["result"] == {"error": "RuntimeError: extra broke", "raised": True}
 
 
-async def test_the_full_detail_tree_node_shape(seeded_kernel):
+async def test_tree_node_includes_id_and_empty_children(seeded_kernel):
     k = seeded_kernel
     k.create(
         "file_bridge.tools",

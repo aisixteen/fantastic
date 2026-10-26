@@ -34,7 +34,7 @@ def test_make_verbs_builds_the_six_verbs():
     }
 
 
-def test_next_corr_namespaces_by_agent_id_and_boot():
+def test_the_corr_prefix_is_the_leg_id_and_a_per_boot_nonce():
     """`<bridge id>-<boot nonce>-<n>`: the id keeps bridges apart, the nonce keeps
     BOOTS apart — the counter restarts at every boot, and a frame id names the
     execution on the receiver."""

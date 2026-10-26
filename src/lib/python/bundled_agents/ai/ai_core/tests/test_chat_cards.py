@@ -93,7 +93,7 @@ async def test_embed_stores_a_row_and_history_replays_it():
     assert len([r for r in k.rows_of(SELF) if r.get("kind") == "embed"]) == 1
 
 
-async def test_embed_refuses_not_found_no_view_and_grants_missing():
+async def test_embed_refuses_missing_view_missing_agent_and_missing_grants():
     k = PanelCtx({"panel": GOOD, "bare": BARE, "weak": WEAK})
     before = len(k.rows_of(SELF))
 
@@ -117,7 +117,7 @@ async def test_embed_refuses_not_found_no_view_and_grants_missing():
     assert len(k.rows_of(SELF)) == before
 
 
-async def test_unembed_removes_the_card_and_never_touches_the_agent():
+async def test_unembed_removes_card_live_and_deleted_and_leaves_agent():
     k = PanelCtx({"panel": GOOD})
     await embed.embed(SELF, {"id": "panel"}, k)
 

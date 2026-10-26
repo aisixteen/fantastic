@@ -80,7 +80,7 @@ def _sys(req: list[dict]) -> str:
     return req[0]["content"]
 
 
-async def test_the_record_prompt_rides_main_reply_woken_and_nudge_turns(
+async def test_the_record_prompt_is_the_system_block_of_a_main_and_a_reply_woken_turn(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel
@@ -96,7 +96,7 @@ async def test_the_record_prompt_rides_main_reply_woken_and_nudge_turns(
     assert [_sys(r) for r in fp.requests] == ["REC-ROLE"] * 3
 
 
-async def test_the_per_call_argument_beats_the_record(seeded_kernel, fake_providers):
+async def test_the_per_call_prompt_beats_the_record(seeded_kernel, fake_providers):
     k = seeded_kernel
     _ai(k, "sp_call", system_prompt="REC-ROLE")
     fp = fake_providers["sp_call"] = _Fake([LIST, DONE])
@@ -110,7 +110,7 @@ async def test_the_per_call_argument_beats_the_record(seeded_kernel, fake_provid
     assert _sys(fp.requests[2]) == "REC-ROLE"
 
 
-async def test_update_agent_takes_effect_on_the_next_turn(
+async def test_an_update_agent_lands_on_the_next_turn_and_null_restores_the_default(
     seeded_kernel, fake_providers
 ):
     k = seeded_kernel
@@ -132,6 +132,7 @@ async def test_update_agent_takes_effect_on_the_next_turn(
     assert _sys(fp.requests[2]) == default
 
 
+# twin: a_system_prompt_is_a_non_blank_string_or_null
 @pytest.mark.parametrize("bad", [5, "", "   ", ["x"], {"a": 1}])
 async def test_a_bad_value_is_refused_at_the_write(seeded_kernel, bad):
     k = seeded_kernel

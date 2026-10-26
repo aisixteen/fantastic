@@ -2214,7 +2214,7 @@ async fn a_dying_handler_comes_back_as_an_error_not_a_dead_chain() {
 /// final answer to finish", "ORIENT FIRST", "NEVER claim you don't have access".
 /// That is the loop, dictated — and reusing that wording because it is "tuned"
 /// would quietly void every emergence result taken afterwards. Same twelve banned
-/// words as python's `test_prompt_states_the_mechanism_not_a_strategy`.
+/// words as python's `test_the_default_prompt_states_the_mechanism_not_a_strategy`.
 #[tokio::test]
 async fn the_default_prompt_states_the_mechanism_not_a_strategy() {
     let tmp = TempDir::new().unwrap();
@@ -2382,7 +2382,7 @@ async fn silent_chain_turns_are_nudged_until_a_call_or_done() {
 /// counts as completed — it is rerolled by the no-call reminder, told why
 /// (a tiny thinking budget, then a clean `stop` with no answer; failing it
 /// outright would end a long chain). python
-/// `test_a_dead_turn_is_discarded_and_rerolled`.
+/// `test_a_thinking_only_turn_is_discarded_and_rerolled`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dead_turn_is_discarded_and_rerolled() {
     let tmp = TempDir::new().unwrap();
@@ -6417,7 +6417,7 @@ async fn the_seam_keeps_the_goal_the_strategies_pinned() {
 /// The kernel's execution rows are the KERNEL's (RAM, then its root store) and
 /// never land under the agent's key; and a row without a chat `role` the agent
 /// writes to its own store (a note to itself) is memory, not a turn. Python
-/// `test_a_note_the_agent_appends_itself_is_memory_not_a_turn`.
+/// `test_kernel_rows_and_role_less_notes_never_become_turns`.
 #[tokio::test]
 async fn kernel_rows_and_role_less_notes_never_become_turns() {
     let tmp = TempDir::new().unwrap();
@@ -6798,7 +6798,7 @@ fn backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation() {
     crate::state::drop_state(&b);
 }
 
-/// Delete-time teardown (python `test_delete_drops_every_row_but_the_incarnation`):
+/// Delete-time teardown (python `test_backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation`):
 /// `delete_agent` runs the backend's `on_delete`, which drops every per-id table,
 /// so the id re-created later starts clean; the incarnation stays monotonic, so a
 /// reply to a call the deleted agent made never becomes a live turn of the new one.
@@ -6987,7 +6987,7 @@ mod tests_retries;
 
 /// A docs body opens with the line naming the grep that keeps what the model needs,
 /// and once answered it is cut to a stub that names the same pid — python
-/// `test_a_docs_reply_is_cut_to_a_stub_once_answered`.
+/// `test_a_docs_reply_is_cut_to_a_stub_naming_its_held_pid`.
 #[test]
 fn a_docs_reply_is_cut_to_a_stub_naming_its_held_pid() {
     let body = "[reply to 12 · kernel docs]\n<of>runner</of>\n<bundle>exec_bridge.tools</bundle>\

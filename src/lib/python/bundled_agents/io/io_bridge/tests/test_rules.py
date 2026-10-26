@@ -28,7 +28,7 @@ def test_allow_all_permits_call_and_watch():
     assert a.authorize(Action("watch", "t", "watch", {})).allowed
 
 
-def test_deny_inbound_seals_all_kinds_and_teaches():
+def test_every_inbound_kind_is_sealed():
     a = DenyInbound()
     # the SEAL refuses every inbound kind — dispatch AND telemetry
     for kind in ("call", "watch", "state_subscribe", "emit", "open"):
@@ -47,7 +47,7 @@ def test_resolve_ingress_absent_is_deny_inbound():
     assert isinstance(resolve_ingress({"ingress_rule": None}), DenyInbound)
 
 
-def test_resolve_ingress_string_and_object_forms():
+def test_ingress_resolves_allow_and_deny():
     assert isinstance(resolve_ingress({"ingress_rule": "deny_ingress"}), DenyInbound)
     # object form — `type` names the rule; config keys ride alongside it
     assert isinstance(
@@ -58,7 +58,7 @@ def test_resolve_ingress_string_and_object_forms():
     )
 
 
-def test_auth_shorthand_is_enforced_not_only_reported():
+def test_auth_shorthand_is_symmetric():
     """`auth` opens/closes BOTH directions, and `describe()` must not disagree.
 
     Was three silent defects at once. This test asserted the precedence with
@@ -91,7 +91,7 @@ def test_auth_shorthand_is_enforced_not_only_reported():
     )
 
 
-def test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule():
+def test_unknown_rule_names_the_legal_values():
     """An unresolvable rule SEALS — it does not raise.
 
     Raising would fail loudly only at boot, but resolution runs PER CALL: an
@@ -122,6 +122,8 @@ def test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule():
         ),
     ],
 )
+# twin: a_malformed_spec_is_named_by_its_python_repr
+# twin: a_malformed_spec_seals_under_its_python_repr
 def test_a_malformed_spec_seals_and_names_itself(spec, name):
     """A spec that is not a string or an object, or whose `type`/`env` is not a
     string, is named by its repr — a name no registry holds — so it SEALS like an
@@ -153,7 +155,7 @@ def test_a_null_type_or_env_is_an_absent_one():
 # ─── password rule, both sides (kernel-group shared secret) ─────
 
 
-def test_ingress_password_checks_envelope_token(monkeypatch):
+def test_password_rule_gates_every_kind(monkeypatch):
     monkeypatch.setenv("FANTASTIC_GROUP_TOKEN", "s3cret")
     p = IngressPassword()
     assert p.authorize(_call("s3cret")).allowed
@@ -166,7 +168,7 @@ def test_ingress_password_checks_envelope_token(monkeypatch):
     assert not p.authorize(Action("state_subscribe", "t", "ss", {})).allowed
 
 
-def test_ingress_password_compares_utf8_bytes_so_any_token_is_a_plain_answer(
+def test_password_compares_utf8_bytes_so_any_token_is_a_plain_answer(
     monkeypatch,
 ):
     """The compare is over UTF-8 BYTES. On `str` `hmac.compare_digest` raises
@@ -195,7 +197,7 @@ def test_egress_password_presents_token(monkeypatch):
     assert EgressPassword(env="MY_GROUP").credential() is None  # unset ⇒ nothing
 
 
-def test_resolve_egress_threads_env_and_defaults_silent():
+def test_egress_resolves_and_presents():
     # the string form names the rule; `auth`'s symmetry is asserted in the auth test
     assert isinstance(
         resolve_egress({"egress_rule": "password_egress"}), EgressPassword
@@ -213,7 +215,7 @@ def test_resolve_egress_threads_env_and_defaults_silent():
     assert isinstance(resolve_egress({}), Silent)
 
 
-def test_asymmetric_ingress_egress():
+def test_asymmetric_ingress_egress_via_engine():
     # a hub: refuse inbound, still present a group token outbound
     rec = {
         "ingress_rule": "deny_ingress",

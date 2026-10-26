@@ -118,7 +118,7 @@ async def test_run_returns_the_output_in_one_reply(seeded_kernel):
     assert any(x["line"] == "hello" for x in r["lines"]), r
 
 
-async def test_run_gives_up_at_wait_s(seeded_kernel):
+async def test_run_returns_running_at_the_deadline(seeded_kernel):
     import time
 
     k = seeded_kernel

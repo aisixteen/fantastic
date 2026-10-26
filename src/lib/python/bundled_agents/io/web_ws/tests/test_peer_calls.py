@@ -235,7 +235,7 @@ async def test_a_call_racing_the_disconnect_settles_instead_of_hanging(seeded_ke
     assert out["reason"] == "transport_error", out
 
 
-async def test_an_emit_to_a_peer_guid_reaches_every_tab(seeded_kernel):
+async def test_an_emit_to_the_identity_reaches_every_tab(seeded_kernel):
     """An emit on `<guid>|<agent>` goes to EVERY live tab of
     that guid as an `emit` frame."""
     k = seeded_kernel
@@ -259,7 +259,7 @@ async def test_an_emit_to_a_peer_guid_reaches_every_tab(seeded_kernel):
         await asyncio.wait_for(asyncio.gather(task, task2), 3)
 
 
-async def test_a_reply_to_one_tab_is_mirrored_to_the_others(seeded_kernel):
+async def test_a_reply_is_mirrored_to_the_sibling_tab(seeded_kernel):
     """Tab A's call gets its `reply`; tab B (same hello guid)
     gets `reply_mirror` with the same id and data; a tab of another guid nothing."""
     k = seeded_kernel

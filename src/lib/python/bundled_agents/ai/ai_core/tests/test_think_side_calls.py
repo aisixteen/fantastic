@@ -47,7 +47,7 @@ def _ctx(summ):
     )
 
 
-async def test_a_fold_title_is_the_first_non_empty_line_after_stripping():
+async def test_summary_lines_split_like_python_splitlines():
     async def summ(msgs, max_tokens=None):
         return (
             '\n\n"Read 8 files; all pangram."\n\nAsked to read; found nothing unusual.'

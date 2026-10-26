@@ -61,7 +61,7 @@ async fn a_rebound_host_cannot_read_the_file_proxy() {
     stop(&kernel, "web_hg").await;
 }
 
-/// python `test_rebound_websocket_upgrade_is_refused`.
+/// python `test_a_rebound_websocket_upgrade_is_refused`.
 #[tokio::test]
 async fn a_rebound_websocket_upgrade_is_refused() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;

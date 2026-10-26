@@ -722,7 +722,7 @@ fn ingress_resolves_allow_and_deny() {
     // error surfaces as an unhandled exception out of the handler, killing the
     // caller's whole chain with no reply at all. An unresolvable rule is not an
     // authorization, so deny — and say which name was wrong. Mirrors py
-    // `test_resolve_ingress_unknown_type_seals_and_names_the_bad_rule`.
+    // `test_unknown_rule_names_the_legal_values`.
     let unknown = resolve(Some(&json!("password:kernel-internal-transcripts")));
     match unknown.authorize(&Action {
         kind: "call",

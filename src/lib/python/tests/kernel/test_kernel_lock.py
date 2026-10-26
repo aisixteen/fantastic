@@ -33,11 +33,13 @@ def _cwd(tmp_path, monkeypatch):
     release_lock()
 
 
-def test_acquire_writes_lock_when_none():
+def test_acquire_writes_lock_file():
     acquire_lock()
     assert LOCK_FILE.exists()
     data = yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8"))
     assert data == {"pid": os.getpid()}
+# twin: acquire_refuses_when_live_pid_holds
+# twin: lock_held_text_is_python_verbatim
 
 
 def test_acquire_raises_when_live_lock_present(tmp_path):
@@ -91,7 +93,7 @@ def test_acquire_overwrites_corrupt_lock():
     assert data == {"pid": os.getpid()}
 
 
-def test_release_removes_when_owner():
+def test_release_removes_file():
     acquire_lock()
     assert LOCK_FILE.exists()
     release_lock()
@@ -112,7 +114,7 @@ def test_release_lets_the_next_acquire_in():
     assert yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8")) == {"pid": os.getpid()}
 
 
-def test_release_silent_when_no_lock():
+def test_release_when_missing_is_noop():
     # No exception even when the lock has already been removed.
     release_lock()
     assert not LOCK_FILE.exists()
@@ -153,7 +155,7 @@ def test_context_manager_raises_on_conflict():
         }
 
 
-def test_lock_shape():
+def test_lock_bytes_are_python_yaml_dump():
     """The lock file is `{pid:int}`."""
     acquire_lock()
     data = yaml.safe_load(LOCK_FILE.read_text(encoding="utf-8"))

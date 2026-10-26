@@ -170,7 +170,7 @@ def setup_function(_):
 # ── chains and closure ──────────────────────────────────────────────
 
 
-def test_chains_are_derived_from_parent_links_across_an_interleave():
+def test_a_chain_is_its_root_plus_everything_parented_into_it():
     a, b, c = (
         _chain("a", 2, big=False),
         _chain("b", 3, big=False),
@@ -187,7 +187,7 @@ def test_chains_are_derived_from_parent_links_across_an_interleave():
         )
 
 
-def test_a_chain_ending_on_an_unanswered_send_is_open():
+def test_a_chain_whose_last_turn_made_a_send_is_still_open():
     rows = _chain("z", 1, big=False, open_end=True)
     ch = folds.chains(rows)[0]
     assert folds.is_open(rows, ch)
@@ -206,7 +206,7 @@ def test_rows_without_ids_are_their_own_roots_and_never_fold():
 # ── render ──────────────────────────────────────────────────────────
 
 
-def test_a_fold_hides_its_refs_and_sits_where_its_first_ref_was():
+def test_a_fold_hides_its_members_and_sits_where_the_first_one_was():
     rows = _chain("a", 2, big=False) + [_row("user", "later", "user:l")]
     f = _fold("ai", [r["id"] for r in rows[:5]], "done a", "body a", False)
     view = _render(rows + [f])
@@ -217,7 +217,7 @@ def test_a_fold_hides_its_refs_and_sits_where_its_first_ref_was():
     assert view[0]["content"].startswith("[fold ") and '"done a"' in view[0]["content"]
 
 
-def test_a_fold_of_folds_hides_the_inner_fold():
+def test_a_fold_of_folds_hides_the_folds_it_wraps():
     rows = _chain("a", 1, big=False)
     inner = _fold("ai", [r["id"] for r in rows], "inner", "b", False)
     outer = _fold("ai", [inner["id"]], "outer", "b", False)
@@ -225,7 +225,7 @@ def test_a_fold_of_folds_hides_the_inner_fold():
     assert [r.get("id") for r in view] == [outer["id"]]
 
 
-def test_expand_ids_descends_through_folds():
+def test_a_fold_id_descends_to_the_rows_it_collapsed():
     rows = _chain("a", 1, big=False)
     inner = _fold("ai", [r["id"] for r in rows], "i", "b", False)
     outer = _fold("ai", [inner["id"], "other:1"], "o", "b", False)
@@ -236,7 +236,7 @@ def test_expand_ids_descends_through_folds():
 # ── the strategy ────────────────────────────────────────────────────
 
 
-async def test_fold_collapses_the_oldest_stretch_first_and_persists_it():
+async def test_a_fold_projection_over_budget_writes_folds():
     k = _K()
     a, b, c = _chain("a", 3), _chain("b", 3), _chain("c", 2, open_end=True)
     mid = _interleave(a, b, c)
@@ -271,7 +271,7 @@ async def test_a_fold_is_monotone_across_projections():
     }
 
 
-async def test_a_failed_summarizer_still_writes_a_fold_and_says_so():
+async def test_a_rendered_rows_title_is_read_back_off_its_reply_tag():
     async def boom(_msgs, max_tokens=None):
         raise RuntimeError("provider down")
 
@@ -330,6 +330,8 @@ def test_the_view_trimmers_keep_row_keys():
 # ── edge cases ──────────────────────────────────────────────────────
 
 from ai_core.strategies.fold import next_span  # noqa: E402
+# twin: a_span_never_takes_the_goal_turn_or_the_live_tail
+# twin: a_span_never_ends_between_a_call_and_its_answer
 
 
 async def test_an_open_superlong_chain_folds_its_oldest_stretch_and_keeps_the_tail():
@@ -386,7 +388,7 @@ async def test_fold_of_folds_terminates_when_even_folds_do_not_fit():
     assert proj is not None  # it returned — no infinite loop
 
 
-def test_a_title_cannot_close_the_tag_or_quote_itself():
+def test_a_fold_title_can_neither_close_its_tag_nor_quote_itself():
     f = _fold("ai", ["x:1", "x:2"], 'weird "title] here', "b", False)
     head = f["content"].splitlines()[0]
     assert head.count("]") == 1 and head.endswith('"weird \'title) here"')
@@ -533,7 +535,7 @@ async def test_the_head_is_coalesced_even_when_the_view_already_fits():
     )
 
 
-async def test_a_fold_starts_at_fold_at_and_lands_at_low_by_tokens():
+async def test_a_span_is_sized_by_tokens_not_rows():
     """The threshold is a share of the context, never a row count.
     Under FOLD_AT of the budget nothing folds; past it ONE fold takes the oldest rows,
     by tokens, and the view lands at LOW or under."""

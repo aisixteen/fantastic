@@ -85,7 +85,7 @@ def test_a_tag_closed_before_the_call_wraps_nothing():
     assert envelopes_in(text)[0].wrapper is None
 
 
-def test_a_bare_word_tag_is_not_a_wrapper():
+def test_prose_angle_brackets_that_are_not_tags_do_not_wrap_a_call():
     text = "a<b and c>d\n" + WRITE
     assert envelopes_in(text)[0].wrapper is None
 
@@ -190,6 +190,8 @@ def test_a_stray_close_is_ignored():
 
 def test_self_closing_does_not_open():
     assert open_tags("<br/>") == []
+# twin: a_call_after_a_type_in_inline_code_runs_with_no_report
+# twin: a_code_span_is_not_an_open_wrapper_in_the_report
 
 
 def test_open_tags_excludes_code():

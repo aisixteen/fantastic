@@ -59,7 +59,7 @@ async def _edit_files(kernel, ed, paths, patch):
     )
 
 
-async def test_named_blocks_edit_two_files_without_hunks(
+async def test_named_blocks_split_a_two_file_edit_without_hunks(
     seeded_kernel, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -75,7 +75,7 @@ async def test_named_blocks_edit_two_files_without_hunks(
     assert (root / "b.txt").read_text(encoding="utf-8") == "dos\n"
 
 
-async def test_a_block_naming_an_unknown_path_is_refused_and_nothing_written(
+async def test_a_block_naming_a_file_outside_edits_is_refused(
     seeded_kernel, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)

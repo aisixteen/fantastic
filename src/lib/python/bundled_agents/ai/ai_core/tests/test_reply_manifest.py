@@ -120,7 +120,7 @@ async def test_fire_and_forget_calls_are_not_counted():
     assert "in batch" not in k.delivered[0]
 
 
-async def test_the_tag_regex_still_parses_a_stamped_envelope():
+async def test_the_tag_matcher_is_pythons():
     """`_REPLY_TAG` drives stale-read dedup; the suffix must not break it."""
     m = _REPLY_TAG.match(
         "[reply to ai:beef · kernel_state reflect · 1 of 3 in batch a1b2]"
@@ -148,7 +148,7 @@ def _pair(text: str) -> tuple[int, int]:
     return len(extract_tool_calls(answer)), len(extract_tool_calls(answer))
 
 
-def test_a_call_inside_a_thought_is_neither_dispatched_nor_stored():
+def test_a_call_written_inside_a_span_is_neither_dispatched_nor_stored():
     assert _pair(f"<think>let me check {_C} done</think>") == (0, 0)
 
 
@@ -157,7 +157,7 @@ def test_a_thought_is_dropped_whole_calls_included():
     assert kept == ""
 
 
-def test_an_unclosed_thought_runs_to_the_end():
+def test_an_unterminated_span_drops_its_tail():
     """An unclosed `<think>` is thinking to the end — a call in it does not act."""
     assert _pair(f"<think>cut mid {_C}") == (0, 0)
     assert without_thinking(f"visible<think>cut mid {_C}") == "visible"
@@ -174,7 +174,7 @@ def test_only_the_answers_call_counts():
 # ─── docs replies: transient, and pointed at from refusals ───────
 
 
-def test_a_docs_reply_is_cut_to_a_stub_once_answered():
+def test_a_docs_reply_is_cut_to_a_stub_naming_its_held_pid():
     from ai_core.core import _DOCS_DROPPED, drop_read_docs
 
     body = (

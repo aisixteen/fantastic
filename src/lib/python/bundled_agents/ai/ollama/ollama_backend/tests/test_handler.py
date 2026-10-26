@@ -231,7 +231,7 @@ async def test_a_send_with_no_memory_store_fails_loud(seeded_kernel, fake_provid
         fake_providers.pop("storeless", None)
 
 
-async def test_send_refuses_cycle(seeded_kernel, store_agent):
+async def test_an_inbound_cycle_is_refused_before_the_lock(seeded_kernel, store_agent):
     """_call_stack containing self → immediate cycle refusal (before the lock)."""
     oid = await _make_ollama(seeded_kernel)
     r = (
@@ -262,6 +262,8 @@ async def test_send_refuses_over_depth(seeded_kernel, store_agent):
         )
     )[0]["result"]
     assert "error" in r and "depth" in r["error"]
+# twin: history_persists_and_round_trips
+# twin: history_persists_and_round_trips
 
 
 async def test_run_persists_history(seeded_kernel, store_agent, fake_providers):
@@ -296,7 +298,7 @@ async def test_unknown_verb_errors(seeded_kernel, store_agent):
     assert "error" in r
 
 
-async def test_cli_caller_routes_to_cli_only(
+async def test_the_cli_caller_round_trips_through_the_cli_agent(
     seeded_kernel, store_agent, fake_providers
 ):
     """Default caller (client_id='cli') has events dispatched via
@@ -346,7 +348,7 @@ async def test_cli_caller_routes_to_cli_only(
         fake_providers.pop(oid, None)
 
 
-async def test_browser_caller_routes_to_own_inbox_only(
+async def test_per_client_events_are_emitted_on_the_agent_not_a_client_named_inbox(
     seeded_kernel, store_agent, fake_providers
 ):
     """Caller passes a non-cli client_id (e.g. browser uuid) → events
@@ -403,7 +405,7 @@ async def test_browser_caller_routes_to_own_inbox_only(
         fake_providers.pop(oid, None)
 
 
-async def test_contended_send_emits_queued_event(
+async def test_contended_sends_emit_one_queued_status_and_no_bare_queued_event(
     seeded_kernel, store_agent, fake_providers
 ):
     """Second concurrent send arrives while the first holds the lock →
@@ -609,6 +611,8 @@ def _statuses_for(events: list[dict], client_id: str) -> list[dict]:
         for p in events
         if p.get("type") == "status" and p.get("client_id") == client_id
     ]
+# twin: send_streams_tokens_and_emits_done
+# twin: send_streams_tokens_and_emits_done
 
 
 async def test_status_event_sequence_no_tool_calls(
@@ -726,7 +730,7 @@ async def test_status_verb_shape_when_idle(seeded_kernel, store_agent):
     assert r["client_id"] == "alice"
 
 
-async def test_status_verb_shape_during_inflight_mine(
+async def test_status_during_in_flight_shows_phase(
     seeded_kernel, store_agent, fake_providers
 ):
     """Mid-flight, the caller's status snapshot reflects current entry
@@ -1047,7 +1051,7 @@ async def test_on_cancel_ignores_a_non_generation_task(seeded_kernel, store_agen
         core._current.pop(oid, None)
 
 
-async def test_status_done_emits_with_reason_timeout(
+async def test_a_stalled_provider_times_out_at_the_python_float_ceiling(
     seeded_kernel, store_agent, monkeypatch, fake_providers
 ):
     """Patched low SEND_TIMEOUT → done with reason='timeout'."""

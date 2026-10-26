@@ -93,6 +93,8 @@ async def _rows(kernel):
 
 
 # ─── C10: once-only under concurrency ───────────────────────────
+# twin: a_second_caller_joins_instead_of_running_twice
+# twin: concurrent_sends_of_one_id_join_and_run_the_body_once
 
 
 async def test_concurrent_same_id_runs_the_body_once(seeded_kernel):
@@ -134,6 +136,8 @@ async def test_two_racing_batches_share_one_execution(seeded_kernel):
 
 
 # ─── C11 / C9: idempotent re-send ───────────────────────────────
+# twin: an_unknown_id_opens_fresh_and_a_settled_one_returns_its_outcome
+# twin: a_named_id_runs_the_handler_exactly_once
 
 
 async def test_a_settled_id_returns_the_recorded_outcome(seeded_kernel):
@@ -175,7 +179,7 @@ async def test_a_failed_outcome_is_recorded_too(seeded_kernel):
     assert len(_runs) == 1
 
 
-async def test_a_cancelled_execution_stays_cancelled(seeded_kernel):
+async def test_a_named_execution_is_registered_under_its_own_id(seeded_kernel):
     """`cancel` settles the id as cancelled; a re-send of the SAME id gets that
     outcome without running anything — a retry must choose a new id."""
     a = await _mk(seeded_kernel, "lp_cx")
@@ -244,7 +248,7 @@ async def test_an_id_is_bound_to_its_first_target(seeded_kernel):
     assert "lp_b1" in out["result"]["error"], "must NAME the bound target"
 
 
-async def test_a_joiners_timeout_bounds_its_wait_not_the_execution(seeded_kernel):
+async def test_a_joiner_timeout_bounds_only_its_own_wait(seeded_kernel):
     """A joiner does not own the execution: its `timeout` expiry settles the
     JOINER as timed_out while the execution keeps running for its owner."""
     a = await _mk(seeded_kernel, "lp_jt")
@@ -266,6 +270,8 @@ async def test_a_joiners_timeout_bounds_its_wait_not_the_execution(seeded_kernel
         [{"target": "kernel", "payload": {"type": "cancel", "task_id": "jt1"}}]
     )
     await asyncio.wait_for(owner, timeout=2)
+# twin: a_named_kernel_reflect_is_ledgered_but_not_dispatched
+# twin: a_named_kernel_reflect_still_opens_the_ledger
 
 
 async def test_a_named_kernel_reflect_is_ledgered_not_ignored(seeded_kernel):
@@ -288,7 +294,7 @@ async def test_a_named_kernel_reflect_is_ledgered_not_ignored(seeded_kernel):
 # ─── the retry engine (C12's machinery, caller-declared budget) ──
 
 
-async def test_retries_rerun_a_failing_body_until_it_succeeds(seeded_kernel):
+async def test_a_retry_budget_re_dispatches_under_the_same_id(seeded_kernel):
     """`retries: N` on a NAMED item: a terminal failed attempt re-dispatches
     under the SAME id until the budget is spent — the caller sees ONE outcome,
     the final one, with `attempts` telling the truth."""
@@ -312,7 +318,7 @@ async def test_retries_rerun_a_failing_body_until_it_succeeds(seeded_kernel):
     assert len(_runs) == 3
 
 
-async def test_a_spent_budget_settles_as_the_last_failure(seeded_kernel):
+async def test_a_spent_budget_parks_a_dead_letter_that_never_re_arms(seeded_kernel):
     """Budget spent ⇒ the row parks with its final failure — THE dead letter.
     Nothing retries it again: a re-send of the id returns the recorded outcome."""
     _runs.clear()
@@ -358,7 +364,7 @@ async def test_completed_never_retries(seeded_kernel):
     assert len(_runs) == 1
 
 
-async def test_cancel_is_absorbing_and_stops_the_retry_loop(seeded_kernel):
+async def test_cancelled_is_absorbing_not_retryable(seeded_kernel):
     """A cancel is a HUMAN decision, not a transient — the loop must not spend
     its budget resurrecting what an operator just killed."""
     a = await _mk(seeded_kernel, "lp_cxr")
@@ -416,7 +422,7 @@ async def test_retries_ride_unnamed_items_too(seeded_kernel):
 # ─── the `ledger` verb: the read surface / dead-letter queue ─────
 
 
-async def test_ledger_lists_named_executions_with_outcomes(seeded_kernel):
+async def test_an_unnamed_execution_is_ledgered_under_its_pid(seeded_kernel):
     """`ps` is work in flight; `ledger` is what named work BECAME. Terminal
     non-completed rows are the dead-letter queue — inspectable, outcome
     attached, never silently retried."""
@@ -442,6 +448,8 @@ async def test_ledger_lists_named_executions_with_outcomes(seeded_kernel):
     assert dead["status"] == "failed" and dead["attempts"] == 2
     assert dead["retries"] == 1
     assert dead["outcome"]["result"]["raised"] is True, "the WHY travels with it"
+# twin: an_in_flight_row_reads_as_in_flight
+# twin: the_ledger_verb_is_paged_like_every_other_listing
 
 
 async def test_ledger_shows_in_flight_and_pages(seeded_kernel):
@@ -516,7 +524,7 @@ async def test_a_send_issued_from_a_spawned_fork_is_in_the_operators_ledger(
 # ─── ledger-ALL: one id space, one engine ────────────────────────
 
 
-async def test_a_minted_pid_is_referencable_for_refetch(seeded_kernel):
+async def test_an_unnamed_execution_still_mints_a_pid(seeded_kernel):
     """A colon id NAMES an existing minted execution — re-fetch its recorded
     outcome; it never creates one (the kernel is the only allocator there)."""
     _runs.clear()
@@ -543,7 +551,7 @@ async def test_a_minted_pid_is_referencable_for_refetch(seeded_kernel):
     assert len(_runs) == 1
 
 
-async def test_the_ring_evicts_oldest_settled_unnamed_first(seeded_kernel):
+async def test_the_ring_evicts_settled_unnamed_before_named_and_never_in_flight(seeded_kernel):
     """`ledger_cap` bounds history: oldest SETTLED unnamed rows go first; named
     rows (a dedup contract) survive them; in-flight rows are never evicted."""
     _runs.clear()
@@ -577,6 +585,9 @@ async def test_the_ring_evicts_oldest_settled_unnamed_first(seeded_kernel):
         assert again == named or again["result"] == named["result"]
     finally:
         seeded_kernel.ctx.ledger_cap = 1_000_000
+# twin: the_view_is_caller_scoped
+# twin: the_ledger_verb_is_scoped_to_what_you_originated
+# twin: the_ledger_view_is_caller_scoped
 
 
 async def test_ledger_view_is_origin_scoped(seeded_kernel):
@@ -700,7 +711,7 @@ def _kernel_rows(k, tables: dict) -> list[dict]:
     return [r["row"] for r in tables["rows"] if r["owner"] == f"{guid}|kernel"]
 
 
-async def test_a_completed_execution_survives_reboot(tmp_path, monkeypatch):
+async def test_a_settled_call_comes_back_from_its_store_rows(tmp_path, monkeypatch):
     """C9, the full property: a completed step is NEVER re-executed — not even
     by a fresh process. The settled call comes back from its `call` + `settle`
     rows in the kernel's store; a re-send of the id returns it and the handler
@@ -754,7 +765,7 @@ async def test_the_store_carries_the_payload_and_the_full_outcome(
     assert row["outcome"]["result"] == out["result"]
 
 
-async def test_raw_bytes_in_the_store_are_a_length_not_base64(tmp_path, monkeypatch):
+async def test_a_write_keeps_the_bytes_slot_where_python_holds_it(tmp_path, monkeypatch):
     """The ONE reduction: a `bytes` value anywhere in a payload or a result is
     stored as its LENGTH. Base64 is banned; text and JSON stay verbatim."""
     k1 = await _boot_with_store(tmp_path, monkeypatch)
@@ -783,7 +794,7 @@ async def test_raw_bytes_in_the_store_are_a_length_not_base64(tmp_path, monkeypa
     assert settle["outcome"]["result"] == {"echo": {"len": 5}, "note": "verbatim"}
 
 
-async def test_a_dead_letter_survives_reboot_and_stays_dead(tmp_path, monkeypatch):
+async def test_a_parked_dead_letter_stays_dead_across_a_restart(tmp_path, monkeypatch):
     _runs.clear()
     k1 = await _boot_with_store(tmp_path, monkeypatch)
     a = await _mk(k1, "lp_rdead")
@@ -971,6 +982,8 @@ async def test_a_joiner_during_the_retry_loop_sees_only_the_final_outcome(
 
 
 # ─── joining is gated on the execution it joins ─────────────────
+# twin: joining_is_gated_on_the_verb_that_execution_ran
+# twin: a_joiner_is_gated_with_the_executions_original_payload
 
 
 async def test_joining_is_authorized_against_the_verb_that_execution_ran(

@@ -32,7 +32,7 @@ explicit design decision.**
 | C22 persisted state survives upgrade | openai run_state corpus | loader version-stamp tests |
 | C23 undeclared capability MUST error | a2a `@must` | sealed-by-default suite (`tests/agentic/`) |
 | C24 stream order, terminal close, fan-out | a2a `test_multi_stream.py`, DBOS offsets | `test_c24_stream_transport.py` + `test_c24_token_stream.py` — in-proc + wire events + token stream |
-| C25 round-trip fidelity incl. bytes/None | checkpoint-conformance `test_put.py` | execution rows flushed to the memory store keep `None`, raw bytes recorded as `{len}` (base64 is banned); `dump` → `inject` round-trips the tables — `tests/kernel/test_memory_store.py::test_stored_rows_keep_none_and_reduce_bytes_to_a_length` |
+| C25 round-trip fidelity incl. bytes/None | checkpoint-conformance `test_put.py` | execution rows flushed to the memory store keep `None`, raw bytes recorded as `{len}` (base64 is banned); `dump` → `inject` round-trips the tables — `tests/kernel/test_memory_store.py::test_the_settle_row_keeps_what_stored_outcome_keeps` |
 | forge 1–2 emit-fake, provenance | (no exemplar — ours) | `test_forge_paths.py` |
 | forge 3 TOCTOU single-use | (no exemplar — ours) | `test_user_actions_topology.py` (two sockets, same frame id → ONE buy) |
 

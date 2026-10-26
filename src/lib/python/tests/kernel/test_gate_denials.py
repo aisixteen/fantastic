@@ -53,6 +53,9 @@ async def _as(k, sender: str, target: str, payload: dict) -> dict:
 
 
 # ─── egress / ingress on an ordinary call ────────────────────────────────────
+# twin: absent_grant_denies_everything
+# twin: the_denial_hint_is_the_from_above_text
+# twin: gate_denial_keys_are_error_reason_hint_side
 
 
 async def test_egress_denial_is_exact(seeded_kernel):

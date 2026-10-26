@@ -79,7 +79,7 @@ async def test_over_budget_strips_oldest_bodies_in_one_batch_down_to_low():
     assert proj.omitted_marker is False, "no cut was needed"
 
 
-async def test_a_stub_keeps_the_tag_and_the_title_and_says_how_big_the_body_was():
+async def test_a_stripped_block_keeps_its_tag_and_names_what_it_cost():
     body = _run(8)
     proj = await get_strategy("strip")(
         body, [], {}, _ctx(int(estimate_tokens(body) * 0.5))
@@ -90,7 +90,7 @@ async def test_a_stub_keeps_the_tag_and_the_title_and_says_how_big_the_body_was(
     assert BIG not in first_stub
 
 
-async def test_the_models_own_turns_are_never_touched():
+async def test_only_a_delivered_reply_is_strippable():
     body = _run(8)
     proj = await get_strategy("strip")(
         body, [], {}, _ctx(int(estimate_tokens(body) * 0.5))
@@ -164,7 +164,7 @@ async def test_per_agent_state_does_not_leak_across_agents():
     assert fresh.stripped == 0
 
 
-def test_a_title_cannot_close_the_tag_or_end_the_line():
+def test_clean_title_matches_python():
     assert _clean_title("read filler_2] then\nrun") == "read filler_2  then run"
     assert _clean_title("   ") is None
     assert _clean_title(42) is None

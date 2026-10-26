@@ -7,7 +7,7 @@ import pytest
 from ai_core import ProviderError, stalled_error, stream_idle_of
 
 
-def test_stream_idle_defaults_to_sixty_and_reads_the_record():
+def test_the_idle_window_defaults_and_takes_a_positive_number():
     assert stream_idle_of({}) == 60.0
     assert stream_idle_of({"stream_idle_seconds": None}) == 60.0
     assert stream_idle_of({"stream_idle_seconds": 2.5}) == 2.5
@@ -15,7 +15,7 @@ def test_stream_idle_defaults_to_sixty_and_reads_the_record():
 
 
 @pytest.mark.parametrize("bad", [0, -1, "x", True, float("nan")])
-def test_a_bad_stream_idle_is_refused_by_name(bad):
+def test_a_window_that_is_not_a_positive_number_is_refused_by_name(bad):
     with pytest.raises(ProviderError) as e:
         stream_idle_of({"stream_idle_seconds": bad})
     assert str(e.value).startswith(
@@ -24,7 +24,7 @@ def test_a_bad_stream_idle_is_refused_by_name(bad):
     assert e.value.transport is False
 
 
-def test_stalled_error_names_seconds_and_endpoint_and_is_transport():
+def test_a_stall_is_a_raise_naming_the_seconds_and_the_endpoint():
     err = stalled_error("x_backend", "http://e/v1", 0.2)
     msg = str(err)
     assert "stream_stalled" in msg and "http://e/v1" in msg

@@ -12,7 +12,7 @@ from pathlib import Path
 from _testkit import persist
 
 
-async def test_persist_copies_no_readme(kernel):
+async def test_a_record_write_copies_no_readme(kernel):
     """Persisting an agent writes its record only — the readme stays in the
     bundle, so no `readme.md` or `docs/` lands in the agent's dir."""
     rec = kernel.create("file_bridge.tools", allow=["."])
@@ -75,7 +75,7 @@ async def test_reflect_readme_attaches_content(seeded_kernel):
     assert "file" in r["readme"].lower()
 
 
-async def test_reflect_readme_null_when_absent(seeded_kernel):
+async def test_readme_flag_tiers(seeded_kernel):
     """An agent whose handler ships no package (a module outside every bundle
     package) → `readme` is null (not a missing key, not a crash)."""
     agent = seeded_kernel.ctx.agents["kernel_state"]
@@ -87,7 +87,7 @@ async def test_reflect_readme_null_when_absent(seeded_kernel):
         agent.handler_module = saved
 
 
-async def test_kernel_reflect_readme_is_root_readme(kernel):
+async def test_readme_present_and_titled(kernel):
     """`reflect kernel readme=true` → the root's readme, the bootstrap doc. The
     root is a `kernel_state` agent, so it is kernel_state's shipped readme."""
     r = (

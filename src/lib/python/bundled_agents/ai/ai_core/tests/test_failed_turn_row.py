@@ -77,7 +77,7 @@ def _errors(rows) -> list[dict]:
     return [r for r in rows if r.get("kind") == "error"]
 
 
-async def test_a_failed_pass_stores_the_incoming_and_an_error_row(
+async def test_a_failed_pass_stores_an_error_row_and_the_queue_moves_on(
     seeded_kernel, fake_providers
 ):
     aid = "ft_rows"
@@ -116,7 +116,7 @@ async def test_the_queue_moves_on_and_the_next_turn_reads_the_failure(
         fake_providers.pop(aid, None)
 
 
-async def test_the_failed_turn_status_is_done_error_naming_the_stall(
+async def test_a_stalled_api_stream_ends_the_turn_with_an_error_row(
     seeded_kernel, fake_providers
 ):
     aid = "ft_status"
@@ -205,7 +205,7 @@ async def test_a_failed_save_is_named_in_the_error(
 # ─── pins: what #177 named that already holds in Python ─────────────────────
 
 
-async def test_stop_during_a_stalled_stream_ends_the_turn(
+async def test_stop_during_a_stalled_stream_clears_generating(
     seeded_kernel, fake_providers
 ):
     aid = "ft_stop"

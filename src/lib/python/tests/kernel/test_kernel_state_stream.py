@@ -21,7 +21,7 @@ async def test_no_subscribers_zero_overhead(seeded_kernel):
         await seeded_kernel.emit("cli", {"type": "noop"})
 
 
-async def test_subscriber_receives_send_events(seeded_kernel):
+async def test_state_events_are_python_shape(seeded_kernel):
     events: list[dict] = []
     seeded_kernel.add_state_subscriber(lambda e: events.append(e))
     (
@@ -39,6 +39,8 @@ async def test_subscriber_receives_send_events(seeded_kernel):
     assert "sender" in e and e["sender"] is None
     # Trimmed payload summary for the messages overlay.
     assert "summary" in e and "token" in e["summary"] and "x" in e["summary"]
+# twin: summarize_never_truncates
+# twin: a_bytes_payload_summarizes_as_bytes_n
 
 
 async def test_summary_shrinks_bytes_but_never_truncates(seeded_kernel):
@@ -127,7 +129,7 @@ async def test_state_event_sender_set_inside_handler_dispatch(seeded_kernel):
     assert emits and emits[0]["sender"] == "alice_xxx"
 
 
-async def test_state_event_sender_resets_after_handler_returns(seeded_kernel):
+async def test_current_sender_outside_scope_is_none(seeded_kernel):
     """After kernel.send returns, the contextvar must be reset so the
     NEXT external send reports sender=None — not the previous handler's
     id leaking through."""
@@ -204,7 +206,7 @@ async def test_non_agent_watcher_does_not_emit_state_events(seeded_kernel):
     assert len(cli_evts) >= 1
 
 
-async def test_unsubscribe_stops_callbacks(seeded_kernel):
+async def test_remove_state_subscriber_detaches(seeded_kernel):
     events: list[dict] = []
     unsub = seeded_kernel.add_state_subscriber(lambda e: events.append(e))
     await seeded_kernel.emit("cli", {"type": "first"})
@@ -214,7 +216,7 @@ async def test_unsubscribe_stops_callbacks(seeded_kernel):
     assert len(events) == pre, "no events should land after unsubscribe"
 
 
-async def test_multiple_subscribers_all_called(seeded_kernel):
+async def test_publish_state_reaches_every_subscriber(seeded_kernel):
     a, b = [], []
     seeded_kernel.add_state_subscriber(lambda e: a.append(e))
     seeded_kernel.add_state_subscriber(lambda e: b.append(e))
@@ -223,7 +225,7 @@ async def test_multiple_subscribers_all_called(seeded_kernel):
     assert len(a) == len(b)
 
 
-async def test_callback_exception_does_not_break_fanout(seeded_kernel):
+async def test_a_raising_state_subscriber_prints_and_others_still_receive(seeded_kernel):
     seen: list[dict] = []
 
     def bad(e):

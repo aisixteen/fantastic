@@ -198,7 +198,7 @@ async def test_whole_line_in_command_is_told_to_use_args(seeded_kernel):
     assert r["error"].endswith(ebt.COMMAND_ONE_PROGRAM), r
 
 
-async def test_match_is_anchored_not_a_prefix(seeded_kernel):
+async def test_command_permitted_fullmatches_and_refuses(seeded_kernel):
     """`echo.*` must not smuggle a second command past the gate — the line is
     shell-joined and FULL-matched, so the metachar arrives quoted and the
     pattern sees one argv, not a shell string."""
@@ -332,7 +332,7 @@ async def test_a_wait_on_a_running_job_still_waits_up_to_wait_s(seeded_kernel):
     await _wait_done(seeded_kernel, "runner", jid)
 
 
-async def test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it(seeded_kernel):
+async def test_job_id_is_an_int_or_absent(seeded_kernel):
     """One id space: the job's id IS its kernel task id — `ps` lists it, `cancel`
     takes it. A string (even a stringified int) is a bad argument, never looked up:
     the old random 8-hex ids came back from a model as ints or infinite floats
@@ -361,7 +361,7 @@ async def test_a_job_id_is_the_jobs_task_id_and_nothing_else_names_it(seeded_ker
     await k.send([{"target": "ids", "payload": {"type": "stop", "job_id": jid}}])
 
 
-async def test_write_time_refusal_for_broken_regex(seeded_kernel):
+async def test_validate_meta_refuses_a_bad_allowed(seeded_kernel):
     r = await _mk(seeded_kernel, agent_id="r2", allowed=["("])
     assert "broken regex" in r["error"]
 
@@ -385,7 +385,7 @@ async def test_nonzero_exit_is_failed(seeded_kernel):
     assert row["status"] == "failed" and row["exit_code"] != 0
 
 
-async def test_stop_kills_a_running_job(seeded_kernel):
+async def test_stop_sigkills_the_job(seeded_kernel):
     await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
     r = await _start(seeded_kernel, "runner", PY, SLEEP)
     s = (
@@ -538,7 +538,7 @@ async def test_the_kernel_env_reaches_a_child_only_by_name(seeded_kernel, monkey
         assert row["last_line"] == want, (aid, row)
 
 
-async def test_a_bare_command_is_found_on_the_childs_path_only(seeded_kernel, tmp_path):
+async def test_spawn_failure_text_matches_python(seeded_kernel, tmp_path):
     # a script found by name: `sh` on POSIX, a `.cmd` (a PATHEXT name) on Windows
     name, body = per_os(
         posix=("ft_only_here", "#!/bin/sh\necho found-by-child-path\n"),
@@ -596,7 +596,7 @@ async def test_many_jobs_run_in_parallel(seeded_kernel):
 # ─── kernel integration ─────────────────────────────────────────
 
 
-async def test_a_job_holds_a_task_row_and_cancel_reaps_it(seeded_kernel):
+async def test_status_job_id_is_the_integer_task_id(seeded_kernel):
     await _mk(seeded_kernel, allowed=[rf"{PY_RX} -c .*"])
     r = await _start(seeded_kernel, "runner", PY, SLEEP)
     st = (
@@ -651,6 +651,8 @@ _WIRE_CHILD = (
     "hdr=s.recv(4); n=struct.unpack('>I',hdr)[0]; m=json.loads(s.recv(n)[1:])\n"
     "print('got', m['payload']['type']); sys.stdout.flush()\n"
 )
+# twin: the_child_receives_the_control_socket_on_the_advertised_fd
+# twin: an_unknown_verb_is_queued_to_the_running_program
 
 
 async def test_mail_reaches_a_live_job_over_the_wire(seeded_kernel):
@@ -668,7 +670,7 @@ async def test_mail_reaches_a_live_job_over_the_wire(seeded_kernel):
     assert "got ping" in (row.get("last_line") or "")
 
 
-async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
+async def test_an_unknown_verb_without_a_job_errors_loudly(seeded_kernel):
     await _mk(seeded_kernel, allowed=[r"echo( .*)?"])
     r = (await seeded_kernel.send([{"target": "runner", "payload": {"type": "ping"}}]))[
         0
@@ -676,7 +678,7 @@ async def test_mail_with_no_live_job_is_a_loud_error(seeded_kernel):
     assert "error" in r
 
 
-async def test_connector_verb_hands_over_the_reference_client(seeded_kernel):
+async def test_the_connector_verb_hands_over_the_reference_client(seeded_kernel):
     """A model pastes the client instead of re-deriving the socket framing
     (int(fd), buffering, not-seekable pipes).
     Ungated like reflect — discovery works on a sealed leg."""
@@ -713,7 +715,7 @@ _STREAM_CHILD = (
 )
 
 
-async def test_a_stream_chunk_crosses_the_wire_raw(
+async def test_the_program_can_send_to_another_agent_and_read_the_reply(
     seeded_kernel, tmp_path, monkeypatch
 ):
     """`write_stream`/`read_stream` from a program: the bytes ride the fd as the
@@ -873,7 +875,7 @@ _WATCHER_CHILD = (
 )
 
 
-async def test_stopping_a_watching_program_leaves_no_proxy_or_watcher(seeded_kernel):
+async def test_stop_releases_the_proxies_a_real_job_held(seeded_kernel):
     """Every proxy the relay held is given back on the way out — the watcher row,
     the INBOX row, and the drain task. A leaked inbox row makes `emit` auto-vivify
     into a Queue nobody drains, one per (job, watched src), forever."""
@@ -1045,7 +1047,7 @@ def _proxy_tasks(kernel, owner, verb):
     ]
 
 
-async def test_a_granted_watch_frames_events_and_unwatch_releases_everything(
+async def test_a_watching_program_holds_drain_task_rows(
     seeded_kernel,
 ):
     k = seeded_kernel
@@ -1142,7 +1144,7 @@ async def test_a_second_onmessage_supersedes_without_being_evicted(seeded_kernel
     assert "_xbself_j2" not in k.ctx.inboxes
 
 
-async def test_the_inbox_relays_a_drive_verb_only_for_its_own_job(seeded_kernel):
+async def test_the_inbox_drops_a_drive_verb_naming_another_job(seeded_kernel):
     """The fanout mirrors every payload sent to the leg into the owner inbox, so
     a program started by one caller would see another caller's `write` keystrokes
     (unechoed input included), paste bytes and drive calls aimed at that caller's
@@ -1430,7 +1432,7 @@ async def test_a_malformed_ctrl_frame_is_skipped_never_fatal(seeded_kernel):
 # ─── python twins of fantastic-exec-bridge tests.rs (#170) ──────
 
 
-async def test_an_overlong_output_line_is_read_whole(seeded_kernel):
+async def test_an_overlong_line_is_read_whole(seeded_kernel):
     """Python twin of tests.rs::an_overlong_line_is_read_whole. asyncio's 64 KiB
     default line limit would end the pipe with a `[pump error]`; the 16 MiB limit
     on the subprocess prevents that."""

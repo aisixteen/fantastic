@@ -524,7 +524,7 @@ mod usage_tests {
     use crate::provider::ProviderReport;
     use serde_json::json;
 
-    /// python `test_the_done_status_carries_the_token_usage`: reported figures as
+    /// python `test_the_done_detail_carries_the_token_usage`: reported figures as
     /// reported; none reported → estimated and marked so.
     #[test]
     fn the_done_detail_carries_the_token_usage() {

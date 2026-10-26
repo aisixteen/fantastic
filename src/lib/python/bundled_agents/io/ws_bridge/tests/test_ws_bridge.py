@@ -160,7 +160,7 @@ async def _wire_memory_pair(ka, kb_kern):
 # ─── tests ───────────────────────────────────────────────────────
 
 
-async def test_reflect_lists_verbs(two_kernels):
+async def test_reflect_shape_for_memory_transport(two_kernels):
     ka, _ = two_kernels
     bid = await _make_bridge(ka, peer_id="ignored", transport="memory")
     r = (await ka.send([{"target": bid, "payload": {"type": "reflect"}}]))[0]["result"]
@@ -179,6 +179,8 @@ async def test_reflect_lists_verbs(two_kernels):
         assert v in d["verbs"], f"missing verb {v}"
     assert r["transport"] == "memory"
     assert r["connected"] is False  # not booted yet
+# twin: boot_pairs_succeed_via_memory
+# twin: forward_round_trip_over_memory
 
 
 async def test_memory_transport_pair_round_trip(two_kernels):
@@ -248,7 +250,7 @@ async def test_corr_id_namespacing_no_collision(two_kernels):
     assert c2 == f"{sb.corr_prefix}-42" and sb.corr_prefix.startswith(f"{b_id}-")
 
 
-async def test_on_delete_cancels_read_task_and_rejects_pending(two_kernels):
+async def test_pending_futures_rejected_on_close(two_kernels):
     """on_delete must (1) cancel the read_loop task, (2) close the
     transport, (3) reject any in-flight forward Futures with
     ConnectionError so callers don't hang forever."""
@@ -419,7 +421,7 @@ async def test_deny_inbound_default_refuses_inbound_call(two_kernels):
 _PASSWORD_AUTH = {"type": "password", "env": "FANTASTIC_GROUP_TOKEN"}
 
 
-async def test_password_dispatches_inbound_call_with_valid_token(
+async def test_password_gate_checks_inbound_and_presents_on_forward(
     two_kernels, monkeypatch
 ):
     """auth=password: an inbound call carrying the matching group `auth_token`
@@ -645,7 +647,7 @@ async def test_watch_remote_sends_watch_frame(two_kernels):
     assert frame == {"type": "watch", "src": "remote_core"}
 
 
-async def test_event_frame_re_emits_on_bridge_inbox_only_when_subscribed(two_kernels):
+async def test_a_remote_event_flows_only_for_a_subscribed_src(two_kernels):
     """A remote `{type:'event', src, payload}` is re-emitted on the bridge agent's
     own inbox (payload + `src`) ONLY for a `src` this leg subscribed to with
     `watch_remote`. Nothing flows before the subscription, nothing without a
