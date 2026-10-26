@@ -18,6 +18,11 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      cleanup:
+        description: "Run the optional cleanup steps (rust-cache target clean and cache save, uv cache prune). Off: skipped, the runner is thrown away."
+        type: boolean
+        default: false
 
 permissions:
   contents: read

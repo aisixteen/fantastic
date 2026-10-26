@@ -38,6 +38,9 @@ name: build
 on:
   workflow_call:
     inputs:
+      cleanup:
+        type: boolean
+        default: false
       profile:
         type: string
         required: true
@@ -100,6 +103,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
+          prune-cache: ${{ inputs.cleanup }}
           cache-dependency-glob: src/lib/python/uv.lock
       - name: build
         run: uv sync --locked
@@ -129,6 +133,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ inputs.cleanup }}
           workspaces: src/lib/rust
           key: ${{ inputs.profile }}
       - name: build
@@ -167,6 +172,7 @@ jobs:
         run: choco install zip --no-progress -y
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ inputs.cleanup }}
           workspaces: |
             src
             src/app
@@ -259,6 +265,7 @@ jobs:
         run: choco install zip --no-progress -y
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ inputs.cleanup }}
           workspaces: |
             src/lib/rust
             src
@@ -267,6 +274,7 @@ jobs:
         if: matrix.e2e != ''
         with:
           enable-cache: true
+          prune-cache: ${{ inputs.cleanup }}
           cache-dependency-glob: src/lib/python/uv.lock
       - name: the CLI + the e2e's kernels and rig
         if: matrix.e2e != ''
@@ -331,6 +339,7 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ inputs.cleanup }}
           workspaces: |
             src/lib/rust
             src
@@ -400,6 +409,7 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ inputs.cleanup }}
           workspaces: src/app
           key: ${{ matrix.app }}-${{ inputs.profile }}
       - uses: actions/download-artifact@v7
@@ -455,6 +465,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
+          prune-cache: ${{ inputs.cleanup }}
           cache-dependency-glob: src/lib/python/uv.lock
       - name: the e2e's python (websockets)
         run: (cd src/lib/python && uv sync --locked)
@@ -551,6 +562,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
+          prune-cache: ${{ inputs.cleanup }}
           cache-dependency-glob: src/lib/python/uv.lock
       - uses: actions/setup-node@v7
         with:
@@ -798,6 +810,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
+          prune-cache: ${{ inputs.cleanup }}
           cache-dependency-glob: src/lib/python/uv.lock
       - name: the check's python (websockets)
         run: (cd src/lib/python && uv sync --locked)
