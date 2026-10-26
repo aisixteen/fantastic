@@ -39,7 +39,7 @@ pub enum Event {
     Changed,
     /// PipeWire or the tools are not there (or a read failed).
     Unavailable { why: String },
-    /// Time; audio does not poll.
+    /// Time; audio does not poll while available, and re-reads while unavailable.
     Tick { now_ms: u64 },
     /// A verb: `set_volume`, `set_mute` or `set_default`.
     Intent {
@@ -175,6 +175,8 @@ impl AudioVm {
     pub fn reduce(&mut self, ev: Event) -> Vec<Effect> {
         match ev {
             Event::Start | Event::Changed => vec![Effect::Read],
+            // PipeWire may come up late or a read may time out: ask again until a dump lands
+            Event::Tick { .. } if !self.available => vec![Effect::Read],
             Event::Tick { .. } => vec![],
             Event::Dump(v) => {
                 self.nodes.clear();
@@ -536,11 +538,28 @@ mod tests {
     }
 
     #[test]
-    fn start_and_changed_ask_for_a_read_and_tick_does_nothing() {
+    fn start_and_changed_ask_for_a_read_and_an_available_tick_does_nothing() {
         let mut vm = AudioVm::new(Config::default());
         assert_eq!(vm.reduce(Event::Start), vec![Effect::Read]);
         assert_eq!(vm.reduce(Event::Changed), vec![Effect::Read]);
+        let mut vm = dumped();
         assert!(vm.reduce(Event::Tick { now_ms: 1_000_000 }).is_empty());
+    }
+
+    #[test]
+    fn a_tick_while_unavailable_asks_for_a_read_until_a_dump_arrives() {
+        let mut fresh = AudioVm::new(Config::default());
+        assert_eq!(fresh.reduce(Event::Tick { now_ms: 1 }), vec![Effect::Read]);
+        let mut vm = dumped();
+        vm.reduce(Event::Unavailable {
+            why: "pw-dump took longer than 5 s".into(),
+        });
+        for now_ms in [5_000, 10_000] {
+            assert_eq!(vm.reduce(Event::Tick { now_ms }), vec![Effect::Read]);
+        }
+        vm.reduce(Event::Dump(serde_json::from_str(FIXTURE).unwrap()));
+        assert!(vm.state().available);
+        assert!(vm.reduce(Event::Tick { now_ms: 15_000 }).is_empty());
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! port call -> reply, port change -> `state` event to a watcher, no tools ->
 //! `available: false`, `on_delete` stops the loop.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,6 +13,7 @@ use fantastic_kernel::{
 };
 use fantastic_system::audio::{Call, Event};
 use fantastic_system_agents::audio::{AudioBundle, HANDLER_MODULE};
+use fantastic_system_agents::driver;
 use fantastic_system_agents::sys::{AudioOs, OsError};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -38,7 +40,9 @@ fn delta(channel: f64) -> Value {
 
 /// The fake: what it reads, what it was called with, and the channel its changes ride.
 struct Fake {
-    read: Mutex<Result<Value, OsError>>,
+    /// The reads in order; the last one repeats.
+    read: Mutex<VecDeque<Result<Value, OsError>>>,
+    reads: Mutex<usize>,
     calls: Mutex<Vec<Call>>,
     tx: mpsc::Sender<Event>,
     rx: Mutex<Option<mpsc::Receiver<Event>>>,
@@ -46,9 +50,14 @@ struct Fake {
 
 impl Fake {
     fn new(read: Result<Value, OsError>) -> Arc<Self> {
+        Self::sequence(vec![read])
+    }
+
+    fn sequence(reads: Vec<Result<Value, OsError>>) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(16);
         Arc::new(Fake {
-            read: Mutex::new(read),
+            read: Mutex::new(reads.into()),
+            reads: Mutex::new(0),
             calls: Mutex::new(vec![]),
             tx,
             rx: Mutex::new(Some(rx)),
@@ -59,7 +68,13 @@ impl Fake {
 #[async_trait]
 impl AudioOs for Fake {
     async fn read(&self) -> Result<Value, OsError> {
-        self.read.lock().unwrap().clone()
+        *self.reads.lock().unwrap() += 1;
+        let mut q = self.read.lock().unwrap();
+        if q.len() > 1 {
+            q.pop_front().unwrap()
+        } else {
+            q.front().cloned().expect("a read")
+        }
     }
     async fn call(&self, c: Call) -> Result<(), OsError> {
         self.calls.lock().unwrap().push(c);
@@ -260,4 +275,18 @@ async fn deleting_the_agent_stops_its_loop() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the loop kept running after on_delete");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_first_read_recovers_on_the_next_tick() {
+    let why = "pw-dump took longer than 5 s";
+    let fake = Fake::sequence(vec![Err(OsError::Failed(why.into())), Ok(dump(0.064))]);
+    let k = kernel(&fake).await;
+    let s = settled(&k, false).await;
+    assert_eq!(s["why"], why);
+    assert_eq!(*fake.reads.lock().unwrap(), 1);
+    tokio::time::sleep(driver::TICK + driver::DEBOUNCE).await;
+    let s = settled(&k, true).await;
+    assert_eq!(s["sinks"][0]["volume"], 0.4);
+    assert_eq!(*fake.reads.lock().unwrap(), 2);
 }

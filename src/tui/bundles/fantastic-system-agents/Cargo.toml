@@ -26,4 +26,4 @@ serde_yaml = "0.9"
 fantastic-user-home-store = { path = "../fantastic-user-home-store" }
 
 [dev-dependencies]
-tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }

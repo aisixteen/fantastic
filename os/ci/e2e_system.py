@@ -323,6 +323,44 @@ def wpctl_volume(vm: Vm) -> tuple[float, bool]:
     return parse_wpctl(as_user(vm, "wpctl get-volume @DEFAULT_AUDIO_SINK@").strip())
 
 
+def wpctl_volume_or_none(vm: Vm) -> tuple[float, bool] | None:
+    """The default sink's (volume, muted), or None while wpctl has no default sink yet."""
+    try:
+        return wpctl_volume(vm)
+    except (Fail, ValueError):
+        return None
+
+
+def audio_diag(vm: Vm) -> str:
+    """What wpctl and the agent say now, for a failure message; never raises."""
+    try:
+        wp = as_user(vm, "wpctl get-volume @DEFAULT_AUDIO_SINK@").strip()
+    except Exception as e:  # noqa: BLE001 - a diagnostic must not hide the failure
+        wp = f"wpctl failed: {e}"
+    try:
+        agent = default_volume(state_of("audio"))
+    except Exception as e:  # noqa: BLE001
+        agent = f"state failed: {e}"
+    return f"wpctl says {wp!r}, audio.state default volume {agent}"
+
+
+def resend_until(vm: Vm | None, what: str, send, check, step: float, every: float = 5.0):
+    """`send()`, then `check()` until it is truthy, sending again every `every` s.
+
+    WirePlumber restores its default route and volume as the sound card comes up,
+    which can overwrite a write made just before; the verbs are idempotent."""
+    sent = [None]
+
+    def poll():
+        now = time.monotonic()
+        if sent[0] is None or now - sent[0] >= every:
+            sent[0] = now
+            send()
+        return check()
+
+    return until(vm, what, poll, step)
+
+
 def check_audio(vm: Vm, step: float) -> None:
     last: list = []
 
@@ -334,14 +372,29 @@ def check_audio(vm: Vm, step: float) -> None:
         until(vm, "audio.state is available with one default sink", ready, step)
     except Fail as e:
         raise Fail(f"audio.state has no single default sink: {json.dumps(last[0] if last else None)[:400]} ({e})") from e
+    until(vm, "wpctl answers for the default sink", lambda: wpctl_volume_or_none(vm), step)
+
+    def act(verb: str, **args):
+        def send():
+            if (e := refused(sys_call("audio", {"type": verb, **args}))):
+                raise Fail(f"audio {verb} refused: {e}")
+
+        return send
+
+    def settle(verb: str, args: dict, want_check, what: str):
+        try:
+            return resend_until(vm, what, act(verb, **args), want_check, step)
+        except Fail as e:
+            try:
+                log(f"audio: wpctl status:\n{as_user(vm, 'wpctl status')}")
+            except Exception as e2:  # noqa: BLE001
+                log(f"audio: wpctl status failed: {e2}")
+            raise Fail(f"{e} ({audio_diag(vm)})") from e
+
     for verb, args, want in (("set_volume", {"volume": 0.3}, (0.3, False)), ("set_mute", {"muted": True}, (0.3, True))):
-        if (e := refused(sys_call("audio", {"type": verb, **args}))):
-            raise Fail(f"audio {verb} refused: {e}")
-        got = until(vm, f"wpctl shows {want}", lambda w=want: (v := wpctl_volume(vm)) == w and v, step)
+        got = settle(verb, args, lambda w=want: (v := wpctl_volume_or_none(vm)) == w and v, f"wpctl shows {want}")
         log(f"audio: {verb} -> wpctl {got}")
-    if (e := refused(sys_call("audio", {"type": "set_mute", "muted": False}))):
-        raise Fail(f"audio unmute refused: {e}")
-    until(vm, "wpctl unmuted", lambda: wpctl_volume(vm)[1] is False, step)
+    settle("set_mute", {"muted": False}, lambda: (v := wpctl_volume_or_none(vm)) is not None and v[1] is False, "wpctl unmuted")
     ev = watch(
         vm,
         "audio",

@@ -89,6 +89,61 @@ class States(unittest.TestCase):
         self.assertFalse(es.displays_ok(None))
 
 
+class Resend(unittest.TestCase):
+    def clock(self):
+        now = [0.0]
+
+        def sleep(d):
+            now[0] += d
+
+        return mock.patch.object(es.time, "monotonic", lambda: now[0]), mock.patch.object(es.time, "sleep", sleep)
+
+    def test_resend_until_sends_again_when_the_check_stays_false(self):
+        sends, polls = [], []
+
+        def check():
+            polls.append(1)
+            return "ok" if len(polls) > 3 else None
+
+        c, s = self.clock()
+        with c, s:
+            got = es.resend_until(None, "x", lambda: sends.append(1), check, 60, every=2)
+        self.assertEqual(got, "ok")
+        self.assertGreater(len(sends), 1)
+
+    def test_resend_until_sends_once_when_the_first_check_passes(self):
+        sends = []
+        c, s = self.clock()
+        with c, s:
+            self.assertEqual(es.resend_until(None, "x", lambda: sends.append(1), lambda: "yes", 60), "yes")
+        self.assertEqual(len(sends), 1)
+
+    def test_resend_until_fails_naming_what_after_the_timeout(self):
+        sends = []
+        c, s = self.clock()
+        with c, s, self.assertRaises(es.Fail) as cm:
+            es.resend_until(None, "the thing", lambda: sends.append(1), lambda: None, 20, every=5)
+        self.assertIn("not within", str(cm.exception))
+        self.assertIn("the thing", str(cm.exception))
+        self.assertGreaterEqual(len(sends), 2)
+
+    def test_audio_diag_names_the_wpctl_line_and_survives_a_failing_wpctl(self):
+        with mock.patch.object(es, "state_of", return_value={"sinks": [{"default": True, "volume": 0.4}]}):
+            with mock.patch.object(es, "as_user", return_value="Volume: 0.40"):
+                out = es.audio_diag(None)
+            self.assertIn("Volume: 0.40", out)
+            self.assertIn("0.4", out)
+            with mock.patch.object(es, "as_user", side_effect=es.Fail("exit 2")):
+                out = es.audio_diag(None)
+            self.assertIn("exit 2", out)
+
+    def test_wpctl_volume_or_none_is_none_when_wpctl_fails_and_parsed_otherwise(self):
+        with mock.patch.object(es, "as_user", return_value="Volume: 0.30 [MUTED]\n"):
+            self.assertEqual(es.wpctl_volume_or_none(None), (0.3, True))
+        with mock.patch.object(es, "as_user", side_effect=es.Fail("exit 1")):
+            self.assertIsNone(es.wpctl_volume_or_none(None))
+
+
 class Run(unittest.TestCase):
     def test_choose_steps_orders_validates_and_puts_system_first(self):
         self.assertEqual(es.choose_steps(None), ["system", "audio", "network", "notifications", "displays"])
