@@ -31,6 +31,11 @@ check_abs 'out/canvas.zip' '/caller/out/canvas.zip'
 check_abs 'D:/a/b/canvas.zip' 'D:/a/b/canvas.zip'
 check_abs 'D:\a\b\canvas.zip' 'D:/a/b/canvas.zip'
 
+# ── 1b. the library zips through the deterministic zip.sh ───────────────────
+if grep -q 'zip\.sh' "$LIB_PACK" && ! grep -Eq '^[^#]*[( ]zip -' "$LIB_PACK"; then
+  echo "ok: lib pack.sh zips via zip.sh"
+else echo "FAIL: lib pack.sh must zip via zip.sh" >&2; FAIL=1; fi
+
 # ── 2. canvas pack.sh against a stub library, in a throwaway tree ───────────
 mkdir -p "$T/src/tui/web/canvas/scripts" "$T/src/lib/ts/scripts"
 cp "$CANVAS_PACK" "$T/src/tui/web/canvas/scripts/pack.sh"

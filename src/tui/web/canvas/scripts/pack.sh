@@ -18,6 +18,7 @@ cd "$APP"
 
 # The output zip: arg 1 (build.rs passes a dir under OUT_DIR, so a cargo build
 # writes nothing into the tree); default dist/canvas.zip, relative to the app.
+# SOURCE_DATE_EPOCH passes through to the library: the zip is byte-reproducible.
 ZIP="${1:-dist/canvas.zip}"
 sh ../../../lib/ts/scripts/pack.sh src/bundle.ts "$ZIP" readme.md \
   --alias:three=./src/vendor/three.module.js \

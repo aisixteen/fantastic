@@ -14,6 +14,7 @@
 #   sh ../../../lib/ts/scripts/pack.sh src/bundle.ts dist/canvas.zip readme.md \
 #     --alias:three=./src/vendor/three.module.js --loader:.css=text …
 #
+# The zip is reproducible: SOURCE_DATE_EPOCH stamps its entries (zip.sh).
 # Paths are relative to the CALLER's directory. PACK_PROFILE=release (default,
 # minified) | debug (the same bundle, unminified — real identifiers in traces).
 #
@@ -134,9 +135,11 @@ BUNDLE_SHA=$(sha256 "$OUT/bundle.min.js")
 sed "s/$PLACEHOLDER/$BUNDLE_SHA/g" "$README" > "$OUT/readme.md"
 
 # ── zip (flat: readme.md + bundle.min.js + bundle.min.js.map) ───────────────
+# Deterministic (zip.sh): fixed order, mode 644, no extra fields, entry times from
+# SOURCE_DATE_EPOCH (default 1980-01-01 UTC).
 mkdir -p "$(dirname "$ZIP")"
 rm -f "$ZIP"
-( cd "$OUT" && zip -q -j "$ZIP" readme.md bundle.min.js bundle.min.js.map )
+sh "$SCRIPT_DIR/zip.sh" "$ZIP" "$OUT" readme.md bundle.min.js bundle.min.js.map
 
 BYTES=$(wc -c < "$OUT/bundle.min.js" | tr -d ' ')
 echo "pack.sh: wrote $ZIP"
