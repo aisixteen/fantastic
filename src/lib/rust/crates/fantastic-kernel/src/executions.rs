@@ -304,6 +304,9 @@ impl Kernel {
         });
         self.exec.lock().flusher_task = Some(tid);
         self.exec.wake.notify_one();
+        // OPEN `await_set` WAITS come back from the store before anyone boots; the
+        // ones already due are completed once the agents are up (below).
+        let due_waits = crate::await_set::restore(self).await;
         if boot_all {
             for id in self.agent_ids() {
                 if id == root.id || id == store.id {
@@ -323,6 +326,7 @@ impl Kernel {
                 }
             }
         }
+        crate::await_set::resume(self, due_waits);
         json!({"started": true, "store": store.id.0, "booted": booted})
     }
 

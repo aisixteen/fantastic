@@ -1,0 +1,12 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: scripted OpenAI-compatible servers
+# play the model of a lead and three workers (the kernel's own vllm_backend agents),
+# driven over web_rest.
+id: await_set
+group: kernel
+title: "a lead awaits a set of three workers with await_set: the call answers at once with a wait_id, the workers' reports are held (never a turn of their own), and the lead gets exactly ONE combined message holding all three"
+runner: probe.py
+runtimes: [python, rust]
+costs: free
+limits:
+  idle_seconds: 120
+  turn_seconds: 300

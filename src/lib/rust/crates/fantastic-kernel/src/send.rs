@@ -2013,6 +2013,18 @@ fn dispatch(
 > {
     Box::pin(async move {
         let verb = verb_of(&payload);
+        // A `report` from a NAMED agent to a lead that `await_set` waits on is
+        // HELD for the one combined message, not delivered as its own turn.
+        if verb == "report" {
+            if let Some(held) = crate::await_set::hold_report(
+                &kernel,
+                &target.id,
+                current_origin().as_ref(),
+                &payload,
+            ) {
+                return Ok((held, None));
+            }
+        }
         if is_kernel_verb(verb) {
             // ROOT ONLY. These verbs act on the TREE and the kernel-wide task
             // table, so the agent named is the OPERAND, not the actor. Answered

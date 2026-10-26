@@ -7,6 +7,13 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `await_set` / `await_cancel` (#426): one wake for a set of agents. A lead sends
+  `await_set {ids, timeout_s?, label?}` to the kernel and is woken ONCE — when every
+  named agent has sent it a message of `type: report` (the signal #424's `report`
+  sends), or at the timeout — with `{wait_id, label, done:[{id, state, result}],
+  missing, timed_out}`; those reports are held, not delivered one by one. The wait
+  is a row and survives a restart; `await_cancel {wait_id}` drops it and releases
+  what it held. Rust first, Python twin (`kernel/_await.py`).
 - Export a subtree, completed (#268): the kernel root answers `export_subtree` like
   `user` (one engine, `fantastic-core` / `kernel_state`), the export now writes an
   html view's body as `<id>/view.html` and a folder bundle's files as
