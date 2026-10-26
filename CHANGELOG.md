@@ -280,8 +280,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   canvas drop now name the ids they made (the verb replies `ids` as a map; both read a
   list, so `imported 3:` and the toast `imported ` ended empty), and the command prints
   a refusal as `refused (<reason>): …` and exits 1 (the kernel marks the call `errored`,
-  so the raw reply went to stderr). New e2e: E125 `import_twice`, E126 `import_refusals`,
-  E127 `import_cli`, E128 `import_drop`.
+  so the raw reply went to stderr). New e2e: E130 `import_twice`, E131 `import_refusals`,
+  E132 `import_cli`, E133 `import_drop`.
 - A file dropped on the canvas (#134) opens its preview where it was dropped: the
   layout rect was written before the preview cell existed, and the page's refresh
   pruned it, so the preview landed on a free spot near the centre. The rect is written
