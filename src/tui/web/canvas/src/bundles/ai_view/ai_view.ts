@@ -189,6 +189,30 @@ export async function historyTail(
   return { rows: window, bytes, lastId };
 }
 
+/** The thoughts kept on rows: row id -> {text, cut}, read from the `rows` verb. The pager
+ *  starts at the HEAD (no `after`): `rows` takes `after` as the id of a row IN the loaded
+ *  head, and row ids are not consecutive, so "the first kept row's id - 1" names no row
+ *  and the answer is empty. Pages follow `next` (the id of the page's last row). */
+export async function keptThoughts(
+  call: (p: Record<string, unknown>) => Promise<Record<string, unknown> | null>,
+  pageSize = 200,
+): Promise<Map<number, { text: string; cut: number }>> {
+  const thoughts = new Map<number, { text: string; cut: number }>();
+  let after: unknown;
+  for (let page = 0; page < 20; page++) {
+    const r = await call({ type: "rows", limit: pageSize, ...(after !== undefined ? { after } : {}) });
+    const got = r !== null && Array.isArray(r["rows"]) ? (r["rows"] as Record<string, unknown>[]) : [];
+    for (const x of got) {
+      if (typeof x["id"] === "number" && typeof x["thinking"] === "string") {
+        thoughts.set(x["id"] as number, { text: x["thinking"] as string, cut: typeof x["thinking_cut"] === "number" ? (x["thinking_cut"] as number) : 0 });
+      }
+    }
+    if (r === null || r["next"] === null || r["next"] === undefined) break;
+    after = r["next"];
+  }
+  return thoughts;
+}
+
 /** A run of CONSECUTIVE report rows with the same head becomes the first of them
  *  with `repeat: n` (n >= 2); every other row is unchanged. */
 export function collapseReports(
@@ -873,17 +897,9 @@ export const aiView: ViewBundle = {
     // THINKING, kept on its answer's row (`thinking`, flagged `has_thinking` in the
     // digest): the full rows are read once, and each answer is drawn after its
     // thought — collapsed. The pager starts just before the first kept row.
-    const thoughts = new Map<number, { text: string; cut: number }>();
-    if (rows.some((m) => m["has_thinking"] === true)) {
-      let after: unknown = typeof rows[0]?.["id"] === "number" ? (rows[0]!["id"] as number) - 1 : undefined;
-      for (let page = 0; page < 20; page++) {
-        const r = (await host.call(backend, { type: "rows", ...(after !== undefined ? { after } : {}) } as never).catch(() => null)) as Dict | null;
-        const got = r !== null && Array.isArray(r["rows"]) ? (r["rows"] as Dict[]) : [];
-        for (const x of got) if (typeof x["id"] === "number" && typeof x["thinking"] === "string") thoughts.set(x["id"] as number, { text: x["thinking"] as string, cut: typeof x["thinking_cut"] === "number" ? (x["thinking_cut"] as number) : 0 });
-        if (r === null || r["next"] === null || r["next"] === undefined) break;
-        after = r["next"];
-      }
-    }
+    const thoughts = rows.some((m) => m["has_thinking"] === true)
+      ? await keptThoughts((p) => host.call(backend, p as never).catch(() => null) as Promise<Dict | null>)
+      : new Map<number, { text: string; cut: number }>();
     // `kind: "notice"` rows are the AI layer's own turns to its model: not chat
     // — except the checker's report (isReport), which repeats fold to one ×N row
     // CARDS: each agent on show is drawn at ITS embed row's place (a later unembed took it out)

@@ -172,13 +172,26 @@ def main() -> bool:
                 r["S3 answers"] = bool(await pg.until(f"{dialog(a)}.includes('S3-answer')", 10))
                 # S4 queue: the first held 2 s, the second sent meanwhile
                 mock.stall = 2.0
-                mock.reply("S4-first", "S4-second")
+                mock.reply("S4-first")
+
+                # The second message arrives mid-chain: it is HELD and read by the chain's
+                # NEXT pass (ONE CHAIN PER AGENT, #227) — which is the runtime's no-call
+                # reminder after the first answer. That pass answers it, so the reply for
+                # it is chosen by what the request carries, not by its place in a queue.
+                def s4_second(req: dict) -> str | None:
+                    msgs = req.get("messages") or []
+                    seen = "second of two" in json.dumps(msgs)
+                    answered = any(m.get("role") == "assistant" and "S4-second" in str(m.get("content")) for m in msgs)
+                    return "S4-second" if seen and not answered else None
+
+                mock.responder = s4_second
                 await send(pg, a, "first of two")
                 await asyncio.sleep(0.4)
                 await send(pg, a, "second of two")
                 info["S4_queued_seen"] = bool(await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{a}\"] .c-queued .msg')", 3))
                 r["S4 queues then answers both, in order"] = bool(await pg.until(
                     f"{dialog(a)}.includes('S4-second') && {dialog(a)}.indexOf('S4-first') < {dialog(a)}.indexOf('S4-second')", 15)) and info["S4_queued_seen"]
+                mock.responder = None
                 # S5 stop while it thinks
                 mock.stall = 6.0
                 mock.reply("S5-never")
@@ -388,13 +401,22 @@ def main() -> bool:
                 # S13 a call with its `<` dropped (vLLM's reasoning parser loses it): the
                 # call checker REPAIRS it — the call runs, the row shows it whole, no notice
                 mock.clear()
-                mock.reply('call name="await"></call>', "S13-recovered")
+                # An `await` with nothing in flight ends the chain with a stored note (#177):
+                # no turn follows it, so the note row IS the proof that the call ran.
+                mock.reply('call name="await"></call>')
                 await send(pg, b, "E75-malformed")
-                recovered0 = await pg.until(f"{dialog(b)}.includes('S13-recovered')", 15)
+                ai13 = next((x.get("backend_id") for x in rig.cells() if x.get("id") == b), None)
+                ran13 = False
+                for _ in range(30):
+                    h = await host_call(rig.port, ai13, {"type": "history"}) if ai13 else {}
+                    ran13 = any(str(x.get("head") or "").startswith("[await: nothing to wait for]")
+                                for x in (h.get("rows") or []) if isinstance(h, dict))
+                    if ran13:
+                        break
+                    await asyncio.sleep(0.5)
                 shown13 = await pg.js(f"!!document.querySelector('.agent-frame[data-id=\"{b}\"] .c-malformed')")
                 info["S13_notice"] = await pg.js(f"document.querySelector('.agent-frame[data-id=\"{b}\"] .c-malformed')?.textContent?.slice(0,200)")
-                recovered = await pg.until(f"{dialog(b)}.includes('S13-recovered')", 10)
-                ai13 = next((x.get("backend_id") for x in rig.cells() if x.get("id") == b), None)
+                recovered = ran13
                 h13 = await host_call(rig.port, ai13, {"type": "history"}) if ai13 else {}
                 info["S13_rows"] = [(x.get("id"), x.get("kind"), x.get("role"), (x.get("head") or "")[:120]) for x in (h13.get("rows") or [])[-6:]] if isinstance(h13, dict) else h13
                 info["S12_place"] = lp.get("place_reply")
@@ -414,6 +436,7 @@ def main() -> bool:
                 await asyncio.sleep(1.0)
                 await pg.open(rig.url)
                 await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{b}\"] .chat-view[data-ready]')", 15)
+                await pg.until(f"!!document.querySelector('.agent-frame[data-id=\"{b}\"] details.c-think')", 10)
                 info["S16_think"] = await pg.js(f"(()=>{{const d=[...document.querySelectorAll('.agent-frame[data-id=\"{b}\"] details.c-think')].pop(); return d ? [d.querySelector('summary')?.textContent, d.open, d.querySelector('.c-think-body')?.textContent] : null}})()")
                 t16 = info["S16_think"] or [None, None, None]
                 r["S16 a kept thought is back after a reload, collapsed"] = t16[1] is False and "deep thought" in (t16[2] or "")

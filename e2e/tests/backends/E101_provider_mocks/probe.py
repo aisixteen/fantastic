@@ -46,6 +46,10 @@ REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 KEY = "mock-e2e-" + secrets.token_hex(12)
 KEY_VAR = "E2E_MOCK_KEY"
+# A mock reply that ends the chain: a prose answer with no call gets a "no call was
+# dispatched" reminder turn, which keeps the chain alive and HOLDS the probe's next send
+# (its answer is then the chain's, not the turn's own). `done` ends the chain at once.
+DONE = '<call name="done"></call>'
 
 #: provider → (mock class, handler module, record fields beyond endpoint/credentials,
 #: fields the backend reads from the server)
@@ -144,7 +148,7 @@ def main() -> int:
 
             # 1 · a turn answers the mock's text; the server-read fields land
             word = f"MOCK-{p.upper()}-{secrets.token_hex(3)}"
-            m.reply(word)
+            m.reply(word + DONE)
             m.prompt_tokens, m.completion_tokens = 1234, 56
             events, stop = watch(hk.port, aid)
             # a browser-style client: its events reach the agent's watchers
@@ -197,7 +201,7 @@ def main() -> int:
             need(bool(out.get("error")) and "500" in json.dumps(out),
                  f"{p}: HTTP 500 → the turn fails naming it "
                  f"({len(m.turns()) - before} tries): {str(out)[:240]}")
-            m.reply("BACK")
+            m.reply("BACK" + DONE)
             out = hk.send(aid, {"type": "send", "text": "again"})
             need("BACK" in str(out.get("response")) and not out.get("error"),
                  f"{p}: the next turn works: {str(out)[:160]}")
