@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: export_root_verb
+group: canvas
+title: "the kernel root answers export_subtree like user does: the same folder, byte for byte, from one engine; bad paths and unknown ids refused"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}

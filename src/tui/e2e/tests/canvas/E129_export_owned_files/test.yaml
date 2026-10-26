@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: export_owned_files
+group: canvas
+title: "export a subtree with owned files (html view, directive, folder bundle) and import it: the files beside the blueprint equal their sources, code is marked and gated"
+runner: probe.py
+costs: free
+limits:
+  seconds: 120
+env: {}
