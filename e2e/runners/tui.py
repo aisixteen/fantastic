@@ -96,7 +96,9 @@ def resolve(argv: list[str], features: list[str], into: Path) -> tuple[Path, Pat
     # features) cannot land in between
     with build_lock(E2E_TARGET):
         if b is None:
-            what = ["--features", ",".join(features)] if features else []
+            # EXACTLY these backends: the default build links all four (#278), and a
+            # scenario that checks "not in this build" needs a build without them.
+            what = ["--no-default-features"] + (["--features", ",".join(features)] if features else [])
             print(f"building {TUI} {' '.join(what)}…", flush=True)
             build(what)
             b = oslayer.exe(TARGET / "fantastic")

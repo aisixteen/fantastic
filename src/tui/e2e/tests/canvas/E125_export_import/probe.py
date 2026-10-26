@@ -55,7 +55,15 @@ def main() -> bool:
     info: dict = {}
     rig.init(host_agents=team_agents())
     # the team as the booted host holds it (it adds its baseline grants): what the export is compared with
-    orig = {i: rig.host_record(i) or {} for i in TEAM}
+    # The baseline grants reach the disk on the loader's debounce (a slow runner: seconds):
+    # read the records once every one of them carries `$self`, or the "originals" are the seed.
+    orig: dict = {}
+    end = time.time() + 30
+    while time.time() < end:
+        orig = {i: rig.host_record(i) or {} for i in TEAM}
+        if all("$self" in (rec.get("can_call") or {}) for rec in orig.values()):
+            break
+        time.sleep(0.25)
 
     async def run() -> None:
         from canvas import host_call

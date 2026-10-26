@@ -99,7 +99,10 @@ def main() -> int:
     for features in sorted(tui_feature_sets()):
         name = variant_name(list(features))
         print(f"═══ {name}", flush=True)
-        cargo = ["cargo", "build", "--locked", "-p", "fantastic-tui", "--target", target]
+        # --no-default-features: the default build links all four backends (#278); a
+        # variant is EXACTLY its features.
+        cargo = ["cargo", "build", "--locked", "-p", "fantastic-tui", "--no-default-features",
+                 "--target", target]
         if features:
             cargo += ["--features", ",".join(features)]
         if a.profile == "release":

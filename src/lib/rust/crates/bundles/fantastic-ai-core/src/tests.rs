@@ -5319,6 +5319,8 @@ fn verb_docs_match_python_docstrings() {
             "reflect",
             "send",
             "stop",
+            "pause",
+            "resume",
             "rows",
             "inquiry",
             "history",

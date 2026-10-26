@@ -236,3 +236,23 @@ async fn pause_twice_and_resume_twice_are_noops() {
     assert_eq!(r2["resumed"], false, "{r2}");
     assert_eq!(r2["released"], 0, "{r2}");
 }
+
+#[test]
+fn pause_and_resume_are_documented_like_every_other_verb() {
+    let docs = crate::verbs::verb_docs();
+    for verb in ["pause", "resume"] {
+        let d = docs[verb].as_str().unwrap_or_default();
+        assert!(
+            d.starts_with("args: "),
+            "`docs` carries no signature for {verb}: {d:?}"
+        );
+    }
+    assert!(docs["pause"]
+        .as_str()
+        .unwrap()
+        .contains("{paused:bool, held:int}"));
+    assert!(docs["resume"]
+        .as_str()
+        .unwrap()
+        .contains("{resumed:bool, released:int}"));
+}

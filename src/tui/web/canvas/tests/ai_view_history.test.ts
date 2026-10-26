@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { historyTail, collapseReports } from "../src/bundles/ai_view/ai_view.ts";
+import { historyTail, collapseReports, keptThoughts } from "../src/bundles/ai_view/ai_view.ts";
 
 const R = "[malformed call — nothing ran] bad verb";
 const isRep = (m: Record<string, unknown>): boolean => typeof m["head"] === "string" && (m["head"] as string).includes("[malformed call — nothing ran]");
@@ -55,4 +55,36 @@ test("collapseReports keeps different heads apart", () => {
   assert.equal(out.length, 2);
   assert.equal("repeat" in out[0]!, false);
   assert.equal("repeat" in out[1]!, false);
+});
+
+test("keptThoughts pages the rows verb from the head, whose ids are not consecutive", async () => {
+  // the loaded head, as `rows` holds it: `after` must be the id of a row IN it, else empty
+  const head = [
+    { id: 101, role: "user" },
+    { id: 160, role: "assistant", thinking: "a deep thought", thinking_cut: 3 },
+    { id: 161, role: "user" },
+    { id: 230, role: "assistant", thinking: "another" },
+  ];
+  const calls: Record<string, unknown>[] = [];
+  const call = async (p: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+    calls.push(p);
+    let rows = head;
+    if (p["after"] !== undefined) {
+      const at = head.findIndex((r) => r.id === p["after"]);
+      rows = at < 0 ? [] : head.slice(at + 1);
+    }
+    const limit = p["limit"] as number;
+    const page = rows.slice(0, limit);
+    return { rows: page, next: rows.length > limit ? page[page.length - 1]!.id : null };
+  };
+  const got = await keptThoughts(call, 2);
+  assert.deepEqual([...got.entries()], [
+    [160, { text: "a deep thought", cut: 3 }],
+    [230, { text: "another", cut: 0 }],
+  ]);
+  assert.equal("after" in calls[0]!, false);
+});
+
+test("keptThoughts stops on a null answer", async () => {
+  assert.equal((await keptThoughts(async () => null)).size, 0);
 });

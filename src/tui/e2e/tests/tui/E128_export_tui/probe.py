@@ -31,9 +31,11 @@ PARENT = "agents/user"
 
 
 def harness() -> Path:
-    """The PTY harness binary: `FANTASTIC_SCREENSHOT`, else built into the e2e target."""
-    if os.environ.get("FANTASTIC_SCREENSHOT"):
-        return Path(os.environ["FANTASTIC_SCREENSHOT"]).expanduser().resolve()
+    """The PTY harness binary: `FANTASTIC_SCREENSHOT`, or `FANTASTIC_TUI_RIG` (what
+    `E2E_ARTIFACTS` sets, so a CI run builds nothing here), else built into the e2e target."""
+    for var in ("FANTASTIC_SCREENSHOT", "FANTASTIC_TUI_RIG"):
+        if os.environ.get(var):
+            return Path(os.environ[var]).expanduser().resolve()
     with build_lock(E2E_TARGET):
         r = subprocess.run(["cargo", "build", "--example", "screenshot", "-p", "fantastic-tui"], cwd=SRC, capture_output=True, text=True,
                            env={**os.environ, "CARGO_TARGET_DIR": str(E2E_TARGET)})
