@@ -17,6 +17,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", dir.display());
     }
     println!("cargo:rerun-if-changed={}", app.join("readme.md").display());
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     // Pack into OUT_DIR, never the source tree: parallel builds of one checkout must not race.
     let pack_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets it")).join("canvas-pack");
     std::fs::create_dir_all(&pack_dir).expect("create the pack dir under OUT_DIR");
