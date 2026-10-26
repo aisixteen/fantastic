@@ -45,6 +45,7 @@ with `src/tui/e2e/wipe.sh`.
 | E63 `prompt_file` | scripted (a stub model): `.fantastic/prompt.md` seeded with the default placeholders, the first turn's block is the default, the AI names the file, an edit is the block on the next turn with its id still filled; records never persist through the prompt bridge | owner 2026-10-08: the project's system block |
 | E64 `mcp_config` | scripted: a `.fantastic/.mcp.json` with another server (nothing created outside `.fantastic`); after boot it also holds `fantastic` → this binary + `[mcp]`, the other server and key order kept, a reboot leaves it byte-identical, no `mcp_config_error` | owner 2026-10-08: the mcp leg keeps .mcp.json |
 | E78 `fit` | scripted: the view's `fit` sizes an html cell to what it draws — a 640×360 box (sandboxed and trusted) and a paragraph wrapped at `max_width: 400` — the frame that size, nothing overflowing, the layout holding it; an unknown id refused | owner 2026-10-13: fit to content, a verb an AI can call | scripted |
+| E133 `import_drop` | scripted: a blueprint folder dragged from the file tree onto the canvas or a cell opens the `import blueprint` dialog (`would create 3 agents`) and creates nothing; Cancel sends nothing more; Approve imports under the canvas host (a cell: its backend) and a toast names the ids; a port asks for the agent (`import: bind ports`) and previews again; code is refused as a toast naming `allow_code` | #269: import a blueprint | scripted |
 
 The `home` group drives the HOME (`_lib/home_live.py`, `HomeRig`): the test-only
 host `fantastic-home-host`, the `fantastic canvas` processes it lists, and Chrome
@@ -62,6 +63,9 @@ on its `home.html`.
 | E127 `export_cell_menu` | scripted: right-click a cell head and pick Export…: a blueprint folder appears; a cell with no host agent says so | #268: export a subtree as a blueprint | scripted |
 | E128 `export_tui` | scripted: the TUI `/export <path>` writes the selected agent and everything under it; `..` and a missing path are refused on screen | #268: export a subtree as a blueprint | scripted |
 | E129 `export_owned_files` | scripted: a subtree with owned files (html view, directive, folder bundle): files beside the blueprint equal their sources, code marked, import gated by allow_code | #268: export a subtree as a blueprint | scripted |
+| E130 `import_twice` | scripted: `import_subtree` on a hand-written blueprint — the preview names the ids, what each reaches and the ports and creates nothing; the approved call makes three agents (`*_1`) with parents right and grants re-wired (the bound store gains them); a second import is an independent copy (`*_2`); an unbound port is refused | #269: import a blueprint | scripted |
+| E131 `import_refusals` | scripted: a key in a blueprint is `secret_found` (never echoed), code is `code_not_allowed` until `allow_code: true` lets the same folder in, `"true"` as a string is not a yes, a missing `blueprint.yaml` is `not_found`; each leaves the home as it was | #269: import a blueprint | scripted |
+| E132 `import_cli` | scripted: `fantastic import` is attach-only (no kernel: exit 1, nothing started), a bad line exits 2 with the usage, off a terminal it previews and creates nothing, on a pty it asks `approve? [y/N]` (`n` nothing, `y` imports and names the ids; skipped on Windows), `--bind … --approve` imports, refusals print `refused (reason)` and exit 1 | #269: import a blueprint | scripted |
 
 ## Results — 2026-10-01, vLLM qwen3.8-27b, 2 lanes (the latest run of each)
 

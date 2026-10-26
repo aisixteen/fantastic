@@ -134,6 +134,14 @@ test("approve_resends_the_same_call_with_approve_true_and_bind", async () => {
   assert.equal(d.sent[1]!["allow_code"], true);
 });
 
+test("the_done_line_lists_the_ids_of_the_verbs_map", async () => {
+  // the verb replies `ids` as {blueprint id: new id}
+  const r = rig((p) => (p["approve"] === true ? { imported: 2, ids: { a: "a_1", b: "b_1" }, parent_id: "home", ports: {} } : PREVIEW));
+  await runImportDrop(r.drop(yes));
+  assert.equal(r.shown.at(-1)!.kind, "done");
+  assert.equal(r.shown.at(-1)!.lines[0], "imported a_1, b_1");
+});
+
 test("a_refusal_is_shown_with_its_message_and_sends_nothing_else", async () => {
   const msg = "the blueprint carries code: pass allow_code: true";
   const r = rig(() => ({ error: msg, reason: "code_not_allowed" }));
