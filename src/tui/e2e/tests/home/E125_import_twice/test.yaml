@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: import_twice
+group: home
+title: "import a blueprint twice: the preview creates nothing, the approved call makes three agents with fresh ids under the parent and the grants re-wired (the bound store gains them), a second import is an independent copy, and an unbound port is refused"
+runner: probe.py
+costs: free
+limits:
+  seconds: 180
+env: {}
