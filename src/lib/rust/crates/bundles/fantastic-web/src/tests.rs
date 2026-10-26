@@ -2318,7 +2318,7 @@ async fn boot_announces_say_to_cli() {
 
 /// The announcement names the host the listener BOUND, not a
 /// hardcoded `127.0.0.1`: a host bound elsewhere does not answer there. The
-/// twin of python `test_boot_announces_say_to_cli`.
+/// twin of python `test_boot_announces_the_bound_host`.
 #[tokio::test]
 async fn boot_announces_the_bound_host() {
     let tmp = TempDir::new().unwrap();

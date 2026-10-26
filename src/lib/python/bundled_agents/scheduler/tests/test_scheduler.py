@@ -508,7 +508,8 @@ async def _wait_for(pred, seconds: float):
     return pred()
 
 
-async def test_tick_loop_fires_due_schedule(seeded_kernel, store_agent):
+# twin: tick_loop_fires_due_schedule
+async def test_due_schedules_fire_as_one_concurrent_batch(seeded_kernel, store_agent):
     # Two due schedules; the FIRST one holds until the second has STARTED.
     # Sequential firing cannot get there (the second starts only after the
     # first returns); one batch starts both together. Observed, not timed — a
@@ -807,7 +808,8 @@ async def test_a_failed_persist_rolls_back_tick_now_but_not_pause(seeded_kernel)
         tools._cache.pop(sid, None)
 
 
-async def test_recreated_scheduler_drops_the_process_cache(
+# twin: recreated_scheduler_drops_the_process_cache
+async def test_two_schedulers_share_nothing_and_delete_frees_only_its_own(
     seeded_kernel, store_agent
 ):
     from scheduler import tools

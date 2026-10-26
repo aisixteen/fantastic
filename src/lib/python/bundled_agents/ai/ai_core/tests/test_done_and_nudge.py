@@ -254,7 +254,8 @@ async def test_two_thinking_only_turns_escalate_the_nudge(
         fake_providers.pop(aid, None)
 
 
-async def test_a_thinking_only_turn_is_discarded_and_rerolled(seeded_kernel, fake_providers):
+# twin: a_thinking_only_turn_is_discarded_and_rerolled
+async def test_a_dead_turn_is_discarded_and_rerolled(seeded_kernel, fake_providers):
     """A turn that is ONLY thinking did not answer: it is never stored and never
     counts as completed — it is rerolled by the no-call reminder, told why
     (a tiny thinking budget, then a clean `stop` with no answer; failing it

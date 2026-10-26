@@ -408,7 +408,8 @@ async def test_empty_path_delete_rename_mkdir_are_refused(
     assert (tmp_path / "keep.txt").exists() and (tmp_path / "a").is_dir()
 
 
-async def test_dotdot_and_absolute_paths_are_refused(
+# twin: dotdot_and_absolute_paths_are_refused
+async def test_absolute_path_is_refused_with_bad_arg(
     seeded_kernel, file_bridge, tmp_path
 ):
     """`/README.md` is never `lstrip("/")`-ed and served as `root/README.md`. One

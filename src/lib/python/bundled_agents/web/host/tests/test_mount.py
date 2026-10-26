@@ -152,7 +152,8 @@ async def test_a_reboot_replaces_a_legs_routes_and_unmount_removes_them_all(
     assert left == [], left
 
 
-async def test_boot_announces_say_to_cli(seeded_kernel, monkeypatch):
+# twin: boot_announces_say_to_cli
+async def test_boot_announces_the_bound_host(seeded_kernel, monkeypatch):
     """ARCH2-10 — the boot announcement to `cli` names the host the server BINDS
     (`host` on the record), not a hardcoded `127.0.0.1`: a host bound elsewhere
     does not answer there. Nothing binds here — the serve loop is stubbed out, and

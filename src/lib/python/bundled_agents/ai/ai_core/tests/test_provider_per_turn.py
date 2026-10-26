@@ -95,7 +95,8 @@ async def test_each_turn_builds_from_the_live_record(seeded_kernel, monkeypatch)
     assert _Recorded.built[-1] == ("http://third.invalid:3", "model-3")
 
 
-async def test_backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation(
+# twin: backend_state_is_per_agent_and_drop_frees_the_slot_not_the_incarnation
+async def test_delete_drops_every_row_but_the_incarnation(
     seeded_kernel, fake_providers
 ):
     """`on_delete` (re-exported by every backend) drops each per-id table, so an

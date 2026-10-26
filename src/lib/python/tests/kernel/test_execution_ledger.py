@@ -179,7 +179,8 @@ async def test_a_failed_outcome_is_recorded_too(seeded_kernel):
     assert len(_runs) == 1
 
 
-async def test_a_named_execution_is_registered_under_its_own_id(seeded_kernel):
+# twin: a_named_execution_is_registered_under_its_own_id
+async def test_a_cancelled_execution_stays_cancelled(seeded_kernel):
     """`cancel` settles the id as cancelled; a re-send of the SAME id gets that
     outcome without running anything — a retry must choose a new id."""
     a = await _mk(seeded_kernel, "lp_cx")

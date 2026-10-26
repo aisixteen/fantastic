@@ -32,7 +32,8 @@ async def _kernel_call(kernel, **payload):
     return (await kernel.send([{"target": "kernel", "payload": payload}]))[0]["result"]
 
 
-async def test_delete_agent_refuses_the_root_with_python_text(seeded_kernel):
+# twin: delete_agent_refuses_the_root_with_python_text
+async def test_delete_agent_refuses_the_root(seeded_kernel):
     child = await _mk(seeded_kernel, "rg_child")
     r = await _kernel_call(seeded_kernel, type="delete_agent", id=seeded_kernel.id)
     assert r.get("reason") == "bad_arg" and r.get("arg") == "id", r
@@ -72,7 +73,8 @@ async def test_create_agent_refuses_reserved_keys(seeded_kernel):
     assert seeded_kernel.ctx.agents.get("rg_reserved") is None
 
 
-async def test_an_unanswerable_verb_at_the_root_carries_reason_and_verb(seeded_kernel):
+# twin: an_unanswerable_verb_at_the_root_carries_reason_and_verb
+async def test_a_verb_a_bare_agent_cannot_answer_is_coded(seeded_kernel):
     """The ROOT is a bare agent for anything outside its own verb set."""
     r = await _kernel_call(seeded_kernel, type="no_such_verb_at_all")
     assert r.get("reason") == "unhandled", r

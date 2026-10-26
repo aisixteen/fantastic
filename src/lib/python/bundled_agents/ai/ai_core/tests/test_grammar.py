@@ -85,7 +85,8 @@ def test_a_tag_closed_before_the_call_wraps_nothing():
     assert envelopes_in(text)[0].wrapper is None
 
 
-def test_prose_angle_brackets_that_are_not_tags_do_not_wrap_a_call():
+# twin: prose_angle_brackets_that_are_not_tags_do_not_wrap_a_call
+def test_a_bare_word_tag_is_not_a_wrapper():
     text = "a<b and c>d\n" + WRITE
     assert envelopes_in(text)[0].wrapper is None
 

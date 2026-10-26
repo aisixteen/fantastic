@@ -137,7 +137,8 @@ async def test_bundles_tiers(seeded_kernel):
         assert b["handler_module"].endswith(".tools")
 
 
-async def test_bundles_all_carries_a_published_record_schema(seeded_kernel):
+# twin: bundles_all_carries_a_published_record_schema
+async def test_the_catalog_carries_each_backend_kinds_record_schema(seeded_kernel):
     """A set-up page reads what a KIND's record takes before any agent of it
     exists: every field with required/type/enum/default/hint — a key included,
     as a `credentials` field (a store ref), never an environment variable."""

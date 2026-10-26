@@ -87,7 +87,8 @@ def _fresh_tables():
 # ─── the stream ──────────────────────────────────────────────────────────────
 
 
-async def test_wrap_opens_and_closes_once_per_turn():
+# twin: wrap_opens_and_closes_once_per_turn
+async def test_the_thought_channel_is_wrapped_once_not_dropped():
     sse = _sse(
         _delta(reasoning_content="let me "),
         _delta(reasoning="think"),  # the other spelling a version may use
@@ -225,7 +226,8 @@ async def test_a_cut_bounded_side_call_is_its_answer():
     assert p.last_stop_reason == "max_tokens"
 
 
-async def test_a_stream_cut_before_finish_is_still_dropped():
+# twin: a_stream_cut_before_finish_is_still_dropped
+async def test_a_stream_that_ends_without_finish_reason_is_an_error():
     # vLLM died mid-answer: the text so far must never read as a completion
     p = _provider(_transport(_sse(_delta(content="partial"), done=False)))
     with pytest.raises(RuntimeError, match="without a finish_reason"):
@@ -360,7 +362,8 @@ async def test_an_http_error_names_the_endpoint_and_the_body():
         (httpx.RemoteProtocolError("reset"), "died or restarted"),
     ],
 )
-async def test_a_refused_connection_says_vllm_is_not_listening_yet(exc, words):
+# twin: a_refused_connection_says_vllm_is_not_listening_yet
+async def test_each_connection_failure_says_what_it_means(exc, words):
     def handler(request):
         raise exc
 
