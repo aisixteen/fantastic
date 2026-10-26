@@ -109,6 +109,9 @@ pub struct BackendState {
     /// ONE CHAIN PER AGENT (#227): whether a chain is running, the token its
     /// own turns carry, and the client_ids of messages held for its next pass.
     pub chain: Mutex<ChainState>,
+    /// When the last provider pass ended (unix seconds) — `fork_points` reads it
+    /// to say whether the prompt cache is still warm. Python `_last_send`.
+    pub last_send_secs: Mutex<Option<f64>>,
 }
 
 /// The agent's chain: `alive` while a pass or its routing is running.
@@ -191,6 +194,7 @@ impl BackendState {
             calib: Mutex::new(None),
             reported: Mutex::new(None),
             chain: Mutex::new(ChainState::default()),
+            last_send_secs: Mutex::new(None),
         })
     }
 }

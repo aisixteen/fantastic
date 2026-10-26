@@ -35,6 +35,10 @@ with the per-agent `context_strategy` (default `compact`; `fold`, `truncate`) an
 `context_clear` (a boundary, nothing deleted) inspect and page it; `context_forget`
 drops the rows folds already summarise. `watch {body?}` /
 `unwatch` subscribe to this agent's row events (a digest; with `body` the content too).
+`fork {at, name?, id?}` starts a NEW agent from the first rows of this one (its card and
+grants, the rows up to `at` copied under its own key with their ids; refused when `at` cuts a turn
+or a fold); `mark {label, note?, version?}` marks a turn boundary to fork from and
+`fork_points {filter?}` lists this agent's marks (across agents: #424).
 ## Calling this agent
 `send {type:'send', text, client_id?}` runs ONE completion (per-backend FIFO lock)
 and returns `{response, final}`. A first-class peer of `exec_bridge`: a

@@ -348,6 +348,8 @@ pub async fn run_generation(
         (cut.then_some(calls), p.splitter.closed_calls.clone())
     };
     let last_text = content_parts.join("");
+    // THE PASS ENDED: the provider's prompt cache is warm from here (`fork_points`).
+    *state.last_send_secs.lock().expect("last_send poisoned") = Some(crate::helpers::now_secs());
     // THE ENDPOINT'S OWN COUNT calibrates our chars/4 estimate (python `_calib`).
     if let Some(reported) = provider.report().prompt_tokens.filter(|n| *n > 0) {
         let est = estimate_tokens(&model_view).max(1);

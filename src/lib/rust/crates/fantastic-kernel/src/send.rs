@@ -71,9 +71,11 @@ pub fn current_sender() -> Option<AgentId> {
 
 /// THE DISPATCH IDENTITY for one of an agent's own HOOKS (`on_cancel`,
 /// `on_delete`): the kernel running that agent's code, so every send made inside
-/// is the agent's — python `Agent._as_self`. Crate-private: the kernel sets an
-/// identity only when it runs an agent's own code.
-pub(crate) async fn as_agent<F, T>(agent: &AgentId, hook: F) -> T
+/// is the agent's — python `Agent._as_self`. The kernel sets an identity only when
+/// it runs an agent's own code; a bundle that creates an agent as bookkeeping
+/// (`fork`) and must write that agent's first rows under ITS key uses it for that
+/// one step.
+pub async fn as_agent<F, T>(agent: &AgentId, hook: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
