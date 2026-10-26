@@ -16,6 +16,12 @@ Script 2 (extended): a `project_lead` spawns two sub-leads with split limits
 line for the whole; the task tree (`reflect tree=all`) shows every task line and
 all agents are still there after completion (nothing is cleaned up).
 
+Script 3 (from a fork point, #424; run by hand, not in CI): a source agent with two
+finished turns is `mark`ed; a lead `spawn`s a `worker` `from:{agent, at}` that mark. The
+new agent has the role card's directive, the source's memory store and the source's
+rows up to the mark with the same ids; a second spawn at an `at` inside a turn is
+refused `cuts_turn` (fork's refusal passes through) and creates nothing.
+
 Each agent is triggered one at a time and the probe waits for it to settle, so the
 one shared script stays in order. The checks are listed in `probe.py`'s docstring.
 

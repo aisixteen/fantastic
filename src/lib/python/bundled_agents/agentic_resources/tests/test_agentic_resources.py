@@ -40,6 +40,45 @@ async def _caller_handler(id, payload, kernel):
 
 register_unlisted("caller.tools", types.SimpleNamespace(handler=_caller_handler))
 
+
+async def _forkable_handler(id, payload, kernel):
+    """Stands for ai_core without the dependency: `fork {at}` makes a SIBLING with the
+    source's record minus `callable_by`/`delete_lock`. `at` 99 is refused `cuts_turn`,
+    98 `no_such_row`."""
+    verb = payload.get("type")
+    if verb in ("boot", "shutdown"):
+        return None
+    if verb == "send":
+        SENT.append((id, payload.get("text")))
+        return {"ok": True, "verb": "send"}
+    if verb != "fork":
+        return None
+    at = payload.get("at")
+    if at in (99, 98):
+        reason = "cuts_turn" if at == 99 else "no_such_row"
+        return {
+            "error": f"fork: refused ({reason})",
+            "reason": reason,
+            "hint": "a hint",
+            "at": at,
+        }
+    meta = dict(kernel._meta)
+    for k in ("callable_by", "delete_lock"):
+        meta.pop(k, None)
+    meta["forked_from"] = id
+    meta.update(
+        {
+            "type": "create_agent",
+            "handler_module": "forkable.tools",
+            "parent_id": kernel.parent.id,
+        }
+    )
+    made = await kernel.parent._verb_create_agent(meta)
+    return {"id": made["id"], "copied": 3, "at": at}
+
+
+register_unlisted("forkable.tools", types.SimpleNamespace(handler=_forkable_handler))
+
 WRITER = "---\nname: writer\npurpose: Writes the first draft of a text.\ntier: fast\nmodel: from-the-card\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n---\nYou write clearly and briefly.\n"
 REVIEWER = "---\nname: reviewer\npurpose: Reads a draft and says what to fix.\ntier: fast\n---\nYou review drafts.\n"
 SUBLEAD = "---\nname: sublead\npurpose: Runs a branch of the work.\ntier: fast\ngrants:\n  $registry: [roles, spawn, get_count, report]\n---\nYou run one branch.\n"
@@ -511,3 +550,222 @@ def test_readme_is_rust_verbatim():
     assert (here / "cards/project_lead.md").read_text() == (
         rust / "cards/project_lead.md"
     ).read_text()
+
+
+# ── spawn from a fork point ─────────────────────────────────────────
+
+
+async def fork_rig(kernel, tmp_path, callers, files):
+    """A rig whose tier carries a `memory_store_id`, plus a source agent that stands
+    for an agent with history: its own prompt, store, grants and stale registry keys."""
+    r = await rig(kernel, tmp_path, callers, files)
+    tier = {
+        "handler_module": "caller.tools",
+        "model": "m1",
+        "endpoint": "http://x",
+        "memory_store_id": "tier_store",
+    }
+    kernel.update(r.reg, tiers={"fast": dict(tier), "lead": dict(tier)})
+    await create(
+        kernel,
+        handler_module="forkable.tools",
+        id="src",
+        system_prompt="SOURCE PROMPT",
+        model="src-model",
+        memory_store_id="src_store",
+        can_call={"src_store": "*", "secret_agent": "*"},
+        spawned_by="stale_reg",
+        role="old_role",
+        tier="old",
+        task={"label": "old task", "state": "done", "waits_on": [], "result": None},
+        limits={"total": 9},
+        lead="stale_lead",
+    )
+    for c in r.callers:
+        grant_fork(kernel, c, "src")
+    return r, "src"
+
+
+def grant_fork(kernel, who, src):
+    def edit(m):
+        tools._grant_verbs(m, src, ["fork"])
+        return True
+
+    _, err = kernel.ctx.edit_can_call(who, edit)
+    assert err is None, err
+
+
+def forks_of(kernel, src):
+    return [
+        a.id for a in kernel.ctx.agents.values() if a._meta.get("forked_from") == src
+    ]
+
+
+def frm(src, at):
+    return {"agent": src, "at": at}
+
+
+async def test_spawn_from_forks_and_applies_the_role_card(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    out = await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)})
+    assert out["role"] == "writer", out
+    assert out["tier"] == "fast"
+    assert out["from"] == frm(src, 5)
+    assert out["copied"] == 3
+    cid = out["id"]
+    assert forks_of(kernel, src) == [cid], "made by fork"
+    m = r.meta(cid)
+    assert m["system_prompt"] == "You write clearly and briefly."
+    assert m["role"] == "writer"
+    assert m["tier"] == "fast"
+    assert m["spawned_by"] == r.reg
+    assert m["model"] == "m1", "the tier's model, not the source's"
+    assert m["lead"] == "lead"
+    assert m["can_call"]["notes"] == ["read"]
+    assert m["can_call"][r.reg] == ["roles", "report"]
+    assert r.meta(r.reg)["callable_by"][cid] == ["roles", "report"]
+    named = await r.spawn_as("lead", role="writer", name="scribe", **{"from": frm(src, 5)})
+    assert r.meta(named["id"])["name"] == "scribe"
+
+
+async def test_spawn_from_keeps_the_source_store_and_drops_its_other_grants(
+    kernel, tmp_path
+):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    cid = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
+    m = r.meta(cid)
+    assert m["memory_store_id"] == "src_store", "not the tier's"
+    assert m["can_call"]["src_store"] == "*"
+    assert "secret_agent" not in m["can_call"], m["can_call"]
+    assert "tier_store" not in m["can_call"]
+    assert len(m["can_call"]) == 3, "store, notes, registry"
+
+
+async def test_spawn_from_overwrites_the_copied_task_and_limits(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    bare = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
+    assert "task" not in r.meta(bare), "no task: none carried over"
+    assert "limits" not in r.meta(bare)
+    given = (
+        await r.spawn_as(
+            "lead",
+            role="writer",
+            task={"label": "draft"},
+            limits={"per_role": 1},
+            **{"from": frm(src, 5)},
+        )
+    )["id"]
+    m = r.meta(given)
+    assert m["task"]["label"] == "draft"
+    assert m["task"]["state"] == "running"
+    assert m["limits"] == {"per_role": 1}
+    assert m["role"] == "writer", "never the source's role"
+    assert r.meta(src)["task"]["label"] == "old task"
+    assert r.meta(src)["limits"] == {"total": 9}
+
+
+async def test_spawn_from_task_string_is_sent_as_first_message(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    out = await r.spawn_as("lead", role="writer", task="branch task", **{"from": frm(src, 5)})
+    cid = out["id"]
+    for _ in range(100):
+        if (cid, "branch task") in SENT:
+            break
+        await asyncio.sleep(0.02)
+    assert (cid, "branch task") in SENT, "the child never got its first message"
+
+
+async def test_spawn_from_passes_fork_refusals_through(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    for at, reason in ((99, "cuts_turn"), (98, "no_such_row")):
+        out = await r.spawn_as("lead", role="writer", **{"from": frm(src, at)})
+        assert out["reason"] == reason, out
+        assert out["at"] == at
+        assert out["hint"] == "a hint"
+        assert out["error"].startswith("fork:"), out
+        assert forks_of(kernel, src) == []
+        assert (await r.op({"type": "fleet"}))["roles"] == {}
+        assert (await r.count())["running"] == 0
+        assert src not in r.meta(r.reg).get("can_call", {}), "no leftover grant"
+        assert r.reg not in r.meta(src).get("callable_by", {})
+
+
+async def test_spawn_from_respects_limits_before_forking(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await r.op({"type": "set_limit", "role": "writer", "max": 1})
+    first = await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)})
+    assert "id" in first, first
+    out = await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)})
+    assert out["error"] == "limit", out
+    assert out["scope"] == "role"
+    assert len(forks_of(kernel, src)) == 1, "fork was not called again"
+
+
+async def test_spawn_from_requires_the_caller_to_hold_fork(kernel, tmp_path):
+    r, src = await fork_rig(
+        kernel, tmp_path, ["lead", "other"], [("writer.md", WRITER)]
+    )
+    # `other` loses what the rig gave it
+    kernel.ctx.edit_can_call("other", lambda m: m.pop(src, None) is not None)
+    out = await r.spawn_as("other", role="writer", **{"from": frm(src, 5)})
+    assert out["error"] == "not_allowed", out
+    assert "may not fork" in out["reason"], out
+    assert forks_of(kernel, src) == []
+    assert src not in r.meta(r.reg).get("can_call", {})
+    ok = await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)})
+    assert "id" in ok, ok
+
+
+async def test_spawn_from_gives_the_parent_pause_resume_stop(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    cid = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
+    assert r.meta("lead")["can_call"][cid] == ["pause", "resume", "stop"]
+    assert r.meta(cid)["callable_by"]["lead"] == ["pause", "resume", "stop"]
+
+
+async def test_spawn_from_counts_in_fleet_and_get_count_and_survives_restart(
+    kernel, tmp_path
+):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    cid = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
+    f = await r.op({"type": "fleet"})
+    assert f["roles"]["writer"] == [{"id": cid, "state": "running"}]
+    assert (await r.count("writer"))["running"] == 1
+    persist(kernel)
+    k2 = boot_root()
+    after = await send(k2, r.reg, {"type": "get_count", "role": "writer"})
+    assert after["running"] == 1, "rebuilt from the records"
+    gone = await send(kernel, "kernel_state", {"type": "delete_agent", "id": cid})
+    assert gone["deleted"] is True, gone
+    assert (await r.count("writer"))["running"] == 0
+
+
+async def test_spawn_from_counts_against_the_leads_subtree_quota(kernel, tmp_path):
+    r, src = await fork_rig(
+        kernel, tmp_path, ["boss"], [("writer.md", WRITER), ("sublead.md", SUBLEAD)]
+    )
+    sub = (await r.spawn_as("boss", role="sublead", limits={"total": 1}))["id"]
+    grant_fork(kernel, sub, src)
+    first = await r.spawn_as(sub, role="writer", **{"from": frm(src, 5)})
+    assert "id" in first, first
+    second = await r.spawn_as(sub, role="writer", **{"from": frm(src, 5)})
+    assert second["error"] == "limit", second
+    assert second["scope"] == "subtree_total", second
+    assert len(forks_of(kernel, src)) == 1
+
+
+async def test_spawn_from_bad_shape_refused(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    for bad_from in (
+        "x",
+        {"at": 1},
+        {"agent": src},
+        {"agent": src, "at": "1"},
+        {"agent": "", "at": 1},
+    ):
+        out = await r.spawn_as("lead", role="writer", **{"from": bad_from})
+        assert "from" in out["error"], (bad_from, out)
+        assert "{agent:str, at:int}" in out["error"]
+    assert forks_of(kernel, src) == []
+    plain = await r.spawn_as("lead", role="writer")
+    assert "id" in plain and "from" not in plain, plain
