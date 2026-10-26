@@ -15,6 +15,7 @@ that keeps working after the builder walks away".
 | `chat_users` (E38) | one AI is the bot of a multi-user chat server — events over several channels and accounts, including look-alike names, one person on two accounts and a spoofed identity |
 | `chat_memory` (E39) | the chat bot's long pre-written past folds at a small window (a fold per batch, then a fold of folds); live asks recall from it |
 | `self_managed_groups` (E124) | a master AI runs up to `MAX_GROUPS` worker groups (worker AI + editor + runner) from its prompt alone — creates, checks and deletes each; the harness builds no group. Scored on the bound, orphans, every suite green and the master's prompt staying bounded; run at 1 and 3 to compare walls |
+| `pause_resume` (E126) | FREE (no model, Python runtime): `pause` holds every message in order in the memory store, a kernel restart keeps the pause and the queue, `resume` releases the held messages in order after one resumed row, none lost or duplicated |
 
 **Wiring here includes granting authority.** The substrate is deny-all: creating
 an agent connects it to nothing, and a builder that only creates agents has built
