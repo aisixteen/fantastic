@@ -12,10 +12,18 @@ host's run file must then name a descendant of it.
    and its `url` answers HTTP 200.
 2. Within 60 s more, `alpha/.fantastic/cli/canvas.yaml` names a live pid whose
    `url` answers 200: the home agent ran the bundled `fantastic canvas`.
-3. The app stops. macOS and Linux: SIGTERM, the orderly quit, so the run file
+3. Linux only: within 60 s more the canvas PAGE loads inside the app's window
+   (the Home page frames every running canvas): `alpha/.fantastic/web/agents/
+   canvas/agent.yaml` appears with a non-empty `guid`, and a `fantastic send`
+   run in alpha to `<guid>|view_root` answers, not `unknown_agent`. WebKitGTK
+   once refused the canvas frame (only the home's port was admitted), so the
+   sidecar served but no page ever connected. WKWebView and WebView2 never
+   refused it and have no such regression to catch, so macOS and Windows skip
+   this step rather than add a flake.
+4. The app stops. macOS and Linux: SIGTERM, the orderly quit, so the run file
    must be gone within 20 s. Windows: TerminateProcess (`Stop-Process`'s), and the
    pid must be gone within 10 s.
-4. The canvas is still alive and answers; then it is stopped (SIGTERM, or
+5. The canvas is still alive and answers; then it is stopped (SIGTERM, or
    `taskkill /T /F` on Windows).
 
 Prints `SMOKE: PASS` or `SMOKE: FAIL: <why>` (exit 1). A failure also prints,
@@ -47,6 +55,10 @@ LINUX = sys.platform.startswith("linux")
 
 # 127.0.0.1 only: never through a proxy the environment names
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+# seconds the canvas page gets to connect
+PAGE_WAIT = 60
 
 
 class Fail(Exception):
@@ -219,6 +231,24 @@ def ws_call(port: int, target: str, payload: dict, timeout: float = 10) -> dict:
                 raise OSError("the socket closed")
 
 
+def sidecar_send(sidecar: Path, cwd: Path, target: str, payload: dict, env: dict) -> dict:
+    """`fantastic send` run in `cwd`: the reply as a dict, or {"error": <output tail>}."""
+    r = subprocess.run(
+        [str(sidecar), "send", json.dumps({"target": target, "payload": payload})],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    try:
+        got = json.loads(r.stdout)
+    except ValueError:
+        return {"error": (r.stdout + r.stderr)[-500:] or f"exit {r.returncode}, no output"}
+    return got if isinstance(got, dict) else {"error": f"not an object: {r.stdout[-500:]}"}
+
+
 def diagnose(home: Path, alpha: Path, app_exe: Path | None) -> None:
     """What a failed smoke prints while the app still runs."""
     print("--- the home's state for alpha ---", flush=True)
@@ -303,17 +333,46 @@ def smoke(root: Path, command: list[str], log: Path) -> None:
         until(f"the canvas {c['url']} answers 200", lambda: http_ok(c["url"]), 30)
         say(f"   canvas pid {c['pid']}, {c['url']}")
 
+        if LINUX:
+            say("3. the canvas page loads in the window and its view_root answers")
+            page_file = alpha / ".fantastic" / "web" / "agents" / "canvas" / "agent.yaml"
+
+            def page() -> dict | None:
+                g = flat_yaml(page_file)
+                return g if g and str(g.get("guid", "")) else None
+
+            guid = until(
+                f"the canvas page connects ({page_file}): the window never loaded the canvas frame", page, PAGE_WAIT
+            )["guid"]
+            if app_exe is None:
+                raise Fail("the app's executable is unknown, so the sidecar cannot be found")
+            sidecar = app_exe.parent / "fantastic"
+            last: dict = {}
+
+            def view_root() -> dict | None:
+                nonlocal last
+                last = sidecar_send(sidecar, alpha, f"{guid}|view_root", {"type": "reflect"}, env)
+                return last if "error" not in last and "unknown_agent" not in json.dumps(last) else None
+
+            try:
+                until("view_root answers", view_root, 30)
+            except Fail as e:
+                raise Fail(f"{e}; last reply {json.dumps(last)[:500]}") from None
+            say(f"   page guid {guid}, view_root answers")
+        else:
+            say("   (page check is Linux-only: skipped)")
+
         def app_gone() -> bool:
             if app_pid == launched.pid:
                 return launched.poll() is not None
             return not pid_alive(app_pid)
 
         if WINDOWS:
-            say("3. Stop-Process the app (TerminateProcess): gone within 10 s")
+            say("4. Stop-Process the app (TerminateProcess): gone within 10 s")
             subprocess.run(["taskkill", "/PID", str(app_pid), "/F"], check=True, capture_output=True)
             until("the app gone", app_gone, 10)
         else:
-            say("3. SIGTERM, the orderly quit: the app and its run file gone within 20 s")
+            say("4. SIGTERM, the orderly quit: the app and its run file gone within 20 s")
             os.kill(app_pid, signal.SIGTERM)
             until("the app gone", app_gone, 20)
             until("the run file removed", lambda: not run_file.exists(), 20)
@@ -323,7 +382,7 @@ def smoke(root: Path, command: list[str], log: Path) -> None:
             raise Fail(f"the launch command {command[0]} outlived the app by 20 s") from None
         say(f"   the launch command exited {code}")
 
-        say("4. the canvas outlives the app, then stops")
+        say("5. the canvas outlives the app, then stops")
         if not pid_alive(c["pid"]):
             raise Fail(f"the canvas {c['pid']} died with the app")
         if not http_ok(c["url"]):

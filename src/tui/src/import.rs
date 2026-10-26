@@ -75,15 +75,14 @@ pub fn item(a: &Args, approve: bool) -> Value {
     json!({"target": "user", "payload": payload})
 }
 
+/// Names from a list of strings, or from a map's values (the verb's `ids` is `{blueprint id: new id}`).
 fn names(v: &Value) -> String {
-    v.as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default()
+    let list: Vec<&str> = match v {
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+        Value::Object(m) => m.values().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    list.join(", ")
 }
 
 /// The verb's reply, as lines for a person.
@@ -170,11 +169,18 @@ fn die(code: i32, msg: impl std::fmt::Display) -> ! {
 
 /// Send one item, the verb's reply back (an error text when the call itself failed).
 fn send(rt: &tokio::runtime::Runtime, item: Value) -> Result<Value, String> {
-    let row = rt.block_on(crate::send::call(item))?;
-    if row.get("status").and_then(Value::as_str) != Some("completed") {
-        return Err(row.to_string());
+    reply_of(&rt.block_on(crate::send::call(item))?)
+}
+
+/// The verb's reply in a `send` row. A refusal (`{error, reason}`) comes back in a row marked
+/// `errored`: it is the verb's answer, rendered as `refused (reason): …`, not the call's failure.
+fn reply_of(row: &Value) -> Result<Value, String> {
+    let result = row.get("result").cloned();
+    match (row.get("status").and_then(Value::as_str), result) {
+        (Some("completed"), r) => Ok(r.unwrap_or(Value::Null)),
+        (Some("errored"), Some(r)) if r.get("error").is_some() => Ok(r),
+        _ => Err(row.to_string()),
     }
-    Ok(row.get("result").cloned().unwrap_or(Value::Null))
 }
 
 /// Entry point, called from `main` before any runtime exists.
@@ -334,5 +340,32 @@ mod tests {
             &json!({"imported": 2, "ids": ["a_1", "b_1"], "parent_id": "home", "ports": {}}),
         );
         assert!(s.contains("imported 2") && s.contains("a_1, b_1"), "{s}");
+    }
+
+    #[test]
+    fn render_imported_lists_the_new_ids_of_the_verbs_map() {
+        // the verb's reply holds `ids` as {blueprint id: new id}, not a list
+        let s = render(
+            &json!({"imported": 2, "ids": {"b": "b_1", "a": "a_1"}, "parent_id": "home", "ports": {}}),
+        );
+        assert!(
+            s.starts_with("imported 2: ") && s.contains("a_1") && s.contains("b_1"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn reply_of_keeps_a_refusal_the_kernel_marks_errored() {
+        // `fantastic send` marks a refused call `errored` with the verb's {error, reason} as its result
+        let row = json!({"pid": 1, "status": "errored", "result": {"error": "x: pass bind", "reason": "unbound_ports"}});
+        let r = reply_of(&row).unwrap();
+        assert_eq!(r["reason"], "unbound_ports");
+        assert!(render(&r).starts_with("refused (unbound_ports): "));
+        let ok = json!({"status": "completed", "result": {"imported": 1}});
+        assert_eq!(reply_of(&ok).unwrap()["imported"], 1);
+        // an errored row with no refusal in it, or any other status, stays the call's failure
+        assert!(reply_of(&json!({"status": "errored"})).is_err());
+        assert!(reply_of(&json!({"status": "errored", "result": {"note": 1}})).is_err());
+        assert!(reply_of(&json!({"status": "timeout"})).is_err());
     }
 }

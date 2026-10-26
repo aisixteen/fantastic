@@ -1,4 +1,4 @@
-"""E125 cabinets (#132) on the REAL host — a master opens 3 cabinets, the workers build and
+"""E134 cabinets (#132) on the REAL host — a master opens 3 cabinets, the workers build and
 talk, their status shows live on the main canvas, the master monitors and concludes:
 
   C1 OPEN       three `open_cabinet` calls in ONE turn: 3 cabinets, 3 canvases (children of the
@@ -107,17 +107,17 @@ class Script:
 
     # ── the master: one batch per marker ────────────────────────────────────
     def master(self, last: str) -> str:
-        if "E125-open" in last:
-            return "".join(call(MANAGER, "open_cabinet", task=f"E125 job {n}", name=n) for n in NAMES)
-        if "E125-place" in last:
+        if "E134-open" in last:
+            return "".join(call(MANAGER, "open_cabinet", task=f"E134 job {n}", name=n) for n in NAMES)
+        if "E134-place" in last:
             return "".join(call(self.view, "place", backend_id=f"cabinet_{n}", x=80 + 330 * i, y=420, width=320, height=240) for i, n in enumerate(NAMES))
-        if "E125-go" in last:
-            return "".join(call(f"cabinet_{n}_worker", "send", text=f"E125-task {n}") for n in NAMES)
-        if "E125-cabinets" in last:
+        if "E134-go" in last:
+            return "".join(call(f"cabinet_{n}_worker", "send", text=f"E134-task {n}") for n in NAMES)
+        if "E134-cabinets" in last:
             return call(MANAGER, "cabinets")
-        if "E125-retask" in last:
-            return call("cabinet_alpha_worker", "send", text="E125-new alpha task: count to three") + call("cabinet_beta_worker", "stop")
-        if "E125-conclude" in last:
+        if "E134-retask" in last:
+            return call("cabinet_alpha_worker", "send", text="E134-new alpha task: count to three") + call("cabinet_beta_worker", "stop")
+        if "E134-conclude" in last:
             return call(MANAGER, "conclude")
         self.results.setdefault("master", []).append(last)
         return DONE
@@ -126,23 +126,23 @@ class Script:
     def worker(self, who: str, last: str) -> str:
         n = who.split("_", 1)[1]
         canvas, run = f"canvas_{who}", f"{n}_run"
-        if "E125-task" in last:  # report, then build equipment on ITS canvas
+        if "E134-task" in last:  # report, then build equipment on ITS canvas
             return (call(who, "status", line="working", progress=30)
-                    + call(canvas, "create", record={"handler_module": "exec_bridge.tools", "id": run, "allowed": ["^echo E125-.*$"], "cwd": ".", "inherit_env": ["*"], "ingress_rule": "allow_all_ingress"}))
-        if "E125-talk" in last:  # alpha pings beta
-            return call("cabinet_beta_worker", "send", text="E125 PING from alpha")
-        if "E125 PING from alpha" in last:  # the peer reports what it heard
+                    + call(canvas, "create", record={"handler_module": "exec_bridge.tools", "id": run, "allowed": ["^echo E134-.*$"], "cwd": ".", "inherit_env": ["*"], "ingress_rule": "allow_all_ingress"}))
+        if "E134-talk" in last:  # alpha pings beta
+            return call("cabinet_beta_worker", "send", text="E134 PING from alpha")
+        if "E134 PING from alpha" in last:  # the peer reports what it heard
             return call(who, "status", line="got ping from alpha", progress=50)
-        if "E125-run" in last:  # run the equipment; beta also reaches for alpha's
-            out = call(run, "start", command="echo", args=[f"E125-{n}"]) + call(canvas, "place", backend_id=run)
-            return out + (call("alpha_run", "start", command="echo", args=["E125-FROM-BETA"]) if n == "beta" else "")
-        if "E125-tail" in last:
+        if "E134-run" in last:  # run the equipment; beta also reaches for alpha's
+            out = call(run, "start", command="echo", args=[f"E134-{n}"]) + call(canvas, "place", backend_id=run)
+            return out + (call("alpha_run", "start", command="echo", args=["E134-FROM-BETA"]) if n == "beta" else "")
+        if "E134-tail" in last:
             return call(run, "tail", job_id=self.job.get(who, "0"), lines=5)
-        if "E125-finish" in last:
-            return call(who, "status", line="done", progress=100, result={"cabinet": n, "answer": f"E125-result-{n}"})
-        if "E125-new alpha task" in last:  # the re-task shows in the cell
+        if "E134-finish" in last:
+            return call(who, "status", line="done", progress=100, result={"cabinet": n, "answer": f"E134-result-{n}"})
+        if "E134-new alpha task" in last:  # the re-task shows in the cell
             return call(who, "status", line="retasked: count to three", progress=10)
-        if "E125-hang" in last:
+        if "E134-hang" in last:
             return "HANG"
         m = re.search(r"<job_id>(\d+)</job_id>", last)
         if m:
@@ -250,7 +250,7 @@ def main() -> bool:
                 assert not got.get("error"), got
                 script.view = f"{rig.page_guid()}|view_root"
                 # the MASTER: an AI cell, as a person opens one
-                await spot(pg, 300, 200, "E125-hello")
+                await spot(pg, 300, 200, "E134-hello")
                 await pg.until("document.querySelectorAll('.chat-view').length === 1", 15)
                 until(lambda: any(x.get("backend_id") for x in rig.cells()), 15)
                 master = next(x["backend_id"] for x in rig.cells() if x.get("backend_id"))
@@ -258,7 +258,7 @@ def main() -> bool:
                 # the AI is made and settled before it works (its cell, its grants, its first turn)
                 until(lambda: script.results.get("master"), 20)
                 await asyncio.sleep(2)
-                await master_says(master, "E125-open the cabinets")
+                await master_says(master, "E134-open the cabinets")
                 workers = [f"cabinet_{n}_worker" for n in NAMES]
                 cabs = [f"cabinet_{n}" for n in NAMES]
                 canvases = [f"canvas_{c}" for c in cabs]
@@ -306,7 +306,7 @@ def main() -> bool:
                 urec = rec("user")
                 info["C1_user_reaches"] = {w: [w in (urec.get("can_call") or {}), "user" in (rec(w).get("callable_by") or {}), "kernel" in (rec(w).get("can_call") or {})] for w in workers}
                 # the master: places the three status cells on the main canvas
-                await master_says(master, "E125-place the cells")
+                await master_says(master, "E134-place the cells")
                 ok = await pg.until("document.querySelectorAll('.agent-frame iframe').length >= 3", 20)
                 until(lambda: len(re.findall(r"<placed>", " ".join(script.results.get("master", [])))) >= 1, 15)
                 placed = re.findall(r"<placed>(\w+)</placed>\s*<shows>(\w+)</shows>", " ".join(script.results.get("master", [])))
@@ -334,11 +334,11 @@ def main() -> bool:
                         if v and v.get("id"):
                             out[v["id"]] = v["h"] or []
                     return out
-                await pg.js("window.__e125_marker = 'still here'; window.__e125_navs = performance.getEntriesByType('navigation').length")
+                await pg.js("window.__e134_marker = 'still here'; window.__e134_navs = performance.getEntriesByType('navigation').length")
                 views0 = sum(1 for ln in rig.log.read_text(errors="replace").splitlines() if re.search(r"\] cabinet_\w+ call view$", ln))
 
                 # ── C2 equipment ───────────────────────────────────────────────
-                await master_says(master, "E125-go")
+                await master_says(master, "E134-go")
                 runs = [f"{n}_run" for n in NAMES]
                 made = until(lambda: all(rec(x) for x in runs), 30)
                 info["C2_equipment_parents"] = {x: rec(x).get("parent_id") for x in runs}
@@ -351,31 +351,31 @@ def main() -> bool:
                     await grant_equipment(n)
                     info.setdefault("reach_after_grant", {})[n] = {w: reach_of(w) for w in workers}
                 for w in workers:
-                    await human(w, {"type": "send", "text": "E125-run"})
+                    await human(w, {"type": "send", "text": "E134-run"})
                 until(lambda: all(any("job_id" in t or "may not call" in t for t in script.results.get(c, [])) for c in cabs), 30)
                 for w in workers:
-                    await human(w, {"type": "send", "text": "E125-tail"})
-                until(lambda: all(any(f"E125-{n}" in t for t in script.results.get(f"cabinet_{n}", [])) for n in NAMES), 30)
+                    await human(w, {"type": "send", "text": "E134-tail"})
+                until(lambda: all(any(f"E134-{n}" in t for t in script.results.get(f"cabinet_{n}", [])) for n in NAMES), 30)
                 res_a = " ".join(script.results.get("cabinet_alpha", []))
                 res_b = " ".join(script.results.get("cabinet_beta", []))
                 res_g = " ".join(script.results.get("cabinet_gamma", []))
                 info["C2_beta_results"] = res_b[-700:]
                 info["C2_alpha_place_on_its_canvas"] = res_a[res_a.find("canvas_cabinet_alpha place"):][:300]
                 r["C2 a worker runs its own equipment and reads its output (echo marker per cabinet)"] = (
-                    "E125-alpha" in res_a and "E125-beta" in res_b and "E125-gamma" in res_g)
+                    "E134-alpha" in res_a and "E134-beta" in res_b and "E134-gamma" in res_g)
                 r["C2 another cabinet's equipment is refused (beta on alpha_run), and ran nothing"] = (
-                    "may not call 'start' on alpha_run" in res_b and "E125-FROM-BETA" not in res_a)
+                    "may not call 'start' on alpha_run" in res_b and "E134-FROM-BETA" not in res_a)
 
                 # ── C3 talk ────────────────────────────────────────────────────
-                await human("cabinet_alpha_worker", {"type": "send", "text": "E125-talk"})
-                heard = until(lambda: any("E125 PING from alpha" in t for t in worker_turns("cabinet_beta")), 20)
+                await human("cabinet_alpha_worker", {"type": "send", "text": "E134-talk"})
+                heard = until(lambda: any("E134 PING from alpha" in t for t in worker_turns("cabinet_beta")), 20)
                 said = until(lambda: "got ping" in ((rec("cabinet_beta").get("status") or {}).get("line") or ""), 20)
                 r["C3 the peer received the ping text"] = heard
                 r["C3 the peer reported it up to its cabinet"] = said
 
                 # ── C4 status up ───────────────────────────────────────────────
                 for w in workers:
-                    await human(w, {"type": "send", "text": "E125-finish"})
+                    await human(w, {"type": "send", "text": "E134-finish"})
                 until(lambda: all((rec(c).get("status") or {}).get("line") == "done" for c in cabs), 30)
                 await asyncio.sleep(1.5)
                 hist = await lines()
@@ -386,7 +386,7 @@ def main() -> bool:
                     h = hist.get(c) or []
                     order &= "working" in h and "done" in h and h.index("working") < h.index("done")
                 r["C4 each status cell shows 'working' and then 'done' as they are reported"] = bool(hist) and order
-                alive = await pg.js("[window.__e125_marker, performance.getEntriesByType('navigation').length === window.__e125_navs]")
+                alive = await pg.js("[window.__e134_marker, performance.getEntriesByType('navigation').length === window.__e134_navs]")
                 r["C4 ...with no reload of the page"] = alive == ["still here", True]
                 views1 = sum(1 for ln in rig.log.read_text(errors="replace").splitlines() if re.search(r"\] cabinet_\w+ call view$", ln))
                 statuses = sum(1 for ln in rig.log.read_text(errors="replace").splitlines() if re.search(r"\] cabinet_\w+ call status$", ln))
@@ -395,17 +395,17 @@ def main() -> bool:
 
                 # ── C5 monitor ─────────────────────────────────────────────────
                 # a send answers when the turn ends: the hung turn is sent and left running
-                hang = asyncio.ensure_future(human("cabinet_beta_worker", {"type": "send", "text": "E125-hang"}))
+                hang = asyncio.ensure_future(human("cabinet_beta_worker", {"type": "send", "text": "E134-hang"}))
                 hang.add_done_callback(lambda f: f.cancelled() or f.exception())
                 hung = False
                 for _ in range(60):  # (async: the sent turn runs on this loop)
-                    if any("E125-hang" in t for t in worker_turns("cabinet_beta")):
+                    if any("E134-hang" in t for t in worker_turns("cabinet_beta")):
                         hung = True
                         break
                     await asyncio.sleep(0.25)
-                await master_says(master, "E125-cabinets list")
-                await master_says(master, "E125-retask")
-                got_new = until(lambda: any("E125-new alpha task" in t for t in worker_turns("cabinet_alpha")), 20)
+                await master_says(master, "E134-cabinets list")
+                await master_says(master, "E134-retask")
+                got_new = until(lambda: any("E134-new alpha task" in t for t in worker_turns("cabinet_alpha")), 20)
                 r["C5 the re-tasked worker got the new task text"] = got_new
                 live_new = False
                 for _ in range(60):
@@ -426,10 +426,10 @@ def main() -> bool:
                 shown = " ".join(script.results.get("master", []))
                 info["C5_master_cabinets"] = shown[-900:]
                 r["C5 the master's cabinets reply lists the same lines and canvases"] = (
-                    all(c in shown for c in cabs) and all(cv in shown for cv in canvases) and "E125-result-alpha" in shown)
+                    all(c in shown for c in cabs) and all(cv in shown for cv in canvases) and "E134-result-alpha" in shown)
 
                 # ── C6 conclude ────────────────────────────────────────────────
-                await master_says(master, "E125-conclude")
+                await master_says(master, "E134-conclude")
                 dead = [*cabs, *workers, *canvases, *runs, *(f"{c}_loader" for c in canvases)]
                 gone = until(lambda: not [p for d in dead for p in on_disk(d)], 30)
                 await asyncio.sleep(1.0)

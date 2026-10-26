@@ -37,8 +37,11 @@ export function importCall(path: string, parentId: string, o: ImportOpts = {}): 
   };
 }
 
-const idsOf = (v: unknown): string =>
-  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").join(", ") : "";
+/** Names from a list of strings, or a map's values (the verb's reply holds `ids` as `{blueprint id: new id}`). */
+const idsOf = (v: unknown): string => {
+  const list = Array.isArray(v) ? v : v !== null && typeof v === "object" ? Object.values(v) : [];
+  return list.filter((x): x is string => typeof x === "string").join(", ");
+};
 
 /** The lines of an `approval_required` reply: the new ids, what each reaches, the ports, the code, the hint. */
 export function previewLines(reply: Rec): string[] {

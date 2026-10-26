@@ -1,4 +1,4 @@
-# E125 `cabinets` — a master opens 3 cabinets, the workers build and talk, the master concludes
+# E134 `cabinets` — a master opens 3 cabinets, the workers build and talk, the master concludes
 
 #136, the end-to-end of #132 on the REAL host (the canvas tree, the reach, the page). Free: the vLLM mock
 from `e2e/mocks` (no model); the master and the three workers share ONE mock and are scripted by their
