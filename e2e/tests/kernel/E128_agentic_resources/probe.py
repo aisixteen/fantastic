@@ -29,6 +29,18 @@ SCRIPT 2 (extended) — the top lead `L0`, a `project_lead`:
   Checks: every task line and result in the registry and in `reflect tree=all`, the
   top result carries both parts, the counts drop as agents finish (finished ones free
   their slot), and EVERY agent is still there at the end: nothing was cleaned up.
+
+SCRIPT 3 (from a fork point, #424) — a source agent `SRC` (a `vllm_backend` agent with
+a memory store; the test gives it two finished turns, then `mark`s it) and a lead `L2`
+(created by the test, holding `fork` on `SRC`):
+  1. `spawn role=worker name=W2 from:{agent:SRC, at:<the mark's at>}` creates an agent;
+  2. a second `spawn ... from.at=<the first row of a turn>` is refused `cuts_turn`
+     (fork's own refusal passes through) and creates nothing.
+  Checks (registry, records, history): the reply carries `from` and `copied`; W2 has
+  role worker, the card's directive as its system prompt, `spawned_by` the registry and
+  the SAME `memory_store_id` as SRC; it sits beside SRC (same parent); it holds SRC's
+  rows up to `at` with the same ids and none after; the refused spawn left no agent;
+  `fleet` lists W2 under its role. NOT part of any CI run: coded, run by hand.
 """
 
 from __future__ import annotations
@@ -54,7 +66,8 @@ REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 AR = "agentic"
 MODEL = "mock-scripted"
-KEY = re.compile(r"\b(L0|L1|SA|SB|WA|WB):")
+KEY = re.compile(r"\b(L0|L1|L2|SA|SB|SRC|WA|WB):")
+SRC, L2 = "src_agent", "lead_two"
 
 WRITER = ("---\nname: writer\npurpose: Writes the first draft of a text.\ntier: fast\n"
           "grants:\n  $registry: [report]\n---\nYou write clearly and briefly.\n")
@@ -89,7 +102,7 @@ def main() -> int:
     roles_dir.mkdir()
     (roles_dir / "writer.md").write_text(WRITER)
     (roles_dir / "worker.md").write_text(WORKER)
-    hk = HostKernel(spec, work, reach=[AR])
+    hk = HostKernel(spec, work, reach=[AR, SRC, L2])
     hk.env["FANTASTIC_AGENTIC_RESOURCES"] = "1"
     hk.boot()
     root = hk.root_id
@@ -175,7 +188,14 @@ def main() -> int:
                sb_report, DONE],
         "WA": [wa_report, DONE],
         "WB": [call("report", state="done", result="leaf b ok"), DONE],
+        "SRC": [],
+        "L2": [lambda: call("spawn", role="worker", name="W2",
+                            **{"from": {"agent": SRC, "at": mark_at["at"]}}),
+               lambda: call("spawn", role="worker", name="W3",
+                            **{"from": {"agent": SRC, "at": mark_at["cut"]}}),
+               DONE],
     }
+    mark_at: dict = {}
 
     def responder(req: dict):
         msgs = req.get("messages") or []
@@ -294,6 +314,78 @@ def main() -> int:
         need(hk.send(AR, {"type": "get_count"}) == {"running": 2, "max": None},
              "get_count counts the two running writers only (finished agents free slots)")
         need(all(a in records() for a in every), "no record was removed")
+
+        # ── script 3: spawn from a fork point ────────────────────────────────
+        def cb_of(aid: str) -> dict:
+            return dict((records().get(aid) or {}).get("callable_by") or {})
+
+        def settled(*ids: str, bound: float = 90) -> bool:
+            end = time.monotonic() + bound
+            while time.monotonic() < end:
+                tasks = hk.send("kernel", {"type": "ps"}).get("tasks") or []
+                if not any(t.get("agent") in ids for t in tasks):
+                    return True
+                time.sleep(0.1)
+            return False
+
+        for who in ("memory",):
+            hk.send(root, {"type": "update_agent", "id": who,
+                           "callable_by": {**cb_of(who), SRC: "*", L2: "*"}})
+        hk.send(root, {"type": "update_agent", "id": AR,
+                       "callable_by": {**cb_of(AR), L2: "*"}})
+        common = {k: v for k, v in tier.items() if k != "handler_module"}
+        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=SRC,
+                        **common, can_call={"$self": "*", "memory": "*"},
+                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+        need(rec.get("id") == SRC, f"create the source agent: {str(rec)[:200]}")
+        rec = hk.create(parent_id="rest", handler_module="vllm_backend.tools", id=L2,
+                        **common, can_call={"$self": "*", "memory": "*", AR: "*",
+                                            SRC: ["fork"]},
+                        callable_by={"$self": "*", "$parent": "*", "rest": "*"})
+        need(rec.get("id") == L2, f"create the lead L2: {str(rec)[:200]}")
+        for n in (1, 2):
+            out = hk.send(SRC, {"type": "send", "text": f"SRC: step {n}"})
+            need(not out.get("error"), f"SRC takes turn {n}: {str(out)[:120]}")
+        need(settled(SRC), "SRC is idle after its two turns")
+        marked = hk.send(SRC, {"type": "mark", "label": "two steps done"})
+        at = marked.get("at")
+        need(isinstance(at, int), f"SRC marks its history: {marked}")
+        mark_at["at"] = at
+        hist = hk.send(SRC, {"type": "history"}).get("rows") or []
+        first_user = next((r["id"] for r in hist if r.get("role") == "user"), None)
+        need(first_user is not None and first_user <= at, f"a turn's first row exists: {hist[:2]}")
+        mark_at["cut"] = first_user
+        want_ids = [r["id"] for r in hist if r.get("id") is not None and r["id"] <= at]
+        before = set(records())
+
+        out = hk.send(L2, {"type": "send", "text": "L2: branch a worker from SRC's mark"})
+        need(not out.get("error"), f"L2 runs: {str(out)[:120]}")
+        need(until(lambda: spent("L2")) and settled(L2, SRC), "L2's script runs to its end")
+        l2 = (seen.get("L2") or []) + [""] * 3
+        need("<id>" in l2[1] and "<role>worker</role>" in l2[1] and "<copied>" in l2[1]
+             and "<from>" in l2[1], f"1 · the spawn from the mark answers: {l2[1][:240]!r}")
+        need("<reason>cuts_turn</reason>" in l2[2],
+             f"2 · an `at` inside a turn is refused cuts_turn: {l2[2][:240]!r}")
+        w2 = named("W2")
+        need(w2 is not None and named("W3") is None, "W2 exists; the refused spawn made nothing")
+        need(set(records()) - before == {w2},
+             f"nothing else appeared: {sorted(set(records()) - before)}")
+        recs = records()
+        w, s_rec = recs.get(w2) or {}, recs.get(SRC) or {}
+        need(w.get("role") == "worker" and w.get("spawned_by") == AR
+             and w.get("system_prompt") == "You do one piece and report it.",
+             f"W2 carries the role card: {str(w)[:300]}")
+        need(w.get("memory_store_id") == s_rec.get("memory_store_id") == "memory",
+             "W2 keeps SRC's memory store")
+        need(w.get("parent_id") == s_rec.get("parent_id"),
+             "W2 sits beside SRC (fork's placement)")
+        need(w2 in fleet() and fleet()[w2]["role"] == "worker", "fleet lists W2 under worker")
+        hk.send(root, {"type": "update_agent", "id": w2,
+                       "callable_by": {**cb_of(w2), "rest": "*"}})
+        got = [r["id"] for r in hk.send(w2, {"type": "history"}).get("rows") or []
+               if r.get("id") is not None]
+        need(got == want_ids and len(got) > 0,
+             f"W2 holds SRC's rows up to the mark, same ids: {got} vs {want_ids}")
     finally:
         hk.close()
         m.stop()
