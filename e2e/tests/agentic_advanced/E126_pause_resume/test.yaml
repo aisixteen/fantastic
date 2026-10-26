@@ -1,0 +1,10 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a stub provider answers (free tier,
+# although this lives in the advanced group: it proves a structure that outlives a restart).
+id: pause_resume
+group: agentic_advanced
+title: "pause holds every message in order in the memory store, a kernel restart keeps the pause and the queue, resume releases them in order after one resumed row (Python runtime)"
+runner: probe.py
+runtimes: [python]
+costs: free
+limits:
+  idle_seconds: 90

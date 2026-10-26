@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow. NO MODEL: a stub provider answers the live turns.
+id: context_fold
+group: memory
+title: "context_fold on a live agent (Python runtime) keeps the rows before the range byte-identical: stored rows, the next prompt, a refused range, a kernel restart"
+runner: probe.py
+runtimes: [python]
+costs: free
+limits:
+  idle_seconds: 60
