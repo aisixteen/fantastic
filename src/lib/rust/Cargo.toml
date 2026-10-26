@@ -20,6 +20,7 @@ members = [
     "crates/bundles/fantastic-mcp-client",
     "crates/bundles/fantastic-credential-store",
     "crates/bundles/fantastic-static-loader",
+    "crates/bundles/fantastic-agentic-resources",
     "crates/bundles/fantastic-scheduler",
     "crates/bundles/fantastic-cabinet",
     "crates/bundles/fantastic-ai-core",

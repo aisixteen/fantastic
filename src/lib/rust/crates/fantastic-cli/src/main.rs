@@ -97,6 +97,13 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register("web_ws.tools", fantastic_web_ws::WebWsBundle);
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);
     reg.register("scheduler.tools", fantastic_scheduler::SchedulerBundle);
+    // OFF BY DEFAULT: the roles registry loads only when the host turns it on.
+    fantastic_agentic_resources::register_if_enabled(
+        &mut reg,
+        std::env::var(fantastic_agentic_resources::ENABLE_ENV)
+            .ok()
+            .as_deref(),
+    );
     reg.register(
         fantastic_cabinet::HANDLER_MODULE,
         fantastic_cabinet::CabinetBundle,

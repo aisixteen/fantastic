@@ -20,6 +20,7 @@ fantastic-credential-store = { path = "../bundles/fantastic-credential-store" }
 fantastic-web = { path = "../bundles/fantastic-web" }
 fantastic-web-ws = { path = "../bundles/fantastic-web-ws" }
 fantastic-web-rest = { path = "../bundles/fantastic-web-rest" }
+fantastic-agentic-resources = { path = "../bundles/fantastic-agentic-resources" }
 fantastic-scheduler = { path = "../bundles/fantastic-scheduler" }
 # A master AI opens cabinets: subcanvases, each with one worker AI.
 fantastic-cabinet = { path = "../bundles/fantastic-cabinet" }

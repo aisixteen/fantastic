@@ -87,7 +87,7 @@ pub fn mint_guid() -> String {
 /// anything else is refused here, so a record can never carry a grant the gate
 /// would have to guess on. Ported from python: a silently-dead grant is the
 /// wrong answer — refuse loud.
-pub(crate) fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
+pub fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
     for field in ["can_call", "callable_by"] {
         let Some(g) = meta.get(field) else { continue };
         let Some(map) = g.as_object() else {

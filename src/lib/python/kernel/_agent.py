@@ -101,6 +101,7 @@ from kernel._kernel import (
 from kernel._bundles import (
     _find_bundle_module,
     _in_catalog,
+    bundle_enabled,
     bundle_package,
     folder_rows,
     import_handler,
@@ -1625,6 +1626,11 @@ class Agent:
         for k in self._PURPOSE_KEYS:
             if raw.get(k) is not None:
                 node[k] = raw[k]
+        # A TASK LINE is state the agent was given (`agentic_resources` `spawn` /
+        # `report`), not a purpose its bundle states: the tree reads it off the record,
+        # so a lead sees its subtree's plan and progress in one `reflect tree=all`.
+        if a._meta.get("task") is not None:
+            node["task"] = a._meta["task"]
         node["children"] = [
             _docs.pruned_stub(c) if c.id in ignore else await self._roster(c, ignore)
             for c in a._children.values()
@@ -1798,6 +1804,8 @@ class Agent:
         cheap `bundles=ids` listing never does it."""
         out = []
         for ep in entry_points(group=BUNDLE_ENTRY_GROUP):
+            if not bundle_enabled(ep.value):
+                continue
             entry = {"name": ep.name, "handler_module": ep.value}
             if schemas:
                 sch = getattr(importlib.import_module(ep.value), "RECORD_SCHEMA", None)

@@ -13,6 +13,7 @@ parent=kernel_state)`); the substrate never instantiates a bundle by name.
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from importlib.metadata import entry_points
 from types import ModuleType
@@ -34,6 +35,21 @@ _MISSING: set[str] = set()
 #: lists — a refused folder too, with its `error`, never loaded.
 _FOLDER: dict[str, ModuleType] = {}
 _FOLDER_ROWS: dict[str, dict] = {}
+
+
+#: Bundles that load ONLY when the host turns them on: handler module -> the
+#: environment variable that does. Off, the module is not in the catalog (a create
+#: of it is an unknown handler, as on a rust host that did not register it).
+_GATED: dict[str, str] = {"agentic_resources.tools": "FANTASTIC_AGENTIC_RESOURCES"}
+
+
+def bundle_enabled(handler_module: str) -> bool:
+    """Is this bundle on? Every bundle is, except a gated one whose environment
+    variable is not truthy (`1`, `true`, `yes`, `on`)."""
+    var = _GATED.get(handler_module)
+    if var is None:
+        return True
+    return os.environ.get(var, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def register_unlisted(handler_module: str, module: ModuleType) -> None:
@@ -104,6 +120,8 @@ def import_handler(handler_module: str) -> ModuleType:
 
 def _in_catalog(handler_module: str) -> bool:
     """Does the `fantastic.bundles` catalog name `handler_module`?"""
+    if not bundle_enabled(handler_module):
+        return False
     if handler_module not in _CATALOG:
         if handler_module not in _MISSING:
             _CATALOG.update(ep.value for ep in entry_points(group=BUNDLE_ENTRY_GROUP))
