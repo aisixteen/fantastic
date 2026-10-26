@@ -39,6 +39,10 @@ pub(super) fn is_kernel_verb(verb: &str) -> bool {
             | "kernel_start"
             | "shutdown_agents"
             | "kernel_stop"
+            // WAITING for a set of agents — one wake for N reports (a message of
+            // `type: "report"` from each named agent). Caller-scoped.
+            | "await_set"
+            | "await_cancel"
             // HOW TO CALL an agent — its bundle's verb docs. Answered by the
             // root and gated like every kernel verb (`gate`).
             | "docs"
@@ -100,6 +104,19 @@ pub fn kernel_verb_docs() -> Value {
     text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` \
     for a verb you are about to use. Gated like every kernel verb: a `can_call` grant \
     of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}.",
+        "await_set": "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of \
+    seconds), label:str?. Waits for EVERY named agent to send YOU a message of \
+    type 'report' (its `state` and `result`); a report from a named agent is HELD \
+    for the one combined message, not delivered as its own turn. Returns at once \
+    {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, \
+    label, done:[{id, state, result}], missing:[ids], timed_out} — when all have \
+    reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that \
+    names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a \
+    non-string `label`. The wait is a row: it survives a restart.",
+        "await_cancel": "args: wait_id:int (req). Drops YOUR wait; the reports it held are then \
+    delivered one by one, each as its own message. Returns {cancelled:bool, \
+    wait_id, released:int}. A wait that is unknown or not yours ⇒ \
+    {cancelled:false}.",
     })
 }
 
@@ -176,6 +193,12 @@ pub(super) async fn handle_kernel_verb(
             json!({ "executions": rows, "next": next })
         }
         "ack_deadletter" => ack_deadletter(kernel, payload).await?,
+        "await_set" => {
+            crate::await_set::await_set(kernel, crate::send::current_origin(), payload).await
+        }
+        "await_cancel" => {
+            crate::await_set::await_cancel(kernel, crate::send::current_origin(), payload).await
+        }
         // The live TASK TABLE, kernel-wide (like `list_agents`), not per-agent:
         // one row per in-flight dispatch, `parent` chaining them into the send
         // tree. `ps` shows its own row too — it IS a dispatch. The table is honest.

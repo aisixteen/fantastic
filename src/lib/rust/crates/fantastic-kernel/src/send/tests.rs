@@ -1686,7 +1686,7 @@ async fn a_literal_dotted_key_summarizes_at_that_key() {
 
 /// python `_SYSTEM_VERB_DOCS`, in declaration order, verbatim
 /// (`P/kernel/_agent.py`).
-const PY_KERNEL_VERB_DOCS: [(&str, &str); 12] = [
+const PY_KERNEL_VERB_DOCS: [(&str, &str); 14] = [
     ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta. Creates a CHILD OF `parent_id` — any agent you name (your own id grows your own subtree); 'kernel_state' for top-level. No default parent."),
     ("update_agent", "args: id:str, **meta. EVERY FIELD YOU NAME IS REPLACED, NOT MERGED (a field you do not name is untouched), so a dict field must be sent WHOLE — `can_call`/`callable_by` included: restate every key you want to keep, the baseline `$self` among them, or the keys you omit are GONE. Granting one edge reads like a PATCH and behaves like a PUT. Whoever holds update_agent on the root updates any agent, itself included."),
     ("delete_agent", "args: id:str. CASCADES — deletes that agent AND ITS WHOLE SUBTREE, deepest first; refuses if any descendant carries `delete_lock`. Whoever holds delete_agent on the root deletes any agent."),
@@ -1699,10 +1699,12 @@ const PY_KERNEL_VERB_DOCS: [(&str, &str); 12] = [
     ("shutdown_agents", "No args. Stops the AGENTS, not the process: drains (new roots refused), sends `shutdown` to every agent advertising it, waits for in-flight work, cancels the rest. Returns {drained, shut:[ids], cancelled:[ids]}."),
     ("kernel_stop", "No args. Stops the kernel PROCESS gracefully — drain, every call settles (done, or cancelled into the dead letters), the last rows flush, agents shut down, exit. Under env:'container', the container."),
     ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?. HOW TO CALL an agent — its bundle's verbs: `oneliners` (default) is one signature line per verb, `detailed` the full text (no `verb`: plus emits, cancel and notes). Pull once per bundle; `detailed` for a verb you are about to use. Gated like every kernel verb: a `can_call` grant of `docs` on the root. Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."),
+    ("await_set", "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of seconds), label:str?. Waits for EVERY named agent to send YOU a message of type 'report' (its `state` and `result`); a report from a named agent is HELD for the one combined message, not delivered as its own turn. Returns at once {wait_id, label, ids, timeout_s}; later ONE message reaches you — {wait_id, label, done:[{id, state, result}], missing:[ids], timed_out} — when all have reported or `timeout_s` passes. Refuses a missing or empty `ids`, an id that names no agent (unknown_agent), yourself, a non-positive `timeout_s` and a non-string `label`. The wait is a row: it survives a restart."),
+    ("await_cancel", "args: wait_id:int (req). Drops YOUR wait; the reports it held are then delivered one by one, each as its own message. Returns {cancelled:bool, wait_id, released:int}. A wait that is unknown or not yours ⇒ {cancelled:false}."),
 ];
 
 /// python `kernel/_docs.signature` of each `_SYSTEM_VERB_DOCS` entry.
-const PY_SIGNATURES: [(&str, &str); 12] = [
+const PY_SIGNATURES: [(&str, &str); 14] = [
     ("create_agent", "args: handler_module:str, parent_id:str REQUIRED, id:str?, **meta"),
     ("update_agent", "args: id:str, **meta"),
     ("delete_agent", "args: id:str"),
@@ -1715,6 +1717,8 @@ const PY_SIGNATURES: [(&str, &str); 12] = [
     ("shutdown_agents", "No args"),
     ("kernel_stop", "No args"),
     ("docs", "args: of:str (req — an agent id (`<guid>|<agent id>` on a connected kernel), a bundle, or 'kernel'), tier:'oneliners'|'detailed'?, verb:str?"),
+    ("await_set", "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive number of seconds), label:str?"),
+    ("await_cancel", "args: wait_id:int (req)"),
 ];
 
 #[test]
