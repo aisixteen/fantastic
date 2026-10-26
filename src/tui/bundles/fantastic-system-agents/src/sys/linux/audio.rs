@@ -146,6 +146,29 @@ pub(crate) fn drain_json(buf: &mut Vec<u8>) -> Vec<Value> {
     out
 }
 
+/// Starts `program --monitor`. A program another process still holds open for
+/// writing (ETXTBSY, which a fork racing a fresh install can cause) is tried
+/// again for a moment; any other error gives up.
+async fn spawn_monitor(path: &Path) -> Option<tokio::process::Child> {
+    for _ in 0..50 {
+        match Command::new(path)
+            .arg("--monitor")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(child) => return Some(child),
+            Err(e) if e.raw_os_error() == Some(26) => {
+                tokio::time::sleep(Duration::from_millis(100)).await
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// `pw-dump --monitor`, each array a [`Event::Delta`], until the receiver is
 /// dropped; a child that ends is started again after [`RESTART`]. A missing
 /// program ends it.
@@ -154,14 +177,7 @@ async fn monitor(program: PathBuf, tx: mpsc::Sender<Event>) {
         let Some(path) = find_program(&program) else {
             return;
         };
-        let Ok(mut child) = Command::new(&path)
-            .arg("--monitor")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-        else {
+        let Some(mut child) = spawn_monitor(&path).await else {
             return;
         };
         let Some(mut out) = child.stdout.take() else {
@@ -247,6 +263,28 @@ mod tests {
         // a bare name is looked up in $PATH: `sh` is everywhere, this name nowhere
         assert!(find_program(Path::new("sh")).is_some());
         assert_eq!(find_program(Path::new("fc-no-such-program-x55")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_program_busy_for_writing_is_spawned_once_it_is_free() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fc-audio-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pw-dump");
+        std::fs::write(&file, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // open for writing: exec of it fails with ETXTBSY until this is dropped
+        let held = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        let freed = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        });
+        assert!(spawn_monitor(&file).await.is_some(), "retried past ETXTBSY");
+        freed.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
