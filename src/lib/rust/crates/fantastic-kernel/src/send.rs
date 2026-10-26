@@ -71,9 +71,11 @@ pub fn current_sender() -> Option<AgentId> {
 
 /// THE DISPATCH IDENTITY for one of an agent's own HOOKS (`on_cancel`,
 /// `on_delete`): the kernel running that agent's code, so every send made inside
-/// is the agent's — python `Agent._as_self`. Crate-private: the kernel sets an
-/// identity only when it runs an agent's own code.
-pub(crate) async fn as_agent<F, T>(agent: &AgentId, hook: F) -> T
+/// is the agent's — python `Agent._as_self`. The kernel sets an identity only when
+/// it runs an agent's own code; a bundle that creates an agent as bookkeeping
+/// (`fork`) and must write that agent's first rows under ITS key uses it for that
+/// one step.
+pub async fn as_agent<F, T>(agent: &AgentId, hook: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -2013,6 +2015,18 @@ fn dispatch(
 > {
     Box::pin(async move {
         let verb = verb_of(&payload);
+        // A `report` from a NAMED agent to a lead that `await_set` waits on is
+        // HELD for the one combined message, not delivered as its own turn.
+        if verb == "report" {
+            if let Some(held) = crate::await_set::hold_report(
+                &kernel,
+                &target.id,
+                current_origin().as_ref(),
+                &payload,
+            ) {
+                return Ok((held, None));
+            }
+        }
         if is_kernel_verb(verb) {
             // ROOT ONLY. These verbs act on the TREE and the kernel-wide task
             // table, so the agent named is the OPERAND, not the actor. Answered

@@ -22,6 +22,7 @@
 
 pub mod agent;
 pub mod authz;
+pub mod await_set;
 pub mod bootstrap;
 pub mod bundle;
 pub mod call_guard;

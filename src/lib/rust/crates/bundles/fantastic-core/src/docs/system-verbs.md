@@ -113,6 +113,32 @@ on the execution's original verb, and receives its recorded outcome.
   NEW id if you choose, then acknowledge it. An acknowledged dead letter may be
   pruned; an unacknowledged one is kept. Returns `{acked:true, id}`.
 
+## Waiting
+
+A lead that waits for a SET of agents wakes ONCE, not on every report. The signal
+is a plain message: a payload of `type: report` that a named agent sends the lead
+(the `report` a project lead's children send). A wait is caller-scoped and is a
+row in the kernel's memory store, so it survives a restart.
+
+`await_set` — args: `ids:list[str]` (agent ids), `timeout_s:number?`, `label:str?`
+: Returns at once `{wait_id, label, ids, timeout_s}`. A `report` from a named agent
+  to you before the set completes is HELD for the combined message, not delivered
+  as its own turn (the reporter is answered `{held:true, wait_id}`); a second
+  report from the same agent replaces the first. When every named agent has
+  reported, or `timeout_s` passes, you get ONE message — `{type:send, text,
+  wait_id, label, done, missing, timed_out}` — `done` is `[{id, state, result}]` in
+  the order of `ids`, `missing` the ids with no report, and `text` the same body as
+  compact JSON for an AI to read. A
+  report that comes after a timeout is delivered as itself. Refuses a missing or
+  empty `ids` (`missing_arg`), a non-list or non-string id, a non-positive
+  `timeout_s`, a non-string `label` (`bad_arg`), an id that names no agent
+  (`unknown_agent`) and yourself.
+
+`await_cancel` — args: `wait_id:int`
+: Drops your wait; the reports it held are then delivered one by one, each as its
+  own message and in the order held. Returns `{cancelled:bool, wait_id, released:int}`.
+  A wait that is unknown or not yours is `{cancelled:false}`.
+
 ## Process
 
 `kernel_start` — no args

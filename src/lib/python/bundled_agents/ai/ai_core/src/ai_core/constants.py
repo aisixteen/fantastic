@@ -123,3 +123,13 @@ MAX_SILENT_TURNS = 10
 # Rust twin: constants.rs CHAT_CARD_MAX_HEIGHT; the canvas's TS twin (chat_card.ts) says
 # the same 1200 — a test reads both.
 CHAT_CARD_MAX_HEIGHT = 1200
+
+# ─── fork points (#425) ─────────────────────────────────────────────────
+
+# How many `mark` rows an agent keeps: a new mark prunes the oldest beyond this.
+# A constant, not a record field — the issue says "config" and names none.
+# Rust twin: constants.rs MAX_MARKS.
+MAX_MARKS = 20
+# How long a provider keeps a prompt prefix warm after a send ended (seconds).
+# `fork_points` reports an agent `warm` while its last send is younger than this.
+CACHE_LIFETIME_SECS = 300.0

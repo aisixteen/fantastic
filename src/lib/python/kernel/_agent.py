@@ -107,7 +107,7 @@ from kernel._bundles import (
     import_handler,
     is_folder,
 )
-from kernel import _docs, _secret, _sys
+from kernel import _await, _docs, _secret, _sys
 
 
 _KEEP_MEMORY = "_keep_memory"
@@ -151,6 +151,10 @@ _SYSTEM_VERBS = frozenset(
         "kernel_start",
         "shutdown_agents",
         "kernel_stop",
+        # WAITING for a set of agents — one wake for N reports (a message of
+        # `type: "report"` from each named agent). Caller-scoped.
+        "await_set",
+        "await_cancel",
         # HOW TO CALL an agent — its bundle's verb docs, in two tiers. Answered
         # by the root and gated like every kernel verb (`_gate`).
         "docs",
@@ -233,6 +237,24 @@ _SYSTEM_VERB_DOCS = {
         "once per bundle; `detailed` for a verb you are about to use. Gated like "
         "every kernel verb: a `can_call` grant of `docs` on the root. "
         "Returns {of, bundle, tier, verbs, emits?, cancel?, notes?}."
+    ),
+    "await_set": (
+        "args: ids:list[str] (req — agent ids), timeout_s:number? (a positive "
+        "number of seconds), label:str?. Waits for EVERY named agent to send "
+        "YOU a message of type 'report' (its `state` and `result`); a report "
+        "from a named agent is HELD for the one combined message, not delivered "
+        "as its own turn. Returns at once {wait_id, label, ids, timeout_s}; "
+        "later ONE message reaches you — {wait_id, label, done:[{id, state, "
+        "result}], missing:[ids], timed_out} — when all have reported or "
+        "`timeout_s` passes. Refuses a missing or empty `ids`, an id that names "
+        "no agent (unknown_agent), yourself, a non-positive `timeout_s` and a "
+        "non-string `label`. The wait is a row: it survives a restart."
+    ),
+    "await_cancel": (
+        "args: wait_id:int (req). Drops YOUR wait; the reports it held are then "
+        "delivered one by one, each as its own message. Returns "
+        "{cancelled:bool, wait_id, released:int}. A wait that is unknown or not "
+        "yours ⇒ {cancelled:false}."
     ),
 }
 
@@ -2181,6 +2203,14 @@ class Agent:
         self._fanout(_secret.shown(payload, _current_secret.get()), kind="send")
         token = _current_sender.set(self.id)
         try:
+            # A `report` from a NAMED agent to a lead that `await_set` waits on is
+            # HELD for the one combined message, not delivered as its own turn.
+            if verb == "report":
+                held = _await.hold_report(
+                    self.ctx, self.id, _current_origin.get(), payload
+                )
+                if held is not None:
+                    return held
             if verb in _SYSTEM_VERBS:
                 # KERNEL-OWNED, answered by the ROOT ONLY. These act on the TREE
                 # (or on the kernel-wide task table); the agent they name is the
@@ -2335,6 +2365,10 @@ class Agent:
             return await self._verb_ledger(payload)
         if verb == "ack_deadletter":
             return await self._verb_ack_deadletter(payload)
+        if verb == "await_set":
+            return _await.await_set(self.ctx, _current_origin.get(), payload)
+        if verb == "await_cancel":
+            return _await.await_cancel(self.ctx, _current_origin.get(), payload)
         if verb == "cancel":
             return await self._verb_cancel(payload)
         if verb == "kernel_start":

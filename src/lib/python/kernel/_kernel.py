@@ -543,6 +543,8 @@ class Kernel:
     # How many `call` rows the store holds for the kernel (counted as flushed, re-read
     # at every prune) — what the retention window is measured against.
     _stored_calls: int = 0
+    # OPEN `await_set` WAITS, wait_id -> `kernel._await.Wait` (rows in the store too).
+    _await_waits: dict = field(default_factory=dict)
 
     # DRAINING: the first phase of a graceful stop (`shutdown_agents`). New roots
     # are refused `{reason:"draining"}`; sends with a live parent task, and the
@@ -727,6 +729,11 @@ class Kernel:
             root.id, "flush_executions", self._flusher(), keepalive=True
         )
         self._flush_wake.set()
+        # OPEN `await_set` WAITS come back from the store before anyone boots; the
+        # ones already due are completed once the agents are up (below).
+        from kernel import _await
+
+        due_waits = await _await.restore(self)
         if boot_all:
             for a in list(self.agents.values()):
                 if a.id in (root.id, store.id):
@@ -739,6 +746,7 @@ class Kernel:
                         f"  [kernel] boot {a.id!r}: {out['status']} {out['result']}",
                         file=sys.stderr,
                     )
+        _await.resume(self, due_waits)
         return {"started": True, "store": store.id, "booted": booted}
 
     async def bookkeeping(self, agent: "Agent", payload: dict) -> dict:
