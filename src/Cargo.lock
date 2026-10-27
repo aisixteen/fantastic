@@ -1009,14 +1009,10 @@ name = "fantastic-sqlite-store"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "fantastic-ai-core",
  "fantastic-bundle",
  "fantastic-kernel",
- "fantastic-ram-store",
- "futures-util",
  "rusqlite",
  "serde_json",
- "tempfile",
  "tokio",
 ]
 

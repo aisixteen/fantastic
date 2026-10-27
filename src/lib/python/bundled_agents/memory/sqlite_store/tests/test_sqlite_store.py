@@ -91,7 +91,7 @@ async def test_a_symlink_out_of_the_dir_is_refused_at_boot(kernel, tmp_path):
 # ── the file ────────────────────────────────────────────────────────────
 
 
-async def test_boot_opens_the_file_with_the_rust_stores_pragmas(kernel, mem):
+async def test_boot_opens_the_file_with_the_pythons_pragmas(kernel, mem):
     assert (await _call(kernel, "mem", {"type": "boot"}))["result"] is None
     assert Path(DB).is_file()
     c = kernel.ctx.agents["mem"]._sqlite_conn
@@ -105,7 +105,7 @@ async def test_boot_opens_the_file_with_the_rust_stores_pragmas(kernel, mem):
     assert {"rows", "ref_lists", "fold_refs", "text_idx"} <= tables
 
 
-async def test_reflect_is_durable_and_names_its_file(kernel, mem):
+async def test_reflect_names_the_same_verbs_and_says_durable(kernel, mem):
     await _call(kernel, "mem", {"type": "append", "rows": [{"id": 1}]}, as_="alice")
     out = (await _call(kernel, "mem", {"type": "reflect"}))["result"]
     own = {k: out[k] for k in list(out)[:7]}
@@ -135,7 +135,7 @@ async def test_a_row_that_is_not_json_is_refused_whole(kernel, mem):
     assert rows["rows"] == [], "all or none"
 
 
-async def test_a_ram_store_dump_injects_here_and_back(kernel, mem):
+async def test_a_ram_dump_injects_into_sqlite_and_back(kernel, mem):
     kernel.create("ram_store.tools", id="ram", callable_by={"alice": "*"})
     wire(kernel, "alice", "ram")
     rows = [
@@ -154,7 +154,7 @@ async def test_a_ram_store_dump_injects_here_and_back(kernel, mem):
     assert (await _call(kernel, "ram", {"type": "dump"}))["result"]["tables"] == tables
 
 
-async def test_delete_agent_deletes_the_file_and_its_wal(kernel, mem):
+async def test_a_stop_keeps_the_file_and_delete_agent_removes_it(kernel, mem):
     await _call(kernel, "mem", {"type": "append", "rows": [{"id": 1}]}, as_="alice")
     assert Path(DB).is_file() and Path(DB + "-wal").exists()
     out = (await _call(kernel, kernel.id, {"type": "delete_agent", "id": "mem"}))[
@@ -165,7 +165,7 @@ async def test_delete_agent_deletes_the_file_and_its_wal(kernel, mem):
         assert not Path(DB + suffix).exists(), suffix
 
 
-async def test_a_stop_checkpoints_and_keeps_the_file(kernel, mem):
+async def test_close_all_after_shutdown_leaves_only_the_db(kernel, mem):
     await _call(kernel, "mem", {"type": "append", "rows": [{"id": 1}]}, as_="alice")
     with shutdown_context():
         await kernel.ctx.shutdown()
@@ -201,7 +201,7 @@ _mod.VERBS = {"reflect": None, "count": None, "fail": None, "work": None}
 register_unlisted("sqlite_probe.tools", _mod)
 
 
-async def test_every_table_survives_a_kernel_restart(tmp_path, monkeypatch):
+async def test_a_new_process_gets_everything_back_without_inject(tmp_path, monkeypatch):
     """Rows, folds, the ledger (a dead letter) and named-call dedup are read back
     by a NEW kernel on the same dir and guid — no dump, no inject."""
     monkeypatch.chdir(tmp_path)
@@ -262,7 +262,7 @@ async def test_every_table_survives_a_kernel_restart(tmp_path, monkeypatch):
         await root2.ctx.shutdown()
 
 
-async def test_verb_docs_are_ram_stores_but_boot(kernel, mem):
+async def test_verb_docs_match_ram_store(kernel, mem):
     """HOW TO CALL it is ram_store's, word for word; only `boot` names the file."""
     kernel.create("ram_store.tools", id="ram")
 
@@ -281,7 +281,7 @@ async def test_verb_docs_are_ram_stores_but_boot(kernel, mem):
 # ── a prune leaves no bytes behind ──────────────────────────────────────
 
 
-async def test_prune_overwrites_bytes_and_truncates_wal(kernel, mem):
+async def test_delete_agent_purges_rows_and_overwrites_bytes(kernel, mem):
     """A pruned row's text must leave the file and the WAL without a close: the
     connection zeroes freed pages (secure_delete) and a prune checkpoints the WAL
     with TRUNCATE, so the bytes are gone from memory.db and memory.db-wal alike."""
@@ -396,3 +396,62 @@ async def test_many_agents_and_the_flusher_share_one_file(tmp_path, monkeypatch)
         con.close()
     with shutdown_context():
         await root.ctx.shutdown()
+
+
+async def test_restart_keeps_ids_folds_and_owners(tmp_path, monkeypatch):
+    """Several owners, a fold and a prune are read back under the same keys by a
+    new kernel, and an append with no id gets an id above every old one."""
+    monkeypatch.chdir(tmp_path)
+    root = boot_root()
+    await _call(root, root.id, {"type": "boot"})  # mints the guid
+    for meta in (
+        {"id": "memory", "handler_module": "sqlite_store.tools", "path": DB},
+        {"id": "ai", "handler_module": "sqlite_probe.tools"},
+        {"id": "probe", "handler_module": "sqlite_probe.tools"},
+    ):
+        out = await _create(root, **meta)
+        assert out.get("id") == meta["id"], out
+    wire(root, "ai", "memory")
+    wire(root, "probe", "memory")
+    root.ctx.update(root.id, memory_store_id="memory")
+    assert (await root.ctx.start(boot_all=False)).get("started")
+    out = await _call(
+        root,
+        "memory",
+        {"type": "append", "rows": [{"content": "one"}, {"content": "two"}]},
+        as_="ai",
+    )
+    a, b = out["result"]["ids"]
+    out = await _call(
+        root,
+        "memory",
+        {"type": "append", "rows": [{"kind": "fold", "refs": [a, b], "content": "[f]"}]},
+        as_="ai",
+    )
+    (fold,) = out["result"]["ids"]
+    out = await _call(
+        root, "memory", {"type": "append", "rows": [{"content": "q"}]}, as_="probe"
+    )
+    assert out["result"]["appended"] == 1, out
+    out = await _call(root, "memory", {"type": "prune", "ids": [a]}, as_="ai")
+    assert out["result"]["pruned"] == 1, out
+    p = (await _call(root, "memory", {"type": "read"}, as_="ai"))["result"]["rows"]
+    q = (await _call(root, "memory", {"type": "read"}, as_="probe"))["result"]["rows"]
+    persist(root)
+    with shutdown_context():
+        await root.ctx.shutdown()
+
+    root2 = boot_root()
+    assert (await root2.ctx.start(boot_all=False)).get("started")
+    p2 = (await _call(root2, "memory", {"type": "read"}, as_="ai"))["result"]["rows"]
+    q2 = (await _call(root2, "memory", {"type": "read"}, as_="probe"))["result"]["rows"]
+    assert p2 == p and q2 == q
+    assert next(r for r in p2 if r["id"] == fold)["refs"] == [b], "the prune's cascade"
+    fresh = (
+        await _call(
+            root2, "memory", {"type": "append", "rows": [{"content": "fresh"}]}, as_="ai"
+        )
+    )["result"]["ids"][0]
+    assert fresh > max(r["id"] for r in p2 + q2), fresh
+    with shutdown_context():
+        await root2.ctx.shutdown()

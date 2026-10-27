@@ -212,6 +212,15 @@ fn a_new_process_gets_everything_back_without_inject() {
     child("read", tmp.path());
 }
 
+/// SEVERAL OWNERS, a fold and a prune survive a restart under the same keys, and
+/// the id counter continues above the old maximum (no id is minted twice).
+#[test]
+fn restart_keeps_ids_folds_and_owners() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    child("owners_write", tmp.path());
+    child("owners_read", tmp.path());
+}
+
 /// Not a test of its own: the body of the two phases above. Inert unless the
 /// parent set the phase.
 #[tokio::test]
@@ -219,7 +228,44 @@ async fn restart_child() {
     let Ok(phase) = std::env::var("SQLITE_STORE_PHASE") else { return };
     let dir = std::path::PathBuf::from(std::env::var("SQLITE_STORE_DIR").unwrap());
     let facts = dir.join("facts.json");
-    if phase == "write" {
+    if phase == "owners_write" {
+        let k = boot(&dir);
+        wire(&k, &dir, &["probe", "probe2"]).await;
+        let (a, b, fold, c) = (k.mint_id(), k.mint_id(), k.mint_id(), k.mint_id());
+        let r = call_as(&k, "probe", "memory", json!({"type": "append", "rows": [
+            {"id": a, "content": "p one"}, {"id": b, "content": "p two"},
+            {"id": fold, "kind": "fold", "content": "summary", "refs": [a, b]}]})).await;
+        assert!(r.get("reason").is_none(), "{r}");
+        let r = call_as(&k, "probe2", "memory", json!({"type": "append", "rows": [{"id": c, "content": "q one"}]})).await;
+        assert!(r.get("reason").is_none(), "{r}");
+        let r = call_as(&k, "probe", "memory", json!({"type": "prune", "ids": [a]})).await;
+        assert_eq!(r["pruned"], json!(1), "{r}");
+        let p = call_as(&k, "probe", "memory", json!({"type": "read"})).await["rows"].clone();
+        let q = call_as(&k, "probe2", "memory", json!({"type": "read"})).await["rows"].clone();
+        assert_eq!(p.as_array().unwrap().len(), 2, "{p}");
+        k.shutdown().await;
+        assert!(fantastic_sqlite_store::close_all(&k).is_empty());
+        let f = json!({"p": p, "q": q, "max": k.rows.next_id().max(c + 1), "fold": fold, "b": b});
+        std::fs::write(&facts, serde_json::to_vec(&f).unwrap()).unwrap();
+    } else if phase == "owners_read" {
+        let f: Value = serde_json::from_slice(&std::fs::read(&facts).unwrap()).unwrap();
+        let k = boot(&dir);
+        let out = k.start(false).await;
+        assert_eq!(out["started"], json!(true), "{out}");
+        let p = call_as(&k, "probe", "memory", json!({"type": "read"})).await["rows"].clone();
+        let q = call_as(&k, "probe2", "memory", json!({"type": "read"})).await["rows"].clone();
+        assert_eq!(p, f["p"], "probe's rows, the fold's refs and the prune are back");
+        assert_eq!(q, f["q"], "probe2's rows are its own");
+        let fold = p.as_array().unwrap().iter().find(|r| r["id"] == f["fold"]).expect("the fold");
+        assert_eq!(fold["refs"], json!([f["b"]]), "the pruned member's ref is gone");
+        // the counter continues: a row without an id lands above every old id
+        let r = call_as(&k, "probe", "memory", json!({"type": "append", "rows": [{"content": "fresh"}]})).await;
+        let fresh = r["ids"][0].as_i64().unwrap_or_else(|| panic!("{r}"));
+        assert!(fresh >= f["max"].as_i64().unwrap(), "{fresh} reuses an id below {}", f["max"]);
+        let old_max = p.as_array().unwrap().iter().chain(q.as_array().unwrap()).filter_map(|r| r["id"].as_i64()).max().unwrap();
+        assert!(fresh > old_max, "{fresh} <= {old_max}");
+        k.shutdown().await;
+    } else if phase == "write" {
         let k = boot(&dir);
         wire(&k, &dir, &["probe"]).await;
         let named = call_named(&k, "probe", json!({"type": "count"}), "nightly").await;

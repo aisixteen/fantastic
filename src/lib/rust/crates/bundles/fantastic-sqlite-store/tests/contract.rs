@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 const RAM: &str = fantastic_ram_store::HANDLER_MODULE;
 const SQL: &str = fantastic_sqlite_store::HANDLER_MODULE;
-const CASES: &str = include_str!("../../../../../contract/memory_store/cases.json");
+const CASES: &str = include_str!("../../../../../../../contract/memory_store/cases.json");
 
 /// `path` is relative to the kernel's workdir: one temp dir for the binary.
 fn work() -> std::path::PathBuf {

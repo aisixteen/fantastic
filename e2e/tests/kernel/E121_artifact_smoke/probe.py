@@ -45,16 +45,11 @@ RUNTIME = os.environ.get("RUNTIME", "")
 #: Kinds DOCUMENTED as runtime-specific: kind → the runtimes that ship it.
 #: `foundation_models_backend` — Apple's on-device model, a Foundation Models bridge
 #: rust links through a C ABI (src/lib/rust/README.md).
-#: `sqlite_store` — the durable memory store ships in the python kernel
-#: (`bundled_agents/memory/sqlite_store`, #59); rust has it only in the `fantastic`
-#: CLI product (`src/tui/bundles/fantastic-sqlite-store`), not in the headless
-#: kernel binary.
 #: `user` — the person's agent (blueprint export and import): a `fantastic` CLI
 #: product bundle in rust (`src/tui/bundles/fantastic-user`), not in the headless
 #: kernel binary; python ships it in `bundled_agents/io/user`.
 RUNTIME_ONLY = {
     "foundation_models_backend": {"rust"},
-    "sqlite_store": {"python"},
     "user": {"python"},
     "cabinet": {"python", "rust"},
 }

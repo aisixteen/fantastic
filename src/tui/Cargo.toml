@@ -62,7 +62,7 @@ fantastic-user = { path = "bundles/fantastic-user" }
 # THE MACHINE'S AGENTS (`fantastic [canvas] system`, Linux): power, network, audio, displays, notifications and lock.
 fantastic-system-agents = { path = "bundles/fantastic-system-agents" }
 fantastic-system = { path = "crates/fantastic-system" }
-fantastic-sqlite-store = { path = "bundles/fantastic-sqlite-store" }
+fantastic-sqlite-store = { path = "../lib/rust/crates/bundles/fantastic-sqlite-store" }
 fantastic-ram-store = { path = "../lib/rust/crates/bundles/fantastic-ram-store" }
 # THE AI AGENT'S SAVED SET-UPS: named agent blueprints in the home dir (FANTASTIC_HOME
 # or ~/.fantastic), owned by this binary — see kern/saved.

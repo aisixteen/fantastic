@@ -59,8 +59,8 @@ weak-bound ts kernel LIBRARY (`src/lib/ts`), booted in the browser by an app
 `file` agent — the host never names it.
 
 THE KERNEL KEEPS NO CONVERSATION. Every message is a row in a MEMORY STORE agent
-(`fantastic-ram-store`: in RAM, gone with the process; a durable store answers
-the same verbs). The root names it in `memory_store_id` and `kernel_start`
+(`fantastic-ram-store`: in RAM, gone with the process; `fantastic-sqlite-store`
+answers the same verbs over one SQLite file, named by the record's `path`). The root names it in `memory_store_id` and `kernel_start`
 refuses without one; the kernel flushes its execution rows (call/settle/ack/
 flush) there, and `ledger`, dead letters (`on_deadletter`, `ack_deadletter`) and
 named-call dedup read them back. Each AI agent names its own store and reads and
@@ -194,6 +194,7 @@ Bundles that compile under either tier:
 |--------------------------------|------|
 | `fantastic-core`               | the `kernel_state.tools` root loader (id="kernel_state") — records, blobs, the record-owner guard |
 | `fantastic-ram-store`          | the MEMORY STORE in RAM — every message (AI conversations, the kernel's execution rows), fold refs, search, inject/dump; a caller reads and writes only its own rows |
+| `fantastic-sqlite-store`       | the DURABLE MEMORY STORE — `ram_store`'s tables, keys and verbs over one SQLite file per store (the record's `path`, relative to the project dir); a caller cannot tell the two apart, except that this one survives the process; the stop folds the WAL into the file (`close_all`) |
 | `fantastic-credential-store`   | SECRETS BY REF — a ref holds named fields bound to ONE host; whoever the call gate admits may `set`/`get`/`forget` a declared ref (values ride the call; a `set`'s and a `get` reply's field values are recorded as `[secret]`, the caller gets them whole); a ref is DECLARED only by `update_agent` on the store's `refs` — `set` stores a declared ref's value, takes no `host` and never creates one; `forget` drops the value and keeps the declaration; the file is read through ONE `O_NOFOLLOW` open judged on its own descriptor; backends `file` (0600 YAML at an ABSOLUTE path — a relative `file` is refused; python's bytes), `keychain` (the OS keychain, items under `keychain_namespace`), `env` (read-only). Every AI backend reads its key here before each request (`credentials: {store, ref}`) |
 | `fantastic-static-loader`      | declarative YAML roster loader — hydrates the declared agents at boot as kernel bookkeeping (the root's `create_agent` run directly) |
 | `fantastic-file`               | filesystem-as-agent (the fs edge of the io family; sealed by default, deny-all `allow` list) + the text verbs — read/write/edit/append/undo, version/if_match |
@@ -240,6 +241,7 @@ rust/
 │   └── bundles/
 │       ├── fantastic-core/                kernel_state.tools root loader
 │       ├── fantastic-ram-store/           the memory store (in RAM)
+│       ├── fantastic-sqlite-store/        the durable memory store (SQLite file)
 │       ├── fantastic-credential-store/    secrets by ref (file / keychain / env)
 │       ├── fantastic-static-loader/       declarative YAML roster loader
 │       ├── fantastic-file/                fs-as-agent + text verbs

@@ -1419,3 +1419,132 @@ fn the_schema_is_what_the_write_enforces() {
     ]);
     assert_eq!(r["id"], "a4", "{r}");
 }
+
+/// THE DURABLE STORE IN THE HEADLESS KERNEL: `sqlite_store` is in the catalog; an
+/// app names it as the root's `memory_store_id` with the file as the record's
+/// `path` (config, never hardcoded); a row written by one process is read by the
+/// next with the id counter continuing; and a STOP (one-shot or daemon) folds the
+/// WAL into the file (`close_all` after the kernel's last flush), leaving only
+/// `memory.db`.
+#[test]
+fn sqlite_store_is_in_the_headless_catalog_and_survives_a_stop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+    let db = dir.join(".fantastic/memory.db");
+    let no_wal = || {
+        for f in ["memory.db-wal", "memory.db-shm"] {
+            assert!(
+                !dir.join(".fantastic").join(f).exists(),
+                "{f} survived the stop"
+            );
+        }
+    };
+    let cat = run_cli(dir, &["reflect", "bundles=all"]);
+    let cat: serde_json::Value = serde_json::from_slice(&cat.stdout).expect("catalog json");
+    let kinds: Vec<&str> = cat["bundles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["name"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"sqlite_store"),
+        "reflect bundles=all lists the kind sqlite_store: {kinds:?}"
+    );
+
+    create_store(dir);
+    run_cli(
+        dir,
+        &[
+            "kernel_state",
+            "create_agent",
+            "parent_id=kernel",
+            "handler_module=sqlite_store.tools",
+            "id=memory",
+            "path=.fantastic/memory.db",
+        ],
+    );
+    run_cli(
+        dir,
+        &[
+            "kernel_state",
+            "update_agent",
+            "id=kernel_state",
+            "memory_store_id=memory",
+        ],
+    );
+
+    // process 1: a one-shot writes a row as the operator
+    let first = one_shot_json(
+        dir,
+        &["memory", "append", r#"rows=[{"content":"the lighthouse"}]"#],
+    );
+    let id1 = first["ids"][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{first}"));
+    assert!(db.is_file(), "the file is the record's path");
+    no_wal();
+
+    // process 2: a daemon over the same dir reads it back, then is stopped
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let port_kv = format!("port={port}");
+    run_cli(
+        dir,
+        &[
+            "kernel_state",
+            "create_agent",
+            "parent_id=kernel",
+            "handler_module=web.tools",
+            "id=web",
+            &port_kv,
+            "can_call={\"$subtree\": [\"get_routes\"]}",
+        ],
+    );
+    let mut child = sys::stoppable(&mut Command::new(fantastic_bin()))
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the daemon");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let up = read_line_bounded(stdout, std::time::Duration::from_secs(10))
+        .expect("the daemon must print [kernel] up within 10s");
+    assert_eq!(up, "[kernel] up");
+    sys::stop(&child);
+    let out = child
+        .wait_with_output()
+        .expect("the daemon exits after the stop");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(db.is_file(), "a stop keeps the file");
+    no_wal();
+
+    // process 3: the row is back, and the counter continues
+    let read = one_shot_json(dir, &["memory", "read"]);
+    let rows = read["rows"].as_array().unwrap_or_else(|| panic!("{read}"));
+    assert!(
+        rows.iter()
+            .any(|r| r["id"] == serde_json::json!(id1) && r["content"] == "the lighthouse"),
+        "the row survived two stops: {read}"
+    );
+    let second = one_shot_json(
+        dir,
+        &["memory", "append", r#"rows=[{"content":"the harbour"}]"#],
+    );
+    let id2 = second["ids"][0]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{second}"));
+    assert!(
+        id2 > id1,
+        "ids never repeat across a restart: {id1} then {id2}"
+    );
+    no_wal();
+}

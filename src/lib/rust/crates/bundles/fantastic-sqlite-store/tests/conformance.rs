@@ -9,7 +9,7 @@ use std::sync::{Arc, Once};
 
 use fantastic_kernel::agent::Agent;
 use fantastic_kernel::test_support::as_agent;
-use fantastic_kernel::{AgentId, Item, Kernel};
+use fantastic_kernel::{AgentId, Item, Kernel, Outcome};
 use serde_json::{json, Value};
 
 const RAM: &str = fantastic_ram_store::HANDLER_MODULE;
@@ -61,6 +61,7 @@ fn store(handler: &str, tag: &str) -> Arc<Kernel> {
 }
 
 struct T {
+    h: &'static str,
     k: Arc<Kernel>,
     log: Vec<Value>,
 }
@@ -91,7 +92,7 @@ macro_rules! conform {
         async fn $name() {
             let mut logs = Vec::new();
             for h in [RAM, SQL] {
-                let mut t = T { k: store(h, stringify!($name)), log: Vec::new() };
+                let mut t = T { h, k: store(h, stringify!($name)), log: Vec::new() };
                 $body(&mut t).await;
                 logs.push(t.log);
             }
@@ -259,20 +260,234 @@ async fn s_cursor_reads_match_with_every_filter(t: &mut T) {
 }
 conform!(cursor_reads_match_with_every_filter, s_cursor_reads_match_with_every_filter);
 
+// ─── the rest of ram_store's own scenarios, same transcripts ──────────────────
+
+impl T {
+    /// A call whose whole outcome (status too) is recorded: a Python `TypeError`
+    /// travels as a failed outcome, not a reply.
+    async fn call_out(&mut self, payload: Value, as_: &str) -> Outcome {
+        let item = Item::new(AgentId::from("mem"), payload);
+        let out = as_agent(AgentId::from(as_), self.k.send(vec![item])).await.remove(0);
+        self.log.push(json!({"status": out.status.as_str(), "result": out.result.clone()}));
+        out
+    }
+}
+
+/// `keep` is Python's `in`: a list, a string (substring), a dict (keys); a row
+/// without a kind raises, a non-iterable keep raises.
+async fn s_prune_keep_is_python_in(t: &mut T) {
+    t.append("alice", json!([{"id": 1, "kind": "fold"}, {"id": 2, "kind": "old"}, {"id": 3, "kind": "msg"}])).await;
+    let out = t.call(json!({"type": "prune", "before_id": 1_000_000, "keep": "folder"}), Some("alice")).await;
+    assert_eq!(out["pruned"], json!(1), "'fold' and 'old' are substrings of 'folder': {out}");
+    t.append("alice", json!([{"id": 4, "kind": "view"}, {"id": 5, "kind": "msg"}])).await;
+    let out = t.call(json!({"type": "prune", "before_id": 1_000_000, "keep": ["view", "fold", "old"]}), Some("alice")).await;
+    assert_eq!(out["pruned"], json!(1), "{out}");
+    t.append("alice", json!([{"id": 6, "kind": "a"}, {"id": 7, "kind": "b"}])).await;
+    let out = t.call(json!({"type": "prune", "before_id": 1_000_000, "keep": {"a": 1, "view": 1, "fold": 1, "old": 1}}), Some("alice")).await;
+    assert_eq!(out["pruned"], json!(1), "a dict keeps its KEYS: {out}");
+    t.append("alice", json!([{"id": 8, "content": "kindless"}])).await;
+    let out = t.call_out(json!({"type": "prune", "before_id": 1_000_000, "keep": "fold"}), "alice").await;
+    assert_eq!(out.status, fantastic_kernel::Status::Failed, "{out:?}");
+    assert_eq!(out.result["error"], "TypeError: 'in <string>' requires string as left operand, not NoneType");
+    let out = t.call_out(json!({"type": "prune", "before_id": 1_000_000, "keep": 5}), "alice").await;
+    assert_eq!(out.result["error"], "TypeError: argument of type 'int' is not iterable");
+}
+conform!(prune_keep_is_python_in, s_prune_keep_is_python_in);
+
+async fn s_a_zero_limit_is_no_limit(t: &mut T) {
+    t.append("alice", json!([{"id": 1, "kind": "msg", "content": "x one"}, {"id": 2, "kind": "msg", "content": "x two"}])).await;
+    let r = t.call(json!({"type": "read", "limit": "0"}), Some("alice")).await;
+    assert_eq!(ids(&r).len(), 2, "{r}");
+    assert_eq!(r["next"], Value::Null);
+    let r = t.call(json!({"type": "search", "query": "x", "limit": "0", "width": "0"}), Some("alice")).await;
+    assert_eq!(r["matches"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(r["matches"][0]["text"], "x one", "width 0 falls back to 200");
+}
+conform!(a_zero_limit_is_no_limit, s_a_zero_limit_is_no_limit);
+
+async fn s_digit_string_refs_are_not_found_like_python(t: &mut T) {
+    let first = t.append("alice", json!([{"id": 4, "kind": "msg", "content": "a"}])).await;
+    let rid = first["ids"][0].as_i64().unwrap();
+    let r = t.append("alice", json!([{"id": 9, "kind": "fold", "content": "f", "refs": [rid.to_string()]}])).await;
+    assert_eq!(r["reason"], "not_found", "{r}");
+    assert!(r["error"].as_str().unwrap().ends_with(&format!("this owner: ['{rid}']")), "{r}");
+    let r = t.append("alice", json!([{"id": 9, "kind": "fold", "content": "f", "refs": [rid]}])).await;
+    assert_eq!(r["appended"], 1, "{r}");
+}
+conform!(digit_string_refs_are_not_found_like_python, s_digit_string_refs_are_not_found_like_python);
+
+async fn s_row_ids_and_limits_parse_as_ascii_digit_ids(t: &mut T) {
+    let rows: Vec<Value> = (1..=5).map(|i| json!({"id": i, "content": format!("needle {i}")})).collect();
+    t.append("alice", Value::Array(rows)).await;
+    for (limit, want) in [
+        (json!(2), 2),
+        (json!(" 2 "), 2),
+        (json!("3"), 3),
+        (json!("٢"), 5),
+        (json!("+2"), 5),
+        (json!(0), 5),
+        (json!("0"), 5),
+        (json!(-1), 5),
+        (json!(2.0), 5),
+        (json!(true), 5),
+    ] {
+        let r = t.call(json!({"type": "search", "query": "needle", "limit": limit.clone()}), Some("alice")).await;
+        assert_eq!(r["matches"].as_array().unwrap().len(), want, "limit={limit}: {r}");
+        assert_eq!(r["total"], json!(5), "limit={limit}");
+        assert_eq!(r["truncated"], json!(want < 5), "limit={limit}");
+    }
+    let r = t.call(json!({"type": "search", "query": "needle", "width": " 3 "}), Some("alice")).await;
+    assert_eq!(r["matches"][0]["text"], json!("nee"));
+}
+conform!(row_ids_and_limits_parse_as_ascii_digit_ids, s_row_ids_and_limits_parse_as_ascii_digit_ids);
+
+fn wire(v: &Value) -> String {
+    serde_json::to_string(v).unwrap()
+}
+
+/// `preserve_order` makes a refusal's KEY ORDER part of the wire, and `Value`
+/// equality ignores it, so these compare the serialized text. Only the store's
+/// name in the message differs between the two bundles.
+async fn s_unknown_type_is_coded_unhandled_with_the_raw_verb(t: &mut T) {
+    let name = if t.h == SQL { "sqlite_store" } else { "ram_store" };
+    for (verb, shown) in [("frob", "'frob'"), ("it's", "\\\"it's\\\""), ("shutdown", "'shutdown'")] {
+        let want = format!(r#"{{"error":"{name}: unknown type {shown}","reason":"unhandled","verb":"{verb}"}}"#);
+        assert_eq!(wire(&t.call(json!({"type": verb}), Some("alice")).await), want);
+    }
+}
+
+async fn s_arg_refusals_carry_error_reason_arg_in_that_order(t: &mut T) {
+    t.append("alice", json!([{"id": 1, "content": "a"}])).await;
+    for (payload, want) in [
+        (
+            json!({"type": "append", "rows": []}),
+            r#"{"error":"append: `rows` must be a non-empty list of rows","reason":"bad_arg","arg":"rows"}"#,
+        ),
+        (
+            json!({"type": "append", "rows": [{"id": "5"}]}),
+            r#"{"error":"append: a row id is a kernel int, got '5'","reason":"bad_arg","arg":"rows"}"#,
+        ),
+        (
+            json!({"type": "append", "rows": [{"id": 7, "refs": ["x"]}]}),
+            r#"{"error":"append: row 7 refs must be row ids","reason":"bad_arg","arg":"rows"}"#,
+        ),
+    ] {
+        let got = t.call(payload.clone(), Some("alice")).await;
+        assert_eq!(wire(&got), want, "{payload}");
+    }
+}
+
+/// The refusal's wire text (key order) is asserted inside the scenario on EACH bundle;
+/// the two messages name their own store, so the transcripts are not compared.
+macro_rules! conform_wire {
+    ($name:ident, $body:expr) => {
+        #[tokio::test]
+        async fn $name() {
+            for h in [RAM, SQL] {
+                let mut t = T { h, k: store(h, stringify!($name)), log: Vec::new() };
+                $body(&mut t).await;
+            }
+        }
+    };
+}
+conform_wire!(unknown_type_is_coded_unhandled_with_the_raw_verb, s_unknown_type_is_coded_unhandled_with_the_raw_verb);
+conform_wire!(arg_refusals_carry_error_reason_arg_in_that_order, s_arg_refusals_carry_error_reason_arg_in_that_order);
+
+async fn s_two_stores_hold_separate_tables(t: &mut T) {
+    let handler = t.h;
+    let mut meta = json!({"callable_by": {"alice": "*"}});
+    if handler == SQL {
+        meta["path"] = json!("stores/second.db");
+    }
+    t.k.register(agent("mem2", Some(handler), Some("kernel_state"), meta));
+    t.k.update(&AgentId::from("alice"), json!({"can_call": {"mem": "*", "mem2": "*"}}).as_object().cloned().unwrap());
+    t.append("alice", json!([{"id": 1, "content": "in mem"}])).await;
+    let read2 = as_agent(AgentId::from("alice"), t.k.send(vec![Item::new(AgentId::from("mem2"), json!({"type": "read"}))]))
+        .await
+        .remove(0)
+        .result;
+    t.log.push(read2.clone());
+    assert_eq!(read2["rows"], json!([]), "mem2 shares nothing with mem: {read2}");
+    let gone = t
+        .k
+        .send(vec![Item::new(AgentId::from("kernel_state"), json!({"type": "delete_agent", "id": "mem2"}))])
+        .await
+        .remove(0)
+        .result;
+    assert!(gone.get("error").is_none(), "{gone}");
+    let read1 = t.call(json!({"type": "read"}), Some("alice")).await;
+    assert_eq!(ids(&read1), vec![1], "mem keeps its rows");
+}
+conform!(two_stores_hold_separate_tables, s_two_stores_hold_separate_tables);
+
+/// alice, bob and the operator write colliding ids into ONE store: each reads only
+/// its own, the dump lists three owners, nobody reaches another's rows.
+async fn s_several_owners_one_file(t: &mut T) {
+    t.append("alice", json!([{"id": 1, "content": "alice one"}, {"id": 2, "content": "alice two"}])).await;
+    t.append("bob", json!([{"id": 1, "content": "bob one"}])).await;
+    t.call(json!({"type": "append", "rows": [{"id": 1, "kind": "call", "content": "operator"}]}), None).await;
+    for (who, want) in [(Some("alice"), vec![1, 2]), (Some("bob"), vec![1]), (None, vec![1])] {
+        let r = t.call(json!({"type": "read"}), who).await;
+        assert_eq!(ids(&r), want, "{who:?}: {r}");
+    }
+    let bob = t.call(json!({"type": "read"}), Some("bob")).await;
+    assert_eq!(bob["rows"][0]["content"], json!("bob one"));
+    let tables = t.call(json!({"type": "dump"}), None).await["tables"].clone();
+    let mut owners: Vec<&str> = tables["rows"].as_array().unwrap().iter().map(|r| r["owner"].as_str().unwrap()).collect();
+    owners.sort_unstable();
+    owners.dedup();
+    assert_eq!(owners, vec!["g1|alice", "g1|bob", "g1|kernel"], "{tables}");
+    // bob cannot prune alice's rows: his ids name HIS rows
+    let out = t.call(json!({"type": "prune", "ids": [2]}), Some("bob")).await;
+    assert_eq!(out["pruned"], json!(0), "{out}");
+    let out = t.call(json!({"type": "prune", "before_id": 99}), Some("bob")).await;
+    assert_eq!(out["pruned"], json!(1), "{out}");
+    let a = t.call(json!({"type": "read"}), Some("alice")).await;
+    assert_eq!(ids(&a), vec![1, 2], "alice is untouched: {a}");
+    let op = t.call(json!({"type": "read"}), None).await;
+    assert_eq!(ids(&op), vec![1], "the operator is untouched: {op}");
+}
+conform!(several_owners_one_file, s_several_owners_one_file);
+
+/// THE ONE ALLOWED DIFFERENCE: a row holding the non-JSON `Infinity` number.
+/// ram_store keeps it in memory; sqlite_store refuses the batch whole (a file
+/// holds JSON). Everything else is identical.
+#[tokio::test]
+async fn a_non_json_number_row_is_the_one_allowed_difference() {
+    let inf = fantastic_kernel::coerce_scalar("3e500123");
+    let mut outs = Vec::new();
+    for h in [RAM, SQL] {
+        let mut t = T { h, k: store(h, "nonjson"), log: Vec::new() };
+        let mut row = serde_json::Map::new();
+        row.insert("id".to_string(), Value::from(7));
+        row.insert("job_id".to_string(), inf.clone());
+        let mut payload = serde_json::Map::new();
+        payload.insert("type".to_string(), Value::from("append"));
+        payload.insert("rows".to_string(), Value::Array(vec![Value::Object(row)]));
+        outs.push(t.call(Value::Object(payload), Some("alice")).await);
+        // the store survives either way
+        let ok = t.append("bob", json!([{"id": 1}])).await;
+        assert_eq!(ok["appended"], json!(1), "{ok}");
+    }
+    assert_eq!(outs[0]["appended"], json!(1), "ram_store holds it: {}", outs[0]);
+    assert_eq!(outs[1]["reason"], json!("bad_arg"), "sqlite_store refuses it: {}", outs[1]);
+    assert_eq!(outs[1]["arg"], json!("rows"));
+}
+
 /// A ram_store dump injects into sqlite and back, identically.
 #[tokio::test]
 async fn a_ram_dump_injects_into_sqlite_and_back() {
     let ram = store(RAM, "x-ram");
     let sql = store(SQL, "x-sql");
-    let mut r = T { k: ram, log: Vec::new() };
-    let mut s = T { k: sql, log: Vec::new() };
+    let mut r = T { h: RAM, k: ram, log: Vec::new() };
+    let mut s = T { h: SQL, k: sql, log: Vec::new() };
     r.append("alice", json!([{"id": 1, "content": "a"}, {"id": 2}, {"id": 3, "kind": "clear", "refs": [1, 2]}])).await;
     r.append("bob", json!([{"id": 1, "content": "b"}])).await;
     let tables = r.call(json!({"type": "dump"}), None).await["tables"].clone();
     assert_eq!(s.call(json!({"type": "inject", "tables": tables.clone()}), None).await, json!({"rows": 4}));
     let back = s.call(json!({"type": "dump"}), None).await["tables"].clone();
     assert_eq!(back, tables, "sqlite gives back exactly the ram dump");
-    let mut r2 = T { k: store(RAM, "x-ram2"), log: Vec::new() };
+    let mut r2 = T { h: RAM, k: store(RAM, "x-ram2"), log: Vec::new() };
     r2.call(json!({"type": "inject", "tables": back}), None).await;
     assert_eq!(r2.call(json!({"type": "dump"}), None).await["tables"], tables);
 }
@@ -280,7 +495,7 @@ async fn a_ram_dump_injects_into_sqlite_and_back() {
 #[tokio::test]
 async fn reflect_names_the_same_verbs_and_says_durable() {
     for h in [RAM, SQL] {
-        let mut t = T { k: store(h, &format!("reflect-{}", h.len())), log: Vec::new() };
+        let mut t = T { h, k: store(h, &format!("reflect-{}", h.len())), log: Vec::new() };
         t.append("alice", json!([{"id": 1}])).await;
         let r = t.call(json!({"type": "reflect"}), None).await;
         assert_eq!(r["durable"], json!(h == SQL));
@@ -303,7 +518,7 @@ async fn reflect_names_the_same_verbs_and_says_durable() {
 fn verb_docs_match_ram_store() {
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../lib/rust/crates/bundles/fantastic-ram-store/src/lib.rs"),
+            .join("../fantastic-ram-store/src/lib.rs"),
     )
     .unwrap();
     for (name, doc) in fantastic_sqlite_store::VERB_DOCS {
