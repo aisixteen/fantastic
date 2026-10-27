@@ -43,6 +43,8 @@ impl Tools {
             &dir.join("wpctl"),
             &format!("echo \"$@\" >> '{d}/wpctl.log'\n{wpctl}\n"),
         );
+        // The probes above logged through the fake wpctl.
+        let _ = std::fs::remove_file(dir.join("wpctl.log"));
         Tools { dir }
     }
 
@@ -64,6 +66,19 @@ impl Drop for Tools {
 fn script(path: &Path, body: &str) {
     std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A sibling test's fork can hold our write fd until its exec, so a run
+    // right now may get ETXTBSY. Once a probe execs, no holder is left.
+    for _ in 0..200 {
+        match std::process::Command::new(path)
+            .arg("--probe")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Err(e) if e.raw_os_error() == Some(26) => std::thread::sleep(Duration::from_millis(10)),
+            _ => return,
+        }
+    }
 }
 
 /// Two `--monitor` arrays, then quiet.
