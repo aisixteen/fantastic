@@ -56,15 +56,23 @@ pub fn view_file(dir: &Path) -> Option<PathBuf> {
 /// lives once, in the bundle. `bytes_rev` (the file's content hash) makes the
 /// write a change; the change is the cells' signal to draw again.
 pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), String> {
-    let Some(f) = view_file(dir) else { return Ok(()) };
-    let bytes = std::fs::read(&f).map_err(|e| format!("{}: {e}", f.display()))?;
-    // the panel's REVISION: a view edit changes no other field of the record,
-    // and an unchanged record redraws nothing
-    let rev = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut h);
-        format!("{:016x}", h.finish())
+    let Some(declared) = bundle_view(dir) else { return Ok(()) };
+    // the TUI part is checked BEFORE any instance is touched: a bad declaration
+    // is refused with its sentence and every instance keeps the view it has
+    if let Some(tui) = declared.get("tui") {
+        crate::panel::declared::parse_tui(tui).map_err(|r| r.error)?;
+    }
+    // the panel's REVISION (only a view with a file has one): a view edit changes
+    // no other field of the record, and an unchanged record redraws nothing
+    let rev = match view_file(dir) {
+        None => None,
+        Some(f) => {
+            let bytes = std::fs::read(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut h);
+            Some(format!("{:016x}", h.finish()))
+        }
     };
     let instances: Vec<String> = h
         .kernel
@@ -75,24 +83,42 @@ pub async fn refresh_views(h: &Host, name: &str, dir: &Path) -> Result<(), Strin
         .collect();
     for id in instances {
         // the instance's view, with the BUNDLE's declared fields (kind, calls,
-        // bytes_file) over it: an edit of bundle.yaml must reach every instance
-        // (an instance's own stale `calls` used to win, and a panel calling a new
-        // verb was refused)
-        let mut view = h
+        // bytes_file, tui) over it: an edit of bundle.yaml must reach every
+        // instance (an instance's own stale `calls` used to win, and a panel
+        // calling a new verb was refused)
+        let own = h
             .kernel
             .agents
             .get(&fantastic_kernel::AgentId::from(id.as_str()))
             .and_then(|a| a.value().record().meta.get("view").and_then(Value::as_object).cloned())
             .unwrap_or_default();
-        view.extend(bundle_view(dir).unwrap_or_default());
-        view.remove("bytes");
-        view.insert("bytes_rev".into(), json!(rev));
+        let view = merged_view(own, declared.clone(), rev.clone());
         let r = h.operator("kernel", json!({"type": "update_agent", "id": id, "view": view})).await.result;
         if let Some(e) = r.get("error").and_then(Value::as_str) {
             return Err(format!("{id}: its view: {e}"));
         }
     }
     Ok(())
+}
+
+/// The view an instance gets: the bundle's declared fields over the instance's
+/// own, NO `bytes`, and `bytes_rev` set when the bundle names a view file.
+fn merged_view(
+    mut instance: serde_json::Map<String, Value>,
+    bundle: serde_json::Map<String, Value>,
+    rev: Option<String>,
+) -> serde_json::Map<String, Value> {
+    instance.extend(bundle);
+    instance.remove("bytes");
+    match rev {
+        Some(r) => {
+            instance.insert("bytes_rev".into(), json!(r));
+        }
+        None => {
+            instance.remove("bytes_rev");
+        }
+    }
+    instance
 }
 
 fn err_of(r: &Value) -> Option<String> {
@@ -262,4 +288,126 @@ pub fn scaffold(store: &Path, kind: &str, name: &str) -> Result<PathBuf, String>
         std::fs::write(dir.join(f), body).map_err(|e| format!("{}/{f}: {e}", dir.display()))?;
     }
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use fantastic_kernel::bundle::{Bundle, BundleError};
+    use fantastic_kernel::{Agent, Kernel};
+
+    struct Plain;
+
+    #[async_trait]
+    impl Bundle for Plain {
+        fn name(&self) -> &str {
+            "board"
+        }
+        async fn handle(&self, _id: &fantastic_kernel::AgentId, _p: &Value, _k: &Arc<Kernel>) -> Result<Option<Value>, BundleError> {
+            Ok(None)
+        }
+    }
+
+    /// A project dir with bundle `board` (its `bundle.yaml` = `record.view` as
+    /// given) and a host with one instance of it, `board_1`, holding `own` as its view.
+    async fn world(name: &str, view: &Value, own: Option<Value>) -> (Host, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fc-bw-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bundle = dir.join(".fantastic/bundles/board");
+        std::fs::create_dir_all(&bundle).unwrap();
+        write_bundle(&bundle, view);
+        std::fs::write(bundle.join("panel.html"), "<p>one</p>").unwrap();
+        let mut kernel = Kernel::new();
+        kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        let kernel = Arc::new(kernel);
+        kernel.bundles.register_folder("board", Arc::new(Plain), json!({}));
+        let root = Agent::new(
+            fantastic_kernel::AgentId::from("kernel"),
+            Some(fantastic_core::HANDLER_MODULE.to_string()),
+            None,
+            serde_json::Map::new(),
+            dir.join(".fantastic"),
+            false,
+        );
+        kernel.register(Arc::clone(&root));
+        kernel.set_root(root);
+        let h = Host { kernel, cfg: crate::env::ClientCfg::here(), root: "kernel".to_string() };
+        let mut spec = json!({"type": "create_agent", "parent_id": "kernel", "id": "board_1", "handler_module": "board"});
+        if let Some(v) = own {
+            spec["view"] = v;
+        }
+        let r = h.operator("kernel", spec).await.result;
+        assert!(r.get("error").is_none(), "{r}");
+        (h, bundle)
+    }
+
+    fn write_bundle(dir: &Path, view: &Value) {
+        let doc = json!({"base": "py_agent", "sentence": "s", "record": {"view": view}});
+        std::fs::write(dir.join("bundle.yaml"), serde_yaml::to_string(&doc).unwrap()).unwrap();
+    }
+
+    fn view_of(h: &Host) -> Value {
+        h.kernel
+            .agents
+            .get(&fantastic_kernel::AgentId::from("board_1"))
+            .and_then(|a| a.value().record().meta.get("view").cloned())
+            .unwrap_or(Value::Null)
+    }
+
+    fn tui(verb: &str) -> Value {
+        json!([{"title": "S", "call": {"verb": verb}, "show": "kv"}])
+    }
+
+    #[tokio::test]
+    async fn a_bundle_declaration_with_only_tui_reaches_its_instances() {
+        let (h, dir) = world("only-tui", &json!({"tui": tui("status")}), None).await;
+        refresh_views(&h, "board", &dir).await.unwrap();
+        let v = view_of(&h);
+        assert_eq!(v["tui"], tui("status"));
+        assert!(v.get("bytes_rev").is_none() && v.get("bytes").is_none(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn editing_tui_in_bundle_yaml_reaches_a_live_instance() {
+        let (h, dir) = world("edit", &json!({"tui": tui("status")}), None).await;
+        refresh_views(&h, "board", &dir).await.unwrap();
+        write_bundle(&dir, &json!({"tui": tui("other")}));
+        refresh_views(&h, "board", &dir).await.unwrap();
+        assert_eq!(view_of(&h)["tui"], tui("other"));
+    }
+
+    #[tokio::test]
+    async fn a_web_and_tui_declaration_in_one_view_reach_the_instance_together() {
+        let view = json!({"kind": "html", "bytes_file": "panel.html", "calls": ["status"], "tui": tui("status")});
+        let (h, dir) = world("both", &view, None).await;
+        refresh_views(&h, "board", &dir).await.unwrap();
+        let v = view_of(&h);
+        assert_eq!(v["kind"], "html");
+        assert_eq!(v["bytes_file"], "panel.html");
+        assert_eq!(v["calls"], json!(["status"]));
+        assert_eq!(v["tui"], tui("status"));
+        assert!(v["bytes_rev"].as_str().is_some_and(|r| r.len() == 16), "{v}");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_tui_in_bundle_yaml_is_refused_and_the_instance_keeps_its_view() {
+        let own = json!({"kind": "html", "tui": tui("kept")});
+        let (h, dir) = world("bad", &json!({"tui": [{"title": "S", "call": {"verb": "v"}, "show": "grid"}]}), Some(own.clone())).await;
+        let e = refresh_views(&h, "board", &dir).await.expect_err("refused");
+        assert!(e.contains("view.tui[0].show") && e.contains("grid"), "{e}");
+        assert_eq!(view_of(&h), own, "the instance keeps its view");
+    }
+
+    #[test]
+    fn merged_view_keeps_the_instances_own_fields_and_drops_bytes() {
+        let obj = |v: Value| v.as_object().unwrap().clone();
+        let own = obj(json!({"kind": "old", "extra": 1, "bytes": "x", "bytes_rev": "old", "calls": ["a"]}));
+        let bundle = obj(json!({"kind": "html", "calls": ["b"], "tui": tui("v")}));
+        let m = merged_view(own.clone(), bundle.clone(), Some("rev".into()));
+        assert_eq!(Value::Object(m), json!({"kind": "html", "extra": 1, "calls": ["b"], "tui": tui("v"), "bytes_rev": "rev"}));
+        // no view file: no revision, and a stale one is dropped
+        let m = merged_view(own, bundle, None);
+        assert!(m.get("bytes_rev").is_none() && m.get("bytes").is_none() && m["extra"] == 1);
+    }
 }

@@ -46,6 +46,8 @@ pub struct Src<'a> {
     pub tasks: &'a [crate::kern::model::Task],
     pub waiting: &'a std::collections::HashMap<AgentId, usize>,
     pub done: &'a std::collections::HashSet<AgentId>,
+    /// Agents whose record declares a valid `view.tui`.
+    pub declared: &'a std::collections::HashSet<AgentId>,
 }
 
 /// Flatten the tree into the lines to draw.
@@ -109,7 +111,11 @@ pub fn flatten(src: &Src<'_>) -> Vec<TreeRow> {
             // A filtered list is flat: there is no parent context to indent under.
             depth: if needle.is_some() { 0 } else { depth },
             label,
-            kind: PanelKind::of(&node.id, node.handler_module.as_deref().unwrap_or("")),
+            kind: PanelKind::choose(
+                &node.id,
+                node.handler_module.as_deref().unwrap_or(""),
+                src.declared.contains(&node.id),
+            ),
             live: node.handler_module.is_some(),
             has_children: !node.children.is_empty(),
             collapsed,
@@ -320,6 +326,7 @@ mod tests {
         collapsed: HashSet<AgentId>,
         waiting: HashMap<AgentId, usize>,
         done: HashSet<AgentId>,
+        declared: HashSet<AgentId>,
     }
     impl Bag {
         fn new() -> Self {
@@ -327,6 +334,7 @@ mod tests {
                 collapsed: HashSet::new(),
                 waiting: HashMap::new(),
                 done: HashSet::new(),
+                declared: HashSet::new(),
             }
         }
     }
@@ -344,6 +352,7 @@ mod tests {
             tasks,
             waiting: &b.waiting,
             done: &b.done,
+            declared: &b.declared,
         })
     }
 
@@ -470,6 +479,25 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_agent_gets_the_declared_kind_in_the_tree_and_a_built_in_keeps_its_own() {
+        let t = node(
+            "root",
+            Some("kernel_state.tools"),
+            vec![
+                node("mine", Some("my.tools"), vec![]),
+                node("plain", Some("other.tools"), vec![]),
+                node("sched", Some("scheduler.tools"), vec![]),
+            ],
+        );
+        let mut b = Bag::new();
+        b.declared = ["mine", "sched"].iter().map(|s| s.to_string()).collect();
+        let kind = |id: &str| flat(&t, &b, None, &[]).into_iter().find(|r| r.id == id).unwrap().kind;
+        assert_eq!(kind("mine"), PanelKind::Declared);
+        assert_eq!(kind("plain"), PanelKind::Generic);
+        assert_eq!(kind("sched"), PanelKind::Scheduler);
+    }
+
+    #[test]
     fn an_empty_tree_renders_nothing_rather_than_inventing_a_root() {
         let b = Bag::new();
         let rows = flatten(&Src {
@@ -479,6 +507,7 @@ mod tests {
             tasks: &[],
             waiting: &b.waiting,
             done: &b.done,
+            declared: &b.declared,
         });
         assert!(rows.is_empty());
     }

@@ -18,6 +18,7 @@ use crate::env::{ClientCfg, Paths};
 use crate::ev::{Cmd, Ev, Got, LinkEv, What};
 use crate::kern::model::{AgentId, KernelErr, Record, RowId, Task, TreeNode};
 use crate::panel::activity::{ActivityPanel, ACTIVITY_ID};
+use crate::panel::declared::DeclaredPanel;
 use crate::panel::setup::{SetupPanel, SETUP_ID};
 use crate::panel::{self, Cx, Panel, PanelKind};
 use crate::presence::Presence;
@@ -90,6 +91,8 @@ pub struct App {
     /// Agents whose work finished since the last look, so the tree can show a
     /// settled agent differently from an idle one.
     pub done: HashSet<AgentId>,
+    /// Agents whose record declares a valid `view.tui` (the panel choice reads it).
+    pub declared: HashSet<AgentId>,
     /// Per agent, how many messages are waiting on the human. DERIVED from rows,
     /// which is the whole of "waiting" in an async system.
     pub waiting: HashMap<AgentId, usize>,
@@ -170,6 +173,7 @@ impl App {
             store: Store::default(),
             tasks: Vec::new(),
             done: HashSet::new(),
+            declared: HashSet::new(),
             waiting: HashMap::new(),
             panels: HashMap::new(),
             focus: Focus::Tree,
@@ -510,6 +514,11 @@ impl App {
             if let Some(a) = p.as_any_mut().downcast_mut::<ActivityPanel>() {
                 a.set_agents(self.all_agents());
             }
+            if let Some(d) = p.as_any_mut().downcast_mut::<DeclaredPanel>() {
+                if let Some(v) = self.records.get(&agent).and_then(|r| r.meta.get("view")) {
+                    d.set_decl(v);
+                }
+            }
             self.panels.insert(agent.clone(), p);
         }
         // Take the panel out so `self` can be borrowed for the context.
@@ -526,6 +535,40 @@ impl App {
         self.dirty = true;
     }
 
+    /// Which agents declare a valid `view.tui`, from their records; an open
+    /// declared panel takes the record's current declaration (a bundle edit
+    /// shows at once), and a generic panel left over from before the
+    /// declaration appeared is dropped, so the next selection builds the right one.
+    fn sync_declared(&mut self) {
+        self.declared = self
+            .records
+            .values()
+            .filter(|r| r.meta.get("view").is_some_and(crate::panel::declared::declared))
+            .map(|r| r.id.clone())
+            .collect();
+        for (id, p) in self.panels.iter_mut() {
+            if let Some(d) = p.as_any_mut().downcast_mut::<DeclaredPanel>() {
+                if let Some(v) = self.records.get(id).and_then(|r| r.meta.get("view")) {
+                    d.set_decl(v);
+                }
+            }
+        }
+        let stale: Vec<AgentId> = self
+            .panels
+            .iter()
+            .filter(|(id, p)| p.kind() == PanelKind::Generic && self.declared.contains(*id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            self.panels.remove(id);
+        }
+        self.reflow();
+        if let Some(a) = self.selected().cloned().filter(|a| stale.contains(a)) {
+            let k = self.selected_kind();
+            self.select(a, k);
+        }
+    }
+
     /// Re-flatten the tree. Called whenever anything it reads changes, because the
     /// flattened list is a projection and keeping it stale would show a kernel
     /// that no longer exists.
@@ -538,6 +581,7 @@ impl App {
             tasks: &self.tasks,
             waiting: &self.waiting,
             done: &self.done,
+            declared: &self.declared,
         });
         use crate::ui::side::SideView;
         self.system_folded = 0;
@@ -550,6 +594,7 @@ impl App {
                 tasks: &self.tasks,
                 waiting: &self.waiting,
                 done: &self.done,
+                declared: &self.declared,
             });
             let modules = self.modules();
             let provider = self.provider.clone();
@@ -714,6 +759,7 @@ impl App {
             }
             Got::Agents { records } => {
                 self.records = records.into_iter().map(|r| (r.id.clone(), r)).collect();
+                self.sync_declared();
                 self.dirty = true;
             }
             Got::Ps(tasks) => {
@@ -939,6 +985,14 @@ impl App {
         hot.sort();
         hot.dedup();
 
+        // the selected panel's own clock (a declared view's `every_s`): only
+        // the one on screen refreshes
+        if let Some(a) = self.selected().cloned() {
+            if let Some(p) = self.panels.get_mut(&a) {
+                p.tick(crate::panel::readonly::now_secs(), &mut cmds);
+            }
+        }
+
         for a in hot {
             // A panel that keeps no conversation is not polled for rows. A terminal
             // and a file surface are streams and listings, not logs.
@@ -1122,5 +1176,82 @@ mod tests {
             assert!(app.out.is_empty(), "{line}: nothing is sent");
             assert_eq!(app.notes.last().map(String::as_str), Some(want), "{line}");
         }
+    }
+
+    fn record(id: &str, view: Value) -> Record {
+        serde_json::from_value(serde_json::json!({"id": id, "handler_module": "x.tools", "view": view}))
+            .expect("a record")
+    }
+
+    #[test]
+    fn an_agent_whose_record_has_view_tui_gets_the_declared_panel_when_selected() {
+        let mut app = app_on("worker");
+        assert_eq!(app.selected_kind(), PanelKind::Generic);
+        let view = serde_json::json!({"kind": "html", "tui": [
+            {"title": "S", "call": {"verb": "status"}, "show": "kv"}]});
+        app.on_got(Got::Agents { records: vec![record("worker", view)] });
+        assert_eq!(app.selected_kind(), PanelKind::Declared);
+        let k = app.selected_kind();
+        app.select("worker".into(), k);
+        assert_eq!(app.panels["worker"].kind(), PanelKind::Declared);
+        assert!(
+            app.out.iter().any(|c| matches!(c, Cmd::Send { target, payload }
+                if target == "worker" && payload["type"] == "status")),
+            "{:?}",
+            app.out.len()
+        );
+        // an edit of the bundle reaches the open panel at once
+        let view = serde_json::json!({"tui": [{"title": "S", "call": {"verb": "other"}, "show": "kv"}]});
+        app.on_got(Got::Agents { records: vec![record("worker", view)] });
+        let p = app.panels.get_mut("worker").unwrap();
+        let d = p.as_any_mut().downcast_mut::<DeclaredPanel>().unwrap();
+        assert_eq!(d.sections[0].verb, "other");
+    }
+
+    #[test]
+    fn a_generic_panel_opened_before_the_declaration_arrived_is_replaced() {
+        let mut app = app_on("worker");
+        app.select("worker".into(), PanelKind::Generic);
+        assert_eq!(app.panels["worker"].kind(), PanelKind::Generic);
+        let view = serde_json::json!({"tui": [{"title": "S", "call": {"verb": "status"}, "show": "kv"}]});
+        app.on_got(Got::Agents { records: vec![record("worker", view)] });
+        assert_eq!(app.panels["worker"].kind(), PanelKind::Declared);
+    }
+
+    #[test]
+    fn a_record_without_a_valid_view_tui_stays_generic() {
+        for view in [
+            serde_json::json!({"kind": "html"}),
+            serde_json::json!({"tui": []}),
+            serde_json::json!({"tui": [{"title": "S", "call": {"verb": "v"}, "show": "grid"}]}),
+        ] {
+            let mut app = app_on("worker");
+            app.on_got(Got::Agents { records: vec![record("worker", view.clone())] });
+            assert_eq!(app.selected_kind(), PanelKind::Generic, "{view}");
+            let k = app.selected_kind();
+            app.select("worker".into(), k);
+            assert_eq!(app.panels["worker"].kind(), PanelKind::Generic, "{view}");
+        }
+    }
+
+    #[test]
+    fn only_the_selected_declared_panel_is_ticked() {
+        let mut app = app_on("worker");
+        app.link = Link::Up;
+        let view = serde_json::json!({"tui": [{"title": "S", "call": {"verb": "status"}, "show": "kv", "every_s": 1}]});
+        for id in ["worker", "other"] {
+            let mut d = DeclaredPanel::new(id.into());
+            d.set_decl(&view);
+            app.panels.insert(id.into(), Box::new(d));
+        }
+        let due = app.due();
+        let asked: Vec<&AgentId> = due
+            .iter()
+            .filter_map(|c| match c {
+                Cmd::Send { target, payload } if payload["type"] == "status" => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, vec!["worker"], "the selected panel's clock only");
     }
 }

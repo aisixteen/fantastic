@@ -72,6 +72,70 @@ Grow it the same way: verbs return data, an `emit` on each change, the panel
 redraws. `innerHTML` runs no `<script>` — keep the panel's script in
 `panel.html` and send data (or script-free HTML) in the events.
 
+## Declared TUI views
+
+The terminal UI draws an agent's own panel from DATA, with no Rust written: add
+`tui` to the same `view` the web panel uses, in `bundle.yaml`. One file declares
+both; `refresh_views` writes it to every instance like the rest of `view`, so an
+edit shows at once (no restart), and a bundle with only `tui` (no `bytes_file`) is
+fine.
+
+`view.tui` is a list of 1 to 16 sections. Each section renders the reply of ONE
+verb call:
+
+| key | |
+|---|---|
+| `title` | the heading (a non-empty string) |
+| `call` | `{verb, args?}`: the verb sent to the agent, `args` merged into the call |
+| `show` | `kv` (label and value per field; no fields: every top-level scalar of the reply), `table` (rows from the reply if it is a list, else its first list-valued key; columns are the fields, or the first row's keys), `list` (one line per item), `log` (the same, newest last, scrolled to the newest line until you scroll up), `text` (the reply string, else the first field, else its `text`) |
+| `fields` | optional: a dotted path (`load.1m`; a number indexes a list: `items.0.name`) or `{path, label?}`; the label defaults to the path |
+| `every_s` | optional: refresh every N seconds (1 to 3600) while this agent is the selected one |
+
+Any other key is refused, naming it. A refused declaration is refused with
+`reason: bad_arg` and a sentence naming the section and the field
+(for example: view.tui[1].show: `grid` is not a kind; the kinds are kv, table, list, log, text):
+`spawn` and the bundle watcher report it, and the instances keep the view they had.
+
+**Which panel an agent gets**: the built-in panels first (ai, terminal, files,
+scheduler, and the other read-only ones), then the declared panel when the
+record's `view.tui` is valid, then the generic panel. In a declared panel `g`
+switches to the generic reflect view and back, `r` asks every section again, and
+`j`/`k`/PageUp/PageDown scroll.
+
+The panel only reads: it sends the declared verbs (when selected, on `r`, and on
+`every_s`) and `reflect`, nothing else. A refusal shows in the section that asked,
+as the kernel answered it: `refused: <error> (<reason>)`.
+
+```yaml
+# .fantastic/bundles/status_board/bundle.yaml
+base: py_agent
+sentence: A status board.
+command: [python3, agent.py]
+verbs: {status: "...", jobs: "...", events: "...", notes: "..."}
+record:
+  view:
+    kind: html              # the web view
+    bytes_file: panel.html
+    calls: [status, jobs, events, notes]
+    tui:                    # the terminal view
+      - title: Status
+        call: {verb: status}
+        show: kv
+        fields: [state, {path: load.1m, label: load}]
+      - title: Jobs
+        call: {verb: jobs, args: {limit: 20}}
+        show: table
+        fields: [id, {path: next.in_s, label: next}]
+        every_s: 5
+      - title: Events
+        call: {verb: events}
+        show: log
+        every_s: 2
+      - title: Notes
+        call: {verb: notes}
+        show: text
+```
+
 ## Share it
 
 A bundle is a folder of open files: zip it, send it, drop it into another

@@ -273,10 +273,14 @@ impl BackendBundle {
     /// `<name>_<n>` (the next free n) under this canvas node, granted like any
     /// cell's backend, its view written from the bundle's view file.
     async fn spawn_instance(host: &Host, me: &AgentId, name: &str, stamp: Map<String, Value>) -> Value {
-        let paths = match crate::env::Paths::here() {
-            Ok(p) => p,
-            Err(e) => return refuse("not_found", format!("spawn: the project dir: {e}"), ""),
-        };
+        match crate::env::Paths::here() {
+            Ok(paths) => Self::spawn_instance_in(host, me, name, stamp, &paths).await,
+            Err(e) => refuse("not_found", format!("spawn: the project dir: {e}"), ""),
+        }
+    }
+
+    /// [`Self::spawn_instance`] in project `paths`.
+    async fn spawn_instance_in(host: &Host, me: &AgentId, name: &str, stamp: Map<String, Value>, paths: &crate::env::Paths) -> Value {
         let dir = paths.store.join("bundles").join(name);
         if !dir.join("bundle.yaml").is_file() || !host.kernel.bundles.is_folder(name) {
             let have: Vec<String> = Self::project_bundles(host).iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect();
@@ -819,6 +823,32 @@ mod create_tests {
         assert_eq!(meta["callable_by"][crate::env::HUMAN], json!(CHAT_VERBS));
         // and the store admits it (its ingress side)
         assert_eq!(record_of(&h, "memory")["callable_by"]["helper"], json!("*"), "the store admits the helper");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn spawn_instance_refuses_a_bad_tui_with_reason_bad_arg() {
+        let (h, dir) = host("bad-tui", &["fakeb_1", "fakeb_2"]).await;
+        h.kernel.bundles.register_folder("fakeb", Arc::new(FakeAi), json!({}));
+        let bundle = dir.join(".fantastic").join("bundles").join("fakeb");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let doc = |show: &str| {
+            fantastic_kernel::yaml_io::dump(&json!({"record": {"view": {"tui": [
+                {"title": "S", "call": {"verb": "v"}, "show": show}]}}}))
+        };
+        std::fs::write(bundle.join("bundle.yaml"), doc("grid")).unwrap();
+        let paths = crate::env::Paths::at(&dir);
+        let me = AgentId::from("canvas_root");
+        let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &paths).await;
+        assert_eq!(out["reason"], "bad_arg", "{out}");
+        let e = out["error"].as_str().unwrap();
+        assert!(e.contains("view.tui[0].show") && e.contains("grid"), "{e}");
+        // a good declaration spawns, and the instance carries it
+        std::fs::write(bundle.join("bundle.yaml"), doc("kv")).unwrap();
+        let out = BackendBundle::spawn_instance_in(&h, &me, "fakeb", Map::new(), &paths).await;
+        assert!(out.get("error").is_none(), "{out}");
+        let id = out["id"].as_str().unwrap().to_string();
+        assert_eq!(record_of(&h, &id)["view"]["tui"][0]["show"], "kv");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
