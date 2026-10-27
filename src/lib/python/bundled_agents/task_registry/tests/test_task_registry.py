@@ -444,6 +444,351 @@ async def test_store_refusal_passes_through(kernel):
     assert len(listed["tasks"]) == 1, listed
 
 
+def vers(n):
+    return [{"repo": f"o/r{n}", "branch": f"b{n}", "commit": f"c{n}"}]
+
+
+FORK = {"agent": "ghost_agent", "mark": "m1"}
+
+
+def usage(i, cr, cw, o):
+    return {
+        "input_tokens": i,
+        "cache_read_tokens": cr,
+        "cache_write_tokens": cw,
+        "output_tokens": o,
+    }
+
+
+async def task_rows(r):
+    return len([x for x in await r.dump_rows() if x["row"]["kind"] == "task"])
+
+
+async def report_usage(r, tid, u):
+    out = await r.call("lead", {"type": "report", "id": tid, "usage": u})
+    assert "error" not in out, out
+
+
+async def test_add_records_versions_source_version_and_fork_from(kernel):
+    r = await rig(kernel)
+    added = await r.add(
+        "lead",
+        "t1",
+        versions=vers(1),
+        source_version="2026-10-01T00:00:00Z",
+        fork_from=FORK,
+        holder="sublead",
+    )
+    assert added["versions"] == vers(1), added
+    assert added["source_version"] == "2026-10-01T00:00:00Z"
+    assert added["fork_from"] == FORK
+    assert added["history"][0]["versions"] == vers(1)
+    got = await r.call("lead", {"type": "get", "id": "t1"})
+    assert got["versions"] == vers(1)
+    assert got["fork_from"] == FORK
+    row = next(x for x in await r.dump_rows() if x["row"]["kind"] == "task")
+    assert row["row"]["content"]["versions"] == vers(1)
+    assert row["row"]["content"]["source_version"] == "2026-10-01T00:00:00Z"
+    assert row["row"]["content"]["fork_from"] == FORK
+
+
+async def test_add_without_the_new_facts_has_empty_defaults(kernel):
+    r = await rig(kernel)
+    added = await r.add("lead", "t1", holder="sublead")
+    assert added["versions"] == [], added
+    assert added["source_version"] is None
+    assert added["fork_from"] is None
+    assert added["usage"] is None
+    assert len(added["history"][0]) == 4
+
+
+async def test_versions_must_be_a_list_of_repo_branch_commit(kernel):
+    r = await rig(kernel)
+    for bad in (
+        "o/r@main",
+        {"repo": "a", "branch": "b", "commit": "c"},
+        [{"repo": "a", "branch": "b"}],
+        [{"repo": "a", "branch": "b", "commit": "c", "extra": "d"}],
+        [{"repo": "a", "branch": "", "commit": "c"}],
+        [{"repo": "a", "branch": "b", "commit": 7}],
+        ["a"],
+    ):
+        out = await r.add("lead", "t1", versions=bad)
+        assert out["reason"] == "bad_arg", (bad, out)
+        assert out["arg"] == "versions", out
+    assert await task_rows(r) == 0
+    await r.add("lead", "t1")
+    out = await r.call(
+        "lead",
+        {"type": "assign", "id": "t1", "holder": "worker", "versions": "x"},
+    )
+    assert out["reason"] == "bad_arg", out
+    assert await task_rows(r) == 1
+    ok = await r.add("lead", "t2", versions=[])
+    assert ok["versions"] == [], ok
+
+
+async def test_fork_from_needs_agent_and_mark(kernel):
+    r = await rig(kernel)
+    for bad in (
+        {"agent": "a"},
+        "a:m",
+        {"agent": "a", "mark": ""},
+        {"agent": "a", "mark": "m", "x": 1},
+    ):
+        out = await r.add("lead", "t1", fork_from=bad)
+        assert out["reason"] == "bad_arg", (bad, out)
+        assert out["arg"] == "fork_from", out
+    assert await task_rows(r) == 0
+    ok = await r.add("lead", "t1", fork_from=FORK)
+    assert ok["fork_from"] == FORK, ok
+
+
+async def test_assign_sets_the_facts_and_reassign_keeps_them_in_history(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    a = await r.call(
+        "lead",
+        {
+            "type": "assign",
+            "id": "t1",
+            "holder": "sublead",
+            "versions": vers(1),
+            "source_version": "v1",
+            "fork_from": FORK,
+        },
+    )
+    assert a["versions"] == vers(1), a
+    b = await r.call(
+        "lead",
+        {
+            "type": "reassign",
+            "id": "t1",
+            "holder": "worker",
+            "versions": vers(2),
+            "source_version": "v2",
+        },
+    )
+    assert b["versions"] == vers(2), b
+    assert b["source_version"] == "v2"
+    assert b["fork_from"] == FORK
+    h = b["history"]
+    assert h[0]["versions"] == vers(1)
+    assert h[0]["source_version"] == "v1"
+    assert h[0]["fork_from"] == FORK
+    assert h[1]["versions"] == vers(2)
+    assert h[1]["source_version"] == "v2"
+    c = await r.call(
+        "lead",
+        {"type": "reassign", "id": "t1", "holder": "sublead", "versions": []},
+    )
+    assert c["versions"] == [], c
+    assert "versions" not in c["history"][2], c
+
+
+async def test_history_item_omits_facts_when_none_were_given(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    await r.call("lead", {"type": "assign", "id": "t1", "holder": "sublead"})
+    b = await r.call("lead", {"type": "reassign", "id": "t1", "holder": "worker"})
+    for item in b["history"]:
+        assert sorted(item) == ["at", "by", "from", "to"], item
+
+
+async def test_lead_updates_the_facts_through_status(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1", status="running")
+    out = await r.call(
+        "lead",
+        {
+            "type": "status",
+            "id": "t1",
+            "versions": vers(3),
+            "source_version": "v9",
+            "fork_from": FORK,
+        },
+    )
+    assert "error" not in out, out
+    assert out["status"] == "running"
+    assert out["versions"] == vers(3)
+    assert out["source_version"] == "v9"
+    assert out["fork_from"] == FORK
+    got = await r.call("lead", {"type": "get", "id": "t1"})
+    assert got["versions"] == vers(3)
+    both = await r.call(
+        "lead", {"type": "status", "id": "t1", "status": "done", "versions": []}
+    )
+    assert (both["status"], both["versions"]) == ("done", [])
+
+
+async def test_status_needs_status_or_a_fact(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    out = await r.call("lead", {"type": "status", "id": "t1"})
+    assert out["reason"] == "missing_arg", out
+    assert out["arg"] == "status", out
+    bad = await r.call(
+        "lead", {"type": "status", "id": "t1", "status": "nope", "versions": vers(1)}
+    )
+    assert bad["reason"] == "bad_arg", bad
+    assert await task_rows(r) == 1
+
+
+async def test_worker_without_a_grant_cannot_update_the_facts(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1", versions=vers(1))
+    out = await r.call(
+        "worker", {"type": "status", "id": "t1", "versions": vers(2)}
+    )
+    assert out["reason"] == "unauthorized", out
+    got = await r.call("lead", {"type": "get", "id": "t1"})
+    assert got["versions"] == vers(1)
+    assert await task_rows(r) == 1
+
+
+async def test_report_records_usage_and_keeps_the_last(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    one = await r.call(
+        "lead",
+        {
+            "type": "report",
+            "id": "t1",
+            "state": "running",
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_tokens": 20,
+                "cache_write_tokens": 30,
+                "output_tokens": 40,
+            },
+        },
+    )
+    assert one["usage"] == usage(10, 20, 30, 40), one
+    assert one["report"]["usage"] == usage(10, 20, 30, 40)
+    two = await r.call("lead", {"type": "report", "id": "t1", "state": "done"})
+    assert two["usage"] == usage(10, 20, 30, 40), two
+    assert two["report"]["usage"] is None
+    three = await r.call(
+        "lead", {"type": "report", "id": "t1", "usage": usage(1, 2, 3, 4)}
+    )
+    assert three["usage"] == usage(1, 2, 3, 4), three
+
+
+async def test_report_usage_fills_missing_keys_with_zero(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    out = await r.call(
+        "lead", {"type": "report", "id": "t1", "usage": {"input_tokens": 5}}
+    )
+    assert out["usage"] == usage(5, 0, 0, 0), out
+    assert out["report"]["usage"] == usage(5, 0, 0, 0)
+
+
+async def test_report_usage_rejects_unknown_keys_and_negatives_and_floats(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    for bad in (
+        {"total_tokens": 5},
+        {"input_tokens": -1},
+        {"input_tokens": 1.5},
+        {"input_tokens": "5"},
+        {"input_tokens": True},
+        5,
+        [1],
+    ):
+        out = await r.call("lead", {"type": "report", "id": "t1", "usage": bad})
+        assert out["reason"] == "bad_arg", (bad, out)
+        assert out["arg"] == "usage", out
+    got = await r.call("lead", {"type": "get", "id": "t1"})
+    assert got["usage"] is None
+    assert got["report"] is None
+    assert await task_rows(r) == 1
+
+
+async def test_list_sums_usage_over_the_given_task_ids(kernel):
+    r = await rig(kernel)
+    for tid in ("a", "b", "c"):
+        await r.add("lead", tid)
+    await report_usage(r, "a", usage(1, 2, 3, 4))
+    await report_usage(r, "b", usage(10, 20, 30, 40))
+    await report_usage(r, "c", usage(100, 200, 300, 400))
+    out = await r.call("lead", {"type": "list", "ids": ["a", "b"]})
+    assert _ids(out) == ["a", "b"], out
+    assert out["usage"] == usage(11, 22, 33, 44), out
+
+
+async def test_list_usage_counts_tasks_without_usage_as_zero(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "a")
+    await r.add("lead", "b")
+    await report_usage(r, "a", usage(1, 2, 3, 4))
+    out = await r.call("lead", {"type": "list", "ids": ["a", "b"]})
+    assert out["usage"] == usage(1, 2, 3, 4), out
+    none = await r.call("lead", {"type": "list", "ids": ["b"]})
+    assert none["usage"] == usage(0, 0, 0, 0), none
+
+
+async def test_list_ids_unknown_is_not_found(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "a")
+    out = await r.call("lead", {"type": "list", "ids": ["a", "ghost"]})
+    assert out["reason"] == "not_found", out
+    for bad in ("a", [1], [""]):
+        out = await r.call("lead", {"type": "list", "ids": bad})
+        assert out["reason"] == "bad_arg", (bad, out)
+
+
+async def test_list_usage_totals_all_returned_tasks_without_ids(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "a", holder="worker")
+    await r.add("lead", "b", holder="sublead")
+    await report_usage(r, "a", usage(1, 1, 1, 1))
+    await report_usage(r, "b", usage(5, 5, 5, 5))
+    allv = await r.call("lead", {"type": "list"})
+    assert allv["usage"] == usage(6, 6, 6, 6), allv
+    one = await r.call("lead", {"type": "list", "holder": "worker"})
+    assert one["usage"] == usage(1, 1, 1, 1), one
+    empty = await r.call("lead", {"type": "list", "status": "done"})
+    assert empty["usage"] == usage(0, 0, 0, 0), empty
+
+
+async def test_facts_survive_a_registry_restart(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1", versions=vers(1), fork_from=FORK)
+    await report_usage(r, "t1", usage(1, 2, 3, 4))
+    await send(kernel, "kernel_state", {"type": "delete_agent", "id": "tr"})
+    await r.make_registry("tr")
+    got = await r.call("lead", {"type": "get", "id": "t1"})
+    assert got["versions"] == vers(1), got
+    assert got["fork_from"] == FORK
+    assert got["usage"] == usage(1, 2, 3, 4)
+
+
+async def test_entries_from_before_the_facts_still_load(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "old", source="gh:o/r#1")
+    tables = (await send(kernel, r.store, {"type": "dump"}))["tables"]
+    for row in tables["rows"]:
+        for k in ("versions", "source_version", "fork_from", "usage"):
+            row["row"]["content"].pop(k, None)
+    inj = await send(kernel, r.store, {"type": "inject", "tables": tables})
+    assert "error" not in inj, inj
+    got = await r.call("lead", {"type": "get", "id": "old"})
+    assert got["versions"] == [], got
+    assert got["source_version"] is None
+    assert got["usage"] is None
+    lst = await r.call("lead", {"type": "list"})
+    assert lst["tasks"][0]["fork_from"] is None, lst
+    a = await r.call("lead", {"type": "assign", "id": "old", "holder": "worker"})
+    assert a["versions"] == [], a
+    assert len(a["history"][0]) == 4
+    rep = await r.call("lead", {"type": "report", "id": "old", "state": "done"})
+    assert rep["usage"] is None, rep
+    rows = await r.dump_rows()
+    last = [x for x in rows if x["row"]["task_id"] == "old"][-1]
+    assert last["row"]["content"]["versions"] == []
+
+
 def test_readme_is_rust_verbatim():
     here = Path(tools.__file__).resolve().parent
     rust = (

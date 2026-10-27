@@ -21,6 +21,13 @@ the write verbs in its `can_call` on the registry. A worker only `report`s to it
 lead (agentic_resources) and the lead writes here. The one rule inside the bundle is
 that a `report`'s `from` is the caller or one of its descendants.
 
+RECORDED FACTS. An entry may also carry `versions` (`[{repo, branch, commit}]`),
+`source_version` (an opaque string) and `fork_from` (`{agent, mark}`), set by
+`add`/`assign`/`reassign`/`status` and kept in the reassign history, and `usage`
+(the last `report`'s token counts). All are opaque facts: nothing is checked
+against a repo or an agent. An entry stored before these existed loads with the
+defaults (`[]`, null, null, null).
+
 Verbs (mirror Rust verb-for-verb): `reflect`, `add`, `assign`, `reassign`,
 `status`, `report`, `list`, `get`.
 """
@@ -46,12 +53,12 @@ PAGE = 500
 
 VERB_DOCS = {
     "reflect": "Identity and whether the registry is enabled (has a task_store_id). No args.",
-    "add": "args: id:str (req), source:str (req, opaque: gh:o/r#12, jira:KEY-5, ...), parent:str? (a task id), update_to:str? (default source), holder:str|{subtree:str}? (an existing agent), status:str? (default waiting). Refused `exists` (id taken), `not_found` (parent or holder). Returns the entry.",
-    "assign": "args: id:str (req), holder:str|{subtree:str} (req; an existing agent id, or a subtree named by its root agent). Only a task nobody holds; else `already_held`. Returns the entry.",
-    "reassign": "args: id:str (req), holder:str|{subtree:str} (req). Only a held task; else `not_held`. Agent to agent, to a subtree and back; every step is kept in history {from, to, by, at}. Returns the entry.",
-    "status": "args: id:str (req), status:waiting|running|blocked|done|failed|paused (req). Returns the entry.",
-    "report": "args: id:str (req), from:str? (an agent id; default you), state:str?, result:any?. Records the task's last report {from, state, result, at}. `from` must be you or one of your descendants, else `not_in_subtree`. Returns the entry.",
-    "list": "args: parent:str?, holder:str|{subtree:str}?, status:str?. Returns {tasks:[entry]} sorted by id.",
+    "add": "args: id:str (req), source:str (req, opaque: gh:o/r#12, jira:KEY-5, ...), parent:str? (a task id), update_to:str? (default source), holder:str|{subtree:str}? (an existing agent), status:str? (default waiting), versions:[{repo,branch,commit}]? (opaque strings, one per repo the task touches), source_version:str? (opaque), fork_from:{agent,mark}? (opaque). Refused `exists` (id taken), `not_found` (parent or holder). Returns the entry.",
+    "assign": "args: id:str (req), holder:str|{subtree:str} (req; an existing agent id, or a subtree named by its root agent). versions:[{repo,branch,commit}]?, source_version:str?, fork_from:{agent,mark}? (each, when given, replaces the entry's value; `versions: []` clears it). Only a task nobody holds; else `already_held`. Returns the entry.",
+    "reassign": "args: id:str (req), holder:str|{subtree:str} (req), versions?, source_version?, fork_from? (as `assign`). Only a held task; else `not_held`. Agent to agent, to a subtree and back; every step is kept in history {from, to, by, at}, plus the entry's non-empty versions, source_version and fork_from as set by that step. Returns the entry.",
+    "status": "args: id:str (req), status:waiting|running|blocked|done|failed|paused?, versions?, source_version?, fork_from? (as `assign`). At least one of status and the three facts is required, else `missing_arg` for status. The lead's way to update the facts. Returns the entry.",
+    "report": "args: id:str (req), from:str? (an agent id; default you), state:str?, result:any?, usage:{input_tokens,cache_read_tokens,cache_write_tokens,output_tokens}? (non-negative integers, missing keys count 0). Records the task's last report {from, state, result, at, usage}; a usage also becomes the entry's `usage` (the last one per task; a report without usage keeps it). `from` must be you or one of your descendants, else `not_in_subtree`. Returns the entry.",
+    "list": "args: parent:str?, holder:str|{subtree:str}?, status:str?, ids:[str]? (only these tasks; an id that is not a task is `not_found`). Returns {tasks:[entry], usage:{input_tokens,cache_read_tokens,cache_write_tokens,output_tokens}} sorted by id; usage is the sum of the returned tasks' last usage (none counts 0).",
     "get": "args: id:str (req). Returns the entry plus children (the ids of the tasks whose parent it is); an unknown id is `not_found`.",
 }
 
@@ -101,6 +108,98 @@ def _opt_str(verb: str, payload: dict, arg: str):
     return v
 
 
+USAGE_KEYS = ("input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens")
+
+
+def _nonempty_str(v) -> bool:
+    return isinstance(v, str) and bool(v)
+
+
+def _versions_arg(verb: str, payload: dict):
+    """An optional `versions`: a list of `{repo, branch, commit}`, all non-empty
+    strings."""
+    v = payload.get("versions")
+    if v is None:
+        return None
+    want = "a list of {repo, branch, commit} strings"
+    if not isinstance(v, list):
+        raise _Refused(bad(verb, "versions", want))
+    for item in v:
+        if not (
+            isinstance(item, dict)
+            and len(item) == 3
+            and all(_nonempty_str(item.get(k)) for k in ("repo", "branch", "commit"))
+        ):
+            raise _Refused(bad(verb, "versions", want))
+    return v
+
+
+def _fork_from_arg(verb: str, payload: dict):
+    """An optional `fork_from`: `{agent, mark}`, both non-empty strings (opaque)."""
+    v = payload.get("fork_from")
+    if v is None:
+        return None
+    if not (
+        isinstance(v, dict)
+        and len(v) == 2
+        and all(_nonempty_str(v.get(k)) for k in ("agent", "mark"))
+    ):
+        raise _Refused(bad(verb, "fork_from", "an {agent, mark} object of strings"))
+    return v
+
+
+def _facts_arg(verb: str, payload: dict) -> tuple:
+    return (
+        _versions_arg(verb, payload),
+        _opt_str(verb, payload, "source_version"),
+        _fork_from_arg(verb, payload),
+    )
+
+
+def _usage_arg(payload: dict):
+    """An optional `usage`: token counts, a subset of USAGE_KEYS, each a non-negative
+    integer. Stored with all four keys (missing ones 0)."""
+    v = payload.get("usage")
+    if v is None:
+        return None
+    want = (
+        "an object of non-negative integer token counts "
+        "(input_tokens, cache_read_tokens, cache_write_tokens, output_tokens)"
+    )
+    if not isinstance(v, dict) or any(k not in USAGE_KEYS for k in v):
+        raise _Refused(bad("report", "usage", want))
+    out = {}
+    for k in USAGE_KEYS:
+        n = v.get(k, 0)
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise _Refused(bad("report", "usage", want))
+        out[k] = n
+    return out
+
+
+def _with_defaults(content: dict) -> dict:
+    """An entry stored before the recorded facts existed gets their defaults."""
+    e = dict(content)
+    for k, d in (
+        ("versions", []),
+        ("source_version", None),
+        ("fork_from", None),
+        ("usage", None),
+    ):
+        e.setdefault(k, d)
+    return e
+
+
+def _set_facts(entry: dict, facts: tuple) -> None:
+    versions, source_version, fork_from = facts
+    if versions is not None:
+        entry["versions"] = versions
+    if source_version is not None:
+        entry["source_version"] = source_version
+    if fork_from is not None:
+        entry["fork_from"] = fork_from
+
+
 def _state_arg(verb: str, arg: str, v: str) -> None:
     if v not in STATES:
         raise _Refused(bad(verb, arg, f"one of {'|'.join(STATES)}"))
@@ -130,8 +229,14 @@ def _not_found_task(verb: str, tid: str) -> _Refused:
     return _Refused(refusal(NOT_FOUND, f"{verb}: task {tid!r} not found"))
 
 
-def _history_item(frm, to, by) -> dict:
-    return {"from": frm, "to": to, "by": by, "at": time.time()}
+def _history_item(frm, to, by, entry: dict) -> dict:
+    """One history step; it carries the entry's recorded facts only when it has any."""
+    item = {"from": frm, "to": to, "by": by, "at": time.time()}
+    for k in ("versions", "source_version", "fork_from"):
+        v = entry.get(k)
+        if v is not None and v != []:
+            item[k] = v
+    return item
 
 
 # ─── the store ───────────────────────────────────────────────────
@@ -166,7 +271,7 @@ async def _load(kernel, store: str, only: str | None = None) -> dict:
         for row in res.get("rows") or []:
             content = row.get("content")
             if isinstance(row.get("task_id"), str) and isinstance(content, dict):
-                tasks[row["task_id"]] = content
+                tasks[row["task_id"]] = _with_defaults(content)
         after = res.get("next")
         if after is None:
             return dict(sorted(tasks.items()))
@@ -199,6 +304,7 @@ async def _add(kernel, store, caller, payload):
     update_to = _opt_str("add", payload, "update_to") or source
     status = _opt_str("add", payload, "status") or "waiting"
     _state_arg("add", "status", status)
+    facts = _facts_arg("add", payload)
     holder = None
     if payload.get("holder") is not None:
         holder = _holder_arg(kernel, "add", payload["holder"])
@@ -207,17 +313,23 @@ async def _add(kernel, store, caller, payload):
         raise _Refused(refusal(EXISTS, f"add: task {tid!r} already exists"))
     if parent is not None and parent not in tasks:
         raise _not_found_task("add", parent)
-    history = [] if holder is None else [_history_item(None, holder, caller)]
     entry = {
         "id": tid,
         "parent": parent,
         "source": source,
         "update_to": update_to,
         "holder": holder,
-        "history": history,
+        "history": [],
         "status": status,
         "report": None,
+        "versions": [],
+        "source_version": None,
+        "fork_from": None,
+        "usage": None,
     }
+    _set_facts(entry, facts)
+    if holder is not None:
+        entry["history"] = [_history_item(None, holder, caller, entry)]
     await _save(kernel, store, entry)
     return entry
 
@@ -225,6 +337,7 @@ async def _add(kernel, store, caller, payload):
 async def _assign(kernel, store, caller, payload, re: bool = False):
     verb = "reassign" if re else "assign"
     tid = _str_arg(verb, payload, "id")
+    facts = _facts_arg(verb, payload)
     if payload.get("holder") is None:
         raise _Refused(missing(verb, "holder"))
     to = _holder_arg(kernel, verb, payload["holder"])
@@ -240,7 +353,8 @@ async def _assign(kernel, store, caller, payload, re: bool = False):
         raise _Refused(
             _fail("not_held", f"reassign: task {tid!r} has no holder; use assign")
         )
-    entry["history"].append(_history_item(frm, to, caller))
+    _set_facts(entry, facts)
+    entry["history"].append(_history_item(frm, to, caller, entry))
     entry["holder"] = to
     await _save(kernel, store, entry)
     return entry
@@ -252,12 +366,19 @@ async def _reassign(kernel, store, caller, payload):
 
 async def _status(kernel, store, caller, payload):
     tid = _str_arg("status", payload, "id")
-    status = _str_arg("status", payload, "status")
-    _state_arg("status", "status", status)
+    facts = _facts_arg("status", payload)
+    if any(f is not None for f in facts):
+        status = _opt_str("status", payload, "status")
+    else:
+        status = _str_arg("status", payload, "status")
+    if status is not None:
+        _state_arg("status", "status", status)
     entry = (await _load(kernel, store, tid)).get(tid)
     if entry is None:
         raise _not_found_task("status", tid)
-    entry["status"] = status
+    if status is not None:
+        entry["status"] = status
+    _set_facts(entry, facts)
     await _save(kernel, store, entry)
     return entry
 
@@ -268,6 +389,7 @@ async def _report(kernel, store, caller, payload):
     if state is not None:
         _state_arg("report", "state", state)
     result = payload.get("result")
+    usage = _usage_arg(payload)
     who = _opt_str("report", payload, "from") or caller
     # the reporter is the caller or below it; the operator may report for anyone
     if who is not None:
@@ -288,7 +410,10 @@ async def _report(kernel, store, caller, payload):
         "state": state,
         "result": result,
         "at": time.time(),
+        "usage": usage,
     }
+    if usage is not None:
+        entry["usage"] = usage
     await _save(kernel, store, entry)
     return entry
 
@@ -297,15 +422,27 @@ async def _list(kernel, store, caller, payload):
     parent = _opt_str("list", payload, "parent")
     status = _opt_str("list", payload, "status")
     holder = payload.get("holder")
+    ids = payload.get("ids")
+    if ids is not None and not (
+        isinstance(ids, list) and all(_nonempty_str(i) for i in ids)
+    ):
+        raise _Refused(bad("list", "ids", "a list of non-empty task ids"))
     tasks = await _load(kernel, store)
+    for i in ids or []:
+        if i not in tasks:
+            raise _not_found_task("list", i)
     out = [
         t
         for t in tasks.values()
-        if (parent is None or t["parent"] == parent)
+        if (ids is None or t["id"] in ids)
+        and (parent is None or t["parent"] == parent)
         and (status is None or t["status"] == status)
         and (holder is None or t["holder"] == holder)
     ]
-    return {"tasks": out}
+    total = {
+        k: sum((t.get("usage") or {}).get(k, 0) for t in out) for k in USAGE_KEYS
+    }
+    return {"tasks": out, "usage": total}
 
 
 async def _get(kernel, store, caller, payload):
