@@ -69,6 +69,20 @@ class _ServerHandle:
         self.routes_by_child: dict[str, list[Any]] = {}
 
 
+def _route_key(spec: dict) -> tuple[str, str | None]:
+    if spec.get("kind") == "websocket":
+        return ("websocket", None)
+    return ("http", (spec.get("method") or "GET").upper())
+
+
+def _route_kind(route: Any) -> tuple[str, str | None]:
+    """The `_route_key` of a mounted starlette route."""
+    methods = getattr(route, "methods", None)
+    if methods is None:
+        return ("websocket", None)
+    return ("http", sorted(methods)[0] if len(methods) == 1 else None)
+
+
 async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
     """Mount one child's call surface. Two halves, one path each:
 
@@ -110,6 +124,25 @@ async def _mount_surface(handle: _ServerHandle, kernel, child_id: str) -> None:
                 "hands over no endpoint for it"
             )
         resolved.append((spec, path, endpoint))
+    # A literal (kind, method, path) another child already holds could never
+    # answer — first match wins — so refuse it. Patterns (`{`) are shared by
+    # design (every web_ws leg declares `/{host_id}/ws`). Rust `conflict` agrees.
+    for _spec, path, _endpoint in resolved:
+        if "{" in path:
+            continue
+        kind, method = _route_key(_spec)
+        for other, theirs in handle.routes_by_child.items():
+            if other == child_id:
+                continue
+            if any(
+                getattr(r, "path", None) == path and _route_kind(r) == (kind, method)
+                for r in theirs
+            ):
+                label = "WS" if kind == "websocket" else method
+                raise RuntimeError(
+                    f"web: route {label} {path} declared by {child_id} "
+                    f"is already declared by {other}"
+                )
     # REPLACE, never append: a re-boot re-mounts every surface, and a second copy
     # of a child's routes outlived its `unmount` (which removes the routes it
     # recorded — the newest list only), so the first copy kept serving.
@@ -424,7 +457,12 @@ async def _mount(id, payload, kernel):
     if handle is None:
         return {"error": "web.mount: not running"}
     _unmount_surface(handle, child_id)
-    await _mount_surface(handle, kernel, child_id)
+    try:
+        await _mount_surface(handle, kernel, child_id)
+    except RuntimeError as e:
+        if "is already declared by" not in str(e):
+            raise
+        return {"error": str(e)}
     return {
         "mounted": [
             getattr(r, "path", str(r)) for r in handle.routes_by_child.get(child_id, [])

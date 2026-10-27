@@ -20,6 +20,7 @@ import { tok } from "./bundles/skin/css.ts";
 import { readShell } from "./bundles/shell.ts";
 import { canvasesOf } from "./canvas_list.ts";
 import type { CanvasEntry } from "./canvas_list.ts";
+import { pickCanvas } from "./canvas_pick.ts";
 
 // The canvas page. The frontend kernel boots as a PEER of the host: it dials the host's `web_loader` (by id) over the bridge (a host-side
 // `kernel_state` rooted at `.fantastic/web/`, which the operator created — no
@@ -143,15 +144,15 @@ if (me["reason"] === "unauthorized") {
 }
 
 const canvases = await listCanvases();
-const asked = new URLSearchParams(location.search).get("canvas");
-const here = asked !== null ? canvases.find((c) => c.id === asked) : (canvases.find((c) => c.main) ?? canvases[0]);
-if (here === undefined) {
-  document.body.textContent = asked !== null ? `no canvas ${asked} on this host` : "this host holds no canvas";
+const pick = pickCanvas(canvases, location.search);
+if ("missing" in pick || "none" in pick) {
+  document.body.textContent = "missing" in pick ? `no canvas ${pick.missing} on this host` : "this host holds no canvas";
   await new Promise(() => {});
 }
+const here = pick as CanvasEntry;
 // known before any record loads: a cell's grants name this canvas's node
-setCanvasNode(here!.id);
-const LOADER = here!.loader;
+setCanvasNode(here.id);
+const LOADER = here.loader;
 const loader = new ProxyLoader(kernel, LOADER);
 kernel.persistenceProvider = LOADER;
 // PAGE BUNDLES (`<its records' root>/bundles/*/bundle.yaml`, through its loader)
@@ -168,7 +169,7 @@ else seed(kernel);
 // taken together, then each touched folder's `reload_bundle` restarts its
 // live instances and their panels draw again. Nothing runs while nothing changes.
 const BRIDGE = "bundles_watch";
-const dir = `${here!.root}/bundles`;
+const dir = `${here.root}/bundles`;
 const watchPath = async (path: string): Promise<void> => {
   const r = (await kernel.callHost(BRIDGE, { type: "watch_path", path } as never)) as Record<string, unknown> | null;
   if (typeof r?.["error"] === "string") console.error(`[canvas] page bundles: watch ${path}: ${r["error"]}`);
@@ -224,7 +225,7 @@ await mountCanvas({
   mount: document.body,
   selfId: kernel.rootId ?? "canvas",
   flush: () => loader.flush(),
-  node: here!.id,
+  node: here.id,
   canvases,
 });
 

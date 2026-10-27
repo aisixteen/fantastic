@@ -405,7 +405,10 @@ Set port on create_agent or via update_agent."
         .map(|e| e.child_ids())
         .unwrap_or_default();
     for cid in children {
-        mount_surface(&table, kernel, &cid).await;
+        if let Err(reason) = mount_surface(&table, kernel, &cid).await {
+            // Refuse BEFORE the listener binds: no shadowed route ever serves.
+            return Err(format!("RuntimeError: {reason}").into());
+        }
     }
     start_serving(agent_id, &state, &table, &host, port).await;
     // Announce OURSELVES to the cli renderer (the boot-event convention): the
@@ -529,7 +532,9 @@ async fn mount_reply(agent_id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) 
         return json!({"error": "web.mount: not running"});
     };
     table.write().await.unmount(&child);
-    mount_surface(&table, kernel, &child).await;
+    if let Err(reason) = mount_surface(&table, kernel, &child).await {
+        return json!({"error": reason});
+    }
     json!({"mounted": table.read().await.paths_for(&child)})
 }
 
@@ -560,7 +565,7 @@ async fn mount_surface(
     table: &Arc<AsyncRwLock<RouteTable>>,
     kernel: &Arc<Kernel>,
     child: &AgentId,
-) {
+) -> Result<(), String> {
     let reply = kernel
         .send(vec![Item::new(
             child.clone(),
@@ -571,9 +576,14 @@ async fn mount_surface(
         .result;
     let mounted = routes::routes_from_spec(child, &reply);
     if mounted.is_empty() {
-        return;
+        return Ok(());
     }
-    table.write().await.mount(child.clone(), mounted);
+    let mut table = table.write().await;
+    if let Some(reason) = table.conflict(child, &mounted) {
+        return Err(reason);
+    }
+    table.mount(child.clone(), mounted);
+    Ok(())
 }
 
 /// python `int(rec.get("port"))` with its falsy check — `None`, `0` and `""`
