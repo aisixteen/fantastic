@@ -33,8 +33,8 @@ $FANTASTIC $TR reflect | jq -e '.enabled == false'
 ### Test 2: every other verb is refused `disabled` without a task_store_id
 
 ```bash
-$FANTASTIC $TR list | jq -e '.error == "disabled"'
-$FANTASTIC $TR add id=t1 source=gh:o/r#1 | jq -e '.error == "disabled"'
+$FANTASTIC $TR list | jq -e '.reason == "disabled"'
+$FANTASTIC $TR add id=t1 source=gh:o/r#1 | jq -e '.reason == "disabled"'
 ```
 
 ## Cleanup

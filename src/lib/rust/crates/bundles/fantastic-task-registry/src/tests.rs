@@ -247,7 +247,7 @@ async fn refuses_every_verb_without_task_store_id() {
     assert_eq!(refl["enabled"], false, "{refl}");
     for verb in WRITE_VERBS {
         let out = send(&r.kernel, "bare", json!({"type": verb, "id": "t"})).await;
-        assert_eq!(out["error"], "disabled", "{verb}: {out}");
+        assert_eq!(out["reason"], "disabled", "{verb}: {out}");
     }
 }
 
@@ -380,7 +380,7 @@ async fn assign_sets_holder_and_history() {
             json!({"type": "assign", "id": "t1", "holder": "worker"}),
         )
         .await;
-    assert_eq!(again["error"], "already_held", "{again}");
+    assert_eq!(again["reason"], "already_held", "{again}");
     let got = r.call("lead", json!({"type": "get", "id": "t1"})).await;
     assert_eq!(got["holder"], "sublead");
     assert_eq!(got["history"].as_array().unwrap().len(), 1);
@@ -403,7 +403,7 @@ async fn reassign_requires_a_holder() {
             json!({"type": "reassign", "id": "t1", "holder": "worker"}),
         )
         .await;
-    assert_eq!(out["error"], "not_held", "{out}");
+    assert_eq!(out["reason"], "not_held", "{out}");
     let got = r.call("lead", json!({"type": "get", "id": "t1"})).await;
     assert_eq!(got["holder"], Value::Null);
     assert_eq!(got["history"], json!([]));
@@ -576,7 +576,7 @@ async fn report_for_an_agent_outside_the_callers_subtree_is_refused() {
             json!({"type": "report", "id": "t1", "from": "lead", "state": "done"}),
         )
         .await;
-    assert_eq!(up["error"], "not_in_subtree", "{up}");
+    assert_eq!(up["reason"], "not_in_subtree", "{up}");
     // worker is below sublead but a sibling-free check: lead -> sublead is fine, the
     // reverse is not
     let ghost = r
@@ -775,7 +775,7 @@ async fn store_refusal_passes_through() {
         })
         .unwrap();
     let out = r.add("lead", "t2", json!({})).await;
-    assert_eq!(out["error"], "store_refused", "{out}");
+    assert_eq!(out["reason"], "store_refused", "{out}");
     assert!(
         out["store_error"].as_str().is_some_and(|e| !e.is_empty()),
         "carries the store's own error: {out}"
@@ -783,7 +783,7 @@ async fn store_refusal_passes_through() {
     assert_eq!(out["store_reason"], "unauthorized", "{out}");
     let read = r.call("lead", json!({"type": "list"})).await;
     assert_eq!(
-        read["error"], "store_refused",
+        read["reason"], "store_refused",
         "reads pass it through too: {read}"
     );
     // reopen the store: nothing was created by the refused add
@@ -1288,4 +1288,107 @@ fn readme_is_python_verbatim() {
         .join("../../../../python/bundled_agents/task_registry/src/task_registry/readme.md");
     let src = std::fs::read_to_string(&py).unwrap_or_else(|e| panic!("{}: {e}", py.display()));
     assert_eq!(src, README, "readme has drifted from {}", py.display());
+}
+
+// ── the refusal shape: `error` is a sentence, `reason` is the code ──────────
+
+fn assert_shape(out: &Value, code: &str) {
+    assert_eq!(out["reason"], code, "{out}");
+    let sentence = out["error"].as_str().unwrap_or_else(|| panic!("{out}"));
+    assert!(sentence.contains(' ') && sentence != code, "{out}");
+}
+
+#[tokio::test]
+async fn disabled_refusal_reason_is_code_error_is_sentence() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    create(
+        &r.kernel,
+        json!({"handler_module": HANDLER_MODULE, "id": "bare"}),
+    )
+    .await;
+    for verb in WRITE_VERBS {
+        let out = send(&r.kernel, "bare", json!({"type": verb, "id": "t"})).await;
+        assert_shape(&out, "disabled");
+        assert!(
+            out["error"]
+                .as_str()
+                .unwrap()
+                .contains("task_registry is disabled"),
+            "{out}"
+        );
+        assert!(out["hint"].is_string(), "{out}");
+    }
+}
+
+#[tokio::test]
+async fn store_refused_reason_is_code_keeps_store_extras() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.kernel
+        .edit_callable_by(&AgentId::from(r.store.as_str()), |m| {
+            m.remove("tr").is_some()
+        })
+        .unwrap();
+    let out = r.add("lead", "t2", json!({})).await;
+    assert_shape(&out, "store_refused");
+    assert!(out["error"].as_str().unwrap().starts_with("store"), "{out}");
+    assert!(
+        out["store_error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{out}"
+    );
+    assert_eq!(out["store_reason"], "unauthorized", "{out}");
+}
+
+#[tokio::test]
+async fn already_held_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    let first = json!({"type": "assign", "id": "t1", "holder": "sublead"});
+    r.call("lead", first).await;
+    let again = r
+        .call(
+            "lead",
+            json!({"type": "assign", "id": "t1", "holder": "worker"}),
+        )
+        .await;
+    assert_shape(&again, "already_held");
+    assert!(
+        again["error"].as_str().unwrap().contains("reassign"),
+        "{again}"
+    );
+}
+
+#[tokio::test]
+async fn not_held_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    let out = r
+        .call(
+            "lead",
+            json!({"type": "reassign", "id": "t1", "holder": "worker"}),
+        )
+        .await;
+    assert_shape(&out, "not_held");
+    assert!(out["error"].as_str().unwrap().contains("assign"), "{out}");
+}
+
+#[tokio::test]
+async fn not_in_subtree_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    let up = r
+        .call(
+            "sublead",
+            json!({"type": "report", "id": "t1", "from": "lead", "state": "done"}),
+        )
+        .await;
+    assert_shape(&up, "not_in_subtree");
+    assert!(
+        up["error"].as_str().unwrap().contains("descendants"),
+        "{up}"
+    );
 }

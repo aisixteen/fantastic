@@ -319,3 +319,15 @@ async def test_await_set_survives_a_restart_closed_wait_stays_closed(
     assert not _seen.get("lead"), "nothing re-delivered on boot"
     r = await _report(root2, "w1", "lead", state="done", result="y")
     assert r == {"ok": True}, "not held: the wait is closed"
+
+
+async def test_await_set_refusals_are_kernel_shape(seeded_kernel):
+    root = seeded_kernel
+    await _fleet(root, ["w1"])
+    for p, code in (
+        ({"type": "await_set"}, "missing_arg"),
+        ({"type": "await_set", "ids": ["nobody"]}, "unknown_agent"),
+    ):
+        r = await _as(root, "lead", root.id, p)
+        assert r["reason"] == code, (p, r)
+        assert " " in r["error"] and r["error"] != code, (p, r)

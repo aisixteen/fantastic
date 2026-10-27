@@ -683,3 +683,42 @@ async fn fork_from_forks_the_named_agent() {
     .await;
     assert_eq!(bad["reason"], "bad_arg", "{bad}");
 }
+
+/// `fork` and `mark` already answer in the kernel's shape: the sentence in
+/// `error`, the code in `reason`. Pinned so they stay that way (#451).
+#[tokio::test]
+async fn fork_and_mark_refusals_put_sentence_in_error_code_in_reason() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, parent) = mk_kernel(&tmp, "fk_shape").await;
+    let u = put_row(&kernel, &parent, json!({"role": "user", "content": "go"})).await;
+    let call = call_envelope("kernel", json!({"type": "reflect"}), Some("self"));
+    let a = put_row(
+        &kernel,
+        &parent,
+        json!({"role": "assistant", "content": call, "parent": u}),
+    )
+    .await;
+    let r = put_row(
+        &kernel,
+        &parent,
+        json!({"role": "user", "content": "[reply]", "parent": a}),
+    )
+    .await;
+    put_row(
+        &kernel,
+        &parent,
+        json!({"role": "assistant", "content": "fine", "parent": r}),
+    )
+    .await;
+    let out = verb(&kernel, &parent, json!({"type": "fork", "at": a})).await;
+    assert_eq!(out["reason"], "cuts_turn", "{out}");
+    assert_ne!(out["error"], out["reason"], "{out}");
+    assert!(out["error"].as_str().unwrap().contains(' '), "{out}");
+    assert!(out["hint"].is_string(), "{out}");
+    assert!(out.get("at").is_some(), "{out}");
+    let lock = Arc::clone(&crate::state::state_for(&parent).lock);
+    let _turn = lock.lock().await;
+    let out = verb(&kernel, &parent, json!({"type": "mark", "label": "busy"})).await;
+    assert_eq!(out["reason"], "mid_turn", "{out}");
+    assert_ne!(out["error"], out["reason"], "{out}");
+}

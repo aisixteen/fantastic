@@ -37,7 +37,20 @@ from agentic_resources.cards import REGISTRY_TOKEN
 
 from kernel import current_origin
 from kernel._authz import ancestor_ids, authorize_call
-from kernel._refusal import NOT_FOUND, UNHANDLED, bad, missing, refusal
+from kernel._refusal import (
+    BAD_TIER,
+    DISABLED,
+    GRANT_FAILED,
+    LIMIT,
+    NOT_ALLOWED,
+    NOT_FOUND,
+    NOT_SPAWNED,
+    UNHANDLED,
+    UNKNOWN_TIER,
+    bad,
+    missing,
+    refusal,
+)
 
 #: Detached first-message sends, held so they are not collected mid-flight.
 _DETACHED: set = set()
@@ -50,7 +63,7 @@ VERB_DOCS = {
     "reflect": "Identity, whether the registry is enabled, and the role names. No args.",
     "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
     "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
-    "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused `not_allowed`, and a grant that cannot be written undoes the whole spawn (`grant_failed`).",
+    "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:<sentence>, reason:'limit', scope, role, running, max, hint}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused with reason `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused with reason `not_allowed`, and a grant that cannot be written undoes the whole spawn (reason `grant_failed`).",
     "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). Refused `not_spawned` for any other caller. Nothing is cleaned up on done. Returns {ok:true}.",
     "fleet": "No args. Returns {roles:{<role>:[{id}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
     "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
@@ -70,12 +83,15 @@ def _role_dirs(meta: dict):
 
 
 def _disabled() -> dict:
-    return {"error": "agentic_resources is disabled"}
+    return refusal(
+        DISABLED, "agentic_resources is disabled", hint="give the record role_dirs"
+    )
 
 
-def _fail(code: str, reason: str) -> dict:
-    """A refusal of the registry's own: {error:<code>, reason:<text>}."""
-    return {"error": code, "reason": reason}
+def _fail(code: str, error: str, hint: str = "") -> dict:
+    """A refusal of the registry's own, in the kernel's shape:
+    {error:<sentence>, reason:<code>, hint?}."""
+    return refusal(code, error, hint=hint)
 
 
 def _spawned(kernel, reg: str) -> list[dict]:
@@ -127,14 +143,15 @@ def _limit_refusal(scope, role, running, mx, who=None) -> dict:
         what = f"the limits asked for exceed {who or 'the caller'}'s remaining quota"
     else:
         what = f"{who or 'the caller'}'s delegated quota is used up"
-    r = {
-        "error": "limit",
-        "scope": scope,
-        "role": role,
-        "running": running,
-        "max": mx,
-        "reason": f"{what} ({running} running, max {mx})",
-    }
+    r = refusal(
+        LIMIT,
+        f"{what} ({running} running, max {mx})",
+        hint="wait for one to finish or delete one, or raise it with set_limit",
+        scope=scope,
+        role=role,
+        running=running,
+        max=mx,
+    )
     if who is not None:
         r["lead"] = who
     return r
@@ -207,13 +224,13 @@ async def _spawn(reg, payload, kernel):
     tier_fields = tiers.get(card["tier"]) if isinstance(tiers, dict) else None
     if not isinstance(tier_fields, dict):
         r = _fail(
-            "unknown_tier",
+            UNKNOWN_TIER,
             f"tier {card['tier']!r} (named by role {role!r}) is not in this registry's tiers",
         )
         r["tier"] = card["tier"]
         return r
     if not isinstance(tier_fields.get("handler_module"), str):
-        return _fail("bad_tier", f"tier {card['tier']!r} has no handler_module")
+        return _fail(BAD_TIER, f"tier {card['tier']!r} has no handler_module")
     # the task: a string is the child's first message
     first_message = None
     task = payload.get("task")
@@ -393,7 +410,7 @@ def _open_edges(kernel, reg, caller, child, reg_verbs):
 
     _, err = ctx.edit_callable_by(reg, _reg_edit)
     if err:
-        return _fail("grant_failed", f"spawn: {err}")
+        return _fail(GRANT_FAILED, f"spawn: {err}", hint="check that the agent records are writable, then spawn again")
     if caller is not None:
 
         def _parent_edit(m):
@@ -402,7 +419,7 @@ def _open_edges(kernel, reg, caller, child, reg_verbs):
 
         _, err = ctx.edit_can_call(caller, _parent_edit)
         if err:
-            return _fail("grant_failed", f"spawn: {err}")
+            return _fail(GRANT_FAILED, f"spawn: {err}", hint="check that the agent records are writable, then spawn again")
     return None
 
 
@@ -456,8 +473,9 @@ def _escalation(kernel, caller, card):
                 other_ancestors=ancestors,
             ).allowed:
                 return _fail(
-                    "not_allowed",
+                    NOT_ALLOWED,
                     f"spawn: {caller} may not grant {verb!r} on {tool!r} (role {card['name']!r})",
+                    hint="drop that grant from the card, or spawn from an agent that holds it",
                 )
     return None
 
@@ -479,7 +497,7 @@ def _open_tool_edges(kernel, child, card):
         _, err = ctx.edit_callable_by(tool, _edit)
         if err:
             _tool_ungrant(ctx, child, done)
-            return _fail("grant_failed", f"spawn: {err}")
+            return _fail(GRANT_FAILED, f"spawn: {err}", hint="check that the agent records are writable, then spawn again")
         done.append(tool)
     return None
 
@@ -574,11 +592,15 @@ async def _spawn_from(
     source = ctx.agents.get(src)
     # the caller (the operator when there is none) must itself hold `fork` on the source
     if caller is not None and source is not None and not _holds_fork(kernel, caller, source):
-        return _fail("not_allowed", f"spawn: {caller} may not fork {src!r}")
+        return _fail(
+            NOT_ALLOWED,
+            f"spawn: {caller} may not fork {src!r}",
+            hint="grant the spawner `fork` on that agent, or spawn without `from`",
+        )
     before, err = _fork_grant(ctx, reg, src)
     if err:
         if source is not None:
-            return _fail("grant_failed", f"spawn: {err}")
+            return _fail(GRANT_FAILED, f"spawn: {err}", hint="check that the agent records are writable, then spawn again")
         before = (None, None)
     # the registry forks AS ITSELF; whatever the fork refuses passes through unchanged
     out = (await kernel.send([{"target": src, "payload": {"type": "fork", "at": at}}]))[
@@ -645,7 +667,7 @@ async def _spawn_from(
         return True
 
     _, err = ctx.edit_callable_by(child, _child_edit)
-    fail = _fail("grant_failed", f"spawn: {err}") if err else None
+    fail = _fail(GRANT_FAILED, f"spawn: {err}", hint="check that the agent records are writable, then spawn again") if err else None
     fail = fail or _open_edges(kernel, reg, caller, child, reg_verbs)
     fail = fail or _open_tool_edges(kernel, child, card)
     if fail:
@@ -675,11 +697,15 @@ async def _report(reg, payload, kernel):
     mine = ctx.agents.get(me) if me is not None else None
     if mine is None:
         return _fail(
-            "not_spawned", "report: only an agent this registry spawned may report"
+            NOT_SPAWNED,
+            "report: only an agent this registry spawned may report",
+            hint="report from an agent created by this registry's spawn",
         )
     if mine._meta.get("spawned_by") != reg:
         return _fail(
-            "not_spawned", f"report: {mine.id!r} was not spawned by this registry"
+            NOT_SPAWNED,
+            f"report: {mine.id!r} was not spawned by this registry",
+            hint="report from an agent created by this registry's spawn",
         )
     # the parent hears it; an emit is gated, so the registry is let in first
     parent = mine.parent.id if mine.parent is not None else None

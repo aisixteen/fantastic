@@ -39,8 +39,13 @@ import time
 
 from kernel import current_origin
 from kernel._refusal import (
+    ALREADY_HELD,
+    DISABLED,
     EXISTS,
     NOT_FOUND,
+    NOT_HELD,
+    NOT_IN_SUBTREE,
+    STORE_REFUSED,
     UNHANDLED,
     bad,
     missing,
@@ -74,9 +79,10 @@ class _Refused(Exception):
 # ─── helpers ─────────────────────────────────────────────────────
 
 
-def _fail(code: str, reason: str) -> dict:
-    """A refusal of the registry's own: {error:<code>, reason:<text>}."""
-    return {"error": code, "reason": reason}
+def _fail(code: str, error: str, hint: str = "") -> dict:
+    """A refusal of the registry's own, in the kernel's shape:
+    {error:<sentence>, reason:<code>, hint?}."""
+    return refusal(code, error, hint=hint)
 
 
 def _ancestors(kernel, aid: str) -> list[str]:
@@ -250,7 +256,7 @@ async def _store_call(kernel, store: str, payload: dict) -> dict:
     err = res.get("error") if isinstance(res, dict) else None
     if err or out.get("status") != "completed":
         text = str(err) if err else str(out.get("status"))
-        r = _fail("store_refused", f"store {store!r} refused: {text}")
+        r = _fail(STORE_REFUSED, f"store {store!r} refused: {text}")
         r["store_error"] = text
         r["store_reason"] = res.get("reason") if isinstance(res, dict) else None
         raise _Refused(r)
@@ -347,11 +353,11 @@ async def _assign(kernel, store, caller, payload, re: bool = False):
     frm = entry["holder"]
     if not re and frm is not None:
         raise _Refused(
-            _fail("already_held", f"assign: task {tid!r} is held by {frm}; use reassign")
+            _fail(ALREADY_HELD, f"assign: task {tid!r} is held by {frm}; use reassign")
         )
     if re and frm is None:
         raise _Refused(
-            _fail("not_held", f"reassign: task {tid!r} has no holder; use assign")
+            _fail(NOT_HELD, f"reassign: task {tid!r} has no holder; use assign")
         )
     _set_facts(entry, facts)
     entry["history"].append(_history_item(frm, to, caller, entry))
@@ -398,7 +404,7 @@ async def _report(kernel, store, caller, payload):
         if caller is not None and who != caller and caller not in _ancestors(kernel, who):
             raise _Refused(
                 _fail(
-                    "not_in_subtree",
+                    NOT_IN_SUBTREE,
                     f"report: {who!r} is not {caller} or one of its descendants",
                 )
             )
@@ -496,7 +502,9 @@ async def handler(id: str, payload: dict, kernel) -> dict | None:
         return await _reflect(kernel, store, None, payload)
     if store is None:
         return _fail(
-            "disabled", "task_registry is disabled: the record has no task_store_id"
+            DISABLED,
+            "task_registry is disabled: the record has no task_store_id",
+            hint="set task_store_id on the record",
         )
     caller = current_origin()
     try:

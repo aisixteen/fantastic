@@ -85,7 +85,7 @@ fn verb_docs_json() -> Value {
         "reflect": "Identity, whether the registry is enabled, and the role names. No args.",
         "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
         "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
-        "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused `not_allowed`, and a grant that cannot be written undoes the whole spawn (`grant_failed`).",
+        "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:<sentence>, reason:'limit', scope, role, running, max, hint}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused with reason `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused with reason `not_allowed`, and a grant that cannot be written undoes the whole spawn (reason `grant_failed`).",
         "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). Refused `not_spawned` for any other caller. Nothing is cleaned up on done. Returns {ok:true}.",
         "fleet": "No args. Returns {roles:{<role>:[{id}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
         "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
@@ -114,12 +114,22 @@ fn role_dirs(meta: &Map<String, Value>) -> Option<Vec<String>> {
 }
 
 fn disabled() -> Value {
-    json!({"error": "agentic_resources is disabled"})
+    refusal::refusal_hint(
+        refusal::DISABLED,
+        "agentic_resources is disabled",
+        "give the record role_dirs",
+    )
 }
 
-/// A refusal of the registry's own: `{error:<code>, reason:<text>, ...}`.
-fn fail(code: &str, reason: String) -> Value {
-    json!({"error": code, "reason": reason})
+/// A refusal of the registry's own, in the kernel's shape:
+/// `{error:<sentence>, reason:<code>, ...}`.
+fn fail(code: &str, error: String) -> Value {
+    refusal::refusal(code, error)
+}
+
+/// [`fail`] plus a `hint` — what to do instead.
+fn fail_hint(code: &str, error: String, hint: &str) -> Value {
+    refusal::refusal_hint(code, error, hint)
 }
 
 /// One agent this registry spawned.
@@ -188,13 +198,17 @@ fn limit_refusal(scope: &str, role: &str, running: usize, max: u64, who: Option<
             who.unwrap_or("the caller")
         ),
     };
-    let mut r = json!({
-        "error": "limit", "scope": scope, "role": role,
-        "running": running, "max": max,
-        "reason": format!("{what} ({running} running, max {max})"),
-    });
+    let mut r = refusal::refusal_hint(
+        refusal::LIMIT,
+        format!("{what} ({running} running, max {max})"),
+        "wait for one to finish or delete one, or raise it with set_limit",
+    );
+    refusal::with(&mut r, "scope", json!(scope));
+    refusal::with(&mut r, "role", json!(role));
+    refusal::with(&mut r, "running", json!(running));
+    refusal::with(&mut r, "max", json!(max));
     if let Some(w) = who {
-        r["lead"] = json!(w);
+        refusal::with(&mut r, "lead", json!(w));
     }
     r
 }
@@ -374,14 +388,14 @@ async fn spawn_reply(
         Some(t) => t.clone(),
         None => {
             let mut r = fail(
-                "unknown_tier",
+                refusal::UNKNOWN_TIER,
                 format!(
                     "tier {} (named by role {}) is not in this registry's tiers",
                     py_repr(&card.tier),
                     py_repr(role)
                 ),
             );
-            r["tier"] = json!(card.tier);
+            refusal::with(&mut r, "tier", json!(card.tier));
             return r;
         }
     };
@@ -391,7 +405,7 @@ async fn spawn_reply(
         .is_none()
     {
         return fail(
-            "bad_tier",
+            refusal::BAD_TIER,
             format!("tier {} has no handler_module", py_repr(&card.tier)),
         );
     }
@@ -578,7 +592,7 @@ async fn spawn_reply(
         create.insert("limits".to_string(), Value::Object(delegated));
     }
     let Some(root) = kernel.root() else {
-        return fail("no_root", "the kernel has no root".to_string());
+        return fail(refusal::NO_ROOT, "the kernel has no root".to_string());
     };
     let made =
         fantastic_kernel::lifecycle::create_from_payload(kernel, &root, &Value::Object(create))
@@ -656,7 +670,13 @@ fn open_edges(
             grant_verbs(m, &child_id, &verbs);
             true
         })
-        .map_err(|e| fail("grant_failed", format!("spawn: {e}")))?;
+        .map_err(|e| {
+            fail_hint(
+                refusal::GRANT_FAILED,
+                format!("spawn: {e}"),
+                "check that the agent records are writable, then spawn again",
+            )
+        })?;
     if let Some(c) = caller {
         let cid = child.to_string();
         kernel
@@ -664,7 +684,13 @@ fn open_edges(
                 m.insert(cid, json!(PARENT_VERBS));
                 true
             })
-            .map_err(|e| fail("grant_failed", format!("spawn: {e}")))?;
+            .map_err(|e| {
+                fail_hint(
+                    refusal::GRANT_FAILED,
+                    format!("spawn: {e}"),
+                    "check that the agent records are writable, then spawn again",
+                )
+            })?;
     }
     Ok(())
 }
@@ -745,14 +771,15 @@ fn escalation(kernel: &Kernel, caller: &Option<AgentId>, card: &Card) -> Option<
             )
             .allowed;
             if !held {
-                return Some(fail(
-                    "not_allowed",
+                return Some(fail_hint(
+                    refusal::NOT_ALLOWED,
                     format!(
                         "spawn: {who} may not grant {} on {} (role {})",
                         py_repr(verb),
                         py_repr(&tool),
                         py_repr(&card.name)
                     ),
+                    "drop that grant from the card, or spawn from an agent that holds it",
                 ));
             }
         }
@@ -778,7 +805,11 @@ fn open_tool_edges(kernel: &Kernel, child: &str, card: &Card) -> Result<(), Valu
             Ok(_) => done.push(id),
             Err(e) => {
                 tool_ungrant(kernel, child, &done);
-                return Err(fail("grant_failed", format!("spawn: {e}")));
+                return Err(fail_hint(
+                    refusal::GRANT_FAILED,
+                    format!("spawn: {e}"),
+                    "check that the agent records are writable, then spawn again",
+                ));
             }
         }
     }
@@ -900,16 +931,23 @@ async fn spawn_from(kernel: &Arc<Kernel>, c: &SpawnFrom<'_>, src: &str, at: i64)
     // the caller (the operator when there is none) must itself hold `fork` on the source
     if let (Some(who), Some(source)) = (c.caller.as_ref(), source.as_ref()) {
         if !holds_fork(kernel, who, source) {
-            return fail(
-                "not_allowed",
+            return fail_hint(
+                refusal::NOT_ALLOWED,
                 format!("spawn: {who} may not fork {}", py_repr(src)),
+                "grant the spawner `fork` on that agent, or spawn without `from`",
             );
         }
     }
     let before = match fork_grant(kernel, reg, &src_id) {
         Ok(b) => b,
         Err(_) if source.is_none() => (None, None),
-        Err(e) => return fail("grant_failed", format!("spawn: {e}")),
+        Err(e) => {
+            return fail_hint(
+                refusal::GRANT_FAILED,
+                format!("spawn: {e}"),
+                "check that the agent records are writable, then spawn again",
+            )
+        }
     };
     // the registry forks AS ITSELF; whatever the fork refuses passes through unchanged
     let out = kernel
@@ -1001,7 +1039,13 @@ async fn spawn_from(kernel: &Arc<Kernel>, c: &SpawnFrom<'_>, src: &str, at: i64)
             }
             true
         })
-        .map_err(|e| fail("grant_failed", format!("spawn: {e}")))
+        .map_err(|e| {
+            fail_hint(
+                refusal::GRANT_FAILED,
+                format!("spawn: {e}"),
+                "check that the agent records are writable, then spawn again",
+            )
+        })
         .and_then(|_| open_edges(kernel, reg, c.caller.as_ref(), &child, &reg_verbs))
         .and_then(|()| open_tool_edges(kernel, &child, card));
     if let Err(e) = opened {
@@ -1035,19 +1079,21 @@ async fn report_reply(reg: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> V
     let result = payload.get("result").cloned().unwrap_or(Value::Null);
     let me = current_origin();
     let Some(mine) = me.as_ref().and_then(|m| agent_of(kernel, m)) else {
-        return fail(
-            "not_spawned",
+        return fail_hint(
+            refusal::NOT_SPAWNED,
             "report: only an agent this registry spawned may report".to_string(),
+            "report from an agent created by this registry's spawn",
         );
     };
     let mm = meta_of(&mine);
     if mm.get("spawned_by").and_then(Value::as_str) != Some(reg.as_str()) {
-        return fail(
-            "not_spawned",
+        return fail_hint(
+            refusal::NOT_SPAWNED,
             format!(
                 "report: {} was not spawned by this registry",
                 py_repr(mine.id.as_str())
             ),
+            "report from an agent created by this registry's spawn",
         );
     }
     // the parent hears it; an emit is gated, so the registry is let in first

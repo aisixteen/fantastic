@@ -53,6 +53,18 @@ FAILED = "failed"  # the operation was valid but the system could not finish it 
 UNBOUND_PORTS = "unbound_ports"  # a blueprint port with nothing bound to it (or not bindable)
 BAD_BINDING = "bad_binding"  # a bind that names no port, no agent, or an agent of the wrong kind
 CODE_NOT_ALLOWED = "code_not_allowed"  # a blueprint carries code and `allow_code` was not true
+LIMIT = "limit"  # a spawn or quota past a configured limit (carries `scope`, `role`, `running`, `max`)
+NOT_ALLOWED = "not_allowed"  # the caller does not hold what it tried to grant or fork
+GRANT_FAILED = "grant_failed"  # a grant could not be written; the whole operation is undone
+UNKNOWN_TIER = "unknown_tier"  # a card names a tier the registry does not have (carries `tier`)
+BAD_TIER = "bad_tier"  # a tier is present but unusable
+NO_ROOT = "no_root"  # the kernel has no root
+NOT_SPAWNED = "not_spawned"  # the caller was not spawned by this registry
+DISABLED = "disabled"  # the bundle's record lacks the config that turns it on
+STORE_REFUSED = "store_refused"  # the backing store refused or failed the call (carries `store_error`, `store_reason`)
+ALREADY_HELD = "already_held"  # the task already has a holder
+NOT_HELD = "not_held"  # the task has no holder
+NOT_IN_SUBTREE = "not_in_subtree"  # the named agent is not the caller or one of its descendants
 
 # Transport codes — a leg that could not carry the call at all. Owned by
 # `relay_connector` today; listed here because they share the field, and a caller
@@ -85,6 +97,18 @@ CODES = frozenset(
         TRANSPORT_ERROR,
         TRANSPORT_CLOSED,
         TIMEOUT,
+        LIMIT,
+        NOT_ALLOWED,
+        GRANT_FAILED,
+        UNKNOWN_TIER,
+        BAD_TIER,
+        NO_ROOT,
+        NOT_SPAWNED,
+        DISABLED,
+        STORE_REFUSED,
+        ALREADY_HELD,
+        NOT_HELD,
+        NOT_IN_SUBTREE,
     }
 )
 

@@ -78,9 +78,37 @@ pub const DRAINING: &str = "draining";
 /// does.
 pub const NO_CONSUMER: &str = "no_consumer";
 
+// Bundle codes — agentic_resources and task_registry. Listed here because the
+// set is closed and a caller branches on `reason` across every bundle.
+
+/// A spawn or quota past a configured limit (carries `scope`, `role`, `running`, `max`).
+pub const LIMIT: &str = "limit";
+/// The caller does not hold what it tried to grant or fork.
+pub const NOT_ALLOWED: &str = "not_allowed";
+/// A grant could not be written; the whole operation is undone.
+pub const GRANT_FAILED: &str = "grant_failed";
+/// A card names a tier the registry does not have (carries `tier`).
+pub const UNKNOWN_TIER: &str = "unknown_tier";
+/// A tier is present but unusable.
+pub const BAD_TIER: &str = "bad_tier";
+/// The kernel has no root.
+pub const NO_ROOT: &str = "no_root";
+/// The caller was not spawned by this registry.
+pub const NOT_SPAWNED: &str = "not_spawned";
+/// The bundle's record lacks the config that turns it on.
+pub const DISABLED: &str = "disabled";
+/// The backing store refused or failed the call (carries `store_error`, `store_reason`).
+pub const STORE_REFUSED: &str = "store_refused";
+/// The task already has a holder.
+pub const ALREADY_HELD: &str = "already_held";
+/// The task has no holder.
+pub const NOT_HELD: &str = "not_held";
+/// The named agent is not the caller or one of its descendants.
+pub const NOT_IN_SUBTREE: &str = "not_in_subtree";
+
 /// The closed set. Each names a KIND of refusal, not a call site — two verbs
 /// that fail for the same reason share a code, and a caller branches on the code.
-pub const CODES: [&str; 16] = [
+pub const CODES: [&str; 28] = [
     UNAUTHORIZED,
     UNKNOWN_AGENT,
     MISSING_ARG,
@@ -97,6 +125,18 @@ pub const CODES: [&str; 16] = [
     TIMEOUT,
     DRAINING,
     NO_CONSUMER,
+    LIMIT,
+    NOT_ALLOWED,
+    GRANT_FAILED,
+    UNKNOWN_TIER,
+    BAD_TIER,
+    NO_ROOT,
+    NOT_SPAWNED,
+    DISABLED,
+    STORE_REFUSED,
+    ALREADY_HELD,
+    NOT_HELD,
+    NOT_IN_SUBTREE,
 ];
 
 /// How many live ids an `unknown_agent` refusal carries. Enough to name the

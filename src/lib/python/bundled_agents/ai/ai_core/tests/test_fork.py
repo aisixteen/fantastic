@@ -495,3 +495,22 @@ async def test_fork_from_forks_the_named_agent(seeded_kernel):
     assert _ids(await _store(k, out["id"])) == allr[:2]
     bad = await _verb(k, peer, {"type": "fork", "from": {"agent": 3}})
     assert bad["reason"] == "bad_arg", bad
+
+
+async def test_fork_and_mark_refusals_put_sentence_in_error_code_in_reason(
+    seeded_kernel,
+):
+    k = seeded_kernel
+    parent = _agent(k, "fk_shape")
+    u = await _put(k, parent, {"role": "user", "content": "go"})
+    a = await _put(k, parent, {"role": "assistant", "content": REFLECT, "parent": u})
+    r = await _put(k, parent, {"role": "user", "content": "[reply]", "parent": a})
+    await _put(k, parent, {"role": "assistant", "content": "fine", "parent": r})
+    out = await _verb(k, parent, {"type": "fork", "at": a})
+    assert out["reason"] == "cuts_turn", out
+    assert out["error"] != out["reason"] and " " in out["error"], out
+    assert isinstance(out["hint"], str) and "at" in out, out
+    async with core._lock_for(parent):
+        out = await _verb(k, parent, {"type": "mark", "label": "busy"})
+    assert out["reason"] == "mid_turn", out
+    assert out["error"] != out["reason"], out

@@ -455,3 +455,15 @@ async def test_restart_keeps_ids_folds_and_owners(tmp_path, monkeypatch):
     assert fresh > max(r["id"] for r in p2 + q2), fresh
     with shutdown_context():
         await root2.ctx.shutdown()
+
+
+async def test_sqlite_store_refusals_are_kernel_shape(kernel, mem):
+    dup = {
+        "rows": [
+            {"owner": "alice", "row": {"id": 1}},
+            {"owner": "alice", "row": {"id": 1}},
+        ]
+    }
+    out = (await _call(kernel, "mem", {"type": "inject", "tables": dup}))["result"]
+    assert out["reason"] == "exists", out
+    assert "duplicate row" in out["error"] and out["error"] != "exists", out

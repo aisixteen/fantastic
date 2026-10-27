@@ -506,9 +506,9 @@ async fn spawn_unknown_tier_refused() {
     let card = "---\nname: odd\npurpose: Odd.\ntier: nowhere\n---\nd\n";
     let r = rig(&tmp, &["lead"], &[("odd.md", card)]).await;
     let out = r.spawn_as(&r.callers[0], json!({"role": "odd"})).await;
-    assert_eq!(out["error"], "unknown_tier", "{out}");
+    assert_eq!(out["reason"], "unknown_tier", "{out}");
     assert!(
-        out["reason"].as_str().unwrap().contains("'nowhere'"),
+        out["error"].as_str().unwrap().contains("'nowhere'"),
         "{out}"
     );
     let none = r.spawn_as(&r.callers[0], json!({"role": "ghost"})).await;
@@ -539,12 +539,12 @@ async fn per_role_limit_refuses_past_cap() {
             .is_some());
     }
     let out = r.spawn_as(lead, json!({"role": "writer"})).await;
-    assert_eq!(out["error"], "limit", "{out}");
+    assert_eq!(out["reason"], "limit", "{out}");
     assert_eq!(out["scope"], "role");
     assert_eq!(out["role"], "writer");
     assert_eq!(out["running"], 2);
     assert_eq!(out["max"], 2);
-    assert!(out["reason"].as_str().unwrap().contains("writer"));
+    assert!(out["error"].as_str().unwrap().contains("writer"));
     // another role is not capped
     assert!(r
         .spawn_as(lead, json!({"role": "reviewer"}))
@@ -575,7 +575,7 @@ async fn total_limit_refuses_past_cap() {
         .get("id")
         .is_some());
     let out = r.spawn_as(lead, json!({"role": "writer"})).await;
-    assert_eq!(out["error"], "limit", "{out}");
+    assert_eq!(out["reason"], "limit", "{out}");
     assert_eq!(out["scope"], "total");
     assert_eq!(
         (out["running"].clone(), out["max"].clone()),
@@ -593,7 +593,7 @@ async fn set_limit_null_clears() {
         .await;
     r.spawn_as(lead, json!({"role": "writer"})).await;
     assert_eq!(
-        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
+        r.spawn_as(lead, json!({"role": "writer"})).await["reason"],
         "limit"
     );
     assert_eq!(
@@ -750,7 +750,11 @@ async fn disabled_without_registry_handler_or_config() {
         let out = send(&kernel, &id, json!({"type": v})).await;
         assert_eq!(
             out,
-            json!({"error": "agentic_resources is disabled"}),
+            json!({
+                "error": "agentic_resources is disabled",
+                "reason": "disabled",
+                "hint": "give the record role_dirs",
+            }),
             "{v}"
         );
     }
@@ -865,9 +869,9 @@ async fn report_messages_parent_and_stores_nothing() {
     let no = r
         .call(other, &r.reg, json!({"type": "report", "state": "done"}))
         .await;
-    assert_eq!(no["error"], "not_spawned", "{no}");
+    assert_eq!(no["reason"], "not_spawned", "{no}");
     assert_eq!(
-        r.op(json!({"type": "report", "state": "done"})).await["error"],
+        r.op(json!({"type": "report", "state": "done"})).await["reason"],
         "not_spawned"
     );
     let bad = r
@@ -899,7 +903,7 @@ async fn delegated_limits_bound_subtree() {
         .spawn_as(&sub, json!({"role": "sublead", "limits": {"total": 5}}))
         .await;
     assert_eq!(
-        (big["error"].clone(), big["scope"].clone()),
+        (big["reason"].clone(), big["scope"].clone()),
         (json!("limit"), json!("request")),
         "{big}"
     );
@@ -913,7 +917,7 @@ async fn delegated_limits_bound_subtree() {
         .get("id")
         .is_some());
     let third = r.spawn_as(&sub, json!({"role": "writer"})).await;
-    assert_eq!(third["error"], "limit", "{third}");
+    assert_eq!(third["reason"], "limit", "{third}");
     assert_eq!(third["scope"], "subtree_total");
     assert_eq!(
         (third["running"].clone(), third["max"].clone()),
@@ -923,7 +927,7 @@ async fn delegated_limits_bound_subtree() {
     // ancestors' quota is the bound of the whole subtree
     let deep = ok["id"].as_str().unwrap();
     let blocked = r.spawn_as(deep, json!({"role": "writer"})).await;
-    assert_eq!(blocked["error"], "limit", "{blocked}");
+    assert_eq!(blocked["reason"], "limit", "{blocked}");
     // the boss itself carries no quota
     assert!(r
         .spawn_as(boss, json!({"role": "writer"}))
@@ -945,13 +949,13 @@ async fn get_count_counts_every_spawned_agent() {
     r.spawn_as(lead, json!({"role": "writer"})).await;
     assert_eq!(r.count(None).await, json!({"running": 2, "max": 2}));
     let third = r.spawn_as(lead, json!({"role": "writer"})).await;
-    assert_eq!(third["error"], "limit", "{third}");
+    assert_eq!(third["reason"], "limit", "{third}");
     // a report frees nothing; only delete_agent does
     r.call(&a, &r.reg, json!({"type": "report", "state": "done"}))
         .await;
     assert_eq!(r.count(None).await["running"], 2);
     assert_eq!(
-        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
+        r.spawn_as(lead, json!({"role": "writer"})).await["reason"],
         "limit"
     );
     let gone = send(
@@ -1302,7 +1306,7 @@ async fn spawn_from_respects_limits_before_forking() {
     let out = r
         .spawn_as(lead, json!({"role": "writer", "from": from(&src, 5)}))
         .await;
-    assert_eq!(out["error"], "limit", "{out}");
+    assert_eq!(out["reason"], "limit", "{out}");
     assert_eq!(out["scope"], "role");
     assert_eq!(forks_of(&r, &src).len(), 1, "fork was not called again");
 }
@@ -1319,9 +1323,9 @@ async fn spawn_from_requires_the_caller_to_hold_fork() {
     let out = r
         .spawn_as(&other, json!({"role": "writer", "from": from(&src, 5)}))
         .await;
-    assert_eq!(out["error"], "not_allowed", "{out}");
+    assert_eq!(out["reason"], "not_allowed", "{out}");
     assert!(
-        out["reason"].as_str().unwrap().contains("may not fork"),
+        out["error"].as_str().unwrap().contains("may not fork"),
         "{out}"
     );
     assert!(forks_of(&r, &src).is_empty());
@@ -1408,7 +1412,7 @@ async fn spawn_from_counts_against_the_leads_subtree_quota() {
     let second = r
         .spawn_as(&sub, json!({"role": "writer", "from": from(&src, 5)}))
         .await;
-    assert_eq!(second["error"], "limit", "{second}");
+    assert_eq!(second["reason"], "limit", "{second}");
     assert_eq!(second["scope"], "subtree_total", "{second}");
     assert_eq!(forks_of(&r, &src).len(), 1);
 }
@@ -1583,7 +1587,7 @@ async fn refused_tool_grant_undoes_the_spawn() {
     let out = r
         .spawn_as(&lead, json!({"role": "two", "task": "go"}))
         .await;
-    assert_eq!(out["error"], "grant_failed", "{out}");
+    assert_eq!(out["reason"], "grant_failed", "{out}");
     assert_eq!(r.kernel.agents.len(), agents_before, "no child left");
     assert_eq!(r.op(json!({"type": "fleet"})).await["roles"], json!({}));
     assert_eq!(r.count(None).await["running"], 0);
@@ -1642,8 +1646,8 @@ async fn spawn_refuses_a_grant_the_spawner_does_not_hold() {
     let notes_before = r.meta("notes")["callable_by"].clone();
     let n = r.kernel.agents.len();
     let out = r.spawn_as(&lead, json!({"role": "wide"})).await;
-    assert_eq!(out["error"], "not_allowed", "{out}");
-    let why = out["reason"].as_str().unwrap();
+    assert_eq!(out["reason"], "not_allowed", "{out}");
+    let why = out["error"].as_str().unwrap();
     assert!(
         why.contains(lead.as_str()) && why.contains("write") && why.contains("notes"),
         "{why}"
@@ -1660,7 +1664,7 @@ async fn spawn_refuses_star_grant_when_spawner_holds_only_verbs() {
     notes_tool(&r).await;
     hold(&r, &r.callers[0], "notes", json!(["read"]));
     let out = r.spawn_as(&r.callers[0], json!({"role": "star"})).await;
-    assert_eq!(out["error"], "not_allowed", "{out}");
+    assert_eq!(out["reason"], "not_allowed", "{out}");
 }
 
 #[tokio::test]
@@ -1674,7 +1678,7 @@ async fn spawn_refuses_a_tool_the_spawner_has_no_grant_on() {
         })
         .unwrap();
     let out = r.spawn_as(&r.callers[0], json!({"role": "writer"})).await;
-    assert_eq!(out["error"], "not_allowed", "{out}");
+    assert_eq!(out["reason"], "not_allowed", "{out}");
 }
 
 #[tokio::test]
@@ -1689,7 +1693,7 @@ async fn spawn_from_refuses_escalation_before_forking() {
             json!({"role": "wide", "from": from(&src, 5)}),
         )
         .await;
-    assert_eq!(out["error"], "not_allowed", "{out}");
+    assert_eq!(out["reason"], "not_allowed", "{out}");
     assert!(forks_of(&r, &src).is_empty(), "nothing forked");
 }
 
@@ -1722,7 +1726,7 @@ async fn subleads_cannot_hand_on_more_than_they_hold() {
     notes_tool(&r).await;
     let sub = id_of(&r.spawn_as(&r.callers[0], json!({"role": "sublead"})).await);
     let no = r.spawn_as(&sub, json!({"role": "wide"})).await;
-    assert_eq!(no["error"], "not_allowed", "{no}");
+    assert_eq!(no["reason"], "not_allowed", "{no}");
     let ok = r.spawn_as(&sub, json!({"role": "writer"})).await;
     assert!(ok.get("id").is_some(), "{ok}");
 }
@@ -1781,7 +1785,7 @@ async fn paused_agent_keeps_its_slot_and_spawn_is_refused() {
     spawn_id(&r, lead, "writer").await;
     r.call(lead, &a, json!({"type": "pause"})).await;
     let third = r.spawn_as(lead, json!({"role": "writer"})).await;
-    assert_eq!(third["error"], "limit", "{third}");
+    assert_eq!(third["reason"], "limit", "{third}");
     assert_eq!(third["scope"], "total");
     assert_eq!(
         (third["running"].clone(), third["max"].clone()),
@@ -1823,7 +1827,7 @@ async fn delete_agent_is_the_only_way_to_free_a_slot() {
     r.call(&a, &r.reg, json!({"type": "report", "state": "done"}))
         .await;
     assert_eq!(
-        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
+        r.spawn_as(lead, json!({"role": "writer"})).await["reason"],
         "limit"
     );
     send(
@@ -1861,7 +1865,7 @@ async fn delegated_quota_counts_paused_and_done_agents() {
     let w = spawn_id(&r, &sub, "writer").await;
     r.call(boss, &w, json!({"type": "pause"})).await;
     let no = r.spawn_as(&sub, json!({"role": "writer"})).await;
-    assert_eq!(no["error"], "limit", "{no}");
+    assert_eq!(no["reason"], "limit", "{no}");
     assert_eq!(no["scope"], "subtree_total");
     // per-role quota: a done sub-agent keeps its role slot
     let sub2 = r
@@ -1874,7 +1878,7 @@ async fn delegated_quota_counts_paused_and_done_agents() {
     r.call(&w2, &r.reg, json!({"type": "report", "state": "done"}))
         .await;
     let no2 = r.spawn_as(&sub2, json!({"role": "writer"})).await;
-    assert_eq!(no2["error"], "limit", "{no2}");
+    assert_eq!(no2["reason"], "limit", "{no2}");
     assert_eq!(no2["scope"], "subtree_role");
 }
 
@@ -1899,4 +1903,218 @@ async fn get_count_ignores_a_resume_arg_and_registry_grants_only_report() {
         r.meta(&r.reg)["callable_by"][&a],
         json!(["roles", "report"])
     );
+}
+
+// ── the refusal shape: `error` is a sentence, `reason` is the code ──────────
+
+/// A refusal in the kernel's shape: `error` a sentence (never the bare code),
+/// `reason` the code.
+fn assert_shape(out: &Value, code: &str) {
+    assert_eq!(out["reason"], code, "{out}");
+    let sentence = out["error"].as_str().unwrap_or_else(|| panic!("{out}"));
+    assert!(sentence.contains(' ') && sentence != code, "{out}");
+}
+
+#[tokio::test]
+async fn limit_refusal_error_is_a_sentence_reason_is_limit() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    let lead = &r.callers[0];
+    r.op(json!({"type": "set_limit", "role": "writer", "max": 1}))
+        .await;
+    r.spawn_as(lead, json!({"role": "writer"})).await;
+    let out = r.spawn_as(lead, json!({"role": "writer"})).await;
+    assert_shape(&out, "limit");
+    assert!(out["error"].as_str().unwrap().contains("is at its limit"));
+    assert_ne!(out["error"], "limit");
+    assert!(!out["hint"].as_str().unwrap().is_empty(), "{out}");
+    assert_eq!(out["scope"], "role");
+    assert_eq!(out["role"], "writer");
+    assert_eq!(out["running"], 1);
+    assert_eq!(out["max"], 1);
+}
+
+#[tokio::test]
+async fn limit_refusal_total_and_subtree_scopes_keep_extras() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(
+        &tmp,
+        &["boss"],
+        &[("writer.md", WRITER), ("sublead.md", SUBLEAD)],
+    )
+    .await;
+    let boss = &r.callers[0];
+    // total
+    r.op(json!({"type": "set_limit", "max": 1})).await;
+    r.spawn_as(boss, json!({"role": "writer"})).await;
+    let total = r.spawn_as(boss, json!({"role": "writer"})).await;
+    assert_shape(&total, "limit");
+    assert_eq!(total["scope"], "total");
+    assert!(total.get("lead").is_none(), "{total}");
+    r.op(json!({"type": "set_limit", "max": null})).await;
+    // request: more than the sub-lead was given
+    let sub = id_of(
+        &r.spawn_as(boss, json!({"role": "sublead", "limits": {"total": 2}}))
+            .await,
+    );
+    let req = r
+        .spawn_as(&sub, json!({"role": "sublead", "limits": {"total": 5}}))
+        .await;
+    assert_shape(&req, "limit");
+    assert_eq!(req["scope"], "request");
+    assert_eq!(req["lead"], sub.as_str());
+    // subtree_total
+    r.spawn_as(&sub, json!({"role": "writer"})).await;
+    r.spawn_as(&sub, json!({"role": "writer"})).await;
+    let st = r.spawn_as(&sub, json!({"role": "writer"})).await;
+    assert_shape(&st, "limit");
+    assert_eq!(st["scope"], "subtree_total");
+    assert_eq!(st["lead"], sub.as_str());
+    // subtree_role
+    let sub2 = id_of(
+        &r.spawn_as(boss, json!({"role": "sublead", "limits": {"per_role": 1}}))
+            .await,
+    );
+    r.spawn_as(&sub2, json!({"role": "writer"})).await;
+    let sr = r.spawn_as(&sub2, json!({"role": "writer"})).await;
+    assert_shape(&sr, "limit");
+    assert_eq!(sr["scope"], "subtree_role");
+    assert_eq!(sr["lead"], sub2.as_str());
+}
+
+#[tokio::test]
+async fn not_allowed_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("wide.md", WIDE)]).await;
+    notes_tool(&r).await;
+    let lead = r.callers[0].clone();
+    hold(&r, &lead, "notes", json!(["read"]));
+    let out = r.spawn_as(&lead, json!({"role": "wide"})).await;
+    assert_shape(&out, "not_allowed");
+    let why = out["error"].as_str().unwrap();
+    assert!(
+        why.contains(lead.as_str()) && why.contains("write") && why.contains("notes"),
+        "{out}"
+    );
+    assert!(out["hint"].is_string(), "{out}");
+}
+
+#[tokio::test]
+async fn fork_not_allowed_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let (r, src) = fork_rig(&tmp, &["lead", "other"], &[("writer.md", WRITER)]).await;
+    let other = r.callers[1].clone();
+    r.kernel
+        .edit_can_call(&AgentId::from(other.as_str()), |m| m.remove(&src).is_some())
+        .unwrap();
+    let out = r
+        .spawn_as(&other, json!({"role": "writer", "from": from(&src, 5)}))
+        .await;
+    assert_shape(&out, "not_allowed");
+    assert!(out["error"].as_str().unwrap().contains("fork"), "{out}");
+}
+
+#[tokio::test]
+async fn grant_failed_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let picky = uid(&tmp, "zpicky");
+    let card = format!(
+        "---\nname: two\npurpose: Two tools.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n  {picky}: [read]\n---\nx\n"
+    );
+    let r = rig(&tmp, &["lead"], &[("two.md", card.as_str())]).await;
+    let lead = r.callers[0].clone();
+    notes_tool(&r).await;
+    create(
+        &r.kernel,
+        json!({"handler_module": "picky.tools", "id": picky, "refuse_grants": true}),
+    )
+    .await;
+    hold(&r, &lead, &picky, json!("*"));
+    let before = r.kernel.agents.len();
+    let out = r.spawn_as(&lead, json!({"role": "two"})).await;
+    assert_shape(&out, "grant_failed");
+    assert!(
+        out["error"].as_str().unwrap().starts_with("spawn:"),
+        "{out}"
+    );
+    assert!(out["hint"].is_string(), "{out}");
+    assert_eq!(r.kernel.agents.len(), before, "nothing left behind");
+    assert_eq!(r.count(None).await["running"], 0);
+}
+
+#[tokio::test]
+async fn unknown_tier_refusal_keeps_tier_extra() {
+    let tmp = TempDir::new().unwrap();
+    let card = "---\nname: odd\npurpose: Odd.\ntier: nowhere\n---\nd\n";
+    let r = rig(&tmp, &["lead"], &[("odd.md", card)]).await;
+    let out = r.spawn_as(&r.callers[0], json!({"role": "odd"})).await;
+    assert_shape(&out, "unknown_tier");
+    assert_eq!(out["tier"], "nowhere");
+}
+
+#[tokio::test]
+async fn bad_tier_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    let mut patch = Map::new();
+    patch.insert("tiers".to_string(), json!({"fast": {"model": "m"}}));
+    r.kernel.update(&AgentId::from(r.reg.as_str()), patch);
+    let out = r.spawn_as(&r.callers[0], json!({"role": "writer"})).await;
+    assert_shape(&out, "bad_tier");
+}
+
+#[tokio::test]
+async fn not_spawned_refusal_reason_is_code() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead", "other"], &[("writer.md", WRITER)]).await;
+    let other = &r.callers[1];
+    // not spawned by anyone: the operator has no origin agent
+    let op = r.op(json!({"type": "report", "state": "done"})).await;
+    assert_shape(&op, "not_spawned");
+    // an agent that exists but was not spawned by this registry
+    let no = r
+        .call(other, &r.reg, json!({"type": "report", "state": "done"}))
+        .await;
+    assert_shape(&no, "not_spawned");
+    assert!(no["hint"].is_string(), "{no}");
+}
+
+#[test]
+fn no_root_refusal_reason_is_code() {
+    // the kernel always has a root in a test rig, so assert the helper's shape
+    let out = fail(refusal::NO_ROOT, "the kernel has no root".to_string());
+    assert_shape(&out, "no_root");
+}
+
+#[tokio::test]
+async fn disabled_refusal_has_reason_disabled() {
+    let tmp = TempDir::new().unwrap();
+    let kernel = Arc::new(new_kernel());
+    root_of(&kernel, &tmp);
+    let id = uid(&tmp, "ar");
+    create(&kernel, json!({"handler_module": HANDLER_MODULE, "id": id})).await;
+    let out = send(&kernel, &id, json!({"type": "roles"})).await;
+    assert_eq!(out["reason"], "disabled", "{out}");
+    assert!(out["error"]
+        .as_str()
+        .unwrap()
+        .contains("agentic_resources is disabled"));
+    assert!(out["hint"].is_string(), "{out}");
+}
+
+#[test]
+fn every_refusal_code_is_in_the_closed_set() {
+    for code in [
+        refusal::LIMIT,
+        refusal::NOT_ALLOWED,
+        refusal::GRANT_FAILED,
+        refusal::UNKNOWN_TIER,
+        refusal::BAD_TIER,
+        refusal::NO_ROOT,
+        refusal::NOT_SPAWNED,
+        refusal::DISABLED,
+    ] {
+        assert!(refusal::CODES.contains(&code), "{code}");
+        assert_eq!(refusal::refusal(code, "x")["reason"], code);
+    }
 }
