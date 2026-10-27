@@ -14,8 +14,15 @@ Script 2 (extended): a `project_lead` spawns two sub-leads with split limits
 (`limits:{total:1}` each); a sub-lead cannot spawn past its quota; the leaves
 `report done`; each sub-lead reports a condensed line and the top lead reports one
 line for the whole. `report` only messages the parent and stores nothing on a record
-(the task tree is `task_registry`'s, E135); `get_count` counts every spawned agent that
-still exists, and all agents are still there after completion (nothing is cleaned up).
+(the task tree is `task_registry`'s, E135); a `done` report pauses the reporter, so
+`get_count` counts only the ACTIVE agents (a finished agent frees its slot), and all
+agents are still there after completion (nothing is deleted; `fleet` lists them all).
+
+Script 4 (active-only counting, #424): with a cap of 2 on the role `worker`, a
+`project_lead` spawns two workers and the third `spawn` is refused `limit`; one worker
+reports `done`, which pauses it, so `get_count` drops to 1 and a third spawn succeeds.
+The lead `pause`s a worker (`get_count` drops); `resume` of a paused worker is refused
+`limit` while two others are active, and succeeds after one of them is paused.
 
 Script 3 (from a fork point, #424; run by hand, not in CI): a source agent with two
 finished turns is `mark`ed; a lead `spawn`s a `worker` `from:{agent, at}` that mark. The
