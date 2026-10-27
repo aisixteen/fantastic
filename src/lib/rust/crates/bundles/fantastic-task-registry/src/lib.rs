@@ -21,6 +21,13 @@
 //! lead (agentic_resources) and the lead writes here. The one rule inside the bundle
 //! is that a `report`'s `from` is the caller or one of its descendants.
 //!
+//! RECORDED FACTS. An entry may also carry `versions` (`[{repo, branch, commit}]`),
+//! `source_version` (an opaque string) and `fork_from` (`{agent, mark}`), set by
+//! `add`/`assign`/`reassign`/`status` and kept in the reassign history, and `usage`
+//! (the last `report`'s token counts). All are opaque facts: nothing is checked
+//! against a repo or an agent. An entry stored before these existed loads with the
+//! defaults (`[]`, null, null, null).
+//!
 //! Verbs (mirror Python verb-for-verb): `reflect`, `add`, `assign`, `reassign`,
 //! `status`, `report`, `list`, `get`.
 
@@ -82,12 +89,12 @@ pub struct TaskRegistryBundle {
 fn verb_docs_json() -> Value {
     json!({
         "reflect": "Identity and whether the registry is enabled (has a task_store_id). No args.",
-        "add": "args: id:str (req), source:str (req, opaque: gh:o/r#12, jira:KEY-5, ...), parent:str? (a task id), update_to:str? (default source), holder:str|{subtree:str}? (an existing agent), status:str? (default waiting). Refused `exists` (id taken), `not_found` (parent or holder). Returns the entry.",
-        "assign": "args: id:str (req), holder:str|{subtree:str} (req; an existing agent id, or a subtree named by its root agent). Only a task nobody holds; else `already_held`. Returns the entry.",
-        "reassign": "args: id:str (req), holder:str|{subtree:str} (req). Only a held task; else `not_held`. Agent to agent, to a subtree and back; every step is kept in history {from, to, by, at}. Returns the entry.",
-        "status": "args: id:str (req), status:waiting|running|blocked|done|failed|paused (req). Returns the entry.",
-        "report": "args: id:str (req), from:str? (an agent id; default you), state:str?, result:any?. Records the task's last report {from, state, result, at}. `from` must be you or one of your descendants, else `not_in_subtree`. Returns the entry.",
-        "list": "args: parent:str?, holder:str|{subtree:str}?, status:str?. Returns {tasks:[entry]} sorted by id.",
+        "add": "args: id:str (req), source:str (req, opaque: gh:o/r#12, jira:KEY-5, ...), parent:str? (a task id), update_to:str? (default source), holder:str|{subtree:str}? (an existing agent), status:str? (default waiting), versions:[{repo,branch,commit}]? (opaque strings, one per repo the task touches), source_version:str? (opaque), fork_from:{agent,mark}? (opaque). Refused `exists` (id taken), `not_found` (parent or holder). Returns the entry.",
+        "assign": "args: id:str (req), holder:str|{subtree:str} (req; an existing agent id, or a subtree named by its root agent). versions:[{repo,branch,commit}]?, source_version:str?, fork_from:{agent,mark}? (each, when given, replaces the entry's value; `versions: []` clears it). Only a task nobody holds; else `already_held`. Returns the entry.",
+        "reassign": "args: id:str (req), holder:str|{subtree:str} (req), versions?, source_version?, fork_from? (as `assign`). Only a held task; else `not_held`. Agent to agent, to a subtree and back; every step is kept in history {from, to, by, at}, plus the entry's non-empty versions, source_version and fork_from as set by that step. Returns the entry.",
+        "status": "args: id:str (req), status:waiting|running|blocked|done|failed|paused?, versions?, source_version?, fork_from? (as `assign`). At least one of status and the three facts is required, else `missing_arg` for status. The lead's way to update the facts. Returns the entry.",
+        "report": "args: id:str (req), from:str? (an agent id; default you), state:str?, result:any?, usage:{input_tokens,cache_read_tokens,cache_write_tokens,output_tokens}? (non-negative integers, missing keys count 0). Records the task's last report {from, state, result, at, usage}; a usage also becomes the entry's `usage` (the last one per task; a report without usage keeps it). `from` must be you or one of your descendants, else `not_in_subtree`. Returns the entry.",
+        "list": "args: parent:str?, holder:str|{subtree:str}?, status:str?, ids:[str]? (only these tasks; an id that is not a task is `not_found`). Returns {tasks:[entry], usage:{input_tokens,cache_read_tokens,cache_write_tokens,output_tokens}} sorted by id; usage is the sum of the returned tasks' last usage (none counts 0).",
         "get": "args: id:str (req). Returns the entry plus children (the ids of the tasks whose parent it is); an unknown id is `not_found`.",
     })
 }
@@ -141,6 +148,95 @@ fn opt_str<'a>(verb: &str, payload: &'a Value, arg: &str) -> Result<Option<&'a s
         Some(Value::String(s)) if !s.is_empty() => Ok(Some(s)),
         Some(_) => Err(bad(verb, arg, "a non-empty string")),
     }
+}
+
+const USAGE_KEYS: [&str; 4] = [
+    "input_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+];
+
+/// An optional `versions`: a list of `{repo, branch, commit}`, all non-empty strings.
+fn versions_arg(verb: &str, payload: &Value) -> Result<Option<Value>, Value> {
+    const WANT: &str = "a list of {repo, branch, commit} strings";
+    let v = match payload.get("versions") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(v) => v,
+    };
+    let Some(list) = v.as_array() else {
+        return Err(bad(verb, "versions", WANT));
+    };
+    for item in list {
+        let ok = item.as_object().is_some_and(|m| {
+            m.len() == 3
+                && ["repo", "branch", "commit"].iter().all(|k| {
+                    m.get(*k)
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                })
+        });
+        if !ok {
+            return Err(bad(verb, "versions", WANT));
+        }
+    }
+    Ok(Some(v.clone()))
+}
+
+/// An optional `fork_from`: `{agent, mark}`, both non-empty strings (opaque).
+fn fork_from_arg(verb: &str, payload: &Value) -> Result<Option<Value>, Value> {
+    let v = match payload.get("fork_from") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(v) => v,
+    };
+    let ok = v.as_object().is_some_and(|m| {
+        m.len() == 2
+            && ["agent", "mark"].iter().all(|k| {
+                m.get(*k)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            })
+    });
+    if ok {
+        Ok(Some(v.clone()))
+    } else {
+        Err(bad(verb, "fork_from", "an {agent, mark} object of strings"))
+    }
+}
+
+/// The three recorded facts of a write verb: (versions, source_version, fork_from).
+type Facts = (Option<Value>, Option<String>, Option<Value>);
+
+fn facts_arg(verb: &str, payload: &Value) -> Result<Facts, Value> {
+    Ok((
+        versions_arg(verb, payload)?,
+        opt_str(verb, payload, "source_version")?.map(str::to_string),
+        fork_from_arg(verb, payload)?,
+    ))
+}
+
+/// An optional `usage`: token counts, a subset of [`USAGE_KEYS`], each a non-negative
+/// integer. Stored with all four keys (missing ones 0).
+fn usage_arg(payload: &Value) -> Result<Option<Value>, Value> {
+    const WANT: &str = "an object of non-negative integer token counts \
+                        (input_tokens, cache_read_tokens, cache_write_tokens, output_tokens)";
+    let m = match payload.get("usage") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(m)) => m,
+        Some(_) => return Err(bad("report", "usage", WANT)),
+    };
+    if m.keys().any(|k| !USAGE_KEYS.contains(&k.as_str())) {
+        return Err(bad("report", "usage", WANT));
+    }
+    let mut out = Map::new();
+    for k in USAGE_KEYS {
+        let n = match m.get(k) {
+            None => 0,
+            Some(v) => v.as_u64().ok_or_else(|| bad("report", "usage", WANT))?,
+        };
+        out.insert(k.to_string(), json!(n));
+    }
+    Ok(Some(Value::Object(out)))
 }
 
 fn state_arg(verb: &str, arg: &str, v: &str) -> Result<(), Value> {
@@ -243,7 +339,7 @@ async fn load(
                 row.get("task_id").and_then(Value::as_str),
                 row.get("content").filter(|c| c.is_object()),
             ) {
-                tasks.insert(id.to_string(), content.clone());
+                tasks.insert(id.to_string(), with_defaults(content));
             }
         }
         match res.get("next") {
@@ -253,6 +349,22 @@ async fn load(
     }
 }
 
+/// An entry stored before the recorded facts existed gets their defaults.
+fn with_defaults(content: &Value) -> Value {
+    let mut e = content.clone();
+    for (k, d) in [
+        ("versions", json!([])),
+        ("source_version", Value::Null),
+        ("fork_from", Value::Null),
+        ("usage", Value::Null),
+    ] {
+        if e.get(k).is_none() {
+            e[k] = d;
+        }
+    }
+    e
+}
+
 /// Append the new snapshot of a task.
 async fn save(kernel: &Arc<Kernel>, store: &str, entry: &Value) -> Result<(), Value> {
     let row = json!({"kind": "task", "task_id": entry["id"], "content": entry});
@@ -260,8 +372,32 @@ async fn save(kernel: &Arc<Kernel>, store: &str, entry: &Value) -> Result<(), Va
     Ok(())
 }
 
-fn history_item(from: &Value, to: &Value, by: &Option<AgentId>) -> Value {
-    json!({"from": from, "to": to, "by": by.as_ref().map(AgentId::as_str), "at": now()})
+/// One history step; it carries the entry's recorded facts only when it has any.
+fn history_item(from: &Value, to: &Value, by: &Option<AgentId>, entry: &Value) -> Value {
+    let mut item =
+        json!({"from": from, "to": to, "by": by.as_ref().map(AgentId::as_str), "at": now()});
+    for k in ["versions", "source_version", "fork_from"] {
+        let v = &entry[k];
+        let empty = v.is_null() || v.as_array().is_some_and(Vec::is_empty);
+        if !empty {
+            item[k] = v.clone();
+        }
+    }
+    item
+}
+
+/// Set the given facts on `entry`.
+fn set_facts(entry: &mut Value, facts: Facts) {
+    let (versions, source_version, fork_from) = facts;
+    if let Some(v) = versions {
+        entry["versions"] = v;
+    }
+    if let Some(s) = source_version {
+        entry["source_version"] = json!(s);
+    }
+    if let Some(f) = fork_from {
+        entry["fork_from"] = f;
+    }
 }
 
 // ── the bundle ──────────────────────────────────────────────────────
@@ -375,6 +511,7 @@ async fn add_inner(
     let update_to = opt_str("add", payload, "update_to")?.unwrap_or(source);
     let status = opt_str("add", payload, "status")?.unwrap_or("waiting");
     state_arg("add", "status", status)?;
+    let facts = facts_arg("add", payload)?;
     let holder = match payload.get("holder") {
         None | Some(Value::Null) => Value::Null,
         Some(h) => holder_arg(kernel, "add", h)?,
@@ -391,15 +528,16 @@ async fn add_inner(
             return Err(not_found_task("add", p));
         }
     }
-    let history = if holder.is_null() {
-        json!([])
-    } else {
-        json!([history_item(&Value::Null, &holder, caller)])
-    };
-    let entry = json!({
+    let mut entry = json!({
         "id": id, "parent": parent, "source": source, "update_to": update_to,
-        "holder": holder, "history": history, "status": status, "report": null,
+        "holder": holder, "history": [], "status": status, "report": null,
+        "versions": [], "source_version": null, "fork_from": null, "usage": null,
     });
+    set_facts(&mut entry, facts);
+    if !holder.is_null() {
+        let item = history_item(&Value::Null, &holder, caller, &entry);
+        entry["history"] = json!([item]);
+    }
     save(kernel, store, &entry).await?;
     Ok(entry)
 }
@@ -423,6 +561,7 @@ async fn assign_inner(
 ) -> Result<Value, Value> {
     let verb = if re { "reassign" } else { "assign" };
     let id = str_arg(verb, payload, "id")?;
+    let facts = facts_arg(verb, payload)?;
     let to = match payload.get("holder") {
         None | Some(Value::Null) => return Err(missing(verb, "holder")),
         Some(h) => holder_arg(kernel, verb, h)?,
@@ -450,10 +589,12 @@ async fn assign_inner(
         }
         _ => {}
     }
+    set_facts(&mut entry, facts);
+    let item = history_item(&from, &to, caller, &entry);
     entry["history"]
         .as_array_mut()
         .expect("history is a list")
-        .push(history_item(&from, &to, caller));
+        .push(item);
     entry["holder"] = to;
     save(kernel, store, &entry).await?;
     Ok(entry)
@@ -465,13 +606,24 @@ async fn status_reply(kernel: &Arc<Kernel>, store: &str, payload: &Value) -> Val
 
 async fn status_inner(kernel: &Arc<Kernel>, store: &str, payload: &Value) -> Result<Value, Value> {
     let id = str_arg("status", payload, "id")?;
-    let status = str_arg("status", payload, "status")?;
-    state_arg("status", "status", status)?;
+    let facts = facts_arg("status", payload)?;
+    let has_fact = facts.0.is_some() || facts.1.is_some() || facts.2.is_some();
+    let status = if has_fact {
+        opt_str("status", payload, "status")?
+    } else {
+        Some(str_arg("status", payload, "status")?)
+    };
+    if let Some(s) = status {
+        state_arg("status", "status", s)?;
+    }
     let mut entry = load(kernel, store, Some(id))
         .await?
         .remove(id)
         .ok_or_else(|| not_found_task("status", id))?;
-    entry["status"] = json!(status);
+    if let Some(s) = status {
+        entry["status"] = json!(s);
+    }
+    set_facts(&mut entry, facts);
     save(kernel, store, &entry).await?;
     Ok(entry)
 }
@@ -497,6 +649,7 @@ async fn report_inner(
         state_arg("report", "state", s)?;
     }
     let result = payload.get("result").cloned().unwrap_or(Value::Null);
+    let usage = usage_arg(payload)?;
     let from = match opt_str("report", payload, "from")? {
         Some(f) => Some(AgentId::from(f)),
         None => caller.clone(),
@@ -527,8 +680,11 @@ async fn report_inner(
         .ok_or_else(|| not_found_task("report", id))?;
     entry["report"] = json!({
         "from": from.as_ref().map(AgentId::as_str), "state": state,
-        "result": result, "at": now(),
+        "result": result, "at": now(), "usage": usage,
     });
+    if usage.is_some() {
+        entry["usage"] = entry["report"]["usage"].clone();
+    }
     save(kernel, store, &entry).await?;
     Ok(entry)
 }
@@ -541,14 +697,41 @@ async fn list_inner(kernel: &Arc<Kernel>, store: &str, payload: &Value) -> Resul
     let parent = opt_str("list", payload, "parent")?;
     let status = opt_str("list", payload, "status")?;
     let holder = payload.get("holder").filter(|h| !h.is_null());
+    let ids: Option<Vec<&str>> = match payload.get("ids") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(
+            a.iter()
+                .map(|v| v.as_str().filter(|s| !s.is_empty()))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| bad("list", "ids", "a list of non-empty task ids"))?,
+        ),
+        Some(_) => return Err(bad("list", "ids", "a list of non-empty task ids")),
+    };
     let tasks = load(kernel, store, None).await?;
+    if let Some(ids) = &ids {
+        if let Some(unknown) = ids.iter().find(|i| !tasks.contains_key(**i)) {
+            return Err(not_found_task("list", unknown));
+        }
+    }
     let out: Vec<Value> = tasks
         .into_values()
+        .filter(|t| {
+            ids.as_ref()
+                .is_none_or(|ids| ids.iter().any(|i| t["id"] == json!(i)))
+        })
         .filter(|t| parent.is_none_or(|p| t["parent"] == json!(p)))
         .filter(|t| status.is_none_or(|s| t["status"] == json!(s)))
         .filter(|t| holder.is_none_or(|h| &t["holder"] == h))
         .collect();
-    Ok(json!({"tasks": out}))
+    let mut sum = Map::new();
+    for k in USAGE_KEYS {
+        let n: u64 = out
+            .iter()
+            .map(|t| t["usage"].get(k).and_then(Value::as_u64).unwrap_or(0))
+            .sum();
+        sum.insert(k.to_string(), json!(n));
+    }
+    Ok(json!({"tasks": out, "usage": sum}))
 }
 
 async fn get_reply(kernel: &Arc<Kernel>, store: &str, payload: &Value) -> Value {

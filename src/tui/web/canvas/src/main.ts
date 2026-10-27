@@ -62,6 +62,8 @@ function register(kernel: Kernel): void {
   kernel.registerBundle("canvases_view.ts", () => null); // the canvas-list cell
   kernel.registerBundle("mcp_view.ts", () => null); // an MCP server agent's view
   kernel.registerBundle("mcp_add_view.ts", () => null); // the add-an-MCP-server form
+  // the read-only views of the agents that had only the stub
+  for (const v of ["resources", "tasks", "store", "scheduler", "cabinets", "credentials"]) kernel.registerBundle(`${v}_view.ts`, () => null);
 
   // Each frontend bundle declares its role via reflect (readme=true): the view
   // CLIENTS name the host CAPABILITY + verb surface they front (an LLM weaves the

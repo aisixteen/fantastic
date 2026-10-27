@@ -11,6 +11,9 @@ use tempfile::TempDir;
 /// Every `send` a caller agent received: (agent, text).
 static SENT: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
+/// Every `pause` a caller agent received: the agent id.
+static PAUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 struct CallerBundle;
 
 #[async_trait]
@@ -48,67 +51,12 @@ impl Bundle for CallerBundle {
                     .push((agent_id.as_str().to_string(), text));
                 Ok(Some(json!({"ok": true, "verb": "send"})))
             }
-            other => Ok(Some(json!({"ok": true, "verb": other}))),
-        }
-    }
-}
-
-/// Child ids that are paused, and ids whose `status` is refused (the stub keeps
-/// them in the process, which stands for the persisted pause row).
-static PAUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-static REFUSE_STATUS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-/// Stands for ai_core's pause: `pause`/`resume` flip a flag, `status` replies
-/// `{paused}`, and `resume` asks the registry first (`get_count {resume}`), a
-/// `limit` refusal passing through, as ai_core does. Everything else is a caller.
-struct PausableBundle;
-
-#[async_trait]
-impl Bundle for PausableBundle {
-    fn name(&self) -> &str {
-        "pausable"
-    }
-    async fn handle(
-        &self,
-        agent_id: &AgentId,
-        payload: &Value,
-        kernel: &Arc<Kernel>,
-    ) -> Result<Reply, BundleError> {
-        let id = agent_id.as_str().to_string();
-        let paused = || PAUSED.lock().unwrap().contains(&id);
-        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
-            "status" if REFUSE_STATUS.lock().unwrap().contains(&id) => {
-                Ok(Some(json!({"error": "status: refused"})))
-            }
-            "status" => Ok(Some(json!({"paused": paused()}))),
-            "pause" => {
-                if !paused() {
-                    PAUSED.lock().unwrap().push(id.clone());
+            other => {
+                if other == "pause" {
+                    PAUSED.lock().unwrap().push(agent_id.as_str().to_string());
                 }
-                Ok(Some(json!({"paused": true, "held": 0})))
+                Ok(Some(json!({"ok": true, "verb": other})))
             }
-            "resume" => {
-                let me = agent_of(kernel, agent_id).unwrap();
-                let m = meta_of(&me);
-                if paused() {
-                    if let Some(reg) = m.get("spawned_by").and_then(Value::as_str) {
-                        let r = kernel
-                            .send(vec![Item::new(
-                                AgentId::from(reg),
-                                json!({"type": "get_count", "role": m["role"], "resume": id}),
-                            )])
-                            .await
-                            .remove(0)
-                            .result;
-                        if r["error"] == "limit" {
-                            return Ok(Some(r));
-                        }
-                    }
-                }
-                PAUSED.lock().unwrap().retain(|x| *x != id);
-                Ok(Some(json!({"resumed": true, "released": 0})))
-            }
-            _ => CallerBundle.handle(agent_id, payload, kernel).await,
         }
     }
 }
@@ -174,9 +122,36 @@ impl Bundle for ForkBundle {
     }
 }
 
+/// A tool whose record refuses every `callable_by` edit while it carries
+/// `refuse_grants` (stands for a bundle whose `validate_meta` says no).
+struct PickyBundle;
+
+#[async_trait]
+impl Bundle for PickyBundle {
+    fn name(&self) -> &str {
+        "picky"
+    }
+    async fn handle(
+        &self,
+        _agent_id: &AgentId,
+        _payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        Ok(None)
+    }
+    fn validate_meta(
+        &self,
+        meta: &Map<String, Value>,
+        record: &Map<String, Value>,
+    ) -> Option<String> {
+        (meta.contains_key("callable_by") && record.get("refuse_grants") == Some(&json!(true)))
+            .then(|| "callable_by refused".to_string())
+    }
+}
+
 const WRITER: &str = "---\nname: writer\npurpose: Writes the first draft of a text.\ntier: fast\nmodel: from-the-card\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n---\nYou write clearly and briefly.\n";
 const REVIEWER: &str = "---\nname: reviewer\npurpose: Reads a draft and says what to fix.\ntier: fast\n---\nYou review drafts.\n";
-const SUBLEAD: &str = "---\nname: sublead\npurpose: Runs a branch of the work.\ntier: fast\ngrants:\n  $registry: [roles, spawn, get_count, report]\n---\nYou run one branch.\n";
+const SUBLEAD: &str = "---\nname: sublead\npurpose: Runs a branch of the work.\ntier: fast\ngrants:\n  $registry: [roles, spawn, get_count, report]\n  notes: [read]\n---\nYou run one branch.\n";
 
 fn write_cards(dir: &Path, cards: &[(&str, &str)]) {
     std::fs::create_dir_all(dir).unwrap();
@@ -192,8 +167,8 @@ fn new_kernel() -> Kernel {
         fantastic_core::KernelStateBundle::default(),
     );
     kernel.bundles.register("caller.tools", CallerBundle);
+    kernel.bundles.register("picky.tools", PickyBundle);
     kernel.bundles.register("forkable.tools", ForkBundle);
-    kernel.bundles.register("pausable.tools", PausableBundle);
     kernel
         .bundles
         .register(HANDLER_MODULE, AgenticResourcesBundle);
@@ -253,16 +228,6 @@ struct Rig {
 /// A kernel with `callers` (caller.tools agents allowed to call the registry) and
 /// an enabled registry over `cards`, with tiers `fast` and `lead` on `caller.tools`.
 async fn rig(tmp: &TempDir, callers: &[&str], cards: &[(&str, &str)]) -> Rig {
-    rig_with(tmp, callers, cards, "caller.tools").await
-}
-
-/// [`rig`] with the tiers' handler chosen (`pausable.tools` for pause tests).
-async fn rig_with(
-    tmp: &TempDir,
-    callers: &[&str],
-    cards: &[(&str, &str)],
-    tier_handler: &str,
-) -> Rig {
     let kernel = Arc::new(new_kernel());
     root_of(&kernel, tmp);
     let dir = tmp.path().join("roles");
@@ -273,7 +238,7 @@ async fn rig_with(
         create(
             &kernel,
             json!({"handler_module": "caller.tools", "id": c,
-                   "can_call": {reg.clone(): "*"}}),
+                   "can_call": {reg.clone(): "*", "notes": "*"}}),
         )
         .await;
     }
@@ -281,7 +246,7 @@ async fn rig_with(
     for c in &ids {
         cb.insert(c.clone(), json!("*"));
     }
-    let tier = json!({"handler_module": tier_handler, "model": "m1", "endpoint": "http://x"});
+    let tier = json!({"handler_module": "caller.tools", "model": "m1", "endpoint": "http://x"});
     create(
         &kernel,
         json!({"handler_module": HANDLER_MODULE, "id": reg,
@@ -325,6 +290,22 @@ impl Rig {
             None => self.op(json!({"type": "get_count"})).await,
         }
     }
+}
+
+fn id_of(v: &Value) -> String {
+    v["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"))
+        .to_string()
+}
+
+async fn deleted(r: &Rig, id: &str) -> Value {
+    send(
+        &r.kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": id}),
+    )
+    .await
 }
 
 // ── cards ───────────────────────────────────────────────────────────
@@ -486,10 +467,7 @@ async fn spawn_creates_child_with_directive_tier_grants() {
     assert_eq!(m["role"], "writer");
     assert_eq!(m["name"], "scribe");
     assert_eq!(m["can_call"]["notes"], json!(["read"]));
-    assert_eq!(
-        m["can_call"][&r.reg],
-        json!(["roles", "report", "get_count"])
-    );
+    assert_eq!(m["can_call"][&r.reg], json!(["roles", "report"]));
 }
 
 #[tokio::test]
@@ -954,66 +932,56 @@ async fn delegated_limits_bound_subtree() {
         .is_some());
 }
 
-/// Poll until `get_count` (total) reports `running` (the pause on a report is detached).
-async fn settle(r: &Rig, running: u64) {
-    for _ in 0..100 {
-        if r.count(None).await["running"] == running {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-}
-
-fn id_of(v: &Value) -> String {
-    v["id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{v}"))
-        .to_string()
-}
-
-async fn deleted(r: &Rig, id: &str) -> Value {
-    send(
-        &r.kernel,
-        "kernel_state",
-        json!({"type": "delete_agent", "id": id}),
-    )
-    .await
-}
-
 #[tokio::test]
-async fn get_count_counts_active_agents() {
+async fn get_count_counts_every_spawned_agent() {
     let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
     let lead = &r.callers[0];
     r.op(json!({"type": "set_limit", "max": 2})).await;
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
+    let a = r.spawn_as(lead, json!({"role": "writer"})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     r.spawn_as(lead, json!({"role": "writer"})).await;
     assert_eq!(r.count(None).await, json!({"running": 2, "max": 2}));
     let third = r.spawn_as(lead, json!({"role": "writer"})).await;
     assert_eq!(third["error"], "limit", "{third}");
-    // a done report frees the slot (the reporter is paused)
+    // a report frees nothing; only delete_agent does
     r.call(&a, &r.reg, json!({"type": "report", "state": "done"}))
         .await;
-    settle(&r, 1).await;
+    assert_eq!(r.count(None).await["running"], 2);
+    assert_eq!(
+        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
+        "limit"
+    );
+    let gone = send(
+        &r.kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": a}),
+    )
+    .await;
+    assert_eq!(gone["deleted"], true);
     assert_eq!(r.count(None).await["running"], 1);
     assert!(r
         .spawn_as(lead, json!({"role": "writer"}))
         .await
         .get("id")
         .is_some());
-    assert_eq!(r.count(None).await["running"], 2);
-    // delete_agent of the paused one changes nothing more
-    assert_eq!(deleted(&r, &a).await["deleted"], true);
-    assert_eq!(r.count(None).await["running"], 2);
 }
 
 #[tokio::test]
 async fn no_auto_cleanup_on_done() {
     let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
     let lead = &r.callers[0];
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    let b = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
+    let a = r.spawn_as(lead, json!({"role": "writer"})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let b = r.spawn_as(lead, json!({"role": "writer"})).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let before = r.kernel.agents.len();
     r.call(
         &a,
@@ -1027,7 +995,6 @@ async fn no_auto_cleanup_on_done() {
         json!({"type": "report", "state": "failed", "result": "no"}),
     )
     .await;
-    settle(&r, 0).await;
     assert_eq!(r.kernel.agents.len(), before, "nothing was deleted");
     let m = r.meta(&a);
     assert_eq!(
@@ -1035,7 +1002,7 @@ async fn no_auto_cleanup_on_done() {
         (json!(r.reg), json!("writer"))
     );
     assert!(m.get("task").is_none());
-    assert_eq!(r.count(None).await["running"], 0, "both are paused");
+    assert_eq!(r.count(None).await["running"], 2, "the count stays");
     let f = r.op(json!({"type": "fleet"})).await;
     assert_eq!(
         f["roles"]["writer"].as_array().unwrap().len(),
@@ -1043,208 +1010,14 @@ async fn no_auto_cleanup_on_done() {
         "still listed: {f}"
     );
     // only an explicit delete removes one
-    assert_eq!(deleted(&r, &a).await["deleted"], true);
-    assert_eq!(r.kernel.agents.len(), before - 1);
-}
-
-#[tokio::test]
-async fn pause_frees_a_slot() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
-    let lead = &r.callers[0];
-    r.op(json!({"type": "set_limit", "max": 2})).await;
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    r.spawn_as(lead, json!({"role": "writer"})).await;
-    assert_eq!(
-        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
-        "limit"
-    );
-    let p = r.call(lead, &a, json!({"type": "pause"})).await;
-    assert_eq!(p["paused"], true, "{p}");
-    assert_eq!(r.count(None).await, json!({"running": 1, "max": 2}));
-    assert!(r
-        .spawn_as(lead, json!({"role": "writer"}))
-        .await
-        .get("id")
-        .is_some());
-}
-
-#[tokio::test]
-async fn resume_takes_the_slot_back_and_is_refused_when_full() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
-    let lead = &r.callers[0];
-    r.op(json!({"type": "set_limit", "max": 2})).await;
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    r.spawn_as(lead, json!({"role": "writer"})).await;
-    r.call(lead, &a, json!({"type": "pause"})).await;
-    let c = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    assert_eq!(r.count(None).await["running"], 2);
-    let no = r.call(lead, &a, json!({"type": "resume"})).await;
-    assert_eq!(no["error"], "limit", "{no}");
-    assert!(no["reason"].as_str().is_some_and(|s| !s.is_empty()), "{no}");
-    assert!(PAUSED.lock().unwrap().contains(&a), "still paused");
-    assert_eq!(r.count(None).await["running"], 2);
-    r.call(lead, &c, json!({"type": "pause"})).await;
-    let ok = r.call(lead, &a, json!({"type": "resume"})).await;
-    assert_eq!(ok["resumed"], true, "{ok}");
-    assert_eq!(r.count(None).await, json!({"running": 2, "max": 2}));
-}
-
-#[tokio::test]
-async fn done_report_frees_the_slot() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
-    let lead = &r.callers[0];
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    let b = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    // these states free nothing
-    for state in ["waiting", "running", "blocked", "paused"] {
-        let rep = r
-            .call(&a, &r.reg, json!({"type": "report", "state": state}))
-            .await;
-        assert_eq!(rep, json!({"ok": true}), "{rep}");
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert_eq!(r.count(None).await["running"], 2);
-    let rep = r
-        .call(&a, &r.reg, json!({"type": "report", "state": "done"}))
-        .await;
-    assert_eq!(rep, json!({"ok": true}), "{rep}");
-    settle(&r, 1).await;
-    assert_eq!(r.count(None).await["running"], 1);
-    r.call(&b, &r.reg, json!({"type": "report", "state": "failed"}))
-        .await;
-    settle(&r, 0).await;
-    assert_eq!(r.count(None).await["running"], 0);
-}
-
-#[tokio::test]
-async fn done_agent_frees_without_task_registry() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
-    let lead = &r.callers[0];
-    assert!(
-        !r.kernel.agents.iter().any(|e| meta_of(e.value())
-            .get("handler_module")
-            .and_then(Value::as_str)
-            .is_some_and(|h| h.contains("task_registry"))),
-        "no task_registry in this kernel"
-    );
-    r.op(json!({"type": "set_limit", "max": 1})).await;
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    assert_eq!(
-        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
-        "limit"
-    );
-    r.call(&a, &r.reg, json!({"type": "report", "state": "done"}))
-        .await;
-    settle(&r, 0).await;
-    assert!(r
-        .spawn_as(lead, json!({"role": "writer"}))
-        .await
-        .get("id")
-        .is_some());
-}
-
-#[tokio::test]
-async fn per_role_and_subtree_quota_count_active_only() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(
-        &tmp,
-        &["boss"],
-        &[("writer.md", WRITER), ("sublead.md", SUBLEAD)],
-        "pausable.tools",
+    let gone = send(
+        &r.kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": a}),
     )
     .await;
-    let boss = &r.callers[0];
-    r.op(json!({"type": "set_limit", "role": "writer", "max": 1}))
-        .await;
-    let sub = id_of(
-        &r.spawn_as(boss, json!({"role": "sublead", "limits": {"total": 1}}))
-            .await,
-    );
-    let w1 = id_of(&r.spawn_as(&sub, json!({"role": "writer"})).await);
-    assert_eq!(
-        r.spawn_as(&sub, json!({"role": "writer"})).await["scope"],
-        "role"
-    );
-    // pausing the leaf frees the role slot and the sub-lead's subtree slot
-    r.call(&sub, &w1, json!({"type": "pause"})).await;
-    let w2 = id_of(&r.spawn_as(&sub, json!({"role": "writer"})).await);
-    // the role cap is full again: resume is refused `role`; lift it, then `subtree_total`
-    let no = r.call(&sub, &w1, json!({"type": "resume"})).await;
-    assert_eq!(
-        (no["error"].clone(), no["scope"].clone()),
-        (json!("limit"), json!("role")),
-        "{no}"
-    );
-    r.op(json!({"type": "set_limit", "role": "writer", "max": null}))
-        .await;
-    let no = r.call(&sub, &w1, json!({"type": "resume"})).await;
-    assert_eq!(
-        (no["error"].clone(), no["scope"].clone()),
-        (json!("limit"), json!("subtree_total")),
-        "{no}"
-    );
-    assert_eq!(no["lead"], sub.as_str());
-    r.call(&sub, &w2, json!({"type": "pause"})).await;
-    let ok = r.call(&sub, &w1, json!({"type": "resume"})).await;
-    assert_eq!(ok["resumed"], true, "{ok}");
-}
-
-#[tokio::test]
-async fn restart_keeps_the_active_counts() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
-    let lead = &r.callers[0];
-    r.op(json!({"type": "set_limit", "max": 3})).await;
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    r.spawn_as(lead, json!({"role": "writer"})).await;
-    r.call(lead, &a, json!({"type": "pause"})).await;
-    let before = r.count(None).await;
-    assert_eq!(before, json!({"running": 1, "max": 3}));
-    let state = r.kernel.save();
-    let k2 = Arc::new(new_kernel());
-    k2.load(state).unwrap();
-    let after = send(&k2, &r.reg, json!({"type": "get_count"})).await;
-    assert_eq!(
-        after, before,
-        "rebuilt from the records and the pause state"
-    );
-    assert_eq!(
-        send(&k2, &r.reg, json!({"type": "get_count", "role": "writer"})).await["running"],
-        1
-    );
-}
-
-#[tokio::test]
-async fn status_failure_counts_as_active() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
-    let lead = &r.callers[0];
-    r.op(json!({"type": "set_limit", "max": 1})).await;
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    REFUSE_STATUS.lock().unwrap().push(a.clone());
-    // even paused, an agent that will not say counts (fail closed)
-    PAUSED.lock().unwrap().push(a.clone());
-    assert_eq!(r.count(None).await["running"], 1);
-    assert_eq!(
-        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
-        "limit"
-    );
-}
-
-#[tokio::test]
-async fn fleet_lists_paused_agents() {
-    let tmp = TempDir::new().unwrap();
-    let r = rig_with(&tmp, &["lead"], &[("writer.md", WRITER)], "pausable.tools").await;
-    let lead = &r.callers[0];
-    let a = id_of(&r.spawn_as(lead, json!({"role": "writer"})).await);
-    r.call(lead, &a, json!({"type": "pause"})).await;
-    assert_eq!(r.count(None).await["running"], 0);
-    let f = r.op(json!({"type": "fleet"})).await;
-    assert_eq!(f["roles"]["writer"], json!([{"id": a}]), "{f}");
+    assert_eq!(gone["deleted"], true);
+    assert_eq!(r.kernel.agents.len(), before - 1);
 }
 
 #[tokio::test]
@@ -1389,13 +1162,10 @@ async fn spawn_from_forks_and_applies_the_role_card() {
     assert_eq!(m["model"], "m1", "the tier's model, not the source's");
     assert_eq!(m["lead"], json!(lead));
     assert_eq!(m["can_call"]["notes"], json!(["read"]));
-    assert_eq!(
-        m["can_call"][&r.reg],
-        json!(["roles", "report", "get_count"])
-    );
+    assert_eq!(m["can_call"][&r.reg], json!(["roles", "report"]));
     assert_eq!(
         r.meta(&r.reg)["callable_by"][id],
-        json!(["roles", "report", "get_count"]),
+        json!(["roles", "report"]),
         "the registry hears its report"
     );
     // the name is applied when given
@@ -1673,5 +1443,460 @@ async fn spawn_from_bad_shape_refused() {
     assert!(
         plain.get("id").is_some() && plain.get("from").is_none(),
         "{plain}"
+    );
+}
+
+// ── the card's tool grants (#436) ───────────────────────────────────
+
+const WIDE: &str = "---\nname: wide\npurpose: Reads and writes notes.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read, write]\n---\nYou write.\n";
+const STAR: &str = "---\nname: star\npurpose: Anything on notes.\ntier: fast\ngrants:\n  notes: \"*\"\n---\nYou do all.\n";
+
+async fn notes_tool(r: &Rig) {
+    create(
+        &r.kernel,
+        json!({"handler_module": "caller.tools", "id": "notes"}),
+    )
+    .await;
+}
+
+/// `who` now holds exactly `verbs` on `key` (replacing the rig's grant).
+fn hold(r: &Rig, who: &str, key: &str, verbs: Value) {
+    let k = key.to_string();
+    r.kernel
+        .edit_can_call(&AgentId::from(who), move |m| {
+            m.insert(k, verbs);
+            true
+        })
+        .unwrap();
+}
+
+fn keys_of(r: &Rig, id: &str, field: &str) -> Vec<String> {
+    let mut k: Vec<String> = r.meta(id)[field]
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    k.sort();
+    k
+}
+
+#[tokio::test]
+async fn spawn_opens_the_cards_tool_grants_on_both_ends() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    notes_tool(&r).await;
+    let before = keys_of(&r, "notes", "callable_by");
+    let id = id_of(&r.spawn_as(&r.callers[0], json!({"role": "writer"})).await);
+    assert_eq!(r.meta(&id)["can_call"]["notes"], json!(["read"]));
+    assert_eq!(r.meta("notes")["callable_by"][&id], json!(["read"]));
+    let mut want = before;
+    want.push(id);
+    want.sort();
+    assert_eq!(
+        keys_of(&r, "notes", "callable_by"),
+        want,
+        "no other new key"
+    );
+}
+
+#[tokio::test]
+async fn spawned_worker_calls_the_granted_tool_without_directive_setup() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    notes_tool(&r).await;
+    let id = id_of(&r.spawn_as(&r.callers[0], json!({"role": "writer"})).await);
+    let ok = r.call(&id, "notes", json!({"type": "read"})).await;
+    assert_eq!(ok["verb"], "read", "{ok}");
+    let no = r.call(&id, "notes", json!({"type": "write"})).await;
+    assert_eq!(no["reason"], "unauthorized", "{no}");
+}
+
+#[tokio::test]
+async fn spawn_from_opens_the_cards_tool_grants_on_both_ends() {
+    let tmp = TempDir::new().unwrap();
+    let (r, src) = fork_rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    notes_tool(&r).await;
+    hold(&r, &src, "notes", json!("*"));
+    let before = keys_of(&r, "notes", "callable_by");
+    let id = id_of(
+        &r.spawn_as(
+            &r.callers[0],
+            json!({"role": "writer", "from": from(&src, 5)}),
+        )
+        .await,
+    );
+    assert_eq!(
+        r.meta(&id)["can_call"]["notes"],
+        json!(["read"]),
+        "not wider than the card"
+    );
+    assert_eq!(r.meta("notes")["callable_by"][&id], json!(["read"]));
+    let mut want = before;
+    want.push(id.clone());
+    want.sort();
+    assert_eq!(keys_of(&r, "notes", "callable_by"), want);
+}
+
+#[tokio::test]
+async fn spawn_tool_grant_with_star_verbs_keeps_star() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("star.md", STAR), ("writer.md", WRITER)]).await;
+    notes_tool(&r).await;
+    let a = id_of(&r.spawn_as(&r.callers[0], json!({"role": "star"})).await);
+    let b = id_of(&r.spawn_as(&r.callers[0], json!({"role": "star"})).await);
+    assert_eq!(r.meta("notes")["callable_by"][&a], json!("*"));
+    assert_eq!(r.meta("notes")["callable_by"][&b], json!("*"));
+    // a grant already there is merged into, never duplicated
+    let w = id_of(&r.spawn_as(&r.callers[0], json!({"role": "writer"})).await);
+    assert_eq!(r.meta("notes")["callable_by"][&w], json!(["read"]));
+    assert_eq!(r.meta("notes")["callable_by"][&a], json!("*"));
+}
+
+#[tokio::test]
+async fn spawn_without_the_tool_agent_still_spawns() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    let id = id_of(&r.spawn_as(&r.callers[0], json!({"role": "writer"})).await);
+    assert_eq!(r.meta(&id)["can_call"]["notes"], json!(["read"]));
+    assert!(r.kernel.agents.get(&AgentId::from("notes")).is_none());
+}
+
+#[tokio::test]
+async fn refused_tool_grant_undoes_the_spawn() {
+    let tmp = TempDir::new().unwrap();
+    let picky = uid(&tmp, "zpicky");
+    let card = format!(
+        "---\nname: two\npurpose: Two tools.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n  {picky}: [read]\n---\nx\n"
+    );
+    let r = rig(&tmp, &["lead"], &[("two.md", card.as_str())]).await;
+    let lead = r.callers[0].clone();
+    notes_tool(&r).await;
+    create(
+        &r.kernel,
+        json!({"handler_module": "picky.tools", "id": picky, "refuse_grants": true}),
+    )
+    .await;
+    hold(&r, &lead, &picky, json!("*"));
+    let notes_before = r.meta("notes")["callable_by"].clone();
+    let reg_before = keys_of(&r, &r.reg, "callable_by");
+    let lead_before = keys_of(&r, &lead, "can_call");
+    let agents_before = r.kernel.agents.len();
+    let out = r
+        .spawn_as(&lead, json!({"role": "two", "task": "go"}))
+        .await;
+    assert_eq!(out["error"], "grant_failed", "{out}");
+    assert_eq!(r.kernel.agents.len(), agents_before, "no child left");
+    assert_eq!(r.op(json!({"type": "fleet"})).await["roles"], json!({}));
+    assert_eq!(r.count(None).await["running"], 0);
+    assert_eq!(
+        r.meta("notes")["callable_by"],
+        notes_before,
+        "first edit undone"
+    );
+    assert_eq!(keys_of(&r, &r.reg, "callable_by"), reg_before);
+    assert_eq!(keys_of(&r, &lead, "can_call"), lead_before);
+}
+
+#[tokio::test]
+async fn delete_agent_removes_the_spawned_agents_tool_entries() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    notes_tool(&r).await;
+    let lead = r.callers[0].clone();
+    let keep = id_of(&r.spawn_as(&lead, json!({"role": "writer"})).await);
+    let id = id_of(&r.spawn_as(&lead, json!({"role": "writer"})).await);
+    assert!(r.meta("notes")["callable_by"].get(&id).is_some());
+    let out = deleted(&r, &id).await;
+    assert!(out.get("error").is_none(), "{out}");
+    assert!(r.meta("notes")["callable_by"].get(&id).is_none());
+    assert!(r.meta(&r.reg)["callable_by"].get(&id).is_none());
+    assert!(r.meta(&lead)["can_call"].get(&id).is_none());
+    assert_eq!(r.meta("notes")["callable_by"][&keep], json!(["read"]));
+}
+
+#[tokio::test]
+async fn delete_of_a_subtree_removes_every_spawned_agents_tool_entries() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(
+        &tmp,
+        &["lead"],
+        &[("sublead.md", SUBLEAD), ("writer.md", WRITER)],
+    )
+    .await;
+    notes_tool(&r).await;
+    let sub = id_of(&r.spawn_as(&r.callers[0], json!({"role": "sublead"})).await);
+    let w = id_of(&r.spawn_as(&sub, json!({"role": "writer"})).await);
+    assert!(r.meta("notes")["callable_by"].get(&sub).is_some());
+    assert!(r.meta("notes")["callable_by"].get(&w).is_some());
+    deleted(&r, &sub).await;
+    assert!(r.meta("notes")["callable_by"].get(&sub).is_none());
+    assert!(r.meta("notes")["callable_by"].get(&w).is_none());
+}
+
+#[tokio::test]
+async fn spawn_refuses_a_grant_the_spawner_does_not_hold() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("wide.md", WIDE)]).await;
+    notes_tool(&r).await;
+    let lead = r.callers[0].clone();
+    hold(&r, &lead, "notes", json!(["read"]));
+    let notes_before = r.meta("notes")["callable_by"].clone();
+    let n = r.kernel.agents.len();
+    let out = r.spawn_as(&lead, json!({"role": "wide"})).await;
+    assert_eq!(out["error"], "not_allowed", "{out}");
+    let why = out["reason"].as_str().unwrap();
+    assert!(
+        why.contains(lead.as_str()) && why.contains("write") && why.contains("notes"),
+        "{why}"
+    );
+    assert_eq!(r.kernel.agents.len(), n, "nothing created");
+    assert_eq!(r.meta("notes")["callable_by"], notes_before);
+    assert_eq!(r.op(json!({"type": "fleet"})).await["roles"], json!({}));
+}
+
+#[tokio::test]
+async fn spawn_refuses_star_grant_when_spawner_holds_only_verbs() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("star.md", STAR)]).await;
+    notes_tool(&r).await;
+    hold(&r, &r.callers[0], "notes", json!(["read"]));
+    let out = r.spawn_as(&r.callers[0], json!({"role": "star"})).await;
+    assert_eq!(out["error"], "not_allowed", "{out}");
+}
+
+#[tokio::test]
+async fn spawn_refuses_a_tool_the_spawner_has_no_grant_on() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    notes_tool(&r).await;
+    r.kernel
+        .edit_can_call(&AgentId::from(r.callers[0].as_str()), |m| {
+            m.remove("notes").is_some()
+        })
+        .unwrap();
+    let out = r.spawn_as(&r.callers[0], json!({"role": "writer"})).await;
+    assert_eq!(out["error"], "not_allowed", "{out}");
+}
+
+#[tokio::test]
+async fn spawn_from_refuses_escalation_before_forking() {
+    let tmp = TempDir::new().unwrap();
+    let (r, src) = fork_rig(&tmp, &["lead"], &[("wide.md", WIDE)]).await;
+    notes_tool(&r).await;
+    hold(&r, &r.callers[0], "notes", json!(["read"]));
+    let out = r
+        .spawn_as(
+            &r.callers[0],
+            json!({"role": "wide", "from": from(&src, 5)}),
+        )
+        .await;
+    assert_eq!(out["error"], "not_allowed", "{out}");
+    assert!(forks_of(&r, &src).is_empty(), "nothing forked");
+}
+
+#[tokio::test]
+async fn operator_spawn_has_no_escalation_check() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &[], &[("wide.md", WIDE)]).await;
+    notes_tool(&r).await;
+    let id = id_of(&r.op(json!({"type": "spawn", "role": "wide"})).await);
+    assert_eq!(r.meta(&id)["can_call"]["notes"], json!(["read", "write"]));
+    assert_eq!(
+        r.meta("notes")["callable_by"][&id],
+        json!(["read", "write"])
+    );
+}
+
+#[tokio::test]
+async fn subleads_cannot_hand_on_more_than_they_hold() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(
+        &tmp,
+        &["lead"],
+        &[
+            ("sublead.md", SUBLEAD),
+            ("wide.md", WIDE),
+            ("writer.md", WRITER),
+        ],
+    )
+    .await;
+    notes_tool(&r).await;
+    let sub = id_of(&r.spawn_as(&r.callers[0], json!({"role": "sublead"})).await);
+    let no = r.spawn_as(&sub, json!({"role": "wide"})).await;
+    assert_eq!(no["error"], "not_allowed", "{no}");
+    let ok = r.spawn_as(&sub, json!({"role": "writer"})).await;
+    assert!(ok.get("id").is_some(), "{ok}");
+}
+
+#[tokio::test]
+async fn registry_token_grants_are_not_escalation_checked() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[]).await;
+    let lead = r.callers[0].clone();
+    hold(&r, &lead, &r.reg, json!(["spawn"]));
+    let out = r.spawn_as(&lead, json!({"role": "project_lead"})).await;
+    assert!(out.get("id").is_some(), "{out}");
+}
+
+// ── every existing agent counts (#424) ──────────────────────────────
+
+fn paused_ids() -> Vec<String> {
+    PAUSED.lock().unwrap().clone()
+}
+
+async fn spawn_id(r: &Rig, who: &str, role: &str) -> String {
+    let out = r.spawn_as(who, json!({"role": role})).await;
+    out["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{out}"))
+        .to_string()
+}
+
+#[tokio::test]
+async fn get_count_counts_all_existing_agents() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(
+        &tmp,
+        &["lead"],
+        &[("writer.md", WRITER), ("reviewer.md", REVIEWER)],
+    )
+    .await;
+    let lead = &r.callers[0];
+    let a = spawn_id(&r, lead, "writer").await;
+    let b = spawn_id(&r, lead, "writer").await;
+    spawn_id(&r, lead, "reviewer").await;
+    r.call(lead, &a, json!({"type": "pause"})).await;
+    r.call(&b, &r.reg, json!({"type": "report", "state": "done"}))
+        .await;
+    assert_eq!(r.count(None).await["running"], 3);
+    assert_eq!(r.count(Some("writer")).await["running"], 2);
+}
+
+#[tokio::test]
+async fn paused_agent_keeps_its_slot_and_spawn_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    let lead = &r.callers[0];
+    r.op(json!({"type": "set_limit", "max": 2})).await;
+    let a = spawn_id(&r, lead, "writer").await;
+    spawn_id(&r, lead, "writer").await;
+    r.call(lead, &a, json!({"type": "pause"})).await;
+    let third = r.spawn_as(lead, json!({"role": "writer"})).await;
+    assert_eq!(third["error"], "limit", "{third}");
+    assert_eq!(third["scope"], "total");
+    assert_eq!(
+        (third["running"].clone(), third["max"].clone()),
+        (json!(2), json!(2))
+    );
+}
+
+#[tokio::test]
+async fn done_report_does_not_pause_the_sender() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    let lead = &r.callers[0];
+    let a = spawn_id(&r, lead, "writer").await;
+    for state in ["done", "failed"] {
+        let rep = r
+            .call(&a, &r.reg, json!({"type": "report", "state": state}))
+            .await;
+        assert_eq!(rep, json!({"ok": true}), "{rep}");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !paused_ids().contains(&a),
+        "no pause was sent to the reporter"
+    );
+    assert_eq!(r.count(None).await["running"], 1);
+    let f = r.op(json!({"type": "fleet"})).await;
+    assert_eq!(f["roles"]["writer"].as_array().unwrap().len(), 1, "{f}");
+}
+
+#[tokio::test]
+async fn delete_agent_is_the_only_way_to_free_a_slot() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    let lead = &r.callers[0];
+    r.op(json!({"type": "set_limit", "max": 2})).await;
+    let a = spawn_id(&r, lead, "writer").await;
+    spawn_id(&r, lead, "writer").await;
+    r.call(lead, &a, json!({"type": "pause"})).await;
+    r.call(&a, &r.reg, json!({"type": "report", "state": "done"}))
+        .await;
+    assert_eq!(
+        r.spawn_as(lead, json!({"role": "writer"})).await["error"],
+        "limit"
+    );
+    send(
+        &r.kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": a}),
+    )
+    .await;
+    assert_eq!(r.count(None).await["running"], 1);
+    assert!(r
+        .spawn_as(lead, json!({"role": "writer"}))
+        .await
+        .get("id")
+        .is_some());
+    assert_eq!(r.count(None).await["running"], 2);
+}
+
+#[tokio::test]
+async fn delegated_quota_counts_paused_and_done_agents() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(
+        &tmp,
+        &["boss"],
+        &[("writer.md", WRITER), ("sublead.md", SUBLEAD)],
+    )
+    .await;
+    let boss = &r.callers[0];
+    // total quota 1: a paused sub-agent keeps the only slot
+    let sub = r
+        .spawn_as(boss, json!({"role": "sublead", "limits": {"total": 1}}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let w = spawn_id(&r, &sub, "writer").await;
+    r.call(boss, &w, json!({"type": "pause"})).await;
+    let no = r.spawn_as(&sub, json!({"role": "writer"})).await;
+    assert_eq!(no["error"], "limit", "{no}");
+    assert_eq!(no["scope"], "subtree_total");
+    // per-role quota: a done sub-agent keeps its role slot
+    let sub2 = r
+        .spawn_as(boss, json!({"role": "sublead", "limits": {"per_role": 1}}))
+        .await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let w2 = spawn_id(&r, &sub2, "writer").await;
+    r.call(&w2, &r.reg, json!({"type": "report", "state": "done"}))
+        .await;
+    let no2 = r.spawn_as(&sub2, json!({"role": "writer"})).await;
+    assert_eq!(no2["error"], "limit", "{no2}");
+    assert_eq!(no2["scope"], "subtree_role");
+}
+
+#[tokio::test]
+async fn get_count_ignores_a_resume_arg_and_registry_grants_only_report() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp, &["lead"], &[("writer.md", WRITER)]).await;
+    let lead = &r.callers[0];
+    let a = spawn_id(&r, lead, "writer").await;
+    // the old per-agent check is gone: an unknown `resume` arg is just ignored
+    let plain = r.count(None).await;
+    let with = r.op(json!({"type": "get_count", "resume": a})).await;
+    assert_eq!(with, plain);
+    assert_eq!(with, json!({"running": 1, "max": null}));
+    let nope = r
+        .op(json!({"type": "get_count", "resume": "no_such_agent"}))
+        .await;
+    assert_eq!(nope, plain);
+    // the registry is only let in for `report`
+    assert_eq!(r.meta(&a)["can_call"][&r.reg], json!(["roles", "report"]));
+    assert_eq!(
+        r.meta(&r.reg)["callable_by"][&a],
+        json!(["roles", "report"])
     );
 }

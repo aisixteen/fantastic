@@ -22,6 +22,17 @@ bundles, seeds an empty tree with the canvas root, and mounts.
 - **ai_view** — chat CLIENT for a host LLM backend. Bound to any agent answering
   `send`/`history`/`status` by `backend_id`; ESC cancels the in-flight turn
   through the kernel (`ps` → `cancel`).
+- **resources_view** / **tasks_view** / **store_view** / **scheduler_view** /
+  **cabinets_view** / **credentials_view** — READ-ONLY views of the agents that had
+  only the stub (`agentic_resources`, `task_registry`, `ram_store` and `sqlite_store`,
+  `scheduler`, the `cabinet` manager, `credential_store`). A record with no `view` gets
+  its module's view (`host_views.ts` `MODULE_KINDS`); a record's own `view` still wins
+  (a cabinet cell keeps its status cell). Each reads with the verbs of its grant
+  (`RENDERER_CALLS`) plus `watch`, and an event on the agent reads it again. The
+  rows come from pure models (`src/bundles/agent_models/`) that keep only whitelisted
+  keys: the store view shows counts and the viewer's own search hits, never another
+  owner's row, and the credentials view shows ref names, hosts, field names and grants,
+  never a value (its grant has no `get`).
 - **html_agent** / **gl_agent** — frontend CONTENT agents (a mutable HTML body in
   a sandboxed frame; a WebGL shader). Content, not host clients.
 - **home_view** — the Home (`home.html`, served by the home kernel): the view of
@@ -102,7 +113,8 @@ src/main.ts            the page: boot (the library) → register → seed → mo
 src/home.ts            the Home page (home.html): boot → its records via web_loader → mount home_view
 src/bundle.ts          the esbuild entry: inlines xterm.css, then loads main.ts, or home.ts on <body data-page="home">
 src/lib.ts             the ONE seam to the library's public entry (src/lib/ts/src/index.ts)
-src/bundles/           canvas/, view.ts, terminal_view/, ai_view/, html_agent/, gl_agent/, skin/, shell.ts
+src/bundles/           canvas/, view.ts, terminal_view/, ai_view/, html_agent/, gl_agent/, skin/, shell.ts,
+                       agent_models/ (pure models of the read-only agent views), read_view.ts (their shared body)
 src/bundles/home_view/ the Home: home_view.ts (the view), home_model.ts (pure: state, labels, cards, shortcuts),
                        pages.ts (the canvas-frame pool), home_css.ts (its style, every colour one --home-* property)
 src/vendor/            three, xterm, addon-fit, xterm.css (hermetic, no CDN — VENDOR.md)

@@ -4162,45 +4162,11 @@ async def _pause(id, payload, kernel):
     return {"paused": True, "held": 0}
 
 
-async def _resume_gate(id: str, kernel) -> dict | None:
-    """The registry's say over a `resume` of a PAUSED agent spawned by an
-    agentic_resources registry (`spawned_by` names a live agent): it is asked
-    `get_count {role, resume:<id>}` as itself. A `limit` refusal is returned
-    unchanged and nothing is written; any other answer (or no `spawned_by`) lets the
-    resume proceed, so an agent no registry spawned is never blocked."""
-    agents = _ctx(kernel).agents
-    me = agents.get(id)
-    meta = getattr(me, "_meta", None) or {}
-    reg = meta.get("spawned_by")
-    if not isinstance(reg, str) or not reg or reg not in agents:
-        return None
-    role = meta.get("role") if isinstance(meta.get("role"), str) else ""
-    try:
-        r = (
-            await kernel.send(
-                [
-                    {
-                        "target": reg,
-                        "payload": {"type": "get_count", "role": role, "resume": id},
-                    }
-                ]
-            )
-        )[0]["result"]
-    except Exception:
-        return None
-    if isinstance(r, dict) and r.get("error") == "limit":
-        return r
-    return None
-
-
 async def _resume(id, payload, kernel):
-    """args: note:str? (text added to the resumed row). RESUME this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Not paused: a no-op. Refused `limit` when this agent was spawned by an agentic_resources registry whose caps are full. Returns {resumed:bool, released:int}."""
+    """args: note:str? (text added to the resumed row). RESUME this agent: write one resumed row, then release the held messages in order, each as a fresh turn after it. Not paused: a no-op. Returns {resumed:bool, released:int}."""
     paused, since, held = await _pause_view(id, kernel)
     if not paused:
         return {"resumed": False, "released": 0}
-    refused = await _resume_gate(id, kernel)
-    if refused is not None:
-        return refused
     started = since if isinstance(since, (int, float)) else time.time()
     secs = max(0.0, time.time() - started)
     content = f"[resumed after a pause of {secs:.0f}s]"
@@ -4355,17 +4321,11 @@ async def on_delete(agent) -> None:
 
 
 async def _status(id, payload, kernel):
-    """args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int, paused:bool}."""
+    """args: client_id:str? — when provided, returns a privacy-filtered snapshot: full text only for this client's queue entries / current generation; other clients collapse to `others_pending` (an integer count). Without client_id the snapshot redacts text everywhere. Used by chat UIs to rebuild queued/in-flight state on page reload (and for headless polling). Returns {source, client_id, generating, current:{phase, send_id, started_at, elapsed, is_mine, text?, text_so_far?, last_tool?}|null, mine_pending:[{send_id,text,queued_at}], others_pending:int}."""
     cid = payload.get("client_id")
     if cid:
         cid = _safe_client(cid)
-    out = _status_snapshot(id, cid)
-    # paused is read off the store head; no store, or a read error, is not paused
-    try:
-        out["paused"] = bool((await _pause_view(id, kernel))[0])
-    except Exception:
-        out["paused"] = False
-    return out
+    return _status_snapshot(id, cid)
 
 
 def _recall_render(m: dict) -> str:

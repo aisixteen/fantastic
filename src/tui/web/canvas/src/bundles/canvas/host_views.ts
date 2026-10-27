@@ -35,6 +35,12 @@ export const RENDERERS: Record<string, string> = {
   html: "agent_view.ts",
   stub: "reflect_view.ts",
   mcp: "mcp_view.ts",
+  resources: "resources_view.ts",
+  tasks: "tasks_view.ts",
+  store: "store_view.ts",
+  scheduler: "scheduler_view.ts",
+  cabinets: "cabinets_view.ts",
+  credentials: "credentials_view.ts",
 };
 
 /** The fixed grants a generic renderer needs on the agent it shows. */
@@ -43,6 +49,26 @@ const RENDERER_CALLS: Record<string, string[]> = {
   chat: ["watch", "reflect", "history", "status", "send", "stop"],
   stub: ["reflect"],
   mcp: ["reflect", "boot", "watch"],
+  // the read-only agent views: reads and `watch`, never a write verb (and the
+  // credential view never `get`: a name and a grant, not a value)
+  resources: ["roles", "fleet", "role", "get_count", "watch"],
+  tasks: ["list", "watch"],
+  store: ["dump", "search", "watch"],
+  scheduler: ["list", "history", "watch"],
+  cabinets: ["cabinets", "watch"],
+  credentials: ["list", "reflect", "watch"],
+};
+
+/** The view kind a handler module defaults to, when its record has no `view`. The
+ *  cabinet module is here only for its MANAGER (`cabinet_role: manager`); a cabinet
+ *  cell has its own status-cell `view` on the record. */
+export const MODULE_KINDS: Record<string, string> = {
+  "agentic_resources.tools": "resources",
+  "task_registry.tools": "tasks",
+  "ram_store.tools": "store",
+  "sqlite_store.tools": "store",
+  "scheduler.tools": "scheduler",
+  "credential_store.tools": "credentials",
 };
 
 const EXEC = "exec_bridge.tools";
@@ -71,6 +97,9 @@ export function viewOf(r: Rec): HostView {
   }
   if (str(r, "handler_module") === EXEC) return { handler: RENDERERS["terminal"]!, kind: "terminal", calls: RENDERER_CALLS["terminal"]! };
   if (str(r, "handler_module") === MCP) return { handler: RENDERERS["mcp"]!, kind: "mcp", calls: RENDERER_CALLS["mcp"]! };
+  const module = str(r, "handler_module");
+  const byModule = module === "cabinet.tools" ? (str(r, "cabinet_role") === "manager" ? "cabinets" : undefined) : module === undefined ? undefined : MODULE_KINDS[module];
+  if (byModule !== undefined) return { handler: RENDERERS[byModule]!, kind: byModule, calls: RENDERER_CALLS[byModule]! };
   if (isAi(r)) return { handler: RENDERERS["chat"]!, kind: "chat", calls: RENDERER_CALLS["chat"]! };
   return { handler: RENDERERS["stub"]!, kind: "stub", calls: RENDERER_CALLS["stub"]! };
 }

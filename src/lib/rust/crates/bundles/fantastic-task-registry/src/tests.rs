@@ -797,6 +797,491 @@ async fn store_refusal_passes_through() {
     assert_eq!(list["tasks"].as_array().unwrap().len(), 1, "{list}");
 }
 
+fn vers(n: u32) -> Value {
+    json!([{"repo": format!("o/r{n}"), "branch": format!("b{n}"), "commit": format!("c{n}")}])
+}
+
+fn fork() -> Value {
+    json!({"agent": "ghost_agent", "mark": "m1"})
+}
+
+fn usage(i: u64, cr: u64, cw: u64, o: u64) -> Value {
+    json!({"input_tokens": i, "cache_read_tokens": cr, "cache_write_tokens": cw, "output_tokens": o})
+}
+
+async fn task_rows(r: &Rig) -> usize {
+    r.dump_rows()
+        .await
+        .iter()
+        .filter(|x| x["row"]["kind"] == "task")
+        .count()
+}
+
+#[tokio::test]
+async fn add_records_versions_source_version_and_fork_from() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    let added = r
+        .add(
+            "lead",
+            "t1",
+            json!({"versions": vers(1), "source_version": "2026-10-01T00:00:00Z", "fork_from": fork(),
+                   "holder": "sublead"}),
+        )
+        .await;
+    assert_eq!(added["versions"], vers(1), "{added}");
+    assert_eq!(added["source_version"], "2026-10-01T00:00:00Z");
+    assert_eq!(added["fork_from"], fork());
+    assert_eq!(
+        added["history"][0]["versions"],
+        vers(1),
+        "first history item"
+    );
+    let got = r.call("lead", json!({"type": "get", "id": "t1"})).await;
+    assert_eq!(got["versions"], vers(1));
+    assert_eq!(got["fork_from"], fork());
+    let rows = r.dump_rows().await;
+    let row = rows.iter().find(|x| x["row"]["kind"] == "task").unwrap();
+    assert_eq!(row["row"]["content"]["versions"], vers(1));
+    assert_eq!(
+        row["row"]["content"]["source_version"],
+        "2026-10-01T00:00:00Z"
+    );
+    assert_eq!(row["row"]["content"]["fork_from"], fork());
+}
+
+#[tokio::test]
+async fn add_without_the_new_facts_has_empty_defaults() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    let added = r.add("lead", "t1", json!({"holder": "sublead"})).await;
+    assert_eq!(added["versions"], json!([]), "{added}");
+    assert_eq!(added["source_version"], Value::Null);
+    assert_eq!(added["fork_from"], Value::Null);
+    assert_eq!(added["usage"], Value::Null);
+    let keys: Vec<&String> = added["history"][0].as_object().unwrap().keys().collect();
+    assert_eq!(keys.len(), 4, "{keys:?}");
+}
+
+#[tokio::test]
+async fn versions_must_be_a_list_of_repo_branch_commit() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    for bad in [
+        json!("o/r@main"),
+        json!({"repo": "a", "branch": "b", "commit": "c"}),
+        json!([{"repo": "a", "branch": "b"}]),
+        json!([{"repo": "a", "branch": "b", "commit": "c", "extra": "d"}]),
+        json!([{"repo": "a", "branch": "", "commit": "c"}]),
+        json!([{"repo": "a", "branch": "b", "commit": 7}]),
+        json!(["a"]),
+    ] {
+        let out = r.add("lead", "t1", json!({"versions": bad})).await;
+        assert_eq!(out["reason"], "bad_arg", "{bad}: {out}");
+        assert_eq!(out["arg"], "versions", "{out}");
+    }
+    assert_eq!(task_rows(&r).await, 0, "nothing was appended");
+    r.add("lead", "t1", json!({})).await;
+    let out = r
+        .call(
+            "lead",
+            json!({"type": "assign", "id": "t1", "holder": "worker", "versions": "x"}),
+        )
+        .await;
+    assert_eq!(out["reason"], "bad_arg", "{out}");
+    assert_eq!(task_rows(&r).await, 1, "only the add");
+    // an empty list is allowed
+    let ok = r.add("lead", "t2", json!({"versions": []})).await;
+    assert_eq!(ok["versions"], json!([]), "{ok}");
+}
+
+#[tokio::test]
+async fn fork_from_needs_agent_and_mark() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    for bad in [
+        json!({"agent": "a"}),
+        json!("a:m"),
+        json!({"agent": "a", "mark": ""}),
+        json!({"agent": "a", "mark": "m", "x": 1}),
+    ] {
+        let out = r.add("lead", "t1", json!({"fork_from": bad})).await;
+        assert_eq!(out["reason"], "bad_arg", "{bad}: {out}");
+        assert_eq!(out["arg"], "fork_from", "{out}");
+    }
+    assert_eq!(task_rows(&r).await, 0);
+    let ok = r.add("lead", "t1", json!({"fork_from": fork()})).await;
+    assert_eq!(
+        ok["fork_from"],
+        fork(),
+        "an opaque agent that is not in the kernel: {ok}"
+    );
+}
+
+#[tokio::test]
+async fn assign_sets_the_facts_and_reassign_keeps_them_in_history() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    let a = r
+        .call(
+            "lead",
+            json!({"type": "assign", "id": "t1", "holder": "sublead", "versions": vers(1),
+                   "source_version": "v1", "fork_from": fork()}),
+        )
+        .await;
+    assert_eq!(a["versions"], vers(1), "{a}");
+    let b = r
+        .call(
+            "lead",
+            json!({"type": "reassign", "id": "t1", "holder": "worker", "versions": vers(2),
+                   "source_version": "v2"}),
+        )
+        .await;
+    assert_eq!(b["versions"], vers(2), "{b}");
+    assert_eq!(b["source_version"], "v2");
+    assert_eq!(b["fork_from"], fork(), "absent arg leaves it");
+    let h = b["history"].as_array().unwrap();
+    assert_eq!(h[0]["versions"], vers(1));
+    assert_eq!(h[0]["source_version"], "v1");
+    assert_eq!(h[0]["fork_from"], fork());
+    assert_eq!(h[1]["versions"], vers(2));
+    assert_eq!(h[1]["source_version"], "v2");
+    // an explicit [] clears the list
+    let c = r
+        .call(
+            "lead",
+            json!({"type": "reassign", "id": "t1", "holder": "sublead", "versions": []}),
+        )
+        .await;
+    assert_eq!(c["versions"], json!([]), "{c}");
+    assert!(c["history"][2].get("versions").is_none(), "{c}");
+}
+
+#[tokio::test]
+async fn history_item_omits_facts_when_none_were_given() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    r.call(
+        "lead",
+        json!({"type": "assign", "id": "t1", "holder": "sublead"}),
+    )
+    .await;
+    let b = r
+        .call(
+            "lead",
+            json!({"type": "reassign", "id": "t1", "holder": "worker"}),
+        )
+        .await;
+    for item in b["history"].as_array().unwrap() {
+        let mut keys: Vec<&str> = item
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["at", "by", "from", "to"], "{item}");
+    }
+}
+
+#[tokio::test]
+async fn lead_updates_the_facts_through_status() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({"status": "running"})).await;
+    let out = r
+        .call(
+            "lead",
+            json!({"type": "status", "id": "t1", "versions": vers(3), "source_version": "v9",
+                   "fork_from": fork()}),
+        )
+        .await;
+    assert!(out.get("error").is_none(), "{out}");
+    assert_eq!(out["status"], "running", "unchanged");
+    assert_eq!(out["versions"], vers(3));
+    assert_eq!(out["source_version"], "v9");
+    assert_eq!(out["fork_from"], fork());
+    let got = r.call("lead", json!({"type": "get", "id": "t1"})).await;
+    assert_eq!(got["versions"], vers(3));
+    let both = r
+        .call(
+            "lead",
+            json!({"type": "status", "id": "t1", "status": "done", "versions": []}),
+        )
+        .await;
+    assert_eq!(
+        (both["status"].clone(), both["versions"].clone()),
+        (json!("done"), json!([]))
+    );
+}
+
+#[tokio::test]
+async fn status_needs_status_or_a_fact() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    let out = r.call("lead", json!({"type": "status", "id": "t1"})).await;
+    assert_eq!(out["reason"], "missing_arg", "{out}");
+    assert_eq!(out["arg"], "status", "{out}");
+    let bad = r
+        .call(
+            "lead",
+            json!({"type": "status", "id": "t1", "status": "nope", "versions": vers(1)}),
+        )
+        .await;
+    assert_eq!(bad["reason"], "bad_arg", "{bad}");
+    assert_eq!(task_rows(&r).await, 1);
+}
+
+#[tokio::test]
+async fn worker_without_a_grant_cannot_update_the_facts() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({"versions": vers(1)})).await;
+    let out = r
+        .call(
+            "worker",
+            json!({"type": "status", "id": "t1", "versions": vers(2)}),
+        )
+        .await;
+    assert_eq!(out["reason"], "unauthorized", "{out}");
+    let got = r.call("lead", json!({"type": "get", "id": "t1"})).await;
+    assert_eq!(got["versions"], vers(1), "unchanged");
+    assert_eq!(task_rows(&r).await, 1);
+}
+
+#[tokio::test]
+async fn report_records_usage_and_keeps_the_last() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    let one = r
+        .call(
+            "lead",
+            json!({"type": "report", "id": "t1", "state": "running",
+                   "usage": {"input_tokens": 10, "cache_read_tokens": 20,
+                             "cache_write_tokens": 30, "output_tokens": 40}}),
+        )
+        .await;
+    assert_eq!(one["usage"], usage(10, 20, 30, 40), "{one}");
+    assert_eq!(one["report"]["usage"], usage(10, 20, 30, 40));
+    let two = r
+        .call(
+            "lead",
+            json!({"type": "report", "id": "t1", "state": "done"}),
+        )
+        .await;
+    assert_eq!(two["usage"], usage(10, 20, 30, 40), "kept: {two}");
+    assert_eq!(two["report"]["usage"], Value::Null);
+    let three = r
+        .call(
+            "lead",
+            json!({"type": "report", "id": "t1", "usage": usage(1, 2, 3, 4)}),
+        )
+        .await;
+    assert_eq!(three["usage"], usage(1, 2, 3, 4), "{three}");
+}
+
+#[tokio::test]
+async fn report_usage_fills_missing_keys_with_zero() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    let out = r
+        .call(
+            "lead",
+            json!({"type": "report", "id": "t1", "usage": {"input_tokens": 5}}),
+        )
+        .await;
+    assert_eq!(out["usage"], usage(5, 0, 0, 0), "{out}");
+    assert_eq!(out["report"]["usage"], usage(5, 0, 0, 0));
+}
+
+#[tokio::test]
+async fn report_usage_rejects_unknown_keys_and_negatives_and_floats() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "t1", json!({})).await;
+    for bad in [
+        json!({"total_tokens": 5}),
+        json!({"input_tokens": -1}),
+        json!({"input_tokens": 1.5}),
+        json!({"input_tokens": "5"}),
+        json!(5),
+        json!([1]),
+    ] {
+        let out = r
+            .call("lead", json!({"type": "report", "id": "t1", "usage": bad}))
+            .await;
+        assert_eq!(out["reason"], "bad_arg", "{bad}: {out}");
+        assert_eq!(out["arg"], "usage", "{out}");
+    }
+    let got = r.call("lead", json!({"type": "get", "id": "t1"})).await;
+    assert_eq!(got["usage"], Value::Null);
+    assert_eq!(got["report"], Value::Null);
+    assert_eq!(task_rows(&r).await, 1);
+}
+
+async fn report_usage(r: &Rig, id: &str, u: Value) {
+    let out = r
+        .call("lead", json!({"type": "report", "id": id, "usage": u}))
+        .await;
+    assert!(out.get("error").is_none(), "{out}");
+}
+
+#[tokio::test]
+async fn list_sums_usage_over_the_given_task_ids() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    for id in ["a", "b", "c"] {
+        r.add("lead", id, json!({})).await;
+    }
+    report_usage(&r, "a", usage(1, 2, 3, 4)).await;
+    report_usage(&r, "b", usage(10, 20, 30, 40)).await;
+    report_usage(&r, "c", usage(100, 200, 300, 400)).await;
+    let out = r
+        .call("lead", json!({"type": "list", "ids": ["a", "b"]}))
+        .await;
+    let ids: Vec<&str> = out["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["a", "b"], "{out}");
+    assert_eq!(out["usage"], usage(11, 22, 33, 44), "{out}");
+}
+
+#[tokio::test]
+async fn list_usage_counts_tasks_without_usage_as_zero() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "a", json!({})).await;
+    r.add("lead", "b", json!({})).await;
+    report_usage(&r, "a", usage(1, 2, 3, 4)).await;
+    let out = r
+        .call("lead", json!({"type": "list", "ids": ["a", "b"]}))
+        .await;
+    assert_eq!(out["usage"], usage(1, 2, 3, 4), "{out}");
+    let none = r.call("lead", json!({"type": "list", "ids": ["b"]})).await;
+    assert_eq!(none["usage"], usage(0, 0, 0, 0), "{none}");
+}
+
+#[tokio::test]
+async fn list_ids_unknown_is_not_found() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "a", json!({})).await;
+    let out = r
+        .call("lead", json!({"type": "list", "ids": ["a", "ghost"]}))
+        .await;
+    assert_eq!(out["reason"], "not_found", "{out}");
+    for bad in [json!("a"), json!([1]), json!([""])] {
+        let out = r.call("lead", json!({"type": "list", "ids": bad})).await;
+        assert_eq!(out["reason"], "bad_arg", "{bad}: {out}");
+    }
+}
+
+#[tokio::test]
+async fn list_usage_totals_all_returned_tasks_without_ids() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add("lead", "a", json!({"holder": "worker"})).await;
+    r.add("lead", "b", json!({"holder": "sublead"})).await;
+    report_usage(&r, "a", usage(1, 1, 1, 1)).await;
+    report_usage(&r, "b", usage(5, 5, 5, 5)).await;
+    let all = r.call("lead", json!({"type": "list"})).await;
+    assert_eq!(all["usage"], usage(6, 6, 6, 6), "{all}");
+    let one = r
+        .call("lead", json!({"type": "list", "holder": "worker"}))
+        .await;
+    assert_eq!(one["usage"], usage(1, 1, 1, 1), "{one}");
+    let empty = r
+        .call("lead", json!({"type": "list", "status": "done"}))
+        .await;
+    assert_eq!(empty["usage"], usage(0, 0, 0, 0), "{empty}");
+}
+
+#[tokio::test]
+async fn facts_survive_a_registry_restart() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    r.add(
+        "lead",
+        "t1",
+        json!({"versions": vers(1), "fork_from": fork()}),
+    )
+    .await;
+    report_usage(&r, "t1", usage(1, 2, 3, 4)).await;
+    send(
+        &r.kernel,
+        "kernel_state",
+        json!({"type": "delete_agent", "id": "tr"}),
+    )
+    .await;
+    r.make_registry("tr").await;
+    let got = r.call("lead", json!({"type": "get", "id": "t1"})).await;
+    assert_eq!(got["versions"], vers(1), "{got}");
+    assert_eq!(got["fork_from"], fork());
+    assert_eq!(got["usage"], usage(1, 2, 3, 4));
+}
+
+#[tokio::test]
+async fn entries_from_before_the_facts_still_load() {
+    let tmp = TempDir::new().unwrap();
+    let r = rig(&tmp).await;
+    // a snapshot written before the facts existed: strip the keys from a real row
+    r.add("lead", "old", json!({"source": "gh:o/r#1"})).await;
+    let mut tables = send(&r.kernel, &r.store, json!({"type": "dump"})).await["tables"].clone();
+    for row in tables["rows"].as_array_mut().unwrap() {
+        let c = row["row"]["content"].as_object_mut().unwrap();
+        for k in ["versions", "source_version", "fork_from", "usage"] {
+            c.remove(k);
+        }
+    }
+    let inj = send(
+        &r.kernel,
+        &r.store,
+        json!({"type": "inject", "tables": tables}),
+    )
+    .await;
+    assert!(inj.get("error").is_none(), "{inj}");
+    let got = r.call("lead", json!({"type": "get", "id": "old"})).await;
+    assert_eq!(got["versions"], json!([]), "{got}");
+    assert_eq!(got["source_version"], Value::Null);
+    assert_eq!(got["usage"], Value::Null);
+    let list = r.call("lead", json!({"type": "list"})).await;
+    assert_eq!(list["tasks"][0]["fork_from"], Value::Null, "{list}");
+    let a = r
+        .call(
+            "lead",
+            json!({"type": "assign", "id": "old", "holder": "worker"}),
+        )
+        .await;
+    assert_eq!(a["versions"], json!([]), "{a}");
+    assert_eq!(a["history"][0].as_object().unwrap().len(), 4);
+    let rep = r
+        .call(
+            "lead",
+            json!({"type": "report", "id": "old", "state": "done"}),
+        )
+        .await;
+    assert_eq!(rep["usage"], Value::Null, "{rep}");
+    let rows = r.dump_rows().await;
+    let last = rows
+        .iter()
+        .rev()
+        .find(|x| x["row"]["task_id"] == "old")
+        .unwrap();
+    assert_eq!(
+        last["row"]["content"]["versions"],
+        json!([]),
+        "rewritten with defaults"
+    );
+}
+
 #[test]
 fn readme_is_python_verbatim() {
     let py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

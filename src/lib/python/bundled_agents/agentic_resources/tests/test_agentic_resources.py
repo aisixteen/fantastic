@@ -19,6 +19,9 @@ from kernel._bundles import bundle_enabled
 #: Every `send` a caller agent received: (agent, text).
 SENT: list = []
 
+#: Every `pause` a caller agent received: the agent id.
+PAUSED: list = []
+
 
 async def _caller_handler(id, payload, kernel):
     """Make the call it is told to (`call {target, payload}`) AS ITSELF, so the gate
@@ -35,58 +38,12 @@ async def _caller_handler(id, payload, kernel):
         return out[0]["result"]
     if verb == "send":
         SENT.append((id, payload.get("text")))
+    if verb == "pause":
+        PAUSED.append(id)
     return {"ok": True, "verb": verb}
 
 
 register_unlisted("caller.tools", types.SimpleNamespace(handler=_caller_handler))
-
-
-#: Child ids that are paused, and ids whose `status` is refused (the stub keeps them
-#: in the process, which stands for the persisted pause row).
-PAUSED: list = []
-REFUSE_STATUS: list = []
-
-
-async def _pausable_handler(id, payload, kernel):
-    """Stands for ai_core's pause: `pause`/`resume` flip a flag, `status` replies
-    `{paused}`, and `resume` asks the registry first (`get_count {resume}`), a `limit`
-    refusal passing through, as ai_core does. Everything else is a caller."""
-    verb = payload.get("type")
-    if verb == "status":
-        if id in REFUSE_STATUS:
-            return {"error": "status: refused"}
-        return {"paused": id in PAUSED}
-    if verb == "pause":
-        if id not in PAUSED:
-            PAUSED.append(id)
-        return {"paused": True, "held": 0}
-    if verb == "resume":
-        meta = kernel._meta
-        reg = meta.get("spawned_by")
-        if id in PAUSED and reg:
-            r = (
-                await kernel.send(
-                    [
-                        {
-                            "target": reg,
-                            "payload": {
-                                "type": "get_count",
-                                "role": meta.get("role"),
-                                "resume": id,
-                            },
-                        }
-                    ]
-                )
-            )[0]["result"]
-            if r.get("error") == "limit":
-                return r
-        if id in PAUSED:
-            PAUSED.remove(id)
-        return {"resumed": True, "released": 0}
-    return await _caller_handler(id, payload, kernel)
-
-
-register_unlisted("pausable.tools", types.SimpleNamespace(handler=_pausable_handler))
 
 
 async def _forkable_handler(id, payload, kernel):
@@ -127,20 +84,27 @@ async def _forkable_handler(id, payload, kernel):
 
 register_unlisted("forkable.tools", types.SimpleNamespace(handler=_forkable_handler))
 
+def _picky_validate(meta, record):
+    """A tool whose record refuses every callable_by edit while it carries
+    `refuse_grants` (stands for a bundle whose `validate_meta` says no)."""
+    if "callable_by" in meta and record.get("refuse_grants") is True:
+        return "callable_by refused"
+    return None
+
+
+register_unlisted(
+    "picky.tools",
+    types.SimpleNamespace(handler=_caller_handler, validate_meta=_picky_validate),
+)
+
 WRITER = "---\nname: writer\npurpose: Writes the first draft of a text.\ntier: fast\nmodel: from-the-card\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n---\nYou write clearly and briefly.\n"
 REVIEWER = "---\nname: reviewer\npurpose: Reads a draft and says what to fix.\ntier: fast\n---\nYou review drafts.\n"
-SUBLEAD = "---\nname: sublead\npurpose: Runs a branch of the work.\ntier: fast\ngrants:\n  $registry: [roles, spawn, get_count, report]\n---\nYou run one branch.\n"
+SUBLEAD = "---\nname: sublead\npurpose: Runs a branch of the work.\ntier: fast\ngrants:\n  $registry: [roles, spawn, get_count, report]\n  notes: [read]\n---\nYou run one branch.\n"
 
 
 @pytest.fixture(autouse=True)
 def _on(monkeypatch):
     monkeypatch.setenv("FANTASTIC_AGENTIC_RESOURCES", "1")
-
-
-@pytest.fixture(autouse=True)
-def _clean_pause_state():
-    PAUSED.clear()
-    REFUSE_STATUS.clear()
 
 
 def write_cards(d: Path, files: list[tuple[str, str]]) -> None:
@@ -188,15 +152,18 @@ class Rig:
         return await self.op(p)
 
 
-async def rig(kernel, tmp_path, callers, files, tier_handler="caller.tools"):
+async def rig(kernel, tmp_path, callers, files):
     d = tmp_path / "roles"
     write_cards(d, files)
     reg = "ar_reg"
     for c in callers:
         await create(
-            kernel, handler_module="caller.tools", id=c, can_call={reg: "*"}
+            kernel,
+            handler_module="caller.tools",
+            id=c,
+            can_call={reg: "*", "notes": "*"},
         )
-    tier = {"handler_module": tier_handler, "model": "m1", "endpoint": "http://x"}
+    tier = {"handler_module": "caller.tools", "model": "m1", "endpoint": "http://x"}
     await create(
         kernel,
         handler_module="agentic_resources.tools",
@@ -209,6 +176,10 @@ async def rig(kernel, tmp_path, callers, files, tier_handler="caller.tools"):
 
 
 # ── cards ───────────────────────────────────────────────────────────
+
+
+async def deleted(r, aid):
+    return await send(r.kernel, "kernel_state", {"type": "delete_agent", "id": aid})
 
 
 def test_card_parses_header_and_directive():
@@ -299,7 +270,7 @@ async def test_spawn_creates_child_with_directive_tier_grants(kernel, tmp_path):
     assert a.handler_module == "caller.tools"
     assert m["spawned_by"] == r.reg and m["role"] == "writer" and m["name"] == "scribe"
     assert m["can_call"]["notes"] == ["read"]
-    assert m["can_call"][r.reg] == ["roles", "report", "get_count"]
+    assert m["can_call"][r.reg] == ["roles", "report"]
 
 
 async def test_spawn_opens_the_tiers_memory_store_to_the_child(kernel, tmp_path):
@@ -502,182 +473,40 @@ async def test_delegated_limits_bound_subtree(kernel, tmp_path):
     assert "id" in await r.spawn_as("boss", role="writer")
 
 
-async def settle(r, running):
-    """Poll until `get_count` (total) reports `running` (the pause on a report is detached)."""
-    for _ in range(100):
-        if (await r.count())["running"] == running:
-            return
-        await asyncio.sleep(0.02)
-
-
-async def pr(kernel, tmp_path, callers, files):
-    return await rig(kernel, tmp_path, callers, files, "pausable.tools")
-
-
-async def deleted(r, aid):
-    return await send(r.kernel, "kernel_state", {"type": "delete_agent", "id": aid})
-
-
-async def test_get_count_counts_active_agents(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+async def test_get_count_counts_every_spawned_agent(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
     await r.op({"type": "set_limit", "max": 2})
     a = (await r.spawn_as("lead", role="writer"))["id"]
     await r.spawn_as("lead", role="writer")
     assert await r.count() == {"running": 2, "max": 2}
     third = await r.spawn_as("lead", role="writer")
     assert third["error"] == "limit", third
-    # a done report frees the slot (the reporter is paused)
     await r.call(a, r.reg, {"type": "report", "state": "done"})
-    await settle(r, 1)
+    assert (await r.count())["running"] == 2, "a report frees nothing"
+    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
+    gone = await send(kernel, "kernel_state", {"type": "delete_agent", "id": a})
+    assert gone["deleted"] is True
     assert (await r.count())["running"] == 1
     assert "id" in await r.spawn_as("lead", role="writer")
-    assert (await r.count())["running"] == 2
-    # delete_agent of the paused one changes nothing more
-    assert (await deleted(r, a))["deleted"] is True
-    assert (await r.count())["running"] == 2
 
 
 async def test_no_auto_cleanup_on_done(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
     a = (await r.spawn_as("lead", role="writer"))["id"]
     b = (await r.spawn_as("lead", role="writer"))["id"]
     before = len(kernel.ctx.agents)
     await r.call(a, r.reg, {"type": "report", "state": "done", "result": "ok"})
     await r.call(b, r.reg, {"type": "report", "state": "failed", "result": "no"})
-    await settle(r, 0)
     assert len(kernel.ctx.agents) == before, "nothing was deleted"
     m = r.meta(a)
     assert (m["spawned_by"], m["role"]) == (r.reg, "writer")
     assert "task" not in m
-    assert (await r.count())["running"] == 0, "both are paused"
+    assert (await r.count())["running"] == 2, "the count stays"
     f = await r.op({"type": "fleet"})
     assert len(f["roles"]["writer"]) == 2, f
-    assert (await deleted(r, a))["deleted"] is True
+    gone = await send(kernel, "kernel_state", {"type": "delete_agent", "id": a})
+    assert gone["deleted"] is True
     assert len(kernel.ctx.agents) == before - 1
-
-
-async def test_pause_frees_a_slot(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    await r.op({"type": "set_limit", "max": 2})
-    a = (await r.spawn_as("lead", role="writer"))["id"]
-    await r.spawn_as("lead", role="writer")
-    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
-    p = await r.call("lead", a, {"type": "pause"})
-    assert p["paused"] is True, p
-    assert await r.count() == {"running": 1, "max": 2}
-    assert "id" in await r.spawn_as("lead", role="writer")
-
-
-async def test_resume_takes_the_slot_back_and_is_refused_when_full(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    await r.op({"type": "set_limit", "max": 2})
-    a = (await r.spawn_as("lead", role="writer"))["id"]
-    await r.spawn_as("lead", role="writer")
-    await r.call("lead", a, {"type": "pause"})
-    c = (await r.spawn_as("lead", role="writer"))["id"]
-    assert (await r.count())["running"] == 2
-    no = await r.call("lead", a, {"type": "resume"})
-    assert no["error"] == "limit", no
-    assert no["reason"], no
-    assert a in PAUSED, "still paused"
-    assert (await r.count())["running"] == 2
-    await r.call("lead", c, {"type": "pause"})
-    ok = await r.call("lead", a, {"type": "resume"})
-    assert ok["resumed"] is True, ok
-    assert await r.count() == {"running": 2, "max": 2}
-
-
-async def test_done_report_frees_the_slot(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    a = (await r.spawn_as("lead", role="writer"))["id"]
-    b = (await r.spawn_as("lead", role="writer"))["id"]
-    # these states free nothing
-    for state in ("waiting", "running", "blocked", "paused"):
-        rep = await r.call(a, r.reg, {"type": "report", "state": state})
-        assert rep == {"ok": True}, rep
-    await asyncio.sleep(0.15)
-    assert (await r.count())["running"] == 2
-    rep = await r.call(a, r.reg, {"type": "report", "state": "done"})
-    assert rep == {"ok": True}, rep
-    await settle(r, 1)
-    assert (await r.count())["running"] == 1
-    await r.call(b, r.reg, {"type": "report", "state": "failed"})
-    await settle(r, 0)
-    assert (await r.count())["running"] == 0
-
-
-async def test_done_agent_frees_without_task_registry(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    assert not any(
-        "task_registry" in str(a._meta.get("handler_module"))
-        for a in kernel.ctx.agents.values()
-    ), "no task_registry in this kernel"
-    await r.op({"type": "set_limit", "max": 1})
-    a = (await r.spawn_as("lead", role="writer"))["id"]
-    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
-    await r.call(a, r.reg, {"type": "report", "state": "done"})
-    await settle(r, 0)
-    assert "id" in await r.spawn_as("lead", role="writer")
-
-
-async def test_per_role_and_subtree_quota_count_active_only(kernel, tmp_path):
-    r = await pr(
-        kernel, tmp_path, ["boss"], [("writer.md", WRITER), ("sublead.md", SUBLEAD)]
-    )
-    await r.op({"type": "set_limit", "role": "writer", "max": 1})
-    sub = (await r.spawn_as("boss", role="sublead", limits={"total": 1}))["id"]
-    w1 = (await r.spawn_as(sub, role="writer"))["id"]
-    assert (await r.spawn_as(sub, role="writer"))["scope"] == "role"
-    # pausing the leaf frees the role slot and the sub-lead's subtree slot
-    await r.call(sub, w1, {"type": "pause"})
-    w2 = (await r.spawn_as(sub, role="writer"))["id"]
-    # the role cap is full again: resume is refused `role`; lift it, then `subtree_total`
-    no = await r.call(sub, w1, {"type": "resume"})
-    assert (no["error"], no["scope"]) == ("limit", "role"), no
-    await r.op({"type": "set_limit", "role": "writer", "max": None})
-    no = await r.call(sub, w1, {"type": "resume"})
-    assert (no["error"], no["scope"]) == ("limit", "subtree_total"), no
-    assert no["lead"] == sub
-    await r.call(sub, w2, {"type": "pause"})
-    ok = await r.call(sub, w1, {"type": "resume"})
-    assert ok["resumed"] is True, ok
-
-
-async def test_restart_keeps_the_active_counts(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    await r.op({"type": "set_limit", "max": 3})
-    a = (await r.spawn_as("lead", role="writer"))["id"]
-    await r.spawn_as("lead", role="writer")
-    await r.call("lead", a, {"type": "pause"})
-    before = await r.count()
-    assert before == {"running": 1, "max": 3}
-    persist(kernel)
-    k2 = boot_root()
-    after = await send(k2, r.reg, {"type": "get_count"})
-    assert after == before, "rebuilt from the records and the pause state"
-    assert (await send(k2, r.reg, {"type": "get_count", "role": "writer"}))[
-        "running"
-    ] == 1
-
-
-async def test_status_failure_counts_as_active(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    await r.op({"type": "set_limit", "max": 1})
-    a = (await r.spawn_as("lead", role="writer"))["id"]
-    REFUSE_STATUS.append(a)
-    # even paused, an agent that will not say counts (fail closed)
-    PAUSED.append(a)
-    assert (await r.count())["running"] == 1
-    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
-
-
-async def test_fleet_lists_paused_agents(kernel, tmp_path):
-    r = await pr(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
-    a = (await r.spawn_as("lead", role="writer"))["id"]
-    await r.call("lead", a, {"type": "pause"})
-    assert (await r.count())["running"] == 0
-    f = await r.op({"type": "fleet"})
-    assert f["roles"]["writer"] == [{"id": a}], f
 
 
 async def test_project_lead_card_ships(kernel, tmp_path):
@@ -778,8 +607,8 @@ async def test_spawn_from_forks_and_applies_the_role_card(kernel, tmp_path):
     assert m["model"] == "m1", "the tier's model, not the source's"
     assert m["lead"] == "lead"
     assert m["can_call"]["notes"] == ["read"]
-    assert m["can_call"][r.reg] == ["roles", "report", "get_count"]
-    assert r.meta(r.reg)["callable_by"][cid] == ["roles", "report", "get_count"]
+    assert m["can_call"][r.reg] == ["roles", "report"]
+    assert r.meta(r.reg)["callable_by"][cid] == ["roles", "report"]
     named = await r.spawn_as("lead", role="writer", name="scribe", **{"from": frm(src, 5)})
     assert r.meta(named["id"])["name"] == "scribe"
 
@@ -923,3 +752,293 @@ async def test_spawn_from_bad_shape_refused(kernel, tmp_path):
     assert forks_of(kernel, src) == []
     plain = await r.spawn_as("lead", role="writer")
     assert "id" in plain and "from" not in plain, plain
+
+
+# ── the card's tool grants (#436) ───────────────────────────────────
+
+WIDE = "---\nname: wide\npurpose: Reads and writes notes.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read, write]\n---\nYou write.\n"
+STAR = '---\nname: star\npurpose: Anything on notes.\ntier: fast\ngrants:\n  notes: "*"\n---\nYou do all.\n'
+
+
+async def notes_tool(kernel):
+    await create(kernel, handler_module="caller.tools", id="notes")
+
+
+def hold(kernel, who, key, verbs):
+    """`who` now holds exactly `verbs` on `key` (replacing the rig's grant)."""
+
+    def edit(m):
+        m[key] = verbs
+        return True
+
+    _, err = kernel.ctx.edit_can_call(who, edit)
+    assert err is None, err
+
+
+def keys_of(r, aid, field):
+    return sorted((r.meta(aid).get(field) or {}).keys())
+
+
+async def test_spawn_opens_the_cards_tool_grants_on_both_ends(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    before = keys_of(r, "notes", "callable_by")
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read"]
+    assert r.meta("notes")["callable_by"][cid] == ["read"]
+    assert keys_of(r, "notes", "callable_by") == sorted(before + [cid])
+
+
+async def test_spawned_worker_calls_the_granted_tool_without_directive_setup(
+    kernel, tmp_path
+):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    ok = await r.call(cid, "notes", {"type": "read"})
+    assert ok["verb"] == "read", ok
+    no = await r.call(cid, "notes", {"type": "write"})
+    assert no["reason"] == "unauthorized", no
+
+
+async def test_spawn_from_opens_the_cards_tool_grants_on_both_ends(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    hold(kernel, src, "notes", "*")
+    before = keys_of(r, "notes", "callable_by")
+    cid = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read"], "not wider than the card"
+    assert r.meta("notes")["callable_by"][cid] == ["read"]
+    assert keys_of(r, "notes", "callable_by") == sorted(before + [cid])
+
+
+async def test_spawn_tool_grant_with_star_verbs_keeps_star(kernel, tmp_path):
+    r = await rig(
+        kernel, tmp_path, ["lead"], [("star.md", STAR), ("writer.md", WRITER)]
+    )
+    await notes_tool(kernel)
+    a = (await r.spawn_as("lead", role="star"))["id"]
+    b = (await r.spawn_as("lead", role="star"))["id"]
+    assert r.meta("notes")["callable_by"][a] == "*"
+    assert r.meta("notes")["callable_by"][b] == "*"
+    w = (await r.spawn_as("lead", role="writer"))["id"]
+    assert r.meta("notes")["callable_by"][w] == ["read"]
+    assert r.meta("notes")["callable_by"][a] == "*"
+
+
+async def test_spawn_without_the_tool_agent_still_spawns(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read"]
+    assert "notes" not in kernel.ctx.agents
+
+
+async def test_refused_tool_grant_undoes_the_spawn(kernel, tmp_path):
+    card = "---\nname: two\npurpose: Two tools.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n  zpicky: [read]\n---\nx\n"
+    r = await rig(kernel, tmp_path, ["lead"], [("two.md", card)])
+    await notes_tool(kernel)
+    await create(
+        kernel, handler_module="picky.tools", id="zpicky", refuse_grants=True
+    )
+    hold(kernel, "lead", "zpicky", "*")
+    notes_before = dict(r.meta("notes")["callable_by"])
+    reg_before = keys_of(r, r.reg, "callable_by")
+    lead_before = keys_of(r, "lead", "can_call")
+    n = len(kernel.ctx.agents)
+    out = await r.spawn_as("lead", role="two", task="go")
+    assert out["error"] == "grant_failed", out
+    assert len(kernel.ctx.agents) == n, "no child left"
+    assert (await r.op({"type": "fleet"}))["roles"] == {}
+    assert (await r.count())["running"] == 0
+    assert r.meta("notes")["callable_by"] == notes_before, "first edit undone"
+    assert keys_of(r, r.reg, "callable_by") == reg_before
+    assert keys_of(r, "lead", "can_call") == lead_before
+
+
+async def test_delete_agent_removes_the_spawned_agents_tool_entries(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    keep = (await r.spawn_as("lead", role="writer"))["id"]
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    assert cid in r.meta("notes")["callable_by"]
+    out = await deleted(r, cid)
+    assert "error" not in out, out
+    assert cid not in r.meta("notes")["callable_by"]
+    assert cid not in r.meta(r.reg)["callable_by"]
+    assert cid not in r.meta("lead")["can_call"]
+    assert r.meta("notes")["callable_by"][keep] == ["read"]
+
+
+async def test_delete_of_a_subtree_removes_every_spawned_agents_tool_entries(
+    kernel, tmp_path
+):
+    r = await rig(
+        kernel, tmp_path, ["lead"], [("sublead.md", SUBLEAD), ("writer.md", WRITER)]
+    )
+    await notes_tool(kernel)
+    sub = (await r.spawn_as("lead", role="sublead"))["id"]
+    w = (await r.spawn_as(sub, role="writer"))["id"]
+    assert sub in r.meta("notes")["callable_by"] and w in r.meta("notes")["callable_by"]
+    await deleted(r, sub)
+    assert sub not in r.meta("notes")["callable_by"]
+    assert w not in r.meta("notes")["callable_by"]
+
+
+async def test_spawn_refuses_a_grant_the_spawner_does_not_hold(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("wide.md", WIDE)])
+    await notes_tool(kernel)
+    hold(kernel, "lead", "notes", ["read"])
+    notes_before = dict(r.meta("notes")["callable_by"])
+    n = len(kernel.ctx.agents)
+    out = await r.spawn_as("lead", role="wide")
+    assert out["error"] == "not_allowed", out
+    why = out["reason"]
+    assert "lead" in why and "write" in why and "notes" in why, why
+    assert len(kernel.ctx.agents) == n, "nothing created"
+    assert r.meta("notes")["callable_by"] == notes_before
+    assert (await r.op({"type": "fleet"}))["roles"] == {}
+
+
+async def test_spawn_refuses_star_grant_when_spawner_holds_only_verbs(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("star.md", STAR)])
+    await notes_tool(kernel)
+    hold(kernel, "lead", "notes", ["read"])
+    out = await r.spawn_as("lead", role="star")
+    assert out["error"] == "not_allowed", out
+
+
+async def test_spawn_refuses_a_tool_the_spawner_has_no_grant_on(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    kernel.ctx.edit_can_call("lead", lambda m: m.pop("notes", None) is not None)
+    out = await r.spawn_as("lead", role="writer")
+    assert out["error"] == "not_allowed", out
+
+
+async def test_spawn_from_refuses_escalation_before_forking(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("wide.md", WIDE)])
+    await notes_tool(kernel)
+    hold(kernel, "lead", "notes", ["read"])
+    out = await r.spawn_as("lead", role="wide", **{"from": frm(src, 5)})
+    assert out["error"] == "not_allowed", out
+    assert forks_of(kernel, src) == [], "nothing forked"
+
+
+async def test_operator_spawn_has_no_escalation_check(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, [], [("wide.md", WIDE)])
+    await notes_tool(kernel)
+    cid = (await r.op({"type": "spawn", "role": "wide"}))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read", "write"]
+    assert r.meta("notes")["callable_by"][cid] == ["read", "write"]
+
+
+async def test_subleads_cannot_hand_on_more_than_they_hold(kernel, tmp_path):
+    r = await rig(
+        kernel,
+        tmp_path,
+        ["lead"],
+        [("sublead.md", SUBLEAD), ("wide.md", WIDE), ("writer.md", WRITER)],
+    )
+    await notes_tool(kernel)
+    sub = (await r.spawn_as("lead", role="sublead"))["id"]
+    no = await r.spawn_as(sub, role="wide")
+    assert no["error"] == "not_allowed", no
+    ok = await r.spawn_as(sub, role="writer")
+    assert "id" in ok, ok
+
+
+async def test_registry_token_grants_are_not_escalation_checked(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [])
+    hold(kernel, "lead", r.reg, ["spawn"])
+    out = await r.spawn_as("lead", role="project_lead")
+    assert "id" in out, out
+
+
+
+# ── every existing agent counts (#424) ──────────────────────────────
+
+
+async def _spawn_id(r, who, role):
+    out = await r.spawn_as(who, role=role)
+    assert "id" in out, out
+    return out["id"]
+
+
+async def test_get_count_counts_all_existing_agents(kernel, tmp_path):
+    r = await rig(
+        kernel, tmp_path, ["lead"], [("writer.md", WRITER), ("reviewer.md", REVIEWER)]
+    )
+    a = await _spawn_id(r, "lead", "writer")
+    b = await _spawn_id(r, "lead", "writer")
+    await _spawn_id(r, "lead", "reviewer")
+    await r.call("lead", a, {"type": "pause"})
+    await r.call(b, r.reg, {"type": "report", "state": "done"})
+    assert (await r.count())["running"] == 3
+    assert (await r.count("writer"))["running"] == 2
+
+
+async def test_paused_agent_keeps_its_slot_and_spawn_is_refused(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await r.op({"type": "set_limit", "max": 2})
+    a = await _spawn_id(r, "lead", "writer")
+    await _spawn_id(r, "lead", "writer")
+    await r.call("lead", a, {"type": "pause"})
+    third = await r.spawn_as("lead", role="writer")
+    assert third["error"] == "limit" and third["scope"] == "total", third
+    assert (third["running"], third["max"]) == (2, 2)
+
+
+async def test_done_report_does_not_pause_the_sender(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    a = await _spawn_id(r, "lead", "writer")
+    for state in ("done", "failed"):
+        rep = await r.call(a, r.reg, {"type": "report", "state": state})
+        assert rep == {"ok": True}, rep
+    await asyncio.sleep(0.1)
+    assert a not in PAUSED, "no pause was sent to the reporter"
+    assert (await r.count())["running"] == 1
+    f = await r.op({"type": "fleet"})
+    assert len(f["roles"]["writer"]) == 1, f
+
+
+async def test_delete_agent_is_the_only_way_to_free_a_slot(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await r.op({"type": "set_limit", "max": 2})
+    a = await _spawn_id(r, "lead", "writer")
+    await _spawn_id(r, "lead", "writer")
+    await r.call("lead", a, {"type": "pause"})
+    await r.call(a, r.reg, {"type": "report", "state": "done"})
+    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
+    await send(kernel, "kernel_state", {"type": "delete_agent", "id": a})
+    assert (await r.count())["running"] == 1
+    assert "id" in await r.spawn_as("lead", role="writer")
+    assert (await r.count())["running"] == 2
+
+
+async def test_delegated_quota_counts_paused_and_done_agents(kernel, tmp_path):
+    r = await rig(
+        kernel, tmp_path, ["boss"], [("writer.md", WRITER), ("sublead.md", SUBLEAD)]
+    )
+    sub = (await r.spawn_as("boss", role="sublead", limits={"total": 1}))["id"]
+    w = await _spawn_id(r, sub, "writer")
+    await r.call("boss", w, {"type": "pause"})
+    no = await r.spawn_as(sub, role="writer")
+    assert no["error"] == "limit" and no["scope"] == "subtree_total", no
+    sub2 = (await r.spawn_as("boss", role="sublead", limits={"per_role": 1}))["id"]
+    w2 = await _spawn_id(r, sub2, "writer")
+    await r.call(w2, r.reg, {"type": "report", "state": "done"})
+    no2 = await r.spawn_as(sub2, role="writer")
+    assert no2["error"] == "limit" and no2["scope"] == "subtree_role", no2
+
+
+async def test_get_count_ignores_a_resume_arg_and_registry_grants_only_report(
+    kernel, tmp_path
+):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    a = await _spawn_id(r, "lead", "writer")
+    plain = await r.count()
+    with_arg = await r.op({"type": "get_count", "resume": a})
+    assert with_arg == plain == {"running": 1, "max": None}
+    assert await r.op({"type": "get_count", "resume": "no_such_agent"}) == plain
+    assert r.meta(a)["can_call"][r.reg] == ["roles", "report"]
+    assert r.meta(r.reg)["callable_by"][a] == ["roles", "report"]

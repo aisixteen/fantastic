@@ -13,16 +13,12 @@
 //!
 //! NOTHING is counted in memory. Every spawned agent carries `spawned_by` (this
 //! registry) and `role`, so `fleet` and `get_count` are read off the records: a
-//! delete lowers the count and a restart rebuilds it. `running` counts ACTIVE
-//! agents: a spawned agent that still exists and is not paused (ai_core `status`
-//! `paused`, which is read off its own store, so a restart keeps it). Pausing an
-//! agent, a `done` or `failed` `report` (which pauses the reporter) or a
-//! `delete_agent` frees its slot; `resume` takes it back and is refused `limit`
-//! when full. A `task_registry` holder status is NOT consulted, so this works
-//! without it. The task tree is not kept here: that is `task_registry`.
+//! delete lowers the count and a restart rebuilds it. `running` counts
+//! EVERY spawned agent that still exists, so a slot frees only on
+//! `delete_agent`. The task tree is not kept here: that is `task_registry`.
 //!
-//! NO CLEANUP: `report` only messages the parent (and pauses the reporter on
-//! `done`/`failed`). Nothing is deleted; `delete_agent` is the only way out.
+//! NO CLEANUP: `report` only messages the parent. Nothing is retired or deleted;
+//! `delete_agent` is the only way out.
 //!
 //! `spawn` may branch `from` a fork point of an existing agent (`from:{agent, at}`):
 //! the registry forks it (ai_core `fork {at}`) and applies the role over the copy.
@@ -89,11 +85,11 @@ fn verb_docs_json() -> Value {
         "reflect": "Identity, whether the registry is enabled, and the role names. No args.",
         "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
         "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
-        "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied.",
-        "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). `done` or `failed` also PAUSES the reporter (its slot is freed; the other states change nothing). Refused `not_spawned` for any other caller. Nothing is deleted on done. Returns {ok:true}.",
+        "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused `not_allowed`, and a grant that cannot be written undoes the whole spawn (`grant_failed`).",
+        "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). Refused `not_spawned` for any other caller. Nothing is cleaned up on done. Returns {ok:true}.",
         "fleet": "No args. Returns {roles:{<role>:[{id}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
         "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
-        "get_count": "args: role:str? (omitted = in total), resume:str? (an agent id this registry spawned: answers as if that agent were active, for the ai_core `resume` check; refused `limit` like `spawn` when full). Returns {running, max} — running counts the ACTIVE agents this registry spawned (not paused; pause, a done or failed report, or delete_agent frees a slot, resume takes it back); max is null when uncapped.",
+        "get_count": "args: role:str? (omitted = in total). Returns {running, max} — running counts every agent this registry spawned that still exists (a slot frees on delete_agent); max is null when uncapped.",
     })
 }
 
@@ -140,7 +136,7 @@ fn below_lead(kernel: &Kernel, s: &Spawned, lead: &AgentId) -> bool {
     s.lead.as_deref() == Some(lead.as_str()) || ancestors(kernel, &s.id).contains(lead)
 }
 
-fn spawned_all(kernel: &Kernel, reg: &AgentId) -> Vec<Spawned> {
+fn spawned(kernel: &Kernel, reg: &AgentId) -> Vec<Spawned> {
     let mut out: Vec<Spawned> = kernel
         .agents
         .iter()
@@ -158,57 +154,6 @@ fn spawned_all(kernel: &Kernel, reg: &AgentId) -> Vec<Spawned> {
         })
         .collect();
     out.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
-    out
-}
-
-/// Let the registry call `verbs` on `child` (both ends of the edge, idempotent).
-fn let_registry_in(kernel: &Kernel, reg: &AgentId, child: &AgentId, verbs: &[&str]) {
-    let have = |m: &Map<String, Value>, key: &str| {
-        m.get(key).is_some_and(|g| {
-            g == "*"
-                || g.as_array()
-                    .is_some_and(|a| verbs.iter().all(|v| a.iter().any(|x| x == v)))
-        })
-    };
-    let (c, r) = (child.as_str().to_string(), reg.as_str().to_string());
-    let want = json!(verbs);
-    let w = want.clone();
-    let _ = kernel.edit_can_call(reg, move |m| {
-        if have(m, &c) {
-            return false;
-        }
-        grant_verbs(m, &c, &w);
-        true
-    });
-    let _ = kernel.edit_callable_by(child, move |m| {
-        if have(m, &r) {
-            return false;
-        }
-        grant_verbs(m, &r, &want);
-        true
-    });
-}
-
-/// Is `id` paused? Asks it `status` as the registry. A child that refuses, errors
-/// or has no `paused` key counts as active (fail closed on the cap).
-async fn is_paused(kernel: &Arc<Kernel>, reg: &AgentId, id: &AgentId) -> bool {
-    let_registry_in(kernel, reg, id, &["status"]);
-    let r = kernel
-        .send(vec![Item::new(id.clone(), json!({"type": "status"}))])
-        .await
-        .remove(0)
-        .result;
-    r.get("error").is_none() && r.get("paused").and_then(Value::as_bool) == Some(true)
-}
-
-/// The agents that hold a slot: spawned, still existing and not paused.
-async fn active(kernel: &Arc<Kernel>, reg: &AgentId) -> Vec<Spawned> {
-    let mut out = Vec::new();
-    for s in spawned_all(kernel, reg) {
-        if !is_paused(kernel, reg, &s.id).await {
-            out.push(s);
-        }
-    }
     out
 }
 
@@ -355,7 +300,7 @@ impl Bundle for AgenticResourcesBundle {
             "report" => report_reply(agent_id, payload, kernel).await,
             "fleet" => fleet_reply(agent_id, kernel),
             "set_limit" => set_limit_reply(agent_id, &meta, payload, kernel),
-            "get_count" => get_count_reply(agent_id, &meta, payload, kernel).await,
+            "get_count" => get_count_reply(agent_id, &meta, payload, kernel),
             _ => {
                 let mut r = refusal::refusal(
                     refusal::UNHANDLED,
@@ -398,67 +343,6 @@ fn count_arg(v: &Value, verb: &str, arg: &str) -> Result<u64, Value> {
         Value::Number(n) if n.as_u64().is_some() => Ok(n.as_u64().unwrap_or(0)),
         _ => Err(bad(verb, arg, "a non-negative int")),
     }
-}
-
-/// The caps a NEW (or resumed) active agent of `role` must fit: the registry's per
-/// role and total caps over `all` (the active agents), then the delegated quota of
-/// every lead in `chain` (the lead and those above it). `None` = it fits.
-fn check_caps(
-    kernel: &Kernel,
-    reg: &AgentId,
-    meta: &Map<String, Value>,
-    role: &str,
-    chain: &[AgentId],
-    all: &[Spawned],
-) -> Option<Value> {
-    let limits = meta.get("limits").cloned().unwrap_or(Value::Null);
-    let in_role = all.iter().filter(|s| s.role == role).count();
-    if let Some(max) = cap(&limits, Some(role)) {
-        if in_role as u64 >= max {
-            return Some(limit_refusal("role", role, in_role, max, None));
-        }
-    }
-    let total = all.len();
-    if let Some(max) = cap(&limits, None) {
-        if total as u64 >= max {
-            return Some(limit_refusal("total", role, total, max, None));
-        }
-    }
-    for lead in chain {
-        let Some(la) = agent_of(kernel, lead) else {
-            continue;
-        };
-        let lm = meta_of(&la);
-        if lm.get("spawned_by").and_then(Value::as_str) != Some(reg.as_str()) {
-            continue;
-        }
-        let Some(q) = lm.get("limits") else { continue };
-        let below: Vec<&Spawned> = all.iter().filter(|s| below_lead(kernel, s, lead)).collect();
-        if let Some(max) = cap(q, None) {
-            if below.len() as u64 >= max {
-                return Some(limit_refusal(
-                    "subtree_total",
-                    role,
-                    below.len(),
-                    max,
-                    Some(lead.as_str()),
-                ));
-            }
-        }
-        if let Some(max) = q.get("per_role").and_then(Value::as_u64) {
-            let n = below.iter().filter(|s| s.role == role).count();
-            if n as u64 >= max {
-                return Some(limit_refusal(
-                    "subtree_role",
-                    role,
-                    n,
-                    max,
-                    Some(lead.as_str()),
-                ));
-            }
-        }
-    }
-    None
 }
 
 async fn spawn_reply(
@@ -553,12 +437,50 @@ async fn spawn_reply(
     };
 
     let caller = current_origin();
+    if let Some(refusal) = escalation(kernel, &caller, card) {
+        return refusal;
+    }
     let parent = caller.clone().unwrap_or_else(|| reg.clone());
-    let all = active(kernel, reg).await;
+    let all = spawned(kernel, reg);
+    let limits = meta.get("limits").cloned().unwrap_or(Value::Null);
+
+    // the registry's caps: per role, then in total
+    let in_role = all.iter().filter(|s| s.role == role).count();
+    if let Some(max) = cap(&limits, Some(role)) {
+        if in_role as u64 >= max {
+            return limit_refusal("role", role, in_role, max, None);
+        }
+    }
+    let total = all.len();
+    if let Some(max) = cap(&limits, None) {
+        if total as u64 >= max {
+            return limit_refusal("total", role, total, max, None);
+        }
+    }
+    // delegated quotas: the caller and every lead above it
     let mut chain = vec![parent.clone()];
     chain.extend(ancestors(kernel, &parent));
-    if let Some(refusal) = check_caps(kernel, reg, meta, role, &chain, &all) {
-        return refusal;
+    for lead in &chain {
+        let Some(la) = agent_of(kernel, lead) else {
+            continue;
+        };
+        let lm = meta_of(&la);
+        if lm.get("spawned_by").and_then(Value::as_str) != Some(reg.as_str()) {
+            continue;
+        }
+        let Some(q) = lm.get("limits") else { continue };
+        let below: Vec<&Spawned> = all.iter().filter(|s| below_lead(kernel, s, lead)).collect();
+        if let Some(max) = cap(q, None) {
+            if below.len() as u64 >= max {
+                return limit_refusal("subtree_total", role, below.len(), max, Some(lead.as_str()));
+            }
+        }
+        if let Some(max) = q.get("per_role").and_then(Value::as_u64) {
+            let n = below.iter().filter(|s| s.role == role).count();
+            if n as u64 >= max {
+                return limit_refusal("subtree_role", role, n, max, Some(lead.as_str()));
+            }
+        }
     }
     // what the caller may hand on: its remaining quota, less the sub-lead's own slot
     if !delegated.is_empty() && caller.is_some() {
@@ -666,14 +588,28 @@ async fn spawn_reply(
     };
 
     // the registry may hear the child's `report`; the parent controls its subtree
-    if let Some(s) = store.filter(|s| kernel.agents.contains_key(&AgentId::from(s.as_str()))) {
+    let store_id = store
+        .clone()
+        .filter(|s| kernel.agents.contains_key(&AgentId::from(s.as_str())));
+    if let Some(s) = store_id.clone() {
         let cid = child.clone();
         let _ = kernel.edit_callable_by(&AgentId::from(s.as_str()), move |m| {
             grant_verbs(m, &cid, &json!("*"));
             true
         });
     }
-    if let Err(e) = open_edges(kernel, reg, caller.as_ref(), &child, &reg_verbs) {
+    let opened = open_edges(kernel, reg, caller.as_ref(), &child, &reg_verbs)
+        .and_then(|()| open_tool_edges(kernel, &child, card));
+    if let Err(e) = opened {
+        undo_spawn(
+            kernel,
+            reg,
+            caller.as_ref(),
+            store_id.as_deref(),
+            card,
+            &child,
+        )
+        .await;
         return e;
     }
     if let Some(text) = first_message {
@@ -693,7 +629,7 @@ fn card_can_call(reg: &AgentId, card: &Card) -> Map<String, Value> {
         };
         grant_verbs(&mut can_call, key, v);
     }
-    grant_verbs(&mut can_call, reg.as_str(), &json!(["report", "get_count"]));
+    grant_verbs(&mut can_call, reg.as_str(), &json!(["report"]));
     can_call
 }
 
@@ -702,7 +638,7 @@ fn reg_verbs_of(can_call: &Map<String, Value>, reg: &AgentId) -> Value {
     can_call
         .get(reg.as_str())
         .cloned()
-        .unwrap_or(json!(["report", "get_count"]))
+        .unwrap_or(json!(["report"]))
 }
 
 /// The two edges every spawn opens: the registry accepts the child's calls, and the
@@ -762,6 +698,130 @@ struct SpawnFrom<'a> {
     delegated: &'a Map<String, Value>,
     name: &'a Option<String>,
     first_message: Option<String>,
+}
+
+/// The card's grants on tools: literal local agent ids only (not `$registry`, not
+/// `$self`-like tokens, not `<guid>|x` peer keys).
+fn tool_grants(card: &Card) -> Vec<(String, Value)> {
+    card.grants
+        .iter()
+        .filter(|(k, _)| !k.starts_with('$') && !k.contains('|'))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// A card may only grant what its spawner holds: `None` when there is no caller (the
+/// operator) or every verb the card lists on a tool is in the caller's own `can_call`;
+/// otherwise the `not_allowed` refusal. `"*"` needs the caller to hold `"*"`.
+fn escalation(kernel: &Kernel, caller: &Option<AgentId>, card: &Card) -> Option<Value> {
+    let who = caller.as_ref()?;
+    let holder = agent_of(kernel, who);
+    let grant = holder
+        .as_ref()
+        .map(|w| meta_of(w).get("can_call").cloned().unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+    let parent = holder
+        .as_ref()
+        .and_then(|w| w.parent_id.as_ref().map(|p| p.as_str().to_string()));
+    for (tool, verbs) in tool_grants(card) {
+        let listed: Vec<String> = match &verbs {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let ancestors =
+            kernel.ancestor_ids(agent_of(kernel, &AgentId::from(tool.as_str())).as_deref());
+        for verb in &listed {
+            let held = fantastic_kernel::authz::authorize_call(
+                &grant,
+                verb,
+                &tool,
+                who.as_str(),
+                parent.as_deref(),
+                &ancestors,
+            )
+            .allowed;
+            if !held {
+                return Some(fail(
+                    "not_allowed",
+                    format!(
+                        "spawn: {who} may not grant {} on {} (role {})",
+                        py_repr(verb),
+                        py_repr(&tool),
+                        py_repr(&card.name)
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Admit `child` on the tools its card grants (the tool's end of the edge; the
+/// child's own end is its `can_call`). A tool that is not an agent is skipped. All or
+/// nothing: on a refused edit the edits made are taken back.
+fn open_tool_edges(kernel: &Kernel, child: &str, card: &Card) -> Result<(), Value> {
+    let mut done: Vec<AgentId> = Vec::new();
+    for (tool, verbs) in tool_grants(card) {
+        let id = AgentId::from(tool.as_str());
+        if agent_of(kernel, &id).is_none() {
+            continue;
+        }
+        let cid = child.to_string();
+        match kernel.edit_callable_by(&id, move |m| {
+            grant_verbs(m, &cid, &verbs);
+            true
+        }) {
+            Ok(_) => done.push(id),
+            Err(e) => {
+                tool_ungrant(kernel, child, &done);
+                return Err(fail("grant_failed", format!("spawn: {e}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Take `child` back out of the `callable_by` of `tools`.
+fn tool_ungrant(kernel: &Kernel, child: &str, tools: &[AgentId]) {
+    for t in tools {
+        let cid = child.to_string();
+        let _ = kernel.edit_callable_by(t, move |m| m.remove(&cid).is_some());
+    }
+}
+
+/// Take a half-made spawn back: its tool edges, its keys on the registry, the memory
+/// store and the caller, then the agent itself.
+async fn undo_spawn(
+    kernel: &Arc<Kernel>,
+    reg: &AgentId,
+    caller: Option<&AgentId>,
+    store: Option<&str>,
+    card: &Card,
+    child: &str,
+) {
+    let tools: Vec<AgentId> = tool_grants(card)
+        .into_iter()
+        .map(|(t, _)| AgentId::from(t.as_str()))
+        .filter(|t| agent_of(kernel, t).is_some())
+        .collect();
+    tool_ungrant(kernel, child, &tools);
+    if let Some(s) = store {
+        let cid = child.to_string();
+        let _ = kernel.edit_callable_by(&AgentId::from(s), move |m| m.remove(&cid).is_some());
+    }
+    let cid = child.to_string();
+    let _ = kernel.edit_callable_by(reg, move |m| m.remove(&cid).is_some());
+    if let Some(c) = caller {
+        let cid = child.to_string();
+        let _ = kernel.edit_can_call(c, move |m| m.remove(&cid).is_some());
+    }
+    if let Some(a) = agent_of(kernel, &AgentId::from(child)) {
+        fantastic_kernel::lifecycle::cascade_delete(kernel, &a).await;
+    }
 }
 
 /// Does `who` hold `fork` on `source` in its own `can_call`?
@@ -942,17 +1002,19 @@ async fn spawn_from(kernel: &Arc<Kernel>, c: &SpawnFrom<'_>, src: &str, at: i64)
             true
         })
         .map_err(|e| fail("grant_failed", format!("spawn: {e}")))
-        .and_then(|_| open_edges(kernel, reg, c.caller.as_ref(), &child, &reg_verbs));
+        .and_then(|_| open_edges(kernel, reg, c.caller.as_ref(), &child, &reg_verbs))
+        .and_then(|()| open_tool_edges(kernel, &child, card));
     if let Err(e) = opened {
         // nothing of the registry is left behind
-        fantastic_kernel::lifecycle::cascade_delete(kernel, &fork).await;
-        if let Some(s) = &store {
-            let cid = child.clone();
-            let _ = kernel.edit_callable_by(&AgentId::from(s.as_str()), move |m| {
-                m.remove(&cid).is_some()
-            });
-        }
-        let _ = kernel.edit_callable_by(reg, |m| m.remove(&child).is_some());
+        undo_spawn(
+            kernel,
+            reg,
+            c.caller.as_ref(),
+            store.as_deref(),
+            card,
+            &child,
+        )
+        .await;
         return e;
     }
     if let Some(text) = c.first_message.clone() {
@@ -1007,27 +1069,12 @@ async fn report_reply(reg: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> V
             )
             .await;
     }
-    // a finished agent is paused: its slot is free (detached, so this turn's reply
-    // is not cut by the pause's `stop`)
-    if state == "done" || state == "failed" {
-        let_registry_in(kernel, reg, &mine.id, &["status", "pause", "resume"]);
-        let (k, target) = (Arc::clone(kernel), mine.id.clone());
-        let reason = format!("report {state}");
-        fantastic_kernel::spawn_inherit(async move {
-            let _ = k
-                .send(vec![Item::new(
-                    target,
-                    json!({"type": "pause", "reason": reason}),
-                )])
-                .await;
-        });
-    }
     json!({"ok": true})
 }
 
 fn fleet_reply(reg: &AgentId, kernel: &Kernel) -> Value {
     let mut roles: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for s in spawned_all(kernel, reg) {
+    for s in spawned(kernel, reg) {
         roles
             .entry(s.role)
             .or_default()
@@ -1092,47 +1139,18 @@ fn set_limit_reply(
     json!({"ok": true, "role": role, "max": max})
 }
 
-async fn get_count_reply(
+fn get_count_reply(
     reg: &AgentId,
     meta: &Map<String, Value>,
     payload: &Value,
-    kernel: &Arc<Kernel>,
+    kernel: &Kernel,
 ) -> Value {
     let role = match payload.get("role") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
         Some(_) => return bad("get_count", "role", "a non-empty string"),
     };
-    let resume = match payload.get("resume") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if !s.is_empty() => Some(AgentId::from(s.as_str())),
-        Some(_) => return bad("get_count", "resume", "a non-empty string"),
-    };
-    let mut all = active(kernel, reg).await;
-    if let Some(id) = resume {
-        // would this agent fit as an active one? Count the others without it.
-        let Some(me) = spawned_all(kernel, reg).into_iter().find(|s| s.id == id) else {
-            return refusal::refusal(
-                refusal::NOT_FOUND,
-                format!(
-                    "get_count: {} was not spawned by this registry",
-                    py_repr(id.as_str())
-                ),
-            );
-        };
-        all.retain(|s| s.id != id);
-        let mut chain: Vec<AgentId> = me.lead.iter().map(|l| AgentId::from(l.as_str())).collect();
-        for a in ancestors(kernel, &id) {
-            if !chain.contains(&a) {
-                chain.push(a);
-            }
-        }
-        if let Some(refusal) = check_caps(kernel, reg, meta, &me.role, &chain, &all) {
-            return refusal;
-        }
-        all.push(me);
-    }
-    let running = all
+    let running = spawned(kernel, reg)
         .iter()
         .filter(|s| role.is_none_or(|r| s.role == r))
         .count();
