@@ -14,16 +14,12 @@ Config is the registry agent's own record: `role_dirs` (folders of cards), `tier
 
 NOTHING is counted in memory. Every spawned agent carries `spawned_by` (this
 registry) and `role`, so `fleet` and `get_count` are read off the records: a delete
-lowers the count and a restart rebuilds it. `running` counts ACTIVE agents: a
-spawned agent that still exists and is not paused (ai_core `status` `paused`, which
-is read off its own store, so a restart keeps it). Pausing an agent, a `done` or
-`failed` `report` (which pauses the reporter) or a `delete_agent` frees its slot;
-`resume` takes it back and is refused `limit` when full. A `task_registry` holder
-status is NOT consulted, so this works without it. The task tree is not kept here:
-that is `task_registry`.
+lowers the count and a restart rebuilds it. `running` counts EVERY spawned agent
+that still exists, so a slot frees only on `delete_agent`. The task tree is not kept
+here: that is `task_registry`.
 
-NO CLEANUP: `report` only messages the parent (and pauses the reporter on
-`done`/`failed`). Nothing is deleted; `delete_agent` is the only way out.
+NO CLEANUP: `report` only messages the parent. Nothing is retired or deleted;
+`delete_agent` is the only way out.
 
 `spawn` may branch `from` a fork point of an existing agent (`from:{agent, at}`): the
 registry forks it (ai_core `fork {at}`) and applies the role over the copy.
@@ -55,10 +51,10 @@ VERB_DOCS = {
     "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
     "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
     "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused `not_allowed`, and a grant that cannot be written undoes the whole spawn (`grant_failed`).",
-    "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). `done` or `failed` also PAUSES the reporter (its slot is freed; the other states change nothing). Refused `not_spawned` for any other caller. Nothing is deleted on done. Returns {ok:true}.",
+    "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). Refused `not_spawned` for any other caller. Nothing is cleaned up on done. Returns {ok:true}.",
     "fleet": "No args. Returns {roles:{<role>:[{id}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
     "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
-    "get_count": "args: role:str? (omitted = in total), resume:str? (an agent id this registry spawned: answers as if that agent were active, for the ai_core `resume` check; refused `limit` like `spawn` when full). Returns {running, max} — running counts the ACTIVE agents this registry spawned (not paused; pause, a done or failed report, or delete_agent frees a slot, resume takes it back); max is null when uncapped.",
+    "get_count": "args: role:str? (omitted = in total). Returns {running, max} — running counts every agent this registry spawned that still exists (a slot frees on delete_agent); max is null when uncapped.",
 }
 
 
@@ -82,7 +78,7 @@ def _fail(code: str, reason: str) -> dict:
     return {"error": code, "reason": reason}
 
 
-def _spawned_all(kernel, reg: str) -> list[dict]:
+def _spawned(kernel, reg: str) -> list[dict]:
     out = [
         {
             "id": a.id,
@@ -93,49 +89,6 @@ def _spawned_all(kernel, reg: str) -> list[dict]:
         if a._meta.get("spawned_by") == reg
     ]
     return sorted(out, key=lambda s: s["id"])
-
-
-def _let_registry_in(kernel, reg: str, child: str, verbs: list) -> None:
-    """Let the registry call `verbs` on `child` (both ends of the edge, idempotent)."""
-
-    def have(m, key):
-        g = m.get(key)
-        return g == "*" or (isinstance(g, list) and all(v in g for v in verbs))
-
-    def _cc(m):
-        if have(m, child):
-            return False
-        _grant_verbs(m, child, list(verbs))
-        return True
-
-    def _cb(m):
-        if have(m, reg):
-            return False
-        _grant_verbs(m, reg, list(verbs))
-        return True
-
-    kernel.ctx.edit_can_call(reg, _cc)
-    kernel.ctx.edit_callable_by(child, _cb)
-
-
-async def _is_paused(kernel, reg: str, aid: str) -> bool:
-    """Is `aid` paused? Asks it `status` as the registry. A child that refuses,
-    errors or has no `paused` key counts as active (fail closed on the cap)."""
-    _let_registry_in(kernel, reg, aid, ["status"])
-    try:
-        r = (await kernel.send([{"target": aid, "payload": {"type": "status"}}]))[0].get(
-            "result"
-        )
-    except Exception:
-        return False
-    return isinstance(r, dict) and "error" not in r and r.get("paused") is True
-
-
-async def _active(kernel, reg: str) -> list[dict]:
-    """The agents that hold a slot: spawned, still existing and not paused."""
-    return [
-        s for s in _spawned_all(kernel, reg) if not await _is_paused(kernel, reg, s["id"])
-    ]
 
 
 def _ancestors(kernel, aid: str) -> list[str]:
@@ -241,39 +194,6 @@ async def _role(id, payload, kernel):
     return refusal(NOT_FOUND, f"role {name!r} not found")
 
 
-def _check_caps(kernel, reg, meta, role, chain, allsp):
-    """The caps a NEW (or resumed) active agent of `role` must fit: the registry's per
-    role and total caps over `allsp` (the active agents), then the delegated quota of
-    every lead in `chain` (the lead and those above it). None = it fits."""
-    ctx = kernel.ctx
-    limits = meta.get("limits")
-    in_role = sum(1 for s in allsp if s["role"] == role)
-    mx = _cap(limits, role)
-    if mx is not None and in_role >= mx:
-        return _limit_refusal("role", role, in_role, mx)
-    total = len(allsp)
-    mx = _cap(limits, None)
-    if mx is not None and total >= mx:
-        return _limit_refusal("total", role, total, mx)
-    for lead in chain:
-        la = ctx.agents.get(lead)
-        if la is None or la._meta.get("spawned_by") != reg:
-            continue
-        q = la._meta.get("limits")
-        if not isinstance(q, dict):
-            continue
-        below = [s for s in allsp if _below_lead(kernel, s, lead)]
-        mx = _cap(q, None)
-        if mx is not None and len(below) >= mx:
-            return _limit_refusal("subtree_total", role, len(below), mx, lead)
-        pr = q.get("per_role")
-        if isinstance(pr, int) and not isinstance(pr, bool):
-            n = sum(1 for s in below if s["role"] == role)
-            if n >= pr:
-                return _limit_refusal("subtree_role", role, n, pr, lead)
-    return None
-
-
 async def _spawn(reg, payload, kernel):
     meta = kernel._meta
     ctx = kernel.ctx
@@ -332,12 +252,39 @@ async def _spawn(reg, payload, kernel):
     if escalated is not None:
         return escalated
     parent = caller or reg
-    allsp = await _active(kernel, reg)
-    refused = _check_caps(
-        kernel, reg, meta, role, [parent, *_ancestors(kernel, parent)], allsp
-    )
-    if refused is not None:
-        return refused
+    allsp = _spawned(kernel, reg)
+    limits = meta.get("limits")
+
+    # the registry's caps: per role, then in total
+    in_role = sum(1 for s in allsp if s["role"] == role)
+    mx = _cap(limits, role)
+    if mx is not None and in_role >= mx:
+        return _limit_refusal("role", role, in_role, mx)
+    total = len(allsp)
+    mx = _cap(limits, None)
+    if mx is not None and total >= mx:
+        return _limit_refusal("total", role, total, mx)
+    # delegated quotas: the caller and every lead above it
+    for lead in [parent, *_ancestors(kernel, parent)]:
+        la = ctx.agents.get(lead)
+        if la is None or la._meta.get("spawned_by") != reg:
+            continue
+        q = la._meta.get("limits")
+        if not isinstance(q, dict):
+            continue
+        below = [
+            s
+            for s in allsp
+            if _below_lead(kernel, s, lead)
+        ]
+        mx = _cap(q, None)
+        if mx is not None and len(below) >= mx:
+            return _limit_refusal("subtree_total", role, len(below), mx, lead)
+        pr = q.get("per_role")
+        if isinstance(pr, int) and not isinstance(pr, bool):
+            n = sum(1 for s in below if s["role"] == role)
+            if n >= pr:
+                return _limit_refusal("subtree_role", role, n, pr, lead)
     # what the caller may hand on: its remaining quota, less the sub-lead's own slot
     if delegated and caller is not None:
         pa = ctx.agents.get(parent)
@@ -426,13 +373,13 @@ def _card_can_call(reg, card) -> dict:
     can_call: dict = {}
     for k, v in card["grants"].items():
         _grant_verbs(can_call, reg if k == REGISTRY_TOKEN else k, v)
-    _grant_verbs(can_call, reg, ["report", "get_count"])
+    _grant_verbs(can_call, reg, ["report"])
     return can_call
 
 
 def _reg_verbs_of(can_call: dict, reg: str):
     """What the registry lets the child call on it."""
-    return can_call.get(reg, ["report", "get_count"])
+    return can_call.get(reg, ["report"])
 
 
 def _open_edges(kernel, reg, caller, child, reg_verbs):
@@ -752,28 +699,12 @@ async def _report(reg, payload, kernel):
             parent,
             {"type": "report", "from": mine.id, "state": state, "result": result},
         )
-    # a finished agent is paused: its slot is free (detached, so this turn's reply is
-    # not cut by the pause's `stop`)
-    if state in ("done", "failed"):
-        _let_registry_in(kernel, reg, mine.id, ["status", "pause", "resume"])
-        t = asyncio.ensure_future(
-            kernel.send(
-                [
-                    {
-                        "target": mine.id,
-                        "payload": {"type": "pause", "reason": f"report {state}"},
-                    }
-                ]
-            )
-        )
-        _DETACHED.add(t)
-        t.add_done_callback(_DETACHED.discard)
     return {"ok": True}
 
 
 async def _fleet(reg, payload, kernel):
     roles: dict = {}
-    for s in _spawned_all(kernel, reg):
+    for s in _spawned(kernel, reg):
         roles.setdefault(s["role"], []).append({"id": s["id"]})
     return {"roles": dict(sorted(roles.items()))}
 
@@ -813,25 +744,11 @@ async def _get_count(reg, payload, kernel):
     role = payload.get("role")
     if role is not None and (not isinstance(role, str) or not role):
         return bad("get_count", "role", "a non-empty string")
-    resume = payload.get("resume")
-    if resume is not None and (not isinstance(resume, str) or not resume):
-        return bad("get_count", "resume", "a non-empty string")
-    allsp = await _active(kernel, reg)
-    if resume is not None:
-        # would this agent fit as an active one? Count the others without it.
-        me = next((s for s in _spawned_all(kernel, reg) if s["id"] == resume), None)
-        if me is None:
-            return refusal(
-                NOT_FOUND, f"get_count: {resume!r} was not spawned by this registry"
-            )
-        allsp = [s for s in allsp if s["id"] != resume]
-        chain = [me["lead"]] if me["lead"] else []
-        chain += [a for a in _ancestors(kernel, resume) if a not in chain]
-        refused = _check_caps(kernel, reg, kernel._meta, me["role"], chain, allsp)
-        if refused is not None:
-            return refused
-        allsp.append(me)
-    running = sum(1 for s in allsp if role is None or s["role"] == role)
+    running = sum(
+        1
+        for s in _spawned(kernel, reg)
+        if (role is None or s["role"] == role)
+    )
     return {"running": running, "max": _cap(kernel._meta.get("limits"), role)}
 
 
