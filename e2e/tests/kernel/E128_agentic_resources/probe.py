@@ -30,8 +30,21 @@ SCRIPT 2 (extended) — the top lead `L0`, a `project_lead`:
   tree is `task_registry`'s, E135), so the probe keeps each scripted result itself.
   Checks: every scripted agent reported done and the top result carries both parts,
   the tree nests the agents under their callers (`reflect tree=all`), `get_count`
-  counts every spawned agent that still exists (a report frees no slot), and EVERY
-  agent is still there at the end: nothing was cleaned up.
+  counts only the ACTIVE agents (a `done` report pauses the reporter and frees its
+  slot, so only the two idle writers of script 1 still count), and EVERY agent is
+  still there at the end: nothing was cleaned up (`fleet` lists all eight).
+
+SCRIPT 4 (active-only counting, #424) — a `project_lead` `L4`, with a cap of 2 on the
+role `worker` (set by the test: the shipped card holds no `set_limit`; script 2's
+finished workers `WA` and `WB` are paused, so they hold no slot):
+  1. `L4` spawns `W41` and `W42`; a third `spawn` is refused `limit` (scope role, 2/2);
+  2. `W41` reports `done` (once L4 has read the refusal), which pauses it: the registry's
+     `get_count worker` drops to 1 while `fleet` still lists it;
+  3. `L4` (sent a second message) spawns `W43` (now 2/2 again) and `pause`s `W42`:
+     `get_count worker` is 1;
+  4. `L4` (a third message) spawns `W44` (2/2), `resume`s `W42`: refused `limit` while
+     two others are active (the agent stays paused), `pause`s `W44`, then `resume`s
+     `W42`: it resumes and `get_count worker` is 2 again.
 
 SCRIPT 3 (from a fork point, #424) — a source agent `SRC` (a `vllm_backend` agent with
 a memory store; the test gives it two finished turns, then `mark`s it) and a lead `L2`
@@ -69,7 +82,7 @@ REPO = E2E.parent
 RUNTIME = os.environ.get("RUNTIME", "")
 AR = "agentic"
 MODEL = "mock-scripted"
-KEY = re.compile(r"\b(L0|L1|L2|SA|SB|SRC|WA|WB):")
+KEY = re.compile(r"\b(L0|L1|L2|L4|SA|SB|SRC|WA|WB|W41|W42|W43|W44):")
 SRC, L2 = "src_agent", "lead_two"
 
 WRITER = ("---\nname: writer\npurpose: Writes the first draft of a text.\ntier: fast\n"
@@ -83,13 +96,13 @@ def text_of(m: dict) -> str:
     return c if isinstance(c, str) else json.dumps(c)
 
 
-def call(verb: str, **args) -> str:
-    """One `<call name="send">` to the registry; a dict value rides as child tags."""
+def call(verb: str, _to: str = AR, **args) -> str:
+    """One `<call name="send">` to `_to` (the registry); a dict value rides as child tags."""
     def tag(k, v):
         if isinstance(v, dict):
             return f"<{k}>" + "".join(tag(a, b) for a, b in v.items()) + f"</{k}>"
         return f"<{k}>{v}</{k}>"
-    return (f'<call name="send">\n<target_id>{AR}</target_id>\n<type>{verb}</type>\n'
+    return (f'<call name="send">\n<target_id>{_to}</target_id>\n<type>{verb}</type>\n'
             + "".join(tag(k, v) for k, v in args.items()) + "\n</call>")
 
 
@@ -159,6 +172,7 @@ def main() -> int:
     # ── the scripts: one queue per agent key; an entry is a callable ─────────────
     seen: dict[str, list[str]] = {}          # key -> the last user turn of each request
     gate_sa = threading.Event()              # SA reached its third turn (its refusal was read)
+    gate_l4 = threading.Event()              # L4 read its refusal and the count
     lock = threading.Lock()
 
     def waits_for(*labels: str):
@@ -199,6 +213,15 @@ def main() -> int:
                sb_report, DONE],
         "WA": [wa_report, DONE],
         "WB": [lambda: finish("WB", "leaf b ok"), DONE],
+        "L4": [call("spawn", role="worker", name="W41", task="W41: do piece one"),
+               call("spawn", role="worker", name="W42", task="W42: do piece two"),
+               call("spawn", role="worker", name="W43", task="W43: one too many"),
+               lambda: (gate_l4.set(), call("get_count", role="worker"))[1],
+               DONE],
+        "W41": [lambda: (gate_l4.wait(60), finish("W41", "piece one ok"))[1], DONE],
+        "W42": [DONE],
+        "W43": [DONE],
+        "W44": [DONE],
         "SRC": [],
         "L2": [lambda: call("spawn", role="worker", name="W2",
                             **{"from": {"agent": SRC, "at": mark_at["at"]}}),
@@ -225,7 +248,9 @@ def main() -> int:
     m.responder = responder
 
     def spent(*keys: str) -> bool:
-        return all(not scripts[k] for k in keys)
+        # a finished agent is paused by its `done` report, which may cut its turn
+        # before the trailing DONE request: only DONE entries may be left
+        return all(all(e == DONE for e in scripts[k]) for k in keys)
 
     def idle(bound: float = 90) -> bool:
         end = time.monotonic() + bound
@@ -318,13 +343,69 @@ def main() -> int:
         need(all("task" not in (recs.get(named(n)) or {}) for n in ("L0", "SA", "WA")),
              "no record carries a task line: report stores nothing")
 
-        # nothing is cleaned up; a report frees no slot
+        # nothing is cleaned up; a done report pauses the reporter and frees its slot
         every = set(fleet())
         need({named(n) for n in ("L0", "SA", "SB", "WA", "WB")} <= every and len(every) == 8,
              f"all eight spawned agents are still there: {len(every)}")
-        need(hk.send(AR, {"type": "get_count"}) == {"running": 8, "max": None},
-             "get_count counts every spawned agent that still exists (a report frees no slot)")
+        # the pause on a report is detached: wait for the six reporters (L1, L0, SA, SB,
+        # WA, WB) to be paused, which leaves only L1's two idle writers active
+        need(until(lambda: hk.send(AR, {"type": "get_count"}).get("running") == 2),
+             f"get_count counts only the active agents: {hk.send(AR, {'type': 'get_count'})}")
+        need(hk.send(AR, {"type": "get_count"}) == {"running": 2, "max": None},
+             "a done report freed its slot: six of eight are paused, two writers are active")
         need(all(a in records() for a in every), "no record was removed")
+
+        # ── script 4: active-only counting ───────────────────────────────────
+        def worker_count() -> int | None:
+            return hk.send(AR, {"type": "get_count", "role": "worker"}).get("running")
+
+        need(worker_count() == 0, "script 2's finished workers hold no slot")
+        need(hk.send(AR, {"type": "set_limit", "role": "worker", "max": 2}).get("ok") is True,
+             "set_limit role=worker max=2")
+        out = hk.send(AR, {"type": "spawn", "role": "project_lead", "name": "L4",
+                           "task": "L4: take two workers, then a third"})
+        need(bool(out.get("id")), f"the test spawns the lead L4: {str(out)[:200]}")
+        need(until(lambda: spent("L4", "W41")) and idle(), "L4 and W41 run to their end")
+        u4 = (seen.get("L4") or []) + [""] * 5
+        need("<id>" in u4[1] and "<id>" in u4[2], "1 · L4's two spawns create an agent")
+        need("<error>limit</error>" in u4[3] and "<scope>role</scope>" in u4[3]
+             and "<running>2</running>" in u4[3],
+             f"1 · the third spawn is refused at the limit of 2: {u4[3][:200]!r}")
+        need(until(lambda: worker_count() == 1),
+             f"2 · W41's done report paused it and freed its slot: {worker_count()}")
+        need(named("W41") in fleet(), "2 · fleet still lists the finished W41")
+        l4 = named("L4")
+        hk.send(root, {"type": "update_agent", "id": l4,
+                       "callable_by": {**dict((records().get(l4) or {}).get("callable_by") or {}),
+                                       "rest": "*"}})
+        scripts["L4"] += [call("spawn", role="worker", name="W43", task="W43: take the slot"),
+                          lambda: call("pause", _to=named("W42")), DONE]
+        n4 = len(seen.get("L4") or [])
+        out = hk.send(l4, {"type": "send", "text": "L4: spawn W43, pause W42"})
+        need(not out.get("error"), f"L4 runs again: {str(out)[:120]}")
+        need(until(lambda: spent("L4")) and idle(), "L4's second script runs to its end")
+        p2 = (seen.get("L4") or [])[n4:] + [""] * 3
+        need("<id>" in p2[1], f"3 · the spawn succeeds once a slot is free: {p2[1][:160]!r}")
+        need("<paused>true</paused>" in p2[2], f"3 · the lead pauses W42: {p2[2][:160]!r}")
+        need(hk.send(AR, {"type": "get_count", "role": "worker"}) == {"running": 1, "max": 2},
+             "3 · pausing W42 freed its slot: 1 of 2")
+        scripts["L4"] += [call("spawn", role="worker", name="W44", task="W44: fill the slot"),
+                          lambda: call("resume", _to=named("W42")),
+                          lambda: call("pause", _to=named("W44")),
+                          lambda: call("resume", _to=named("W42")), DONE]
+        n4 = len(seen.get("L4") or [])
+        out = hk.send(l4, {"type": "send", "text": "L4: fill, resume W42, free, resume"})
+        need(not out.get("error"), f"L4 runs a third time: {str(out)[:120]}")
+        need(until(lambda: spent("L4")) and idle(), "L4's third script runs to its end")
+        p3 = (seen.get("L4") or [])[n4:] + [""] * 5
+        need("<id>" in p3[1], f"4 · the spawn fills the free slot: {p3[1][:160]!r}")
+        need("<error>limit</error>" in p3[2],
+             f"4 · resuming W42 is refused while two others are active: {p3[2][:200]!r}")
+        need("<resumed>true</resumed>" in p3[4],
+             f"4 · resuming W42 succeeds after a pause: {p3[4][:160]!r}")
+        need(until(lambda: worker_count() == 2),
+             f"4 · the resumed W42 holds a slot again: {worker_count()}")
+        hk.send(AR, {"type": "set_limit", "role": "worker", "max": None})
 
         # ── script 3: spawn from a fork point ────────────────────────────────
         def cb_of(aid: str) -> dict:
