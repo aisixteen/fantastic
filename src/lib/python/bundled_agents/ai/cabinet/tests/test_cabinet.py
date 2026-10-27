@@ -1175,3 +1175,29 @@ async def test_cabinets_lists_each_canvas_and_its_equipment(world):
     row = res["cabinets"][0]
     assert row["canvas"] == canvas
     assert row["equipment"] == ["list_exec"]
+
+
+async def test_the_cabinet_record_names_its_canvas_before_the_canvas_exists(world):
+    # The Rust stub-ordering part (a new_canvas no record names is refused) is
+    # Rust-only: Python makes the canvas first and then the record. The observable
+    # result is the same: the record names its canvas, and a clash leaves one cabinet.
+    k = world
+    cab = (await open_cabinet(k, "x", name="first"))["id"]
+    assert k.get(cab)["canvas"] == "canvas_cabinet_first"
+    again = await open_cabinet(k, "y", name="first")
+    assert "error" in again, again
+    cabinets = [i for i in list(k.ctx.agents) if k.get(i).get(ROLE) == "cabinet"]
+    assert len(cabinets) == 1
+
+
+async def test_a_cabinets_canvas_holds_create_agent_on_the_root_and_nothing_else(world):
+    k = world
+    cab = (await open_cabinet(k, "x", name="lean"))["id"]
+    canvas = k.get(cab)["canvas"]
+    cc = k.get(canvas)["can_call"]
+    assert set(cc) == {"$self", k.id}, cc
+    assert cc[k.id] == ["create_agent"], cc
+    assert k.get(k.id)["callable_by"][canvas] == ["create_agent"]
+    res = await as_(k, MASTER, MANAGER, {"type": "close_cabinet", "id": cab})
+    assert not res.get("error"), res
+    assert canvas not in k.get(k.id)["callable_by"]
