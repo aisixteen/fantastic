@@ -44,7 +44,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use fantastic_bundle::{py_json_dumps, py_repr_value, py_splitlines, py_str, py_strip, py_truthy};
+use fantastic_bundle::{py_json_dumps, py_repr_value, py_type_name, py_splitlines, py_str, py_strip, py_truthy};
 use fantastic_kernel::bundle::{Bundle, BundleError, Reply};
 use fantastic_kernel::refusal::{
     missing, refusal, refusal_hint, with, BAD_ARG, EXISTS, NOT_FOUND, UNHANDLED,
@@ -525,6 +525,30 @@ pub const VERB_DOCS: [(&str, &str); 8] = [
     ("dump", "No args. The whole store as tables — {rows:[{owner, row}], fold_refs:[{owner, fold, members}]} — exactly what `inject` takes back. Returns {tables}."),
 ];
 
+/// python `x in container` for the JSON value a payload carried. `Err` is the
+/// TypeError python raises (`'in <string>' requires string as left operand`,
+/// `argument of type 'int' is not iterable`, `unhashable type: 'list'`) — the
+/// same text as ram_store's.
+fn py_in(x: &Value, container: &Value) -> Result<bool, BundleError> {
+    let type_error = |m: String| -> BundleError { format!("TypeError: {m}").into() };
+    match container {
+        Value::Array(items) => Ok(items.contains(x)),
+        Value::String(s) => match x {
+            Value::String(needle) => Ok(s.contains(needle.as_str())),
+            other => Err(type_error(format!(
+                "'in <string>' requires string as left operand, not {}",
+                py_type_name(other)
+            ))),
+        },
+        Value::Object(m) => match x {
+            Value::String(k) => Ok(m.contains_key(k)),
+            Value::Array(_) | Value::Object(_) => Err(type_error(format!("unhashable type: '{}'", py_type_name(x)))),
+            _ => Ok(false),
+        },
+        other => Err(type_error(format!("argument of type '{}' is not iterable", py_type_name(other)))),
+    }
+}
+
 /// Why a record's `path` cannot name the file: it is required, relative, and
 /// never climbs out of the kernel's workdir.
 pub fn check_path(rec: &Map<String, Value>) -> Result<&Path, String> {
@@ -548,7 +572,22 @@ pub fn resolve_path(rec: &Map<String, Value>, kernel: &Kernel) -> Result<PathBuf
         .storage
         .workdir()
         .ok_or("sqlite_store needs a disk-backed kernel: an in-memory kernel has no project dir to hold the file")?;
-    Ok(work.join(path))
+    // Clamp like python `fs.resolve`: the deepest part of the path that exists is
+    // followed through its symlinks and must still lie under the real workdir —
+    // a `stores -> /elsewhere` link must not carry the file out of the project.
+    let escapes = || format!("sqlite_store: `path` {:?} escapes the project dir", path.display().to_string());
+    let base = work.canonicalize().map_err(|e| format!("sqlite_store: {}: {e}", work.display()))?;
+    let joined = base.join(path);
+    let mut probe = joined.as_path();
+    while probe.symlink_metadata().is_err() {
+        probe = probe.parent().ok_or_else(escapes)?;
+    }
+    let real = probe.canonicalize().map_err(|_| escapes())?;
+    if !real.starts_with(&base) {
+        return Err(escapes());
+    }
+    let rest = joined.strip_prefix(probe).map_err(|_| escapes())?;
+    Ok(if rest.as_os_str().is_empty() { real } else { real.join(rest) })
 }
 
 /// The `sqlite_store.tools` bundle. Its connections are the KERNEL'S state
@@ -726,22 +765,42 @@ impl SqliteStoreBundle {
                     with(&mut e, "arg", json!("rows"));
                     return Err(e);
                 };
-                let mut missing_refs = Vec::new();
-                for m in list.iter().filter_map(as_id) {
-                    if !(db.has(&owner, m).map_err(db_err)? || batch.contains(&m)) {
-                        missing_refs.push(m);
+                // python `t.has(owner, m) or m in batch` on the RAW ref: the tables
+                // are keyed by int, so a digit STRING passes `as_id` and is still
+                // never found.
+                let mut missing_refs: Vec<Value> = Vec::new();
+                for m in list {
+                    let held = match (m.is_number(), as_id(m)) {
+                        (true, Some(i)) => db.has(&owner, i).map_err(db_err)? || batch.contains(&i),
+                        _ => false,
+                    };
+                    if !held {
+                        missing_refs.push(m.clone());
                     }
                 }
                 if !missing_refs.is_empty() {
                     let mut e = refusal(
                         NOT_FOUND,
-                        format!("append: row {rid} refs rows that do not exist for this owner: {missing_refs:?}"),
+                        format!("append: row {rid} refs rows that do not exist for this owner: {}", py_repr_value(&Value::Array(missing_refs))),
                     );
                     with(&mut e, "arg", json!("rows"));
                     return Err(e);
                 }
             }
             let ids: Vec<Value> = staged.iter().map(|r| r.get("id").cloned().unwrap_or(Value::Null)).collect();
+            // The file holds JSON: a row whose text does not parse back (the one
+            // non-JSON number the kernel keeps, `Infinity`) is refused, never
+            // rewritten — all or none, like python's `_encode`.
+            for r in &staged {
+                if let Err(e) = serde_json::from_str::<Value>(&to_text(r)) {
+                    let mut e = refusal(
+                        BAD_ARG,
+                        format!("append: row {} is not JSON: {e}", r.get("id").map_or("None".to_string(), Value::to_string)),
+                    );
+                    with(&mut e, "arg", json!("rows"));
+                    return Err(e);
+                }
+            }
             let n = staged.len();
             db.insert(&owner, &staged).map_err(db_err)?;
             Ok(json!({"ids": ids, "appended": n}))
@@ -912,26 +971,36 @@ impl SqliteStoreBundle {
         })
     }
 
-    fn prune(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
+    /// `Err` is python's TypeError out of `kind in keep` — a raise.
+    fn prune(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Result<Value, BundleError> {
         let (owner, _) = match caller(kernel) {
             Ok(o) => o,
-            Err(r) => return r,
+            Err(r) => return Ok(r),
         };
         let before = payload.get("before_id").and_then(as_id);
         let want = payload.get("ids").and_then(Value::as_array);
         if before.is_none() && want.is_none() {
-            return missing("prune", "before_id");
+            return Ok(missing("prune", "before_id"));
         }
         let wanted: HashSet<Option<i64>> = want.map(|w| w.iter().map(as_id).collect()).unwrap_or_default();
-        let keep: Vec<Value> = payload.get("keep").and_then(Value::as_array).cloned().unwrap_or_default();
+        // `keep = payload.get("keep") or []`, then `row.get("kind") in keep` —
+        // python's `in` on WHATEVER arrived: a list is membership, a string a
+        // SUBSTRING test, a dict its keys, and anything else raises.
+        let keep: Value = payload.get("keep").filter(|v| py_truthy(v)).cloned().unwrap_or_else(|| json!([]));
         let has_want = want.is_some();
+        let mut raised: Option<BundleError> = None;
         let out = self.tx(id, kernel, |db| {
             let rows = db.all_rows(&owner).map_err(db_err)?;
             let mut doomed: HashSet<i64> = HashSet::new();
             for i in db.ids(&owner).map_err(db_err)? {
                 let kind = rows.get(&i).and_then(|r| r.get("kind")).cloned().unwrap_or(Value::Null);
-                if keep.contains(&kind) {
-                    continue;
+                match py_in(&kind, &keep) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => {
+                        raised = Some(e);
+                        return Err(refusal(UNHANDLED, "prune raised"));
+                    }
                 }
                 if before.is_some_and(|b| i < b) || (has_want && wanted.contains(&Some(i))) {
                     doomed.insert(i);
@@ -948,7 +1017,10 @@ impl SqliteStoreBundle {
                 let _ = c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
             }
         }
-        out
+        match raised {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
     }
 
     fn inject(&self, id: &AgentId, payload: &Value, kernel: &Arc<Kernel>) -> Value {
@@ -991,8 +1063,10 @@ impl Bundle for SqliteStoreBundle {
         Value::Object(verbs)
     }
 
+    /// The CATALOG name — python's entry-point name, not the handler module
+    /// (the kind `reflect bundles=all` lists and a system prompt names).
     fn name(&self) -> &str {
-        HANDLER_MODULE
+        "sqlite_store"
     }
 
     fn readme(&self) -> Option<&'static str> {
@@ -1021,7 +1095,7 @@ impl Bundle for SqliteStoreBundle {
             "append" => self.append(agent_id, payload, kernel),
             "read" => self.read(agent_id, payload, kernel),
             "search" => self.search(agent_id, payload, kernel),
-            "prune" => self.prune(agent_id, payload, kernel),
+            "prune" => self.prune(agent_id, payload, kernel)?,
             "inject" => self.inject(agent_id, payload, kernel),
             "dump" => self.dump(agent_id, kernel),
             _ => {
@@ -1060,3 +1134,5 @@ impl Bundle for SqliteStoreBundle {
     }
 }
 
+#[cfg(test)]
+mod tests;

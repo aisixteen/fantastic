@@ -18,7 +18,7 @@ fantastic-core = { path = "../../../lib/rust/crates/bundles/fantastic-core" }
 fantastic-file = { path = "../../../lib/rust/crates/bundles/fantastic-file" }
 fantastic-web = { path = "../../../lib/rust/crates/bundles/fantastic-web" }
 fantastic-web-ws = { path = "../../../lib/rust/crates/bundles/fantastic-web-ws" }
-fantastic-sqlite-store = { path = "../../bundles/fantastic-sqlite-store" }
+fantastic-sqlite-store = { path = "../../../lib/rust/crates/bundles/fantastic-sqlite-store" }
 fantastic-user = { path = "../../bundles/fantastic-user" }
 fantastic-user-home-store = { path = "../../bundles/fantastic-user-home-store" }
 fantastic-canvas-page = { path = "../../bundles/fantastic-canvas-page" }

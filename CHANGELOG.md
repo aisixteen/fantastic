@@ -7,6 +7,14 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Added
 
+- `sqlite_store` in the headless Rust kernel (#432): the durable memory store moved from
+  the CLI product into the lib (`fantastic-sqlite-store`) and is registered in the
+  `fantastic_kernel` binary; the file is the record's `path` (config), and a stop
+  folds the WAL into it after the last flush. Aligned with Python's: the readme is
+  byte-identical, `path` is clamped through symlinks, `prune keep` and digit-string
+  refs behave like Python's, a non-JSON row is refused whole, and the catalog kind is
+  `sqlite_store`. Shared conformance now covers the rest of ram_store's scenarios and
+  `contract/memory_store/cases.json` four more; e2e `E136_sqlite_history_restart`.
 - `await_set` / `await_cancel` (#426): one wake for a set of agents. A lead sends
   `await_set {ids, timeout_s?, label?}` to the kernel and is woken ONCE — when every
   named agent has sent it a message of `type: report` (the signal #424's `report`

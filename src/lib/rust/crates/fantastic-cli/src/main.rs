@@ -32,6 +32,16 @@ use std::sync::Arc;
 
 mod sys;
 
+/// Stop the kernel in the order the durable store needs: every row flushed
+/// (`shutdown`), THEN each sqlite_store folds its WAL into its file and closes,
+/// and the caller releases the lock last (as the app's host does).
+async fn stop_kernel(kernel: &Arc<fantastic_kernel::Kernel>) {
+    kernel.shutdown().await;
+    for line in fantastic_sqlite_store::close_all(kernel) {
+        eprintln!("[kernel] shutdown: {line}");
+    }
+}
+
 fn register_default_bundles() -> BundleRegistry {
     let mut reg = BundleRegistry::new();
 
@@ -54,6 +64,12 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register(
         fantastic_ram_store::HANDLER_MODULE,
         fantastic_ram_store::RamStoreBundle::default(),
+    );
+    // THE DURABLE STORE — the same verbs over one SQLite file. Which file is
+    // CONFIG: the record's `path` (relative to the workdir), never hardcoded.
+    reg.register(
+        fantastic_sqlite_store::HANDLER_MODULE,
+        fantastic_sqlite_store::SqliteStoreBundle::default(),
     );
     // SECRETS BY REF — every AI backend reads its key here (`credentials:
     // {store, ref}` on its record), before each request. The OS keychain is
@@ -410,7 +426,7 @@ async fn dispatch(
         // Every non-daemon mode ends with an idempotent kernel
         // shutdown (python's atexit → `Kernel.shutdown`), even here where no
         // lock was ever taken.
-        booted.kernel.shutdown().await;
+        stop_kernel(&booted.kernel).await;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -447,7 +463,7 @@ async fn dispatch(
         // and python's float repr, not serde's pretty printer.
         println!("{}", py_json_dumps(&reply, true, Some(2)));
         // Every non-daemon mode ends with an idempotent kernel shutdown.
-        booted.kernel.shutdown().await;
+        stop_kernel(&booted.kernel).await;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -464,7 +480,7 @@ async fn dispatch(
                 "usage: fantastic init <loader_bundle> <manifest>\n   \
                  e.g. fantastic init static_loader ./fantastic.yaml"
             );
-            booted.kernel.shutdown().await;
+            stop_kernel(&booted.kernel).await;
             return Ok(ExitCode::from(2));
         }
         let loader_name = rest[0].clone();
@@ -511,7 +527,7 @@ async fn dispatch(
         // The lock release, THEN the kernel shutdown — see the same
         // note on Mode 3 below.
         bootstrap::shutdown(&workdir)?;
-        booted.kernel.shutdown().await;
+        stop_kernel(&booted.kernel).await;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -567,7 +583,7 @@ async fn dispatch(
         // lock synchronously inside `call()`/`init()`, and `Kernel.shutdown()`
         // runs LAST, from the process's atexit handler.
         bootstrap::shutdown(&workdir)?;
-        booted.kernel.shutdown().await;
+        stop_kernel(&booted.kernel).await;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -580,7 +596,7 @@ async fn dispatch(
         apply_ledger_cap(&booted, cap);
         eprintln!("{USAGE}");
         // Python's `sys.exit(2)` still runs the atexit shutdown chain.
-        booted.kernel.shutdown().await;
+        stop_kernel(&booted.kernel).await;
         return Ok(ExitCode::from(2));
     }
 
@@ -631,7 +647,7 @@ async fn dispatch(
         {
             msg.push_str(&format!("\n  hint: {}", fantastic_bundle::py_str(hint)));
         }
-        kernel.shutdown().await;
+        stop_kernel(&kernel).await;
         bootstrap::shutdown(&workdir)?;
         return Err(msg.into());
     }
@@ -643,7 +659,7 @@ async fn dispatch(
     let mut stop = match sys::StopSignals::install() {
         Ok(s) => s,
         Err(e) => {
-            kernel.shutdown().await;
+            stop_kernel(&kernel).await;
             bootstrap::shutdown(&workdir)?;
             return Err(format!("cannot install the stop-signal handlers: {e}").into());
         }
@@ -682,7 +698,7 @@ async fn dispatch(
     // shutdown`'s own completion flag makes a second call a no-op.
     eprintln!("[kernel] tearing down agents...");
     let _ = std::io::Write::flush(&mut std::io::stderr());
-    kernel.shutdown().await;
+    stop_kernel(&kernel).await;
     eprintln!("[kernel] down");
     let _ = std::io::Write::flush(&mut std::io::stderr());
     // Lock release LAST — python's `with FantasticLock():` wraps the whole
