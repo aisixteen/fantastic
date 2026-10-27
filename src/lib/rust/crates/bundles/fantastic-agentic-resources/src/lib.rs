@@ -89,7 +89,7 @@ fn verb_docs_json() -> Value {
         "reflect": "Identity, whether the registry is enabled, and the role names. No args.",
         "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
         "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
-        "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied.",
+        "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused `not_allowed`, and a grant that cannot be written undoes the whole spawn (`grant_failed`).",
         "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). `done` or `failed` also PAUSES the reporter (its slot is freed; the other states change nothing). Refused `not_spawned` for any other caller. Nothing is deleted on done. Returns {ok:true}.",
         "fleet": "No args. Returns {roles:{<role>:[{id}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
         "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
@@ -553,6 +553,9 @@ async fn spawn_reply(
     };
 
     let caller = current_origin();
+    if let Some(refusal) = escalation(kernel, &caller, card) {
+        return refusal;
+    }
     let parent = caller.clone().unwrap_or_else(|| reg.clone());
     let all = active(kernel, reg).await;
     let mut chain = vec![parent.clone()];
@@ -666,14 +669,28 @@ async fn spawn_reply(
     };
 
     // the registry may hear the child's `report`; the parent controls its subtree
-    if let Some(s) = store.filter(|s| kernel.agents.contains_key(&AgentId::from(s.as_str()))) {
+    let store_id = store
+        .clone()
+        .filter(|s| kernel.agents.contains_key(&AgentId::from(s.as_str())));
+    if let Some(s) = store_id.clone() {
         let cid = child.clone();
         let _ = kernel.edit_callable_by(&AgentId::from(s.as_str()), move |m| {
             grant_verbs(m, &cid, &json!("*"));
             true
         });
     }
-    if let Err(e) = open_edges(kernel, reg, caller.as_ref(), &child, &reg_verbs) {
+    let opened = open_edges(kernel, reg, caller.as_ref(), &child, &reg_verbs)
+        .and_then(|()| open_tool_edges(kernel, &child, card));
+    if let Err(e) = opened {
+        undo_spawn(
+            kernel,
+            reg,
+            caller.as_ref(),
+            store_id.as_deref(),
+            card,
+            &child,
+        )
+        .await;
         return e;
     }
     if let Some(text) = first_message {
@@ -762,6 +779,130 @@ struct SpawnFrom<'a> {
     delegated: &'a Map<String, Value>,
     name: &'a Option<String>,
     first_message: Option<String>,
+}
+
+/// The card's grants on tools: literal local agent ids only (not `$registry`, not
+/// `$self`-like tokens, not `<guid>|x` peer keys).
+fn tool_grants(card: &Card) -> Vec<(String, Value)> {
+    card.grants
+        .iter()
+        .filter(|(k, _)| !k.starts_with('$') && !k.contains('|'))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// A card may only grant what its spawner holds: `None` when there is no caller (the
+/// operator) or every verb the card lists on a tool is in the caller's own `can_call`;
+/// otherwise the `not_allowed` refusal. `"*"` needs the caller to hold `"*"`.
+fn escalation(kernel: &Kernel, caller: &Option<AgentId>, card: &Card) -> Option<Value> {
+    let who = caller.as_ref()?;
+    let holder = agent_of(kernel, who);
+    let grant = holder
+        .as_ref()
+        .map(|w| meta_of(w).get("can_call").cloned().unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+    let parent = holder
+        .as_ref()
+        .and_then(|w| w.parent_id.as_ref().map(|p| p.as_str().to_string()));
+    for (tool, verbs) in tool_grants(card) {
+        let listed: Vec<String> = match &verbs {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let ancestors =
+            kernel.ancestor_ids(agent_of(kernel, &AgentId::from(tool.as_str())).as_deref());
+        for verb in &listed {
+            let held = fantastic_kernel::authz::authorize_call(
+                &grant,
+                verb,
+                &tool,
+                who.as_str(),
+                parent.as_deref(),
+                &ancestors,
+            )
+            .allowed;
+            if !held {
+                return Some(fail(
+                    "not_allowed",
+                    format!(
+                        "spawn: {who} may not grant {} on {} (role {})",
+                        py_repr(verb),
+                        py_repr(&tool),
+                        py_repr(&card.name)
+                    ),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Admit `child` on the tools its card grants (the tool's end of the edge; the
+/// child's own end is its `can_call`). A tool that is not an agent is skipped. All or
+/// nothing: on a refused edit the edits made are taken back.
+fn open_tool_edges(kernel: &Kernel, child: &str, card: &Card) -> Result<(), Value> {
+    let mut done: Vec<AgentId> = Vec::new();
+    for (tool, verbs) in tool_grants(card) {
+        let id = AgentId::from(tool.as_str());
+        if agent_of(kernel, &id).is_none() {
+            continue;
+        }
+        let cid = child.to_string();
+        match kernel.edit_callable_by(&id, move |m| {
+            grant_verbs(m, &cid, &verbs);
+            true
+        }) {
+            Ok(_) => done.push(id),
+            Err(e) => {
+                tool_ungrant(kernel, child, &done);
+                return Err(fail("grant_failed", format!("spawn: {e}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Take `child` back out of the `callable_by` of `tools`.
+fn tool_ungrant(kernel: &Kernel, child: &str, tools: &[AgentId]) {
+    for t in tools {
+        let cid = child.to_string();
+        let _ = kernel.edit_callable_by(t, move |m| m.remove(&cid).is_some());
+    }
+}
+
+/// Take a half-made spawn back: its tool edges, its keys on the registry, the memory
+/// store and the caller, then the agent itself.
+async fn undo_spawn(
+    kernel: &Arc<Kernel>,
+    reg: &AgentId,
+    caller: Option<&AgentId>,
+    store: Option<&str>,
+    card: &Card,
+    child: &str,
+) {
+    let tools: Vec<AgentId> = tool_grants(card)
+        .into_iter()
+        .map(|(t, _)| AgentId::from(t.as_str()))
+        .filter(|t| agent_of(kernel, t).is_some())
+        .collect();
+    tool_ungrant(kernel, child, &tools);
+    if let Some(s) = store {
+        let cid = child.to_string();
+        let _ = kernel.edit_callable_by(&AgentId::from(s), move |m| m.remove(&cid).is_some());
+    }
+    let cid = child.to_string();
+    let _ = kernel.edit_callable_by(reg, move |m| m.remove(&cid).is_some());
+    if let Some(c) = caller {
+        let cid = child.to_string();
+        let _ = kernel.edit_can_call(c, move |m| m.remove(&cid).is_some());
+    }
+    if let Some(a) = agent_of(kernel, &AgentId::from(child)) {
+        fantastic_kernel::lifecycle::cascade_delete(kernel, &a).await;
+    }
 }
 
 /// Does `who` hold `fork` on `source` in its own `can_call`?
@@ -942,17 +1083,19 @@ async fn spawn_from(kernel: &Arc<Kernel>, c: &SpawnFrom<'_>, src: &str, at: i64)
             true
         })
         .map_err(|e| fail("grant_failed", format!("spawn: {e}")))
-        .and_then(|_| open_edges(kernel, reg, c.caller.as_ref(), &child, &reg_verbs));
+        .and_then(|_| open_edges(kernel, reg, c.caller.as_ref(), &child, &reg_verbs))
+        .and_then(|()| open_tool_edges(kernel, &child, card));
     if let Err(e) = opened {
         // nothing of the registry is left behind
-        fantastic_kernel::lifecycle::cascade_delete(kernel, &fork).await;
-        if let Some(s) = &store {
-            let cid = child.clone();
-            let _ = kernel.edit_callable_by(&AgentId::from(s.as_str()), move |m| {
-                m.remove(&cid).is_some()
-            });
-        }
-        let _ = kernel.edit_callable_by(reg, |m| m.remove(&child).is_some());
+        undo_spawn(
+            kernel,
+            reg,
+            c.caller.as_ref(),
+            store.as_deref(),
+            card,
+            &child,
+        )
+        .await;
         return e;
     }
     if let Some(text) = c.first_message.clone() {
