@@ -226,6 +226,32 @@ impl RouteTable {
         self.order();
     }
 
+    /// A literal `(kind, method, path)` this child declares that ANOTHER mounted
+    /// child already holds: resolution is first-match-wins, so the second
+    /// declaration could never answer. Patterns (`{`) are by design shared (every
+    /// `web_ws` leg declares `/{host_id}/ws`); base routes are not checked; a
+    /// websocket route and an http route, or two methods, never shadow each other.
+    pub(crate) fn conflict(&self, child: &AgentId, routes: &[Route]) -> Option<String> {
+        for route in routes.iter().filter(|r| !r.path.contains('{')) {
+            for (other, theirs) in self.children.iter().filter(|(c, _)| c != child) {
+                if theirs
+                    .iter()
+                    .any(|t| t.path == route.path && t.method == route.method)
+                {
+                    let kind = route
+                        .method
+                        .as_ref()
+                        .map_or("WS".to_string(), |m| m.to_string());
+                    return Some(format!(
+                        "web: route {kind} {} declared by {child} is already declared by {other}",
+                        route.path
+                    ));
+                }
+            }
+        }
+        None
+    }
+
     /// python `_unmount_surface` — drop every route belonging to a child.
     pub(crate) fn unmount(&mut self, child: &AgentId) {
         self.children.retain(|(c, _)| c != child);

@@ -3183,6 +3183,10 @@ mod watch_path;
 #[path = "tests_route_order.rs"]
 mod route_order;
 
+/// Two children, one literal route: refused (python `test_mount.py`).
+#[path = "tests_duplicate_route.rs"]
+mod duplicate_route;
+
 /// The ws leg as the transport of cross-kernel addressing (python
 /// `web_ws/tests/test_peer_calls.py`).
 #[path = "tests_peer_calls.rs"]
