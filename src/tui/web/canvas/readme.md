@@ -12,6 +12,13 @@ host (Python/Rust) knows nothing about it (weak binding). The library does
 the kernel, the WS bridge and the persistence (`boot`); this app registers its
 bundles, seeds an empty tree with the canvas root, and mounts.
 
+## Opening one canvas
+
+The page opens the host's main canvas (else the first). `?canvas=<node id>` opens
+that canvas instead, so an iframe may point at `<page url>?canvas=<id>`; an id the
+host does not hold shows `no canvas <id> on this host` (never the main canvas).
+`src/canvas_pick.ts` holds the choice.
+
 ## What's in it
 
 - **canvas** — the compositor root; renders the frontend's own member tree, each
