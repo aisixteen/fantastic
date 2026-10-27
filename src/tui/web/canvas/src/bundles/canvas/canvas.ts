@@ -28,6 +28,12 @@ const CELL_VERBS = ["reflect", "get_html", "set_html", "emit"] as const;
 /** What a cell's AI may ask the background. */
 const BG_VERBS = ["set_bg", "default_bg", "clear_bg", "get_bg", "reflect"] as const;
 import { MCP_ADD_VIEW, mcpAddView, mcpView, setMcpDeps } from "../mcp_view/mcp_view.ts";
+import { resourcesView } from "../resources_view/resources_view.ts";
+import { tasksView } from "../tasks_view/tasks_view.ts";
+import { storeView } from "../store_view/store_view.ts";
+import { schedulerView } from "../scheduler_view/scheduler_view.ts";
+import { cabinetsView } from "../cabinets_view/cabinets_view.ts";
+import { credentialsView } from "../credentials_view/credentials_view.ts";
 import { canvasesView, setCanvasesDeps } from "../side_view/side_view.ts";
 import { FILES_VERBS } from "../files/files_controller.ts";
 import { filesView } from "../files/files_view.ts";
@@ -57,7 +63,7 @@ import type { GlHost, GlView } from "./gl_host.ts";
 // kernel sends. The kernel knows none of this.
 
 // inline view registry — host handler_module → TS view bundle
-const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, filesView, previewView, canvasesView, mcpView, mcpAddView, backgroundsView];
+const VIEW_BUNDLES: readonly ViewBundle[] = [terminalView, aiView, htmlView, agentViewBundle, setupView, reflectView, streamView, filesView, previewView, canvasesView, mcpView, mcpAddView, backgroundsView, resourcesView, tasksView, storeView, schedulerView, cabinetsView, credentialsView];
 // A PAGE BUNDLE's instance (handler_module = its folder name) is drawn by its
 // BASE's view (`base: html_agent` → `html_agent.ts`), read off the catalog row.
 function viewFor(handlerModule: unknown, kernel: Kernel): ViewBundle | undefined {

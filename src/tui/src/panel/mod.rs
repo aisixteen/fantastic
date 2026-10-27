@@ -20,11 +20,18 @@
 
 pub mod activity;
 pub mod ai;
+pub mod cabinet;
+pub mod credentials;
 pub mod files;
 pub mod generic;
+pub mod readonly;
+pub mod resources;
+pub mod scheduler;
 pub mod setup;
-pub mod wizard;
+pub mod store;
+pub mod tasks;
 pub mod terminal;
+pub mod wizard;
 
 use serde_json::Value;
 
@@ -45,6 +52,18 @@ pub enum PanelKind {
     Activity,
     /// Not an agent: the page that writes a new ai agent's record.
     Setup,
+    /// `agentic_resources`: roles, fleet, counts and limits. Read-only.
+    Resources,
+    /// `task_registry`: the task tree. Read-only.
+    Tasks,
+    /// `ram_store` and `sqlite_store`: owners, counts, search. Read-only.
+    Store,
+    /// `scheduler`: jobs and their last results. Read-only.
+    Scheduler,
+    /// `cabinet`: a manager's cabinets, or one cabinet's cell. Read-only.
+    Cabinet,
+    /// `credential_store`: names and grants, never a value. Read-only.
+    Credentials,
 }
 
 impl PanelKind {
@@ -66,6 +85,12 @@ impl PanelKind {
         }
         match m {
             "file_bridge.tools" => PanelKind::Files,
+            "agentic_resources.tools" => PanelKind::Resources,
+            "task_registry.tools" => PanelKind::Tasks,
+            "ram_store.tools" | "sqlite_store.tools" => PanelKind::Store,
+            "scheduler.tools" => PanelKind::Scheduler,
+            "cabinet.tools" => PanelKind::Cabinet,
+            "credential_store.tools" => PanelKind::Credentials,
             _ => PanelKind::Generic,
         }
     }
@@ -78,6 +103,12 @@ impl PanelKind {
             PanelKind::Generic => "agent",
             PanelKind::Activity => "activity",
             PanelKind::Setup => "setup",
+            PanelKind::Resources => "resources",
+            PanelKind::Tasks => "tasks",
+            PanelKind::Store => "store",
+            PanelKind::Scheduler => "scheduler",
+            PanelKind::Cabinet => "cabinet",
+            PanelKind::Credentials => "credentials",
         }
     }
 }
@@ -193,6 +224,12 @@ pub fn make(kind: PanelKind, agent: &AgentId) -> Box<dyn Panel> {
         PanelKind::Generic => Box::new(generic::GenericPanel::new(agent.clone())),
         PanelKind::Activity => Box::new(activity::ActivityPanel::new()),
         PanelKind::Setup => Box::new(setup::SetupPanel::new()),
+        PanelKind::Resources => Box::new(resources::ResourcesPanel::new(agent.clone())),
+        PanelKind::Tasks => Box::new(tasks::TasksPanel::new(agent.clone())),
+        PanelKind::Store => Box::new(store::StorePanel::new(agent.clone())),
+        PanelKind::Scheduler => Box::new(scheduler::SchedulerPanel::new(agent.clone())),
+        PanelKind::Cabinet => Box::new(cabinet::CabinetPanel::new(agent.clone())),
+        PanelKind::Credentials => Box::new(credentials::CredentialsPanel::new(agent.clone())),
     }
 }
 
@@ -225,6 +262,51 @@ mod tests {
     #[test]
     fn the_known_surfaces_map_to_their_own_panels() {
         assert_eq!(PanelKind::of("x", "file_bridge.tools"), PanelKind::Files);
+    }
+
+    #[test]
+    fn the_registry_and_store_agents_map_to_their_own_panels() {
+        for (m, k) in [
+            ("agentic_resources.tools", PanelKind::Resources),
+            ("task_registry.tools", PanelKind::Tasks),
+            ("ram_store.tools", PanelKind::Store),
+            ("sqlite_store.tools", PanelKind::Store),
+            ("scheduler.tools", PanelKind::Scheduler),
+            ("cabinet.tools", PanelKind::Cabinet),
+            ("credential_store.tools", PanelKind::Credentials),
+        ] {
+            assert_eq!(PanelKind::of("x", m), k, "{m}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_module_still_gets_the_generic_panel_after_the_new_kinds() {
+        for m in ["scheduler", "store.tools", "cabinet", "credential_store", "task_registry.tool"] {
+            assert_eq!(PanelKind::of("x", m), PanelKind::Generic, "{m}");
+        }
+    }
+
+    #[test]
+    fn make_builds_a_panel_of_the_requested_kind_for_every_new_kind() {
+        let kinds = [
+            PanelKind::Resources,
+            PanelKind::Tasks,
+            PanelKind::Store,
+            PanelKind::Scheduler,
+            PanelKind::Cabinet,
+            PanelKind::Credentials,
+        ];
+        let a: AgentId = "x".into();
+        let mut labels = std::collections::HashSet::new();
+        for k in kinds {
+            assert_eq!(make(k, &a).kind(), k);
+            assert!(labels.insert(k.label()), "{}", k.label());
+            let n = make(k, &a).needs();
+            assert!(!n.rows && n.reflect && n.watch);
+        }
+        for k in [PanelKind::Ai, PanelKind::Terminal, PanelKind::Files, PanelKind::Generic, PanelKind::Activity, PanelKind::Setup] {
+            assert!(labels.insert(k.label()), "{}", k.label());
+        }
     }
 
     #[test]
