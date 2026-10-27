@@ -13,8 +13,9 @@
 //!   either call shows it as `[secret]`.
 //! - An AI agent NAMES its ref on its record (`credentials: {store, ref}`) and
 //!   its backend reads it before every request: a stored or rotated key is live
-//!   on the next call, with no restart. [`wire`] gives it the three grants that
-//!   takes (its `can_call` [get], the store's `callable_by`, the ref's readers).
+//!   on the next call, with no restart. Reading it takes two grants: its own
+//!   `can_call` [get] on the store, written at create ([`grant_on_create`]), and
+//!   the store's `callable_by` naming it, written by [`wire`].
 //! - The refs (metadata only — host, field names) are also remembered in the
 //!   user's home, so every project's store knows the keys already stored there.
 
