@@ -220,7 +220,7 @@ pub async fn create_from_payload(
         }
     }
 
-    // The structural authority baseline ({$self,$parent,$subtree} on both
+    // The structural authority baseline ({$self:*} on both
     // `can_call` and `callable_by`) is stamped + merged uniformly in `Agent::new`
     // for EVERY agent — so it is NOT re-stamped here; an explicit grant in the
     // payload rides in `meta` and merges over the baseline at construction.
