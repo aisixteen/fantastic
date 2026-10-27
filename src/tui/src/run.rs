@@ -35,9 +35,7 @@ pub async fn main_loop(opts: Opts) -> Result<()> {
     }
     // Running here IS the command to init, like `fantastic mcp`: a fresh
     // directory is seeded before anything else.
-    if paths.is_fresh() {
-        crate::boot::seed::write_all(&paths).map_err(|e| anyhow::anyhow!("init failed: {e}"))?;
-    }
+    crate::boot::seed::seed_dir(&paths.cwd).map_err(|e| anyhow::anyhow!("init failed: {e}"))?;
     let mut app = App::new(paths.clone());
     app.want = opts.shows();
 

@@ -14,7 +14,9 @@
 //! `main_with(args, &[])`. Another binary (aisixteen/fantastic_shift: a headless
 //! one, an app) runs the same shell with its own bundles: each [`Extra`] it
 //! passes registers them on the host's registry AFTER the stock set, in every
-//! mode that boots a kernel (the UI, `--headless`, `canvas`, `mcp`).
+//! mode that boots a kernel (the UI, `--headless`, `canvas`, `mcp`). A host
+//! that boots its own kernel in a directory first calls [`seed_dir`], so a fresh
+//! directory has the same `user` record the CLI writes on a first run.
 
 mod app;
 mod atomic;
@@ -55,6 +57,10 @@ use anyhow::Result;
 /// bundles against the SAME crate (`fantastic_tui::fantastic_kernel::bundle::Bundle`).
 pub use fantastic_kernel;
 pub use fantastic_kernel::BundleRegistry;
+/// Seed a directory like the `fantastic` CLI's first run: writes the blueprint
+/// tree (the `user` record and its children) when `.fantastic` is absent and
+/// returns `Ok(true)`; a no-op returning `Ok(false)` once it exists.
+pub use boot::seed::seed_dir;
 
 /// AN EMBEDDER'S BUNDLES: registers them on the host's registry, after the stock
 /// set (`kern/host.rs`), so a record naming one hydrates into a live agent.

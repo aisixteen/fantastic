@@ -110,6 +110,23 @@ pub fn write_all(paths: &Paths) -> Result<(), String> {
     write_from(paths, BLUEPRINT)
 }
 
+/// THE HOST ENTRY POINT: seed `dir` the way the `fantastic` CLI does on a first
+/// run. An embedding binary calls this before booting its kernel in `dir`.
+///
+/// Idempotent: when `dir/.fantastic` already exists it writes nothing and
+/// returns `Ok(false)`; otherwise it writes the blueprint tree (the `user`
+/// record and its children) and returns `Ok(true)`. Refuses the fantastic home
+/// itself, like the CLI. The error text is the writer's.
+pub fn seed_dir(dir: &std::path::Path) -> Result<bool, String> {
+    let paths = Paths::at(dir);
+    if !paths.is_fresh() {
+        return Ok(false);
+    }
+    paths.refuse_the_home()?;
+    write_all(&paths)?;
+    Ok(true)
+}
+
 /// `write_all` over an explicit blueprint text, so tests can prove the writer's
 /// refusals without editing the shipped file.
 fn write_from(paths: &Paths, text: &str) -> Result<(), String> {
@@ -320,6 +337,73 @@ mod tests {
         let u = rec(&p, "user/agent.yaml");
         assert!(u["can_call"].get(ROOT_PLACEHOLDER).is_none(), "the placeholder never reaches disk");
         assert_eq!(u["can_call"][ROOT_ID], "*");
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(base: &std::path::Path, d: &std::path::Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for e in std::fs::read_dir(d).unwrap().filter_map(Result::ok) {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(base, &p, out);
+                } else {
+                    let rel = p.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                    out.insert(rel, std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    #[test]
+    fn seed_dir_on_a_fresh_dir_writes_the_same_tree_as_the_cli() {
+        let a = sandbox("seed_a");
+        let b = sandbox("seed_b");
+        assert_eq!(seed_dir(&a.cwd), Ok(true));
+        write_all(&b).unwrap();
+        let (sa, sb) = (snapshot(&a.store), snapshot(&b.store));
+        assert_eq!(sa, sb);
+        for k in ["kernel_memory", "user", "user/agents/memory", "user/agents/store", "user/agents/exec", "user/agents/files"] {
+            assert!(sa.contains_key(&format!("agents/{k}/agent.yaml")), "{k}");
+        }
+        assert!(!sa.contains_key("agent.yaml"), "the kernel owns the root record");
+        let _ = std::fs::remove_dir_all(&a.cwd);
+        let _ = std::fs::remove_dir_all(&b.cwd);
+    }
+
+    #[test]
+    fn seed_dir_twice_changes_nothing() {
+        let p = sandbox("seed_twice");
+        assert_eq!(seed_dir(&p.cwd), Ok(true));
+        let f = p.store.join("agents/user/agent.yaml");
+        let mut text = std::fs::read_to_string(&f).unwrap();
+        text.push_str("# marker\n");
+        std::fs::write(&f, &text).unwrap();
+        let before = snapshot(&p.store);
+        assert_eq!(seed_dir(&p.cwd), Ok(false));
+        assert_eq!(snapshot(&p.store), before);
+        assert!(std::fs::read_to_string(&f).unwrap().contains("# marker"));
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn seed_dir_leaves_an_existing_store_alone() {
+        let p = sandbox("seed_existing");
+        std::fs::create_dir_all(&p.store).unwrap();
+        assert_eq!(seed_dir(&p.cwd), Ok(false));
+        assert!(!p.store.join("agents").exists());
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn seed_dir_reports_a_write_failure() {
+        let p = sandbox("seed_fail");
+        let file = p.cwd.join("not_a_dir");
+        std::fs::write(&file, b"x").unwrap();
+        let err = seed_dir(&file).unwrap_err();
+        assert!(err.contains("could not write"), "{err}");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
 }
