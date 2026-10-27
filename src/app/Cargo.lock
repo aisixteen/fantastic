@@ -1018,6 +1018,7 @@ dependencies = [
  "fantastic-kernel",
  "rusqlite",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
