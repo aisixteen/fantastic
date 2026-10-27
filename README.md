@@ -51,7 +51,7 @@ model to take it from there with `create_agent`, `send` and `docs`.
 - **AI agents** over vLLM, Ollama, the OpenAI Responses API and Anthropic's
   Messages API (plus Apple's on-device model on macOS, through a small
   Swift Foundation Models bridge the Rust kernel links). Tool calling is the
-  kernel's own prompt-taught `<call>` grammar — no provider tool API — so any
+  fantastic's own prompt-taught `<call>` grammar (in `ai_core`) — no provider tool API — so any
   capable model drives the same verbs.
 - **IO legs**: `file_bridge` (files, edits, streams, watches; clamped to the
   running dir, deny-all at the path level), `exec_bridge` (allow-listed commands
