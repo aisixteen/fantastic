@@ -22,6 +22,7 @@ pub mod activity;
 pub mod ai;
 pub mod cabinet;
 pub mod credentials;
+pub mod declared;
 pub mod files;
 pub mod generic;
 pub mod readonly;
@@ -64,9 +65,20 @@ pub enum PanelKind {
     Cabinet,
     /// `credential_store`: names and grants, never a value. Read-only.
     Credentials,
+    /// Any agent whose record declares `view.tui`: sections drawn from data.
+    Declared,
 }
 
 impl PanelKind {
+    /// The choice: a built-in kind first, then a declared `view.tui`, then the
+    /// generic panel.
+    pub fn choose(id: &str, handler_module: &str, declared: bool) -> Self {
+        match Self::of(id, handler_module) {
+            PanelKind::Generic if declared => PanelKind::Declared,
+            k => k,
+        }
+    }
+
     /// The classification. Suffix matching on the module is deliberate: a kernel
     /// may ship `vllm_backend.tools` or `responses_backend.tools` and both are
     /// the same UI, so the rule is "ends with `_backend.tools`", not a list of
@@ -109,6 +121,7 @@ impl PanelKind {
             PanelKind::Scheduler => "scheduler",
             PanelKind::Cabinet => "cabinet",
             PanelKind::Credentials => "credentials",
+            PanelKind::Declared => "declared",
         }
     }
 }
@@ -150,6 +163,9 @@ pub trait Panel {
     fn on_event(&mut self, payload: &Value, out: &mut Vec<Cmd>) -> bool;
     /// The agent just became the selection.
     fn on_select(&mut self, cx: &Cx<'_>, out: &mut Vec<Cmd>);
+    /// The clock, called for the SELECTED panel only (`now` in epoch seconds):
+    /// a panel that refreshes on a period pushes its reads here. Default: none.
+    fn tick(&mut self, _now: f64, _out: &mut Vec<Cmd>) {}
     /// A reply to something this panel asked for. Returns whether it took it.
     ///
     /// This is how a pane shows what a call answered. Sending a verb and seeing
@@ -230,6 +246,7 @@ pub fn make(kind: PanelKind, agent: &AgentId) -> Box<dyn Panel> {
         PanelKind::Scheduler => Box::new(scheduler::SchedulerPanel::new(agent.clone())),
         PanelKind::Cabinet => Box::new(cabinet::CabinetPanel::new(agent.clone())),
         PanelKind::Credentials => Box::new(credentials::CredentialsPanel::new(agent.clone())),
+        PanelKind::Declared => Box::new(declared::DeclaredPanel::new(agent.clone())),
     }
 }
 
@@ -307,6 +324,28 @@ mod tests {
         for k in [PanelKind::Ai, PanelKind::Terminal, PanelKind::Files, PanelKind::Generic, PanelKind::Activity, PanelKind::Setup] {
             assert!(labels.insert(k.label()), "{}", k.label());
         }
+    }
+
+    #[test]
+    fn panel_choice_order_built_in_then_declared_then_generic() {
+        assert_eq!(PanelKind::choose("x", "scheduler.tools", true), PanelKind::Scheduler);
+        assert_eq!(PanelKind::choose("x", "ai_core.tools", true), PanelKind::Ai);
+        assert_eq!(
+            PanelKind::choose("term", fantastic_exec_bridge::HANDLER_MODULE, true),
+            PanelKind::Terminal
+        );
+        assert_eq!(PanelKind::choose("x", "my.tools", true), PanelKind::Declared);
+        assert_eq!(PanelKind::choose("x", "my.tools", false), PanelKind::Generic);
+    }
+
+    #[test]
+    fn make_builds_a_declared_panel_of_kind_declared() {
+        let a: AgentId = "x".into();
+        let p = make(PanelKind::Declared, &a);
+        assert_eq!(p.kind(), PanelKind::Declared);
+        assert_eq!(PanelKind::Declared.label(), "declared");
+        let n = p.needs();
+        assert!(!n.rows && n.reflect && !n.watch);
     }
 
     #[test]
