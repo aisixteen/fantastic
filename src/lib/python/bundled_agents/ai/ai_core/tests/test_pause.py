@@ -265,3 +265,13 @@ async def test_status_has_no_paused_field(seeded_kernel, fake_providers):
         assert "paused" not in st, st
     finally:
         fake_providers.pop(aid, None)
+
+
+# twin of the Rust test in tests_pause.rs
+def test_pause_and_resume_are_documented_like_every_other_verb():
+    pause = core._pause.__doc__ or ""
+    resume = core._resume.__doc__ or ""
+    assert pause.startswith("args: "), pause
+    assert resume.startswith("args: "), resume
+    assert "{paused:bool, held:int}" in pause, pause
+    assert "{resumed:bool, released:int}" in resume, resume

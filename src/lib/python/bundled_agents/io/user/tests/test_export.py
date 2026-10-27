@@ -410,3 +410,12 @@ def test_no_owned_files_when_the_record_has_none():
     ex = export(tree())
     assert ex.files == [] and ex.code == [], ex.files
     assert "# code:" not in ex.yaml
+
+
+def test_a_secret_hit_names_the_file_with_slashes_on_every_os(tmp_path):
+    d = tmp_path / "bundles" / "py_ab12"
+    d.mkdir(parents=True)
+    (d / "agent.py").write_text("KEY = 'sk-abcd1234efgh'\n")
+    hits = scan_secrets(tmp_path)
+    assert hits == ["bundles/py_ab12/agent.py: an sk- key token"], hits
+    assert all("\\" not in h for h in hits), hits
