@@ -36,6 +36,18 @@ def test_an_unknown_code_is_a_programming_error():
         "unbound_ports",
         "bad_binding",
         "code_not_allowed",
+        "limit",
+        "not_allowed",
+        "grant_failed",
+        "unknown_tier",
+        "bad_tier",
+        "no_root",
+        "not_spawned",
+        "disabled",
+        "store_refused",
+        "already_held",
+        "not_held",
+        "not_in_subtree",
     }
     with pytest.raises(ValueError) as e:
         refusal("memory_store", "x")
@@ -131,3 +143,45 @@ async def test_the_id_index_is_bounded(seeded_kernel):
     assert r["reason"] == "unknown_agent", r
     assert len(r["agents"]) == Kernel.UNKNOWN_AGENT_IDS_MAX, r
     assert r["agent_count"] == len(seeded_kernel.ctx.agents) > 200, r
+
+
+def test_every_refusal_code_is_in_the_closed_set():
+    for code in (
+        "limit",
+        "not_allowed",
+        "grant_failed",
+        "unknown_tier",
+        "bad_tier",
+        "no_root",
+        "not_spawned",
+        "disabled",
+        "store_refused",
+        "already_held",
+        "not_held",
+        "not_in_subtree",
+    ):
+        assert code in CODES
+        assert refusal(code, "x") == {"error": "x", "reason": code}
+
+
+
+def test_new_bundle_codes_are_in_closed_set():
+    from kernel import _refusal
+
+    for name in (
+        "LIMIT",
+        "NOT_ALLOWED",
+        "GRANT_FAILED",
+        "UNKNOWN_TIER",
+        "BAD_TIER",
+        "NO_ROOT",
+        "NOT_SPAWNED",
+        "DISABLED",
+        "STORE_REFUSED",
+        "ALREADY_HELD",
+        "NOT_HELD",
+        "NOT_IN_SUBTREE",
+    ):
+        code = getattr(_refusal, name)
+        assert code == name.lower() and code in CODES
+        assert refusal(code, "x") == {"error": "x", "reason": code}

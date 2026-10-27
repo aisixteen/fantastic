@@ -220,3 +220,28 @@ fn every_builder_serializes_in_pythons_key_order() {
         r#"{"error":"create_agent: id must be a single path segment (no separators); got 'a/b'","reason":"bad_arg","arg":"id"}"#
     );
 }
+
+#[test]
+fn new_bundle_codes_are_in_closed_set() {
+    for code in [
+        LIMIT,
+        NOT_ALLOWED,
+        GRANT_FAILED,
+        UNKNOWN_TIER,
+        BAD_TIER,
+        NO_ROOT,
+        NOT_SPAWNED,
+        DISABLED,
+        STORE_REFUSED,
+        ALREADY_HELD,
+        NOT_HELD,
+        NOT_IN_SUBTREE,
+    ] {
+        assert!(CODES.contains(&code), "{code}");
+        assert_eq!(
+            refusal(code, "x"),
+            serde_json::json!({"error": "x", "reason": code})
+        );
+    }
+    assert_eq!(CODES.len(), 28);
+}

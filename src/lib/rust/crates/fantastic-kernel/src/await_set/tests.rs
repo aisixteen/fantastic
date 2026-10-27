@@ -423,3 +423,20 @@ async fn await_set_completion_race_delivers_once() {
     let combined: Vec<_> = all.iter().filter(|p| p.get("wait_id").is_some()).collect();
     assert_eq!(combined.len(), 1, "exactly one combined message: {all:?}");
 }
+
+#[tokio::test]
+async fn await_set_refusals_are_kernel_shape() {
+    let (k, _rec) = fleet(&["w1"]).await;
+    for (p, code) in [
+        (json!({"type": "await_set"}), "missing_arg"),
+        (
+            json!({"type": "await_set", "ids": ["nobody"]}),
+            "unknown_agent",
+        ),
+    ] {
+        let r = as_lead(&k, p.clone()).await;
+        assert_eq!(r["reason"], json!(code), "{p}: {r}");
+        let sentence = r["error"].as_str().unwrap();
+        assert!(sentence.contains(' ') && sentence != code, "{p}: {r}");
+    }
+}

@@ -288,8 +288,8 @@ async def test_spawn_unknown_tier_refused(kernel, tmp_path):
     card = "---\nname: odd\npurpose: Odd.\ntier: nowhere\n---\nd\n"
     r = await rig(kernel, tmp_path, ["lead"], [("odd.md", card)])
     out = await r.spawn_as("lead", role="odd")
-    assert out["error"] == "unknown_tier", out
-    assert "'nowhere'" in out["reason"]
+    assert out["reason"] == "unknown_tier", out
+    assert "'nowhere'" in out["error"]
     assert (await r.spawn_as("lead", role="ghost"))["reason"] == "not_found"
     assert (await r.op({"type": "fleet"}))["roles"] == {}
 
@@ -302,10 +302,10 @@ async def test_per_role_limit_refuses_past_cap(kernel, tmp_path):
     for _ in range(2):
         assert "id" in await r.spawn_as("lead", role="writer")
     out = await r.spawn_as("lead", role="writer")
-    assert out["error"] == "limit", out
+    assert out["reason"] == "limit", out
     assert out["scope"] == "role" and out["role"] == "writer"
     assert out["running"] == 2 and out["max"] == 2
-    assert "writer" in out["reason"]
+    assert "writer" in out["error"]
     assert "id" in await r.spawn_as("lead", role="reviewer")
 
 
@@ -317,7 +317,7 @@ async def test_total_limit_refuses_past_cap(kernel, tmp_path):
     assert "id" in await r.spawn_as("lead", role="writer")
     assert "id" in await r.spawn_as("lead", role="reviewer")
     out = await r.spawn_as("lead", role="writer")
-    assert out["error"] == "limit" and out["scope"] == "total", out
+    assert out["reason"] == "limit" and out["scope"] == "total", out
     assert (out["running"], out["max"]) == (2, 2)
     assert await r.count() == {"running": 2, "max": 2}
 
@@ -326,7 +326,7 @@ async def test_set_limit_null_clears(kernel, tmp_path):
     r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
     await r.op({"type": "set_limit", "role": "writer", "max": 1})
     await r.spawn_as("lead", role="writer")
-    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
+    assert (await r.spawn_as("lead", role="writer"))["reason"] == "limit"
     assert (await r.op({"type": "set_limit", "role": "writer", "max": None}))["ok"] is True
     assert await r.count("writer") == {"running": 1, "max": None}
     assert "id" in await r.spawn_as("lead", role="writer")
@@ -390,7 +390,11 @@ async def test_disabled_without_registry_handler_or_config(kernel, monkeypatch):
     await create(kernel, handler_module="agentic_resources.tools", id="ar_on")
     for v in ("roles", "role", "spawn", "report", "fleet", "set_limit", "get_count"):
         out = await send(kernel, "ar_on", {"type": v})
-        assert out == {"error": "agentic_resources is disabled"}, v
+        assert out == {
+            "error": "agentic_resources is disabled",
+            "reason": "disabled",
+            "hint": "give the record role_dirs",
+        }, v
 
 
 # ── the extended surface ────────────────────────────────────────────
@@ -447,8 +451,8 @@ async def test_report_messages_parent_and_stores_nothing(kernel, tmp_path):
         "result": {"words": 120},
     }
     no = await r.call("other", r.reg, {"type": "report", "state": "done"})
-    assert no["error"] == "not_spawned", no
-    assert (await r.op({"type": "report", "state": "done"}))["error"] == "not_spawned"
+    assert no["reason"] == "not_spawned", no
+    assert (await r.op({"type": "report", "state": "done"}))["reason"] == "not_spawned"
     bad = await r.call(cid, r.reg, {"type": "report", "state": "finished"})
     assert bad["reason"] == "bad_arg", bad
     assert "task" not in r.meta(cid)
@@ -461,15 +465,15 @@ async def test_delegated_limits_bound_subtree(kernel, tmp_path):
     sub = (await r.spawn_as("boss", role="sublead", limits={"total": 2}))["id"]
     assert r.meta(sub)["limits"] == {"total": 2}
     big = await r.spawn_as(sub, role="sublead", limits={"total": 5})
-    assert (big["error"], big["scope"]) == ("limit", "request"), big
+    assert (big["reason"], big["scope"]) == ("limit", "request"), big
     ok = await r.spawn_as(sub, role="sublead", limits={"total": 1})
     assert "id" in ok, ok
     assert "id" in await r.spawn_as(sub, role="writer")
     third = await r.spawn_as(sub, role="writer")
-    assert third["error"] == "limit" and third["scope"] == "subtree_total", third
+    assert third["reason"] == "limit" and third["scope"] == "subtree_total", third
     assert (third["running"], third["max"]) == (2, 2)
     blocked = await r.spawn_as(ok["id"], role="writer")
-    assert blocked["error"] == "limit", blocked
+    assert blocked["reason"] == "limit", blocked
     assert "id" in await r.spawn_as("boss", role="writer")
 
 
@@ -480,10 +484,10 @@ async def test_get_count_counts_every_spawned_agent(kernel, tmp_path):
     await r.spawn_as("lead", role="writer")
     assert await r.count() == {"running": 2, "max": 2}
     third = await r.spawn_as("lead", role="writer")
-    assert third["error"] == "limit", third
+    assert third["reason"] == "limit", third
     await r.call(a, r.reg, {"type": "report", "state": "done"})
     assert (await r.count())["running"] == 2, "a report frees nothing"
-    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
+    assert (await r.spawn_as("lead", role="writer"))["reason"] == "limit"
     gone = await send(kernel, "kernel_state", {"type": "delete_agent", "id": a})
     assert gone["deleted"] is True
     assert (await r.count())["running"] == 1
@@ -679,7 +683,7 @@ async def test_spawn_from_respects_limits_before_forking(kernel, tmp_path):
     first = await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)})
     assert "id" in first, first
     out = await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)})
-    assert out["error"] == "limit", out
+    assert out["reason"] == "limit", out
     assert out["scope"] == "role"
     assert len(forks_of(kernel, src)) == 1, "fork was not called again"
 
@@ -691,8 +695,8 @@ async def test_spawn_from_requires_the_caller_to_hold_fork(kernel, tmp_path):
     # `other` loses what the rig gave it
     kernel.ctx.edit_can_call("other", lambda m: m.pop(src, None) is not None)
     out = await r.spawn_as("other", role="writer", **{"from": frm(src, 5)})
-    assert out["error"] == "not_allowed", out
-    assert "may not fork" in out["reason"], out
+    assert out["reason"] == "not_allowed", out
+    assert "may not fork" in out["error"], out
     assert forks_of(kernel, src) == []
     assert src not in r.meta(r.reg).get("can_call", {})
     ok = await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)})
@@ -732,7 +736,7 @@ async def test_spawn_from_counts_against_the_leads_subtree_quota(kernel, tmp_pat
     first = await r.spawn_as(sub, role="writer", **{"from": frm(src, 5)})
     assert "id" in first, first
     second = await r.spawn_as(sub, role="writer", **{"from": frm(src, 5)})
-    assert second["error"] == "limit", second
+    assert second["reason"] == "limit", second
     assert second["scope"] == "subtree_total", second
     assert len(forks_of(kernel, src)) == 1
 
@@ -846,7 +850,7 @@ async def test_refused_tool_grant_undoes_the_spawn(kernel, tmp_path):
     lead_before = keys_of(r, "lead", "can_call")
     n = len(kernel.ctx.agents)
     out = await r.spawn_as("lead", role="two", task="go")
-    assert out["error"] == "grant_failed", out
+    assert out["reason"] == "grant_failed", out
     assert len(kernel.ctx.agents) == n, "no child left"
     assert (await r.op({"type": "fleet"}))["roles"] == {}
     assert (await r.count())["running"] == 0
@@ -891,8 +895,8 @@ async def test_spawn_refuses_a_grant_the_spawner_does_not_hold(kernel, tmp_path)
     notes_before = dict(r.meta("notes")["callable_by"])
     n = len(kernel.ctx.agents)
     out = await r.spawn_as("lead", role="wide")
-    assert out["error"] == "not_allowed", out
-    why = out["reason"]
+    assert out["reason"] == "not_allowed", out
+    why = out["error"]
     assert "lead" in why and "write" in why and "notes" in why, why
     assert len(kernel.ctx.agents) == n, "nothing created"
     assert r.meta("notes")["callable_by"] == notes_before
@@ -904,7 +908,7 @@ async def test_spawn_refuses_star_grant_when_spawner_holds_only_verbs(kernel, tm
     await notes_tool(kernel)
     hold(kernel, "lead", "notes", ["read"])
     out = await r.spawn_as("lead", role="star")
-    assert out["error"] == "not_allowed", out
+    assert out["reason"] == "not_allowed", out
 
 
 async def test_spawn_refuses_a_tool_the_spawner_has_no_grant_on(kernel, tmp_path):
@@ -912,7 +916,7 @@ async def test_spawn_refuses_a_tool_the_spawner_has_no_grant_on(kernel, tmp_path
     await notes_tool(kernel)
     kernel.ctx.edit_can_call("lead", lambda m: m.pop("notes", None) is not None)
     out = await r.spawn_as("lead", role="writer")
-    assert out["error"] == "not_allowed", out
+    assert out["reason"] == "not_allowed", out
 
 
 async def test_spawn_from_refuses_escalation_before_forking(kernel, tmp_path):
@@ -920,7 +924,7 @@ async def test_spawn_from_refuses_escalation_before_forking(kernel, tmp_path):
     await notes_tool(kernel)
     hold(kernel, "lead", "notes", ["read"])
     out = await r.spawn_as("lead", role="wide", **{"from": frm(src, 5)})
-    assert out["error"] == "not_allowed", out
+    assert out["reason"] == "not_allowed", out
     assert forks_of(kernel, src) == [], "nothing forked"
 
 
@@ -942,7 +946,7 @@ async def test_subleads_cannot_hand_on_more_than_they_hold(kernel, tmp_path):
     await notes_tool(kernel)
     sub = (await r.spawn_as("lead", role="sublead"))["id"]
     no = await r.spawn_as(sub, role="wide")
-    assert no["error"] == "not_allowed", no
+    assert no["reason"] == "not_allowed", no
     ok = await r.spawn_as(sub, role="writer")
     assert "id" in ok, ok
 
@@ -984,7 +988,7 @@ async def test_paused_agent_keeps_its_slot_and_spawn_is_refused(kernel, tmp_path
     await _spawn_id(r, "lead", "writer")
     await r.call("lead", a, {"type": "pause"})
     third = await r.spawn_as("lead", role="writer")
-    assert third["error"] == "limit" and third["scope"] == "total", third
+    assert third["reason"] == "limit" and third["scope"] == "total", third
     assert (third["running"], third["max"]) == (2, 2)
 
 
@@ -1008,7 +1012,7 @@ async def test_delete_agent_is_the_only_way_to_free_a_slot(kernel, tmp_path):
     await _spawn_id(r, "lead", "writer")
     await r.call("lead", a, {"type": "pause"})
     await r.call(a, r.reg, {"type": "report", "state": "done"})
-    assert (await r.spawn_as("lead", role="writer"))["error"] == "limit"
+    assert (await r.spawn_as("lead", role="writer"))["reason"] == "limit"
     await send(kernel, "kernel_state", {"type": "delete_agent", "id": a})
     assert (await r.count())["running"] == 1
     assert "id" in await r.spawn_as("lead", role="writer")
@@ -1023,12 +1027,12 @@ async def test_delegated_quota_counts_paused_and_done_agents(kernel, tmp_path):
     w = await _spawn_id(r, sub, "writer")
     await r.call("boss", w, {"type": "pause"})
     no = await r.spawn_as(sub, role="writer")
-    assert no["error"] == "limit" and no["scope"] == "subtree_total", no
+    assert no["reason"] == "limit" and no["scope"] == "subtree_total", no
     sub2 = (await r.spawn_as("boss", role="sublead", limits={"per_role": 1}))["id"]
     w2 = await _spawn_id(r, sub2, "writer")
     await r.call(w2, r.reg, {"type": "report", "state": "done"})
     no2 = await r.spawn_as(sub2, role="writer")
-    assert no2["error"] == "limit" and no2["scope"] == "subtree_role", no2
+    assert no2["reason"] == "limit" and no2["scope"] == "subtree_role", no2
 
 
 async def test_get_count_ignores_a_resume_arg_and_registry_grants_only_report(
@@ -1042,3 +1046,138 @@ async def test_get_count_ignores_a_resume_arg_and_registry_grants_only_report(
     assert await r.op({"type": "get_count", "resume": "no_such_agent"}) == plain
     assert r.meta(a)["can_call"][r.reg] == ["roles", "report"]
     assert r.meta(r.reg)["callable_by"][a] == ["roles", "report"]
+
+
+# ── the refusal shape: `error` is a sentence, `reason` is the code ──────────
+
+
+def _assert_shape(out, code):
+    assert out["reason"] == code, out
+    assert " " in out["error"] and out["error"] != code, out
+
+
+async def test_limit_refusal_error_is_a_sentence_reason_is_limit(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await r.op({"type": "set_limit", "role": "writer", "max": 1})
+    await r.spawn_as("lead", role="writer")
+    out = await r.spawn_as("lead", role="writer")
+    _assert_shape(out, "limit")
+    assert "is at its limit" in out["error"]
+    assert out["hint"]
+    assert (out["scope"], out["role"], out["running"], out["max"]) == (
+        "role",
+        "writer",
+        1,
+        1,
+    )
+
+
+async def test_limit_refusal_total_and_subtree_scopes_keep_extras(kernel, tmp_path):
+    r = await rig(
+        kernel, tmp_path, ["boss"], [("writer.md", WRITER), ("sublead.md", SUBLEAD)]
+    )
+    await r.op({"type": "set_limit", "max": 1})
+    await r.spawn_as("boss", role="writer")
+    total = await r.spawn_as("boss", role="writer")
+    _assert_shape(total, "limit")
+    assert total["scope"] == "total" and "lead" not in total
+    await r.op({"type": "set_limit", "max": None})
+    sub = (await r.spawn_as("boss", role="sublead", limits={"total": 2}))["id"]
+    req = await r.spawn_as(sub, role="sublead", limits={"total": 5})
+    _assert_shape(req, "limit")
+    assert (req["scope"], req["lead"]) == ("request", sub)
+    await r.spawn_as(sub, role="writer")
+    await r.spawn_as(sub, role="writer")
+    st = await r.spawn_as(sub, role="writer")
+    _assert_shape(st, "limit")
+    assert (st["scope"], st["lead"]) == ("subtree_total", sub)
+    sub2 = (await r.spawn_as("boss", role="sublead", limits={"per_role": 1}))["id"]
+    await r.spawn_as(sub2, role="writer")
+    sr = await r.spawn_as(sub2, role="writer")
+    _assert_shape(sr, "limit")
+    assert (sr["scope"], sr["lead"]) == ("subtree_role", sub2)
+
+
+async def test_not_allowed_refusal_reason_is_code(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("wide.md", WIDE)])
+    await notes_tool(kernel)
+    hold(kernel, "lead", "notes", ["read"])
+    out = await r.spawn_as("lead", role="wide")
+    _assert_shape(out, "not_allowed")
+    assert "lead" in out["error"] and "write" in out["error"] and "notes" in out["error"]
+    assert out["hint"]
+
+
+async def test_fork_not_allowed_refusal_reason_is_code(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead", "other"], [("writer.md", WRITER)])
+    kernel.ctx.edit_can_call("other", lambda m: m.pop(src, None) is not None)
+    out = await r.spawn_as("other", role="writer", **{"from": frm(src, 5)})
+    _assert_shape(out, "not_allowed")
+    assert "fork" in out["error"], out
+
+
+async def test_grant_failed_refusal_reason_is_code(kernel, tmp_path):
+    card = "---\nname: two\npurpose: Two tools.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n  zpicky: [read]\n---\nx\n"
+    r = await rig(kernel, tmp_path, ["lead"], [("two.md", card)])
+    await notes_tool(kernel)
+    await create(kernel, handler_module="picky.tools", id="zpicky", refuse_grants=True)
+    hold(kernel, "lead", "zpicky", "*")
+    n = len(kernel.ctx.agents)
+    out = await r.spawn_as("lead", role="two")
+    _assert_shape(out, "grant_failed")
+    assert out["error"].startswith("spawn:") and out["hint"], out
+    assert len(kernel.ctx.agents) == n, "nothing left behind"
+    assert (await r.count())["running"] == 0
+
+
+async def test_unknown_tier_refusal_keeps_tier_extra(kernel, tmp_path):
+    card = "---\nname: odd\npurpose: Odd.\ntier: nowhere\n---\nd\n"
+    r = await rig(kernel, tmp_path, ["lead"], [("odd.md", card)])
+    out = await r.spawn_as("lead", role="odd")
+    _assert_shape(out, "unknown_tier")
+    assert out["tier"] == "nowhere"
+
+
+async def test_bad_tier_refusal_reason_is_code(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    kernel.update(r.reg, tiers={"fast": {"model": "m"}})
+    out = await r.spawn_as("lead", role="writer")
+    _assert_shape(out, "bad_tier")
+
+
+async def test_not_spawned_refusal_reason_is_code(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead", "other"], [("writer.md", WRITER)])
+    _assert_shape(await r.op({"type": "report", "state": "done"}), "not_spawned")
+    no = await r.call("other", r.reg, {"type": "report", "state": "done"})
+    _assert_shape(no, "not_spawned")
+    assert no["hint"]
+
+
+def test_no_root_refusal_reason_is_code():
+    out = tools._fail("no_root", "the kernel has no root")
+    _assert_shape(out, "no_root")
+
+
+async def test_disabled_refusal_has_reason_disabled(kernel, monkeypatch):
+    monkeypatch.setenv("FANTASTIC_AGENTIC_RESOURCES", "1")
+    await create(kernel, handler_module="agentic_resources.tools", id="ar_on")
+    out = await send(kernel, "ar_on", {"type": "roles"})
+    assert out["reason"] == "disabled", out
+    assert "agentic_resources is disabled" in out["error"] and out["hint"]
+
+
+def test_every_refusal_code_is_in_the_closed_set():
+    from kernel._refusal import CODES, refusal
+
+    for code in (
+        "limit",
+        "not_allowed",
+        "grant_failed",
+        "unknown_tier",
+        "bad_tier",
+        "no_root",
+        "not_spawned",
+        "disabled",
+    ):
+        assert code in CODES
+        assert refusal(code, "x")["reason"] == code

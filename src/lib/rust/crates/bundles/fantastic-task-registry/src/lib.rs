@@ -109,9 +109,15 @@ fn agent_of(kernel: &Kernel, id: &AgentId) -> Option<Arc<Agent>> {
     kernel.agents.get(id).map(|e| Arc::clone(&e))
 }
 
-/// A refusal of the registry's own: `{error:<code>, reason:<text>}`.
-fn fail(code: &str, reason: String) -> Value {
-    json!({"error": code, "reason": reason})
+/// A refusal of the registry's own, in the kernel's shape:
+/// `{error:<sentence>, reason:<code>}`.
+fn fail(code: &str, error: String) -> Value {
+    refusal::refusal(code, error)
+}
+
+/// [`fail`] plus a `hint` — what to do instead.
+fn fail_hint(code: &str, error: String, hint: &str) -> Value {
+    refusal::refusal_hint(code, error, hint)
 }
 
 fn now() -> f64 {
@@ -302,11 +308,15 @@ async fn store_call(kernel: &Arc<Kernel>, store: &str, payload: Value) -> Result
             None => out.status.as_str().to_string(),
         };
         let mut r = fail(
-            "store_refused",
+            refusal::STORE_REFUSED,
             format!("store {} refused: {text}", py_repr(store)),
         );
-        r["store_error"] = json!(text);
-        r["store_reason"] = res.get("reason").cloned().unwrap_or(Value::Null);
+        refusal::with(&mut r, "store_error", json!(text));
+        refusal::with(
+            &mut r,
+            "store_reason",
+            res.get("reason").cloned().unwrap_or(Value::Null),
+        );
         return Err(r);
     }
     Ok(res)
@@ -443,9 +453,10 @@ impl Bundle for TaskRegistryBundle {
                 "sentence": "A registry of tasks: who holds each one and where it came from.",
                 "enabled": store.is_some(),
             }),
-            _ if store.is_none() => fail(
-                "disabled",
+            _ if store.is_none() => fail_hint(
+                refusal::DISABLED,
                 "task_registry is disabled: the record has no task_store_id".to_string(),
+                "set task_store_id on the record",
             ),
             "list" | "get" => {
                 let store = store.unwrap_or_default();
@@ -574,7 +585,7 @@ async fn assign_inner(
     match (re, from.is_null()) {
         (false, false) => {
             return Err(fail(
-                "already_held",
+                refusal::ALREADY_HELD,
                 format!(
                     "assign: task {} is held by {from}; use reassign",
                     py_repr(id)
@@ -583,7 +594,7 @@ async fn assign_inner(
         }
         (true, true) => {
             return Err(fail(
-                "not_held",
+                refusal::NOT_HELD,
                 format!("reassign: task {} has no holder; use assign", py_repr(id)),
             ))
         }
@@ -665,7 +676,7 @@ async fn report_inner(
         if let Some(c) = caller.as_ref() {
             if who != c && !ancestors(kernel, who).contains(c) {
                 return Err(fail(
-                    "not_in_subtree",
+                    refusal::NOT_IN_SUBTREE,
                     format!(
                         "report: {} is not {c} or one of its descendants",
                         py_repr(who.as_str())

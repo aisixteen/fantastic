@@ -154,7 +154,7 @@ async def test_refuses_every_verb_without_task_store_id(kernel):
     assert refl["enabled"] is False, refl
     for verb in WRITE_VERBS:
         out = await send(kernel, "bare", {"type": verb, "id": "t"})
-        assert out["error"] == "disabled", (verb, out)
+        assert out["reason"] == "disabled", (verb, out)
 
 
 async def test_add_appends_one_row_to_the_store_agent(kernel):
@@ -221,7 +221,7 @@ async def test_assign_sets_holder_and_history(kernel):
     assert (h[0]["from"], h[0]["to"], h[0]["by"]) == (None, "sublead", "lead")
     assert h[0]["at"] > 0
     again = await r.call("lead", {"type": "assign", "id": "t1", "holder": "worker"})
-    assert again["error"] == "already_held", again
+    assert again["reason"] == "already_held", again
     got = await r.call("lead", {"type": "get", "id": "t1"})
     assert got["holder"] == "sublead"
     assert len(got["history"]) == 1
@@ -234,7 +234,7 @@ async def test_reassign_requires_a_holder(kernel):
     r = await rig(kernel)
     await r.add("lead", "t1")
     out = await r.call("lead", {"type": "reassign", "id": "t1", "holder": "worker"})
-    assert out["error"] == "not_held", out
+    assert out["reason"] == "not_held", out
     got = await r.call("lead", {"type": "get", "id": "t1"})
     assert got["holder"] is None
     assert got["history"] == []
@@ -330,7 +330,7 @@ async def test_report_for_an_agent_outside_the_callers_subtree_is_refused(kernel
     up = await r.call(
         "sublead", {"type": "report", "id": "t1", "from": "lead", "state": "done"}
     )
-    assert up["error"] == "not_in_subtree", up
+    assert up["reason"] == "not_in_subtree", up
     ghost = await r.call(
         "lead", {"type": "report", "id": "t1", "from": "nobody", "state": "done"}
     )
@@ -434,11 +434,11 @@ async def test_store_refusal_passes_through(kernel):
     cb = dict(ctx.agents[r.store]._meta["callable_by"])
     ctx.update(r.store, callable_by={k: v for k, v in cb.items() if k != "tr"})
     out = await r.add("lead", "t2")
-    assert out["error"] == "store_refused", out
+    assert out["reason"] == "store_refused", out
     assert out["store_error"], f"carries the store's own error: {out}"
     assert out["store_reason"] == "unauthorized", out
     read = await r.call("lead", {"type": "list"})
-    assert read["error"] == "store_refused", read
+    assert read["reason"] == "store_refused", read
     ctx.update(r.store, callable_by=cb)
     listed = await r.call("lead", {"type": "list"})
     assert len(listed["tasks"]) == 1, listed
@@ -796,3 +796,59 @@ def test_readme_is_rust_verbatim():
         / "lib/rust/crates/bundles/fantastic-task-registry"
     )
     assert (here / "readme.md").read_text() == (rust / "src/readme.md").read_text()
+
+
+# ── the refusal shape: `error` is a sentence, `reason` is the code ──────────
+
+
+def _assert_shape(out, code):
+    assert out["reason"] == code, out
+    assert " " in out["error"] and out["error"] != code, out
+
+
+async def test_disabled_refusal_reason_is_code_error_is_sentence(kernel):
+    await rig(kernel)
+    await create(kernel, handler_module="task_registry.tools", id="bare")
+    for verb in WRITE_VERBS:
+        out = await send(kernel, "bare", {"type": verb, "id": "t"})
+        _assert_shape(out, "disabled")
+        assert "task_registry is disabled" in out["error"], out
+        assert out["hint"], out
+
+
+async def test_store_refused_reason_is_code_keeps_store_extras(kernel):
+    r = await rig(kernel)
+    ctx = kernel.ctx
+    cb = dict(ctx.agents[r.store]._meta["callable_by"])
+    ctx.update(r.store, callable_by={k: v for k, v in cb.items() if k != "tr"})
+    out = await r.add("lead", "t2")
+    _assert_shape(out, "store_refused")
+    assert out["error"].startswith("store"), out
+    assert out["store_error"] and out["store_reason"] == "unauthorized", out
+
+
+async def test_already_held_refusal_reason_is_code(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    await r.call("lead", {"type": "assign", "id": "t1", "holder": "sublead"})
+    again = await r.call("lead", {"type": "assign", "id": "t1", "holder": "worker"})
+    _assert_shape(again, "already_held")
+    assert "reassign" in again["error"], again
+
+
+async def test_not_held_refusal_reason_is_code(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    out = await r.call("lead", {"type": "reassign", "id": "t1", "holder": "worker"})
+    _assert_shape(out, "not_held")
+    assert "assign" in out["error"], out
+
+
+async def test_not_in_subtree_refusal_reason_is_code(kernel):
+    r = await rig(kernel)
+    await r.add("lead", "t1")
+    up = await r.call(
+        "sublead", {"type": "report", "id": "t1", "from": "lead", "state": "done"}
+    )
+    _assert_shape(up, "not_in_subtree")
+    assert "descendants" in up["error"], up

@@ -51,7 +51,7 @@ $FANTASTIC $AR role name=ghost | jq -e '.reason == "not_found"'
 ```bash
 $FANTASTIC $AR set_limit role=writer max=1 | jq -e '.ok'
 $FANTASTIC $AR spawn role=writer | jq -e '.id'
-$FANTASTIC $AR spawn role=writer | jq -e '.error == "limit" and .scope == "role"'
+$FANTASTIC $AR spawn role=writer | jq -e '.reason == "limit" and .scope == "role"'
 $FANTASTIC $AR get_count role=writer | jq -e '.running == 1 and .max == 1'
 ```
 

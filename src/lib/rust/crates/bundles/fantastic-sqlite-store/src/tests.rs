@@ -233,3 +233,24 @@ fn the_catalog_name_is_the_kind_not_the_handler_module() {
     assert_eq!(SqliteStoreBundle.name(), "sqlite_store");
     assert_eq!(HANDLER_MODULE, "sqlite_store.tools");
 }
+
+#[tokio::test]
+async fn sqlite_store_refusals_are_kernel_shape() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let k = kernel(tmp.path());
+    add_store(&k, "mem.db");
+    let dup = json!({"rows": [
+        {"owner": "alice", "row": {"id": 1}},
+        {"owner": "alice", "row": {"id": 1}},
+    ]});
+    let out = call(
+        &k,
+        "mem",
+        json!({"type": "inject", "tables": dup}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(out["reason"], json!("exists"), "{out}");
+    let sentence = out["error"].as_str().unwrap();
+    assert!(sentence.contains("duplicate row") && sentence != "exists", "{out}");
+}
