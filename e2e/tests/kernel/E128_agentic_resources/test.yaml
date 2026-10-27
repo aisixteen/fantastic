@@ -2,7 +2,7 @@
 # server plays the model for the kernel's own vllm_backend agents, driven over web_rest.
 id: agentic_resources
 group: kernel
-title: "the agentic_resources roles registry (enabled by env): a lead lists roles, spawns two of one role, the third is refused at a limit of 2 and get_count shows 2/2; a project_lead spawns two sub-leads with split limits, a sub-lead cannot spawn past its quota, the leaves report, the reports reach the top condensed, nothing is stored on any record, and the whole tree stays after completion (a report frees no slot); a lead spawns a worker from a source agent's mark (fork) and gets the card over the copied history, and an at inside a turn is refused cuts_turn"
+title: "the agentic_resources roles registry (enabled by env): a lead lists roles, spawns two of one role, the third is refused at a limit of 2 and get_count shows 2/2; a project_lead spawns two sub-leads with split limits, a sub-lead cannot spawn past its quota, the leaves report, the reports reach the top condensed, nothing is stored on any record, and the whole tree stays after completion (a done report pauses the reporter and frees its slot); with a cap of 2 a lead's third worker is refused, a done or paused worker frees its slot for a new one, and resuming a worker is refused limit while the cap is full; a lead spawns a worker from a source agent's mark (fork) and gets the card over the copied history, and an at inside a turn is refused cuts_turn"
 runner: probe.py
 runtimes: [python, rust]
 costs: free

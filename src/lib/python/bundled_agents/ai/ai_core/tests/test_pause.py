@@ -7,10 +7,12 @@ the store, so a restart reads them back. Port of the Rust #219 tests
 from __future__ import annotations
 
 import asyncio
+import types
 
 from _testkit import memory_meta
 
 from ai_core import core
+from kernel import register_unlisted
 
 DONE = '<call name="done"></call>'
 
@@ -216,5 +218,94 @@ async def test_pause_cancels_a_stalled_generation_and_stores_the_notice(
         await asyncio.wait_for(turn, 5)
         notices = await _rows_of_kind(seeded_kernel, aid, "stopped")
         assert notices and "stopped by" in notices[-1]["content"], notices
+    finally:
+        fake_providers.pop(aid, None)
+
+
+# ── the registry's say over a resume (agentic_resources caps) ──────────────
+
+_REG_ASKS: list = []
+_REG_REPLY: dict = {}
+
+
+async def _stub_registry(id, payload, kernel):
+    if payload.get("type") != "get_count":
+        return None
+    _REG_ASKS.append(payload)
+    return _REG_REPLY.get("reply", {"running": 0, "max": None})
+
+
+register_unlisted("stub_registry.tools", types.SimpleNamespace(handler=_stub_registry))
+
+
+async def _spawned_child(kernel, tag, reply):
+    aid = f"pause_{tag}"
+    reg = f"stubreg_{tag}"
+    _agent(kernel, aid)
+    r = await _verb(
+        kernel,
+        "kernel_state",
+        {
+            "type": "create_agent",
+            "parent_id": "kernel_state",
+            "id": reg,
+            "handler_module": "stub_registry.tools",
+            "callable_by": {aid: "*"},
+        },
+    )
+    assert "error" not in r, r
+    kernel.update(aid, spawned_by=reg, role="writer", can_call={reg: "*", "memory": "*"})
+    _REG_REPLY["reply"] = reply
+    return aid
+
+
+async def test_status_reports_paused(seeded_kernel, fake_providers):
+    aid = "pause_status"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = _Recorder()
+    try:
+        assert (await _verb(seeded_kernel, aid, {"type": "status"}))["paused"] is False
+        await _verb(seeded_kernel, aid, {"type": "pause"})
+        assert (await _verb(seeded_kernel, aid, {"type": "status"}))["paused"] is True
+        await _verb(seeded_kernel, aid, {"type": "resume"})
+        assert (await _verb(seeded_kernel, aid, {"type": "status"}))["paused"] is False
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_resume_unrestricted_without_spawned_by(seeded_kernel, fake_providers):
+    aid = "pause_nospawn"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = _Recorder()
+    try:
+        await _verb(seeded_kernel, aid, {"type": "pause"})
+        r = await _verb(seeded_kernel, aid, {"type": "resume"})
+        assert r["resumed"] is True, r
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_resume_refused_when_registry_says_limit(seeded_kernel, fake_providers):
+    limit = {
+        "error": "limit",
+        "scope": "total",
+        "role": "writer",
+        "running": 1,
+        "max": 1,
+        "reason": "all roles together are at the limit",
+    }
+    aid = await _spawned_child(seeded_kernel, "limit", limit)
+    fake_providers[aid] = _Recorder()
+    try:
+        await _verb(seeded_kernel, aid, {"type": "pause"})
+        r = await _verb(seeded_kernel, aid, {"type": "resume"})
+        assert r == limit, r
+        s = await _verb(seeded_kernel, aid, {"type": "status"})
+        assert s["paused"] is True, f"no resume row was written: {s}"
+        assert _REG_ASKS[-1]["resume"] == aid and _REG_ASKS[-1]["role"] == "writer"
+        # the registry makes room: the same resume goes through
+        _REG_REPLY["reply"] = {"running": 0, "max": 1}
+        r = await _verb(seeded_kernel, aid, {"type": "resume"})
+        assert r["resumed"] is True, r
     finally:
         fake_providers.pop(aid, None)
