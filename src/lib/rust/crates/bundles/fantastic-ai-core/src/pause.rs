@@ -113,42 +113,6 @@ pub async fn pause(
     Ok(json!({"paused": true, "held": 0}))
 }
 
-/// The registry's say over a `resume`: a PAUSED agent spawned by an
-/// agentic_resources registry (`spawned_by` names a live agent) asks it
-/// `get_count {role, resume:<id>}`, as itself. A `limit` refusal is returned
-/// unchanged and nothing is written; any other answer (or no `spawned_by`) lets the
-/// resume proceed, so an agent no registry spawned is never blocked.
-pub async fn resume_gate(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Option<Value> {
-    let a = kernel.agents.get(agent_id).map(|e| Arc::clone(&e))?;
-    let (reg, role) = {
-        let m = a.meta.read().expect("meta poisoned");
-        let reg = m
-            .get("spawned_by")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())?
-            .to_string();
-        let role = m
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        (reg, role)
-    };
-    let reg = AgentId::from(reg.as_str());
-    if !kernel.agents.contains_key(&reg) || !view(agent_id, kernel).await.ok()?.paused {
-        return None;
-    }
-    let r = kernel
-        .send(vec![Item::new(
-            reg,
-            json!({"type": "get_count", "role": role, "resume": agent_id.as_str()}),
-        )])
-        .await
-        .remove(0)
-        .result;
-    (r.get("error").and_then(Value::as_str) == Some("limit")).then_some(r)
-}
-
 /// `resume` — write one resumed row (with the note), then release the held messages
 /// in order as if they had just arrived. Not paused: a no-op.
 pub async fn resume(

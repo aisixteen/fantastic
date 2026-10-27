@@ -55,7 +55,7 @@ $FANTASTIC $AR spawn role=writer | jq -e '.error == "limit" and .scope == "role"
 $FANTASTIC $AR get_count role=writer | jq -e '.running == 1 and .max == 1'
 ```
 
-### Test 4: fleet keeps every spawned agent (a paused or done one only frees its slot); delete is the only way out
+### Test 4: nothing is cleaned up on done; delete is the only way out
 
 ```bash
 $FANTASTIC $AR fleet | jq -e '.roles.writer | length == 1'
