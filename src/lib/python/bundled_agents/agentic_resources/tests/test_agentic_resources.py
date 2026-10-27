@@ -127,9 +127,22 @@ async def _forkable_handler(id, payload, kernel):
 
 register_unlisted("forkable.tools", types.SimpleNamespace(handler=_forkable_handler))
 
+def _picky_validate(meta, record):
+    """A tool whose record refuses every callable_by edit while it carries
+    `refuse_grants` (stands for a bundle whose `validate_meta` says no)."""
+    if "callable_by" in meta and record.get("refuse_grants") is True:
+        return "callable_by refused"
+    return None
+
+
+register_unlisted(
+    "picky.tools",
+    types.SimpleNamespace(handler=_caller_handler, validate_meta=_picky_validate),
+)
+
 WRITER = "---\nname: writer\npurpose: Writes the first draft of a text.\ntier: fast\nmodel: from-the-card\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n---\nYou write clearly and briefly.\n"
 REVIEWER = "---\nname: reviewer\npurpose: Reads a draft and says what to fix.\ntier: fast\n---\nYou review drafts.\n"
-SUBLEAD = "---\nname: sublead\npurpose: Runs a branch of the work.\ntier: fast\ngrants:\n  $registry: [roles, spawn, get_count, report]\n---\nYou run one branch.\n"
+SUBLEAD = "---\nname: sublead\npurpose: Runs a branch of the work.\ntier: fast\ngrants:\n  $registry: [roles, spawn, get_count, report]\n  notes: [read]\n---\nYou run one branch.\n"
 
 
 @pytest.fixture(autouse=True)
@@ -194,7 +207,10 @@ async def rig(kernel, tmp_path, callers, files, tier_handler="caller.tools"):
     reg = "ar_reg"
     for c in callers:
         await create(
-            kernel, handler_module="caller.tools", id=c, can_call={reg: "*"}
+            kernel,
+            handler_module="caller.tools",
+            id=c,
+            can_call={reg: "*", "notes": "*"},
         )
     tier = {"handler_module": tier_handler, "model": "m1", "endpoint": "http://x"}
     await create(
@@ -923,3 +939,203 @@ async def test_spawn_from_bad_shape_refused(kernel, tmp_path):
     assert forks_of(kernel, src) == []
     plain = await r.spawn_as("lead", role="writer")
     assert "id" in plain and "from" not in plain, plain
+
+
+# ── the card's tool grants (#436) ───────────────────────────────────
+
+WIDE = "---\nname: wide\npurpose: Reads and writes notes.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read, write]\n---\nYou write.\n"
+STAR = '---\nname: star\npurpose: Anything on notes.\ntier: fast\ngrants:\n  notes: "*"\n---\nYou do all.\n'
+
+
+async def notes_tool(kernel):
+    await create(kernel, handler_module="caller.tools", id="notes")
+
+
+def hold(kernel, who, key, verbs):
+    """`who` now holds exactly `verbs` on `key` (replacing the rig's grant)."""
+
+    def edit(m):
+        m[key] = verbs
+        return True
+
+    _, err = kernel.ctx.edit_can_call(who, edit)
+    assert err is None, err
+
+
+def keys_of(r, aid, field):
+    return sorted((r.meta(aid).get(field) or {}).keys())
+
+
+async def test_spawn_opens_the_cards_tool_grants_on_both_ends(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    before = keys_of(r, "notes", "callable_by")
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read"]
+    assert r.meta("notes")["callable_by"][cid] == ["read"]
+    assert keys_of(r, "notes", "callable_by") == sorted(before + [cid])
+
+
+async def test_spawned_worker_calls_the_granted_tool_without_directive_setup(
+    kernel, tmp_path
+):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    ok = await r.call(cid, "notes", {"type": "read"})
+    assert ok["verb"] == "read", ok
+    no = await r.call(cid, "notes", {"type": "write"})
+    assert no["reason"] == "unauthorized", no
+
+
+async def test_spawn_from_opens_the_cards_tool_grants_on_both_ends(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    hold(kernel, src, "notes", "*")
+    before = keys_of(r, "notes", "callable_by")
+    cid = (await r.spawn_as("lead", role="writer", **{"from": frm(src, 5)}))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read"], "not wider than the card"
+    assert r.meta("notes")["callable_by"][cid] == ["read"]
+    assert keys_of(r, "notes", "callable_by") == sorted(before + [cid])
+
+
+async def test_spawn_tool_grant_with_star_verbs_keeps_star(kernel, tmp_path):
+    r = await rig(
+        kernel, tmp_path, ["lead"], [("star.md", STAR), ("writer.md", WRITER)]
+    )
+    await notes_tool(kernel)
+    a = (await r.spawn_as("lead", role="star"))["id"]
+    b = (await r.spawn_as("lead", role="star"))["id"]
+    assert r.meta("notes")["callable_by"][a] == "*"
+    assert r.meta("notes")["callable_by"][b] == "*"
+    w = (await r.spawn_as("lead", role="writer"))["id"]
+    assert r.meta("notes")["callable_by"][w] == ["read"]
+    assert r.meta("notes")["callable_by"][a] == "*"
+
+
+async def test_spawn_without_the_tool_agent_still_spawns(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read"]
+    assert "notes" not in kernel.ctx.agents
+
+
+async def test_refused_tool_grant_undoes_the_spawn(kernel, tmp_path):
+    card = "---\nname: two\npurpose: Two tools.\ntier: fast\ngrants:\n  $registry: [roles, report]\n  notes: [read]\n  zpicky: [read]\n---\nx\n"
+    r = await rig(kernel, tmp_path, ["lead"], [("two.md", card)])
+    await notes_tool(kernel)
+    await create(
+        kernel, handler_module="picky.tools", id="zpicky", refuse_grants=True
+    )
+    hold(kernel, "lead", "zpicky", "*")
+    notes_before = dict(r.meta("notes")["callable_by"])
+    reg_before = keys_of(r, r.reg, "callable_by")
+    lead_before = keys_of(r, "lead", "can_call")
+    n = len(kernel.ctx.agents)
+    out = await r.spawn_as("lead", role="two", task="go")
+    assert out["error"] == "grant_failed", out
+    assert len(kernel.ctx.agents) == n, "no child left"
+    assert (await r.op({"type": "fleet"}))["roles"] == {}
+    assert (await r.count())["running"] == 0
+    assert r.meta("notes")["callable_by"] == notes_before, "first edit undone"
+    assert keys_of(r, r.reg, "callable_by") == reg_before
+    assert keys_of(r, "lead", "can_call") == lead_before
+
+
+async def test_delete_agent_removes_the_spawned_agents_tool_entries(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    keep = (await r.spawn_as("lead", role="writer"))["id"]
+    cid = (await r.spawn_as("lead", role="writer"))["id"]
+    assert cid in r.meta("notes")["callable_by"]
+    out = await deleted(r, cid)
+    assert "error" not in out, out
+    assert cid not in r.meta("notes")["callable_by"]
+    assert cid not in r.meta(r.reg)["callable_by"]
+    assert cid not in r.meta("lead")["can_call"]
+    assert r.meta("notes")["callable_by"][keep] == ["read"]
+
+
+async def test_delete_of_a_subtree_removes_every_spawned_agents_tool_entries(
+    kernel, tmp_path
+):
+    r = await rig(
+        kernel, tmp_path, ["lead"], [("sublead.md", SUBLEAD), ("writer.md", WRITER)]
+    )
+    await notes_tool(kernel)
+    sub = (await r.spawn_as("lead", role="sublead"))["id"]
+    w = (await r.spawn_as(sub, role="writer"))["id"]
+    assert sub in r.meta("notes")["callable_by"] and w in r.meta("notes")["callable_by"]
+    await deleted(r, sub)
+    assert sub not in r.meta("notes")["callable_by"]
+    assert w not in r.meta("notes")["callable_by"]
+
+
+async def test_spawn_refuses_a_grant_the_spawner_does_not_hold(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("wide.md", WIDE)])
+    await notes_tool(kernel)
+    hold(kernel, "lead", "notes", ["read"])
+    notes_before = dict(r.meta("notes")["callable_by"])
+    n = len(kernel.ctx.agents)
+    out = await r.spawn_as("lead", role="wide")
+    assert out["error"] == "not_allowed", out
+    why = out["reason"]
+    assert "lead" in why and "write" in why and "notes" in why, why
+    assert len(kernel.ctx.agents) == n, "nothing created"
+    assert r.meta("notes")["callable_by"] == notes_before
+    assert (await r.op({"type": "fleet"}))["roles"] == {}
+
+
+async def test_spawn_refuses_star_grant_when_spawner_holds_only_verbs(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("star.md", STAR)])
+    await notes_tool(kernel)
+    hold(kernel, "lead", "notes", ["read"])
+    out = await r.spawn_as("lead", role="star")
+    assert out["error"] == "not_allowed", out
+
+
+async def test_spawn_refuses_a_tool_the_spawner_has_no_grant_on(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [("writer.md", WRITER)])
+    await notes_tool(kernel)
+    kernel.ctx.edit_can_call("lead", lambda m: m.pop("notes", None) is not None)
+    out = await r.spawn_as("lead", role="writer")
+    assert out["error"] == "not_allowed", out
+
+
+async def test_spawn_from_refuses_escalation_before_forking(kernel, tmp_path):
+    r, src = await fork_rig(kernel, tmp_path, ["lead"], [("wide.md", WIDE)])
+    await notes_tool(kernel)
+    hold(kernel, "lead", "notes", ["read"])
+    out = await r.spawn_as("lead", role="wide", **{"from": frm(src, 5)})
+    assert out["error"] == "not_allowed", out
+    assert forks_of(kernel, src) == [], "nothing forked"
+
+
+async def test_operator_spawn_has_no_escalation_check(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, [], [("wide.md", WIDE)])
+    await notes_tool(kernel)
+    cid = (await r.op({"type": "spawn", "role": "wide"}))["id"]
+    assert r.meta(cid)["can_call"]["notes"] == ["read", "write"]
+    assert r.meta("notes")["callable_by"][cid] == ["read", "write"]
+
+
+async def test_subleads_cannot_hand_on_more_than_they_hold(kernel, tmp_path):
+    r = await rig(
+        kernel,
+        tmp_path,
+        ["lead"],
+        [("sublead.md", SUBLEAD), ("wide.md", WIDE), ("writer.md", WRITER)],
+    )
+    await notes_tool(kernel)
+    sub = (await r.spawn_as("lead", role="sublead"))["id"]
+    no = await r.spawn_as(sub, role="wide")
+    assert no["error"] == "not_allowed", no
+    ok = await r.spawn_as(sub, role="writer")
+    assert "id" in ok, ok
+
+
+async def test_registry_token_grants_are_not_escalation_checked(kernel, tmp_path):
+    r = await rig(kernel, tmp_path, ["lead"], [])
+    hold(kernel, "lead", r.reg, ["spawn"])
+    out = await r.spawn_as("lead", role="project_lead")
+    assert "id" in out, out

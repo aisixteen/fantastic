@@ -54,7 +54,7 @@ VERB_DOCS = {
     "reflect": "Identity, whether the registry is enabled, and the role names. No args.",
     "roles": "No args. Returns {roles:[{name, purpose}], errors:[...]} — every role card the config's folders hold, plus the shipped project_lead. Cards are re-read on each call.",
     "role": "args: name:str (req). Returns the full card {name, purpose, tier, grants, directive}; an unknown name is `not_found`.",
-    "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied.",
+    "spawn": "args: role:str (req), task:str? (sent to the child as its first message; anything but a string is `bad_arg`), name:str?, limits:{total?, per_role?}? (part of YOUR quota handed to the child as its own subtree cap). Creates the agent from the card (directive as its system prompt, the tier's backend fields from config, the card's grants) as a CHILD OF THE CALLER, and gives the caller pause/resume/stop on it. Refused past a limit: {error:'limit', scope, role, running, max, reason}. Returns {id, role, tier}. from:{agent:str, at:int}? branches the new agent off a fork point of `agent` instead (ai_core `fork {at}`, same memory store, so it starts with that conversation up to `at`), then applies the card and limits; it sits BESIDE its source, not under you, and you still get pause/resume/stop on it; you must hold `fork` on `agent` or it is refused `not_allowed`; a refusal from fork (cuts_turn, cuts_fold, no_such_row, parent_mid_turn, ...) passes through unchanged and nothing is left behind. Then the reply also has from:{agent, at} and copied. The card's grants on tools are opened on both ends (the child's own grant and the tool's callable_by, all or nothing): a card may only grant what the spawner itself holds, or the spawn is refused `not_allowed`, and a grant that cannot be written undoes the whole spawn (`grant_failed`).",
     "report": "args: state:waiting|running|blocked|done|failed|paused (req), result:any?. A spawned agent tells its parent: the parent gets a message {type:'report', from, state, result}. Nothing is stored on the record (the task tree is `task_registry`'s). `done` or `failed` also PAUSES the reporter (its slot is freed; the other states change nothing). Refused `not_spawned` for any other caller. Nothing is deleted on done. Returns {ok:true}.",
     "fleet": "No args. Returns {roles:{<role>:[{id}]}} — the agents this registry spawned, per role, read from the records (survives restart).",
     "set_limit": "args: role:str? (omitted = all agents in total), max:int|null (req; null clears). Returns {ok:true, role, max}.",
@@ -328,6 +328,9 @@ async def _spawn(reg, payload, kernel):
         src, at = a, n
 
     caller = current_origin()
+    escalated = _escalation(kernel, caller, card)
+    if escalated is not None:
+        return escalated
     parent = caller or reg
     allsp = await _active(kernel, reg)
     refused = _check_caps(
@@ -399,15 +402,19 @@ async def _spawn(reg, payload, kernel):
         return made
 
     # the registry may hear the child's `report`; the parent controls its subtree
-    if store is not None and store in ctx.agents:
+    store_id = store if store is not None and store in ctx.agents else None
+    if store_id is not None:
 
         def _store_edit(m):
             _grant_verbs(m, child, "*")
             return True
 
-        ctx.edit_callable_by(store, _store_edit)
-    err = _open_edges(kernel, reg, caller, child, reg_verbs)
+        ctx.edit_callable_by(store_id, _store_edit)
+    err = _open_edges(kernel, reg, caller, child, reg_verbs) or _open_tool_edges(
+        kernel, child, card
+    )
     if err:
+        await _undo_spawn(kernel, reg, caller, store_id, card, child)
         return err
     if first_message is not None:
         _send_first(kernel, reg, child, first_message)
@@ -466,6 +473,89 @@ def _send_first(kernel, reg, child, text) -> None:
     )
     _DETACHED.add(t)
     t.add_done_callback(_DETACHED.discard)
+
+
+def _tool_grants(card) -> list:
+    """The card's grants on tools: literal local agent ids only (not `$registry`, not
+    `$self`-like tokens, not `<guid>|x` peer keys)."""
+    return [
+        (k, v)
+        for k, v in card["grants"].items()
+        if not k.startswith("$") and "|" not in k
+    ]
+
+
+def _escalation(kernel, caller, card):
+    """A card may only grant what its spawner holds: None when there is no caller (the
+    operator) or every verb the card lists on a tool is in the caller's own can_call;
+    otherwise the `not_allowed` refusal. `"*"` needs the caller to hold `"*"`."""
+    if caller is None:
+        return None
+    ctx = kernel.ctx
+    holder = ctx.agents.get(caller)
+    grant = holder._meta.get("can_call") if holder is not None else None
+    parent = holder.parent.id if holder is not None and holder.parent is not None else None
+    for tool, verbs in _tool_grants(card):
+        listed = [verbs] if isinstance(verbs, str) else list(verbs)
+        target = ctx.agents.get(tool)
+        ancestors = ancestor_ids(target) if target is not None else set()
+        for verb in listed:
+            if not authorize_call(
+                grant,
+                verb,
+                tool,
+                holder_id=caller,
+                holder_parent=parent,
+                other_ancestors=ancestors,
+            ).allowed:
+                return _fail(
+                    "not_allowed",
+                    f"spawn: {caller} may not grant {verb!r} on {tool!r} (role {card['name']!r})",
+                )
+    return None
+
+
+def _open_tool_edges(kernel, child, card):
+    """Admit `child` on the tools its card grants (the tool's end of the edge; the
+    child's own end is its can_call). A tool that is not an agent is skipped. All or
+    nothing: on a refused edit the edits made are taken back. A refusal, or None."""
+    ctx = kernel.ctx
+    done: list = []
+    for tool, verbs in _tool_grants(card):
+        if tool not in ctx.agents:
+            continue
+
+        def _edit(m, verbs=verbs):
+            _grant_verbs(m, child, verbs)
+            return True
+
+        _, err = ctx.edit_callable_by(tool, _edit)
+        if err:
+            _tool_ungrant(ctx, child, done)
+            return _fail("grant_failed", f"spawn: {err}")
+        done.append(tool)
+    return None
+
+
+def _tool_ungrant(ctx, child, tools) -> None:
+    """Take `child` back out of the callable_by of `tools`."""
+    for t in tools:
+        ctx.edit_callable_by(t, lambda m: m.pop(child, None) is not None)
+
+
+async def _undo_spawn(kernel, reg, caller, store, card, child) -> None:
+    """Take a half-made spawn back: its tool edges, its keys on the registry, the
+    memory store and the caller, then the agent itself."""
+    ctx = kernel.ctx
+    _tool_ungrant(ctx, child, [t for t, _ in _tool_grants(card) if t in ctx.agents])
+    if store is not None:
+        ctx.edit_callable_by(store, lambda m: m.pop(child, None) is not None)
+    ctx.edit_callable_by(reg, lambda m: m.pop(child, None) is not None)
+    if caller is not None:
+        ctx.edit_can_call(caller, lambda m: m.pop(child, None) is not None)
+    agent = ctx.agents.get(child)
+    if agent is not None:
+        await agent._cascade_delete()
 
 
 def _holds_fork(kernel, who: str, source) -> bool:
@@ -610,12 +700,10 @@ async def _spawn_from(
     _, err = ctx.edit_callable_by(child, _child_edit)
     fail = _fail("grant_failed", f"spawn: {err}") if err else None
     fail = fail or _open_edges(kernel, reg, caller, child, reg_verbs)
+    fail = fail or _open_tool_edges(kernel, child, card)
     if fail:
         # nothing of the registry is left behind
-        await fork._cascade_delete()
-        if store is not None:
-            ctx.edit_callable_by(store, lambda m: m.pop(child, None) is not None)
-        ctx.edit_callable_by(reg, lambda m: m.pop(child, None) is not None)
+        await _undo_spawn(kernel, reg, caller, store, card, child)
         return fail
     if first_message is not None:
         _send_first(kernel, reg, child, first_message)
