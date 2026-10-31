@@ -207,13 +207,18 @@ async def test_flow_control_pauses_the_reader_until_acked(term, monkeypatch):
     # what the terminal said before the pause (the program's first line — or, on
     # Windows, the console's own opening sequences) is already the viewer's
     q = term.ctx.inboxes["viewer"]
-    # drain until quiet: ConPTY's opening sequences can arrive after one drain
-    for _ in range(10):
-        await asyncio.sleep(0.05)
-        while not q.empty():
-            q.get_nowait()
+    # Deterministic drain: every char the reader took is counted in pt["unacked"] and
+    # emitted exactly once, nothing is acked yet and the reader is detached — so when
+    # the viewer holds pt["unacked"] chars, every in-flight emit (ConPTY's late
+    # opening sequences included) has landed and no more can come.
+    counted = pt["unacked"]
+    await _until(term, lambda t: len(t) >= pt["unacked"])
+    assert pt["unacked"] == counted, "the reader is detached after the pause"
+    while not q.empty():
+        q.get_nowait()
     # typed while paused: the program answers, but nothing reaches the viewer
     await _call(term, {"type": "write", "job_id": jid, "data": "hello" + ENTER})
+    # a measured negative window: an absence has no event to wait on
     await asyncio.sleep(0.4)
     while not q.empty():
         assert q.get_nowait().get("type") != "output", "output flowed while paused"
@@ -225,6 +230,32 @@ async def test_flow_control_pauses_the_reader_until_acked(term, monkeypatch):
         chunk, _ = await _until(term, lambda t: bool(t))
         text += chunk
         await _call(term, {"type": "ack", "job_id": jid, "chars": 10_000})
+
+
+async def test_flow_control_pause_leaves_no_emit_in_flight(term, monkeypatch):
+    monkeypatch.setattr(ebt, "HIGH_WATERMARK", 10)
+    monkeypatch.setattr(ebt, "LOW_WATERMARK", 5)
+    jid = await _start(term, program=_CHILD + "sys.stdin.readline()\n")
+    pt = ebt._jobs[jid]["pty"]
+    for _ in range(250):
+        if pt["paused"]:
+            break
+        await asyncio.sleep(0.02)
+    assert pt["paused"]
+    counted = pt["unacked"]
+    text, _ = await _until(term, lambda t: len(t) >= pt["unacked"])
+    assert len(text) == counted == pt["unacked"], (len(text), counted)
+    # barrier: the replay call is mirrored to the viewer as a data-less `output`
+    await _call(term, {"type": "output", "job_id": jid})
+    q = term.ctx.inboxes["viewer"]
+    while True:
+        ev = await asyncio.wait_for(q.get(), timeout=5)
+        if ev.get("type") == "output":
+            assert "data" not in ev, "a chunk was still in flight at the pause"
+            break
+    await _call(term, {"type": "ack", "job_id": jid, "chars": 10_000})
+    await _call(term, {"type": "write", "job_id": jid, "data": "x" + ENTER})
+    await _until(term, lambda t: "GOT" in t)
 
 
 async def test_paste_image_types_a_saved_path(term):
