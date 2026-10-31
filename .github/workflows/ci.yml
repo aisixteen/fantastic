@@ -61,7 +61,7 @@ on:
         options: [all, linux]
         default: all
       cleanup:
-        description: "Run the optional cleanup steps (rust-cache target clean and cache save, uv cache prune, image removal). Off: skipped, the runner is thrown away."
+        description: "Run the optional cleanup steps (rust-cache target clean and cache save; the cache is also saved on main runs, uv cache prune, image removal). Off: skipped, the runner is thrown away."
         type: boolean
         default: false
       flatpak:

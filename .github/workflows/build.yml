@@ -134,7 +134,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ inputs.cleanup }}
+          save-if: ${{ inputs.cleanup || github.ref == 'refs/heads/main' }}
           workspaces: src/lib/rust
           key: ${{ inputs.profile }}
       - name: build
@@ -173,34 +173,75 @@ jobs:
         run: choco install zip --no-progress -y
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ inputs.cleanup }}
-          workspaces: |
-            src
-            src/app
+          save-if: ${{ inputs.cleanup || github.ref == 'refs/heads/main' }}
+          workspaces: src
           key: ${{ inputs.profile }}
       - name: build
         run: cargo build --locked $CARGO_PROFILE
       - name: unit tests
         run: cargo test --locked --no-fail-fast $CARGO_PROFILE
-      # the system agents on a fake bus: dbus-daemon is on the runner, dbusmock is not
-      - name: system agents on a fake bus (Linux)
-        if: runner.os == 'Linux'
+
+  # the system agents on a fake bus: dbus-daemon is on the runner, dbusmock is not
+  system-agents:
+    if: inputs.units
+    name: system agents (fake bus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ inputs.cleanup || github.ref == 'refs/heads/main' }}
+          workspaces: src
+          key: ${{ inputs.profile }}-system-agents
+      - name: system agents on a fake bus
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q python3-dbusmock
           cargo test --locked $CARGO_PROFILE -p fantastic-system-agents -- --ignored
+
+  desktop-app:
+    if: inputs.units
+    name: desktop app · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.units_os == 'linux' && '["ubuntu-latest"]' || '["ubuntu-latest","xcode-27","windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: src/app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ inputs.cleanup || github.ref == 'refs/heads/main' }}
+          workspaces: src/app
+          key: ${{ inputs.profile }}-desktop-app
       - name: the desktop app's libraries (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
       - name: unit tests (desktop app)
-        # its own workspace (src/app); tauri-build needs the canvas sidecar staged
-        # under the host's triple, so the CLI just built stands in for it
-        working-directory: src/app
+        # its own workspace (src/app). tauri-build only needs the canvas sidecar
+        # to exist under the host's triple (externalBin); no unit test runs it
+        # (home::canvas_bin is called from main() only), so a placeholder file
+        # stands in and the CLI is not built in this job
         shell: bash # the job's defaults set no shell, so Windows would take pwsh
         run: |
           X=${{ runner.os == 'Windows' && '.exe' || '' }}
           t=$(rustc --print host-tuple)
           mkdir -p binaries
-          cp ../target/${{ inputs.profile }}/fantastic$X binaries/fantastic-$t$X
+          : > binaries/fantastic-$t$X
+          chmod +x binaries/fantastic-$t$X
           cargo test --locked --no-fail-fast
 
   ts:
@@ -266,7 +307,7 @@ jobs:
         run: choco install zip --no-progress -y
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ inputs.cleanup }}
+          save-if: ${{ inputs.cleanup || github.ref == 'refs/heads/main' }}
           workspaces: |
             src/lib/rust
             src
@@ -340,7 +381,7 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ inputs.cleanup }}
+          save-if: ${{ inputs.cleanup || github.ref == 'refs/heads/main' }}
           workspaces: |
             src/lib/rust
             src
@@ -410,7 +451,7 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ inputs.cleanup }}
+          save-if: ${{ inputs.cleanup || github.ref == 'refs/heads/main' }}
           workspaces: src/app
           key: ${{ matrix.app }}-${{ inputs.profile }}
       - uses: actions/download-artifact@v7
