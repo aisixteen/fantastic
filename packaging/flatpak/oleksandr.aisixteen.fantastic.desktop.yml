@@ -42,12 +42,13 @@ modules:
   # away with the sandbox, so nothing needs a chmod that a failed go install would skip.
   # flatpak-builder strips and splits the debug info of every binary a module installs, which
   # changes the bytes and so the sha256 pack.sh checks (CI run 41216339699): `strip: false` and
-  # `no-debuginfo: true` leave the staged binary exactly as `go install` made it.
+  # `no-debuginfo: true` are build-options (a module-level `strip` is ignored, CI run 41217757747) and leave the staged binary exactly as `go install` made it.
   - name: esbuild
     buildsystem: simple
-    strip: false
-    no-debuginfo: true
     build-options:
+      strip: false
+      no-debuginfo: true
+      no-debuginfo-compression: true
       append-path: /usr/lib/sdk/golang/bin
       build-args:
         - --share=network
