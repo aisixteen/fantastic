@@ -8,7 +8,7 @@
 # CI builds it only on a manual run: `gh workflow run ci.yml -f flatpak=true`.
 app-id: oleksandr.aisixteen.fantastic.desktop # = identifier in src/app/tauri.conf.json
 runtime: org.gnome.Platform
-runtime-version: '48' # a GNOME runtime that ships webkit2gtk-4.1 (Tauri 2); its freedesktop base is 24.08
+runtime-version: '49' # GNOME 49 ships webkit2gtk-4.1 (Tauri 2); its freedesktop base is 25.08, whose rust-stable is >= 1.90 (tauri needs it)
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable

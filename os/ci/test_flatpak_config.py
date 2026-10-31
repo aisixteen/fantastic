@@ -57,6 +57,11 @@ class FlatpakManifest(unittest.TestCase):
         # the manifest quotes it: unquoted, YAML reads 48 as a number and flatpak-builder wants a string
         self.assertRegex(text, r"(?m)^runtime-version:\s*['\"]\d+['\"]")
 
+    def test_runtime_is_gnome_49_or_newer(self):
+        # tauri needs rustc >= 1.90; GNOME 48 (freedesktop 24.08) has rust-stable 1.89 (CI run 41219159229)
+        version = scalar(manifest_text(), "runtime-version")
+        self.assertGreaterEqual(int(version), 49)
+
     def test_sandbox_is_marked_placeholder_and_wide(self):
         text = manifest_text()
         head, _, tail = text.partition("finish-args:")
