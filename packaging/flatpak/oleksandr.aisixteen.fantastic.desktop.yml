@@ -46,7 +46,7 @@ modules:
         GOPATH: /run/build/esbuild/go
         GOCACHE: /run/build/esbuild/gocache
     build-commands:
-      - GOTOOLCHAIN=go1.23.4 CGO_ENABLED=0 GOFLAGS=-trimpath GOBIN=/app/esbuild-pack go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
+      - GOTOOLCHAIN=go1.23.4 CGO_ENABLED=0 GOFLAGS="-trimpath -modcacherw" GOBIN=/app/esbuild-pack go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
 
   - name: fantastic
     buildsystem: simple
