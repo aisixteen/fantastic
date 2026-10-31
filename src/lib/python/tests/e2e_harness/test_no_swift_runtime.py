@@ -42,6 +42,7 @@ ALLOWED_PATHS = (
     "src/tui/crates/fantastic-home-kernel/docs/home.md",
     "src/tui/web/canvas/readme.md",
     "src/app/Cargo.lock",
+    "packaging/flatpak/cargo-sources.json",  # generated vendored crate list (swift-rs)
     THIS,
 )
 

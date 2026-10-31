@@ -1,0 +1,70 @@
+# Flatpak of the desktop app (#82). Built by flatpak-builder from THIS repo checkout, offline:
+# the crates and the npm packages are vendored by the generated cargo-sources*.json and
+# node-sources.json (regenerate them with generate-sources.sh when a lockfile changes).
+#
+#   flatpak-builder --user --install-deps-from=flathub --force-clean build-dir \
+#     packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.yml
+#
+# CI builds it only on a manual run: `gh workflow run ci.yml -f flatpak=true`.
+app-id: oleksandr.aisixteen.fantastic.desktop # = identifier in src/app/tauri.conf.json
+runtime: org.gnome.Platform
+runtime-version: '48' # a GNOME runtime that ships webkit2gtk-4.1 (Tauri 2); its freedesktop base is 24.08
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.golang
+  - org.freedesktop.Sdk.Extension.node22 # npm, for the Tauri CLI
+command: fantastic-app
+
+# PLACEHOLDER sandbox decision (#82): wide on purpose, the maintainer will revisit it.
+# Fantastic opens any folder and runs the user's shell, terminals and programs, so for now
+# the sandbox is open: the whole home, the network, and the Flatpak portal that lets the
+# app start programs on the host (`flatpak-spawn --host`). The CLI has no flatpak-spawn
+# code yet: terminals run inside the sandbox until the decision is made.
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  - name: fantastic
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/golang/bin:/usr/lib/sdk/node22/bin
+      env:
+        CARGO_HOME: /run/build/fantastic/cargo
+        CARGO_NET_OFFLINE: 'true'
+        # the version app.sh would read from the last tag: the checkout has no tags here
+        FANTASTIC_VERSION: 0.0.0-flatpak
+    build-commands:
+      # The canvas sidecar. The glibc target on purpose: inside the runtime there is no musl
+      # toolchain, and the sidecar only has to run next to the app on the runtime's glibc.
+      - cd src && cargo --offline build --release --locked --bin fantastic
+      - mkdir -p src/app/binaries && cp src/target/release/fantastic src/app/binaries/fantastic-x86_64-unknown-linux-gnu
+      - cd src/app && npm ci --offline --no-audit --no-fund --cache=/run/build/fantastic/flatpak-node/npm-cache
+      # `tauri build` turns on tauri/custom-protocol, which a production app needs (as app.sh does).
+      - cd src/app && npx tauri build --no-bundle --ci --config "{\"version\":\"$FANTASTIC_VERSION\"}" -- --offline --locked
+      - install -Dm755 src/app/target/release/fantastic-app /app/bin/fantastic-app
+      - install -Dm755 src/target/release/fantastic /app/bin/fantastic
+      - install -Dm644 packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.desktop /app/share/applications/oleksandr.aisixteen.fantastic.desktop.desktop
+      - install -Dm644 src/app/icons/128x128.png /app/share/icons/hicolor/128x128/apps/oleksandr.aisixteen.fantastic.desktop.png
+      - install -Dm644 packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.metainfo.xml /app/share/metainfo/oleksandr.aisixteen.fantastic.desktop.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..
+      - cargo-sources.json
+      - cargo-sources-cli.json
+      - node-sources.json
+      - type: inline
+        dest: cargo
+        dest-filename: config
+        contents: |
+          [source.crates-io]
+          replace-with = "vendored-sources"
+
+          [source.vendored-sources]
+          directory = "/run/build/fantastic/cargo/vendor"
