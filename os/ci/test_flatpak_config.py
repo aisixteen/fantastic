@@ -124,8 +124,11 @@ class FlatpakManifest(unittest.TestCase):
         text = manifest_text()
         esb = text[text.index("  - name: esbuild"):text.index("  - name: fantastic")]
         body = uncommented(esb)
-        self.assertRegex(body, r"(?m)^    strip: false$")
-        self.assertRegex(body, r"(?m)^    no-debuginfo: true$")
+        # `strip` is a build-options key; at module level flatpak-builder ignores it (run 41217757747)
+        self.assertRegex(body, r"(?m)^      strip: false$")
+        self.assertRegex(body, r"(?m)^      no-debuginfo: true$")
+        self.assertRegex(body, r"(?m)^      no-debuginfo-compression: true$")
+        self.assertNotRegex(body, r"(?m)^    strip:")
 
     def test_pycache_and_pyc_are_gitignored(self):
         lines = {l.strip() for l in (REPO / ".gitignore").read_text().splitlines()}
