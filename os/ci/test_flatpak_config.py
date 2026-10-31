@@ -119,6 +119,14 @@ class FlatpakManifest(unittest.TestCase):
             self.assertNotIn("/run/build/", value, key)
             self.assertNotIn(".flatpak-builder", value, key)
 
+    def test_esbuild_module_is_not_stripped(self):
+        # flatpak-builder strips the staged binary, its sha256 then no longer matches SHA256SUMS
+        text = manifest_text()
+        esb = text[text.index("  - name: esbuild"):text.index("  - name: fantastic")]
+        body = uncommented(esb)
+        self.assertRegex(body, r"(?m)^    strip: false$")
+        self.assertRegex(body, r"(?m)^    no-debuginfo: true$")
+
     def test_pycache_and_pyc_are_gitignored(self):
         lines = {l.strip() for l in (REPO / ".gitignore").read_text().splitlines()}
         self.assertIn("__pycache__/", lines)
