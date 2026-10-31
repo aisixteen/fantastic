@@ -234,6 +234,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 - fantastic-exec-bridge: the monitor end-delivery unit test waits on the delivery and the monitor leaving, not on fixed sleeps (#65, #92)
 - ai-core `rows` test (`rows_is_a_view_of_what_the_agent_holds`, #65, #91): the paging test now waits until the turn's head has settled (all four rows, the nudge pass's answer included) before reading its two pages, so a row appended by the nudge pass can no longer make the pages disagree with the total. Rust and Python twin; 200/200 local runs.
+- exec_bridge test `test_flow_control_pauses_the_reader_until_acked` (#65): after the pause the test now waits until the viewer holds exactly the chars counted as unacked (every in-flight output emit delivered) instead of draining for fixed 50 ms rounds, so ConPTY's late opening sequences can no longer be mistaken for output that flowed while paused.
 
 ### Changed
 
