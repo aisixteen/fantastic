@@ -39,6 +39,10 @@
 # The run's title says which it was (`ci · units` / `ci · full`). A green FULL
 # run is what `release.yml` publishes for its commit.
 #
+# One more manual job, beside all of the above: `-f flatpak=true` builds the desktop
+# app's Flatpak (`packaging/flatpak/`, #82) on Ubuntu to prove the manifest compiles.
+# It uploads and publishes nothing, and no other job reads it.
+#
 # Free: standard GitHub-hosted runners on a public repo (see `build.yml`).
 
 name: ci
@@ -58,6 +62,10 @@ on:
         default: all
       cleanup:
         description: "Run the optional cleanup steps (rust-cache target clean and cache save, uv cache prune, image removal). Off: skipped, the runner is thrown away."
+        type: boolean
+        default: false
+      flatpak:
+        description: "Also build the Flatpak of the desktop app (flatpak-builder) to prove it compiles. Uploads and publishes nothing. Off: skipped."
         type: boolean
         default: false
 
@@ -183,3 +191,19 @@ jobs:
           name: container-image-${{ matrix.arch }}
           path: container-image/
           retention-days: 30
+
+  # The desktop app's Flatpak (#82), built from the manifest to prove it compiles.
+  # Manual (`-f flatpak=true`), alone: it needs no other job and nothing needs it.
+  # Nothing is uploaded, exported or published.
+  flatpak:
+    if: inputs.flatpak
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: flatpak and flatpak-builder
+        run: sudo apt-get update -q && sudo apt-get install -y -q flatpak flatpak-builder
+      - name: the Flathub remote (the runtime and the SDK extensions)
+        run: flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+      - name: build the Flatpak
+        run: flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse build-dir packaging/flatpak/oleksandr.aisixteen.fantastic.desktop.yml

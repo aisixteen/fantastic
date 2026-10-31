@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Aisixteen Fantastic
+Comment=A live canvas for every folder
+Exec=fantastic-app
+Icon=oleksandr.aisixteen.fantastic.desktop
+Terminal=false
+Categories=Development;
