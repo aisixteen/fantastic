@@ -68,7 +68,14 @@ class FlatpakManifest(unittest.TestCase):
     def test_build_is_offline(self):
         text = manifest_text()
         code = uncommented(text)
-        self.assertNotIn("build-args", code, "no network for the build: no --share=network in build-args")
+        # only the esbuild module (Go fetches the pinned toolchain and module) has the network
+        self.assertEqual(code.count("build-args"), 1, "one module has build-args")
+        esb, _, rest = code.partition("- name: fantastic")
+        self.assertIn("build-args", esb, "the esbuild module, before fantastic, is the networked one")
+        self.assertNotIn("build-args", rest, "no network for the fantastic build: no --share=network in build-args")
+        self.assertIn("go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0", esb)
+        self.assertIn("GOTOOLCHAIN=go1.23.4", esb)
+        self.assertIn("tools/esbuild/linux-x64/esbuild", rest, "fantastic gets the staged esbuild")
         cargo_lines = [l for l in code.splitlines() if re.search(r"\bcargo\b.*\bbuild\b", l)]
         self.assertGreaterEqual(len(cargo_lines), 1, "the CLI sidecar is built with cargo")
         tauri_lines = [l for l in code.splitlines() if "tauri build" in l]

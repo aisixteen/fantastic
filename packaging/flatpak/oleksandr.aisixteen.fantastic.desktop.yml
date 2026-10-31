@@ -31,6 +31,23 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
 
 modules:
+  # The canvas packer's esbuild (src/lib/ts/scripts/pack.sh builds it from pinned source when
+  # the platform binary is absent, and Go fetches go1.23.4 and the module from the network).
+  # The `fantastic` module below is offline, so this one module, and only it, has the network:
+  # it builds the same pinned esbuild and stages it in /app; `fantastic` copies it into place
+  # (pack.sh still sha-verifies it against SHA256SUMS) and removes it before the build ends.
+  - name: esbuild
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/golang/bin
+      build-args:
+        - --share=network
+      env:
+        GOPATH: /run/build/esbuild/go
+        GOCACHE: /run/build/esbuild/gocache
+    build-commands:
+      - GOTOOLCHAIN=go1.23.4 CGO_ENABLED=0 GOFLAGS=-trimpath GOBIN=/app/esbuild-pack go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
+
   - name: fantastic
     buildsystem: simple
     build-options:
@@ -41,6 +58,8 @@ modules:
         # the version app.sh would read from the last tag: the checkout has no tags here
         FANTASTIC_VERSION: 0.0.0-flatpak
     build-commands:
+      # The packer's esbuild from the module above, where pack.sh looks for it.
+      - mkdir -p src/lib/ts/tools/esbuild/linux-x64 && mv /app/esbuild-pack/esbuild src/lib/ts/tools/esbuild/linux-x64/esbuild && rmdir /app/esbuild-pack
       # The canvas sidecar. The glibc target on purpose: inside the runtime there is no musl
       # toolchain, and the sidecar only has to run next to the app on the runtime's glibc.
       - cd src && cargo --offline build --release --locked --bin fantastic
