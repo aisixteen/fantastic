@@ -36,6 +36,10 @@ modules:
   # The `fantastic` module below is offline, so this one module, and only it, has the network:
   # it builds the same pinned esbuild and stages it in /app; `fantastic` copies it into place
   # (pack.sh still sha-verifies it against SHA256SUMS) and removes it before the build ends.
+  # GOPATH and GOCACHE sit in the sandbox /tmp, never under /run/build/esbuild (the build dir): Go
+  # extracts the GOTOOLCHAIN download read-only into $GOPATH/pkg/mod, -modcacherw does not cover
+  # that, and flatpak-builder cannot remove a read-only build dir (CI run 41214841446). /tmp goes
+  # away with the sandbox, so nothing needs a chmod that a failed go install would skip.
   - name: esbuild
     buildsystem: simple
     build-options:
@@ -43,8 +47,8 @@ modules:
       build-args:
         - --share=network
       env:
-        GOPATH: /run/build/esbuild/go
-        GOCACHE: /run/build/esbuild/gocache
+        GOPATH: /tmp/esbuild-go
+        GOCACHE: /tmp/esbuild-gocache
     build-commands:
       - GOTOOLCHAIN=go1.23.4 CGO_ENABLED=0 GOFLAGS="-trimpath -modcacherw" GOBIN=/app/esbuild-pack go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0
 

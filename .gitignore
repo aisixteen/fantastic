@@ -39,3 +39,7 @@ src/tui/e2e/tests/**/__pycache__/
 
 # the paper drafts — local only
 /paper/
+
+# Python bytecode.
+__pycache__/
+*.pyc

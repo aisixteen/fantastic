@@ -10,6 +10,7 @@ the files say.
 
 import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -96,6 +97,40 @@ class FlatpakManifest(unittest.TestCase):
         app = {s["dest"] for s in json.loads((FLATPAK / "cargo-sources.json").read_text())}
         self.assertTrue(any("tauri-2.12.1" in d for d in app))
         self.assertFalse(any("tauri-2.12.1" in d for d in cli))
+
+    def go_env(self, text):
+        return re.findall(r"^\s*(GOPATH|GOMODCACHE|GOCACHE):\s*(\S+)\s*$", uncommented(text), re.M)
+
+    def test_esbuild_go_cache_is_outside_the_build_dir(self):
+        # Go extracts the GOTOOLCHAIN download read-only into GOMODCACHE ($GOPATH/pkg/mod); under
+        # /run/build/<module> that is flatpak-builder's build dir and it cannot remove it
+        # (unlinkat(VERSION): Permission denied, CI run 41214841446). -modcacherw does not cover it.
+        esb, _, _ = uncommented(manifest_text()).partition("- name: fantastic")
+        env = dict(self.go_env(esb))
+        for key in ("GOPATH", "GOCACHE"):
+            self.assertIn(key, env, f"{key} is set for the esbuild module")
+            self.assertFalse(env[key].startswith("/run/build/"), f"{key}={env[key]} is inside the build dir")
+            self.assertTrue(env[key].startswith("/tmp/"), f"{key}={env[key]} lives in the sandbox /tmp")
+
+    def test_esbuild_go_cache_not_in_any_module_build_dir(self):
+        found = self.go_env(manifest_text())
+        self.assertTrue(found, "the Go cache locations are set")
+        for key, value in found:
+            self.assertNotIn("/run/build/", value, key)
+            self.assertNotIn(".flatpak-builder", value, key)
+
+    def test_pycache_and_pyc_are_gitignored(self):
+        lines = {l.strip() for l in (REPO / ".gitignore").read_text().splitlines()}
+        self.assertIn("__pycache__/", lines)
+        self.assertIn("*.pyc", lines)
+
+    def test_no_bytecode_is_tracked(self):
+        try:
+            out = subprocess.run(["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git or the repo is missing")
+        bad = [p for p in out.splitlines() if "__pycache__" in p or p.endswith(".pyc")]
+        self.assertEqual(bad, [])
 
     def test_installs_both_binaries_desktop_icon_metainfo(self):
         text = manifest_text()
