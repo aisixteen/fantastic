@@ -75,6 +75,8 @@ class FlatpakManifest(unittest.TestCase):
         self.assertNotIn("build-args", rest, "no network for the fantastic build: no --share=network in build-args")
         self.assertIn("go install github.com/evanw/esbuild/cmd/esbuild@v0.25.0", esb)
         self.assertIn("GOTOOLCHAIN=go1.23.4", esb)
+        # the Go module cache is read-only by default; flatpak-builder could not remove the build dir (CI run 41213633505)
+        self.assertIn("-modcacherw", esb)
         self.assertIn("tools/esbuild/linux-x64/esbuild", rest, "fantastic gets the staged esbuild")
         cargo_lines = [l for l in code.splitlines() if re.search(r"\bcargo\b.*\bbuild\b", l)]
         self.assertGreaterEqual(len(cargo_lines), 1, "the CLI sidecar is built with cargo")
