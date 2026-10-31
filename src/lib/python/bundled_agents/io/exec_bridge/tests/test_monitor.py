@@ -339,7 +339,10 @@ async def test_the_end_is_delivered_when_nothing_waits_any_more(seeded_kernel):
     assert "INFO step 2" in _heard()[0] and "job ended" not in _heard()[0], _heard()
     await _call(k, "runner", {"type": "stop", "job_id": jid})
     await _until(lambda: mid not in _mon()._MONITORS, what="monitor gone")
-    await asyncio.sleep(0.2)  # the final delivery is its own task: let it land
+    # the final delivery is its own task: wait for it, not for time
+    await _until(
+        lambda: any("job ended" in t for t in _heard()), what="the final delivery"
+    )
     ended = [t for t in _heard() if "job ended" in t]
     assert len(ended) == 1 and len(_heard()) == 2, _heard()
     assert ended[0] == (

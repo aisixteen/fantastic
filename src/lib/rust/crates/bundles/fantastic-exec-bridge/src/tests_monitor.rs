@@ -424,6 +424,9 @@ async fn a_monitor_ends_with_its_job_delivering_what_waited() {
 /// delivered — once, as the header alone. Lines fed "at once" are NO burst here:
 /// on a multi-threaded runtime the monitor's task may drain after the first line
 /// (python's single-threaded loop cannot), so this feeds one line and waits for it.
+/// The ordering after the stop is pinned by waiting on state, not on time: the end
+/// delivery seen, then the monitor gone (its `run` ended after its one final
+/// delivery), and only then is the count asserted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_end_is_delivered_when_nothing_waits_any_more() {
     let tmp = TempDir::new().unwrap();
@@ -441,14 +444,23 @@ async fn the_end_is_delivered_when_nothing_waits_any_more() {
     crate::monitor::feed_line(&owner, TaskId(jid), "INFO step 0");
     until(|| ear.texts().len() == 1, 5.0, "the first delivery").await;
     assert!(ear.texts()[0].contains("INFO step 0"), "{:?}", ear.texts());
-    stop_all(&k, &rn).await;
+    let _ = call(&k, &rn, json!({"type": "stop"})).await;
     until(
         || ear.texts().iter().any(|t| t.contains("job ended")),
         5.0,
         "the final delivery at job end",
     )
     .await;
-    until(|| true, 0.2, "").await;
+    let mut gone = false;
+    for _ in 0..250 {
+        let listed = call(&k, &rn, json!({"type": "monitors"})).await;
+        if listed["monitors"] == json!([]) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(gone, "the monitor never left");
     let texts = ear.texts();
     assert_eq!(texts.len(), 2, "{texts:?}");
     assert!(

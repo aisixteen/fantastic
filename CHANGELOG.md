@@ -230,6 +230,11 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   one-file example client at `list.html`. A non-Rust shell talks to a running
   app's port.
 
+### Fixed
+
+- fantastic-exec-bridge: the monitor end-delivery unit test waits on the delivery and the monitor leaving, not on fixed sleeps (#65, #92)
+- ai-core `rows` test (`rows_is_a_view_of_what_the_agent_holds`, #65, #91): the paging test now waits until the turn's head has settled (all four rows, the nudge pass's answer included) before reading its two pages, so a row appended by the nudge pass can no longer make the pages disagree with the total. Rust and Python twin; 200/200 local runs.
+
 ### Changed
 
 - CI runs only by hand: a push to a `fix/**` or `feat/**` branch no longer
