@@ -398,20 +398,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fantastic-agentic-resources"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-core",
- "fantastic-file",
- "fantastic-kernel",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "fantastic-ai-core"
 version = "0.1.0"
 dependencies = [
@@ -493,7 +479,6 @@ dependencies = [
 name = "fantastic-cli"
 version = "0.1.0"
 dependencies = [
- "fantastic-agentic-resources",
  "fantastic-anthropic-backend",
  "fantastic-bridge",
  "fantastic-bundle",
@@ -514,7 +499,6 @@ dependencies = [
  "fantastic-scheduler",
  "fantastic-sqlite-store",
  "fantastic-static-loader",
- "fantastic-task-registry",
  "fantastic-vllm-backend",
  "fantastic-web",
  "fantastic-web-rest",
@@ -792,20 +776,6 @@ dependencies = [
  "fantastic-kernel",
  "serde_json",
  "serde_yaml",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "fantastic-task-registry"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-core",
- "fantastic-kernel",
- "fantastic-ram-store",
- "serde_json",
  "tempfile",
  "tokio",
 ]

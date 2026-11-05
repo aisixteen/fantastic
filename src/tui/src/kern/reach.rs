@@ -727,8 +727,7 @@ mod tests {
 
     /// A scripted AI, no model. `send` is its FIRST TURN: one tool call, to `sink`, made as
     /// itself and so gated by its own grants; the outcome goes to `turns`. `make` creates a
-    /// child AI and sends it a message at once (an AI's `create_agent`, then `send`);
-    /// `spawn` asks the registry for a worker with a task.
+    /// child AI and sends it a message at once (an AI's `create_agent`, then `send`).
     struct ProbeAi {
         turns: tokio::sync::mpsc::UnboundedSender<(String, Value)>,
     }
@@ -767,7 +766,6 @@ mod tests {
                     let first = call(id, json!({"type": "send", "text": "go"})).await;
                     Some(json!({"made": made, "first": first}))
                 }
-                "spawn" => Some(call("roles", payload["spawn"].clone()).await),
                 other => Some(json!({"error": format!("probe ai: no verb {other}")})),
             })
         }
@@ -811,7 +809,7 @@ mod tests {
     static ONE_WATCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// A host with the watch running (on a runtime nobody drives), an AI `master` (a holder), the store `m` and `sink`
-    /// and the roles registry made before it started; the receiver sees every first turn's tool outcome.
+    /// made before it started; the receiver sees every first turn's tool outcome.
     async fn watched_host(
         name: &str,
     ) -> (tokio::sync::MutexGuard<'static, ()>, Undriven, Host, tokio::sync::mpsc::UnboundedReceiver<(String, Value)>) {
@@ -821,7 +819,6 @@ mod tests {
         let h = host_with_bundles(name, |k| {
             k.bundles.register(PROBE_AI, ProbeAi { turns: tx });
             k.bundles.register(SINK, Sink);
-            k.bundles.register(fantastic_agentic_resources::HANDLER_MODULE, fantastic_agentic_resources::AgenticResourcesBundle);
         })
         .await;
         for (id, hm, meta) in [
@@ -836,21 +833,6 @@ mod tests {
             let made = h.operator("kernel", Value::Object(spec)).await.result;
             assert!(made.get("error").is_none(), "{id}: {made}");
         }
-        // the roles registry, also made before the watch (the grants of what exists are written by `start`)
-        let dir = std::env::temp_dir().join(format!("fc-reach-{}-{name}", std::process::id())).join("roles");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("worker.md"), "---\nname: worker\npurpose: Works.\ntier: fast\n---\nYou work.\n").unwrap();
-        let made = h
-            .operator(
-                "kernel",
-                json!({"type": "create_agent", "parent_id": "kernel", "id": "roles",
-                       "handler_module": fantastic_agentic_resources::HANDLER_MODULE,
-                       "role_dirs": [dir.to_string_lossy()],
-                       "tiers": {"fast": {"handler_module": PROBE_AI, "memory_store_id": "m"}}}),
-            )
-            .await
-            .result;
-        assert!(made.get("error").is_none(), "{made}");
         // The watch runs on a runtime nobody drives: the state a loaded host is in when a
         // first turn arrives before the watch's task has been scheduled. Grants that wait
         // for that task never come; the ones the subscriber writes do not need it.
@@ -881,17 +863,6 @@ mod tests {
         assert!(out["made"].get("error").is_none(), "{out}");
         assert_eq!(out["first"]["tool"], json!({"pong": true}), "the child's first turn: {out}");
         assert_eq!(first_turn(&mut rx, "child_ai").await, json!({"pong": true}));
-    }
-
-    #[tokio::test]
-    async fn a_spawn_with_a_task_runs_a_first_turn_that_can_call_a_tool() {
-        let (_one, _watch, h, mut rx) = watched_host("first-turn-spawn").await;
-        let out = h
-            .operator("master", json!({"type": "spawn", "spawn": {"type": "spawn", "role": "worker", "task": "go"}}))
-            .await
-            .result;
-        let child = out["id"].as_str().unwrap_or_else(|| panic!("{out}")).to_string();
-        assert_eq!(first_turn(&mut rx, &child).await, json!({"pong": true}));
     }
 
     #[tokio::test]

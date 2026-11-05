@@ -140,10 +140,8 @@ The closing PRs come from GitHub's closing references, or, where there are none,
 | #368 | Python: port refused mail never reaches a sealed leg (Rust first, #170) | #372 | `test_a_refused_mail_entry_is_consumed_once` in `src/lib/python/bundled_agents/io/exec_bridge/tests/test_exec_bridge.py`<br>`test_a_refused_mail_is_dropped_even_if_the_leg_reopens_before_the_drain_runs` in `src/lib/python/bundled_agents/io/exec_bridge/tests/test_exec_bridge.py`<br>`test_a_late_refusal_note_does_not_swallow_later_identical_mail` in `src/lib/python/bundled_agents/io/exec_bridge/tests/test_exec_bridge.py`<br>`test_a_refused_drive_verb_is_dropped_even_if_the_leg_reopens_before_the_drain_runs` in `src/lib/python/bundled_agents/io/exec_bridge/tests/test_exec_bridge.py`<br>+2 more in the same PR(s) | deferred to the e2e phase | units only |
 | #369 | Python: port the atomic-write rename retry (Rust first, #170) | #371 | `test_transient_rename_error_reads_winerror_codes` in `src/lib/python/bundled_agents/io/file_bridge/tests/test_fs.py`<br>`test_a_created_file_is_announced_added_once_then_modified` in `src/lib/python/bundled_agents/io/file_bridge/tests/test_file_watch.py`<br>`test_a_file_created_later_in_a_missing_folder_fires_added` in `src/lib/python/bundled_agents/io/file_bridge/tests/test_file_watch.py`<br>`test_a_file_in_a_deep_missing_folder_created_at_once_fires_added` in `src/lib/python/bundled_agents/io/file_bridge/tests/test_file_watch.py`<br>+6 more in the same PR(s) | deferred to the e2e phase | units only |
 | #402 | CI: make cleanup steps optional, off by default | #406 | none found | deferred to the e2e phase | missing |
-| #424 | agentic_resources: a generic roles registry — roles, spawn, fleet, per-role and total limi | #440, #434, #431, #430 | `fleet_groups_by_role_with_ids` in `src/lib/rust/crates/bundles/fantastic-agentic-resources/src/tests.rs`<br>`spawn_from_counts_in_fleet_and_get_count_and_survives_restart` in `src/lib/rust/crates/bundles/fantastic-agentic-resources/src/tests.rs`<br>`spawn_from_forks_and_applies_the_role_card` in `src/lib/rust/crates/bundles/fantastic-agentic-resources/src/tests.rs`<br>`spawn_from_respects_limits_before_forking` in `src/lib/rust/crates/bundles/fantastic-agentic-resources/src/tests.rs`<br>+72 more in the same PR(s) | `e2e/tests/kernel/E128_agentic_resources` | covered |
-| #425 | ai_core: fork {at} — a new agent from the first N messages (copied prefix, cache hits) | #431, #427 | `fork_from_forks_the_named_agent` in `src/lib/rust/crates/bundles/fantastic-ai-core/src/tests_fork.rs`<br>`test_fork_from_forks_the_named_agent` in `src/lib/python/bundled_agents/ai/ai_core/tests/test_fork.py`<br>`spawn_from_passes_fork_refusals_through` in `src/lib/rust/crates/bundles/fantastic-agentic-resources/src/tests.rs`<br>`spawn_from_requires_the_caller_to_hold_fork` in `src/lib/rust/crates/bundles/fantastic-agentic-resources/src/tests.rs`<br>+54 more in the same PR(s) | `e2e/tests/kernel/E128_agentic_resources`<br>`e2e/tests/memory/E127_fork_marks`<br>`e2e/tests/memory/E128_fork_cache` | covered |
+| #425 | ai_core: fork {at} — a new agent from the first N messages (copied prefix, cache hits) | #431, #427 | `fork_from_forks_the_named_agent` in `src/lib/rust/crates/bundles/fantastic-ai-core/src/tests_fork.rs`<br>`test_fork_from_forks_the_named_agent` in `src/lib/python/bundled_agents/ai/ai_core/tests/test_fork.py`<br>+54 more in the same PR(s) | `e2e/tests/memory/E127_fork_marks`<br>`e2e/tests/memory/E128_fork_cache` | covered |
 | #426 | kernel: await_set — one wake when a set of children has reported (or a timeout) | #428 | `await_set_timeout_names_the_missing` in `src/lib/rust/crates/fantastic-kernel/src/await_set/tests.rs`<br>`test_await_set_timeout_names_the_missing` in `src/lib/python/tests/kernel/test_await_set.py`<br>`await_cancel_releases_held_reports_in_order` in `src/lib/rust/crates/fantastic-kernel/src/await_set/tests.rs`<br>`await_set_completion_race_delivers_once` in `src/lib/rust/crates/fantastic-kernel/src/await_set/tests.rs`<br>+16 more in the same PR(s) | `e2e/tests/kernel/E128_await_set` | covered |
-| #429 | task_registry: task source for agents and subtrees (holder, origin, reassign) | #433 | `reassign_requires_a_holder` in `src/lib/rust/crates/bundles/fantastic-task-registry/src/tests.rs`<br>`test_reassign_requires_a_holder` in `src/lib/python/bundled_agents/task_registry/tests/test_task_registry.py`<br>`assign_sets_holder_and_history` in `src/lib/rust/crates/bundles/fantastic-task-registry/src/tests.rs`<br>`holder_must_exist` in `src/lib/rust/crates/bundles/fantastic-task-registry/src/tests.rs`<br>+44 more in the same PR(s) | `e2e/tests/kernel/E128_agentic_resources`<br>`e2e/tests/kernel/E135_task_registry` | covered |
 | #432 | Rust sqlite_store: the durable twin of ram_store | #435 | `sqlite_store_is_in_the_headless_catalog_and_survives_a_stop` in `src/lib/rust/crates/fantastic-cli/tests/cli_runs.rs`<br>`test_a_ram_dump_injects_into_sqlite_and_back` in `src/lib/python/bundled_agents/memory/sqlite_store/tests/test_sqlite_store.py`<br>`test_reflect_names_the_same_verbs_and_says_durable` in `src/lib/python/bundled_agents/memory/sqlite_store/tests/test_sqlite_store.py`<br>`test_verb_docs_match_ram_store` in `src/lib/python/bundled_agents/memory/sqlite_store/tests/test_sqlite_store.py`<br>+15 more in the same PR(s) | `e2e/tests/kernel/E121_artifact_smoke`<br>`e2e/tests/kernel/E136_sqlite_history_restart` | covered |
 
 ## Reopened by the coverage check
@@ -165,7 +163,6 @@ Not yet measured. No `cargo llvm-cov` or `pytest --cov` run has been recorded; t
 | Rust `fantastic-cli` | not yet measured | not yet measured |
 | Rust `fantastic-io-bridge` | not yet measured | not yet measured |
 | Rust `fantastic-kernel` | not yet measured | not yet measured |
-| Rust `fantastic-agentic-resources` | not yet measured | not yet measured |
 | Rust `fantastic-ai-core` | not yet measured | not yet measured |
 | Rust `fantastic-anthropic-backend` | not yet measured | not yet measured |
 | Rust `fantastic-bridge` | not yet measured | not yet measured |
@@ -185,7 +182,6 @@ Not yet measured. No `cargo llvm-cov` or `pytest --cov` run has been recorded; t
 | Rust `fantastic-scheduler` | not yet measured | not yet measured |
 | Rust `fantastic-sqlite-store` | not yet measured | not yet measured |
 | Rust `fantastic-static-loader` | not yet measured | not yet measured |
-| Rust `fantastic-task-registry` | not yet measured | not yet measured |
 | Rust `fantastic-vllm-backend` | not yet measured | not yet measured |
 | Rust `fantastic-web` | not yet measured | not yet measured |
 | Rust `fantastic-web-rest` | not yet measured | not yet measured |
@@ -199,7 +195,6 @@ Not yet measured. No `cargo llvm-cov` or `pytest --cov` run has been recorded; t
 | Rust `fantastic-user-home-store` | not yet measured | not yet measured |
 | Rust `fantastic-web-mcp` | not yet measured | not yet measured |
 | Python `kernel` | not yet measured | not yet measured |
-| Python `bundled_agents/agentic_resources` | not yet measured | not yet measured |
 | Python `bundled_agents/ai` | not yet measured | not yet measured |
 | Python `bundled_agents/cli` | not yet measured | not yet measured |
 | Python `bundled_agents/io` | not yet measured | not yet measured |
@@ -207,7 +202,6 @@ Not yet measured. No `cargo llvm-cov` or `pytest --cov` run has been recorded; t
 | Python `bundled_agents/memory` | not yet measured | not yet measured |
 | Python `bundled_agents/scheduler` | not yet measured | not yet measured |
 | Python `bundled_agents/security` | not yet measured | not yet measured |
-| Python `bundled_agents/task_registry` | not yet measured | not yet measured |
 | Python `bundled_agents/web` | not yet measured | not yet measured |
 | TS canvas (`c8`) | not yet measured | not yet measured |
 

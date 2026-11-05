@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { FakeEl, installFakeDom } from "./fake_dom.ts";
 import { credentialsView } from "../src/bundles/credentials_view/credentials_view.ts";
 import { storeView } from "../src/bundles/store_view/store_view.ts";
-import { tasksView } from "../src/bundles/tasks_view/tasks_view.ts";
 import type { ViewContext } from "../src/bundles/view.ts";
 
 installFakeDom();
@@ -55,27 +54,4 @@ test("store_view_search_sends_search_and_shows_hits", async () => {
   await flush();
   assert.deepEqual(r.calls.filter((c) => c["type"] === "search"), [{ type: "search", query: "own" }]);
   assert.match(r.mount.textContent, /7:2 {2}my own line/);
-});
-
-test("tasks_view_refreshes_on_watch_event", async () => {
-  let tasks: Dict[] = [{ id: "a", status: "waiting", source: "gh:o/r#1", holder: null }];
-  const r = rig(() => ({ tasks }));
-  const h = await tasksView.mount(r.ctx);
-  assert.match(r.mount.textContent, /a {2}waiting/);
-  assert.ok(r.live(), "watching the agent");
-  tasks = [{ id: "a", status: "running", source: "gh:o/r#1", holder: "w1" }];
-  r.fire({ type: "updated" });
-  await flush();
-  assert.match(r.mount.textContent, /a {2}running {2}w1/);
-  assert.ok(r.calls.every((c) => c["type"] === "list"));
-  h.unmount();
-  assert.ok(!r.live(), "unmount stops the watch");
-});
-
-test("tasks_view_click_expands_the_history", async () => {
-  const r = rig(() => ({ tasks: [{ id: "a", status: "running", source: "s", holder: "w2", history: [{ from: "w1", to: "w2", by: "lead" }] }] }));
-  await tasksView.mount(r.ctx);
-  assert.ok(!r.mount.textContent.includes(" by "));
-  r.mount.querySelector("[data-id='a']")!.dispatch("click");
-  assert.match(r.mount.textContent, /w1 -> w2 by lead/);
 });
