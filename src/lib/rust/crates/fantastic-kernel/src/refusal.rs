@@ -78,7 +78,7 @@ pub const DRAINING: &str = "draining";
 /// does.
 pub const NO_CONSUMER: &str = "no_consumer";
 
-// Bundle codes — agentic_resources and task_registry. Listed here because the
+// Bundle codes — the generic kinds bundles refuse with. Listed here because the
 // set is closed and a caller branches on `reason` across every bundle.
 
 /// A spawn or quota past a configured limit (carries `scope`, `role`, `running`, `max`).

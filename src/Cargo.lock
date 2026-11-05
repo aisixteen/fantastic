@@ -727,17 +727,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fantastic-agentic-resources"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "fantastic-bundle",
- "fantastic-kernel",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "fantastic-ai-core"
 version = "0.1.0"
 dependencies = [
@@ -1074,7 +1063,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "crossterm 0.29.0",
- "fantastic-agentic-resources",
  "fantastic-anthropic-backend",
  "fantastic-bridge",
  "fantastic-cabinet",

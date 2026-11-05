@@ -119,8 +119,6 @@ test("the user store tile places a view of the host's user_store agent", async (
 // THE READ-ONLY VIEWS OF THE AGENTS THAT HAD ONLY THE STUB (#438)
 
 const TARGETS: Array<[string, string, Record<string, unknown>?]> = [
-  ["agentic_resources.tools", "resources_view.ts"],
-  ["task_registry.tools", "tasks_view.ts"],
   ["ram_store.tools", "store_view.ts"],
   ["sqlite_store.tools", "store_view.ts"],
   ["scheduler.tools", "scheduler_view.ts"],
@@ -129,14 +127,14 @@ const TARGETS: Array<[string, string, Record<string, unknown>?]> = [
 ];
 const WRITES = ["set", "get", "forget", "append", "add", "assign", "reassign", "status", "report", "schedule", "unschedule", "pause", "resume", "tick_now", "spawn", "set_limit", "send", "write", "delete", "close_cabinet", "conclude"];
 
-test("each_target_agent_module_gets_its_own_view_kind: 7 modules, 6 handler files, the two stores share one", () => {
+test("each_target_agent_module_gets_its_own_view_kind: 5 modules, 4 handler files, the two stores share one", () => {
   const handlers = new Set<string>();
   for (const [module, handler, extra] of TARGETS) {
     const v = viewOf({ id: "a", handler_module: module, ...extra });
     assert.equal(v.handler, handler, module);
     handlers.add(v.handler);
   }
-  assert.equal(handlers.size, 6);
+  assert.equal(handlers.size, 4);
   assert.equal(viewOf({ id: "a", handler_module: "ram_store.tools" }).handler, viewOf({ id: "b", handler_module: "sqlite_store.tools" }).handler);
 });
 
@@ -145,21 +143,17 @@ test("an_explicit_record_view_still_beats_the_module_default: the cabinet cell k
   const v = viewOf(cell);
   assert.deepEqual([v.kind, v.handler, v.bytes], ["html", "agent_view.ts", "<p>status</p>"]);
   assert.equal(viewOf({ id: "cab1", handler_module: "cabinet.tools", cabinet_role: "cabinet" }).kind, "stub", "a cell without a view is not the manager");
-  assert.equal(viewOf({ id: "m", handler_module: "task_registry.tools", view: { handler: "my_tasks" } }).handler, "my_tasks.ts");
+  assert.equal(viewOf({ id: "m", handler_module: "scheduler.tools", view: { handler: "my_tasks" } }).handler, "my_tasks.ts");
 });
 
 test("their_grants_are_read_only_verbs: the cell's grant is exactly the declared reads, and each view bundle's own grant is the same", async () => {
   const bundles = {
-    "resources_view.ts": (await import("../src/bundles/resources_view/resources_view.ts")).resourcesView,
-    "tasks_view.ts": (await import("../src/bundles/tasks_view/tasks_view.ts")).tasksView,
     "store_view.ts": (await import("../src/bundles/store_view/store_view.ts")).storeView,
     "scheduler_view.ts": (await import("../src/bundles/scheduler_view/scheduler_view.ts")).schedulerView,
     "cabinets_view.ts": (await import("../src/bundles/cabinets_view/cabinets_view.ts")).cabinetsView,
     "credentials_view.ts": (await import("../src/bundles/credentials_view/credentials_view.ts")).credentialsView,
   } as const;
   const want: Record<string, string[]> = {
-    "resources_view.ts": ["roles", "fleet", "role", "get_count", "watch"],
-    "tasks_view.ts": ["list", "watch"],
     "store_view.ts": ["dump", "search", "watch"],
     "scheduler_view.ts": ["list", "history", "watch"],
     "cabinets_view.ts": ["cabinets", "watch"],

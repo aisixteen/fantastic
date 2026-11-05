@@ -35,8 +35,6 @@ export const RENDERERS: Record<string, string> = {
   html: "agent_view.ts",
   stub: "reflect_view.ts",
   mcp: "mcp_view.ts",
-  resources: "resources_view.ts",
-  tasks: "tasks_view.ts",
   store: "store_view.ts",
   scheduler: "scheduler_view.ts",
   cabinets: "cabinets_view.ts",
@@ -51,8 +49,6 @@ const RENDERER_CALLS: Record<string, string[]> = {
   mcp: ["reflect", "boot", "watch"],
   // the read-only agent views: reads and `watch`, never a write verb (and the
   // credential view never `get`: a name and a grant, not a value)
-  resources: ["roles", "fleet", "role", "get_count", "watch"],
-  tasks: ["list", "watch"],
   store: ["dump", "search", "watch"],
   scheduler: ["list", "history", "watch"],
   cabinets: ["cabinets", "watch"],
@@ -63,8 +59,6 @@ const RENDERER_CALLS: Record<string, string[]> = {
  *  cabinet module is here only for its MANAGER (`cabinet_role: manager`); a cabinet
  *  cell has its own status-cell `view` on the record. */
 export const MODULE_KINDS: Record<string, string> = {
-  "agentic_resources.tools": "resources",
-  "task_registry.tools": "tasks",
   "ram_store.tools": "store",
   "sqlite_store.tools": "store",
   "scheduler.tools": "scheduler",

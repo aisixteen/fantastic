@@ -262,8 +262,8 @@ fn roster(
                 node.insert(k.to_string(), v.clone());
             }
         }
-        // A TASK LINE is state the agent was given (`agentic_resources` `spawn` /
-        // `report`), not a purpose its bundle states: the tree reads it off the record,
+        // A TASK LINE is state the agent was given (a bundle that spawns it or takes
+        // its report), not a purpose its bundle states: the tree reads it off the record,
         // so a lead sees its subtree's plan and progress in one `reflect tree=all`.
         if let Some(t) = a
             .meta

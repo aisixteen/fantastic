@@ -1,7 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { countText, resourcesRows, resourcesState } from "../src/bundles/agent_models/resources_model.ts";
-import { holderText, taskOrder, tasksRows, tasksState } from "../src/bundles/agent_models/tasks_model.ts";
 import { hitsState, storeRows, storeState } from "../src/bundles/agent_models/store_model.ts";
 import { lastFire, nextText, schedulerRows, schedulerState } from "../src/bundles/agent_models/scheduler_model.ts";
 import { cabinetsRows, cabinetsState } from "../src/bundles/agent_models/cabinets_model.ts";
@@ -9,61 +7,6 @@ import { credentialRows, credentialsState, grantsOf } from "../src/bundles/agent
 import type { Row } from "../src/bundles/agent_models/rows.ts";
 
 const text = (rows: Row[]): string => rows.map((r) => `${"  ".repeat(r.depth ?? 0)}${r.text}`).join("\n");
-
-test("resources_model_rows_roles_fleet_and_counts", () => {
-  const s = resourcesState({
-    roles: { roles: [{ name: "worker", purpose: "does the thing" }] },
-    fleet: { roles: { worker: [{ id: "w1", parent: "boss", paused: true }, { id: "w2" }] } },
-    total: { running: 2, max: null },
-    cards: { worker: { name: "worker", tier: "small" } },
-    counts: { worker: { running: 2, max: 5 } },
-  });
-  const t = text(resourcesRows(s));
-  assert.match(t, /worker {2}tier small {2}2\/5/);
-  assert.match(t, /does the thing/);
-  assert.match(t, /w1 {2}worker {2}parent boss {2}paused/);
-  assert.match(t, /w2 {2}worker {2}parent - {2}active/, "no answer is active");
-  assert.match(t, /2 · no limit/, "uncapped says no limit");
-  assert.equal(countText({ running: 1, max: 3 }), "1/3");
-  assert.match(text(resourcesRows(resourcesState({ roles: { error: "denied" } }))), /refused: denied/);
-});
-
-const TASKS = {
-  tasks: [
-    { id: "b", parent: "a", status: "waiting", source: "gh:o/r#2", holder: null, history: [] },
-    { id: "a", parent: null, status: "running", source: "gh:o/r#1", holder: "w1", update_to: "gh:o/r#9", versions: "1.2",
-      history: [{ from: null, to: "w1", by: "lead", at: 1 }, { from: "w1", to: { subtree: "lead" }, by: "lead", at: 2 }],
-      report: { from: "w1", state: "running", result: "half", at: 3 } },
-    { id: "c", parent: "a", status: "done", source: "gh:o/r#3", holder: { subtree: "lead" } },
-    { id: "o", parent: "ghost", status: "waiting", source: "s", holder: null },
-    { id: "x", parent: "y", status: "waiting", source: "s", holder: null },
-    { id: "y", parent: "x", status: "waiting", source: "s", holder: null },
-  ],
-};
-
-test("tasks_model_builds_the_tree_with_holder_status_source_and_shows_versions_only_when_present", () => {
-  const s = tasksState(TASKS);
-  const order = taskOrder(s.tasks).map(([d, t]) => `${d}${t.id}`);
-  assert.deepEqual(order, ["0a", "1b", "1c", "0o", "0x", "1y"], "parents first, children by id, orphan and cycle at the root, no loop");
-  const t = text(tasksRows(s, new Set()));
-  assert.match(t, /a {2}running {2}w1 {2}gh:o\/r#1 {2}v1\.2/);
-  assert.match(t, /c {2}done {2}subtree:lead/);
-  assert.match(t, /b {2}waiting {2}unheld/);
-  const b = t.split("\n").find((l) => l.includes(" b  waiting"))!;
-  assert.ok(!b.includes("v1") && !b.includes("versions"), "no versions, nothing shown");
-  assert.equal(holderText({ subtree: "r" }), "subtree:r");
-  assert.match(text(tasksRows(tasksState({ tasks: [{ id: "a", versions: ["1", "2"] }] }), new Set())), /versions \[1, 2\]/);
-});
-
-test("tasks_model_history_rows_only_when_expanded", () => {
-  const s = tasksState(TASKS);
-  assert.ok(!text(tasksRows(s, new Set())).includes(" by "));
-  const t = text(tasksRows(s, new Set(["a"])));
-  assert.match(t, /unheld -> w1 by lead/);
-  assert.match(t, /w1 -> subtree:lead by lead/);
-  assert.match(t, /update_to gh:o\/r#9/);
-  assert.match(t, /report w1 running half/);
-});
 
 test("store_model_counts_per_owner_and_folds_and_drops_row_bodies", () => {
   const BODY = "SENTINEL-ROW-BODY";

@@ -4,7 +4,6 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
-    "fantastic-agentic-resources",
     "fantastic-ai-core",
     "fantastic-anthropic-backend",
     "fantastic-cabinet",
@@ -24,7 +23,6 @@ members = [
     "fantastic-scheduler",
     "fantastic-sqlite-store",
     "fantastic-static-loader",
-    "fantastic-task-registry",
     "fantastic-user",
     "fantastic-vllm-backend",
     "fantastic-web",
@@ -339,21 +337,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fantastic-agentic-resources"
-version = "0.1.0"
-source = { editable = "bundled_agents/agentic_resources" }
-dependencies = [
-    { name = "fantastic-kernel-state" },
-    { name = "pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" },
-    { name = "pyyaml", specifier = ">=6" },
-]
-
-[[package]]
 name = "fantastic-ai-core"
 version = "0.1.0"
 source = { editable = "bundled_agents/ai/ai_core" }
@@ -440,7 +423,6 @@ name = "fantastic-kernel"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fantastic-agentic-resources" },
     { name = "fantastic-ai-core" },
     { name = "fantastic-anthropic-backend" },
     { name = "fantastic-cabinet" },
@@ -459,7 +441,6 @@ dependencies = [
     { name = "fantastic-scheduler" },
     { name = "fantastic-sqlite-store" },
     { name = "fantastic-static-loader" },
-    { name = "fantastic-task-registry" },
     { name = "fantastic-user" },
     { name = "fantastic-vllm-backend" },
     { name = "fantastic-web" },
@@ -480,7 +461,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fantastic-agentic-resources", editable = "bundled_agents/agentic_resources" },
     { name = "fantastic-ai-core", editable = "bundled_agents/ai/ai_core" },
     { name = "fantastic-anthropic-backend", editable = "bundled_agents/ai/anthropic/anthropic_backend" },
     { name = "fantastic-cabinet", editable = "bundled_agents/ai/cabinet" },
@@ -499,7 +479,6 @@ requires-dist = [
     { name = "fantastic-scheduler", editable = "bundled_agents/scheduler" },
     { name = "fantastic-sqlite-store", editable = "bundled_agents/memory/sqlite_store" },
     { name = "fantastic-static-loader", editable = "bundled_agents/loader/static_loader" },
-    { name = "fantastic-task-registry", editable = "bundled_agents/task_registry" },
     { name = "fantastic-user", editable = "bundled_agents/io/user" },
     { name = "fantastic-vllm-backend", editable = "bundled_agents/ai/vllm/vllm_backend" },
     { name = "fantastic-web", editable = "bundled_agents/web/host" },
@@ -653,17 +632,6 @@ requires-dist = [
     { name = "fantastic-file-bridge", editable = "bundled_agents/io/file_bridge" },
     { name = "pyyaml", specifier = ">=6" },
 ]
-
-[[package]]
-name = "fantastic-task-registry"
-version = "0.1.0"
-source = { editable = "bundled_agents/task_registry" }
-dependencies = [
-    { name = "fantastic-kernel-state" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "fantastic-kernel-state", editable = "bundled_agents/loader/kernel_state" }]
 
 [[package]]
 name = "fantastic-user"

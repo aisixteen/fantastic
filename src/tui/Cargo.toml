@@ -138,8 +138,6 @@ foundation-models = ["dep:fantastic-foundation-models-backend"]
 # never links a PTY — the terminal PANEL renders a remote stream in step 10).
 [dev-dependencies]
 portable-pty = "0.8"
-# `reach`'s first-turn tests spawn through the real registry (#467).
-fantastic-agentic-resources = { path = "../lib/rust/crates/bundles/fantastic-agentic-resources" }
 
 [[example]]
 name = "screenshot"
