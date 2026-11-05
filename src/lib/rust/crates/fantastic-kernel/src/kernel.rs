@@ -54,15 +54,22 @@ pub(crate) fn publish_state_to(
     event: &Value,
     body: Option<&crate::outcome::Blob>,
 ) {
-    let subs = subs.read().expect("state subs poisoned");
-    // Nothing inside the kernel's own ledger flush is published.
-    if subs.is_empty() || crate::send::state_quiet() {
-        return;
-    }
+    // The subscribers are copied out and the registry's lock released BEFORE any
+    // is called: a subscriber may itself change the kernel (a grant edit publishes
+    // `updated`), and a read guard held across that re-entry deadlocks the moment a
+    // writer (`add_state_subscriber`) queues between the two reads.
+    let subs: Vec<StateSubscriber> = {
+        let subs = subs.read().expect("state subs poisoned");
+        // Nothing inside the kernel's own ledger flush is published.
+        if subs.is_empty() || crate::send::state_quiet() {
+            return;
+        }
+        subs.iter().map(|(_token, cb)| Arc::clone(cb)).collect()
+    };
     let mut stamped = match event {
         Value::Object(m) => m.clone(),
         other => {
-            for (_token, cb) in subs.iter() {
+            for cb in &subs {
                 call_state_subscriber(cb, other, body);
             }
             return;
@@ -73,7 +80,7 @@ pub(crate) fn publish_state_to(
         .map_or(0.0, |d| d.as_secs_f64());
     stamped.insert("ts".to_string(), json!(ts));
     let stamped = Value::Object(stamped);
-    for (_token, cb) in subs.iter() {
+    for cb in &subs {
         call_state_subscriber(cb, &stamped, body);
     }
 }
