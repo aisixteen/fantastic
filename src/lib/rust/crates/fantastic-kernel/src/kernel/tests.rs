@@ -119,6 +119,47 @@ fn publish_state_reaches_every_subscriber() {
 }
 
 #[test]
+fn a_state_subscriber_may_change_the_subscribers_and_publish_while_it_is_called() {
+    // A subscriber that edits the kernel (a grant edit publishes `updated`) re-enters
+    // the registry; adding a subscriber needs its write lock, which a read guard held
+    // across the callback would never give: one thread, a certain deadlock.
+    let k = Arc::new(Kernel::new());
+    let seen = Arc::new(AtomicUsize::new(0));
+    let late = Arc::new(AtomicUsize::new(0));
+    let (weak, seen2, late2) = (Arc::downgrade(&k), Arc::clone(&seen), Arc::clone(&late));
+    k.add_state_subscriber(Arc::new(move |ev, _body| {
+        if ev["type"] == "outer" {
+            let k = weak.upgrade().expect("kernel alive");
+            let late3 = Arc::clone(&late2);
+            k.add_state_subscriber(Arc::new(move |_ev, _body| {
+                late3.fetch_add(1, Ordering::SeqCst);
+            }));
+            k.publish_state(&json!({"type": "inner"}));
+        } else {
+            seen2.fetch_add(1, Ordering::SeqCst);
+        }
+    }));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let k2 = Arc::clone(&k);
+    std::thread::spawn(move || {
+        k2.publish_state(&json!({"type": "outer"}));
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("publishing from inside a subscriber deadlocked");
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the inner event reached the subscriber"
+    );
+    assert_eq!(
+        late.load(Ordering::SeqCst),
+        1,
+        "a subscriber added mid-publish gets the inner event"
+    );
+}
+
+#[test]
 fn a_raising_state_subscriber_prints_and_others_still_receive() {
     // Python `publish_state` wraps each subscriber call in its own
     // try/except and keeps going (`_kernel.py:1060-1068`); a rust subscriber

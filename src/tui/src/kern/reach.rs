@@ -171,7 +171,9 @@ const NARROWED: [&str; 3] = [crate::kern::saved::HOME_ID, crate::kern::user_stor
 /// `can_call` names the target (and `kernel`); the canvas leg, both edges, its
 /// [`leg_verbs`]. A cabinet's agents ([`cabinet_owned`]) take only the human's
 /// and the canvas leg's grants. One write per changed record.
-pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
+/// Synchronous kernel edits, so the state watch makes them before the call that
+/// made the agent returns ([`start`]).
+fn write_grants(h: &Host, ids: &[String]) -> Result<(), String> {
     let all = json!(verbs());
     let holders = holders(h);
     let owned = cabinet_owned(&h.kernel);
@@ -237,7 +239,7 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
             })
             .map_err(|e| format!("reach: `{holder}`.can_call: {e}"))?;
     }
-    grant_back(h, ids).await
+    write_back(h, ids)
 }
 
 /// THE WAY BACK (owner 2026-10-11: the canvas AI is god mode — it builds): every
@@ -246,7 +248,7 @@ pub async fn grant(h: &Host, ids: &[String]) -> Result<(), String> {
 /// for every pair that involves one of `ids`: the holder's `callable_by` names the
 /// agent with `send`, the agent's `can_call` names the holder with `send` (merged —
 /// a `*` stays `*`). One write per changed record.
-pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
+fn write_back(h: &Host, ids: &[String]) -> Result<(), String> {
     let send = json!(["send"]);
     let holders = holders(h);
     let root = h.kernel.root().map(|r| r.id.0.clone());
@@ -316,8 +318,12 @@ pub async fn grant_back(h: &Host, ids: &[String]) -> Result<(), String> {
 
 /// Grant on every agent now.
 pub async fn grant_all(h: &Host) -> Result<(), String> {
+    write_all(h)
+}
+
+fn write_all(h: &Host) -> Result<(), String> {
     let ids: Vec<String> = h.kernel.agents.iter().map(|e| e.key().0.clone()).collect();
-    grant(h, &ids).await
+    write_grants(h, &ids)
 }
 
 static WATCHING: AtomicBool = AtomicBool::new(false);
@@ -356,13 +362,22 @@ pub async fn start(h: &Host) -> Result<(), String> {
     if WATCHING.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // THE GRANTS ARE WRITTEN IN THE SUBSCRIBER, before the call that made the agent
+    // returns (`create_agent` publishes `added` and only then answers): whoever
+    // makes an agent and acts on it at once — an AI's `create_agent` then `send`, a
+    // spawn's task, a `send` right after a `create_agent` — finds its edges there
+    // (#467). The announcement, the waiters and the system block follow in a task.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+    let (weak_kernel, cfg, root) = (Arc::downgrade(&h.kernel), h.cfg.clone(), h.root.clone());
     let sub: fantastic_kernel::StateSubscriber = Arc::new(move |v: &Value, _body: Option<&fantastic_kernel::Blob>| {
-        if v.get("kind").and_then(Value::as_str) == Some("added") {
-            if let Some(id) = v.get("agent_id").and_then(Value::as_str) {
-                let _ = tx.send(id.to_string());
-            }
+        if v.get("kind").and_then(Value::as_str) != Some("added") {
+            return;
         }
+        let (Some(id), Some(kernel)) = (v.get("agent_id").and_then(Value::as_str), weak_kernel.upgrade()) else { return };
+        let host = Host { kernel, cfg: cfg.clone(), root: root.clone() };
+        // a new holder (a leg, an AI cell) reaches every agent, not just itself
+        let r = if holders(&host).iter().any(|x| x == id) { write_all(&host) } else { write_grants(&host, &[id.to_string()]) };
+        let _ = tx.send((id.to_string(), r.err()));
     });
     h.kernel.add_state_subscriber(sub);
     // A PAGE CONNECTING: `<guid>|*` is the only grant that reaches a connected
@@ -395,26 +410,20 @@ pub async fn start(h: &Host) -> Result<(), String> {
     });
     let host = Host { kernel: Arc::clone(&h.kernel), cfg: h.cfg.clone(), root: h.root.clone() };
     tokio::spawn(async move {
-        while let Some(id) = rx.recv().await {
-            let mut batch = vec![id];
+        while let Some(first) = rx.recv().await {
+            let mut batch = vec![first];
             while let Ok(more) = rx.try_recv() {
                 batch.push(more);
             }
-            // a new holder (a leg, an AI cell) reaches every agent, not just the batch
-            let holders_now = holders(&host);
-            let r = if batch.iter().any(|b| holders_now.contains(b)) {
-                grant_all(&host).await
-            } else {
-                grant(&host, &batch).await
-            };
-            let refused = r.as_ref().err().cloned();
-            if let Some(e) = &refused {
-                tracing::warn!("{e}");
+            for (id, refused) in &batch {
+                if let Some(e) = refused {
+                    tracing::warn!("{e}");
+                }
+                announce(&host.kernel, std::slice::from_ref(id), refused.as_deref());
             }
-            announce(&host.kernel, &batch, refused.as_deref());
             GRANTED.notify_waiters();
             // a new AI reads the project's system block (`kern/prompt`)
-            for id in &batch {
+            for (id, _) in &batch {
                 if let Err(e) = crate::kern::prompt::stamp(&host, id).await {
                     tracing::warn!("{e}");
                 }
@@ -463,7 +472,7 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{announce, cabinet_owned, grant, holders, leg_verbs, CANVAS_LEG, NARROWED};
+    use super::{announce, cabinet_owned, holders, write_grants, leg_verbs, CANVAS_LEG, NARROWED};
     use crate::kern::host::Host;
     use fantastic_kernel::{Agent, AgentId, Kernel};
     use serde_json::{json, Map, Value};
@@ -554,11 +563,17 @@ mod tests {
     /// A host on a kernel rooted at `kernel` (the root is the kernel-state handler, so the
     /// reach's operator writes land), with the human `user` and the canvas leg registered.
     async fn host_with_leg(name: &str) -> Host {
+        host_with_bundles(name, |_| {}).await
+    }
+
+    /// [`host_with_leg`] with more bundles registered on the kernel.
+    async fn host_with_bundles(name: &str, more: impl FnOnce(&mut Kernel)) -> Host {
         let dir = std::env::temp_dir().join(format!("fc-reach-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut kernel = Kernel::new();
         kernel.bundles.register(fantastic_core::HANDLER_MODULE, fantastic_core::KernelStateBundle::default());
+        more(&mut kernel);
         let kernel = std::sync::Arc::new(kernel);
         let root = Agent::new(
             AgentId::from("kernel"),
@@ -588,7 +603,7 @@ mod tests {
         put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
         put(k, "m", Some("kernel"), json!({}));
         let ids: Vec<String> = fantastic_system_agents::IDS.iter().map(|s| s.to_string()).collect();
-        grant(&h, &ids).await.unwrap();
+        write_grants(&h, &ids).unwrap();
         let field = |id: &str, f: &str| -> Value {
             k.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get(f).cloned().unwrap_or(Value::Null)
         };
@@ -623,7 +638,7 @@ mod tests {
         // an ordinary AI, which must not reach the cabinet's equipment (no god mode)
         put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
         put(k, "m", Some("kernel"), json!({}));
-        grant(&h, &["helper".to_string(), "canvas_cabinet_a".to_string()]).await.unwrap();
+        write_grants(&h, &["helper".to_string(), "canvas_cabinet_a".to_string()]).unwrap();
         let field = |id: &str, f: &str| -> Value {
             k.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get(f).cloned().unwrap_or(Value::Null)
         };
@@ -677,7 +692,7 @@ mod tests {
             let id = format!("helper{round}");
             put(k, &id, Some("kernel"), json!({}));
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-            // the competing writer adds 50 distinct keys while grant() runs on another thread
+            // the competing writer adds 50 distinct keys while write_grants() runs on another thread
             let (k2, id2, b2) = (std::sync::Arc::clone(k), id.clone(), std::sync::Arc::clone(&barrier));
             let writer = std::thread::spawn(move || {
                 b2.wait();
@@ -693,7 +708,7 @@ mod tests {
             let id1 = id.clone();
             let granter = tokio::task::spawn_blocking(move || {
                 barrier.wait();
-                tokio::runtime::Handle::current().block_on(grant(&h2, &[id1]))
+                write_grants(&h2, &[id1])
             });
             granter.await.unwrap().unwrap();
             writer.join().unwrap();
@@ -703,5 +718,197 @@ mod tests {
                 assert_eq!(cb.get(format!("viewer{n}")), Some(&json!(["*"])), "round {round} viewer{n}: {cb}");
             }
         }
+    }
+
+    // ── #467: THE FIRST TURN OF A NEW AGENT NEVER RUNS BEFORE ITS GRANTS ──
+
+    const PROBE_AI: &str = "probe_ai.tools";
+    const SINK: &str = "sink.tools";
+
+    /// A scripted AI, no model. `send` is its FIRST TURN: one tool call, to `sink`, made as
+    /// itself and so gated by its own grants; the outcome goes to `turns`. `make` creates a
+    /// child AI and sends it a message at once (an AI's `create_agent`, then `send`);
+    /// `spawn` asks the registry for a worker with a task.
+    struct ProbeAi {
+        turns: tokio::sync::mpsc::UnboundedSender<(String, Value)>,
+    }
+
+    #[async_trait::async_trait]
+    impl fantastic_kernel::bundle::Bundle for ProbeAi {
+        fn name(&self) -> &str {
+            PROBE_AI
+        }
+        async fn handle(
+            &self,
+            agent_id: &AgentId,
+            payload: &Value,
+            kernel: &std::sync::Arc<Kernel>,
+        ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
+            let call = |target: &str, payload: Value| {
+                let kernel = std::sync::Arc::clone(kernel);
+                let target = AgentId::from(target);
+                async move { kernel.send(vec![fantastic_kernel::Item::new(target, payload)]).await.remove(0).result }
+            };
+            Ok(match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+                "boot" | "shutdown" => None,
+                "send" => {
+                    let tool = call("sink", json!({"type": "ping"})).await;
+                    let _ = self.turns.send((agent_id.0.clone(), tool.clone()));
+                    Some(json!({"tool": tool}))
+                }
+                "make" => {
+                    let id = payload["id"].as_str().unwrap_or("child_ai");
+                    let made = call(
+                        "kernel",
+                        json!({"type": "create_agent", "parent_id": agent_id.0, "id": id,
+                               "handler_module": PROBE_AI, "memory_store_id": "m"}),
+                    )
+                    .await;
+                    let first = call(id, json!({"type": "send", "text": "go"})).await;
+                    Some(json!({"made": made, "first": first}))
+                }
+                "spawn" => Some(call("roles", payload["spawn"].clone()).await),
+                other => Some(json!({"error": format!("probe ai: no verb {other}")})),
+            })
+        }
+    }
+
+    /// An agent any granted caller reaches: it answers `ping`.
+    struct Sink;
+
+    #[async_trait::async_trait]
+    impl fantastic_kernel::bundle::Bundle for Sink {
+        fn name(&self) -> &str {
+            SINK
+        }
+        async fn handle(
+            &self,
+            _agent_id: &AgentId,
+            payload: &Value,
+            _kernel: &std::sync::Arc<Kernel>,
+        ) -> Result<fantastic_kernel::bundle::Reply, fantastic_kernel::bundle::BundleError> {
+            Ok(match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+                "boot" | "shutdown" => None,
+                "ping" => Some(json!({"pong": true})),
+                other => Some(json!({"error": format!("sink: no verb {other}")})),
+            })
+        }
+    }
+
+    /// A runtime nobody drives; dropped from inside a test's runtime, it is shut down without blocking.
+    struct Undriven(Option<tokio::runtime::Runtime>);
+
+    impl Drop for Undriven {
+        fn drop(&mut self) {
+            if let Some(rt) = self.0.take() {
+                rt.shutdown_background();
+            }
+        }
+    }
+
+    /// The watch is one per process (`WATCHING`); each of these tests starts it on its own
+    /// kernel, one at a time.
+    static ONE_WATCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A host with the watch running (on a runtime nobody drives), an AI `master` (a holder), the store `m` and `sink`
+    /// and the roles registry made before it started; the receiver sees every first turn's tool outcome.
+    async fn watched_host(
+        name: &str,
+    ) -> (tokio::sync::MutexGuard<'static, ()>, Undriven, Host, tokio::sync::mpsc::UnboundedReceiver<(String, Value)>) {
+        let guard = ONE_WATCH.lock().await;
+        super::WATCHING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let h = host_with_bundles(name, |k| {
+            k.bundles.register(PROBE_AI, ProbeAi { turns: tx });
+            k.bundles.register(SINK, Sink);
+            k.bundles.register(fantastic_agentic_resources::HANDLER_MODULE, fantastic_agentic_resources::AgenticResourcesBundle);
+        })
+        .await;
+        for (id, hm, meta) in [
+            ("m", SINK, json!({})),
+            ("sink", SINK, json!({})),
+            ("master", PROBE_AI, json!({"memory_store_id": "m"})),
+        ] {
+            let mut spec = meta.as_object().cloned().unwrap_or_default();
+            for (k, v) in [("type", "create_agent"), ("parent_id", "kernel"), ("id", id), ("handler_module", hm)] {
+                spec.insert(k.into(), json!(v));
+            }
+            let made = h.operator("kernel", Value::Object(spec)).await.result;
+            assert!(made.get("error").is_none(), "{id}: {made}");
+        }
+        // the roles registry, also made before the watch (the grants of what exists are written by `start`)
+        let dir = std::env::temp_dir().join(format!("fc-reach-{}-{name}", std::process::id())).join("roles");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("worker.md"), "---\nname: worker\npurpose: Works.\ntier: fast\n---\nYou work.\n").unwrap();
+        let made = h
+            .operator(
+                "kernel",
+                json!({"type": "create_agent", "parent_id": "kernel", "id": "roles",
+                       "handler_module": fantastic_agentic_resources::HANDLER_MODULE,
+                       "role_dirs": [dir.to_string_lossy()],
+                       "tiers": {"fast": {"handler_module": PROBE_AI, "memory_store_id": "m"}}}),
+            )
+            .await
+            .result;
+        assert!(made.get("error").is_none(), "{made}");
+        // The watch runs on a runtime nobody drives: the state a loaded host is in when a
+        // first turn arrives before the watch's task has been scheduled. Grants that wait
+        // for that task never come; the ones the subscriber writes do not need it.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let watch = Host { kernel: std::sync::Arc::clone(&h.kernel), cfg: h.cfg.clone(), root: h.root.clone() };
+        let rt = std::thread::spawn(move || {
+            rt.block_on(super::start(&watch)).unwrap();
+            rt
+        })
+        .join()
+        .unwrap();
+        (guard, Undriven(Some(rt)), h, rx)
+    }
+
+    async fn first_turn(rx: &mut tokio::sync::mpsc::UnboundedReceiver<(String, Value)>, who: &str) -> Value {
+        let (id, tool) = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the first turn never ran")
+            .expect("the probe is alive");
+        assert_eq!(id, who);
+        tool
+    }
+
+    #[tokio::test]
+    async fn an_ais_create_agent_then_send_runs_a_first_turn_that_can_call_a_tool() {
+        let (_one, _watch, h, mut rx) = watched_host("first-turn-ai").await;
+        let out = h.operator("master", json!({"type": "make", "id": "child_ai"})).await.result;
+        assert!(out["made"].get("error").is_none(), "{out}");
+        assert_eq!(out["first"]["tool"], json!({"pong": true}), "the child's first turn: {out}");
+        assert_eq!(first_turn(&mut rx, "child_ai").await, json!({"pong": true}));
+    }
+
+    #[tokio::test]
+    async fn a_spawn_with_a_task_runs_a_first_turn_that_can_call_a_tool() {
+        let (_one, _watch, h, mut rx) = watched_host("first-turn-spawn").await;
+        let out = h
+            .operator("master", json!({"type": "spawn", "spawn": {"type": "spawn", "role": "worker", "task": "go"}}))
+            .await
+            .result;
+        let child = out["id"].as_str().unwrap_or_else(|| panic!("{out}")).to_string();
+        assert_eq!(first_turn(&mut rx, &child).await, json!({"pong": true}));
+    }
+
+    #[tokio::test]
+    async fn a_send_right_after_a_create_agent_runs_a_first_turn_that_can_call_a_tool() {
+        // `fantastic send` twice: the create, then the message
+        let (_one, _watch, h, mut rx) = watched_host("first-turn-send").await;
+        let made = h
+            .operator(
+                "kernel",
+                json!({"type": "create_agent", "parent_id": "kernel", "id": "teammate",
+                       "handler_module": PROBE_AI, "memory_store_id": "m"}),
+            )
+            .await
+            .result;
+        assert!(made.get("error").is_none(), "{made}");
+        let out = h.operator("teammate", json!({"type": "send", "text": "go"})).await.result;
+        assert_eq!(out["tool"], json!({"pong": true}), "{out}");
+        assert_eq!(first_turn(&mut rx, "teammate").await, json!({"pong": true}));
     }
 }
