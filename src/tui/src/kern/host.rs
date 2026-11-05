@@ -85,6 +85,10 @@ fn registry_with(cwd: &std::path::Path, extras: &[crate::Extra]) -> BundleRegist
         fantastic_exec_bridge::HANDLER_MODULE,
         fantastic_exec_bridge::ExecBridgeBundle,
     );
+    // THE BRIDGES: a `ws_bridge` dials another kernel's `web_ws` (an ssh tunnel is an
+    // `exec_bridge` job it dials locally); `relay_connector` joins a relay kernel (#469).
+    reg.register(fantastic_bridge::WS_HANDLER_MODULE, fantastic_bridge::WsBridgeBundle);
+    reg.register(fantastic_bridge::RELAY_HANDLER_MODULE, fantastic_bridge::RelayConnectorBundle);
     // THE HUMAN, as an agent. This is the id the terminal acts as, so every act
     // carries a ledger row naming a person instead of an operator injection.
     reg.register(fantastic_user::HANDLER_MODULE, fantastic_user::UserBundle::default());
@@ -646,6 +650,8 @@ mod tests {
             "web.tools",
             "canvas_page.tools",
             "web_ws.tools",
+            "ws_bridge.tools",
+            "relay_connector.tools",
         ] {
             assert!(reg.get(m).is_some(), "{m} must be registered");
         }
@@ -707,6 +713,7 @@ mod tests {
             "mcp_client.tools",
             "py_agent.tools",
             "ram_store.tools",
+            "relay_connector.tools",
             "setup.tools",
             "sqlite_store.tools",
             "user.tools",
@@ -715,6 +722,7 @@ mod tests {
             "web.tools",
             "web_mcp.tools",
             "web_ws.tools",
+            "ws_bridge.tools",
         ];
         #[cfg(target_os = "linux")]
         want.extend(fantastic_system_agents::HANDLER_MODULES);
@@ -770,6 +778,67 @@ mod tests {
         let stock = bootstrap::bootstrap(registry_with(&dir, &[]), BootstrapOptions::one_shot(&dir)).expect("boots");
         assert!(!stock.loaded.contains(&AgentId::from("probe")), "weak-skipped without the extra: {:?}", stock.loaded);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A booted in-memory kernel from the CLI host's own registry, with `guid`.
+    fn host_kernel(guid: &str) -> Arc<Kernel> {
+        let k = bootstrap::bootstrap(registry_with(std::path::Path::new("."), &[]), BootstrapOptions::in_memory())
+            .expect("boots")
+            .kernel;
+        let root = k.root().expect("root").id.clone();
+        let mut m = serde_json::Map::new();
+        m.insert("guid".into(), json!(guid));
+        k.update(&root, m);
+        k
+    }
+
+    async fn send(k: &Arc<Kernel>, to: &str, payload: Value) -> Value {
+        k.send(vec![Item::new(AgentId::from(to), payload)]).await.remove(0).result
+    }
+
+    /// #469: a CLI host kernel makes a `ws_bridge` and `forward` reaches an agent on the
+    /// other kernel (memory transport). Before the registry held `ws_bridge.tools`,
+    /// `boot` and `forward` were refused: "cannot be imported in this runtime".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cli_kernel_bridges_to_another_kernel_through_ws_bridge() {
+        let (ka, kb) = (host_kernel("host-a"), host_kernel("host-b"));
+        let root_a = ka.root().expect("root").id.0.clone();
+        let root_b = kb.root().expect("root").id.0.clone();
+        let tag = format!("brg469_{}", std::process::id());
+        let (a_id, b_id) = (format!("{tag}_a"), format!("{tag}_b"));
+        // the agent on the far side: its `callable_by` names the serving leg
+        let made = send(
+            &kb,
+            "kernel",
+            json!({"type": "create_agent", "parent_id": root_b, "id": "far",
+                   "handler_module": "ram_store.tools", "callable_by": {&b_id: "*"}}),
+        )
+        .await;
+        assert_eq!(made["id"], "far", "{made}");
+        fantastic_bridge::inject_pair(&AgentId::from(a_id.as_str()), &AgentId::from(b_id.as_str()));
+        let made = send(
+            &ka,
+            "kernel",
+            json!({"type": "create_agent", "parent_id": root_a, "id": a_id,
+                   "handler_module": "ws_bridge.tools", "transport": "memory", "peer_id": "B"}),
+        )
+        .await;
+        assert_eq!(made["id"], json!(a_id), "{made}");
+        let made = send(
+            &kb,
+            "kernel",
+            json!({"type": "create_agent", "parent_id": root_b, "id": b_id,
+                   "handler_module": "ws_bridge.tools", "transport": "memory", "peer_id": "A",
+                   "ingress_rule": "allow_all_ingress", "can_call": {"far": "*"}}),
+        )
+        .await;
+        assert_eq!(made["id"], json!(b_id), "{made}");
+        for (k, id) in [(&ka, &a_id), (&kb, &b_id)] {
+            let r = send(k, id, json!({"type": "boot"})).await;
+            assert!(r["booted"] == json!(true) || r["already"] == json!(true), "{r}");
+        }
+        let r = send(&ka, &a_id, json!({"type": "forward", "target": "far", "payload": {"type": "reflect"}})).await;
+        assert_eq!(r["id"], "far", "forward reached the far agent: {r}");
     }
 
     #[test]
