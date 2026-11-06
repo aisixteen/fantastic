@@ -354,8 +354,9 @@ async def test_web_rest_literal_binding_stays_literal_across_a_bridge(two):
     sock = _WsEnd(mt_h)
     serving = asyncio.create_task(ws_run(sock, kh, kh.id, "h_ws"))
     try:
+        # P's leg says `hello {guid, leg}` itself, first, at boot
+        kp.update(kp.id, guid="P-g")
         assert (await _op(kp, p["result"]["id"], {"type": "boot"}))["result"]["booted"]
-        await mt_p.send({"type": "hello", "guid": "P-g"})
         await _until(lambda: "P-g" in kh.ctx.peers)
         app = FastAPI()
         app.add_api_route(

@@ -31,6 +31,12 @@ async fn leg(tmp: &TempDir, tag: &str) -> (Arc<Kernel>, String, Arc<dyn BridgeTr
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let booted = ask(&kernel, &bid, json!({"type": "boot"})).await;
     assert_eq!(booted["booted"], true, "{booted}");
+    // the leg's first frame names its kernel to the far side
+    let hello = peer.recv_frame().await.expect("hello").into_value();
+    assert_eq!(
+        hello,
+        json!({"type": "hello", "guid": "local-g", "leg": bid})
+    );
     (kernel, bid, peer)
 }
 

@@ -20,6 +20,16 @@ Two on-the-wire formats, picked automatically by payload content:
                                                      tab of that guid)
     S->C {type:"reply_mirror", id, data}          -> a reply another tab of THIS
                                                      connection's hello guid got
+    C->S {type:"hello", guid, leg?}               -> the page kernel (or, with `leg`,
+                                                     a kernel's dialing leg) becomes
+                                                     the host's peer `<guid>|<agent>`
+    S->C {type:"call", id:"h-<nonce>-<n>", target, payload}
+                                                  -> the host calling a peer agent
+    C->S {type:"reply"|"error", id, data, secret?} -> that call's outcome
+    S->C {type:"watch"|"unwatch", src}            -> the host watching a kernel
+                                                     leg's agent `src`
+    C->S {type:"event", src, payload}             -> an event of that agent, to the
+                                                     host's watchers of `<guid>|<src>`
 
   BINARY FRAMES (when payload contains a `bytes` value anywhere):
     [4-byte BE uint32 H | H-byte JSON envelope | M-byte raw blob]
@@ -49,7 +59,7 @@ from starlette.websockets import WebSocketState
 import logging
 import secrets
 
-from kernel._kernel import PeerRoute
+from kernel._kernel import PeerRoute, note_reply_secret
 from kernel._refusal import TRANSPORT_ERROR, UNKNOWN_AGENT, bad, refusal
 
 from io_bridge import (
@@ -69,6 +79,23 @@ logger = logging.getLogger(__name__)
 # {client_id: that connection's `_send_envelope`}. Every reply a leg answers to
 # one tab of an identity is mirrored to the others.
 _TABS: dict[tuple[int, str], dict] = {}
+
+# A KERNEL's leg (`hello {guid, leg}`) has ONE live connection per guid, per
+# kernel: (id(kernel.ctx), guid) → {"client": client_id, "retire": async ()}. A
+# newer hello for the guid retires the older connection (the newest wins).
+_LEGS: dict[tuple[int, str], dict] = {}
+
+
+def _wire_marks(value) -> list[str]:
+    """A reply frame's optional `secret`: a list of non-empty dotted paths (no
+    empty segment, never `type`). Anything else is NO marks; the reply is still
+    delivered."""
+    if not isinstance(value, list):
+        return []
+    for m in value:
+        if not (isinstance(m, str) and m and "" not in m.split(".") and m != "type"):
+            return []
+    return list(value)
 
 
 def _make_client_id() -> str:
@@ -401,29 +428,90 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     # frames — the host kernel routes and gates, the page kernel gates its own
     # agents. One guid per connection, pinned by the first hello; many connections
     # per guid (every tab of one identity).
-    peer: dict = {"guid": None, "route": None, "closed": False}
+    #
+    # A KERNEL'S LEG says `hello {guid, leg}` (a `ws_bridge` dialing in): the same
+    # address, plus the two-way parts a page has no use for. The host may WATCH
+    # that kernel's agents — a host `watch` of `<guid>|<agent>` rides this socket
+    # as an outbound `{type:"watch"|"unwatch", src}` frame, and the leg streams the
+    # agent's events back as inbound `{type:"event", src, payload}` frames, handed
+    # to the host's watchers (`peer_event`). ONE connection per kernel guid: a
+    # newer hello for the same guid REPLACES the older connection (its waiting
+    # calls settle `bridge_down`, the socket is closed), and the host's watches of
+    # that guid are asked for again on the new one. Kernel legs join no tabs.
+    peer: dict = {"guid": None, "route": None, "closed": False, "leg": None}
     out_calls: dict[str, asyncio.Future] = {}
+    # `h-<12 hex>`, minted per CONNECTION: the frame id NAMES the execution on the
+    # peer, so a reconnected peer kernel must never see an id an earlier
+    # connection used (the counter restarts with every connection).
+    out_prefix = f"h-{secrets.token_hex(6)}"
     out_seq = [0]
+    out_sends: set[asyncio.Task] = set()
+
+    def _gone() -> dict:
+        """The one ending for a call the peer will never answer. A kernel's leg
+        ends it `bridge_down` — the link that carried it dropped (or a newer hello
+        replaced it); the caller may call again once the leg redials."""
+        if peer["leg"] is not None:
+            return refusal(
+                TRANSPORT_ERROR,
+                f"bridge_down: the kernel {peer['guid']} (leg {peer['leg']}) "
+                "disconnected before answering",
+            )
+        return refusal(
+            TRANSPORT_ERROR,
+            f"the page {peer['guid']} disconnected before answering",
+        )
+
+    def _settle_gone() -> None:
+        peer["closed"] = True
+        for fut in list(out_calls.values()):
+            if not fut.done():
+                fut.set_result((_gone(), []))
 
     async def _call_page(agent_id: str, payload: dict) -> dict:
         # A call that resolved this route just as the socket closed must not wait
         # on a future the teardown has already swept — it settles now, the same
         # way the teardown settles the ones already waiting.
         if peer["closed"] or ws.application_state != WebSocketState.CONNECTED:
-            return refusal(
-                TRANSPORT_ERROR,
-                f"the page {peer['guid']} disconnected before answering",
-            )
+            return _gone()
         out_seq[0] += 1
-        fid = f"h{out_seq[0]}"
+        fid = f"{out_prefix}-{out_seq[0]}"
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         out_calls[fid] = fut
         frame = {"type": "call", "id": fid, "target": agent_id, "payload": payload}
         try:
             await _send_envelope(frame)
-            return await fut
+            data, marks = await fut
         finally:
             out_calls.pop(fid, None)
+        # The reply frame's own secret marks, rooted at this reply: this kernel
+        # records the call's reply as `[secret]` there (this runs inside the
+        # remote target's dispatch); the caller gets it whole.
+        note_reply_secret(marks)
+        return data
+
+    def _watch_leg(agent_id: str, on: bool) -> None:
+        """Ask a kernel's leg to start (`on`) or stop streaming its agent: an
+        outbound `{type:"watch"|"unwatch", src}` frame, put on the wire in the
+        order asked. A gone socket drops it — the host's watch stays, and is
+        asked for again when the guid reconnects."""
+        if peer["closed"]:
+            return
+        frame = {"type": "watch" if on else "unwatch", "src": agent_id}
+        t = asyncio.get_running_loop().create_task(_send_envelope(frame))
+        out_sends.add(t)
+        t.add_done_callback(out_sends.discard)
+
+    async def _retire() -> None:
+        """A newer hello took this kernel's guid: stop being its address, settle
+        what waits here, close the socket."""
+        if peer["route"] is not None:
+            kernel.ctx.unregister_peer(peer["guid"], peer["route"])
+        _settle_gone()
+        if ws.application_state == WebSocketState.CONNECTED:
+            await ws.close(
+                code=1000, reason=f"replaced by a newer hello for {peer['guid']}"
+            )
 
     async def _emit_page(agent_id: str, payload: dict) -> None:
         await _send_envelope({"type": "emit", "target": agent_id, "payload": payload})
@@ -439,6 +527,20 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                         "hello",
                         "guid",
                         "the page kernel's guid, a non-empty id without `|`",
+                    ),
+                }
+            )
+            return
+        dialer = frame.get("leg")
+        if "leg" in frame and not (isinstance(dialer, str) and dialer):
+            await _send_envelope(
+                {
+                    "type": "error",
+                    "id": frame.get("id", ""),
+                    **bad(
+                        "hello",
+                        "leg",
+                        "the dialing kernel leg's id, a non-empty string",
                     ),
                 }
             )
@@ -459,12 +561,39 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                     }
                 )
             return
-        # A guid already live on another connection is another tab of that
-        # identity: this route JOINS it (one principal, kernel `register_peer`).
-        route = PeerRoute(via=web_agent_id, call=_call_page, emit=_emit_page)
+        key = (id(kernel.ctx), guid)
+        if dialer is None:
+            # A guid already live on another connection is another tab of that
+            # identity: this route JOINS it (one principal, kernel `register_peer`).
+            route = PeerRoute(via=web_agent_id, call=_call_page, emit=_emit_page)
+            kernel.ctx.register_peer(guid, route)
+            peer["guid"], peer["route"] = guid, route
+            _TABS.setdefault(key, {})[client_id] = _send_envelope
+            return
+        route = PeerRoute(
+            via=web_agent_id, call=_call_page, emit=_emit_page, watch=_watch_leg
+        )
+        peer["guid"], peer["route"], peer["leg"] = guid, route, dialer
+        # THE NEWEST CONNECTION WINS: the older one stops being the address
+        # before this one becomes it, so no call is split across the two.
+        older = _LEGS.get(key)
+        _LEGS[key] = {"client": client_id, "retire": _retire}
+        if older is not None and older["client"] != client_id:
+            await older["retire"]()
         kernel.ctx.register_peer(guid, route)
-        peer["guid"], peer["route"] = guid, route
-        _TABS.setdefault((id(kernel.ctx), guid), {})[client_id] = _send_envelope
+        # the host's watches of this guid resume on the new connection
+        for agent_id in kernel.ctx.peer_watched(guid):
+            _watch_leg(agent_id, True)
+
+    def _on_event(frame):
+        """An inbound `{type:"event", src, payload}` from a kernel's leg: an event
+        of its agent `src` that this host watches — into the host's watchers of
+        `<guid>|<src>`. A page's events, or one before hello, are dropped."""
+        src, payload = _name(frame, "src"), frame.get("payload")
+        if peer["leg"] is None or peer["closed"] or not src:
+            return
+        if isinstance(payload, dict):
+            kernel.peer_event(peer["guid"], src, payload)
 
     def _on_answer(frame):
         """An inbound `reply`/`error` answers one of OUR outbound calls — its
@@ -472,7 +601,12 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
         fut = out_calls.get(_name(frame, "id"))
         if fut is not None and not fut.done():
             data = frame.get("data")
-            fut.set_result(data if isinstance(data, dict) else {"result": data})
+            fut.set_result(
+                (
+                    data if isinstance(data, dict) else {"result": data},
+                    _wire_marks(frame.get("secret")),
+                )
+            )
 
     FRAME_HANDLERS_INLINE = {
         "emit": _on_emit,
@@ -537,6 +671,9 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
                 await _on_hello(frame)
             elif ftype in ("reply", "error"):
                 _on_answer(frame)
+            elif ftype == "event":
+                # never gated: it only answers a watch this leg itself sent
+                _on_event(frame)
             else:
                 inline = FRAME_HANDLERS_INLINE.get(ftype)
                 if inline is not None:
@@ -545,22 +682,21 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
     finally:
         # The page is gone: it is no longer an address, and every call still
         # waiting on it settles NOW with the reason — never a hang, never a retry.
-        peer["closed"] = True
         if peer["route"] is not None:
             kernel.ctx.unregister_peer(peer["guid"], peer["route"])
             key = (id(kernel.ctx), peer["guid"])
-            tabs = _TABS.get(key, {})
-            tabs.pop(client_id, None)
-            if not tabs:
-                _TABS.pop(key, None)
-        for fut in list(out_calls.values()):
-            if not fut.done():
-                fut.set_result(
-                    refusal(
-                        TRANSPORT_ERROR,
-                        f"the page {peer['guid']} disconnected before answering",
-                    )
-                )
+            if peer["leg"] is not None:
+                # only this connection's own entry — a newer hello's stays
+                if _LEGS.get(key, {}).get("client") == client_id:
+                    _LEGS.pop(key, None)
+            else:
+                tabs = _TABS.get(key, {})
+                tabs.pop(client_id, None)
+                if not tabs:
+                    _TABS.pop(key, None)
+        _settle_gone()
+        for t in list(out_sends):
+            t.cancel()
         drain_task.cancel()
         # Cancel any in-flight `call` handlers so the underlying
         # kernel.send tasks unwind (ollama_backend honors

@@ -10,8 +10,13 @@
 //! C→S {type:"emit",  target, payload}         → kernel.emit (no reply)
 //! C→S {type:"watch"|"unwatch", src}           → (un)register a watcher
 //! C→S {type:"state_subscribe"|"state_unsubscribe"}
-//! C→S {type:"hello", guid}                    → the page kernel becomes the
-//!                                               host's peer `<guid>|<agent>`
+//! C→S {type:"hello", guid, leg?}              → the page kernel (or, with `leg`,
+//!                                               a kernel's dialing leg) becomes
+//!                                               the host's peer `<guid>|<agent>`
+//! S→C {type:"watch"|"unwatch", src}            → the host watching a kernel
+//!                                               leg's agent `src`
+//! C→S {type:"event", src, payload}            → an event of that agent, to the
+//!                                               host's watchers of `<guid>|<src>`
 //! S→C {type:"reply", id, data, secret?} | {type:"error", id, …}
 //!                                             (`secret` = dotted paths into `data`
 //!                                               the reply's bundle marked — absent
@@ -19,9 +24,11 @@
 //! S→C {type:"event", src, payload}            → an event from a watched agent
 //!                                               (`src` = the name the client watched)
 //! S→C {type:"event", payload}                 → an event emitted to THIS connection
-//! S→C {type:"call", id:"h<n>", target, payload, caller, secret?}
+//! S→C {type:"call", id:"h-<nonce>-<n>", target, payload, caller, secret?}
 //!                                             → the host calling a page agent
-//! C→S {type:"reply"|"error", id:"h<n>", data} → that call's outcome
+//! C→S {type:"reply"|"error", id:"h-<nonce>-<n>", data, secret?}
+//!                                             → that call's outcome (the nonce is
+//!                                               the connection's)
 //! S→C {type:"emit", target, payload, caller?}  → a host emit to a page agent
 //!                                               (every tab of the guid)
 //! S→C {type:"reply_mirror", id, data}          → a reply this leg sent ANOTHER
@@ -637,6 +644,9 @@ pub(crate) async fn ws_loop(
             // An answer to one of the host's calls INTO the page — never gated:
             // it only settles a call this leg itself sent.
             "reply" | "error" => peer.answer(&frame, inbound.answer_body),
+            // An event a kernel's leg streams for an agent the host watches —
+            // never gated: it only answers a watch this leg itself sent.
+            "event" => peer.event(&kernel, &frame, inbound.body),
             "emit" => {
                 if !matches!(gate_leg(&kernel, &leg, "emit", &frame), Decision::Allow) {
                     continue;

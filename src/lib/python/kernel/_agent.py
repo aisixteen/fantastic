@@ -351,6 +351,9 @@ class RemoteTarget:
         sink: list | None = None,
     ):
         _current_task.set(task_id)
+        # the reply marks a route notes (the peer's reply frame `secret`) are this
+        # dispatch's — set BEFORE the route calls copy the context
+        _reply_sink.set(sink)
         calls = [
             asyncio.ensure_future(r.call(self.agent_id, payload)) for r in self.routes
         ]
@@ -1902,9 +1905,19 @@ class Agent:
         The verb checked is `watch`, so an operator grants it exactly like any
         other edge (`callable_by: {viewer: ["watch"]}`). An OPERATOR watch
         (`sender=None` — the bootstrap wiring a renderer, a test) is the origin
-        root of trust and stays ungated, as with send."""
+        root of trust and stays ungated, as with send.
+
+        A QUALIFIED `<guid>|<agent>` OF A CONNECTED PEER watches that agent on its
+        kernel: the same gate (the watcher's `can_call` must grant `watch` on the
+        qualified id), the same reader rule; the first local watcher asks the
+        peer's routes to stream it, and each event the transport hands back
+        (`peer_event`) lands in every watcher's inbox."""
         src = self.ctx.agents.get(src_id)
         if src is None:
+            if "|" in src_id:
+                remote = self._qualified_target(src_id)
+                if isinstance(remote, RemoteTarget):
+                    return self._watch_remote(remote, tgt_id)
             return None  # nothing to mirror; not a refusal
         sender_id = _current_sender.get()
         if sender_id is not None:
@@ -1916,20 +1929,66 @@ class Agent:
         # `INBOX_BOUND` and then be evicted one per message, forever, with nothing
         # to say so. `ensure_inbox` is the registration; making one here on the
         # watcher's behalf would invent a consumer that does not exist.
-        if tgt_id not in self.ctx.inboxes:
-            return refusal(
-                NO_CONSUMER,
-                f"watch: {tgt_id!r} has no registered inbox, so nothing would "
-                "read what is mirrored there",
-                hint=(
-                    f"register the reader first — ctx.ensure_inbox({tgt_id!r}) "
-                    "— then watch"
-                ),
-                watcher=tgt_id,
-                src=src_id,
-            )
+        no_reader = self._no_consumer(src_id, tgt_id)
+        if no_reader is not None:
+            return no_reader
         src._watcher_ids.add(tgt_id)
         return None
+
+    def _no_consumer(self, src_id: str, tgt_id: str) -> dict | None:
+        """A WATCHER MUST ALREADY BE A READER (see `watch`). The refusal, or None."""
+        if tgt_id in self.ctx.inboxes:
+            return None
+        return refusal(
+            NO_CONSUMER,
+            f"watch: {tgt_id!r} has no registered inbox, so nothing would "
+            "read what is mirrored there",
+            hint=(
+                f"register the reader first — ctx.ensure_inbox({tgt_id!r}) — then watch"
+            ),
+            watcher=tgt_id,
+            src=src_id,
+        )
+
+    def _watch_remote(self, remote: "RemoteTarget", tgt_id: str) -> dict | None:
+        """`watch` of an agent on a connected peer: gated like a send, the watcher
+        a reader, the peer a kernel's leg (a page tab cannot be watched). The
+        first local watcher of that agent asks every route of the guid."""
+        sender_id = _current_sender.get()
+        if sender_id is not None:
+            denial = self._gate(sender_id, "watch", remote)
+            if denial is not None:
+                return denial
+        no_reader = self._no_consumer(remote.id, tgt_id)
+        if no_reader is not None:
+            return no_reader
+        if all(r.watch is None for r in remote.routes):
+            return refusal(
+                UNHANDLED,
+                f"watch: the peer {remote.guid} is not a kernel leg — its agents "
+                "cannot be watched",
+                src=remote.id,
+            )
+        watchers = self.ctx.peer_watches.setdefault(
+            (remote.guid, remote.agent_id), set()
+        )
+        first = not watchers
+        watchers.add(tgt_id)
+        if first:
+            for r in remote.routes:
+                if r.watch is not None:
+                    r.watch(remote.agent_id, True)
+        return None
+
+    def peer_event(self, guid: str, agent_id: str, payload: dict) -> None:
+        """An event the peer `guid` streamed for its agent `agent_id`: into the
+        inbox of every local watcher of `<guid>|<agent_id>`, as a local watch
+        mirrors — nothing on the state stream (it happened on the other kernel).
+        An event nobody here watches is dropped."""
+        for w in sorted(self.ctx.peer_watches.get((guid, agent_id), ())):
+            q = self.ctx.inboxes.get(w)
+            if q is not None:
+                self._put_drop_oldest(q, payload)
 
     def authorize_state_subscribe(self, watcher_id: str) -> dict | None:
         """May `watcher_id` tap the kernel-wide STATE STREAM? Refusal, or None.
@@ -1952,9 +2011,25 @@ class Agent:
         return self._gate(watcher_id, "state_subscribe", self._root())
 
     def unwatch(self, src_id: str, tgt_id: str) -> None:
+        """Detach a watcher. For a qualified `<guid>|<agent>` this forgets a PEER
+        watch — connected or not; the last watcher asks the guid's live routes to
+        stop streaming the agent."""
         src = self.ctx.agents.get(src_id)
         if src is not None:
             src._watcher_ids.discard(tgt_id)
+            return
+        guid, bar, agent_id = src_id.partition("|")
+        key = (guid, agent_id)
+        watchers = self.ctx.peer_watches.get(key)
+        if not bar or watchers is None or tgt_id not in watchers:
+            return
+        watchers.discard(tgt_id)
+        if watchers:
+            return
+        del self.ctx.peer_watches[key]
+        for r in self.ctx.peers.get(guid, ()):
+            if r.watch is not None:
+                r.watch(agent_id, False)
 
     def has_watchers(self, src_id: str) -> bool:
         """Whether anything still mirrors src_id's traffic: a watcher that has

@@ -2427,6 +2427,12 @@ async fn booted_leg(
     let peer = inject_one(&AgentId::from(bid.as_str()));
     let booted = ask(&kernel, &bid, json!({"type": "boot"})).await;
     assert!(booted.get("error").is_none(), "{booted}");
+    // the leg's first frame names its kernel to the far side
+    let hello = peer.recv_frame().await.expect("hello").into_value();
+    assert_eq!(
+        hello,
+        json!({"type": "hello", "guid": "g-local", "leg": bid})
+    );
     (kernel, bid, peer)
 }
 
@@ -2673,6 +2679,11 @@ mod leg_lifetime;
 /// `relay_connector/tests/test_relay_credentials.py`).
 #[path = "tests_relay_credentials.rs"]
 mod relay_credentials;
+
+/// The two-way leg (#476): `hello` at every boot, an inbound `watch` gated and
+/// streamed back (python `ws_bridge/tests/test_two_way_leg.py`).
+#[path = "tests_two_way.rs"]
+mod two_way;
 
 /// A bridge leg makes the one write-time check every leg makes
 /// (python `io_bridge._engine.validate_meta` → `unknown_ingress_refusal`): an

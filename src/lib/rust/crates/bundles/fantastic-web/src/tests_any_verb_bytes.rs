@@ -326,25 +326,14 @@ type Crossed = Arc<Mutex<Vec<(&'static str, &'static str, Value, Vec<u8>)>>>;
 
 /// python `_WsEnd`: a bridge leg's memory half whose far end is a REAL socket
 /// into `web_id`'s web_ws — every frame crosses the codec, and every frame is
-/// kept as it crossed. `hello` makes the leg's kernel the host's peer.
-async fn ws_end(
-    port: u16,
-    web_id: &str,
-    half: Arc<dyn BridgeTransport>,
-    hello: Option<&str>,
-) -> Crossed {
+/// kept as it crossed. The leg says its own `hello` at boot, which makes its
+/// kernel the host's peer.
+async fn ws_end(port: u16, web_id: &str, half: Arc<dyn BridgeTransport>) -> Crossed {
     let wire: Crossed = Arc::default();
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web_id}/ws"))
         .await
         .expect("ws connect");
     let (mut sink, mut source) = ws.split();
-    if let Some(guid) = hello {
-        sink.send(TMessage::Text(
-            json!({"type": "hello", "guid": guid}).to_string(),
-        ))
-        .await
-        .expect("hello");
-    }
     // web_ws → the leg
     let (down, seen) = (Arc::clone(&half), Arc::clone(&wire));
     tokio::spawn(async move {
@@ -456,7 +445,7 @@ async fn c_a_ws_bridge_forward_text_call_binary_reply() {
     let half = fantastic_bridge::inject_one(&AgentId::from(a_leg.as_str()));
     let booted = op(&ka, &a_leg, json!({"type": "boot"})).await.result;
     assert_eq!(booted["booted"], json!(true), "{booted}");
-    let wire = ws_end(port, &b_web, half, None).await;
+    let wire = ws_end(port, &b_web, half).await;
 
     // a PLAIN item: no body on the call, nothing declared
     let out = op(
@@ -533,7 +522,7 @@ async fn d_a_peer_bridge_engine_answers_a_text_call_with_bytes() {
     let half = fantastic_bridge::inject_one(&AgentId::from(p_leg.as_str()));
     let booted = op(&kp, &p_leg, json!({"type": "boot"})).await.result;
     assert_eq!(booted["booted"], json!(true), "{booted}");
-    let wire = ws_end(port, &h_web, half, Some("P-g")).await;
+    let wire = ws_end(port, &h_web, half).await;
     until("P is H's peer", || !kh.peer_routes("P-g").is_empty()).await;
 
     let r = reqwest::Client::new()

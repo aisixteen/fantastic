@@ -61,6 +61,9 @@ async def leg(seeded_kernel):
     _engine._test_transport_inject[leg_id] = mt_leg
     r = (await k.send([{"target": leg_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True, r
+    # the leg's first frame names its kernel to the far side
+    hello = await asyncio.wait_for(mt_peer.recv(), timeout=2.0)
+    assert hello == {"type": "hello", "guid": k._meta["guid"], "leg": leg_id}, hello
     yield k, leg_id, target, mt_peer
     _engine._bridges.clear()
     _engine._test_transport_inject.clear()

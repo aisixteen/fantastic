@@ -1724,37 +1724,50 @@ impl Kernel {
     ///
     /// An OPERATOR watch (`current_sender()` is `None`) is the origin root of
     /// trust and stays ungated, as with send.
+    ///
+    /// A QUALIFIED `<guid>|<agent>` OF A CONNECTED PEER watches that agent on its
+    /// kernel ([`crate::peers`]): the same gate, the same reader rule.
     pub async fn watch(self: &Arc<Self>, src_id: &AgentId, watcher_id: AgentId) -> Option<Value> {
         let Some(src) = self.agents.get(src_id).map(|e| Arc::clone(&e)) else {
-            return None; // nothing to mirror; not a refusal
+            let remote = self
+                .qualified_target(src_id.as_str())
+                .filter(|a| a.is_remote())?;
+            return self.watch_peer(&remote, watcher_id).await;
         };
         if let Some(orig) = current_sender() {
             if let Some(denial) = self.gate(&orig, "watch", &src) {
                 return Some(denial);
             }
         }
-        // A WATCHER MUST ALREADY BE A READER: a lazily created inbox would be a
-        // sender with no receiver, so the mirror would go nowhere and the caller
-        // would have no way to know. Registering a consumer is what `watch`
-        // requires, not what it does.
-        if !self.inboxes.contains_key(&watcher_id) {
-            let who = fantastic_bundle::py_repr(&watcher_id.0);
-            let mut r = crate::refusal::refusal_hint(
-                crate::refusal::NO_CONSUMER,
-                format!(
-                    "watch: {who} has no registered inbox, so nothing would read \
-                     what is mirrored there"
-                ),
-                format!("register the reader first — ctx.ensure_inbox({who}) — then watch"),
-            );
-            crate::refusal::with(&mut r, "watcher", json!(watcher_id.0));
-            crate::refusal::with(&mut r, "src", json!(src_id.0));
+        if let Some(r) = self.no_consumer(&watcher_id, src_id) {
             return Some(r);
         }
         {
             src.watcher_ids.write().await.insert(watcher_id.clone());
         }
         None
+    }
+
+    /// A WATCHER MUST ALREADY BE A READER: a lazily created inbox would be a
+    /// sender with no receiver, so the mirror would go nowhere and the caller
+    /// would have no way to know. Registering a consumer is what `watch`
+    /// requires, not what it does. The refusal, or `None`.
+    pub(crate) fn no_consumer(&self, watcher_id: &AgentId, src_id: &AgentId) -> Option<Value> {
+        if self.inboxes.contains_key(watcher_id) {
+            return None;
+        }
+        let who = fantastic_bundle::py_repr(&watcher_id.0);
+        let mut r = crate::refusal::refusal_hint(
+            crate::refusal::NO_CONSUMER,
+            format!(
+                "watch: {who} has no registered inbox, so nothing would read \
+                 what is mirrored there"
+            ),
+            format!("register the reader first — ctx.ensure_inbox({who}) — then watch"),
+        );
+        crate::refusal::with(&mut r, "watcher", json!(watcher_id.0));
+        crate::refusal::with(&mut r, "src", json!(src_id.0));
+        Some(r)
     }
 
     /// May `watcher_id` tap the kernel-wide STATE STREAM? Refusal, or `None`.
@@ -1774,9 +1787,16 @@ impl Kernel {
     }
 
     /// Detach a previously-registered watcher.
+    ///
+    /// For a qualified `<guid>|<agent>` this forgets a PEER watch — connected or
+    /// not.
     pub async fn unwatch(&self, src_id: &AgentId, watcher_id: &AgentId) {
-        if let Some(src) = self.agents.get(src_id) {
-            src.watcher_ids.write().await.remove(watcher_id);
+        let local = self.agents.get(src_id).map(|e| Arc::clone(&e));
+        match local {
+            Some(src) => {
+                src.watcher_ids.write().await.remove(watcher_id);
+            }
+            None => self.unwatch_peer(src_id.as_str(), watcher_id).await,
         }
     }
 

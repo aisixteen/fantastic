@@ -6,7 +6,7 @@
 //! over a pluggable transport. Weak binding: remote agents are
 //! addressed by URL + path only; no shared Rust types across kernels.
 //!
-//! WS-only, asymmetric (matches the canonical Python kernel). Transports:
+//! WS-only; the dialer owns the link (matches the canonical Python kernel). Transports:
 //! - `memory`  — in-process paired channels (tests only)
 //! - `ws`      — `tokio-tungstenite` client against a remote `web_ws` surface
 //!   (`host` explicit). The bridge spawns nothing: an ssh tunnel is an
@@ -27,13 +27,17 @@
 //! | `watch_remote` | `{target}` | `{ok, watching}` — stream a remote agent's emits onto this bridge's inbox |
 //! | `unwatch_remote` | `{target}` | `{ok, unwatched}` |
 //!
-//! # Frame protocol (asymmetric — bridge is a pure client)
+//! # Frame protocol (the dialer owns the link; calls and watches go both ways)
 //!
 //! Ships **raw** call frames to the remote's `web_ws`, which dispatches
 //! `kernel.send` exactly like a browser frame. No peer bridge needed.
 //! Matches Python ws_bridge + fantastic-web WS server:
 //!
 //! ```text
+//! outbound  {type:"hello", guid, leg}   — `ws_bridge` only, first, at every boot
+//!                                        (`reconnect` included), when this kernel
+//!                                        has a guid: the remote then reaches this
+//!                                        kernel's agents as `<guid>|<agent>`
 //! outbound  {type:"call",  id:corr, target, payload}
 //!                                        — the far kernel judges it as the leg
 //!                                        that serves it there
@@ -44,6 +48,14 @@
 //! inbound   {type:"error", id, error}    — read loop fails the pending oneshot
 //! inbound   {type:"event", src, payload} — re-emitted (payload + `src`) on this bridge's
 //!                                        inbox ONLY for a subscribed `src`, else dropped
+//! inbound   {type:"call", id, target, payload} — served AS THE LEG, answered
+//!                                        `{type:"reply", id, data, secret?}`
+//! inbound   {type:"watch"|"unwatch", src} — the remote watching a local agent: the
+//!                                        leg's ingress rule, then the leg's own
+//!                                        `watch` grant on `src`; each event of
+//!                                        `src` goes back `{type:"event", src,
+//!                                        payload}` until `unwatch` or the link
+//!                                        drops (a refusal is `{type:"error", src, …}`)
 //! ```
 //!
 //! Reply correlation: a frame id is `<bridge id>-<boot nonce>-<counter>` — the
@@ -218,6 +230,24 @@ pub(crate) struct BridgeState {
     /// `event` frame is re-emitted only when its `src` is here — nothing flows
     /// until subscribed, and nothing after an unwatch.
     pub(crate) watching: Mutex<HashSet<String>>,
+    /// The LOCAL agents the far side watches through this leg (an inbound
+    /// `watch` frame), by the `src` it named — each with its reader and the
+    /// drain that streams its events back. Dropped on `unwatch` and with the
+    /// link.
+    pub(crate) served: Mutex<HashMap<String, Served>>,
+}
+
+/// One local agent the far side watches through the leg.
+pub(crate) struct Served {
+    /// The agent watched.
+    target: AgentId,
+    /// The watch's own reader (`<leg>><agent>`).
+    reader: AgentId,
+    /// The reader's receive half: the drain forwards under its lock, and a reply
+    /// flushes it first (see [`serve_inbound_call`]).
+    rx: Arc<AsyncMutex<fantastic_kernel::inbox::InboxReceiver>>,
+    /// The drain task, a `ps` row of the leg.
+    task: fantastic_kernel::TaskId,
 }
 
 impl BridgeState {
@@ -917,7 +947,22 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
         corr_counter: AtomicU64::new(0),
         down_emitted: std::sync::atomic::AtomicBool::new(false),
         watching: Mutex::new(HashSet::new()),
+        served: Mutex::new(HashMap::new()),
     });
+
+    // HELLO FIRST: the far `web_ws` registers this connection as this kernel's
+    // leg, so its agents reach ours as `<guid>|<agent>` — at every boot, so a
+    // redial (`reconnect`) replaces the dropped connection there. A kernel with
+    // no guid yet has no address to give and says nothing.
+    if family == Family::Ws {
+        if let Some(guid) = own_guid(kernel) {
+            let hello = json!({"type": "hello", "guid": guid, "leg": agent_id.as_str()});
+            if let Err(e) = transport.send_frame(hello).await {
+                transport.close().await;
+                return json!({"error": format!("bridge: {kind} boot failed: hello: {}", transport_error_text(&e))});
+            }
+        }
+    }
 
     // Spawn the read loop BEFORE we publish the state so the
     // very first inbound frame can land.
@@ -1075,6 +1120,16 @@ async fn emit_bridge_down(agent_id: &AgentId, state: &Arc<BridgeState>, kernel: 
     kernel.emit(agent_id, json!({"type": "bridge_down"})).await;
 }
 
+/// This kernel's guid (the root record's), when its loader minted one.
+fn own_guid(kernel: &Kernel) -> Option<String> {
+    let root = kernel.root()?;
+    let meta = root.meta.read().expect("meta poisoned");
+    meta.get("guid")
+        .and_then(Value::as_str)
+        .filter(|g| !g.is_empty())
+        .map(str::to_string)
+}
+
 async fn shutdown_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     let removed = BRIDGES.lock().remove(agent_id);
     let Some(state) = removed else {
@@ -1087,6 +1142,8 @@ async fn shutdown_reply(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
     if let Some(tid) = state.read_task.lock().await.take() {
         kernel.cancel_task(&tid).await;
     }
+    // the cancelled loop never reaches its tail: the far side's watches go here
+    drop_served(&state, kernel).await;
     state.transport.close().await;
     // The cancelled read loop never reaches its own tail — python's `finally`
     // does, so the leg still announces exactly one `bridge_down`.
@@ -1313,10 +1370,15 @@ fn deny_reply(denial: &authorizer::Denial) -> Value {
 /// `forward` back over this same bridge, and a read loop parked inside
 /// `kernel.send` cannot read the frame that would settle it.
 ///
-/// In production (WS) the bridge is a pure client and never sees inbound calls —
-/// its peer is the remote's `web_ws`, not another bridge. This path serves the
-/// memory-paired tests and the symmetric relay legs, where two in-process bridges
-/// shake hands (each read loop plays the `web_ws._on_call` role).
+/// Over WS the remote's `web_ws` calls this kernel's agents once the leg said
+/// `hello` (`<guid>|<agent>` there); the memory-paired tests and the symmetric
+/// relay legs reach the same path (each read loop plays the `web_ws._on_call`
+/// role).
+///
+/// The reply goes out AFTER every event the far side watches through this leg
+/// that is already queued (the served readers are flushed under their drains'
+/// locks first): a watcher never sees a call's reply overtake the events the
+/// call produced.
 async fn serve_inbound_call(
     leg: AgentId,
     state: Arc<BridgeState>,
@@ -1371,6 +1433,7 @@ async fn serve_inbound_call(
             item = item.with_binary(b.path, b.bytes);
         }
         let out = kernel.send(vec![item]).await.remove(0);
+        let _held = flush_served(&state).await;
         // the reply's own secret paths ride the frame (absent when none), as
         // `web_ws` sends them
         let marks = out.secret.clone();
@@ -1396,6 +1459,171 @@ async fn serve_inbound_call(
                 let _ = state.transport.send_binary(env, at).await;
             }
         }
+    }
+}
+
+/// Every event already queued for a watch the far side holds through this leg,
+/// sent now — and the readers' locks HELD, so no drain sends after them until
+/// the caller (a reply about to go out) drops the guards.
+async fn flush_served(
+    state: &Arc<BridgeState>,
+) -> Vec<tokio::sync::OwnedMutexGuard<fantastic_kernel::inbox::InboxReceiver>> {
+    let readers: Vec<(
+        String,
+        Arc<AsyncMutex<fantastic_kernel::inbox::InboxReceiver>>,
+    )> = state
+        .served
+        .lock()
+        .expect("served poisoned")
+        .iter()
+        .map(|(src, s)| (src.clone(), Arc::clone(&s.rx)))
+        .collect();
+    let mut held = Vec::with_capacity(readers.len());
+    for (src, rx) in readers {
+        let mut g = rx.lock_owned().await;
+        while let Some(item) = g.try_recv() {
+            let _ = send_event(&state.transport, &src, item).await;
+        }
+        held.push(g);
+    }
+    held
+}
+
+/// One event of a watched local agent → `{type:"event", src, payload}` over the
+/// transport; binary when it carries a body (at its path inside `payload`).
+async fn send_event(
+    transport: &Arc<dyn BridgeTransport>,
+    src: &str,
+    item: fantastic_kernel::inbox::InboxItem,
+) -> Result<(), TransportError> {
+    let mut env = json!({"type": "event", "src": src, "payload": item.payload});
+    match item.body {
+        None => transport.send_frame(env).await,
+        Some(b) => {
+            let at = Blob::new(b.nested_in("payload"), b.bytes);
+            let _ = fantastic_bundle::path::place(&mut env, &at.path, Value::Null);
+            transport.send_binary(env, at).await
+        }
+    }
+}
+
+/// `{type:"error", id, src, …refusal}` — the answer to an inbound `watch` that
+/// did not register (its keys flattened, as `web_ws` answers a refused watch).
+async fn refuse_watch(state: &Arc<BridgeState>, frame: &Value, src: &str, r: &Value) {
+    let mut out = Map::new();
+    out.insert("type".into(), json!("error"));
+    out.insert(
+        "id".into(),
+        frame.get("id").cloned().unwrap_or_else(|| json!("")),
+    );
+    out.insert("src".into(), json!(src));
+    if let Value::Object(m) = r {
+        for (k, v) in m {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    let _ = state.transport.send_frame(Value::Object(out)).await;
+}
+
+/// Serve ONE inbound `{type:"watch", src}`: the far side asks to watch the
+/// local agent `src` through this leg. The leg's INGRESS rule first (kind
+/// `watch`, read off the live record per frame), then the kernel's own gate AS
+/// THE LEG — this runs in the leg's read loop, so the leg's `can_call` must grant
+/// `watch` on `src` and `src`'s `callable_by` must accept the leg. Registered, the
+/// agent's events stream back as `{type:"event", src, payload}` until `unwatch`
+/// or the link drops. A refusal, or a name that is no agent, is answered with an
+/// `error` frame and nothing is registered. Inline in the read loop, so a call
+/// frame that follows it is served after the watch is in place.
+async fn serve_watch(leg: &AgentId, state: &Arc<BridgeState>, kernel: &Arc<Kernel>, frame: &Value) {
+    let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+    if src.is_empty()
+        || state
+            .served
+            .lock()
+            .expect("served poisoned")
+            .contains_key(src)
+    {
+        return;
+    }
+    let decision = authorizer::ingress::resolve(rule_spec(leg, kernel, "ingress_rule").as_ref())
+        .authorize(&Action {
+            kind: "watch",
+            target: src,
+            verb: "watch",
+            token: frame.get("auth_token").and_then(Value::as_str),
+        });
+    if let Decision::Deny(denial) = decision {
+        refuse_watch(state, frame, src, &deny_reply(&denial)).await;
+        return;
+    }
+    let Some(target) = kernel.resolve_target(src) else {
+        let r = fantastic_kernel::refusal(
+            fantastic_kernel::refusal::UNKNOWN_AGENT,
+            format!("watch: no agent {} (an id, or `kernel`)", py_repr(src)),
+        );
+        refuse_watch(state, frame, src, &r).await;
+        return;
+    };
+    // THIS WATCH'S OWN READER — registered before the watch asks for one.
+    let reader = AgentId::from(format!("{leg}>{}", target.id).as_str());
+    let rx = Arc::new(AsyncMutex::new(kernel.ensure_inbox(&reader)));
+    let ready = kernel.ensure_inbox(&reader);
+    if let Some(denial) = kernel.watch(&target.id, reader.clone()).await {
+        kernel.remove_inbox(&reader);
+        refuse_watch(state, frame, src, &denial).await;
+        return;
+    }
+    let task = kernel.spawn_task(leg, "watch_drain", {
+        let (rx, transport, tag) = (
+            Arc::clone(&rx),
+            Arc::clone(&state.transport),
+            src.to_string(),
+        );
+        async move {
+            loop {
+                {
+                    let mut g = rx.lock().await;
+                    while let Some(item) = g.try_recv() {
+                        if send_event(&transport, &tag, item).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                ready.ready().await;
+            }
+        }
+    });
+    state.served.lock().expect("served poisoned").insert(
+        src.to_string(),
+        Served {
+            target: target.id.clone(),
+            reader,
+            rx,
+            task,
+        },
+    );
+}
+
+/// Give one served watch back: unwatch as the leg's reader, stop its drain,
+/// drop its inbox.
+async fn drop_watch(kernel: &Arc<Kernel>, served: Served) {
+    kernel.unwatch(&served.target, &served.reader).await;
+    kernel.cancel_task(&served.task).await;
+    kernel.remove_inbox(&served.reader);
+}
+
+/// Every watch the far side held through this leg, given back — the link is
+/// gone (or going).
+async fn drop_served(state: &Arc<BridgeState>, kernel: &Arc<Kernel>) {
+    let all: Vec<Served> = state
+        .served
+        .lock()
+        .expect("served poisoned")
+        .drain()
+        .map(|(_, s)| s)
+        .collect();
+    for s in all {
+        drop_watch(kernel, s).await;
     }
 }
 
@@ -1508,9 +1736,18 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                     )));
                 }
             }
+            "watch" => serve_watch(&agent_id, &state, &kernel, &frame).await,
+            "unwatch" => {
+                // NO GATE — giving a watch back (as `web_ws` leaves it ungated).
+                let src = frame.get("src").and_then(Value::as_str).unwrap_or("");
+                let served = state.served.lock().expect("served poisoned").remove(src);
+                if let Some(s) = served {
+                    drop_watch(&kernel, s).await;
+                }
+            }
             _ => {
                 // Unknown frame type — ignore so the loop stays robust.
-                // (call/reply/error/event are handled above.)
+                // (call/reply/error/event/watch/unwatch are handled above.)
             }
         }
     }
@@ -1521,6 +1758,7 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
     for h in &calls {
         h.abort();
     }
+    drop_served(&state, &kernel).await;
     emit_bridge_down(&agent_id, &state, &kernel).await;
     let drained: Vec<PendingReply> = {
         let mut p = state.pending.lock().expect("pending poisoned");

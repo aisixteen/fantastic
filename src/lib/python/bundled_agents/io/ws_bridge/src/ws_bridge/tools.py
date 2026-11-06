@@ -38,6 +38,8 @@ VERBS = make_verbs(
     sentence=SENTENCE,
     reflect_fields=reflect_fields,
     default_kind="ws",
+    # the dialer names its kernel first, so the remote reaches its agents too
+    hello=True,
 )
 
 

@@ -381,11 +381,17 @@ class PeerRoute:
     ONE call to that kernel's `agent_id` and returns the peer's reply — or a
     refusal when the connection ends first. `emit(agent_id, payload)` drops ONE
     event into that kernel's `agent_id` (no reply). The peer judges what arrives
-    as the transport leg that serves it there — a caller is always local."""
+    as the transport leg that serves it there — a caller is always local.
+
+    `watch(agent_id, on)` asks the peer to start (`on`) or stop streaming that
+    agent's events over this route — set for a peer KERNEL's leg (`hello {guid,
+    leg}`), None for a peer that cannot be watched (a page tab). It returns at
+    once; the transport puts the frame on the wire in order."""
 
     via: str
     call: Callable[[str, dict], Any]
     emit: Callable[[str, dict], Any]
+    watch: Callable[[str, bool], None] | None = None
 
 
 @dataclass
@@ -482,6 +488,13 @@ class Kernel:
     # route of it, a call to `<guid>|x` goes to all of them and settles with the
     # first reply (`RemoteTarget`). Kept in registration order.
     peers: dict[str, list["PeerRoute"]] = field(default_factory=dict)
+
+    # This kernel's watches of PEER agents: `(guid, agent id)` → the local
+    # watchers of `<guid>|<agent>`. Kept per guid across connections — a
+    # transport that registers the guid again asks the peer for every watched
+    # agent (`peer_watched`); events emitted while no connection was up are not
+    # replayed.
+    peer_watches: dict[tuple[str, str], set[str]] = field(default_factory=dict)
 
     # THE ONE COUNTER. Every id in the kernel — a call (one per batch item), a
     # forked task, a settle, a conversation row an AI agent writes to its store —
@@ -1386,6 +1399,11 @@ class Kernel:
             self.peers[guid] = rest
         else:
             self.peers.pop(guid, None)
+
+    def peer_watched(self, guid: str) -> list[str]:
+        """The agents of peer `guid` this kernel watches — what a transport that
+        (re)connects that guid asks the peer to stream again."""
+        return [a for (g, a) in sorted(self.peer_watches) if g == guid]
 
     def peer_rows(self) -> list[dict]:
         """The connected peer kernels, for the root reflect: `[{guid, via}]` —

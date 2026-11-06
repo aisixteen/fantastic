@@ -44,3 +44,6 @@ fantastic-exec-bridge = { path = "../fantastic-exec-bridge" }
 fantastic-bridge = { path = "../fantastic-bridge" }
 fantastic-ram-store = { path = "../fantastic-ram-store" }
 fantastic-credential-store = { path = "../fantastic-credential-store" }
+# The two-way bridge (#476): a scripted AI agent — the real ai_core verb table, a
+# canned provider — whose stream a connected kernel watches.
+fantastic-ai-core = { path = "../fantastic-ai-core" }
