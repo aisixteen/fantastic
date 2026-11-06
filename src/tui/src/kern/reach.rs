@@ -410,7 +410,7 @@ async fn grant_peer(h: &Host, guid: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{announce, write_grants, CANVAS_LEG, NARROWED};
+    use super::{announce, leg_verbs, write_grants, CANVAS_LEG, NARROWED};
     use crate::kern::host::Host;
     use fantastic_kernel::{Agent, AgentId, Kernel};
     use serde_json::{json, Map, Value};
@@ -492,6 +492,31 @@ mod tests {
         assert!(cb.get("master").is_none(), "{cb}");
         assert_eq!(cb[crate::env::HUMAN], json!(fantastic_system_agents::lock::VERBS));
         assert!(NARROWED.contains(&"lock"));
+    }
+
+    #[tokio::test]
+    async fn grant_on_an_agent_on_a_child_canvas_gives_the_holders_all_and_the_canvas_leg_its_edges() {
+        let h = host_with_leg("child-canvas-grant").await;
+        let k = &h.kernel;
+        // a child canvas nested under the main one, an AI placed on it, and an ordinary AI holder
+        put(k, "canvas_root", Some("kernel"), json!({}));
+        put(k, "canvas_child_a", Some("canvas_root"), json!({}));
+        put(k, "helper", Some("canvas_child_a"), json!({"memory_store_id": "m"}));
+        put(k, "master", Some("kernel"), json!({"memory_store_id": "m"}));
+        put(k, "m", Some("kernel"), json!({}));
+        write_grants(&h, &["helper".to_string(), "canvas_child_a".to_string()]).unwrap();
+        let field = |id: &str, f: &str| -> Value {
+            k.agents.get(&AgentId::from(id)).unwrap().value().record().meta.get(f).cloned().unwrap_or(Value::Null)
+        };
+        // the human and every holder reach both; the leg watches and emits on them, both edges
+        for id in ["helper", "canvas_child_a"] {
+            assert_eq!(field(id, "callable_by")[crate::env::HUMAN], json!(["*"]), "{id}");
+            assert_eq!(field(crate::env::HUMAN, "can_call")[id], json!(["*"]), "{id}");
+            assert_eq!(field(id, "callable_by")["master"], json!(["*"]), "{id}");
+            assert_eq!(field("master", "can_call")[id], json!(["*"]), "{id}");
+            assert_eq!(field(id, "callable_by")[CANVAS_LEG], leg_verbs(&h, id), "{id}");
+            assert_eq!(field(CANVAS_LEG, "can_call")[id], leg_verbs(&h, id), "{id}");
+        }
     }
 
     #[test]
