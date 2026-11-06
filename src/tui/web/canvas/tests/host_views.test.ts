@@ -124,7 +124,7 @@ const TARGETS: Array<[string, string, Record<string, unknown>?]> = [
   ["scheduler.tools", "scheduler_view.ts"],
   ["credential_store.tools", "credentials_view.ts"],
 ];
-const WRITES = ["set", "get", "forget", "append", "add", "assign", "reassign", "status", "report", "schedule", "unschedule", "pause", "resume", "tick_now", "spawn", "set_limit", "send", "write", "delete", "conclude"];
+const WRITES = ["set", "get", "forget", "append", "add", "assign", "reassign", "status", "report", "schedule", "unschedule", "pause", "resume", "tick_now", "spawn", "set_limit", "send", "write", "delete"];
 
 test("each_target_agent_module_gets_its_own_view_kind: 4 modules, 3 handler files, the two stores share one", () => {
   const handlers = new Set<string>();
