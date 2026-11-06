@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hitsState, storeRows, storeState } from "../src/bundles/agent_models/store_model.ts";
 import { lastFire, nextText, schedulerRows, schedulerState } from "../src/bundles/agent_models/scheduler_model.ts";
-import { cabinetsRows, cabinetsState } from "../src/bundles/agent_models/cabinets_model.ts";
 import { credentialRows, credentialsState, grantsOf } from "../src/bundles/agent_models/credentials_model.ts";
 import type { Row } from "../src/bundles/agent_models/rows.ts";
 
@@ -46,16 +45,6 @@ test("scheduler_model_next_run_target_verb_last_result", () => {
   assert.match(t, /last: no runs yet/);
   assert.equal(nextText(900, 1000), "due");
   assert.equal(lastFire(s.history, "s1")?.error, "timeout");
-});
-
-test("cabinets_model_rows", () => {
-  const m = cabinetsState({ count: 1, cabinets: [{ id: "c1", task: "build", worker: "w1", canvas: "cv", status: { line: "halfway", progress: 50 }, equipment: [{}, {}] }] });
-  const t = text(cabinetsRows(m));
-  for (const w of ["CABINETS · 1", "c1  build", "worker w1", "canvas cv", "2 equipment", "halfway  50%"]) assert.ok(t.includes(w), w);
-  assert.match(text(cabinetsRows(cabinetsState({ cabinets: [] }))), /no cabinets yet/);
-  const cell = cabinetsState({ id: "c1", task: "t", worker: "w", canvas: "cv", status: null, equipment: [] });
-  assert.equal(cell.manager, false);
-  assert.match(text(cabinetsRows(cell)), /not reported yet/);
 });
 
 test("credentials_model_exposes_names_hosts_field_names_and_grants_only", () => {

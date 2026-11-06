@@ -114,10 +114,6 @@ fn register_default_bundles() -> BundleRegistry {
     reg.register("web_rest.tools", fantastic_web_rest::WebRestBundle);
     reg.register("scheduler.tools", fantastic_scheduler::SchedulerBundle);
     reg.register(
-        fantastic_cabinet::HANDLER_MODULE,
-        fantastic_cabinet::CabinetBundle,
-    );
-    reg.register(
         fantastic_static_loader::HANDLER_MODULE,
         fantastic_static_loader::StaticLoaderBundle,
     );
