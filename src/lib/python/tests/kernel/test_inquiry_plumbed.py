@@ -31,6 +31,7 @@ import types
 import pytest
 
 from _testkit import memory_meta
+from ai_core import core
 from ai_core.tool_parse import render_reply
 from kernel import current_origin, current_task, register_unlisted
 
@@ -44,6 +45,12 @@ from kernel import current_origin, current_task, register_unlisted
 _RECEIVED: dict[str, int] = {}
 #: agent id → every `action` proposal handed to it, in arrival order.
 _PROPOSALS: dict[str, list] = {}
+#: agent id → the moment this human replies. A test that pins WHEN the answer
+#: lands sets it; without one the human reads for READ_DELAY.
+_REPLY_GATE: dict[str, asyncio.Event] = {}
+#: agent id → set once the human's reply send has RETURNED: the asker's pass that
+#: read the answer has ended (a held send returns the answer of that pass).
+_REPLY_READ: dict[str, asyncio.Event] = {}
 
 KINDS = ("text", "single", "multi", "confirm")
 
@@ -56,9 +63,13 @@ def _fresh_desk():
     empty desk."""
     _RECEIVED.clear()
     _PROPOSALS.clear()
+    _REPLY_GATE.clear()
+    _REPLY_READ.clear()
     yield
     _RECEIVED.clear()
     _PROPOSALS.clear()
+    _REPLY_GATE.clear()
+    _REPLY_READ.clear()
 
 
 USER_SENTENCE = (
@@ -121,7 +132,11 @@ async def _user_handler(id, payload, kernel):
         reply_client = payload.get("reply_client_id") or "cli"
 
         async def _reply():
-            await asyncio.sleep(READ_DELAY)
+            gate = _REPLY_GATE.get(id)
+            if gate is None:
+                await asyncio.sleep(READ_DELAY)
+            else:
+                await gate.wait()
             await kernel.send(
                 [
                     {
@@ -134,6 +149,9 @@ async def _user_handler(id, payload, kernel):
                     }
                 ]
             )
+            read = _REPLY_READ.get(id)
+            if read is not None:
+                read.set()
 
         kernel.ctx.spawn_task(id, "inquiry_answer", _reply())
         return {"accepted": True, "re": pid, "request_id": payload.get("request_id")}
@@ -155,16 +173,22 @@ register_unlisted("user_agent.tools", _user_mod)
 
 class _Script:
     """One scripted completion per `chat()` call. `requests` keeps every pass's
-    messages, so a test can prove the human's answer became the NEXT message."""
+    messages, so a test can prove the human's answer became the NEXT message.
+    `before[n]`, when set, is awaited inside pass `n` before it answers — the
+    model is still working while it runs."""
 
     def __init__(self, messages: list[str]):
         self._messages = list(messages)
         self.requests: list = []
         self.calls = 0
+        self.before: dict = {}
 
     async def chat(self, messages, max_tokens=None):
         self.requests.append(messages)
+        n = self.calls
         self.calls += 1
+        if n in self.before:
+            await self.before[n]()
         if self._messages:
             yield self._messages.pop(0)
 
@@ -175,6 +199,12 @@ class _Script:
             (m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"),
             "",
         )
+
+    def read(self, n: int) -> list[str]:
+        """Every user-role text pass `n` (0-based) had in view, oldest first."""
+        return [
+            m.get("content", "") for m in self.requests[n] if m.get("role") == "user"
+        ]
 
 
 def _ask(text: str, *, kind: str = "text", **extra) -> str:
@@ -247,14 +277,48 @@ async def _tally(kernel, uid: str = "user") -> dict:
 # ─── the tests ──────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("lands", ["after_the_chain", "while_working"])
 async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(
-    seeded_kernel, fake_providers
+    seeded_kernel, fake_providers, monkeypatch, lands
 ):
     """THE WHOLE CONTRACT IN ONE MESSAGE PAIR. The model asks; the human's answer
     comes back as that call's reply, tagged like any other; the model reads it
     and finishes. Scored on the human's own count, which only its handler can
-    raise."""
+    raise.
+
+    WHEN THE ANSWER LANDS is the human's business, not the model's, so both orders
+    are pinned (#473). After the asker's `await` ended its chain, the answer IS
+    the next turn. While the asker is still working, the answer is HELD on the
+    live chain (ONE CHAIN PER AGENT, #227): stored as a row, and the chain's end
+    wakes the model with the held-message notice, the answer just above it."""
     script = _Script([_ask("Proceed?", kind="confirm"), AWAIT, "understood " + DONE])
+    gate, read = asyncio.Event(), asyncio.Event()
+    _REPLY_GATE["user"], _REPLY_READ["user"] = gate, read
+    if lands == "after_the_chain":
+        chain_ended = core._chain_ended
+
+        def ended(kernel, self_id, system_prompt):
+            chain_ended(kernel, self_id, system_prompt)
+            if self_id == "asker":
+                gate.set()
+
+        monkeypatch.setattr(core, "_chain_ended", ended)
+    else:
+        held = asyncio.Event()
+        push_held = core._push_held_or_wake
+
+        def holding(kernel, self_id, *rest):
+            push_held(kernel, self_id, *rest)
+            if self_id == "asker":
+                held.set()
+
+        monkeypatch.setattr(core, "_push_held_or_wake", holding)
+
+        async def answered_mid_pass():
+            gate.set()  # the human replies while the model reads "accepted"...
+            await held.wait()  # ...and the answer is held on the live chain
+
+        script.before[1] = answered_mid_pass
     aid = await _wire(
         seeded_kernel, script, answer="yes, proceed", providers=fake_providers
     )
@@ -262,17 +326,26 @@ async def test_an_inquiry_is_a_call_and_the_answer_is_its_reply(
         await seeded_kernel.send(
             [{"target": aid, "payload": {"type": "send", "text": "set it up"}}]
         )
-        await asyncio.sleep(0.5)
+        await asyncio.wait_for(read.wait(), timeout=30)
 
         tally = await _tally(seeded_kernel)
         assert tally["inquiries"] == 1, f"the human was never asked: {tally}"
 
         assert script.calls == 3, f"the answer did not become a message: {script.calls}"
         assert "<accepted>true</accepted>" in script.incoming(1), script.incoming(1)
-        third = script.incoming(2)
-        assert third.startswith("[from user]") and "[reply to " in third, third
-        assert " user inquiry" in third, third
-        assert "yes, proceed" in third, third
+
+        def is_answer(m: str) -> bool:
+            return m.startswith("[from user]") and "[reply to " in m
+
+        assert not any(map(is_answer, script.read(1))), script.read(1)
+        third = [m for m in script.read(2) if is_answer(m)]
+        assert len(third) == 1, script.read(2)
+        assert " user inquiry" in third[0], third[0]
+        assert "yes, proceed" in third[0], third[0]
+        if lands == "while_working":
+            assert script.incoming(2).startswith("[1 message(s) arrived"), (
+                script.incoming(2)
+            )
     finally:
         fake_providers.pop(aid, None)
 
