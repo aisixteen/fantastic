@@ -3,8 +3,8 @@ import type { ViewContext, ViewHandle } from "./view.ts";
 import { tint, tok } from "./skin/css.ts";
 import type { Dict, Row } from "./agent_models/rows.ts";
 
-// THE SHARED BODY of the read-only agent views (resources, tasks, store,
-// scheduler, cabinets, credentials): a header with ⟳, rows drawn as TEXT (never
+// THE SHARED BODY of the read-only agent views (store, scheduler,
+// credentials): a header with ⟳, rows drawn as TEXT (never
 // markup), and the agent's events as the live path — an event on the agent
 // reads it again. A view supplies `load` (the reads it may make: its grant) and
 // `shape` (the pure model: replies → rows).

@@ -75,8 +75,8 @@ ROOMS = [
     ("south_wing", "site", "South wing: storage."),
     ("basement", "south_wing", "The basement."),
     ("archive_room", "basement", "Archive room — old records, and the vault."),
-    ("cabinet_1", "archive_room", "Cabinet 1 — ledgers."),
-    ("cabinet_2", "archive_room", "Cabinet 2 — deeds."),
+    ("drawer_1", "archive_room", "Drawer 1 — ledgers."),
+    ("drawer_2", "archive_room", "Drawer 2 — deeds."),
 ]
 
 

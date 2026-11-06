@@ -1,5 +1,5 @@
 // The shared shape of the read-only agent views (store, scheduler,
-// cabinets, credentials): a model turns a reply into ROWS, a view
+// credentials): a model turns a reply into ROWS, a view
 // draws them as text. No DOM here. A model keeps only whitelisted keys of a
 // reply, so nothing it does not name can reach a row.
 
