@@ -5,7 +5,7 @@ import { panelRelay } from "../panel_relay.ts";
 import { mountHostPanel } from "../agent_view/agent_view.ts";
 import { ChatCards, cardRows, isCardRow } from "./chat_card.ts";
 import { canvasNode, cellGrant, hostRecordFresh, viewOf } from "../canvas/host_views.ts";
-import { hiddenOf, rectsOf, setHidden, themeOf } from "../canvas/layout.ts";
+import { hiddenOf, layoutFor, rectsOf, setHidden } from "../canvas/layout.ts";
 import { tint, tok } from "../skin/css.ts";
 
 // ai_view — inline, MULTI-MODE AI view (chat mode = provider-agnostic chat UI). Ported from
@@ -950,9 +950,9 @@ export const aiView: ViewBundle = {
     // names one (the action popup's). Plain chat views (not cells) send plain text.
     const isCell = tpl !== "";
     const cellSpot = (): [number, number] => {
-      // where it sits in the theme in use (its view's layout)
+      // where it sits in its view's layout in use
       const view = kernel.get(selfId)?.parentId ?? "";
-      const r = rectsOf(kernel, view, themeOf(kernel, view, innerWidth))[selfId];
+      const r = rectsOf(kernel, view, layoutFor(innerWidth))[selfId];
       return [Math.round(r?.x ?? 0), Math.round(r?.y ?? 0)];
     };
     const submit = (override?: string, at?: [number, number]): void => {

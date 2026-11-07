@@ -96,36 +96,36 @@ export const CANVAS_CSS = `
   }
   .frame-head .lock.locked { color: ${tok("color.status.lock")}; background: ${tint("color.status.lock", 10)}; }
   .frame-head .pin { display: none; }
-  #canvas.theme-mobile .frame-head .pin {
+  #canvas.column .frame-head .pin {
     display: inline-flex; align-items: center; justify-content: center;
     width: 20px; height: 20px; border-radius: ${tok("radius.chip")}; font-size: 11px; cursor: pointer; user-select: none;
     background: ${tint("color.ink", 5)}; border: 1px solid ${tint("color.ink", 6)}; filter: grayscale(1); opacity: .7;
   }
-  #canvas.theme-mobile .frame-head .pin.on { filter: none; opacity: 1; background: ${tint("color.status.ok", 12)}; border-color: ${tint("color.status.ok", 40)}; }
+  #canvas.column .frame-head .pin.on { filter: none; opacity: 1; background: ${tint("color.status.ok", 12)}; border-color: ${tint("color.status.ok", 40)}; }
   .agent-frame.pinned { z-index: 50; }
   /* MOBILE: the chrome always shows (no hover on a phone), the bezel opaque over
      the background's headline; the width is the column's — no resize */
-  #canvas.theme-mobile .agent-frame::before,
-  #canvas.theme-mobile .agent-frame > .frame-head { opacity: 1; pointer-events: auto; }
-  #canvas.theme-mobile .agent-frame::before { background: ${tok("color.surface.bezel-flat")}; }
-  #canvas.theme-mobile .agent-frame > .resize-handle { display: none; }
+  #canvas.column .agent-frame::before,
+  #canvas.column .agent-frame > .frame-head { opacity: 1; pointer-events: auto; }
+  #canvas.column .agent-frame::before { background: ${tok("color.surface.bezel-flat")}; }
+  #canvas.column .agent-frame > .resize-handle { display: none; }
   /* MOBILE IS FLAT (owner 2026-10-12): no border, no rounding, edge to edge; the
      head's middle is a grip that drags a cell up or down the column */
-  #canvas.theme-mobile .agent-frame::before { inset: -32px 0 0 0; border: 0; border-radius: 0; box-shadow: none; }
-  #canvas.theme-mobile .agent-frame::after { inset: -32px 0 0 0; }
-  #canvas.theme-mobile .agent-frame > .frame-body { border-radius: 0; }
-  #canvas.theme-mobile .agent-frame.dragging { z-index: 40; }
-  #canvas.theme-mobile .agent-frame > .frame-head { cursor: default; }
+  #canvas.column .agent-frame::before { inset: -32px 0 0 0; border: 0; border-radius: 0; box-shadow: none; }
+  #canvas.column .agent-frame::after { inset: -32px 0 0 0; }
+  #canvas.column .agent-frame > .frame-body { border-radius: 0; }
+  #canvas.column .agent-frame.dragging { z-index: 40; }
+  #canvas.column .agent-frame > .frame-head { cursor: default; }
   /* the name stops short of the grip in the head's middle */
-  #canvas.theme-mobile .frame-head .id { max-width: calc(50% - 36px); }
+  #canvas.column .frame-head .id { max-width: calc(50% - 36px); }
   .frame-head .grip { display: none; }
-  #canvas.theme-mobile .frame-head .grip {
+  #canvas.column .frame-head .grip {
     display: inline-flex; align-items: center; justify-content: center;
     position: absolute; left: 50%; top: 0; transform: translateX(-50%);
     width: 56px; height: 32px; font-size: 18px; color: ${tint("color.ink", 55)};
     cursor: grab; touch-action: none; user-select: none;
   }
-  #canvas.theme-mobile .agent-frame.dragging .frame-head .grip { cursor: grabbing; color: ${tok("color.text.bright")}; }
+  #canvas.column .agent-frame.dragging .frame-head .grip { cursor: grabbing; color: ${tok("color.text.bright")}; }
   /* MINIMIZED (owner 2026-10-12): the head bar alone — the body stays mounted at
      its size (a terminal keeps its rows), only hidden; the bezel shrinks to the bar */
   .agent-frame.minimized > .frame-body,
@@ -135,8 +135,8 @@ export const CANVAS_CSS = `
   .agent-frame.minimized > .frame-head { opacity: 1 !important; pointer-events: auto !important; }
   .agent-frame.minimized::before { bottom: auto; height: 32px; }
   .agent-frame.minimized::after { bottom: auto; height: 42px; }
-  #canvas.theme-mobile .agent-frame.minimized::before,
-  #canvas.theme-mobile .agent-frame.minimized::after { bottom: auto; height: 32px; }
+  #canvas.column .agent-frame.minimized::before,
+  #canvas.column .agent-frame.minimized::after { bottom: auto; height: 32px; }
   .frame-body { position: relative; z-index: 2; flex: 1 1 0; min-height: 0; overflow: hidden; background: transparent; border-radius: ${tok("radius.panel")}; }
   .frame-body iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; }
   /* A HANDLE ON EACH CORNER of the bezel (head included) */

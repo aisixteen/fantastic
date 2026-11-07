@@ -48,7 +48,7 @@ function register(kernel: Kernel): void {
   registerCanvas(kernel); // the compositor root and its control plane
   registerBackground(kernel); // its singleton, delete-locked background (set_bg/default_bg/clear_bg/get_bg)
   registerSelector(kernel); // the double-click popup, as its singleton, delete-locked agent
-  registerLayout(kernel); // a view's layout per theme (canvas | mobile): where its cells sit
+  registerLayout(kernel); // a view's layouts (canvas | mobile column): where its cells sit
   registerBackgrounds(kernel); // the backgrounds manager: stock + the user's own, random, every minute
   registerSkin(kernel); // the page's skin: its design tokens and backdrop (`skin`, made by mountCanvas)
   // View bundles that front a host backend are real frontend agents too — a
@@ -111,10 +111,9 @@ function seed(kernel: Kernel): void {
 
 // THE SKIN FIRST, before anything awaits: the shell's flag says the backdrop
 // (a plain tab has none: web), and its stock skin is installed so the first
-// paint — the refused box too — is already skinned. The skin agent's record
-// (`watchSkin`, from mountCanvas) takes over once the tree is loaded. A
-// malformed flag is the shell's bug: said in place of the canvas, and nothing
-// else runs.
+// paint — the refused box too — is already skinned. That is the one skin the
+// page shows. A malformed flag is the shell's bug: said in place of the canvas,
+// and nothing else runs.
 try {
   readShell();
 } catch (e) {

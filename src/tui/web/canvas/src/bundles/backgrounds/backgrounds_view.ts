@@ -1,25 +1,15 @@
 import type { Payload } from "../../lib.ts";
 import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { BACKGROUNDS } from "./backgrounds_agent.ts";
-import { DEFAULT_THEME } from "../canvas/layout.ts";
 import { tint, tok } from "../skin/css.ts";
-import { SKIN_ID } from "../skin/skin_agent.ts";
+import { skinNow } from "../skin/apply.ts";
 
-// THE CANVAS THEME PANEL (owner 2026-10-12) — two sections: BACKGROUNDS and
-// THEMES. Themes: each row uses it on a click; ✎ edits it (name, layout, its
-// width trigger), × deletes yours or hides a stock one, `restore stock` brings
-// them back, a new one is your AI agent's to add (`add_theme`), the default `canvas` is never deleted; `auto` lets the triggers choose.
-//
-// THE BACKGROUNDS SECTION — the backgrounds agent's own view (one record: the
+// THE BACKGROUNDS PANEL — the backgrounds agent's own view (one record: the
 // agent IS the cell). Top: random · every minute · none · default. Then the
 // STOCK list (each with its colour sets; × hides one, `restore stock` brings
 // them back) and YOUR list (× deletes), with the hint how an AI fills it. Every
 // button is a verb on the agent, so a panel click and an AI's call are the same
 // act; the panel redraws on the agent's `updated` events.
-//
-// THE SKINS SECTION (phase 4, #49) — the page's `skin` agent: stock then your
-// skins, a click `use`s one for this tab's backdrop, × deletes one of yours; a
-// new one is your AI agent's to write (`add`). Redrawn on the skin's `updated`.
 
 const CSS = `
   .bgs { height: 100%; overflow: auto; box-sizing: border-box; padding: 12px 14px; color: ${tok("color.text.primary")};
@@ -50,14 +40,6 @@ const CSS = `
   .bgs .hint code { font: 11px ${tok("font.family.mono")}; color: ${tok("color.accent.base")}; }
   .bgs h2 { margin: 18px 0 8px; font: 650 15px ${tok("font.family.sans")}; color: ${tok("color.text.primary")}; display: flex; align-items: baseline; justify-content: space-between; }
   .bgs h2:first-child { margin-top: 0; }
-  .bgs .tform { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 6px 10px; align-items: center; padding: 10px; margin: 6px 0; border-radius: ${tok("radius.card")}; border: 1px solid ${tok("color.line.button")}; background: ${tok("color.surface.panel")}; }
-  .bgs .tform input, .bgs .tform select { font: 12px ${tok("font.family.mono")}; color: ${tok("color.text.primary")}; background: ${tok("color.surface.field")}; border: 1px solid ${tok("color.line.button")}; border-radius: ${tok("radius.control")}; padding: 5px 7px; min-width: 0; width: 100%; box-sizing: border-box; }
-  .bgs .tform .trig select { flex: 1; width: auto; }
-  .bgs .tform .trig input { flex: 0 0 72px; }
-  .bgs .tform .trig span { flex: 0 0 auto; color: ${tok("color.text.subtle")}; font-size: 12px; }
-  .bgs .tform label { color: ${tok("color.text.subtle")}; font-size: 12px; }
-  .bgs .tform .trig { display: flex; gap: 6px; align-items: center; }
-  .bgs .tform .row2 { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
   .bgs .note { margin: 0 0 8px; color: ${tok("color.text.faint")}; font-size: 12px; }
   .bgs .st { margin-top: 8px; min-height: 16px; color: ${tok("color.text.faint")}; font: 11px ${tok("font.family.mono")}; }
 `;
@@ -73,11 +55,6 @@ function ensureStyle(): void {
 type Dict = Record<string, unknown>;
 interface SetRow { name: string; colors: string[] }
 interface Item { name: string; note: string; sets: SetRow[] }
-interface SkinRow { name: string; note: string; backdrop: "web" | "native" | null; base?: string; error?: string }
-interface ThemeRow { name: string; layout: "free" | "column"; trigger: { max_width?: number; min_width?: number } | null; note?: string; from: "stock" | "user" }
-/** A trigger in words. */
-const triggerText = (t: ThemeRow["trigger"]): string =>
-  t === null ? "manual" : t.max_width !== undefined && t.min_width !== undefined ? `${t.min_width}–${t.max_width}px wide` : t.max_width !== undefined ? `up to ${t.max_width}px wide` : t.min_width !== undefined ? `from ${t.min_width}px wide` : "manual";
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] => {
   const e = document.createElement(tag);
@@ -134,22 +111,13 @@ export const backgroundsView: ViewBundle = {
       r.append(x);
       return r;
     };
-    // ONE DRAW AT A TIME: both lists are read first, then the panel is drawn in
+    // ONE DRAW AT A TIME: the list is read first, then the panel is drawn in
     // one go — a redraw overtaken by a newer one (an update event while it
-    // waited) draws nothing, or two halves of the panel stacked (two Themes)
+    // waited) draws nothing, or two halves of the panel stacked
     let drawing = 0;
-    // the page's skin agent — an operator send, like the panel's own
-    const skinCall = async (p: Dict): Promise<Dict> =>
-      (((await ctx.kernel.send([{ target: SKIN_ID, payload: p as Payload }]))[0]?.result ?? {}) as Dict);
-    const skinAct = async (p: Dict, doing: string): Promise<void> => {
-      st.textContent = doing;
-      const r = await skinCall(p);
-      st.textContent = typeof r["error"] === "string" ? `✕ ${r["error"]}` : "";
-      await render();
-    };
     const render = async (): Promise<void> => {
       const mine = ++drawing;
-      const [l, th, sk] = await Promise.all([call({ type: "list" }), call({ type: "themes" }), skinCall({ type: "list" })]);
+      const l = await call({ type: "list" });
       if (mine !== drawing) return;
       const cur = (l["current"] ?? null) as Dict | null;
       const rot = (l["rotate"] ?? {}) as Dict;
@@ -157,12 +125,9 @@ export const backgroundsView: ViewBundle = {
       const user = (l["user"] ?? []) as Item[];
       const hidden = (l["hidden_stock"] ?? []) as string[];
       root.replaceChildren(el("h2", "", "Backgrounds"));
-      // the skin in use paints no background under a native backdrop
-      const skinsStock = (sk["stock"] ?? []) as SkinRow[];
-      const skinsUser = (sk["user"] ?? []) as SkinRow[];
-      const inUse = String(sk["in_use"] ?? "");
-      if ([...skinsStock, ...skinsUser].find((x) => x.name === inUse)?.backdrop === "native") {
-        root.append(el("p", "note", "The skin in use shows the window's own backdrop; backgrounds show under a web skin."));
+      // the skin shows the window's own backdrop under a native one
+      if (skinNow().skin.backdrop === "native") {
+        root.append(el("p", "note", "The window's own backdrop shows; backgrounds show on the web."));
       }
       // the bar
       const bar = el("div", "bar");
@@ -198,126 +163,12 @@ export const backgroundsView: ViewBundle = {
         `it adds them here with <code>add</code> on this agent (<code class="self"></code>), and they stay.`;
       (hint.querySelector("code.self") as HTMLElement).textContent = ctx.selfId;
       root.append(hint);
-      // ── THEMES ──
-      const themes = (th["themes"] ?? []) as ThemeRow[];
-      const hiddenT = (th["hidden"] ?? []) as string[];
-      const curT = String(th["current"] ?? "auto");
-      const h2 = el("h2", "", "Themes");
-      const tbar = el("div", "bar");
-      tbar.append(
-        btn(curT === "auto" ? "auto ✓" : "auto", "let the width triggers choose", { type: "use_theme", name: "auto" }, "…", curT === "auto"),
-      );
-      if (hiddenT.length > 0) {
-        const rs = el("button", "link", `restore stock (${hiddenT.length} hidden)`);
-        rs.onclick = () => void act({ type: "restore_themes" }, "restoring…");
-        h2.append(rs);
-      }
-      root.append(h2, tbar);
-      for (const t of themes) {
-        const r = el("div", "row");
-        const b = el("button", "name");
-        b.append(el("b", "", t.name), el("small", "", `${t.layout === "column" ? "one column" : "free canvas"} · ${triggerText(t.trigger)}${t.from === "user" ? " · yours" : ""}${t.note ? ` · ${t.note}` : ""}`));
-        if (curT === t.name) b.classList.add("on");
-        b.title = `use ${t.name}`;
-        b.onclick = () => void act({ type: "use_theme", name: t.name }, `switching to ${t.name}…`);
-        const ed = el("button", "x", "✎");
-        ed.title = t.from === "stock" ? "edit (saves as yours, in place of the stock one)" : "edit";
-        ed.onclick = (): void => {
-          root.querySelector(".tform")?.remove();
-          r.after(themeForm(t));
-        };
-        const x = el("button", "x", "×");
-        x.title = t.from === "stock" ? "hide it (restore stock brings it back)" : "delete it";
-        x.onclick = () => void act({ type: "delete_theme", name: t.name }, `removing ${t.name}…`);
-        // the default theme stays: no × on it
-        if (t.name === DEFAULT_THEME && t.from === "stock") r.append(b, ed);
-        else r.append(b, ed, x);
-        root.append(r);
-      }
-      const thint = el("div", "hint");
-      thint.innerHTML =
-        "<b>To make a new theme, ask your AI agent.</b><br>" +
-        "Open an AI cell (double-click → <b>AI agent</b>) and say e.g. <i>“add a theme for wide screens”</i> — " +
-        `it adds it here with <code>add_theme</code> on this agent (<code class="self"></code>).`;
-      (thint.querySelector("code.self") as HTMLElement).textContent = ctx.selfId;
-      root.append(thint);
-      // ── SKINS ──
-      if (typeof sk["error"] !== "string") {
-        root.append(el("h2", "", "Skins"));
-        const skinRow = (s: SkinRow, from: "stock" | "user"): HTMLElement => {
-          const r = el("div", "row");
-          const b = el("button", "name");
-          b.dataset["skin"] = s.name;
-          b.append(el("b", "", s.name), el("small", "", [s.backdrop ?? "✕ does not compile", from === "user" ? "yours" : "stock", s.note].filter((x) => x).join(" · ")));
-          if (s.name === inUse) b.classList.add("on");
-          b.title = s.error ?? `use ${s.name}`;
-          b.onclick = () => void skinAct({ type: "use", name: s.name }, `switching to ${s.name}…`);
-          r.append(b);
-          if (from === "user") {
-            const x = el("button", "x", "×");
-            x.title = "delete it";
-            x.onclick = () => void skinAct({ type: "delete", name: s.name }, `deleting ${s.name}…`);
-            r.append(x);
-          }
-          return r;
-        };
-        for (const s of skinsStock) root.append(skinRow(s, "stock"));
-        for (const s of skinsUser) root.append(skinRow(s, "user"));
-        const shint = el("div", "hint");
-        shint.innerHTML =
-          "<b>To make a new skin, ask your AI agent.</b><br>" +
-          "Open an AI cell (double-click → <b>AI agent</b>) and say e.g. <i>“make a skin with a sea-green accent”</i> — " +
-          `it adds it here with <code>add</code> on the skin agent (<code class="self"></code>).`;
-        (shint.querySelector("code.self") as HTMLElement).textContent = SKIN_ID;
-        root.append(shint);
-      }
       root.append(st);
-    };
-    // a theme's form: name, layout, its width trigger, a note — saved as yours
-    const themeForm = (t: ThemeRow): HTMLElement => {
-      const f = el("div", "tform");
-      const name = el("input");
-      name.value = t.name;
-      name.placeholder = "letters, digits, - _";
-      const layout = el("select");
-      layout.append(Object.assign(el("option"), { value: "free", textContent: "free canvas" }), Object.assign(el("option"), { value: "column", textContent: "one column" }));
-      layout.value = t.layout;
-      const kind = el("select");
-      kind.append(
-        Object.assign(el("option"), { value: "manual", textContent: "manual only" }),
-        Object.assign(el("option"), { value: "max", textContent: "when the tab is at most" }),
-        Object.assign(el("option"), { value: "min", textContent: "when the tab is at least" }),
-      );
-      const px = el("input");
-      px.type = "number";
-      const tr = t.trigger;
-      kind.value = tr === null ? "manual" : tr.max_width !== undefined ? "max" : "min";
-      px.value = String(tr?.max_width ?? tr?.min_width ?? "");
-      const note = el("input");
-      note.value = t.note ?? "";
-      const trig = el("div", "trig");
-      trig.append(kind, px, el("span", "", "px wide"));
-      const save = el("button", "btn on", "save");
-      const cancel = el("button", "btn", "cancel");
-      cancel.onclick = () => f.remove();
-      save.onclick = (): void => {
-        const n = Number(px.value);
-        const trigger = kind.value === "manual" || !Number.isFinite(n) || n <= 0 ? null : kind.value === "max" ? { max_width: n } : { min_width: n };
-        void act({ type: "add_theme", name: name.value.trim(), layout: layout.value, trigger, note: note.value.trim() }, "saving…");
-      };
-      const row2 = el("div", "row2");
-      row2.append(cancel, save);
-      f.append(el("label", "", "name"), name, el("label", "", "layout"), layout, el("label", "", "auto"), trig, el("label", "", "note"), note, row2);
-      f.addEventListener("keydown", (e) => e.stopPropagation());
-      return f;
     };
     void render();
     // the agent's state moved (an AI's add, another tab) → draw again
     const off = ctx.kernel.addStateSubscriber((e) => {
-      // …or its view's theme moved (use_theme, the view's `theme` verb)
-      const who = (e as Dict)["agent_id"];
-      // …or the page's skin (a use, an add, another tab)
-      if ((who === ctx.selfId || who === SKIN_ID || who === ctx.kernel.get(ctx.selfId)?.parentId) && (e as Dict)["kind"] === "updated") void render();
+      if ((e as Dict)["agent_id"] === ctx.selfId && (e as Dict)["kind"] === "updated") void render();
     });
     return {
       unmount(): void {

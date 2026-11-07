@@ -1,7 +1,7 @@
 // THE SKIN SCHEMA — the design tokens the canvas reads (phase 4, #49): every
 // colour, radius, font family, elevation shadow and motion value its views are
-// drawn with. A skin (`stock/*.tokens.json`, or one an AI adds through the
-// `skin` agent) gives each of them a value; `tokens.ts` compiles it to one CSS
+// drawn with. A skin (`stock/*.tokens.json`) gives each of
+// them a value; `tokens.ts` compiles it to one CSS
 // custom property per token, `--fc-<path with . as ->`.
 //
 // `opaque` marks a token the CSS mixes with `tint()` (`css.ts`): a skin must give
@@ -78,7 +78,7 @@ export const SKIN_SCHEMA: ReadonlyArray<SchemaToken> = [
   { path: "color.surface.raised", type: "color", note: "the stopped-terminal box" },
   { path: "color.surface.popup", type: "color", note: "the action popup" },
   { path: "color.surface.pill", type: "color", note: "the full-view label" },
-  { path: "color.surface.panel", type: "color", note: "wizard, not-set-up card, theme form" },
+  { path: "color.surface.panel", type: "color", note: "wizard, not-set-up card" },
   { path: "color.surface.field", type: "color", note: "inputs and selects" },
   { path: "color.surface.button", type: "color", note: "buttons" },
   { path: "color.surface.badge", type: "color", note: "the terminal's last-command bar" },

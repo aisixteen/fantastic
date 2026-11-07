@@ -122,25 +122,17 @@ moves with it. ←↑↓→ move across the tiles as drawn. Double-click → `ti
 a tips & tricks card on the canvas — an html cell: ask your AI to add a tip, or
 edit its html.
 
-CANVAS THEME: double-click → `canvas theme` places the view's theme manager,
-two sections. BACKGROUNDS: four stock backgrounds — Isoline, Glyph, Copper,
-Moire — each in several colour sets, your own list, `random bg`, `every
-minute`, `none` and `default` (Isoline). × hides a stock one (`restore stock`
-brings them back) or deletes one of yours. THEMES: where the cells sit — stock
-`canvas` (the free canvas) and `mobile` (one column, auto under 768px wide),
-and yours: `+ new theme` / ✎ edit a theme's name, layout (free canvas or one
-column) and AUTO trigger (when the tab is at most / at least N px wide); ×
-hides a stock one or deletes yours — never the default `canvas`; `auto` lets
-the triggers choose (yours first). A NEW theme (or background) is your AI
-agent's to make: ask an AI cell — it calls `add` / `add_theme` on the manager,
-and they stay.
+BACKGROUNDS: double-click → `backgrounds` places the view's background manager:
+four stock backgrounds — Isoline, Glyph, Copper, Moire — each in several colour
+sets, your own list, `random bg`, `every minute`, `none` and `default`
+(Isoline). × hides a stock one (`restore stock` brings them back) or deletes
+one of yours. A NEW background is your AI agent's to make: ask an AI cell — it
+calls `add` on the manager, and it stays.
 
-SKINS: how the canvas looks — every colour, corner radius, font family,
-shadow and motion value — is a SKIN: W3C design tokens plus a backdrop, held by
-the page agent `skin`. Stock `dark` (a browser tab) and `glass` (the app's
-window, over its native material); the canvas theme panel's third section,
-Skins, switches them live. A new skin is your AI agent's to write (`schema`,
-`get`, `add`, `use` on `skin`). A skin is not a theme: it never moves a cell.
+THE SKIN: how the canvas looks — every colour, corner radius, font family,
+shadow and motion value — is the SKIN: W3C design tokens plus a backdrop, read
+from the page agent `skin` (`get`, `schema`). It is fixed by the backdrop:
+`dark` in a browser tab, `glass` in the app's window, over its native material.
 `fantastic readme skins`.
 
 THE DOUBLE-CLICK: `AI agent` — the ONE way to make an AI: your default (★)
@@ -199,17 +191,16 @@ both sides; the human narrows them with `update_agent`).
 | verb | what |
 |---|---|
 | `place {kind, x, y, …}` | a new cell: `html`, `gl`, `terminal`, `chat` — or `handler_module` (any page bundle, `.ts` optional) instead of `kind` (one view for now — no nested views) |
-| `move {id, x, y, …}` | move / resize a cell — in the layout of the theme in use |
+| `move {id, x, y, …}` | move / resize a cell — in the layout in use |
 | `fit {id, max_width?, max_height?}` | size an html cell to what it draws (its width, then its height at that width) — `overflowed` when it still does not fit; a cell keeps its size otherwise, so call it after placing or updating an html cell |
 | `update {id, bytes?, fields?}` | a cell's new body (`bytes`, verbatim) or fields (display_name, trusted, readme, geometry, can_call, callable_by) |
-| `theme {name?}` | which layout the cells sit in: `canvas` (the free 2D canvas), `mobile` (one column), `auto` (default — mobile in a tab under 768px wide); no name: what it is |
 | `terminal_renderer {name?}` | the view's terminals' renderer: `auto` (default — xterm's DOM renderer in WebKitGTK, the shared WebGL elsewhere; resolved in each tab), `webgl`, `dom`; switches every terminal of the view live; no name: what it is, `in_use` here and `why` |
 | `wire {sender, receiver, verbs}` | a grant, written on each side that is a cell of the view (a host agent receiver: the sender's side only) |
 | (a live URL or a file) | an html cell whose body is `<iframe src=URL>` — `trusted: true` for the host's own files |
 | (grant hint) | a body that calls an agent the cell's `can_call` lacks → the reply names `grants_missing` and the `update` that adds them |
 | (html check) | an html body that is empty, a placeholder (no element) or truncated (an unclosed script, a cut tag) is refused, saying why |
 | `hide {id}` | take a cell OFF the view: its agent keeps running and its rect is kept; a reload keeps it hidden (the hidden set is on the view). Hiding a hidden cell changes nothing |
-| `show {id, x?, y?}` | put a hidden cell back where it was, or at `x`, `y` in the theme in use; it re-attaches live. A shown cell keeps its place |
+| `show {id, x?, y?}` | put a hidden cell back where it was, or at `x`, `y` in the layout in use; it re-attaches live. A shown cell keeps its place |
 | `remove {id}` | delete the CELL from the view (refused for a delete-locked agent); its agent is untouched — Shift+✕ and right-click → Delete delete the agent |
 
 `update {id: <the view>, fields: {…}}` sets the view's own fields. Every cell answers `reflect`, `get_html`,
@@ -241,22 +232,21 @@ canvas shown in it (a frame on the canvas's own port) read the same one.
 A plain browser tab has no flag: its backdrop is `web`. A malformed flag is the
 shell's bug: the page says it in place of the canvas and stops.
 
-## Themes — where the cells sit
+## Layout — where the cells sit
 
 A cell's `x, y, width, height` are not on the cell: they are in its view's
-LAYOUT for the theme in use — one agent per theme, `layout_<theme>`
-(`layout.ts`, children of the view, `rects: {<cell id>: {x, y, width,
-height}}`). Switching theme moves the cells, never the agents. A cell with no
-rect in the theme in use is placed by its layout, once: free — the nearest free
+LAYOUT (`layout.ts`, children of the view, `rects: {<cell id>: {x, y, width,
+height}}`). The view uses one by the tab's width, a fixed rule: a tab under 768px
+wide draws ONE column (stored in `layout_mobile`), any other the free 2D canvas
+(`layout_canvas`). Crossing the width moves the cells, never the agents. A cell
+with no rect in the layout in use is placed by it, once: free — the nearest free
 space around the centre of what the tab shows; column — the bottom of the
-column. In a column theme the wheel scrolls the column, and a cell's 📌 PINS it
-(one per layout, `pinned` on its layout agent): held on the screen's bottom,
-full width, while the column scrolls (e.g. a chat). The column is flat (no
-border, no rounding, no holes); the ⠿ grip in the middle of a cell's head drags
-it up or down the column. A double click on any cell's head MINIMIZES it to its
-bar (`minimized` on its layout agent); again, it is back. Themes are chosen and edited
-on the canvas theme agent (`themes`, `use_theme`, `add_theme`), or with the
-view's `theme` verb.
+column. In the column the wheel scrolls it, and a cell's 📌 PINS it (one per
+layout, `pinned` on its layout agent): held on the screen's bottom, full width,
+while the column scrolls (e.g. a chat). The column is flat (no border, no
+rounding, no holes); the ⠿ grip in the middle of a cell's head drags it up or
+down the column. A double click on any cell's head MINIMIZES it to its bar
+(`minimized` on its layout agent); again, it is back.
 
 ## Views of host agents
 

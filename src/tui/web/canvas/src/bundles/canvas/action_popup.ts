@@ -106,8 +106,8 @@ const KINDS: Array<[string, Pick, Icon, Section]> = [
   ["file tree", { kind: "files" }, "tree", "page"],
   // a file or the live agent: highlighted, rendered, editable (a `preview_view.ts` cell)
   ["preview", { kind: "preview" }, "preview", "page"],
-  // the view's backgrounds AND themes (owner 2026-10-12: "backgrounds" renamed)
-  ["canvas theme", { kind: "backgrounds" }, "backgrounds", "page"],
+  // the view's backgrounds
+  ["backgrounds", { kind: "backgrounds" }, "backgrounds", "page"],
   ["tips", { kind: "tips" }, "tips", "page"],
 ];
 /** The groups in DRAWN order — the flat tile order follows it (arrow keys walk it). */

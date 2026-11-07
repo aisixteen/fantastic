@@ -64,7 +64,8 @@ host does not hold shows `no canvas <id> on this host` (never the main canvas).
   serves: when it unmounts the path is released, and a view the state stream reports
   removed releases every path it serves (`release`, `onStateFrame`).
 - **skin** — the page's skin agent: the design tokens (W3C 2025.10) every view is
-  drawn with, per backdrop; it takes skins an AI writes (`fantastic readme skins`).
+  drawn with, fixed by the backdrop (`dark` on the web, `glass` in the app's window); it
+  answers `get` and `schema`, read only (`fantastic readme skins`).
 - **the canvas's own file tree sidebar** (#148, `canvas/tree_sidebar.ts`) — the file
   tree fused into the canvas page, not an agent and not a cell: a column fixed to the
   viewport's left edge, mounted beside the zoomed world (never in it), so a zoom or a
