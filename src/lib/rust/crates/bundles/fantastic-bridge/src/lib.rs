@@ -1634,9 +1634,10 @@ fn validate_bridge_meta(meta: &Map<String, Value>) -> Option<String> {
 }
 
 async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kernel>) {
-    // In-flight inbound dispatches — one task per `call` frame, aborted together
-    // when the loop exits so nothing keeps running into a dead transport.
-    let mut calls: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // In-flight inbound dispatches — one task per `call` frame (with the frame id
+    // that names its execution), ended together when the loop exits so nothing
+    // keeps running into a dead transport.
+    let mut calls: Vec<(String, tokio::task::JoinHandle<()>)> = Vec::new();
     loop {
         let frame = match state.transport.recv_frame().await {
             Ok(f) => f,
@@ -1662,14 +1663,22 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
                 // the loop exits.
                 let call_state = Arc::clone(&state);
                 let call_kernel = Arc::clone(&kernel);
-                calls.retain(|h| !h.is_finished());
-                calls.push(fantastic_kernel::spawn_inherit(serve_inbound_call(
-                    agent_id.clone(),
-                    call_state,
-                    call_kernel,
-                    frame,
-                    body,
-                )));
+                calls.retain(|(_, h)| !h.is_finished());
+                let frame_id = frame
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                calls.push((
+                    frame_id,
+                    fantastic_kernel::spawn_inherit(serve_inbound_call(
+                        agent_id.clone(),
+                        call_state,
+                        call_kernel,
+                        frame,
+                        body,
+                    )),
+                ));
             }
             "event" => {
                 // The `watch_remote` RETURN half: re-emitted on the bridge's OWN
@@ -1753,9 +1762,22 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
     }
 
     // Read loop exit — the transport is gone, so every in-flight inbound dispatch
-    // has nowhere to send its reply. Abort them, then emit bridge_down + fail
+    // has nowhere to send its reply. End them, then emit bridge_down + fail
     // every pending oneshot.
-    for h in &calls {
+    //
+    // THROUGH THE TABLE, not a raw abort: the frame id IS the execution id (the
+    // pid), and a dropped dispatch frees none of what its handler holds — an AI
+    // agent's turn stays `generating` for good and every later send to it hangs.
+    // `cancel_task` runs the bundle's `on_cancel` (the turn is released) before it
+    // stops the task, exactly as an operator's `cancel` would. The abort then
+    // catches the serving task itself (its reply has nowhere to go) and a call
+    // still before its dispatch (no execution yet).
+    for (frame_id, h) in &calls {
+        if !h.is_finished() {
+            if let Some(exec) = kernel.ledger.resolve_name(frame_id) {
+                kernel.cancel_task(&fantastic_kernel::TaskId(exec)).await;
+            }
+        }
         h.abort();
     }
     drop_served(&state, &kernel).await;
