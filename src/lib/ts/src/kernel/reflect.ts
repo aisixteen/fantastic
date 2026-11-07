@@ -13,7 +13,8 @@ import { page } from "./paging.ts";
 // messages — who do I send to? — with a ROSTER `{id, sentence, description?,
 // mode?, children}`. `detail:"full"` is the WIRING tree (handler_module +
 // posture on every node). A reflect says what an agent IS, never how to call it:
-// verb docs are the `docs` kernel verb.
+// verb docs are the `docs` kernel verb. How an agent is DRAWN is its record
+// `view`, which rides every reflect (hosts resolve renderers from here).
 
 export interface BundleInfo {
   name: string;
@@ -107,6 +108,9 @@ export function applyReflectFlags(
   for (const gate of ["can_call", "callable_by"]) {
     if (gate in target.meta && !(gate in obj)) obj[gate] = target.meta[gate] as Json;
   }
+  // HOW THIS AGENT IS DRAWN: `view` is on every reflect (identity flattens meta;
+  // this keeps a reply built elsewhere to the same contract).
+  if ("view" in target.meta && !("view" in obj)) obj["view"] = target.meta["view"] as Json;
   // Kernel runtime identity + deployment context, on the ROOT only. This kernel
   // runs in the BROWSER — no OS env, so env is always "host" and version null.
   // Same field names + key order (runtime → peers → env → version) as the others.

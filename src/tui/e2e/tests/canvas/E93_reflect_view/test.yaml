@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: reflect_view
+group: canvas
+title: "a host bundle agent with an html view is drawn from its reflect: the cell shows the body its reflect carries, and a changed view redraws it"
+runner: probe.py
+costs: free
+limits:
+  seconds: 300
+env: {}

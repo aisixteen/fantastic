@@ -46,7 +46,7 @@ import { previewView } from "../preview/preview_view.ts";
 import type { Pick, Presets } from "./action_popup.ts";
 import { htmlView } from "../html_agent/html_view.ts";
 import { agentViewBundle } from "../agent_view/agent_view.ts";
-import { headTitle, hostRecordFresh, seenHere, setCanvasNode, setHostRecords, setHostSync, sideOf, viewChangedFor } from "./host_views.ts";
+import { headTitle, seenHere, setCanvasNode, setHostRecords, setHostReflect, setHostSync, sideOf, rereflectViews, viewRecordFresh, viewRecordOf } from "./host_views.ts";
 import { createGlHost } from "./gl_host.ts";
 import { COLUMN, LAYOUT, framesToRemove, hiddenCellFor, hiddenOf, minimizedOf, pinnedOf, placeMissing, prune, rectsOf, reorderY, setHidden, setMinimized, setPinned, setRect, showHidden, stack, layoutFor, writeRects } from "./layout.ts";
 import { CELL_MENU, closeIntent, exportCall, exportTarget } from "./cell_menu.ts";
@@ -289,6 +289,11 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
   const placing = new Set<string>();
   setHostRecords((id) => registry.get(id));
   setHostSync(() => syncRegistry());
+  // an agent's `view` is read from its REFLECT: a page agent from the page
+  // kernel, any other from the host
+  setHostReflect((id) =>
+    (kernel.get(id) !== undefined ? host.call(id, { type: "reflect", tree: "none" } as unknown as Payload) : host.callHost(id, { type: "reflect", tree: "none" } as unknown as Payload)) as Promise<Rec>,
+  );
   // the page cells showing host agent `agent`
   const shownBy = (agent: string): string[] =>
     everyAgent().filter((id) => {
@@ -325,11 +330,8 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         const isCanvas = (id: string): boolean => byId.get(id)?.["handler_module"] === "canvas.tools";
         const next = new Map<string, Rec>();
         for (const [id, a] of byId) if (seenHere(id, parentOf, isCanvas)) next.set(id, a);
-        const changed: string[] = [];
-        for (const [id, r] of next) {
-          const was = registry.get(id);
-          if (was === undefined && synced && !placing.has(id)) fresh.add(id);
-          if (was !== undefined && JSON.stringify(was["view"] ?? null) !== JSON.stringify(r["view"] ?? null)) changed.push(id);
+        for (const [id] of next) {
+          if (!registry.has(id) && synced && !placing.has(id)) fresh.add(id);
         }
         for (const id of [...registry.keys()]) {
           if (!next.has(id)) {
@@ -339,15 +341,22 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
         }
         registry.clear();
         for (const [k, v] of next) registry.set(k, v);
-        for (const id of changed) viewChangedFor(id);
-        // a host view's GRANT is derived from its agent's record, never written
-        // by hand: each `agent_view` cell's `can_call` onto its agent follows
-        // the agent's `view.calls`
+        // an `updated` that touches a SHOWN agent's `view` re-reflects it: the
+        // reflect says what it is drawn with now, and its cells draw again
+        const shown = new Set<string>();
+        for (const cell of everyAgent()) {
+          const m = kernel.get(cell)?.meta ?? {};
+          if (typeof m["backend_id"] === "string" && registry.has(m["backend_id"])) shown.add(m["backend_id"]);
+        }
+        const recs = (await rereflectViews(shown)) as Map<string, Rec | undefined>;
+        // a host view's GRANT is derived from its agent's `view` (its reflect),
+        // never written by hand: each `agent_view` cell's `can_call` onto its
+        // agent follows the agent's `view.calls`
         for (const cell of everyAgent()) {
           const a = kernel.get(cell);
           if (a === undefined || a.record().handler_module !== "agent_view.ts") continue;
           const agent = typeof a.meta["backend_id"] === "string" ? (a.meta["backend_id"] as string) : undefined;
-          const rec = agent !== undefined ? registry.get(agent) : undefined;
+          const rec = agent !== undefined ? recs.get(agent) : undefined;
           if (agent === undefined || rec === undefined) continue;
           const want = hostViewCell(agent, rec).meta["can_call"] as Record<string, unknown>;
           const have = (a.meta["can_call"] as Record<string, unknown> | undefined) ?? {};
@@ -1506,13 +1515,13 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       openSetupAt({ x: at.x + at.w + 40, y: at.y }, { ...(cell !== undefined ? { target_cell: cell } : {}), ...(ai !== undefined ? { edit_ai: ai } : {}) });
     },
     // a chat card's ⤢ (#339): the agent's own cell full screen — the one that shows it, else a new one
-    viewFull(agent) {
+    async viewFull(agent) {
       const shows = everyAgent().find((id) => (kernel.get(id)?.record() as Rec | undefined)?.["backend_id"] === agent);
       if (shows !== undefined) {
         showPicked(shows);
         return setViewed(shows);
       }
-      const rec = registry.get(agent);
+      const rec = await viewRecordOf(agent);
       if (rec === undefined) return toast(`✕ no agent ${agent}`);
       const { handler, meta } = hostViewCell(agent, rec);
       const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;
@@ -1591,7 +1600,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     const id = String(r["id"]);
     placing.add(id);
     await syncRegistry();
-    const rec = registry.get(id);
+    const rec = await viewRecordOf(id);
     if (rec === undefined) {
       toast(`✕ ${id} was made but is not on the host`);
       return;
@@ -1685,9 +1694,9 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
       }
       return { error: String(r?.["error"] ?? "add_mcp: no answer") };
     },
-    show: (id, cell) => {
+    show: async (id, cell) => {
       const at = rectsNow()[cell];
-      const rec = registry.get(id);
+      const rec = await viewRecordOf(id);
       if (rec === undefined) return;
       const { handler, meta } = hostViewCell(id, rec);
       kernel.remove(cell);
@@ -1748,7 +1757,7 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     mountAgentView: async (agentId, el, selfCell) => {
       const local = kernel.get(agentId);
       if (local !== undefined) return pageReflect(local, el);
-      const rec = registry.get(agentId) ?? (await hostRecordFresh(agentId));
+      const rec = await viewRecordFresh(agentId);
       if (rec === undefined) throw new Error(`no agent ${agentId}`);
       const { handler, meta } = hostViewCell(agentId, rec);
       const bundle = viewFor(handler, kernel);
@@ -1787,10 +1796,10 @@ export async function mountCanvas(opts: MountOptions): Promise<void> {
     mac: onMac(),
     // an agent no cell shows: an AI opens in a chat cell, anything else as its
     // reflect card — a weak peer either way (✕ leaves the agent)
-    open: (id) => {
-      // a host agent, drawn as ITS RECORD says (`view`, else its kind's default,
+    open: async (id) => {
+      // a host agent, drawn as ITS REFLECT says (`view`, else its kind's default,
       // else the stub) — the same path `place {backend_id}` takes
-      const rec = registry.get(id);
+      const rec = await viewRecordOf(id);
       if (rec === undefined) return;
       const { handler, meta } = hostViewCell(id, rec);
       const viewId = `view_${crypto.randomUUID().slice(0, 8)}`;

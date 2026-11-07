@@ -6,7 +6,7 @@ import { mountPanel } from "../html_agent/html_view.ts";
 import type { PanelOptions } from "../html_agent/html_view.ts";
 import { Host } from "../../lib.ts";
 import { bodyText } from "../body_text.ts";
-import { hostRecordOf, onViewChange, viewOf } from "../canvas/host_views.ts";
+import { onViewChange, viewOf, viewRecordOf } from "../canvas/host_views.ts";
 
 // agent_view — a HOST agent's OWN view (backend-owned views,
 // tmp/backend_owned_views.md). NOT page content: the cell holds only layout and
@@ -57,7 +57,7 @@ async function readHostFile(host: Host, path: string): Promise<string> {
 /** The host agent's view body: its bundle's view file (its `{{agent}}` = this
  *  instance), else the record's inline `bytes`. */
 async function bodyOf(host: Host, agent: string): Promise<string> {
-  const rec = hostRecordOf(agent);
+  const rec = await viewRecordOf(agent);
   if (rec === undefined) return `<pre>no host agent ${agent}</pre>`;
   const v = viewOf(rec);
   if (v.bytesFile !== undefined) {

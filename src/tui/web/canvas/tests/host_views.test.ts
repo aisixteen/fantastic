@@ -5,7 +5,7 @@ import { registerHtmlAgent } from "../src/bundles/html_agent/html_agent.ts";
 import type { Payload } from "../src/lib.ts";
 import { registerCanvas } from "../src/bundles/canvas/canvas_agent.ts";
 import { registerAgentView } from "../src/bundles/agent_view/agent_view.ts";
-import { cellGrant, seenHere, setCanvasNode, setHostRecords, sideOf, viewOf } from "../src/bundles/canvas/host_views.ts";
+import { cellGrant, onViewChange, rereflectViews, seenHere, setCanvasNode, setHostRecords, setHostReflect, sideOf, viewOf, viewRecordOf } from "../src/bundles/canvas/host_views.ts";
 
 // BACKEND-OWNED VIEWS: a host agent's record says how it is drawn; a page cell
 // is layout + `backend_id` + a grant DERIVED from the record.
@@ -29,11 +29,17 @@ test("place {backend_id} draws a host agent by its record — layout + derived g
   registerAgentView(k);
   k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
   k.register(new Agent({ id: "view_root", parentId: "canvas", handlerModule: "view.ts" }));
+  // the LISTING carries no view (or a stale one): the view is read from REFLECT
   const host: Record<string, Record<string, unknown>> = {
+    search: { id: "search", handler_module: "exec_bridge.tools", view: { kind: "chat" } },
+    term: { id: "term", handler_module: "exec_bridge.tools" },
+  };
+  const reflects: Record<string, Record<string, unknown>> = {
     search: { id: "search", handler_module: "exec_bridge.tools", view: { kind: "html", bytes: "<p>s</p>", calls: ["search"] } },
     term: { id: "term", handler_module: "exec_bridge.tools" },
   };
   setHostRecords((id) => host[id]);
+  setHostReflect(async (id) => (reflects[id] ?? { error: "no such agent", reason: "not_found" }) as never);
   const call = async (p: Record<string, unknown>): Promise<Payload> =>
     (await k.send([{ target: "view_root", payload: p as Payload }]))[0]!.result as Payload;
 
@@ -175,4 +181,48 @@ test("an_unknown_module_still_gets_the_stub", () => {
     assert.equal(viewOf({ id: "x", handler_module: m }).kind, "stub", m);
   }
   assert.equal(viewOf({ id: "x" }).kind, "stub");
+});
+
+// RENDERERS ARE RESOLVED FROM `reflect`, not from the `list_agents` record.
+
+test("viewRecordOf: the view is the reflect's — the listing's own view is ignored; no view falls back as viewOf does", async () => {
+  setHostRecords((id) => ({ listed: { id: "listed", handler_module: "file_bridge.tools", view: { kind: "terminal" } } } as Record<string, Record<string, unknown>>)[id]);
+  const reflects: Record<string, Record<string, unknown>> = {
+    listed: { id: "listed", handler_module: "file_bridge.tools", view: { kind: "html", bytes: "<b>r</b>" } },
+  };
+  setHostReflect(async (id) => (reflects[id] ?? { error: "no such agent" }) as never);
+  assert.deepEqual(viewOf((await viewRecordOf("listed"))!).kind, "html", "from reflect, not the listing's terminal");
+  delete reflects["listed"]!["view"];
+  assert.equal(viewOf((await viewRecordOf("listed"))!).kind, "stub", "reflect without view: the default, not the listing's view");
+  reflects["listed"] = { error: "refused", reason: "gate" };
+  assert.equal(viewOf((await viewRecordOf("listed"))!).kind, "stub", "a refusal draws nothing of its own");
+  assert.equal(await viewRecordOf("ghost"), undefined);
+});
+
+test("a page-only html agent with a view resolves from the page kernel's reflect, with no host record", async () => {
+  const k = new Kernel();
+  k.setRoot(new Agent({ id: "canvas", handlerModule: "canvas.ts" }));
+  k.register(new Agent({ id: "page_agent", parentId: "canvas", meta: { view: { kind: "html", bytes: "<i>p</i>", calls: ["ping"] } } }));
+  setHostRecords(() => undefined);
+  setHostReflect(async (id) => (await k.send([{ target: id, payload: { type: "reflect", tree: "none" } as Payload }]))[0]!.result as never);
+  const v = viewOf((await viewRecordOf("page_agent"))!);
+  assert.deepEqual([v.kind, v.handler, v.bytes, v.calls], ["html", "agent_view.ts", "<i>p</i>", ["ping", "watch"]]);
+});
+
+test("an agent's changed view is re-reflected and its cells told", async () => {
+  let view: Record<string, unknown> = { kind: "html", bytes: "one" };
+  setHostRecords(() => ({ id: "a", handler_module: "x.tools" }));
+  setHostReflect(async () => ({ id: "a", view }) as never);
+  let redraws = 0;
+  const off = onViewChange("a", () => redraws++);
+  await viewRecordOf("a"); // the cell's first draw
+  await rereflectViews(new Set(["a"]));
+  assert.equal(redraws, 0, "the first reflect only records");
+  await rereflectViews(new Set(["a"]));
+  assert.equal(redraws, 0, "an unchanged view is not redrawn");
+  view = { kind: "html", bytes: "two" };
+  const recs = await rereflectViews(new Set(["a"]));
+  assert.equal(redraws, 1);
+  assert.equal(viewOf(recs.get("a")!).bytes, "two");
+  off();
 });

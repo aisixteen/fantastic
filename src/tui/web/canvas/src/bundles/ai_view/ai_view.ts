@@ -4,7 +4,7 @@ import type { Handler, Json } from "../../lib.ts";
 import { panelRelay } from "../panel_relay.ts";
 import { mountHostPanel } from "../agent_view/agent_view.ts";
 import { ChatCards, cardRows, isCardRow } from "./chat_card.ts";
-import { canvasNode, cellGrant, hostRecordFresh, viewOf } from "../canvas/host_views.ts";
+import { canvasNode, cellGrant, viewOf, viewRecordFresh } from "../canvas/host_views.ts";
 import { hiddenOf, layoutFor, rectsOf, setHidden } from "../canvas/layout.ts";
 import { tint, tok } from "../skin/css.ts";
 
@@ -442,7 +442,7 @@ export const aiView: ViewBundle = {
     const chatView = (): string => kernel.get(selfId)?.parentId ?? "";
     const cards = new ChatCards({
       chat: selfId,
-      recordOf: (a) => hostRecordFresh(a),
+      recordOf: (a) => viewRecordFresh(a),
       mountPanel: (el, agent, rec, sizeKey) => {
         const have = kernel.get(selfId)?.meta["can_call"];
         kernel.updateMeta(selfId, { can_call: { ...(have !== null && typeof have === "object" ? (have as Dict) : {}), ...cellGrant(agent, viewOf(rec)) } } as never);

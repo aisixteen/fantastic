@@ -290,7 +290,7 @@ fn roster(
 /// uniformly to bare-agent and bundle reflects (python
 /// `_apply_reflect_flags`). Non-object replies and refusals pass through.
 ///
-/// Key order is python's: identity, `description`, gate fields, the root
+/// Key order is python's: identity, `description`, gate fields, `view`, the root
 /// frame, `tree`, `next`, `bundles`, `bundles_next`, `readme`. A reflect says
 /// what an agent IS, never how to call it: verb docs are
 /// the `docs` kernel verb ([`crate::docs`]).
@@ -329,6 +329,13 @@ pub async fn apply_reflect_flags(
             if let Some(v) = meta.get(k) {
                 obj.entry(k.to_string()).or_insert_with(|| v.clone());
             }
+        }
+        // HOW THIS AGENT IS DRAWN. `reflect` is the one place any client learns
+        // it, so a bundle agent's record `view` rides its reflect like the gate
+        // fields do (a bare agent already flattens its meta). A reply that
+        // built its own `view` keeps it.
+        if let Some(v) = meta.get("view") {
+            obj.entry("view".to_string()).or_insert_with(|| v.clone());
         }
     }
     // Kernel runtime identity + deployment context — surfaced on the ROOT

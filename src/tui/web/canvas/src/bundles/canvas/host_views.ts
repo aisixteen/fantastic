@@ -1,5 +1,5 @@
 // BACKEND-OWNED VIEWS (tmp/backend_owned_views.md): the HOST agent is the unit,
-// its record declares how it is shown, and a page cell is only a VIEW of it —
+// its `reflect` reply declares how it is shown (its record's `view`), and a page cell is only a VIEW of it —
 // layout (where, how big) plus `backend_id`, the agent it shows. This module is
 // the pure part: a host record → the view it gets, the page bundle that draws
 // it, and the cell's grant onto its agent. Nothing here touches the DOM or the
@@ -133,6 +133,58 @@ export async function hostRecordFresh(id: string): Promise<Rec | undefined> {
   if (now !== undefined) return now;
   await syncHost();
   return recordOf(id);
+}
+// HOW AN AGENT IS DRAWN is read from its `reflect` reply — the one place any
+// client learns it, for a host agent (a Rust/Python backend) and a page agent
+// (the page kernel, no backend) alike — never from the `list_agents` record,
+// which stays the listing of the tree. The canvas sets the reflector at mount.
+let reflectOf: (id: string) => Promise<Rec | undefined> = () => Promise.resolve(undefined);
+export function setHostReflect(fn: (id: string) => Promise<Rec | undefined>): void {
+  reflectOf = fn;
+}
+/** `id`'s `reflect` reply, or `undefined` for a refusal (a gate's, or no such
+ *  agent): the same refusal any call gets, never a bypass. */
+export async function reflectFresh(id: string): Promise<Rec | undefined> {
+  const r = await reflectOf(id).catch(() => undefined);
+  return r !== undefined && r !== null && typeof r === "object" && typeof r["error"] !== "string" ? r : undefined;
+}
+/** The record `viewOf` draws `id` from: the listing's fields (kind defaults read
+ *  `handler_module`, `memory_store_id`) with the `view` of the agent's REFLECT —
+ *  the listing's own `view` is never used. `undefined` when neither the page's
+ *  listing nor a reflect knows the agent. */
+/** The `view` (JSON) each agent was last drawn or re-reflected with. */
+const drawnViews = new Map<string, string>();
+export async function viewRecordOf(id: string): Promise<Rec | undefined> {
+  const reflected = await reflectFresh(id);
+  const listed = recordOf(id);
+  if (listed === undefined && reflected === undefined) return undefined;
+  const { view: _listed, ...rest } = listed ?? {};
+  const out: Rec = { ...rest, ...(reflected ?? {}) };
+  if (reflected === undefined || reflected["view"] === undefined) delete out["view"];
+  // the first view drawn for an agent is what a later re-reflect compares to
+  if (!drawnViews.has(id)) drawnViews.set(id, JSON.stringify(out["view"] ?? null));
+  return out;
+}
+/** `viewRecordOf`, the host's agents read again first when the page has none yet. */
+export async function viewRecordFresh(id: string): Promise<Rec | undefined> {
+  if (recordOf(id) === undefined) await syncHost();
+  return viewRecordOf(id);
+}
+/** Reflect each agent in `shown` again; one whose `view` differs from the one
+ *  it was last drawn with has its cells told (`viewChangedFor`). Answers each
+ *  agent's `viewRecordOf`. */
+export async function rereflectViews(shown: Set<string>): Promise<Map<string, Rec | undefined>> {
+  for (const id of [...drawnViews.keys()]) if (!shown.has(id)) drawnViews.delete(id);
+  const was = new Map([...shown].map((id) => [id, drawnViews.get(id)] as const));
+  const recs = new Map<string, Rec | undefined>();
+  await Promise.all([...shown].map(async (id) => void recs.set(id, await viewRecordOf(id))));
+  for (const id of shown) {
+    const now = JSON.stringify(recs.get(id)?.["view"] ?? null);
+    const before = was.get(id);
+    drawnViews.set(id, now);
+    if (before !== undefined && before !== now) viewChangedFor(id);
+  }
+  return recs;
 }
 /** Run `fn` whenever host agent `id`'s `view` changes; returns the unsubscribe. */
 export function onViewChange(id: string, fn: () => void): () => void {
