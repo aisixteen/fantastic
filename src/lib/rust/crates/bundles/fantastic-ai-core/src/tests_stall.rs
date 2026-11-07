@@ -357,6 +357,17 @@ async fn a_held_sender_settles_with_reason_timeout_when_the_turn_that_reads_it_t
     assert_eq!(two["client_id"], json!("t"), "{two}");
 }
 
+/// A `send` call carrying its own `<timeout>`: the parent's wait outlasts the child's
+/// send ceiling, so the child's refusal (not the parent's own deadline) is what the
+/// parent is handed.
+fn send_with_deadline(target: &str, text: &str, secs: u64) -> String {
+    let mut args = Map::new();
+    args.insert("target_id".into(), json!(target));
+    args.insert("timeout".into(), json!(secs));
+    args.insert("payload".into(), json!({"type": "send", "text": text}));
+    crate::tool_parse::render_call("send", &args)
+}
+
 /// A parent that sent to a child and awaits its reply reads the child's failure:
 /// the child's send settles with `reason: timeout` and the parent's next turn is
 /// handed that reply, not silence.
@@ -375,11 +386,7 @@ async fn a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout() {
     let ps = script(
         &parent,
         vec![
-            pass(call_envelope(
-                child.as_str(),
-                json!({"type": "send", "text": "work"}),
-                None,
-            )),
+            pass(send_with_deadline(child.as_str(), "work", 5)),
             pass(r#"<call name="done"></call>"#),
         ],
         Duration::ZERO,
@@ -399,7 +406,7 @@ async fn a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout() {
     );
     let seen = ps.request(1);
     assert!(
-        seen.contains("[reply to ") && seen.contains("timeout"),
+        seen.contains("[reply to ") && seen.contains("send: timeout after 0.5s"),
         "{seen}"
     );
 }

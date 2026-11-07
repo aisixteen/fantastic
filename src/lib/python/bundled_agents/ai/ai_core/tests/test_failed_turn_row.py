@@ -461,7 +461,7 @@ async def test_a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout(
     wire(seeded_kernel, child, parent)
     call = render_call(
         "send",
-        {"target_id": child, "payload": {"type": "send", "text": "work"}},
+        {"target_id": child, "timeout": 5, "payload": {"type": "send", "text": "work"}},
     )
     pf = fake_providers[parent] = _Script([[call], [DONE]])
 
@@ -482,7 +482,7 @@ async def test_a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout(
             await asyncio.sleep(0.05)
         assert len(pf.seen) >= 2, "the parent was never handed the child's failure"
         read = str(pf.seen[1])
-        assert "[reply to " in read and "timeout" in read, pf.seen[1]
+        assert "[reply to " in read and "send: timeout after 0.5s" in read, pf.seen[1]
         assert cf.calls == 1, "the child's turn was retried"
     finally:
         fake_providers.pop(parent, None)
