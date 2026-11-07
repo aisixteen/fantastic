@@ -16,7 +16,10 @@
 //! passes registers them on the host's registry AFTER the stock set, in every
 //! mode that boots a kernel (the UI, `--headless`, `canvas`, `mcp`). A host
 //! that boots its own kernel in a directory first calls [`seed_dir`], so a fresh
-//! directory has the same `user` record the CLI writes on a first run.
+//! directory has the same `user` record the CLI writes on a first run. A host
+//! with agents of its own seeds them the same way, once, with [`seed_dir_with`]:
+//! its blueprints are written after the stock one, ids as written, and every
+//! later run rehydrates from disk.
 
 mod app;
 mod atomic;
@@ -60,7 +63,8 @@ pub use fantastic_kernel::BundleRegistry;
 /// Seed a directory like the `fantastic` CLI's first run: writes the blueprint
 /// tree (the `user` record and its children) when `.fantastic` is absent and
 /// returns `Ok(true)`; a no-op returning `Ok(false)` once it exists.
-pub use boot::seed::seed_dir;
+/// [`seed_dir_with`] also writes an embedder's own blueprints, ids as written.
+pub use boot::seed::{seed_dir, seed_dir_with};
 
 /// AN EMBEDDER'S BUNDLES: registers them on the host's registry, after the stock
 /// set (`kern/host.rs`), so a record naming one hydrates into a live agent.

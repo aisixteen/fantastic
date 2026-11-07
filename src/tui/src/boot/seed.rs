@@ -61,9 +61,31 @@ pub fn root_fields() -> Result<Map<String, Value>, String> {
     }
 }
 
+/// Every id written so far, with where it sits on disk and which blueprint wrote
+/// it. Ids are one namespace across the whole tree, so a second writer of an id
+/// (other than as a parent entry, see [`write_blueprint`]) is a clash.
+#[derive(Default)]
+struct Written {
+    ids: std::collections::HashMap<String, (std::path::PathBuf, String)>,
+}
+
+impl Written {
+    fn claim(&mut self, id: &str, here: &std::path::Path, who: &str) -> Result<(), String> {
+        match self.ids.get(id) {
+            Some((_, first)) => Err(format!(
+                "blueprint: `{id}` in {who} is already written by {first}"
+            )),
+            None => {
+                self.ids.insert(id.to_string(), (here.to_path_buf(), who.to_string()));
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Write one level of the tree under `dir` (which is some `…/agents`), then
 /// recurse into each entry's own `agents:`.
-fn write_level(dir: &std::path::Path, list: &[Value]) -> Result<(), String> {
+fn write_level(dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &str) -> Result<(), String> {
     for entry in list {
         let obj = entry
             .as_object()
@@ -84,6 +106,7 @@ fn write_level(dir: &std::path::Path, list: &[Value]) -> Result<(), String> {
             ));
         }
         let here = dir.join(id);
+        seen.claim(id, &here, who)?;
         std::fs::create_dir_all(&here)
             .map_err(|e| format!("could not write {}: {e}", here.display()))?;
 
@@ -94,7 +117,40 @@ fn write_level(dir: &std::path::Path, list: &[Value]) -> Result<(), String> {
 
         match kids {
             None => {}
-            Some(Value::Array(k)) => write_level(&here.join("agents"), &k)?,
+            Some(Value::Array(k)) => write_level(&here.join("agents"), &k, seen, who)?,
+            Some(_) => return Err(format!("blueprint: `{id}.agents` must be a list")),
+        }
+    }
+    Ok(())
+}
+
+/// Write one blueprint's top level. A top entry whose id an EARLIER blueprint
+/// wrote is a PARENT entry: it carries only `id` and `agents:`, names the parent,
+/// and its `agents:` are written beneath that agent. Its record is never
+/// rewritten, so any other field on it is refused.
+fn write_blueprint(agents_dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &str) -> Result<(), String> {
+    let earlier: std::collections::HashSet<String> = seen.ids.keys().cloned().collect();
+    for entry in list {
+        let parent = entry
+            .as_object()
+            .and_then(|o| o.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| earlier.contains(*id));
+        let Some(id) = parent else {
+            write_level(agents_dir, std::slice::from_ref(entry), seen, who)?;
+            continue;
+        };
+        let obj = entry.as_object().expect("an entry with an id is a map");
+        if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "id" | "agents")) {
+            let (_, first) = &seen.ids[id];
+            return Err(format!(
+                "blueprint: `{id}` in {who} is already written by {first}; as a parent it may carry only `id` and `agents`, not `{extra}`"
+            ));
+        }
+        let under = seen.ids[id].0.join("agents");
+        match obj.get("agents") {
+            None => {}
+            Some(Value::Array(k)) => write_level(&under, k, seen, who)?,
             Some(_) => return Err(format!("blueprint: `{id}.agents` must be a list")),
         }
     }
@@ -107,7 +163,7 @@ fn write_level(dir: &std::path::Path, list: &[Value]) -> Result<(), String> {
 /// removing a directory the user may have had other files in would be worse than
 /// a clear message.
 pub fn write_all(paths: &Paths) -> Result<(), String> {
-    write_from(paths, BLUEPRINT)
+    write_from(paths, &[BLUEPRINT])
 }
 
 /// THE HOST ENTRY POINT: seed `dir` the way the `fantastic` CLI does on a first
@@ -118,26 +174,48 @@ pub fn write_all(paths: &Paths) -> Result<(), String> {
 /// record and its children) and returns `Ok(true)`. Refuses the fantastic home
 /// itself, like the CLI. The error text is the writer's.
 pub fn seed_dir(dir: &std::path::Path) -> Result<bool, String> {
+    seed_dir_with(dir, &[])
+}
+
+/// [`seed_dir`] plus an embedder's own blueprints, written after the stock one,
+/// in order, by the same writer and under the same rules (no `parent_id`, no
+/// `mcp`, `@root` resolved, disk position is the parent). Ids land as written.
+///
+/// A top entry whose id an earlier blueprint wrote is a parent entry: only `id`
+/// and `agents:`, and its `agents:` are written beneath that agent. Any other
+/// field on it is refused, and so is any other reuse of an earlier id, naming
+/// both writers. On a refusal the tree written so far stays on disk.
+pub fn seed_dir_with(dir: &std::path::Path, blueprints: &[&str]) -> Result<bool, String> {
     let paths = Paths::at(dir);
     if !paths.is_fresh() {
         return Ok(false);
     }
     paths.refuse_the_home()?;
-    write_all(&paths)?;
+    let mut texts = vec![BLUEPRINT];
+    texts.extend_from_slice(blueprints);
+    write_from(&paths, &texts)?;
     Ok(true)
 }
 
-/// `write_all` over an explicit blueprint text, so tests can prove the writer's
-/// refusals without editing the shipped file.
-fn write_from(paths: &Paths, text: &str) -> Result<(), String> {
-    let list = entries(text)?;
+/// `write_all` over explicit blueprint texts (the first is the stock one), so
+/// tests can prove the writer's refusals without editing the shipped file.
+fn write_from(paths: &Paths, texts: &[&str]) -> Result<(), String> {
+    // Parse every blueprint before the first write: a text that does not parse
+    // must not leave a half-seeded store behind.
+    let lists = texts.iter().map(|t| entries(t)).collect::<Result<Vec<_>, _>>()?;
     std::fs::create_dir_all(&paths.cli)
         .map_err(|e| format!("could not write {}: {e}", paths.cli.display()))?;
 
     // NOT WRITTEN HERE: `.fantastic/agent.yaml`. The kernel creates the root
     // itself on first boot, with its own id and a freshly minted guid. Writing it
     // from here would be this shell guessing at a record the kernel owns.
-    write_level(&paths.store.join("agents"), &list)
+    let agents = paths.store.join("agents");
+    let mut seen = Written::default();
+    for (i, list) in lists.iter().enumerate() {
+        let who = if i == 0 { "the stock blueprint".to_string() } else { format!("blueprint {i}") };
+        write_blueprint(&agents, list, &mut seen, &who)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -304,7 +382,7 @@ mod tests {
     #[test]
     fn a_blueprint_naming_mcp_is_refused() {
         let p = sandbox("nomcp");
-        let err = write_from(&p, "agents:\n  - id: mcp\n    handler_module: web_mcp.tools\n")
+        let err = write_from(&p, &["agents:\n  - id: mcp\n    handler_module: web_mcp.tools\n"])
             .unwrap_err();
         assert!(err.contains("mcp"), "{err}");
         let _ = std::fs::remove_dir_all(&p.cwd);
@@ -313,7 +391,7 @@ mod tests {
     #[test]
     fn a_blueprint_naming_a_parent_is_refused() {
         let p = sandbox("parent");
-        let err = write_from(&p, "agents:\n  - id: x\n    parent_id: core\n").unwrap_err();
+        let err = write_from(&p, &["agents:\n  - id: x\n    parent_id: core\n"]).unwrap_err();
         assert!(err.contains("parent_id"), "{err}");
         let _ = std::fs::remove_dir_all(&p.cwd);
     }
@@ -405,5 +483,110 @@ mod tests {
         let err = seed_dir(&file).unwrap_err();
         assert!(err.contains("could not write"), "{err}");
         let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    fn seed_with(tag: &str, bp: &str) -> (Paths, Result<bool, String>) {
+        let p = sandbox(tag);
+        let r = seed_dir_with(&p.cwd, &[bp]);
+        (p, r)
+    }
+
+    #[test]
+    fn an_embedder_entry_is_written_with_its_id_and_the_stock_tree_too() {
+        let (p, r) = seed_with("emb_top", "agents:\n  - id: probe\n    handler_module: ram_store.tools\n");
+        assert_eq!(r, Ok(true));
+        assert_eq!(rec(&p, "probe/agent.yaml")["id"], "probe");
+        assert!(p.store.join("agents/user/agent.yaml").is_file());
+        assert!(p.store.join("agents/user/agents/memory/agent.yaml").is_file());
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn a_parent_entry_places_children_under_a_stock_agent_and_leaves_its_record() {
+        let plain = sandbox("emb_plain");
+        write_all(&plain).unwrap();
+        let (p, r) = seed_with(
+            "emb_parent",
+            "agents:\n  - id: user\n    agents:\n      - id: probe2\n        handler_module: ram_store.tools\n        can_call:\n          '@root': '*'\n",
+        );
+        assert_eq!(r, Ok(true));
+        let kid = rec(&p, "user/agents/probe2/agent.yaml");
+        assert_eq!(kid["id"], "probe2");
+        assert!(kid["can_call"].get(ROOT_PLACEHOLDER).is_none());
+        assert_eq!(kid["can_call"][ROOT_ID], "*");
+        assert_eq!(rec(&p, "user/agent.yaml"), rec(&plain, "user/agent.yaml"));
+        let _ = std::fs::remove_dir_all(&p.cwd);
+        let _ = std::fs::remove_dir_all(&plain.cwd);
+    }
+
+    #[test]
+    fn a_parent_entry_with_another_field_is_refused() {
+        let (p, r) = seed_with("emb_field", "agents:\n  - id: user\n    handler_module: x\n");
+        let err = r.unwrap_err();
+        assert!(err.contains("user") && err.contains("handler_module"), "{err}");
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn an_id_clash_with_the_stock_tree_is_refused_naming_both() {
+        let (p, r) = seed_with("emb_clash", "agents:\n  - id: probe\n    agents:\n      - id: memory\n");
+        let err = r.unwrap_err();
+        assert!(err.contains("memory") && err.contains("blueprint 1") && err.contains("stock"), "{err}");
+        let (p2, r2) = seed_with("emb_clash_top", "agents:\n  - id: exec\n    handler_module: x\n");
+        // `exec` is stock but nested, so a top entry naming it is a parent entry
+        // carrying another field: refused too.
+        assert!(r2.is_err());
+        let _ = std::fs::remove_dir_all(&p.cwd);
+        let _ = std::fs::remove_dir_all(&p2.cwd);
+    }
+
+    #[test]
+    fn a_second_embedder_blueprint_clashing_with_the_first_is_refused() {
+        let p = sandbox("emb_two");
+        let a = "agents:\n  - id: probe\n";
+        let b = "agents:\n  - id: other\n    agents:\n      - id: probe\n";
+        let err = seed_dir_with(&p.cwd, &[a, b]).unwrap_err();
+        assert!(err.contains("probe") && err.contains("blueprint 1") && err.contains("blueprint 2"), "{err}");
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn seed_dir_with_twice_changes_nothing() {
+        let p = sandbox("emb_twice");
+        let bp = "agents:\n  - id: probe\n";
+        assert_eq!(seed_dir_with(&p.cwd, &[bp]), Ok(true));
+        let before = snapshot(&p.store);
+        assert_eq!(seed_dir_with(&p.cwd, &[bp]), Ok(false));
+        assert_eq!(snapshot(&p.store), before);
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn an_embedder_blueprint_naming_parent_id_or_mcp_is_refused() {
+        let (p, r) = seed_with("emb_pid", "agents:\n  - id: x\n    parent_id: core\n");
+        assert!(r.unwrap_err().contains("parent_id"));
+        let (q, r) = seed_with("emb_mcp", "agents:\n  - id: mcp\n");
+        assert!(r.unwrap_err().contains("mcp"));
+        let _ = std::fs::remove_dir_all(&p.cwd);
+        let _ = std::fs::remove_dir_all(&q.cwd);
+    }
+
+    #[test]
+    fn an_unparsable_embedder_blueprint_writes_nothing() {
+        let (p, r) = seed_with("emb_bad", "not: agents\n");
+        assert!(r.is_err());
+        assert!(p.is_fresh());
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn seed_dir_is_seed_dir_with_nothing() {
+        let a = sandbox("emb_eq_a");
+        let b = sandbox("emb_eq_b");
+        assert_eq!(seed_dir(&a.cwd), Ok(true));
+        assert_eq!(seed_dir_with(&b.cwd, &[]), Ok(true));
+        assert_eq!(snapshot(&a.store), snapshot(&b.store));
+        let _ = std::fs::remove_dir_all(&a.cwd);
+        let _ = std::fs::remove_dir_all(&b.cwd);
     }
 }
