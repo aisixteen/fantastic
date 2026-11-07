@@ -67,7 +67,7 @@ pub struct App {
     pub side: crate::ui::side::SideView,
     /// The view the rail collapsed from, for `>`.
     pub side_before_rail: crate::ui::side::SideView,
-    /// FLAT: how many system agents fold into `+ N system`.
+    /// FLAT: how many plumbing agents fold into `+ N system`.
     pub system_folded: usize,
     /// The persistence provider's id, from the root reflect: plumbing, so FLAT
     /// folds it.
@@ -302,14 +302,6 @@ impl App {
             },
             // the terminal `run` made (with the canvas the program is a cell there)
             Recipe::Run => (self.trows.iter().position(|t| t.id == TERM_ID), Focus::Term),
-            // the machine's agents: `network`, else the first one present
-            Recipe::System => (
-                self.trows
-                    .iter()
-                    .position(|t| t.id == fantastic_system_agents::network::ID)
-                    .or_else(|| self.trows.iter().position(|t| fantastic_system_agents::IDS.contains(&t.id.as_str()))),
-                Focus::Panel,
-            ),
         };
         let Some(i) = target else {
             self.note(format!("{r:?}: nothing to open"));

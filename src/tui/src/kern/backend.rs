@@ -130,19 +130,9 @@ impl BackendBundle {
             Ok(sh) => json!({
                 "preferred": sh.preferred,
                 "bundles": Self::project_bundles(host),
-                "system": Self::system_agents(host),
             }),
             Err(e) => refuse("not_found", e, "the user's saved set-ups are not readable"),
         }
-    }
-
-    /// THE MACHINE'S AGENTS present here (`kern/system`): each a host tile on the page.
-    fn system_agents(host: &Host) -> Vec<&'static str> {
-        crate::kern::system::ids()
-            .iter()
-            .copied()
-            .filter(|id| host.kernel.agents.contains_key(&AgentId::from(*id)))
-            .collect()
     }
 
     /// THE PROJECT'S OWN BUNDLES (owner 2026-10-09: "bundle it, then place it from
@@ -674,7 +664,7 @@ impl Bundle for BackendBundle {
         json!({
                     "create": "args: record:dict (req — handler_module, id?, its own fields; no parent or grants). One direct child of this agent; asking for an existing child of the same handler again answers it. An AI (its handler names a memory store) is made as every AI is: on the project's memory store, granted that store and the human's chat verbs. {id, …}.",
                     "delete": "args: id:str (req — an agent under this one). Deletes it and its subtree.",
-                    "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles), system: [id] (the machine's agents here — the `system` recipe)}.",
+                    "presets": "No args. {preferred (the default AI set-up), bundles: [{name, sentence}] (the project's own bundles)}.",
                     "spawn": "args: saved:str? (else the default) | bundle:str (a NEW project bundle from that starter — only when the user asks for a bundle) | instance_of:str (one more instance of a project bundle), stamp:dict? (the caller's own fields for the backend root, copied unread), peer_grants:dict? (any grant key — more egress for the AI). {id, root, saved, handler_module, model}.",
                     "keep": "args: id:str (req — the cell's AI), name:str?. Records the dialog (its rows are already in the project's memory store); it outlives the cell. {kept, name}.",
                     "rename": "args: id:str, name:str. {id, name}.",
@@ -848,27 +838,6 @@ mod create_tests {
         assert!(out.get("error").is_none(), "{out}");
         let id = out["id"].as_str().unwrap().to_string();
         assert_eq!(record_of(&h, &id)["view"]["tui"][0]["show"], "kv");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn system_tiles_list_matches_ids() {
-        let (h, dir) = host("system-tiles", &[]).await;
-        // none made here: none offered
-        assert!(BackendBundle::system_agents(&h).is_empty());
-        // all made: the tiles are the agents' ids, in order
-        for id in crate::kern::system::ids() {
-            let out = h
-                .operator("kernel", json!({"type": "create_agent", "parent_id": "kernel", "id": id, "handler_module": fantastic_core::HANDLER_MODULE}))
-                .await;
-            assert!(out.result.get("error").is_none(), "{id}: {:?}", out.result);
-        }
-        assert_eq!(BackendBundle::system_agents(&h), crate::kern::system::ids());
-        assert_eq!(BackendBundle::system_agents(&h), ["power", "network", "audio", "displays", "notifications", "lock"]);
-        // one that is gone is not offered
-        let out = h.operator("kernel", json!({"type": "delete_agent", "id": "network"})).await;
-        assert!(out.result.get("error").is_none(), "{:?}", out.result);
-        assert_eq!(BackendBundle::system_agents(&h), ["power", "audio", "displays", "notifications", "lock"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

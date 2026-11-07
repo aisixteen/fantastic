@@ -17,8 +17,7 @@ replay it.
 
 ## 1. Host it
 
-- The desktop app hosts the home in-process, and so does the kiosk, which runs
-  the app. A Rust shell of its own links `fantastic-home-kernel` and calls
+- The desktop app hosts the home in-process. A Rust shell of its own links `fantastic-home-kernel` and calls
   `HomeKernel::boot` (section 8).
 - One host per home dir: the host holds the folder lock of `<home>/app`. There
   is no standalone host and no `fantastic home` command.
