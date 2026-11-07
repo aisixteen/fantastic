@@ -293,6 +293,8 @@ async fn closed_follows_an_abrupt_drop() {
 
 /// A ws LEG whose remote dropped reflects `connected:false`, refuses a forward as
 /// not connected, and `boot` DIALS AGAIN instead of answering `{already:true}`.
+/// The leg's own redial (#493) is held off here: its first dial is hung up on
+/// before the handshake, and the leg is backing off when `boot` dials in.
 #[tokio::test]
 async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
     use fantastic_kernel::{Agent, AgentId, Item, Kernel};
@@ -304,12 +306,21 @@ async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
     let (drop_tx, mut drop_rx) = tokio::sync::mpsc::channel::<()>(4);
     let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = Arc::clone(&accepted);
+    // the connection to hang up on (before its handshake), and how many were
+    let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (refuse_in, refused_in) = (Arc::clone(&refuse), Arc::clone(&refused));
     let server = tokio::spawn(async move {
         let mut held = Vec::new();
         loop {
             tokio::select! {
                 conn = listener.accept() => {
                     let (mut sock, _) = conn.unwrap();
+                    if refuse_in.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        drop(sock);
+                        refused_in.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        continue;
+                    }
                     handshake(&mut sock, None).await;
                     count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     held.push(sock);
@@ -381,6 +392,7 @@ async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
         json!(true)
     );
 
+    refuse.store(true, std::sync::atomic::Ordering::SeqCst);
     drop_tx.send(()).await.unwrap();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     while ask(json!({"type": "reflect"})).await["connected"] != json!(false) {
@@ -393,6 +405,10 @@ async fn a_dropped_leg_reflects_down_and_boot_dials_again() {
     let fwd = ask(json!({"type": "forward", "target": "x", "payload": {"type": "reflect"}})).await;
     assert_eq!(fwd["reason"], json!("not_connected"), "{fwd}");
 
+    // the leg's own redial has been hung up on: it is waiting out its backoff
+    while refused.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
     let dials = accepted.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         ask(json!({"type": "boot"})).await,

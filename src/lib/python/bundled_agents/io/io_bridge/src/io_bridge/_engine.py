@@ -119,6 +119,10 @@ class _BridgeState:
     # frame), by the `src` it named → (the agent, the watch's reader, its drain
     # task, the leg agent that holds it). Dropped on `unwatch` and with the link.
     served: dict[str, tuple[str, str, asyncio.Task, Any]] = field(default_factory=dict)
+    # Set by a dialled `ws` leg's boot: dials the known address again, carrying the
+    # watches the dropped link held. `None` for every other kind (a memory pair is
+    # a test seam; the relay heals its own socket). Run by the read loop after a drop.
+    redial: Callable[[set[str]], Awaitable[dict]] | None = None
 
 
 # Per-agent bridge state — process-memory only, keyed by agent id (shared across
@@ -361,11 +365,14 @@ async def _read_loop(id: str, kernel: Any) -> None:
     st = _state(id)
     transport = st.transport
     assert transport is not None
+    dropped = False
+    watched: set[str] = set()
     try:
         while True:
             try:
                 frame = await transport.recv()
             except ConnectionClosed:
+                dropped = True
                 break
             ftype = frame.get("type")
             if ftype == "call":
@@ -423,6 +430,7 @@ async def _read_loop(id: str, kernel: Any) -> None:
         for t in list(st.pending_calls):
             t.cancel()
         st.pending_calls.clear()
+        watched = set(st.watching)
         st.watching.clear()
         _drop_served(st)
         try:
@@ -433,6 +441,39 @@ async def _read_loop(id: str, kernel: Any) -> None:
             if not fut.done():
                 fut.set_exception(ConnectionError("bridge transport closed"))
         st.pending.clear()
+    # A dialled link that dropped is dialled again. A loop that was cancelled
+    # (`shutdown`, the agent's deletion) never reaches here: the redial belongs to
+    # the dropped link's own read task, so the teardown that cancels it ends it.
+    if dropped and st.redial is not None:
+        await _redial(st, watched)
+
+
+# The redial backoff: the first dial is at once, then one second, doubling to thirty.
+REDIAL_FIRST_DELAY = 1.0
+REDIAL_MAX_DELAY = 30.0
+
+
+def redial_delay(attempt: int) -> float:
+    """The wait before redial attempt `attempt` (0 = the first, which is at once)."""
+    if attempt <= 0:
+        return 0.0
+    return min(REDIAL_FIRST_DELAY * 2 ** min(attempt - 1, 16), REDIAL_MAX_DELAY)
+
+
+async def _redial(st: _BridgeState, watched: set[str]) -> None:
+    """The dialing side dials the known address again — the record's
+    host/port/peer_id, as `boot` reads them — until a link is up, waiting longer
+    after each refusal. A `reconnect` or `boot` that got there first has a live
+    transport, which `boot` answers `already`: that ends the loop too."""
+    assert st.redial is not None
+    attempt = 0
+    while True:
+        wait = redial_delay(attempt)
+        if wait:
+            await asyncio.sleep(wait)
+        if "error" not in await st.redial(watched):
+            return
+        attempt += 1
 
 
 async def _teardown(id: str) -> None:
@@ -484,6 +525,7 @@ async def boot(
     *,
     build_transport: BuildTransport,
     hello: bool = False,
+    watching: set[str] | None = None,
 ):
     """Shared boot: idempotency + the `memory` test kind + the `build_transport`
     seam for every other kind, then the common tail (mint this boot's correlator
@@ -495,7 +537,11 @@ async def boot(
     `{type:"hello", guid, leg}` — the far `web_ws` registers this connection as
     this kernel's leg, so its agents reach ours as `<guid>|<agent>`, and a redial
     replaces the dropped connection there. A kernel with no guid yet has no
-    address to give and says nothing."""
+    address to give and says nothing.
+
+    `watching` (a redial of a dropped `ws` link): the remote agents that link was
+    watching — asked for again on the new one, so a watcher of this leg keeps
+    receiving without subscribing anew."""
     rec = kernel.get(id) or {}
     st = _state(id)
     if st.transport is not None and not st.transport.closed:
@@ -536,11 +582,31 @@ async def boot(
     st.transport = transport
     st.transport_kind = kind
     st.corr_prefix, st.corr_counter = _new_corr_prefix(id), 0
+    st.redial = None
+    if hello and kind == "ws":
+
+        async def redial(watched: set[str]) -> dict:
+            return await boot(
+                id,
+                {},
+                kernel,
+                build_transport=build_transport,
+                hello=hello,
+                watching=watched,
+            )
+
+        st.redial = redial
     # REGISTERED: the read loop outlives this `boot` dispatch and re-emits
     # every inbound frame for the life of the leg.
     st.read_task = kernel.ctx.tasks[
         kernel.ctx.spawn_task(id, "read_loop", _read_loop(id, kernel))
     ]["_task"]
+    for src in sorted(watching or ()):
+        st.watching.add(src)
+        try:
+            await transport.send({"type": "watch", "src": src})
+        except ConnectionClosed:
+            break  # the link dropped already: the read loop sees it and redials
     await kernel.emit(id, {"type": "bridge_up"})
     return {"booted": True, "transport": kind}
 
@@ -657,7 +723,7 @@ def make_verbs(
         )
 
     async def _reconnect(id, payload, kernel):
-        """No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry)."""
+        """No args. Teardown + boot — the manual redial. A `ws` leg whose link dropped redials its known address by itself, with a backoff, and keeps its watches; `bridge_down` then `bridge_up` mark the drop and the return."""
         await _teardown(id)
         return await _boot(id, payload, kernel)
 

@@ -22,7 +22,7 @@
 //! | `reflect` | none | `{id, sentence, transport, connected, host?, port?, peer_id?, ingress, egress, auth, pending_count, verbs, emits}` |
 //! | `boot` | none | `{booted, transport}` or `{error, already}` |
 //! | `shutdown` | none | `{stopped:true}` (runs the `on_delete` cascade) |
-//! | `reconnect` | none | shutdown + boot |
+//! | `reconnect` | none | shutdown + boot (the manual redial; a dropped `ws` link redials by itself) |
 //! | `forward` | `{target, payload, forward_timeout?}` | the unwrapped reply from the remote |
 //! | `watch_remote` | `{target}` | `{ok, watching}` — stream a remote agent's emits onto this bridge's inbox |
 //! | `unwatch_remote` | `{target}` | `{ok, unwatched}` |
@@ -138,7 +138,7 @@ impl Family {
         let mut v = json!({
             "reflect": "Identity + transport + connectivity. No args.",
             "boot": "No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op.",
-            "reconnect": "No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry).",
+            "reconnect": "No args. Teardown + boot — the manual redial. A `ws` leg whose link dropped redials its known address by itself, with a backoff, and keeps its watches; `bridge_down` then `bridge_up` mark the drop and the return.",
             "forward": "args: target:str (req — an id on the REMOTE kernel), payload:dict (req — the call to run there, a verb frame with its own `type`), forward_timeout:float? (default 30s — not `timeout`, which is a call's own routing field). Example: {\"type\":\"forward\",\"target\":\"src\",\"payload\":{\"type\":\"read_stream\",\"path\":\"data.bin\",\"offset\":0}}. Ships a raw `{type:'call', id, target, payload}` frame over the transport, awaits the matching reply, returns the unwrapped data. The far kernel judges the call as the leg that serves it there. Local→local stays direct kernel.send (this verb is only for cross-kernel). Multi-hop loop detection is the caller's responsibility — the bridge ships whatever it's given.",
             "watch_remote": "args: target:str (req — id on the REMOTE kernel to watch). Sends `{type:'watch', src:<target>}` over the transport and subscribes this leg to `target`. Subsequent `{type:'event', src, payload}` frames whose `src` is subscribed are re-emitted on THIS bridge agent's inbox as the payload plus `src`; an event for anything not subscribed is dropped. Local watchers subscribe to the bridge with `kernel.watch(<bridge_id>, ...)`. Idempotent (web_ws de-dups via its own `watching` set).",
             "unwatch_remote": "args: target:str (req — id previously passed to watch_remote). Unsubscribes this leg from `target` (events for it are dropped from now on) and sends `{type:'unwatch', src:<target>}` so the remote stops emitting them.",
@@ -904,6 +904,30 @@ fn reflect_reply(family: Family, agent_id: &AgentId, kernel: &Kernel) -> Value {
 }
 
 async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) -> Value {
+    boot_carrying(family, agent_id, kernel, HashSet::new()).await
+}
+
+/// `boot`, with the remote agents a dropped link was watching: the new link asks
+/// the far side for each of them again, so a watcher of this leg keeps receiving
+/// without subscribing anew. A plain `boot` carries none.
+///
+/// Boxed: the read loop `boot` spawns redials through this very function, and a
+/// boxed `Send` future breaks the cycle the compiler would otherwise chase.
+fn boot_carrying<'a>(
+    family: Family,
+    agent_id: &'a AgentId,
+    kernel: &'a Arc<Kernel>,
+    carried: HashSet<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send + 'a>> {
+    Box::pin(boot_carrying_inner(family, agent_id, kernel, carried))
+}
+
+async fn boot_carrying_inner(
+    family: Family,
+    agent_id: &AgentId,
+    kernel: &Arc<Kernel>,
+    carried: HashSet<String>,
+) -> Value {
     // python: idempotent only while the transport is OPEN — a closed leg is
     // rebuilt in place.
     if let Some(existing) = BRIDGES.lock().get(agent_id).cloned() {
@@ -946,7 +970,7 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
         corr_prefix: new_corr_prefix(agent_id),
         corr_counter: AtomicU64::new(0),
         down_emitted: std::sync::atomic::AtomicBool::new(false),
-        watching: Mutex::new(HashSet::new()),
+        watching: Mutex::new(carried.clone()),
         served: Mutex::new(HashMap::new()),
     });
 
@@ -969,6 +993,7 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     let read_state = Arc::clone(&state);
     let read_agent = agent_id.clone();
     let read_kernel = Arc::clone(kernel);
+    let read_family = family;
     // REGISTERED, AND UNDER THE LEG'S OWN IDENTITY. The read loop outlives the
     // `boot` dispatch and issues a send per inbound frame, so it is real work:
     // `spawn_task` gives it a `ps` row and a `cancel` that reaches it, and
@@ -976,11 +1001,19 @@ async fn boot_reply(family: Family, agent_id: &AgentId, kernel: &Arc<Kernel>) ->
     // would reach `Kernel::launch` with `current_sender() == None`, the OPERATOR,
     // and the two-sided gate would be skipped for every frame a peer sends.
     let task_id = kernel.spawn_task(&agent_id.clone(), "read_loop", async move {
-        read_loop(read_agent, read_state, read_kernel).await;
+        read_loop(read_agent, read_state, read_kernel, read_family).await;
     });
     *state.read_task.lock().await = Some(task_id);
 
     BRIDGES.lock().insert(agent_id.clone(), Arc::clone(&state));
+
+    // The watches the dropped link held, asked for again on this one. A failed
+    // send is the link dropping already: the read loop sees it and redials.
+    for src in &carried {
+        let _ = transport
+            .send_frame(json!({"type": "watch", "src": src}))
+            .await;
+    }
 
     kernel.emit(agent_id, json!({"type": "bridge_up"})).await;
     json!({"booted": true, "transport": kind})
@@ -1633,7 +1666,12 @@ fn validate_bridge_meta(meta: &Map<String, Value>) -> Option<String> {
     authorizer::ingress::unknown_refusal(meta, &authorizer::ingress::REGISTRY)
 }
 
-async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kernel>) {
+async fn read_loop(
+    agent_id: AgentId,
+    state: Arc<BridgeState>,
+    kernel: Arc<Kernel>,
+    family: Family,
+) {
     // In-flight inbound dispatches — one task per `call` frame (with the frame id
     // that names its execution), ended together when the loop exits so nothing
     // keeps running into a dead transport.
@@ -1788,6 +1826,61 @@ async fn read_loop(agent_id: AgentId, state: Arc<BridgeState>, kernel: Arc<Kerne
     };
     for tx in drained {
         let _ = tx.send(Err("bridge transport closed".to_string()));
+    }
+    // A dialled `ws` link that dropped is dialled again. Any other end of this
+    // loop is not a drop to heal: the memory transport is a test pair, and the
+    // relay transport heals its own socket.
+    if family == Family::Ws && state.transport_kind == "ws" {
+        redial(family, &agent_id, &state, &kernel).await;
+    }
+}
+
+/// The first wait of the redial backoff.
+const REDIAL_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// The longest wait of the redial backoff.
+const REDIAL_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The wait before redial attempt `attempt` (0 = the first, which is at once):
+/// one second, doubling, up to thirty.
+fn redial_delay(attempt: u32) -> std::time::Duration {
+    match attempt {
+        0 => std::time::Duration::ZERO,
+        n => REDIAL_FIRST_DELAY
+            .saturating_mul(1u32 << (n - 1).min(16))
+            .min(REDIAL_MAX_DELAY),
+    }
+}
+
+/// The dialing side redials the known address after a drop — the record's
+/// `host`/`port`/`peer_id`, as `boot` reads them — until a link is up, waiting
+/// longer after each refusal. It runs as the dropped link's own read task, so
+/// `shutdown` (the verb or the agent's deletion) cancels it with that task; a
+/// `reconnect` or `boot` that got there first has replaced the state, and ends it.
+async fn redial(
+    family: Family,
+    agent_id: &AgentId,
+    dropped: &Arc<BridgeState>,
+    kernel: &Arc<Kernel>,
+) {
+    // The reader may report the drop a moment before the socket reads as closed;
+    // closing settles it, so `boot` rebuilds instead of answering `already`.
+    dropped.transport.close().await;
+    let watched = dropped.watching.lock().expect("watching poisoned").clone();
+    let mut attempt = 0u32;
+    loop {
+        let wait = redial_delay(attempt);
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        let current = BRIDGES.lock().get(agent_id).cloned();
+        if !current.is_some_and(|c| Arc::ptr_eq(&c, dropped)) {
+            return;
+        }
+        let r = boot_carrying(family, agent_id, kernel, watched.clone()).await;
+        if r.get("error").is_none() {
+            return;
+        }
+        attempt = attempt.saturating_add(1);
     }
 }
 
