@@ -7,7 +7,7 @@
 //! ```
 //!
 //! A broken spec is fatal (the caller's): the home served what no shell can build.
-//! The kiosk applies no menu at all.
+//! Fullscreen mode applies no menu at all.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

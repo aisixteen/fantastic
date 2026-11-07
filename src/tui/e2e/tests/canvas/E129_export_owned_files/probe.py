@@ -17,7 +17,7 @@ c) importing without `allow_code` is refused (`code_not_allowed`, the code named
    the pointers (`view.bytes_file`, `system_prompt_file`).
 
 (The importer does not write the owned files into the new agents' folders: that
-is documented as "not yet" in docs/system.md, so the files compared are the
+is documented as "not yet" in docs/subtrees.md, so the files compared are the
 export folder's.)"""
 
 from __future__ import annotations

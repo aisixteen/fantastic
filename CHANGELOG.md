@@ -27,31 +27,6 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   html view's body as `<id>/view.html` and a folder bundle's files as
   `bundles/<name>/…` (marked `# code:` in the blueprint), the TUI has
   `/export <path>`, and a canvas cell's right-click menu has "Export…".
-- System agents (Linux, `fantastic [canvas] system`): the machine's basics as
-  agents an AI calls like any other, each with its view as a canvas cell — first
-  `power` (battery over UPower; power off, reboot, suspend over logind), then
-  `audio` (PipeWire's sinks and sources: volume, mute and the default, read with
-  `pw-dump` and followed with `pw-dump --monitor`, set with `wpctl`). The model
-  and ViewModel are pure (`fantastic-system`); every OS call is in the bundle's
-  `sys/linux`. On fantastic OS they run in the system canvas `/home/fantastic/system`,
-  the user service `fantastic-system`, which the Home lists.
-- System agents, `network` (#55): NetworkManager's devices, Wi-Fi networks (one per
-  SSID, the strongest first, with their security: open, wpa-psk, sae, wep or
-  enterprise) and saved connections; `scan`, `connect` (a saved network is
-  activated, a new one made with the password never kept), `activate`,
-  `deactivate`, `forget`, `set_wireless`. A host tile opens it at 640x480.
-- System agents, `notifications` (#55): the session's notification server
-  (`org.freedesktop.Notifications`, spec 1.2): what programs send lands in the
-  agent's state; `notify`, `dismiss`, `dismiss_all`, `invoke`, `set_dnd`.
-- System agents, `displays` (#55): the compositor's outputs through `wlr-randr`
-  (mode, scale, transform, position, on and off; never the last output off) and the
-  backlight through logind; `set_output`, `set_brightness`.
-- System agents, `lock` (#55): the kiosk's lock screen. A PIN of 4 to 12 digits
-  (Argon2id, in `<home>/lock.yaml`, mode 0600), the wait after wrong PINs, an idle
-  lock, logind's `Lock`/`Unlock` and sleep; `lock`, `unlock`, `set_pin`, `clear_pin`,
-  `set_auto_lock`, `activity`. The Home page covers itself with an overlay only
-  `unlock` removes, over the system canvas's socket. `user` alone may call it. A UI
-  lock, not a security boundary.
 - The canvas's own file tree sidebar (#148): the file tree fused into the canvas page,
   fixed to the viewport's left edge and beside the zoomed world, so a zoom or a pan
   never moves it. Zoom far out and drag files, folders and agents from it onto the
@@ -68,7 +43,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   through that view agent; dispose lets it go.
 - The fantastic server: a headless container image of one canvas (#158), for
   Docker and Podman (rootless), amd64 and arm64, from
-  `ghcr.io/aisixteen/fantastic`. Debian 13 "trixie", the kiosk's base; the same
+  `ghcr.io/aisixteen/fantastic`. Debian 13 "trixie"; the same
   `fantastic` binary as the `.deb`; non-root uid 1000; state on the volumes
   `/home/fantastic/.fantastic` and `/work`; tini as PID 1; SIGTERM stops it in
   order. `fantastic canvas --host ADDR` is the bind address it needs (`127.0.0.1`
@@ -168,13 +143,6 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   WebGL renderer everywhere else; switching is live. The e2e probe E88
   measures keystroke → render latency per renderer, in Chrome and, on Linux,
   in WebKitGTK.
-- fantastic OS: a Debian 13 (trixie) kiosk image built with mkosi (x86_64, arm64)
-  that boots into the desktop app. The `fantastic-session` package logs the user
-  `fantastic` in on tty1 and runs `fantastic-app --kiosk` full screen under cage,
-  with screen blanking off; `scripts/build/deb.sh` builds it and the app's `.deb`.
-  CI boots the image in QEMU and checks that the home kernel serves, the Home page
-  answers a key press, and a canvas survives a restart of the kiosk. The
-  installers carry `fantastic-session` beside the app's `.deb`.
 - Installers for the desktop app, built and verified by CI (`installers.yml`,
   from the binaries a green CI run tested) and signed by hand by the
   maintainer: a notarized DMG (macOS, Apple silicon), a signed NSIS installer
@@ -188,8 +156,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   vibrancy on macOS, Mica on Windows 11), native menus and shortcuts from the
   home's menu spec, and Open Folder, drops and Finder/Dock opens as intents. One
   app per home; quitting shuts the kernel down in order and leaves the canvases
-  it started running. `--kiosk` runs it fullscreen with no decorations, for the
-  kiosk.
+  it started running. `--fullscreen` runs it fullscreen with no decorations.
 - The `home` agent's `menu` and `focus` verbs and its `menu_spec` stream.
 - The `fantastic-home` crate: the fantastic manager's model and ViewModel, pure
   (no OS, no I/O, no clock), the base of `fantastic home`.
@@ -238,6 +205,8 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
+- The app's fullscreen flag is `--fullscreen` (renamed; the old flag name no longer parses) (#475). The server container's
+  files are in `container/server/`, and the installers carry the app's `.deb` only.
 - CI runs only by hand: a push to a `fix/**` or `feat/**` branch no longer
   starts the units. Ready branches are batched into one temporary
   `ci/batch-<n>` branch and run once.
@@ -356,7 +325,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   filter admits the running canvases' ports. WebKitGTK sends their frames
   through the same check, which refused them (a regression from #77).
 - home: a canvas that fails to start says why. The row reads `it did not start
-  — <error>`, the launch log keeps the error, and `--kiosk` prints a new problem
+  — <error>`, the launch log keeps the error, and `--fullscreen` prints a new problem
   once on stderr.
 - Canvas terminal: after a re-attach, flow control counts each character once,
   so the unacked count no longer reads low and output is not sent past the

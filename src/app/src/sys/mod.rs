@@ -8,7 +8,7 @@
 //! ```text
 //!   OS, WEBVIEW, MENU_OS, EXE
 //!   backdrop()                 the material behind the window, from the OS version, once
-//!   style(builder)             the non-kiosk window
+//!   style(builder)             the windowed
 //!   apply_backdrop(w, b)       on the main thread
 //!   opened_paths(event)        the folders a Finder / Dock / `open -a` hands the app (macOS)
 //!   on_terminate(app)          the OS's polite stop → app.exit(0)

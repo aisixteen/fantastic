@@ -1,7 +1,7 @@
 //! THE ONE FAILURE PATH. Nothing retries and nothing continues without the
-//! kernel: the text goes to stderr, then (outside the kiosk) to an error
-//! dialog whose dismissal exits 1. In the kiosk it exits 1 at once — a modal
-//! dialog would block the screen, and the kiosk's session manager restarts the app.
+//! kernel: the text goes to stderr, then (outside fullscreen mode) to an error
+//! dialog whose dismissal exits 1. In fullscreen mode it exits 1 at once — a modal
+//! dialog would block the screen, and the session manager restarts the app.
 
 use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -15,7 +15,7 @@ pub fn fatal(app: &AppHandle, text: &str) {
         return;
     }
     eprintln!("fantastic-app: {text}");
-    if shell.kiosk {
+    if shell.fullscreen {
         app.exit(1);
         return;
     }

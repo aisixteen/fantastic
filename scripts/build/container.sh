@@ -1,5 +1,5 @@
 #!/bin/sh
-# The fantastic server's image (Phase 12, #158): os/container/Containerfile, built
+# The fantastic server's image (Phase 12, #158): container/server/Containerfile, built
 # with docker or podman. ONE place builds it, for CI and the publish workflow.
 #
 #   sh scripts/build/container.sh --arch amd64                 one arch, loaded locally
@@ -14,7 +14,7 @@
 # Each arch's `fantastic` is the one its release archive holds (`cli.sh` leaves
 # dist/fantastic-<triple>.tar.gz; CI keeps it as the release-<triple> artifact).
 # It is staged at dist/container/<arch>/fantastic, where the Containerfile copies
-# it from: the bytes the fantastic-app .deb carries, so the server and the kiosk
+# it from: the bytes the fantastic-app .deb carries, so the server and the app
 # run one build. Build the archives first (`cli.sh --target <triple>`).
 #
 # Engine: $ENGINE (docker or podman) when set, else podman, else docker. Podman
@@ -103,7 +103,7 @@ case "$ARCH" in
     echo "container.sh: $ENGINE build linux/$ARCH -> $TAGS (version $VERSION)"
     # shellcheck disable=SC2046,SC2086
     "$ENGINE" build $FORMAT_ARG --platform "linux/$ARCH" --build-arg "FANTASTIC_VERSION=$VERSION" \
-      -f os/container/Containerfile $(tag_args) .
+      -f container/server/Containerfile $(tag_args) .
     if [ "$PUSH" = 1 ]; then
       for t in $TAGS; do "$ENGINE" push "$t"; done
     fi
@@ -115,7 +115,7 @@ case "$ARCH" in
     echo "container.sh: docker buildx linux/amd64,linux/arm64 -> $TAGS (version $VERSION)"
     # shellcheck disable=SC2046
     docker buildx build --platform linux/amd64,linux/arm64 --build-arg "FANTASTIC_VERSION=$VERSION" \
-      -f os/container/Containerfile $(tag_args) --push .
+      -f container/server/Containerfile $(tag_args) --push .
     echo "container.sh: done -> $TAGS"
     ;;
 esac

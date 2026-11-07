@@ -6,8 +6,7 @@
 //! only job is managing fantastics: its own sqlite store, a loopback web host
 //! that serves the home page, and the `home` agent, which binds the pure
 //! ViewModel (`fantastic_home::Home`) to the kernel protocol. No exec, no file
-//! leg, no AI. Its only host is the desktop app (and the kiosk that runs that
-//! app); the e2e's `fantastic-home-host` is a test binary.
+//! leg, no AI. Its only host is the desktop app; the e2e's `fantastic-home-host` is a test binary.
 //!
 //! ```text
 //!   lib        the API: home_dir_from_env, Config, Running, running, hand_over, HomeKernel

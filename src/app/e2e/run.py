@@ -21,7 +21,7 @@ read on stderr and asked through the home's socket (`plain`).
 
 So on macOS and Windows the page itself isn't driven: step 2 (the shell's
 `__FANTASTIC_SHELL__` flag) and step 4's clicks go through the home's API
-instead, and step 8 (kiosk) is Linux's. The Home page's DOM is driven by the CLI
+instead, and step 8 (fullscreen) is Linux's. The Home page's DOM is driven by the CLI
 e2e (E83–E85) in Chrome.
 
 Every call to `home` is the page's own path: `user.forward` over
@@ -458,18 +458,18 @@ async def sessions(run: Run, wd: WebDriver) -> None:
     need(not run.run_file.exists(), "the run file outlived the quit")
     wd.end()
 
-    say("8. kiosk: fullscreen, no folder dialog")
-    wd.start(run.app, ["--kiosk"])
+    say("8. fullscreen mode: no folder dialog")
+    wd.start(run.app, ["--fullscreen"])
     await on_page(wd, run)
     rect = await until("a fullscreen window", lambda: _fullscreen(wd), 20)
-    need(rect, f"the kiosk window: {rect}")
+    need(rect, f"the fullscreen window: {rect}")
     flag = wd.js(SHELL_JS)
-    need(flag and flag["pickFolder"] == "undefined", f"the kiosk's flag: {flag}")
+    need(flag and flag["pickFolder"] == "undefined", f"the fullscreen flag: {flag}")
     await until("the Home page loads", lambda: wd.js("return document.body && document.body.dataset.page"), 30)
     app_pid = int(run.host()["pid"])
     quit_app(app_pid)
     await until("the app gone", lambda: not pid_alive(app_pid), 20)
-    need(not run.run_file.exists(), "the kiosk's run file outlived the quit")
+    need(not run.run_file.exists(), "the fullscreen run file outlived the quit")
     wd.end()
 
 

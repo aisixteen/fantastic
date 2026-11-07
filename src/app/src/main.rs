@@ -7,7 +7,7 @@
 //! ```
 //!
 //! ```text
-//!   args      argv → {kiosk, paths}
+//!   args      argv → {fullscreen, paths}
 //!   home      the in-process kernel: boot, calls, events, the orderly shutdown
 //!   menu      menu spec → native menus; a click → its intent
 //!   intents   the paths the OS hands the app → `open`; the folder dialog
@@ -97,7 +97,7 @@ fn main() -> ExitCode {
 
     let backdrop = sys::backdrop();
     let built = tauri::Builder::default()
-        .manage(Arc::new(Shell::new(args.kiosk, backdrop)))
+        .manage(Arc::new(Shell::new(args.fullscreen, backdrop)))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![intents::pick_folders])
         .setup(move |app| {
@@ -150,13 +150,13 @@ fn window(app: &AppHandle, args: &Args, backdrop: Backdrop) -> Result<(), String
             sys::OS,
             sys::WEBVIEW,
             backdrop.flag(),
-            !args.kiosk,
+            !args.fullscreen,
         ))
         .on_navigation(move |url| page::allowed(url, shell.port(), &shell.canvas_ports()));
     if let Some([r, g, bl]) = backdrop.window_color() {
         b = b.background_color(tauri::window::Color(r, g, bl, 255));
     }
-    if args.kiosk {
+    if args.fullscreen {
         b = b.fullscreen(true).decorations(false);
     } else {
         b = sys::style(b);

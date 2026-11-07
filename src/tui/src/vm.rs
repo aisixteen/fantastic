@@ -105,8 +105,6 @@ pub struct Boot {
     pub ai: Option<crate::kern::root_ai::Backend>,
     /// `run COMMAND…`: the program the terminal (or a canvas cell) runs.
     pub run: Option<Vec<String>>,
-    /// The `system` recipe: the machine's agents (`kern/system`).
-    pub system: bool,
     /// A terminal View is attached (it sizes the ViewModel).
     pub tui: bool,
     /// HEADLESS ONLY: where to say the page's URL, or why there is none. The
@@ -233,25 +231,6 @@ async fn run(
                                 app.note(e);
                                 failed();
                                 app.quit = true;
-                            }
-                        }
-                    }
-                    // THE MACHINE'S AGENTS (`system`): made, their grants written here too
-                    if boot.system {
-                        match crate::kern::system::ensure(&h).await {
-                            Ok(()) => {
-                                if let Err(e) = crate::kern::reach::grant_all(&h).await {
-                                    app.note(e);
-                                }
-                                // the lock screen's channel: the Home page dials this canvas
-                                // (`lock`), so its origin is let into the `web` record
-                                if boot.canvas {
-                                    crate::kern::home_origin::spawn(Arc::clone(&h));
-                                }
-                            }
-                            Err(e) => {
-                                boot.say(&format!("fantastic: {e}"));
-                                app.note(e);
                             }
                         }
                     }

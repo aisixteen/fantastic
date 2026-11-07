@@ -120,7 +120,7 @@ pub fn parse_login_env(printed: &[u8]) -> Result<Vec<(OsString, OsString)>, Stri
 /// session (`setsid`), so it outlives the host and never gets its terminal's
 /// signals, and it inherits NO other descriptor of the host: a long-lived canvas
 /// holding the app's compositor connection (or any socket) would keep it open
-/// after the app is gone (the kiosk's cage then never sees its client leave).
+/// after the app is gone (a compositor that supervises the app then never sees its client leave).
 pub async fn spawn(
     bin: &Path,
     path: &str,

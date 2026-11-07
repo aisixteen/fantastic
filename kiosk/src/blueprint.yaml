@@ -1,0 +1,25 @@
+# THE KIOSK'S TREE, written once on a fresh folder by `fantastic_tui::seed_dir_with`
+# after the base's own blueprint, ids as written. `user` is the base's agent: an
+# entry that names it holds only `agents:`. Views are not here: `ensure` puts them
+# inline in the records on every boot.
+agents:
+  - id: user
+    agents:
+      - id: power
+        handler_module: power.tools
+        callable_by: {user: "*"}
+      - id: network
+        handler_module: network.tools
+        callable_by: {user: "*"}
+      - id: audio
+        handler_module: audio.tools
+        callable_by: {user: "*"}
+      - id: displays
+        handler_module: displays.tools
+        callable_by: {user: "*"}
+      - id: notifications
+        handler_module: notifications.tools
+        callable_by: {user: "*"}
+      - id: lock
+        handler_module: lock.tools
+        callable_by: {user: "*"}

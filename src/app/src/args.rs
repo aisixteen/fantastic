@@ -1,4 +1,4 @@
-//! THE ARGUMENTS: `fantastic-app [--kiosk] [<folder>…]`. Pure.
+//! THE ARGUMENTS: `fantastic-app [--fullscreen] [<folder>…]`. Pure.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -6,22 +6,22 @@ use std::path::{Path, PathBuf};
 /// What the app was started with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
-    /// The kiosk's screen: fullscreen, no decorations, no menu, no dialogs.
-    pub kiosk: bool,
+    /// The fullscreen mode's screen: fullscreen, no decorations, no menu, no dialogs.
+    pub fullscreen: bool,
     /// The folders to open, absolute (a relative one joined to `cwd`).
     pub paths: Vec<PathBuf>,
 }
 
-/// `argv` (without the program) read against `cwd`. `--kiosk` is the only
+/// `argv` (without the program) read against `cwd`. `--fullscreen` is the only
 /// option; any other word starting with `-` is refused. Every other word is a folder.
 pub fn parse(argv: impl IntoIterator<Item = OsString>, cwd: &Path) -> Result<Args, String> {
     let mut args = Args {
-        kiosk: false,
+        fullscreen: false,
         paths: Vec::new(),
     };
     for word in argv {
-        if word == "--kiosk" {
-            args.kiosk = true;
+        if word == "--fullscreen" {
+            args.fullscreen = true;
         } else if word.as_encoded_bytes().starts_with(b"-") {
             return Err(format!("unknown option {}", word.to_string_lossy()));
         } else {
@@ -44,14 +44,14 @@ mod tests {
     }
 
     #[test]
-    fn kiosk_and_paths() {
+    fn fullscreen_and_paths() {
         let cwd = root();
         let abs = cwd.join("abs");
-        let got = parse_words(&["--kiosk", abs.to_str().unwrap()], &cwd).unwrap();
+        let got = parse_words(&["--fullscreen", abs.to_str().unwrap()], &cwd).unwrap();
         assert_eq!(
             got,
             Args {
-                kiosk: true,
+                fullscreen: true,
                 paths: vec![abs]
             }
         );
@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(
             none,
             Args {
-                kiosk: false,
+                fullscreen: false,
                 paths: vec![]
             }
         );

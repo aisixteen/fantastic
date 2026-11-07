@@ -1,0 +1,214 @@
+# fantastic OS, the kiosk (`kiosk/`): its own crate on the fantastic base, built and
+# tested on its own, run by hand (`gh workflow run kiosk.yml --ref <branch>`). The base's
+# workflows build without it.
+name: kiosk
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The base's canvas packer provisions its pinned esbuild with this toolchain.
+  GO_VERSION: "1.23.4"
+  NODE_VERSION: "24"
+
+jobs:
+  units:
+    name: kiosk units
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: kiosk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kiosk
+      - name: build
+        run: cargo build --workspace
+      - name: unit tests
+        run: cargo test --workspace --no-fail-fast
+      - name: the lock screen and tile size (pure TypeScript)
+        run: node --test "src/canvas/tests/*.test.ts" "src/lock/canvas/tests/*.test.ts"
+
+  # the system agents on a fake bus: dbus-daemon is on the runner, dbusmock is not
+  system-agents:
+    name: system agents (fake bus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: kiosk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kiosk
+          key: system-agents
+      - name: system agents on a fake bus
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q python3-dbusmock
+          cargo test -p fantastic-system-agents -- --ignored
+
+  # the session package: its maintainer scripts and the unit tests of the image's checks
+  session-package:
+    name: session package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: shellcheck and unit tests
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
+          shellcheck -s sh kiosk/os/session/DEBIAN/postinst kiosk/os/session/DEBIAN/prerm kiosk/os/session/DEBIAN/postrm kiosk/os/build/debs.sh kiosk/os/build/os.sh
+          python3 -m unittest discover -s kiosk/os/ci -p 'test_*.py'
+
+  # The image: the kiosk binary as the app .deb's sidecar, the session package, the
+  # mkosi image of exactly those, booted in QEMU. The app .deb is the base's, from
+  # the latest Release (the base builds it; the kiosk only replaces its sidecar).
+  # x86-64 runs on KVM and is the gate; `ubuntu-24.04-arm` has no /dev/kvm
+  # (actions/runner-images#14062), so arm64 boots on TCG, slowly, and does not fail
+  # the run until a green boot has been seen.
+  image:
+    needs: [units, session-package]
+    name: image · ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86-64
+            target: x86_64-unknown-linux-gnu
+            qemu: qemu-system-x86 ovmf
+            boot: ""
+            minutes: 90
+            soft: false
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            qemu: qemu-system-arm qemu-efi-aarch64
+            boot: --timeout 2400 --step 600
+            minutes: 120
+            # not a gate yet: remove `soft` after a green TCG boot has been seen
+            soft: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.minutes }}
+    continue-on-error: ${{ matrix.soft }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # debian:trixie-slim, pinned by digest: debian:trixie-20260918-slim
+      TRIXIE_SLIM: debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # debs.sh and os.sh read the version from the last tag
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kiosk
+          key: image-${{ matrix.arch }}
+      - name: the kiosk binary
+        run: (cd kiosk && cargo build --release --target ${{ matrix.target }} -p fantastic-kiosk)
+      - name: the base's app .deb, from the latest Release
+        run: |
+          version=$(git describe --tags --abbrev=0 | sed 's/^v//')
+          echo "FANTASTIC_VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p dist/deb
+          gh release download "v$version" -R "$GITHUB_REPOSITORY" -D dist/deb -p 'fantastic-app-${{ matrix.target }}.deb'
+          ls -l dist/deb
+      - name: the packages
+        run: sh kiosk/os/build/debs.sh --target ${{ matrix.target }}
+      # the host is not touched: a container. No systemd runs in it, so the
+      # maintainer scripts take their no-systemd branch; the VM covers the live path.
+      - name: install on stock Debian 13, no recommends
+        run: |
+          docker run --rm -v "$PWD/dist/kiosk/deb:/deb:ro" "$TRIXIE_SLIM" sh -euxc '
+            cat /etc/debian_version
+            apt-get update -q
+            apt-get install -y -q --no-install-recommends /deb/fantastic-app-*.deb /deb/fantastic-session_*_all.deb
+            fantastic readme | grep -q "fantastic canvas"
+            test -x /usr/bin/fantastic-app
+            id fantastic
+            test -L /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
+            systemd-analyze verify /usr/lib/systemd/system/fantastic-kiosk.service
+            # the system canvas: its user unit enabled for every user manager, its folder, the polkit rule
+            test -f /usr/lib/systemd/user/fantastic-system.service
+            test -L /etc/systemd/user/default.target.wants/fantastic-system.service
+            test -f /usr/share/polkit-1/rules.d/50-fantastic-session.rules
+            test "$(stat -c "%U:%G %a" /home/fantastic/system)" = "fantastic:fantastic 700"
+            apt-get remove -y -q fantastic-session
+            test "$(readlink /etc/systemd/system/fantastic-kiosk.service)" = /dev/null
+            apt-get purge -y -q fantastic-session
+            test ! -e /etc/systemd/system/fantastic-kiosk.service
+            test ! -e /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
+            test ! -e /etc/pam.d/fantastic-kiosk
+            test ! -e /etc/systemd/user/default.target.wants/fantastic-system.service
+            test ! -e /usr/share/polkit-1/rules.d/50-fantastic-session.rules
+            test -d /home/fantastic/system
+            id fantastic'
+      # makes /dev/kvm usable, removes AppArmor, links mkosi into /usr/bin.
+      # Not Ubuntu's own `mkosi` package: it is 20.2.
+      - uses: systemd/mkosi@v27.1
+      # as root (os.sh says why), then the runner owns the output again
+      - name: the image
+        run: |
+          sudo FANTASTIC_VERSION="$FANTASTIC_VERSION" sh kiosk/os/build/os.sh --arch ${{ matrix.arch }} --profile ci
+          sudo chown -R "$(id -u):$(id -g)" dist/kiosk/os
+          ls -l dist/kiosk/os
+      - name: qemu
+        run: sudo apt-get update -q && sudo apt-get install -y -q ${{ matrix.qemu }}
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/lib/python/uv.lock
+      - name: the check's python (websockets)
+        run: (cd src/lib/python && uv sync --locked)
+      - name: boot it, and check the kiosk
+        run: |
+          raw=dist/kiosk/os/fantastic-os_${FANTASTIC_VERSION}.raw
+          echo "the raw image: $(du -h "$raw" | cut -f1) ($(stat -c %s "$raw") bytes)" | tee -a "$GITHUB_STEP_SUMMARY"
+          uv run --project src/lib/python python kiosk/os/ci/boot_check.py \
+            --image "$raw" --arch ${{ matrix.arch }} --out os-check ${{ matrix.boot }}
+      - name: keep the check (screenshots, logs)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: os-check-${{ matrix.arch }}
+          path: os-check/
+          retention-days: 14
+      - name: the system agents
+        run: |
+          raw=dist/kiosk/os/fantastic-os_${FANTASTIC_VERSION}.raw
+          uv run --project src/lib/python python kiosk/os/ci/e2e_system.py \
+            --image "$raw" --arch ${{ matrix.arch }} --out os-e2e-system ${{ matrix.boot }}
+      - name: keep the system agents' check (logs)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: os-e2e-system-${{ matrix.arch }}
+          path: os-e2e-system/
+          retention-days: 14

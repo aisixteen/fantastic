@@ -5,7 +5,6 @@ import type { ViewBundle, ViewContext, ViewHandle } from "../view.ts";
 import { HOME_CSS, HOME_STYLE_ID } from "./home_css.ts";
 import { cardVerbs, colourVar, decodeState, isMacPlatform, label, lastSeen, shortcut, stateCard, verbLabel } from "./home_model.ts";
 import type { HomeRow, HomeState } from "./home_model.ts";
-import { LockScreen } from "./lock_screen.ts";
 import { FramePool, plan } from "./pages.ts";
 
 // THE HOME VIEW — the screen of the host's `home` agent (`home.tools`). It
@@ -22,9 +21,7 @@ import { FramePool, plan } from "./pages.ts";
 //   ├── nav.nav-pill         the Home, then each page (a dot; the shown one named)
 //   ├── .status-capsule      the shown page's status, name, address and pid
 //   ├── .problem             the home's problem, with Dismiss
-//   ├── .notice              a refused intent, for 6 s
-//   └── .lock-overlay        the lock screen (`lock_screen.ts`): over everything while the
-//                            system canvas's `lock` agent says locked; only `unlock` removes it
+//   └── .notice              a refused intent, for 6 s
 
 /** Every verb the view sends `home` (and its watch). `focus` is the host shell's. */
 export const HOME_VERBS = ["list", "open", "register", "start", "stop", "remove", "select", "select_page", "close_page", "dismiss", "log", "watch"] as const;
@@ -91,8 +88,6 @@ export const homeView: ViewBundle = {
     carousel.append(homePage);
     root.append(carousel, nav, capsule, problem, notice);
     ctx.mount.append(root);
-    // the lock screen: the page shell's own, over the carousel and the nav
-    const lockScreen = new LockScreen(root);
 
     // ── intents ──
     let noticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -305,7 +300,6 @@ export const homeView: ViewBundle = {
       if (typeof s === "string") return fatal(`The home sent a state this page cannot read — ${s}.`);
       if (shown !== null && s.seq <= shown.seq) return;
       shown = s;
-      lockScreen.rows(s.rows);
       drawRows(s);
       const p = plan(pool.held(), s);
       pool.apply({ keep: [], create: [], drop: p.drop }, () => root); // a closed page's frame goes before its page does
@@ -349,7 +343,7 @@ export const homeView: ViewBundle = {
     // ── keys and the shell's hook ──
     const isMac = isMacPlatform((navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform);
     const onKey = (e: KeyboardEvent): void => {
-      if (shown === null || broken || lockScreen.locked) return;
+      if (shown === null || broken) return;
       if (e.key === "Escape" && shown.problem !== null && logDialog === null) {
         e.preventDefault();
         void intent("dismiss");
@@ -375,7 +369,6 @@ export const homeView: ViewBundle = {
         off();
         host.unwatch(ctx.backend);
         window.removeEventListener("keydown", onKey);
-        lockScreen.unmount();
         if ((window as { fantasticHome?: HomeHook }).fantasticHome === hook) delete (window as { fantasticHome?: HomeHook }).fantasticHome;
         if (noticeTimer !== null) clearTimeout(noticeTimer);
         logDialog?.remove();

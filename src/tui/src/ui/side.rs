@@ -53,7 +53,7 @@ pub fn tile_colour(id: &str) -> Color {
 }
 
 /// The FLAT projection of the tree rows: the root first, then the rest at one
-/// level with the system agents taken out. Returns the rows and how many were
+/// level with the plumbing taken out. Returns the rows and how many were
 /// folded into `+ N system`.
 pub fn flatten(rows: Vec<TreeRow>, is_system: impl Fn(&TreeRow) -> bool) -> (Vec<TreeRow>, usize) {
     let mut out = Vec::with_capacity(rows.len());

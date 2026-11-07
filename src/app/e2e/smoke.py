@@ -1,6 +1,6 @@
 """THE INSTALLER SMOKE: an INSTALLED desktop app boots its kernel, and its bundled
 sidecar starts a canvas. Stdlib only; `installers.yml`'s verify jobs run it on
-every OS, on a fresh runner (and in `debian:trixie-slim` for the kiosk).
+every OS, on a fresh runner (and in `debian:trixie-slim`).
 
     python3 smoke.py --root <empty dir> -- <command that starts the app> [args…]
 
