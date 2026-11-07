@@ -331,3 +331,159 @@ async def test_a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_windo
         assert len(_errors(await _rows(seeded_kernel, aid))) == 1
     finally:
         fake_providers.pop(aid, None)
+
+
+# ─── a failed turn settles its sender and tells its watchers (#496) ─────────
+
+
+def _done_events(kernel, inbox) -> list[dict]:
+    q = kernel.ctx.inboxes[inbox]
+    out = []
+    while not q.empty():
+        ev = q.get_nowait()
+        if ev.get("type") == "status" and ev.get("phase") == "done":
+            out.append(ev)
+    return out
+
+
+async def test_a_timed_out_turn_settles_its_sender_with_reason_timeout_and_is_not_retried(
+    seeded_kernel, fake_providers, monkeypatch
+):
+    monkeypatch.setattr(core, "SEND_TIMEOUT", 0.1)
+    aid = "ft_to_reason"
+    _agent(seeded_kernel, aid)
+    seeded_kernel.ctx.ensure_inbox("watch_to")
+    seeded_kernel.watch(aid, "watch_to")
+    fp = fake_providers[aid] = _Hang()
+    try:
+        reply = await _say(seeded_kernel, aid, "one")
+        assert reply["reason"] == "timeout", reply
+        assert reply["client_id"] == "tab1", reply
+        assert reply["error"].startswith("send: timeout after 0.1s"), reply
+        done = _done_events(seeded_kernel, "watch_to")
+        assert done and done[-1]["detail"]["reason"] == "timeout", done
+        assert len(_errors(await _rows(seeded_kernel, aid))) == 1
+        await asyncio.sleep(0.4)
+        assert fp.calls == 1, "the failed turn was run again"
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_held_sender_settles_with_reason_timeout_when_the_turn_that_reads_it_times_out(
+    seeded_kernel, fake_providers, monkeypatch
+):
+    monkeypatch.setattr(core, "SEND_TIMEOUT", 0.5)
+    aid = "ft_held_to"
+    _agent(seeded_kernel, aid)
+    fake_providers[aid] = _Hang()
+
+    def send(text, cid):
+        return asyncio.ensure_future(
+            seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {"type": "send", "text": text, "client_id": cid},
+                    }
+                ]
+            )
+        )
+
+    try:
+        first = send("one", "o")
+        await asyncio.sleep(0.2)
+        second = send("two", "t")
+        one = (await asyncio.wait_for(first, 10))[0]["result"]
+        assert one["reason"] == "timeout", one
+        two = (await asyncio.wait_for(second, 10))[0]["result"]
+        assert two["reason"] == "timeout", two
+        assert two["client_id"] == "t", two
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_fails(
+    seeded_kernel, fake_providers
+):
+    aid = "ft_held_fail"
+    _agent(seeded_kernel, aid)
+
+    class _SlowFail:
+        calls = 0
+
+        async def chat(self, messages, max_tokens=None):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(0.6)
+            raise ProviderError("boom", transport=False)
+            yield  # pragma: no cover
+
+    fake_providers[aid] = _SlowFail()
+
+    def send(text, cid):
+        return asyncio.ensure_future(
+            seeded_kernel.send(
+                [
+                    {
+                        "target": aid,
+                        "payload": {"type": "send", "text": text, "client_id": cid},
+                    }
+                ]
+            )
+        )
+
+    try:
+        first = send("one", "o")
+        await asyncio.sleep(0.2)
+        second = send("two", "t")
+        one = (await asyncio.wait_for(first, 10))[0]
+        assert one["status"] == "failed", one
+        two = (await asyncio.wait_for(second, 10))[0]["result"]
+        assert two["reason"] == "transport_error", two
+        assert two["client_id"] == "t", two
+        assert "boom" in two["error"], two
+    finally:
+        fake_providers.pop(aid, None)
+
+
+async def test_a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout(
+    seeded_kernel, fake_providers, monkeypatch
+):
+    from _testkit import wire
+
+    from ai_core.tool_parse import render_call
+
+    monkeypatch.setattr(core, "SEND_TIMEOUT", 0.5)
+    parent, child = "ft_parent", "ft_child"
+    _agent(seeded_kernel, parent)
+    _agent(seeded_kernel, child)
+    wire(seeded_kernel, parent, child)
+    wire(seeded_kernel, child, parent)
+    call = render_call(
+        "send",
+        {"target_id": child, "timeout": 5, "payload": {"type": "send", "text": "work"}},
+    )
+    pf = fake_providers[parent] = _Script([[call], [DONE]])
+
+    class _SlowChild:
+        calls = 0
+
+        async def chat(self, messages, max_tokens=None):
+            self.calls += 1
+            await asyncio.sleep(2.5)
+            yield "never"
+
+    cf = fake_providers[child] = _SlowChild()
+    try:
+        await _say(seeded_kernel, parent, "go")
+        for _ in range(300):
+            if len(pf.seen) >= 2:
+                break
+            await asyncio.sleep(0.05)
+        assert len(pf.seen) >= 2, "the parent was never handed the child's failure"
+        read = str(pf.seen[1])
+        assert "[reply to " in read and "send: timeout after 0.5s" in read, pf.seen[1]
+        assert cf.calls == 1, "the child's turn was retried"
+    finally:
+        fake_providers.pop(parent, None)
+        fake_providers.pop(child, None)

@@ -142,7 +142,11 @@ async def test_a_turn_over_the_send_timeout(seeded_kernel, monkeypatch):
     monkeypatch.setattr(core, "SEND_TIMEOUT", 0.05)
     _ai(k, "kp_to", _Script(["late"], hold=5))
     r = await _call(k, "kp_to", {"type": "send", "text": "x"})
-    assert r == {"error": "send: timeout after 0.05s", "client_id": "cli"}
+    assert r == {
+        "error": "send: timeout after 0.05s",
+        "reason": "timeout",
+        "client_id": "cli",
+    }
 # twin: unknown_type_is_pythons_repr_and_shutdown_is_unknown
 # twin: unknown_type_wire_shape_is_byte_exact
 # twin: unknown_type_wire_shape_is_byte_exact

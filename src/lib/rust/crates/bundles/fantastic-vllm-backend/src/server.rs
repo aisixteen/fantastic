@@ -10,8 +10,9 @@
 //!
 //! - `model` — the ONE model the server serves (`GET {endpoint}/models`); a server
 //!   serving several names them, and the record must pick one.
-//! - `context_window` and `max_tokens` — that model's `max_model_len` (same list).
-//!   The same number for both: a main turn whose `max_tokens` reaches the window
+//! - `context_window` — that model's `max_model_len` (same list). `max_tokens` —
+//!   16384, plus the record's `thinking_token_budget` when it sets one, never above
+//!   `max_model_len` (#495). A main turn whose `max_tokens` could overrun the window
 //!   sends NO `max_tokens`, so the server bounds the reply by what the prompt
 //!   leaves.
 //! - `kv_slots` — how many full-length conversations the server's KV cache holds:
@@ -24,6 +25,7 @@
 //! A server that does not answer refuses the verb, naming the field, the URL and
 //! what came back. The key goes only to the endpoint's host, as on a chat request.
 
+use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::helpers;
 use fantastic_kernel::refusal::{refusal, with, BAD_ARG};
@@ -339,7 +341,16 @@ pub async fn read(
         }
         for f in ["max_tokens", "context_window"] {
             if want.contains(&f) {
-                out.insert(f.into(), json!(max_model_len(&entry, &url, f)?));
+                let window = max_model_len(&entry, &url, f)?;
+                // the window is the model's MAXIMUM; the output budget of a record
+                // that names none is bounded below it (#495)
+                let n = if f == "max_tokens" {
+                    let budget = rec.get("thinking_token_budget").and_then(Value::as_i64);
+                    default_max_tokens(budget, window)
+                } else {
+                    window
+                };
+                out.insert(f.into(), json!(n));
             }
         }
     }

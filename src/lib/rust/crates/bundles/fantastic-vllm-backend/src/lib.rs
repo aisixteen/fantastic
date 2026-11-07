@@ -1372,7 +1372,10 @@ pub fn record_schema() -> &'static Value {
             Field::new(
                 "max_tokens",
                 "int",
-                format!("a turn's output budget (tokens){FROM_SERVER} (max_model_len)"),
+                format!(
+                    "a turn's output budget (tokens){FROM_SERVER} (16384, plus \
+                     thinking_token_budget, never above max_model_len)"
+                ),
             ),
             Field::new(
                 "context_window",

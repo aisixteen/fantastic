@@ -152,7 +152,9 @@ RECORD_SCHEMA = schema(
         field(
             "max_tokens",
             "int",
-            "a turn's output budget (tokens)" + _FROM_SERVER + " (max_model_len)",
+            "a turn's output budget (tokens)"
+            + _FROM_SERVER
+            + " (16384, plus thinking_token_budget, never above max_model_len)",
         ),
         field(
             "context_window",

@@ -370,3 +370,20 @@ def test_stream_idle_seconds_is_validated_at_the_write():
         )
     assert validate_meta({"stream_idle_seconds": 2.5}, rec) is None
     assert "stream_idle_seconds" in [f["name"] for f in RECORD_SCHEMA["fields"]]
+
+
+@pytest.mark.parametrize(
+    ("rec", "sent"),
+    [({}, 16384), ({"num_predict": 0}, 16384), ({"num_predict": 200}, 200)],
+)
+async def test_a_record_with_no_num_predict_sends_the_bounded_default(rec, sent):
+    # #495: ollama's own default is no cap at all; the record builds a bounded one
+    from ollama_backend.tools import make_provider
+
+    class _K:
+        def get(self, id):
+            return {"endpoint": "http://ollama.test", "model": "m", **rec}
+
+    p = make_provider("o", _K())
+    _, kw = await _run(p, [{"message": {"content": "x"}}])
+    assert kw["options"]["num_predict"] == sent

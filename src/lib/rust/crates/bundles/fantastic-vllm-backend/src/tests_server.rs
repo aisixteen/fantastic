@@ -116,6 +116,41 @@ fn rec(endpoint: &str, extra: Value) -> Map<String, Value> {
 
 // ─── the read ───────────────────────────────────────────────────────────────
 
+/// The `max_tokens` the server read gives a record made with `extra`, when the
+/// server's window is `window` (#495).
+async fn read_max_tokens(window: i64, extra: Value) -> Value {
+    let (_srv, ep) = vllm(
+        models(&[(MODEL, window)]),
+        metrics(&["1.1377245508982037"]),
+        200,
+    )
+    .await;
+    let got = server::read(&rec(&ep, extra), &NoKey).await.expect("read");
+    got.get("max_tokens").cloned().unwrap_or(Value::Null)
+}
+
+#[tokio::test]
+async fn a_record_with_no_max_tokens_reads_the_bounded_default() {
+    assert_eq!(read_max_tokens(65536, json!({})).await, json!(16384));
+    // an explicit thinking budget adds to it
+    assert_eq!(
+        read_max_tokens(65536, json!({"thinking_token_budget": 2000})).await,
+        json!(2000 + 16384)
+    );
+    // never above the server's window
+    assert_eq!(read_max_tokens(8192, json!({})).await, json!(8192));
+    assert_eq!(
+        read_max_tokens(20000, json!({"thinking_token_budget": 8000})).await,
+        json!(20000)
+    );
+    // a record's own max_tokens is never read
+    let (_srv, ep) = default_vllm().await;
+    let got = server::read(&rec(&ep, json!({"max_tokens": 40000})), &NoKey)
+        .await
+        .expect("read");
+    assert!(got.get("max_tokens").is_none(), "{got:?}");
+}
+
 #[tokio::test]
 async fn what_the_record_leaves_out_is_read() {
     let (srv, ep) = default_vllm().await;
@@ -124,7 +159,7 @@ async fn what_the_record_leaves_out_is_read() {
         .expect("read");
     assert_eq!(
         Value::Object(got),
-        json!({"model": MODEL, "max_tokens": 65536, "context_window": 65536, "kv_slots": 1})
+        json!({"model": MODEL, "max_tokens": 16384, "context_window": 65536, "kv_slots": 1})
     );
     let paths: Vec<String> = seen(&srv).await.into_iter().map(|(p, _)| p).collect();
     assert!(
@@ -446,11 +481,11 @@ async fn a_send_reads_the_server_first_and_reflect_shows_the_values() {
             &rec["context_window"],
             &rec["kv_slots"]
         ),
-        (&json!(MODEL), &json!(65536), &json!(65536), &json!(1)),
+        (&json!(MODEL), &json!(16384), &json!(65536), &json!(1)),
         "{rec:?}"
     );
     let after = call(&kernel, "v1", json!({"type": "reflect"})).await;
-    assert_eq!(after["max_tokens"], json!(65536), "{after}");
+    assert_eq!(after["max_tokens"], json!(16384), "{after}");
     assert_eq!(after["kv"]["slots"], json!(1), "{after}");
 }
 

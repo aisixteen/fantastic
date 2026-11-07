@@ -446,7 +446,7 @@ async fn what_the_record_leaves_out_is_read_from_the_model_entry() {
         .expect("read");
     assert_eq!(
         Value::Object(got),
-        json!({"max_tokens": 64000, "context_window": 200_000})
+        json!({"max_tokens": 16384, "context_window": 200_000})
     );
     let reqs = srv.received_requests().await.unwrap_or_default();
     assert_eq!(
@@ -558,7 +558,179 @@ async fn a_send_reads_the_api_first_and_a_no_turn_verb_reads_nothing() {
     let rec = helpers::agent_meta(&AgentId::from("a1"), &kernel);
     assert_eq!(
         (&rec["max_tokens"], &rec["context_window"]),
-        (&json!(64000), &json!(200_000))
+        (&json!(16384), &json!(200_000))
+    );
+}
+
+// ─── the bounded default (#495) ─────────────────────────────────────────────
+
+/// A model entry whose maximum output is `max`.
+fn entry_max(max: i64) -> Value {
+    json!({"id": MODEL, "max_input_tokens": 200_000, "max_tokens": max})
+}
+
+/// A POST answer that says it was asked: the turn runs after `send` has replied, so
+/// the test waits on this, not on a clock.
+struct Asked(Arc<tokio::sync::Notify>, String);
+impl wiremock::Respond for Asked {
+    fn respond(&self, _req: &wiremock::Request) -> ResponseTemplate {
+        self.0.notify_one();
+        ResponseTemplate::new(200).set_body_raw(self.1.clone(), "text/event-stream")
+    }
+}
+
+/// The `max_tokens` a request carries when a record made from `extra` (its model
+/// `model`) is sent to: the record is created, `send` reads the entry, and the POST's
+/// body is read back off the wire.
+async fn sent_max_tokens(model: &str, extra: Value, max: i64) -> Value {
+    let tmp = TempDir::new().unwrap();
+    let srv = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/models/{model}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            json!({"id": model, "max_input_tokens": 200_000, "max_tokens": max}).to_string(),
+        ))
+        .mount(&srv)
+        .await;
+    let mut events = vec![start(), text("<call name=\"done\"></call>")];
+    events.extend(stop("end_turn"));
+    let asked = Arc::new(tokio::sync::Notify::new());
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(Asked(Arc::clone(&asked), sse(&events)))
+        .mount(&srv)
+        .await;
+    let ep = format!("{}/v1/messages", srv.uri());
+    let mut extra = extra;
+    extra["model"] = json!(model);
+    // process-wide per-agent state (usage tables) is keyed by id: one id per test
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = format!(
+        "bound{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let kernel = mk_unbounded_store(&tmp, &ep, &id, extra).await;
+    call(
+        &kernel,
+        &id,
+        json!({"type": "send", "text": "hi", "client_id": "t"}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(30), asked.notified())
+        .await
+        .expect("the turn sent its request");
+    let reqs = srv.received_requests().await.unwrap_or_default();
+    let post = reqs
+        .iter()
+        .find(|r| r.method.as_str() == "POST")
+        .expect("a request was sent");
+    let body: Value = serde_json::from_slice(&post.body).expect("json body");
+    body["max_tokens"].clone()
+}
+
+/// `mk_with`, with a memory store the agent may use — a turn needs one to run — and no
+/// `max_tokens` unless `extra` names one.
+async fn mk_unbounded_store(tmp: &TempDir, endpoint: &str, id: &str, extra: Value) -> Arc<Kernel> {
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(HANDLER_MODULE, AnthropicBundle);
+    kernel.bundles.register(
+        fantastic_ram_store::HANDLER_MODULE,
+        fantastic_ram_store::RamStoreBundle::default(),
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let mut payload = json!({"type": "create_agent", "parent_id": "kernel", "handler_module": HANDLER_MODULE, "id": id});
+    let mut record = rec(extra);
+    record.insert("endpoint".into(), json!(endpoint));
+    record.extend(fantastic_ram_store::test_support::memory_meta(&kernel, id, json!({})).await);
+    for (k, v) in record {
+        payload[k] = v;
+    }
+    let r = call(&kernel, "kernel_state", payload).await;
+    assert_eq!(r["id"], json!(id), "{r}");
+    kernel
+}
+
+/// A model whose id the budget-thinking refusal does not cover.
+const OLD: &str = "claude-3-5-sonnet";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_with_no_max_tokens_sends_the_bounded_default() {
+    assert_eq!(sent_max_tokens(MODEL, json!({}), 64000).await, json!(16384));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thinking_budget_adds_to_the_default() {
+    assert_eq!(
+        sent_max_tokens(OLD, json!({"thinking_budget": 2048}), 64000).await,
+        json!(2048 + 16384)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_max_tokens_wins() {
+    assert_eq!(
+        sent_max_tokens(MODEL, json!({"max_tokens": 40000}), 64000).await,
+        json!(40000)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_default_is_never_above_the_models_own_maximum() {
+    assert_eq!(sent_max_tokens(MODEL, json!({}), 8000).await, json!(8000));
+    assert_eq!(
+        sent_max_tokens(OLD, json!({"thinking_budget": 4000}), 10000).await,
+        json!(10000)
+    );
+}
+
+/// A model that never stops of its own accord: it answers with one delta per 1024
+/// tokens of the request's `max_tokens`, then ends on `max_tokens` — the API's own
+/// cut at the bound it was given.
+struct Runaway;
+impl wiremock::Respond for Runaway {
+    fn respond(&self, req: &wiremock::Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let bound = body["max_tokens"].as_i64().unwrap_or(0);
+        let mut events = vec![start()];
+        events.extend((0..bound / 1024).map(|_| text("\n</invoke")));
+        events.extend(stop("max_tokens"));
+        ResponseTemplate::new(200).set_body_raw(sse(&events), "text/event-stream")
+    }
+}
+
+#[tokio::test]
+async fn a_stream_that_never_stops_is_cut_by_the_bound_long_before_the_send_timeout() {
+    let srv = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(Runaway)
+        .mount(&srv)
+        .await;
+    let ep = format!("{}/v1/messages", srv.uri());
+    let (_m, models_ep) = models(200, entry_max(64000)).await;
+    let read = server::read(&rec(json!({"endpoint": models_ep})), &NoKey)
+        .await
+        .expect("read");
+    let mut p = provider(&ep, Arc::new(NoKey));
+    p.max_tokens = read["max_tokens"].as_i64().unwrap();
+    let started = std::time::Instant::now();
+    let e = drain(&p, None).await.unwrap_err();
+    assert!(e.contains("cut at max_tokens=16384"), "{e}");
+    assert_eq!(p.report().stop_reason.as_deref(), Some("max_tokens"));
+    assert!(
+        started.elapsed().as_secs_f64() < fantastic_ai_core::constants::SEND_TIMEOUT_SECS / 10.0,
+        "took {:?}",
+        started.elapsed()
     );
 }
 

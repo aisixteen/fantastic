@@ -23,6 +23,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use fantastic_ai_core::constants::DEFAULT_TURN_TOKENS;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::provider::{
     stream_idle_of, within, Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream,
@@ -95,7 +96,7 @@ struct OllamaProvider {
     num_ctx: Option<u64>,
     /// Generation cap (`num_predict`). Unbounded, a weak model can ramble for
     /// thousands of tokens instead of emitting one action, blowing the send
-    /// timeout. `None` = leave ollama's default (unbounded). CAUTION on a
+    /// timeout. Left off the record it is `DEFAULT_TURN_TOKENS` (#495). CAUTION on a
     /// THINKING model: the cap is spent on reasoning tokens first, so too small a
     /// value truncates mid-thought and yields an EMPTY completion — pair it with
     /// `think:false`, or leave it unset.
@@ -423,7 +424,11 @@ pub fn record_schema() -> &'static Value {
             ),
             Field::new("temperature", "float", "sampling temperature")
                 .default(json!(DEFAULT_TEMPERATURE)),
-            Field::new("num_predict", "int", "a turn's output budget (tokens)"),
+            Field::new(
+                "num_predict",
+                "int",
+                "a turn's output budget (tokens); unset, 16384",
+            ),
             Field::new(
                 "think",
                 "bool",
@@ -576,7 +581,14 @@ fn build_provider(agent_id: &AgentId, kernel: &Arc<Kernel>) -> Arc<dyn Provider>
             .and_then(Value::as_f64)
             .unwrap_or(DEFAULT_TEMPERATURE),
         num_ctx: meta.get("num_ctx").and_then(Value::as_u64),
-        num_predict: meta.get("num_predict").and_then(Value::as_u64),
+        // a record that names none is bounded (#495): ollama's own default is no
+        // cap at all
+        num_predict: Some(
+            meta.get("num_predict")
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0)
+                .unwrap_or(u64::try_from(DEFAULT_TURN_TOKENS).unwrap_or(u64::MAX)),
+        ),
         think: meta.get("think").and_then(Value::as_bool),
         key: Arc::new(key_reader(agent_id, kernel, BACKEND, false)),
         report: ReportCell::default(),

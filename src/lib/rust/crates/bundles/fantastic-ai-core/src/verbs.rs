@@ -441,6 +441,15 @@ async fn store_failed_turn(
         .map_err(|e| e.0)
 }
 
+/// The reply of a send that outlived its ceiling (#496): the kernel's refusal shape
+/// with the existing `timeout` code, so a sender branching on `reason` settles on
+/// it — the same text the error row carries, and the `client_id` the send came in on.
+fn timeout_reply(message: String, client_id: &str) -> Value {
+    let mut v = fantastic_kernel::refusal::refusal(fantastic_kernel::refusal::TIMEOUT, message);
+    fantastic_kernel::refusal::with(&mut v, "client_id", json!(client_id));
+    v
+}
+
 /// The failure a turn reports, with the store's outcome: when its error row could
 /// not be stored, the message says so too.
 fn with_store_outcome(message: String, stored: Result<(), String>) -> String {
@@ -1161,10 +1170,10 @@ pub async fn send(
             match tokio::time::timeout(Duration::from_secs_f64(ceiling), reply_rx).await {
                 Ok(Ok(v)) => v,
                 Ok(Err(_)) => json!({"held": true, "cancelled": true, "client_id": client_id}),
-                Err(_) => json!({
-                    "error": format!("send: timeout after {}s", py_float_repr(ceiling)),
-                    "client_id": client_id,
-                }),
+                Err(_) => timeout_reply(
+                    format!("send: timeout after {}s", py_float_repr(ceiling)),
+                    &client_id,
+                ),
             },
         );
     }
@@ -1511,10 +1520,7 @@ pub async fn send(
             // The send ceiling ends the turn with an error row too (#177).
             let stored =
                 store_failed_turn(agent_id, kernel, &incoming_text, notice, &message).await;
-            json!({
-                "error": with_store_outcome(message, stored),
-                "client_id": client_id,
-            })
+            timeout_reply(with_store_outcome(message, stored), &client_id)
         }
     };
 
@@ -1535,7 +1541,19 @@ pub async fn send(
     // ONE CHAIN PER AGENT (#227): the pass that read the held messages answers
     // each of them with its own reply, under that sender's own client_id.
     let answer = match &raise {
-        Some((_, msg)) => json!({"error": msg, "client_id": client_id}),
+        Some((kind, msg)) => {
+            let mut v = json!({"error": msg, "client_id": client_id});
+            // A refused record (`ValueError`) is the caller's own fault, not a link
+            // or provider failure: it carries no transport code.
+            if *kind != "ValueError" {
+                fantastic_kernel::refusal::with(
+                    &mut v,
+                    "reason",
+                    json!(fantastic_kernel::refusal::TRANSPORT_ERROR),
+                );
+            }
+            v
+        }
         None => reply.clone(),
     };
     for held in answering {

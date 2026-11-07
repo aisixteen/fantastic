@@ -6,7 +6,8 @@ runs a turn (`TURN_VERBS`), each one still absent is read from the API's model
 entry — `GET {models}/{model}`, where `{models}` is the record's endpoint with its
 `/messages` replaced by `/models` — and WRITTEN BACK to the record:
 
-- `max_tokens` — the entry's `max_tokens` (the most a request may ask for);
+- `max_tokens` — 16384, plus the record's `thinking_budget` when it sets one, never
+  above the entry's `max_tokens` (the most a request may ask for) (#495);
 - `context_window` — its `max_input_tokens`.
 
 `model` is the record's to name (the API serves many); a field set on the record is
@@ -19,6 +20,7 @@ from __future__ import annotations
 import json
 
 import httpx
+from ai_core.constants import default_max_tokens
 from ai_core.credentials import CredentialError
 from kernel._refusal import BAD_ARG, refusal
 
@@ -104,6 +106,10 @@ async def read(rec: dict, *, key, transport=None) -> dict:
             raise ServerReadError(
                 f, f"{f}: {url} names no {SOURCE[f]}; set {f} on the record"
             )
+        if f == "max_tokens":
+            # the entry's `max_tokens` is the model's MAXIMUM — what a record left
+            # out is bounded below it (#495)
+            n = default_max_tokens(rec.get("thinking_budget"), n)
         out[f] = n
     return out
 

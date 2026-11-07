@@ -5,8 +5,11 @@
 //! runs a turn ([`TURN_VERBS`]), each one still absent is read from the API's model
 //! entry — `GET {models}/{model}`, `{models}` being the endpoint with its
 //! `/messages` replaced by `/models` — and WRITTEN BACK: `max_tokens` from the
-//! entry's `max_tokens`, `context_window` from its `max_input_tokens`.
+//! entry's `max_tokens` BOUNDED to [`default_max_tokens`] (16384, plus the record's
+//! `thinking_budget`, never above the entry's own maximum), `context_window` from
+//! its `max_input_tokens`.
 
+use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::credentials::{key_reader, KeySource};
 use fantastic_ai_core::helpers;
 use fantastic_kernel::refusal::{refusal, with, BAD_ARG};
@@ -198,6 +201,14 @@ pub async fn read(
         let src = source(f);
         match entry.get(src).and_then(Value::as_i64).filter(|n| *n >= 1) {
             Some(n) if !entry[src].is_boolean() => {
+                // the entry's `max_tokens` is the model's MAXIMUM — what a record
+                // left out is bounded below it (#495)
+                let n = if f == "max_tokens" {
+                    let budget = rec.get("thinking_budget").and_then(Value::as_i64);
+                    default_max_tokens(budget, n)
+                } else {
+                    n
+                };
                 out.insert(f.to_string(), json!(n));
             }
             _ => {

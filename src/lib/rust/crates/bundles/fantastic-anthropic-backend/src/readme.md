@@ -18,7 +18,8 @@ READ FROM THE API when left out — before a verb that runs a turn (`send`, `inq
 `context_recall`) each one still absent is read from the model's entry,
 `GET {endpoint with /messages replaced by /models}/{model}`, and WRITTEN BACK to the
 record (reflect shows it; cleared with `null`, it is read again):
-- `max_tokens` — a turn's output budget; left out, the entry's `max_tokens`
+- `max_tokens` — a turn's output budget; left out, 16384 (plus `thinking_budget`
+  when set), never above the entry's own `max_tokens`
 - `context_window` — the input window; left out, the entry's `max_input_tokens`
 
 An API that does not answer refuses the verb (`bad_arg`, `arg` = the field), naming

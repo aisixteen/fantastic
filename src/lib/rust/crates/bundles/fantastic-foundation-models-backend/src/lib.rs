@@ -34,6 +34,7 @@ pub mod system;
 
 use async_trait::async_trait;
 use engine::{unavailable_message, FmEngine, FmEvent, FmRequest, FmStream, FmTurn};
+use fantastic_ai_core::constants::default_max_tokens;
 use fantastic_ai_core::provider::{
     Provider, ProviderError, ProviderEvent, ProviderReport, ProviderStream, ReportCell,
 };
@@ -130,7 +131,13 @@ impl FoundationModelsBackendBundle {
         Arc::new(FoundationModelsProvider {
             engine: Arc::clone(&self.engine),
             temperature: meta.get("temperature").and_then(number),
-            max_tokens: meta.get("max_tokens").and_then(int),
+            // a record that names none gets the bounded default, never above the
+            // model's window (#495)
+            max_tokens: Some(
+                meta.get("max_tokens")
+                    .and_then(int)
+                    .unwrap_or_else(|| default_max_tokens(None, self.engine.context_size())),
+            ),
             refusal,
             report: ReportCell::default(),
         })

@@ -975,7 +975,11 @@ async fn a_stalled_provider_times_out_at_the_python_float_ceiling() {
     }
     assert_eq!(
         r,
-        json!({"error": "send: timeout after 0.05s", "client_id": "probe"})
+        json!({
+            "error": "send: timeout after 0.05s",
+            "reason": "timeout",
+            "client_id": "probe"
+        })
     );
     assert!(
         elapsed < Duration::from_millis(500),
