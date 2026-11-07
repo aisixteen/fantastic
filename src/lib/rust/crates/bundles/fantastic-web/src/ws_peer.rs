@@ -480,6 +480,36 @@ impl PeerLink {
         kernel.peer_event(guid, src, &item);
     }
 
+    /// An inbound `{type:"error", src, …refusal}` from a kernel's leg: it refused
+    /// the host's `watch` of its agent `src` (a call's answer carries an `id` and
+    /// no `src`). The refusal reaches the host's watchers of `<guid>|<src>` as the
+    /// frame's own keys, and the watch is forgotten.
+    fn refused_watch(&self, kernel: &Kernel, frame: &Value) -> bool {
+        if self.leg.is_none() || frame.get("type").and_then(Value::as_str) != Some("error") {
+            return false;
+        }
+        let Some(src) = frame
+            .get("src")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            return false;
+        };
+        let Some((guid, _)) = &self.pinned else {
+            return true;
+        };
+        let mut refusal = frame.clone();
+        if let Some(m) = refusal.as_object_mut() {
+            m.remove("id");
+        }
+        kernel.peer_watch_refused(
+            guid,
+            src,
+            &fantastic_kernel::inbox::InboxItem::text(refusal),
+        );
+        true
+    }
+
     /// An inbound `reply`/`error` answers one of OUR outbound calls — its `data`
     /// is that call's outcome (a page-side refusal included), a non-object
     /// wrapped as `{result}`. An id we are not waiting on is ignored. Python
@@ -488,7 +518,15 @@ impl PeerLink {
     /// `body` is the frame's raw body at its envelope path (`["data", …]`): the
     /// reply holds it at the rest of that path — under `result` when `data` was
     /// not an object and got wrapped, as python's dict holds it.
-    pub(super) fn answer(&self, frame: &Value, body: Option<fantastic_kernel::Blob>) {
+    pub(super) fn answer(
+        &self,
+        kernel: &Kernel,
+        frame: &Value,
+        body: Option<fantastic_kernel::Blob>,
+    ) {
+        if self.refused_watch(kernel, frame) {
+            return;
+        }
         let Some(fid) = frame.get("id").and_then(Value::as_str) else {
             return;
         };

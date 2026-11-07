@@ -232,6 +232,31 @@ impl Kernel {
         }
     }
 
+    /// The peer `guid` REFUSED the watch of its agent `agent_id`: the watch is not
+    /// registered there, so it is forgotten here and the refusal lands in every
+    /// watcher's inbox, in place of the events that will never come. A later
+    /// `watch` asks the peer again.
+    pub fn peer_watch_refused(
+        &self,
+        guid: &str,
+        agent_id: &str,
+        refusal: &crate::inbox::InboxItem,
+    ) {
+        let watchers = self
+            .peer_watch_table()
+            .remove(&(guid.to_string(), agent_id.to_string()))
+            .unwrap_or_default();
+        for w in watchers {
+            if let Some(tx) = self
+                .inboxes
+                .get(&AgentId::from(w.as_str()))
+                .map(|e| e.clone())
+            {
+                tx.send(refusal.clone());
+            }
+        }
+    }
+
     /// `watch` of an agent on a connected peer (`target` is the remote target one
     /// send would resolve): gated like a send, the watcher must already be a
     /// reader, and the peer must carry watches. The first local watcher of that
