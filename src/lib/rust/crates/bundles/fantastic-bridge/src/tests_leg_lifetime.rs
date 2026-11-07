@@ -11,6 +11,7 @@
 //!     the old one, answered with its recorded outcome, and never run).
 
 use super::*;
+use std::sync::atomic::AtomicBool;
 
 /// One leg on a kernel (guid `local-g`), its raw peer end in hand; `notes` (a
 /// child of the leg) accepts its parent — the leg, which serves every inbound
@@ -240,4 +241,150 @@ async fn a_restarted_sender_never_joins_a_settled_execution() {
     assert_eq!(second["size"], 6, "{second}");
     let read = ask(&kb, &doc, json!({"type": "read", "path": "doc.txt"})).await;
     assert_eq!(read["lines"][0]["text"], "v2-NEW", "{read}");
+}
+
+// ─── A drop mid-turn releases the called agent's turn ─────────────────
+
+/// An agent whose turn holds state only `on_cancel` frees — the shape of an AI
+/// agent's `generating`: dropping the turn's future releases nothing. `turn`
+/// with `park` starts a turn that never ends on its own; a `turn` while one is
+/// held is refused as busy (the later send that hangs on a wedged agent).
+struct TurnProbe {
+    busy: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Bundle for TurnProbe {
+    fn name(&self) -> &str {
+        "turn_probe.tools"
+    }
+    async fn handle(
+        &self,
+        id: &AgentId,
+        payload: &Value,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<Reply, BundleError> {
+        match payload["type"].as_str().unwrap_or("") {
+            "turn" => {
+                if self.busy.swap(true, Ordering::SeqCst) {
+                    return Ok(Some(json!({"error": "busy"})));
+                }
+                if payload["park"] == json!(true) {
+                    self.started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                self.busy.store(false, Ordering::SeqCst);
+                Ok(Some(json!({"answered": true})))
+            }
+            "status" => Ok(Some(
+                json!({"generating": self.busy.load(Ordering::SeqCst)}),
+            )),
+            _ => Ok(Some(
+                json!({"id": id.0, "sentence": "turn probe", "verbs": {}}),
+            )),
+        }
+    }
+    async fn on_cancel(
+        &self,
+        _id: &AgentId,
+        _task: &fantastic_kernel::TaskId,
+        _kernel: &Arc<Kernel>,
+    ) -> Result<(), BundleError> {
+        self.busy.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// The connection drops while the peer's call is mid-turn on a local agent: the
+/// turn ends through `cancel` (its state released), so after a reconnect the
+/// next call is served and `status` is idle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drop_mid_turn_releases_the_called_agent() {
+    let tmp = TempDir::new().unwrap();
+    let busy = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let mut kernel = Kernel::new();
+    kernel.bundles.register(WS_HANDLER_MODULE, WsBridgeBundle);
+    kernel.bundles.register(
+        "turn_probe.tools",
+        TurnProbe {
+            busy: Arc::clone(&busy),
+            started: Arc::clone(&started),
+        },
+    );
+    let kernel = Arc::new(kernel);
+    let root = Agent::new(
+        AgentId::from("kernel_state"),
+        None,
+        None,
+        Map::new(),
+        tmp.path().join(".fantastic"),
+        false,
+    );
+    kernel.register(Arc::clone(&root));
+    kernel.set_root(Arc::clone(&root));
+    let bid = id_for("brg_dropturn", &tmp);
+    create_bridge(&kernel, &bid, "stand_in", "memory").await;
+    let agent = ask(
+        &kernel,
+        "kernel_state",
+        json!({"type": "create_agent", "parent_id": bid, "handler_module": "turn_probe.tools",
+               "id": format!("turner_{bid}"), "callable_by": {"$parent": "*"}}),
+    )
+    .await;
+    assert!(agent.get("error").is_none(), "{agent}");
+    let target = format!("turner_{bid}");
+    let peer = inject_one(&AgentId::from(bid.as_str()));
+    let mut events = kernel.ensure_inbox(&AgentId::from(bid.as_str()));
+    let booted = ask(&kernel, &bid, json!({"type": "boot"})).await;
+    assert_eq!(booted["booted"], true, "{booted}");
+
+    // the peer's call starts a turn that does not end on its own
+    peer.send_frame(
+        json!({"type": "call", "id": "peer-turn-1", "target": target,
+                           "payload": {"type": "turn", "park": true}}),
+    )
+    .await
+    .unwrap();
+    started.notified().await;
+    assert!(busy.load(Ordering::SeqCst), "the turn is in flight");
+
+    // the connection drops mid-turn; `bridge_down` is the leg's last word, after
+    // the in-flight dispatch has been ended
+    peer.close().await;
+    loop {
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+            .await
+            .expect("bridge_down arrives")
+            .expect("the inbox stays open");
+        if ev.payload["type"] == "bridge_down" {
+            break;
+        }
+    }
+    assert!(
+        !busy.load(Ordering::SeqCst),
+        "the drop ended the turn cleanly: its state is released"
+    );
+    assert_eq!(
+        ask(&kernel, &target, json!({"type": "status"})).await["generating"],
+        false
+    );
+
+    // reconnect, and the next call is served
+    let peer = inject_one(&AgentId::from(bid.as_str()));
+    let again = ask(&kernel, &bid, json!({"type": "reconnect"})).await;
+    assert_eq!(again["booted"], true, "{again}");
+    peer.send_frame(
+        json!({"type": "call", "id": "peer-turn-2", "target": target,
+                           "payload": {"type": "turn"}}),
+    )
+    .await
+    .unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), peer.recv_frame())
+        .await
+        .expect("the next call is answered")
+        .expect("a frame")
+        .into_value();
+    assert_eq!(reply["data"], json!({"answered": true}), "{reply}");
 }
