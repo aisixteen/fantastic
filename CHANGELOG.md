@@ -205,7 +205,7 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
 
 ### Changed
 
-- The app's fullscreen flag is `--fullscreen` (it was `--kiosk`) (#475). The server container's
+- The app's fullscreen flag is `--fullscreen` (renamed; the old flag name no longer parses) (#475). The server container's
   files are in `container/server/`, and the installers carry the app's `.deb` only.
 - CI runs only by hand: a push to a `fix/**` or `feat/**` branch no longer
   starts the units. Ready branches are batched into one temporary

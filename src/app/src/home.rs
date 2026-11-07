@@ -209,7 +209,12 @@ async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     let shell = shell(&app);
     let mut problem = None;
     while let Some(payload) = events.recv().await {
-        announce(shell.fullscreen, &payload, &mut problem, &mut std::io::stderr());
+        announce(
+            shell.fullscreen,
+            &payload,
+            &mut problem,
+            &mut std::io::stderr(),
+        );
         match payload.get("type").and_then(Value::as_str) {
             Some(fantastic_home::menu::MENU_SPEC) if !shell.fullscreen => {
                 if let Err(e) = menu::apply(&app, payload).await {

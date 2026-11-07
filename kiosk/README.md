@@ -23,7 +23,7 @@ crates, its record format, an agent record's `view`) and changes no base source 
    (`view: {kind: html, bytes, calls}`), and re-sets all of it on every boot, so a new
    build's view replaces the old one. No bundle file, no boot code for the views.
 4. **The first run** is seeded from a kiosk blueprint with the base's
-   `fantastic_tui::seed_dir_with` (aisixteen/fantastic#480): see "Open steps".
+   `fantastic_tui::seed_dir_with` (#480): `main.rs` calls it with `src/blueprint.yaml` in a `canvas` folder before `main_with`.
 5. **Tests.** `cargo test --workspace` in this folder: the pure models, each bundle
    against a fake bus/fixtures (`tests/fake_*.rs`), the boundary (`tests/boundary.rs`:
    the base's dependency closure has none of the six agents' crates, the kiosk's has
@@ -60,17 +60,15 @@ The image installs the binary as `/usr/bin/fantastic` (the app's sidecar path).
 | `kern/home_origin.rs` | `src/lock/home_origin.rs` (source only: not wired, see below) |
 | `home_view/lock_screen.ts`, `lock_model.ts`, the lock overlay CSS, their test | `src/lock/canvas/` |
 | `action_popup.ts` `systemTileSize` and its test | `src/canvas/` |
+| `os/` (session, mkosi, QEMU checks), `scripts/build/os.sh`, the session half of `scripts/build/deb.sh` | `os/` (`os/build/debs.sh` builds the packages; `os/build/os.sh` the image) |
 | `docs/system.md` (`fantastic readme system`) | `docs/system.md` |
 | E91 `system_views`, E92 `lock_overlay` | `e2e/tests/` |
-| CI job "system agents (fake bus)" | `.github/workflows/kiosk.yml` (checked by `ci/test_kiosk_workflow.py`) |
+| CI job "system agents (fake bus)", the `debs`/`os` jobs of `build.yml` | `.github/workflows/kiosk.yml` (`session-package`, `image`) (checked by `ci/test_kiosk_workflow.py`) |
 
 ## Open steps (what the base has to give first)
 
 The base is not changed to make these work; each is a generic gap, to be its own issue.
 
-- **First-run seeding**: `main` must call `fantastic_tui::seed_dir_with(dir, &[KIOSK_BLUEPRINT])`
-  (#480) before `main_with`, with a kiosk blueprint (the six records under `user`, ids as
-  written). Not written yet: its format depends on what #480 merges.
 - **`ensure` on every boot**: `ensure(&Arc<Kernel>)` is ready and tested, but nothing calls
   it. The base's hook, `Extra = fn(&mut BundleRegistry)` (`src/tui/src/lib.rs:68`), sees only
   the registry. What is missing is a call after the host boots with the kernel in hand, at
@@ -89,6 +87,4 @@ The base is not changed to make these work; each is a generic gap, to be its own
   fed by `backend presets` (`kern/backend.rs`). No generic "host agents offered as tiles".
 - **`fantastic readme system`**: `src/tui/src/readme.rs` `CLI_DOCS` is a fixed list; the kiosk's
   doc (`docs/system.md`) has no way into the binary's readme.
-- **Not moved in this change**: `os/` (image, session package, QEMU boot check, e2e_system.py),
-  the app's `--fullscreen` window flag (`src/app`), and the packaging scripts. `os/session`'s user
-  unit still runs `fantastic canvas system`, a word the base no longer parses.
+- **`os/`** is `kiosk/os/` now (image, session package, QEMU checks, `build/debs.sh`, `build/os.sh`); the app's flag is `--fullscreen` and the base's workflows name no kiosk.
