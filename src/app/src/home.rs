@@ -34,7 +34,7 @@ pub const WINDOW: &str = "main";
 
 /// The shell's state, managed by Tauri.
 pub struct Shell {
-    pub kiosk: bool,
+    pub fullscreen: bool,
     pub backdrop: Backdrop,
     kernel: Arc<RwLock<Option<HomeKernel>>>,
     /// The kernel's port once it serves (0 before): the home's own loopback
@@ -53,9 +53,9 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(kiosk: bool, backdrop: Backdrop) -> Shell {
+    pub fn new(fullscreen: bool, backdrop: Backdrop) -> Shell {
         Shell {
-            kiosk,
+            fullscreen,
             backdrop,
             kernel: Arc::new(RwLock::new(None)),
             port: AtomicU16::new(0),
@@ -163,7 +163,7 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     drop(guard);
     shell.port.store(port, Ordering::SeqCst);
 
-    if !shell.kiosk {
+    if !shell.fullscreen {
         let grant = tauri::ipc::CapabilityBuilder::new("home-page")
             .window(WINDOW)
             .local(false)
@@ -187,7 +187,7 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     }
     let watcher = app.clone();
     tauri::async_runtime::spawn(async move { watch(watcher, events).await });
-    if !shell.kiosk {
+    if !shell.fullscreen {
         let applied = match shell.call(json!({"type": "menu"})).await {
             Ok(spec) => menu::apply(&app, spec).await,
             Err(e) => Err(e),
@@ -202,16 +202,16 @@ async fn up(app: AppHandle, mut guard: OwnedRwLockWriteGuard<Option<HomeKernel>>
     eprintln!("fantastic-app: the backdrop: {}", shell.backdrop.name());
 }
 
-/// The events task: `menu_spec` (applied, outside the kiosk), `state` (the
-/// running canvases' ports; the home's problems to stderr in the kiosk) and
+/// The events task: `menu_spec` (applied, outside fullscreen mode), `state` (the
+/// running canvases' ports; the home's problems to stderr in fullscreen mode) and
 /// `focus`; every other payload is a mirrored call, and is dropped.
 async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     let shell = shell(&app);
     let mut problem = None;
     while let Some(payload) = events.recv().await {
-        announce(shell.kiosk, &payload, &mut problem, &mut std::io::stderr());
+        announce(shell.fullscreen, &payload, &mut problem, &mut std::io::stderr());
         match payload.get("type").and_then(Value::as_str) {
-            Some(fantastic_home::menu::MENU_SPEC) if !shell.kiosk => {
+            Some(fantastic_home::menu::MENU_SPEC) if !shell.fullscreen => {
                 if let Err(e) = menu::apply(&app, payload).await {
                     fatal(&app, &format!("the home's menu: {e}"));
                 }
@@ -226,17 +226,17 @@ async fn watch(app: AppHandle, mut events: mpsc::Receiver<Value>) {
     }
 }
 
-/// In the kiosk, a `state` payload whose problem is new (not the one `last`
+/// In fullscreen mode, a `state` payload whose problem is new (not the one `last`
 /// holds) is written to `out` as `fantastic-app: <problem>`: nobody sees a toast
 /// there, so the session journal holds it. A cleared problem is forgotten, so
 /// the same failure after it is new again.
 fn announce(
-    kiosk: bool,
+    fullscreen: bool,
     payload: &Value,
     last: &mut Option<String>,
     out: &mut impl std::io::Write,
 ) {
-    if !kiosk || payload.get("type").and_then(Value::as_str) != Some("state") {
+    if !fullscreen || payload.get("type").and_then(Value::as_str) != Some("state") {
         return;
     }
     let problem = payload
@@ -271,9 +271,9 @@ pub async fn send(app: &AppHandle, intent: Intent) {
     }
 }
 
-/// A refusal of the shell's own: a warning dialog, or stderr in the kiosk.
+/// A refusal of the shell's own: a warning dialog, or stderr in fullscreen mode.
 pub fn warn(app: &AppHandle, text: &str) {
-    if shell(app).kiosk {
+    if shell(app).fullscreen {
         eprintln!("fantastic-app: {text}");
         return;
     }
@@ -361,17 +361,17 @@ mod tests {
         wire::state(&home, 0, 1, &|_| None)
     }
 
-    fn said(kiosk: bool, payloads: &[Value]) -> String {
+    fn said(fullscreen: bool, payloads: &[Value]) -> String {
         let mut last = None;
         let mut out = Vec::new();
         for p in payloads {
-            announce(kiosk, p, &mut last, &mut out);
+            announce(fullscreen, p, &mut last, &mut out);
         }
         String::from_utf8(out).unwrap()
     }
 
     #[test]
-    fn a_new_problem_is_one_stderr_line_in_the_kiosk() {
+    fn a_new_problem_is_one_stderr_line_in_fullscreen_mode() {
         let why = "Could not add alpha: it did not start — no login environment: SHELL is not set";
         assert_eq!(
             said(
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn outside_the_kiosk_stderr_stays_quiet() {
+    fn outside_fullscreen_mode_stderr_stays_quiet() {
         assert_eq!(said(false, &[state(Some("a"))]), "");
     }
 

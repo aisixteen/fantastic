@@ -87,7 +87,7 @@ All steps run from the repo root, on `main`, with a clean tree.
    | `to-sign-aarch64-apple-darwin` | `fantastic-app-aarch64-apple-darwin.app.tar`: the unsigned `Aisixteen Fantastic.app` |
    | `installer-x86_64-pc-windows-msvc` | the unsigned setup it verified |
    | `to-sign-x86_64-pc-windows-msvc` | `fantastic-app-x86_64-pc-windows-msvc.stage.tar`: `fantastic-app.exe` and the sidecar, at the paths the bundler takes them |
-   | `installer-x86_64-unknown-linux-gnu` | the two `.deb`s, built by `scripts/build/deb.sh` — they ARE the release packages: the app's, and `fantastic-session_<version>_all.deb` (the kiosk, #54) |
+   | `installer-x86_64-unknown-linux-gnu` | the `.deb`, built by `scripts/build/deb.sh` — it IS the release package |
 
    Its guard refuses, listing every problem at once, a tag not on `main`, a
    Release that is missing or names no CI run, a failed or mismatched run, and
@@ -168,7 +168,7 @@ All steps run from the repo root, on `main`, with a clean tree.
    ```sh
    FPR=<40 hex>
    gh run download "$RUN" -n installer-x86_64-unknown-linux-gnu -D out
-   for deb in out/fantastic-app-x86_64-unknown-linux-gnu.deb out/fantastic-session_${V}_all.deb; do
+   for deb in out/fantastic-app-x86_64-unknown-linux-gnu.deb; do
      gpg --local-user "$FPR" --armor --detach-sign "$deb"   # → .deb.asc
    done
    gpg --armor --export "$FPR" > out/fantastic-app-linux-signing-key.asc
@@ -189,8 +189,7 @@ All steps run from the repo root, on `main`, with a clean tree.
    |---|---|
    | `fantastic-app-aarch64-apple-darwin.dmg` | macOS 14+, Apple silicon: Developer ID, the app and the DMG notarized and stapled |
    | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` | Windows 10/11 x64: NSIS, per user, Authenticode-signed and timestamped |
-   | `fantastic-app-x86_64-unknown-linux-gnu.deb` (+ `.asc`) | x86_64 Linux: Ubuntu 24.04+, Debian 13+ (the kiosk, #54) |
-   | `fantastic-session_<version>_all.deb` (+ `.asc`) | turns a headless Debian 13 (amd64) into the kiosk (#54): `sudo apt install ./fantastic-app-x86_64-unknown-linux-gnu.deb ./fantastic-session_<version>_all.deb`, then reboot. It depends on `aisixteen-fantastic (= <version>)` |
+   | `fantastic-app-x86_64-unknown-linux-gnu.deb` (+ `.asc`) | x86_64 Linux: Ubuntu 24.04+, Debian 13+ |
    | `fantastic-app-linux-signing-key.asc` | the public key of the `.asc` signatures |
    | `SHA256SUMS-app` | the sums of all of the above |
 9. **Check the Release** (on `main`, so it reads `SHA256SUMS-app` against
@@ -212,7 +211,7 @@ All steps run from the repo root, on `main`, with a clean tree.
     gh workflow run publish-container.yml -f commit=<sha> -f version=X.Y.Z -f latest=true
     ```
     It stages the `release-*` archives of that run (kept 30 days, so publish
-    within them), builds `os/container/Containerfile` for `linux/amd64` and
+    within them), builds `container/server/Containerfile` for `linux/amd64` and
     `linux/arm64` with `scripts/build/container.sh --arch all`, and pushes
     `ghcr.io/aisixteen/fantastic` with `X.Y.Z`, the sha, and `latest` (pass
     `latest=false`, or leave it out, for an older release). It rebuilds the image

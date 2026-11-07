@@ -2,7 +2,7 @@
 
 `system` runs `fantastic canvas` in a folder named `system` (the Home's `systemRow`), `alpha`
 is a second canvas for the Home to have a page and a selection. The `lock` agent is made in
-the system canvas the way the `system` recipe makes it (`kern/system.rs`): handler
+the system canvas the way the kiosk makes it (`kern/system.rs`): handler
 `lock.tools`, under `user`, `callable_by {user: verbs}`. The Home page's origin is added to
 the system canvas's `web` (`kern/home_origin` does it only under `canvas system` on Linux).
 

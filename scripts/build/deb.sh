@@ -1,12 +1,11 @@
 #!/bin/sh
-# The Debian packages — ONE place builds them, for the image (CI) and the release.
+# The desktop app's Debian package, for the release and as the input of other images.
 #
 #   sh scripts/build/deb.sh --target <CLI triple>
 #
 # Writes to `dist/deb/`:
 #   fantastic-app-<app triple>.deb       `aisixteen-fantastic`: the desktop app and
 #                                        its sidecar, from `tauri bundle --bundles deb`
-#   fantastic-session_<version>_all.deb  `fantastic-session`: the kiosk (os/session)
 #
 # `--out` is not supported: the packages always go to `dist/deb/`.
 # `--target` is the CLI's triple, as in `app.sh`; the app is built for glibc
@@ -58,22 +57,5 @@ set -- "$APP/target/$APP_TARGET/release/bundle/deb/"*.deb
 APP_DEB="$DEB_DIR/fantastic-app-$APP_TARGET.deb"
 cp "$1" "$APP_DEB"
 
-# ── fantastic-session: dpkg-deb over os/session ─────────────────────────────
-STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
-cp -R "$REPO/os/session/." "$STAGE/"
-sed "s/@VERSION@/$VERSION/g" "$STAGE/DEBIAN/control.in" > "$STAGE/DEBIAN/control"
-rm "$STAGE/DEBIAN/control.in"
-find "$STAGE" -type d -exec chmod 755 {} +
-find "$STAGE" -type f -exec chmod 644 {} +
-chmod 755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/prerm" "$STAGE/DEBIAN/postrm"
-( cd "$STAGE" && find . -type f ! -path './DEBIAN/*' | sed 's|^\./||' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums )
-chmod 644 "$STAGE/DEBIAN/md5sums"
-SESSION_DEB="$DEB_DIR/fantastic-session_${VERSION}_all.deb"
-rm -f "$SESSION_DEB"
-dpkg-deb --build --root-owner-group "$STAGE" "$SESSION_DEB"
-
 say "wrote $APP_DEB"
-say "wrote $SESSION_DEB"
 echo "$APP_DEB"
-echo "$SESSION_DEB"

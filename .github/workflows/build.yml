@@ -15,16 +15,13 @@
 #              (`ci.yml`): it takes the `e2e-<os>` artifacts of the same run.
 #              And the desktop app's e2e (`src/app/e2e/run.py`) on the `app-*`
 #              and `release-*` artifacts of the same run.
-#   os         fantastic OS (Phase 9, `os/`): the app's `.deb` and
-#              `fantastic-session` from `scripts/build/deb.sh` on the Linux
-#              `app-*` and `release-*` artifacts of the same run (`debs`,
-#              installed on stock Debian 13 in a container), the mkosi image of
-#              them, and its boot in QEMU (`os/ci/boot_check.py`), then the
-#              system agents on the booted image (`os/ci/e2e_system.py`). Its
-#              own call, after the `binaries` call (`ci.yml`).
+#   debs       the app's `.deb` from `scripts/build/deb.sh` on the Linux
+#              `app-*` and `release-*` artifacts of the same run, installed on
+#              stock Debian 13 in a container. Its own call, after the
+#              `binaries` call (`ci.yml`).
 #
 # Callers: `ci.yml` ({debug, units}, {release, binaries}, then {release, e2e}
-# and {release, os}).
+# and {release, debs}).
 # FREE:
 # standard GitHub-hosted runners only
 # (ubuntu-latest, ubuntu-24.04-arm, xcode-27, windows-latest) — a `-large` /
@@ -58,7 +55,7 @@ on:
       e2e:
         type: boolean
         default: false
-      os:
+      debs:
         type: boolean
         default: false
 
@@ -381,9 +378,9 @@ jobs:
   # `scripts/build/app.sh` is the one build path: it stages the target's CLI as
   # the canvas sidecar and runs `tauri build --no-bundle`. The installers (Phase
   # 6b) take `app-<triple>`. Linux is `ubuntu-24.04`, NOT `ubuntu-latest`: the
-  # app links glibc, and the kiosk (Debian trixie) has glibc 2.41. The Linux
-  # arm64 app (`ubuntu-24.04-arm`, glibc 2.39) is for the kiosk's arm64 image
-  # (Phase 9) only; its CLI comes from `cross`.
+  # app links glibc, and Debian 13 (trixie) has glibc 2.41. The Linux
+  # arm64 app (`ubuntu-24.04-arm`, glibc 2.39) is for the arm64 Debian 13 packages
+  # only; its CLI comes from `cross`.
   app:
     if: inputs.binaries
     needs: [binaries, cross]
@@ -395,7 +392,7 @@ jobs:
           - { os: xcode-27, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
-          # for the kiosk image's arm64 build only: no installer, no e2e
+          # for the arm64 .deb only: no installer, no e2e
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, app: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -448,7 +445,7 @@ jobs:
           need=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
           echo "the app needs $need"
           top=$(printf '%s\nGLIBC_2.41\n' "$need" | sort -V | tail -1)
-          [ "$top" = GLIBC_2.41 ] || { echo "::error::the app needs $need, above the kiosk's GLIBC_2.41"; exit 1; }
+          [ "$top" = GLIBC_2.41 ] || { echo "::error::the app needs $need, above Debian 13's GLIBC_2.41"; exit 1; }
       - name: keep the app
         uses: actions/upload-artifact@v7
         with:
@@ -652,12 +649,12 @@ jobs:
             src/tui/e2e/runs/**/*.html
           retention-days: 14
 
-  # ── fantastic OS (Phase 9, os/): the Debian packages, the image, its boot ──
-  # `scripts/build/deb.sh` writes the app's .deb and `fantastic-session` from the
-  # `app-*` and `release-*` artifacts of the `binaries` call (ci.yml's `os` call
+  # ── the app's Debian package ──
+  # `scripts/build/deb.sh` writes the app's .deb from the
+  # `app-*` and `release-*` artifacts of the `binaries` call (ci.yml's `debs` call
   # follows it). Unsigned: signing is by hand (src/lib/rust/RELEASING.md).
   debs:
-    if: inputs.os
+    if: inputs.debs
     name: debs · ${{ matrix.deb }}
     strategy:
       fail-fast: false
@@ -699,11 +696,8 @@ jobs:
       - name: the packages, checked
         run: |
           APP_DEB=dist/deb/fantastic-app-${{ matrix.app }}.deb
-          SESSION_DEB=dist/deb/fantastic-session_${FANTASTIC_VERSION}_all.deb
-          for d in "$APP_DEB" "$SESSION_DEB"; do
-            dpkg-deb --info "$d"
-            dpkg-deb --contents "$d"
-          done
+          dpkg-deb --info "$APP_DEB"
+          dpkg-deb --contents "$APP_DEB"
           field() { dpkg-deb --field "$1" "$2"; }
           bad=0
           want() {  # <what> <got> <want>
@@ -722,46 +716,20 @@ jobs:
           packed=$(dpkg-deb --fsys-tarfile "$APP_DEB" | tar -xO "$member" | sha256sum | cut -d' ' -f1)
           archive=$(tar -xzOf dist/fantastic-${{ matrix.target }}.tar.gz fantastic | sha256sum | cut -d' ' -f1)
           want "the sha256 of the .deb's /usr/bin/fantastic" "$packed" "$archive"
-          want "fantastic-session's Architecture" "$(field "$SESSION_DEB" Architecture)" all
-          depends=$(field "$SESSION_DEB" Depends)
-          case "$depends" in
-            "aisixteen-fantastic (= $FANTASTIC_VERSION), "*) ;;
-            *) echo "::error::fantastic-session's Depends is '$depends', wanted it to start with 'aisixteen-fantastic (= $FANTASTIC_VERSION)'"; bad=1 ;;
-          esac
           exit $bad
-      - name: lint and unit tests
+      - name: unit tests of the CI files
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-          shellcheck -s sh os/session/DEBIAN/postinst os/session/DEBIAN/prerm os/session/DEBIAN/postrm
-          python3 -m unittest discover -s os/ci -p 'test_*.py'
-      # the host is not touched: a container. No systemd runs in it, so the
-      # maintainer scripts take their no-systemd branch; the VM covers the live path.
+          python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+          python3 -m unittest discover -s container/server -p 'test_*.py'
+      # the host is not touched: a container
       - name: install on stock Debian 13, no recommends
         run: |
           docker run --rm -v "$PWD/dist/deb:/deb:ro" "$TRIXIE_SLIM" sh -euxc '
             cat /etc/debian_version
             apt-get update -q
-            apt-get install -y -q --no-install-recommends /deb/fantastic-app-*.deb /deb/fantastic-session_*_all.deb
+            apt-get install -y -q --no-install-recommends /deb/fantastic-app-*.deb
             fantastic readme | grep -q "fantastic canvas"
-            test -x /usr/bin/fantastic-app
-            id fantastic
-            test -L /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
-            systemd-analyze verify /usr/lib/systemd/system/fantastic-kiosk.service
-            # the system canvas: its user unit enabled for every user manager, its folder, the polkit rule
-            test -f /usr/lib/systemd/user/fantastic-system.service
-            test -L /etc/systemd/user/default.target.wants/fantastic-system.service
-            test -f /usr/share/polkit-1/rules.d/50-fantastic-session.rules
-            test "$(stat -c "%U:%G %a" /home/fantastic/system)" = "fantastic:fantastic 700"
-            apt-get remove -y -q fantastic-session
-            test "$(readlink /etc/systemd/system/fantastic-kiosk.service)" = /dev/null
-            apt-get purge -y -q fantastic-session
-            test ! -e /etc/systemd/system/fantastic-kiosk.service
-            test ! -e /etc/systemd/system/multi-user.target.wants/fantastic-kiosk.service
-            test ! -e /etc/pam.d/fantastic-kiosk
-            test ! -e /etc/systemd/user/default.target.wants/fantastic-system.service
-            test ! -e /usr/share/polkit-1/rules.d/50-fantastic-session.rules
-            test -d /home/fantastic/system
-            id fantastic'
+            test -x /usr/bin/fantastic-app'
       - name: keep the packages
         uses: actions/upload-artifact@v7
         with:
@@ -769,98 +737,3 @@ jobs:
           path: dist/deb/*.deb
           if-no-files-found: error
           retention-days: 30
-
-  # The image (mkosi v27.1) of exactly those packages, booted in QEMU:
-  # `os/ci/boot_check.py`. x86-64 runs on KVM and is the gate. `ubuntu-24.04-arm`
-  # exposes no /dev/kvm (actions/runner-images#14062), so arm64 boots on TCG, slowly,
-  # and does not fail the run until a green boot has been seen.
-  os:
-    if: inputs.os
-    needs: debs
-    name: os · ${{ matrix.arch }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            arch: x86-64
-            app: x86_64-unknown-linux-gnu
-            qemu: qemu-system-x86 ovmf
-            boot: ""
-            minutes: 90
-            soft: false
-          - os: ubuntu-24.04-arm
-            arch: arm64
-            app: aarch64-unknown-linux-gnu
-            qemu: qemu-system-arm qemu-efi-aarch64
-            boot: --timeout 2400 --step 600
-            minutes: 120
-            # not a gate yet: remove `soft` after a green TCG boot has been seen
-            soft: true
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.minutes }}
-    continue-on-error: ${{ matrix.soft }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0 # os.sh reads the version from the last tag
-      # makes /dev/kvm usable, removes AppArmor, links mkosi into /usr/bin.
-      # Not Ubuntu's own `mkosi` package: it is 20.2.
-      - uses: systemd/mkosi@v27.1
-      - uses: actions/download-artifact@v7
-        with:
-          name: deb-${{ matrix.app }}
-          path: dist/deb
-      # as root (os.sh says why), then the runner owns the output again
-      - name: the image
-        run: |
-          version=$(git describe --tags --abbrev=0 | sed 's/^v//')
-          echo "FANTASTIC_VERSION=$version" >> "$GITHUB_ENV"
-          sudo FANTASTIC_VERSION="$version" sh scripts/build/os.sh --arch ${{ matrix.arch }} --profile ci
-          sudo chown -R "$(id -u):$(id -g)" dist/os
-          ls -l dist/os
-      - name: qemu
-        run: sudo apt-get update -q && sudo apt-get install -y -q ${{ matrix.qemu }}
-      - uses: astral-sh/setup-uv@v10.3.0
-        with:
-          enable-cache: true
-          prune-cache: ${{ inputs.cleanup }}
-          cache-dependency-glob: src/lib/python/uv.lock
-      - name: the check's python (websockets)
-        run: (cd src/lib/python && uv sync --locked)
-      - name: boot it, and check the kiosk
-        run: |
-          raw=dist/os/fantastic-os_${FANTASTIC_VERSION}.raw
-          echo "the raw image: $(du -h "$raw" | cut -f1) ($(stat -c %s "$raw") bytes)" | tee -a "$GITHUB_STEP_SUMMARY"
-          uv run --project src/lib/python python os/ci/boot_check.py \
-            --image "$raw" --arch ${{ matrix.arch }} --out os-check ${{ matrix.boot }}
-      - name: keep the check (screenshots, logs)
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: os-check-${{ matrix.arch }}
-          path: os-check/
-          retention-days: 14
-      - name: the system agents
-        run: |
-          raw=dist/os/fantastic-os_${FANTASTIC_VERSION}.raw
-          uv run --project src/lib/python python os/ci/e2e_system.py \
-            --image "$raw" --arch ${{ matrix.arch }} --out os-e2e-system ${{ matrix.boot }}
-      - name: keep the system agents' check (logs)
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: os-e2e-system-${{ matrix.arch }}
-          path: os-e2e-system/
-          retention-days: 14
-      - name: compress the image
-        if: success() && matrix.arch == 'x86-64'
-        run: zstd -T0 -10 "dist/os/fantastic-os_${FANTASTIC_VERSION}.raw" -o dist/os/fantastic-os-x86-64.raw.zst
-      - name: keep the image
-        if: success() && matrix.arch == 'x86-64'
-        uses: actions/upload-artifact@v7
-        with:
-          name: os-image-x86-64
-          path: dist/os/fantastic-os-x86-64.raw.zst
-          if-no-files-found: error
-          retention-days: 7

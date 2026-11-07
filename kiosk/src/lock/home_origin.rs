@@ -1,4 +1,4 @@
-//! THE HOME PAGE'S ORIGIN, LET INTO THE SYSTEM CANVAS (`canvas system`).
+//! THE HOME PAGE'S ORIGIN, LET INTO THE SYSTEM CANVAS.
 //!
 //! The lock screen is a state the Home page obeys, and the `lock` agent lives in
 //! the system canvas, which the Home page does not share a port with: it dials

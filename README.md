@@ -183,12 +183,11 @@ beside `SHA256SUMS-app`:
 | macOS 14+, Apple silicon | `fantastic-app-aarch64-apple-darwin.dmg` (notarized) |
 | Windows 10/11 x64 | `fantastic-app-x86_64-pc-windows-msvc-setup.exe` (per user, no admin) |
 | x86_64 Linux: Ubuntu 24.04+, Debian 13+ | `fantastic-app-x86_64-unknown-linux-gnu.deb` (`sudo apt install ./…deb`) |
-| a headless Debian 13 (amd64), as a kiosk | `fantastic-session_<version>_all.deb`: `sudo apt install ./fantastic-app-x86_64-unknown-linux-gnu.deb ./fantastic-session_<version>_all.deb`, then reboot ([`os/`](os/README.md)) |
 
 The `.deb` installs `/usr/bin/fantastic-app` and `/usr/bin/fantastic`, with
 `Depends: libwebkit2gtk-4.1-0, libgtk-3-0` and `Recommends: fonts-dejavu-core`.
-On a minimal system installed with `--no-install-recommends` (the kiosk), add
-`fonts-dejavu-core` and `libgl1-mesa-dri`; `fantastic-app --kiosk` then runs it
+On a minimal system installed with `--no-install-recommends`, add
+`fonts-dejavu-core` and `libgl1-mesa-dri`; `fantastic-app --fullscreen` then runs it
 fullscreen, with no desktop environment. The session must set `SHELL`, as a
 login does: the app starts each canvas in the login environment `$SHELL` prints.
 
@@ -201,7 +200,7 @@ Verify before you install:
 
 ```sh
 spctl -a -vvv -t open --context context:primary-signature fantastic-app-aarch64-apple-darwin.dmg   # macOS: source=Notarized Developer ID
-gpg --import fantastic-app-linux-signing-key.asc && gpg --verify fantastic-app-x86_64-unknown-linux-gnu.deb.asc fantastic-app-x86_64-unknown-linux-gnu.deb   # and the same for fantastic-session_<version>_all.deb
+gpg --import fantastic-app-linux-signing-key.asc && gpg --verify fantastic-app-x86_64-unknown-linux-gnu.deb.asc fantastic-app-x86_64-unknown-linux-gnu.deb
 ```
 
 ```powershell
@@ -436,8 +435,6 @@ Public, on [the board](https://github.com/orgs/aisixteen/projects/1) and in
 |---|---|
 | [M1 — App MVP](https://github.com/aisixteen/fantastic/milestone/1) | The manager of your fantastics as a desktop app: Home lists them with live status; open, start and stop them |
 | [M2 — Cross-platform app and the reskin contract](https://github.com/aisixteen/fantastic/milestone/2) | Tauri on macOS, Windows and Linux with signed installers; one UI, many skins, and the contract other projects reskin |
-| [M3 — fantastic OS: kiosk](https://github.com/aisixteen/fantastic/milestone/3) | A Debian headless image that boots straight into fantastic |
-| [M4 — fantastic OS: system agents](https://github.com/aisixteen/fantastic/milestone/4) | Network, audio, power and displays as agents |
 
 ## Read more
 

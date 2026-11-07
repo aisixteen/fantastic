@@ -1,6 +1,6 @@
 //! Linux: WebKitGTK 4.1, an opaque window (window-vibrancy does not support
-//! Linux; the compositor owns blur), a GTK menubar outside the kiosk, SIGTERM
-//! (how systemd and `cage` stop the kiosk).
+//! Linux; the compositor owns blur), a GTK menubar outside fullscreen mode, SIGTERM
+//! (how systemd and a compositor stop it).
 //!
 //! The app needs no D-Bus session of its own, no tray, no portal and no desktop
 //! environment: the folder dialog is GTK 3's own, in process.

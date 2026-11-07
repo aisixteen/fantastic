@@ -90,5 +90,5 @@ The base is not changed to make these work; each is a generic gap, to be its own
 - **`fantastic readme system`**: `src/tui/src/readme.rs` `CLI_DOCS` is a fixed list; the kiosk's
   doc (`docs/system.md`) has no way into the binary's readme.
 - **Not moved in this change**: `os/` (image, session package, QEMU boot check, e2e_system.py),
-  the app's `--kiosk` window flag (`src/app`), and the packaging scripts. `os/session`'s user
+  the app's `--fullscreen` window flag (`src/app`), and the packaging scripts. `os/session`'s user
   unit still runs `fantastic canvas system`, a word the base no longer parses.

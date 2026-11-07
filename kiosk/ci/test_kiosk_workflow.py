@@ -1,5 +1,5 @@
 """Static test of `.github/workflows/kiosk.yml` (stdlib unittest; the yml is read as text):
-the kiosk's units and the system agents on a fake bus are two parallel jobs, each in `kiosk/`.
+the kiosk's units and the system agents on a fake bus are two parallel jobs, each in `kiosk/`; the session package and the image are two more.
 
     python3 -m unittest discover -s kiosk/ci -p 'test_kiosk_workflow.py'
 """
@@ -40,3 +40,15 @@ class KioskWorkflow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KioskImageJobs(unittest.TestCase):
+    def test_the_session_package_and_the_image_are_jobs_of_the_kiosk(self):
+        self.assertIn("kiosk/os/ci", job("session-package"))
+        self.assertIn("shellcheck", job("session-package"))
+        image = job("image")
+        for step in ("kiosk/os/build/debs.sh", "kiosk/os/build/os.sh", "kiosk/os/ci/boot_check.py", "kiosk/os/ci/e2e_system.py"):
+            self.assertIn(step, image, step)
+
+    def test_the_image_pulls_nothing_from_the_base_workflows(self):
+        self.assertNotIn("scripts/build/deb.sh", job("image"), "the base's .deb comes from its Release")

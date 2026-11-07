@@ -26,14 +26,12 @@
 #                      binaries — ONLY once every unit
 #                      suite passed and every binary built: a red unit test stops
 #                      the run before the e2e starts (full runs only)
-#   os        release  fantastic OS (Phase 9): the app's .deb and
-#                      `fantastic-session` from those binaries, the Debian
-#                      kiosk image of them, and its boot in QEMU. Beside the
-#                      e2e: it neither gates them nor waits for them (full
-#                      runs only)
+#   debs      release  the desktop app's .deb from those binaries, checked and
+#                      installed on stock Debian 13. Beside the e2e: it neither
+#                      gates them nor waits for them (full runs only)
 #   container release  the fantastic server's image (Phase 12, #158), amd64 and
 #                      arm64 on native runners, smoke-tested under Docker and
-#                      rootless Podman (`os/ci/container_check.py`). Beside the
+#                      rootless Podman (`container/server/container_check.py`). Beside the
 #                      e2e, the same way: full runs only
 #
 # The run's title says which it was (`ci · units` / `ci · full`). A green FULL
@@ -103,14 +101,14 @@ jobs:
       profile: release
       e2e: true
 
-  os:
+  debs:
     if: inputs.e2e
     needs: [binaries]
     uses: ./.github/workflows/build.yml
     with:
       cleanup: ${{ inputs.cleanup }}
       profile: release
-      os: true
+      debs: true
 
   # The fantastic server's image (Phase 12, #158): the same Containerfile on both
   # architectures, built on the native free runners (no emulation), and the same
@@ -169,14 +167,14 @@ jobs:
           docker save -o container-image/image.tar fantastic-server:ci
           ls -l container-image
       - name: smoke test, Docker
-        run: uv run --project src/lib/python python os/ci/container_check.py --engine docker --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/docker
+        run: uv run --project src/lib/python python container/server/container_check.py --engine docker --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/docker
       - name: the image into Podman
         # not `docker save | podman load`: Docker's containerd image store saves an OCI
         # image, whose config Podman reads without the HEALTHCHECK ("no defined
         # healthcheck"). Podman builds the same staged binary in docker's format.
         run: ENGINE=podman sh scripts/build/container.sh --arch ${{ matrix.arch }} --tag fantastic-server:ci
       - name: smoke test, rootless Podman
-        run: uv run --project src/lib/python python os/ci/container_check.py --engine podman --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/podman
+        run: uv run --project src/lib/python python container/server/container_check.py --engine podman --image fantastic-server:ci --arch ${{ matrix.arch }} --out container-check/podman
       - name: keep the checks (logs)
         if: always()
         uses: actions/upload-artifact@v7
