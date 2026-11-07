@@ -122,27 +122,25 @@ const TARGETS: Array<[string, string, Record<string, unknown>?]> = [
   ["ram_store.tools", "store_view.ts"],
   ["sqlite_store.tools", "store_view.ts"],
   ["scheduler.tools", "scheduler_view.ts"],
-  ["cabinet.tools", "cabinets_view.ts", { cabinet_role: "manager" }],
   ["credential_store.tools", "credentials_view.ts"],
 ];
-const WRITES = ["set", "get", "forget", "append", "add", "assign", "reassign", "status", "report", "schedule", "unschedule", "pause", "resume", "tick_now", "spawn", "set_limit", "send", "write", "delete", "close_cabinet", "conclude"];
+const WRITES = ["set", "get", "forget", "append", "add", "assign", "reassign", "status", "report", "schedule", "unschedule", "pause", "resume", "tick_now", "spawn", "set_limit", "send", "write", "delete"];
 
-test("each_target_agent_module_gets_its_own_view_kind: 5 modules, 4 handler files, the two stores share one", () => {
+test("each_target_agent_module_gets_its_own_view_kind: 4 modules, 3 handler files, the two stores share one", () => {
   const handlers = new Set<string>();
   for (const [module, handler, extra] of TARGETS) {
     const v = viewOf({ id: "a", handler_module: module, ...extra });
     assert.equal(v.handler, handler, module);
     handlers.add(v.handler);
   }
-  assert.equal(handlers.size, 4);
+  assert.equal(handlers.size, 3);
   assert.equal(viewOf({ id: "a", handler_module: "ram_store.tools" }).handler, viewOf({ id: "b", handler_module: "sqlite_store.tools" }).handler);
 });
 
-test("an_explicit_record_view_still_beats_the_module_default: the cabinet cell keeps its html view, and only the manager gets the cabinets view", () => {
-  const cell = { id: "cab1", handler_module: "cabinet.tools", cabinet_role: "cabinet", view: { kind: "html", bytes: "<p>status</p>", calls: ["view"] } };
+test("an_explicit_record_view_still_beats_the_module_default: a record's own html view renders with the generic html renderer", () => {
+  const cell = { id: "s1", handler_module: "scheduler.tools", view: { kind: "html", bytes: "<p>status</p>", calls: ["view"] } };
   const v = viewOf(cell);
   assert.deepEqual([v.kind, v.handler, v.bytes], ["html", "agent_view.ts", "<p>status</p>"]);
-  assert.equal(viewOf({ id: "cab1", handler_module: "cabinet.tools", cabinet_role: "cabinet" }).kind, "stub", "a cell without a view is not the manager");
   assert.equal(viewOf({ id: "m", handler_module: "scheduler.tools", view: { handler: "my_tasks" } }).handler, "my_tasks.ts");
 });
 
@@ -150,13 +148,11 @@ test("their_grants_are_read_only_verbs: the cell's grant is exactly the declared
   const bundles = {
     "store_view.ts": (await import("../src/bundles/store_view/store_view.ts")).storeView,
     "scheduler_view.ts": (await import("../src/bundles/scheduler_view/scheduler_view.ts")).schedulerView,
-    "cabinets_view.ts": (await import("../src/bundles/cabinets_view/cabinets_view.ts")).cabinetsView,
     "credentials_view.ts": (await import("../src/bundles/credentials_view/credentials_view.ts")).credentialsView,
   } as const;
   const want: Record<string, string[]> = {
     "store_view.ts": ["dump", "search", "watch"],
     "scheduler_view.ts": ["list", "history", "watch"],
-    "cabinets_view.ts": ["cabinets", "watch"],
     "credentials_view.ts": ["list", "reflect", "watch"],
   };
   for (const [module, handler, extra] of TARGETS) {
@@ -175,7 +171,7 @@ test("credentials_grant_never_includes_get", () => {
 });
 
 test("an_unknown_module_still_gets_the_stub", () => {
-  for (const m of ["kernel_state.tools", "scheduler", "cabinet.tools", "credential_store", ""]) {
+  for (const m of ["kernel_state.tools", "scheduler", "credential_store", ""]) {
     assert.equal(viewOf({ id: "x", handler_module: m }).kind, "stub", m);
   }
   assert.equal(viewOf({ id: "x" }).kind, "stub");

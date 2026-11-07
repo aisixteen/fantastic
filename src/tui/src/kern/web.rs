@@ -413,10 +413,10 @@ mod tests {
     #[test]
     fn a_child_canvas_records_nest_under_its_parents_records_dir() {
         // the main canvas's records are `.fantastic/web`: its child's sit inside them
-        let under_main = child_records_root(".fantastic/web", "canvas_cabinet_a");
-        assert_eq!(under_main, ".fantastic/web/canvas_cabinet_a");
+        let under_main = child_records_root(".fantastic/web", "canvas_child_a");
+        assert_eq!(under_main, ".fantastic/web/canvas_child_a");
         // a grandchild nests under its parent's, one level deeper
-        assert_eq!(child_records_root(&under_main, "canvas_eq"), ".fantastic/web/canvas_cabinet_a/canvas_eq");
+        assert_eq!(child_records_root(&under_main, "canvas_eq"), ".fantastic/web/canvas_child_a/canvas_eq");
     }
 
     #[test]

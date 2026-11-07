@@ -1,6 +1,6 @@
 // THE CANVASES ON THE HOST, read off its agent listing: every `canvas.tools`
 // node under `canvas_page`, at ANY depth — a canvas spawned by a canvas is its
-// child (a cabinet's, #132), a peer canvas sits under `canvas_page` itself —
+// child, a peer canvas sits under `canvas_page` itself —
 // each with its page loader (its `kernel_state` child). Pure: main.ts lists, this
 // picks.
 

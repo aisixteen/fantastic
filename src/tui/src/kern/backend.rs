@@ -313,9 +313,8 @@ impl BackendBundle {
     /// verbs, it may call the store, its key and `peer`. `user`'s own side is
     /// `kern/reach`'s.
     pub(crate) async fn make_ai(host: &Host, me: &AgentId, ai: &str, mut spec: Map<String, Value>, peer: Map<String, Value>) -> Result<(), String> {
-        // the project's store, named or not, admits the AI (a cabinet's helper AI
-        // names it: equipment is not a reach holder, so nothing else would); a
-        // caller's OWN store is the caller's to grant
+        // the project's store, named or not, admits the AI; a caller's OWN store
+        // is the caller's to grant
         let named = spec.get("memory_store_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
         let store = match named {
             Some(s) if host.ai_store().ok().as_deref() != Some(s.as_str()) => s,

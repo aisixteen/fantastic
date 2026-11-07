@@ -51,7 +51,6 @@ RUNTIME = os.environ.get("RUNTIME", "")
 RUNTIME_ONLY = {
     "foundation_models_backend": {"rust"},
     "user": {"python"},
-    "cabinet": {"python", "rust"},
 }
 
 #: The distilled root reflect (kernel_state readme + CLAUDE.md "Universal patterns").

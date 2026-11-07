@@ -1,6 +1,5 @@
-//! Shared parts of the READ-ONLY panels (resources, tasks, store, scheduler,
-//! cabinet, credentials): the line builders, the scroll keys and the refusal
-//! reader. A panel built on these sends reads only and shows every `{error}`.
+//! Shared parts of the READ-ONLY panels (store, scheduler, credentials): the
+//! line builders, the scroll keys and the refusal reader. A panel built on these sends reads only and shows every `{error}`.
 
 use crossterm::event::{KeyCode as K, KeyEvent};
 use ratatui::layout::Rect;

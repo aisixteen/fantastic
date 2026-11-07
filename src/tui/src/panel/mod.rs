@@ -20,7 +20,6 @@
 
 pub mod activity;
 pub mod ai;
-pub mod cabinet;
 pub mod credentials;
 pub mod declared;
 pub mod files;
@@ -55,8 +54,6 @@ pub enum PanelKind {
     Store,
     /// `scheduler`: jobs and their last results. Read-only.
     Scheduler,
-    /// `cabinet`: a manager's cabinets, or one cabinet's cell. Read-only.
-    Cabinet,
     /// `credential_store`: names and grants, never a value. Read-only.
     Credentials,
     /// Any agent whose record declares `view.tui`: sections drawn from data.
@@ -93,7 +90,6 @@ impl PanelKind {
             "file_bridge.tools" => PanelKind::Files,
             "ram_store.tools" | "sqlite_store.tools" => PanelKind::Store,
             "scheduler.tools" => PanelKind::Scheduler,
-            "cabinet.tools" => PanelKind::Cabinet,
             "credential_store.tools" => PanelKind::Credentials,
             _ => PanelKind::Generic,
         }
@@ -109,7 +105,6 @@ impl PanelKind {
             PanelKind::Setup => "setup",
             PanelKind::Store => "store",
             PanelKind::Scheduler => "scheduler",
-            PanelKind::Cabinet => "cabinet",
             PanelKind::Credentials => "credentials",
             PanelKind::Declared => "declared",
         }
@@ -232,7 +227,6 @@ pub fn make(kind: PanelKind, agent: &AgentId) -> Box<dyn Panel> {
         PanelKind::Setup => Box::new(setup::SetupPanel::new()),
         PanelKind::Store => Box::new(store::StorePanel::new(agent.clone())),
         PanelKind::Scheduler => Box::new(scheduler::SchedulerPanel::new(agent.clone())),
-        PanelKind::Cabinet => Box::new(cabinet::CabinetPanel::new(agent.clone())),
         PanelKind::Credentials => Box::new(credentials::CredentialsPanel::new(agent.clone())),
         PanelKind::Declared => Box::new(declared::DeclaredPanel::new(agent.clone())),
     }
@@ -275,7 +269,6 @@ mod tests {
             ("ram_store.tools", PanelKind::Store),
             ("sqlite_store.tools", PanelKind::Store),
             ("scheduler.tools", PanelKind::Scheduler),
-            ("cabinet.tools", PanelKind::Cabinet),
             ("credential_store.tools", PanelKind::Credentials),
         ] {
             assert_eq!(PanelKind::of("x", m), k, "{m}");
@@ -284,7 +277,7 @@ mod tests {
 
     #[test]
     fn an_unknown_module_still_gets_the_generic_panel_after_the_new_kinds() {
-        for m in ["scheduler", "store.tools", "cabinet", "credential_store", "scheduler.tool"] {
+        for m in ["scheduler", "store.tools", "credential_store", "scheduler.tool"] {
             assert_eq!(PanelKind::of("x", m), PanelKind::Generic, "{m}");
         }
     }
@@ -294,7 +287,6 @@ mod tests {
         let kinds = [
             PanelKind::Store,
             PanelKind::Scheduler,
-            PanelKind::Cabinet,
             PanelKind::Credentials,
         ];
         let a: AgentId = "x".into();
