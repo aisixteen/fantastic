@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Agent, Kernel } from "../src/lib.ts";
 import type { Payload } from "../src/lib.ts";
 import { bgCallableBy, registerBackground } from "../src/bundles/canvas/background_agent.ts";
-import { BACKGROUNDS, grantsFor, registerBackgrounds } from "../src/bundles/backgrounds/backgrounds_agent.ts";
+import { BACKGROUNDS, BACKGROUNDS_VERBS, grantsFor, registerBackgrounds } from "../src/bundles/backgrounds/backgrounds_agent.ts";
 import { STOCK, sourceOf } from "../src/bundles/backgrounds/stock.ts";
 import { DEFAULT_BG_SOURCE } from "../src/bundles/canvas/default_bg.ts";
 
@@ -87,26 +87,22 @@ test("none clears the background; default restores Isoline; rotate is kept in th
   await call({ type: "shutdown" });
 });
 
-test("the default theme `canvas` cannot be deleted; a stock `mobile` still hides", async () => {
+test("the agent offers no theme verbs: they are unknown", async () => {
   const { call } = page();
-  const r = await call({ type: "delete_theme", name: "canvas" });
-  assert.equal(r["reason"], "bad_arg");
-  assert.ok((((await call({ type: "themes" }))["themes"]) as { name: string }[]).some((t) => t.name === "canvas"), "canvas still listed");
-  assert.equal((await call({ type: "delete_theme", name: "mobile" }))["deleted"], "mobile");
+  for (const type of ["themes", "use_theme", "add_theme", "delete_theme", "restore_themes"]) {
+    const r = await call({ type });
+    assert.equal(r["reason"], "unhandled", type);
+    assert.ok(!String(r["hint"]).includes("theme"), "its verb list has no theme");
+  }
+  assert.ok(!BACKGROUNDS_VERBS.some((v) => v.includes("theme")));
 });
 
-test("the theme panel has no `+ new theme`: a new theme is the AI agent's to add", async () => {
+test("the backgrounds panel draws once per redraw: the list is read first, an overtaken redraw dropped", async () => {
   const src = await import("node:fs").then((fs) => fs.readFileSync(new URL("../src/bundles/backgrounds/backgrounds_view.ts", import.meta.url), "utf8"));
-  assert.ok(!src.includes("+ new theme"));
-  assert.match(src, /To make a new theme, ask your AI agent/);
-  assert.match(src, /t\.name === DEFAULT_THEME && t\.from === "stock"\) r\.append\(b, ed\)/, "no × on the default theme");
-});
-
-test("the theme panel draws once per redraw: every list (backgrounds, themes, skins) read first, an overtaken redraw dropped (no two Themes)", async () => {
-  const src = await import("node:fs").then((fs) => fs.readFileSync(new URL("../src/bundles/backgrounds/backgrounds_view.ts", import.meta.url), "utf8"));
-  const body = src.slice(src.indexOf("const render = async"), src.indexOf("const themeForm"));
+  const body = src.slice(src.indexOf("const render = async"), src.indexOf("void render();"));
   assert.equal((body.match(/await /g) ?? []).length, 1, "one wait, before anything is drawn");
-  assert.match(body, /const \[l, th, sk\] = await Promise\.all\(\[call\(\{ type: "list" \}\), call\(\{ type: "themes" \}\), skinCall\(\{ type: "list" \}\)\]\);\s*if \(mine !== drawing\) return;/);
+  assert.match(body, /const l = await call\(\{ type: "list" \}\);\s*if \(mine !== drawing\) return;/);
+  assert.ok(!/skinCall|skinAct|_theme|"themes"/.test(src), "the panel chooses no theme and no skin");
 });
 
 test("background none costs no GPU: with no GL view the frame loop stops, and a new view wakes it", async () => {

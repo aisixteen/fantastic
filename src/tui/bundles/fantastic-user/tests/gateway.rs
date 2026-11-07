@@ -122,7 +122,7 @@ fn rec(id: &str, parent: &str) -> Value {
     json!({"id": id, "parent_id": parent, "handler_module": "x.ts"})
 }
 
-/// The page's canvas-theme layout under `view`: each cell's rect (never on the
+/// The page's free-canvas layout under `view`: each cell's rect (never on the
 /// cell's record). One per page kernel, as the page keeps it (`layout.ts`).
 fn layout(view: &str, cells: &[&str]) -> Value {
     let rects: serde_json::Map<String, Value> = cells
@@ -134,7 +134,7 @@ fn layout(view: &str, cells: &[&str]) -> Value {
             )
         })
         .collect();
-    json!({"id": "layout_canvas", "parent_id": view, "handler_module": "layout.ts", "theme": "canvas", "rects": rects})
+    json!({"id": "layout_canvas", "parent_id": view, "handler_module": "layout.ts", "rects": rects})
 }
 
 /// root ─ leg · echo · user {loader}; the page tree canvas {view_root {cv1 {c1}, cv2}},
@@ -303,7 +303,7 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
         .collect();
     assert_eq!(got, vec!["cv1", "cv2"], "{r}");
     assert_eq!(r["members"][0]["distance"], 0.0);
-    // a cell with no rect in the theme is not placed there: none found
+    // a cell with no rect in the layout is not placed there: none found
     let r = tab(
         &k,
         json!({"type": "around", "view": "cv1", "x": 0, "y": 0, "radius": 5}),
@@ -315,7 +315,13 @@ async fn around_answers_from_the_page_records_by_the_callers_page_grants() {
         json!({"type": "around", "theme": "mobile", "x": 50, "y": 25, "radius": 10}),
     )
     .await;
-    assert_eq!(r["members"], json!([]), "no mobile layout: {r}");
+    let got: Vec<&str> = r["members"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert_eq!(got, vec!["cv1", "cv2"], "no theme argument: it still reads layout_canvas: {r}");
     let r = tab(&k, json!({"type": "around", "x": "a", "y": 0, "radius": 5})).await;
     assert_eq!(r["reason"], "bad_arg", "{r}");
     // a cell's AI: judged by its own page grants (cv2 only)

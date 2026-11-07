@@ -7,7 +7,6 @@ import type { SchemaToken, TokenType } from "./schema.ts";
 // never silently ignored. Pure: no DOM, so node's tests run it as the page does.
 //
 //   parseTokens(doc)        → every token, its type and its resolved value
-//   mergeTokens(base, over) → a partial skin over its base (a token replaced whole)
 //   compileSkin(doc)        → the skin the page installs: its CSS custom
 //                             properties, its resolved values, its backdrop
 //
@@ -315,29 +314,6 @@ function shadowOf(path: string, v: unknown, alias: (target: string) => Token): S
     spread: member("spread", "dimension", dim),
     inset: v["inset"] === true,
   };
-}
-
-// ─── merge ────────────────────────────────────────────────────────────────
-
-const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
-
-/** A partial skin `over` its `base`: groups merge deeply, a token in `over`
- *  replaces the base's whole, and the root's `$extensions.fantastic` merges the
- *  same way (a skin keeps its base's backdrop unless it sets its own). */
-export function mergeTokens(base: unknown, over: unknown): Dict {
-  const out = isDict(base) ? clone(base) : {};
-  if (!isDict(over)) return out;
-  mergeInto(out, over);
-  return out;
-}
-
-function mergeInto(into: Dict, over: Dict): void {
-  for (const [k, v] of Object.entries(over)) {
-    const had = into[k];
-    const token = isDict(v) && "$value" in v;
-    if (!token && isDict(v) && isDict(had) && !("$value" in had)) mergeInto(had, v);
-    else into[k] = clone(v);
-  }
 }
 
 // ─── compile ──────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compileSkin, mergeTokens, parseTokens } from "../src/bundles/skin/tokens.ts";
+import { compileSkin, parseTokens } from "../src/bundles/skin/tokens.ts";
 import type { ColorValue, Measure, ShadowLayer } from "../src/bundles/skin/tokens.ts";
 import { SKIN_SCHEMA } from "../src/bundles/skin/schema.ts";
 import type { SchemaToken } from "../src/bundles/skin/schema.ts";
@@ -154,6 +154,20 @@ const MINI: SchemaToken[] = [
   { path: "color.b", type: "color", note: "" },
   { path: "size.r", type: "dimension", note: "" },
 ];
+/** `over` laid over `base` (a group merges deeply, a token replaces whole): the tests' way to vary a document. */
+const mergeTokens = (base: Dict, over: Dict): Dict => {
+  const isDict = (v: unknown): v is Dict => typeof v === "object" && v !== null && !Array.isArray(v);
+  const into = JSON.parse(JSON.stringify(base)) as Dict;
+  const walk = (to: Dict, from: Dict): void => {
+    for (const [k, v] of Object.entries(from)) {
+      const had = to[k];
+      if (isDict(v) && !("$value" in v) && isDict(had) && !("$value" in had)) walk(had, v);
+      else to[k] = JSON.parse(JSON.stringify(v));
+    }
+  };
+  walk(into, over);
+  return into;
+};
 const mini = (over: Dict = {}): Dict =>
   mergeTokens(doc({ color: { $type: "color", a: { $value: srgb(1, 0, 0) }, b: { $value: srgb(0, 0, 0, { alpha: 0.5 }) } }, size: { r: { $type: "dimension", $value: px(4) } } }), over);
 

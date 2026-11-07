@@ -37,7 +37,7 @@ test("hide takes the cell off the view and keeps its agent, record and rect", as
   assert.equal(k.get("a")?.parentId, "view_root", "still a child of the view");
   assert.equal(k.get("a")?.meta["html"], "<p>a</p>", "its record is untouched");
   assert.equal(k.get("a")?.record().handler_module, before.handler_module);
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 10, y: 20, width: 480, height: 320 }, "its rect is kept");
+  assert.deepEqual(rectsOf(k, "view_root", "free")["a"], { x: 10, y: 20, width: 480, height: 320 }, "its rect is kept");
 });
 
 test("hide is idempotent; the hidden set holds each cell once", async () => {
@@ -57,21 +57,20 @@ test("hide refuses what is no cell of the view, and the view's own background or
   assert.deepEqual([...hiddenOf(k, "view_root")], [], "nothing hidden");
 });
 
-test("show puts a hidden cell back where it was, or at x, y in the theme in use", async () => {
+test("show puts a hidden cell back where it was, or at x, y in the layout in use", async () => {
   const k = page();
   await call(k, { type: "place", kind: "html", id: "a", x: 10, y: 20, html: "<p>a</p>" });
   await call(k, { type: "hide", id: "a" });
   assert.deepEqual(await call(k, { type: "show", id: "a" }), {
     shown: "a",
-    theme: "canvas",
     hidden_cells: [],
   });
   assert.deepEqual([...hiddenOf(k, "view_root")], []);
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 10, y: 20, width: 480, height: 320 });
+  assert.deepEqual(rectsOf(k, "view_root", "free")["a"], { x: 10, y: 20, width: 480, height: 320 });
   await call(k, { type: "hide", id: "a" });
   const moved = await call(k, { type: "show", id: "a", x: 300, y: 40 });
   assert.equal(moved["shown"], "a");
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 300, y: 40, width: 480, height: 320 });
+  assert.deepEqual(rectsOf(k, "view_root", "free")["a"], { x: 300, y: 40, width: 480, height: 320 });
 });
 
 test("show of a cell not hidden is harmless; show refuses what is no cell of the view", async () => {
@@ -114,10 +113,9 @@ test("show of a cell that is not hidden keeps its place: x, y do not move it", a
   await call(k, { type: "place", kind: "html", id: "a", x: 10, y: 20, html: "<p>a</p>" });
   assert.deepEqual(await call(k, { type: "show", id: "a", x: 300, y: 40 }), {
     shown: "a",
-    theme: "canvas",
     hidden_cells: [],
   });
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 10, y: 20, width: 480, height: 320 }, "the rect is not moved");
+  assert.deepEqual(rectsOf(k, "view_root", "free")["a"], { x: 10, y: 20, width: 480, height: 320 }, "the rect is not moved");
 });
 
 test("prune clears a hidden id whose cell is no longer live, and keeps a live one hidden", async () => {
@@ -140,7 +138,7 @@ test("showHidden brings a hidden cell back (its rect kept) and reports whether i
   await call(k, { type: "hide", id: "a" });
   assert.equal(showHidden(k, "a"), true);
   assert.deepEqual([...hiddenOf(k, "view_root")], []);
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 10, y: 20, width: 480, height: 320 });
+  assert.deepEqual(rectsOf(k, "view_root", "free")["a"], { x: 10, y: 20, width: 480, height: 320 });
   assert.equal(showHidden(k, "ghost"), false, "an unknown id is not a hidden cell");
 });
 
@@ -167,6 +165,6 @@ test("the reopened hidden cell comes back where it was, and is then no hidden ma
   k.updateMeta("hid", { backend_id: "ai_1" } as unknown as Payload);
   await call(k, { type: "hide", id: "hid" });
   assert.equal(showHidden(k, "hid"), true);
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["hid"], { x: 10, y: 20, width: 480, height: 320 });
+  assert.deepEqual(rectsOf(k, "view_root", "free")["hid"], { x: 10, y: 20, width: 480, height: 320 });
   assert.equal(hiddenCellFor(k, "ai_1", ["hid"]), undefined, "shown now");
 });

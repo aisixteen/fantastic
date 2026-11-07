@@ -6,7 +6,7 @@ import { hostRecordFresh } from "../canvas/host_views.ts";
 import { attach as attachTo, launched, pressed, runLine, savedCmd, shortCmd, stoppedText } from "./last_cmd.ts";
 import type { TermState } from "./last_cmd.ts";
 import { earlyPlan, runEarly } from "./early.ts";
-import { onSkin, skinNow } from "../skin/apply.ts";
+import { skinNow } from "../skin/apply.ts";
 import { xtermColor } from "../skin/tokens.ts";
 import type { ColorValue, CompiledSkin } from "../skin/tokens.ts";
 
@@ -103,7 +103,7 @@ export const terminalView: ViewBundle = {
     const FitAddonCtor = g.FitAddon?.FitAddon;
     if (typeof TerminalCtor !== "function") throw new Error("terminal_view: the vendored xterm set no globalThis.Terminal");
     if (typeof FitAddonCtor !== "function") throw new Error("terminal_view: the vendored addon-fit set no globalThis.FitAddon.FitAddon");
-    // its theme and font are the skin's (`termLook`), and follow it live
+    // its theme and font are the skin's (`termLook`)
     const look = termLook(skinNow().skin);
     const term = new TerminalCtor({
       cursorBlink: true,
@@ -398,15 +398,6 @@ export const terminalView: ViewBundle = {
         tightFit();
       });
     });
-    // THE SKIN CHANGES: the theme and font follow; a font can change the cell
-    // metrics, so the grid is fitted again
-    const offSkin = onSkin((_name, skin) => {
-      const l = termLook(skin);
-      term.options.theme = l.theme;
-      if (term.options.fontFamily !== l.fontFamily) term.options.fontFamily = l.fontFamily;
-      tightFit();
-    });
-
     // init order: fit (cols/rows) → a live job is resized to them, then its
     // ring replays (vim/tmux must replay against the right dimensions); none
     // → start the child's login shell AT them.
@@ -533,7 +524,6 @@ export const terminalView: ViewBundle = {
         },
       ],
       unmount(): void {
-        offSkin();
         offRenderer();
         io.disconnect();
         offLifecycle();

@@ -12,7 +12,7 @@
 //          presentation path, and it masks the renderer string — the context
 //          cannot tell, so WEBKITGTK IS KNOWN BY THE WEBVIEW, never by probing GL.
 //   auto   dom in WebKitGTK (the shell's flag says so, else the user agent),
-//          webgl everywhere else — resolved in each tab, like the view's theme.
+//          webgl everywhere else — resolved in each tab.
 //
 // It knows nothing of the canvas: it takes a terminal and the element it lives
 // in. A lost context: the addon is dropped and a fresh one made while webgl is

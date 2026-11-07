@@ -1,6 +1,6 @@
-"""E69 themes — the same cells in two themes (owner 2026-10-11): a phone-wide
-tab is `mobile` by `auto` (under 768px) and stacks the canvas's cells in ONE
-column; a desktop tab keeps the canvas rects; the cell records carry no geometry."""
+"""E69 column — the same cells in two layouts (owner 2026-10-11): a phone-wide
+tab (under 768px) stacks the canvas's cells in ONE column; a desktop tab keeps
+the free canvas rects; the cell records carry no geometry."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def main() -> bool:
                 info["pinned_at"] = await pg.js(bottom)
                 # the canvas as drawn (a headless window is at least ~500px wide)
                 info["canvas_box"] = await pg.js("(()=>{const r=document.getElementById('canvas').getBoundingClientRect(); return [Math.round(r.width), Math.round(r.bottom)]})()")
-                # the column fills the width edge to edge (mobile is flat, owner 2026-10-12) and its chrome shows without hover
+                # the column fills the width edge to edge (the column is flat, owner 2026-10-12) and its chrome shows without hover
                 info["a_screen_w"] = await pg.js("Math.round(document.querySelector('.agent-frame[data-id=a]').getBoundingClientRect().width)")
                 info["a_head_opacity"] = await pg.js("getComputedStyle(document.querySelector('.agent-frame[data-id=a] > .frame-head')).opacity")
                 # the wheel over A's head bar (no gutter now; an iframe takes its own wheel). Past the

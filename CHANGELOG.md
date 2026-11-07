@@ -294,6 +294,17 @@ the wire protocol and on-disk `.fantastic/` format may change between releases.
   dependencies inside the rust `fantastic-foundation-models-backend` crate,
   built and linked on macOS by its `build.rs` — which no longer fetches 23
   Swift packages to do it. v0.0.6 is the last release with the Swift kernel.
+- Theming (#482): one look stays, the default theme `canvas` and the default skin
+  (`dark` on the web, `glass` in the app's window). The view's `theme` verb, the
+  canvas theme agent's themes (`themes`, `use_theme`, `add_theme`, `delete_theme`,
+  `restore_themes`), the skin agent's `list`, `use`, `add` and `delete` and its
+  `skins` / `user_skins` fields, and `around`'s `theme` argument are gone, with
+  the panel's Themes and Skins sections (the popup entry "canvas theme" is now
+  "backgrounds"). The phone column is no longer a theme: a tab under 768px wide
+  draws the one column, any other the free canvas, a fixed rule of the view; its
+  state stays in `layout_mobile`. A stored `theme`, `user_themes`,
+  `hidden_themes`, `skins` or `user_skins` is ignored, and a user theme's
+  `layout_<name>` is pruned.
 
 ### Fixed
 

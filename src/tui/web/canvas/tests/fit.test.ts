@@ -51,7 +51,7 @@ test("the view's fit: the width the content wants, then its height at that width
   const r = await call(k, { type: "fit", id: "f" });
   assert.equal(r["fitted"], "f");
   assert.equal(r["overflowed"], false);
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["f"], { x: 10, y: 20, width: 640, height: 90 }, "the height is the one at the new width; x/y kept");
+  assert.deepEqual(rectsOf(k, "view_root", "free")["f"], { x: 10, y: 20, width: 640, height: 90 }, "the height is the one at the new width; x/y kept");
   // a max: clamped, and said
   // wider than the max but it WRAPS there: not overflowed
   forgetSize("f");
@@ -59,14 +59,14 @@ test("the view's fit: the width the content wants, then its height at that width
   setTimeout(() => reportSize("f", { mw: 2000, h: 200, ox: false }), 30);
   const w = await call(k, { type: "fit", id: "f", max_width: 500, max_height: 300 });
   assert.equal(w["overflowed"], false, "a paragraph wrapped at the max fits");
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["f"], { x: 10, y: 20, width: 500, height: 200 });
+  assert.deepEqual(rectsOf(k, "view_root", "free")["f"], { x: 10, y: 20, width: 500, height: 200 });
   // too tall for the max, or too wide to wrap: clamped, and said
   forgetSize("f");
   reportSize("f", { mw: 2000, h: 50 });
   setTimeout(() => reportSize("f", { mw: 2000, h: 400, ox: true }), 30);
   const c = await call(k, { type: "fit", id: "f", max_width: 500, max_height: 300 });
   assert.equal(c["overflowed"], true);
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["f"], { x: 10, y: 20, width: 500, height: 300 });
+  assert.deepEqual(rectsOf(k, "view_root", "free")["f"], { x: 10, y: 20, width: 500, height: 300 });
 });
 
 test("fit refuses what is not its cell, and a cell that never measured", async () => {

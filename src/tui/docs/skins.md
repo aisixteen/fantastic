@@ -5,14 +5,10 @@
 A SKIN is how the canvas looks: every colour, corner radius, font family,
 elevation shadow and motion value its views are drawn with, as DESIGN TOKENS
 (the W3C Design Tokens Format Module 2025.10), plus a BACKDROP. A new look is
-one token document — no CSS edit, no rebuild, no reload. The page compiles a
-skin to one CSS custom property per token (`--fc-<path, . as ->`) in one
-`<style id="fantastic-skin">`; switching skins replaces that stylesheet and the
-browser restyles everything at once.
-
-A skin is NOT a theme. A THEME (`canvas`, `mobile`, yours) says where the cells
-sit — the canvas theme panel's Themes section, `fantastic readme canvas`. A
-skin never moves a cell.
+one token document. The page compiles the skin to one CSS custom property per
+token (`--fc-<path, . as ->`) in one `<style id="fantastic-skin">`. There is one
+look: the skin is fixed by the backdrop (below) and nothing chooses or writes
+one. A skin never moves a cell.
 
 ## Two backdrops
 
@@ -32,14 +28,10 @@ plain tab — is `web`.
 ## The skin agent
 
 Each canvas (peer canvases too) has one page agent `skin` (`skin.ts`), a
-delete-locked child of the page root, made when missing. Its record:
-
-- `skins: {web: <name>, native: <name>}` — the skin used on each backdrop.
-  The skin IN USE is the slot of this tab's backdrop, so one canvas can show
-  glass in the app's window and dark in a browser tab at the same time.
-- `user_skins: [{name, base, note, tokens}]` — skins written by an AI or a
-  human. `tokens` is a PARTIAL token document merged over `base` (a stock
-  skin or another user skin).
+delete-locked child of the page root, made when missing. It is read only. The
+skin shown is the stock one of this tab's backdrop (`dark` for `web`, `glass`
+for `native`), installed once when the page boots; one canvas can show glass in
+the app's window and dark in a browser tab at the same time.
 
 Stock skins: `dark` (web — the canvas's own look) and `glass` (native —
 translucent surfaces over the window's material).
@@ -49,30 +41,14 @@ reopened):
 
 | verb | args | answer / rule |
 |---|---|---|
-| `list` | — | `{stock: [{name, note, backdrop}], user: [{name, base, note, backdrop, error?}], skins, backdrop: <this tab's>, in_use}` |
-| `get` | `name` | `{name, from: stock \| user, base?, note, backdrop, tokens, merged}` — `tokens` as authored, `merged` the full document that compiles |
+| `get` | `name` (`dark` or `glass`) | `{name, note, backdrop, tokens}` — `tokens` as authored, a complete example |
 | `schema` | — | the format, the supported and refused features, and every token: `{path, type, opaque, note, css}` |
-| `use` | `name`, `backdrop?: web \| native` | sets that slot (default: this tab's). A skin whose backdrop is `native` is refused for the `web` slot (nothing is behind a browser tab); a web skin may sit in the `native` slot. |
-| `add` | `name`, `base`, `tokens`, `note?` | `name` is `^[a-z0-9][a-z0-9_-]{0,39}$`, not a stock name; `base` exists; no base cycle; the merged document must compile, or the refusal names the token path. The same name replaces; in use, the page shows the new version at once. |
-| `delete` | `name` | yours only; refused while it is in a slot ("use another first") or another skin's base |
 
-A skin that cannot apply (a record hand-edited into tokens that no longer
-compile) is logged and toasted; the page keeps the skin it shows, and `list`
-reports it with its `error`.
-
-## Writing a skin
-
-1. Reflect the page and find `skin`.
-2. `schema` names the tokens.
-3. `get {name: "dark"}` is a complete example (`merged`).
-4. `add {name: "ocean", base: "dark", tokens: {color: {accent: {base: {$value: {colorSpace: "srgb", components: [0.2, 0.7, 0.9], hex: "#33b3e6"}}}}}}`
-5. `use {name: "ocean"}` — the page shows it, live.
+## The token format
 
 A token is an object with `$value`; a group is an object without one, and a
-group's `$type` is inherited by its tokens. `mergeTokens` merges groups deeply
-and a token you give REPLACES the base's whole token. The document root's
-`$extensions.fantastic.backdrop` (`web` | `native`) is required on a stock
-skin; a user skin keeps its base's unless it sets its own.
+group's `$type` is inherited by its tokens. The document root's
+`$extensions.fantastic.backdrop` (`web` | `native`) is required.
 
 THE SUPPORTED SUBSET:
 
@@ -163,7 +139,7 @@ A skin must give every token below, with its type, and no other (but
 | `color.surface.raised` | color | `--fc-color-surface-raised` | the stopped-terminal box | `rgb(17 17 26 / 0.92)` | `rgb(20 20 31 / 0.72)` |
 | `color.surface.popup` | color | `--fc-color-surface-popup` | the action popup | `rgb(22 20 32 / 0.96)` | `rgb(24 22 36 / 0.74)` |
 | `color.surface.pill` | color | `--fc-color-surface-pill` | the full-view label | `rgb(20 18 30)` | `rgb(20 18 30 / 0.7)` |
-| `color.surface.panel` | color | `--fc-color-surface-panel` | wizard, not-set-up card, theme form | `rgb(15 14 22)` | `rgb(15 14 22 / 0.45)` |
+| `color.surface.panel` | color | `--fc-color-surface-panel` | wizard, not-set-up card | `rgb(15 14 22)` | `rgb(15 14 22 / 0.45)` |
 | `color.surface.field` | color | `--fc-color-surface-field` | inputs and selects | `rgb(26 24 36)` | `rgb(0 0 0 / 0.25)` |
 | `color.surface.button` | color | `--fc-color-surface-button` | buttons | `rgb(36 31 53)` | `rgb(255 255 255 / 0.08)` |
 | `color.surface.badge` | color | `--fc-color-surface-badge` | the terminal's last-command bar | `rgb(10 10 18 / 0.72)` | `rgb(10 10 18 / 0.5)` |

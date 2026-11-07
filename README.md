@@ -312,7 +312,7 @@ content (`html`, `gl`).
 - **Double-click** opens the selector, which lists everything that can be placed
   there: `AI agent`, a terminal, coding agents found on your `PATH` (`claude`,
   `codex`, `aider`, `opencode`, `fantastic`), `python agent`, `mcp connector`,
-  `file tree`, `preview`, `canvas theme`, `user store`, `tips`, and your bundles. Nothing
+  `file tree`, `preview`, `backgrounds`, `user store`, `tips`, and your bundles. Nothing
   floats on the canvas; every surface is a cell.
 - **AI agents** are set up in a two-page wizard: the provider (responses,
   anthropic, ollama or vllm), then its name, URL, model and key. Saved set-ups
@@ -328,8 +328,8 @@ content (`html`, `gl`).
   and `remove`.
 - **Canvases** are flat peers. `new_canvas {name}` makes one, and
   `?canvas=<node id>` opens it. Each has its own page kernel and shows only its
-  own subtree. **Themes** (free canvas, one column, your own) move cells and
-  never the agents.
+  own subtree. A tab under 768px wide draws the cells as one column, any other
+  as the free canvas; the layout moves cells, never the agents.
 - **Grants**: `user`, and every AI under a canvas, may call every host agent
   with every verb (god mode, granted on both sides). You narrow it with
   `update_agent`.

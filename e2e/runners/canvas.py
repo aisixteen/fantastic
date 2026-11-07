@@ -400,7 +400,7 @@ def members(cwd: Path) -> list[dict]:
 
 
 def rect_of(cwd: Path, cell: str) -> dict:
-    """Where `cell` sits in the canvas theme: the root view's `layout_canvas`
+    """Where `cell` sits in the free canvas: the root view's `layout_canvas`
     agent's rects (a cell carries no geometry)."""
     f = cwd / ROOT_VIEW / "layout_canvas" / "agent.yaml"
     try:
@@ -477,7 +477,7 @@ async def restart(spec, page: Page, host: Host, cwd: Path, url: str, state: dict
     host.start()
     tree = await host_call(host.port, "web_loader", {"type": "load_tree"})
     state["tree"] = [(r.get("id"), r.get("parent_id")) for r in tree.get("records", [])]
-    # a view's layouts (where its cells sit, per theme) are no members
+    # a view's layouts (where its cells sit) are no members
     state["tree_layouts"] = [r.get("id") for r in tree.get("records", []) if r.get("handler_module") == "layout.ts"]
     await page.open(url)
 

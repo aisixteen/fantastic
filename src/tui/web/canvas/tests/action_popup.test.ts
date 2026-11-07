@@ -8,9 +8,9 @@ const P: Presets = {
   dialogs: [{ id: "ai_1", name: "release notes" }],
 };
 
-test("empty: two groups — host (AI agent, terminal, python agent, mcp connector, user store), page (html, stream, file tree, preview, canvas theme, tips) — then chats; no AI saved set-up tiles", () => {
+test("empty: two groups — host (AI agent, terminal, python agent, mcp connector, user store), page (html, stream, file tree, preview, backgrounds, tips) — then chats; no AI saved set-up tiles", () => {
   const t = tiles("", P);
-  assert.deepEqual(t.map((x) => x.label), ["AI agent", "terminal", "python agent", "mcp connector", "user store", "html", "stream", "file tree", "preview", "canvas theme", "tips", "release notes"]);
+  assert.deepEqual(t.map((x) => x.label), ["AI agent", "terminal", "python agent", "mcp connector", "user store", "html", "stream", "file tree", "preview", "backgrounds", "tips", "release notes"]);
   assert.deepEqual(t.find((x) => x.label === "python agent")!.pick, { kind: "bundle", starter: "python_agent" });
   assert.deepEqual([...new Set(t.map((x) => x.section))], ["host", "page", "chats"]);
   assert.deepEqual(t.at(-1)!.pick, { kind: "chat", id: "ai_1", name: "release notes" });
@@ -21,7 +21,7 @@ test("a kind typed exactly offers only that kind", () => {
   assert.deepEqual(tiles("new ai agent…", P).map((x) => x.label), ["AI agent · gpt5"], "no \"new AI agent…\": only free text for the one AI agent tile");
   assert.deepEqual(tiles("file tree", P).map((x) => x.pick), [{ kind: "files" }]);
   assert.deepEqual(tiles("preview", P).map((x) => x.pick), [{ kind: "preview" }]);
-  assert.deepEqual(tiles("canvas theme", P).map((x) => x.pick), [{ kind: "backgrounds" }]);
+  assert.deepEqual(tiles("backgrounds", P).map((x) => x.pick), [{ kind: "backgrounds" }]);
 });
 
 test("free text: the first tile asks the default; the rest filter", () => {

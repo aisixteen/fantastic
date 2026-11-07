@@ -30,7 +30,7 @@ test("a view places, moves, updates, wires and removes its own cells", async () 
   await call(k, { type: "place", kind: "html", id: "b", x: 400, y: 20 });
   assert.equal((await call(k, { type: "move", id: "a", x: 99 }))["moved"], "a");
   assert.equal(k.get("a")?.meta["x"], undefined, "geometry is never on the cell");
-  assert.deepEqual(rectsOf(k, "view_root", "canvas")["a"], { x: 99, y: 20, width: 480, height: 320 }, "it is in the layout of the theme in use");
+  assert.deepEqual(rectsOf(k, "view_root", "free")["a"], { x: 99, y: 20, width: 480, height: 320 }, "it is in the layout in use");
   assert.equal((await call(k, { type: "update", id: "b", fields: { html: "<p>b</p>" } }))["updated"], "b");
   // a cell's grants are the view's to write — it is the cell's parent
   await call(k, { type: "update", id: "b", fields: { can_call: { dev: ["start", "stop"] } } });

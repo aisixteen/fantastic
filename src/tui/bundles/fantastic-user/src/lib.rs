@@ -73,7 +73,7 @@ pub const VERBS: [&str; 9] = [
 ];
 
 /// A view's children that are not cells: its background (drawn behind them),
-/// its theme layouts, a double click's selector, the canvas theme agent.
+/// its layouts, a double click's selector, the backgrounds agent.
 const NOT_CELLS: [&str; 4] = [
     "background.ts",
     "layout.ts",
@@ -81,8 +81,8 @@ const NOT_CELLS: [&str; 4] = [
     "backgrounds.ts",
 ];
 
-/// The theme `around` reads rects in by default: the free 2D canvas.
-const AROUND_THEME: &str = "canvas";
+/// The layout `around` reads rects from: the view's free 2D canvas.
+const AROUND_LAYOUT: &str = "layout_canvas";
 
 /// The page's root view: `around`'s default.
 pub const ROOT_VIEW: &str = "view_root";
@@ -305,18 +305,12 @@ impl UserBundle {
             return refuse("not_found", format!("user.around: no view {view:?} here"));
         }
         let up = Self::ancestors(&recs, &loader, Some(&view));
-        // a cell's rect is not on its record but in the view's layout for a theme
-        // (`layout_<theme>`, `rects: {<cell id>: {x, y, width, height}}`)
-        let theme = p
-            .get("theme")
-            .and_then(Value::as_str)
-            .filter(|t| !t.is_empty())
-            .unwrap_or(AROUND_THEME);
-        let layout = format!("layout_{theme}");
+        // a cell's rect is not on its record but in the view's layout
+        // (`layout_canvas`, `rects: {<cell id>: {x, y, width, height}}`)
         let rects = recs
             .iter()
             .find(|r| {
-                r.get("id").and_then(Value::as_str) == Some(layout.as_str())
+                r.get("id").and_then(Value::as_str) == Some(AROUND_LAYOUT)
                     && r.get("parent_id").and_then(Value::as_str) == Some(view.as_str())
             })
             .and_then(|r| r.get("rects").and_then(Value::as_object).cloned())
@@ -436,7 +430,7 @@ impl Bundle for UserBundle {
         v.insert("export_subtree".into(), json!("args: agent_id:str (req), path:str (req) — writes the agent and everything under it as a blueprint folder; outside references become ports; no keys, no absolute paths, no rows. path: a new or empty folder (relative to the running dir; no `..`). Reply {exported, path, ports, files}."));
         v.insert("import_subtree".into(), json!("args: path:str (req — a blueprint folder, relative to the running dir; no `..`), parent_id:str (req), bind:dict? ({\"@port\": \"<agent id>\"} — every declared port, to an agent of its kind), allow_code:bool? (only true counts), approve:bool? (only true counts) — without approve: {approval_required, agents, new_ids, reaches, ports, code} and nothing is created; with it: the agents under parent_id with fresh ids (one `_<k>` suffix), bound agents granted back. Refused: unbound_ports, bad_binding, secret_found, code_not_allowed. Reply {imported, ids, parent_id, ports}."));
         v.insert("path".into(), json!("args: rescan:bool? — {dirs: [PATH dirs], executables: {name: full path}, self: the running fantastic's own executable}: every program on the human's PATH (this process's merged with the login shell's), the first on PATH winning; `executables.fantastic` is always `self` (#216); scanned at boot, `rescan: true` scans again. The caller decides what a name means."));
-        v.insert("around".into(), json!("args: canvas:str? (a canvas node id — default the main canvas), view:str? (default view_root), theme:str? (whose layout's rects — default canvas), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
+        v.insert("around".into(), json!("args: canvas:str? (a canvas node id — default the main canvas), view:str? (default view_root), x:num, y:num, radius:num — {view, members: [{id, kind, title, rect:{x,y,w,h}, distance, backend_id?}]}: the cells of a page view within radius, nearest first, from the page records; judged by YOUR page grants."));
         Value::Object(v)
     }
 

@@ -1,8 +1,7 @@
 import dark from "./stock/dark.tokens.json" with { type: "json" };
 import glass from "./stock/glass.tokens.json" with { type: "json" };
 
-// THE STOCK SKINS — read-only, built in. A user skin is merged over one of them
-// (or over another user skin): `skin_agent.ts`.
+// THE STOCK SKINS — read-only, built in; the skin agent (`skin_agent.ts`) reads them.
 //
 //   dark   web     today's look, value for value
 //   glass  native  translucent, for a window over a native vibrancy backdrop

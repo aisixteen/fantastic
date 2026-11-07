@@ -1,6 +1,6 @@
 import { Host } from "../../lib.ts";
 import type { Kernel, Payload } from "../../lib.ts";
-import { onSkin, skinNow } from "../skin/apply.ts";
+import { skinNow } from "../skin/apply.ts";
 import type { ColorValue } from "../skin/tokens.ts";
 import { worldAt } from "../files/drag.ts";
 import type { ViewPose } from "../files/drag.ts";
@@ -106,12 +106,6 @@ export async function createGlHost(opts: {
   function wake(): void {
     if (raf === 0) raf = requestAnimationFrame(frame);
   }
-  // the skin changes: the clear colour follows, drawn on the next frame
-  const offSkin = onSkin(() => {
-    clearFromSkin();
-    dirty = true;
-    wake();
-  });
 
   // a minimal transport shim for GL sources (call/emit/subscribeState + a
   // local bus). The old `t.on`/`t.watch` global-dispatch isn't used by the
@@ -323,7 +317,6 @@ export async function createGlHost(opts: {
       applyCamera(); // marks the frame dirty
     },
     dispose() {
-      offSkin();
       cancelAnimationFrame(raf);
       for (const id of [...views.keys()]) teardown(id);
       try {

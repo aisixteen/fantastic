@@ -328,7 +328,7 @@ A skin is a W3C design token document compiled to CSS custom properties,
 A page takes a skin as ONE `:root` block of the schema's custom properties,
 and paints with `var(--fc-…)` only. `list.html` does exactly that, its block
 copied from the dark skin: swapping that block is the whole reskin of the page.
-The Home takes the skin agent's live skin the same way.
+The Home takes the page's skin (the stock skin of its backdrop) the same way.
 
 ## 8. Rust shells
 

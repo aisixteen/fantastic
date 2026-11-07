@@ -61,7 +61,7 @@ FEATURES = {
 KEY_VARS = {"vllm": "VLLM_API_KEY", "responses": "OPENAI_API_KEY"}
 
 
-#: A cell's geometry — kept in its view's layout per theme (`layout.ts`), never on the cell.
+#: A cell's geometry — kept in its view's layout (`layout.ts`), never on the cell.
 GEOMETRY = ("x", "y", "width", "height")
 
 def host_of(endpoint: str) -> str:
@@ -286,7 +286,7 @@ class Rig:
 
     def seed_cells(self, cells: list[dict]) -> None:
         """Write page cells into the root view as the page loader stores them (host stopped):
-        each cell's x/y/width/height into the view's canvas-theme layout, never on the cell."""
+        each cell's x/y/width/height into the view's free-canvas layout, never on the cell."""
         rects = self.rects()
         for c in cells:
             rec = {"parent_id": "view_root", **{k: v for k, v in c.items() if k not in GEOMETRY}}
@@ -299,16 +299,16 @@ class Rig:
             d = self.cells_dir / "layout_canvas"
             d.mkdir(parents=True, exist_ok=True)
             (d / "agent.yaml").write_text(yaml.safe_dump({"id": "layout_canvas", "parent_id": "view_root", "handler_module": "layout.ts",
-                                                          "theme": "canvas", "rects": rects}, sort_keys=False))
+                                                          "rects": rects}, sort_keys=False))
 
-    def pinned(self, theme: str = "mobile") -> str | None:
-        """The cell pinned in `theme` (its layout agent's `pinned`)."""
-        f = self.cells_dir / f"layout_{theme}" / "agent.yaml"
+    def pinned(self, layout: str = "mobile") -> str | None:
+        """The cell pinned in the layout agent `layout_<layout>` (its `pinned`): `mobile` is the column's."""
+        f = self.cells_dir / f"layout_{layout}" / "agent.yaml"
         return (yaml.safe_load(oslayer.read_text(f)) or {}).get("pinned") if f.exists() else None
 
-    def rects(self, theme: str = "canvas") -> dict:
-        """Where the root view's cells sit in `theme` (its layout agent's rects)."""
-        f = self.cells_dir / f"layout_{theme}" / "agent.yaml"
+    def rects(self, layout: str = "canvas") -> dict:
+        """Where the root view's cells sit in the layout agent `layout_<layout>` (its rects): `canvas` is the free canvas, `mobile` the column."""
+        f = self.cells_dir / f"layout_{layout}" / "agent.yaml"
         return dict((yaml.safe_load(oslayer.read_text(f)) or {}).get("rects") or {}) if f.exists() else {}
 
     def seed_host_agent(self, parent_path: str, rec: dict) -> None:

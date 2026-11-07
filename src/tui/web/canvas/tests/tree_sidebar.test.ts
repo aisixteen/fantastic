@@ -528,7 +528,7 @@ test("the sidebar tells the canvas when its width changes: open or collapsed, be
   sb.dispose();
 });
 
-test("the canvas's resize handler gives the sidebar the width test, as the theme gets it", () => {
+test("the canvas's resize handler gives the sidebar the width test, as the layout gets it", () => {
   const src = readFileSync(new URL("../src/bundles/canvas/canvas.ts", import.meta.url), "utf8");
   assert.match(src, /treeSidebar\.setWide\(innerWidth > 768\);/, "the resize handler sets the place from the width");
   assert.match(src, /const treeSidebar = mountTreeSidebar\(/, "the sidebar it sets is the one mounted on the page");
