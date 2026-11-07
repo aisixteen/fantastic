@@ -790,6 +790,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "fantastic-ai-core",
  "fantastic-bridge",
  "fantastic-bundle",
  "fantastic-core",

@@ -324,6 +324,25 @@ async fn a_reply_is_mirrored_to_the_sibling_tab() {
     stop(&kernel, "web_peer_mirror").await;
 }
 
+/// A page is an address but not a kernel's leg: its agents cannot be watched
+/// from the host (only a `hello {guid, leg}` connection streams events back).
+#[tokio::test]
+async fn a_pages_agent_cannot_be_watched() {
+    let tmp = TempDir::new().unwrap();
+    let (kernel, mut ws, _) = open(&tmp, "web_peer_nowatch", true).await;
+    push(&mut ws, json!({"type": "hello", "guid": PAGE})).await;
+    until("peer registered", || !kernel.peer_routes(PAGE).is_empty()).await;
+    let w = AgentId::from("w");
+    let _rx = kernel.ensure_inbox(&w);
+    let refused = kernel
+        .watch(&AgentId::from(format!("{PAGE}|canvas")), w)
+        .await
+        .expect("a refusal");
+    assert_eq!(refused["reason"], "unhandled", "{refused}");
+    assert!(kernel.peer_watched(PAGE).is_empty());
+    stop(&kernel, "web_peer_nowatch").await;
+}
+
 #[tokio::test]
 async fn a_sealed_leg_carries_no_peer() {
     let tmp = TempDir::new().unwrap();

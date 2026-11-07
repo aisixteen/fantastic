@@ -3216,6 +3216,11 @@ mod binary_steps;
 #[path = "tests_credential_forward.rs"]
 mod credential_forward;
 
+/// The two-way kernel bridge (#476): a `ws_bridge` dialing `web_ws` is the
+/// remote kernel's leg — calls and watches both ways, gated by the leg.
+#[path = "tests_two_way.rs"]
+mod two_way;
+
 /// ANY verb whose reply carries raw bytes answers binary on every leg — no verb
 /// list (python `io_bridge/tests/test_any_verb_bytes_reply.py`).
 #[path = "tests_any_verb_bytes.rs"]

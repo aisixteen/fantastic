@@ -396,8 +396,9 @@ async def test_d_a_peer_bridge_engine_answers_a_text_call_with_bytes(two):
     sock = _WsEnd(mt_h)
     serving = asyncio.create_task(ws_run(sock, kh, kh.id, "h_ws"))
     try:
+        # P's leg says `hello {guid, leg}` itself, first, at boot
+        kp.update(kp.id, guid="P-g")
         assert (await _op(kp, p["result"]["id"], {"type": "boot"}))["result"]["booted"]
-        await mt_p.send({"type": "hello", "guid": "P-g"})
         await _until(lambda: "P-g" in kh.ctx.peers)
         app = FastAPI()
         app.add_api_route(

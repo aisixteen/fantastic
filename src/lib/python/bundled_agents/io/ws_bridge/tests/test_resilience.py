@@ -245,6 +245,8 @@ async def test_a_mistyped_answer_id_is_skipped_while_a_forward_waits(two_kernels
     engine._test_transport_inject[a_id] = mine
     r = (await ka.send([{"target": a_id, "payload": {"type": "boot"}}]))[0]["result"]
     assert r.get("booted") is True, r
+    hello = await asyncio.wait_for(peer.recv(), 2.0)
+    assert hello == {"type": "hello", "guid": "guid-a", "leg": a_id}, hello
     fwd = asyncio.ensure_future(
         ka.send(
             [

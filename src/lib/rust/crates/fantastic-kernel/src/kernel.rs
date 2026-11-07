@@ -192,6 +192,10 @@ pub struct Kernel {
     /// call's ordinary outcome. A TRANSPORT registers the peer it is connected to
     /// and unregisters it when the connection ends. See [`crate::peers`].
     pub(crate) peers: crate::peers::PeerTable,
+    /// This kernel's watches of PEER agents (`<guid>|<agent>`), per guid — they
+    /// outlive a connection and are asked for again when the guid reconnects.
+    /// See [`crate::peers`].
+    pub(crate) peer_watches: crate::peers::PeerWatchTable,
     /// The on-disk children-container dir name — `<agent>/<children_dir>/<child>`
     /// for EVERY agent of this tree. The root record declares it (a
     /// self-describing layout sets e.g. `host_agents`); [`Self::load`] reads it,
@@ -264,6 +268,7 @@ impl Kernel {
             exec: crate::executions::ExecState::default(),
             extensions: DashMap::new(),
             peers: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            peer_watches: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             children_dir: RwLock::new(DEFAULT_CHILDREN_DIR.to_string()),
         }
     }

@@ -271,6 +271,8 @@ async def test_a_malformed_rule_on_the_record_denies_in_python_s_words(seeded_ke
     mine, peer = MemoryTransport.pair()
     _test_transport_inject["br"] = mine
     assert (await _call(k, "br", {"type": "boot"})).get("booted") is True
+    hello = await asyncio.wait_for(peer.recv(), 2.0)
+    assert hello == {"type": "hello", "guid": "guid-a", "leg": "br"}, hello
     await peer.send(
         {
             "type": "call",

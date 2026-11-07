@@ -209,25 +209,14 @@ pub(super) async fn until(what: &str, pred: impl Fn() -> bool) {
 /// python `_WsEnd`: a bridge leg's memory half whose far end is a REAL socket
 /// into `web_id`'s web_ws — every frame crosses the codec. Returns the binary
 /// heads that crossed, both ways, in order, `_binary_path` and all (the TEST's
-/// capture). `hello` makes the leg's kernel the host's peer under that guid.
-async fn ws_end(
-    port: u16,
-    web_id: &str,
-    half: Arc<dyn BridgeTransport>,
-    hello: Option<&str>,
-) -> Arc<Mutex<Vec<Value>>> {
+/// capture). The leg says its own `hello` at boot, which makes its kernel the
+/// host's peer under its guid.
+async fn ws_end(port: u16, web_id: &str, half: Arc<dyn BridgeTransport>) -> Arc<Mutex<Vec<Value>>> {
     let heads: Arc<Mutex<Vec<Value>>> = Arc::default();
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/{web_id}/ws"))
         .await
         .expect("ws connect");
     let (mut sink, mut source) = ws.split();
-    if let Some(guid) = hello {
-        sink.send(TMessage::Text(
-            json!({"type": "hello", "guid": guid}).to_string(),
-        ))
-        .await
-        .expect("hello");
-    }
     // web_ws → the leg
     let (down, seen) = (Arc::clone(&half), Arc::clone(&heads));
     tokio::spawn(async move {
@@ -274,7 +263,7 @@ async fn ws_end(
 
 /// [`ws_end`] for a caller that wants only the pipe.
 pub(super) async fn ws_end_for_tests(port: u16, web_id: &str, half: Arc<dyn BridgeTransport>) {
-    let _ = ws_end(port, web_id, half, None).await;
+    let _ = ws_end(port, web_id, half).await;
 }
 
 fn binary_paths(heads: &Arc<Mutex<Vec<Value>>>) -> Vec<Value> {
@@ -319,7 +308,7 @@ async fn a_literal_key_crosses_a_ws_bridge_forward_both_ways() {
     let half = fantastic_bridge::inject_one(&AgentId::from(a_leg.as_str()));
     let booted = op(&ka, &a_leg, json!({"type": "boot"})).await.result;
     assert_eq!(booted["booted"], json!(true), "{booted}");
-    let heads = ws_end(port, &b_web, half, None).await;
+    let heads = ws_end(port, &b_web, half).await;
 
     let out = ka
         .send(vec![Item::new(
@@ -405,7 +394,7 @@ async fn web_rest_literal_binding_stays_literal_across_a_bridge() {
     let half = fantastic_bridge::inject_one(&AgentId::from(p_leg.as_str()));
     let booted = op(&kp, &p_leg, json!({"type": "boot"})).await.result;
     assert_eq!(booted["booted"], json!(true), "{booted}");
-    let heads = ws_end(port, &h_web, half, Some("P-g")).await;
+    let heads = ws_end(port, &h_web, half).await;
     until("P is H's peer", || !kh.peer_routes("P-g").is_empty()).await;
 
     let r = reqwest::Client::new()

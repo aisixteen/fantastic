@@ -7,7 +7,7 @@ Verbs: `boot` · `reconnect` · `forward(target,payload[,forward_timeout])` · `
 Transports: `ws` (default) · `memory` (test). No tunnel is spawned here — an ssh tunnel is an `exec_bridge` job or devops; dial its local end.
 Emits: `bridge_up` · `bridge_down` · remote events for a `watch_remote` subscription only (payload + `src`); anything unsubscribed is dropped.
 
-Inbound calls (a paired transport) are served AS THIS LEG: its `can_call` and the target's `callable_by` decide.
+**Two-way.** At every boot (`reconnect` included) the first frame is `{type:"hello", guid, leg}` (this kernel's guid, when it has one): the remote `web_ws` then reaches this kernel's agents as `<guid>|<agent>`, and a redial replaces the dropped connection there. Inbound calls are served AS THIS LEG: its `can_call` and the target's `callable_by` decide. An inbound `{type:"watch"|"unwatch", src}` watches a local agent AS THIS LEG (the ingress rule, then `watch` on `src` in its `can_call` and the target's `callable_by`); its events go back as `{type:"event", src, payload}` until `unwatch` or the link drops, and a reply goes out after the events its call produced. A refused watch is answered `{type:"error", src, …}`.
 
 Frame ids are `<leg id>-<boot nonce>-<n>` — fresh per boot, so a restarted sender never names an execution the peer already settled.
 

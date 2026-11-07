@@ -33,3 +33,14 @@ and a reply this leg sends one tab is mirrored to the others as `{type:"reply_mi
 being a route (the guid stays an address while another connection holds it) and every
 call still waiting on it settles as a `transport_error`. This leg only carries the frames: the
 host kernel routes and gates the sender, the page kernel gates its own agents.
+
+**A kernel's leg.** A `ws_bridge` dialing in says `{type:"hello", guid, leg}` (its own
+id as `leg`): the same address, plus watches. A host `watch` of `<guid>|<agent>` (gated
+like a send: `watch` on that id in the watcher's `can_call`) rides this socket as
+`{type:"watch"|"unwatch", src}`; the leg streams the agent's events back as
+`{type:"event", src, payload}` to the host's watchers. One connection per kernel guid:
+a newer hello for it replaces the older connection (closed; its waiting calls settle
+`transport_error`, text `bridge_down: …`), and the host's watches of the guid are asked
+for again on the new one — events emitted while no connection was up are not replayed.
+A page's agents cannot be watched. Call frame ids carry a per-connection nonce
+(`h-<nonce>-<n>`), so a reconnected kernel never sees an id twice.

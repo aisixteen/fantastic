@@ -13,12 +13,22 @@
 //! A SET PER GUID: the tabs of one identity are ONE principal
 //! — every tab says hello with the identity's guid, each is a live route of it, a
 //! call to `<guid>|x` goes to all of them and settles with the first reply.
+//!
+//! WATCHING A PEER'S AGENT: `watch(<guid>|<agent>, watcher)` is gated like a
+//! send (the watcher's `can_call` must grant `watch` on the qualified id) and
+//! asks the peer's routes that carry watches (a peer KERNEL's leg, not a page
+//! tab) to stream that agent's events here; each one the transport hands back
+//! ([`Kernel::peer_event`]) lands in every watcher's inbox. The subscription is
+//! THIS kernel's, per guid: it outlives the connection, and a transport that
+//! registers the guid again re-asks for every watched agent
+//! ([`Kernel::peer_watched`]). Events emitted while no connection was up are not
+//! replayed.
 
 use crate::agent::{Agent, AgentId};
 use crate::kernel::Kernel;
 use crate::outcome::Blob;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -46,6 +56,11 @@ pub type PeerEmitFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// the raw body rides at its payload path.
 type PeerEmitFn = dyn Fn(String, Value, Option<Blob>) -> PeerEmitFuture + Send + Sync;
 
+/// `watch(agent_id, on)` — ask the peer to start (`on`) or stop streaming
+/// `agent_id`'s events over this route; it settles once the frame is handed to
+/// the transport.
+type PeerWatchFn = dyn Fn(String, bool) -> PeerEmitFuture + Send + Sync;
+
 /// How a connected PEER KERNEL is reached. `via` names the transport agent
 /// carrying it (the root reflect reports it); the call delivers one call and
 /// resolves with the peer's reply — or a refusal when the connection ends first.
@@ -57,6 +72,9 @@ pub struct PeerRoute {
     pub via: String,
     call: Box<PeerCallFn>,
     emit: Box<PeerEmitFn>,
+    /// `Some` when the peer streams its agents' events back (a kernel's leg);
+    /// `None` for a peer that cannot be watched (a page tab).
+    watch: Option<Box<PeerWatchFn>>,
 }
 
 impl PeerRoute {
@@ -71,7 +89,30 @@ impl PeerRoute {
             via: via.into(),
             call: Box::new(call),
             emit: Box::new(emit),
+            watch: None,
         })
+    }
+
+    /// [`Self::new`] for a peer whose agents can be WATCHED: `watch` asks it to
+    /// start or stop streaming one agent's events over this route.
+    pub fn with_watch<F, E, W>(via: impl Into<String>, call: F, emit: E, watch: W) -> Arc<Self>
+    where
+        F: Fn(String, Value, Option<Blob>) -> PeerCallFuture + Send + Sync + 'static,
+        E: Fn(String, Value, Option<Blob>) -> PeerEmitFuture + Send + Sync + 'static,
+        W: Fn(String, bool) -> PeerEmitFuture + Send + Sync + 'static,
+    {
+        Arc::new(Self {
+            via: via.into(),
+            call: Box::new(call),
+            emit: Box::new(emit),
+            watch: Some(Box::new(watch)),
+        })
+    }
+
+    /// Ask the peer to start (`on`) or stop streaming `agent_id`'s events — `None`
+    /// when this route carries no watches.
+    pub fn watch(&self, agent_id: String, on: bool) -> Option<PeerEmitFuture> {
+        self.watch.as_ref().map(|w| w(agent_id, on))
     }
 
     /// Deliver one emit through this route.
@@ -104,6 +145,10 @@ pub(crate) struct RemoteRef {
 /// SORTED by guid so `peer_rows` reads in python's `sorted(self.peers.items())`
 /// order.
 pub(crate) type PeerTable = std::sync::Mutex<BTreeMap<String, Vec<Arc<PeerRoute>>>>;
+
+/// This kernel's watches of peer agents — `(guid, agent id)` → the local
+/// watchers. Kept per guid across connections (see the module doc).
+pub(crate) type PeerWatchTable = std::sync::Mutex<BTreeMap<(String, String), BTreeSet<String>>>;
 
 impl Kernel {
     fn peer_table(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Vec<Arc<PeerRoute>>>> {
@@ -151,6 +196,118 @@ impl Kernel {
                 .flat_map(|(g, rs)| rs.iter().map(move |r| json!({"guid": g, "via": r.via})))
                 .collect(),
         )
+    }
+
+    fn peer_watch_table(
+        &self,
+    ) -> std::sync::MutexGuard<'_, BTreeMap<(String, String), BTreeSet<String>>> {
+        self.peer_watches.lock().expect("peer watches poisoned")
+    }
+
+    /// The agents of peer `guid` this kernel watches — what a transport that
+    /// (re)connects that guid asks the peer to stream again.
+    #[must_use]
+    pub fn peer_watched(&self, guid: &str) -> Vec<String> {
+        self.peer_watch_table()
+            .keys()
+            .filter(|(g, _)| g == guid)
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+
+    /// An event the peer `guid` streamed for its agent `agent_id`: into the inbox
+    /// of every local watcher of `<guid>|<agent_id>`, as a local watch mirrors —
+    /// and nothing on the state stream (the event happened on the other kernel).
+    /// An event nobody here watches is dropped.
+    pub fn peer_event(&self, guid: &str, agent_id: &str, item: &crate::inbox::InboxItem) {
+        let watchers: Vec<AgentId> = self
+            .peer_watch_table()
+            .get(&(guid.to_string(), agent_id.to_string()))
+            .map(|w| w.iter().map(|id| AgentId::from(id.as_str())).collect())
+            .unwrap_or_default();
+        for w in watchers {
+            if let Some(tx) = self.inboxes.get(&w).map(|e| e.clone()) {
+                tx.send(item.clone());
+            }
+        }
+    }
+
+    /// `watch` of an agent on a connected peer (`target` is the remote target one
+    /// send would resolve): gated like a send, the watcher must already be a
+    /// reader, and the peer must carry watches. The first local watcher of that
+    /// agent asks every route of the guid to stream it.
+    pub(crate) async fn watch_peer(
+        self: &Arc<Self>,
+        target: &Arc<Agent>,
+        watcher_id: AgentId,
+    ) -> Option<Value> {
+        let remote = target.remote.as_ref()?;
+        if let Some(orig) = crate::send::current_sender() {
+            if let Some(denial) = self.gate(&orig, "watch", target) {
+                return Some(denial);
+            }
+        }
+        if let Some(r) = self.no_consumer(&watcher_id, &target.id) {
+            return Some(r);
+        }
+        if remote.routes.iter().all(|r| r.watch.is_none()) {
+            let mut r = crate::refusal::refusal(
+                crate::refusal::UNHANDLED,
+                format!(
+                    "watch: the peer {} is not a kernel leg — its agents cannot be watched",
+                    remote.guid
+                ),
+            );
+            crate::refusal::with(&mut r, "src", json!(target.id.0));
+            return Some(r);
+        }
+        let first = {
+            let mut table = self.peer_watch_table();
+            let set = table
+                .entry((remote.guid.clone(), remote.agent_id.clone()))
+                .or_default();
+            let first = set.is_empty();
+            set.insert(watcher_id.0);
+            first
+        };
+        if first {
+            for r in &remote.routes {
+                if let Some(f) = r.watch(remote.agent_id.clone(), true) {
+                    f.await;
+                }
+            }
+        }
+        None
+    }
+
+    /// `unwatch` of `<guid>|<agent>`: forget the watcher; the last one asks the
+    /// guid's live routes to stop streaming the agent.
+    pub(crate) async fn unwatch_peer(&self, qualified: &str, watcher_id: &AgentId) {
+        let Some((guid, agent_id)) = qualified.split_once('|') else {
+            return;
+        };
+        let key = (guid.to_string(), agent_id.to_string());
+        let last = {
+            let mut table = self.peer_watch_table();
+            let Some(set) = table.get_mut(&key) else {
+                return;
+            };
+            if !set.remove(&watcher_id.0) {
+                return;
+            }
+            let last = set.is_empty();
+            if last {
+                table.remove(&key);
+            }
+            last
+        };
+        if last {
+            for r in self.peer_routes(guid) {
+                if let Some(f) = r.watch(agent_id.to_string(), false) {
+                    f.await;
+                }
+            }
+        }
     }
 
     /// This kernel's own guid — the root record's `guid`, once its loader minted

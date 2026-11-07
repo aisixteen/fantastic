@@ -41,7 +41,7 @@ from io_bridge.channel import CredentialExtractor, EnvelopeExtractor
 from io_bridge.ingress_rules import resolve_ingress, unknown_ingress_refusal
 from io_bridge.egress_rules import resolve_egress
 from kernel import note_reply_secret
-from kernel._refusal import NOT_CONNECTED, UNHANDLED, refusal
+from kernel._refusal import NOT_CONNECTED, UNHANDLED, UNKNOWN_AGENT, refusal
 
 DEFAULT_FORWARD_TIMEOUT = 30.0
 
@@ -115,6 +115,10 @@ class _BridgeState:
     # `event` frame is re-emitted only when its `src` is here — nothing flows
     # until subscribed, and nothing after an unwatch.
     watching: set[str] = field(default_factory=set)
+    # The LOCAL agents the far side watches through this leg (an inbound `watch`
+    # frame), by the `src` it named → (the agent, the watch's reader, its drain
+    # task, the leg agent that holds it). Dropped on `unwatch` and with the link.
+    served: dict[str, tuple[str, str, asyncio.Task, Any]] = field(default_factory=dict)
 
 
 # Per-agent bridge state — process-memory only, keyed by agent id (shared across
@@ -255,6 +259,85 @@ async def _serve_inbound_call(
         pass  # the peer went away mid-dispatch; the read loop already knows
 
 
+def _refuse_watch_frame(frame: dict, src: str, denial: dict) -> dict:
+    """`{type:"error", id, src, **refusal}` — the answer to an inbound `watch` that
+    did not register (its keys flattened, as `web_ws` answers a refused watch)."""
+    return {"type": "error", "id": frame.get("id", ""), "src": src, **denial}
+
+
+async def _serve_watch(
+    id: str, st: "_BridgeState", transport: _BaseTransport, kernel: Any, frame: dict
+) -> None:
+    """Serve ONE inbound `{type:"watch", src}`: the far side asks to watch the
+    local agent `src` through this leg. The leg's INGRESS rule first (kind
+    `watch`, off the live record per frame), then the kernel's own gate AS THE
+    LEG — this runs in the leg's read loop, so the leg's `can_call` must grant
+    `watch` on `src` and `src`'s `callable_by` must accept the leg. Registered,
+    the agent's events stream back as `{type:"event", src, payload}` until
+    `unwatch` or the link drops. A refusal, or a name that is no agent, is
+    answered with an `error` frame and nothing is registered. Inline in the read
+    loop, so a call frame that follows it is served after the watch is in place."""
+    src = frame.get("src")
+    if not isinstance(src, str) or not src or src in st.served:
+        return
+    decision = gate_inbound(resolve_ingress(kernel.get(id) or {}), "watch", frame)
+    if not decision.allowed:
+        denial: dict = {"error": decision.reason, "reason": "unauthorized"}
+        if decision.hint:
+            denial["hint"] = decision.hint
+        if decision.see:
+            denial["see"] = decision.see
+        await _send_quiet(transport, _refuse_watch_frame(frame, src, denial))
+        return
+    target = kernel._resolve_agent(src)
+    if target is None:
+        denial = refusal(UNKNOWN_AGENT, f"watch: no agent {src!r} (an id, or `kernel`)")
+        await _send_quiet(transport, _refuse_watch_frame(frame, src, denial))
+        return
+    # THIS WATCH'S OWN READER — registered before the watch asks for one.
+    reader = f"{id}>{target.id}"
+    q = kernel.ctx.ensure_inbox(reader)
+    denial = kernel.watch(target.id, reader)
+    if denial is not None:
+        kernel.ctx.inboxes.pop(reader, None)
+        await _send_quiet(transport, _refuse_watch_frame(frame, src, denial))
+        return
+
+    async def drain() -> None:
+        while True:
+            payload = await q.get()
+            try:
+                await transport.send({"type": "event", "src": src, "payload": payload})
+            except ConnectionClosed:
+                return
+
+    task = kernel.ctx.tasks[kernel.ctx.spawn_task(id, "watch_drain", drain())]["_task"]
+    st.served[src] = (target.id, reader, task, kernel)
+
+
+def _drop_watch(served: tuple[str, str, asyncio.Task, Any]) -> None:
+    """Give one served watch back: unwatch the leg's reader, stop its drain, drop
+    its inbox."""
+    aid, reader, task, leg = served
+    leg.unwatch(aid, reader)
+    task.cancel()
+    leg.ctx.inboxes.pop(reader, None)
+
+
+def _drop_served(st: "_BridgeState") -> None:
+    """Every watch the far side held through this leg, given back — the link is
+    gone (or going)."""
+    for src in list(st.served):
+        _drop_watch(st.served.pop(src))
+
+
+async def _send_quiet(transport: _BaseTransport, frame: dict) -> None:
+    try:
+        await transport.send(frame)
+    except ConnectionClosed:
+        pass  # the peer went away; the read loop already knows
+
+
 async def _read_loop(id: str, kernel: Any) -> None:
     """Long-lived consumer of the transport. Frame shapes:
 
@@ -269,6 +352,9 @@ async def _read_loop(id: str, kernel: Any) -> None:
       - inbound `event` — `{type:'event', src, payload}` from a remote `watch`;
         re-emitted (payload + `src`) on this bridge's inbox ONLY when `src` is a
         subscribed remote agent (`watch_remote`), else dropped.
+      - inbound `watch`/`unwatch` — `{type:'watch'|'unwatch', src}`: the far side
+        watching a LOCAL agent through this leg (`_serve_watch`); its events go
+        back as `{type:'event', src, payload}` until `unwatch` or the link drops.
 
     On ConnectionClosed: emit `{type:'bridge_down'}`, fail every pending Future.
     """
@@ -322,6 +408,13 @@ async def _read_loop(id: str, kernel: Any) -> None:
                         await kernel.emit(id, {**payload, "src": src})
                     except Exception:
                         pass
+            elif ftype == "watch":
+                await _serve_watch(id, st, transport, kernel, frame)
+            elif ftype == "unwatch":
+                # NO GATE — giving a watch back (as `web_ws` leaves it ungated).
+                src = frame.get("src")
+                if isinstance(src, str) and src in st.served:
+                    _drop_watch(st.served.pop(src))
             # Other frame types are ignored so the loop stays robust.
     finally:
         # The transport is gone — every in-flight inbound dispatch has nowhere to
@@ -331,6 +424,7 @@ async def _read_loop(id: str, kernel: Any) -> None:
             t.cancel()
         st.pending_calls.clear()
         st.watching.clear()
+        _drop_served(st)
         try:
             await kernel.emit(id, {"type": "bridge_down"})
         except Exception:
@@ -356,6 +450,7 @@ async def _teardown(id: str) -> None:
     for t in list(st.pending_calls):
         t.cancel()
     st.pending_calls.clear()
+    _drop_served(st)
     if st.transport is not None:
         try:
             await st.transport.close()
@@ -388,12 +483,19 @@ async def boot(
     kernel,
     *,
     build_transport: BuildTransport,
+    hello: bool = False,
 ):
     """Shared boot: idempotency + the `memory` test kind + the `build_transport`
     seam for every other kind, then the common tail (mint this boot's correlator
     nonce, spawn read loop, emit `bridge_up`). The leg's rules are NOT cached here:
     the gate and `forward` read them off the live record per frame; boot only
-    refuses an egress rule the registry does not know, before dialing."""
+    refuses an egress rule the registry does not know, before dialing.
+
+    `hello` (the `ws_bridge` derivation): the leg's FIRST frame, at every boot, is
+    `{type:"hello", guid, leg}` — the far `web_ws` registers this connection as
+    this kernel's leg, so its agents reach ours as `<guid>|<agent>`, and a redial
+    replaces the dropped connection there. A kernel with no guid yet has no
+    address to give and says nothing."""
     rec = kernel.get(id) or {}
     st = _state(id)
     if st.transport is not None and not st.transport.closed:
@@ -422,6 +524,14 @@ async def boot(
                     pass
                 st.cleanup = None
             return {"error": f"bridge: {kind} boot failed: {e}"}
+
+    guid = kernel._root()._meta.get("guid") if hello else None
+    if isinstance(guid, str) and guid:
+        try:
+            await transport.send({"type": "hello", "guid": guid, "leg": id})
+        except ConnectionClosed as e:
+            await transport.close()
+            return {"error": f"bridge: {kind} boot failed: hello: {e}"}
 
     st.transport = transport
     st.transport_kind = kind
@@ -532,15 +642,19 @@ def make_verbs(
     sentence: str,
     reflect_fields: Callable[[dict, _BridgeState], dict],
     default_kind: str = "ws",
+    hello: bool = False,
 ) -> dict:
     """Build the 6-verb table for a bridge bundle. `reflect_fields(rec, st)`
     supplies the transport-specific reflect fields; `sentence` is the one-liner;
-    `default_kind` is the `transport` a record without one reflects. The leg's ingress/egress
+    `default_kind` is the `transport` a record without one reflects; `hello` makes
+    every boot say `hello {guid, leg}` first (see `boot`). The leg's ingress/egress
     rules are resolved from the record by the shared registries (see boot)."""
 
     async def _boot(id, payload, kernel):
         """No args. Reads `transport` (kind) + transport-specific fields off the agent record, builds the transport, spawns the read loop, emits `bridge_up`. Idempotent: re-booting a connected bridge is a no-op."""
-        return await boot(id, payload, kernel, build_transport=build_transport)
+        return await boot(
+            id, payload, kernel, build_transport=build_transport, hello=hello
+        )
 
     async def _reconnect(id, payload, kernel):
         """No args. Teardown + boot — explicit because we don't auto-reconnect on transport failure (keeps real network problems visible to operators / telemetry)."""
