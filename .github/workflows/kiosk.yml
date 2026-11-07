@@ -1,18 +1,10 @@
 # fantastic OS, the kiosk (`kiosk/`): its own crate on the fantastic base, built and
-# tested on its own. The base's workflows build without it.
+# tested on its own, run by hand (`gh workflow run kiosk.yml --ref <branch>`). The base's
+# workflows build without it.
 name: kiosk
 
 on:
-  pull_request:
-    paths:
-      - "kiosk/**"
-      - ".github/workflows/kiosk.yml"
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "kiosk/**"
-      - ".github/workflows/kiosk.yml"
 
 env:
   CARGO_TERM_COLOR: always
@@ -95,7 +87,6 @@ jobs:
   # (actions/runner-images#14062), so arm64 boots on TCG, slowly, and does not fail
   # the run until a green boot has been seen.
   image:
-    if: github.event_name != 'pull_request'
     needs: [units, session-package]
     name: image · ${{ matrix.arch }}
     strategy:
