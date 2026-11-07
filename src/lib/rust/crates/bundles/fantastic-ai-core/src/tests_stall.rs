@@ -201,3 +201,254 @@ async fn a_queued_send_waits_behind_a_stalled_turn_and_runs_when_the_window_ends
         s.request(1)
     );
 }
+
+// ─── a failed turn settles its sender and tells its watchers (#496) ─────────
+
+/// Holds the process-wide send ceiling at `secs` and restores what it found.
+struct Ceiling(Option<String>);
+
+impl Ceiling {
+    fn set(secs: &str) -> Self {
+        let prev = std::env::var("FANTASTIC_AI_SEND_TIMEOUT").ok();
+        std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", secs);
+        Self(prev)
+    }
+}
+
+impl Drop for Ceiling {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => std::env::set_var("FANTASTIC_AI_SEND_TIMEOUT", v),
+            None => std::env::remove_var("FANTASTIC_AI_SEND_TIMEOUT"),
+        }
+    }
+}
+
+/// A send whose turn outlives the ceiling settles with the kernel's refusal shape,
+/// `reason: timeout` (a sender branching on `reason` settles on it), carrying the
+/// same text the error row holds. The agent emits `done {reason: timeout}`, and the
+/// turn is NOT retried: one pass served, however long the caller waits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timed_out_turn_settles_its_sender_with_reason_timeout_and_is_not_retried() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let _ceiling = Ceiling::set("0.1");
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_to_reason").await;
+    let s = script(
+        &backend,
+        vec![pass("never arrives"), pass("never arrives")],
+        Duration::from_millis(800),
+    );
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let mut seen: Vec<Value> = Vec::new();
+    let out = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out["reason"], json!("timeout"), "{out}");
+    assert_eq!(out["client_id"], json!("probe"), "{out}");
+    let error = out["error"].as_str().unwrap_or_default();
+    assert!(error.starts_with("send: timeout after 0.1s"), "{out}");
+    events_until(&mut rx, &mut seen, |ev| {
+        status_of(ev, "probe", "done").is_some()
+    })
+    .await;
+    let done = status_of(&seen, "probe", "done").expect("done");
+    assert_eq!(done["detail"]["reason"], json!("timeout"), "{done}");
+    let rows = stored_rows(&kernel, &backend).await;
+    assert_eq!(error_rows(&rows).len(), 1, "{rows:#?}");
+    // nothing retries it: the agent is idle and no second pass starts
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(s.passes_served(), 1, "the failed turn was run again");
+}
+
+/// A provider failure that is not a timeout also emits `done {reason: error}` and
+/// leaves the sender with an error reply (a raised failure, as ever), once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_provider_turn_settles_its_sender_and_emits_done_error_once() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_fail_done").await;
+    let s = script(
+        &backend,
+        vec![vec![ScriptEvent::Fail("boom".into())], pass("never")],
+        Duration::ZERO,
+    );
+    let mut rx = rebind_backend_inbox(&kernel, &backend);
+    let mut seen: Vec<Value> = Vec::new();
+    let out = kernel
+        .send(vec![Item::new(
+            backend.clone(),
+            json!({"type": "send", "text": "go", "client_id": "probe"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert_eq!(out["raised"], json!(true), "{out}");
+    assert!(out["error"].as_str().unwrap_or_default().contains("boom"));
+    events_until(&mut rx, &mut seen, |ev| {
+        status_of(ev, "probe", "done").is_some()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while let Some(v) = rx.try_recv() {
+        seen.push(v.payload);
+    }
+    let dones: Vec<&Value> = seen
+        .iter()
+        .filter(|e| {
+            e["type"] == json!("status")
+                && e["phase"] == json!("done")
+                && e["client_id"] == json!("probe")
+        })
+        .collect();
+    assert_eq!(dones.len(), 1, "{seen:#?}");
+    assert_eq!(dones[0]["detail"]["reason"], json!("error"), "{dones:#?}");
+    assert_eq!(s.passes_served(), 1, "the failed turn was run again");
+}
+
+/// A message held behind a chain is answered by the pass that reads it. When that
+/// pass times out, the held sender settles with the same `reason: timeout` reply
+/// (under its own `client_id`), not a bare error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_sender_settles_with_reason_timeout_when_the_turn_that_reads_it_times_out() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let _ceiling = Ceiling::set("0.5");
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_held_to").await;
+    let s = script(
+        &backend,
+        vec![pass("never arrives")],
+        Duration::from_millis(1500),
+    );
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let second = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    let one = first.await.expect("first");
+    assert_eq!(one["reason"], json!("timeout"), "{one}");
+    let two = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("the held sender was left waiting")
+        .expect("second");
+    assert_eq!(two["reason"], json!("timeout"), "{two}");
+    assert_eq!(two["client_id"], json!("t"), "{two}");
+}
+
+/// A parent that sent to a child and awaits its reply reads the child's failure:
+/// the child's send settles with `reason: timeout` and the parent's next turn is
+/// handed that reply, not silence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parent_awaiting_a_child_that_times_out_is_handed_the_timeout() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let _ceiling = Ceiling::set("0.5");
+    let tmp = TempDir::new().unwrap();
+    let (kernel, parent) = mk_kernel(&tmp, "rt_parent_to").await;
+    let child = add_peer(&kernel, &tmp, &parent).await;
+    let cs = script(
+        &child,
+        vec![pass("never arrives")],
+        Duration::from_millis(2500),
+    );
+    let ps = script(
+        &parent,
+        vec![
+            pass(call_envelope(
+                child.as_str(),
+                json!({"type": "send", "text": "work"}),
+                None,
+            )),
+            pass(r#"<call name="done"></call>"#),
+        ],
+        Duration::ZERO,
+    );
+    let _ = kernel
+        .send(vec![Item::new(
+            parent.clone(),
+            json!({"type": "send", "text": "go"}),
+        )])
+        .await
+        .remove(0)
+        .result;
+    assert!(until_passes(&cs, 1).await, "the child never started");
+    assert!(
+        until_passes(&ps, 2).await,
+        "the parent was never handed the child's failure"
+    );
+    let seen = ps.request(1);
+    assert!(
+        seen.contains("[reply to ") && seen.contains("timeout"),
+        "{seen}"
+    );
+}
+
+/// A held sender whose answering pass fails on the provider settles with the
+/// existing `transport_error` code under its own `client_id`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_sender_settles_with_transport_error_when_the_turn_that_reads_it_fails() {
+    let _guard = SEND_TIMEOUT_ENV_LOCK.lock().await;
+    let tmp = TempDir::new().unwrap();
+    let (kernel, backend) = mk_kernel(&tmp, "rt_held_fail").await;
+    let s = script(
+        &backend,
+        // the first turn fails, and so does the wake turn that reads the held message
+        vec![
+            vec![ScriptEvent::Fail("boom".into())],
+            vec![ScriptEvent::Fail("boom".into())],
+        ],
+        Duration::from_millis(1000),
+    );
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let first = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "one", "client_id": "o"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    assert!(until_passes(&s, 1).await, "the first pass never started");
+    let (k, b) = (Arc::clone(&kernel), backend.clone());
+    let second = tokio::spawn(async move {
+        k.send(vec![Item::new(
+            b,
+            json!({"type": "send", "text": "two", "client_id": "t"}),
+        )])
+        .await
+        .remove(0)
+        .result
+    });
+    until_held(&backend, 1).await;
+    let one = first.await.expect("first");
+    assert_eq!(one["raised"], json!(true), "{one}");
+    let two = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("the held sender was left waiting")
+        .expect("second");
+    assert_eq!(two["reason"], json!("transport_error"), "{two}");
+    assert_eq!(two["client_id"], json!("t"), "{two}");
+    assert!(two["error"].as_str().unwrap_or_default().contains("boom"));
+}

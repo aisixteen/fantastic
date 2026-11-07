@@ -85,7 +85,14 @@ from ai_core.tool_parse import (
     render_reply,
 )
 from kernel import current_origin, current_task
-from kernel._refusal import BAD_ARG, LOCKED, UNHANDLED, refusal
+from kernel._refusal import (
+    BAD_ARG,
+    LOCKED,
+    TIMEOUT,
+    TRANSPORT_ERROR,
+    UNHANDLED,
+    refusal,
+)
 from kernel._refusal import bad as bad_arg
 from ai_core.constants import (  # noqa: F401 — re-exported seams
     CACHE_LIFETIME_SECS,
@@ -759,6 +766,13 @@ async def _store_failed_turn(
     except Exception as e:
         return str(e)
     return None
+
+
+def _timeout_reply(message: str, client_id: str) -> dict:
+    """The reply of a send that outlived its ceiling (#496): the kernel's refusal
+    shape with the existing `timeout` code, so a sender branching on `reason`
+    settles on it; `client_id` is the one the send came in on."""
+    return {**refusal(TIMEOUT, message), "client_id": client_id}
 
 
 def _with_store_outcome(message: str, stored_error: str | None) -> str:
@@ -3689,10 +3703,7 @@ def _make_send(cfg: Backend):
                 async with asyncio.timeout(SEND_TIMEOUT):
                     return await fut
             except TimeoutError:
-                return {
-                    "error": f"send: timeout after {SEND_TIMEOUT}s",
-                    "client_id": client_id,
-                }
+                return _timeout_reply(f"send: timeout after {SEND_TIMEOUT}s", client_id)
         settle_owed()
         entry = {
             "client_id": client_id,
@@ -3830,10 +3841,7 @@ def _make_send(cfg: Backend):
                 stored = await _store_failed_turn(
                     id, kernel, text, bool(entry.get("notice")), message
                 )
-                reply = {
-                    "error": _with_store_outcome(message, stored),
-                    "client_id": client_id,
-                }
+                reply = _timeout_reply(_with_store_outcome(message, stored), client_id)
             except MemoryStoreError as e:
                 # FAIL FAST: the store refused or is gone — no turn, said so.
                 await _emit_status(
@@ -3891,7 +3899,11 @@ def _make_send(cfg: Backend):
                 )
                 # ONE CHAIN PER AGENT (#227): a pass that raised is not routed — its
                 # chain ends here, and the held sends it took get its error.
-                _answer_held(answering, {"error": message})
+                held_answer = {"error": message}
+                if not isinstance(e, ValueError):
+                    # a link or provider failure: the existing transport code
+                    held_answer["reason"] = TRANSPORT_ERROR
+                _answer_held(answering, held_answer)
                 _chain_ended(kernel, id, system_prompt)
                 raise
             finally:
