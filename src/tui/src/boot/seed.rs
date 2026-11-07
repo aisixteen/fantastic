@@ -124,30 +124,86 @@ fn write_level(dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &
     Ok(())
 }
 
-/// Write one blueprint's top level. A top entry whose id an EARLIER blueprint
-/// wrote is a PARENT entry: it carries only `id` and `agents:`, names the parent,
-/// and its `agents:` are written beneath that agent. Its record is never
-/// rewritten, so any other field on it is refused.
-fn write_blueprint(agents_dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &str) -> Result<(), String> {
+/// Stock agents CODE creates after the seed (not on disk at seed time): a
+/// parent entry naming one declares grants for it, kept until it is made (see
+/// [`crate::boot::declared`]). Each is read by the code that creates it.
+const MADE_BY_CODE: [&str; 1] = [crate::kern::keys::STORE];
+
+/// The grants a parent entry carries, `@root` resolved: only `callable_by` and
+/// `can_call`, each a map.
+fn declared_grants(obj: &Map<String, Value>, id: &str) -> Result<Map<String, Value>, String> {
+    let mut g = Map::new();
+    for f in crate::boot::declared::FIELDS {
+        match obj.get(f) {
+            None => {}
+            Some(v @ Value::Object(_)) => {
+                g.insert(f.to_string(), v.clone());
+            }
+            Some(_) => return Err(format!("blueprint: `{id}.{f}` must be a grant map")),
+        }
+    }
+    resolve_root(&mut g);
+    Ok(g)
+}
+
+/// Write one blueprint's top level. A top entry is a PARENT entry when it names
+///
+/// - an agent an EARLIER blueprint wrote, or
+/// - the ROOT (`@root`, or the kernel's own root id), or
+/// - a stock agent code creates later ([`MADE_BY_CODE`]).
+///
+/// It carries `id`, `agents:` (written beneath that agent) and the grants
+/// `callable_by` / `can_call`, which are UNIONED into the agent's grants, never
+/// removing or narrowing one. Any other field is refused. An agent written
+/// earlier has its record rewritten with the union; the root and a code-made
+/// agent have no record yet, so their grants are declared for when they are made
+/// ([`crate::boot::declared`]). A code-made agent has no children dir to place
+/// `agents:` under, so it takes grants only.
+fn write_blueprint(paths: &Paths, agents_dir: &std::path::Path, list: &[Value], seen: &mut Written, who: &str) -> Result<(), String> {
     let earlier: std::collections::HashSet<String> = seen.ids.keys().cloned().collect();
+    let root_id = fantastic_kernel::bootstrap::DEFAULT_ROOT_ID;
     for entry in list {
-        let parent = entry
+        let id = entry
             .as_object()
             .and_then(|o| o.get("id"))
             .and_then(Value::as_str)
-            .filter(|id| earlier.contains(*id));
-        let Some(id) = parent else {
+            .filter(|id| earlier.contains(*id) || *id == ROOT_PLACEHOLDER || *id == root_id || MADE_BY_CODE.contains(id));
+        let Some(id) = id else {
             write_level(agents_dir, std::slice::from_ref(entry), seen, who)?;
             continue;
         };
         let obj = entry.as_object().expect("an entry with an id is a map");
-        if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "id" | "agents")) {
-            let (_, first) = &seen.ids[id];
+        let is_root = id == ROOT_PLACEHOLDER || id == root_id;
+        let first = seen.ids.get(id).map_or_else(|| "the kernel".to_string(), |(_, f)| f.clone());
+        if let Some(extra) = obj.keys().find(|k| !matches!(k.as_str(), "id" | "agents" | "callable_by" | "can_call")) {
             return Err(format!(
-                "blueprint: `{id}` in {who} is already written by {first}; as a parent it may carry only `id` and `agents`, not `{extra}`"
+                "blueprint: `{id}` in {who} is already written by {first}; as a parent it may carry only `id`, `agents`, `callable_by` and `can_call`, not `{extra}`"
             ));
         }
-        let under = seen.ids[id].0.join("agents");
+        let grants = declared_grants(obj, id)?;
+        if !grants.is_empty() {
+            match seen.ids.get(id) {
+                Some((at, _)) => {
+                    let f = at.join("agent.yaml");
+                    let Value::Object(mut rec) = crate::atomic::read_yaml(&f)? else {
+                        return Err(format!("{}: not a map", f.display()));
+                    };
+                    crate::boot::declared::union_record(&mut rec, &grants);
+                    atomic::write_yaml(&f, &Value::Object(rec))?;
+                }
+                None => crate::boot::declared::declare(&paths.cli, if is_root { root_id } else { id }, &grants)?,
+            }
+        }
+        let under = if is_root {
+            agents_dir.to_path_buf()
+        } else if let Some((at, _)) = seen.ids.get(id) {
+            at.join("agents")
+        } else {
+            if obj.contains_key("agents") {
+                return Err(format!("blueprint: `{id}` in {who} is made by code later; it takes grants, not `agents`"));
+            }
+            continue;
+        };
         match obj.get("agents") {
             None => {}
             Some(Value::Array(k)) => write_level(&under, k, seen, who)?,
@@ -181,10 +237,15 @@ pub fn seed_dir(dir: &std::path::Path) -> Result<bool, String> {
 /// in order, by the same writer and under the same rules (no `parent_id`, no
 /// `mcp`, `@root` resolved, disk position is the parent). Ids land as written.
 ///
-/// A top entry whose id an earlier blueprint wrote is a parent entry: only `id`
-/// and `agents:`, and its `agents:` are written beneath that agent. Any other
-/// field on it is refused, and so is any other reuse of an earlier id, naming
-/// both writers. On a refusal the tree written so far stays on disk.
+/// A top entry whose id an earlier blueprint wrote is a parent entry: `id`,
+/// `agents:` (written beneath that agent) and the grants `callable_by` /
+/// `can_call`, which are merged into the agent's as a union per key (a stock
+/// grant is never removed or narrowed; `@root` is resolved). The root (`@root`)
+/// and the stock agents code creates later (the credential store) take the same
+/// entry: their grants are kept and applied when the agent is made, and stay
+/// across later boots. Any other field on a parent entry is refused, and so is
+/// any other reuse of an earlier id, naming both writers. On a refusal the tree
+/// written so far stays on disk.
 pub fn seed_dir_with(dir: &std::path::Path, blueprints: &[&str]) -> Result<bool, String> {
     let paths = Paths::at(dir);
     if !paths.is_fresh() {
@@ -213,7 +274,7 @@ fn write_from(paths: &Paths, texts: &[&str]) -> Result<(), String> {
     let mut seen = Written::default();
     for (i, list) in lists.iter().enumerate() {
         let who = if i == 0 { "the stock blueprint".to_string() } else { format!("blueprint {i}") };
-        write_blueprint(&agents, list, &mut seen, &who)?;
+        write_blueprint(paths, &agents, list, &mut seen, &who)?;
     }
     Ok(())
 }
@@ -517,6 +578,87 @@ mod tests {
         assert_eq!(rec(&p, "user/agent.yaml"), rec(&plain, "user/agent.yaml"));
         let _ = std::fs::remove_dir_all(&p.cwd);
         let _ = std::fs::remove_dir_all(&plain.cwd);
+    }
+
+    fn grants(p: &Paths) -> Value {
+        crate::atomic::read_yaml(&p.cli.join("grants.yaml")).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn a_parent_entry_unions_its_grants_into_the_stock_record() {
+        let plain = sandbox("emb_union_plain");
+        write_all(&plain).unwrap();
+        let (p, r) = seed_with(
+            "emb_union",
+            "agents:\n  - id: user\n    callable_by:\n      probe: '*'\n      exec: [run]\n      '@root': '*'\n    can_call:\n      memory: [get]\n      probe: [ping]\n",
+        );
+        assert_eq!(r, Ok(true));
+        let (was, now) = (rec(&plain, "user/agent.yaml"), rec(&p, "user/agent.yaml"));
+        // added
+        assert_eq!(now["callable_by"]["probe"], "*");
+        assert_eq!(now["callable_by"][ROOT_ID], "*");
+        assert!(now["callable_by"].get(ROOT_PLACEHOLDER).is_none());
+        assert_eq!(now["can_call"]["probe"], json!(["ping"]));
+        // never narrowed or removed: stock `"*"` stays against a verb list
+        assert_eq!(now["callable_by"]["exec"], "*");
+        assert_eq!(now["callable_by"]["files"], "*");
+        assert_eq!(now["can_call"]["memory"], "*");
+        assert_eq!(now["can_call"]["store"], was["can_call"]["store"]);
+        let _ = std::fs::remove_dir_all(&p.cwd);
+        let _ = std::fs::remove_dir_all(&plain.cwd);
+    }
+
+    #[test]
+    fn a_parent_entry_widens_a_verb_list_across_blueprints() {
+        let p = sandbox("emb_widen");
+        let first = "agents:\n  - id: probe\n    handler_module: ram_store.tools\n    callable_by:\n      user: [a]\n";
+        let second = "agents:\n  - id: probe\n    callable_by:\n      user: [b]\n    agents:\n      - id: kid\n        handler_module: ram_store.tools\n";
+        assert_eq!(seed_dir_with(&p.cwd, &[first, second]), Ok(true));
+        assert_eq!(rec(&p, "probe/agent.yaml")["callable_by"]["user"], json!(["a", "b"]));
+        assert_eq!(rec(&p, "probe/agent.yaml")["handler_module"], "ram_store.tools");
+        assert_eq!(rec(&p, "probe/agents/kid/agent.yaml")["id"], "kid");
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn a_root_parent_entry_declares_its_grants_and_places_children_under_the_root() {
+        let (p, r) = seed_with(
+            "emb_root",
+            "agents:\n  - id: '@root'\n    callable_by:\n      '@root': '*'\n      user: [get]\n    agents:\n      - id: probe\n        handler_module: ram_store.tools\n  - id: kernel_state\n    can_call:\n      user: '*'\n",
+        );
+        assert_eq!(r, Ok(true));
+        assert_eq!(rec(&p, "probe/agent.yaml")["id"], "probe");
+        let g = grants(&p);
+        assert_eq!(g[ROOT_ID]["callable_by"], json!({ROOT_ID: "*", "user": ["get"]}));
+        assert_eq!(g[ROOT_ID]["can_call"], json!({"user": "*"}));
+        assert!(!p.store.join("agent.yaml").exists(), "the root record stays the kernel's");
+        let _ = std::fs::remove_dir_all(&p.cwd);
+    }
+
+    #[test]
+    fn grants_for_the_code_made_store_are_declared_not_written_as_an_agent() {
+        let (p, r) = seed_with("emb_creds", "agents:\n  - id: credentials\n    callable_by:\n      probe: [get]\n");
+        assert_eq!(r, Ok(true));
+        assert_eq!(grants(&p)["credentials"]["callable_by"], json!({"probe": ["get"]}));
+        assert!(!p.store.join("agents/credentials").exists());
+        let _ = std::fs::remove_dir_all(&p.cwd);
+        for bad in [
+            "agents:\n  - id: credentials\n    handler_module: x\n",
+            "agents:\n  - id: credentials\n    agents: []\n",
+            "agents:\n  - id: user\n    callable_by: [x]\n",
+        ] {
+            let (p, r) = seed_with("emb_creds_bad", bad);
+            assert!(r.is_err(), "{bad}");
+            let _ = std::fs::remove_dir_all(&p.cwd);
+        }
+    }
+
+    #[test]
+    fn no_grants_declared_means_no_grants_file() {
+        let (p, r) = seed_with("emb_nogrants", "agents:\n  - id: probe\n    handler_module: ram_store.tools\n");
+        assert_eq!(r, Ok(true));
+        assert!(!p.cli.join("grants.yaml").exists());
+        let _ = std::fs::remove_dir_all(&p.cwd);
     }
 
     #[test]

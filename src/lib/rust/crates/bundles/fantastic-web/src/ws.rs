@@ -643,7 +643,7 @@ pub(crate) async fn ws_loop(
             "hello" => peer.hello(&kernel, &leg, &out, &frame, &fid).await,
             // An answer to one of the host's calls INTO the page — never gated:
             // it only settles a call this leg itself sent.
-            "reply" | "error" => peer.answer(&frame, inbound.answer_body),
+            "reply" | "error" => peer.answer(&kernel, &frame, inbound.answer_body),
             // An event a kernel's leg streams for an agent the host watches —
             // never gated: it only answers a watch this leg itself sent.
             "event" => peer.event(&kernel, &frame, inbound.body),

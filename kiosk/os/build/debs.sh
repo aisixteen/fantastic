@@ -50,7 +50,7 @@ dpkg-deb -R "$BASE_DEB" "$STAGE/app"
 [ -f "$STAGE/app/usr/bin/fantastic" ] || { echo "debs.sh: $BASE_DEB has no /usr/bin/fantastic" >&2; exit 1; }
 install -m 755 "$KIOSK_BIN" "$STAGE/app/usr/bin/fantastic"
 # the sums name the bytes the package carries
-( cd "$STAGE/app" && find . -type f ! -path './DEBIAN/*' | sed 's|^\./||' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums )
+( cd "$STAGE/app" && find . -type f ! -path './DEBIAN/*' | sed 's|^\./||' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 md5sum > DEBIAN/md5sums )
 rm -f "$APP_DEB"
 dpkg-deb --build --root-owner-group "$STAGE/app" "$APP_DEB"
 
@@ -62,7 +62,7 @@ rm "$STAGE/session/DEBIAN/control.in"
 find "$STAGE/session" -type d -exec chmod 755 {} +
 find "$STAGE/session" -type f -exec chmod 644 {} +
 chmod 755 "$STAGE/session/DEBIAN/postinst" "$STAGE/session/DEBIAN/prerm" "$STAGE/session/DEBIAN/postrm"
-( cd "$STAGE/session" && find . -type f ! -path './DEBIAN/*' | sed 's|^\./||' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums )
+( cd "$STAGE/session" && find . -type f ! -path './DEBIAN/*' | sed 's|^\./||' | LC_ALL=C sort | tr '\n' '\0' | xargs -0 md5sum > DEBIAN/md5sums )
 chmod 644 "$STAGE/session/DEBIAN/md5sums"
 SESSION_DEB="$OUT_DIR/fantastic-session_${VERSION}_all.deb"
 rm -f "$SESSION_DEB"

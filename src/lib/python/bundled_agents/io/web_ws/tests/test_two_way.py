@@ -223,9 +223,15 @@ class _Pair:
         self.wire, self.ka, self.kb, self.leg, self.ai = wire, ka, kb, leg, ai
         self.serving: list[asyncio.Task] = []
         self.link = None
+        # B is reachable. A `ws` leg redials a dropped link by itself (#493), so a
+        # test that watches the leg while it is down first makes B unreachable:
+        # the leg's dials are refused until `dial` (or the test) lets them in.
+        self.reachable = True
         if wire == "ws":
 
             async def connect(url, **kw):
+                if not self.reachable:
+                    raise ConnectionRefusedError("B is down")
                 assert url == f"ws://127.0.0.1:8088/{kb.id}/ws", url
                 link = _WsLink()
                 self._serve(link)
@@ -242,6 +248,7 @@ class _Pair:
     async def dial(self):
         """Boot A's leg (the first dial, or a redial after a drop): it says hello,
         and B routes A's guid through it."""
+        self.reachable = True
         if self.wire == "memory":
             mt_a, mt_b = MemoryTransport.pair()
             _test_transport_inject[self.leg] = mt_a
@@ -253,6 +260,7 @@ class _Pair:
 
     async def cut(self):
         """Drop the link under A's leg, then wait until both ends know."""
+        self.reachable = False
         await self.link.cut()
         await _until(lambda: A not in self.kb.ctx.peers)
         await _until(lambda: not self.reflect_connected())
@@ -485,6 +493,14 @@ async def test_a_watch_from_b_is_gated_by_the_legs_watch_grant(pair_of, wire):
         q = p.kb.ctx.ensure_inbox("watcher")
         # B's own side takes it (B's operator); A's leg holds no `watch` on `ai`
         assert p.kb.watch(f"{A}|{p.ai}", "watcher") is None
+        # A's leg refuses it: the refusal reaches the watcher, named, and B
+        # forgets the watch it never got
+        refusal = await asyncio.wait_for(q.get(), 3.0)
+        assert refusal["type"] == "error", refusal
+        assert refusal["src"] == p.ai, refusal
+        assert refusal["reason"] == "unauthorized", refusal
+        assert "id" not in refusal, refusal
+        assert p.kb.ctx.peer_watched(A) == []
         # the leg serves calls but not watches: the turn runs, nothing streams
         p.patch_leg(can_call={p.ai: ["send"]})
         p.ka.update(p.ai, callable_by={p.leg: "*"})
@@ -572,6 +588,7 @@ async def test_a_dropped_link_fails_calls_fast_and_a_redial_resumes_the_watch(
 async def test_a_second_hello_for_the_guid_replaces_the_first_connection(pair_of, wire):
     p = await pair_of(wire)
     try:
+        p.reachable = False  # the leg's own redial would replace `newer` in turn
         newer = _Raw()
         serving = asyncio.create_task(ws_run(newer, p.kb, p.kb.id, "b_ws"))
         newer.push({"type": "hello", "guid": A, "leg": "newer"})

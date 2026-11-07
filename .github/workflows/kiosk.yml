@@ -81,8 +81,9 @@ jobs:
           python3 -m unittest discover -s kiosk/os/ci -p 'test_*.py'
 
   # The image: the kiosk binary as the app .deb's sidecar, the session package, the
-  # mkosi image of exactly those, booted in QEMU. The app .deb is the base's, from
-  # the latest Release (the base builds it; the kiosk only replaces its sidecar).
+  # mkosi image of exactly those, booted in QEMU. The app .deb is the base's, built
+  # here from the checked-out commit with the base's scripts (cli.sh, app.sh, deb.sh);
+  # the kiosk only replaces its sidecar.
   # x86-64 runs on KVM and is the gate; `ubuntu-24.04-arm` has no /dev/kvm
   # (actions/runner-images#14062), so arm64 boots on TCG, slowly, and does not fail
   # the run until a green boot has been seen.
@@ -112,7 +113,6 @@ jobs:
     timeout-minutes: ${{ matrix.minutes }}
     continue-on-error: ${{ matrix.soft }}
     env:
-      GH_TOKEN: ${{ github.token }}
       # debian:trixie-slim, pinned by digest: debian:trixie-20260918-slim
       TRIXIE_SLIM: debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
     steps:
@@ -129,16 +129,27 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: kiosk
+          workspaces: |
+            kiosk
+            src
+            src/app
           key: image-${{ matrix.arch }}
       - name: the kiosk binary
         run: (cd kiosk && cargo build --release --target ${{ matrix.target }} -p fantastic-kiosk)
-      - name: the base's app .deb, from the latest Release
+      # The base's app .deb, built from this commit by the base's own scripts (as
+      # build.yml's `binaries` and `debs` jobs do): the CLI (the app's sidecar), the
+      # app, the .deb. The kiosk's debs.sh then replaces the sidecar.
+      - name: the desktop app's libraries
+        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev
+      - name: one version, from the last tag
+        run: echo "FANTASTIC_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')" >> "$GITHUB_ENV"
+      - name: the base's CLI
+        run: sh scripts/build/cli.sh --target ${{ matrix.target }}
+      - name: the base's app
+        run: sh scripts/build/app.sh --target ${{ matrix.target }}
+      - name: the base's app .deb
         run: |
-          version=$(git describe --tags --abbrev=0 | sed 's/^v//')
-          echo "FANTASTIC_VERSION=$version" >> "$GITHUB_ENV"
-          mkdir -p dist/deb
-          gh release download "v$version" -R "$GITHUB_REPOSITORY" -D dist/deb -p 'fantastic-app-${{ matrix.target }}.deb'
+          sh scripts/build/deb.sh --target ${{ matrix.target }}
           ls -l dist/deb
       - name: the packages
         run: sh kiosk/os/build/debs.sh --target ${{ matrix.target }}

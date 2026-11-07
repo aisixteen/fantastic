@@ -1998,6 +1998,16 @@ class Agent:
             if q is not None:
                 self._put_drop_oldest(q, payload)
 
+    def peer_watch_refused(self, guid: str, agent_id: str, refusal: dict) -> None:
+        """The peer `guid` REFUSED the watch of its agent `agent_id`: it is not
+        registered there, so it is forgotten here and the refusal lands in every
+        watcher's inbox, in place of the events that will never come. A later
+        `watch` asks the peer again."""
+        for w in sorted(self.ctx.peer_watches.pop((guid, agent_id), ())):
+            q = self.ctx.inboxes.get(w)
+            if q is not None:
+                self._put_drop_oldest(q, refusal)
+
     def authorize_state_subscribe(self, watcher_id: str) -> dict | None:
         """May `watcher_id` tap the kernel-wide STATE STREAM? Refusal, or None.
 
