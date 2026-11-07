@@ -23,6 +23,16 @@ class _Remote:
     def __init__(self) -> None:
         self.conns: list = []
         self.accepted = asyncio.Event()
+        # refuse the next connection at the handshake (the leg's own redial, #493)
+        self.refuse_next = False
+        self.refused = asyncio.Event()
+
+    def process_request(self, conn, request):
+        if self.refuse_next:
+            self.refuse_next = False
+            self.refused.set()
+            return conn.respond(503, "refused\n")
+        return None
 
     async def handler(self, conn) -> None:
         self.conns.append(conn)
@@ -51,10 +61,14 @@ async def test_closed_follows_the_socket():
 
 
 # twin: reflect_connected_false_after_peer_close_and_boot_rebuilds
+# The leg's own redial (#493) is held off here: its first dial is refused, and the
+# leg is backing off when `boot` dials in.
 async def test_a_dropped_leg_reflects_down_and_boot_dials_again(seeded_kernel):
     k = seeded_kernel
     remote = _Remote()
-    async with websockets.serve(remote.handler, "127.0.0.1", 0) as server:
+    async with websockets.serve(
+        remote.handler, "127.0.0.1", 0, process_request=remote.process_request
+    ) as server:
         port = server.sockets[0].getsockname()[1]
         leg = (
             await k.send(
@@ -85,10 +99,12 @@ async def test_a_dropped_leg_reflects_down_and_boot_dials_again(seeded_kernel):
             assert await call({"type": "boot"}) == {"already": True, "transport": "ws"}
             assert (await call({"type": "reflect"}))["connected"] is True
 
+            remote.refuse_next = True
             await remote.drop(0)
             while (await asyncio.wait_for(inbox.get(), 2)).get("type") != "bridge_down":
                 pass
 
+            await asyncio.wait_for(remote.refused.wait(), 5)
             assert (await call({"type": "reflect"}))["connected"] is False
             fwd = await call(
                 {"type": "forward", "target": "x", "payload": {"type": "reflect"}}

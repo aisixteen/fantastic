@@ -174,10 +174,14 @@ const WIRES: [Wire; 2] = [Wire::Memory, Wire::Ws];
 
 /// The test's ssh `-L`: a TCP forwarder on `[::1]:<B's port>` (the same port, so
 /// the Host B sees is its own loopback authority) into B on `127.0.0.1`. `cut`
-/// drops every live connection; the listener stays, so a redial gets through.
+/// drops every live connection; the listener stays, so a redial gets through
+/// once the tunnel is `up` again. A `ws` leg redials a dropped link by itself
+/// (#493), so a test that watches the leg while it is down holds the tunnel down:
+/// a dial in is hung up on until `dial` (or the test) lets it through.
 struct Tunnel {
     conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     accept: tokio::task::JoinHandle<()>,
+    up: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Tunnel {
@@ -187,8 +191,13 @@ impl Tunnel {
             .expect("bind the tunnel");
         let conns: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
         let live = Arc::clone(&conns);
+        let up = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let gate = Arc::clone(&up);
         let accept = tokio::spawn(async move {
             while let Ok((mut inbound, _)) = listener.accept().await {
+                if !gate.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue; // hung up on: B is down
+                }
                 let h = tokio::spawn(async move {
                     let mut out = tokio::net::TcpStream::connect(("127.0.0.1", port))
                         .await
@@ -198,10 +207,15 @@ impl Tunnel {
                 live.lock().unwrap().push(h);
             }
         });
-        Self { conns, accept }
+        Self { conns, accept, up }
+    }
+
+    fn set_up(&self, up: bool) {
+        self.up.store(up, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn cut(&self) {
+        self.set_up(false);
         for h in self.conns.lock().unwrap().drain(..) {
             h.abort();
         }
@@ -407,6 +421,9 @@ impl Pair {
     /// and B routes A's guid through it.
     async fn dial(&self) {
         let leg = AgentId::from(self.leg.as_str());
+        if let Link::Ws(t) = &self.link {
+            t.set_up(true);
+        }
         let half = matches!(self.wire, Wire::Memory).then(|| fantastic_bridge::inject_one(&leg));
         let booted = op(&self.ka, &self.leg, json!({"type": "boot"}))
             .await
@@ -843,6 +860,9 @@ async fn a_dropped_link_fails_calls_fast_and_a_redial_resumes_the_watch() {
 async fn a_second_hello_for_the_guid_replaces_the_first_connection() {
     for wire in WIRES {
         let p = pair(wire, true, true).await;
+        if let Link::Ws(t) = &p.link {
+            t.set_up(false); // the leg's own redial would replace `newer` in turn
+        }
         let mut newer = raw_ws(p.port, &p.b_web).await;
         newer
             .send(TMessage::Text(

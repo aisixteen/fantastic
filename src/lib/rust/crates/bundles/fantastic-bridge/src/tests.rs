@@ -2680,6 +2680,10 @@ mod leg_lifetime;
 #[path = "tests_relay_credentials.rs"]
 mod relay_credentials;
 
+/// A dropped `ws` link is redialled by the leg itself (#493).
+#[path = "tests_redial.rs"]
+mod redial;
+
 /// The two-way leg (#476): `hello` at every boot, an inbound `watch` gated and
 /// streamed back (python `ws_bridge/tests/test_two_way_leg.py`).
 #[path = "tests_two_way.rs"]
