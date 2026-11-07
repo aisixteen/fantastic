@@ -19,6 +19,9 @@ use serde_json::{json, Value};
 
 pub use fantastic_system_agents::{HANDLER_MODULES, IDS};
 
+/// The kiosk's blueprint: the six agents under `user`, for `fantastic_tui::seed_dir_with`.
+pub const BLUEPRINT: &str = include_str!("blueprint.yaml");
+
 /// The id of the human's own agent (`user`): the parent of every system agent and
 /// the one holder of their grants. The base's own constant for it is private.
 pub const USER: &str = "user";
@@ -61,6 +64,44 @@ async fn act(kernel: &Arc<Kernel>, target: &str, payload: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_first_run_seeds_all_six_agents_under_user_with_their_plain_ids() {
+        let dir = std::env::temp_dir().join(format!("kiosk-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            fantastic_tui::seed_dir_with(&dir, &[BLUEPRINT]).unwrap(),
+            "a fresh folder is seeded"
+        );
+        let found: Vec<String> = walk(&dir);
+        for id in IDS {
+            assert!(
+                found
+                    .iter()
+                    .any(|p| p.ends_with(&format!("/user/agents/{id}/agent.yaml"))),
+                "{id} is a child of user, id as written: {found:?}"
+            );
+        }
+        assert!(
+            !fantastic_tui::seed_dir_with(&dir, &[BLUEPRINT]).unwrap(),
+            "a second run writes nothing"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn walk(dir: &std::path::Path) -> Vec<String> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        out
+    }
     use fantastic_kernel::Agent;
     use fantastic_system::{audio, displays, lock, network, notifications, power};
     use fantastic_system_agents::sys::{
