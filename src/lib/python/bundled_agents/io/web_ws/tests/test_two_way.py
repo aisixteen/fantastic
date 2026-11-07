@@ -485,6 +485,14 @@ async def test_a_watch_from_b_is_gated_by_the_legs_watch_grant(pair_of, wire):
         q = p.kb.ctx.ensure_inbox("watcher")
         # B's own side takes it (B's operator); A's leg holds no `watch` on `ai`
         assert p.kb.watch(f"{A}|{p.ai}", "watcher") is None
+        # A's leg refuses it: the refusal reaches the watcher, named, and B
+        # forgets the watch it never got
+        refusal = await asyncio.wait_for(q.get(), 3.0)
+        assert refusal["type"] == "error", refusal
+        assert refusal["src"] == p.ai, refusal
+        assert refusal["reason"] == "unauthorized", refusal
+        assert "id" not in refusal, refusal
+        assert p.kb.ctx.peer_watched(A) == []
         # the leg serves calls but not watches: the turn runs, nothing streams
         p.patch_leg(can_call={p.ai: ["send"]})
         p.ka.update(p.ai, callable_by={p.leg: "*"})

@@ -597,7 +597,18 @@ async def run(ws, kernel, host_agent_id: str, web_agent_id: str) -> None:
 
     def _on_answer(frame):
         """An inbound `reply`/`error` answers one of OUR outbound calls — its
-        data is that call's outcome (a page-side refusal included)."""
+        data is that call's outcome (a page-side refusal included). An `error`
+        carrying `src` (no call's answer does) is a kernel's leg refusing the
+        host's `watch` of its agent `src`: the refusal reaches the host's
+        watchers of `<guid>|<src>` as the frame's own keys, and the watch is
+        forgotten."""
+        src = _name(frame, "src")
+        if frame.get("type") == "error" and src:
+            if peer["leg"] is not None and not peer["closed"]:
+                kernel.peer_watch_refused(
+                    peer["guid"], src, {k: v for k, v in frame.items() if k != "id"}
+                )
+            return
         fut = out_calls.get(_name(frame, "id"))
         if fut is not None and not fut.done():
             data = frame.get("data")

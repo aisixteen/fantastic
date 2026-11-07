@@ -691,6 +691,22 @@ async fn a_watch_from_b_is_gated_by_the_legs_watch_grant() {
         let mut rx = p.kb.ensure_inbox(&w);
         // B's own side takes it (B's operator); A's leg holds no `watch` on `ai`
         assert_eq!(p.kb.watch(&target, w.clone()).await, None, "{wire:?}");
+        // A's leg refuses it: the refusal reaches the watcher, named, and B
+        // forgets the watch it never got
+        let refusal = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("{wire:?}: the refused watch said nothing"))
+            .expect("inbox open")
+            .payload;
+        assert_eq!(refusal["type"], json!("error"), "{wire:?}: {refusal}");
+        assert_eq!(refusal["src"], json!(p.n("ai")), "{wire:?}: {refusal}");
+        assert_eq!(
+            refusal["reason"],
+            json!("unauthorized"),
+            "{wire:?}: {refusal}"
+        );
+        assert!(refusal.get("id").is_none(), "{wire:?}: {refusal}");
+        assert!(p.kb.peer_watched(A).is_empty(), "{wire:?}");
         // the leg serves calls but not watches: the turn runs, nothing streams
         p.patch_leg("can_call", json!({p.n("ai"): ["send"]}));
         let mut m = Map::new();
