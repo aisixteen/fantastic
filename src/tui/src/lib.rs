@@ -19,7 +19,9 @@
 //! directory has the same `user` record the CLI writes on a first run. A host
 //! with agents of its own seeds them the same way, once, with [`seed_dir_with`]:
 //! its blueprints are written after the stock one, ids as written, and every
-//! later run rehydrates from disk.
+//! later run rehydrates from disk. A blueprint entry naming a stock agent (or
+//! the root, `@root`) may add `callable_by` / `can_call` grants to it: merged as
+//! a union, never narrowing a stock grant.
 
 mod app;
 mod atomic;
