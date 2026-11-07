@@ -82,21 +82,41 @@ pub async fn ensure_store(h: &Host) -> Result<(), String> {
         }
     }
     fields.insert("refs".into(), Value::Object(refs));
+    let cli = h.kernel.workdir().ok().map(|d| crate::env::Paths::at(&d).cli);
+    let declared = match (&cli, store_meta(h).is_some()) {
+        (Some(c), false) => crate::boot::declared::pending(c, STORE)?,
+        _ => None,
+    };
     let payload = if store_meta(h).is_some() {
         let mut p = json!({"type": "update_agent", "id": STORE});
         p.as_object_mut().expect("an object").extend(fields);
         p
     } else {
-        let mut p = json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": STORE, "handler_module": fantastic_credential_store::HANDLER_MODULE});
-        p.as_object_mut().expect("an object").extend(fields);
-        p
+        create_payload(fields, declared.as_ref())
     };
     // as `user`, the store's parent: grants and refs come from above
     let r = h.act("kernel", payload).await.result;
     match r.get("error").and_then(Value::as_str) {
         Some(e) => Err(format!("the credential store: {e}")),
-        None => Ok(()),
+        None => match (declared, cli) {
+            // the store carries its declared grants now: forget the declaration
+            (Some(_), Some(c)) => crate::boot::declared::done(&c, STORE),
+            _ => Ok(()),
+        },
     }
+}
+
+/// The store's `create_agent`: its fields, plus any grants a product declared
+/// for it, carried by the create itself. The update path never writes
+/// `callable_by`/`can_call`, so they stay across later boots.
+fn create_payload(fields: Map<String, Value>, declared: Option<&Map<String, Value>>) -> Value {
+    let mut p = json!({"type": "create_agent", "parent_id": crate::env::HUMAN, "id": STORE, "handler_module": fantastic_credential_store::HANDLER_MODULE});
+    let o = p.as_object_mut().expect("an object");
+    o.extend(fields);
+    if let Some(g) = declared {
+        crate::boot::declared::union_record(o, g);
+    }
+    p
 }
 
 /// Choose (or change) where keys are kept. Refused while keys are stored in
@@ -252,5 +272,16 @@ mod tests {
         assert!(ref_for("vllm_backend.tools", "").is_err(), "no endpoint, no host, no ref");
         assert_eq!(ref_for("mcp_client.tools", "http://127.0.0.1:9000/mcp").unwrap(), "mcp_client/127.0.0.1:9000", "an MCP server's key: its bundle name and the url's host");
         assert_eq!(host_of("http://u:p@h.example/x"), Some("h.example".into()));
+    }
+
+    #[test]
+    fn the_stores_create_carries_the_grants_a_product_declared_for_it() {
+        let g = json!({"callable_by": {"probe": ["get"]}, "can_call": {"probe": "*"}});
+        let p = create_payload(Map::new(), g.as_object());
+        assert_eq!(p["id"], STORE);
+        assert_eq!(p["callable_by"], json!({"probe": ["get"]}));
+        assert_eq!(p["can_call"], json!({"probe": "*"}));
+        let bare = create_payload(Map::new(), None);
+        assert!(bare.get("callable_by").is_none() && bare.get("can_call").is_none());
     }
 }

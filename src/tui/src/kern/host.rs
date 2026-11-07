@@ -249,6 +249,13 @@ impl Host {
         }
         let done: Vec<String> = serde_json::from_value(started["booted"].clone()).unwrap_or_default();
 
+        // Grants a product declared for the root (its blueprint's `@root` parent
+        // entry): unioned in once the kernel runs, because only then does the root
+        // loader write the record to disk.
+        crate::boot::declared::apply_to_root(&kernel)
+            .await
+            .map_err(|e| KernelErr::Boot(format!("could not set the root's grants: {e}")))?;
+
         // Everyone else, in registration order. A failure is logged and
         // skipped: one bundle refusing must not take the shell down with it.
         let mut notes = Vec::new();
