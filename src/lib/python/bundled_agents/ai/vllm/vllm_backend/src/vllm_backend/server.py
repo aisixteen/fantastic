@@ -10,10 +10,11 @@ the record sets is used as set, never read.
 
 - `model` — the ONE model the server serves (`GET {endpoint}/models`); a server
   serving several names them, and the record must pick one.
-- `context_window` and `max_tokens` — that model's window: `max_model_len`, or, when
-  the entry names none, llama.cpp's `meta.n_ctx` (same list). The same number for
-  both: a main turn whose `max_tokens` reaches the window sends NO `max_tokens`, so
-  the server bounds the reply by what the prompt leaves.
+- `context_window` — that model's window: `max_model_len`, or, when the entry names
+  none, llama.cpp's `meta.n_ctx` (same list). `max_tokens` — 16384, plus the record's
+  `thinking_token_budget` when it sets one, never above that window (#495). A main
+  turn whose `max_tokens` could overrun the window sends NO `max_tokens`, so the
+  server bounds the reply by what the prompt leaves.
 - `kv_slots` — how many full-length conversations the server's KV cache holds:
   `floor(kv_cache_max_concurrency)` of the `vllm:cache_config_info` line on the
   server's Prometheus page — vLLM's own figure for requests of `max_model_len`
@@ -33,6 +34,7 @@ import re
 from urllib.parse import urlsplit
 
 import httpx
+from ai_core.constants import default_max_tokens
 from ai_core.credentials import CredentialError
 from kernel._refusal import BAD_ARG, refusal
 
@@ -183,7 +185,12 @@ async def read(rec: dict, *, key, transport=None, timeouts=(5.0, 900.0)) -> dict
                 out["model"] = entry.get("id")
             for f in ("max_tokens", "context_window"):
                 if f in want:
-                    out[f] = max_model_len(entry, url, f)
+                    n = max_model_len(entry, url, f)
+                    if f == "max_tokens":
+                        # the window is the model's MAXIMUM; a record that names no
+                        # output budget is bounded below it (#495)
+                        n = default_max_tokens(rec.get("thinking_token_budget"), n)
+                    out[f] = n
         if "kv_slots" in want:
             url = metrics_url(rec)
             if url is None:

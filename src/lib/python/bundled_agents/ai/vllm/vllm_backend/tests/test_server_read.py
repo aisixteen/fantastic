@@ -112,7 +112,7 @@ async def test_what_the_record_leaves_out_is_read():
     k = _Kernel(_rec())
     assert await _resolve(k, _server(seen)) is None
     assert k.updates == [
-        {"model": MODEL, "max_tokens": 65536, "context_window": 65536, "kv_slots": 1}
+        {"model": MODEL, "max_tokens": 16384, "context_window": 65536, "kv_slots": 1}
     ]
     assert [u for u, _ in seen] == [
         "http://vllm.test/v1/models",
@@ -136,12 +136,27 @@ async def test_a_field_the_record_sets_is_used_as_set_never_read():
     assert k.updates == [{"kv_slots": 1}]
 
 
+async def test_the_output_budget_is_bounded_below_the_window():
+    # no max_tokens on the record (#495): 16384, plus an explicit thinking budget,
+    # never above the server's window; a record's own max_tokens is never read
+    async def read(window, **rec):
+        k = _Kernel(_rec(model=MODEL, kv_slots=6, **rec))
+        assert await _resolve(k, _server([], models=_models((MODEL, window)))) is None
+        return k.updates[0].get("max_tokens")
+
+    assert await read(65536) == 16384
+    assert await read(65536, thinking_token_budget=2000) == 2000 + 16384
+    assert await read(8192) == 8192
+    assert await read(20000, thinking_token_budget=8000) == 20000
+    assert await read(65536, max_tokens=40000) is None
+
+
 async def test_the_record_s_model_picks_its_entry_among_several():
     seen: list = []
     body = _models(("other", 4096), (MODEL, 262144))
     k = _Kernel(_rec(model=MODEL, kv_slots=6))
     assert await _resolve(k, _server(seen, models=body)) is None
-    assert k.updates == [{"max_tokens": 262144, "context_window": 262144}]
+    assert k.updates == [{"max_tokens": 16384, "context_window": 262144}]
 
 
 async def test_several_served_models_and_no_model_refuse_naming_them():
@@ -365,12 +380,12 @@ async def test_a_send_reads_the_server_first_and_reflect_shows_the_values(
         rec["kv_slots"],
     ) == (
         MODEL,
-        65536,
+        16384,
         65536,
         1,
     ), rec
     after = await _call(k, "v1", {"type": "reflect"})
-    assert after["max_tokens"] == 65536 and after["kv"]["slots"] == 1, after
+    assert after["max_tokens"] == 16384 and after["kv"]["slots"] == 1, after
     assert [u for u, _ in seen][:2] == [
         "http://vllm.test/v1/models",
         "http://vllm.test/metrics",
@@ -425,7 +440,7 @@ async def test_a_llama_cpp_entry_gives_its_window_as_meta_n_ctx():
     )
     k = _Kernel(_rec(model=MODEL, kv_slots=6))
     assert await _resolve(k, _server([], models=body)) is None
-    assert k.updates == [{"max_tokens": 131072, "context_window": 131072}]
+    assert k.updates == [{"max_tokens": 16384, "context_window": 131072}]
 
 
 async def test_an_entry_with_neither_max_model_len_nor_n_ctx_is_refused():

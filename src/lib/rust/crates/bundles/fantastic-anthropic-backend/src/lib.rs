@@ -7,8 +7,8 @@
 //!
 //! - ONE `system` string, top level — every system message joined; `messages` holds
 //!   only `user` / `assistant`, consecutive turns of one role merged.
-//! - `max_tokens` on every request (the API requires it): the record's (read from
-//!   the model entry when left out, [`server`]), or a side call's own bound.
+//! - `max_tokens` on every request (the API requires it): the record's (left out,
+//!   read from the model entry and bounded, [`server`]), or a side call's own bound.
 //! - THE THOUGHT CHANNEL: with `thinking_budget` set, `thinking_delta`s stream
 //!   before the answer, wrapped once in `<think>…</think>`.
 //! - The SSE stream ends with `message_stop`; a stream that ends without it did not
@@ -1383,7 +1383,8 @@ pub fn record_schema() -> &'static Value {
             Field::new(
                 "max_tokens",
                 "int",
-                format!("a turn's output budget (tokens){FROM_API} (the model's max_tokens)"),
+                format!("a turn's output budget (tokens){FROM_API} (16384, plus thinking_budget, never above the \
+                     model's max_tokens)"),
             ),
             Field::new(
                 "context_window",

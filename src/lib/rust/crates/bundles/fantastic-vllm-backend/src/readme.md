@@ -30,7 +30,8 @@ field is cleared (`null`). A value set on the record is used as set:
   window — sends NO `max_tokens`: the server bounds the reply by what the prompt
   leaves (prompt + `max_tokens` past the window is an HTTP 400). A bounded side
   call (a fold summary) keeps its own bound.
-- `max_tokens` — the output budget of a turn; left out, `max_model_len` too
+- `max_tokens` — the output budget of a turn; left out, 16384 (plus an explicit
+  `thinking_token_budget`), never above `max_model_len`
 - `kv_slots` — how many conversations may be LIVE on this endpoint at once; left out,
   `floor(kv_cache_max_concurrency)` from the `vllm:cache_config_info` line of the
   server's Prometheus page — `metrics_url`, or, left out, the endpoint with `/v1`

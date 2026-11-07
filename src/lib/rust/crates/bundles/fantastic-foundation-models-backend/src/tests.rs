@@ -559,6 +559,30 @@ async fn a_broken_bridge_delta_is_an_error_and_still_cancels_on_drop() {
 
 // ── whole turns through the kernel ──────────────────────────────────
 
+/// The `max_tokens` the engine was asked for on one turn of a record made from `meta`.
+async fn asked_max_tokens(window: i64, meta: Value) -> Option<i64> {
+    let engine = Arc::new(
+        FakeEngine::new()
+            .context_size(window)
+            .script(vec![vec![Step::Text("<call name=\"done\"></call>")]]),
+    );
+    let fx = kernel(&engine, meta).await;
+    fx.send("hi", json!({})).await;
+    engine.requests()[0].max_tokens
+}
+
+#[tokio::test]
+async fn a_record_with_no_max_tokens_asks_for_the_bounded_default() {
+    // no `max_tokens` on the record (#495): bounded, never above the model's window
+    assert_eq!(asked_max_tokens(32768, json!({})).await, Some(16384));
+    assert_eq!(asked_max_tokens(8192, json!({})).await, Some(8192));
+    // the record's own wins, even above the default
+    assert_eq!(
+        asked_max_tokens(32768, json!({"max_tokens": 20000})).await,
+        Some(20000)
+    );
+}
+
 #[tokio::test]
 async fn a_send_streams_the_engines_text_and_replays_the_conversation_next_turn() {
     let engine = Arc::new(FakeEngine::new().context_size(32768).script(vec![

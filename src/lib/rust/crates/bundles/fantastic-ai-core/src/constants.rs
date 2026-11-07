@@ -57,6 +57,23 @@ pub const TRIGGER: f64 = 0.8;
 /// `SEND_TIMEOUT` (the hard ceiling per generation; releases the lock).
 pub const SEND_TIMEOUT_SECS: f64 = 180.0;
 
+/// The output budget a request carries when the record names no `max_tokens`
+/// (#495): bounded, so a degenerate generation is cut by the model's own stop
+/// long before [`SEND_TIMEOUT_SECS`] instead of asking for the model's maximum.
+pub const DEFAULT_TURN_TOKENS: i64 = 16384;
+
+/// The default `max_tokens` for a record that names none: [`DEFAULT_TURN_TOKENS`],
+/// plus the record's thinking budget when it sets one (thinking is spent out of
+/// the same budget), never above `model_max` — the model's own maximum.
+#[must_use]
+pub fn default_max_tokens(thinking_budget: Option<i64>, model_max: i64) -> i64 {
+    thinking_budget
+        .unwrap_or(0)
+        .max(0)
+        .saturating_add(DEFAULT_TURN_TOKENS)
+        .min(model_max)
+}
+
 /// The READ CLOCK on a provider stream, in seconds: the longest the endpoint may
 /// go without sending a byte (headers included) before the stream is judged
 /// stalled and the turn ends with an error row (#177). A record's
@@ -191,3 +208,17 @@ pub const MAX_MARKS: usize = 20;
 /// How long a provider keeps a prompt prefix warm after a send ended (seconds).
 /// `fork_points` reports an agent `warm` while its last send is younger than this.
 pub const CACHE_LIFETIME_SECS: f64 = 300.0;
+
+#[cfg(test)]
+mod default_max_tokens_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_is_bounded_grows_with_thinking_and_stops_at_the_models_maximum() {
+        assert_eq!(default_max_tokens(None, 64000), 16384);
+        assert_eq!(default_max_tokens(Some(2048), 64000), 2048 + 16384);
+        assert_eq!(default_max_tokens(None, 8000), 8000);
+        assert_eq!(default_max_tokens(Some(4000), 10000), 10000);
+        assert_eq!(default_max_tokens(Some(i64::MAX), i64::MAX), i64::MAX);
+    }
+}

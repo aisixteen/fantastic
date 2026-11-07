@@ -42,6 +42,19 @@ TRIGGER = 0.8
 SEND_TIMEOUT = float(
     os.environ.get("FANTASTIC_AI_SEND_TIMEOUT", "180")
 )  # hard ceiling per-generation; releases the lock (env-overridable — slow local models need more)
+# The output budget a request carries when the record names no `max_tokens` (#495):
+# bounded, so a degenerate generation is cut at the model's own stop long before
+# SEND_TIMEOUT instead of asking for the model's maximum.
+DEFAULT_TURN_TOKENS = 16384
+
+
+def default_max_tokens(thinking_budget: int | None, model_max: int) -> int:
+    """The default `max_tokens` of a record that names none: DEFAULT_TURN_TOKENS plus
+    the record's thinking budget when it sets one (thinking is spent out of the same
+    budget), never above `model_max` — the model's own maximum."""
+    return min(max(thinking_budget or 0, 0) + DEFAULT_TURN_TOKENS, model_max)
+
+
 # The READ CLOCK on a provider stream, in seconds: the longest the endpoint may go
 # without sending a byte (headers included) before the stream is judged stalled and
 # the turn ends with an error row (#177). A record's `stream_idle_seconds` replaces

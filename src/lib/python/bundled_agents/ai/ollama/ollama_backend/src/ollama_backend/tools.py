@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from ai_core import build, on_cancel, on_delete, required_meta  # noqa: F401 — the hooks
 from ai_core import ProviderError, caching, stream_idle_of
+from ai_core.constants import DEFAULT_TURN_TOKENS
 from ai_core.credentials import key_reader
 from ai_core.schema import credentials_field, field, schema, validate
 
@@ -44,7 +45,7 @@ RECORD_SCHEMA = schema(
         field(
             "temperature", "float", "sampling temperature", default=DEFAULT_TEMPERATURE
         ),
-        field("num_predict", "int", "a turn's output budget (tokens)"),
+        field("num_predict", "int", "a turn's output budget (tokens); unset, 16384"),
         field("think", "bool", "turn the model's thinking channel on or off"),
         field(
             "stream_idle_seconds",
@@ -89,7 +90,7 @@ def make_provider(id, kernel):
         model=required_meta(rec, "model", NAME),
         num_ctx=int(num_ctx) if num_ctx else None,
         temperature=float(temperature) if temperature is not None else None,
-        num_predict=int(num_predict) if num_predict else None,
+        num_predict=int(num_predict) if num_predict else DEFAULT_TURN_TOKENS,
         think=bool(think) if think is not None else None,
         key=key_reader(id, kernel, NAME, required=False),
         stream_idle=stream_idle_of(rec),

@@ -62,7 +62,8 @@ class OllamaProvider:
         )
         # Generation cap. Unbounded, a weak model can ramble for thousands of
         # tokens instead of emitting one tool-call, blowing the send timeout;
-        # the record's `num_predict` bounds it. None = ollama's default.
+        # the record's `num_predict` bounds it; a record naming none gets
+        # DEFAULT_TURN_TOKENS (#495). None = ollama's own default (unbounded).
         self._num_predict = num_predict
         # Reasoning toggle for THINKING models. Such a model spends hundreds of
         # hidden reasoning tokens before its answer (gemma4:12b: ~250 tok and ~11x

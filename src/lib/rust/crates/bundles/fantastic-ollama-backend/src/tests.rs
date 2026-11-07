@@ -415,6 +415,47 @@ async fn sends_temperature_default_and_override() {
     assert_eq!(last["options"]["temperature"], json!(0.15));
 }
 
+/// The `num_predict` a request carries when the record is made with `extra` (#495).
+/// The answer ends the turn (a `done` call), so no later pass of it reaches a port
+/// that another case's server has since taken.
+async fn sent_num_predict(tag: &str, extra: Value) -> Value {
+    let tmp = TempDir::new().unwrap();
+    let server = MockServer::start().await;
+    let body = ndjson_body(&[
+        json!({"message": {"content": "<call name=\"done\"></call>"}, "done": true}),
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+    let (kernel, backend) = mk_kernel_with(&tmp, tag, &server.uri(), extra).await;
+    let _rx = rebind_backend_inbox(&kernel, &backend);
+    send_once(&kernel, &backend, "c_np").await;
+    let reqs = server.received_requests().await.unwrap();
+    let sent: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+    sent["options"]["num_predict"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_with_no_num_predict_sends_the_bounded_default() {
+    assert_eq!(sent_num_predict("npd", json!({})).await, json!(16384));
+    // 0 reads as unset (as in reflect): the default bounds it too
+    assert_eq!(
+        sent_num_predict("np0", json!({"num_predict": 0})).await,
+        json!(16384)
+    );
+    // the record's own wins, above or below the default
+    assert_eq!(
+        sent_num_predict("npw", json!({"num_predict": 200})).await,
+        json!(200)
+    );
+    assert_eq!(
+        sent_num_predict("npx", json!({"num_predict": 40000})).await,
+        json!(40000)
+    );
+}
+
 #[tokio::test]
 async fn list_models_is_unknown_type() {
     // `list_models` was a rust-only verb. Python's ollama backend never had
