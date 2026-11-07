@@ -117,6 +117,37 @@ async def test_an_agent_can_read_its_own_authority(seeded_kernel):
     assert node["callable_by"]["cli"] == "*"
 
 
+_VIEW = {"kind": "html", "bytes": "<b>hi</b>"}
+
+
+async def test_reflect_carries_the_agents_view(seeded_kernel):
+    """`reflect` is where any client learns how an agent is drawn: a bundle
+    agent's record `view` rides its reflect; no `view` -> no key."""
+    await _mk(seeded_kernel, "drawn", view=_VIEW)
+    await _mk(seeded_kernel, "plain")
+    assert (await _call(seeded_kernel, "drawn", {"type": "reflect"}))["view"] == _VIEW
+    assert "view" not in await _call(seeded_kernel, "plain", {"type": "reflect"})
+
+
+async def test_a_reply_that_built_its_own_view_keeps_it(seeded_kernel):
+    await _mk(seeded_kernel, "drawn", view=_VIEW)
+    target = seeded_kernel.ctx.agents["drawn"]
+    own = {"kind": "html", "bytes": "own"}
+    out = await seeded_kernel._apply_reflect_flags(
+        target, {"type": "reflect"}, {"id": "drawn", "view": own}
+    )
+    assert out["view"] == own
+
+
+async def test_a_refusal_gets_no_view(seeded_kernel):
+    await _mk(seeded_kernel, "drawn", view=_VIEW)
+    target = seeded_kernel.ctx.agents["drawn"]
+    out = await seeded_kernel._apply_reflect_flags(
+        target, {"type": "reflect"}, {"error": "nope"}
+    )
+    assert out == {"error": "nope"}
+
+
 async def test_tree_children_keep_creation_order(seeded_kernel):
     """The tree frame, `tree=ids` and a removal all read INSERTION order, never
     sorted by id."""

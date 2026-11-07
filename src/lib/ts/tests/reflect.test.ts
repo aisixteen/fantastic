@@ -60,3 +60,18 @@ test("reflect matches the cross-language conformance fixture", async () => {
     assert.deepEqual(got, c.expect, `case: ${c.name}`);
   }
 });
+
+test("a page agent's view rides its reflect; no view, no key", async () => {
+  const k = new Kernel();
+  const root = new Agent({ id: "kernel", parentId: null, handlerModule: null, sentence: null, meta: {} });
+  k.register(root);
+  k.setRoot(root);
+  const view = { kind: "html", bytes: "<b>hi</b>" };
+  for (const [id, meta] of [["drawn", { view }], ["plain", {}]] as const) {
+    k.register(new Agent({ id, parentId: "kernel", handlerModule: null, sentence: null, meta: structuredClone(meta) as Payload }));
+  }
+  const ask = async (id: string) =>
+    (await k.send([{ target: id, payload: { type: "reflect" } }]))[0]!.result as Payload;
+  assert.deepEqual((await ask("drawn"))["view"], view);
+  assert.equal("view" in (await ask("plain")), false);
+});

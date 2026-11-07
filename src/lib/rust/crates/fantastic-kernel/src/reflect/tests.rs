@@ -743,6 +743,52 @@ async fn kernel_reflect(kernel: &Arc<Kernel>, payload: Value) -> crate::outcome:
 }
 
 #[tokio::test]
+async fn reflect_carries_the_agents_view() {
+    // `reflect` is where any client learns how an agent is drawn: a BUNDLE
+    // agent's record `view` rides its reflect; no `view` -> no key.
+    let (kernel, root) = roster_kernel();
+    let view = json!({"kind": "html", "bytes": "<b>hi</b>"});
+    probe_child(&kernel, "drawn", &root, json!({"view": view}));
+    probe_child(&kernel, "plain", &root, json!({}));
+    let ask = |id: &str| {
+        let kernel = Arc::clone(&kernel);
+        let id = id.to_string();
+        async move {
+            kernel
+                .send(vec![Item::new(AgentId::from(id), json!({"type": "reflect"}))])
+                .await
+                .remove(0)
+                .result
+        }
+    };
+    assert_eq!(ask("drawn").await["view"], view);
+    assert!(ask("plain").await.get("view").is_none());
+}
+
+#[tokio::test]
+async fn a_reply_that_built_its_own_view_keeps_it() {
+    let (kernel, root) = roster_kernel();
+    let a = probe_child(&kernel, "drawn", &root, json!({"view": {"kind": "html"}}));
+    let own = json!({"kind": "html", "bytes": "own"});
+    let mut reply = json!({"id": "drawn", "view": own});
+    apply_reflect_flags(&kernel, &a, &json!({"type": "reflect"}), &mut reply)
+        .await
+        .expect("no roster node raised");
+    assert_eq!(reply["view"], own);
+}
+
+#[tokio::test]
+async fn a_refusal_gets_no_view() {
+    let (kernel, root) = roster_kernel();
+    let a = probe_child(&kernel, "drawn", &root, json!({"view": {"kind": "html"}}));
+    let mut reply = json!({"error": "nope"});
+    apply_reflect_flags(&kernel, &a, &json!({"type": "reflect"}), &mut reply)
+        .await
+        .expect("no roster node raised");
+    assert_eq!(reply, json!({"error": "nope"}));
+}
+
+#[tokio::test]
 async fn reflect_carries_no_verb_docs() {
     // A reflect says what an agent IS; verbs, emits, cancel,
     // `more` and `kernel_verbs` are the `docs` kernel verb.

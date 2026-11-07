@@ -1666,6 +1666,9 @@ class Agent:
         """Compose any reflect reply with the universal flags — applied
         uniformly to bare-agent and bundle reflects alike:
 
+        - `view`: the agent's record `view` (how it is drawn) rides every
+          reflect when it has one; hosts resolve renderers from here, not from
+          `list_agents`.
         - `detail=distilled|full` (default distilled). DISTILLED answers the
           question a caller actually has most messages — *who do I send to?* — with
           a roster of `{id, sentence, mode?}` and nothing else. FULL is the
@@ -1707,6 +1710,11 @@ class Agent:
         for _gate in ("can_call", "callable_by"):
             if _gate in target._meta and _gate not in reply:
                 reply[_gate] = target._meta[_gate]
+        # HOW THIS AGENT IS DRAWN, on its own reflect: `reflect` is the one place
+        # any client learns it, so the record's `view` rides every reflect like
+        # the gate fields (a reply that built its own `view` keeps it).
+        if "view" in target._meta and "view" not in reply:
+            reply["view"] = target._meta["view"]
         # Kernel runtime identity + deployment context — surfaced on the ROOT
         # reflect so a client that hops to this kernel learns, in one
         # round-trip: which runtime (`runtime`), WHERE it runs (`env` —
