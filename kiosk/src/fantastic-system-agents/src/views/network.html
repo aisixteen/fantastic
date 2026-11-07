@@ -1,0 +1,71 @@
+<style>
+  body { margin: 0; padding: 14px 16px; font: 13px/1.45 ui-sans-serif, -apple-system, system-ui, sans-serif; color: #d8d8e4; background: transparent; }
+  h2 { margin: 14px 0 6px; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .6px; text-transform: uppercase; color: rgba(255,255,255,.55); }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); min-width: 0; }
+  .grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dim { color: rgba(255,255,255,.45); font-size: 11px; }
+  code { font: 12px ui-monospace, SFMono-Regular, monospace; }
+  button { font: inherit; font-size: 12px; color: #e6dcff; background: rgba(183,140,255,.16); border: 1px solid rgba(183,140,255,.45); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  button:hover { background: rgba(183,140,255,.32); color: #fff; }
+  button:disabled { opacity: .35; cursor: default; }
+  input { font: inherit; font-size: 12px; color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.18); border-radius: 6px; padding: 3px 8px; min-width: 0; }
+  .empty { color: rgba(255,255,255,.35); padding: 4px 0; }
+  .err { color: #f7768e; }
+  .bar { width: 38px; height: 6px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; flex: none; }
+  .bar > i { display: block; height: 100%; background: #7ee2a8; }
+</style>
+<h2>Network</h2>
+<div id="line" class="row"></div>
+<div id="devices"></div>
+<h2>Wi-Fi</h2>
+<div id="aps"></div>
+<h2>Saved</h2>
+<div id="known"></div>
+<div id="err" class="err"></div>
+<script>
+const ID = "network";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const say = (r) => { $("err").textContent = r && r.error ? r.error : ""; };
+// an intent, then the reply's refusal (if any) is shown; the state comes by event
+const send = async (msg) => say(await fantastic.send(ID, msg));
+let held = null;
+// a redraw would wipe a password being typed: wait for the box to lose focus
+function draw(st) {
+  if (!st) return;
+  if (document.activeElement && document.activeElement.tagName === "INPUT") { held = st; return; }
+  held = null;
+  if (!st.available) {
+    $("line").innerHTML = `<span class="empty">${esc(st.why || "not available")}</span>`;
+    for (const k of ["devices", "aps", "known"]) $(k).innerHTML = "";
+    return;
+  }
+  $("line").innerHTML = `<b class="grow">${esc(st.state.replace(/_/g, " "))}</b><span class="dim">${esc(st.connectivity)}</span>` +
+    `<button data-w="${st.wireless.enabled ? 0 : 1}"${st.wireless.hardware_enabled ? "" : " disabled"}>wi-fi ${st.wireless.enabled ? "off" : "on"}</button>`;
+  $("line").querySelector("button").onclick = (e) => send({ type: "set_wireless", enabled: e.target.dataset.w === "1" });
+  $("devices").innerHTML = st.devices.length ? st.devices.map((d) =>
+    `<div class="row"><code>${esc(d.iface)}</code><span class="grow">${esc(d.connection || d.state)}</span><span class="dim">${esc(d.ip4.join(" "))}</span>` +
+    (d.connection ? `<button data-off="${esc(d.iface)}">disconnect</button>` : "") + `</div>`).join("") : `<div class="empty">no devices</div>`;
+  for (const b of $("devices").querySelectorAll("[data-off]")) b.onclick = () => send({ type: "deactivate", iface: b.dataset.off });
+  $("aps").innerHTML = `<div class="row"><button id="scan">scan</button></div>` + (st.access_points.length ? st.access_points.map((a, i) =>
+    `<div class="row"><span class="grow">${esc(a.ssid)}${a.active ? " ·" : ""}</span><span class="dim">${esc(a.security)}</span><span class="bar"><i style="width:${a.strength}%"></i></span>` +
+    (a.active ? "" : `<input type="password" placeholder="password" data-pw="${i}"${a.security === "open" || a.known ? " hidden" : ""} size="10"><button data-c="${i}">connect</button>`) + `</div>`).join("") : `<div class="empty">no networks</div>`);
+  $("scan").onclick = () => send({ type: "scan" });
+  for (const b of $("aps").querySelectorAll("[data-c]")) b.onclick = () => {
+    const i = Number(b.dataset.c), box = $("aps").querySelector(`[data-pw="${i}"]`);
+    const msg = { type: "connect", ssid: st.access_points[i].ssid };
+    if (box && box.value) msg.password = box.value;
+    // the password leaves the page with the intent
+    if (box) box.value = "";
+    send(msg);
+  };
+  $("known").innerHTML = st.known.length ? st.known.map((k) =>
+    `<div class="row"><span class="grow">${esc(k.id)}</span><span class="dim">${esc(k.kind)}</span><button data-up="${esc(k.uuid)}">connect</button><button data-fg="${esc(k.uuid)}">forget</button></div>`).join("") : `<div class="empty">none</div>`;
+  for (const b of $("known").querySelectorAll("[data-up]")) b.onclick = () => send({ type: "activate", uuid: b.dataset.up });
+  for (const b of $("known").querySelectorAll("[data-fg]")) b.onclick = () => send({ type: "forget", uuid: b.dataset.fg });
+}
+document.addEventListener("focusout", () => setTimeout(() => { if (held) draw(held); }, 0));
+fantastic.watch(ID, (ev) => { if (ev && ev.type === "state") draw(ev.state); });
+fantastic.send(ID, { type: "state" }).then(draw);
+</script>

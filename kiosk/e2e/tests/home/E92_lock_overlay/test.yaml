@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: lock_overlay
+group: home
+title: "the lock: only `user` may call the lock agent (the MCP leg is refused, a foreign Origin gets 403), and the Home's lock overlay cannot be dismissed by a key, a click or the Home's own state, only by the lock agent saying unlocked"
+runner: probe.py
+costs: free
+limits:
+  seconds: 240
+env: {}

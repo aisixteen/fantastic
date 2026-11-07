@@ -1,0 +1,33 @@
+[
+  {
+    "name": "Virtual-1",
+    "description": "Unknown Unknown (Virtual-1)",
+    "make": "Unknown",
+    "model": "Unknown",
+    "serial": "Unknown",
+    "physical_size": { "width": 0, "height": 0 },
+    "enabled": true,
+    "modes": [
+      { "width": 1280, "height": 800, "refresh": 59.999001, "preferred": true, "current": true },
+      { "width": 1280, "height": 720, "refresh": 60.0, "preferred": false, "current": false },
+      { "width": 1024, "height": 768, "refresh": 60.003998, "preferred": false, "current": false }
+    ],
+    "position": { "x": 0, "y": 0 },
+    "transform": "normal",
+    "scale": 1.0,
+    "adaptive_sync": false
+  },
+  {
+    "name": "HDMI-A-1",
+    "description": "Acme Panel 24 (HDMI-A-1)",
+    "make": "Acme",
+    "model": "Panel 24",
+    "serial": "A1B2C3",
+    "physical_size": { "width": 530, "height": 300 },
+    "enabled": false,
+    "modes": [
+      { "width": 1920, "height": 1080, "refresh": 60.0, "preferred": true, "current": false },
+      { "width": 1920, "height": 1080, "refresh": 50.0, "preferred": false, "current": false }
+    ]
+  }
+]

@@ -1,0 +1,31 @@
+# Copy this file to .cargo/config.toml to build the kiosk against a local checkout
+# of the fantastic base (this repository's `src/`) instead of its git branch. Do not
+# commit the copy. Every fantastic crate of the base's dependency tree is patched, so
+# Cargo sees ONE copy of each.
+[patch."https://github.com/aisixteen/fantastic"]
+fantastic-ai-core = { path = "../src/lib/rust/crates/bundles/fantastic-ai-core" }
+fantastic-anthropic-backend = { path = "../src/lib/rust/crates/bundles/fantastic-anthropic-backend" }
+fantastic-bridge = { path = "../src/lib/rust/crates/bundles/fantastic-bridge" }
+fantastic-bundle = { path = "../src/lib/rust/crates/fantastic-bundle" }
+fantastic-canvas-page = { path = "../src/tui/bundles/fantastic-canvas-page" }
+fantastic-core = { path = "../src/lib/rust/crates/bundles/fantastic-core" }
+fantastic-credential-store = { path = "../src/lib/rust/crates/bundles/fantastic-credential-store" }
+fantastic-exec-bridge = { path = "../src/lib/rust/crates/bundles/fantastic-exec-bridge" }
+fantastic-file = { path = "../src/lib/rust/crates/bundles/fantastic-file" }
+fantastic-home = { path = "../src/tui/crates/fantastic-home" }
+fantastic-io-bridge = { path = "../src/lib/rust/crates/fantastic-io-bridge" }
+fantastic-kernel = { path = "../src/lib/rust/crates/fantastic-kernel" }
+fantastic-mcp-client = { path = "../src/lib/rust/crates/bundles/fantastic-mcp-client" }
+fantastic-ollama-backend = { path = "../src/lib/rust/crates/bundles/fantastic-ollama-backend" }
+fantastic-py-agent = { path = "../src/lib/rust/crates/bundles/fantastic-py-agent" }
+fantastic-ram-store = { path = "../src/lib/rust/crates/bundles/fantastic-ram-store" }
+fantastic-responses-backend = { path = "../src/lib/rust/crates/bundles/fantastic-responses-backend" }
+fantastic-scenario-probes = { path = "../src/lib/rust/crates/bundles/fantastic-scenario-probes" }
+fantastic-sqlite-store = { path = "../src/lib/rust/crates/bundles/fantastic-sqlite-store" }
+fantastic-tui = { path = "../src/tui" }
+fantastic-user = { path = "../src/tui/bundles/fantastic-user" }
+fantastic-user-home-store = { path = "../src/tui/bundles/fantastic-user-home-store" }
+fantastic-vllm-backend = { path = "../src/lib/rust/crates/bundles/fantastic-vllm-backend" }
+fantastic-web = { path = "../src/lib/rust/crates/bundles/fantastic-web" }
+fantastic-web-mcp = { path = "../src/tui/bundles/fantastic-web-mcp" }
+fantastic-web-ws = { path = "../src/lib/rust/crates/bundles/fantastic-web-ws" }

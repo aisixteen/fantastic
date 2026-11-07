@@ -1,0 +1,29 @@
+[package]
+name = "fantastic-system-agents"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "The fantastic OS system agents (`power.tools`, …) as bundles: a generic driver runs each pure ViewModel (`fantastic-system`) against an OS port; every OS call is in `sys/linux`."
+
+# Only the base's public crates (git, like any outside project), never its source.
+[dependencies]
+fantastic-kernel = { workspace = true }
+fantastic-system = { path = "../fantastic-system" }
+async-trait = "0.1"
+serde_json = "1"
+tokio = { version = "1.40", features = ["sync", "time", "rt", "process", "io-util"] }
+
+# zbus is pure Rust (no libdbus): the binary stays static musl. Only Linux has a
+# real implementation; `tests/os_boundary.rs` keeps it inside `src/sys/linux`.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
+# the lock's PIN: Argon2id (pure Rust) in `<home>/lock.yaml`, `<home>` resolved as the user store does
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_yaml = "0.9"
+fantastic-user-home-store = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }

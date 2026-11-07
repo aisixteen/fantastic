@@ -1,0 +1,9 @@
+# WHAT to measure and HOW LONG to allow — never a model or an endpoint. Scripted: no model.
+id: system_views
+group: canvas
+title: "the system agents' cells (power, network, audio, displays, notifications, lock): each draws a fixture state, an unavailable state shows its why and no controls, its controls call only its own agent with its own verbs, and no cell reaches another agent"
+runner: probe.py
+costs: free
+limits:
+  seconds: 300
+env: {}

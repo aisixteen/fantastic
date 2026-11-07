@@ -1,0 +1,49 @@
+# fantastic OS, the kiosk: a derived kernel built ON the fantastic base. It adds the
+# system agents (`power`, `network`, `audio`, `displays`, `notifications`, `lock`)
+# to the base's CRATES and changes no base source file. Its own workspace: the
+# base's workspaces do not know it, and the base builds without this folder.
+[workspace]
+members = [".", "src/fantastic-system", "src/fantastic-system-agents"]
+resolver = "2"
+
+[workspace.dependencies]
+# The base, as any outside project takes it: a git dependency on its crates,
+# ONE repository and branch so Cargo resolves them to one commit (Cargo.lock
+# pins it). Never `path = "../src/..."`. To build against a local checkout of
+# the base, copy `.cargo/config.toml.example` to `.cargo/config.toml`.
+fantastic-tui = { git = "https://github.com/aisixteen/fantastic", branch = "main" }
+fantastic-kernel = { git = "https://github.com/aisixteen/fantastic", branch = "main" }
+fantastic-core = { git = "https://github.com/aisixteen/fantastic", branch = "main" }
+fantastic-user = { git = "https://github.com/aisixteen/fantastic", branch = "main" }
+fantastic-user-home-store = { git = "https://github.com/aisixteen/fantastic", branch = "main" }
+
+[package]
+name = "fantastic-kiosk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "fantastic OS, the kiosk: the fantastic base plus the machine's agents (power, network, audio, displays, notifications, lock)."
+
+[lib]
+name = "fantastic_kiosk"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "fantastic-kiosk"
+path = "src/main.rs"
+
+[dependencies]
+fantastic-tui = { workspace = true }
+fantastic-kernel = { workspace = true }
+fantastic-system-agents = { path = "src/fantastic-system-agents" }
+serde_json = "1"
+
+[dev-dependencies]
+fantastic-core = { workspace = true }
+fantastic-user = { workspace = true }
+fantastic-system = { path = "src/fantastic-system" }
+async-trait = "0.1"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }

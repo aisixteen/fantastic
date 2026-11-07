@@ -1,0 +1,56 @@
+<style>
+  body { margin: 0; padding: 14px 16px; font: 13px/1.45 ui-sans-serif, -apple-system, system-ui, sans-serif; color: #d8d8e4; background: transparent; }
+  h2 { margin: 14px 0 6px; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .6px; text-transform: uppercase; color: rgba(255,255,255,.55); }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); min-width: 0; flex-wrap: wrap; }
+  .grow { flex: 1 1 auto; min-width: 0; }
+  .dim { color: rgba(255,255,255,.45); font-size: 11px; }
+  button { font: inherit; font-size: 12px; color: #e6dcff; background: rgba(183,140,255,.16); border: 1px solid rgba(183,140,255,.45); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  button:hover { background: rgba(183,140,255,.32); color: #fff; }
+  input { font: inherit; font-size: 12px; color: inherit; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.18); border-radius: 6px; padding: 3px 8px; min-width: 0; width: 7em; }
+  .empty { color: rgba(255,255,255,.35); padding: 4px 0; }
+  .err { color: #f7768e; }
+  .note { margin-top: 12px; color: rgba(255,255,255,.45); font-size: 11px; }
+</style>
+<h2>Lock</h2>
+<div id="line" class="row"></div>
+<h2>PIN</h2>
+<div id="pin"></div>
+<h2>Auto-lock</h2>
+<div id="auto" class="row"></div>
+<div id="err" class="err"></div>
+<div class="note">A kiosk UI lock, not a security boundary: a program already running as the user is not stopped by it.</div>
+<script>
+const ID = "lock";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const send = async (msg) => { const r = await fantastic.send(ID, msg); $("err").textContent = r && r.error ? r.error : ""; };
+let held = null;
+// a redraw would wipe a PIN being typed: wait for the box to lose focus
+function draw(st) {
+  if (!st) return;
+  if (document.activeElement && document.activeElement.tagName === "INPUT") { held = st; return; }
+  held = null;
+  if (!st.available) {
+    $("line").innerHTML = `<span class="empty">${esc(st.why || "not available")}</span>`;
+    $("pin").innerHTML = "";
+    $("auto").innerHTML = "";
+    return;
+  }
+  $("line").innerHTML = `<b class="grow">${st.locked ? "locked" : "unlocked"}</b>` +
+    (st.failures ? `<span class="dim">${st.failures} wrong PIN${st.failures === 1 ? "" : "s"}</span>` : "") +
+    `<button id="lock"${st.has_pin ? "" : " disabled"} title="${st.has_pin ? "" : "set a PIN first"}">lock now</button>`;
+  $("lock").onclick = () => send({ type: "lock" });
+  $("pin").innerHTML = st.has_pin
+    ? `<div class="row"><input id="old" type="password" inputmode="numeric" placeholder="PIN" autocomplete="off"><input id="new" type="password" inputmode="numeric" placeholder="new PIN" autocomplete="off"><button id="change">change</button><button id="clear">clear</button></div>`
+    : `<div class="row"><input id="new" type="password" inputmode="numeric" placeholder="new PIN" autocomplete="off"><button id="change">set PIN</button></div><div class="dim">4 to 12 digits</div>`;
+  const take = (id) => { const el = $(id); const v = el ? el.value : ""; if (el) el.value = ""; return v; };
+  $("change").onclick = () => { const old = take("old"), nu = take("new"); send(st.has_pin ? { type: "set_pin", old, new: nu } : { type: "set_pin", new: nu }); };
+  if (st.has_pin) $("clear").onclick = () => send({ type: "clear_pin", pin: take("old") });
+  $("auto").innerHTML = `<span class="grow">lock after</span><input id="min" type="number" min="0" max="1440" value="${st.auto_lock_min}"><span class="dim">min (0: off)</span><button id="set">set</button>`;
+  $("set").onclick = () => send({ type: "set_auto_lock", minutes: Number($("min").value) });
+}
+document.addEventListener("focusout", () => setTimeout(() => { if (held) draw(held); }, 0));
+fantastic.watch(ID, (ev) => { if (ev && ev.type === "state") draw(ev.state); });
+fantastic.send(ID, { type: "state" }).then(draw);
+</script>

@@ -1,0 +1,59 @@
+<style>
+  body { margin: 0; padding: 14px 16px; font: 13px/1.45 ui-sans-serif, -apple-system, system-ui, sans-serif; color: #d8d8e4; background: transparent; }
+  h2 { margin: 14px 0 6px; font: 600 11px ui-monospace, SFMono-Regular, monospace; letter-spacing: .6px; text-transform: uppercase; color: rgba(255,255,255,.55); }
+  h2:first-child { margin-top: 0; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); min-width: 0; flex-wrap: wrap; }
+  .grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dim { color: rgba(255,255,255,.45); font-size: 11px; }
+  code { font: 12px ui-monospace, SFMono-Regular, monospace; }
+  button, select { font: inherit; font-size: 12px; color: #e6dcff; background: rgba(183,140,255,.16); border: 1px solid rgba(183,140,255,.45); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  button:hover { background: rgba(183,140,255,.32); color: #fff; }
+  select option { color: #222; }
+  input[type=range] { flex: 1 1 auto; min-width: 0; }
+  .empty { color: rgba(255,255,255,.35); padding: 4px 0; }
+  .err { color: #f7768e; }
+</style>
+<h2>Outputs</h2>
+<div id="outputs"></div>
+<h2>Brightness</h2>
+<div id="light"></div>
+<div id="err" class="err"></div>
+<script>
+const ID = "displays";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const TRANSFORMS = ["normal", "90", "180", "270", "flipped", "flipped-90", "flipped-180", "flipped-270"];
+const send = async (msg) => { const r = await fantastic.send(ID, msg); $("err").textContent = r && r.error ? r.error : ""; };
+const hz = (m) => (m.refresh_mhz / 1000).toFixed(2);
+let held = null;
+// a redraw would close an open list: wait until the control loses focus
+function draw(st) {
+  if (!st) return;
+  if (document.activeElement && ["SELECT", "INPUT"].includes(document.activeElement.tagName)) { held = st; return; }
+  held = null;
+  if (!st.available) {
+    $("outputs").innerHTML = `<div class="empty">${esc(st.why || "not available")}</div>`;
+    $("light").innerHTML = "";
+    return;
+  }
+  $("outputs").innerHTML = st.outputs.length ? st.outputs.map((o, i) =>
+    `<div class="row"><code class="grow">${esc(o.name)}</code><span class="dim">${esc([o.make, o.model].filter(Boolean).join(" "))}</span>` +
+    `<button data-p="${i}">${o.enabled ? "turn off" : "turn on"}</button></div>` +
+    (o.enabled ? `<div class="row"><select data-m="${i}">${o.modes.map((m, j) => `<option value="${j}"${m.current ? " selected" : ""}>${m.width}x${m.height} @ ${hz(m)}</option>`).join("")}</select>` +
+    `<select data-t="${i}">${TRANSFORMS.map((t) => `<option${t === o.transform ? " selected" : ""}>${t}</option>`).join("")}</select>` +
+    `<span class="dim">scale</span><select data-s="${i}">${[0.5, 0.75, 1, 1.25, 1.5, 2, 3].map((s) => `<option${s === o.scale ? " selected" : ""}>${s}</option>`).join("")}</select></div>` : "")).join("") : `<div class="empty">no outputs</div>`;
+  const out = (el) => st.outputs[Number(el.dataset.p ?? el.dataset.m ?? el.dataset.t ?? el.dataset.s)];
+  for (const b of $("outputs").querySelectorAll("[data-p]")) b.onclick = () => send({ type: "set_output", name: out(b).name, enabled: !out(b).enabled });
+  for (const s of $("outputs").querySelectorAll("[data-m]")) s.onchange = () => { const m = out(s).modes[Number(s.value)]; send({ type: "set_output", name: out(s).name, mode: { width: m.width, height: m.height, refresh_mhz: m.refresh_mhz } }); };
+  for (const s of $("outputs").querySelectorAll("[data-t]")) s.onchange = () => send({ type: "set_output", name: out(s).name, transform: s.value });
+  for (const s of $("outputs").querySelectorAll("[data-s]")) s.onchange = () => send({ type: "set_output", name: out(s).name, scale: Number(s.value) });
+  $("light").innerHTML = st.backlight
+    ? `<div class="row"><span class="dim">${esc(st.backlight.name)}</span><input type="range" min="0" max="100" value="${Math.round(st.backlight.value * 100)}"></div>`
+    : `<div class="empty">no backlight</div>`;
+  const r = $("light").querySelector("input");
+  if (r) r.onchange = () => send({ type: "set_brightness", value: Number(r.value) / 100 });
+}
+document.addEventListener("focusout", () => setTimeout(() => { if (held) draw(held); }, 0));
+fantastic.watch(ID, (ev) => { if (ev && ev.type === "state") draw(ev.state); });
+fantastic.send(ID, { type: "state" }).then(draw);
+</script>
