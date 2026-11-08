@@ -82,15 +82,16 @@ pub const SEND_TO_HOWTO: &str = r#"## Reaching other agents
 Everything is an agent with a string id; `send` reaches any of them. A call is a
 `<call>` element, one child tag per argument — no JSON, no quotes, no escaping:
 <call name="send">
-<target_id>notes</target_id>
-<type>reflect</type>
+<routing><target_id>notes</target_id></routing>
+<payload><type>reflect</type></payload>
 </call>
-`<target_id>` names the agent, `<type>` the verb, every other child is an argument. A
+`<routing>` is how the call travels: `<target_id>` names the agent. `<payload>` is
+delivered whole: `<type>` the verb, every other child an argument. A
 value is text as written (`true`, `12`, a path); a list is `<item>` children
 (`<ids><item>12</item><item>15</item></ids>`); an object is child tags
 (`<edits><item><path>a.py</path><hunks>2</hunks></item></edits>`); a map's keys are its
 tags, `$` included (`<callable_by><$self>*</$self><web><item>read</item></web></callable_by>`).
-`<reply_to>` picks
+`<reply_to>` in `<routing>` picks
 where the reply goes: you by default (your next message), another id hands it to them,
 `null` discards it. `reflect` goes to the agent itself (`<target_id>runner</target_id>`)
 and says what it IS (sentence, state, tree); how to CALL it is `docs` (below). Text outside calls is your message to whoever asked — keep it
@@ -176,12 +177,10 @@ twice — you get the first outcome back; a new attempt needs a new name);
 /// The titles how-to, appended when the record sets `context_titles`. A title
 /// rides on the reply's tag and is what REMAINS once the body is stripped.
 pub const TITLES_HOWTO: &str = r#"## Titling your calls
-Every call carries a one-sentence `<title>` beside its `<target_id>`:
+Every call carries a one-sentence `<title>` in its `<routing>`:
 <call name="send">
-<target_id>notes</target_id>
-<title>read filler_2 — looking for the audit marker</title>
-<type>read</type>
-<path>filler_2.txt</path>
+<routing><target_id>notes</target_id><title>read filler_2 — looking for the audit marker</title></routing>
+<payload><type>read</type><path>filler_2.txt</path></payload>
 </call>
 The title rides on the reply's tag and is what remains once the reply BODY is stripped
 from your view (bodies stay fetchable by pid). Title the INTENT ("read filler_2 — looking
