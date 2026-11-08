@@ -26,7 +26,8 @@
 //! counted in characters, as python counts them.
 
 use crate::tool_parse::grammar::{
-    elements, envelopes, envelopes_in, open_tags, parse_call, Envelope, Malformed, OpenTag, ROUTING,
+    elements, envelopes, envelopes_in, open_tags, parse_call, tags_outside, Envelope, Malformed,
+    OpenTag, ROUTING,
 };
 use crate::tool_parse::{defang, CLOSE, TOOLS};
 use fantastic_bundle::py_str;
@@ -686,11 +687,12 @@ fn wrapped_report(text: &str, env: &Envelope, end: usize, wrapper: &OpenTag) -> 
 /// tag, with the form to write and the done line, so a finished answer still ends.
 /// `None` when there is any envelope, so a call that ran is never followed by a
 /// report about its own wrapper.
-fn wrapper_only(answer: &str) -> Option<String> {
+fn wrapper_only(answer: &str) -> Option<(OpenTag, String)> {
     if !envelopes(answer).is_empty() {
         return None;
     }
     let outer = open_tags(answer).into_iter().next()?;
+    let at = outer.clone();
     let (line, col, quoted, caret) = place(answer, &span_tok(answer, outer.start, outer.end));
     let example = vec![
         (
@@ -699,7 +701,8 @@ fn wrapper_only(answer: &str) -> Option<String> {
         ),
         ("type".to_string(), Value::String("verb".to_string())),
     ];
-    Some(
+    Some((
+        at,
         [
             format!("[malformed call — nothing ran] line {line}, col {col}:"),
             format!("  {quoted}"),
@@ -715,7 +718,50 @@ fn wrapper_only(answer: &str) -> Option<String> {
             FORM.to_string(),
         ]
         .join("\n"),
-    )
+    ))
+}
+
+/// One report per tag outside every `<call` envelope that no report above already
+/// names (`covered`): the call grammar has no other markup, so `<invoke name="x">`,
+/// `<b>` or an empty `<tool_call></tool_call>` is an error the model is told about.
+/// Code spans and fences are code, not tags. A close whose open tag was reported or
+/// covered is not reported again.
+fn unsupported(answer: &str, covered: &[(usize, usize)]) -> Vec<(usize, String)> {
+    let inside = |t: &OpenTag| covered.iter().any(|(a, b)| t.start >= *a && t.end <= *b);
+    let mut named: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for (tag, closing) in tags_outside(answer) {
+        if inside(&tag) {
+            if !closing {
+                named.push(tag.name.clone());
+            }
+            continue;
+        }
+        if closing {
+            if let Some(i) = named.iter().rposition(|n| *n == tag.name) {
+                named.remove(i);
+                continue;
+            }
+        } else {
+            named.push(tag.name.clone());
+        }
+        let written = &answer[tag.start..tag.end];
+        let (line, col, quoted, caret) = place(answer, &span_tok(answer, tag.start, tag.end));
+        out.push((
+            tag.start,
+            [
+                format!("[unsupported tag — not read] line {line}, col {col}:"),
+                format!("  {quoted}"),
+                format!(
+                    "  {caret} `{}` is not part of the call grammar — delete it",
+                    defang(written)
+                ),
+                FORM.to_string(),
+            ]
+            .join("\n"),
+        ));
+    }
+    out
 }
 
 /// One report per call the answer wrote wrongly, in document order (at most
@@ -728,20 +774,36 @@ fn wrapper_only(answer: &str) -> Option<String> {
 #[must_use]
 pub fn check(answer: &str, ran: usize) -> Vec<String> {
     let masked = mask(answer);
-    let mut found: Vec<(usize, String)> = calls(&masked, tokens(&masked))
+    // What a report below already names: byte ranges, and the tag names opened in
+    // them (so their closes are not reported again).
+    let mut covered: Vec<(usize, usize)> = Vec::new();
+    let runs = calls(&masked, tokens(&masked));
+    let mut found: Vec<(usize, String)> = runs
         .iter()
         .map(|c| {
             let at = c.toks.first().expect("a run has a token").start;
+            let end = c.toks.last().map_or(at, |t| t.end);
+            covered.push((at, end));
+            covered.extend(c.wrappers.iter().map(|w| (w.start, w.end)));
             (at, report(answer, &masked, c))
         })
         .collect();
     for env in envelopes_in(answer) {
         if let (Some(wrapper), Some(end)) = (env.wrapper.as_ref(), env.end) {
             if let Some(r) = wrapped_report(answer, &env, end, wrapper) {
+                covered.push((wrapper.start, env.start));
                 found.push((env.start, r));
             }
         }
     }
+    if found.is_empty() {
+        if let Some((outer, r)) = wrapper_only(answer) {
+            // The wrapper holds no call: what follows it is part of that report.
+            covered.push((outer.start, answer.len()));
+            found.push((outer.start, r));
+        }
+    }
+    found.extend(unsupported(answer, &covered));
     found.sort_by_key(|(at, _)| *at);
     let total = found.len();
     let mut reports: Vec<String> = found
@@ -756,9 +818,6 @@ pub fn check(answer: &str, ran: usize) -> Vec<String> {
                 total - MAX_REPORTS
             ));
         }
-    }
-    if reports.is_empty() {
-        reports.extend(wrapper_only(answer));
     }
     if ran > 0 {
         let tail = if ran == 1 {
