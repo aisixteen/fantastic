@@ -121,6 +121,27 @@ pub fn bad_grant_shape(meta: &Map<String, Value>) -> Option<String> {
     None
 }
 
+/// The create payload with its meta bundle's fields under it, or `None` when it
+/// names no meta bundle (nothing changes). `bundle: X` (with `handler_module`
+/// absent or naming X's base) becomes `handler_module: X`.
+fn with_bundle_defaults(kernel: &Kernel, payload: &Value) -> Option<Value> {
+    let obj = payload.as_object()?;
+    let mut out = obj.clone();
+    if let Some(b) = obj.get("bundle").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        out.remove("bundle");
+        out.insert("handler_module".into(), Value::String(b.to_string()));
+    }
+    let hm = out.get("handler_module").and_then(Value::as_str)?.to_string();
+    let defaults = kernel.bundles.defaults(&hm);
+    if defaults.is_empty() && !obj.contains_key("bundle") {
+        return None;
+    }
+    for (k, v) in defaults {
+        out.entry(k).or_insert(v);
+    }
+    Some(Value::Object(out))
+}
+
 /// The `create_agent` body, for a bundle that makes a child as bookkeeping — python's
 /// `Agent.create` (a view of a file bridge is made this way). NOT a gated send: the
 /// caller already holds the verb that asked for it.
@@ -129,6 +150,12 @@ pub async fn create_from_payload(
     root: &Arc<Agent>,
     payload: &Value,
 ) -> Value {
+    // A META BUNDLE'S FIELDS go under the payload's: an instance inherits its
+    // bundle's `record` (each meta bundle on the way to the compiled base) and
+    // overrides any field it names. `bundle: X` beside the base's handler_module
+    // is the same create as `handler_module: X`.
+    let inherited = with_bundle_defaults(kernel, payload);
+    let payload = inherited.as_ref().unwrap_or(payload);
     // python: `if not isinstance(handler_module, str) or not handler_module:
     // return missing(...)` — an EMPTY string is falsy and refused the same as
     // an absent one, not just a missing/non-string value.

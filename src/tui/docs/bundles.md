@@ -56,6 +56,35 @@ otherwise it makes agents with `create_agent` from the bundles `reflect` lists.
   the release folder — every instance of the RELEASE restarts with the new code.
 - Never edit a bundle to change ONE agent: every instance of it changes. Fork first.
 
+## A bundle with no code: fields over any bundle
+
+A `bundle.yaml` with a `base` and no `command` is a META bundle: the yaml over a
+compiled bundle, in RAM. Nothing is built or registered. Its instances run the
+base's code; the bundle only gives them fields.
+
+```yaml
+# .fantastic/bundles/notes/bundle.yaml
+base: file_bridge.tools        # any registered handler_module, or another bundle
+sentence: A notes folder.
+record:                        # the fields every instance inherits
+  root: notes
+  allow: ['.']
+```
+
+- **make one**: `create_agent {handler_module: notes, …}`. Its record names
+  `notes`; the kernel runs it on `file_bridge.tools` with the bundle's `record`
+  under the payload's fields. `create_agent {handler_module: file_bridge.tools,
+  bundle: notes}` is the same create.
+- **override**: any field the create (or a later `update_agent`) names is the
+  instance's own and wins.
+- **inherit**: a meta bundle may extend another (`base: notes`); the nearest
+  bundle's field wins.
+- **change it**: a save reloads it; each instance's inherited fields take the new
+  values (a field the bundle dropped goes), its own fields stay. There is no
+  program, so nothing restarts.
+- An AI agent's directive is a field like any other (`post_system_prompt: |`),
+  so a role is a meta bundle over an AI backend.
+
 ## Live panels
 
 A host agent can PUSH updates into its own cell — a live panel, no polling. The
